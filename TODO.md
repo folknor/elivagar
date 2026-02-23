@@ -2,9 +2,6 @@
 
 ## Release prep
 
-- [x] Run clippy and fix all warnings
-- [x] Extend test suite — wire format roundtrip, zoom filtering, boundary label thresholds
-- [x] Add Cargo.toml metadata for crates.io (`description`, `repository`, `keywords`, `categories`, `readme`)
 - [ ] Publish `pbfhogg` to crates.io first (currently a path dependency)
 - [ ] Switch `pbfhogg` dependency from path to crates.io version
 - [ ] Publish `elivagar` to crates.io
@@ -66,18 +63,6 @@
   **Fix:** In `railway_zoom`, swap the zoom values for `rail` (service→10, mainline→8)
   and extend `narrow_gauge` with the same service-tag split. Note: this intentionally
   diverges from Planetiler output, matching the spec instead.
-- [x] **[P0]** Geometry command count truncated to u16 — widened to u32 in wire format.
-  Was `geom_cmds.len() as u16` (max 65,535 commands, overflow at 32,767 vertices).
-  Coastlines/fjords at z14 routinely exceed this. Fixed: encode/decode now use u32,
-  +2 bytes per sort record (negligible). Roundtrip tests verify the change.
-
-- [x] **[P1]** PMTiles dedup hash collision — added size verification on hash hit.
-  64-bit hash alone had ~0.24% collision chance at planet scale (~300M tiles).
-  Now verifies `data.len() == dup_length` before deduplicating — a collision would
-  need matching hash AND matching compressed size, which is effectively impossible.
-- [x] Ocean layer missing from PMTiles metadata — `build_metadata` lists 25 layers, but
-  tiles contain 26 including ocean. Confirmed Planetiler includes ocean z0-14.
-  Fixed: `build_metadata` now derives from `Layer::ALL`.
 - [ ] **[P2]** `area_sq_meters` cos²(lat) approximation — **investigated, moderate risk.**
   Uses single centroid latitude for entire polygon (`geometry.rs:485-500`). Affects
   `enrich_polygon_matches` thresholds (2M/700K/100K km²) in `pipeline.rs:726-750`.
@@ -98,37 +83,8 @@
 
 ## Performance
 
-### High impact, more effort
-
-- [x] Double-buffer Phase 4 — 3-stage pipeline (reader thread → rayon encode → writer thread)
-  using `std::thread::scope` + `sync_channel(1)`. Overlaps sort read and PMTiles write with
-  CPU-bound encoding. Assemble phase 5.5s → 3.5s (skip-to-sort), 5.3s → 4.1s (full run)
-  on Denmark.
-- [x] Reuse encode buffers — MVT `encode()` scratch Vecs (`layer_buf`, `feat_buf`, `val_buf`,
-  `packed`) now reused via `EncodeScratch` struct + rayon `map_init`. Benchmark-neutral on
-  Denmark (assemble phase ~5.5s before and after — gzip dominates, mimalloc handles transient
-  allocs well), but cleaner code. `encode_attrs_bytes` was already buffer-reused (P3).
-- ~~SmallVec for `LayerMatch` vec, `attrs` vec, and `tags_vec`~~ — **Reverted.** Benchmarked
-  on Denmark (best of 3): PBF phase 22.8s vs baseline 18.7-19.3s (~20% slower). `Attr` is
-  ~40 bytes so `SmallVec<[Attr; 8]>` = ~320 bytes inline; `LayerMatch` containing that makes
-  `SmallVec<[LayerMatch; 4]>` enormous. Extra stack memcpy outweighs saved heap allocs.
-- [x] `WayIndex::get` returns zero-copy `&[(i32, i32)]` slice over mmap instead of allocating
-
-### Medium impact
-
 - [ ] Gzip level — `Compression::fast()` (level 1) may be too aggressive. Level 2-3 could
   give 10-20% smaller tiles at minimal extra CPU cost. Benchmark.
-- [x] Batch relations for parallel processing like ways — split `process_relation` into
-  `prepare_relation` (serial I/O: way_index lookups + projection) and
-  `process_prepared_relation` (parallel CPU: multipolygon assembly + matching + clipping).
-  Batched into `Vec<PreparedRelation>` (1024), flushed via rayon like ways.
-  Tags owned as `Vec<(String, String)>` since PBF borrows don't survive batch boundary.
-  Output byte-identical on Denmark. Impact on Denmark minimal (few relations), but
-  critical at planet scale (hundreds of thousands of complex boundary/multipolygon relations).
-
-- [x] `madvise` hints on mmap — `MADV_SEQUENTIAL` during write phase (node/way IDs
-  increasing), `MADV_RANDOM` after `finish_writing()` for relation member lookups.
-  Prevents wasted readahead when mmaps exceed available RAM at planet scale.
 
 ## Quality
 
@@ -138,49 +94,110 @@
 
 ## Feature merging
 
-Post-decode merge pass in `flush_tile_batch`, per layer, before MVT encoding.
+Post-decode merge pass in `encode_tile_batch`, per layer, before MVT encoding.
 Reduces tile size by combining geometries that share identical attributes.
 
-**Before implementing:** compare tile sizes and feature counts per layer per zoom
-against Planetiler output to quantify the gap. Inspect Planetiler's `FeatureMerge`
-and `VectorTile.mergeSortedFeatures` to understand their approach and which layers
-they merge.
+### Planetiler investigation (2026-02-23)
 
-### Linestring merging
+Planetiler's `FeatureMerge` class (`planetiler-core/.../FeatureMerge.java`) provides
+several strategies, but **the Shortbread YAML profile uses none of them** — no
+`tile_post_process` sections are defined. Only the OpenMapTiles Java profile does
+merging. This means Planetiler's Shortbread output has the same unmerged features
+as ours.
 
-Group linestring features by their tag set (sorted `Vec<(u16, u16)>`). Within
-each group, build an adjacency graph: two linestrings connect if one's endpoint
-matches the other's startpoint (MVT delta-encoded coords, so compare absolute
-cursor positions). Walk chains greedily to produce merged linestrings. The merged
-feature drops the `id` (no single OSM ID applies) and concatenates the geometry
-commands, replacing each subsequent MoveTo+LineTo with just LineTo.
+**Planetiler's merging strategies (for reference):**
 
-Layers that benefit: `streets`, `street_labels`, `water_lines`, `ferries`,
-`bridges`, `tunnels`. Skip layers where merging doesn't make sense (points,
-labels with per-feature identity).
+1. **Simple multi-geometry** (`mergeMultiPoint/LineString/Polygon`): groups features
+   by identical attributes and concatenates geometry commands. Cheapest option — no
+   geometric computation, just command array concatenation. This is what we should
+   start with.
 
-### Polygon merging
+2. **Linestring merging** (`mergeLineStrings` via `LoopLineMerger`): snap-rounds
+   coordinates, splits intersecting lines, joins endpoints, removes stubs below a
+   threshold, re-simplifies with Douglas-Peucker. Expensive — requires full JTS
+   geometry decode/encode cycle.
 
-Group polygon features by tag set. Merge is simpler: combine into a single
-multi-polygon by concatenating geometry commands (each polygon is already
-MoveTo+LineTo+ClosePath, and MVT allows multiple rings per feature). No
-adjacency detection needed — just batching same-attribute polygons into one
-feature.
+3. **Polygon overlap resolution** (`mergeOverlappingPolygons`): unions
+   overlapping/touching polygons via JTS. Filters by `minArea`.
 
-Layers that benefit: `water_polygons`, `land`, `sites`, `buildings` (at low
-zooms if we ever add generalization).
+4. **Polygon proximity merging** (`mergeNearbyPolygons`): clusters polygons within
+   `minDist` pixels via STR-tree spatial index, buffers/unions/unbuffers to close
+   gaps. Most expensive strategy.
+
+**Typical parameters** (from OpenMapTiles profile):
+- `minLength`: 0–0.5 px (linestrings shorter than this dropped after merge)
+- `tolerance`: ~0.1 px (Douglas-Peucker re-simplification)
+- `buffer`: 4.0 px (retain detail outside tile boundary)
+- `minArea`: 4 sq px (drop tiny polygons after merge)
+
+**`VectorTile.VectorGeometryMerger`** (inner class): concatenates MVT command arrays
+into multi-geometries, adjusting delta-encoded coordinates. Used by simple
+multi-geometry merging — this is the closest analog to what we'd implement.
+
+### Priority assessment
+
+Since Planetiler's Shortbread profile doesn't merge, our tile sizes should be
+comparable. Feature merging would still reduce tile sizes (fewer feature headers,
+better tag dedup), but it's an improvement over the baseline, not catching up.
+
+**Before implementing:** write a comparison tool to decode sample tiles from both
+outputs and compare feature counts per layer per zoom. This quantifies the actual
+gap and identifies which layers have the most mergeable features.
+
+### Implementation plan
+
+**Phase 1: Simple multi-geometry merging (cheap, no geometry library)**
+
+Group features by `(geom_type, sorted tags)` within each layer. Concatenate
+geometry commands for features in the same group into a single multi-geometry
+feature. Drop the `id` field (no single OSM ID applies to merged features).
+
+- **Polygon merging**: each polygon ring is self-contained
+  (MoveTo+LineTo+ClosePath), so rings from different features can be concatenated
+  directly into one geometry command buffer.
+- **Linestring merging**: each linestring is MoveTo+LineTo, so multiple
+  linestrings concatenate directly into a multi-linestring (multiple MoveTo
+  segments in one geometry).
+- **Point merging**: multiple points concatenate into a multi-point (single
+  MoveTo command with count > 1, but needs coordinate re-delta-encoding).
+
+MVT delta encoding caveat: each feature's geometry starts with absolute
+coordinates (cursor resets per feature). When concatenating into a single feature,
+only the first geometry starts absolute — subsequent geometries need their
+initial MoveTo adjusted to be relative to the running cursor position.
+
+Layers to merge: `water_polygons`, `land`, `sites`, `buildings`, `streets`,
+`water_lines`, `ferries`, `bridges`, `tunnels`.
+
+Skip: `pois`, `places`, `addresses`, `boundary_labels`, `street_labels_points`,
+`public_transport` — per-feature identity matters.
+
+**Phase 2: Endpoint-joining linestring merge (moderate effort)**
+
+Within same-attribute linestring groups, build adjacency graph on endpoints.
+Join chains where one linestring's last point matches another's first point.
+Saves one MoveTo+coordinates per join. Requires tracking absolute cursor
+position through delta-encoded commands.
+
+**Phase 3: Advanced merging (future, may not be needed)**
+
+Snap-rounding, intersection splitting, polygon union. Would need a geometry
+library (equivalent to JTS). Only worth it if Phase 1-2 leave significant gaps.
 
 ### Where it fits in the pipeline
 
-In `flush_tile_batch`, after `add_feature_to_layer` populates the `LayerBuilder`
+In `encode_tile_batch`, after `add_feature_to_layer` populates the `LayerBuilder`
 and before `mvt::encode_tile`. New function `merge_features(layer: &mut LayerBuilder)`
-operates on the decoded `Feature` vec. This keeps the sort and wire format
-untouched — merging is purely a tile-assembly optimization.
+operates on the `features: Vec<Feature>` directly. This keeps the sort and wire
+format untouched — merging is purely a tile-assembly optimization.
+
+Sort key already orders features by `(tile_id, layer, priority)`, so same-layer
+features are adjacent in the input stream and land in the same `LayerBuilder`.
 
 ### What NOT to merge
 
-- Point features (no geometry to combine)
-- Features with `id: Some(...)` where identity matters (POIs, places)
 - Features across different layers
+- Features with different `geom_type`
+- Features where per-feature `id` matters (POIs, places, addresses, labels)
 - Polygons with inner rings that belong to different outer rings (would
   need topology-aware merging, not worth the complexity)

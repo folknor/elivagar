@@ -15,7 +15,8 @@ Write new scripts in `scripts/` as needed. Follow these conventions:
 - `scripts/build.sh` — build release
 - `scripts/test.sh` — run tests
 - `scripts/bench-self.sh [pbf] [runs] [--skip-to ocean|sort]` — quick self-benchmark (no comparisons)
-- `scripts/bench.sh [pbf] [--skip-to ocean|sort]` — benchmark elivagar vs Planetiler
+- `scripts/bench.sh [pbf] [--skip-to ocean|sort]` — benchmark elivagar vs Planetiler vs Tilemaker
+- `scripts/bench-tilemaker.sh [pbf] [runs]` — benchmark Tilemaker Shortbread (auto-builds from source, downloads shapefiles)
 - `scripts/run.sh [pbf] [out.pmtiles]` — build + run
 - `scripts/bench-pmtiles.sh [tiles] [runs]` — benchmark PMTiles writer vs pmtiles-rs (default: 500K tiles, 5 runs)
 
