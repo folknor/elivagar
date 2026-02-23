@@ -83,16 +83,138 @@
 
 ## Output size
 
-Three-way comparison on Denmark (2026-02-23):
+### Three-way comparison on Denmark (2026-02-23)
+
+Gzip level 6 throughout. Visual output verified identical across all three (nidhogg).
+
+**With ocean:**
 
 | | elivagar | Planetiler | Tilemaker |
 |---|---|---|---|
-| File size | 545 MB | 388 MB | 308 MB |
-| Tiles | 1,328,874 | 104,394 | 113,476 |
-| Unique tiles | 162,926 | — | — |
-| Time | ~30s | ~12-15s | ~30s |
+| File size | 457 MB | 388 MB | 293 MB |
+| Addressed tiles | 1,328,874 | 104,394 | 113,476 |
+| Unique tiles | 162,926 | 50,083 | 51,250 |
+| Time | ~32s | ~12-15s | ~30s |
 
-Visual output verified identical across all three (nidhogg test suite).
+**Without ocean** (elivagar run with no `--ocean` flag):
+
+| | elivagar | Planetiler | Tilemaker |
+|---|---|---|---|
+| File size | 347 MB | 388 MB | 293 MB |
+| Unique tiles | 53,861 | 50,083 | 51,250 |
+
+Without ocean, elivagar is **smaller than Planetiler** and has a comparable unique
+tile count to both. The ocean phase is the dominant source of the size gap.
+
+### Per-zoom unique tile breakdown
+
+| Zoom | elivagar (ocean) | elivagar (no ocean) | Planetiler | Tilemaker |
+|------|-----------------|-------------------|------------|-----------|
+| z0   | 1               | 1                 | 1          | 1         |
+| z1   | 2               | 1                 | 1          | 1         |
+| z2   | 2               | 1                 | 1          | 1         |
+| z3   | 2               | 1                 | 1          | 1         |
+| z4   | 5               | 2                 | 2          | 2         |
+| z5   | 11              | 4                 | 4          | 4         |
+| z6   | 30              | 4                 | 4          | 4         |
+| z7   | 102             | 9                 | 12         | 11        |
+| z8   | 337             | 26                | 32         | 31        |
+| z9   | 763             | 75                | 106        | 105       |
+| z10  | 1,957           | 499               | 339        | 338       |
+| z11  | 5,042           | 1,374             | 1,100      | 1,094     |
+| z12  | 13,635          | 3,947             | 3,389      | 3,355     |
+| z13  | 37,339          | 11,550            | 10,567     | 10,427    |
+| z14  | 103,755         | 36,367            | 34,591     | 35,887    |
+| **Total** | **162,926** | **53,861**    | **50,083** | **51,250** |
+
+Without ocean, tile counts match closely at z0-z9. At z10-z14, elivagar has
+slightly more tiles (e.g. z14: 36K vs 35K) — likely from minor clipping or
+simplification differences. Not a significant concern.
+
+### Per-zoom unique tile sizes (elivagar with ocean, gzip 6)
+
+| Zoom | Unique tiles | Unique MB | Avg size |
+|------|-------------|-----------|----------|
+| z0-z6 | 55        | 0.7 MB    | 13 KB    |
+| z7   | 102         | 2.4 MB    | 24 KB    |
+| z8   | 337         | 6.8 MB    | 21 KB    |
+| z9   | 763         | 10.7 MB   | 14 KB    |
+| z10  | 1,957       | 25.2 MB   | 13 KB    |
+| z11  | 5,042       | 35.9 MB   | 7.3 KB   |
+| z12  | 13,635      | 49.7 MB   | 3.7 KB   |
+| z13  | 37,339      | 81.0 MB   | 2.2 KB   |
+| z14  | 103,755     | 222.4 MB  | 2.2 KB   |
+
+z14 alone is 222 MB (49% of output). z13+z14 = 303 MB (66%).
+
+### Problem 1: Ocean bbox flooding
+
+**Root cause:** Ocean processing emits tiles for the entire PBF data bounds.
+The Denmark PBF includes the Faroe Islands (~62°N, 7°W), which stretches the
+bounding box to cover the entire North Sea. Ocean polygons fill this vast area
+with boundary tiles (each unique due to clipped polygon geometry) and fill tiles
+(deduplicated, but generating 1.2M directory entries).
+
+This affects **any regional extract with outlier territory** — not just Denmark.
+European country extracts commonly have overseas territories or distant islands.
+
+At planet scale the bbox is the whole world anyway, so no "outlier" problem —
+but the architectural issue remains: we generate ocean tiles where there are
+no land features, producing tiles that Planetiler and Tilemaker never emit.
+
+**How Planetiler/Tilemaker avoid this:** They process ocean per-tile during
+assembly, not as a separate global phase. A tile only gets ocean if it also has
+(or is adjacent to) land features. They never generate standalone ocean tiles
+in empty ocean.
+
+**Potential solutions:**
+
+- [ ] **Per-tile ocean injection at assembly time** — Instead of emitting ocean
+  as sort records in a separate phase, inject ocean geometry into tiles during
+  the assemble phase when encoding each tile. For each tile that has land features,
+  also clip the ocean shapefile to that tile. Conceptually simpler but requires
+  the ocean shapefile to be available during assembly (currently assembly only
+  reads sorted records).
+
+- [ ] **Ocean tile mask** — After PBF processing, record which coarse-grid cells
+  (e.g. z8) have land features. During ocean processing, only emit tiles within
+  a radius of populated cells. Preserves the current architecture but adds
+  coupling between phases.
+
+- [ ] **User-specified `--bounds`** — Let users constrain the ocean processing
+  area. Pragmatic but puts the burden on the user. Doesn't solve the
+  architectural problem.
+
+**Open questions:**
+- At planet scale, how much data do standalone ocean tiles (tiles with ONLY ocean,
+  no land features) contribute? If it's significant, the architecture matters even
+  at planet scale.
+- Would per-tile ocean injection be too slow? Each tile would need a spatial lookup
+  into the ocean shapefile. An R-tree or grid index over ocean polygons could make
+  this fast.
+- Can we keep the separate ocean phase but restrict it to only tiles that exist in
+  the land feature set? This would require a two-pass approach (PBF first, then
+  ocean guided by the PBF results).
+
+### Problem 2: Per-tile size gap vs Tilemaker
+
+Without ocean, elivagar produces 347 MB vs Tilemaker's 293 MB for ~54K unique
+tiles each. Average tile size: 6.4 KB (elivagar) vs 5.7 KB (Tilemaker) — 12% larger.
+
+**Potential causes:**
+- Gzip level — we use level 6, Tilemaker may use higher (or zstd)
+- Simplification tolerance — our `PIXEL_FACTOR` is 0.375, which is conservative.
+  Typical values are 1.0-2.0. More aggressive simplification = fewer geometry
+  commands = smaller tiles.
+- Attribute encoding differences — different attribute sets or types per layer
+- Feature merging granularity — Tilemaker's `combine_below: 14` may be more
+  aggressive than our `merge_same_attr_geometries()`
+
+**Open questions:**
+- What gzip level / compression does Tilemaker use for tile data?
+- Would increasing `PIXEL_FACTOR` to 1.0 close the per-tile gap without
+  visible quality loss?
+- Are we encoding attributes that Tilemaker omits, or vice versa?
 
 ### Done
 
@@ -120,26 +242,13 @@ dedup'd tiles. Fixed + corrected `num_tile_entries` header field.
 during random-access ID lookups. Removed Sequential hints, kept Random hints after
 `finish_writing()` for relation member lookups.
 
-### Remaining size gap: 545 MB vs 308-388 MB
-
-**Gzip compression level** — currently `Compression::fast()` (level 1). Testing
-level 6 reduced output from 545 → 457 MB (16% saving) with +0.7s assemble time.
+**Gzip level 6** — changed from `Compression::fast()` (level 1) to level 6.
+Output reduced from 545 → 457 MB (16% saving) with +0.7s assemble time on Denmark.
 
 | | Level 1 | Level 6 | Delta |
 |---|---|---|---|
 | Output | 545 MB | 457 MB | -16% |
 | Assemble | 6.7s | 7.4s | +0.7s |
-
-Still 149 MB above Tilemaker (308 MB) at level 6. The remaining gap comes from:
-- 49K more unique tiles (163K vs 113K) — mostly ocean boundary tiles at z8-14
-  with more geometry commands than Tilemaker's equivalent tiles
-- Higher average tile size (3.3 KB vs 2.7 KB per unique tile)
-
-### Next steps
-
-- [ ] **Gzip level tuning** — benchmark levels 2-6, find the sweet spot for
-  size vs speed. Level 6 saves 16% for +0.7s.
-- [ ] Investigate remaining 49K extra unique tiles vs Tilemaker at z8-14
 
 ## Quality
 

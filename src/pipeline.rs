@@ -1095,18 +1095,29 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
 
         // --- Writer thread: encoded tiles → PMTiles ---
         // move takes ownership of pmtiles; returned via join handle for write_to().
-        let writer = s.spawn(move || -> (u64, PmtilesWriter) {
+        let writer = s.spawn(move || -> (u64, PmtilesWriter, [u64; 15], [u64; 15], [u64; 15]) {
             let mut pmtiles = pmtiles;
             let mut tiles_written: u64 = 0;
+            let mut tiles_per_zoom = [0u64; 15];
+            let mut unique_per_zoom = [0u64; 15];
+            let mut bytes_per_zoom = [0u64; 15];
             while let Ok(batch) = encode_rx.recv() {
                 for tile in batch {
                     let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-                    pmtiles.add_tile(z, x, y, &tile.compressed)
+                    let tile_bytes = tile.compressed.len() as u64;
+                    let is_unique = pmtiles.add_tile(z, x, y, &tile.compressed)
                         .expect("failed to write tile");
                     tiles_written += 1;
+                    if (z as usize) < 15 {
+                        tiles_per_zoom[z as usize] += 1;
+                        if is_unique {
+                            unique_per_zoom[z as usize] += 1;
+                            bytes_per_zoom[z as usize] += tile_bytes;
+                        }
+                    }
                 }
             }
-            (tiles_written, pmtiles)
+            (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom)
         });
 
         // --- Main thread: receive batches, encode with rayon, forward to writer ---
@@ -1117,13 +1128,24 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
         drop(encode_tx);
 
         let features_read = reader.join().expect("reader panicked")?;
-        let (tiles_written, pmtiles) = writer.join().expect("writer panicked");
-        Ok((features_read, tiles_written, pmtiles))
+        let (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom) = writer.join().expect("writer panicked");
+        Ok((features_read, tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom))
     });
 
-    let (features_read, tiles_written, mut pmtiles) = scope_result?;
+    let (features_read, tiles_written, mut pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom) = scope_result?;
     let unique_tiles = pmtiles.unique_tile_count();
     pmtiles.write_to(&config.output_path)?;
+
+    // Per-zoom tile breakdown
+    eprintln!("  Per-zoom tiles (total / unique / unique MB):");
+    for z in config.min_zoom..=config.max_zoom {
+        let total = tiles_per_zoom[z as usize];
+        let unique = unique_per_zoom[z as usize];
+        let mb = bytes_per_zoom[z as usize] as f64 / (1024.0 * 1024.0);
+        if total > 0 {
+            eprintln!("    z{z:2}: {total:>8} / {unique:>8} / {mb:>7.1} MB");
+        }
+    }
 
     Ok((features_read, tiles_written, unique_tiles))
 }
@@ -1164,7 +1186,7 @@ fn encode_tile_batch(batch: &[PendingTile]) -> Vec<EncodedTile> {
                 return None;
             }
 
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
             encoder.write_all(&mvt_data).expect("gzip write failed");
             let compressed = encoder.finish().expect("gzip finish failed");
 
