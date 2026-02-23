@@ -4,7 +4,7 @@
 // data bounds, parses polygons, and processes them in parallel with rayon.
 // Uses scanline fill to minimize point-in-polygon tests.
 
-use crate::geometry::{self, ClipRect, MercBbox, Point, BUFFER_FRACTION, ensure_cw_tile, ensure_ccw_tile, merc_bbox};
+use crate::geometry::{self, ClipRect, MercBbox, Point, BUFFER_FRACTION, close_and_orient_cw, close_and_orient_ccw, merc_bbox};
 use crate::mvt::{self, GeomType};
 use crate::pmtiles_writer;
 use crate::shortbread::{self, Layer};
@@ -377,12 +377,7 @@ fn emit_boundary_tile(
         return;
     }
     let mut outer_tc = geometry::to_tile_coords(&clipped_outer, tx, ty, z);
-    if outer_tc.first() != outer_tc.last()
-        && let Some(&first) = outer_tc.first()
-    {
-        outer_tc.push(first);
-    }
-    ensure_cw_tile(&mut outer_tc);
+    close_and_orient_cw(&mut outer_tc);
 
     let mut all_rings: Vec<Vec<(i32, i32)>> = vec![outer_tc];
     for inner in inners {
@@ -391,12 +386,7 @@ fn emit_boundary_tile(
             continue;
         }
         let mut inner_tc = geometry::to_tile_coords(&clipped_inner, tx, ty, z);
-        if inner_tc.first() != inner_tc.last()
-            && let Some(&first) = inner_tc.first()
-        {
-            inner_tc.push(first);
-        }
-        ensure_ccw_tile(&mut inner_tc);
+        close_and_orient_ccw(&mut inner_tc);
         all_rings.push(inner_tc);
     }
 

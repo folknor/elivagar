@@ -15,7 +15,7 @@ fn main() {
 
     let mut tmp_dir = std::path::PathBuf::from(".tilegen_tmp");
     let mut ocean_shapefile = None;
-    let mut skip_to = None;
+    let mut skip_to: Option<elivagar::SkipTo> = None;
     let mut in_memory = false;
 
     let mut i = 3;
@@ -31,7 +31,14 @@ fn main() {
             }
             "--skip-to" => {
                 i += 1;
-                skip_to = Some(args[i].clone());
+                skip_to = Some(match args[i].as_str() {
+                    "ocean" => elivagar::SkipTo::Ocean,
+                    "sort" => elivagar::SkipTo::Sort,
+                    other => {
+                        eprintln!("Unknown skip-to value: {other} (expected ocean or sort)");
+                        std::process::exit(1);
+                    }
+                });
             }
             "--in-memory" => {
                 in_memory = true;
@@ -55,5 +62,8 @@ fn main() {
         in_memory,
     };
 
-    elivagar::run(&config);
+    if let Err(e) = elivagar::run(&config) {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
 }

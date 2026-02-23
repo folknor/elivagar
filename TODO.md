@@ -23,9 +23,36 @@
 
 ## Bugs
 
-- [ ] Railway zoom inverted — `railway=rail` with `service` tag gets zoom 8 (more prominent)
-  while mainline rail (no service tag) gets zoom 10. **Verify against Planetiler's Shortbread
-  profile before changing.** (`shortbread.rs:884`)
+- [ ] Railway zoom inverted — **confirmed bug, also present in Planetiler's Shortbread YAML.**
+  The Shortbread spec 1.0 (https://shortbread-tiles.org/schema/1.0/) says for `rail` and
+  `narrow_gauge` in the streets layer: "ways with `service=*` on zoom level 10+, other ways
+  on zoom level 8+." Mainline rail (no service tag) should be MORE prominent (z8), service
+  tracks (sidings, yards) LESS prominent (z10). Both elivagar and Planetiler have it backwards.
+
+  **Current elivagar code** (`shortbread.rs`, `railway_zoom` function):
+  ```
+  "rail" => {
+      if tags.has("service") { Some(8) }   // BUG: service rail gets z8
+      else                   { Some(10) }  // BUG: mainline rail gets z10
+  }
+  "narrow_gauge" => Some(10),  // BUG: should also split on service tag
+  ```
+
+  **Planetiler's shortbread.yml** has the same inversion — the min_zoom override blocks
+  assign `service: __any__` (service tag present) to the z8 block and `service: ''`
+  (service tag absent) to the z10 block.
+
+  **Correct values per spec:**
+  | Feature                          | Spec min_zoom | elivagar | Planetiler |
+  |----------------------------------|---------------|----------|------------|
+  | `railway=rail` (mainline)        | **8**         | 10 (bug) | 10 (bug)   |
+  | `railway=rail` + `service=*`     | **10**        | 8 (bug)  | 8 (bug)    |
+  | `narrow_gauge` (mainline)        | **8**         | 10 (bug) | 10 (bug)   |
+  | `narrow_gauge` + `service=*`     | **10**        | 10 (ok)  | 8 (bug)    |
+
+  **Fix:** In `railway_zoom`, swap the zoom values for `rail` (service→10, mainline→8)
+  and extend `narrow_gauge` with the same service-tag split. Note: this intentionally
+  diverges from Planetiler output, matching the spec instead.
 - [ ] PMTiles dedup hash collision — 64-bit content hash with no collision verification.
   ~1:50,000 chance of wrong tile content on planet-scale data. **Check how pmtiles-rs and
   Planetiler handle dedup.** (`pmtiles_writer.rs:111`)
@@ -47,18 +74,16 @@
   Fixed: removed `LAYER_NAMES`, pipeline uses `Layer::ALL[idx].name()` directly.
 - [x] `Layer::count()` returns magic number 26 — derive from enum.
   Fixed: `Layer::ALL` const array, `count()` returns `ALL.len()`.
-- [ ] Remove dead code: `_attr_float` (shortbread.rs:258), `encode_multi_point` (mvt.rs:179),
-  `LayerBuilder::clear` (mvt.rs:68)
-- [ ] Test-only functions exposed as `pub` — `tiles_for_bbox`, `project_bbox`, `reverse_ring`,
-  `is_ccw`, `is_cw` in geometry.rs should be `#[cfg(test)]`
-- [ ] Over-exposed modules in lib.rs — 11 modules are `pub` but only `run()` + `TilegenConfig`
-  are the public API. Make internals `pub(crate)`.
-- [ ] Extract ring close+orient helper — same pattern repeated 4 times in pipeline.rs and
-  ocean.rs (close ring, ensure CW/CCW)
-- [ ] `run()` should return `Result` — currently panics on I/O errors mid-run
-- [ ] `TilegenConfig.skip_to: Option<String>` → `Option<SkipTo>` enum for type safety
-- [ ] `MemberWay.role: String` → enum `{ Outer, Inner, Other }` to avoid string allocs
-- [ ] `assert!` in `load_checkpoint` — use proper error handling (`pipeline.rs:169`)
+- [x] Remove dead code: `_attr_float`, `encode_multi_point`, `LayerBuilder::clear`
+- [x] Test-only functions gated with `#[cfg(test)]` — `tiles_for_bbox`, `project_bbox`,
+  `reverse_ring`, `is_ccw`, `is_cw` in geometry.rs
+- [x] Over-exposed modules in lib.rs → `pub(crate)` (except `pmtiles_writer` used by bench example)
+- [x] Extract `close_and_orient_cw`/`close_and_orient_ccw` helpers in geometry.rs —
+  replaced 5 occurrences of close+orient pattern in pipeline.rs and ocean.rs
+- [x] `run()` returns `Result<(), PipelineError>` — propagates I/O errors instead of panicking
+- [x] `TilegenConfig.skip_to: Option<SkipTo>` enum for type safety
+- [x] `MemberWay.role: WayRole` enum `{ Outer, Inner, Other }` — no more string allocs
+- [x] `load_checkpoint` uses proper error handling (returns `Result`)
 
 ## Performance
 

@@ -289,10 +289,6 @@ pub(crate) fn attr_bool(key: &'static str, val: bool) -> Attr {
     (key, AttrValue::Bool(val), 0)
 }
 
-fn _attr_float(key: &'static str, val: f64) -> Attr {
-    (key, AttrValue::Float(val), 0)
-}
-
 fn attr_bool_z(key: &'static str, val: bool, min_zoom: u8) -> Attr {
     (key, AttrValue::Bool(val), min_zoom)
 }

@@ -8,9 +8,9 @@
 
 
 use crate::geometry::{
-    self, ClipRect, MercBbox, Point, BUFFER_FRACTION, ensure_cw_tile, ensure_ccw_tile, merc_bbox,
+    self, ClipRect, MercBbox, Point, BUFFER_FRACTION, close_and_orient_cw, close_and_orient_ccw, merc_bbox,
 };
-use crate::multipolygon::{self, MemberWay};
+use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::mvt::{self, GeomType, LayerBuilder};
 use crate::node_index::NodeIndex;
 use crate::ocean;
@@ -28,9 +28,42 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Pipeline error type.
+#[derive(Debug)]
+pub struct PipelineError(pub String);
+
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PipelineError {}
+
+impl From<std::io::Error> for PipelineError {
+    fn from(e: std::io::Error) -> Self {
+        Self(e.to_string())
+    }
+}
+
+impl From<String> for PipelineError {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+
+/// Which pipeline phase to skip to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipTo {
+    /// Skip PBF read, reuse PBF chunks, re-run ocean + sort + assemble.
+    Ocean,
+    /// Skip PBF + ocean, reuse all chunks, re-run sort + assemble.
+    Sort,
+}
 
 pub struct TilegenConfig {
     pub pbf_path: PathBuf,
@@ -40,8 +73,7 @@ pub struct TilegenConfig {
     pub max_zoom: u8,
     pub ocean_shapefile: Option<PathBuf>,
     /// Skip to a later phase, reusing checkpoint data from a previous run.
-    /// Valid values: "ocean", "sort".
-    pub skip_to: Option<String>,
+    pub skip_to: Option<SkipTo>,
     /// Keep tile blob in memory instead of streaming to a temp file.
     pub in_memory: bool,
 }
@@ -54,49 +86,48 @@ const SORT_CHUNKS_DIR: &str = "sort_chunks";
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines)]
-pub fn run(config: &TilegenConfig) {
+pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let total_start = Instant::now();
-    let skip = config.skip_to.as_deref().unwrap_or("");
+    let skip = config.skip_to;
 
     eprintln!("=== Tilegen: {} → {}", config.pbf_path.display(), config.output_path.display());
     eprintln!("    Zoom range: z{}–z{}", config.min_zoom, config.max_zoom);
     eprintln!("    Tmp dir:    {}", config.tmp_dir.display());
-    if !skip.is_empty() {
-        eprintln!("    Skip to:    {skip}");
+    if let Some(s) = skip {
+        eprintln!("    Skip to:    {s:?}");
     }
 
     // --- Phase 1+2: PBF read + feature processing ---
     let phase12_elapsed;
     let ocean_elapsed;
 
-    let sort_reader = if skip == "sort" {
+    let sort_reader = if skip == Some(SkipTo::Sort) {
         // Skip straight to sort — read all existing chunks
         phase12_elapsed = None;
         ocean_elapsed = None;
         eprintln!("--- Skipping to sort (using existing chunks) ---");
         None
     } else {
-        let mut sort_writer = if skip.is_empty() {
+        let mut sort_writer = if skip.is_none() {
             // Full run: clean tmp dir and run PBF phase
             drop(std::fs::remove_dir_all(&config.tmp_dir));
-            std::fs::create_dir_all(&config.tmp_dir).expect("failed to create tmp dir");
+            std::fs::create_dir_all(&config.tmp_dir)?;
 
             let phase12_start = Instant::now();
-            let (sw, bounds_out) = phase_read_and_process(config);
+            let (sw, bounds_out) = phase_read_and_process(config)?;
             phase12_elapsed = Some(phase12_start.elapsed());
-            save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count());
+            save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
             sw
         } else {
             // --skip-to ocean: load checkpoint, resume from PBF chunks
-            let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir);
+            let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir)?;
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
             phase12_elapsed = None;
-            sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), 1024 * 1024 * 1024, pbf_chunks)
-                .expect("failed to resume sort writer")
+            sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), 1024 * 1024 * 1024, pbf_chunks)?
         };
 
         // Load data_bounds (needed for ocean, always available from checkpoint or just computed)
-        let (data_bounds, _) = load_checkpoint(&config.tmp_dir);
+        let (data_bounds, _) = load_checkpoint(&config.tmp_dir)?;
 
         // --- Ocean shapefile processing ---
         ocean_elapsed = if let Some(ref ocean_path) = config.ocean_shapefile {
@@ -119,16 +150,16 @@ pub fn run(config: &TilegenConfig) {
     let phase3_start = Instant::now();
     eprintln!("--- Sort ---");
     let mut sort_reader = if let Some(sw) = sort_reader {
-        sw.finish().expect("sort finish failed")
+        sw.finish()?
     } else {
-        sort::SortReader::from_dir(&config.tmp_dir.join(SORT_CHUNKS_DIR)).expect("failed to open sort chunks")
+        sort::SortReader::from_dir(&config.tmp_dir.join(SORT_CHUNKS_DIR))?
     };
     let phase3_elapsed = phase3_start.elapsed();
 
     // --- Phase 4: Tile assembly + PMTiles write ---
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
-    let (features_read, tiles_written) = phase_assemble(&mut sort_reader, config);
+    let (features_read, tiles_written) = phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
 
     let total = total_start.elapsed();
@@ -150,31 +181,39 @@ pub fn run(config: &TilegenConfig) {
     if let Ok(meta) = std::fs::metadata(&config.output_path) {
         eprintln!("output_bytes={}", meta.len());
     }
+    Ok(())
 }
 
-fn save_checkpoint(tmp_dir: &std::path::Path, bounds: &MercBbox, chunk_count: usize) {
+fn save_checkpoint(tmp_dir: &std::path::Path, bounds: &MercBbox, chunk_count: usize) -> Result<(), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let content = format!(
         "{} {} {} {} {}",
         bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y, chunk_count
     );
-    std::fs::write(path, content).expect("failed to save checkpoint");
+    std::fs::write(path, content)?;
+    Ok(())
 }
 
-fn load_checkpoint(tmp_dir: &std::path::Path) -> (MercBbox, usize) {
+fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("No checkpoint in {}: {e}. Run a full tilegen first.", tmp_dir.display()));
+        .map_err(|e| PipelineError(format!("No checkpoint in {}: {e}. Run a full tilegen first.", tmp_dir.display())))?;
     let parts: Vec<&str> = content.split_whitespace().collect();
-    assert!(parts.len() == 5, "Invalid checkpoint format");
-    let bounds = MercBbox {
-        min_x: parts[0].parse().expect("parse min_x"),
-        min_y: parts[1].parse().expect("parse min_y"),
-        max_x: parts[2].parse().expect("parse max_x"),
-        max_y: parts[3].parse().expect("parse max_y"),
+    if parts.len() != 5 {
+        return Err(PipelineError(format!("Invalid checkpoint format: expected 5 fields, got {}", parts.len())));
+    }
+    let parse = |s: &str, name: &str| -> Result<f64, PipelineError> {
+        s.parse().map_err(|e| PipelineError(format!("checkpoint parse {name}: {e}")))
     };
-    let chunks: usize = parts[4].parse().expect("parse chunk count");
-    (bounds, chunks)
+    let bounds = MercBbox {
+        min_x: parse(parts[0], "min_x")?,
+        min_y: parse(parts[1], "min_y")?,
+        max_x: parse(parts[2], "max_x")?,
+        max_y: parse(parts[3], "max_y")?,
+    };
+    let chunks: usize = parts[4].parse()
+        .map_err(|e| PipelineError(format!("checkpoint parse chunk count: {e}")))?;
+    Ok((bounds, chunks))
 }
 
 // ---------------------------------------------------------------------------
@@ -182,21 +221,21 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> (MercBbox, usize) {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-fn phase_read_and_process(config: &TilegenConfig) -> (SortWriter, MercBbox) {
+fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let mut sort_writer =
-        SortWriter::new(&config.tmp_dir.join("sort_chunks"), 1_073_741_824)
-            .expect("failed to create sort writer");
+        SortWriter::new(&config.tmp_dir.join("sort_chunks"), 1_073_741_824)?;
 
     let reader =
-        ElementReader::from_path(&config.pbf_path).expect("failed to open PBF");
+        ElementReader::from_path(&config.pbf_path)
+            .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?;
 
     let idx_dir = &config.tmp_dir;
     let mut node_index =
-        NodeIndex::create(&idx_dir.join("nodes.idx")).expect("failed to create node index");
+        NodeIndex::create(&idx_dir.join("nodes.idx"))?;
     let mut way_index =
-        WayIndex::create(idx_dir).expect("failed to create way index");
+        WayIndex::create(idx_dir)?;
 
     let mut node_count: u64 = 0;
     let mut way_count: u64 = 0;
@@ -347,7 +386,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> (SortWriter, MercBbox) {
                 features_emitted += n;
             }
         })
-        .expect("PBF read failed");
+        .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
 
     // Flush any remaining way batch (in case PBF ends with ways and no relations)
     if !way_batch.is_empty() {
@@ -376,7 +415,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> (SortWriter, MercBbox) {
     eprintln!("  Data bounds (merc): x[{:.4}–{:.4}] y[{:.4}–{:.4}]",
         data_bounds.min_x, data_bounds.max_x, data_bounds.min_y, data_bounds.max_y);
 
-    (sort_writer, data_bounds)
+    Ok((sort_writer, data_bounds))
 }
 
 // ---------------------------------------------------------------------------
@@ -544,7 +583,7 @@ fn process_relation(
         if member.member_type != RelMemberType::Way {
             continue;
         }
-        let role = member.role().unwrap_or("").to_string();
+        let role = WayRole::from_str(member.role().unwrap_or(""));
         if let Some(coords_e7) = way_index.get(member.member_id) {
             let merc: Vec<Point> = coords_e7
                 .iter()
@@ -814,14 +853,8 @@ fn emit_polygon_feature(
             if clipped.len() < 3 {
                 return;
             }
-            let tile_coords = geometry::to_tile_coords(&clipped, tx, ty, z);
-            let mut ring = tile_coords;
-            if ring.first() != ring.last()
-                && let Some(&first) = ring.first()
-            {
-                ring.push(first);
-            }
-            ensure_cw_tile(&mut ring);
+            let mut ring = geometry::to_tile_coords(&clipped, tx, ty, z);
+            close_and_orient_cw(&mut ring);
 
             mvt::encode_polygon(&mut geom_buf, &[&ring]);
             if geom_buf.is_empty() {
@@ -879,12 +912,7 @@ fn emit_multipolygon_feature(
                 return;
             }
             let mut outer_tc = geometry::to_tile_coords(&clipped_outer, tx, ty, z);
-            if outer_tc.first() != outer_tc.last()
-                && let Some(&first) = outer_tc.first()
-            {
-                outer_tc.push(first);
-            }
-            ensure_cw_tile(&mut outer_tc);
+            close_and_orient_cw(&mut outer_tc);
 
             let mut all_rings: Vec<Vec<(i32, i32)>> = vec![outer_tc];
             for inner in simp_inners {
@@ -893,12 +921,7 @@ fn emit_multipolygon_feature(
                     continue;
                 }
                 let mut inner_tc = geometry::to_tile_coords(&clipped_inner, tx, ty, z);
-                if inner_tc.first() != inner_tc.last()
-                    && let Some(&first) = inner_tc.first()
-                {
-                    inner_tc.push(first);
-                }
-                ensure_ccw_tile(&mut inner_tc);
+                close_and_orient_ccw(&mut inner_tc);
                 all_rings.push(inner_tc);
             }
 
@@ -928,7 +951,7 @@ struct PendingTile {
 }
 
 #[allow(clippy::too_many_lines)]
-fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> (u64, u64) {
+fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64), PipelineError> {
     let pmtiles_config = PmtilesConfig {
         min_zoom: config.min_zoom,
         max_zoom: config.max_zoom,
@@ -938,8 +961,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
     let mut pmtiles = if config.in_memory {
         PmtilesWriter::new(pmtiles_config)
     } else {
-        PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir)
-            .expect("failed to create streaming PMTiles writer")
+        PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir)?
     };
 
     let mut tiles_written: u64 = 0;
@@ -950,7 +972,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
     let mut current = PendingTile { tile_id: u64::MAX, features: Vec::new() };
 
     loop {
-        let record = sort_reader.next().expect("sort read error");
+        let record = sort_reader.next()?;
         let Some(r) = record else {
             if current.tile_id != u64::MAX {
                 batch.push(current);
@@ -978,11 +1000,9 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
         current.features.push((layer_idx, r.data));
     }
 
-    pmtiles
-        .write_to(&config.output_path)
-        .expect("failed to write PMTiles");
+    pmtiles.write_to(&config.output_path)?;
 
-    (features_read, tiles_written)
+    Ok((features_read, tiles_written))
 }
 
 /// Encode + gzip a batch of tiles in parallel, then add to PMTiles writer.

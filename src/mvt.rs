@@ -64,15 +64,6 @@ impl LayerBuilder {
         self.features.is_empty()
     }
 
-    /// Reset for reuse without deallocating backing memory.
-    pub fn clear(&mut self) {
-        self.features.clear();
-        self.keys.clear();
-        self.key_map.clear();
-        self.values.clear();
-        self.value_map.clear();
-    }
-
     #[allow(clippy::cast_possible_truncation)]
     pub fn intern_key(&mut self, key: &str) -> u16 {
         if let Some(&idx) = self.key_map.get(key) {
@@ -173,24 +164,6 @@ pub fn encode_point(buf: &mut Vec<u32>, x: i32, y: i32) {
     buf.push(command(1, 1)); // MoveTo, count=1
     buf.push(zigzag(x));
     buf.push(zigzag(y));
-}
-
-pub fn encode_multi_point(points: &[(i32, i32)]) -> Vec<u32> {
-    if points.is_empty() {
-        return Vec::new();
-    }
-    let mut cmds = Vec::with_capacity(1 + points.len() * 2);
-    #[allow(clippy::cast_possible_truncation)]
-    cmds.push(command(1, points.len() as u32));
-    let mut cx: i32 = 0;
-    let mut cy: i32 = 0;
-    for &(x, y) in points {
-        cmds.push(zigzag(x - cx));
-        cmds.push(zigzag(y - cy));
-        cx = x;
-        cy = y;
-    }
-    cmds
 }
 
 pub fn encode_linestring(buf: &mut Vec<u32>, coords: &[(i32, i32)]) {

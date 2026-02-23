@@ -14,9 +14,27 @@ use crate::geometry::{signed_area, Point};
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Role of a member way in a multipolygon relation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WayRole {
+    Outer,
+    Inner,
+    Other,
+}
+
+impl WayRole {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "outer" => Self::Outer,
+            "inner" => Self::Inner,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// A member way with role and coordinates (already projected to Mercator).
 pub struct MemberWay {
-    pub role: String,
+    pub role: WayRole,
     pub coords: Vec<Point>,
 }
 
@@ -64,10 +82,10 @@ fn separate_by_role(members: &[MemberWay]) -> RingGroups<'_> {
         if m.coords.len() < 2 {
             continue;
         }
-        match m.role.as_str() {
-            "outer" => outers.push(m.coords.as_slice()),
-            "inner" => inners.push(m.coords.as_slice()),
-            _ => unclassified.push(m.coords.as_slice()),
+        match m.role {
+            WayRole::Outer => outers.push(m.coords.as_slice()),
+            WayRole::Inner => inners.push(m.coords.as_slice()),
+            WayRole::Other => unclassified.push(m.coords.as_slice()),
         }
     }
 
@@ -369,7 +387,7 @@ mod tests {
 
     fn make_member(role: &str, coords: Vec<Point>) -> MemberWay {
         MemberWay {
-            role: role.to_string(),
+            role: WayRole::from_str(role),
             coords,
         }
     }

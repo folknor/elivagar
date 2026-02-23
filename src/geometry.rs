@@ -455,18 +455,21 @@ pub fn signed_area(ring: &[Point]) -> f64 {
 }
 
 /// Returns `true` if the ring is wound counter-clockwise.
+#[cfg(test)]
 #[inline]
 pub fn is_ccw(ring: &[Point]) -> bool {
     signed_area(ring) > 0.0
 }
 
 /// Returns `true` if the ring is wound clockwise.
+#[cfg(test)]
 #[inline]
 pub fn is_cw(ring: &[Point]) -> bool {
     signed_area(ring) < 0.0
 }
 
 /// Reverse a ring's winding order in place.
+#[cfg(test)]
 pub fn reverse_ring(ring: &mut [Point]) {
     ring.reverse();
 }
@@ -593,6 +596,7 @@ fn collect_intersections(ring: &[Point], scan_y: f64) -> Vec<f64> {
 /// Find all tiles at a given zoom level that intersect the given Mercator bbox.
 ///
 /// Returns a list of `(tile_x, tile_y)` pairs.
+#[cfg(test)]
 pub fn tiles_for_bbox(bbox: &MercBbox, zoom: u8) -> Vec<(u32, u32)> {
     let z_scale = f64::from(1u32 << zoom);
     let max_tile = (1u32 << zoom).saturating_sub(1);
@@ -648,6 +652,7 @@ fn clamp_tile(val: f64, max_tile: u32) -> u32 {
 }
 
 /// Project a WGS84 bbox to Mercator and return the `MercBbox`.
+#[cfg(test)]
 pub fn project_bbox(south: f64, west: f64, north: f64, east: f64) -> MercBbox {
     let sw = project(south, west);
     let ne = project(north, east);
@@ -703,9 +708,29 @@ pub(crate) fn merc_bbox(points: &[Point]) -> MercBbox {
     MercBbox { min_x, min_y, max_x, max_y }
 }
 
+/// Close a tile-coordinate ring (if not already closed) and enforce clockwise winding (MVT outer).
+pub(crate) fn close_and_orient_cw(ring: &mut Vec<(i32, i32)>) {
+    if ring.first() != ring.last() {
+        if let Some(&first) = ring.first() {
+            ring.push(first);
+        }
+    }
+    ensure_cw_tile(ring);
+}
+
+/// Close a tile-coordinate ring (if not already closed) and enforce counter-clockwise winding (MVT inner).
+pub(crate) fn close_and_orient_ccw(ring: &mut Vec<(i32, i32)>) {
+    if ring.first() != ring.last() {
+        if let Some(&first) = ring.first() {
+            ring.push(first);
+        }
+    }
+    ensure_ccw_tile(ring);
+}
+
 /// Ensure a tile-coordinate ring is clockwise (for MVT outer rings).
 /// In tile coordinates, Y increases downward, so positive signed area = CW.
-pub(crate) fn ensure_cw_tile(ring: &mut [(i32, i32)]) {
+fn ensure_cw_tile(ring: &mut [(i32, i32)]) {
     let area = signed_area_tile(ring);
     if area < 0.0 {
         ring.reverse();
@@ -713,7 +738,7 @@ pub(crate) fn ensure_cw_tile(ring: &mut [(i32, i32)]) {
 }
 
 /// Ensure a tile-coordinate ring is counter-clockwise (for MVT inner rings).
-pub(crate) fn ensure_ccw_tile(ring: &mut [(i32, i32)]) {
+fn ensure_ccw_tile(ring: &mut [(i32, i32)]) {
     let area = signed_area_tile(ring);
     if area > 0.0 {
         ring.reverse();
