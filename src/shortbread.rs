@@ -285,20 +285,20 @@ fn is_bridge(tags: &Tags<'_>) -> bool {
 
 pub(crate) fn name_attrs(tags: &Tags<'_>) -> Vec<Attr> {
     let mut attrs = Vec::new();
-    if let Some(v) = tags.get("name") {
-        if !v.is_empty() {
-            attrs.push(attr_dyn("name", v));
-        }
+    if let Some(v) = tags.get("name")
+        && !v.is_empty()
+    {
+        attrs.push(attr_dyn("name", v));
     }
-    if let Some(v) = tags.get("name:en") {
-        if !v.is_empty() {
-            attrs.push(attr_dyn("name_en", v));
-        }
+    if let Some(v) = tags.get("name:en")
+        && !v.is_empty()
+    {
+        attrs.push(attr_dyn("name_en", v));
     }
-    if let Some(v) = tags.get("name:de") {
-        if !v.is_empty() {
-            attrs.push(attr_dyn("name_de", v));
-        }
+    if let Some(v) = tags.get("name:de")
+        && !v.is_empty()
+    {
+        attrs.push(attr_dyn("name_de", v));
     }
     attrs
 }
@@ -629,10 +629,10 @@ fn match_land(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
 }
 
 fn land_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
-    if let Some(v) = tags.get("amenity") {
-        if v == "grave_yard" {
-            return Some(("grave_yard", 13));
-        }
+    if let Some(v) = tags.get("amenity")
+        && v == "grave_yard"
+    {
+        return Some(("grave_yard", 13));
     }
     if let Some(v) = tags.get("landuse") {
         return land_match_landuse(v);
@@ -760,16 +760,16 @@ fn sites_kind(tags: &Tags<'_>) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 
 fn match_buildings(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
-    if let Some(v) = tags.get("building") {
-        if v != "no" {
-            out.push(LayerMatch {
-                layer: Layer::Buildings,
-                min_zoom: 14,
-                max_zoom: 14,
-                geom_expect: GeomExpect::Polygon,
-                attrs: vec![],
-            });
-        }
+    if let Some(v) = tags.get("building")
+        && v != "no"
+    {
+        out.push(LayerMatch {
+            layer: Layer::Buildings,
+            min_zoom: 14,
+            max_zoom: 14,
+            geom_expect: GeomExpect::Polygon,
+            attrs: vec![],
+        });
     }
 }
 
@@ -1043,20 +1043,20 @@ fn match_street_labels_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
 }
 
 fn street_label_kind_raw<'a>(tags: &Tags<'a>) -> Option<&'a str> {
-    if let Some(v) = tags.get("highway") {
-        if highway_zoom(v).is_some() {
-            return Some(v);
-        }
+    if let Some(v) = tags.get("highway")
+        && highway_zoom(v).is_some()
+    {
+        return Some(v);
     }
-    if let Some(v) = tags.get("aeroway") {
-        if aeroway_zoom(v).is_some() {
-            return Some(v);
-        }
+    if let Some(v) = tags.get("aeroway")
+        && aeroway_zoom(v).is_some()
+    {
+        return Some(v);
     }
-    if let Some(v) = tags.get("railway") {
-        if railway_zoom(tags, v).is_some() {
-            return Some(v);
-        }
+    if let Some(v) = tags.get("railway")
+        && railway_zoom(tags, v).is_some()
+    {
+        return Some(v);
     }
     None
 }

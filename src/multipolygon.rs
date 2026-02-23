@@ -53,7 +53,9 @@ pub fn assemble(members: &[MemberWay]) -> MultiPolygon {
 /// Separate member ways into outer, inner, and unclassified groups.
 ///
 /// Skips ways with fewer than 2 coordinates.
-fn separate_by_role(members: &[MemberWay]) -> (Vec<&[Point]>, Vec<&[Point]>, Vec<&[Point]>) {
+type RingGroups<'a> = (Vec<&'a [Point]>, Vec<&'a [Point]>, Vec<&'a [Point]>);
+
+fn separate_by_role(members: &[MemberWay]) -> RingGroups<'_> {
     let mut outers = Vec::new();
     let mut inners = Vec::new();
     let mut unclassified = Vec::new();

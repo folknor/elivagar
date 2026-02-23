@@ -87,10 +87,10 @@ impl LayerBuilder {
     #[allow(clippy::cast_possible_truncation)]
     pub fn intern_value(&mut self, val: Value) -> u16 {
         let hash = value_hash(&val);
-        if let Some(&idx) = self.value_map.get(&hash) {
-            if self.values[idx as usize] == val {
-                return idx;
-            }
+        if let Some(&idx) = self.value_map.get(&hash)
+            && self.values[idx as usize] == val
+        {
+            return idx;
         }
         let idx = self.values.len() as u16;
         self.values.push(val);

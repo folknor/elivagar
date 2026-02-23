@@ -310,6 +310,7 @@ impl SortReader {
 
     /// Return the next record in globally sorted order, or `None` when all
     /// records have been consumed.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> io::Result<Option<SortRecord>> {
         let entry = match self.heap.pop() {
             Some(e) => e,
@@ -340,10 +341,10 @@ impl SortReader {
             drop(fs::remove_file(path));
         }
         // Only remove the parent dir if all chunks came from the same place.
-        if let Some(first) = self.chunk_paths.first() {
-            if let Some(parent) = first.parent() {
-                drop(fs::remove_dir(parent));
-            }
+        if let Some(first) = self.chunk_paths.first()
+            && let Some(parent) = first.parent()
+        {
+            drop(fs::remove_dir(parent));
         }
     }
 }
@@ -394,7 +395,7 @@ mod tests {
     #[test]
     fn single_chunk_sort() {
         let dir = test_tmp_dir("single_chunk");
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
 
         // Use a large chunk size so everything fits in one chunk.
         let mut writer = SortWriter::new(&dir, 1_000_000).unwrap();
@@ -436,13 +437,13 @@ mod tests {
         assert_eq!(output_keys, expected_keys);
 
         reader.cleanup();
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
     }
 
     #[test]
     fn multi_chunk_sort() {
         let dir = test_tmp_dir("multi_chunk");
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
 
         // Very small chunk size forces multiple chunks.
         let mut writer = SortWriter::new(&dir, 100).unwrap();
@@ -487,13 +488,13 @@ mod tests {
         assert_eq!(output_keys, expected_keys);
 
         reader.cleanup();
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
     }
 
     #[test]
     fn empty_input() {
         let dir = test_tmp_dir("empty");
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
 
         let writer = SortWriter::new(&dir, 1_000_000).unwrap();
         let mut reader = writer.finish().unwrap();
@@ -501,13 +502,13 @@ mod tests {
         assert!(reader.next().unwrap().is_none());
 
         reader.cleanup();
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
     }
 
     #[test]
     fn duplicate_keys() {
         let dir = test_tmp_dir("dup_keys");
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
 
         // Very small chunk size to force multi-chunk even with few records.
         let mut writer = SortWriter::new(&dir, 50).unwrap();
@@ -533,13 +534,13 @@ mod tests {
         assert_eq!(count, 100);
 
         reader.cleanup();
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
     }
 
     #[test]
     fn data_integrity() {
         let dir = test_tmp_dir("data_integrity");
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
 
         let mut writer = SortWriter::new(&dir, 200).unwrap();
 
@@ -572,6 +573,6 @@ mod tests {
         assert_eq!(count, 50);
 
         reader.cleanup();
-        let _ = fs::remove_dir_all(&dir);
+        drop(fs::remove_dir_all(&dir));
     }
 }

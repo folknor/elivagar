@@ -295,10 +295,10 @@ fn pois_match_man_made(
         return None;
     }
     let mut attrs = vec![attr_dyn("man_made", v)];
-    if v == "tower" {
-        if let Some(tt) = tags.get("tower:type") {
-            attrs.push(attr_dyn("tower:type", tt));
-        }
+    if v == "tower"
+        && let Some(tt) = tags.get("tower:type")
+    {
+        attrs.push(attr_dyn("tower:type", tt));
     }
     Some(attrs)
 }
@@ -377,10 +377,10 @@ fn pois_match_tourism(
         return None;
     }
     let mut attrs = vec![attr_dyn("tourism", v)];
-    if v == "information" {
-        if let Some(i) = tags.get("information") {
-            attrs.push(attr_dyn("information", i));
-        }
+    if v == "information"
+        && let Some(i) = tags.get("information")
+    {
+        attrs.push(attr_dyn("information", i));
     }
     Some(attrs)
 }

@@ -3,6 +3,11 @@ name = "elivagar"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "Shortbread vector tile generator — reads OSM PBF files and produces PMTiles v3 archives"
+repository = "https://github.com/folknor/elivagar"
+readme = "README.md"
+keywords = ["openstreetmap", "vector-tiles", "pmtiles", "shortbread", "tiles"]
+categories = ["command-line-utilities", "science::geo"]
 
 [[bin]]
 name = "elivagar"

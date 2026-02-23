@@ -674,17 +674,17 @@ fn shortbread_spec_yaml() {
 
             // Check min_zoom (skip for boundary_labels — area-dependent,
             // requires geometry we don't have in match_element)
-            if exp_layer != "boundary_labels" {
-                if let Some(expected_zoom) = exp["min_zoom"].as_u64() {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let ez = expected_zoom as u8;
-                    if m.min_zoom != ez {
-                        failures.push(format!(
-                            "[{name}] layer '{exp_layer}' min_zoom: expected {ez}, got {}",
-                            m.min_zoom
-                        ));
-                        case_ok = false;
-                    }
+            if exp_layer != "boundary_labels"
+                && let Some(expected_zoom) = exp["min_zoom"].as_u64()
+            {
+                #[allow(clippy::cast_possible_truncation)]
+                let ez = expected_zoom as u8;
+                if m.min_zoom != ez {
+                    failures.push(format!(
+                        "[{name}] layer '{exp_layer}' min_zoom: expected {ez}, got {}",
+                        m.min_zoom
+                    ));
+                    case_ok = false;
                 }
             }
 
@@ -739,7 +739,7 @@ fn shortbread_spec_yaml() {
                 // zoom-dependent attribute filtering yet.
                 let has_at_zoom = exp.get("at_zoom").is_some();
                 if !has_at_zoom
-                    && exp.get("allow_extra_tags").and_then(|v| v.as_bool())
+                    && exp.get("allow_extra_tags").and_then(serde_yaml::Value::as_bool)
                         == Some(false)
                 {
                     for (ak, _, _) in &m.attrs {

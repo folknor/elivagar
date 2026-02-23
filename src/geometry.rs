@@ -155,8 +155,8 @@ fn find_farthest(points: &[Point], start: usize, end: usize) -> (usize, f64) {
     let mut max_dist_sq: f64 = 0.0;
     let mut max_idx = start;
 
-    for i in (start + 1)..end {
-        let dist_sq = perp_dist_sq(&points[i], &a, dx, dy, len_sq);
+    for (i, pt) in points.iter().enumerate().take(end).skip(start + 1) {
+        let dist_sq = perp_dist_sq(pt, &a, dx, dy, len_sq);
         if dist_sq > max_dist_sq {
             max_dist_sq = dist_sq;
             max_idx = i;

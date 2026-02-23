@@ -1009,12 +1009,10 @@ fn flush_tile_batch(batch: &[PendingTile], pmtiles: &mut PmtilesWriter) -> u64 {
         .collect();
 
     let mut count: u64 = 0;
-    for result in results {
-        if let Some((tile_id, compressed)) = result {
-            let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile_id);
-            pmtiles.add_tile(z, x, y, &compressed).expect("failed to write tile");
-            count += 1;
-        }
+    for (tile_id, compressed) in results.into_iter().flatten() {
+        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile_id);
+        pmtiles.add_tile(z, x, y, &compressed).expect("failed to write tile");
+        count += 1;
     }
     count
 }
@@ -1047,12 +1045,6 @@ fn get_or_create_layer(layers: &mut [Option<LayerBuilder>], idx: usize) -> &mut 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-#[inline]
-#[allow(clippy::cast_possible_truncation)]
-fn to_e7(deg: f64) -> i32 {
-    (deg * 1e7).round() as i32
-}
 
 fn centroid_of(points: &[Point]) -> Point {
     if points.is_empty() {
