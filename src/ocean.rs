@@ -1,0 +1,517 @@
+// Ocean shapefile processing.
+//
+// Reads a water-polygons-split-3857 shapefile (mmap + .shx index), filters to
+// data bounds, parses polygons, and processes them in parallel with rayon.
+// Uses scanline fill to minimize point-in-polygon tests.
+
+use crate::geometry::{self, ClipRect, MercBbox, Point, BUFFER_FRACTION, ensure_cw_tile, ensure_ccw_tile, merc_bbox};
+use crate::mvt::{self, GeomType};
+use crate::pmtiles_writer;
+use crate::shortbread::{self, Layer};
+use crate::sort::{self, SortRecord, SortWriter};
+use crate::wire_format::encode_feature_data;
+
+use std::collections::{HashMap, HashSet};
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// Parsed ocean polygon ready for parallel processing.
+struct OceanPolygon {
+    outer: Vec<Point>,
+    inners: Vec<Vec<Point>>,
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// Read ocean shapefile with mmap + bbox-first filtering, then process in parallel.
+///
+/// Mmaps the .shp file and reads the .shx index to get record offsets.
+/// For each record, reads only the 32-byte bbox from the mmap. Only shapes
+/// intersecting data_bounds get their full geometry parsed.
+/// Then all polygons are processed in parallel with rayon.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn process_ocean_shapefile(
+    path: &std::path::Path,
+    data_bounds: &MercBbox,
+    min_zoom: u8,
+    max_zoom: u8,
+    sort_writer: &mut SortWriter,
+) -> u64 {
+    eprintln!("  Opening {}", path.display());
+
+    // --- Read .shx index to get record offsets ---
+    let shx_path = path.with_extension("shx");
+    let shx_data = std::fs::read(&shx_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", shx_path.display()));
+
+    let shape_count = (shx_data.len() - 100) / 8;
+    let mut offsets: Vec<usize> = Vec::with_capacity(shape_count);
+    for i in 0..shape_count {
+        let base = 100 + i * 8;
+        let offset_words = i32::from_be_bytes([
+            shx_data[base], shx_data[base + 1], shx_data[base + 2], shx_data[base + 3],
+        ]);
+        #[allow(clippy::cast_sign_loss)]
+        offsets.push((offset_words as usize) * 2);
+    }
+    eprintln!("  Index: {shape_count} shapes");
+
+    // --- Mmap the .shp file ---
+    let shp_file = std::fs::File::open(path)
+        .unwrap_or_else(|e| panic!("Failed to open {}: {e}", path.display()));
+    let shp_mmap = unsafe { memmap2::Mmap::map(&shp_file) }
+        .unwrap_or_else(|e| panic!("Failed to mmap {}: {e}", path.display()));
+    let shp = &shp_mmap[..];
+    eprintln!("  Mmapped {:.1} MB", shp.len() as f64 / (1024.0 * 1024.0));
+
+    let bounds_clip = ClipRect::new(
+        data_bounds.min_x, data_bounds.min_y,
+        data_bounds.max_x, data_bounds.max_y,
+    );
+
+    // --- Parse phase: extract all polygons (single-threaded, sequential I/O) ---
+    let mut polygons: Vec<OceanPolygon> = Vec::new();
+    let mut shapes_hit: u64 = 0;
+
+    for &offset in &offsets {
+        let rec = offset + 8;
+        if rec + 44 > shp.len() {
+            break;
+        }
+
+        let bb = rec + 4;
+        let xmin = f64::from_le_bytes(shp[bb..bb + 8].try_into().expect("slice"));
+        let ymin = f64::from_le_bytes(shp[bb + 8..bb + 16].try_into().expect("slice"));
+        let xmax = f64::from_le_bytes(shp[bb + 16..bb + 24].try_into().expect("slice"));
+        let ymax = f64::from_le_bytes(shp[bb + 24..bb + 32].try_into().expect("slice"));
+
+        let merc_min = geometry::from_epsg3857(xmin, ymax);
+        let merc_max = geometry::from_epsg3857(xmax, ymin);
+
+        if merc_max.x < data_bounds.min_x
+            || merc_min.x > data_bounds.max_x
+            || merc_max.y < data_bounds.min_y
+            || merc_min.y > data_bounds.max_y
+        {
+            continue;
+        }
+
+        shapes_hit += 1;
+
+        #[allow(clippy::cast_sign_loss)]
+        let num_parts = i32::from_le_bytes(shp[rec + 36..rec + 40].try_into().expect("slice")) as usize;
+        #[allow(clippy::cast_sign_loss)]
+        let num_points = i32::from_le_bytes(shp[rec + 40..rec + 44].try_into().expect("slice")) as usize;
+
+        let parts_start = rec + 44;
+        let points_start = parts_start + num_parts * 4;
+
+        let mut ring_starts: Vec<usize> = (0..num_parts)
+            .map(|j| {
+                let b = parts_start + j * 4;
+                #[allow(clippy::cast_sign_loss)]
+                let v = i32::from_le_bytes(shp[b..b + 4].try_into().expect("slice")) as usize;
+                v
+            })
+            .collect();
+        ring_starts.push(num_points);
+
+        let all_points: Vec<Point> = (0..num_points)
+            .map(|j| {
+                let b = points_start + j * 16;
+                let x = f64::from_le_bytes(shp[b..b + 8].try_into().expect("slice"));
+                let y = f64::from_le_bytes(shp[b + 8..b + 16].try_into().expect("slice"));
+                geometry::from_epsg3857(x, y)
+            })
+            .collect();
+
+        let mut current_outer: Option<Vec<Point>> = None;
+        let mut current_inners: Vec<Vec<Point>> = Vec::new();
+
+        for w in 0..ring_starts.len() - 1 {
+            let ring = &all_points[ring_starts[w]..ring_starts[w + 1]];
+
+            let clipped = geometry::clip_polygon(ring, &bounds_clip);
+            if clipped.len() < 3 {
+                if w == 0 || geometry::signed_area(ring) >= 0.0 {
+                    if let Some(outer) = current_outer.take() {
+                        polygons.push(OceanPolygon { outer, inners: std::mem::take(&mut current_inners) });
+                    }
+                    current_outer = None;
+                }
+                continue;
+            }
+
+            let is_outer = w == 0 || geometry::signed_area(ring) < 0.0;
+
+            if is_outer {
+                if let Some(outer) = current_outer.take() {
+                    polygons.push(OceanPolygon { outer, inners: std::mem::take(&mut current_inners) });
+                }
+                current_outer = Some(clipped);
+            } else {
+                current_inners.push(clipped);
+            }
+        }
+
+        if let Some(outer) = current_outer {
+            polygons.push(OceanPolygon { outer, inners: current_inners });
+        }
+    }
+
+    let poly_count = polygons.len();
+    eprintln!("  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons — processing in parallel");
+
+    // --- Process phase: parallel with rayon ---
+    use rayon::prelude::*;
+
+    let ocean_layer = Layer::Ocean as u8;
+    let empty_attrs: Vec<shortbread::Attr> = Vec::new();
+
+    let results: Vec<Vec<SortRecord>> = polygons
+        .par_iter()
+        .enumerate()
+        .map(|(idx, poly)| {
+            let mut records = Vec::new();
+            emit_ocean_polygon(
+                idx as u64, &poly.outer, &poly.inners,
+                min_zoom, max_zoom, ocean_layer, &empty_attrs,
+                &mut records,
+            );
+            records
+        })
+        .collect();
+
+    let mut count: u64 = 0;
+    for batch in results {
+        count += batch.len() as u64;
+        for record in batch {
+            sort_writer.push(record).expect("sort push failed");
+        }
+    }
+
+    eprintln!("  {poly_count} polygons, {count} features");
+    count
+}
+
+// ---------------------------------------------------------------------------
+// Ocean polygon emission (scanline fill)
+// ---------------------------------------------------------------------------
+
+/// Emit an ocean polygon with scanline fill optimization.
+///
+/// For each zoom level:
+/// 1. Rasterize polygon edges → boundary tiles (DDA grid traversal)
+/// 2. Group boundary tiles by row, sort by x
+/// 3. For each row: clip+encode boundary tiles, then for each gap between
+///    boundary tiles do ONE point-in-polygon test and fill the entire gap.
+/// 4. Rows with no boundary tiles: single PIP test, fill entire row if inside.
+///
+/// Reduces PIP calls from O(bbox_tiles) to O(gaps × rows).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn emit_ocean_polygon(
+    feature_id: u64,
+    outer: &[Point],
+    inners: &[Vec<Point>],
+    min_zoom: u8,
+    max_zoom: u8,
+    layer_idx: u8,
+    attrs: &[shortbread::Attr],
+    records: &mut Vec<SortRecord>,
+) {
+    if outer.len() < 4 {
+        return;
+    }
+
+    // Pre-compute fill tile data (a rectangle covering the full tile extent).
+    // This is zoom-independent: empty attrs + same geometry = identical bytes.
+    #[allow(clippy::cast_possible_truncation)]
+    let ext = geometry::EXTENT as i32;
+    let fill_ring: [(i32, i32); 5] = [(0, 0), (ext, 0), (ext, ext), (0, ext), (0, 0)];
+    let fill_cmds = mvt::encode_polygon(&[&fill_ring]);
+    let fill_data = encode_feature_data(feature_id, GeomType::Polygon, &fill_cmds, attrs, 0);
+
+    let bbox = merc_bbox(outer);
+
+    // Reuse collections across zoom iterations (O4: avoid re-alloc per zoom)
+    let mut boundary_tiles: HashSet<u64> = HashSet::new();
+    let mut boundary_rows: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    // Cascading simplification (O3): simplify from the previous zoom's result
+    // instead of from the original geometry. D-P simplification is hierarchical,
+    // so z13's result is always a subset of z14's.
+    let mut cascade_outer = outer.to_vec();
+    let mut cascade_inners: Vec<Vec<Point>> = inners.to_vec();
+
+    for z in (min_zoom..=max_zoom).rev() {
+        let tol = if z < 14 { geometry::simplify_tolerance(z) } else { 0.0 };
+        if tol > 0.0 {
+            cascade_outer = geometry::simplify(&cascade_outer, tol);
+            cascade_inners = cascade_inners
+                .iter()
+                .map(|r| geometry::simplify(r, tol))
+                .filter(|r| r.len() >= 4)
+                .collect();
+        }
+        if cascade_outer.len() < 4 {
+            break; // coarser zooms will also vanish
+        }
+
+        let simp_outer = &cascade_outer;
+        let simp_inners = &cascade_inners;
+
+        let scale = f64::from(1u32 << z);
+        let inv_scale = 1.0 / scale;
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let max_tile = (1u32 << z) - 1;
+
+        // Rasterize polygon edges → boundary tiles
+        boundary_tiles.clear();
+        rasterize_ring_edges(simp_outer, scale, &mut boundary_tiles);
+        for inner in simp_inners {
+            rasterize_ring_edges(inner, scale, &mut boundary_tiles);
+        }
+
+        // Group boundary tiles by row (ty → sorted tx list)
+        boundary_rows.clear();
+        for &packed in &boundary_tiles {
+            #[allow(clippy::cast_possible_truncation)]
+            let tx = (packed >> 32) as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let ty = packed as u32;
+            boundary_rows.entry(ty).or_default().push(tx);
+        }
+        for txs in boundary_rows.values_mut() {
+            txs.sort_unstable();
+            txs.dedup();
+        }
+
+        // Tile range from bbox
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let tx_min = (bbox.min_x * scale).floor().max(0.0) as u32;
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let ty_min = (bbox.min_y * scale).floor().max(0.0) as u32;
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let tx_max = ((bbox.max_x * scale).floor() as u32).min(max_tile);
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let ty_max = ((bbox.max_y * scale).floor() as u32).min(max_tile);
+
+        // PIP helper: inside outer and not in any hole
+        let pip = |px: f64, py: f64| -> bool {
+            point_in_polygon(px, py, simp_outer)
+                && !simp_inners.iter().any(|inner| point_in_polygon(px, py, inner))
+        };
+
+        // Scanline: process row by row
+        for ty in ty_min..=ty_max {
+            let cy = (f64::from(ty) + 0.5) * inv_scale;
+
+            if let Some(bx_list) = boundary_rows.get(&ty) {
+                // Row has boundary tiles — clip+emit them, then fill gaps
+                for &tx in bx_list {
+                    emit_boundary_tile(
+                        feature_id, tx, ty, z, simp_outer, simp_inners,
+                        layer_idx, attrs, records,
+                    );
+                }
+
+                // Fill gaps between boundary tiles
+                let mut gaps: Vec<(u32, u32)> = Vec::new();
+                if bx_list[0] > tx_min {
+                    gaps.push((tx_min, bx_list[0] - 1));
+                }
+                for w in 0..bx_list.len() - 1 {
+                    if bx_list[w + 1] > bx_list[w] + 1 {
+                        gaps.push((bx_list[w] + 1, bx_list[w + 1] - 1));
+                    }
+                }
+                if *bx_list.last().expect("nonempty") < tx_max {
+                    gaps.push((bx_list.last().expect("nonempty") + 1, tx_max));
+                }
+
+                for (gx_min, gx_max) in &gaps {
+                    let test_cx = (f64::from(*gx_min) + 0.5) * inv_scale;
+                    if pip(test_cx, cy) {
+                        for tx in *gx_min..=*gx_max {
+                            let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                            let key = sort::make_sort_key(tile_id, layer_idx, 0);
+                            records.push(SortRecord { key, data: fill_data.clone() });
+                        }
+                    }
+                }
+            } else {
+                // No boundary tiles in this row — single PIP test
+                let test_cx = (f64::from(tx_min) + 0.5) * inv_scale;
+                if pip(test_cx, cy) {
+                    for tx in tx_min..=tx_max {
+                        let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                        let key = sort::make_sort_key(tile_id, layer_idx, 0);
+                        records.push(SortRecord { key, data: fill_data.clone() });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Clip and encode a single boundary tile (polygon edge crosses this tile).
+#[allow(clippy::too_many_arguments)]
+fn emit_boundary_tile(
+    feature_id: u64,
+    tx: u32, ty: u32, z: u8,
+    outer: &[Point],
+    inners: &[Vec<Point>],
+    layer_idx: u8,
+    attrs: &[shortbread::Attr],
+    records: &mut Vec<SortRecord>,
+) {
+    let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
+
+    let clipped_outer = geometry::clip_polygon(outer, &clip);
+    if clipped_outer.len() < 3 {
+        return;
+    }
+    let mut outer_tc = geometry::to_tile_coords(&clipped_outer, tx, ty, z);
+    if outer_tc.first() != outer_tc.last()
+        && let Some(&first) = outer_tc.first()
+    {
+        outer_tc.push(first);
+    }
+    ensure_cw_tile(&mut outer_tc);
+
+    let mut all_rings: Vec<Vec<(i32, i32)>> = vec![outer_tc];
+    for inner in inners {
+        let clipped_inner = geometry::clip_polygon(inner, &clip);
+        if clipped_inner.len() < 3 {
+            continue;
+        }
+        let mut inner_tc = geometry::to_tile_coords(&clipped_inner, tx, ty, z);
+        if inner_tc.first() != inner_tc.last()
+            && let Some(&first) = inner_tc.first()
+        {
+            inner_tc.push(first);
+        }
+        ensure_ccw_tile(&mut inner_tc);
+        all_rings.push(inner_tc);
+    }
+
+    let ring_refs: Vec<&[(i32, i32)]> = all_rings.iter().map(Vec::as_slice).collect();
+    let geom_cmds = mvt::encode_polygon(&ring_refs);
+    if geom_cmds.is_empty() {
+        return;
+    }
+    let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+    let data = encode_feature_data(feature_id, GeomType::Polygon, &geom_cmds, attrs, z);
+    let key = sort::make_sort_key(tile_id, layer_idx, 0);
+    records.push(SortRecord { key, data });
+}
+
+// ---------------------------------------------------------------------------
+// Rasterization helpers
+// ---------------------------------------------------------------------------
+
+/// Rasterize polygon ring edges into tile grid cells using DDA grid traversal.
+/// Marks all tiles that a ring's edges cross through.
+fn rasterize_ring_edges(ring: &[Point], scale: f64, tiles: &mut HashSet<u64>) {
+    if ring.len() < 2 {
+        return;
+    }
+    for i in 0..ring.len() {
+        let j = if i + 1 < ring.len() { i + 1 } else { 0 };
+        let x0 = ring[i].x * scale;
+        let y0 = ring[i].y * scale;
+        let x1 = ring[j].x * scale;
+        let y1 = ring[j].y * scale;
+        rasterize_segment(x0, y0, x1, y1, tiles);
+    }
+}
+
+/// DDA grid traversal: enumerate all grid cells a line segment crosses.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn rasterize_segment(
+    x0: f64, y0: f64, x1: f64, y1: f64,
+    tiles: &mut HashSet<u64>,
+) {
+    let mut cx = x0.floor() as i32;
+    let mut cy = y0.floor() as i32;
+    let ex = x1.floor() as i32;
+    let ey = y1.floor() as i32;
+
+    if cx >= 0 && cy >= 0 {
+        tiles.insert(pack_tile(cx as u32, cy as u32));
+    }
+
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+
+    let step_x: i32 = if dx > 0.0 { 1 } else { -1 };
+    let step_y: i32 = if dy > 0.0 { 1 } else { -1 };
+
+    let mut t_max_x = if dx != 0.0 {
+        let next_x = if dx > 0.0 { (cx + 1) as f64 } else { cx as f64 };
+        (next_x - x0) / dx
+    } else {
+        f64::MAX
+    };
+    let mut t_max_y = if dy != 0.0 {
+        let next_y = if dy > 0.0 { (cy + 1) as f64 } else { cy as f64 };
+        (next_y - y0) / dy
+    } else {
+        f64::MAX
+    };
+
+    let t_delta_x = if dx != 0.0 { (step_x as f64) / dx } else { f64::MAX };
+    let t_delta_y = if dy != 0.0 { (step_y as f64) / dy } else { f64::MAX };
+
+    // Walk until we reach the end tile
+    let max_steps = (cx - ex).unsigned_abs() + (cy - ey).unsigned_abs() + 2;
+    for _ in 0..max_steps {
+        if cx == ex && cy == ey {
+            break;
+        }
+        if t_max_x < t_max_y {
+            cx += step_x;
+            t_max_x += t_delta_x;
+        } else {
+            cy += step_y;
+            t_max_y += t_delta_y;
+        }
+        if cx >= 0 && cy >= 0 {
+            tiles.insert(pack_tile(cx as u32, cy as u32));
+        }
+    }
+}
+
+#[inline]
+fn pack_tile(tx: u32, ty: u32) -> u64 {
+    (u64::from(tx) << 32) | u64::from(ty)
+}
+
+/// Ray-casting point-in-polygon test.
+fn point_in_polygon(px: f64, py: f64, polygon: &[Point]) -> bool {
+    let mut inside = false;
+    let n = polygon.len();
+    if n < 3 {
+        return false;
+    }
+    let mut j = n - 1;
+    for i in 0..n {
+        let yi = polygon[i].y;
+        let yj = polygon[j].y;
+        if ((yi > py) != (yj > py))
+            && (px < (polygon[j].x - polygon[i].x) * (py - yi) / (yj - yi) + polygon[i].x)
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}

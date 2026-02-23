@@ -1,0 +1,160 @@
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
+
+use memmap2::{Mmap, MmapMut};
+
+const ENTRY_SIZE: u64 = 12; // 8 bytes data_offset + 4 bytes coord_count
+const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
+const COORD_SIZE: u64 = 8; // 4 bytes lat_e7 + 4 bytes lon_e7
+
+pub struct WayIndex {
+    // Offset index (way_offsets.bin): mmap'd, indexed at way_id * 12
+    offsets_file: File,
+    offsets_mmap: MmapMut,
+    offsets_file_len: u64,
+
+    // Data file (way_data.bin): buffered writer during write phase, mmap after finish
+    data_writer: Option<BufWriter<File>>,
+    data_write_pos: u64,
+    data_path: PathBuf,
+
+    // Read-only mmap over way_data.bin, set after finish_writing()
+    data_mmap: Option<Mmap>,
+}
+
+impl WayIndex {
+    /// Create a new writable way index. Creates two files in `dir`:
+    /// - `way_offsets.bin` -- indexed at way_id * 12, stores (u64 data_offset, u32 coord_count)
+    /// - `way_data.bin` -- append-only packed coordinates
+    pub fn create(dir: &Path) -> io::Result<Self> {
+        let offsets_path = dir.join("way_offsets.bin");
+        let data_path = dir.join("way_data.bin");
+
+        let offsets_file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&offsets_path)?;
+
+        let offsets_file_len = GROW_INCREMENT;
+        offsets_file.set_len(offsets_file_len)?;
+
+        let offsets_mmap = unsafe { MmapMut::map_mut(&offsets_file)? };
+
+        let data_file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&data_path)?;
+
+        let data_writer = Some(BufWriter::new(data_file));
+
+        Ok(WayIndex {
+            offsets_file,
+            offsets_mmap,
+            offsets_file_len,
+            data_writer,
+            data_write_pos: 0,
+            data_path,
+            data_mmap: None,
+        })
+    }
+
+    /// Write geometry for a way. Appends coords to data file, records offset in index.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub fn put(&mut self, way_id: i64, coords: &[(i32, i32)]) {
+        let coord_count = coords.len() as u32;
+
+        // Record the current data write position as the offset for this way.
+        let data_offset = self.data_write_pos;
+
+        // Write coordinates to the data file.
+        let writer = self.data_writer.as_mut().expect("put called after finish_writing");
+        for &(lat_e7, lon_e7) in coords {
+            writer.write_all(&lat_e7.to_le_bytes()).expect("failed to write lat to way data");
+            writer.write_all(&lon_e7.to_le_bytes()).expect("failed to write lon to way data");
+        }
+        self.data_write_pos += coord_count as u64 * COORD_SIZE;
+
+        // Write the offset entry in the index file.
+        let index_offset = way_id as u64 * ENTRY_SIZE;
+        let needed = index_offset + ENTRY_SIZE;
+
+        if needed > self.offsets_file_len {
+            let mut new_len = self.offsets_file_len;
+            while new_len < needed {
+                new_len += GROW_INCREMENT;
+            }
+            self.offsets_file.set_len(new_len).expect("failed to grow way offsets file");
+            self.offsets_mmap = unsafe {
+                MmapMut::map_mut(&self.offsets_file).expect("failed to remap way offsets")
+            };
+            self.offsets_file_len = new_len;
+        }
+
+        let off = index_offset as usize;
+        self.offsets_mmap[off..off + 8].copy_from_slice(&data_offset.to_le_bytes());
+        self.offsets_mmap[off + 8..off + 12].copy_from_slice(&coord_count.to_le_bytes());
+    }
+
+    /// Call after all ways have been written. Flushes the data writer and
+    /// opens a read-only mmap over way_data.bin for random access reads.
+    pub fn finish_writing(&mut self) -> io::Result<()> {
+        // Flush and drop the BufWriter.
+        if let Some(mut writer) = self.data_writer.take() {
+            writer.flush()?;
+        }
+
+        // Open a read-only mmap over the data file (only if non-empty).
+        if self.data_write_pos > 0 {
+            let data_file = File::open(&self.data_path)?;
+            let mmap = unsafe { Mmap::map(&data_file)? };
+            self.data_mmap = Some(mmap);
+        }
+
+        Ok(())
+    }
+
+    /// Read geometry for a way. Only valid after finish_writing().
+    /// Returns None if entry is unset (offset and count both zero).
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::unwrap_used)]
+    pub fn get(&self, way_id: i64) -> Option<Vec<(i32, i32)>> {
+        let index_offset = way_id as u64 * ENTRY_SIZE;
+        let needed = index_offset + ENTRY_SIZE;
+
+        if needed > self.offsets_file_len {
+            return None;
+        }
+
+        let off = index_offset as usize;
+        let data_offset =
+            u64::from_le_bytes(self.offsets_mmap[off..off + 8].try_into().unwrap());
+        let coord_count =
+            u32::from_le_bytes(self.offsets_mmap[off + 8..off + 12].try_into().unwrap());
+
+        // Unset detection: both zero means no entry.
+        if data_offset == 0 && coord_count == 0 {
+            return None;
+        }
+
+        let mmap = self.data_mmap.as_ref()?;
+
+        let start = data_offset as usize;
+        let byte_len = coord_count as usize * COORD_SIZE as usize;
+        let slice = &mmap[start..start + byte_len];
+
+        let mut coords = Vec::with_capacity(coord_count as usize);
+        let mut pos = 0usize;
+        for _ in 0..coord_count {
+            let lat_e7 = i32::from_le_bytes(slice[pos..pos + 4].try_into().unwrap());
+            let lon_e7 = i32::from_le_bytes(slice[pos + 4..pos + 8].try_into().unwrap());
+            coords.push((lat_e7, lon_e7));
+            pos += 8;
+        }
+
+        Some(coords)
+    }
+}
