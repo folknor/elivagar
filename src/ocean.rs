@@ -228,13 +228,15 @@ fn emit_ocean_polygon(
     }
 
     // Pre-compute fill tile data (a rectangle covering the full tile extent).
-    // This is zoom-independent: empty attrs + same geometry = identical bytes.
+    // Use osm_id=0 so ALL ocean fill tiles produce identical bytes, enabling
+    // PMTiles content-hash dedup. The per-polygon feature_id is irrelevant
+    // for full-tile fills (no visible feature identity).
     #[allow(clippy::cast_possible_truncation)]
     let ext = geometry::EXTENT as i32;
     let fill_ring: [(i32, i32); 5] = [(0, 0), (ext, 0), (ext, ext), (0, ext), (0, 0)];
     let mut geom_buf: Vec<u32> = Vec::new();
     mvt::encode_polygon(&mut geom_buf, &[&fill_ring]);
-    let fill_data = encode_feature_data(feature_id, GeomType::Polygon, &geom_buf, attrs, 0);
+    let fill_data = encode_feature_data(0, GeomType::Polygon, &geom_buf, attrs, 0);
 
     let bbox = merc_bbox(outer);
 
