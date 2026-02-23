@@ -22,7 +22,7 @@ use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use osmpbf::{Element, ElementReader, RelMemberType};
+use pbfhogg::{Element, ElementReader, RelMemberType};
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -517,7 +517,7 @@ fn process_matched_way(
 
 fn process_relation(
     osm_id: u64,
-    rel: &osmpbf::Relation<'_>,
+    rel: &pbfhogg::Relation<'_>,
     tags: &[(&str, &str)],
     way_index: &WayIndex,
     min_zoom: u8,

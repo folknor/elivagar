@@ -9,7 +9,7 @@ name = "elivagar"
 path = "src/main.rs"
 
 [dependencies]
-osmpbf = { package = "pbfhogg", path = "../pbfhogg", default-features = false, features = ["zlib-ng"] }
+pbfhogg = { path = "../pbfhogg", default-features = false, features = ["zlib-ng"] }
 rayon = "1.5"
 memmap2 = "0.9"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-ng"] }
