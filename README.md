@@ -41,7 +41,7 @@ Denmark extract (483 MB PBF) → Shortbread PMTiles, best of 3 runs:
 <!-- BENCH:START -->
 | Tool | Total | PBF+Features | Ocean | Sort | Assembly |
 |------|-------|-------------|-------|------|----------|
-| **elivagar** | **29s** | 19s | 4s | 0.3s | 5s |
+| **elivagar** | **29s** | 19s | 4s | 0.3s | 4s |
 | Planetiler 0.10 | 44s | — | — | — | — |
 <!-- BENCH:END -->
 

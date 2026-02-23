@@ -72,14 +72,16 @@
 
 ### High impact, more effort
 
-- [ ] Double-buffer Phase 4 — overlap sort read, rayon encode, and PMTiles write. Currently
-  the sort reader is serial, rayon waits for previous batch writes before starting next batch.
+- [x] Double-buffer Phase 4 — 3-stage pipeline (reader thread → rayon encode → writer thread)
+  using `std::thread::scope` + `sync_channel(1)`. Overlaps sort read and PMTiles write with
+  CPU-bound encoding. Assemble phase 5.5s → 3.5s (skip-to-sort), 5.3s → 4.1s (full run)
+  on Denmark.
 - [x] Reuse encode buffers — MVT `encode()` scratch Vecs (`layer_buf`, `feat_buf`, `val_buf`,
   `packed`) now reused via `EncodeScratch` struct + rayon `map_init`. Benchmark-neutral on
   Denmark (assemble phase ~5.5s before and after — gzip dominates, mimalloc handles transient
   allocs well), but cleaner code. `encode_attrs_bytes` was already buffer-reused (P3).
 - ~~SmallVec for `LayerMatch` vec, `attrs` vec, and `tags_vec`~~ — **Reverted.** Benchmarked
-  on Denmark (best of 3): PBF phase 22.8s vs baseline 18.7–19.3s (~20% slower). `Attr` is
+  on Denmark (best of 3): PBF phase 22.8s vs baseline 18.7-19.3s (~20% slower). `Attr` is
   ~40 bytes so `SmallVec<[Attr; 8]>` = ~320 bytes inline; `LayerMatch` containing that makes
   `SmallVec<[LayerMatch; 4]>` enormous. Extra stack memcpy outweighs saved heap allocs.
 - [x] `WayIndex::get` returns zero-copy `&[(i32, i32)]` slice over mmap instead of allocating

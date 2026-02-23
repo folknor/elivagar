@@ -950,66 +950,115 @@ struct PendingTile {
     features: Vec<(u8, Vec<u8>)>, // (layer_idx, feature_data)
 }
 
+/// An encoded + gzip-compressed tile ready for writing to PMTiles.
+struct EncodedTile {
+    tile_id: u64,
+    compressed: Vec<u8>,
+}
+
 #[allow(clippy::too_many_lines)]
 fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64), PipelineError> {
+    use std::sync::mpsc::sync_channel;
+
     let pmtiles_config = PmtilesConfig {
         min_zoom: config.min_zoom,
         max_zoom: config.max_zoom,
         bounds: (-180.0, -85.05, 180.0, 85.05),
         center: (0.0, 0.0, 2),
     };
-    let mut pmtiles = if config.in_memory {
+    let pmtiles = if config.in_memory {
         PmtilesWriter::new(pmtiles_config)
     } else {
         PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir)?
     };
 
-    let mut tiles_written: u64 = 0;
-    let mut features_read: u64 = 0;
-
     const BATCH_SIZE: usize = 4096;
-    let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
-    let mut current = PendingTile { tile_id: u64::MAX, features: Vec::new() };
 
-    loop {
-        let record = sort_reader.next()?;
-        let Some(r) = record else {
-            if current.tile_id != u64::MAX {
-                batch.push(current);
+    // Double-buffer pipeline: reader → encoder (main/rayon) → writer.
+    // sync_channel(1) allows one batch ahead, overlapping read/write I/O
+    // with CPU-bound rayon encoding.
+    // Error cascade: reader error → drops read_tx → encoder loop ends →
+    // drops encode_tx → writer loop ends → scope joins → error propagated.
+    let (read_tx, read_rx) = sync_channel::<Vec<PendingTile>>(1);
+    let (encode_tx, encode_rx) = sync_channel::<Vec<EncodedTile>>(1);
+
+    let scope_result: Result<_, PipelineError> = std::thread::scope(|s| {
+        // --- Reader thread: k-way merge → PendingTile batches ---
+        let reader = s.spawn(move || -> Result<u64, PipelineError> {
+            let mut features_read: u64 = 0;
+            let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
+            let mut current = PendingTile { tile_id: u64::MAX, features: Vec::new() };
+
+            loop {
+                let record = sort_reader.next()?;
+                let Some(r) = record else {
+                    if current.tile_id != u64::MAX {
+                        batch.push(current);
+                    }
+                    if !batch.is_empty() {
+                        let _ = read_tx.send(batch); // ignore: encoder may have exited
+                    }
+                    break;
+                };
+                features_read += 1;
+
+                let tile_id = sort::tile_id_from_key(r.key);
+                let layer_idx = sort::layer_from_key(r.key);
+
+                if tile_id != current.tile_id {
+                    if current.tile_id != u64::MAX {
+                        batch.push(current);
+                        if batch.len() >= BATCH_SIZE {
+                            if read_tx.send(batch).is_err() { break; }
+                            batch = Vec::with_capacity(BATCH_SIZE);
+                        }
+                    }
+                    current = PendingTile { tile_id, features: Vec::new() };
+                }
+                current.features.push((layer_idx, r.data));
             }
-            if !batch.is_empty() {
-                tiles_written += flush_tile_batch(&batch, &mut pmtiles);
-            }
-            break;
-        };
-        features_read += 1;
+            Ok(features_read)
+        });
 
-        let tile_id = sort::tile_id_from_key(r.key);
-        let layer_idx = sort::layer_from_key(r.key);
-
-        if tile_id != current.tile_id {
-            if current.tile_id != u64::MAX {
-                batch.push(current);
-                if batch.len() >= BATCH_SIZE {
-                    tiles_written += flush_tile_batch(&batch, &mut pmtiles);
-                    batch.clear();
+        // --- Writer thread: encoded tiles → PMTiles ---
+        // move takes ownership of pmtiles; returned via join handle for write_to().
+        let writer = s.spawn(move || -> (u64, PmtilesWriter) {
+            let mut pmtiles = pmtiles;
+            let mut tiles_written: u64 = 0;
+            while let Ok(batch) = encode_rx.recv() {
+                for tile in batch {
+                    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+                    pmtiles.add_tile(z, x, y, &tile.compressed)
+                        .expect("failed to write tile");
+                    tiles_written += 1;
                 }
             }
-            current = PendingTile { tile_id, features: Vec::new() };
-        }
-        current.features.push((layer_idx, r.data));
-    }
+            (tiles_written, pmtiles)
+        });
 
+        // --- Main thread: receive batches, encode with rayon, forward to writer ---
+        for batch in read_rx {
+            let encoded = encode_tile_batch(&batch);
+            if encode_tx.send(encoded).is_err() { break; }
+        }
+        drop(encode_tx);
+
+        let features_read = reader.join().expect("reader panicked")?;
+        let (tiles_written, pmtiles) = writer.join().expect("writer panicked");
+        Ok((features_read, tiles_written, pmtiles))
+    });
+
+    let (features_read, tiles_written, mut pmtiles) = scope_result?;
     pmtiles.write_to(&config.output_path)?;
 
     Ok((features_read, tiles_written))
 }
 
-/// Encode + gzip a batch of tiles in parallel, then add to PMTiles writer.
-fn flush_tile_batch(batch: &[PendingTile], pmtiles: &mut PmtilesWriter) -> u64 {
+/// Encode + gzip a batch of tiles in parallel using rayon.
+fn encode_tile_batch(batch: &[PendingTile]) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 
-    let results: Vec<Option<(u64, Vec<u8>)>> = batch
+    batch
         .par_iter()
         .map_init(
             mvt::EncodeScratch::new,
@@ -1038,17 +1087,10 @@ fn flush_tile_batch(batch: &[PendingTile], pmtiles: &mut PmtilesWriter) -> u64 {
             encoder.write_all(&mvt_data).expect("gzip write failed");
             let compressed = encoder.finish().expect("gzip finish failed");
 
-            Some((tile.tile_id, compressed))
+            Some(EncodedTile { tile_id: tile.tile_id, compressed })
         })
-        .collect();
-
-    let mut count: u64 = 0;
-    for (tile_id, compressed) in results.into_iter().flatten() {
-        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile_id);
-        pmtiles.add_tile(z, x, y, &compressed).expect("failed to write tile");
-        count += 1;
-    }
-    count
+        .flatten()
+        .collect()
 }
 
 const LAYER_COUNT: usize = Layer::count();
