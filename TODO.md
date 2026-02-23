@@ -38,9 +38,22 @@
   "narrow_gauge" => Some(10),  // BUG: should also split on service tag
   ```
 
-  **Planetiler's shortbread.yml** has the same inversion — the min_zoom override blocks
-  assign `service: __any__` (service tag present) to the z8 block and `service: ''`
-  (service tag absent) to the z10 block.
+  **Planetiler's shortbread.yml** (verified 2026-02-23, source:
+  https://github.com/versatiles-org/planetiler-shortbread/blob/main/resources/config/shortbread.yml)
+  has the same inversion — the min_zoom override blocks assign `service: __any__`
+  (service tag present) to the z8 block and `service: ''` (service tag absent) to
+  the z10 block:
+  ```yaml
+  # Planetiler's YAML (buggy):
+  8:                          # ← service tracks get z8 (should be z10)
+    __all__:
+      railway: [ rail, narrow_gauge ]
+      service: __any__
+  10:                         # ← mainline gets z10 (should be z8)
+    __all__:
+      railway: [ rail, narrow_gauge ]
+      service: ''
+  ```
 
   **Correct values per spec:**
   | Feature                          | Spec min_zoom | elivagar | Planetiler |
@@ -53,20 +66,45 @@
   **Fix:** In `railway_zoom`, swap the zoom values for `rail` (service→10, mainline→8)
   and extend `narrow_gauge` with the same service-tag split. Note: this intentionally
   diverges from Planetiler output, matching the spec instead.
-- [ ] PMTiles dedup hash collision — 64-bit content hash with no collision verification.
-  ~1:50,000 chance of wrong tile content on planet-scale data. **Check how pmtiles-rs and
-  Planetiler handle dedup.** (`pmtiles_writer.rs:111`)
-- [ ] Geometry command count truncated to u16 — overflows at ~21K vertices, plausible for
-  complex country boundaries. **Check actual max vertex counts in Planetiler Denmark output
-  to see if this is hit in practice.** Either widen to u32 or detect and split.
-  (`wire_format.rs:72`)
+- [x] **[P0]** Geometry command count truncated to u16 — widened to u32 in wire format.
+  Was `geom_cmds.len() as u16` (max 65,535 commands, overflow at 32,767 vertices).
+  Coastlines/fjords at z14 routinely exceed this. Fixed: encode/decode now use u32,
+  +2 bytes per sort record (negligible). Roundtrip tests verify the change.
+
+- [ ] **[P1]** PMTiles dedup hash collision — **investigated, confirmed risk.**
+  Both elivagar (`DefaultHasher`, 64-bit) and pmtiles-rs (`XxHash3_64`, 64-bit) use
+  64-bit hashes with **no content verification** on match. (`pmtiles_writer.rs:111-124`)
+
+  Birthday problem at planet scale (~300M unique tiles):
+  P(collision) ≈ k²/2^65 ≈ (3×10⁸)²/(3.7×10¹⁹) ≈ **0.24%** — roughly 1-2 expected
+  collisions per planet run. Failure mode: wrong tile content served, undetectable.
+
+  go-pmtiles uses FNV-128a (128-bit), much safer. pmtiles-rs has the same 64-bit bug.
+
+  **Fix options (cheapest first):**
+  1. Verify `data.len() == dup_length` on hash hit (catches most collisions for free)
+  2. Full content comparison on size match (catches all collisions, cost only on dedup hits)
+  3. Upgrade to 128-bit hash (reduces collision probability by ~10⁹×)
 - [x] Ocean layer missing from PMTiles metadata — `build_metadata` lists 25 layers, but
   tiles contain 26 including ocean. Confirmed Planetiler includes ocean z0-14.
   Fixed: `build_metadata` now derives from `Layer::ALL`.
-- [ ] `area_sq_meters` uses cos²(lat) approximation — 20-30% error for features spanning
-  large latitude ranges (e.g. Norway). Affects `enrich_polygon_matches` boundary label zoom
-  thresholds. **Compare boundary_labels min_zoom values against Planetiler for
-  Scandinavia/Russia.** (`geometry.rs:482`)
+- [ ] **[P2]** `area_sq_meters` cos²(lat) approximation — **investigated, moderate risk.**
+  Uses single centroid latitude for entire polygon (`geometry.rs:485-500`). Affects
+  `enrich_polygon_matches` thresholds (2M/700K/100K km²) in `pipeline.rs:726-750`.
+
+  **Error by latitude span:**
+  | Feature | True area | Lat span | Centroid | Est. error | Threshold | Risk |
+  |---------|----------|----------|----------|-----------|-----------|------|
+  | Russia | 17.1M km² | 41°–82°N | 60°N | 20-30% under | 2M km² | Safe (>>2M) |
+  | Canada | 10M km² | 42°–83°N | 62°N | 20-30% under | 2M km² | Safe (>>2M) |
+  | Norway | 385K km² | 58°–71°N | 64°N | 15-25% under | 100K km² | Safe (>>100K) |
+
+  **Real risk:** moderately-sized high-latitude regions near thresholds. A 700K km² region
+  at 70°N (cos²≈0.12) could be underestimated to ~490K km², misclassifying from z3→z4.
+  Unlikely for well-known countries but possible for sub-national boundaries.
+
+  **Fix options:** per-edge latitude weighting (~2× cost), or latitude-range-aware cos²
+  averaging (moderate cost, good tradeoff).
 
 ## Performance
 
@@ -98,21 +136,9 @@
   Output byte-identical on Denmark. Impact on Denmark minimal (few relations), but
   critical at planet scale (hundreds of thousands of complex boundary/multipolygon relations).
 
-- [ ] `madvise` hints on mmap — critical at planet scale (75GB PBF, 64GB RAM). Without
-  hints, the kernel readaheads pages during random `way_index.get()` lookups in the
-  relation phase, wasting I/O bandwidth on pages that immediately get evicted.
-
-  **Where to add hints** (via `memmap2`'s `.advise()` method):
-  | Phase | Index | Access | Hint |
-  |-------|-------|--------|------|
-  | PBF write | `node_index` mmap | Sequential (IDs increasing) | `MADV_SEQUENTIAL` |
-  | PBF write | `way_index` offsets mmap | Sequential (IDs increasing) | `MADV_SEQUENTIAL` |
-  | Way reads | `node_index.get()` | Roughly sequential (refs within ways) | `MADV_SEQUENTIAL` |
-  | Relation reads | `way_index` offsets + data | Random (member way IDs arbitrary) | `MADV_RANDOM` |
-
-  **Implementation:** `NodeIndex::create()` → `advise(Sequential)`. `WayIndex::create()`
-  → `advise(Sequential)` on offsets. `WayIndex::finish_writing()` → `advise(Random)` on
-  both offsets_mmap and data_mmap. (~5 lines of code total.)
+- [x] `madvise` hints on mmap — `MADV_SEQUENTIAL` during write phase (node/way IDs
+  increasing), `MADV_RANDOM` after `finish_writing()` for relation member lookups.
+  Prevents wasted readahead when mmaps exceed available RAM at planet scale.
 
 ## Quality
 

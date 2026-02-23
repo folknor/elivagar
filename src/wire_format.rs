@@ -6,7 +6,7 @@
 // Format:
 //   u64   osm_id
 //   u8    geom_type (1=point, 2=line, 3=polygon)
-//   u16   geometry command count
+//   u32   geometry command count
 //   u32×  geometry commands
 //   u8    attribute count
 //   per attribute:
@@ -64,11 +64,11 @@ pub(crate) fn encode_feature_data_with_attrs(
     geom_cmds: &[u32],
     attrs_bytes: &[u8],
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(11 + geom_cmds.len() * 4 + attrs_bytes.len());
+    let mut buf = Vec::with_capacity(13 + geom_cmds.len() * 4 + attrs_bytes.len());
     buf.extend_from_slice(&osm_id.to_le_bytes());
     buf.push(geom_type as u8);
     #[allow(clippy::cast_possible_truncation)]
-    let cmd_count = geom_cmds.len() as u16;
+    let cmd_count = geom_cmds.len() as u32;
     buf.extend_from_slice(&cmd_count.to_le_bytes());
     for &cmd in geom_cmds {
         buf.extend_from_slice(&cmd.to_le_bytes());
@@ -92,7 +92,7 @@ pub(crate) fn encode_feature_data(
 /// Decode feature data from a sort record and add it to a layer builder.
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
-    if data.len() < 11 {
+    if data.len() < 13 {
         return;
     }
 
@@ -111,8 +111,8 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
     };
 
     // geometry commands — bulk memcpy (little-endian wire format matches native u32 layout)
-    let cmd_count = u16::from_le_bytes(data[pos..pos + 2].try_into().expect("cmd_count")) as usize;
-    pos += 2;
+    let cmd_count = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("cmd_count")) as usize;
+    pos += 4;
     let cmd_bytes = cmd_count * 4;
     if pos + cmd_bytes > data.len() {
         return;
