@@ -1011,7 +1011,9 @@ fn flush_tile_batch(batch: &[PendingTile], pmtiles: &mut PmtilesWriter) -> u64 {
 
     let results: Vec<Option<(u64, Vec<u8>)>> = batch
         .par_iter()
-        .map(|tile| {
+        .map_init(
+            mvt::EncodeScratch::new,
+            |scratch, tile| {
             let mut layers = new_layer_slots();
             for &(layer_idx, ref data) in &tile.features {
                 if (layer_idx as usize) < layers.len() {
@@ -1027,7 +1029,7 @@ fn flush_tile_batch(batch: &[PendingTile], pmtiles: &mut PmtilesWriter) -> u64 {
                 return None;
             }
 
-            let mvt_data = mvt::encode_tile(&non_empty);
+            let mvt_data = mvt::encode_tile_with(&non_empty, scratch);
             if mvt_data.is_empty() {
                 return None;
             }

@@ -74,12 +74,14 @@
 
 - [ ] Double-buffer Phase 4 — overlap sort read, rayon encode, and PMTiles write. Currently
   the sort reader is serial, rayon waits for previous batch writes before starting next batch.
-- [ ] Reuse encode buffers — `encode_attrs_bytes` allocates per feature, MVT protobuf
-  `encode()` creates nested scratch Vecs (`layer_buf`, `feat_buf`, `val_buf`, `packed`).
-  Use thread-local or passed-in buffers.
-- [ ] SmallVec for `LayerMatch` vec and `attrs` vec — most elements match 1-3 layers with
-  1-8 attrs, avoids heap alloc for common case (`shortbread.rs:147,155`)
-- [ ] SmallVec for `tags_vec` per PBF element — typically 2-10 tags (`pipeline.rs:234`)
+- [x] Reuse encode buffers — MVT `encode()` scratch Vecs (`layer_buf`, `feat_buf`, `val_buf`,
+  `packed`) now reused via `EncodeScratch` struct + rayon `map_init`. Benchmark-neutral on
+  Denmark (assemble phase ~5.5s before and after — gzip dominates, mimalloc handles transient
+  allocs well), but cleaner code. `encode_attrs_bytes` was already buffer-reused (P3).
+- ~~SmallVec for `LayerMatch` vec, `attrs` vec, and `tags_vec`~~ — **Reverted.** Benchmarked
+  on Denmark (best of 3): PBF phase 22.8s vs baseline 18.7–19.3s (~20% slower). `Attr` is
+  ~40 bytes so `SmallVec<[Attr; 8]>` = ~320 bytes inline; `LayerMatch` containing that makes
+  `SmallVec<[LayerMatch; 4]>` enormous. Extra stack memcpy outweighs saved heap allocs.
 - [x] `WayIndex::get` returns zero-copy `&[(i32, i32)]` slice over mmap instead of allocating
 
 ### Medium impact

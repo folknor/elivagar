@@ -35,6 +35,27 @@ pub struct Feature {
     pub tags: Vec<(u16, u16)>,
 }
 
+/// Reusable scratch buffers for MVT encoding, avoiding per-feature allocations.
+pub struct EncodeScratch {
+    layer_buf: Vec<u8>,
+    feat_buf: Vec<u8>,
+    val_buf: Vec<u8>,
+    packed: Vec<u8>,
+    tag_vals: Vec<u32>,
+}
+
+impl EncodeScratch {
+    pub fn new() -> Self {
+        Self {
+            layer_buf: Vec::new(),
+            feat_buf: Vec::new(),
+            val_buf: Vec::new(),
+            packed: Vec::new(),
+            tag_vals: Vec::new(),
+        }
+    }
+}
+
 pub struct LayerBuilder {
     name: String,
     features: Vec<Feature>,
@@ -93,51 +114,52 @@ impl LayerBuilder {
         self.features.push(feature);
     }
 
-    fn encode(&self, buf: &mut Vec<u8>) {
-        let mut layer_buf = Vec::new();
+    fn encode(&self, buf: &mut Vec<u8>, s: &mut EncodeScratch) {
+        s.layer_buf.clear();
 
         // field 15: version = 2
-        encode_field_varint(&mut layer_buf, 15, 2);
+        encode_field_varint(&mut s.layer_buf, 15, 2);
         // field 1: name
-        encode_field_bytes(&mut layer_buf, 1, self.name.as_bytes());
+        encode_field_bytes(&mut s.layer_buf, 1, self.name.as_bytes());
         // field 5: extent = 4096
-        encode_field_varint(&mut layer_buf, 5, 4096);
+        encode_field_varint(&mut s.layer_buf, 5, 4096);
 
         // field 2: features
         for f in &self.features {
-            let mut feat_buf = Vec::new();
+            s.feat_buf.clear();
             if let Some(id) = f.id {
-                encode_field_varint(&mut feat_buf, 1, id);
+                encode_field_varint(&mut s.feat_buf, 1, id);
             }
             if !f.tags.is_empty() {
-                let tag_vals: Vec<u32> = f
-                    .tags
-                    .iter()
-                    .flat_map(|&(k, v)| [u32::from(k), u32::from(v)])
-                    .collect();
-                encode_packed_u32(&mut feat_buf, 2, &tag_vals);
+                s.tag_vals.clear();
+                s.tag_vals.extend(
+                    f.tags
+                        .iter()
+                        .flat_map(|&(k, v)| [u32::from(k), u32::from(v)]),
+                );
+                encode_packed_u32(&mut s.feat_buf, 2, &s.tag_vals, &mut s.packed);
             }
-            encode_field_varint(&mut feat_buf, 3, f.geom_type as u64);
+            encode_field_varint(&mut s.feat_buf, 3, f.geom_type as u64);
             if !f.geometry.is_empty() {
-                encode_packed_u32(&mut feat_buf, 4, &f.geometry);
+                encode_packed_u32(&mut s.feat_buf, 4, &f.geometry, &mut s.packed);
             }
-            encode_field_bytes(&mut layer_buf, 2, &feat_buf);
+            encode_field_bytes(&mut s.layer_buf, 2, &s.feat_buf);
         }
 
         // field 3: keys
         for k in &self.keys {
-            encode_field_bytes(&mut layer_buf, 3, k.as_bytes());
+            encode_field_bytes(&mut s.layer_buf, 3, k.as_bytes());
         }
 
         // field 4: values
         for v in &self.values {
-            let mut val_buf = Vec::new();
-            encode_value(&mut val_buf, v);
-            encode_field_bytes(&mut layer_buf, 4, &val_buf);
+            s.val_buf.clear();
+            encode_value(&mut s.val_buf, v);
+            encode_field_bytes(&mut s.layer_buf, 4, &s.val_buf);
         }
 
         // Write as field 3 (Tile.layers) length-delimited
-        encode_field_bytes(buf, 3, &layer_buf);
+        encode_field_bytes(buf, 3, &s.layer_buf);
     }
 }
 
@@ -145,11 +167,17 @@ impl LayerBuilder {
 // Top-level encoder
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 pub fn encode_tile(layers: &[&LayerBuilder]) -> Vec<u8> {
+    let mut scratch = EncodeScratch::new();
+    encode_tile_with(layers, &mut scratch)
+}
+
+pub fn encode_tile_with(layers: &[&LayerBuilder], scratch: &mut EncodeScratch) -> Vec<u8> {
     let mut buf = Vec::with_capacity(4096);
     for layer in layers {
         if !layer.is_empty() {
-            layer.encode(&mut buf);
+            layer.encode(&mut buf, scratch);
         }
     }
     buf
@@ -252,12 +280,12 @@ fn encode_field_bytes(buf: &mut Vec<u8>, field: u32, data: &[u8]) {
     buf.extend_from_slice(data);
 }
 
-fn encode_packed_u32(buf: &mut Vec<u8>, field: u32, vals: &[u32]) {
-    let mut packed = Vec::new();
+fn encode_packed_u32(buf: &mut Vec<u8>, field: u32, vals: &[u32], packed: &mut Vec<u8>) {
+    packed.clear();
     for &v in vals {
-        encode_varint(&mut packed, u64::from(v));
+        encode_varint(packed, u64::from(v));
     }
-    encode_field_bytes(buf, field, &packed);
+    encode_field_bytes(buf, field, packed);
 }
 
 fn encode_value(buf: &mut Vec<u8>, val: &Value) {
