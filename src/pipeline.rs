@@ -1117,6 +1117,13 @@ fn encode_tile_batch(batch: &[PendingTile]) -> Vec<EncodedTile> {
                 }
             }
 
+            // Merge same-attribute geometries to reduce feature count
+            for layer in &mut layers {
+                if let Some(lb) = layer.as_mut() {
+                    lb.merge_same_attr_geometries();
+                }
+            }
+
             let non_empty: Vec<&LayerBuilder> = layers.iter()
                 .filter_map(|l| l.as_ref())
                 .filter(|l| !l.is_empty())

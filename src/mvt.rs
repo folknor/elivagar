@@ -9,7 +9,7 @@ use std::collections::HashMap;
 // Public types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum GeomType {
     Point = 1,
@@ -344,6 +344,144 @@ fn value_hash(val: &Value) -> u64 {
         Value::Bool(b) => b.hash(&mut hasher),
     }
     hasher.finish()
+}
+
+#[inline]
+fn decode_zigzag(v: u32) -> i32 {
+    #[allow(clippy::cast_possible_wrap)]
+    { ((v >> 1) as i32) ^ (-((v & 1) as i32)) }
+}
+
+/// Append a source MVT geometry command stream to a destination buffer,
+/// adjusting delta encoding so the commands are relative to the running
+/// cursor (`cx`, `cy`). This allows multiple independently-encoded
+/// geometries to be concatenated into a valid multi-geometry.
+fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32) {
+    let mut last_move_x: i32 = 0;
+    let mut last_move_y: i32 = 0;
+    // The source feature was encoded assuming cursor starts at (0,0).
+    // Track the source's absolute cursor so we can re-encode deltas
+    // relative to our running destination cursor.
+    let mut src_cx: i32 = 0;
+    let mut src_cy: i32 = 0;
+    let mut i = 0;
+    while i < src.len() {
+        let cmd = src[i];
+        let cmd_id = cmd & 0x7;
+        let cmd_count = cmd >> 3;
+        i += 1;
+
+        match cmd_id {
+            1 | 2 => {
+                // MoveTo or LineTo
+                dest.push(cmd);
+                for _ in 0..cmd_count {
+                    if i + 1 >= src.len() {
+                        break;
+                    }
+                    let dx = decode_zigzag(src[i]);
+                    let dy = decode_zigzag(src[i + 1]);
+                    // Absolute position in source coordinate space
+                    src_cx += dx;
+                    src_cy += dy;
+                    // Delta relative to our running cursor
+                    dest.push(zigzag(src_cx - *cx));
+                    dest.push(zigzag(src_cy - *cy));
+                    *cx = src_cx;
+                    *cy = src_cy;
+                    if cmd_id == 1 {
+                        last_move_x = src_cx;
+                        last_move_y = src_cy;
+                    }
+                    i += 2;
+                }
+            }
+            7 => {
+                // ClosePath
+                dest.push(cmd);
+                *cx = last_move_x;
+                *cy = last_move_y;
+            }
+            _ => {
+                // Unknown command, copy as-is
+                dest.push(cmd);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-geometry merging
+// ---------------------------------------------------------------------------
+
+impl LayerBuilder {
+    /// Merge features that share the same geometry type and identical
+    /// attribute tags into a single multi-geometry feature. This reduces
+    /// feature counts in the encoded tile without losing any visual
+    /// information. Point features are skipped (not merged).
+    pub fn merge_same_attr_geometries(&mut self) {
+        if self.features.len() < 2 {
+            return;
+        }
+
+        // Group features by (geom_type, sorted tags).
+        // Value: list of feature indices in this group.
+        let mut groups: HashMap<(GeomType, Vec<(u16, u16)>), Vec<usize>> = HashMap::new();
+        for (i, f) in self.features.iter().enumerate() {
+            if f.geom_type == GeomType::Point {
+                continue;
+            }
+            let mut sorted_tags = f.tags.clone();
+            sorted_tags.sort();
+            groups
+                .entry((f.geom_type, sorted_tags))
+                .or_default()
+                .push(i);
+        }
+
+        // Check if any group has >1 feature worth merging
+        let any_mergeable = groups.values().any(|v| v.len() > 1);
+        if !any_mergeable {
+            return;
+        }
+
+        // Track which features get absorbed into a merged feature
+        let mut merged_set: Vec<bool> = vec![false; self.features.len()];
+        let mut new_features: Vec<Feature> = Vec::new();
+
+        for ((geom_type, tags), indices) in &groups {
+            if indices.len() < 2 {
+                continue;
+            }
+            // Mark all indices as merged
+            for &idx in indices {
+                merged_set[idx] = true;
+            }
+            // Concatenate geometries with delta-encoding adjustment
+            let mut merged_geom: Vec<u32> = Vec::new();
+            let mut cx: i32 = 0;
+            let mut cy: i32 = 0;
+            for &idx in indices {
+                append_geometry(&mut merged_geom, &self.features[idx].geometry, &mut cx, &mut cy);
+            }
+            new_features.push(Feature {
+                id: None,
+                geom_type: *geom_type,
+                geometry: merged_geom,
+                tags: tags.clone(),
+            });
+        }
+
+        // Rebuild: keep unmerged features, then append merged ones
+        let mut kept: Vec<Feature> = Vec::new();
+        for (i, f) in self.features.drain(..).enumerate() {
+            if !merged_set[i] {
+                kept.push(f);
+            }
+        }
+        kept.append(&mut new_features);
+        self.features = kept;
+    }
 }
 
 // ---------------------------------------------------------------------------
