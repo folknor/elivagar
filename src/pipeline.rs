@@ -252,8 +252,9 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let min_z = config.min_zoom;
     let max_z = config.max_zoom;
 
-    // Way batch for parallel geometry processing (P1 optimization)
+    // Batches for parallel geometry processing
     let mut way_batch: Vec<MatchedWay> = Vec::with_capacity(WAY_BATCH_SIZE);
+    let mut rel_batch: Vec<PreparedRelation> = Vec::with_capacity(REL_BATCH_SIZE);
 
     reader
         .for_each_pipelined(|element| match element {
@@ -374,23 +375,23 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     return;
                 }
 
-                let mut rel_records = Vec::new();
-                #[allow(clippy::cast_sign_loss)]
-                let n = process_relation(
-                    rel.id() as u64, &rel, &tags_vec,
-                    &way_index, min_z, max_z, &mut rel_records,
-                );
-                for r in rel_records {
-                    sort_writer.push(r).expect("sort push failed");
+                if let Some(prepared) = prepare_relation(&rel, &tags_vec, &way_index) {
+                    rel_batch.push(prepared);
+                    if rel_batch.len() >= REL_BATCH_SIZE {
+                        let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
+                        features_emitted += flush_rel_batch(batch, min_z, max_z, &mut sort_writer);
+                    }
                 }
-                features_emitted += n;
             }
         })
         .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
 
-    // Flush any remaining way batch (in case PBF ends with ways and no relations)
+    // Flush any remaining batches
     if !way_batch.is_empty() {
         features_emitted += flush_way_batch(way_batch, min_z, max_z, &mut sort_writer);
+    }
+    if !rel_batch.is_empty() {
+        features_emitted += flush_rel_batch(rel_batch, min_z, max_z, &mut sort_writer);
     }
 
     eprintln!("  Nodes: {node_count}, Ways: {way_count}, Relations: {rel_count}");
@@ -553,29 +554,36 @@ fn process_matched_way(
 }
 
 // ---------------------------------------------------------------------------
-// Relation processing (multipolygon + boundary lines)
+// Relation processing (multipolygon + boundary lines) — parallel batch processing
 // ---------------------------------------------------------------------------
 
-fn process_relation(
+/// A relation with geometry resolved from way_index, ready for parallel processing.
+/// Tags are owned because PBF borrows don't survive the batch boundary.
+struct PreparedRelation {
     osm_id: u64,
+    tags: Vec<(String, String)>,
+    member_ways: Vec<MemberWay>,
+    boundary_way_coords: Vec<Vec<Point>>,
+}
+
+const REL_BATCH_SIZE: usize = 1024;
+
+/// Resolve relation geometry from way_index (serial I/O). Returns None if
+/// the relation is not a multipolygon/boundary or has no resolvable member ways.
+fn prepare_relation(
     rel: &pbfhogg::Relation<'_>,
     tags: &[(&str, &str)],
     way_index: &WayIndex,
-    min_zoom: u8,
-    max_zoom: u8,
-    records: &mut Vec<SortRecord>,
-) -> u64 {
+) -> Option<PreparedRelation> {
     let tag_helper = Tags(tags);
 
-    // Check if it's a multipolygon/boundary type
     let rel_type = tag_helper.get("type").unwrap_or("");
-    let is_multipolygon = rel_type == "multipolygon" || rel_type == "boundary";
-
-    if !is_multipolygon {
-        return 0;
+    if rel_type != "multipolygon" && rel_type != "boundary" {
+        return None;
     }
 
-    // Collect member ways
+    let is_boundary = tag_helper.has_value("boundary", "administrative");
+
     let mut member_ways: Vec<MemberWay> = Vec::new();
     let mut boundary_way_coords: Vec<Vec<Point>> = Vec::new();
 
@@ -590,8 +598,7 @@ fn process_relation(
                 .map(|&(lat, lon)| geometry::project_e7(lat, lon))
                 .collect();
 
-            // Save for boundary line emission
-            if tag_helper.has_value("boundary", "administrative") {
+            if is_boundary {
                 boundary_way_coords.push(merc.clone());
             }
 
@@ -600,74 +607,114 @@ fn process_relation(
     }
 
     if member_ways.is_empty() {
-        return 0;
+        return None;
     }
+
+    #[allow(clippy::cast_sign_loss)]
+    Some(PreparedRelation {
+        osm_id: rel.id() as u64,
+        tags: tags.iter().map(|&(k, v)| (k.to_owned(), v.to_owned())).collect(),
+        member_ways,
+        boundary_way_coords,
+    })
+}
+
+/// Process a batch of prepared relations in parallel and push results to sort writer.
+fn flush_rel_batch(
+    batch: Vec<PreparedRelation>,
+    min_zoom: u8,
+    max_zoom: u8,
+    sort_writer: &mut SortWriter,
+) -> u64 {
+    use rayon::prelude::*;
+
+    let results: Vec<Vec<SortRecord>> = batch
+        .into_par_iter()
+        .map(|rel| process_prepared_relation(rel, min_zoom, max_zoom))
+        .collect();
 
     let mut count: u64 = 0;
-
-    // Assemble multipolygon
-    let multi = multipolygon::assemble(&member_ways);
-
-    if !multi.polygons.is_empty() {
-        // Match as multipolygon
-        let mut matches = shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon);
-
-        // Enrich polygon matches with area-dependent data
-        let total_area_m2: f64 = multi.polygons.iter()
-            .map(|(outer, _)| geometry::area_sq_meters(outer))
-            .sum();
-        enrich_polygon_matches(&mut matches, total_area_m2);
-
-        for m in &matches {
-            let z_lo = m.min_zoom.max(min_zoom);
-            let z_hi = m.max_zoom.min(max_zoom);
-            if z_lo > z_hi {
-                continue;
-            }
-
-            match m.geom_expect {
-                GeomExpect::Polygon => {
-                    // Use the first polygon's outer ring for bbox/processing
-                    for (outer, inners) in &multi.polygons {
-                        if outer.len() < 4 {
-                            continue;
-                        }
-                        let bbox = merc_bbox(outer);
-                        count += emit_multipolygon_feature(
-                            osm_id, outer, inners, &bbox, m,
-                            z_lo, z_hi, records,
-                        );
-                    }
-                }
-                GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
-                    for (outer, _inners) in &multi.polygons {
-                        if outer.len() < 4 {
-                            continue;
-                        }
-                        let bbox = merc_bbox(outer);
-                        count += emit_centroid_feature(
-                            osm_id, outer, &bbox, m, z_lo, z_hi, records,
-                        );
-                    }
-                }
-                GeomExpect::Line => {
-                    // Boundary lines: emit each member way as a line
-                    for way_coords in &boundary_way_coords {
-                        if way_coords.len() < 2 {
-                            continue;
-                        }
-                        let bbox = merc_bbox(way_coords);
-                        count += emit_line_feature(
-                            osm_id, way_coords, &bbox, m, z_lo, z_hi, records,
-                        );
-                    }
-                }
-                _ => {}
-            }
+    for rel_records in results {
+        count += rel_records.len() as u64;
+        for record in rel_records {
+            sort_writer.push(record).expect("sort push failed");
         }
     }
-
     count
+}
+
+/// Process a prepared relation's geometry (CPU-bound). Called from rayon worker threads.
+fn process_prepared_relation(
+    rel: PreparedRelation,
+    min_zoom: u8,
+    max_zoom: u8,
+) -> Vec<SortRecord> {
+    let tags_ref: Vec<(&str, &str)> = rel.tags.iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let tag_helper = Tags(&tags_ref);
+
+    let multi = multipolygon::assemble(&rel.member_ways);
+
+    if multi.polygons.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches = shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon);
+
+    let total_area_m2: f64 = multi.polygons.iter()
+        .map(|(outer, _)| geometry::area_sq_meters(outer))
+        .sum();
+    enrich_polygon_matches(&mut matches, total_area_m2);
+
+    let mut records = Vec::new();
+
+    for m in &matches {
+        let z_lo = m.min_zoom.max(min_zoom);
+        let z_hi = m.max_zoom.min(max_zoom);
+        if z_lo > z_hi {
+            continue;
+        }
+
+        match m.geom_expect {
+            GeomExpect::Polygon => {
+                for (outer, inners) in &multi.polygons {
+                    if outer.len() < 4 {
+                        continue;
+                    }
+                    let bbox = merc_bbox(outer);
+                    emit_multipolygon_feature(
+                        rel.osm_id, outer, inners, &bbox, m,
+                        z_lo, z_hi, &mut records,
+                    );
+                }
+            }
+            GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
+                for (outer, _inners) in &multi.polygons {
+                    if outer.len() < 4 {
+                        continue;
+                    }
+                    let bbox = merc_bbox(outer);
+                    emit_centroid_feature(
+                        rel.osm_id, outer, &bbox, m, z_lo, z_hi, &mut records,
+                    );
+                }
+            }
+            GeomExpect::Line => {
+                for way_coords in &rel.boundary_way_coords {
+                    if way_coords.len() < 2 {
+                        continue;
+                    }
+                    let bbox = merc_bbox(way_coords);
+                    emit_line_feature(
+                        rel.osm_id, way_coords, &bbox, m, z_lo, z_hi, &mut records,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    records
 }
 
 // ---------------------------------------------------------------------------

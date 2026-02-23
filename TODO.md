@@ -90,28 +90,13 @@
 
 - [ ] Gzip level — `Compression::fast()` (level 1) may be too aggressive. Level 2-3 could
   give 10-20% smaller tiles at minimal extra CPU cost. Benchmark.
-- [ ] Batch relations for parallel processing like ways — currently fully serial
-  (`pipeline.rs:370`). At planet scale, hundreds of thousands of multipolygon/boundary
-  relations with complex geometry (country borders, coastlines, large forests).
-
-  **Split `process_relation` into serial I/O + parallel geometry:**
-  - Serial (in PBF callback): resolve `way_index.get()` for member ways, project to
-    Mercator, build `Vec<MemberWay>` + `boundary_way_coords`, early-exit non-multipolygon.
-    This is I/O-bound (random mmap reads) and already done in lines 578-600.
-  - Parallel (rayon batch): `multipolygon::assemble()`, tag matching, area computation,
-    polygon enrichment, clipping, feature emission per zoom. CPU-bound, lines 609-668.
-
-  **New struct:**
-  ```
-  struct PreparedRelation {
-      osm_id: u64,
-      tags: Vec<(String, String)>,  // owned — PBF borrows don't survive batch boundary
-      member_ways: Vec<MemberWay>,  // already resolved + projected
-      boundary_way_coords: Vec<Vec<Point>>,
-  }
-  ```
-  Batch into `Vec<PreparedRelation>`, flush via rayon like `flush_way_batch`.
-  Tags must be owned Strings (small cost per relation).
+- [x] Batch relations for parallel processing like ways — split `process_relation` into
+  `prepare_relation` (serial I/O: way_index lookups + projection) and
+  `process_prepared_relation` (parallel CPU: multipolygon assembly + matching + clipping).
+  Batched into `Vec<PreparedRelation>` (1024), flushed via rayon like ways.
+  Tags owned as `Vec<(String, String)>` since PBF borrows don't survive batch boundary.
+  Output byte-identical on Denmark. Impact on Denmark minimal (few relations), but
+  critical at planet scale (hundreds of thousands of complex boundary/multipolygon relations).
 
 - [ ] `madvise` hints on mmap — critical at planet scale (75GB PBF, 64GB RAM). Without
   hints, the kernel readaheads pages during random `way_index.get()` lookups in the
