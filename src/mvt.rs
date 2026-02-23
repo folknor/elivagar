@@ -348,6 +348,33 @@ fn value_hash(val: &Value) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Test accessors (expose private fields for cross-module test assertions)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+impl LayerBuilder {
+    /// Number of features added to this layer.
+    pub fn test_feature_count(&self) -> usize {
+        self.features.len()
+    }
+
+    /// Access the i-th feature (panics if out of range).
+    pub fn test_feature(&self, i: usize) -> &Feature {
+        &self.features[i]
+    }
+
+    /// Resolve a key index to its string.
+    pub fn test_key(&self, idx: u16) -> &str {
+        &self.keys[idx as usize]
+    }
+
+    /// Resolve a value index to its `Value`.
+    pub fn test_value(&self, idx: u16) -> &Value {
+        &self.values[idx as usize]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

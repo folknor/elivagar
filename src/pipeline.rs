@@ -1061,3 +1061,98 @@ fn centroid_of(points: &[Point]) -> Point {
     Point { x: sx / n, y: sy / n }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
+    use std::borrow::Cow;
+
+    /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
+    fn boundary_labels_match(admin_level: i64) -> LayerMatch {
+        LayerMatch {
+            layer: Layer::BoundaryLabels,
+            min_zoom: 5,
+            max_zoom: 14,
+            geom_expect: GeomExpect::PolygonPointOnSurface,
+            attrs: vec![
+                ("admin_level", AttrValue::Int(admin_level), 0),
+                ("name", AttrValue::Str(Cow::Borrowed("TestCountry")), 0),
+            ],
+        }
+    }
+
+    /// admin_level=2 with area >= 2,000,000 km^2 -> min_zoom overridden to 2
+    #[test]
+    fn boundary_label_admin2_large_area() {
+        let area_m2 = 2_000_000.0 * 1e6; // exactly 2M km^2
+        let mut matches = vec![boundary_labels_match(2)];
+        enrich_polygon_matches(&mut matches, area_m2);
+
+        assert_eq!(matches[0].min_zoom, 2);
+        // Also verify way_area was added (in hectares)
+        let way_area_attr = matches[0].attrs.iter()
+            .find(|(k, _, _)| *k == "way_area")
+            .expect("way_area attr missing");
+        if let AttrValue::Float(h) = way_area_attr.1 {
+            let expected_hectares = area_m2 / 10_000.0;
+            assert!((h - expected_hectares).abs() < 0.01, "way_area hectares mismatch");
+        } else {
+            panic!("way_area should be Float");
+        }
+    }
+
+    /// admin_level=4 with area >= 700,000 km^2 -> min_zoom overridden to 3
+    #[test]
+    fn boundary_label_admin4_700k_km2() {
+        let area_m2 = 700_000.0 * 1e6;
+        let mut matches = vec![boundary_labels_match(4)];
+        enrich_polygon_matches(&mut matches, area_m2);
+
+        assert_eq!(matches[0].min_zoom, 3);
+    }
+
+    /// admin_level=4 with area >= 100,000 km^2 (but < 700,000) -> min_zoom overridden to 4
+    #[test]
+    fn boundary_label_admin4_100k_km2() {
+        let area_m2 = 150_000.0 * 1e6; // 150k km^2
+        let mut matches = vec![boundary_labels_match(4)];
+        enrich_polygon_matches(&mut matches, area_m2);
+
+        assert_eq!(matches[0].min_zoom, 4);
+    }
+
+    /// admin_level=4 with area < 100,000 km^2 -> min_zoom stays at default (5)
+    #[test]
+    fn boundary_label_admin4_small_area() {
+        let area_m2 = 50_000.0 * 1e6; // 50k km^2 — below 100k threshold
+        let mut matches = vec![boundary_labels_match(4)];
+        enrich_polygon_matches(&mut matches, area_m2);
+
+        assert_eq!(matches[0].min_zoom, 5, "small area should keep default min_zoom=5");
+    }
+
+    /// Non-BoundaryLabels layer should be completely unchanged by enrich_polygon_matches.
+    #[test]
+    fn non_boundary_labels_unchanged() {
+        let mut matches = vec![LayerMatch {
+            layer: Layer::Buildings,
+            min_zoom: 14,
+            max_zoom: 14,
+            geom_expect: GeomExpect::Polygon,
+            attrs: vec![],
+        }];
+        let original_min_zoom = matches[0].min_zoom;
+        let original_attr_count = matches[0].attrs.len();
+
+        enrich_polygon_matches(&mut matches, 9_999_999_999.0);
+
+        assert_eq!(matches[0].min_zoom, original_min_zoom);
+        assert_eq!(matches[0].attrs.len(), original_attr_count, "attrs should not be modified");
+    }
+}
+

@@ -24,5 +24,5 @@
 ## Quality
 
 - [ ] Feature merging — combine adjacent linestrings/polygons with identical attributes to reduce tile size
-- [ ] Visual verification — serve tiles and compare against Planetiler in OpenLayers
+- [ ] Visual verification — tracked in nidhogg TODO
 - [ ] Planet-scale test — run on full planet PBF (~73 GB), needs NVMe server

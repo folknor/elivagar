@@ -202,3 +202,129 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
         tags: tag_pairs,
     });
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::mvt::{GeomType, LayerBuilder, Value};
+    use crate::shortbread::AttrValue;
+    use std::borrow::Cow;
+
+    /// Test 1: Full roundtrip — encode a feature with all 4 attribute types,
+    /// decode it via `add_feature_to_layer`, and verify every field matches.
+    #[test]
+    fn roundtrip_mixed_attribute_types() {
+        let osm_id: u64 = 123_456_789;
+        let geom_type = GeomType::LineString;
+        // MoveTo(1,1) + LineTo(2,2): command(1,1)=9, zigzag(1)=2, zigzag(1)=2, command(2,1)=18, zigzag(1)=2, zigzag(1)=2
+        let geom_cmds: Vec<u32> = vec![9, 2, 2, 18, 2, 2];
+
+        let attrs: Vec<shortbread::Attr> = vec![
+            ("name", AttrValue::Str(Cow::Borrowed("Main Street")), 0),
+            ("admin_level", AttrValue::Int(4), 0),
+            ("bridge", AttrValue::Bool(true), 0),
+            ("way_area", AttrValue::Float(1234.5), 0),
+        ];
+
+        let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 14);
+
+        let mut layer = LayerBuilder::new("test");
+        add_feature_to_layer(&mut layer, &encoded);
+
+        // Exactly 1 feature
+        assert_eq!(layer.test_feature_count(), 1);
+
+        let f = layer.test_feature(0);
+
+        // osm_id roundtrips
+        assert_eq!(f.id, Some(osm_id));
+
+        // geom_type roundtrips
+        assert_eq!(f.geom_type, geom_type);
+
+        // geometry commands roundtrip (validates the unsafe memcpy path)
+        assert_eq!(f.geometry, geom_cmds);
+
+        // 4 attributes
+        assert_eq!(f.tags.len(), 4);
+
+        // Check each key-value pair
+        let (k0, v0) = f.tags[0];
+        assert_eq!(layer.test_key(k0), "name");
+        assert_eq!(*layer.test_value(v0), Value::String("Main Street".to_string()));
+
+        let (k1, v1) = f.tags[1];
+        assert_eq!(layer.test_key(k1), "admin_level");
+        assert_eq!(*layer.test_value(v1), Value::Int(4));
+
+        let (k2, v2) = f.tags[2];
+        assert_eq!(layer.test_key(k2), "bridge");
+        assert_eq!(*layer.test_value(v2), Value::Bool(true));
+
+        let (k3, v3) = f.tags[3];
+        assert_eq!(layer.test_key(k3), "way_area");
+        assert_eq!(*layer.test_value(v3), Value::Double(1234.5));
+    }
+
+    /// Test 2: Zoom-dependent attribute filtering — attrs with attr_zoom > current zoom
+    /// must be excluded from the encoded output.
+    #[test]
+    fn zoom_dependent_attribute_filtering() {
+        let osm_id: u64 = 42;
+        let geom_type = GeomType::Point;
+        let geom_cmds: Vec<u32> = vec![9, 10, 20]; // MoveTo(5, 10)
+
+        let attrs: Vec<shortbread::Attr> = vec![
+            // attr_zoom=0 → always emit
+            ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
+            // attr_zoom=0 → always emit
+            ("bridge", AttrValue::Bool(false), 0),
+            // attr_zoom=12 → only at zoom >= 12
+            ("tunnel", AttrValue::Bool(true), 12),
+            // attr_zoom=12 → only at zoom >= 12
+            ("surface", AttrValue::Str(Cow::Borrowed("asphalt")), 12),
+        ];
+
+        // Encode at zoom=10: only attr_zoom <= 10 should survive
+        let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 10);
+
+        let mut layer = LayerBuilder::new("test");
+        add_feature_to_layer(&mut layer, &encoded);
+
+        assert_eq!(layer.test_feature_count(), 1);
+        let f = layer.test_feature(0);
+
+        // Only 2 attrs should be present (the zoom=0 ones)
+        assert_eq!(f.tags.len(), 2);
+
+        let (k0, v0) = f.tags[0];
+        assert_eq!(layer.test_key(k0), "kind");
+        assert_eq!(*layer.test_value(v0), Value::String("city".to_string()));
+
+        let (k1, v1) = f.tags[1];
+        assert_eq!(layer.test_key(k1), "bridge");
+        assert_eq!(*layer.test_value(v1), Value::Bool(false));
+
+        // Now encode at zoom=12: all 4 attrs should be present
+        let encoded_z12 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 12);
+
+        let mut layer2 = LayerBuilder::new("test2");
+        add_feature_to_layer(&mut layer2, &encoded_z12);
+
+        let f2 = layer2.test_feature(0);
+        assert_eq!(f2.tags.len(), 4);
+
+        let (k2, v2) = f2.tags[2];
+        assert_eq!(layer2.test_key(k2), "tunnel");
+        assert_eq!(*layer2.test_value(v2), Value::Bool(true));
+
+        let (k3, v3) = f2.tags[3];
+        assert_eq!(layer2.test_key(k3), "surface");
+        assert_eq!(*layer2.test_value(v3), Value::String("asphalt".to_string()));
+    }
+}
