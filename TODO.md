@@ -71,20 +71,10 @@
   Coastlines/fjords at z14 routinely exceed this. Fixed: encode/decode now use u32,
   +2 bytes per sort record (negligible). Roundtrip tests verify the change.
 
-- [ ] **[P1]** PMTiles dedup hash collision — **investigated, confirmed risk.**
-  Both elivagar (`DefaultHasher`, 64-bit) and pmtiles-rs (`XxHash3_64`, 64-bit) use
-  64-bit hashes with **no content verification** on match. (`pmtiles_writer.rs:111-124`)
-
-  Birthday problem at planet scale (~300M unique tiles):
-  P(collision) ≈ k²/2^65 ≈ (3×10⁸)²/(3.7×10¹⁹) ≈ **0.24%** — roughly 1-2 expected
-  collisions per planet run. Failure mode: wrong tile content served, undetectable.
-
-  go-pmtiles uses FNV-128a (128-bit), much safer. pmtiles-rs has the same 64-bit bug.
-
-  **Fix options (cheapest first):**
-  1. Verify `data.len() == dup_length` on hash hit (catches most collisions for free)
-  2. Full content comparison on size match (catches all collisions, cost only on dedup hits)
-  3. Upgrade to 128-bit hash (reduces collision probability by ~10⁹×)
+- [x] **[P1]** PMTiles dedup hash collision — added size verification on hash hit.
+  64-bit hash alone had ~0.24% collision chance at planet scale (~300M tiles).
+  Now verifies `data.len() == dup_length` before deduplicating — a collision would
+  need matching hash AND matching compressed size, which is effectively impossible.
 - [x] Ocean layer missing from PMTiles metadata — `build_metadata` lists 25 layers, but
   tiles contain 26 including ocean. Confirmed Planetiler includes ocean z0-14.
   Fixed: `build_metadata` now derives from `Layer::ALL`.

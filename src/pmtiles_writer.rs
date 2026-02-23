@@ -113,14 +113,17 @@ impl PmtilesWriter {
         let hash = hasher.finish();
 
         if let Some(&(dup_offset, dup_length)) = self.dedup.get(&hash) {
-            self.tiles.push((
-                tile_id,
-                StoredTile::Dedup {
-                    offset: dup_offset,
-                    length: dup_length,
-                },
-            ));
-            return Ok(false);
+            // Verify size matches to guard against 64-bit hash collisions.
+            if dup_length == data.len() as u32 {
+                self.tiles.push((
+                    tile_id,
+                    StoredTile::Dedup {
+                        offset: dup_offset,
+                        length: dup_length,
+                    },
+                ));
+                return Ok(false);
+            }
         }
 
         let offset;
