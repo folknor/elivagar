@@ -87,76 +87,59 @@ Three-way comparison on Denmark (2026-02-23):
 
 | | elivagar | Planetiler | Tilemaker |
 |---|---|---|---|
-| File size | 550 MB | 388 MB | 308 MB |
+| File size | 545 MB | 388 MB | 308 MB |
 | Tiles | 1,328,874 | 104,394 | 113,476 |
-| Time | ~5.5s | ~12-15s | ~30s |
+| Unique tiles | 162,926 | — | — |
+| Time | ~30s | ~12-15s | ~30s |
 
 Visual output verified identical across all three (nidhogg test suite).
 
-### Done: Feature merging (Phase 1)
+### Done
 
-Simple multi-geometry merging implemented in `mvt.rs:merge_same_attr_geometries()`.
+**Feature merging** — multi-geometry merging in `mvt.rs:merge_same_attr_geometries()`.
 Groups features by `(geom_type, sorted tags)` and concatenates geometry commands
-with delta-encoding adjustment. Called in `encode_tile_batch` before MVT encoding.
+with delta-encoding adjustment. Feature count reduced 97% (1.2M → 35K sampled),
+file size reduced 13% (630 → 550 MB).
 
-**Results:** Feature count reduced 97% (1.2M → 35K sampled features). File size
-reduced 13% (630 MB → 550 MB). Geometry commands unchanged (same vertices).
+**Canonical ocean fill_data** — `osm_id=0` for all fill tiles. PMTiles dedup was
+already catching them via the merge pass (162K unique either way), but this ensures
+correctness regardless of merge order.
 
-### Remaining size gap: 550 MB vs 308-388 MB
+**Simplified ocean shapefile at z0-7** — `--ocean-simplified` flag uses the
+30 MB simplified shapefile for z0-7 (9K polygons vs 219K full-res). Full-res
+used for z8-14. Modest size impact (~5 MB on Denmark) since low-zoom tiles are
+a small fraction of total data, but dramatically fewer geometry commands at z0-7.
 
-The remaining gap is **geometry command volume** — we have ~3.3x more geometry
-commands than Planetiler/Tilemaker. Root causes:
+**PMTiles run-length fix** — the `try_extend_run` function checked for consecutive
+offsets, but PMTiles v3 spec says run_length means all tiles share the SAME data
+(same offset). Old code produced corrupt runs for unique tiles and couldn't merge
+dedup'd tiles. Fixed + corrected `num_tile_entries` header field.
 
-**1. Tile count (1.3M vs ~100-113K) — biggest contributor**
+**madvise regression fix** — `Advice::Sequential` on node/way index mmaps caused
+2.3x PBF phase regression (20s → 46s on Denmark) by triggering aggressive readahead
+during random-access ID lookups. Removed Sequential hints, kept Random hints after
+`finish_writing()` for relation member lookups.
 
-We emit ~1.2M more tiles than competitors, mostly ocean fill tiles at z7-z14.
-The scanline fill in `ocean.rs` emits a fill tile for every tile inside an ocean
-polygon at every zoom level. Each ocean polygon gets a different `feature_id`
-(line 181: `idx as u64`), so even though fill tile geometry is identical (4096×4096
-rectangle), the wire format includes different `osm_id` bytes, producing different
-compressed data, preventing PMTiles content-hash dedup.
+### Remaining size gap: 545 MB vs 308-388 MB
 
-After merging, multiple ocean polygons' fills in the same tile merge to one feature
-(since attrs are identical), so the encoded MVT should now be identical across fill
-tiles. But fill_data still differs at the sort record level because of per-polygon
-osm_id in the wire format.
+**Gzip compression level** — currently `Compression::fast()` (level 1). Testing
+level 6 reduced output from 545 → 457 MB (16% saving) with +0.7s assemble time.
 
-**Fix options:**
-- [ ] **Use a canonical fill_data for all ocean fills** — compute fill_data once
-  with `osm_id=0` and reuse for every fill tile, regardless of source polygon.
-  This ensures PMTiles dedup catches all identical ocean fills. The osm_id is
-  irrelevant for fill tiles (no visible feature identity).
-- [ ] **Use simplified ocean shapefile at z0-7** — like Tilemaker, use
-  `simplified-water-polygons-split-3857` at z0-7 for far fewer source polygons
-  and vertices. Reduces both tile count and geometry commands at low zooms.
-  Requires downloading a second shapefile (~100 MB).
+| | Level 1 | Level 6 | Delta |
+|---|---|---|---|
+| Output | 545 MB | 457 MB | -16% |
+| Assemble | 6.7s | 7.4s | +0.7s |
 
-**2. Geometry commands at low zooms (ocean/water/land)**
+Still 149 MB above Tilemaker (308 MB) at level 6. The remaining gap comes from:
+- 49K more unique tiles (163K vs 113K) — mostly ocean boundary tiles at z8-14
+  with more geometry commands than Tilemaker's equivalent tiles
+- Higher average tile size (3.3 KB vs 2.7 KB per unique tile)
 
-Even after merging, ocean boundary tiles at z0-z7 have massive geometry command
-counts because we clip the full-resolution shapefile at all zooms. Tilemaker uses
-a simplified shapefile at z0-z7 with far fewer vertices.
+### Next steps
 
-Per-tile MVT sizes: z0 elivagar=19KB vs Tilemaker=888B (22x), z3 elivagar=190KB
-vs Tilemaker=2.3KB (80x). By z14 they converge.
-
-**Fix:** Use simplified shapefile at low zooms (see above).
-
-**3. Extra tiles at z12-z14**
-
-z14 alone: 990K tiles (elivagar) vs 85K (Tilemaker). The extra ~905K tiles are
-pure ocean fill tiles. If dedup works correctly (fix #1 above), these should all
-collapse to references to one shared tile blob, adding only ~10 bytes of PMTiles
-directory overhead each instead of ~150 bytes of compressed tile data.
-
-### Priority order
-
-1. **Canonical ocean fill_data** — cheapest fix, ~10 lines in `ocean.rs`. Makes
-   PMTiles dedup catch all fill tiles. Could save ~135 MB (905K tiles × ~150B each).
-2. **Simplified ocean shapefile at z0-7** — reduces geometry commands dramatically
-   at low zooms. Requires data pipeline change and second shapefile download.
-3. **Gzip level tuning** — `Compression::fast()` (level 1) may leave 10-20% on
-   the table. Benchmark levels 2-3.
+- [ ] **Gzip level tuning** — benchmark levels 2-6, find the sweet spot for
+  size vs speed. Level 6 saves 16% for +0.7s.
+- [ ] Investigate remaining 49K extra unique tiles vs Tilemaker at z8-14
 
 ## Quality
 
