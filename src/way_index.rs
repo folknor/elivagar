@@ -46,6 +46,7 @@ impl WayIndex {
         offsets_file.set_len(offsets_file_len)?;
 
         let offsets_mmap = unsafe { MmapMut::map_mut(&offsets_file)? };
+        offsets_mmap.advise(memmap2::Advice::Sequential)?;
 
         let data_file = File::options()
             .read(true)
@@ -96,6 +97,7 @@ impl WayIndex {
             self.offsets_mmap = unsafe {
                 MmapMut::map_mut(&self.offsets_file).expect("failed to remap way offsets")
             };
+            self.offsets_mmap.advise(memmap2::Advice::Sequential).ok();
             self.offsets_file_len = new_len;
         }
 
@@ -112,10 +114,14 @@ impl WayIndex {
             writer.flush()?;
         }
 
+        // Switch offsets to random access (relation member lookups are non-sequential).
+        self.offsets_mmap.advise(memmap2::Advice::Random).ok();
+
         // Open a read-only mmap over the data file (only if non-empty).
         if self.data_write_pos > 0 {
             let data_file = File::open(&self.data_path)?;
             let mmap = unsafe { Mmap::map(&data_file)? };
+            mmap.advise(memmap2::Advice::Random)?;
             self.data_mmap = Some(mmap);
         }
 

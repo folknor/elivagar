@@ -91,9 +91,43 @@
 - [ ] Gzip level — `Compression::fast()` (level 1) may be too aggressive. Level 2-3 could
   give 10-20% smaller tiles at minimal extra CPU cost. Benchmark.
 - [ ] Batch relations for parallel processing like ways — currently fully serial
-  (`pipeline.rs:318`)
-- [ ] `madvise` hints on mmap — `MADV_SEQUENTIAL` for write phase, `MADV_RANDOM` for
-  relation read phase (`node_index.rs`, `way_index.rs`)
+  (`pipeline.rs:370`). At planet scale, hundreds of thousands of multipolygon/boundary
+  relations with complex geometry (country borders, coastlines, large forests).
+
+  **Split `process_relation` into serial I/O + parallel geometry:**
+  - Serial (in PBF callback): resolve `way_index.get()` for member ways, project to
+    Mercator, build `Vec<MemberWay>` + `boundary_way_coords`, early-exit non-multipolygon.
+    This is I/O-bound (random mmap reads) and already done in lines 578-600.
+  - Parallel (rayon batch): `multipolygon::assemble()`, tag matching, area computation,
+    polygon enrichment, clipping, feature emission per zoom. CPU-bound, lines 609-668.
+
+  **New struct:**
+  ```
+  struct PreparedRelation {
+      osm_id: u64,
+      tags: Vec<(String, String)>,  // owned — PBF borrows don't survive batch boundary
+      member_ways: Vec<MemberWay>,  // already resolved + projected
+      boundary_way_coords: Vec<Vec<Point>>,
+  }
+  ```
+  Batch into `Vec<PreparedRelation>`, flush via rayon like `flush_way_batch`.
+  Tags must be owned Strings (small cost per relation).
+
+- [ ] `madvise` hints on mmap — critical at planet scale (75GB PBF, 64GB RAM). Without
+  hints, the kernel readaheads pages during random `way_index.get()` lookups in the
+  relation phase, wasting I/O bandwidth on pages that immediately get evicted.
+
+  **Where to add hints** (via `memmap2`'s `.advise()` method):
+  | Phase | Index | Access | Hint |
+  |-------|-------|--------|------|
+  | PBF write | `node_index` mmap | Sequential (IDs increasing) | `MADV_SEQUENTIAL` |
+  | PBF write | `way_index` offsets mmap | Sequential (IDs increasing) | `MADV_SEQUENTIAL` |
+  | Way reads | `node_index.get()` | Roughly sequential (refs within ways) | `MADV_SEQUENTIAL` |
+  | Relation reads | `way_index` offsets + data | Random (member way IDs arbitrary) | `MADV_RANDOM` |
+
+  **Implementation:** `NodeIndex::create()` → `advise(Sequential)`. `WayIndex::create()`
+  → `advise(Sequential)` on offsets. `WayIndex::finish_writing()` → `advise(Random)` on
+  both offsets_mmap and data_mmap. (~5 lines of code total.)
 
 ## Quality
 
