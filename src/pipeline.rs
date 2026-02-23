@@ -400,6 +400,7 @@ fn process_node(
 
     let p = geometry::project_e7(lat_e7, lon_e7);
     let mut count: u64 = 0;
+    let mut geom_buf: Vec<u32> = Vec::new();
 
     for m in &matches {
         let z_lo = m.min_zoom.max(min_zoom);
@@ -414,8 +415,8 @@ fn process_node(
             geometry::for_each_tile_in_bbox(&pbbox, z, |tx, ty| {
                 let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
                 let (px, py) = geometry::merc_to_tile_px(&p, tx, ty, z);
-                let geom_cmds = mvt::encode_point(px, py);
-                let data = encode_feature_data_with_attrs(osm_id, GeomType::Point, &geom_cmds, &attrs_bytes);
+                mvt::encode_point(&mut geom_buf, px, py);
+                let data = encode_feature_data_with_attrs(osm_id, GeomType::Point, &geom_buf, &attrs_bytes);
                 let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
                 records.push(SortRecord { key, data });
                 count += 1;
@@ -680,13 +681,14 @@ fn emit_point_feature(
     let centroid = centroid_of(coords);
     let cbbox = MercBbox { min_x: centroid.x, min_y: centroid.y, max_x: centroid.x, max_y: centroid.y };
     let mut count: u64 = 0;
+    let mut geom_buf: Vec<u32> = Vec::new();
     for z in z_lo..=z_hi {
         let attrs_bytes = encode_attrs_bytes(&m.attrs, z);
         geometry::for_each_tile_in_bbox(&cbbox, z, |tx, ty| {
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
             let (px, py) = geometry::merc_to_tile_px(&centroid, tx, ty, z);
-            let geom_cmds = mvt::encode_point(px, py);
-            let data = encode_feature_data_with_attrs(osm_id, GeomType::Point, &geom_cmds, &attrs_bytes);
+            mvt::encode_point(&mut geom_buf, px, py);
+            let data = encode_feature_data_with_attrs(osm_id, GeomType::Point, &geom_buf, &attrs_bytes);
             let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
             records.push(SortRecord { key, data });
             count += 1;
@@ -713,13 +715,14 @@ fn emit_centroid_feature(
 
     let cbbox = MercBbox { min_x: p.x, min_y: p.y, max_x: p.x, max_y: p.y };
     let mut count: u64 = 0;
+    let mut geom_buf: Vec<u32> = Vec::new();
     for z in z_lo..=z_hi {
         let attrs_bytes = encode_attrs_bytes(&m.attrs, z);
         geometry::for_each_tile_in_bbox(&cbbox, z, |tx, ty| {
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
             let (px, py) = geometry::merc_to_tile_px(&p, tx, ty, z);
-            let geom_cmds = mvt::encode_point(px, py);
-            let data = encode_feature_data_with_attrs(osm_id, GeomType::Point, &geom_cmds, &attrs_bytes);
+            mvt::encode_point(&mut geom_buf, px, py);
+            let data = encode_feature_data_with_attrs(osm_id, GeomType::Point, &geom_buf, &attrs_bytes);
             let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
             records.push(SortRecord { key, data });
             count += 1;
@@ -738,6 +741,7 @@ fn emit_line_feature(
     records: &mut Vec<SortRecord>,
 ) -> u64 {
     let mut count: u64 = 0;
+    let mut geom_buf: Vec<u32> = Vec::new();
     // Cascading simplification (P2): simplify from previous zoom's result
     let mut cascade = merc.to_vec();
     for z in (z_lo..=z_hi).rev() {
@@ -759,12 +763,12 @@ fn emit_line_feature(
                     continue;
                 }
                 let tile_coords = geometry::to_tile_coords(segment, tx, ty, z);
-                let geom_cmds = mvt::encode_linestring(&tile_coords);
-                if geom_cmds.is_empty() {
+                mvt::encode_linestring(&mut geom_buf, &tile_coords);
+                if geom_buf.is_empty() {
                     continue;
                 }
                 let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                let data = encode_feature_data_with_attrs(osm_id, GeomType::LineString, &geom_cmds, &attrs_bytes);
+                let data = encode_feature_data_with_attrs(osm_id, GeomType::LineString, &geom_buf, &attrs_bytes);
                 let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
                 records.push(SortRecord { key, data });
                 count += 1;
@@ -786,6 +790,7 @@ fn emit_polygon_feature(
 ) -> u64 {
     // Single-ring polygon (no holes)
     let mut count: u64 = 0;
+    let mut geom_buf: Vec<u32> = Vec::new();
     // Cascading simplification (P2): simplify from previous zoom's result
     let mut cascade = merc.to_vec();
     for z in (z_lo..=z_hi).rev() {
@@ -813,12 +818,12 @@ fn emit_polygon_feature(
             }
             ensure_cw_tile(&mut ring);
 
-            let geom_cmds = mvt::encode_polygon(&[&ring]);
-            if geom_cmds.is_empty() {
+            mvt::encode_polygon(&mut geom_buf, &[&ring]);
+            if geom_buf.is_empty() {
                 return;
             }
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_cmds, &attrs_bytes);
+            let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_buf, &attrs_bytes);
             let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
             records.push(SortRecord { key, data });
             count += 1;
@@ -839,6 +844,7 @@ fn emit_multipolygon_feature(
     records: &mut Vec<SortRecord>,
 ) -> u64 {
     let mut count: u64 = 0;
+    let mut geom_buf: Vec<u32> = Vec::new();
     // Cascading simplification (P2): simplify from previous zoom's result
     let mut cascade_outer = outer.to_vec();
     let mut cascade_inners: Vec<Vec<Point>> = inners.to_vec();
@@ -891,12 +897,12 @@ fn emit_multipolygon_feature(
             }
 
             let ring_refs: Vec<&[(i32, i32)]> = all_rings.iter().map(Vec::as_slice).collect();
-            let geom_cmds = mvt::encode_polygon(&ring_refs);
-            if geom_cmds.is_empty() {
+            mvt::encode_polygon(&mut geom_buf, &ring_refs);
+            if geom_buf.is_empty() {
                 return;
             }
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_cmds, &attrs_bytes);
+            let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_buf, &attrs_bytes);
             let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
             records.push(SortRecord { key, data });
             count += 1;

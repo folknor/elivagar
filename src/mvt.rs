@@ -168,12 +168,11 @@ pub fn encode_tile(layers: &[&LayerBuilder]) -> Vec<u8> {
 // Geometry command encoding
 // ---------------------------------------------------------------------------
 
-pub fn encode_point(x: i32, y: i32) -> Vec<u32> {
-    vec![
-        command(1, 1), // MoveTo, count=1
-        zigzag(x),
-        zigzag(y),
-    ]
+pub fn encode_point(buf: &mut Vec<u32>, x: i32, y: i32) {
+    buf.clear();
+    buf.push(command(1, 1)); // MoveTo, count=1
+    buf.push(zigzag(x));
+    buf.push(zigzag(y));
 }
 
 pub fn encode_multi_point(points: &[(i32, i32)]) -> Vec<u32> {
@@ -194,31 +193,31 @@ pub fn encode_multi_point(points: &[(i32, i32)]) -> Vec<u32> {
     cmds
 }
 
-pub fn encode_linestring(coords: &[(i32, i32)]) -> Vec<u32> {
+pub fn encode_linestring(buf: &mut Vec<u32>, coords: &[(i32, i32)]) {
+    buf.clear();
     if coords.len() < 2 {
-        return Vec::new();
+        return;
     }
-    let mut cmds = Vec::with_capacity(3 + (coords.len() - 1) * 2);
+    buf.reserve(3 + (coords.len() - 1) * 2);
     // MoveTo first point
-    cmds.push(command(1, 1));
-    cmds.push(zigzag(coords[0].0));
-    cmds.push(zigzag(coords[0].1));
+    buf.push(command(1, 1));
+    buf.push(zigzag(coords[0].0));
+    buf.push(zigzag(coords[0].1));
     // LineTo remaining points
     #[allow(clippy::cast_possible_truncation)]
-    cmds.push(command(2, (coords.len() - 1) as u32));
+    buf.push(command(2, (coords.len() - 1) as u32));
     let mut cx = coords[0].0;
     let mut cy = coords[0].1;
     for &(x, y) in &coords[1..] {
-        cmds.push(zigzag(x - cx));
-        cmds.push(zigzag(y - cy));
+        buf.push(zigzag(x - cx));
+        buf.push(zigzag(y - cy));
         cx = x;
         cy = y;
     }
-    cmds
 }
 
-pub fn encode_polygon(rings: &[&[(i32, i32)]]) -> Vec<u32> {
-    let mut cmds = Vec::new();
+pub fn encode_polygon(buf: &mut Vec<u32>, rings: &[&[(i32, i32)]]) {
+    buf.clear();
     let mut cx: i32 = 0;
     let mut cy: i32 = 0;
     for ring in rings {
@@ -227,29 +226,28 @@ pub fn encode_polygon(rings: &[&[(i32, i32)]]) -> Vec<u32> {
         }
         let points = &ring[..ring.len() - 1];
         // MoveTo first point
-        cmds.push(command(1, 1));
-        cmds.push(zigzag(points[0].0 - cx));
-        cmds.push(zigzag(points[0].1 - cy));
+        buf.push(command(1, 1));
+        buf.push(zigzag(points[0].0 - cx));
+        buf.push(zigzag(points[0].1 - cy));
         cx = points[0].0;
         cy = points[0].1;
         // LineTo remaining (excluding last which is same as first)
         if points.len() > 1 {
             #[allow(clippy::cast_possible_truncation)]
-            cmds.push(command(2, (points.len() - 1) as u32));
+            buf.push(command(2, (points.len() - 1) as u32));
             for &(x, y) in &points[1..] {
-                cmds.push(zigzag(x - cx));
-                cmds.push(zigzag(y - cy));
+                buf.push(zigzag(x - cx));
+                buf.push(zigzag(y - cy));
                 cx = x;
                 cy = y;
             }
         }
         // ClosePath
-        cmds.push(command(7, 1));
+        buf.push(command(7, 1));
         // After ClosePath, cursor returns to the MoveTo position
         cx = points[0].0;
         cy = points[0].1;
     }
-    cmds
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +422,8 @@ mod tests {
 
     #[test]
     fn test_encode_point() {
-        let cmds = encode_point(25, 17);
+        let mut cmds = Vec::new();
+        encode_point(&mut cmds, 25, 17);
         assert_eq!(cmds, vec![
             9,  // MoveTo, count=1
             50, // zigzag(25) = 50
@@ -435,7 +434,8 @@ mod tests {
     #[test]
     fn test_encode_linestring() {
         let coords = [(2, 1), (4, 3), (6, 5)];
-        let cmds = encode_linestring(&coords);
+        let mut cmds = Vec::new();
+        encode_linestring(&mut cmds, &coords);
         assert_eq!(cmds, vec![
             9,  // MoveTo count=1
             4,  // zigzag(2)
@@ -452,7 +452,8 @@ mod tests {
     fn test_encode_polygon() {
         // Simple square: (0,0) -> (10,0) -> (10,10) -> (0,10) -> (0,0)
         let ring = [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
-        let cmds = encode_polygon(&[&ring]);
+        let mut cmds = Vec::new();
+        encode_polygon(&mut cmds, &[&ring]);
         // MoveTo(0,0): cmd=9, zigzag(0)=0, zigzag(0)=0
         // LineTo 3 points: cmd=26
         //   delta(10,0): 20, 0
@@ -489,10 +490,12 @@ mod tests {
         let mut layer = LayerBuilder::new("streets");
         let ki = layer.intern_key("kind");
         let vi = layer.intern_value(Value::String("motorway".into()));
+        let mut geom = Vec::new();
+        encode_linestring(&mut geom, &[(100, 200), (300, 400)]);
         layer.add_feature(Feature {
             id: Some(42),
             geom_type: GeomType::LineString,
-            geometry: encode_linestring(&[(100, 200), (300, 400)]),
+            geometry: geom,
             tags: vec![(ki, vi)],
         });
 

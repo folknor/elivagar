@@ -232,8 +232,9 @@ fn emit_ocean_polygon(
     #[allow(clippy::cast_possible_truncation)]
     let ext = geometry::EXTENT as i32;
     let fill_ring: [(i32, i32); 5] = [(0, 0), (ext, 0), (ext, ext), (0, ext), (0, 0)];
-    let fill_cmds = mvt::encode_polygon(&[&fill_ring]);
-    let fill_data = encode_feature_data(feature_id, GeomType::Polygon, &fill_cmds, attrs, 0);
+    let mut geom_buf: Vec<u32> = Vec::new();
+    mvt::encode_polygon(&mut geom_buf, &[&fill_ring]);
+    let fill_data = encode_feature_data(feature_id, GeomType::Polygon, &geom_buf, attrs, 0);
 
     let bbox = merc_bbox(outer);
 
@@ -400,12 +401,13 @@ fn emit_boundary_tile(
     }
 
     let ring_refs: Vec<&[(i32, i32)]> = all_rings.iter().map(Vec::as_slice).collect();
-    let geom_cmds = mvt::encode_polygon(&ring_refs);
-    if geom_cmds.is_empty() {
+    let mut geom_buf: Vec<u32> = Vec::new();
+    mvt::encode_polygon(&mut geom_buf, &ring_refs);
+    if geom_buf.is_empty() {
         return;
     }
     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-    let data = encode_feature_data(feature_id, GeomType::Polygon, &geom_cmds, attrs, z);
+    let data = encode_feature_data(feature_id, GeomType::Polygon, &geom_buf, attrs, z);
     let key = sort::make_sort_key(tile_id, layer_idx, 0);
     records.push(SortRecord { key, data });
 }
