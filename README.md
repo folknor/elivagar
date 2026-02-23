@@ -49,6 +49,19 @@ System: Linux 6.18, Ryzen 9 7950X.
 
 Measured with `scripts/bench.sh`. Results are logged to `benchmarks.tsv` for tracking over time.
 
+### PMTiles writer
+
+Elivagar's hand-rolled PMTiles v3 writer vs [pmtiles-rs](https://github.com/stadiamaps/pmtiles-rs) 0.20,
+synthetic tiles (unique gzipped payloads, Hilbert-ordered), best of 5 runs:
+
+| Tiles | elivagar | pmtiles-rs | Speedup |
+|------:|---------:|-----------:|--------:|
+| 100K | 28 ms | 68 ms | 2.4x |
+| 500K | 110 ms | 309 ms | 2.8x |
+| 1M | 223 ms | 646 ms | 2.9x |
+
+Run with `scripts/bench-pmtiles.sh [tiles] [runs]`.
+
 ## Building
 
 Requires Rust nightly (edition 2024) and [pbfhogg](https://github.com/folknor/pbfhogg) as a sibling directory.

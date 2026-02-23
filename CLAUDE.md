@@ -11,11 +11,12 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 
 ## Scripts
 
-None yet. Write new scripts in `scripts/` as needed. Follow these conventions:
+Write new scripts in `scripts/` as needed. Follow these conventions:
 - `scripts/build.sh` — build release
 - `scripts/test.sh` — run tests
 - `scripts/bench.sh [pbf] [--skip-to ocean|sort]` — run tilegen with benchmarking
 - `scripts/run.sh [pbf] [out.pmtiles]` — build + run
+- `scripts/bench-pmtiles.sh [tiles] [runs]` — benchmark PMTiles writer vs pmtiles-rs (default: 500K tiles, 5 runs)
 
 If you need something these scripts don't cover, write a new script.
 
@@ -59,7 +60,7 @@ Sequential, same PBF input:
 
 ## Dependencies
 
-- `pbfhogg` (aliased as `osmpbf` in Cargo.toml) — PBF reader, sibling dir `../pbfhogg`
+- `pbfhogg` — PBF reader, sibling dir `../pbfhogg`
 - `rayon` — parallel processing
 - `memmap2` — memory-mapped I/O for node/way indices
 - `flate2` (zlib-ng) — gzip compression for MVT tiles

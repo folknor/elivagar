@@ -248,7 +248,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> (SortWriter, MercBbox) {
                 node_count += 1;
                 let lat_e7 = node.decimicro_lat();
                 let lon_e7 = node.decimicro_lon();
-                node_index.put(node.id, lat_e7, lon_e7);
+                node_index.put(node.id(), lat_e7, lon_e7);
 
                 min_lat_e7 = min_lat_e7.min(lat_e7);
                 max_lat_e7 = max_lat_e7.max(lat_e7);
@@ -260,7 +260,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> (SortWriter, MercBbox) {
                     let mut node_records = Vec::new();
                     #[allow(clippy::cast_sign_loss)]
                     let n = process_node(
-                        node.id as u64, lat_e7, lon_e7,
+                        node.id() as u64, lat_e7, lon_e7,
                         &tags_vec, min_z, max_z, &mut node_records,
                     );
                     for r in node_records {
