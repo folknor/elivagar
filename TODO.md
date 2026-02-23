@@ -33,9 +33,9 @@
   complex country boundaries. **Check actual max vertex counts in Planetiler Denmark output
   to see if this is hit in practice.** Either widen to u32 or detect and split.
   (`wire_format.rs:72`)
-- [ ] Ocean layer missing from PMTiles metadata — `build_metadata` lists 25 layers, but
-  tiles contain 26 including ocean. **Compare metadata JSON against Planetiler output.**
-  (`pmtiles_writer.rs:479`)
+- [x] Ocean layer missing from PMTiles metadata — `build_metadata` lists 25 layers, but
+  tiles contain 26 including ocean. Confirmed Planetiler includes ocean z0-14.
+  Fixed: `build_metadata` now derives from `Layer::ALL`.
 - [ ] `area_sq_meters` uses cos²(lat) approximation — 20-30% error for features spanning
   large latitude ranges (e.g. Norway). Affects `enrich_polygon_matches` boundary label zoom
   thresholds. **Compare boundary_labels min_zoom values against Planetiler for
@@ -43,10 +43,10 @@
 
 ## Code quality
 
-- [ ] `LAYER_NAMES` in pipeline.rs duplicates `Layer::name()` in shortbread.rs — sync hazard.
-  Derive one from the other, or add a compile-time assertion they match.
-- [ ] `Layer::count()` returns magic number 26 — derive from enum
-  (`Layer::Ocean as usize + 1` or const assert)
+- [x] `LAYER_NAMES` in pipeline.rs duplicates `Layer::name()` in shortbread.rs — sync hazard.
+  Fixed: removed `LAYER_NAMES`, pipeline uses `Layer::ALL[idx].name()` directly.
+- [x] `Layer::count()` returns magic number 26 — derive from enum.
+  Fixed: `Layer::ALL` const array, `count()` returns `ALL.len()`.
 - [ ] Remove dead code: `_attr_float` (shortbread.rs:258), `encode_multi_point` (mvt.rs:179),
   `LayerBuilder::clear` (mvt.rs:68)
 - [ ] Test-only functions exposed as `pub` — `tiles_for_bbox`, `project_bbox`, `reverse_ring`,

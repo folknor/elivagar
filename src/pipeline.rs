@@ -1029,18 +1029,7 @@ fn flush_tile_batch(batch: &[PendingTile], pmtiles: &mut PmtilesWriter) -> u64 {
     count
 }
 
-/// Static layer names indexed by Layer discriminant (A4 optimization).
-const LAYER_NAMES: [&str; 26] = [
-    "water_polygons", "water_polygons_labels", "water_lines", "water_lines_labels",
-    "dam_lines", "dam_polygons", "pier_lines", "pier_polygons",
-    "boundaries", "boundary_labels", "place_labels", "land",
-    "sites", "buildings", "addresses", "streets",
-    "street_polygons", "street_labels", "street_labels_points", "streets_polygons_labels",
-    "bridges", "aerialways", "ferries", "public_transport",
-    "pois", "ocean",
-];
-
-const LAYER_COUNT: usize = LAYER_NAMES.len();
+const LAYER_COUNT: usize = Layer::count();
 
 /// Create an empty slot array for lazy layer builder initialization.
 fn new_layer_slots() -> [Option<LayerBuilder>; LAYER_COUNT] {
@@ -1050,7 +1039,7 @@ fn new_layer_slots() -> [Option<LayerBuilder>; LAYER_COUNT] {
 /// Get or create a LayerBuilder at the given index.
 fn get_or_create_layer(layers: &mut [Option<LayerBuilder>], idx: usize) -> &mut LayerBuilder {
     if layers[idx].is_none() {
-        layers[idx] = Some(LayerBuilder::new(LAYER_NAMES[idx]));
+        layers[idx] = Some(LayerBuilder::new(Layer::ALL[idx].name()));
     }
     layers[idx].as_mut().expect("just inserted")
 }

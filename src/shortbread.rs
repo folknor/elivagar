@@ -42,6 +42,21 @@ pub enum Layer {
 }
 
 impl Layer {
+    /// All layers in enum order.
+    pub const ALL: [Layer; 26] = [
+        Self::WaterPolygons, Self::WaterPolygonsLabels,
+        Self::WaterLines, Self::WaterLinesLabels,
+        Self::DamLines, Self::DamPolygons,
+        Self::PierLines, Self::PierPolygons,
+        Self::Boundaries, Self::BoundaryLabels,
+        Self::PlaceLabels, Self::Land,
+        Self::Sites, Self::Buildings, Self::Addresses,
+        Self::Streets, Self::StreetPolygons,
+        Self::StreetLabels, Self::StreetLabelsPoints, Self::StreetsPolygonsLabels,
+        Self::Bridges, Self::Aerialways, Self::Ferries,
+        Self::PublicTransport, Self::Pois, Self::Ocean,
+    ];
+
     /// MVT layer name string.
     pub fn name(self) -> &'static str {
         match self {
@@ -74,9 +89,28 @@ impl Layer {
         }
     }
 
+    /// Minimum zoom level at which this layer appears in tiles.
+    pub fn min_zoom(self) -> u8 {
+        match self {
+            Self::Boundaries => 0,
+            Self::Ocean => 0,
+            Self::BoundaryLabels => 2,
+            Self::WaterPolygons | Self::WaterPolygonsLabels | Self::PlaceLabels => 4,
+            Self::Streets => 5,
+            Self::Land => 7,
+            Self::WaterLines | Self::WaterLinesLabels => 9,
+            Self::StreetLabels | Self::Ferries => 10,
+            Self::StreetPolygons | Self::PublicTransport => 11,
+            Self::DamLines | Self::DamPolygons | Self::PierLines | Self::PierPolygons
+            | Self::StreetLabelsPoints | Self::Bridges | Self::Aerialways => 12,
+            Self::Sites | Self::Buildings | Self::Addresses
+            | Self::StreetsPolygonsLabels | Self::Pois => 14,
+        }
+    }
+
     /// Total number of layers.
-    pub fn count() -> usize {
-        26
+    pub const fn count() -> usize {
+        Self::ALL.len()
     }
 }
 

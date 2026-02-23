@@ -476,39 +476,16 @@ fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 fn build_metadata(config: &PmtilesConfig) -> String {
-    let layers: &[(&str, u8, u8)] = &[
-        ("water_polygons", 4, 14),
-        ("water_polygons_labels", 4, 14),
-        ("water_lines", 9, 14),
-        ("water_lines_labels", 9, 14),
-        ("dam_lines", 12, 14),
-        ("dam_polygons", 12, 14),
-        ("pier_lines", 12, 14),
-        ("pier_polygons", 12, 14),
-        ("boundaries", 0, 14),
-        ("boundary_labels", 2, 14),
-        ("place_labels", 4, 14),
-        ("land", 7, 14),
-        ("sites", 14, 14),
-        ("buildings", 14, 14),
-        ("addresses", 14, 14),
-        ("streets", 5, 14),
-        ("street_polygons", 11, 14),
-        ("street_labels", 10, 14),
-        ("street_labels_points", 12, 14),
-        ("streets_polygons_labels", 14, 14),
-        ("bridges", 12, 14),
-        ("aerialways", 12, 14),
-        ("ferries", 10, 14),
-        ("public_transport", 11, 14),
-        ("pois", 14, 14),
-    ];
+    use crate::shortbread::Layer;
 
     let mut layer_arr = String::from("[");
-    for (i, &(name, min_z, max_z)) in layers.iter().enumerate() {
+    for (i, &layer) in Layer::ALL.iter().enumerate() {
         if i > 0 {
             layer_arr.push(',');
         }
+        let name = layer.name();
+        let min_z = layer.min_zoom();
+        let max_z = config.max_zoom;
         layer_arr.push_str(&format!(
             r#"{{"id":"{name}","minzoom":{min_z},"maxzoom":{max_z}}}"#,
         ));
@@ -882,9 +859,10 @@ mod tests {
         assert_eq!(parsed["name"], "Shortbread");
         assert_eq!(parsed["format"], "pbf");
         let layers = parsed["vector_layers"].as_array().unwrap();
-        assert_eq!(layers.len(), 25);
+        assert_eq!(layers.len(), 26);
         assert_eq!(layers[0]["id"], "water_polygons");
         assert_eq!(layers[15]["id"], "streets");
+        assert_eq!(layers[25]["id"], "ocean");
     }
 
     // -----------------------------------------------------------------------
