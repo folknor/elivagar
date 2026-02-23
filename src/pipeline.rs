@@ -159,7 +159,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // --- Phase 4: Tile assembly + PMTiles write ---
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
-    let (features_read, tiles_written) = phase_assemble(&mut sort_reader, config)?;
+    let (features_read, tiles_written, unique_tiles) = phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
 
     let total = total_start.elapsed();
@@ -178,6 +178,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("phase4_ms={}", phase4_elapsed.as_millis());
     eprintln!("features={features_read}");
     eprintln!("tiles={tiles_written}");
+    eprintln!("unique_tiles={unique_tiles}");
     if let Ok(meta) = std::fs::metadata(&config.output_path) {
         eprintln!("output_bytes={}", meta.len());
     }
@@ -1004,7 +1005,7 @@ struct EncodedTile {
 }
 
 #[allow(clippy::too_many_lines)]
-fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64), PipelineError> {
+fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64, u64), PipelineError> {
     use std::sync::mpsc::sync_channel;
 
     let pmtiles_config = PmtilesConfig {
@@ -1096,9 +1097,10 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
     });
 
     let (features_read, tiles_written, mut pmtiles) = scope_result?;
+    let unique_tiles = pmtiles.unique_tile_count();
     pmtiles.write_to(&config.output_path)?;
 
-    Ok((features_read, tiles_written))
+    Ok((features_read, tiles_written, unique_tiles))
 }
 
 /// Encode + gzip a batch of tiles in parallel using rayon.

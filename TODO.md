@@ -81,123 +81,84 @@
   **Fix options:** per-edge latitude weighting (~2× cost), or latitude-range-aware cos²
   averaging (moderate cost, good tradeoff).
 
-## Performance
+## Output size
 
-- [ ] Gzip level — `Compression::fast()` (level 1) may be too aggressive. Level 2-3 could
-  give 10-20% smaller tiles at minimal extra CPU cost. Benchmark.
+Three-way comparison on Denmark (2026-02-23):
+
+| | elivagar | Planetiler | Tilemaker |
+|---|---|---|---|
+| File size | 550 MB | 388 MB | 308 MB |
+| Tiles | 1,328,874 | 104,394 | 113,476 |
+| Time | ~5.5s | ~12-15s | ~30s |
+
+Visual output verified identical across all three (nidhogg test suite).
+
+### Done: Feature merging (Phase 1)
+
+Simple multi-geometry merging implemented in `mvt.rs:merge_same_attr_geometries()`.
+Groups features by `(geom_type, sorted tags)` and concatenates geometry commands
+with delta-encoding adjustment. Called in `encode_tile_batch` before MVT encoding.
+
+**Results:** Feature count reduced 97% (1.2M → 35K sampled features). File size
+reduced 13% (630 MB → 550 MB). Geometry commands unchanged (same vertices).
+
+### Remaining size gap: 550 MB vs 308-388 MB
+
+The remaining gap is **geometry command volume** — we have ~3.3x more geometry
+commands than Planetiler/Tilemaker. Root causes:
+
+**1. Tile count (1.3M vs ~100-113K) — biggest contributor**
+
+We emit ~1.2M more tiles than competitors, mostly ocean fill tiles at z7-z14.
+The scanline fill in `ocean.rs` emits a fill tile for every tile inside an ocean
+polygon at every zoom level. Each ocean polygon gets a different `feature_id`
+(line 181: `idx as u64`), so even though fill tile geometry is identical (4096×4096
+rectangle), the wire format includes different `osm_id` bytes, producing different
+compressed data, preventing PMTiles content-hash dedup.
+
+After merging, multiple ocean polygons' fills in the same tile merge to one feature
+(since attrs are identical), so the encoded MVT should now be identical across fill
+tiles. But fill_data still differs at the sort record level because of per-polygon
+osm_id in the wire format.
+
+**Fix options:**
+- [ ] **Use a canonical fill_data for all ocean fills** — compute fill_data once
+  with `osm_id=0` and reuse for every fill tile, regardless of source polygon.
+  This ensures PMTiles dedup catches all identical ocean fills. The osm_id is
+  irrelevant for fill tiles (no visible feature identity).
+- [ ] **Use simplified ocean shapefile at z0-7** — like Tilemaker, use
+  `simplified-water-polygons-split-3857` at z0-7 for far fewer source polygons
+  and vertices. Reduces both tile count and geometry commands at low zooms.
+  Requires downloading a second shapefile (~100 MB).
+
+**2. Geometry commands at low zooms (ocean/water/land)**
+
+Even after merging, ocean boundary tiles at z0-z7 have massive geometry command
+counts because we clip the full-resolution shapefile at all zooms. Tilemaker uses
+a simplified shapefile at z0-z7 with far fewer vertices.
+
+Per-tile MVT sizes: z0 elivagar=19KB vs Tilemaker=888B (22x), z3 elivagar=190KB
+vs Tilemaker=2.3KB (80x). By z14 they converge.
+
+**Fix:** Use simplified shapefile at low zooms (see above).
+
+**3. Extra tiles at z12-z14**
+
+z14 alone: 990K tiles (elivagar) vs 85K (Tilemaker). The extra ~905K tiles are
+pure ocean fill tiles. If dedup works correctly (fix #1 above), these should all
+collapse to references to one shared tile blob, adding only ~10 bytes of PMTiles
+directory overhead each instead of ~150 bytes of compressed tile data.
+
+### Priority order
+
+1. **Canonical ocean fill_data** — cheapest fix, ~10 lines in `ocean.rs`. Makes
+   PMTiles dedup catch all fill tiles. Could save ~135 MB (905K tiles × ~150B each).
+2. **Simplified ocean shapefile at z0-7** — reduces geometry commands dramatically
+   at low zooms. Requires data pipeline change and second shapefile download.
+3. **Gzip level tuning** — `Compression::fast()` (level 1) may leave 10-20% on
+   the table. Benchmark levels 2-3.
 
 ## Quality
 
-- [ ] Feature merging (see below)
 - [ ] Visual verification — tracked in nidhogg TODO
 - [ ] Planet-scale test — run on full planet PBF (~73 GB), needs NVMe server
-
-## Feature merging
-
-Post-decode merge pass in `encode_tile_batch`, per layer, before MVT encoding.
-Reduces tile size by combining geometries that share identical attributes.
-
-### Planetiler investigation (2026-02-23)
-
-Planetiler's `FeatureMerge` class (`planetiler-core/.../FeatureMerge.java`) provides
-several strategies, but **the Shortbread YAML profile uses none of them** — no
-`tile_post_process` sections are defined. Only the OpenMapTiles Java profile does
-merging. This means Planetiler's Shortbread output has the same unmerged features
-as ours.
-
-**Planetiler's merging strategies (for reference):**
-
-1. **Simple multi-geometry** (`mergeMultiPoint/LineString/Polygon`): groups features
-   by identical attributes and concatenates geometry commands. Cheapest option — no
-   geometric computation, just command array concatenation. This is what we should
-   start with.
-
-2. **Linestring merging** (`mergeLineStrings` via `LoopLineMerger`): snap-rounds
-   coordinates, splits intersecting lines, joins endpoints, removes stubs below a
-   threshold, re-simplifies with Douglas-Peucker. Expensive — requires full JTS
-   geometry decode/encode cycle.
-
-3. **Polygon overlap resolution** (`mergeOverlappingPolygons`): unions
-   overlapping/touching polygons via JTS. Filters by `minArea`.
-
-4. **Polygon proximity merging** (`mergeNearbyPolygons`): clusters polygons within
-   `minDist` pixels via STR-tree spatial index, buffers/unions/unbuffers to close
-   gaps. Most expensive strategy.
-
-**Typical parameters** (from OpenMapTiles profile):
-- `minLength`: 0–0.5 px (linestrings shorter than this dropped after merge)
-- `tolerance`: ~0.1 px (Douglas-Peucker re-simplification)
-- `buffer`: 4.0 px (retain detail outside tile boundary)
-- `minArea`: 4 sq px (drop tiny polygons after merge)
-
-**`VectorTile.VectorGeometryMerger`** (inner class): concatenates MVT command arrays
-into multi-geometries, adjusting delta-encoded coordinates. Used by simple
-multi-geometry merging — this is the closest analog to what we'd implement.
-
-### Priority assessment
-
-Since Planetiler's Shortbread profile doesn't merge, our tile sizes should be
-comparable. Feature merging would still reduce tile sizes (fewer feature headers,
-better tag dedup), but it's an improvement over the baseline, not catching up.
-
-**Before implementing:** write a comparison tool to decode sample tiles from both
-outputs and compare feature counts per layer per zoom. This quantifies the actual
-gap and identifies which layers have the most mergeable features.
-
-### Implementation plan
-
-**Phase 1: Simple multi-geometry merging (cheap, no geometry library)**
-
-Group features by `(geom_type, sorted tags)` within each layer. Concatenate
-geometry commands for features in the same group into a single multi-geometry
-feature. Drop the `id` field (no single OSM ID applies to merged features).
-
-- **Polygon merging**: each polygon ring is self-contained
-  (MoveTo+LineTo+ClosePath), so rings from different features can be concatenated
-  directly into one geometry command buffer.
-- **Linestring merging**: each linestring is MoveTo+LineTo, so multiple
-  linestrings concatenate directly into a multi-linestring (multiple MoveTo
-  segments in one geometry).
-- **Point merging**: multiple points concatenate into a multi-point (single
-  MoveTo command with count > 1, but needs coordinate re-delta-encoding).
-
-MVT delta encoding caveat: each feature's geometry starts with absolute
-coordinates (cursor resets per feature). When concatenating into a single feature,
-only the first geometry starts absolute — subsequent geometries need their
-initial MoveTo adjusted to be relative to the running cursor position.
-
-Layers to merge: `water_polygons`, `land`, `sites`, `buildings`, `streets`,
-`water_lines`, `ferries`, `bridges`, `tunnels`.
-
-Skip: `pois`, `places`, `addresses`, `boundary_labels`, `street_labels_points`,
-`public_transport` — per-feature identity matters.
-
-**Phase 2: Endpoint-joining linestring merge (moderate effort)**
-
-Within same-attribute linestring groups, build adjacency graph on endpoints.
-Join chains where one linestring's last point matches another's first point.
-Saves one MoveTo+coordinates per join. Requires tracking absolute cursor
-position through delta-encoded commands.
-
-**Phase 3: Advanced merging (future, may not be needed)**
-
-Snap-rounding, intersection splitting, polygon union. Would need a geometry
-library (equivalent to JTS). Only worth it if Phase 1-2 leave significant gaps.
-
-### Where it fits in the pipeline
-
-In `encode_tile_batch`, after `add_feature_to_layer` populates the `LayerBuilder`
-and before `mvt::encode_tile`. New function `merge_features(layer: &mut LayerBuilder)`
-operates on the `features: Vec<Feature>` directly. This keeps the sort and wire
-format untouched — merging is purely a tile-assembly optimization.
-
-Sort key already orders features by `(tile_id, layer, priority)`, so same-layer
-features are adjacent in the input stream and land in the same `LayerBuilder`.
-
-### What NOT to merge
-
-- Features across different layers
-- Features with different `geom_type`
-- Features where per-feature `id` matters (POIs, places, addresses, labels)
-- Polygons with inner rings that belong to different outer rings (would
-  need topology-aware merging, not worth the complexity)

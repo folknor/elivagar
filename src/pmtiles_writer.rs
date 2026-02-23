@@ -76,6 +76,18 @@ pub struct PmtilesWriter {
 }
 
 impl PmtilesWriter {
+    /// Total tiles added (including deduped references).
+    pub fn tile_count(&self) -> u64 {
+        self.tiles.len() as u64
+    }
+
+    /// Unique tile data blobs (after dedup).
+    pub fn unique_tile_count(&self) -> u64 {
+        self.unique_count
+    }
+}
+
+impl PmtilesWriter {
     /// Create an in-memory writer (tile data kept in a Vec).
     pub fn new(config: PmtilesConfig) -> Self {
         PmtilesWriter {
