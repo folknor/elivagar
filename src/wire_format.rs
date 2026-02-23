@@ -19,12 +19,12 @@ use crate::shortbread::{self, AttrValue};
 
 const _: () = assert!(cfg!(target_endian = "little"), "wire format assumes little-endian");
 
-/// Pre-encode the attribute portion for a given zoom level.
-/// Returns bytes that can be appended to the geometry portion via
-/// `encode_feature_data_with_attrs`.
+/// Pre-encode the attribute portion for a given zoom level into `buf`.
+/// The buffer is cleared and filled with bytes that can be appended to
+/// the geometry portion via `encode_feature_data_with_attrs`.
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn encode_attrs_bytes(attrs: &[shortbread::Attr], zoom: u8) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(64);
+pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], zoom: u8) {
+    buf.clear();
     let filtered_count = attrs.iter().filter(|(_, _, az)| zoom >= *az).count();
     buf.push(filtered_count as u8);
     for (key, val, attr_zoom) in attrs {
@@ -55,7 +55,6 @@ pub(crate) fn encode_attrs_bytes(attrs: &[shortbread::Attr], zoom: u8) -> Vec<u8
             }
         }
     }
-    buf
 }
 
 /// Encode feature data with pre-encoded attribute bytes (P3 optimization).
@@ -85,7 +84,8 @@ pub(crate) fn encode_feature_data(
     attrs: &[shortbread::Attr],
     zoom: u8,
 ) -> Vec<u8> {
-    let attrs_bytes = encode_attrs_bytes(attrs, zoom);
+    let mut attrs_bytes = Vec::with_capacity(64);
+    encode_attrs_bytes(&mut attrs_bytes, attrs, zoom);
     encode_feature_data_with_attrs(osm_id, geom_type, geom_cmds, &attrs_bytes)
 }
 
