@@ -1028,9 +1028,11 @@ const LAYER_NAMES: [&str; 26] = [
     "pois", "ocean",
 ];
 
+const LAYER_COUNT: usize = LAYER_NAMES.len();
+
 /// Create an empty slot array for lazy layer builder initialization.
-fn new_layer_slots() -> Vec<Option<LayerBuilder>> {
-    (0..Layer::count()).map(|_| None).collect()
+fn new_layer_slots() -> [Option<LayerBuilder>; LAYER_COUNT] {
+    [const { None }; LAYER_COUNT]
 }
 
 /// Get or create a LayerBuilder at the given index.

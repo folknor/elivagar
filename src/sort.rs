@@ -190,7 +190,7 @@ struct ChunkReader {
 impl ChunkReader {
     fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::with_capacity(256 * 1024, file);
 
         let mut buf4 = [0u8; 4];
         reader.read_exact(&mut buf4)?;
