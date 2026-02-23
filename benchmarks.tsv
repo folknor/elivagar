@@ -1,0 +1,3 @@
+date	commit	subject	tool	total_ms	phase12_ms	ocean_ms	phase3_ms	phase4_ms	features	tiles	output_bytes	pbf
+2026-02-23	2552867	Rename osmpbf alias to pbfhogg	elivagar	29357	18677	3755	310	5294	19784579	1328874	660192706	denmark-latest
+2026-02-23	2552867	Rename osmpbf alias to pbfhogg	planetiler	43932	-	-	-	-	-	-	406064947	denmark-latest

@@ -1,1 +1,7 @@
-/target
+target
+data/
+.plans/
+.tilegen_tmp/
+.planetiler_tmp/
+.bench_stderr.*
+.sort_test_tmp/
