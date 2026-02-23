@@ -5,3 +5,4 @@ data/
 .planetiler_tmp/
 .bench_stderr.*
 .sort_test_tmp/
+benchmarks.tsv

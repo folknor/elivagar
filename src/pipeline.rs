@@ -22,7 +22,7 @@ use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use pbfhogg::{Element, ElementReader, RelMemberType};
+use pbfhogg::{Element, ElementReader, MemberId};
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -580,11 +580,11 @@ fn process_relation(
     let mut boundary_way_coords: Vec<Vec<Point>> = Vec::new();
 
     for member in rel.members() {
-        if member.member_type != RelMemberType::Way {
+        let MemberId::Way(way_id) = member.id else {
             continue;
-        }
+        };
         let role = WayRole::from_str(member.role().unwrap_or(""));
-        if let Some(coords_e7) = way_index.get(member.member_id) {
+        if let Some(coords_e7) = way_index.get(way_id) {
             let merc: Vec<Point> = coords_e7
                 .iter()
                 .map(|&(lat, lon)| geometry::project_e7(lat, lon))

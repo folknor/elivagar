@@ -68,33 +68,7 @@
   thresholds. **Compare boundary_labels min_zoom values against Planetiler for
   Scandinavia/Russia.** (`geometry.rs:482`)
 
-## Code quality
-
-- [x] `LAYER_NAMES` in pipeline.rs duplicates `Layer::name()` in shortbread.rs — sync hazard.
-  Fixed: removed `LAYER_NAMES`, pipeline uses `Layer::ALL[idx].name()` directly.
-- [x] `Layer::count()` returns magic number 26 — derive from enum.
-  Fixed: `Layer::ALL` const array, `count()` returns `ALL.len()`.
-- [x] Remove dead code: `_attr_float`, `encode_multi_point`, `LayerBuilder::clear`
-- [x] Test-only functions gated with `#[cfg(test)]` — `tiles_for_bbox`, `project_bbox`,
-  `reverse_ring`, `is_ccw`, `is_cw` in geometry.rs
-- [x] Over-exposed modules in lib.rs → `pub(crate)` (except `pmtiles_writer` used by bench example)
-- [x] Extract `close_and_orient_cw`/`close_and_orient_ccw` helpers in geometry.rs —
-  replaced 5 occurrences of close+orient pattern in pipeline.rs and ocean.rs
-- [x] `run()` returns `Result<(), PipelineError>` — propagates I/O errors instead of panicking
-- [x] `TilegenConfig.skip_to: Option<SkipTo>` enum for type safety
-- [x] `MemberWay.role: WayRole` enum `{ Outer, Inner, Other }` — no more string allocs
-- [x] `load_checkpoint` uses proper error handling (returns `Result`)
-
 ## Performance
-
-### High impact, low effort
-
-- [ ] Sort chunk `BufReader` — default 8KB buffer, increase to 256KB+. Sort read is the
-  serial bottleneck in Phase 4. (`sort.rs:193`)
-- [ ] `new_layer_slots()` — `Vec<Option<LayerBuilder>>` → `[Option<LayerBuilder>; 26]`,
-  avoids heap alloc per tile (`pipeline.rs:1032`)
-- [ ] Per-geometry `Vec<u32>` allocs in `mvt::encode_point/linestring/polygon` — millions of
-  unnecessary heap allocs. Return arrays for points, take `&mut Vec<u32>` for lines/polygons.
 
 ### High impact, more effort
 
@@ -106,7 +80,7 @@
 - [ ] SmallVec for `LayerMatch` vec and `attrs` vec — most elements match 1-3 layers with
   1-8 attrs, avoids heap alloc for common case (`shortbread.rs:147,155`)
 - [ ] SmallVec for `tags_vec` per PBF element — typically 2-10 tags (`pipeline.rs:234`)
-- [ ] `WayIndex::get` allocates Vec per call — return slice over mmap instead (`way_index.rs:124`)
+- [x] `WayIndex::get` returns zero-copy `&[(i32, i32)]` slice over mmap instead of allocating
 
 ### Medium impact
 

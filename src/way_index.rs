@@ -8,6 +8,10 @@ const ENTRY_SIZE: u64 = 12; // 8 bytes data_offset + 4 bytes coord_count
 const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
 const COORD_SIZE: u64 = 8; // 4 bytes lat_e7 + 4 bytes lon_e7
 
+// Safety: coords are stored as sequential LE i32 pairs matching (i32, i32) layout.
+const _: () = assert!(std::mem::size_of::<(i32, i32)>() == 8);
+const _: () = assert!(std::mem::align_of::<(i32, i32)>() == 4);
+
 pub struct WayIndex {
     // Offset index (way_offsets.bin): mmap'd, indexed at way_id * 12
     offsets_file: File,
@@ -118,10 +122,11 @@ impl WayIndex {
         Ok(())
     }
 
-    /// Read geometry for a way. Only valid after finish_writing().
-    /// Returns None if entry is unset (offset and count both zero).
+    /// Read geometry for a way as a zero-copy slice into the mmap.
+    /// Only valid after `finish_writing()`.
+    /// Returns `None` if entry is unset (offset and count both zero).
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::unwrap_used)]
-    pub fn get(&self, way_id: i64) -> Option<Vec<(i32, i32)>> {
+    pub fn get(&self, way_id: i64) -> Option<&[(i32, i32)]> {
         let index_offset = way_id as u64 * ENTRY_SIZE;
         let needed = index_offset + ENTRY_SIZE;
 
@@ -144,17 +149,12 @@ impl WayIndex {
 
         let start = data_offset as usize;
         let byte_len = coord_count as usize * COORD_SIZE as usize;
-        let slice = &mmap[start..start + byte_len];
+        let bytes = &mmap[start..start + byte_len];
 
-        let mut coords = Vec::with_capacity(coord_count as usize);
-        let mut pos = 0usize;
-        for _ in 0..coord_count {
-            let lat_e7 = i32::from_le_bytes(slice[pos..pos + 4].try_into().unwrap());
-            let lon_e7 = i32::from_le_bytes(slice[pos + 4..pos + 8].try_into().unwrap());
-            coords.push((lat_e7, lon_e7));
-            pos += 8;
-        }
-
-        Some(coords)
+        // Safety: data was written as sequential LE i32 pairs via put().
+        // (i32, i32) is 8 bytes / 4-byte aligned (const-asserted above).
+        // Mmap is page-aligned, data_offset is always a multiple of 8.
+        let ptr = bytes.as_ptr().cast::<(i32, i32)>();
+        Some(unsafe { std::slice::from_raw_parts(ptr, coord_count as usize) })
     }
 }
