@@ -46,7 +46,7 @@ impl WayIndex {
         offsets_file.set_len(offsets_file_len)?;
 
         let offsets_mmap = unsafe { MmapMut::map_mut(&offsets_file)? };
-        offsets_mmap.advise(memmap2::Advice::Sequential)?;
+
 
         let data_file = File::options()
             .read(true)
@@ -97,7 +97,7 @@ impl WayIndex {
             self.offsets_mmap = unsafe {
                 MmapMut::map_mut(&self.offsets_file).expect("failed to remap way offsets")
             };
-            self.offsets_mmap.advise(memmap2::Advice::Sequential).ok();
+
             self.offsets_file_len = new_len;
         }
 

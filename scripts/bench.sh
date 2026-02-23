@@ -33,10 +33,15 @@ echo ""
 
 # Ocean shapefile detection
 OCEAN_SHP="data/water-polygons-split-3857/water_polygons.shp"
+OCEAN_SIMPLIFIED_SHP="data/simplified-water-polygons-split-3857/simplified_water_polygons.shp"
 OCEAN_FLAG=""
 if [ -f "$OCEAN_SHP" ]; then
     OCEAN_FLAG="--ocean $OCEAN_SHP"
     echo "  ocean: $OCEAN_SHP"
+    if [ -f "$OCEAN_SIMPLIFIED_SHP" ]; then
+        OCEAN_FLAG="$OCEAN_FLAG --ocean-simplified $OCEAN_SIMPLIFIED_SHP"
+        echo "  ocean-simplified: $OCEAN_SIMPLIFIED_SHP"
+    fi
 else
     echo "  ocean: not found (run scripts/download_ocean.sh)"
 fi

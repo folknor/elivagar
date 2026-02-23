@@ -27,7 +27,7 @@ impl NodeIndex {
         file.set_len(file_len)?;
 
         let mmap = unsafe { MmapMut::map_mut(&file)? };
-        mmap.advise(memmap2::Advice::Sequential)?;
+
 
         Ok(NodeIndex {
             file,
@@ -50,7 +50,7 @@ impl NodeIndex {
             }
             self.file.set_len(new_len).expect("failed to grow node index file");
             self.mmap = unsafe { MmapMut::map_mut(&self.file).expect("failed to remap node index") };
-            self.mmap.advise(memmap2::Advice::Sequential).ok();
+
             self.file_len = new_len;
         }
 

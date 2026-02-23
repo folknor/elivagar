@@ -181,6 +181,7 @@ impl PmtilesWriter {
         let leaf_dirs_length = leaf_bytes.len() as u64;
         let data_offset = leaf_dirs_offset + leaf_dirs_length;
 
+        let num_entries = entries.len() as u64;
         let header = self.build_header(
             root_dir_offset,
             root_dir_length,
@@ -190,6 +191,7 @@ impl PmtilesWriter {
             leaf_dirs_length,
             data_offset,
             data_length,
+            num_entries,
         );
 
         let file = File::create(path)?;
@@ -269,6 +271,7 @@ impl PmtilesWriter {
         leaf_dirs_length: u64,
         data_offset: u64,
         data_length: u64,
+        num_entries: u64,
     ) -> [u8; 127] {
         let mut h = [0u8; 127];
 
@@ -284,7 +287,7 @@ impl PmtilesWriter {
         write_u64_le(&mut h, 56, data_offset);
         write_u64_le(&mut h, 64, data_length);
 
-        write_header_counts(&mut h, &self.tiles, self.unique_count);
+        write_header_counts(&mut h, &self.tiles, num_entries, self.unique_count);
 
         // Clustered
         h[96] = 1;
@@ -306,10 +309,10 @@ impl PmtilesWriter {
 
 /// Write tile count fields into header bytes 72..96.
 #[allow(clippy::cast_possible_truncation)]
-fn write_header_counts(h: &mut [u8; 127], tiles: &[(u64, StoredTile)], unique_count: u64) {
+fn write_header_counts(h: &mut [u8; 127], tiles: &[(u64, StoredTile)], num_entries: u64, unique_count: u64) {
     let num_addressed = tiles.len() as u64;
     write_u64_le(h, 72, num_addressed);
-    write_u64_le(h, 80, num_addressed);
+    write_u64_le(h, 80, num_entries);
     write_u64_le(h, 88, unique_count);
 }
 
@@ -328,11 +331,14 @@ fn write_header_bounds(h: &mut [u8; 127], config: &PmtilesConfig) {
 }
 
 /// Try to extend the last entry's run, or push a new entry.
+///
+/// PMTiles v3 run_length means all tiles in the run share the SAME data blob
+/// (same offset, same length). Only consecutive tile IDs pointing to identical
+/// data can be merged.
 fn try_extend_run(entries: &mut Vec<DirEntry>, tile_id: u64, offset: u64, length: u32) {
     if let Some(last) = entries.last_mut() {
         let next_id = last.tile_id + u64::from(last.run_length);
-        let next_offset = last.offset + u64::from(last.length) * u64::from(last.run_length);
-        if tile_id == next_id && offset == next_offset && length == last.length {
+        if tile_id == next_id && offset == last.offset && length == last.length {
             last.run_length += 1;
             return;
         }
@@ -885,7 +891,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_run_length_encoding() {
+    fn test_run_length_dedup() {
+        // PMTiles v3: run_length means all tiles in the run share the SAME data.
+        // Consecutive dedup'd tiles pointing to the same offset should merge.
         let config = PmtilesConfig {
             min_zoom: 1,
             max_zoom: 1,
@@ -895,27 +903,23 @@ mod tests {
 
         let mut writer = PmtilesWriter::new(config);
 
-        // All 4 tiles at z=1 have consecutive Hilbert IDs (1,2,3,4) and
-        // gzip of single bytes produces identical compressed sizes, so they
-        // merge into a single run.
-        let data = gzip_compress(b"x").unwrap();
-        let data2 = gzip_compress(b"y").unwrap();
-        let data3 = gzip_compress(b"z").unwrap();
-        let data4 = gzip_compress(b"w").unwrap();
-
+        // All 4 tiles at z=1 with the same data → dedup'd to same offset.
+        let data = gzip_compress(b"same").unwrap();
         writer.add_tile(1, 0, 0, &data).unwrap();
-        writer.add_tile(1, 0, 1, &data2).unwrap();
-        writer.add_tile(1, 1, 1, &data3).unwrap();
-        writer.add_tile(1, 1, 0, &data4).unwrap();
+        writer.add_tile(1, 0, 1, &data).unwrap();
+        writer.add_tile(1, 1, 1, &data).unwrap();
+        writer.add_tile(1, 1, 0, &data).unwrap();
 
+        assert_eq!(writer.unique_count, 1);
         let entries = writer.build_dir_entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].run_length, 4);
     }
 
     #[test]
-    fn test_run_length_same_size() {
-        // Directly craft StoredTile entries to test run merging.
+    fn test_no_run_for_different_data() {
+        // Consecutive tiles with different data should NOT form runs,
+        // even if they have the same compressed length.
         let config = PmtilesConfig {
             min_zoom: 1,
             max_zoom: 1,
@@ -930,11 +934,7 @@ mod tests {
         writer.tiles.push((5, StoredTile::Unique { offset: 300, length: 100 }));
 
         let entries = writer.build_dir_entries();
-        // tile_ids 1,2,3 merge into run of 3; tile_id 5 is separate
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].tile_id, 1);
-        assert_eq!(entries[0].run_length, 3);
-        assert_eq!(entries[1].tile_id, 5);
-        assert_eq!(entries[1].run_length, 1);
+        // Each tile has a different offset, so no runs despite same length
+        assert_eq!(entries.len(), 4);
     }
 }

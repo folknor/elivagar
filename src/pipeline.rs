@@ -72,6 +72,9 @@ pub struct TilegenConfig {
     pub min_zoom: u8,
     pub max_zoom: u8,
     pub ocean_shapefile: Option<PathBuf>,
+    /// Simplified ocean shapefile for z0-7 (fewer vertices, faster at low zooms).
+    /// When set, `ocean_shapefile` is used only for z8+.
+    pub ocean_simplified_shapefile: Option<PathBuf>,
     /// Skip to a later phase, reusing checkpoint data from a previous run.
     pub skip_to: Option<SkipTo>,
     /// Keep tile blob in memory instead of streaming to a temp file.
@@ -130,12 +133,34 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         let (data_bounds, _) = load_checkpoint(&config.tmp_dir)?;
 
         // --- Ocean shapefile processing ---
+        // When a simplified shapefile is provided, use it for z0-7 and the
+        // full-resolution shapefile for z8+. Otherwise use the full-res for all zooms.
         ocean_elapsed = if let Some(ref ocean_path) = config.ocean_shapefile {
             let ocean_start = Instant::now();
             eprintln!("--- Ocean shapefile ---");
-            let ocean_features = ocean::process_ocean_shapefile(
-                ocean_path, &data_bounds, config.min_zoom, config.max_zoom, &mut sort_writer,
-            );
+            let mut ocean_features: u64 = 0;
+
+            if let Some(ref simplified_path) = config.ocean_simplified_shapefile {
+                let simplified_max = config.max_zoom.min(7);
+                if config.min_zoom <= simplified_max {
+                    eprintln!("  Simplified (z{}–z{}):", config.min_zoom, simplified_max);
+                    ocean_features += ocean::process_ocean_shapefile(
+                        simplified_path, &data_bounds, config.min_zoom, simplified_max, &mut sort_writer,
+                    );
+                }
+                if config.max_zoom >= 8 {
+                    let full_min = config.min_zoom.max(8);
+                    eprintln!("  Full-resolution (z{full_min}–z{}):", config.max_zoom);
+                    ocean_features += ocean::process_ocean_shapefile(
+                        ocean_path, &data_bounds, full_min, config.max_zoom, &mut sort_writer,
+                    );
+                }
+            } else {
+                ocean_features = ocean::process_ocean_shapefile(
+                    ocean_path, &data_bounds, config.min_zoom, config.max_zoom, &mut sort_writer,
+                );
+            }
+
             let elapsed = ocean_start.elapsed();
             eprintln!("  {ocean_features} features in {elapsed:.2?}");
             Some((elapsed, ocean_features))
