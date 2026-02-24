@@ -86,6 +86,9 @@ pub struct TilegenConfig {
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
 const LAND_MASK_FILE: &str = "land_mask.bin";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
+/// Target memory budget per sort chunk (1 GB). Records buffer in memory up to
+/// this limit, then flush as a sorted chunk file to disk.
+const SORT_CHUNK_SIZE: usize = 1 << 30;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -130,7 +133,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir)?;
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
             phase12_elapsed = None;
-            let sw = sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), 1024 * 1024 * 1024, pbf_chunks)?;
+            let sw = sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), SORT_CHUNK_SIZE, pbf_chunks)?;
             let mask = load_land_mask(&config.tmp_dir);
             if mask.is_none() {
                 eprintln!("  No land mask found — ocean filtering disabled");
@@ -271,7 +274,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let mut sort_writer =
-        SortWriter::new(&config.tmp_dir.join("sort_chunks"), 1_073_741_824)?;
+        SortWriter::new(&config.tmp_dir.join(SORT_CHUNKS_DIR), SORT_CHUNK_SIZE)?;
 
     let reader =
         ElementReader::from_path(&config.pbf_path)
@@ -1159,6 +1162,7 @@ fn encode_tile_batch(batch: &[PendingTile]) -> Vec<EncodedTile> {
                 return None;
             }
 
+            // Gzip level 6: good compression/speed tradeoff for MVT tiles.
             let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
             encoder.write_all(&mvt_data).expect("gzip write failed");
             let compressed = encoder.finish().expect("gzip finish failed");

@@ -167,25 +167,24 @@ All reviewed, none worth changing:
 
 ## Code Quality: Miscellaneous
 
-- [ ] **`expect("slice")` messages not helpful** — Multiple `.expect("slice")` calls with no context. Use descriptive messages. (`ocean.rs:49-68`)
+- [x] **`expect("slice")` messages not helpful** — changed to `expect("shapefile field read")`.
 
-- [ ] **Silent failures in `add_feature_to_layer`** — Silently returns on malformed data with no logging. Add `eprintln!` warning or return `Result`. (`wire_format.rs:94-204`)
+- [x] **Dead match arm in `water_polygons_labels`** — simplified to `let label_zoom = 14`.
 
-- [ ] **Dead match arm in `water_polygons_labels`** — Both arms return 14. Either differentiate or simplify to `let label_zoom = 14`. (`shortbread.rs:404-407`)
+- [x] **`main.rs` argument parsing has no bounds check** — added bounds check with
+  `"{flag} requires a value"` error message for all flags that take arguments.
 
-- [ ] **Unused `mvt::Value` variants** — `Float(f32)`, `SInt(i64)`, `UInt(u64)` may never be constructed. Remove if confirmed unused. (`mvt.rs:21-30`)
+- [x] **Magic numbers: sort chunk size** — extracted `SORT_CHUNK_SIZE: usize = 1 << 30` in
+  pipeline.rs, also fixed inconsistent use of `"sort_chunks"` literal vs `SORT_CHUNKS_DIR`.
 
-- [ ] **`drop(std::fs::remove_dir_all(...))` is non-idiomatic** — Use `let _ =` to ignore the `Result`. (`pipeline.rs:117`)
+Reviewed, not worth changing:
 
-- [ ] **PMTiles metadata JSON manually constructed** — String concatenation is fragile. Use `serde_json`. (`pmtiles_writer.rs:499-520`)
-
-- [ ] **`main.rs` argument parsing has no bounds check** — `args[i+1]` will panic if a flag is the last argument. (`main.rs:5-57`)
-
-- [ ] **Magic numbers: sort chunk size** — `1_073_741_824` (1 GB) appears twice. Define `const SORT_CHUNK_SIZE: usize = 1 << 30`. (`pipeline.rs:131, 272`)
-
-- [ ] **Magic numbers: gzip level, batch sizes, area thresholds, BufWriter capacity** — Hardcoded without named constants or documentation. (`pipeline.rs:531,621,797,1098,1239`, `pmtiles_writer.rs:106`)
-
-- [ ] **Ocean boundary tiles use `HashSet<u64>`** — A bitset indexed by packed tile coordinates would be more cache-friendly. (`ocean.rs`)
+- **Silent failures in `add_feature_to_layer`** — internal format, corruption means a code bug (caught by tests). Logging in a billion-call hot path would add noise. Commented.
+- **Unused `mvt::Value` variants** — MVT protobuf spec completeness; already `#[allow(dead_code)]`.
+- **`drop(std::fs::remove_dir_all(...))`** — `drop()` is actually the clippy-preferred way to discard a `#[must_use]` value (`let_underscore_must_use`).
+- **PMTiles metadata JSON** — 20 lines of fixed-schema formatting doesn't warrant a serde_json runtime dep. Validated by test. Commented.
+- **Gzip level / batch sizes** — batch sizes already named constants; gzip level 6 is a single site, commented.
+- **Ocean `HashSet<u64>`** — ocean phase is 2.8s total; a bitset would complicate code for marginal gain.
 
 ## Test Coverage Gaps
 

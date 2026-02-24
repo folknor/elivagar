@@ -22,28 +22,29 @@ fn main() {
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
-            "--tmp-dir" => {
+            "--tmp-dir" | "--ocean" | "--ocean-simplified" | "--skip-to" => {
+                let flag = &args[i];
                 i += 1;
-                tmp_dir = std::path::PathBuf::from(&args[i]);
-            }
-            "--ocean" => {
-                i += 1;
-                ocean_shapefile = Some(std::path::PathBuf::from(&args[i]));
-            }
-            "--ocean-simplified" => {
-                i += 1;
-                ocean_simplified_shapefile = Some(std::path::PathBuf::from(&args[i]));
-            }
-            "--skip-to" => {
-                i += 1;
-                skip_to = Some(match args[i].as_str() {
-                    "ocean" => elivagar::SkipTo::Ocean,
-                    "sort" => elivagar::SkipTo::Sort,
-                    other => {
-                        eprintln!("Unknown skip-to value: {other} (expected ocean or sort)");
-                        std::process::exit(1);
+                if i >= args.len() {
+                    eprintln!("{flag} requires a value");
+                    std::process::exit(1);
+                }
+                match flag.as_str() {
+                    "--tmp-dir" => tmp_dir = std::path::PathBuf::from(&args[i]),
+                    "--ocean" => ocean_shapefile = Some(std::path::PathBuf::from(&args[i])),
+                    "--ocean-simplified" => ocean_simplified_shapefile = Some(std::path::PathBuf::from(&args[i])),
+                    "--skip-to" => {
+                        skip_to = Some(match args[i].as_str() {
+                            "ocean" => elivagar::SkipTo::Ocean,
+                            "sort" => elivagar::SkipTo::Sort,
+                            other => {
+                                eprintln!("Unknown skip-to value: {other} (expected ocean or sort)");
+                                std::process::exit(1);
+                            }
+                        });
                     }
-                });
+                    _ => unreachable!(),
+                }
             }
             "--in-memory" => {
                 in_memory = true;

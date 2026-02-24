@@ -406,11 +406,8 @@ fn match_water_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
     if let Some((kind, _base_zoom)) = water_polygon_match(tags) {
         let mut attrs = smallvec![attr_str("kind", kind)];
         attrs.extend(name_attrs(tags));
-        // Label layer has its own (higher) min_zoom per Shortbread spec
-        let label_zoom = match kind {
-            "dock" | "canal" => 14,
-            _ => 14,
-        };
+        // All water polygon labels start at z14 per Shortbread spec.
+        let label_zoom = 14;
         out.push(LayerMatch {
             layer: Layer::WaterPolygonsLabels,
             min_zoom: label_zoom,

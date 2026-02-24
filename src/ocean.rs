@@ -85,10 +85,10 @@ pub(crate) fn process_ocean_shapefile(
         }
 
         let bb = rec + 4;
-        let xmin = f64::from_le_bytes(shp[bb..bb + 8].try_into().expect("slice"));
-        let ymin = f64::from_le_bytes(shp[bb + 8..bb + 16].try_into().expect("slice"));
-        let xmax = f64::from_le_bytes(shp[bb + 16..bb + 24].try_into().expect("slice"));
-        let ymax = f64::from_le_bytes(shp[bb + 24..bb + 32].try_into().expect("slice"));
+        let xmin = f64::from_le_bytes(shp[bb..bb + 8].try_into().expect("shapefile field read"));
+        let ymin = f64::from_le_bytes(shp[bb + 8..bb + 16].try_into().expect("shapefile field read"));
+        let xmax = f64::from_le_bytes(shp[bb + 16..bb + 24].try_into().expect("shapefile field read"));
+        let ymax = f64::from_le_bytes(shp[bb + 24..bb + 32].try_into().expect("shapefile field read"));
 
         let merc_min = geometry::from_epsg3857(xmin, ymax);
         let merc_max = geometry::from_epsg3857(xmax, ymin);
@@ -104,9 +104,9 @@ pub(crate) fn process_ocean_shapefile(
         shapes_hit += 1;
 
         #[allow(clippy::cast_sign_loss)]
-        let num_parts = i32::from_le_bytes(shp[rec + 36..rec + 40].try_into().expect("slice")) as usize;
+        let num_parts = i32::from_le_bytes(shp[rec + 36..rec + 40].try_into().expect("shapefile field read")) as usize;
         #[allow(clippy::cast_sign_loss)]
-        let num_points = i32::from_le_bytes(shp[rec + 40..rec + 44].try_into().expect("slice")) as usize;
+        let num_points = i32::from_le_bytes(shp[rec + 40..rec + 44].try_into().expect("shapefile field read")) as usize;
 
         let parts_start = rec + 44;
         let points_start = parts_start + num_parts * 4;
@@ -115,7 +115,7 @@ pub(crate) fn process_ocean_shapefile(
             .map(|j| {
                 let b = parts_start + j * 4;
                 #[allow(clippy::cast_sign_loss)]
-                let v = i32::from_le_bytes(shp[b..b + 4].try_into().expect("slice")) as usize;
+                let v = i32::from_le_bytes(shp[b..b + 4].try_into().expect("shapefile field read")) as usize;
                 v
             })
             .collect();
@@ -124,8 +124,8 @@ pub(crate) fn process_ocean_shapefile(
         let all_points: Vec<Point> = (0..num_points)
             .map(|j| {
                 let b = points_start + j * 16;
-                let x = f64::from_le_bytes(shp[b..b + 8].try_into().expect("slice"));
-                let y = f64::from_le_bytes(shp[b + 8..b + 16].try_into().expect("slice"));
+                let x = f64::from_le_bytes(shp[b..b + 8].try_into().expect("shapefile field read"));
+                let y = f64::from_le_bytes(shp[b + 8..b + 16].try_into().expect("shapefile field read"));
                 geometry::from_epsg3857(x, y)
             })
             .collect();

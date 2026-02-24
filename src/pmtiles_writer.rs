@@ -542,6 +542,9 @@ fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
 // Metadata JSON
 // ---------------------------------------------------------------------------
 
+/// Build PMTiles metadata JSON. Hand-rolled rather than serde_json to avoid
+/// a runtime dependency for ~20 lines of fixed-schema formatting.
+/// Validated by test_metadata_json which round-trips through serde_json.
 fn build_metadata(config: &PmtilesConfig) -> String {
     use crate::shortbread::Layer;
 
