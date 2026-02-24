@@ -4,8 +4,6 @@ Shortbread vector tile generator. Reads OSM PBF files and produces
 [PMTiles v3](https://github.com/protomaps/PMTiles) archives with the
 [Shortbread](https://shortbread-tiles.org/) schema (26 layers).
 
-Named after the rivers of Niflheim.
-
 ## Usage
 
 ```
@@ -16,7 +14,8 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 
 | Flag | Description |
 |------|-------------|
-| `--ocean path.shp` | Ocean shapefile for water polygons |
+| `--ocean path.shp` | Ocean shapefile (`water-polygons-split-3857`) |
+| `--ocean-simplified path.shp` | Simplified ocean shapefile for z0-7 (fewer vertices) |
 | `--tmp-dir path` | Directory for temporary sort files (default: `.tilegen_tmp`) |
 | `--skip-to ocean\|sort` | Resume from a previous run's checkpoint |
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |
@@ -24,7 +23,9 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 ### Example
 
 ```
-elivagar denmark-latest.osm.pbf denmark.pmtiles --ocean water-polygons-split-4326/water_polygons.shp
+elivagar denmark-latest.osm.pbf denmark.pmtiles \
+  --ocean water-polygons-split-3857/water_polygons.shp \
+  --ocean-simplified simplified-water-polygons-split-3857/simplified_water_polygons.shp
 ```
 
 ## Pipeline
@@ -33,6 +34,20 @@ elivagar denmark-latest.osm.pbf denmark.pmtiles --ocean water-polygons-split-432
 2. **Ocean** -- ocean shapefile processing (optional, requires `--ocean`)
 3. **Sort** -- external merge sort by Hilbert tile ID
 4. **Assembly** -- MVT encode + gzip + PMTiles write
+
+`--skip-to ocean` reuses PBF chunks from a previous full run.
+`--skip-to sort` reuses all chunks (PBF + ocean).
+
+## Output size
+
+Denmark extract (483 MB PBF), gzip level 6, z0-14:
+
+| | elivagar | Planetiler | Tilemaker |
+|---|---|---|---|
+| With ocean | **380 MB** | 388 MB | 293 MB |
+| Without ocean | **317 MB** | 388 MB | 293 MB |
+
+Full analysis: [`docs/tile-comparison-2026-02-24.md`](docs/tile-comparison-2026-02-24.md)
 
 ## Performance
 
