@@ -18,6 +18,20 @@
 - [ ] Write a small 1-page project website (what it does, benchmark, usage, link to repo)
 - [ ] Host via GitHub Pages
 
+## Performance Regression
+
+- [ ] **[P1] ~2.5× PBF phase regression between 77c217f and 1797ee4** — `benchmarks.tsv` at
+  77c217f records Denmark total=26794ms (pbf=18617ms, assemble=3167ms). At 1797ee4 (without
+  the Tags binary search change), bench-self shows total=66735ms (pbf=54871ms, assemble=6878ms).
+  The regression spans 6 commits: 99113b0 (clippy fixes), 8f84903 (add tests), b63dbd7 (MVT
+  hash fix + PMTiles memory + allocation pressure: SmallVec, clip_polygon double-buffer,
+  to_tile_coords_into), ba2a92b (deduplicate code), 862a91c (doc comments), 998814f (misc
+  code quality), 1797ee4 (NodeIndex XOR sentinel + compare_tiles fix). Most are doc/test/quality
+  changes that shouldn't affect perf — prime suspect is b63dbd7 which changed hot-path data
+  structures. Note: `benchmarks.tsv` was collected via `bench.sh` (3 runs, best-of) while the
+  regression number is from `bench-self.sh` (1 run), so some variance is expected, but not 2.5×.
+  Bisect with `git stash && git checkout <hash> && scripts/bench-self.sh` to isolate.
+
 ## Bugs
 
 - [ ] **[P2]** `area_sq_meters` cos²(lat) approximation — **investigated, moderate risk.**
@@ -78,9 +92,28 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
   the ChunkReader, and the HeapEntry ownership model. Minimal runtime benefit vs major complexity.
   The real bottleneck is CPU and I/O, not malloc. (`sort.rs:47`)
 
-- [ ] **Per-feature Vec allocations in PBF callback** — `node_records`, `coords_e7`, and `merc`
-  projection Vecs are allocated per-element (billions of times). Hoist outside the closure and
-  reuse via clear-between-iterations, or use thread-local reusable buffers. (`pipeline.rs:320-567`)
+- [x] **`node_records` allocated per tagged node in PBF callback** — Hoisted before the
+  `for_each_pipelined` closure, reused via `clear()` + `drain(..)`. Saves ~200M allocations
+  at planet scale (usually 1-3 SortRecords per tagged node). (`pipeline.rs:313,328`)
+
+- [ ] **`tags_vec` allocated per element in PBF callback** — Investigated: **cannot hoist**.
+  `tags_vec: Vec<(&str, &str)>` holds `&str` references borrowed from PBF elements that don't
+  outlive the closure body. Hoisting outside the closure fails with E0521 (borrowed data escapes
+  closure) because `Vec<&'a str>` through a mutable reference is invariant over `'a` — the
+  compiler can't see that `clear()` drops old references before `extend()` adds new ones.
+  Allocated for every tagged node + every way with tags + every relation (~700M at planet).
+  Would need owned `Vec<(String, String)>` which is worse, or unsafe lifetime transmute.
+  (`pipeline.rs:326, 372, 416`)
+
+- [ ] **`coords_e7` allocated per way, cannot hoist** — Investigated: `coords_e7: Vec<(i32, i32)>`
+  is allocated for every way (~1B at planet, avg ~8 coords = 64 bytes). Ownership transfers into
+  `MatchedWay` which gets batched and sent to rayon for parallel geometry processing. Hoisting
+  would require `.to_vec()` or `.clone()` to preserve the reusable buffer while the batch takes
+  ownership, defeating the purpose. The only real fix is changing the batch architecture — e.g.
+  a flat arena of coords that `MatchedWay` references by offset+length, but that requires
+  redesigning `MatchedWay`, `flush_way_batch`, and all emit functions that take `&[(i32, i32)]`.
+  Not worth the complexity unless profiling shows way coord allocation as a bottleneck distinct
+  from the geometry CPU work that dominates way processing. (`pipeline.rs:358-363`)
 
 - [ ] **`encode_feature_data_with_attrs` allocates per call** — Investigated: unavoidable. The
   returned Vec becomes `SortRecord.data` which must be owned. Passing `&mut Vec<u8>` and reusing

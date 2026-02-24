@@ -307,6 +307,12 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut way_batch: Vec<MatchedWay> = Vec::with_capacity(WAY_BATCH_SIZE);
     let mut rel_batch: Vec<PreparedRelation> = Vec::with_capacity(REL_BATCH_SIZE);
 
+    // Reusable buffer hoisted out of the PBF closure to avoid per-element
+    // allocation (~200M allocs at planet scale). Cleared each iteration.
+    // tags_vec cannot be hoisted: it holds &str references into PBF elements
+    // that don't outlive the closure body (mutable reference invariance).
+    let mut node_records: Vec<SortRecord> = Vec::new();
+
     // Macro to handle Node and DenseNode identically — both types expose the
     // same API (.id(), .decimicro_lat(), .decimicro_lon(), .tags()) but are
     // distinct types, so a generic function would not work without a trait.
@@ -325,13 +331,13 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             if $node.tags().next().is_some() {
                 let mut tags_vec: Vec<(&str, &str)> = $node.tags().collect();
                 shortbread::sort_tags(&mut tags_vec);
-                let mut node_records = Vec::new();
+                node_records.clear();
                 #[allow(clippy::cast_sign_loss)]
                 let n = process_node(
                     $node.id() as u64, lat_e7, lon_e7,
                     &tags_vec, min_z, max_z, &land_mask, &mut node_records,
                 );
-                for r in node_records {
+                for r in node_records.drain(..) {
                     sort_writer.push(r).expect("sort push failed");
                 }
                 features_emitted += n;
