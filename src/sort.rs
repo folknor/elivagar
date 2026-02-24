@@ -308,6 +308,9 @@ impl SortReader {
 
     /// Return the next record in globally sorted order, or `None` when all
     /// records have been consumed.
+    ///
+    /// Named `next` for clarity, but can't implement `Iterator` because iteration
+    /// is fallible (`io::Result`). The `fallible-iterator` crate isn't worth the dep.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> io::Result<Option<SortRecord>> {
         let entry = match self.heap.pop() {

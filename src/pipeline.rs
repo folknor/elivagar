@@ -29,7 +29,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
-/// Pipeline error type.
+/// Pipeline error type. Stringly-typed because no caller inspects variants —
+/// errors are only displayed or propagated. An enum would add boilerplate for no benefit.
 #[derive(Debug)]
 pub struct PipelineError(pub String);
 

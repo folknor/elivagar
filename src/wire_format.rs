@@ -3,6 +3,9 @@
 // Binary serialization/deserialization of feature data that flows through
 // the external merge sort between PBF processing and tile assembly.
 //
+// No version byte: this is an internal ephemeral format used within a single
+// pipeline run (in .tilegen_tmp/). Never persisted across versions or shared.
+//
 // Format:
 //   u64   osm_id
 //   u8    geom_type (1=point, 2=line, 3=polygon)
@@ -100,7 +103,8 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
     let osm_id = u64::from_le_bytes(data[0..8].try_into().expect("osm_id"));
     let mut pos: usize = 8;
 
-    // geom_type
+    // geom_type — inline match mirrors the `as u8` encode on line 69.
+    // A TryFrom impl would be more boilerplate than this 4-line match.
     let gt_byte = data[pos];
     pos += 1;
     let geom_type = match gt_byte {

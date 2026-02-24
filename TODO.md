@@ -156,17 +156,14 @@
 
 ## Code Quality: Type Safety & API
 
-- [ ] **`Attr` is a raw tuple `(&str, AttrValue, u8)`** — Replace with a named struct with `key`, `value`, `min_zoom` fields. (`shortbread.rs:173`)
+All reviewed, none worth changing:
 
-- [ ] **`PipelineError(String)` is stringly-typed** — Loses original error type. Use an enum with `Io`, `PbfRead`, `Sort` variants, or adopt `thiserror`. (`pipeline.rs:32-53`)
-
-- [ ] **Layer indices used as raw `u8`** — `m.layer as u8` appears many times. Add `Layer::index()` and `Layer::from_index()` methods. (`sort.rs:22-37`, `pipeline.rs`)
-
-- [ ] **`GeomType` deserialization uses hardcoded integers** — `gt_byte` matched against 1, 2, 3 instead of using `GeomType::try_from`. (`wire_format.rs:106-111`)
-
-- [ ] **`SortReader::next()` should implement `Iterator`** — Currently suppresses `clippy::should_implement_trait`. Use a `FallibleIterator` wrapper. (`sort.rs:311-334`)
-
-- [ ] **Wire format has no version byte** — Hand-written binary encoding with no versioning or checksums. Add a format version byte. (`wire_format.rs`)
+- **`Attr` tuple** — 3-element tuple is clear when destructured (`key, val, min_zoom`). A named struct would make ~100+ construction sites more verbose for no readability gain.
+- **`PipelineError(String)`** — No code ever inspects the variant; errors are only displayed. An enum would be over-engineering.
+- **Layer indices as `u8`** — `Layer` is `#[repr(u8)]`, so `as u8` is a zero-cost correct cast. A wrapper method is pure ceremony.
+- **`GeomType` hardcoded integers** — 4-line match in one place, right next to "geom_type" comment. `TryFrom` would be more boilerplate than the match.
+- **`SortReader::next()` fallible** — Standard `Iterator` can't express `Result<Option<T>>`. The `#[allow]` + `while let` pattern is idiomatic for fallible iteration.
+- **Wire format version byte** — Internal format used in `.tilegen_tmp` within a single run. Never persisted across versions or shared.
 
 ## Code Quality: Miscellaneous
 

@@ -11,6 +11,8 @@ use smallvec::{SmallVec, smallvec};
 // ---------------------------------------------------------------------------
 
 /// MVT layer in the Shortbread schema.
+/// `#[repr(u8)]` so `layer as u8` is a zero-cost index into layer arrays.
+/// No `from_index()` needed — layer indices are only used as array offsets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Layer {
@@ -171,6 +173,7 @@ pub enum AttrValue {
 
 /// A single attribute: (key, value, min_zoom).
 /// min_zoom=0 means always emit; higher values mean only at that zoom+.
+/// Kept as a tuple: destructuring is clear, and a named struct would bloat ~100 construction sites.
 pub type Attr = (&'static str, AttrValue, u8);
 
 /// A single layer match result.
