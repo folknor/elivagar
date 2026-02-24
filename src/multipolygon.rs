@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::geometry::{signed_area, Point};
+use crate::geometry::{self, signed_area, Point};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -153,7 +153,7 @@ fn pair_rings(
         let test_pt = &inner[0];
         let mut target_idx: Option<usize> = None;
         for (i, poly) in polygons.iter().enumerate() {
-            if point_in_ring(test_pt, &poly.0) {
+            if geometry::point_in_polygon(test_pt, &poly.0) {
                 target_idx = Some(i);
                 break;
             }
@@ -338,41 +338,6 @@ fn finalize_chain(
 }
 
 // ---------------------------------------------------------------------------
-// Point-in-polygon (ray casting)
-// ---------------------------------------------------------------------------
-
-/// Test if point `p` is inside polygon `ring` using the ray casting algorithm.
-///
-/// Casts a horizontal ray from `p` towards +x and counts edge crossings.
-fn point_in_ring(p: &Point, ring: &[Point]) -> bool {
-    if ring.len() < 3 {
-        return false;
-    }
-
-    let mut inside = false;
-    let n = ring.len();
-    let mut j = n - 1;
-
-    for i in 0..n {
-        let yi = ring[i].y;
-        let yj = ring[j].y;
-
-        let crosses = (yi > p.y) != (yj > p.y);
-        if crosses {
-            let xi = ring[i].x;
-            let xj = ring[j].x;
-            let intersect_x = xi + (p.y - yi) / (yj - yi) * (xj - xi);
-            if p.x < intersect_x {
-                inside = !inside;
-            }
-        }
-        j = i;
-    }
-
-    inside
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -392,31 +357,31 @@ mod tests {
         }
     }
 
-    // --- point_in_ring ---
+    // --- point_in_polygon ---
 
     #[test]
-    fn test_point_in_ring_inside() {
+    fn test_point_in_polygon_inside() {
         let ring = vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(0.0, 1.0)];
-        assert!(point_in_ring(&pt(0.5, 0.5), &ring));
+        assert!(geometry::point_in_polygon(&pt(0.5, 0.5), &ring));
     }
 
     #[test]
-    fn test_point_in_ring_outside() {
+    fn test_point_in_polygon_outside() {
         let ring = vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(0.0, 1.0)];
-        assert!(!point_in_ring(&pt(2.0, 2.0), &ring));
+        assert!(!geometry::point_in_polygon(&pt(2.0, 2.0), &ring));
     }
 
     #[test]
-    fn test_point_in_ring_degenerate() {
+    fn test_point_in_polygon_degenerate() {
         let ring = vec![pt(0.0, 0.0), pt(1.0, 0.0)];
-        assert!(!point_in_ring(&pt(0.5, 0.0), &ring));
+        assert!(!geometry::point_in_polygon(&pt(0.5, 0.0), &ring));
     }
 
     #[test]
-    fn test_point_in_ring_triangle() {
+    fn test_point_in_polygon_triangle() {
         let ring = vec![pt(0.0, 0.0), pt(2.0, 0.0), pt(1.0, 2.0)];
-        assert!(point_in_ring(&pt(1.0, 0.5), &ring));
-        assert!(!point_in_ring(&pt(0.0, 2.0), &ring));
+        assert!(geometry::point_in_polygon(&pt(1.0, 0.5), &ring));
+        assert!(!geometry::point_in_polygon(&pt(0.0, 2.0), &ring));
     }
 
     // --- Single outer ring from 3 ways joining end-to-end ---

@@ -250,29 +250,7 @@ fn emit_ocean_polygon(
     let mut boundary_tiles: HashSet<u64> = HashSet::new();
     let mut boundary_rows: HashMap<u32, Vec<u32>> = HashMap::new();
 
-    // Cascading simplification (O3): simplify from the previous zoom's result
-    // instead of from the original geometry. D-P simplification is hierarchical,
-    // so z13's result is always a subset of z14's.
-    let mut cascade_outer = outer.to_vec();
-    let mut cascade_inners: Vec<Vec<Point>> = inners.to_vec();
-
-    for z in (min_zoom..=max_zoom).rev() {
-        let tol = if z < 14 { geometry::simplify_tolerance(z) } else { 0.0 };
-        if tol > 0.0 {
-            cascade_outer = geometry::simplify(&cascade_outer, tol);
-            cascade_inners = cascade_inners
-                .iter()
-                .map(|r| geometry::simplify(r, tol))
-                .filter(|r| r.len() >= 4)
-                .collect();
-        }
-        if cascade_outer.len() < 4 {
-            break; // coarser zooms will also vanish
-        }
-
-        let simp_outer = &cascade_outer;
-        let simp_inners = &cascade_inners;
-
+    geometry::for_each_zoom_simplified_multi(outer, inners, min_zoom, max_zoom, |z, simp_outer, simp_inners| {
         let scale = f64::from(1u32 << z);
         let inv_scale = 1.0 / scale;
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -311,8 +289,9 @@ fn emit_ocean_polygon(
 
         // PIP helper: inside outer and not in any hole
         let pip = |px: f64, py: f64| -> bool {
-            point_in_polygon(px, py, simp_outer)
-                && !simp_inners.iter().any(|inner| point_in_polygon(px, py, inner))
+            let test_pt = Point::new(px, py);
+            geometry::point_in_polygon(&test_pt, simp_outer)
+                && !simp_inners.iter().any(|inner| geometry::point_in_polygon(&test_pt, inner))
         };
 
         // Scanline: process row by row
@@ -370,7 +349,7 @@ fn emit_ocean_polygon(
                 }
             }
         }
-    }
+    });
 }
 
 /// Clip and encode a single boundary tile (polygon edge crosses this tile).
@@ -501,27 +480,6 @@ fn pack_tile(tx: u32, ty: u32) -> u64 {
     (u64::from(tx) << 32) | u64::from(ty)
 }
 
-/// Ray-casting point-in-polygon test.
-fn point_in_polygon(px: f64, py: f64, polygon: &[Point]) -> bool {
-    let mut inside = false;
-    let n = polygon.len();
-    if n < 3 {
-        return false;
-    }
-    let mut j = n - 1;
-    for i in 0..n {
-        let yi = polygon[i].y;
-        let yj = polygon[j].y;
-        if ((yi > py) != (yj > py))
-            && (px < (polygon[j].x - polygon[i].x) * (py - yi) / (yj - yi) + polygon[i].x)
-        {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -625,19 +583,19 @@ mod tests {
 
     #[test]
     fn pip_inside_square() {
-        assert!(point_in_polygon(0.5, 0.5, &unit_square()));
+        assert!(geometry::point_in_polygon(&Point::new(0.5, 0.5), &unit_square()));
     }
 
     #[test]
     fn pip_outside_square() {
-        assert!(!point_in_polygon(2.0, 0.5, &unit_square()));
+        assert!(!geometry::point_in_polygon(&Point::new(2.0, 0.5), &unit_square()));
     }
 
     #[test]
     fn pip_on_edge() {
         // Edge behavior is implementation-defined for ray-casting;
         // just verify it does not panic.
-        let _ = point_in_polygon(0.5, 0.0, &unit_square());
+        let _ = geometry::point_in_polygon(&Point::new(0.5, 0.0), &unit_square());
     }
 
     #[test]
@@ -647,7 +605,7 @@ mod tests {
             Point { x: 4.0, y: 0.0 },
             Point { x: 2.0, y: 3.0 },
         ];
-        assert!(point_in_polygon(2.0, 1.0, &tri));
+        assert!(geometry::point_in_polygon(&Point::new(2.0, 1.0), &tri));
     }
 
     #[test]
@@ -657,17 +615,16 @@ mod tests {
             Point { x: 4.0, y: 0.0 },
             Point { x: 2.0, y: 3.0 },
         ];
-        assert!(!point_in_polygon(0.0, 3.0, &tri));
+        assert!(!geometry::point_in_polygon(&Point::new(0.0, 3.0), &tri));
     }
 
     #[test]
     fn pip_degenerate() {
         // Fewer than 3 points should return false
-        assert!(!point_in_polygon(0.0, 0.0, &[]));
-        assert!(!point_in_polygon(0.0, 0.0, &[Point { x: 0.0, y: 0.0 }]));
-        assert!(!point_in_polygon(
-            0.0,
-            0.0,
+        assert!(!geometry::point_in_polygon(&Point::new(0.0, 0.0), &[]));
+        assert!(!geometry::point_in_polygon(&Point::new(0.0, 0.0), &[Point { x: 0.0, y: 0.0 }]));
+        assert!(!geometry::point_in_polygon(
+            &Point::new(0.0, 0.0),
             &[Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 1.0 }],
         ));
     }
@@ -694,10 +651,10 @@ mod tests {
         ];
 
         // Inside the body of the L
-        assert!(point_in_polygon(0.5, 0.5, &l_shape));
-        assert!(point_in_polygon(0.5, 2.0, &l_shape));
+        assert!(geometry::point_in_polygon(&Point::new(0.5, 0.5), &l_shape));
+        assert!(geometry::point_in_polygon(&Point::new(0.5, 2.0), &l_shape));
 
         // Inside the concavity (the cut-out region) — should be false
-        assert!(!point_in_polygon(1.5, 2.0, &l_shape));
+        assert!(!geometry::point_in_polygon(&Point::new(1.5, 2.0), &l_shape));
     }
 }

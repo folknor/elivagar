@@ -19,6 +19,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use elivagar::pmtiles_writer::tile_id_to_zxy;
 use flate2::read::GzDecoder;
 
 // ---------------------------------------------------------------------------
@@ -212,58 +213,6 @@ fn decode_varint(data: &[u8], pos: &mut usize) -> u64 {
 
 fn read_u64_le(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
-}
-
-// ---------------------------------------------------------------------------
-// Hilbert tile ID -> (z, x, y)
-// ---------------------------------------------------------------------------
-
-fn tile_id_to_zxy(tile_id: u64) -> (u8, u32, u32) {
-    if tile_id == 0 {
-        return (0, 0, 0);
-    }
-    let mut z: u8 = 0;
-    loop {
-        z += 1;
-        let n = 1u64 << z;
-        let next_base = (n * n * 4 - 1) / 3;
-        if tile_id < next_base || z >= 31 {
-            break;
-        }
-    }
-    let n = 1u64 << z;
-    let base = (n * n - 1) / 3;
-    let d = tile_id - base;
-    let (x, y) = hilbert_d2xy(n as u32, d);
-    (z, x, y)
-}
-
-fn hilbert_d2xy(n: u32, d: u64) -> (u32, u32) {
-    let mut x: u32 = 0;
-    let mut y: u32 = 0;
-    let mut d = d;
-    let mut s: u32 = 1;
-    while s < n {
-        let val = (d & 3) as u32;
-        let rx = u32::from(val >= 2);
-        let ry = u32::from(val == 1 || val == 2);
-        hilbert_rot(s, &mut x, &mut y, rx, ry);
-        x += s * rx;
-        y += s * ry;
-        d >>= 2;
-        s <<= 1;
-    }
-    (x, y)
-}
-
-fn hilbert_rot(n: u32, x: &mut u32, y: &mut u32, rx: u32, ry: u32) {
-    if ry == 0 {
-        if rx == 1 {
-            *x = n - 1 - *x;
-            *y = n - 1 - *y;
-        }
-        std::mem::swap(x, y);
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -302,59 +302,41 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut way_batch: Vec<MatchedWay> = Vec::with_capacity(WAY_BATCH_SIZE);
     let mut rel_batch: Vec<PreparedRelation> = Vec::with_capacity(REL_BATCH_SIZE);
 
+    // Macro to handle Node and DenseNode identically — both types expose the
+    // same API (.id(), .decimicro_lat(), .decimicro_lon(), .tags()) but are
+    // distinct types, so a generic function would not work without a trait.
+    macro_rules! handle_node {
+        ($node:expr) => {{
+            node_count += 1;
+            let lat_e7 = $node.decimicro_lat();
+            let lon_e7 = $node.decimicro_lon();
+            node_index.put($node.id(), lat_e7, lon_e7);
+
+            min_lat_e7 = min_lat_e7.min(lat_e7);
+            max_lat_e7 = max_lat_e7.max(lat_e7);
+            min_lon_e7 = min_lon_e7.min(lon_e7);
+            max_lon_e7 = max_lon_e7.max(lon_e7);
+
+            if $node.tags().next().is_some() {
+                let tags_vec: Vec<(&str, &str)> = $node.tags().collect();
+                let mut node_records = Vec::new();
+                #[allow(clippy::cast_sign_loss)]
+                let n = process_node(
+                    $node.id() as u64, lat_e7, lon_e7,
+                    &tags_vec, min_z, max_z, &land_mask, &mut node_records,
+                );
+                for r in node_records {
+                    sort_writer.push(r).expect("sort push failed");
+                }
+                features_emitted += n;
+            }
+        }};
+    }
+
     reader
         .for_each_pipelined(|element| match element {
-            Element::Node(node) => {
-                node_count += 1;
-                let lat_e7 = node.decimicro_lat();
-                let lon_e7 = node.decimicro_lon();
-                node_index.put(node.id(), lat_e7, lon_e7);
-
-                min_lat_e7 = min_lat_e7.min(lat_e7);
-                max_lat_e7 = max_lat_e7.max(lat_e7);
-                min_lon_e7 = min_lon_e7.min(lon_e7);
-                max_lon_e7 = max_lon_e7.max(lon_e7);
-
-                // Process point features (skip tagless nodes)
-                if node.tags().next().is_some() {
-                    let tags_vec: Vec<(&str, &str)> = node.tags().collect();
-                    let mut node_records = Vec::new();
-                    #[allow(clippy::cast_sign_loss)]
-                    let n = process_node(
-                        node.id() as u64, lat_e7, lon_e7,
-                        &tags_vec, min_z, max_z, &land_mask, &mut node_records,
-                    );
-                    for r in node_records {
-                        sort_writer.push(r).expect("sort push failed");
-                    }
-                    features_emitted += n;
-                }
-            }
-            Element::DenseNode(node) => {
-                node_count += 1;
-                let lat_e7 = node.decimicro_lat();
-                let lon_e7 = node.decimicro_lon();
-                node_index.put(node.id(), lat_e7, lon_e7);
-
-                min_lat_e7 = min_lat_e7.min(lat_e7);
-                max_lat_e7 = max_lat_e7.max(lat_e7);
-                min_lon_e7 = min_lon_e7.min(lon_e7);
-                max_lon_e7 = max_lon_e7.max(lon_e7);
-
-                if node.tags().next().is_some() {
-                    let tags_vec: Vec<(&str, &str)> = node.tags().collect();
-                    let mut node_records = Vec::new();
-                    #[allow(clippy::cast_sign_loss)]
-                    let n = process_node(
-                        node.id() as u64, lat_e7, lon_e7,
-                        &tags_vec, min_z, max_z, &land_mask, &mut node_records,
-                    );
-                    for r in node_records {
-                        sort_writer.push(r).expect("sort push failed");
-                    }
-                    features_emitted += n;
-                }
-            }
+            Element::Node(node) => handle_node!(node),
+            Element::DenseNode(node) => handle_node!(node),
             Element::Way(way) => {
                 way_count += 1;
 
@@ -589,11 +571,8 @@ fn process_matched_way(
         }
 
         match m.geom_expect {
-            GeomExpect::Point => {
-                emit_point_feature(way.osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
-            }
-            GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
-                emit_centroid_feature(way.osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
+            GeomExpect::Point | GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
+                emit_point_or_centroid(way.osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
             }
             GeomExpect::Line => {
                 emit_line_feature(way.osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
@@ -752,7 +731,7 @@ fn process_prepared_relation(
                     }
                     let bbox = merc_bbox(outer);
                     land_mask.mark_bbox(&bbox);
-                    emit_centroid_feature(
+                    emit_point_or_centroid(
                         rel.osm_id, outer, &bbox, m, z_lo, z_hi, &mut records,
                     );
                 }
@@ -811,7 +790,7 @@ fn enrich_polygon_matches(matches: &mut [LayerMatch], area_m2: f64) {
 // Feature emission helpers
 // ---------------------------------------------------------------------------
 
-fn emit_point_feature(
+fn emit_point_or_centroid(
     osm_id: u64,
     coords: &[Point],
     _bbox: &MercBbox,
@@ -823,35 +802,6 @@ fn emit_point_feature(
     if coords.is_empty() {
         return 0;
     }
-    let centroid = centroid_of(coords);
-    let cbbox = MercBbox { min_x: centroid.x, min_y: centroid.y, max_x: centroid.x, max_y: centroid.y };
-    let mut count: u64 = 0;
-    let mut geom_buf: Vec<u32> = Vec::new();
-    let mut attrs_buf: Vec<u8> = Vec::new();
-    for z in z_lo..=z_hi {
-        encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
-        geometry::for_each_tile_in_bbox(&cbbox, z, |tx, ty| {
-            let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            let (px, py) = geometry::merc_to_tile_px(&centroid, tx, ty, z);
-            mvt::encode_point(&mut geom_buf, px, py);
-            let data = encode_feature_data_with_attrs(osm_id, GeomType::Point, &geom_buf, &attrs_buf);
-            let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
-            records.push(SortRecord { key, data });
-            count += 1;
-        });
-    }
-    count
-}
-
-fn emit_centroid_feature(
-    osm_id: u64,
-    coords: &[Point],
-    _bbox: &MercBbox,
-    m: &LayerMatch,
-    z_lo: u8,
-    z_hi: u8,
-    records: &mut Vec<SortRecord>,
-) -> u64 {
     let pt = if m.geom_expect == GeomExpect::PolygonPointOnSurface {
         geometry::point_on_surface(coords)
     } else {
@@ -892,17 +842,8 @@ fn emit_line_feature(
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
     let mut tc_buf: Vec<(i32, i32)> = Vec::new();
-    // Cascading simplification (P2): simplify from previous zoom's result
-    let mut cascade = merc.to_vec();
-    for z in (z_lo..=z_hi).rev() {
-        if z < 14 {
-            let tol = geometry::simplify_tolerance(z);
-            cascade = geometry::simplify(&cascade, tol);
-        }
-        if cascade.len() < 2 {
-            break;
-        }
-        let simplified = &cascade;
+
+    geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, |z, simplified| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
         // Skip min-size filtering at max zoom and for boundaries/streets
@@ -931,7 +872,7 @@ fn emit_line_feature(
                 count += 1;
             }
         });
-    }
+    });
     count
 }
 
@@ -951,22 +892,14 @@ fn emit_polygon_feature(
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
     let mut tc_buf: Vec<(i32, i32)> = Vec::new();
-    // Cascading simplification (P2): simplify from previous zoom's result
-    let mut cascade = merc.to_vec();
-    for z in (z_lo..=z_hi).rev() {
-        if z < 14 {
-            let tol = geometry::simplify_tolerance(z);
-            cascade = geometry::simplify(&cascade, tol);
-        }
-        if cascade.len() < 4 {
-            break;
-        }
+
+    geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
         let skip_size_filter = z >= 14;
         geometry::for_each_tile_in_bbox(bbox, z, |tx, ty| {
             let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-            let clipped = geometry::clip_polygon(&cascade, &clip);
+            let clipped = geometry::clip_polygon(simplified, &clip);
             if clipped.len() < 3 {
                 return;
             }
@@ -986,7 +919,7 @@ fn emit_polygon_feature(
             records.push(SortRecord { key, data });
             count += 1;
         });
-    }
+    });
     count
 }
 
@@ -1004,24 +937,8 @@ fn emit_multipolygon_feature(
     let mut count: u64 = 0;
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
-    // Cascading simplification (P2): simplify from previous zoom's result
-    let mut cascade_outer = outer.to_vec();
-    let mut cascade_inners: Vec<Vec<Point>> = inners.to_vec();
-    for z in (z_lo..=z_hi).rev() {
-        let tol = if z < 14 { geometry::simplify_tolerance(z) } else { 0.0 };
-        if tol > 0.0 {
-            cascade_outer = geometry::simplify(&cascade_outer, tol);
-            cascade_inners = cascade_inners
-                .iter()
-                .map(|r| geometry::simplify(r, tol))
-                .filter(|r| r.len() >= 4)
-                .collect();
-        }
-        if cascade_outer.len() < 4 {
-            break;
-        }
-        let simp_outer = &cascade_outer;
-        let simp_inners = &cascade_inners;
+
+    geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, |z, simp_outer, simp_inners| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
         let skip_size_filter = z >= 14;
@@ -1064,7 +981,7 @@ fn emit_multipolygon_feature(
             records.push(SortRecord { key, data });
             count += 1;
         });
-    }
+    });
     count
 }
 
@@ -1429,7 +1346,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // emit_point_feature tests
+    // emit_point_or_centroid tests (formerly emit_point_feature)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1437,7 +1354,7 @@ mod tests {
         let m = test_layer_match(Layer::Pois, GeomExpect::Point);
         let bbox = MercBbox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 };
         let mut records = Vec::new();
-        let count = emit_point_feature(1, &[], &bbox, &m, 0, 0, &mut records);
+        let count = emit_point_or_centroid(1, &[], &bbox, &m, 0, 0, &mut records);
         assert_eq!(count, 0);
         assert!(records.is_empty());
     }
@@ -1448,7 +1365,7 @@ mod tests {
         let coords = [Point { x: 0.5, y: 0.5 }];
         let bbox = MercBbox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 };
         let mut records = Vec::new();
-        emit_point_feature(42, &coords, &bbox, &m, 0, 0, &mut records);
+        emit_point_or_centroid(42, &coords, &bbox, &m, 0, 0, &mut records);
         assert_eq!(records.len(), 1);
 
         let rec = &records[0];
@@ -1485,7 +1402,7 @@ mod tests {
         let coords = [Point { x: 0.25, y: 0.25 }];
         let bbox = MercBbox { min_x: 0.25, min_y: 0.25, max_x: 0.25, max_y: 0.25 };
         let mut records = Vec::new();
-        emit_point_feature(7, &coords, &bbox, &m, 0, 1, &mut records);
+        emit_point_or_centroid(7, &coords, &bbox, &m, 0, 1, &mut records);
 
         // Should get 1 record at z=0 and 1 record at z=1 = 2 total
         assert_eq!(records.len(), 2);

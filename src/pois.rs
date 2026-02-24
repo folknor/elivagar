@@ -214,10 +214,21 @@ fn poi_recycling_attrs(
     ));
 }
 
-fn pois_match_emergency(
+/// Match a tag key against an allowed values list. Returns attrs with the matched value.
+fn match_tag_in_list(
     tags: &Tags<'_>,
+    key: &'static str,
+    allowed: &[&str],
 ) -> Option<SmallVec<[Attr; 8]>> {
-    static EMERGENCY_VALUES: &[&str] = &[
+    let v = tags.get(key)?;
+    if !allowed.contains(&v) {
+        return None;
+    }
+    Some(smallvec![attr_dyn(key, v)])
+}
+
+fn pois_match_emergency(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
+    static VALUES: &[&str] = &[
         "defibrillator",
         "fire_hydrant",
         "phone",
@@ -226,17 +237,11 @@ fn pois_match_emergency(
         "water_tank",
         "suction_point",
     ];
-    let v = tags.get("emergency")?;
-    if !EMERGENCY_VALUES.contains(&v) {
-        return None;
-    }
-    Some(smallvec![attr_dyn("emergency", v)])
+    match_tag_in_list(tags, "emergency", VALUES)
 }
 
-fn pois_match_historic(
-    tags: &Tags<'_>,
-) -> Option<SmallVec<[Attr; 8]>> {
-    static HISTORIC_VALUES: &[&str] = &[
+fn pois_match_historic(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
+    static VALUES: &[&str] = &[
         "archaeological_site",
         "battlefield",
         "castle",
@@ -247,11 +252,7 @@ fn pois_match_historic(
         "wayside_cross",
         "wayside_shrine",
     ];
-    let v = tags.get("historic")?;
-    if !HISTORIC_VALUES.contains(&v) {
-        return None;
-    }
-    Some(smallvec![attr_dyn("historic", v)])
+    match_tag_in_list(tags, "historic", VALUES)
 }
 
 fn pois_match_leisure(
@@ -304,10 +305,8 @@ fn pois_match_man_made(
     Some(attrs)
 }
 
-fn pois_match_shop(
-    tags: &Tags<'_>,
-) -> Option<SmallVec<[Attr; 8]>> {
-    static SHOP_VALUES: &[&str] = &[
+fn pois_match_shop(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
+    static VALUES: &[&str] = &[
         "alcohol",
         "bakery",
         "beauty",
@@ -347,11 +346,7 @@ fn pois_match_shop(
         "supermarket",
         "toys",
     ];
-    let v = tags.get("shop")?;
-    if !SHOP_VALUES.contains(&v) {
-        return None;
-    }
-    Some(smallvec![attr_dyn("shop", v)])
+    match_tag_in_list(tags, "shop", VALUES)
 }
 
 fn pois_match_tourism(

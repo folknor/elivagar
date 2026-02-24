@@ -233,6 +233,72 @@ fn perp_dist_sq(p: &Point, a: &Point, dx: f64, dy: f64, len_sq: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// Cascading simplification helpers
+// ---------------------------------------------------------------------------
+// These deduplicate the zoom-descending simplification loop used in
+// emit_line_feature, emit_polygon_feature, emit_multipolygon_feature,
+// and emit_ocean_polygon. Douglas-Peucker simplification is hierarchical,
+// so each zoom's result is always a subset of the previous zoom's.
+
+/// Cascading simplification for a single geometry (line or polygon ring).
+///
+/// Iterates from `z_hi` down to `z_lo`, simplifying the geometry at each zoom
+/// using the previous zoom's result. Calls `callback(z, &simplified)` at each
+/// zoom level. Stops early if the simplified geometry drops below `min_points`.
+pub fn for_each_zoom_simplified<F>(
+    merc: &[Point],
+    z_lo: u8,
+    z_hi: u8,
+    min_points: usize,
+    mut callback: F,
+) where
+    F: FnMut(u8, &[Point]),
+{
+    let mut cascade = merc.to_vec();
+    for z in (z_lo..=z_hi).rev() {
+        if z < 14 {
+            cascade = simplify(&cascade, simplify_tolerance(z));
+        }
+        if cascade.len() < min_points {
+            break;
+        }
+        callback(z, &cascade);
+    }
+}
+
+/// Cascading simplification for a multipolygon (outer ring + inner holes).
+///
+/// Same zoom-descending approach as [`for_each_zoom_simplified`], but also
+/// simplifies inner rings and drops any that fall below 4 points.
+pub fn for_each_zoom_simplified_multi<F>(
+    outer: &[Point],
+    inners: &[Vec<Point>],
+    z_lo: u8,
+    z_hi: u8,
+    mut callback: F,
+) where
+    F: FnMut(u8, &[Point], &[Vec<Point>]),
+{
+    let mut cascade_outer = outer.to_vec();
+    let mut cascade_inners: Vec<Vec<Point>> = inners.to_vec();
+    for z in (z_lo..=z_hi).rev() {
+        let tol = if z < 14 { simplify_tolerance(z) } else { 0.0 };
+        if tol > 0.0 {
+            cascade_outer = simplify(&cascade_outer, tol);
+            cascade_inners = cascade_inners
+                .iter()
+                .map(|r| simplify(r, tol))
+                .filter(|r| r.len() >= 4)
+                .collect();
+        }
+        if cascade_outer.len() < 4 {
+            break;
+        }
+        callback(z, &cascade_outer, &cascade_inners);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cohen-Sutherland line clipping
 // ---------------------------------------------------------------------------
 
@@ -831,6 +897,35 @@ fn signed_area_tile(ring: &[(i32, i32)]) -> f64 {
         sum -= f64::from(ring[j].0) * f64::from(ring[i].1);
     }
     sum / 2.0
+}
+
+// ---------------------------------------------------------------------------
+// Point-in-polygon (ray casting)
+// ---------------------------------------------------------------------------
+
+/// Ray-casting point-in-polygon test. Returns true if `p` is inside `ring`.
+///
+/// Consolidated from ocean.rs and multipolygon.rs which both had independent
+/// implementations of the same ray-casting algorithm.
+pub fn point_in_polygon(p: &Point, ring: &[Point]) -> bool {
+    let n = ring.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let yi = ring[i].y;
+        let yj = ring[j].y;
+        if (yi > p.y) != (yj > p.y) {
+            let intersect_x = ring[i].x + (p.y - yi) / (yj - yi) * (ring[j].x - ring[i].x);
+            if p.x < intersect_x {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
 }
 
 // ---------------------------------------------------------------------------

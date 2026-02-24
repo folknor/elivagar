@@ -827,7 +827,7 @@ fn is_poi_element(tags: &Tags<'_>) -> bool {
         || tags.has("office")
 }
 
-fn match_addresses_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+fn match_addresses(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<[LayerMatch; 4]>) {
     if is_poi_element(tags) {
         return;
     }
@@ -847,34 +847,17 @@ fn match_addresses_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
         layer: Layer::Addresses,
         min_zoom: 14,
         max_zoom: 14,
-        geom_expect: GeomExpect::Point,
+        geom_expect,
         attrs,
     });
 }
 
+fn match_addresses_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+    match_addresses(tags, GeomExpect::Point, out);
+}
+
 fn match_addresses_centroid(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    if is_poi_element(tags) {
-        return;
-    }
-    let has_number = tags.has("addr:housenumber");
-    let has_housename = tags.has("addr:housename");
-    if !has_number && !has_housename {
-        return;
-    }
-    let mut attrs = SmallVec::new();
-    if let Some(v) = tags.get("addr:housename") {
-        attrs.push(attr_dyn("housename", v));
-    }
-    if let Some(v) = tags.get("addr:housenumber") {
-        attrs.push(attr_dyn("housenumber", v));
-    }
-    out.push(LayerMatch {
-        layer: Layer::Addresses,
-        min_zoom: 14,
-        max_zoom: 14,
-        geom_expect: GeomExpect::PolygonCentroid,
-        attrs,
-    });
+    match_addresses(tags, GeomExpect::PolygonCentroid, out);
 }
 
 // ---------------------------------------------------------------------------

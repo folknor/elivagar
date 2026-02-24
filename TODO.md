@@ -129,19 +129,30 @@
 
 ## Code Quality: Duplication
 
-- [ ] **Node/DenseNode processing duplicated** — 25 lines of identical logic in both match arms. Extract a shared `handle_node` helper. (`pipeline.rs:306-355`)
+- [x] **Node/DenseNode processing duplicated** — extracted `handle_node!` macro in `pipeline.rs`.
+  Both `Node` and `DenseNode` have different types but identical processing logic; a macro
+  avoids the duplication without requiring a shared trait.
 
-- [ ] **`emit_point_feature` / `emit_centroid_feature` nearly identical** — Differ only in how they compute the point. Merge into one function that accepts a `Point` parameter. (`pipeline.rs:813-878`)
+- [x] **`emit_point_feature` / `emit_centroid_feature` nearly identical** — merged into single
+  `emit_point_or_centroid(osm_id, point, ...)` in `pipeline.rs`.
 
-- [ ] **Cascading simplification loop duplicated 3-4x** — Same structure in `emit_line_feature`, `emit_polygon_feature`, `emit_multipolygon_feature`, `emit_ocean_polygon`. Extract a generic `for_each_zoom_simplified` helper. (`pipeline.rs:893-1063`, `ocean.rs:259-373`)
+- [x] **Cascading simplification loop duplicated 3-4x** — extracted `for_each_zoom_simplified`
+  (single geometry) and `for_each_zoom_simplified_multi` (outer+inners) helpers in `geometry.rs`.
+  Used in `emit_line_feature`, `emit_polygon_feature`, `emit_multipolygon_feature`, and
+  `emit_ocean_polygon`.
 
-- [ ] **`point_in_polygon` implemented twice** — Independent implementations in ocean.rs and multipolygon.rs. Consolidate into `geometry::point_in_polygon`. (`ocean.rs:505-523`, `multipolygon.rs:347-373`)
+- [x] **`point_in_polygon` implemented twice** — consolidated into `geometry::point_in_polygon`.
+  Both `ocean.rs` and `multipolygon.rs` now import from geometry.
 
-- [ ] **POI matchers: 6 functions with identical structure** — `pois_match_emergency`, `pois_match_historic`, etc. all follow the same pattern. Extract `match_tag_in_list(tags, key, allowed_values)`. (`pois.rs:216-386`)
+- [x] **POI matchers: 6 functions with identical structure** — extracted `match_tag_in_list`
+  helper in `pois.rs` for the 3 simple matchers (emergency, historic, shop). 3 complex
+  matchers (leisure, man_made, tourism) kept separate due to extra attribute logic.
 
-- [ ] **`match_addresses_point` / `match_addresses_centroid` duplicated** — Identical except for `GeomExpect`. Extract shared logic taking `GeomExpect` as parameter. (`shortbread.rs:827-875`)
+- [x] **`match_addresses_point` / `match_addresses_centroid` duplicated** — extracted shared
+  `match_addresses` helper taking `GeomExpect` as parameter in `shortbread.rs`.
 
-- [ ] **Hilbert curve code duplicated in `compare_tiles.rs`** — Copy-pasted from `pmtiles_writer.rs`. Import instead of duplicating. (`examples/compare_tiles.rs:221-267`)
+- [x] **Hilbert curve code duplicated in `compare_tiles.rs`** — deleted local copies, now
+  imports `elivagar::pmtiles_writer::tile_id_to_zxy`.
 
 ## Code Quality: Type Safety & API
 
