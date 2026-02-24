@@ -20,6 +20,52 @@ const PIXEL_FACTOR: f64 = 0.375;
 /// Buffer fraction of tile size for clipping (8 pixels / 4096 extent).
 pub(crate) const BUFFER_FRACTION: f64 = 8.0 / EXTENT;
 
+/// One tile pixel in extent units: 4096 / 256 = 16.
+const PX: i64 = (EXTENT as i64) / 256;
+
+/// Minimum line length squared in tile extent units (1 pixel = 16 extent units).
+/// A line whose bounding box diagonal² is below this is sub-pixel and invisible.
+pub const MIN_LINE_EXTENT_SQ: i64 = PX * PX; // 256
+
+/// Minimum polygon area in tile extent units² (1 sq pixel).
+/// Polygon rings with |area| below this contribute nothing visible.
+pub const MIN_POLY_AREA: i64 = PX * PX; // 256
+
+/// Check if a linestring's bounding box is sub-pixel (both dimensions < 1 px).
+/// Returns true if the feature is too small and should be dropped.
+pub fn line_is_subpixel(coords: &[(i32, i32)]) -> bool {
+    if coords.len() < 2 {
+        return true;
+    }
+    let (mut min_x, mut min_y) = coords[0];
+    let (mut max_x, mut max_y) = (min_x, min_y);
+    for &(x, y) in &coords[1..] {
+        if x < min_x { min_x = x; }
+        if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; }
+        if y > max_y { max_y = y; }
+    }
+    let dx = i64::from(max_x - min_x);
+    let dy = i64::from(max_y - min_y);
+    dx * dx + dy * dy < MIN_LINE_EXTENT_SQ
+}
+
+/// Check if a polygon ring's area is sub-pixel. Uses the shoelace formula.
+/// Returns true if the feature is too small and should be dropped.
+pub fn ring_is_subpixel(coords: &[(i32, i32)]) -> bool {
+    if coords.len() < 4 {
+        return true;
+    }
+    let mut area: i64 = 0;
+    let n = coords.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area += i64::from(coords[i].0) * i64::from(coords[j].1);
+        area -= i64::from(coords[j].0) * i64::from(coords[i].1);
+    }
+    area.abs() / 2 < MIN_POLY_AREA
+}
+
 // ---------------------------------------------------------------------------
 // Point type
 // ---------------------------------------------------------------------------

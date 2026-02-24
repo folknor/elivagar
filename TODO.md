@@ -231,7 +231,7 @@ All three use gzip level 6. Tilemaker uses libdeflate 1.22, Planetiler uses
 Java's built-in deflater, we use flate2/zlib-ng. libdeflate may produce slightly
 better ratios (1-3%), but this is not the dominant factor.
 
-#### Cause 1: No minimum polygon/line size filtering (dominant factor)
+#### Cause 1: No minimum polygon/line size filtering — DONE
 
 **Planetiler:** Drops polygons smaller than 1 sq tile pixel and lines shorter
 than 1 tile pixel at all zoom levels below max. At max zoom (z14), threshold
@@ -247,14 +247,23 @@ Additionally, the Lua script computes per-feature min zoom based on area via
 `zmin_for_area()` — water polygons are placed at the zoom where they first
 cover a minimum number of pixels.
 
-**Elivagar:** No equivalent. Every polygon fragment and line segment, no matter
-how small, gets encoded into the MVT tile. This is likely the single largest
-contributor — both Planetiler and Tilemaker filter aggressively, just with
-different mechanisms.
+**Fixed:** Drop sub-pixel features at z0-z13 (matching Planetiler's approach):
+- Lines: skip if bounding box diagonal < 1 pixel (16 extent units)
+- Polygons: skip outer/inner rings with area < 1 sq pixel (shoelace formula)
+- Exemptions: boundaries and streets (never filtered, matching Planetiler)
+- At z14 (max zoom): no filtering (all features preserved for overzooming)
 
-- [ ] Add minimum-size filtering: drop polygon rings below 1 sq pixel and
-  line segments below 1 pixel at zooms below max. This matches Planetiler's
-  approach and is simpler to implement than Tilemaker's per-layer config.
+**Impact (Denmark no-ocean, cumulative):** -21.3 MB from original baseline.
+-1,430,438 features (-8.6%), sort 31% faster, assemble 13% faster.
+
+| | Original baseline | After all fixes | Delta |
+|---|---|---|---|
+| Output | 347.0 MB | 325.7 MB | -21.3 MB (-6.1%) |
+| Sort | 781 ms | 537 ms | -244 ms (-31%) |
+| Assemble | 2,493 ms | 2,165 ms | -328 ms (-13%) |
+| Features | 16,583,912 | 15,153,474 | -1,430,438 (-8.6%) |
+
+Remaining gap vs Tilemaker (293 MB): 33 MB, down from 54 MB (closed 39%).
 
 #### Cause 2: Simplification tolerance vs Tilemaker
 
@@ -296,9 +305,12 @@ filtering, this accounts for the bulk of the gap. However, since Planetiler
 achieves comparable size with even less simplification, min-size filtering alone
 may close most of the gap.
 
-- [ ] After implementing min-size filtering, re-measure the gap. If still
-  significant, consider increasing `PIXEL_FACTOR` to 1.0 (still conservative
-  vs Tilemaker, and 10x more aggressive than Planetiler's 0.1 px).
+After min-size filtering, 33 MB gap remains (326 vs 293 MB). Simplification
+is likely the main remaining factor — Tilemaker is 10-40x more aggressive.
+
+- [ ] Consider increasing `PIXEL_FACTOR` to 1.0 (still conservative vs
+  Tilemaker, 10x more aggressive than Planetiler's 0.1 px) and measure
+  size + visual quality.
 
 #### Cause 3: Redundant false-valued boolean attributes — DONE
 
