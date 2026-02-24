@@ -937,4 +937,54 @@ mod tests {
         // Each tile has a different offset, so no runs despite same length
         assert_eq!(entries.len(), 4);
     }
+
+    // -----------------------------------------------------------------------
+    // End-to-end write_to
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_to_produces_valid_header() {
+        let config = PmtilesConfig {
+            min_zoom: 0,
+            max_zoom: 1,
+            bounds: (-180.0, -85.0, 180.0, 85.0),
+            center: (0.0, 0.0, 0),
+        };
+
+        let mut writer = PmtilesWriter::new(config);
+
+        let tile_a = gzip_compress(b"tile-a").unwrap();
+        let tile_b = gzip_compress(b"tile-b").unwrap();
+        let tile_c = gzip_compress(b"tile-c").unwrap();
+
+        writer.add_tile(0, 0, 0, &tile_a).unwrap();
+        writer.add_tile(1, 0, 0, &tile_b).unwrap();
+        writer.add_tile(1, 1, 0, &tile_c).unwrap();
+
+        assert_eq!(writer.tile_count(), 3);
+        assert_eq!(writer.unique_tile_count(), 3);
+
+        // Write to a temporary file and verify the header.
+        let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tilegen_tmp");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out_path = out_dir.join("test_write_to.pmtiles");
+
+        writer.write_to(&out_path).unwrap();
+
+        let bytes = std::fs::read(&out_path).unwrap();
+        // PMTiles v3 header is 127 bytes
+        assert!(
+            bytes.len() > 127,
+            "output file should be larger than the 127-byte header, got {} bytes",
+            bytes.len(),
+        );
+        // First 7 bytes: "PMTiles"
+        assert_eq!(&bytes[0..7], b"PMTiles");
+        // Byte 7: version = 3
+        assert_eq!(bytes[7], 3);
+
+        // Clean up
+        let _ = std::fs::remove_file(&out_path);
+    }
 }

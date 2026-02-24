@@ -164,3 +164,99 @@ impl WayIndex {
         Some(unsafe { std::slice::from_raw_parts(ptr, coord_count as usize) })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_and_get_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = WayIndex::create(dir.path()).unwrap();
+        idx.finish_writing().unwrap();
+        assert!(idx.get(1).is_none());
+    }
+
+    #[test]
+    fn put_and_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = WayIndex::create(dir.path()).unwrap();
+        let coords = [(10, 20), (30, 40), (50, 60)];
+        idx.put(100, &coords);
+        idx.finish_writing().unwrap();
+        let result = idx.get(100).unwrap();
+        assert_eq!(result, &coords);
+    }
+
+    #[test]
+    fn put_multiple_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = WayIndex::create(dir.path()).unwrap();
+
+        let coords_a = [(1, 2)];
+        let coords_b = [(10, 20), (30, 40)];
+        let coords_c = [(100, 200), (300, 400), (500, 600), (700, 800)];
+
+        idx.put(5, &coords_a);
+        idx.put(42, &coords_b);
+        idx.put(999, &coords_c);
+        idx.finish_writing().unwrap();
+
+        assert_eq!(idx.get(5).unwrap(), &coords_a);
+        assert_eq!(idx.get(42).unwrap(), &coords_b);
+        assert_eq!(idx.get(999).unwrap(), &coords_c);
+    }
+
+    #[test]
+    fn get_before_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = WayIndex::create(dir.path()).unwrap();
+        idx.put(7, &[(1, 2), (3, 4)]);
+        // data_mmap is None because finish_writing was never called,
+        // so get returns None even though the offset entry exists.
+        assert!(idx.get(7).is_none());
+    }
+
+    #[test]
+    fn get_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = WayIndex::create(dir.path()).unwrap();
+        idx.put(1, &[(1, 2)]);
+        idx.finish_writing().unwrap();
+        // way_id 9999 was never written; its offset slot is zeroed out.
+        assert!(idx.get(9999).is_none());
+    }
+
+    #[test]
+    fn empty_way() {
+        // Known edge case: putting an empty coords slice writes offset=current_pos
+        // and count=0 into the offset entry. However, because data_write_pos starts
+        // at 0 for the first insertion (and no bytes are appended), the entry is
+        // (offset=0, count=0) which matches the sentinel for "unset". So get
+        // returns None for an empty way that was the first insertion.
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = WayIndex::create(dir.path()).unwrap();
+        idx.put(50, &[]);
+        idx.finish_writing().unwrap();
+        // Sentinel (0, 0) is indistinguishable from unset — returns None.
+        assert!(idx.get(50).is_none());
+    }
+
+    #[test]
+    fn overwrite_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = WayIndex::create(dir.path()).unwrap();
+
+        let first = [(1, 1), (2, 2)];
+        let second = [(10, 10), (20, 20), (30, 30)];
+
+        idx.put(77, &first);
+        idx.put(77, &second);
+        idx.finish_writing().unwrap();
+
+        // The second put overwrites the offset entry, so get returns the second value.
+        let result = idx.get(77).unwrap();
+        assert_eq!(result, &second);
+    }
+}

@@ -80,3 +80,68 @@ impl NodeIndex {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_and_get_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_index_test.bin");
+        let idx = NodeIndex::create(&path).unwrap();
+        assert_eq!(idx.get(1), None);
+    }
+
+    #[test]
+    fn put_and_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_index_test.bin");
+        let mut idx = NodeIndex::create(&path).unwrap();
+        idx.put(100, 555_000_000, 133_000_000);
+        assert_eq!(idx.get(100), Some((555_000_000, 133_000_000)));
+    }
+
+    #[test]
+    fn put_multiple_get_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_index_test.bin");
+        let mut idx = NodeIndex::create(&path).unwrap();
+        idx.put(10, 100_000, 200_000);
+        idx.put(20, 300_000, 400_000);
+        idx.put(30, 500_000, 600_000);
+        assert_eq!(idx.get(10), Some((100_000, 200_000)));
+        assert_eq!(idx.get(20), Some((300_000, 400_000)));
+        assert_eq!(idx.get(30), Some((500_000, 600_000)));
+    }
+
+    #[test]
+    fn get_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_index_test.bin");
+        let mut idx = NodeIndex::create(&path).unwrap();
+        idx.put(5, 111, 222);
+        assert_eq!(idx.get(999), None);
+    }
+
+    #[test]
+    fn sentinel_zero_zero() {
+        // Known limitation: (0,0) is the sentinel value, so nodes at exactly lat=0, lon=0 appear as unset.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_index_test.bin");
+        let mut idx = NodeIndex::create(&path).unwrap();
+        idx.put(1, 0, 0);
+        assert_eq!(idx.get(1), None);
+    }
+
+    #[test]
+    fn overwrite_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_index_test.bin");
+        let mut idx = NodeIndex::create(&path).unwrap();
+        idx.put(42, 111_000, 222_000);
+        idx.put(42, 333_000, 444_000);
+        assert_eq!(idx.get(42), Some((333_000, 444_000)));
+    }
+}

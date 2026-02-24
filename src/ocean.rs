@@ -521,3 +521,183 @@ fn point_in_polygon(px: f64, py: f64, polygon: &[Point]) -> bool {
     }
     inside
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use crate::geometry::Point;
+
+    // -----------------------------------------------------------------------
+    // rasterize_segment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rasterize_horizontal() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(0.5, 0.5, 3.5, 0.5, &mut tiles);
+        let expected: HashSet<u64> = [
+            pack_tile(0, 0),
+            pack_tile(1, 0),
+            pack_tile(2, 0),
+            pack_tile(3, 0),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    fn rasterize_vertical() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(0.5, 0.5, 0.5, 3.5, &mut tiles);
+        let expected: HashSet<u64> = [
+            pack_tile(0, 0),
+            pack_tile(0, 1),
+            pack_tile(0, 2),
+            pack_tile(0, 3),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    fn rasterize_diagonal() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(0.5, 0.5, 2.5, 2.5, &mut tiles);
+        // Must hit the three main diagonal tiles
+        assert!(tiles.contains(&pack_tile(0, 0)));
+        assert!(tiles.contains(&pack_tile(1, 1)));
+        assert!(tiles.contains(&pack_tile(2, 2)));
+        // DDA may also step through (0,1) or (1,0) at grid crossings —
+        // just verify the result is a subset of the plausible set.
+        let plausible: HashSet<u64> = [
+            pack_tile(0, 0),
+            pack_tile(0, 1),
+            pack_tile(1, 0),
+            pack_tile(1, 1),
+            pack_tile(1, 2),
+            pack_tile(2, 1),
+            pack_tile(2, 2),
+        ]
+        .into_iter()
+        .collect();
+        assert!(tiles.is_subset(&plausible));
+    }
+
+    #[test]
+    fn rasterize_zero_length() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(1.5, 2.5, 1.5, 2.5, &mut tiles);
+        assert_eq!(tiles.len(), 1);
+        assert!(tiles.contains(&pack_tile(1, 2)));
+    }
+
+    #[test]
+    fn rasterize_negative_coords() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(-1.5, -0.5, 1.5, 0.5, &mut tiles);
+        // Only tiles with cx >= 0 && cy >= 0 are inserted
+        for &packed in &tiles {
+            let tx = packed >> 32;
+            let ty = packed & 0xFFFF_FFFF;
+            assert!(tx < 0x8000_0000, "negative tx snuck in");
+            assert!(ty < 0x8000_0000, "negative ty snuck in");
+        }
+        // The segment enters the non-negative quadrant, so at least one tile
+        assert!(!tiles.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // point_in_polygon tests
+    // -----------------------------------------------------------------------
+
+    fn unit_square() -> Vec<Point> {
+        vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 1.0, y: 0.0 },
+            Point { x: 1.0, y: 1.0 },
+            Point { x: 0.0, y: 1.0 },
+        ]
+    }
+
+    #[test]
+    fn pip_inside_square() {
+        assert!(point_in_polygon(0.5, 0.5, &unit_square()));
+    }
+
+    #[test]
+    fn pip_outside_square() {
+        assert!(!point_in_polygon(2.0, 0.5, &unit_square()));
+    }
+
+    #[test]
+    fn pip_on_edge() {
+        // Edge behavior is implementation-defined for ray-casting;
+        // just verify it does not panic.
+        let _ = point_in_polygon(0.5, 0.0, &unit_square());
+    }
+
+    #[test]
+    fn pip_inside_triangle() {
+        let tri = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 4.0, y: 0.0 },
+            Point { x: 2.0, y: 3.0 },
+        ];
+        assert!(point_in_polygon(2.0, 1.0, &tri));
+    }
+
+    #[test]
+    fn pip_outside_triangle() {
+        let tri = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 4.0, y: 0.0 },
+            Point { x: 2.0, y: 3.0 },
+        ];
+        assert!(!point_in_polygon(0.0, 3.0, &tri));
+    }
+
+    #[test]
+    fn pip_degenerate() {
+        // Fewer than 3 points should return false
+        assert!(!point_in_polygon(0.0, 0.0, &[]));
+        assert!(!point_in_polygon(0.0, 0.0, &[Point { x: 0.0, y: 0.0 }]));
+        assert!(!point_in_polygon(
+            0.0,
+            0.0,
+            &[Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 1.0 }],
+        ));
+    }
+
+    #[test]
+    fn pip_concave() {
+        // An L-shaped (concave) polygon:
+        //
+        //   (0,0)---(2,0)
+        //     |        |
+        //   (0,2)---(1,2)
+        //            |
+        //   (0,3)---(1,3)   <-- not connected; full shape below
+        //
+        // Vertices (counter-clockwise on a math-y axis):
+        //   (0,0) (2,0) (2,1) (1,1) (1,3) (0,3)
+        let l_shape = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 2.0, y: 0.0 },
+            Point { x: 2.0, y: 1.0 },
+            Point { x: 1.0, y: 1.0 },
+            Point { x: 1.0, y: 3.0 },
+            Point { x: 0.0, y: 3.0 },
+        ];
+
+        // Inside the body of the L
+        assert!(point_in_polygon(0.5, 0.5, &l_shape));
+        assert!(point_in_polygon(0.5, 2.0, &l_shape));
+
+        // Inside the concavity (the cut-out region) — should be false
+        assert!(!point_in_polygon(1.5, 2.0, &l_shape));
+    }
+}
