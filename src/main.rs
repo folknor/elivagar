@@ -1,3 +1,6 @@
+// hotpath-alloc provides its own #[global_allocator] for allocation tracking,
+// so mimalloc must be disabled when that feature is active.
+#[cfg(not(feature = "hotpath-alloc"))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

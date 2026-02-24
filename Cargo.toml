@@ -65,6 +65,7 @@ too_many_lines = "deny"
 
 [features]
 hotpath = ["hotpath/hotpath"]
+hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 
 [profile.release]
 strip = true

@@ -76,14 +76,72 @@ the linear scan over 3-15 tags is fast. This confirms reverting the binary searc
 `phase_assemble` = 2.1s (7%). MVT encoding + gzip + PMTiles write is fast. All optimization
 effort should go into the PBF phase.
 
+## Allocation Profile (hotpath-alloc, system allocator — no mimalloc)
+
+Separate run with `--features hotpath-alloc`. Mimalloc disabled (hotpath-alloc provides its own
+`#[global_allocator]`). Wall-clock times are not meaningful — only allocation counts and bytes.
+
+Total allocated: **14.0 GB** for Denmark. Global throughput: **67.3 GB alloc, 75.4 GB dealloc.**
+
+### Allocation by function (cumulative, top 10 of 25)
+
+| Function | Calls | Avg | P50 | P95 | P99 | Total | % |
+|---|---|---|---|---|---|---|---|
+| `process_matched_way` | 6.1M | 2.1 KB | 1.1 KB | 6.7 KB | 17.6 KB | 12.4 GB | 89% |
+| `for_each_zoom_simplified` | 6.6M | 1.9 KB | 826 B | 5.9 KB | 15.7 KB | 11.6 GB | 83% |
+| `blob::decode_blob` (pbfhogg) | 7.4K | 1.4 MB | 853 KB | 5.2 MB | 5.9 MB | 10.2 GB | 73% |
+| `emit_polygon_feature` | 4.5M | 2.0 KB | 932 B | 6.7 KB | 18.5 KB | 8.7 GB | 63% |
+| `clip_polygon` | 8.9M | 530 B | 320 B | 1.2 KB | 3.2 KB | 4.4 GB | 31% |
+| `emit_line_feature` | 2.0M | 1.5 KB | 824 B | 4.2 KB | 9.1 KB | 2.9 GB | 21% |
+
+Note: cumulative means parent includes children. Exclusive allocations are the deltas.
+
+### Per-thread allocation
+
+| Thread | Alloc | Dealloc | Diff |
+|---|---|---|---|
+| Main | 15.7 GB | 25.6 GB | -9.9 GB |
+| Rayon worker ×4 | ~3.3 GB each | ~2.9 GB each | ~450 MB each |
+
+RSS: 1.6 GB. System allocator is much less memory-efficient than mimalloc.
+
+### Key allocation insights
+
+#### 1. clip_polygon is the #1 exclusive allocator
+
+8.9M calls × 530 B avg = **4.4 GB.** This is `input = ring.to_vec()` (the double-buffer
+input copy) plus the output Vec created each call. Fix: pass in reusable double-buffers
+from the caller so the Vecs grow to max size and stop allocating.
+
+#### 2. simplify() is the #2 exclusive allocator
+
+Called from `for_each_zoom_simplified` at every zoom level. Allocates a `vec![bool]` keep
+array and a result `Vec<Point>` per invocation. 6.6M calls × ~1.4 KB exclusive (subtracting
+clip_polygon's share) ≈ **~7 GB**. Fix: bitset for keep array + reusable output buffer.
+
+#### 3. pbfhogg blob decoding is 10.2 GB — out of our hands
+
+7.4K blobs × 1.4 MB avg. This is zlib decompression buffers inside pbfhogg. We don't
+control this unless we modify pbfhogg.
+
+#### 4. Planet-scale projection
+
+Denmark is ~1/150th of planet by PBF size. Extrapolating naively: **~2 TB of allocator
+throughput** at planet scale. Even mimalloc will feel pressure at that level — contention
+across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-local heaps.
+
 ## Implied Priorities
 
-1. **Reduce node index I/O pressure** — prefetch, batch lookups, or restructure to avoid
-   random mmap faults. This is 54% of main thread time.
-2. **Increase PBF phase parallelism** — move tag matching/collection off the serial callback.
-   Currently only ~2 of 28 cores are utilized.
-3. **Optimize simplification for large features** — the P99 tail in `for_each_zoom_simplified`
+1. **Eliminate clip_polygon per-call allocation** — 4.4 GB from 8.9M calls. Pass reusable
+   double-buffers from the caller. Highest bang-for-buck change.
+2. **Eliminate simplify per-call allocation** — ~7 GB exclusive from 6.6M calls. Bitset for
+   keep array + reusable output buffer.
+3. **Reduce node index I/O pressure** — 54% of main thread CPU is kernel time from mmap
+   page faults. Prefetch, batch lookups, or restructure to reduce random access.
+4. **Increase PBF phase parallelism** — only ~2 of 28 cores utilized. Move tag
+   matching/collection off the serial callback into parallel batches.
+5. **Optimize simplification for large features** — the P99 tail in `for_each_zoom_simplified`
    is where most CPU goes. Early termination, incremental simplification, or subpixel culling
    at coarser zooms could help.
-4. **Polygon-focused optimization** — polygons are 2x the workload of lines. Any polygon-specific
+6. **Polygon-focused optimization** — polygons are 2x the workload of lines. Any polygon-specific
    improvement (e.g. ring area pre-filter before per-zoom processing) has outsized impact.

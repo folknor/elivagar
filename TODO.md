@@ -156,6 +156,30 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
 
 - [ ] **MVT value interning uses SipHash** — `DefaultHasher` is slower than needed for non-adversarial input. Use `FxHasher` or `ahash`. (`mvt.rs:366-379`)
 
+- [ ] **Rayon alternatives for slice-based parallelism** — Wild linker discussion
+  ([davidlattimore/wild#1072](https://github.com/davidlattimore/wild/discussions/1072)) surveys
+  the landscape. Key options:
+  - **paralight** (v0.0.8) — lightweight, targets slice/mut-slice parallelism. Can run on top of
+    rayon's thread pool via `RayonThreadPool::new_global` (no extra threads). Has proper
+    `try_for_each_init` that inits once per thread (rayon inits once per work item). Only needs
+    `&` not `&mut` for the rayon backend. Limitation: no scopes, no graph algorithms, no recursive
+    parallelism. Max `u32::MAX` elements.
+  - **orx-parallel** — has `using()` API for guaranteed per-thread init. No thread pool yet
+    (spawns threads per pipeline), on roadmap. No scopes/graph support.
+  - **chili** — low-level, only provides `join`. A rayon fork (`par-iter`) builds par_iter on top
+    of it. Uses lazy scheduling (less overhead for fine-grained work).
+  - **forte** — experimental, rayon-like API with lazy scheduling. Supports spawn, join, scopes,
+    scoped spawns. No par_iter or par_bridge yet.
+  - **spindle** — built on rayon, optimised for small tasks. Very early.
+
+  Wild's `thread_local` crate trick is also relevant: wrap per-thread state in
+  `thread_local::ThreadLocal` and `.get_or()` inside rayon closures to guarantee one init per
+  thread. Simple and works today without switching libraries.
+
+  Not a current bottleneck — hotpath shows workers are starved by serial I/O, not slow at
+  processing. But worth evaluating if we move more work into parallel batches (e.g. moving tag
+  matching off the serial PBF callback).
+
 - [ ] **NodeIndex madvise for planet scale** — MADV_SEQUENTIAL tried (6724e0a) and reverted
   (4e427b4, 2.3× regression). MADV_RANDOM tried (ca6f17e) and reverted (+65% regression on
   Denmark). Key finding: the node index is 102 GB even for Denmark (node IDs are global),
