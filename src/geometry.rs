@@ -245,6 +245,7 @@ fn perp_dist_sq(p: &Point, a: &Point, dx: f64, dy: f64, len_sq: f64) -> f64 {
 /// Iterates from `z_hi` down to `z_lo`, simplifying the geometry at each zoom
 /// using the previous zoom's result. Calls `callback(z, &simplified)` at each
 /// zoom level. Stops early if the simplified geometry drops below `min_points`.
+#[hotpath::measure]
 pub fn for_each_zoom_simplified<F>(
     merc: &[Point],
     z_lo: u8,
@@ -270,6 +271,7 @@ pub fn for_each_zoom_simplified<F>(
 ///
 /// Same zoom-descending approach as [`for_each_zoom_simplified`], but also
 /// simplifies inner rings and drops any that fall below 4 points.
+#[hotpath::measure]
 pub fn for_each_zoom_simplified_multi<F>(
     outer: &[Point],
     inners: &[Vec<Point>],
@@ -355,6 +357,7 @@ impl ClipRect {
 ///
 /// Returns zero or more sub-linestrings (the line may enter and exit multiple times).
 /// SmallVec<[_; 1]>: most clips produce exactly one segment, avoiding the outer heap alloc.
+#[hotpath::measure]
 pub fn clip_linestring(line: &[Point], rect: &ClipRect) -> SmallVec<[Vec<Point>; 1]> {
     if line.len() < 2 {
         return SmallVec::new();
@@ -475,6 +478,7 @@ fn intersect_edge(p0: &Point, p1: &Point, rect: &ClipRect, code: u8) -> Point {
 /// The input ring should NOT have a duplicated closing vertex.
 /// Returns the clipped ring (may be empty if fully outside).
 /// Uses a double-buffer (input/output swap) instead of allocating 4 intermediate Vecs.
+#[hotpath::measure]
 pub fn clip_polygon(ring: &[Point], rect: &ClipRect) -> Vec<Point> {
     if ring.is_empty() {
         return Vec::new();

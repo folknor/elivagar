@@ -20,6 +20,7 @@ memmap2 = "0.9"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-ng"] }
 smallvec = "1"
 mimalloc = { version = "0.1", default-features = false }
+hotpath = "0.11"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -61,6 +62,9 @@ cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 unwrap_used = "deny"
 too_many_lines = "deny"
+
+[features]
+hotpath = ["hotpath/hotpath"]
 
 [profile.release]
 strip = true

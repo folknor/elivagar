@@ -19,6 +19,8 @@ Write new scripts in `scripts/` as needed. Follow these conventions:
 - `scripts/bench-tilemaker.sh [pbf] [runs]` — benchmark Tilemaker Shortbread (auto-builds from source, downloads shapefiles)
 - `scripts/run.sh [pbf] [out.pmtiles]` — build + run
 - `scripts/bench-pmtiles.sh [tiles] [runs]` — benchmark PMTiles writer vs pmtiles-rs (default: 500K tiles, 5 runs)
+- `scripts/build-hotpath.sh` — build release with hotpath profiling enabled
+- `scripts/run-hotpath.sh [pbf] [out.pmtiles]` — build + run with hotpath profiling (prints function timing report on exit)
 
 If you need something these scripts don't cover, write a new script.
 
@@ -67,6 +69,7 @@ Sequential, same PBF input:
 - `memmap2` — memory-mapped I/O for node/way indices
 - `flate2` (zlib-ng) — gzip compression for MVT tiles
 - `mimalloc` — global allocator (critical for rayon performance)
+- `hotpath` — function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
 
 ## Key conventions
 

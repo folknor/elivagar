@@ -198,6 +198,7 @@ pub struct LayerMatch {
 // ---------------------------------------------------------------------------
 
 /// Match an OSM element against all Shortbread layers, returning every match.
+#[hotpath::measure]
 pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> SmallVec<[LayerMatch; 4]> {
     let mut out = SmallVec::new();
     match geom_type {

@@ -69,6 +69,10 @@ fn main() {
         in_memory,
     };
 
+    let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")
+        .percentiles(&[50, 95, 99])
+        .build();
+
     if let Err(e) = elivagar::run(&config) {
         eprintln!("Error: {e}");
         std::process::exit(1);

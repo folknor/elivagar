@@ -95,6 +95,7 @@ const SORT_CHUNK_SIZE: usize = 1 << 30;
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines)]
+#[hotpath::measure]
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let total_start = Instant::now();
     let skip = config.skip_to;
@@ -270,6 +271,7 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+#[hotpath::measure]
 fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
@@ -463,6 +465,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn process_node(
     osm_id: u64,
     lat_e7: i32,
@@ -524,6 +527,7 @@ struct MatchedWay {
 const WAY_BATCH_SIZE: usize = 8192;
 
 /// Process a batch of matched ways in parallel and push results to sort writer.
+#[hotpath::measure]
 fn flush_way_batch(
     batch: Vec<MatchedWay>,
     min_zoom: u8,
@@ -550,6 +554,7 @@ fn flush_way_batch(
 
 /// Process a pre-matched way's geometry. Called from rayon worker threads.
 /// Does the CPU-heavy work: projection, simplification, clipping, MVT encoding.
+#[hotpath::measure]
 fn process_matched_way(
     way: &mut MatchedWay,
     min_zoom: u8,
@@ -612,6 +617,7 @@ const REL_BATCH_SIZE: usize = 1024;
 
 /// Resolve relation geometry from way_index (serial I/O). Returns None if
 /// the relation is not a multipolygon/boundary or has no resolvable member ways.
+#[hotpath::measure]
 fn prepare_relation(
     rel: &pbfhogg::Relation<'_>,
     tags: &[(&str, &str)],
@@ -662,6 +668,7 @@ fn prepare_relation(
 }
 
 /// Process a batch of prepared relations in parallel and push results to sort writer.
+#[hotpath::measure]
 fn flush_rel_batch(
     batch: Vec<PreparedRelation>,
     min_zoom: u8,
@@ -687,6 +694,7 @@ fn flush_rel_batch(
 }
 
 /// Process a prepared relation's geometry (CPU-bound). Called from rayon worker threads.
+#[hotpath::measure]
 fn process_prepared_relation(
     rel: &PreparedRelation,
     min_zoom: u8,
@@ -800,6 +808,7 @@ fn enrich_polygon_matches(matches: &mut [LayerMatch], area_m2: f64) {
 // Feature emission helpers
 // ---------------------------------------------------------------------------
 
+#[hotpath::measure]
 fn emit_point_or_centroid(
     osm_id: u64,
     coords: &[Point],
@@ -838,6 +847,7 @@ fn emit_point_or_centroid(
     count
 }
 
+#[hotpath::measure]
 fn emit_line_feature(
     osm_id: u64,
     merc: &[Point],
@@ -887,6 +897,7 @@ fn emit_line_feature(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn emit_polygon_feature(
     osm_id: u64,
     merc: &[Point],
@@ -934,6 +945,7 @@ fn emit_polygon_feature(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn emit_multipolygon_feature(
     osm_id: u64,
     outer: &[Point],
@@ -1012,6 +1024,7 @@ struct EncodedTile {
 }
 
 #[allow(clippy::too_many_lines)]
+#[hotpath::measure]
 fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64, u64), PipelineError> {
     use std::sync::mpsc::sync_channel;
 
@@ -1133,6 +1146,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
 }
 
 /// Encode + gzip a batch of tiles in parallel using rayon.
+#[hotpath::measure]
 fn encode_tile_batch(batch: &[PendingTile]) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 

@@ -55,17 +55,16 @@
 
 ## Planet-Scale Blockers
 
-- [x] **PMTiles writer unbounded memory growth** — replaced `tiles: Vec<(u64, StoredTile)>` with
-  incremental `DirStore` (memory or streaming to disk). Run-length encoded `DirEntry` built on the
-  fly in `push_dir_entry()`. Dedup HashMap capped at 1M entries (`MAX_DEDUP_ENTRIES`). Tile data
-  optionally streamed via `TileBlob::File`. Saves ~12 GB at planet scale.
-
 - [ ] **Node index virtual memory at planet scale** — `advise_random()` method exists in
   node_index.rs but is **not called** — it regresses Denmark by +65% because way→node lookups
   have locality and readahead helps. The node index is 102 GB even for Denmark (OSM node IDs
   are global). Two-level index rejected (12B/4096 blocks ≈ 93 GB, no savings). Needs
   planet-scale testing to determine if MADV_RANDOM helps when node density is higher.
   See `docs/madvise-investigation.md` and `node_index.rs` module comment.
+
+## Profiling
+
+Hotpath profile results and analysis: `docs/hotpath-profile.md`
 
 ## Performance: Allocation Pressure (High Impact)
 
@@ -133,24 +132,7 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
   perfect hash (`phf`) over the ~50 known tag keys, mapping to enum — eliminates string
   comparison entirely but requires maintaining the key set.
 
-- [x] **Polygon clipping creates 4 intermediate Vecs** — replaced with double-buffer swap in
-  `clip_polygon()`. Two Vecs (`input`/`output`) swap roles via `std::mem::swap` across the four
-  Sutherland-Hodgman edge passes. New `clip_polygon_edge_into()` appends to an existing buffer.
-
 - [ ] **Simplify allocates two Vecs per call** — `simplify()` allocates a `vec![bool]` keep array and a result Vec per invocation. Accept an output buffer, use a bitset for keep array. (`geometry.rs:167-180`)
-
-- [x] **`to_tile_coords` allocates a new Vec per call** — added `to_tile_coords_into()` buffer-reuse
-  variant. Used in `emit_line_feature` and `emit_polygon_feature` hot paths. Original function
-  retained for tests and non-hot paths.
-
-- [x] **`clip_linestring` returns `Vec<Vec<Point>>`** — changed to `SmallVec<[Vec<Point>; 1]>`.
-  Most clips produce exactly one segment, so the outer container stays inline.
-
-- [x] **`match_element` always allocates `Vec<LayerMatch>`** — changed to `SmallVec<[LayerMatch; 4]>`.
-  Most elements match 1-3 layers.
-
-- [x] **`LayerMatch.attrs: Vec<Attr>` allocates per match** — changed to `SmallVec<[Attr; 8]>`.
-  Most matches have 1-6 attributes.
 
 - [ ] **POI `contains()` linear scan on 50-entry arrays** — `AMENITY_VALUES` (51 entries), `SHOP_VALUES` (37 entries) searched linearly. These are already sorted; use `binary_search()` or `phf` perfect hash set. (`pois.rs:93-157, 219-233`)
 
@@ -181,79 +163,6 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
   `ram_bytes()` exist in node_index.rs but are not called. Needs planet-scale testing.
   Full investigation: `docs/madvise-investigation.md`. WayIndex MADV_RANDOM in
   `finish_writing()` is fine (relation lookups are truly non-sequential).
-
-## Correctness Bugs
-
-- [x] **MVT value hash collision bug** — `value_map` now uses `HashMap<Value, u16>` with manual
-  `Hash`+`Eq` impls on `Value` (floats hashed via `to_bits()`). Eliminates silent wrong tile data
-  from 64-bit hash collisions. Old `value_hash` helper removed.
-
-- [x] **NodeIndex sentinel value `(0, 0)` is a valid coordinate** — XOR stored coordinates with
-  `COORD_XOR = 0x55555555` so that zero-filled mmap pages (unwritten) remain detectable as None,
-  while a real node at (0, 0) stores as non-zero. The XOR constant decodes to 143.17° latitude,
-  which is outside the valid range, so no real coordinate pair can produce a false "unset".
-
-- [x] **`compare_tiles.rs` `expand_single` wrong for runs** — all tiles in a PMTiles run share
-  the same data blob; removed the `offset + length * r` increment so all tiles use the same offset.
-
-## Code Quality: Duplication
-
-- [x] **Node/DenseNode processing duplicated** — extracted `handle_node!` macro in `pipeline.rs`.
-  Both `Node` and `DenseNode` have different types but identical processing logic; a macro
-  avoids the duplication without requiring a shared trait.
-
-- [x] **`emit_point_feature` / `emit_centroid_feature` nearly identical** — merged into single
-  `emit_point_or_centroid(osm_id, point, ...)` in `pipeline.rs`.
-
-- [x] **Cascading simplification loop duplicated 3-4x** — extracted `for_each_zoom_simplified`
-  (single geometry) and `for_each_zoom_simplified_multi` (outer+inners) helpers in `geometry.rs`.
-  Used in `emit_line_feature`, `emit_polygon_feature`, `emit_multipolygon_feature`, and
-  `emit_ocean_polygon`.
-
-- [x] **`point_in_polygon` implemented twice** — consolidated into `geometry::point_in_polygon`.
-  Both `ocean.rs` and `multipolygon.rs` now import from geometry.
-
-- [x] **POI matchers: 6 functions with identical structure** — extracted `match_tag_in_list`
-  helper in `pois.rs` for the 3 simple matchers (emergency, historic, shop). 3 complex
-  matchers (leisure, man_made, tourism) kept separate due to extra attribute logic.
-
-- [x] **`match_addresses_point` / `match_addresses_centroid` duplicated** — extracted shared
-  `match_addresses` helper taking `GeomExpect` as parameter in `shortbread.rs`.
-
-- [x] **Hilbert curve code duplicated in `compare_tiles.rs`** — deleted local copies, now
-  imports `elivagar::pmtiles_writer::tile_id_to_zxy`.
-
-## Code Quality: Type Safety & API
-
-All reviewed, none worth changing:
-
-- **`Attr` tuple** — 3-element tuple is clear when destructured (`key, val, min_zoom`). A named struct would make ~100+ construction sites more verbose for no readability gain.
-- **`PipelineError(String)`** — No code ever inspects the variant; errors are only displayed. An enum would be over-engineering.
-- **Layer indices as `u8`** — `Layer` is `#[repr(u8)]`, so `as u8` is a zero-cost correct cast. A wrapper method is pure ceremony.
-- **`GeomType` hardcoded integers** — 4-line match in one place, right next to "geom_type" comment. `TryFrom` would be more boilerplate than the match.
-- **`SortReader::next()` fallible** — Standard `Iterator` can't express `Result<Option<T>>`. The `#[allow]` + `while let` pattern is idiomatic for fallible iteration.
-- **Wire format version byte** — Internal format used in `.tilegen_tmp` within a single run. Never persisted across versions or shared.
-
-## Code Quality: Miscellaneous
-
-- [x] **`expect("slice")` messages not helpful** — changed to `expect("shapefile field read")`.
-
-- [x] **Dead match arm in `water_polygons_labels`** — simplified to `let label_zoom = 14`.
-
-- [x] **`main.rs` argument parsing has no bounds check** — added bounds check with
-  `"{flag} requires a value"` error message for all flags that take arguments.
-
-- [x] **Magic numbers: sort chunk size** — extracted `SORT_CHUNK_SIZE: usize = 1 << 30` in
-  pipeline.rs, also fixed inconsistent use of `"sort_chunks"` literal vs `SORT_CHUNKS_DIR`.
-
-Reviewed, not worth changing:
-
-- **Silent failures in `add_feature_to_layer`** — internal format, corruption means a code bug (caught by tests). Logging in a billion-call hot path would add noise. Commented.
-- **Unused `mvt::Value` variants** — MVT protobuf spec completeness; already `#[allow(dead_code)]`.
-- **`drop(std::fs::remove_dir_all(...))`** — `drop()` is actually the clippy-preferred way to discard a `#[must_use]` value (`let_underscore_must_use`).
-- **PMTiles metadata JSON** — 20 lines of fixed-schema formatting doesn't warrant a serde_json runtime dep. Validated by test. Commented.
-- **Gzip level / batch sizes** — batch sizes already named constants; gzip level 6 is a single site, commented.
-- **Ocean `HashSet<u64>`** — ocean phase is 2.8s total; a bitset would complicate code for marginal gain.
 
 ## Test Coverage Gaps
 

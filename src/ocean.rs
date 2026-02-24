@@ -34,6 +34,7 @@ struct OceanPolygon {
 /// intersecting data_bounds get their full geometry parsed.
 /// Then all polygons are processed in parallel with rayon.
 #[allow(clippy::too_many_lines)]
+#[hotpath::measure]
 pub(crate) fn process_ocean_shapefile(
     path: &std::path::Path,
     data_bounds: &MercBbox,

@@ -193,6 +193,7 @@ pub fn encode_tile(layers: &[&LayerBuilder]) -> Vec<u8> {
     encode_tile_with(layers, &mut scratch)
 }
 
+#[hotpath::measure]
 pub fn encode_tile_with(layers: &[&LayerBuilder], scratch: &mut EncodeScratch) -> Vec<u8> {
     let mut buf = Vec::with_capacity(4096);
     for layer in layers {
