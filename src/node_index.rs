@@ -1,3 +1,28 @@
+// Flat mmap'd node coordinate index.
+//
+// Direct-addressed at `node_id * 8`: for each node, stores 4 bytes lat_e7 +
+// 4 bytes lon_e7. The file grows in 1 GB increments and is backed by mmap for
+// zero-copy access.
+//
+// Planet scale: OSM has ~8.5B nodes with IDs up to ~12B, so the index file
+// grows to ~96 GB. On a 64 GB machine this exceeds physical RAM, making
+// madvise hints critical — see `advise_random()`.
+//
+// A two-level index (blocks of 4096 nodes) was considered but rejected:
+// 12B / 4096 = ~2.9M blocks × 32 KB = ~93 GB — nearly identical to the flat
+// index because OSM node IDs are distributed fairly continuously, not sparsely.
+//
+// madvise history:
+//   6724e0a — added MADV_SEQUENTIAL at create time + after grow
+//   4e427b4 — removed MADV_SEQUENTIAL (caused 2.3× PBF regression on Denmark,
+//             34s→74s, because the hint persisted into the way-processing phase
+//             where reads are random, triggering aggressive wasted readahead)
+//
+// Current approach: no hints during the write phase (kernel default NORMAL is
+// fine for sequential writes to fresh zero-filled pages), then MADV_RANDOM
+// before the read phase via `advise_random()`. This tells the kernel not to
+// readahead when doing billions of random node lookups during way processing.
+
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -21,6 +46,9 @@ pub struct NodeIndex {
 
 impl NodeIndex {
     /// Create a new writable node index file at `path`.
+    ///
+    /// No madvise hints are set during the write phase — see module-level
+    /// comment for history on why MADV_SEQUENTIAL was removed.
     pub fn create(path: &Path) -> io::Result<Self> {
         let file = File::options()
             .read(true)
@@ -34,12 +62,22 @@ impl NodeIndex {
 
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
-
         Ok(NodeIndex {
             file,
             mmap,
             file_len,
         })
+    }
+
+    /// Switch to random-access mode. Call once after all nodes have been
+    /// written and before way processing begins reading node coordinates.
+    ///
+    /// At planet scale the index is ~96 GB. Without this hint, each random
+    /// read triggers ~128 KB of kernel readahead that gets evicted before use,
+    /// wasting enormous I/O bandwidth. MADV_RANDOM limits faults to the single
+    /// 4 KB page actually needed.
+    pub fn advise_random(&self) {
+        self.mmap.advise(memmap2::Advice::Random).ok();
     }
 
     /// Write coordinates for a node. Grows the file if needed.

@@ -136,29 +136,40 @@ pub enum OsmGeomType {
     MultiPolygon,
 }
 
-/// Tag lookup helper.
+/// Tag lookup helper. Expects tags pre-sorted by key (call `sort_tags()`
+/// first) so lookups use binary search (O(log n)) instead of linear scan
+/// (O(n)). With 3-15 tags per element and ~160 lookups per closed way across
+/// 21 matchers, this cuts total comparisons from ~1280 to ~480 per element.
 pub struct Tags<'a>(pub &'a [(&'a str, &'a str)]);
+
+/// Sort a tag slice by key for binary search in `Tags`.
+/// PBF tags are usually already sorted, so this is ~N comparisons (insertion sort).
+pub fn sort_tags(tags: &mut [(&str, &str)]) {
+    tags.sort_unstable_by_key(|(k, _)| *k);
+}
 
 impl<'a> Tags<'a> {
     pub fn get(&self, key: &str) -> Option<&'a str> {
-        self.0
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| *v)
+        let i = self.0.binary_search_by_key(&key, |(k, _)| k).ok()?;
+        Some(self.0[i].1)
     }
 
     pub fn has(&self, key: &str) -> bool {
-        self.0.iter().any(|(k, _)| *k == key)
+        self.0.binary_search_by_key(&key, |(k, _)| k).is_ok()
     }
 
     pub fn has_value(&self, key: &str, val: &str) -> bool {
-        self.0.iter().any(|(k, v)| *k == key && *v == val)
+        match self.0.binary_search_by_key(&key, |(k, _)| k) {
+            Ok(i) => self.0[i].1 == val,
+            Err(_) => false,
+        }
     }
 
     pub fn has_any(&self, key: &str, vals: &[&str]) -> bool {
-        self.0
-            .iter()
-            .any(|(k, v)| *k == key && vals.contains(v))
+        match self.0.binary_search_by_key(&key, |(k, _)| k) {
+            Ok(i) => vals.contains(&self.0[i].1),
+            Err(_) => false,
+        }
     }
 }
 

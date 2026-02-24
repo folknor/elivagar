@@ -108,13 +108,16 @@ impl WayIndex {
 
     /// Call after all ways have been written. Flushes the data writer and
     /// opens a read-only mmap over way_data.bin for random access reads.
+    ///
+    /// Sets MADV_RANDOM on both mmaps — relation member lookups are
+    /// non-sequential. See node_index.rs module comment for madvise history
+    /// (commits 6724e0a, 4e427b4).
     pub fn finish_writing(&mut self) -> io::Result<()> {
         // Flush and drop the BufWriter.
         if let Some(mut writer) = self.data_writer.take() {
             writer.flush()?;
         }
 
-        // Switch offsets to random access (relation member lookups are non-sequential).
         self.offsets_mmap.advise(memmap2::Advice::Random).ok();
 
         // Open a read-only mmap over the data file (only if non-empty).

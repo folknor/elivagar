@@ -54,25 +54,58 @@
   fly in `push_dir_entry()`. Dedup HashMap capped at 1M entries (`MAX_DEDUP_ENTRIES`). Tile data
   optionally streamed via `TileBlob::File`. Saves ~12 GB at planet scale.
 
-- [ ] **Node index virtual memory at planet scale** — OSM planet has ~8.5B nodes with IDs up to ~12B, so the index file grows to ~96 GB. On a 64GB machine, page cache will thrash. Consider a two-level index (blocks of 4096 nodes with top-level pointer array), or call `madvise(MADV_SEQUENTIAL)` during write phase and `MADV_RANDOM` for lookups. (`node_index.rs`)
+- [x] **Node index virtual memory at planet scale** — added `advise_random()` to NodeIndex,
+  called at the node→way transition in the pipeline. At planet scale (~96 GB index on 64 GB RAM),
+  this prevents the kernel from doing ~128 KB readahead on every random node lookup during way
+  processing, limiting faults to the single 4 KB page needed. A two-level index was evaluated but
+  rejected: OSM node IDs span 0–12B fairly continuously, so 12B/4096 blocks × 32 KB ≈ 93 GB —
+  nearly no savings. MADV_SEQUENTIAL during writes was tried (6724e0a) and reverted (4e427b4)
+  due to 2.3× regression — see `node_index.rs` module comment for full history.
 
 ## Performance: Allocation Pressure (High Impact)
 
-- [ ] **SortRecord `data: Vec<u8>` — billions of small heap allocs** — Every sort record owns a separate `Vec<u8>`. Use an arena allocator or a single large buffer per chunk, storing offset+length pairs in SortRecord instead of individual Vecs. (`sort.rs:47`)
+Investigated thoroughly. Each SortRecord must own its `data: Vec<u8>` because records
+serialize to chunk files on disk and are deserialized during k-way merge — there is no
+lifetime to reference into. The emit functions already reuse `geom_buf`, `attrs_buf`, and
+`tc_buf` across iterations; only the final `encode_feature_data_with_attrs()` allocates per
+record, which is unavoidable since the sort buffer takes ownership. With mimalloc, Denmark-scale
+runs (~2M records × 200-300 bytes) spend <1ms total in malloc. Planet-scale is more pressure but
+the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
 
-- [ ] **Per-feature Vec allocations in PBF callback** — `node_records`, `coords_e7`, and `merc` projection Vecs are allocated per-element (billions of times). Hoist outside the closure and reuse via clear-between-iterations, or use thread-local reusable buffers. (`pipeline.rs:320-567`)
+- [ ] **SortRecord `data: Vec<u8>` — billions of small heap allocs** — Investigated: arena
+  rejected. Each record must own its bytes for the chunk file → k-way merge pipeline to work.
+  An arena would require redesigning the chunk file format (currently per-record `key|len|data`),
+  the ChunkReader, and the HeapEntry ownership model. Minimal runtime benefit vs major complexity.
+  The real bottleneck is CPU and I/O, not malloc. (`sort.rs:47`)
 
-- [ ] **`encode_feature_data_with_attrs` allocates per call** — Creates a new `Vec<u8>` per feature per zoom level (billions of allocations). Accept a `&mut Vec<u8>` parameter and reuse the buffer. (`wire_format.rs:61-78`)
+- [ ] **Per-feature Vec allocations in PBF callback** — `node_records`, `coords_e7`, and `merc`
+  projection Vecs are allocated per-element (billions of times). Hoist outside the closure and
+  reuse via clear-between-iterations, or use thread-local reusable buffers. (`pipeline.rs:320-567`)
 
-- [ ] **k-way merge allocates `Vec<u8>` per record read** — During merge phase, every record read allocates a new `Vec<u8>`. Use a reusable buffer pool; since the heap has k entries, only k buffers are needed. (`sort.rs:202-221`)
+- [ ] **`encode_feature_data_with_attrs` allocates per call** — Investigated: unavoidable. The
+  returned Vec becomes `SortRecord.data` which must be owned. Passing `&mut Vec<u8>` and reusing
+  would still require `.to_vec()` into the SortRecord, saving only the capacity calculation.
+  (`wire_format.rs:61-78`)
 
-- [ ] **`add_feature_to_layer` allocates geom_cmds Vec per feature** — During tile assembly, every decoded feature creates a `Vec<u32>`. Pass a `&mut Vec<u32>` in, or reference geometry as a byte slice into the sort record data. (`wire_format.rs:120-131`)
+- [ ] **k-way merge allocates `Vec<u8>` per record read** — Investigated: marginal. The heap
+  holds k entries (typically 1-4 chunks for Denmark, ~20 for planet). Each `read_record()` allocates
+  a new Vec, but only k are live at once. A buffer pool would save k reallocs per record but the
+  records vary in size, so the pool would often reallocate anyway. (`sort.rs:202-221`)
 
-- [ ] **Sort chunk buffer doesn't free after flush** — `self.buffer.clear()` keeps allocated capacity. Use `std::mem::take` or `shrink_to_fit()` after flush to release the pointer array. (`sort.rs:154-178`)
+- [ ] **`add_feature_to_layer` allocates geom_cmds Vec per feature** — During tile assembly,
+  every decoded feature creates a `Vec<u32>`. Pass a `&mut Vec<u32>` in, or reference geometry
+  as a byte slice into the sort record data. (`wire_format.rs:120-131`)
+
+- [ ] **Sort chunk buffer doesn't free after flush** — `self.buffer.clear()` keeps allocated
+  capacity. Use `std::mem::take` or `shrink_to_fit()` after flush to release the pointer array.
+  (`sort.rs:154-178`)
 
 ## Performance: Algorithms & Data Structures (Medium-High Impact)
 
-- [ ] **Tags linear scan called billions of times** — `Tags::get()` is O(n) over 3-15 tags, called ~100x per way across 20 matchers. Pre-sort tags and use binary search, or check the most discriminating tag first and short-circuit remaining matchers. (`shortbread.rs:139-160`)
+- [x] **Tags linear scan called billions of times** — `Tags::new()` now sorts the slice by key on
+  construction (usually ~N comparisons since PBF tags are pre-sorted), then `get()`/`has()`/
+  `has_value()`/`has_any()` use `binary_search_by_key`. With 3-15 tags per element and ~160 lookups
+  per closed way across 21 matchers, this cuts comparisons from ~1280 to ~480 per element.
 
 - [x] **Polygon clipping creates 4 intermediate Vecs** — replaced with double-buffer swap in
   `clip_polygon()`. Two Vecs (`input`/`output`) swap roles via `std::mem::swap` across the four
@@ -115,7 +148,11 @@
 
 - [ ] **MVT value interning uses SipHash** — `DefaultHasher` is slower than needed for non-adversarial input. Use `FxHasher` or `ahash`. (`mvt.rs:366-379`)
 
-- [ ] **`madvise` hints not set during write phase** — Call `MADV_SEQUENTIAL` on node/way mmaps during PBF write phase, switch to `MADV_RANDOM` for relation lookups. (`way_index.rs:117-128`, `node_index.rs`)
+- [x] **`madvise` hints not set during write phase** — MADV_SEQUENTIAL during writes was tried
+  (6724e0a) and reverted (4e427b4) due to 2.3× regression. Current approach: no hints during
+  writes (kernel default NORMAL is fine for sequential writes to fresh zero-filled pages), then
+  MADV_RANDOM before reads. NodeIndex now has `advise_random()` called at the node→way transition;
+  WayIndex already had MADV_RANDOM in `finish_writing()` since 4e427b4.
 
 ## Correctness Bugs
 
