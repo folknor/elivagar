@@ -114,16 +114,18 @@ hoisted in `emit_polygon_feature` and `emit_multipolygon_feature`. After fix: **
 (297 B avg). Residual is first-call growth per rayon thread. Global throughput dropped
 67.3 GB → 63.1 GB (−4.2 GB).
 
-#### 2. simplify() is the #2 exclusive allocator
+#### 2. simplify() was the #2 exclusive allocator — FIXED
 
-Called from `for_each_zoom_simplified` at every zoom level. Allocates a `vec![bool]` keep
-array and a result `Vec<Point>` per invocation. 6.6M calls × ~1.4 KB exclusive (subtracting
-clip_polygon's share) ≈ **~7 GB**. Fix: bitset for keep array + reusable output buffer.
+Was allocating a `vec![bool]` keep array and result `Vec<Point>` per call from
+`for_each_zoom_simplified`. Added `simplify_into()` with reusable buffers hoisted outside
+the zoom loop, using `swap` instead of re-allocating each level. After fix:
+`for_each_zoom_simplified` dropped 10.3 GB → **9.1 GB** (−1.2 GB). Global throughput
+63.1 GB → **62.6 GB** (−0.5 GB).
 
-#### 3. pbfhogg blob decoding is 10.2 GB — out of our hands
+#### 3. pbfhogg blob decoding is 10.2 GB — being improved upstream
 
-7.4K blobs × 1.4 MB avg. This is zlib decompression buffers inside pbfhogg. We don't
-control this unless we modify pbfhogg.
+7.4K blobs × 1.4 MB avg. This is zlib decompression buffers inside pbfhogg. Work is
+underway in pbfhogg to reduce this.
 
 #### 4. Planet-scale projection
 
@@ -134,8 +136,7 @@ across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-l
 ## Implied Priorities
 
 1. ~~**Eliminate clip_polygon per-call allocation**~~ — Done. 4.4 GB → 2.5 GB.
-2. **Eliminate simplify per-call allocation** — ~7 GB exclusive from 6.6M calls. Bitset for
-   keep array + reusable output buffer.
+2. ~~**Eliminate simplify per-call allocation**~~ — Done. 10.3 GB → 9.1 GB cumulative.
 3. **Reduce node index I/O pressure** — 54% of main thread CPU is kernel time from mmap
    page faults. Prefetch, batch lookups, or restructure to reduce random access.
 4. **Increase PBF phase parallelism** — only ~2 of 28 cores utilized. Move tag
