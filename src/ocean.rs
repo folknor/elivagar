@@ -217,7 +217,7 @@ pub(crate) fn process_ocean_shapefile(
 /// 4. Rows with no boundary tiles: single PIP test, fill entire row if inside.
 ///
 /// Reduces PIP calls from O(bbox_tiles) to O(gaps × rows).
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
 fn emit_ocean_polygon(
     feature_id: u64,
     outer: &[Point],
@@ -322,9 +322,8 @@ fn emit_ocean_polygon(
             if let Some(bx_list) = boundary_rows.get(&ty) {
                 // Row has boundary tiles — clip+emit them, then fill gaps
                 for &tx in bx_list {
-                    if let Some(mask) = land_mask {
-                        if !mask.has_land(z, tx, ty) { continue; }
-                    }
+                    if let Some(mask) = land_mask
+                        && !mask.has_land(z, tx, ty) { continue; }
                     emit_boundary_tile(
                         feature_id, tx, ty, z, simp_outer, simp_inners,
                         layer_idx, attrs, records,
@@ -349,9 +348,8 @@ fn emit_ocean_polygon(
                     let test_cx = (f64::from(*gx_min) + 0.5) * inv_scale;
                     if pip(test_cx, cy) {
                         for tx in *gx_min..=*gx_max {
-                            if let Some(mask) = land_mask {
-                                if !mask.has_land(z, tx, ty) { continue; }
-                            }
+                            if let Some(mask) = land_mask
+                                && !mask.has_land(z, tx, ty) { continue; }
                             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
                             let key = sort::make_sort_key(tile_id, layer_idx, 0);
                             records.push(SortRecord { key, data: fill_data.clone() });
@@ -363,9 +361,8 @@ fn emit_ocean_polygon(
                 let test_cx = (f64::from(tx_min) + 0.5) * inv_scale;
                 if pip(test_cx, cy) {
                     for tx in tx_min..=tx_max {
-                        if let Some(mask) = land_mask {
-                            if !mask.has_land(z, tx, ty) { continue; }
-                        }
+                        if let Some(mask) = land_mask
+                            && !mask.has_land(z, tx, ty) { continue; }
                         let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
                         let key = sort::make_sort_key(tile_id, layer_idx, 0);
                         records.push(SortRecord { key, data: fill_data.clone() });

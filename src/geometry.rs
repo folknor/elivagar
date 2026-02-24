@@ -22,6 +22,7 @@ const PIXEL_FACTOR: f64 = 1.0;
 pub(crate) const BUFFER_FRACTION: f64 = 8.0 / EXTENT;
 
 /// One tile pixel in extent units: 4096 / 256 = 16.
+#[allow(clippy::cast_possible_truncation)]
 const PX: i64 = (EXTENT as i64) / 256;
 
 /// Minimum line length squared in tile extent units (1 pixel = 16 extent units).
@@ -757,20 +758,18 @@ pub(crate) fn merc_bbox(points: &[Point]) -> MercBbox {
 
 /// Close a tile-coordinate ring (if not already closed) and enforce clockwise winding (MVT outer).
 pub(crate) fn close_and_orient_cw(ring: &mut Vec<(i32, i32)>) {
-    if ring.first() != ring.last() {
-        if let Some(&first) = ring.first() {
+    if ring.first() != ring.last()
+        && let Some(&first) = ring.first() {
             ring.push(first);
-        }
     }
     ensure_cw_tile(ring);
 }
 
 /// Close a tile-coordinate ring (if not already closed) and enforce counter-clockwise winding (MVT inner).
 pub(crate) fn close_and_orient_ccw(ring: &mut Vec<(i32, i32)>) {
-    if ring.first() != ring.last() {
-        if let Some(&first) = ring.first() {
+    if ring.first() != ring.last()
+        && let Some(&first) = ring.first() {
             ring.push(first);
-        }
     }
     ensure_ccw_tile(ring);
 }

@@ -18,6 +18,7 @@ pub enum GeomType {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum Value {
     String(String),
     Float(f32),
@@ -457,7 +458,8 @@ impl LayerBuilder {
 
         // Group features by (geom_type, sorted tags).
         // Value: list of feature indices in this group.
-        let mut groups: HashMap<(GeomType, Vec<(u16, u16)>), Vec<usize>> = HashMap::new();
+        type MergeKey = (GeomType, Vec<(u16, u16)>);
+        let mut groups: HashMap<MergeKey, Vec<usize>> = HashMap::new();
         for (i, f) in self.features.iter().enumerate() {
             if f.geom_type == GeomType::Point {
                 continue;

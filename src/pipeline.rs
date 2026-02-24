@@ -469,6 +469,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 // Node processing (point layers)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn process_node(
     osm_id: u64,
     lat_e7: i32,
@@ -682,7 +683,7 @@ fn flush_rel_batch(
 
     let results: Vec<Vec<SortRecord>> = batch
         .into_par_iter()
-        .map(|rel| process_prepared_relation(rel, min_zoom, max_zoom, land_mask))
+        .map(|rel| process_prepared_relation(&rel, min_zoom, max_zoom, land_mask))
         .collect();
 
     let mut count: u64 = 0;
@@ -697,7 +698,7 @@ fn flush_rel_batch(
 
 /// Process a prepared relation's geometry (CPU-bound). Called from rayon worker threads.
 fn process_prepared_relation(
-    rel: PreparedRelation,
+    rel: &PreparedRelation,
     min_zoom: u8,
     max_zoom: u8,
     land_mask: &geometry::LandMask,
@@ -1118,7 +1119,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
                         batch.push(current);
                     }
                     if !batch.is_empty() {
-                        let _ = read_tx.send(batch); // ignore: encoder may have exited
+                        drop(read_tx.send(batch)); // ignore: encoder may have exited
                     }
                     break;
                 };

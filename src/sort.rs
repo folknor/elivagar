@@ -137,7 +137,7 @@ impl SortWriter {
         if !self.buffer.is_empty() {
             self.flush_chunk()?;
         }
-        SortReader::new(self.chunk_paths)
+        SortReader::new(&self.chunk_paths)
     }
 
     /// Sort the in-memory buffer by key and write a chunk file to disk.
@@ -263,7 +263,6 @@ impl PartialOrd for HeapEntry {
 pub struct SortReader {
     chunk_readers: Vec<ChunkReader>,
     heap: BinaryHeap<HeapEntry>,
-    chunk_paths: Vec<PathBuf>,
 }
 
 impl SortReader {
@@ -280,12 +279,12 @@ impl SortReader {
                 break;
             }
         }
-        Self::new(chunk_paths)
+        Self::new(&chunk_paths)
     }
 
     /// Open all chunk files and prime the merge heap with the first record
     /// from each chunk.
-    fn new(chunk_paths: Vec<PathBuf>) -> io::Result<Self> {
+    fn new(chunk_paths: &[PathBuf]) -> io::Result<Self> {
         let mut chunk_readers = Vec::with_capacity(chunk_paths.len());
         let mut heap = BinaryHeap::with_capacity(chunk_paths.len());
 
@@ -304,7 +303,6 @@ impl SortReader {
         Ok(SortReader {
             chunk_readers,
             heap,
-            chunk_paths,
         })
     }
 
@@ -335,18 +333,6 @@ impl SortReader {
         Ok(Some(result))
     }
 
-    /// Delete all chunk files and the temporary directory.
-    pub fn cleanup(&self) {
-        for path in &self.chunk_paths {
-            drop(fs::remove_file(path));
-        }
-        // Only remove the parent dir if all chunks came from the same place.
-        if let Some(first) = self.chunk_paths.first()
-            && let Some(parent) = first.parent()
-        {
-            drop(fs::remove_dir(parent));
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +422,7 @@ mod tests {
         expected_keys.sort();
         assert_eq!(output_keys, expected_keys);
 
-        reader.cleanup();
+
         drop(fs::remove_dir_all(&dir));
     }
 
@@ -487,7 +473,7 @@ mod tests {
         expected_keys.sort();
         assert_eq!(output_keys, expected_keys);
 
-        reader.cleanup();
+
         drop(fs::remove_dir_all(&dir));
     }
 
@@ -501,7 +487,7 @@ mod tests {
 
         assert!(reader.next().unwrap().is_none());
 
-        reader.cleanup();
+
         drop(fs::remove_dir_all(&dir));
     }
 
@@ -533,7 +519,7 @@ mod tests {
         }
         assert_eq!(count, 100);
 
-        reader.cleanup();
+
         drop(fs::remove_dir_all(&dir));
     }
 
@@ -572,7 +558,7 @@ mod tests {
         }
         assert_eq!(count, 50);
 
-        reader.cleanup();
+
         drop(fs::remove_dir_all(&dir));
     }
 }
