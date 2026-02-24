@@ -107,11 +107,12 @@ RSS: 1.6 GB. System allocator is much less memory-efficient than mimalloc.
 
 ### Key allocation insights
 
-#### 1. clip_polygon is the #1 exclusive allocator
+#### 1. clip_polygon was the #1 exclusive allocator — FIXED
 
-8.9M calls × 530 B avg = **4.4 GB.** This is `input = ring.to_vec()` (the double-buffer
-input copy) plus the output Vec created each call. Fix: pass in reusable double-buffers
-from the caller so the Vecs grow to max size and stop allocating.
+Was 8.9M calls × 530 B avg = 4.4 GB. Added `clip_polygon_into()` with reusable double-buffers
+hoisted in `emit_polygon_feature` and `emit_multipolygon_feature`. After fix: **2.5 GB**
+(297 B avg). Residual is first-call growth per rayon thread. Global throughput dropped
+67.3 GB → 63.1 GB (−4.2 GB).
 
 #### 2. simplify() is the #2 exclusive allocator
 
@@ -132,8 +133,7 @@ across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-l
 
 ## Implied Priorities
 
-1. **Eliminate clip_polygon per-call allocation** — 4.4 GB from 8.9M calls. Pass reusable
-   double-buffers from the caller. Highest bang-for-buck change.
+1. ~~**Eliminate clip_polygon per-call allocation**~~ — Done. 4.4 GB → 2.5 GB.
 2. **Eliminate simplify per-call allocation** — ~7 GB exclusive from 6.6M calls. Bitset for
    keep array + reusable output buffer.
 3. **Reduce node index I/O pressure** — 54% of main thread CPU is kernel time from mmap
