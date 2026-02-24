@@ -300,34 +300,37 @@ may close most of the gap.
   significant, consider increasing `PIXEL_FACTOR` to 1.0 (still conservative
   vs Tilemaker, and 10x more aggressive than Planetiler's 0.1 px).
 
-#### Cause 3: Redundant false-valued boolean attributes
+#### Cause 3: Redundant false-valued boolean attributes — DONE
 
-Elivagar emits boolean attributes even when false: `rail=false`, `tunnel=false`,
+Elivagar emitted boolean attributes even when false: `rail=false`, `tunnel=false`,
 `bridge=false`, `oneway=false`, `oneway_reverse=false` on streets; `rail=false`
-on street_polygons. Each costs a key+value index pair in the protobuf tag array.
-Tilemaker's Lua config only sets these when true — `Attribute("tunnel", "yes")`
-is conditional, so the attribute is absent on non-tunnel features. Planetiler's
-Shortbread YAML also zoom-gates these attributes (tunnel/bridge/link at z11+,
-oneway at z14+).
+on street_polygons.
 
-On a layer like streets with many features, this adds up: 3-6 unnecessary boolean
-tags per feature × thousands of features per tile.
+**Fixed:** Only emit boolean attrs when true on streets, street_polygons,
+street_labels, water_lines, water_lines_labels. Recycling POI booleans
+(semantically meaningful per spec) left unchanged.
 
-- [ ] Only emit boolean attributes when true. Skip `rail`, `tunnel`, `bridge`,
-  `oneway`, `oneway_reverse`, `surface`, `service` etc. when the value is false
-  or empty.
+**Impact (Denmark no-ocean):** -2.75 MB (-0.8%), sort -105 ms, assemble -69 ms.
 
-#### Cause 4: No collinear vertex removal after clipping
+#### Cause 4: Duplicate vertex removal after clipping — DONE
 
 Both Tilemaker and Planetiler filter consecutive duplicate points after scaling
-to integer tile coordinates. Planetiler's `CommandEncoder` skips points where
-`_x == x && _y == y`. Our Sutherland-Hodgman polygon clipper can produce
-collinear vertices along clip edges that survive into the MVT encoding. Minor
-but contributes extra geometry commands.
+to integer tile coordinates.
 
-- [ ] Deduplicate consecutive identical points after coordinate scaling in MVT
-  encoding. Optionally also remove collinear points (three consecutive points
-  on the same line).
+**Fixed:** `encode_linestring` and `encode_polygon` in `mvt.rs` now skip
+consecutive duplicate points. Degenerate geometries (lines collapsed to 1 point,
+rings collapsed to < 3 unique points) are discarded.
+
+**Impact (Denmark no-ocean, cumulative with Cause 3):** additional -0.6 MB,
+-36,706 degenerate features dropped, -19 empty tiles eliminated.
+
+**Combined (Cause 3 + 4):** -3.4 MB (-1.0%), 347.0 → 343.6 MB. No perf regression.
+
+| | Baseline | After Cause 3+4 | Delta |
+|---|---|---|---|
+| Output | 347.0 MB | 343.6 MB | -3.4 MB (-1.0%) |
+| Assemble | 2,493 ms | 2,366 ms | -127 ms (-5.1%) |
+| Features | 16,583,912 | 16,547,206 | -36,706 |
 
 ### Done
 

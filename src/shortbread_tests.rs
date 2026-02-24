@@ -726,10 +726,14 @@ fn shortbread_spec_yaml() {
                             }
                         }
                         None => {
-                            failures.push(format!(
-                                "[{name}] layer '{exp_layer}' missing attr '{key}' (expected {expected_val:?})"
-                            ));
-                            case_ok = false;
+                            // Absent Bool(false) is OK — we omit false booleans
+                            // to save space (absent = default = false).
+                            if expected_val != AttrValue::Bool(false) {
+                                failures.push(format!(
+                                    "[{name}] layer '{exp_layer}' missing attr '{key}' (expected {expected_val:?})"
+                                ));
+                                case_ok = false;
+                            }
                         }
                     }
                 }

@@ -430,8 +430,12 @@ fn water_line_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
 fn match_water_lines(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     if let Some((kind, min_zoom)) = water_line_match(tags) {
         let mut attrs = vec![attr_str("kind", kind)];
-        attrs.push(attr_bool("tunnel", is_tunnel(tags)));
-        attrs.push(attr_bool("bridge", is_bridge(tags)));
+        if is_tunnel(tags) {
+            attrs.push(attr_bool("tunnel", true));
+        }
+        if is_bridge(tags) {
+            attrs.push(attr_bool("bridge", true));
+        }
         out.push(LayerMatch {
             layer: Layer::WaterLines,
             min_zoom,
@@ -449,8 +453,12 @@ fn match_water_lines_labels(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     if let Some((kind, _base_zoom)) = water_line_match(tags) {
         let mut attrs = vec![attr_str("kind", kind)];
         attrs.extend(name_attrs(tags));
-        attrs.push(attr_bool("tunnel", is_tunnel(tags)));
-        attrs.push(attr_bool("bridge", is_bridge(tags)));
+        if is_tunnel(tags) {
+            attrs.push(attr_bool("tunnel", true));
+        }
+        if is_bridge(tags) {
+            attrs.push(attr_bool("bridge", true));
+        }
         // Label layer has its own min_zoom per Shortbread spec
         let label_zoom = match kind {
             "canal" | "river" => 12,
@@ -934,27 +942,34 @@ fn match_streets_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     };
     let kind = street_kind(kind_raw);
     let is_link = kind_raw.ends_with("_link");
-    // kind and rail: always emitted. Others have per-attribute min_zoom.
-    let mut attrs = vec![
-        attr_dyn("kind", kind),
-        attr_bool_z("link", is_link, 11),
-        attr_bool("rail", is_rail),
-        attr_bool_z("tunnel", is_tunnel(tags), 11),
-        attr_bool_z("bridge", is_bridge(tags), 11),
-    ];
-    // Oneway: for non-railway, check tags; for railway, always false
+    // kind: always emitted. Boolean attrs only when true (saves ~3-6 tags/feature).
+    let mut attrs = vec![attr_dyn("kind", kind)];
+    if is_link {
+        attrs.push(attr_bool_z("link", true, 11));
+    }
     if is_rail {
-        attrs.push(attr_bool_z("oneway", false, 14));
-        attrs.push(attr_bool_z("oneway_reverse", false, 14));
-    } else {
+        attrs.push(attr_bool("rail", true));
+    }
+    if is_tunnel(tags) {
+        attrs.push(attr_bool_z("tunnel", true, 11));
+    }
+    if is_bridge(tags) {
+        attrs.push(attr_bool_z("bridge", true, 11));
+    }
+    // Oneway: only for non-railway, only when true
+    if !is_rail {
         let oneway_val = tags.get("oneway");
         let is_oneway = matches!(
             oneway_val,
             Some("yes") | Some("1") | Some("true") | Some("-1")
         );
         let is_reverse = oneway_val == Some("-1");
-        attrs.push(attr_bool_z("oneway", is_oneway, 14));
-        attrs.push(attr_bool_z("oneway_reverse", is_reverse, 14));
+        if is_oneway {
+            attrs.push(attr_bool_z("oneway", true, 14));
+        }
+        if is_reverse {
+            attrs.push(attr_bool_z("oneway_reverse", true, 14));
+        }
     }
     // Optional string attrs
     if let Some(v) = tags.get("tracktype") {
@@ -987,12 +1002,13 @@ fn match_streets_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
 
 fn match_street_polygons(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     if let Some((kind, min_zoom)) = street_polygon_match(tags) {
-        let mut attrs = vec![
-            attr_str("kind", kind),
-            attr_bool("bridge", is_bridge(tags)),
-            attr_bool("rail", false),
-            attr_bool("tunnel", is_tunnel(tags)),
-        ];
+        let mut attrs = vec![attr_str("kind", kind)];
+        if is_bridge(tags) {
+            attrs.push(attr_bool("bridge", true));
+        }
+        if is_tunnel(tags) {
+            attrs.push(attr_bool("tunnel", true));
+        }
         if let Some(v) = tags.get("service") {
             attrs.push(attr_dyn("service", v));
         }
@@ -1062,7 +1078,9 @@ fn match_street_labels_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
             attrs.push(attr_int("ref_cols", ref_cols as i64));
         }
     }
-    attrs.push(attr_bool("tunnel", is_tunnel(tags)));
+    if is_tunnel(tags) {
+        attrs.push(attr_bool("tunnel", true));
+    }
     out.push(LayerMatch {
         layer: Layer::StreetLabels,
         min_zoom,

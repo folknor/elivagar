@@ -204,16 +204,29 @@ pub fn encode_linestring(buf: &mut Vec<u32>, coords: &[(i32, i32)]) {
     buf.push(command(1, 1));
     buf.push(zigzag(coords[0].0));
     buf.push(zigzag(coords[0].1));
-    // LineTo remaining points
-    #[allow(clippy::cast_possible_truncation)]
-    buf.push(command(2, (coords.len() - 1) as u32));
+    // LineTo remaining points, skipping consecutive duplicates
+    let lineto_pos = buf.len();
+    buf.push(0); // placeholder for LineTo command (patched below)
     let mut cx = coords[0].0;
     let mut cy = coords[0].1;
+    let mut count = 0u32;
     for &(x, y) in &coords[1..] {
+        if x == cx && y == cy {
+            continue;
+        }
         buf.push(zigzag(x - cx));
         buf.push(zigzag(y - cy));
         cx = x;
         cy = y;
+        count += 1;
+    }
+    if count < 1 {
+        buf.clear(); // degenerate: all points collapsed to one
+        return;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        buf[lineto_pos] = command(2, count);
     }
 }
 
@@ -226,22 +239,40 @@ pub fn encode_polygon(buf: &mut Vec<u32>, rings: &[&[(i32, i32)]]) {
             continue;
         }
         let points = &ring[..ring.len() - 1];
+        // Save state in case we need to discard a degenerate ring
+        let save_len = buf.len();
+        let save_cx = cx;
+        let save_cy = cy;
         // MoveTo first point
         buf.push(command(1, 1));
         buf.push(zigzag(points[0].0 - cx));
         buf.push(zigzag(points[0].1 - cy));
         cx = points[0].0;
         cy = points[0].1;
-        // LineTo remaining (excluding last which is same as first)
-        if points.len() > 1 {
-            #[allow(clippy::cast_possible_truncation)]
-            buf.push(command(2, (points.len() - 1) as u32));
-            for &(x, y) in &points[1..] {
-                buf.push(zigzag(x - cx));
-                buf.push(zigzag(y - cy));
-                cx = x;
-                cy = y;
+        // LineTo remaining, skipping consecutive duplicates
+        let lineto_pos = buf.len();
+        buf.push(0); // placeholder for LineTo command
+        let mut count = 0u32;
+        for &(x, y) in &points[1..] {
+            if x == cx && y == cy {
+                continue;
             }
+            buf.push(zigzag(x - cx));
+            buf.push(zigzag(y - cy));
+            cx = x;
+            cy = y;
+            count += 1;
+        }
+        if count < 2 {
+            // Degenerate ring after dedup (< 3 unique points) — discard
+            buf.truncate(save_len);
+            cx = save_cx;
+            cy = save_cy;
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            buf[lineto_pos] = command(2, count);
         }
         // ClosePath
         buf.push(command(7, 1));

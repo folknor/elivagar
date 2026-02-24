@@ -5,18 +5,20 @@ cd "$(dirname "$0")/.."
 PBF="${1:-data/denmark-latest.osm.pbf}"
 RUNS="${2:-1}"
 SKIP_TO=""
+NO_OCEAN=false
 
 shift 2 2>/dev/null || true
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-to) SKIP_TO="$2"; shift 2 ;;
+        --no-ocean) NO_OCEAN=true; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
 
 if [ ! -f "$PBF" ]; then
     echo "PBF not found: $PBF"
-    echo "Usage: scripts/bench-self.sh [pbf] [runs] [--skip-to ocean|sort]"
+    echo "Usage: scripts/bench-self.sh [pbf] [runs] [--skip-to ocean|sort] [--no-ocean]"
     exit 1
 fi
 
@@ -40,7 +42,7 @@ ELIVAGAR_BIN=$(cargo build --release --message-format=json 2>/dev/null \
 OCEAN_SHP="data/water-polygons-split-3857/water_polygons.shp"
 OCEAN_SIMPLIFIED_SHP="data/simplified-water-polygons-split-3857/simplified_water_polygons.shp"
 OCEAN_FLAG=""
-if [ -f "$OCEAN_SHP" ]; then
+if [ "$NO_OCEAN" = false ] && [ -f "$OCEAN_SHP" ]; then
     OCEAN_FLAG="--ocean $OCEAN_SHP"
     if [ -f "$OCEAN_SIMPLIFIED_SHP" ]; then
         OCEAN_FLAG="$OCEAN_FLAG --ocean-simplified $OCEAN_SIMPLIFIED_SHP"
