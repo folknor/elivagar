@@ -22,7 +22,7 @@ FILE_MB=$(( $(stat -c%s "$PBF") / 1000000 ))
 OUT="data/planetiler-bench.pmtiles"
 
 # --- Temurin JDK setup ---
-JDK_MAJOR=21
+JDK_MAJOR=25
 JDK_DIR="data/jdk"
 JDK_VERSION_FILE="data/.jdk-version"
 JAVA="$JDK_DIR/bin/java"

@@ -181,10 +181,6 @@ in empty ocean.
   a radius of populated cells. Preserves the current architecture but adds
   coupling between phases.
 
-- [ ] **User-specified `--bounds`** — Let users constrain the ocean processing
-  area. Pragmatic but puts the burden on the user. Doesn't solve the
-  architectural problem.
-
 **Open questions:**
 - At planet scale, how much data do standalone ocean tiles (tiles with ONLY ocean,
   no land features) contribute? If it's significant, the architecture matters even
@@ -201,20 +197,137 @@ in empty ocean.
 Without ocean, elivagar produces 347 MB vs Tilemaker's 293 MB for ~54K unique
 tiles each. Average tile size: 6.4 KB (elivagar) vs 5.7 KB (Tilemaker) — 12% larger.
 
-**Potential causes:**
-- Gzip level — we use level 6, Tilemaker may use higher (or zstd)
-- Simplification tolerance — our `PIXEL_FACTOR` is 0.375, which is conservative.
-  Typical values are 1.0-2.0. More aggressive simplification = fewer geometry
-  commands = smaller tiles.
-- Attribute encoding differences — different attribute sets or types per layer
-- Feature merging granularity — Tilemaker's `combine_below: 14` may be more
-  aggressive than our `merge_same_attr_geometries()`
+Without ocean, elivagar (347 MB) is already **smaller than Planetiler** (388 MB).
+The size gap is specifically vs Tilemaker.
 
-**Open questions:**
-- What gzip level / compression does Tilemaker use for tile data?
-- Would increasing `PIXEL_FACTOR` to 1.0 close the per-tile gap without
-  visible quality loss?
-- Are we encoding attributes that Tilemaker omits, or vice versa?
+**Root cause analysis** (verified against Tilemaker + Planetiler source, 2026-02-24):
+
+#### Three-way encoding comparison
+
+| | elivagar | Planetiler | Tilemaker |
+|---|---|---|---|
+| Gzip | level 6 (flate2/zlib-ng) | level 6 (Java deflate) | level 6 (libdeflate) |
+| Simplification | **0.375 px** DP, all layers | **0.1 px** DP, all layers | **degree-based**, per-layer, exponential zoom scaling |
+| Min polygon size | **none** | **1 sq pixel** | per-layer area-based zoom filtering |
+| Feature merging | multi-geom concat | **none** (Shortbread YAML) | `combine_below` (line/poly union) |
+| Dup vertex removal | **no** | yes | yes |
+| Boolean attrs | emits false values | zoom-gated | only when true |
+| Tile extent | 4096 | 4096 | 4096 |
+
+Key insight: **Planetiler is MORE conservative on simplification** (0.1 px vs our
+0.375 px) yet produces a comparable-sized output. Planetiler compensates with its
+**1 sq pixel minimum polygon size** — any polygon covering less than 1 tile pixel
+is dropped at zooms below max. Also notable: Planetiler's Shortbread YAML has
+**no post-processing at all** — no line or polygon merging. Our
+`merge_same_attr_geometries` already does more than Planetiler.
+
+The size gap vs Tilemaker comes from Tilemaker's more aggressive approach on
+every axis: much more aggressive simplification, polygon area filtering, proper
+geometric union (not just multi-geom concat), and no wasted boolean attributes.
+
+#### Ruled out: compression
+
+All three use gzip level 6. Tilemaker uses libdeflate 1.22, Planetiler uses
+Java's built-in deflater, we use flate2/zlib-ng. libdeflate may produce slightly
+better ratios (1-3%), but this is not the dominant factor.
+
+#### Cause 1: No minimum polygon/line size filtering (dominant factor)
+
+**Planetiler:** Drops polygons smaller than 1 sq tile pixel and lines shorter
+than 1 tile pixel at all zoom levels below max. At max zoom (z14), threshold
+drops to 0.0625 px to allow overzooming. Boundaries and streets override to 0
+(never filtered). This is a global default — the Shortbread YAML adds no
+per-layer customization.
+
+**Tilemaker:** Per-layer `filter_below` and `filter_area` config that removes
+small polygon rings below a zoom threshold. The filter area scales exponentially
+with zoom: `filter_area_degrees * pow(2.0, (filter_below - 1) - zoom)`.
+Used on ocean (`filter_below: 12, filter_area: 0.5`), water, landuse, landcover.
+Additionally, the Lua script computes per-feature min zoom based on area via
+`zmin_for_area()` — water polygons are placed at the zoom where they first
+cover a minimum number of pixels.
+
+**Elivagar:** No equivalent. Every polygon fragment and line segment, no matter
+how small, gets encoded into the MVT tile. This is likely the single largest
+contributor — both Planetiler and Tilemaker filter aggressively, just with
+different mechanisms.
+
+- [ ] Add minimum-size filtering: drop polygon rings below 1 sq pixel and
+  line segments below 1 pixel at zooms below max. This matches Planetiler's
+  approach and is simpler to implement than Tilemaker's per-layer config.
+
+#### Cause 2: Simplification tolerance vs Tilemaker
+
+**Elivagar:** `PIXEL_FACTOR = 0.375` — tolerance is 0.375 sub-pixels in MVT
+coordinate space, constant across all layers. Formula: `0.375 / (4096 * 2^zoom)`.
+
+**Planetiler:** 0.1 px tolerance (Douglas-Peucker), also constant across all
+layers. Even more conservative than us. This confirms simplification alone
+doesn't explain the gap — Planetiler is more conservative yet comparable in size.
+
+**Tilemaker:** Per-layer, degree-based tolerance with exponential zoom scaling.
+Each layer has `simplify_below` (zoom threshold), `simplify_level` (base tolerance
+in degrees), and `simplify_ratio` (exponential factor, default 2.0). Formula:
+`simplify_level * pow(simplify_ratio, (simplify_below - 1) - zoom)`.
+
+Tilemaker's Shortbread config values:
+
+| Layer | simplify_below | simplify_level | algorithm |
+|---|---|---|---|
+| ocean | 13 | 0.0001 | visvalingam |
+| water | 12 | 0.0003 | visvalingam |
+| waterway | 12 | 0.0003 | douglas-peucker |
+| landuse | 13 | 0.0003 | visvalingam |
+| landcover | 13 | 0.0003 | visvalingam |
+| boundary | 12 | 0.0003 | visvalingam |
+| transportation | 13 | 0.0003 | douglas-peucker |
+
+Example: `transportation` at z10, simplify_below=13:
+- tolerance = 0.0003 * pow(2.0, 12 - 10) = 0.0012 degrees
+- One MVT extent unit at z10 ≈ 8.5e-5 degrees
+- 0.0012 / 8.5e-5 ≈ **14 pixels** — vs our **0.375 pixels** (37x more aggressive)
+
+At z14, all three tools skip or minimize simplification, matching the tile
+comparison showing convergence at z14.
+
+**Impact:** Tilemaker's aggressive simplification at z7-z12 (10-40x more than us)
+produces dramatically fewer geometry commands per feature. Combined with min-size
+filtering, this accounts for the bulk of the gap. However, since Planetiler
+achieves comparable size with even less simplification, min-size filtering alone
+may close most of the gap.
+
+- [ ] After implementing min-size filtering, re-measure the gap. If still
+  significant, consider increasing `PIXEL_FACTOR` to 1.0 (still conservative
+  vs Tilemaker, and 10x more aggressive than Planetiler's 0.1 px).
+
+#### Cause 3: Redundant false-valued boolean attributes
+
+Elivagar emits boolean attributes even when false: `rail=false`, `tunnel=false`,
+`bridge=false`, `oneway=false`, `oneway_reverse=false` on streets; `rail=false`
+on street_polygons. Each costs a key+value index pair in the protobuf tag array.
+Tilemaker's Lua config only sets these when true — `Attribute("tunnel", "yes")`
+is conditional, so the attribute is absent on non-tunnel features. Planetiler's
+Shortbread YAML also zoom-gates these attributes (tunnel/bridge/link at z11+,
+oneway at z14+).
+
+On a layer like streets with many features, this adds up: 3-6 unnecessary boolean
+tags per feature × thousands of features per tile.
+
+- [ ] Only emit boolean attributes when true. Skip `rail`, `tunnel`, `bridge`,
+  `oneway`, `oneway_reverse`, `surface`, `service` etc. when the value is false
+  or empty.
+
+#### Cause 4: No collinear vertex removal after clipping
+
+Both Tilemaker and Planetiler filter consecutive duplicate points after scaling
+to integer tile coordinates. Planetiler's `CommandEncoder` skips points where
+`_x == x && _y == y`. Our Sutherland-Hodgman polygon clipper can produce
+collinear vertices along clip edges that survive into the MVT encoding. Minor
+but contributes extra geometry commands.
+
+- [ ] Deduplicate consecutive identical points after coordinate scaling in MVT
+  encoding. Optionally also remove collinear points (three consecutive points
+  on the same line).
 
 ### Done
 

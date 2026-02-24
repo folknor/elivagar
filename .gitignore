@@ -4,5 +4,9 @@ data/
 .tilegen_tmp/
 .planetiler_tmp/
 .bench_stderr.*
+.bench_noocean.log
+.bench_pzoom.log
 .sort_test_tmp/
+.tilegen_tmp_noocean/
 benchmarks.tsv
+tile_weights.tsv.gz
