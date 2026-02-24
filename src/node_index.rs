@@ -7,6 +7,12 @@ use memmap2::MmapMut;
 const ENTRY_SIZE: u64 = 8; // 4 bytes lat_e7 + 4 bytes lon_e7
 const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
 
+// XOR mask applied to stored coordinates so that (0,0) on disk means "unset"
+// while a real node at lat=0, lon=0 stores as non-zero.
+// 0x55555555 = 1431655765 E7 = 143.17° — outside valid latitude range [-90°, 90°],
+// so no real coordinate pair can XOR to (0, 0).
+const COORD_XOR: i32 = 0x5555_5555_u32 as i32;
+
 pub struct NodeIndex {
     file: File,
     mmap: MmapMut,
@@ -55,8 +61,8 @@ impl NodeIndex {
         }
 
         let off = offset as usize;
-        self.mmap[off..off + 4].copy_from_slice(&lat_e7.to_le_bytes());
-        self.mmap[off + 4..off + 8].copy_from_slice(&lon_e7.to_le_bytes());
+        self.mmap[off..off + 4].copy_from_slice(&(lat_e7 ^ COORD_XOR).to_le_bytes());
+        self.mmap[off + 4..off + 8].copy_from_slice(&(lon_e7 ^ COORD_XOR).to_le_bytes());
     }
 
     /// Read coordinates for a node. Returns None if entry is unset (all zeros).
@@ -70,13 +76,13 @@ impl NodeIndex {
         }
 
         let off = offset as usize;
-        let lat_e7 = i32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap());
-        let lon_e7 = i32::from_le_bytes(self.mmap[off + 4..off + 8].try_into().unwrap());
+        let lat_raw = i32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap());
+        let lon_raw = i32::from_le_bytes(self.mmap[off + 4..off + 8].try_into().unwrap());
 
-        if lat_e7 == 0 && lon_e7 == 0 {
-            None
+        if lat_raw == 0 && lon_raw == 0 {
+            None // unwritten entry (mmap zero-fills)
         } else {
-            Some((lat_e7, lon_e7))
+            Some((lat_raw ^ COORD_XOR, lon_raw ^ COORD_XOR))
         }
     }
 }
@@ -126,13 +132,13 @@ mod tests {
     }
 
     #[test]
-    fn sentinel_zero_zero() {
-        // Known limitation: (0,0) is the sentinel value, so nodes at exactly lat=0, lon=0 appear as unset.
+    fn zero_zero_is_valid() {
+        // Nodes at lat=0, lon=0 (Gulf of Guinea) should be stored and retrieved correctly.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_test.bin");
         let mut idx = NodeIndex::create(&path).unwrap();
         idx.put(1, 0, 0);
-        assert_eq!(idx.get(1), None);
+        assert_eq!(idx.get(1), Some((0, 0)));
     }
 
     #[test]

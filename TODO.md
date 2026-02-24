@@ -123,9 +123,13 @@
   `Hash`+`Eq` impls on `Value` (floats hashed via `to_bits()`). Eliminates silent wrong tile data
   from 64-bit hash collisions. Old `value_hash` helper removed.
 
-- [ ] **NodeIndex sentinel value `(0, 0)` is a valid coordinate** — A node at exactly lat=0, lon=0 (Gulf of Guinea) appears as "not found". Use a separate bit or different sentinel. Document at minimum. (`node_index.rs:63-81`)
+- [x] **NodeIndex sentinel value `(0, 0)` is a valid coordinate** — XOR stored coordinates with
+  `COORD_XOR = 0x55555555` so that zero-filled mmap pages (unwritten) remain detectable as None,
+  while a real node at (0, 0) stores as non-zero. The XOR constant decodes to 143.17° latitude,
+  which is outside the valid range, so no real coordinate pair can produce a false "unset".
 
-- [ ] **`compare_tiles.rs` `expand_single` wrong for runs** — Assumes each tile in a run has data at `offset + length * r`, but PMTiles run-length means all tiles in a run share the SAME blob. (`examples/compare_tiles.rs:98-106`)
+- [x] **`compare_tiles.rs` `expand_single` wrong for runs** — all tiles in a PMTiles run share
+  the same data blob; removed the `offset + length * r` increment so all tiles use the same offset.
 
 ## Code Quality: Duplication
 

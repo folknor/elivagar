@@ -97,10 +97,11 @@ impl PmtilesReader {
     }
 
     fn expand_single(e: &RawDirEntry, out: &mut Vec<TileEntry>) {
+        // All tiles in a PMTiles run share the same data blob.
         for r in 0..e.run_length {
             out.push(TileEntry {
                 tile_id: e.tile_id + u64::from(r),
-                offset: e.offset + u64::from(e.length) * u64::from(r),
+                offset: e.offset,
                 length: e.length,
             });
         }
