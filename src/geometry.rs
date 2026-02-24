@@ -476,26 +476,40 @@ fn intersect_edge(p0: &Point, p1: &Point, rect: &ClipRect, code: u8) -> Point {
 /// Clip a polygon ring to an axis-aligned rectangle using Sutherland-Hodgman.
 ///
 /// The input ring should NOT have a duplicated closing vertex.
-/// Returns the clipped ring (may be empty if fully outside).
-/// Uses a double-buffer (input/output swap) instead of allocating 4 intermediate Vecs.
+/// Result is left in `buf_a` after the call (4 edge swaps = even = back to original).
+/// Callers should hoist `buf_a`/`buf_b` outside inner loops to avoid per-call allocation.
 #[hotpath::measure]
-pub fn clip_polygon(ring: &[Point], rect: &ClipRect) -> Vec<Point> {
+pub fn clip_polygon_into(
+    ring: &[Point],
+    rect: &ClipRect,
+    buf_a: &mut Vec<Point>,
+    buf_b: &mut Vec<Point>,
+) {
+    buf_a.clear();
+    buf_b.clear();
     if ring.is_empty() {
-        return Vec::new();
+        return;
     }
-    let mut input = ring.to_vec();
-    let mut output = Vec::with_capacity(ring.len() + 4);
+    buf_a.extend_from_slice(ring);
     for edge in [
         Edge::Left(rect.min_x),
         Edge::Right(rect.max_x),
         Edge::Bottom(rect.min_y),
         Edge::Top(rect.max_y),
     ] {
-        clip_polygon_edge_into(&input, edge, &mut output);
-        std::mem::swap(&mut input, &mut output);
-        output.clear();
+        clip_polygon_edge_into(buf_a, edge, buf_b);
+        std::mem::swap(buf_a, buf_b);
+        buf_b.clear();
     }
-    input
+    // Result is in buf_a
+}
+
+/// Convenience wrapper that allocates its own buffers. Use [`clip_polygon_into`] in hot paths.
+pub fn clip_polygon(ring: &[Point], rect: &ClipRect) -> Vec<Point> {
+    let mut buf_a = Vec::new();
+    let mut buf_b = Vec::new();
+    clip_polygon_into(ring, rect, &mut buf_a, &mut buf_b);
+    buf_a
 }
 
 /// Which rectangle edge we are clipping against, and its coordinate value.

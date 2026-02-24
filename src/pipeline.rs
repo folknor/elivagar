@@ -913,6 +913,8 @@ fn emit_polygon_feature(
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
     let mut tc_buf: Vec<(i32, i32)> = Vec::new();
+    let mut clip_a: Vec<Point> = Vec::new();
+    let mut clip_b: Vec<Point> = Vec::new();
 
     geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
@@ -920,11 +922,11 @@ fn emit_polygon_feature(
         let skip_size_filter = z >= 14;
         geometry::for_each_tile_in_bbox(bbox, z, |tx, ty| {
             let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-            let clipped = geometry::clip_polygon(simplified, &clip);
-            if clipped.len() < 3 {
+            geometry::clip_polygon_into(simplified, &clip, &mut clip_a, &mut clip_b);
+            if clip_a.len() < 3 {
                 return;
             }
-            geometry::to_tile_coords_into(&mut tc_buf, &clipped, tx, ty, z);
+            geometry::to_tile_coords_into(&mut tc_buf, &clip_a, tx, ty, z);
             if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
                 return;
             }
@@ -959,6 +961,8 @@ fn emit_multipolygon_feature(
     let mut count: u64 = 0;
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
+    let mut clip_a: Vec<Point> = Vec::new();
+    let mut clip_b: Vec<Point> = Vec::new();
 
     geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, |z, simp_outer, simp_inners| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
@@ -967,11 +971,11 @@ fn emit_multipolygon_feature(
         geometry::for_each_tile_in_bbox(bbox, z, |tx, ty| {
             let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
 
-            let clipped_outer = geometry::clip_polygon(simp_outer, &clip);
-            if clipped_outer.len() < 3 {
+            geometry::clip_polygon_into(simp_outer, &clip, &mut clip_a, &mut clip_b);
+            if clip_a.len() < 3 {
                 return;
             }
-            let mut outer_tc = geometry::to_tile_coords(&clipped_outer, tx, ty, z);
+            let mut outer_tc = geometry::to_tile_coords(&clip_a, tx, ty, z);
             if !skip_size_filter && geometry::ring_is_subpixel(&outer_tc) {
                 return;
             }
@@ -979,11 +983,11 @@ fn emit_multipolygon_feature(
 
             let mut all_rings: Vec<Vec<(i32, i32)>> = vec![outer_tc];
             for inner in simp_inners {
-                let clipped_inner = geometry::clip_polygon(inner, &clip);
-                if clipped_inner.len() < 3 {
+                geometry::clip_polygon_into(inner, &clip, &mut clip_a, &mut clip_b);
+                if clip_a.len() < 3 {
                     continue;
                 }
-                let mut inner_tc = geometry::to_tile_coords(&clipped_inner, tx, ty, z);
+                let mut inner_tc = geometry::to_tile_coords(&clip_a, tx, ty, z);
                 // Also drop sub-pixel inner rings (holes)
                 if !skip_size_filter && geometry::ring_is_subpixel(&inner_tc) {
                     continue;
