@@ -136,40 +136,35 @@ pub enum OsmGeomType {
     MultiPolygon,
 }
 
-/// Tag lookup helper. Expects tags pre-sorted by key (call `sort_tags()`
-/// first) so lookups use binary search (O(log n)) instead of linear scan
-/// (O(n)). With 3-15 tags per element and ~160 lookups per closed way across
-/// 21 matchers, this cuts total comparisons from ~1280 to ~480 per element.
+/// Tag lookup helper. Uses linear scan — with 3-15 tags per OSM element,
+/// this is faster than sorting + binary search. Binary search was tried
+/// (ca6f17e) and reverted: sort_unstable_by_key on every element plus
+/// binary_search_by_key on every lookup added +55% to the PBF phase on
+/// Denmark (20s → 31s). Linear scan wins at this size because the slice
+/// fits in a cache line, key comparisons short-circuit on first byte
+/// mismatch, and there's zero per-element setup cost.
 pub struct Tags<'a>(pub &'a [(&'a str, &'a str)]);
-
-/// Sort a tag slice by key for binary search in `Tags`.
-/// PBF tags are usually already sorted, so this is ~N comparisons (insertion sort).
-pub fn sort_tags(tags: &mut [(&str, &str)]) {
-    tags.sort_unstable_by_key(|(k, _)| *k);
-}
 
 impl<'a> Tags<'a> {
     pub fn get(&self, key: &str) -> Option<&'a str> {
-        let i = self.0.binary_search_by_key(&key, |(k, _)| k).ok()?;
-        Some(self.0[i].1)
+        self.0
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
     }
 
     pub fn has(&self, key: &str) -> bool {
-        self.0.binary_search_by_key(&key, |(k, _)| k).is_ok()
+        self.0.iter().any(|(k, _)| *k == key)
     }
 
     pub fn has_value(&self, key: &str, val: &str) -> bool {
-        match self.0.binary_search_by_key(&key, |(k, _)| k) {
-            Ok(i) => self.0[i].1 == val,
-            Err(_) => false,
-        }
+        self.0.iter().any(|(k, v)| *k == key && *v == val)
     }
 
     pub fn has_any(&self, key: &str, vals: &[&str]) -> bool {
-        match self.0.binary_search_by_key(&key, |(k, _)| k) {
-            Ok(i) => vals.contains(&self.0[i].1),
-            Err(_) => false,
-        }
+        self.0
+            .iter()
+            .any(|(k, v)| *k == key && vals.contains(v))
     }
 }
 

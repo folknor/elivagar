@@ -291,7 +291,6 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut rel_count: u64 = 0;
     let mut features_emitted: u64 = 0;
     let mut way_index_finalized = false;
-    let mut node_index_advised = false;
     let land_mask = geometry::LandMask::new();
 
     // Track data extent for ocean shapefile filtering
@@ -329,8 +328,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             max_lon_e7 = max_lon_e7.max(lon_e7);
 
             if $node.tags().next().is_some() {
-                let mut tags_vec: Vec<(&str, &str)> = $node.tags().collect();
-                shortbread::sort_tags(&mut tags_vec);
+                let tags_vec: Vec<(&str, &str)> = $node.tags().collect();
                 node_records.clear();
                 #[allow(clippy::cast_sign_loss)]
                 let n = process_node(
@@ -350,14 +348,6 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             Element::Node(node) => handle_node!(node),
             Element::DenseNode(node) => handle_node!(node),
             Element::Way(way) => {
-                // On first way: switch node index from write to read mode.
-                // At planet scale (~96 GB index, 64 GB RAM) this prevents the
-                // kernel from doing ~128 KB readahead on every random lookup.
-                if !node_index_advised {
-                    node_index.advise_random();
-                    node_index_advised = true;
-                }
-
                 way_count += 1;
 
                 // Resolve geometry (fast: mmap read)
@@ -375,11 +365,10 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                 way_index.put(way.id(), &coords_e7);
 
                 // Tag matching (fast: ~3-5% of time, needs PBF borrowed data)
-                let mut tags_vec: Vec<(&str, &str)> = way.tags().collect();
+                let tags_vec: Vec<(&str, &str)> = way.tags().collect();
                 if tags_vec.is_empty() {
                     return;
                 }
-                shortbread::sort_tags(&mut tags_vec);
 
                 let is_closed = coords_e7.len() >= 4
                     && coords_e7.first() == coords_e7.last();
@@ -419,11 +408,10 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                 }
                 rel_count += 1;
 
-                let mut tags_vec: Vec<(&str, &str)> = rel.tags().collect();
+                let tags_vec: Vec<(&str, &str)> = rel.tags().collect();
                 if tags_vec.is_empty() {
                     return;
                 }
-                shortbread::sort_tags(&mut tags_vec);
 
                 if let Some(prepared) = prepare_relation(&rel, &tags_vec, &way_index) {
                     rel_batch.push(prepared);
@@ -705,10 +693,9 @@ fn process_prepared_relation(
     max_zoom: u8,
     land_mask: &geometry::LandMask,
 ) -> Vec<SortRecord> {
-    let mut tags_ref: Vec<(&str, &str)> = rel.tags.iter()
+    let tags_ref: Vec<(&str, &str)> = rel.tags.iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    shortbread::sort_tags(&mut tags_ref);
     let tag_helper = Tags(&tags_ref);
 
     let multi = multipolygon::assemble(&rel.member_ways);

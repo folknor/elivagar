@@ -3,9 +3,7 @@ use std::borrow::Cow;
 
 #[test]
 fn test_highway_motorway_matches_streets_z5() {
-    let mut t = [("highway", "motorway")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("highway", "motorway")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let street = matches
         .iter()
@@ -23,9 +21,7 @@ fn test_highway_motorway_matches_streets_z5() {
 
 #[test]
 fn test_building_yes_matches_buildings_z14() {
-    let mut t = [("building", "yes")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("building", "yes")]);
     let matches = match_element(&tags, OsmGeomType::ClosedWay);
     let bldg = matches
         .iter()
@@ -38,9 +34,7 @@ fn test_building_yes_matches_buildings_z14() {
 
 #[test]
 fn test_building_no_does_not_match() {
-    let mut t = [("building", "no")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("building", "no")]);
     let matches = match_element(&tags, OsmGeomType::ClosedWay);
     let bldg = matches.iter().find(|m| m.layer == Layer::Buildings);
     assert!(bldg.is_none(), "building=no should not match Buildings");
@@ -48,14 +42,12 @@ fn test_building_no_does_not_match() {
 
 #[test]
 fn test_place_city_capital() {
-    let mut t = [
+    let tags = Tags(&[
         ("place", "city"),
         ("name", "Oslo"),
         ("capital", "yes"),
         ("population", "700000"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let place = matches
         .iter()
@@ -72,9 +64,7 @@ fn test_place_city_capital() {
 
 #[test]
 fn test_natural_wood_becomes_forest() {
-    let mut t = [("natural", "wood")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("natural", "wood")]);
     let matches = match_element(&tags, OsmGeomType::ClosedWay);
     let land = matches
         .iter()
@@ -113,9 +103,7 @@ fn test_layer_count() {
 
 #[test]
 fn test_water_polygon_natural_water() {
-    let mut t = [("natural", "water")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("natural", "water")]);
     let matches = match_element(&tags, OsmGeomType::ClosedWay);
     let water = matches
         .iter()
@@ -132,13 +120,11 @@ fn test_water_polygon_natural_water() {
 
 #[test]
 fn test_boundary_admin_level_2() {
-    let mut t = [
+    let tags = Tags(&[
         ("boundary", "administrative"),
         ("admin_level", "2"),
         ("maritime", "yes"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let boundary = matches
         .iter()
@@ -155,13 +141,11 @@ fn test_boundary_admin_level_2() {
 
 #[test]
 fn test_streets_tunnel_bridge() {
-    let mut t = [
+    let tags = Tags(&[
         ("highway", "primary"),
         ("tunnel", "yes"),
         ("bridge", "viaduct"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let street = matches
         .iter()
@@ -183,9 +167,7 @@ fn test_streets_tunnel_bridge() {
 
 #[test]
 fn test_street_link_stripped() {
-    let mut t = [("highway", "motorway_link")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("highway", "motorway_link")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let street = matches
         .iter()
@@ -207,13 +189,11 @@ fn test_street_link_stripped() {
 
 #[test]
 fn test_ferry_with_motor_vehicle_no() {
-    let mut t = [
+    let tags = Tags(&[
         ("route", "ferry"),
         ("motor_vehicle", "no"),
         ("name", "Foot Ferry"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let ferry = matches
         .iter()
@@ -224,9 +204,7 @@ fn test_ferry_with_motor_vehicle_no() {
 
 #[test]
 fn test_ferry_default_zoom() {
-    let mut t = [("route", "ferry"), ("name", "Car Ferry")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("route", "ferry"), ("name", "Car Ferry")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let ferry = matches
         .iter()
@@ -237,13 +215,11 @@ fn test_ferry_default_zoom() {
 
 #[test]
 fn test_pois_restaurant_cuisine() {
-    let mut t = [
+    let tags = Tags(&[
         ("amenity", "restaurant"),
         ("name", "Pasta House"),
         ("cuisine", "italian"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let poi = matches
         .iter()
@@ -259,9 +235,7 @@ fn test_pois_restaurant_cuisine() {
 
 #[test]
 fn test_aerialway_cable_car() {
-    let mut t = [("aerialway", "cable_car")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("aerialway", "cable_car")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let aerial = matches
         .iter()
@@ -278,13 +252,11 @@ fn test_aerialway_cable_car() {
 
 #[test]
 fn test_public_transport_aerodrome() {
-    let mut t = [
+    let tags = Tags(&[
         ("aeroway", "aerodrome"),
         ("name", "Oslo Airport"),
         ("iata", "OSL"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let pt = matches
         .iter()
@@ -301,13 +273,11 @@ fn test_public_transport_aerodrome() {
 
 #[test]
 fn test_address_excluded_by_poi() {
-    let mut t = [
+    let tags = Tags(&[
         ("amenity", "restaurant"),
         ("addr:housenumber", "42"),
         ("name", "Bistro"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let addr = matches.iter().find(|m| m.layer == Layer::Addresses);
     assert!(
@@ -321,9 +291,7 @@ fn test_address_excluded_by_poi() {
 
 #[test]
 fn test_address_housenumber() {
-    let mut t = [("addr:housenumber", "12B")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("addr:housenumber", "12B")]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let addr = matches
         .iter()
@@ -340,9 +308,7 @@ fn test_address_housenumber() {
 
 #[test]
 fn test_tags_helper() {
-    let mut t = [("highway", "motorway"), ("name", "E6")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("highway", "motorway"), ("name", "E6")]);
     assert_eq!(tags.get("highway"), Some("motorway"));
     assert_eq!(tags.get("missing"), None);
     assert!(tags.has("name"));
@@ -355,13 +321,11 @@ fn test_tags_helper() {
 
 #[test]
 fn test_state_capital() {
-    let mut t = [
+    let tags = Tags(&[
         ("place", "city"),
         ("name", "Bergen"),
         ("capital", "4"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let place = matches
         .iter()
@@ -377,9 +341,7 @@ fn test_state_capital() {
 
 #[test]
 fn test_sites_hospital() {
-    let mut t = [("amenity", "hospital")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("amenity", "hospital")]);
     let matches = match_element(&tags, OsmGeomType::ClosedWay);
     let site = matches
         .iter()
@@ -396,9 +358,7 @@ fn test_sites_hospital() {
 
 #[test]
 fn test_dam_line() {
-    let mut t = [("waterway", "dam")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("waterway", "dam")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let dam = matches
         .iter()
@@ -409,9 +369,7 @@ fn test_dam_line() {
 
 #[test]
 fn test_bridge_polygon() {
-    let mut t = [("man_made", "bridge")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("man_made", "bridge")]);
     let matches = match_element(&tags, OsmGeomType::ClosedWay);
     let bridge = matches
         .iter()
@@ -428,9 +386,7 @@ fn test_bridge_polygon() {
 
 #[test]
 fn test_oneway_reverse() {
-    let mut t = [("highway", "residential"), ("oneway", "-1")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("highway", "residential"), ("oneway", "-1")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let street = matches
         .iter()
@@ -452,9 +408,7 @@ fn test_oneway_reverse() {
 
 #[test]
 fn test_place_population_default() {
-    let mut t = [("place", "hamlet"), ("name", "Tiny")];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    let tags = Tags(&[("place", "hamlet"), ("name", "Tiny")]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let place = matches
         .iter()
@@ -470,13 +424,11 @@ fn test_place_population_default() {
 
 #[test]
 fn test_recycling_attrs() {
-    let mut t = [
+    let tags = Tags(&[
         ("amenity", "recycling"),
         ("recycling:glass_bottles", "yes"),
         ("recycling:paper", "yes"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let poi = matches
         .iter()
@@ -498,13 +450,11 @@ fn test_recycling_attrs() {
 
 #[test]
 fn test_street_ref_semicolons() {
-    let mut t = [
+    let tags = Tags(&[
         ("highway", "motorway"),
         ("ref", "E6;E18"),
         ("name", "Motorveien"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
     let label = matches
         .iter()
@@ -532,13 +482,11 @@ fn test_street_ref_semicolons() {
 
 #[test]
 fn test_motorway_junction() {
-    let mut t = [
+    let tags = Tags(&[
         ("highway", "motorway_junction"),
         ("ref", "23"),
         ("name", "Exit 23"),
-    ];
-    sort_tags(&mut t);
-    let tags = Tags(&t);
+    ]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let pt = matches
         .iter()
@@ -660,11 +608,10 @@ fn shortbread_spec_yaml() {
             })
             .unwrap_or_default();
 
-        let mut tag_refs: Vec<(&str, &str)> = tag_pairs
+        let tag_refs: Vec<(&str, &str)> = tag_pairs
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        sort_tags(&mut tag_refs);
         let tags = Tags(&tag_refs);
 
         let matches = match_element(&tags, osm_geom);

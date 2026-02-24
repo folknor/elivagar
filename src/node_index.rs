@@ -38,6 +38,22 @@ const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
 // so no real coordinate pair can XOR to (0, 0).
 const COORD_XOR: i32 = 0x5555_5555_u32 as i32;
 
+/// Return total physical RAM in bytes via /proc/meminfo (Linux-only).
+/// Returns 0 on non-Linux or if unreadable — this means advise_random()
+/// won't activate, which is the safe default (readahead helps small datasets).
+#[allow(dead_code)]
+fn ram_bytes() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            // First line: "MemTotal:     65541272 kB"
+            let line = s.lines().next()?;
+            let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+            Some(kb * 1024)
+        })
+        .unwrap_or(0)
+}
+
 pub struct NodeIndex {
     file: File,
     mmap: MmapMut,
@@ -69,15 +85,27 @@ impl NodeIndex {
         })
     }
 
-    /// Switch to random-access mode. Call once after all nodes have been
-    /// written and before way processing begins reading node coordinates.
+    /// Switch to random-access mode if the index is large enough to benefit.
+    /// Call once after all nodes have been written and before way processing
+    /// begins reading node coordinates.
     ///
-    /// At planet scale the index is ~96 GB. Without this hint, each random
-    /// read triggers ~128 KB of kernel readahead that gets evicted before use,
-    /// wasting enormous I/O bandwidth. MADV_RANDOM limits faults to the single
-    /// 4 KB page actually needed.
+    /// MADV_RANDOM tells the kernel not to readahead on each fault, limiting
+    /// I/O to the single 4 KB page actually needed. This is critical at planet
+    /// scale (~96 GB index on 64 GB RAM) where readahead pages get evicted
+    /// before use. But when the index fits in RAM (e.g. Denmark ~3 GB), default
+    /// readahead *helps* because way references have ID locality and the
+    /// prefetched neighbors will be used soon. Setting MADV_RANDOM on small
+    /// datasets causes a +65% PBF phase regression (20s → 33s on Denmark).
+    ///
+    /// Threshold: only set MADV_RANDOM when the index exceeds half of physical
+    /// RAM, since at that point the page cache can't hold it and readahead
+    /// becomes pure waste.
+    #[allow(dead_code)]
     pub fn advise_random(&self) {
-        self.mmap.advise(memmap2::Advice::Random).ok();
+        let ram = ram_bytes();
+        if self.file_len > ram / 2 {
+            self.mmap.advise(memmap2::Advice::Random).ok();
+        }
     }
 
     /// Write coordinates for a node. Grows the file if needed.

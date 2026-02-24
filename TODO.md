@@ -18,19 +18,11 @@
 - [ ] Write a small 1-page project website (what it does, benchmark, usage, link to repo)
 - [ ] Host via GitHub Pages
 
-## Performance Regression
+## Performance Regression — Investigated
 
-- [ ] **[P1] ~2.5× PBF phase regression between 77c217f and 1797ee4** — `benchmarks.tsv` at
-  77c217f records Denmark total=26794ms (pbf=18617ms, assemble=3167ms). At 1797ee4 (without
-  the Tags binary search change), bench-self shows total=66735ms (pbf=54871ms, assemble=6878ms).
-  The regression spans 6 commits: 99113b0 (clippy fixes), 8f84903 (add tests), b63dbd7 (MVT
-  hash fix + PMTiles memory + allocation pressure: SmallVec, clip_polygon double-buffer,
-  to_tile_coords_into), ba2a92b (deduplicate code), 862a91c (doc comments), 998814f (misc
-  code quality), 1797ee4 (NodeIndex XOR sentinel + compare_tiles fix). Most are doc/test/quality
-  changes that shouldn't affect perf — prime suspect is b63dbd7 which changed hot-path data
-  structures. Note: `benchmarks.tsv` was collected via `bench.sh` (3 runs, best-of) while the
-  regression number is from `bench-self.sh` (1 run), so some variance is expected, but not 2.5×.
-  Bisect with `git stash && git checkout <hash> && scripts/bench-self.sh` to isolate.
+- [x] **ca6f17e caused +64% PBF regression** — Bisected (best-of-3 on Denmark). Two causes:
+  Tags binary search (+55%) and `advise_random()` (+65%, not additive). Both reverted.
+  Full investigation in `docs/madvise-investigation.md`.
 
 ## Bugs
 
@@ -68,13 +60,12 @@
   fly in `push_dir_entry()`. Dedup HashMap capped at 1M entries (`MAX_DEDUP_ENTRIES`). Tile data
   optionally streamed via `TileBlob::File`. Saves ~12 GB at planet scale.
 
-- [x] **Node index virtual memory at planet scale** — added `advise_random()` to NodeIndex,
-  called at the node→way transition in the pipeline. At planet scale (~96 GB index on 64 GB RAM),
-  this prevents the kernel from doing ~128 KB readahead on every random node lookup during way
-  processing, limiting faults to the single 4 KB page needed. A two-level index was evaluated but
-  rejected: OSM node IDs span 0–12B fairly continuously, so 12B/4096 blocks × 32 KB ≈ 93 GB —
-  nearly no savings. MADV_SEQUENTIAL during writes was tried (6724e0a) and reverted (4e427b4)
-  due to 2.3× regression — see `node_index.rs` module comment for full history.
+- [ ] **Node index virtual memory at planet scale** — `advise_random()` method exists in
+  node_index.rs but is **not called** — it regresses Denmark by +65% because way→node lookups
+  have locality and readahead helps. The node index is 102 GB even for Denmark (OSM node IDs
+  are global). Two-level index rejected (12B/4096 blocks ≈ 93 GB, no savings). Needs
+  planet-scale testing to determine if MADV_RANDOM helps when node density is higher.
+  See `docs/madvise-investigation.md` and `node_index.rs` module comment.
 
 ## Performance: Allocation Pressure (High Impact)
 
@@ -135,10 +126,12 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
 
 ## Performance: Algorithms & Data Structures (Medium-High Impact)
 
-- [x] **Tags linear scan called billions of times** — `Tags::new()` now sorts the slice by key on
-  construction (usually ~N comparisons since PBF tags are pre-sorted), then `get()`/`has()`/
-  `has_value()`/`has_any()` use `binary_search_by_key`. With 3-15 tags per element and ~160 lookups
-  per closed way across 21 matchers, this cuts comparisons from ~1280 to ~480 per element.
+- [ ] **Tags linear scan called billions of times** — Binary search tried (ca6f17e) and
+  **reverted**: +55% PBF regression (20s → 31s on Denmark). `sort_unstable_by_key` per element
+  plus `binary_search_by_key` per lookup is slower than linear `.any()` for 3-15 element slices.
+  See `shortbread.rs` Tags comment and `docs/madvise-investigation.md`. Possible alternative:
+  perfect hash (`phf`) over the ~50 known tag keys, mapping to enum — eliminates string
+  comparison entirely but requires maintaining the key set.
 
 - [x] **Polygon clipping creates 4 intermediate Vecs** — replaced with double-buffer swap in
   `clip_polygon()`. Two Vecs (`input`/`output`) swap roles via `std::mem::swap` across the four
@@ -181,11 +174,13 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
 
 - [ ] **MVT value interning uses SipHash** — `DefaultHasher` is slower than needed for non-adversarial input. Use `FxHasher` or `ahash`. (`mvt.rs:366-379`)
 
-- [x] **`madvise` hints not set during write phase** — MADV_SEQUENTIAL during writes was tried
-  (6724e0a) and reverted (4e427b4) due to 2.3× regression. Current approach: no hints during
-  writes (kernel default NORMAL is fine for sequential writes to fresh zero-filled pages), then
-  MADV_RANDOM before reads. NodeIndex now has `advise_random()` called at the node→way transition;
-  WayIndex already had MADV_RANDOM in `finish_writing()` since 4e427b4.
+- [ ] **NodeIndex madvise for planet scale** — MADV_SEQUENTIAL tried (6724e0a) and reverted
+  (4e427b4, 2.3× regression). MADV_RANDOM tried (ca6f17e) and reverted (+65% regression on
+  Denmark). Key finding: the node index is 102 GB even for Denmark (node IDs are global),
+  but way→node lookups have locality so readahead helps. `advise_random()` method and
+  `ram_bytes()` exist in node_index.rs but are not called. Needs planet-scale testing.
+  Full investigation: `docs/madvise-investigation.md`. WayIndex MADV_RANDOM in
+  `finish_writing()` is fine (relation lookups are truly non-sequential).
 
 ## Correctness Bugs
 
