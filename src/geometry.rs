@@ -14,8 +14,8 @@ const MAX_LATITUDE: f64 = 85.051_129;
 /// MVT tile extent (pixels per tile axis).
 pub const EXTENT: f64 = 4096.0;
 
-/// Sub-pixel simplification factor.
-const PIXEL_FACTOR: f64 = 0.375;
+/// Sub-pixel simplification factor (1 pixel = 1/256 of tile width).
+const PIXEL_FACTOR: f64 = 1.0;
 
 /// Buffer fraction of tile size for clipping (8 pixels / 4096 extent).
 pub(crate) const BUFFER_FRACTION: f64 = 8.0 / EXTENT;

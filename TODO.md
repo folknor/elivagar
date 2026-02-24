@@ -20,49 +20,6 @@
 
 ## Bugs
 
-- [ ] Railway zoom inverted — **confirmed bug, also present in Planetiler's Shortbread YAML.**
-  The Shortbread spec 1.0 (https://shortbread-tiles.org/schema/1.0/) says for `rail` and
-  `narrow_gauge` in the streets layer: "ways with `service=*` on zoom level 10+, other ways
-  on zoom level 8+." Mainline rail (no service tag) should be MORE prominent (z8), service
-  tracks (sidings, yards) LESS prominent (z10). Both elivagar and Planetiler have it backwards.
-
-  **Current elivagar code** (`shortbread.rs`, `railway_zoom` function):
-  ```
-  "rail" => {
-      if tags.has("service") { Some(8) }   // BUG: service rail gets z8
-      else                   { Some(10) }  // BUG: mainline rail gets z10
-  }
-  "narrow_gauge" => Some(10),  // BUG: should also split on service tag
-  ```
-
-  **Planetiler's shortbread.yml** (verified 2026-02-23, source:
-  https://github.com/versatiles-org/planetiler-shortbread/blob/main/resources/config/shortbread.yml)
-  has the same inversion — the min_zoom override blocks assign `service: __any__`
-  (service tag present) to the z8 block and `service: ''` (service tag absent) to
-  the z10 block:
-  ```yaml
-  # Planetiler's YAML (buggy):
-  8:                          # ← service tracks get z8 (should be z10)
-    __all__:
-      railway: [ rail, narrow_gauge ]
-      service: __any__
-  10:                         # ← mainline gets z10 (should be z8)
-    __all__:
-      railway: [ rail, narrow_gauge ]
-      service: ''
-  ```
-
-  **Correct values per spec:**
-  | Feature                          | Spec min_zoom | elivagar | Planetiler |
-  |----------------------------------|---------------|----------|------------|
-  | `railway=rail` (mainline)        | **8**         | 10 (bug) | 10 (bug)   |
-  | `railway=rail` + `service=*`     | **10**        | 8 (bug)  | 8 (bug)    |
-  | `narrow_gauge` (mainline)        | **8**         | 10 (bug) | 10 (bug)   |
-  | `narrow_gauge` + `service=*`     | **10**        | 10 (ok)  | 8 (bug)    |
-
-  **Fix:** In `railway_zoom`, swap the zoom values for `rail` (service→10, mainline→8)
-  and extend `narrow_gauge` with the same service-tag split. Note: this intentionally
-  diverges from Planetiler output, matching the spec instead.
 - [ ] **[P2]** `area_sq_meters` cos²(lat) approximation — **investigated, moderate risk.**
   Uses single centroid latitude for entire polygon (`geometry.rs:485-500`). Affects
   `enrich_polygon_matches` thresholds (2M/700K/100K km²) in `pipeline.rs:726-750`.
@@ -207,11 +164,11 @@ The size gap is specifically vs Tilemaker.
 | | elivagar | Planetiler | Tilemaker |
 |---|---|---|---|
 | Gzip | level 6 (flate2/zlib-ng) | level 6 (Java deflate) | level 6 (libdeflate) |
-| Simplification | **0.375 px** DP, all layers | **0.1 px** DP, all layers | **degree-based**, per-layer, exponential zoom scaling |
-| Min polygon size | **none** | **1 sq pixel** | per-layer area-based zoom filtering |
+| Simplification | **1.0 px** DP, all layers | **0.1 px** DP, all layers | **degree-based**, per-layer, exponential zoom scaling |
+| Min polygon size | **1 sq pixel** (z0-z13) | **1 sq pixel** | per-layer area-based zoom filtering |
 | Feature merging | multi-geom concat | **none** (Shortbread YAML) | `combine_below` (line/poly union) |
-| Dup vertex removal | **no** | yes | yes |
-| Boolean attrs | emits false values | zoom-gated | only when true |
+| Dup vertex removal | yes | yes | yes |
+| Boolean attrs | only when true | zoom-gated | only when true |
 | Tile extent | 4096 | 4096 | 4096 |
 
 Key insight: **Planetiler is MORE conservative on simplification** (0.1 px vs our
@@ -253,22 +210,24 @@ cover a minimum number of pixels.
 - Exemptions: boundaries and streets (never filtered, matching Planetiler)
 - At z14 (max zoom): no filtering (all features preserved for overzooming)
 
-**Impact (Denmark no-ocean, cumulative):** -21.3 MB from original baseline.
--1,430,438 features (-8.6%), sort 31% faster, assemble 13% faster.
+**Impact (Denmark no-ocean, cumulative):** -21.3 MB from original baseline
+(before Cause 2 simplification change). See Cause 2 for final cumulative numbers.
 
-| | Original baseline | After all fixes | Delta |
+| | Original baseline | After Causes 1+3+4 | After all (incl. Cause 2) |
 |---|---|---|---|
-| Output | 347.0 MB | 325.7 MB | -21.3 MB (-6.1%) |
-| Sort | 781 ms | 537 ms | -244 ms (-31%) |
-| Assemble | 2,493 ms | 2,165 ms | -328 ms (-13%) |
-| Features | 16,583,912 | 15,153,474 | -1,430,438 (-8.6%) |
+| Output | 347.0 MB | 325.7 MB (-6.1%) | 316.7 MB (-8.7%) |
+| Sort | 781 ms | 537 ms (-31%) | 471 ms (-40%) |
+| Assemble | 2,493 ms | 2,165 ms (-13%) | 2,467 ms (-1%) |
+| Features | 16,583,912 | 15,153,474 (-8.6%) | 15,149,684 (-8.6%) |
 
-Remaining gap vs Tilemaker (293 MB): 33 MB, down from 54 MB (closed 39%).
+Remaining gap vs Tilemaker (293 MB): 24 MB, down from 54 MB (closed 56%).
 
-#### Cause 2: Simplification tolerance vs Tilemaker
+#### Cause 2: Simplification tolerance vs Tilemaker — DONE
 
-**Elivagar:** `PIXEL_FACTOR = 0.375` — tolerance is 0.375 sub-pixels in MVT
-coordinate space, constant across all layers. Formula: `0.375 / (4096 * 2^zoom)`.
+**Elivagar:** `PIXEL_FACTOR` increased from 0.375 to 1.0 — tolerance is now
+1 pixel in MVT coordinate space, constant across all layers. Still conservative
+vs Tilemaker (10-40x more aggressive at mid zooms), 10x more aggressive than
+Planetiler's 0.1 px.
 
 **Planetiler:** 0.1 px tolerance (Douglas-Peucker), also constant across all
 layers. Even more conservative than us. This confirms simplification alone
@@ -294,23 +253,20 @@ Tilemaker's Shortbread config values:
 Example: `transportation` at z10, simplify_below=13:
 - tolerance = 0.0003 * pow(2.0, 12 - 10) = 0.0012 degrees
 - One MVT extent unit at z10 ≈ 8.5e-5 degrees
-- 0.0012 / 8.5e-5 ≈ **14 pixels** — vs our **0.375 pixels** (37x more aggressive)
+- 0.0012 / 8.5e-5 ≈ **14 pixels** — vs our **1.0 pixel** (14x more aggressive)
 
-At z14, all three tools skip or minimize simplification, matching the tile
-comparison showing convergence at z14.
+**Impact (Denmark no-ocean, cumulative with Causes 1+3+4):** -9.0 MB additional.
 
-**Impact:** Tilemaker's aggressive simplification at z7-z12 (10-40x more than us)
-produces dramatically fewer geometry commands per feature. Combined with min-size
-filtering, this accounts for the bulk of the gap. However, since Planetiler
-achieves comparable size with even less simplification, min-size filtering alone
-may close most of the gap.
+| | After Causes 1+3+4 | After all fixes | Delta |
+|---|---|---|---|
+| Output | 325.7 MB | 316.7 MB | -9.0 MB (-2.8%) |
+| Features | 15,153,474 | 15,149,684 | -3,790 |
+| Sort | 537 ms | 471 ms | -66 ms |
+| Assemble | 2,165 ms | 2,467 ms | +302 ms |
 
-After min-size filtering, 33 MB gap remains (326 vs 293 MB). Simplification
-is likely the main remaining factor — Tilemaker is 10-40x more aggressive.
-
-- [ ] Consider increasing `PIXEL_FACTOR` to 1.0 (still conservative vs
-  Tilemaker, 10x more aggressive than Planetiler's 0.1 px) and measure
-  size + visual quality.
+Remaining gap vs Tilemaker (293 MB): 24 MB, down from 54 MB (closed 56%).
+Tilemaker is still 14x more aggressive on simplification — further gains would
+require per-layer tuning or a different algorithm (Visvalingam).
 
 #### Cause 3: Redundant false-valued boolean attributes — DONE
 
