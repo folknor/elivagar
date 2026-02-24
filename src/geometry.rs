@@ -161,23 +161,40 @@ pub fn simplify_tolerance(zoom: u8) -> f64 {
 // Douglas-Peucker simplification
 // ---------------------------------------------------------------------------
 
-/// Simplify a polyline using the Douglas-Peucker algorithm.
+/// Simplify a polyline using the Douglas-Peucker algorithm, reusing caller-owned buffers.
 ///
 /// Points whose perpendicular distance to the line segment between endpoints
-/// is less than `tolerance` are removed.
-pub fn simplify(points: &[Point], tolerance: f64) -> Vec<Point> {
+/// is less than `tolerance` are removed. Result is left in `output`.
+/// `keep_buf` is a reusable scratch buffer for the keep-flags array.
+pub fn simplify_into(
+    points: &[Point],
+    tolerance: f64,
+    keep_buf: &mut Vec<bool>,
+    output: &mut Vec<Point>,
+) {
+    output.clear();
     if points.len() <= 2 {
-        return points.to_vec();
+        output.extend_from_slice(points);
+        return;
     }
-    let mut keep = vec![false; points.len()];
-    keep[0] = true;
-    keep[points.len() - 1] = true;
-    dp_recurse(points, 0, points.len() - 1, tolerance * tolerance, &mut keep);
-    keep.iter()
-        .enumerate()
-        .filter(|&(_, &k)| k)
-        .map(|(i, _)| points[i])
-        .collect()
+    keep_buf.clear();
+    keep_buf.resize(points.len(), false);
+    keep_buf[0] = true;
+    keep_buf[points.len() - 1] = true;
+    dp_recurse(points, 0, points.len() - 1, tolerance * tolerance, keep_buf);
+    for (i, &k) in keep_buf.iter().enumerate() {
+        if k {
+            output.push(points[i]);
+        }
+    }
+}
+
+/// Convenience wrapper that allocates its own buffers. Use [`simplify_into`] in hot paths.
+pub fn simplify(points: &[Point], tolerance: f64) -> Vec<Point> {
+    let mut keep = Vec::new();
+    let mut output = Vec::new();
+    simplify_into(points, tolerance, &mut keep, &mut output);
+    output
 }
 
 /// Recursive step of Douglas-Peucker. Uses squared tolerance to avoid sqrt.
@@ -256,9 +273,12 @@ pub fn for_each_zoom_simplified<F>(
     F: FnMut(u8, &[Point]),
 {
     let mut cascade = merc.to_vec();
+    let mut keep_buf: Vec<bool> = Vec::new();
+    let mut simp_buf: Vec<Point> = Vec::new();
     for z in (z_lo..=z_hi).rev() {
         if z < 14 {
-            cascade = simplify(&cascade, simplify_tolerance(z));
+            simplify_into(&cascade, simplify_tolerance(z), &mut keep_buf, &mut simp_buf);
+            std::mem::swap(&mut cascade, &mut simp_buf);
         }
         if cascade.len() < min_points {
             break;
@@ -283,15 +303,18 @@ pub fn for_each_zoom_simplified_multi<F>(
 {
     let mut cascade_outer = outer.to_vec();
     let mut cascade_inners: Vec<Vec<Point>> = inners.to_vec();
+    let mut keep_buf: Vec<bool> = Vec::new();
+    let mut simp_buf: Vec<Point> = Vec::new();
     for z in (z_lo..=z_hi).rev() {
         let tol = if z < 14 { simplify_tolerance(z) } else { 0.0 };
         if tol > 0.0 {
-            cascade_outer = simplify(&cascade_outer, tol);
-            cascade_inners = cascade_inners
-                .iter()
-                .map(|r| simplify(r, tol))
-                .filter(|r| r.len() >= 4)
-                .collect();
+            simplify_into(&cascade_outer, tol, &mut keep_buf, &mut simp_buf);
+            std::mem::swap(&mut cascade_outer, &mut simp_buf);
+            cascade_inners.retain_mut(|r| {
+                simplify_into(r, tol, &mut keep_buf, &mut simp_buf);
+                std::mem::swap(r, &mut simp_buf);
+                r.len() >= 4
+            });
         }
         if cascade_outer.len() < 4 {
             break;
