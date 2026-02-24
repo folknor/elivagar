@@ -528,9 +528,9 @@ dependencies = [
 
 [[package]]
 name = "hotpath"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14e824029e8ae4de779bd5087c3e06b4bf272736ace49d5f8137fdc49a497143"
+checksum = "c98352b06411638e5131542059b6578ae5f53eab64ac2b9205b0e863619033f1"
 dependencies = [
  "arc-swap",
  "cfg-if",
@@ -554,9 +554,9 @@ dependencies = [
 
 [[package]]
 name = "hotpath-macros"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aec0045cb18ddd3e8df0970e1950a838f7100f79aac1758ea15755e01c322c21"
+checksum = "e891ef460ac98cc1c63df56e008587150577c0cc6c7d216392642ea141ff948a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -770,6 +770,7 @@ dependencies = [
  "bytes",
  "clap",
  "flate2",
+ "hotpath",
  "memmap2",
  "protobuf",
  "protobuf-codegen",
