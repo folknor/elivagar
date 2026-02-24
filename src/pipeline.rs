@@ -16,6 +16,7 @@ use crate::node_index::NodeIndex;
 use crate::ocean;
 use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter};
 use crate::shortbread::{self, AttrValue, GeomExpect, Layer, LayerMatch, OsmGeomType, Tags};
+use smallvec::SmallVec;
 use crate::sort::{self, SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add_feature_to_layer};
@@ -524,7 +525,7 @@ fn process_node(
 struct MatchedWay {
     osm_id: u64,
     coords_e7: Vec<(i32, i32)>,
-    matches: Vec<LayerMatch>,
+    matches: SmallVec<[LayerMatch; 4]>,
     is_closed: bool,
 }
 
@@ -887,8 +888,10 @@ fn emit_line_feature(
     records: &mut Vec<SortRecord>,
 ) -> u64 {
     let mut count: u64 = 0;
+    // Reusable buffers: hoisted outside the zoom×tile loops to avoid per-tile allocation.
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
+    let mut tc_buf: Vec<(i32, i32)> = Vec::new();
     // Cascading simplification (P2): simplify from previous zoom's result
     let mut cascade = merc.to_vec();
     for z in (z_lo..=z_hi).rev() {
@@ -913,11 +916,11 @@ fn emit_line_feature(
                 if segment.len() < 2 {
                     continue;
                 }
-                let tile_coords = geometry::to_tile_coords(segment, tx, ty, z);
-                if !skip_size_filter && geometry::line_is_subpixel(&tile_coords) {
+                geometry::to_tile_coords_into(&mut tc_buf, segment, tx, ty, z);
+                if !skip_size_filter && geometry::line_is_subpixel(&tc_buf) {
                     continue;
                 }
-                mvt::encode_linestring(&mut geom_buf, &tile_coords);
+                mvt::encode_linestring(&mut geom_buf, &tc_buf);
                 if geom_buf.is_empty() {
                     continue;
                 }
@@ -944,8 +947,10 @@ fn emit_polygon_feature(
 ) -> u64 {
     // Single-ring polygon (no holes)
     let mut count: u64 = 0;
+    // Reusable buffers: hoisted outside the zoom×tile loops to avoid per-tile allocation.
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
+    let mut tc_buf: Vec<(i32, i32)> = Vec::new();
     // Cascading simplification (P2): simplify from previous zoom's result
     let mut cascade = merc.to_vec();
     for z in (z_lo..=z_hi).rev() {
@@ -965,13 +970,13 @@ fn emit_polygon_feature(
             if clipped.len() < 3 {
                 return;
             }
-            let mut ring = geometry::to_tile_coords(&clipped, tx, ty, z);
-            if !skip_size_filter && geometry::ring_is_subpixel(&ring) {
+            geometry::to_tile_coords_into(&mut tc_buf, &clipped, tx, ty, z);
+            if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
                 return;
             }
-            close_and_orient_cw(&mut ring);
+            close_and_orient_cw(&mut tc_buf);
 
-            mvt::encode_polygon(&mut geom_buf, &[&ring]);
+            mvt::encode_polygon(&mut geom_buf, &[&tc_buf]);
             if geom_buf.is_empty() {
                 return;
             }
@@ -1290,6 +1295,7 @@ fn centroid_of(points: &[Point]) -> Point {
 mod tests {
     use super::*;
     use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
+    use smallvec::smallvec;
     use std::borrow::Cow;
 
     /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
@@ -1299,7 +1305,7 @@ mod tests {
             min_zoom: 5,
             max_zoom: 14,
             geom_expect: GeomExpect::PolygonPointOnSurface,
-            attrs: vec![
+            attrs: smallvec![
                 ("admin_level", AttrValue::Int(admin_level), 0),
                 ("name", AttrValue::Str(Cow::Borrowed("TestCountry")), 0),
             ],
@@ -1364,7 +1370,7 @@ mod tests {
             min_zoom: 14,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![],
+            attrs: smallvec![],
         }];
         let original_min_zoom = matches[0].min_zoom;
         let original_attr_count = matches[0].attrs.len();
@@ -1388,7 +1394,7 @@ mod tests {
             min_zoom: 0,
             max_zoom: 14,
             geom_expect,
-            attrs: vec![("kind", AttrValue::Str(Cow::Borrowed("test")), 0)],
+            attrs: smallvec![("kind", AttrValue::Str(Cow::Borrowed("test")), 0)],
         }
     }
 
@@ -1638,7 +1644,7 @@ mod tests {
             min_zoom: 0,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![
+            attrs: smallvec![
                 ("kind", AttrValue::Str(Cow::Borrowed("building")), 0),
                 ("height", AttrValue::Float(15.0), 10),
             ],
@@ -1666,7 +1672,7 @@ mod tests {
             min_zoom: 14,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![
+            attrs: smallvec![
                 ("kind", AttrValue::Str(Cow::Borrowed("building")), 0),
                 ("height", AttrValue::Float(15.0), 10),
             ],

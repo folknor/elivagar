@@ -1,8 +1,9 @@
 // Geometry engine: projection, simplification, clipping for vector tile generation.
 //
 // All operations work in Mercator [0,1] coordinate space unless stated otherwise.
-// Pure Rust — no external crates.
+// Pure Rust aside from smallvec for inline small-vec returns.
 
+use smallvec::SmallVec;
 use std::f64::consts::PI;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -287,11 +288,12 @@ impl ClipRect {
 /// Clip a linestring to an axis-aligned rectangle using Cohen-Sutherland.
 ///
 /// Returns zero or more sub-linestrings (the line may enter and exit multiple times).
-pub fn clip_linestring(line: &[Point], rect: &ClipRect) -> Vec<Vec<Point>> {
+/// SmallVec<[_; 1]>: most clips produce exactly one segment, avoiding the outer heap alloc.
+pub fn clip_linestring(line: &[Point], rect: &ClipRect) -> SmallVec<[Vec<Point>; 1]> {
     if line.len() < 2 {
-        return Vec::new();
+        return SmallVec::new();
     }
-    let mut result: Vec<Vec<Point>> = Vec::new();
+    let mut result: SmallVec<[Vec<Point>; 1]> = SmallVec::new();
     let mut current: Vec<Point> = Vec::new();
 
     for i in 0..(line.len() - 1) {
@@ -312,7 +314,7 @@ fn clip_segment_and_collect(
     p1: Point,
     rect: &ClipRect,
     current: &mut Vec<Point>,
-    result: &mut Vec<Vec<Point>>,
+    result: &mut SmallVec<[Vec<Point>; 1]>,
 ) {
     if let Some((a, b)) = clip_segment(p0, p1, rect) {
         let enters_from_outside = !points_near(&a, &p0);
@@ -337,7 +339,7 @@ fn clip_segment_and_collect(
 }
 
 /// Move the contents of `current` into `result` if it has at least 2 points.
-fn flush_segment(current: &mut Vec<Point>, result: &mut Vec<Vec<Point>>) {
+fn flush_segment(current: &mut Vec<Point>, result: &mut SmallVec<[Vec<Point>; 1]>) {
     if current.len() >= 2 {
         result.push(std::mem::take(current));
     } else {
@@ -406,16 +408,24 @@ fn intersect_edge(p0: &Point, p1: &Point, rect: &ClipRect, code: u8) -> Point {
 ///
 /// The input ring should NOT have a duplicated closing vertex.
 /// Returns the clipped ring (may be empty if fully outside).
+/// Uses a double-buffer (input/output swap) instead of allocating 4 intermediate Vecs.
 pub fn clip_polygon(ring: &[Point], rect: &ClipRect) -> Vec<Point> {
     if ring.is_empty() {
         return Vec::new();
     }
-
-    // Clip against each of the four edges sequentially.
-    let after_left = clip_polygon_edge(ring, Edge::Left(rect.min_x));
-    let after_right = clip_polygon_edge(&after_left, Edge::Right(rect.max_x));
-    let after_bottom = clip_polygon_edge(&after_right, Edge::Bottom(rect.min_y));
-    clip_polygon_edge(&after_bottom, Edge::Top(rect.max_y))
+    let mut input = ring.to_vec();
+    let mut output = Vec::with_capacity(ring.len() + 4);
+    for edge in [
+        Edge::Left(rect.min_x),
+        Edge::Right(rect.max_x),
+        Edge::Bottom(rect.min_y),
+        Edge::Top(rect.max_y),
+    ] {
+        clip_polygon_edge_into(&input, edge, &mut output);
+        std::mem::swap(&mut input, &mut output);
+        output.clear();
+    }
+    input
 }
 
 /// Which rectangle edge we are clipping against, and its coordinate value.
@@ -455,18 +465,15 @@ fn edge_intersect(s: &Point, e: &Point, edge: Edge) -> Point {
     }
 }
 
-/// Clip a polygon against a single edge.
-fn clip_polygon_edge(polygon: &[Point], edge: Edge) -> Vec<Point> {
+/// Clip a polygon against a single edge, appending results to `output`.
+fn clip_polygon_edge_into(polygon: &[Point], edge: Edge, output: &mut Vec<Point>) {
     if polygon.is_empty() {
-        return Vec::new();
+        return;
     }
-    let mut output = Vec::with_capacity(polygon.len());
     let mut s = polygon[polygon.len() - 1];
-
     for &e in polygon {
         let e_inside = is_inside(&e, edge);
         let s_inside = is_inside(&s, edge);
-
         if e_inside {
             if !s_inside {
                 output.push(edge_intersect(&s, &e, edge));
@@ -477,7 +484,6 @@ fn clip_polygon_edge(polygon: &[Point], edge: Edge) -> Vec<Point> {
         }
         s = e;
     }
-    output
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +721,27 @@ pub fn project_bbox(south: f64, west: f64, north: f64, east: f64) -> MercBbox {
 // ---------------------------------------------------------------------------
 // MVT geometry helpers
 // ---------------------------------------------------------------------------
+
+/// Buffer-reuse variant of `to_tile_coords` for hot paths (called per tile per feature).
+/// Clears `buf` and writes tile pixel coordinates into it, avoiding a Vec alloc per call.
+#[allow(clippy::cast_possible_truncation)]
+pub fn to_tile_coords_into(
+    buf: &mut Vec<(i32, i32)>,
+    points: &[Point],
+    tile_x: u32,
+    tile_y: u32,
+    zoom: u8,
+) {
+    buf.clear();
+    let z_scale = f64::from(1u32 << zoom);
+    let tx = f64::from(tile_x);
+    let ty = f64::from(tile_y);
+    buf.extend(points.iter().map(|p| {
+        let px_x = (p.x * z_scale - tx) * EXTENT;
+        let px_y = (p.y * z_scale - ty) * EXTENT;
+        (px_x.round() as i32, px_y.round() as i32)
+    }));
+}
 
 /// Convert a slice of Mercator points to tile pixel coordinates for MVT encoding.
 #[allow(clippy::cast_possible_truncation)]

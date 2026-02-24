@@ -4,6 +4,7 @@
 // No YAML parsing — every layer, filter, and attribute mapping is compiled code.
 
 use std::borrow::Cow;
+use smallvec::{SmallVec, smallvec};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -173,12 +174,14 @@ pub enum AttrValue {
 pub type Attr = (&'static str, AttrValue, u8);
 
 /// A single layer match result.
+/// SmallVec avoids heap allocation: most matches have 1-6 attrs (inline up to 8),
+/// and most elements match 1-3 layers (match_element returns SmallVec<[_; 4]>).
 pub struct LayerMatch {
     pub layer: Layer,
     pub min_zoom: u8,
     pub max_zoom: u8,
     pub geom_expect: GeomExpect,
-    pub attrs: Vec<Attr>,
+    pub attrs: SmallVec<[Attr; 8]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +189,8 @@ pub struct LayerMatch {
 // ---------------------------------------------------------------------------
 
 /// Match an OSM element against all Shortbread layers, returning every match.
-pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> Vec<LayerMatch> {
-    let mut out = Vec::new();
+pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> SmallVec<[LayerMatch; 4]> {
+    let mut out = SmallVec::new();
     match geom_type {
         OsmGeomType::Node => match_node(tags, &mut out),
         OsmGeomType::OpenWay => match_open_way(tags, &mut out),
@@ -197,7 +200,7 @@ pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> Vec<LayerMatch>
     out
 }
 
-fn match_node(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_node(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     match_place_labels(tags, out);
     match_addresses_point(tags, out);
     match_street_labels_points(tags, out);
@@ -205,7 +208,7 @@ fn match_node(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     pois::match_pois_point(tags, out);
 }
 
-fn match_open_way(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_open_way(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     match_water_lines(tags, out);
     match_water_lines_labels(tags, out);
     match_dam_lines(tags, out);
@@ -217,7 +220,7 @@ fn match_open_way(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     match_ferries(tags, out);
 }
 
-fn match_closed_way(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_closed_way(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     // Polygon layers
     match_water_polygons(tags, out);
     match_water_polygons_labels(tags, out);
@@ -246,7 +249,7 @@ fn match_closed_way(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     pois::match_pois_centroid(tags, out);
 }
 
-fn match_multipolygon(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_multipolygon(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     match_water_polygons(tags, out);
     match_water_polygons_labels(tags, out);
     match_dam_polygons(tags, out);
@@ -313,8 +316,8 @@ fn is_bridge(tags: &Tags<'_>) -> bool {
     )
 }
 
-pub(crate) fn name_attrs(tags: &Tags<'_>) -> Vec<Attr> {
-    let mut attrs = Vec::new();
+pub(crate) fn name_attrs(tags: &Tags<'_>) -> SmallVec<[Attr; 8]> {
+    let mut attrs = SmallVec::new();
     if let Some(v) = tags.get("name")
         && !v.is_empty()
     {
@@ -381,24 +384,24 @@ fn water_polygon_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
     None
 }
 
-fn match_water_polygons(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_water_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some((kind, min_zoom)) = water_polygon_match(tags) {
         out.push(LayerMatch {
             layer: Layer::WaterPolygons,
             min_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![attr_str("kind", kind)],
+            attrs: smallvec![attr_str("kind", kind)],
         });
     }
 }
 
-fn match_water_polygons_labels(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_water_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if !has_name(tags) {
         return;
     }
     if let Some((kind, _base_zoom)) = water_polygon_match(tags) {
-        let mut attrs = vec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_str("kind", kind)];
         attrs.extend(name_attrs(tags));
         // Label layer has its own (higher) min_zoom per Shortbread spec
         let label_zoom = match kind {
@@ -427,9 +430,9 @@ fn water_line_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
     }
 }
 
-fn match_water_lines(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_water_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some((kind, min_zoom)) = water_line_match(tags) {
-        let mut attrs = vec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_str("kind", kind)];
         if is_tunnel(tags) {
             attrs.push(attr_bool("tunnel", true));
         }
@@ -446,12 +449,12 @@ fn match_water_lines(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     }
 }
 
-fn match_water_lines_labels(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_water_lines_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if !has_name(tags) {
         return;
     }
     if let Some((kind, _base_zoom)) = water_line_match(tags) {
-        let mut attrs = vec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_str("kind", kind)];
         attrs.extend(name_attrs(tags));
         if is_tunnel(tags) {
             attrs.push(attr_bool("tunnel", true));
@@ -474,50 +477,50 @@ fn match_water_lines_labels(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     }
 }
 
-fn match_dam_lines(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_dam_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if tags.has_value("waterway", "dam") {
         out.push(LayerMatch {
             layer: Layer::DamLines,
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
-            attrs: vec![attr_str("kind", "dam")],
+            attrs: smallvec![attr_str("kind", "dam")],
         });
     }
 }
 
-fn match_dam_polygons(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_dam_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if tags.has_value("waterway", "dam") {
         out.push(LayerMatch {
             layer: Layer::DamPolygons,
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![attr_str("kind", "dam")],
+            attrs: smallvec![attr_str("kind", "dam")],
         });
     }
 }
 
-fn match_pier_lines(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_pier_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some(kind) = pier_kind(tags) {
         out.push(LayerMatch {
             layer: Layer::PierLines,
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
-            attrs: vec![attr_str("kind", kind)],
+            attrs: smallvec![attr_str("kind", kind)],
         });
     }
 }
 
-fn match_pier_polygons(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_pier_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some(kind) = pier_kind(tags) {
         out.push(LayerMatch {
             layer: Layer::PierPolygons,
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![attr_str("kind", kind)],
+            attrs: smallvec![attr_str("kind", kind)],
         });
     }
 }
@@ -550,7 +553,7 @@ fn boundary_match(tags: &Tags<'_>) -> Option<(i64, u8)> {
     }
 }
 
-fn match_boundaries_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_boundaries_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some((admin_level, min_zoom)) = boundary_match(tags) {
         let maritime =
             tags.has("maritime") || tags.has_value("natural", "coastline");
@@ -560,7 +563,7 @@ fn match_boundaries_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
             min_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
-            attrs: vec![
+            attrs: smallvec![
                 attr_int("admin_level", admin_level),
                 attr_bool("maritime", maritime),
                 attr_bool("disputed", disputed),
@@ -569,9 +572,9 @@ fn match_boundaries_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     }
 }
 
-fn match_boundary_labels(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_boundary_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some((admin_level, _)) = boundary_match(tags) {
-        let mut attrs = vec![attr_int("admin_level", admin_level)];
+        let mut attrs = smallvec![attr_int("admin_level", admin_level)];
         attrs.extend(name_attrs(tags));
         // Default min_zoom is 5. Area-based overrides (z2-z4 for large
         // territories) are applied later in tilegen when geometry is available.
@@ -589,7 +592,7 @@ fn match_boundary_labels(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
 // Place labels
 // ---------------------------------------------------------------------------
 
-fn match_place_labels(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if !has_name(tags) {
         return;
     }
@@ -598,7 +601,7 @@ fn match_place_labels(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
         None => return,
     };
     if let Some((kind, min_zoom, pop_default)) = place_label_info(tags, place) {
-        let mut attrs = vec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_str("kind", kind)];
         attrs.extend(name_attrs(tags));
         let population = tags
             .get("population")
@@ -654,14 +657,14 @@ fn place_label_info(
 // Land
 // ---------------------------------------------------------------------------
 
-fn match_land(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_land(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some((kind, min_zoom)) = land_match(tags) {
         out.push(LayerMatch {
             layer: Layer::Land,
             min_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![attr_str("kind", kind)],
+            attrs: smallvec![attr_str("kind", kind)],
         });
     }
 }
@@ -757,14 +760,14 @@ fn land_match_wetland(v: &str) -> Option<(&'static str, u8)> {
 // Sites
 // ---------------------------------------------------------------------------
 
-fn match_sites(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_sites(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some(kind) = sites_kind(tags) {
         out.push(LayerMatch {
             layer: Layer::Sites,
             min_zoom: 14,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![attr_str("kind", kind)],
+            attrs: smallvec![attr_str("kind", kind)],
         });
     }
 }
@@ -797,7 +800,7 @@ fn sites_kind(tags: &Tags<'_>) -> Option<&'static str> {
 // Buildings
 // ---------------------------------------------------------------------------
 
-fn match_buildings(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some(v) = tags.get("building")
         && v != "no"
     {
@@ -806,7 +809,7 @@ fn match_buildings(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
             min_zoom: 14,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![],
+            attrs: smallvec![],
         });
     }
 }
@@ -824,7 +827,7 @@ fn is_poi_element(tags: &Tags<'_>) -> bool {
         || tags.has("office")
 }
 
-fn match_addresses_point(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_addresses_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if is_poi_element(tags) {
         return;
     }
@@ -833,7 +836,7 @@ fn match_addresses_point(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     if !has_number && !has_housename {
         return;
     }
-    let mut attrs = Vec::new();
+    let mut attrs = SmallVec::new();
     if let Some(v) = tags.get("addr:housename") {
         attrs.push(attr_dyn("housename", v));
     }
@@ -849,7 +852,7 @@ fn match_addresses_point(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     });
 }
 
-fn match_addresses_centroid(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_addresses_centroid(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if is_poi_element(tags) {
         return;
     }
@@ -858,7 +861,7 @@ fn match_addresses_centroid(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     if !has_number && !has_housename {
         return;
     }
-    let mut attrs = Vec::new();
+    let mut attrs = SmallVec::new();
     if let Some(v) = tags.get("addr:housename") {
         attrs.push(attr_dyn("housename", v));
     }
@@ -935,7 +938,7 @@ fn railway_zoom(tags: &Tags<'_>, v: &str) -> Option<u8> {
     }
 }
 
-fn match_streets_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     let (kind_raw, min_zoom, is_rail) = match street_match(tags) {
         Some(v) => v,
         None => return,
@@ -943,7 +946,7 @@ fn match_streets_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     let kind = street_kind(kind_raw);
     let is_link = kind_raw.ends_with("_link");
     // kind: always emitted. Boolean attrs only when true (saves ~3-6 tags/feature).
-    let mut attrs = vec![attr_dyn("kind", kind)];
+    let mut attrs = smallvec![attr_dyn("kind", kind)];
     if is_link {
         attrs.push(attr_bool_z("link", true, 11));
     }
@@ -1000,9 +1003,9 @@ fn match_streets_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
 // Street polygons
 // ---------------------------------------------------------------------------
 
-fn match_street_polygons(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_street_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some((kind, min_zoom)) = street_polygon_match(tags) {
-        let mut attrs = vec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_str("kind", kind)];
         if is_bridge(tags) {
             attrs.push(attr_bool("bridge", true));
         }
@@ -1047,7 +1050,7 @@ fn street_polygon_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
 // Street labels
 // ---------------------------------------------------------------------------
 
-fn match_street_labels_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     let has_ref = tags.has("ref");
     if !has_name(tags) && !has_ref {
         return;
@@ -1060,7 +1063,7 @@ fn match_street_labels_line(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
         Some(k) => k, // street_labels keeps raw kind (including _link suffix)
         None => return,
     };
-    let mut attrs = vec![attr_dyn("kind", kind)];
+    let mut attrs = smallvec![attr_dyn("kind", kind)];
     attrs.extend(name_attrs(tags));
     // ref: semicolons → newlines
     if let Some(r) = tags.get("ref") {
@@ -1147,11 +1150,11 @@ fn street_label_zoom_highway(v: &str) -> Option<u8> {
 // Street label points
 // ---------------------------------------------------------------------------
 
-fn match_street_labels_points(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_street_labels_points(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if !tags.has_value("highway", "motorway_junction") {
         return;
     }
-    let mut attrs = vec![attr_str("kind", "motorway_junction")];
+    let mut attrs = smallvec![attr_str("kind", "motorway_junction")];
     if let Some(v) = tags.get("ref") {
         attrs.push(attr_dyn("ref", v));
     }
@@ -1171,13 +1174,13 @@ fn match_street_labels_points(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
 
 fn match_streets_polygons_labels(
     tags: &Tags<'_>,
-    out: &mut Vec<LayerMatch>,
+    out: &mut SmallVec<[LayerMatch; 4]>,
 ) {
     if !has_name(tags) {
         return;
     }
     if let Some((kind, _)) = street_polygon_match(tags) {
-        let mut attrs = vec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_str("kind", kind)];
         attrs.extend(name_attrs(tags));
         out.push(LayerMatch {
             layer: Layer::StreetsPolygonsLabels,
@@ -1193,14 +1196,14 @@ fn match_streets_polygons_labels(
 // Bridges
 // ---------------------------------------------------------------------------
 
-fn match_bridges(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_bridges(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if tags.has_value("man_made", "bridge") {
         out.push(LayerMatch {
             layer: Layer::Bridges,
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: vec![attr_str("kind", "bridge")],
+            attrs: smallvec![attr_str("kind", "bridge")],
         });
     }
 }
@@ -1209,14 +1212,14 @@ fn match_bridges(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
 // Aerialways
 // ---------------------------------------------------------------------------
 
-fn match_aerialways(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_aerialways(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some(kind) = aerialway_kind(tags) {
         out.push(LayerMatch {
             layer: Layer::Aerialways,
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
-            attrs: vec![attr_str("kind", kind)],
+            attrs: smallvec![attr_str("kind", kind)],
         });
     }
 }
@@ -1241,7 +1244,7 @@ fn aerialway_kind(tags: &Tags<'_>) -> Option<&'static str> {
 // Ferries
 // ---------------------------------------------------------------------------
 
-fn match_ferries(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+fn match_ferries(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if !tags.has_value("route", "ferry") {
         return;
     }
@@ -1250,7 +1253,7 @@ fn match_ferries(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     } else {
         10
     };
-    let mut attrs = vec![attr_str("kind", "ferry")];
+    let mut attrs = smallvec![attr_str("kind", "ferry")];
     attrs.extend(name_attrs(tags));
     out.push(LayerMatch {
         layer: Layer::Ferries,
@@ -1267,10 +1270,10 @@ fn match_ferries(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
 
 fn match_public_transport_point(
     tags: &Tags<'_>,
-    out: &mut Vec<LayerMatch>,
+    out: &mut SmallVec<[LayerMatch; 4]>,
 ) {
     if let Some((kind, min_zoom)) = public_transport_match(tags) {
-        let mut attrs = vec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_str("kind", kind)];
         attrs.extend(name_attrs(tags));
         if let Some(v) = tags.get("iata") {
             attrs.push(attr_dyn("iata", v));
@@ -1287,10 +1290,10 @@ fn match_public_transport_point(
 
 fn match_public_transport_centroid(
     tags: &Tags<'_>,
-    out: &mut Vec<LayerMatch>,
+    out: &mut SmallVec<[LayerMatch; 4]>,
 ) {
     if let Some((kind, min_zoom)) = public_transport_match(tags) {
-        let mut attrs = vec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_str("kind", kind)];
         attrs.extend(name_attrs(tags));
         if let Some(v) = tags.get("iata") {
             attrs.push(attr_dyn("iata", v));

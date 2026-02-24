@@ -1,12 +1,13 @@
 // POI (Point of Interest) matching for the Shortbread schema.
 
 use crate::shortbread::{attr_str, attr_dyn, attr_bool, name_attrs, Attr, Tags, Layer, LayerMatch, GeomExpect};
+use smallvec::{SmallVec, smallvec};
 
 // ---------------------------------------------------------------------------
 // Entry points (called from shortbread dispatch)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn match_pois_point(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+pub(crate) fn match_pois_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some(mut attrs) = pois_match(tags) {
         attrs.extend(pois_common_attrs(tags));
         out.push(LayerMatch {
@@ -19,7 +20,7 @@ pub(crate) fn match_pois_point(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
     }
 }
 
-pub(crate) fn match_pois_centroid(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
+pub(crate) fn match_pois_centroid(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some(mut attrs) = pois_match(tags) {
         attrs.extend(pois_common_attrs(tags));
         out.push(LayerMatch {
@@ -36,8 +37,8 @@ pub(crate) fn match_pois_centroid(tags: &Tags<'_>, out: &mut Vec<LayerMatch>) {
 // Common attrs
 // ---------------------------------------------------------------------------
 
-fn pois_common_attrs(tags: &Tags<'_>) -> Vec<Attr> {
-    let mut attrs = Vec::new();
+fn pois_common_attrs(tags: &Tags<'_>) -> SmallVec<[Attr; 8]> {
+    let mut attrs = SmallVec::new();
     attrs.extend(name_attrs(tags));
     if let Some(v) = tags.get("addr:housename") {
         attrs.push(attr_dyn("housename", v));
@@ -53,7 +54,7 @@ fn pois_common_attrs(tags: &Tags<'_>) -> Vec<Attr> {
 // ---------------------------------------------------------------------------
 
 /// Match POI tags. Returns the base attrs (the category key) if matched.
-fn pois_match(tags: &Tags<'_>) -> Option<Vec<Attr>> {
+fn pois_match(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
     if let Some(attrs) = pois_match_amenity(tags) {
         return Some(attrs);
     }
@@ -63,7 +64,7 @@ fn pois_match(tags: &Tags<'_>) -> Option<Vec<Attr>> {
     if let Some(v) = tags.get("highway")
         && v == "emergency_access_point"
     {
-        return Some(vec![attr_dyn("highway", v)]);
+        return Some(smallvec![attr_dyn("highway", v)]);
     }
     if let Some(attrs) = pois_match_historic(tags) {
         return Some(attrs);
@@ -75,7 +76,7 @@ fn pois_match(tags: &Tags<'_>) -> Option<Vec<Attr>> {
         return Some(attrs);
     }
     if tags.has_value("office", "diplomatic") {
-        return Some(vec![attr_str("office", "diplomatic")]);
+        return Some(smallvec![attr_str("office", "diplomatic")]);
     }
     if let Some(attrs) = pois_match_shop(tags) {
         return Some(attrs);
@@ -89,7 +90,7 @@ fn pois_match(tags: &Tags<'_>) -> Option<Vec<Attr>> {
 #[allow(clippy::too_many_lines)]
 fn pois_match_amenity(
     tags: &Tags<'_>,
-) -> Option<Vec<Attr>> {
+) -> Option<SmallVec<[Attr; 8]>> {
     static AMENITY_VALUES: &[&str] = &[
         "arts_centre",
         "atm",
@@ -150,7 +151,7 @@ fn pois_match_amenity(
     if !AMENITY_VALUES.contains(&v) {
         return None;
     }
-    let mut attrs = vec![attr_dyn("amenity", v)];
+    let mut attrs = smallvec![attr_dyn("amenity", v)];
     // Special attrs per amenity type
     poi_amenity_special_attrs(tags, v, &mut attrs);
     Some(attrs)
@@ -159,7 +160,7 @@ fn pois_match_amenity(
 fn poi_amenity_special_attrs(
     tags: &Tags<'_>,
     amenity: &str,
-    attrs: &mut Vec<Attr>,
+    attrs: &mut SmallVec<[Attr; 8]>,
 ) {
     match amenity {
         "restaurant" | "fast_food" | "pub" | "bar" | "cafe" => {
@@ -193,7 +194,7 @@ fn poi_amenity_special_attrs(
 
 fn poi_recycling_attrs(
     tags: &Tags<'_>,
-    attrs: &mut Vec<Attr>,
+    attrs: &mut SmallVec<[Attr; 8]>,
 ) {
     attrs.push(attr_bool(
         "recycling:glass_bottles",
@@ -215,7 +216,7 @@ fn poi_recycling_attrs(
 
 fn pois_match_emergency(
     tags: &Tags<'_>,
-) -> Option<Vec<Attr>> {
+) -> Option<SmallVec<[Attr; 8]>> {
     static EMERGENCY_VALUES: &[&str] = &[
         "defibrillator",
         "fire_hydrant",
@@ -229,12 +230,12 @@ fn pois_match_emergency(
     if !EMERGENCY_VALUES.contains(&v) {
         return None;
     }
-    Some(vec![attr_dyn("emergency", v)])
+    Some(smallvec![attr_dyn("emergency", v)])
 }
 
 fn pois_match_historic(
     tags: &Tags<'_>,
-) -> Option<Vec<Attr>> {
+) -> Option<SmallVec<[Attr; 8]>> {
     static HISTORIC_VALUES: &[&str] = &[
         "archaeological_site",
         "battlefield",
@@ -250,12 +251,12 @@ fn pois_match_historic(
     if !HISTORIC_VALUES.contains(&v) {
         return None;
     }
-    Some(vec![attr_dyn("historic", v)])
+    Some(smallvec![attr_dyn("historic", v)])
 }
 
 fn pois_match_leisure(
     tags: &Tags<'_>,
-) -> Option<Vec<Attr>> {
+) -> Option<SmallVec<[Attr; 8]>> {
     static LEISURE_VALUES: &[&str] = &[
         "dog_park",
         "golf_course",
@@ -269,7 +270,7 @@ fn pois_match_leisure(
     if !LEISURE_VALUES.contains(&v) {
         return None;
     }
-    let mut attrs = vec![attr_dyn("leisure", v)];
+    let mut attrs = smallvec![attr_dyn("leisure", v)];
     // pitch and sports_centre get sport attr
     if (v == "pitch" || v == "sports_centre")
         && let Some(s) = tags.get("sport")
@@ -281,7 +282,7 @@ fn pois_match_leisure(
 
 fn pois_match_man_made(
     tags: &Tags<'_>,
-) -> Option<Vec<Attr>> {
+) -> Option<SmallVec<[Attr; 8]>> {
     static MAN_MADE_VALUES: &[&str] = &[
         "lighthouse",
         "mast",
@@ -294,7 +295,7 @@ fn pois_match_man_made(
     if !MAN_MADE_VALUES.contains(&v) {
         return None;
     }
-    let mut attrs = vec![attr_dyn("man_made", v)];
+    let mut attrs = smallvec![attr_dyn("man_made", v)];
     if v == "tower"
         && let Some(tt) = tags.get("tower:type")
     {
@@ -305,7 +306,7 @@ fn pois_match_man_made(
 
 fn pois_match_shop(
     tags: &Tags<'_>,
-) -> Option<Vec<Attr>> {
+) -> Option<SmallVec<[Attr; 8]>> {
     static SHOP_VALUES: &[&str] = &[
         "alcohol",
         "bakery",
@@ -350,12 +351,12 @@ fn pois_match_shop(
     if !SHOP_VALUES.contains(&v) {
         return None;
     }
-    Some(vec![attr_dyn("shop", v)])
+    Some(smallvec![attr_dyn("shop", v)])
 }
 
 fn pois_match_tourism(
     tags: &Tags<'_>,
-) -> Option<Vec<Attr>> {
+) -> Option<SmallVec<[Attr; 8]>> {
     static TOURISM_VALUES: &[&str] = &[
         "alpine_hut",
         "artwork",
@@ -376,7 +377,7 @@ fn pois_match_tourism(
     if !TOURISM_VALUES.contains(&v) {
         return None;
     }
-    let mut attrs = vec![attr_dyn("tourism", v)];
+    let mut attrs = smallvec![attr_dyn("tourism", v)];
     if v == "information"
         && let Some(i) = tags.get("information")
     {

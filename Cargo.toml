@@ -18,6 +18,7 @@ pbfhogg = { path = "../pbfhogg", default-features = false, features = ["zlib-ng"
 rayon = "1.5"
 memmap2 = "0.9"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-ng"] }
+smallvec = "1"
 mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]

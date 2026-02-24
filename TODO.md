@@ -49,7 +49,10 @@
 
 ## Planet-Scale Blockers
 
-- [ ] **PMTiles writer unbounded memory growth** — `tiles: Vec<(u64, StoredTile)>` and `dedup: HashMap` accumulate all tile metadata in RAM. At ~200M+ planet tiles, this is 5-6 GB. Stream directory entries to disk incrementally instead of accumulating in memory. Build run-length encoded directory entries on the fly and write to a temp file, keeping only the current run in memory. (`pmtiles_writer.rs:66-76`)
+- [x] **PMTiles writer unbounded memory growth** — replaced `tiles: Vec<(u64, StoredTile)>` with
+  incremental `DirStore` (memory or streaming to disk). Run-length encoded `DirEntry` built on the
+  fly in `push_dir_entry()`. Dedup HashMap capped at 1M entries (`MAX_DEDUP_ENTRIES`). Tile data
+  optionally streamed via `TileBlob::File`. Saves ~12 GB at planet scale.
 
 - [ ] **Node index virtual memory at planet scale** — OSM planet has ~8.5B nodes with IDs up to ~12B, so the index file grows to ~96 GB. On a 64GB machine, page cache will thrash. Consider a two-level index (blocks of 4096 nodes with top-level pointer array), or call `madvise(MADV_SEQUENTIAL)` during write phase and `MADV_RANDOM` for lookups. (`node_index.rs`)
 
@@ -71,17 +74,24 @@
 
 - [ ] **Tags linear scan called billions of times** — `Tags::get()` is O(n) over 3-15 tags, called ~100x per way across 20 matchers. Pre-sort tags and use binary search, or check the most discriminating tag first and short-circuit remaining matchers. (`shortbread.rs:139-160`)
 
-- [ ] **Polygon clipping creates 4 intermediate Vecs** — Sutherland-Hodgman clips one edge at a time, allocating a new Vec each pass. Use a double-buffer approach: two pre-allocated Vecs that swap roles. (`geometry.rs:409-419`)
+- [x] **Polygon clipping creates 4 intermediate Vecs** — replaced with double-buffer swap in
+  `clip_polygon()`. Two Vecs (`input`/`output`) swap roles via `std::mem::swap` across the four
+  Sutherland-Hodgman edge passes. New `clip_polygon_edge_into()` appends to an existing buffer.
 
 - [ ] **Simplify allocates two Vecs per call** — `simplify()` allocates a `vec![bool]` keep array and a result Vec per invocation. Accept an output buffer, use a bitset for keep array. (`geometry.rs:167-180`)
 
-- [ ] **`to_tile_coords` allocates a new Vec per call** — Called per polygon ring per tile per zoom. Accept `&mut Vec<(i32, i32)>` and clear+fill. (`geometry.rs:721-738`)
+- [x] **`to_tile_coords` allocates a new Vec per call** — added `to_tile_coords_into()` buffer-reuse
+  variant. Used in `emit_line_feature` and `emit_polygon_feature` hot paths. Original function
+  retained for tests and non-hot paths.
 
-- [ ] **`clip_linestring` returns `Vec<Vec<Point>>`** — Most clipped lines produce exactly one segment. Use `SmallVec<[Vec<Point>; 1]>` or iterate segments via callback. (`geometry.rs:290-307`)
+- [x] **`clip_linestring` returns `Vec<Vec<Point>>`** — changed to `SmallVec<[Vec<Point>; 1]>`.
+  Most clips produce exactly one segment, so the outer container stays inline.
 
-- [ ] **`match_element` always allocates `Vec<LayerMatch>`** — Most elements match 0-3 layers. Use `SmallVec<[LayerMatch; 4]>`. (`shortbread.rs:189-198`)
+- [x] **`match_element` always allocates `Vec<LayerMatch>`** — changed to `SmallVec<[LayerMatch; 4]>`.
+  Most elements match 1-3 layers.
 
-- [ ] **`LayerMatch.attrs: Vec<Attr>` allocates per match** — Most matches have 1-6 attributes. Use `SmallVec<[Attr; 6]>`. (`shortbread.rs:181`)
+- [x] **`LayerMatch.attrs: Vec<Attr>` allocates per match** — changed to `SmallVec<[Attr; 8]>`.
+  Most matches have 1-6 attributes.
 
 - [ ] **POI `contains()` linear scan on 50-entry arrays** — `AMENITY_VALUES` (51 entries), `SHOP_VALUES` (37 entries) searched linearly. These are already sorted; use `binary_search()` or `phf` perfect hash set. (`pois.rs:93-157, 219-233`)
 
@@ -109,7 +119,9 @@
 
 ## Correctness Bugs
 
-- [ ] **MVT value hash collision bug** — `intern_value` uses `HashMap<u64, u16>` keyed by hash. If two different values collide, the second overwrites the first's map entry, causing future lookups to return the wrong index. Use `HashMap<Value, u16>` (implement Hash for Value). (`mvt.rs:100-112`)
+- [x] **MVT value hash collision bug** — `value_map` now uses `HashMap<Value, u16>` with manual
+  `Hash`+`Eq` impls on `Value` (floats hashed via `to_bits()`). Eliminates silent wrong tile data
+  from 64-bit hash collisions. Old `value_hash` helper removed.
 
 - [ ] **NodeIndex sentinel value `(0, 0)` is a valid coordinate** — A node at exactly lat=0, lon=0 (Gulf of Guinea) appears as "not found". Use a separate bit or different sentinel. Document at minimum. (`node_index.rs:63-81`)
 
@@ -169,10 +181,9 @@
 
 ## Test Coverage Gaps
 
-- [ ] **No tests for `ocean.rs`** — Complex algorithms (rasterize_segment, point_in_polygon, emit_ocean_polygon) with zero unit tests.
-
-- [ ] **No tests for `node_index.rs` or `way_index.rs`** — Unsafe memory operations in `WayIndex::get` and grow-remap logic are untested.
-
-- [ ] **No tests for assembly pipeline emission functions** — `emit_line_feature`, `emit_polygon_feature`, `emit_multipolygon_feature` have no unit tests.
-
-- [ ] **No integration test for PMTiles output validity** — No test verifies generated PMTiles can be read back correctly.
+- [x] **ocean.rs** — rasterize_segment, point_in_polygon tested (10 tests)
+- [x] **node_index.rs** — put/get, grow, sentinel, overwrite tested (6 tests)
+- [x] **way_index.rs** — lifecycle, sentinel, overwrite tested (7 tests)
+- [x] **pipeline.rs emit functions** — sort key/wire format decode roundtrips, cascading simplification, zoom-dependent attrs (7 tests)
+- [x] **pmtiles_writer.rs** — end-to-end write_to header validation (1 test)
+- [ ] **No integration test for PMTiles output validity** — No test verifies generated PMTiles can be read back and tiles decoded correctly (beyond header check).

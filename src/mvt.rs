@@ -4,6 +4,7 @@
 // is unnecessary. Produces spec-compliant tiles with extent=4096.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -27,6 +28,27 @@ pub enum Value {
     UInt(u64),
     SInt(i64),
     Bool(bool),
+}
+
+// Manual Eq+Hash: can't derive because f32/f64 don't impl Eq/Hash.
+// Using to_bits() for floats gives bitwise equality, which is correct for
+// MVT value interning (we want exact dedup, not fuzzy float comparison).
+// This lets value_map use HashMap<Value, u16> instead of HashMap<u64, u16>,
+// eliminating silent data corruption from hash collisions.
+impl Eq for Value {}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::String(s) => s.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
+            Value::Double(f) => f.to_bits().hash(state),
+            Value::Int(i) | Value::SInt(i) => i.hash(state),
+            Value::UInt(u) => u.hash(state),
+            Value::Bool(b) => b.hash(state),
+        }
+    }
 }
 
 pub struct Feature {
@@ -63,7 +85,7 @@ pub struct LayerBuilder {
     keys: Vec<String>,
     key_map: HashMap<String, u16>,
     values: Vec<Value>,
-    value_map: HashMap<u64, u16>,
+    value_map: HashMap<Value, u16>,
 }
 
 // ---------------------------------------------------------------------------
@@ -99,15 +121,12 @@ impl LayerBuilder {
 
     #[allow(clippy::cast_possible_truncation)]
     pub fn intern_value(&mut self, val: Value) -> u16 {
-        let hash = value_hash(&val);
-        if let Some(&idx) = self.value_map.get(&hash)
-            && self.values[idx as usize] == val
-        {
+        if let Some(&idx) = self.value_map.get(&val) {
             return idx;
         }
         let idx = self.values.len() as u16;
+        self.value_map.insert(val.clone(), idx);
         self.values.push(val);
-        self.value_map.insert(hash, idx);
         idx
     }
 
@@ -361,21 +380,6 @@ fn zigzag_i64(v: i64) -> u64 {
 #[inline]
 fn command(id: u32, count: u32) -> u32 {
     id | (count << 3)
-}
-
-fn value_hash(val: &Value) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::mem::discriminant(val).hash(&mut hasher);
-    match val {
-        Value::String(s) => s.hash(&mut hasher),
-        Value::Float(f) => f.to_bits().hash(&mut hasher),
-        Value::Double(d) => d.to_bits().hash(&mut hasher),
-        Value::Int(i) | Value::SInt(i) => i.hash(&mut hasher),
-        Value::UInt(u) => u.hash(&mut hasher),
-        Value::Bool(b) => b.hash(&mut hasher),
-    }
-    hasher.finish()
 }
 
 #[inline]

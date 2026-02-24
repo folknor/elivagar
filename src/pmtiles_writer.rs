@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Read as _, Write};
 use std::path::{Path, PathBuf};
 
 use flate2::write::GzEncoder;
@@ -26,6 +26,12 @@ pub struct PmtilesConfig {
     pub center: (f64, f64, u8),
 }
 
+/// Maximum number of entries in the dedup HashMap before we stop inserting.
+/// At planet scale, unlimited dedup grows to ~7 GB. Capping at 1M entries
+/// keeps the map under ~50 MB while still deduplicating the ocean fill tiles
+/// (which are added early and remain cached).
+const MAX_DEDUP_ENTRIES: usize = 1_000_000;
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -38,15 +44,23 @@ struct DirEntry {
     run_length: u32,
 }
 
-/// Stored tile: either unique data or a reference to another tile's data.
-enum StoredTile {
-    /// Unique tile data at this offset/length in the blob.
-    Unique { offset: u64, length: u32 },
-    /// Duplicate — points to the same offset/length as the original.
-    Dedup { offset: u64, length: u32 },
+/// Storage for directory entries: in-memory or streamed to a temp file.
+/// Streaming avoids accumulating all ~200M+ directory entries in RAM at
+/// planet scale. Entries are built incrementally with run-length encoding
+/// in push_dir_entry(), so the on-disk format is already compacted.
+enum DirStore {
+    Memory(Vec<DirEntry>),
+    Streaming {
+        writer: BufWriter<File>,
+        path: PathBuf,
+        count: u64,
+    },
 }
 
 /// Tile data storage: in-memory or streamed to a temp file.
+/// Streaming mode avoids buffering all compressed tile data in RAM (~3 GB
+/// for a planet). The blob is written sequentially and read back during
+/// write_to() via io::copy.
 enum TileBlob {
     /// All tile data in a Vec (original behavior, for tests and small runs).
     Memory(Vec<u8>),
@@ -67,8 +81,12 @@ pub struct PmtilesWriter {
     config: PmtilesConfig,
     /// Concatenated compressed tile data (in-memory or file-backed).
     blob: TileBlob,
-    /// Per-tile metadata in insertion order: (tile_id, stored).
-    tiles: Vec<(u64, StoredTile)>,
+    /// Total number of tiles addressed (including deduped references).
+    num_addressed: u64,
+    /// Current run being built (flushed when a new non-extending tile arrives).
+    current_run: Option<DirEntry>,
+    /// Directory entries (in-memory or streamed to disk).
+    dir_store: DirStore,
     /// Content hash -> (offset, length) for dedup.
     dedup: HashMap<u64, (u64, u32)>,
     /// Number of unique tile contents (after dedup).
@@ -78,7 +96,7 @@ pub struct PmtilesWriter {
 impl PmtilesWriter {
     /// Total tiles added (including deduped references).
     pub fn tile_count(&self) -> u64 {
-        self.tiles.len() as u64
+        self.num_addressed
     }
 
     /// Unique tile data blobs (after dedup).
@@ -93,7 +111,9 @@ impl PmtilesWriter {
         PmtilesWriter {
             config,
             blob: TileBlob::Memory(Vec::new()),
-            tiles: Vec::new(),
+            num_addressed: 0,
+            current_run: None,
+            dir_store: DirStore::Memory(Vec::new()),
             dedup: HashMap::new(),
             unique_count: 0,
         }
@@ -104,10 +124,17 @@ impl PmtilesWriter {
         let blob_path = tmp_dir.join("tiles.blob");
         let file = File::create(&blob_path)?;
         let writer = BufWriter::with_capacity(1 << 20, file); // 1 MB buffer
+
+        let dir_path = tmp_dir.join("dir_entries.bin");
+        let dir_file = File::create(&dir_path)?;
+        let dir_writer = BufWriter::new(dir_file);
+
         Ok(PmtilesWriter {
             config,
             blob: TileBlob::File { writer, path: blob_path, offset: 0 },
-            tiles: Vec::new(),
+            num_addressed: 0,
+            current_run: None,
+            dir_store: DirStore::Streaming { writer: dir_writer, path: dir_path, count: 0 },
             dedup: HashMap::new(),
             unique_count: 0,
         })
@@ -127,13 +154,7 @@ impl PmtilesWriter {
         if let Some(&(dup_offset, dup_length)) = self.dedup.get(&hash) {
             // Verify size matches to guard against 64-bit hash collisions.
             if dup_length == data.len() as u32 {
-                self.tiles.push((
-                    tile_id,
-                    StoredTile::Dedup {
-                        offset: dup_offset,
-                        length: dup_length,
-                    },
-                ));
+                self.push_dir_entry(tile_id, dup_offset, dup_length)?;
                 return Ok(false);
             }
         }
@@ -152,19 +173,26 @@ impl PmtilesWriter {
             }
         }
 
-        self.dedup.insert(hash, (offset, length));
-        self.tiles.push((tile_id, StoredTile::Unique { offset, length }));
+        if self.dedup.len() < MAX_DEDUP_ENTRIES {
+            self.dedup.insert(hash, (offset, length));
+        }
+        self.push_dir_entry(tile_id, offset, length)?;
         self.unique_count += 1;
         Ok(true)
     }
 
     /// Write the complete PMTiles archive to a file.
     pub fn write_to(&mut self, path: &Path) -> io::Result<()> {
-        let entries = self.build_dir_entries();
+        let entries = self.collect_dir_entries()?;
         let metadata_json = build_metadata(&self.config);
 
         let (root_bytes, leaf_bytes) = self.build_directories(&entries)?;
         let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
+
+        // Clean up streaming dir_entries temp file if it exists.
+        if let DirStore::Streaming { path: dir_path, .. } = &self.dir_store {
+            drop(std::fs::remove_file(dir_path));
+        }
 
         // Determine tile data length.
         let data_length = match &self.blob {
@@ -226,23 +254,64 @@ impl PmtilesWriter {
 // ---------------------------------------------------------------------------
 
 impl PmtilesWriter {
-    /// Convert stored tiles into directory entries with run-length encoding.
-    fn build_dir_entries(&self) -> Vec<DirEntry> {
-        if self.tiles.is_empty() {
-            return Vec::new();
+    /// Flush the current run-length entry to the dir store.
+    fn flush_run(&mut self) -> io::Result<()> {
+        if let Some(run) = self.current_run.take() {
+            match &mut self.dir_store {
+                DirStore::Memory(entries) => entries.push(run),
+                DirStore::Streaming { writer, count, .. } => {
+                    writer.write_all(&run.tile_id.to_le_bytes())?;
+                    writer.write_all(&run.offset.to_le_bytes())?;
+                    writer.write_all(&run.length.to_le_bytes())?;
+                    writer.write_all(&run.run_length.to_le_bytes())?;
+                    *count += 1;
+                }
+            }
         }
+        Ok(())
+    }
 
-        let mut entries: Vec<DirEntry> = Vec::new();
-
-        for &(tile_id, ref stored) in &self.tiles {
-            let (offset, length) = match *stored {
-                StoredTile::Unique { offset, length } => (offset, length),
-                StoredTile::Dedup { offset, length } => (offset, length),
-            };
-            try_extend_run(&mut entries, tile_id, offset, length);
+    /// Record a directory entry, extending the current run if possible.
+    fn push_dir_entry(&mut self, tile_id: u64, offset: u64, length: u32) -> io::Result<()> {
+        self.num_addressed += 1;
+        if let Some(ref run) = self.current_run {
+            let next_id = run.tile_id + u64::from(run.run_length);
+            if tile_id == next_id && offset == run.offset && length == run.length {
+                self.current_run.as_mut().expect("just checked").run_length += 1;
+                return Ok(());
+            }
         }
+        // Flush old run if any, then start new one
+        self.flush_run()?;
+        self.current_run = Some(DirEntry { tile_id, offset, length, run_length: 1 });
+        Ok(())
+    }
 
-        entries
+    /// Collect all directory entries (flushing the current run and reading back
+    /// from the streaming temp file if necessary).
+    fn collect_dir_entries(&mut self) -> io::Result<Vec<DirEntry>> {
+        self.flush_run()?;
+        match &mut self.dir_store {
+            DirStore::Memory(entries) => Ok(std::mem::take(entries)),
+            DirStore::Streaming { writer, path, count } => {
+                writer.flush()?;
+                #[allow(clippy::cast_possible_truncation)]
+                let num = *count as usize;
+                let mut data = Vec::new();
+                let mut file = File::open(path)?;
+                file.read_to_end(&mut data)?;
+                let mut entries = Vec::with_capacity(num);
+                let mut pos = 0;
+                for _ in 0..num {
+                    let tile_id = read_u64_le(&data, &mut pos);
+                    let offset = read_u64_le(&data, &mut pos);
+                    let length = read_u32_le(&data, &mut pos);
+                    let run_length = read_u32_le(&data, &mut pos);
+                    entries.push(DirEntry { tile_id, offset, length, run_length });
+                }
+                Ok(entries)
+            }
+        }
     }
 
     /// Build root and leaf directory bytes. Returns (root_compressed, leaf_compressed).
@@ -287,7 +356,7 @@ impl PmtilesWriter {
         write_u64_le(&mut h, 56, data_offset);
         write_u64_le(&mut h, 64, data_length);
 
-        write_header_counts(&mut h, &self.tiles, num_entries, self.unique_count);
+        write_header_counts(&mut h, self.num_addressed, num_entries, self.unique_count);
 
         // Clustered
         h[96] = 1;
@@ -308,9 +377,7 @@ impl PmtilesWriter {
 }
 
 /// Write tile count fields into header bytes 72..96.
-#[allow(clippy::cast_possible_truncation)]
-fn write_header_counts(h: &mut [u8; 127], tiles: &[(u64, StoredTile)], num_entries: u64, unique_count: u64) {
-    let num_addressed = tiles.len() as u64;
+fn write_header_counts(h: &mut [u8; 127], num_addressed: u64, num_entries: u64, unique_count: u64) {
     write_u64_le(h, 72, num_addressed);
     write_u64_le(h, 80, num_entries);
     write_u64_le(h, 88, unique_count);
@@ -328,27 +395,6 @@ fn write_header_bounds(h: &mut [u8; 127], config: &PmtilesConfig) {
     h[118] = center_zoom;
     write_i32_le(h, 119, f64_to_e7(center_lon));
     write_i32_le(h, 123, f64_to_e7(center_lat));
-}
-
-/// Try to extend the last entry's run, or push a new entry.
-///
-/// PMTiles v3 run_length means all tiles in the run share the SAME data blob
-/// (same offset, same length). Only consecutive tile IDs pointing to identical
-/// data can be merged.
-fn try_extend_run(entries: &mut Vec<DirEntry>, tile_id: u64, offset: u64, length: u32) {
-    if let Some(last) = entries.last_mut() {
-        let next_id = last.tile_id + u64::from(last.run_length);
-        if tile_id == next_id && offset == last.offset && length == last.length {
-            last.run_length += 1;
-            return;
-        }
-    }
-    entries.push(DirEntry {
-        tile_id,
-        offset,
-        length,
-        run_length: 1,
-    });
 }
 
 /// Build leaf directories when entries exceed the root limit.
@@ -522,6 +568,22 @@ fn build_metadata(config: &PmtilesConfig) -> String {
 // ---------------------------------------------------------------------------
 // Binary helpers
 // ---------------------------------------------------------------------------
+
+/// Read a u64 from a byte buffer at the given position, advancing the position.
+fn read_u64_le(data: &[u8], pos: &mut usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&data[*pos..*pos + 8]);
+    *pos += 8;
+    u64::from_le_bytes(bytes)
+}
+
+/// Read a u32 from a byte buffer at the given position, advancing the position.
+fn read_u32_le(data: &[u8], pos: &mut usize) -> u32 {
+    let mut bytes = [0u8; 4];
+    bytes.copy_from_slice(&data[*pos..*pos + 4]);
+    *pos += 4;
+    u32::from_le_bytes(bytes)
+}
 
 fn write_u64_le(buf: &mut [u8], offset: usize, val: u64) {
     buf[offset..offset + 8].copy_from_slice(&val.to_le_bytes());
@@ -911,7 +973,7 @@ mod tests {
         writer.add_tile(1, 1, 0, &data).unwrap();
 
         assert_eq!(writer.unique_count, 1);
-        let entries = writer.build_dir_entries();
+        let entries = writer.collect_dir_entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].run_length, 4);
     }
@@ -928,13 +990,17 @@ mod tests {
         };
 
         let mut writer = PmtilesWriter::new(config);
-        writer.tiles.push((1, StoredTile::Unique { offset: 0, length: 100 }));
-        writer.tiles.push((2, StoredTile::Unique { offset: 100, length: 100 }));
-        writer.tiles.push((3, StoredTile::Unique { offset: 200, length: 100 }));
-        writer.tiles.push((5, StoredTile::Unique { offset: 300, length: 100 }));
+        // Add 4 tiles with distinct data — each gets a different offset, no runs possible
+        let data_a = gzip_compress(b"data-a").unwrap();
+        let data_b = gzip_compress(b"data-b").unwrap();
+        let data_c = gzip_compress(b"data-c").unwrap();
+        let data_d = gzip_compress(b"data-d").unwrap();
+        writer.add_tile(1, 0, 0, &data_a).unwrap();
+        writer.add_tile(1, 0, 1, &data_b).unwrap();
+        writer.add_tile(1, 1, 1, &data_c).unwrap();
+        writer.add_tile(1, 1, 0, &data_d).unwrap();
 
-        let entries = writer.build_dir_entries();
-        // Each tile has a different offset, so no runs despite same length
+        let entries = writer.collect_dir_entries().unwrap();
         assert_eq!(entries.len(), 4);
     }
 
@@ -985,6 +1051,6 @@ mod tests {
         assert_eq!(bytes[7], 3);
 
         // Clean up
-        let _ = std::fs::remove_file(&out_path);
+        drop(std::fs::remove_file(&out_path));
     }
 }
