@@ -44,8 +44,8 @@ Denmark extract (483 MB PBF), gzip level 6, z0-14:
 
 | | elivagar | Planetiler | Tilemaker |
 |---|---|---|---|
-| With ocean | **380 MB** | 388 MB | 293 MB |
-| Without ocean | **317 MB** | 388 MB | 293 MB |
+| With ocean | **380 MB** | 406 MB | 308 MB |
+| Without ocean | **317 MB** | 406 MB | 308 MB |
 
 Full analysis: [`docs/tile-comparison-2026-02-24.md`](docs/tile-comparison-2026-02-24.md)
 
@@ -56,8 +56,9 @@ Denmark extract (483 MB PBF) → Shortbread PMTiles, best of 3 runs:
 <!-- BENCH:START -->
 | Tool | Total | PBF+Features | Ocean | Sort | Assembly |
 |------|-------|-------------|-------|------|----------|
-| **elivagar** | **29s** | 19s | 4s | 0.3s | 4s |
-| Planetiler 0.10 | 44s | — | — | — | — |
+| **elivagar** | **27s** | 19s | 2.5s | 0.7s | 3.2s |
+| Tilemaker | 29s | — | — | — | — |
+| Planetiler 0.10 | 41s | — | — | — | — |
 <!-- BENCH:END -->
 
 System: Linux 6.18, Ryzen 9 7950X.

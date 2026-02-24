@@ -114,13 +114,13 @@ else
 fi
 
 # --- Tilemaker benchmark ---
-if [ -x "data/tilemaker/build/tilemaker" ]; then
+if command -v cmake &>/dev/null && command -v g++ &>/dev/null; then
     echo "--- tilemaker ---"
     scripts/bench-tilemaker.sh "$PBF" "$RUNS" 2> "$STDERR_FILE"
     record_result "tilemaker"
     echo ""
 else
-    echo "Skipping Tilemaker (run scripts/bench-tilemaker.sh once to set up)"
+    echo "Skipping Tilemaker (cmake and g++ required)"
     echo ""
 fi
 

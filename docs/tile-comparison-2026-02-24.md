@@ -11,16 +11,16 @@ Supersedes `tile-comparison-2026-02-23.md` (raw feature count data).
 
 | | elivagar | Planetiler | Tilemaker |
 |---|---|---|---|
-| File size | **380 MB** | 388 MB | 293 MB |
+| File size | **380 MB** | 406 MB | 308 MB |
 | Addressed tiles | 667,547 | 104,394 | 113,476 |
 | Unique tiles | ~54K | 50,083 | 51,250 |
-| Time (Denmark) | ~32s | ~12-15s | ~30s |
+| Time (Denmark) | **27s** | 41s | 29s |
 
 **Without ocean:**
 
 | | elivagar | Planetiler | Tilemaker |
 |---|---|---|---|
-| File size | **317 MB** | 388 MB | 293 MB |
+| File size | **317 MB** | 406 MB | 308 MB |
 | Unique tiles | ~54K | 50,083 | 51,250 |
 
 elivagar is now **smaller than Planetiler** in both configurations.
