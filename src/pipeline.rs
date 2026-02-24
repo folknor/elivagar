@@ -595,7 +595,10 @@ fn process_raw_way(
     max_zoom: u8,
     land_mask: &geometry::LandMask,
 ) -> ProcessedWay {
-    // Resolve node coordinates (the expensive mmap reads — now parallel)
+    // Resolve node coordinates (the expensive mmap reads — now parallel).
+    // Allocates per way (~8 coords avg). Cannot hoist: ownership transfers into
+    // ProcessedWay for the serial way_index.put() phase, so a reusable buffer
+    // would need .to_vec()/.clone() anyway, defeating the purpose.
     let coords_e7: Vec<(i32, i32)> = raw.node_refs.iter()
         .filter_map(|&id| node_reader.get(id))
         .collect();

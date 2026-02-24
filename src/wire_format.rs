@@ -61,6 +61,10 @@ pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], 
 }
 
 /// Encode feature data with pre-encoded attribute bytes (P3 optimization).
+/// Returns an owned Vec because the caller stores it as `SortRecord.data` which
+/// must own its bytes for the chunk file → k-way merge pipeline. Passing a
+/// `&mut Vec<u8>` would still require `.to_vec()` into the SortRecord, saving
+/// only the capacity calculation.
 pub(crate) fn encode_feature_data_with_attrs(
     osm_id: u64,
     geom_type: GeomType,

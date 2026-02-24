@@ -41,6 +41,13 @@ pub fn layer_from_key(key: SortKey) -> u8 {
 // ---------------------------------------------------------------------------
 
 /// A record in the sort buffer: a sort key plus opaque payload bytes.
+///
+/// `data` must be an owned Vec because records are serialized to chunk files on
+/// disk and deserialized during k-way merge — there is no lifetime to reference
+/// into. Arena allocation was considered and rejected: it would require
+/// redesigning the chunk file format (currently per-record `key|len|data`), the
+/// ChunkReader, and the HeapEntry ownership model, for minimal runtime benefit
+/// since mimalloc handles the small allocs efficiently.
 pub struct SortRecord {
     pub key: SortKey,
     pub data: Vec<u8>,
@@ -199,6 +206,9 @@ impl ChunkReader {
         Ok(ChunkReader { reader, remaining })
     }
 
+    // Allocates a Vec per record. A reusable buffer was considered but the heap
+    // holds only k entries (1-4 chunks for Denmark, ~20 for planet) and records
+    // vary in size, so a pool would often reallocate anyway. Not a bottleneck.
     fn read_record(&mut self) -> io::Result<Option<(SortKey, Vec<u8>)>> {
         if self.remaining == 0 {
             return Ok(None);

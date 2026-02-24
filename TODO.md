@@ -18,12 +18,6 @@
 - [ ] Write a small 1-page project website (what it does, benchmark, usage, link to repo)
 - [ ] Host via GitHub Pages
 
-## Performance Regression — Investigated
-
-- [x] **ca6f17e caused +64% PBF regression** — Bisected (best-of-3 on Denmark). Two causes:
-  Tags binary search (+55%) and `advise_random()` (+65%, not additive). Both reverted.
-  Full investigation in `docs/madvise-investigation.md`.
-
 ## Bugs
 
 - [ ] **[P2]** `area_sq_meters` cos²(lat) approximation — **investigated, moderate risk.**
@@ -53,65 +47,16 @@
 
 - [ ] Generally check for updates to all dependencies.
 
-## Planet-Scale Blockers
-
-- [x] **Node index virtual memory at planet scale** — Node lookups moved to rayon (parallel
-  page faults). `NodeIndex::into_reader()` converts to read-only `NodeIndexReader` (Sync).
-  madvise tuning may still help at planet scale — see NodeIndex madvise item below.
-  See `docs/madvise-investigation.md` and `node_index.rs` module comment for madvise history.
-
 ## Profiling
 
 Hotpath profile results and analysis: `docs/hotpath-profile.md`
 
-## Performance: Allocation Pressure (High Impact)
+## Performance: Allocation Pressure
 
-Investigated thoroughly. Each SortRecord must own its `data: Vec<u8>` because records
-serialize to chunk files on disk and are deserialized during k-way merge — there is no
-lifetime to reference into. The emit functions already reuse `geom_buf`, `attrs_buf`, and
-`tc_buf` across iterations; only the final `encode_feature_data_with_attrs()` allocates per
-record, which is unavoidable since the sort buffer takes ownership. With mimalloc, Denmark-scale
-runs (~2M records × 200-300 bytes) spend <1ms total in malloc. Planet-scale is more pressure but
-the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
-
-- [ ] **SortRecord `data: Vec<u8>` — billions of small heap allocs** — Investigated: arena
-  rejected. Each record must own its bytes for the chunk file → k-way merge pipeline to work.
-  An arena would require redesigning the chunk file format (currently per-record `key|len|data`),
-  the ChunkReader, and the HeapEntry ownership model. Minimal runtime benefit vs major complexity.
-  The real bottleneck is CPU and I/O, not malloc. (`sort.rs:47`)
-
-- [x] **`node_records` allocated per tagged node in PBF callback** — Hoisted before the
-  `for_each_pipelined` closure, reused via `clear()` + `drain(..)`. Saves ~200M allocations
-  at planet scale (usually 1-3 SortRecords per tagged node). (`pipeline.rs:313,328`)
-
-- [ ] **`tags_vec` allocated per element in PBF callback** — Investigated: **cannot hoist**.
-  `tags_vec: Vec<(&str, &str)>` holds `&str` references borrowed from PBF elements that don't
-  outlive the closure body. Hoisting outside the closure fails with E0521 (borrowed data escapes
-  closure) because `Vec<&'a str>` through a mutable reference is invariant over `'a` — the
-  compiler can't see that `clear()` drops old references before `extend()` adds new ones.
-  Allocated for every tagged node + every way with tags + every relation (~700M at planet).
-  Would need owned `Vec<(String, String)>` which is worse, or unsafe lifetime transmute.
-  (`pipeline.rs:326, 372, 416`)
-
-- [ ] **`coords_e7` allocated per way, cannot hoist** — Investigated: `coords_e7: Vec<(i32, i32)>`
-  is allocated for every way (~1B at planet, avg ~8 coords = 64 bytes). Ownership transfers into
-  `MatchedWay` which gets batched and sent to rayon for parallel geometry processing. Hoisting
-  would require `.to_vec()` or `.clone()` to preserve the reusable buffer while the batch takes
-  ownership, defeating the purpose. The only real fix is changing the batch architecture — e.g.
-  a flat arena of coords that `MatchedWay` references by offset+length, but that requires
-  redesigning `MatchedWay`, `flush_way_batch`, and all emit functions that take `&[(i32, i32)]`.
-  Not worth the complexity unless profiling shows way coord allocation as a bottleneck distinct
-  from the geometry CPU work that dominates way processing. (`pipeline.rs:358-363`)
-
-- [ ] **`encode_feature_data_with_attrs` allocates per call** — Investigated: unavoidable. The
-  returned Vec becomes `SortRecord.data` which must be owned. Passing `&mut Vec<u8>` and reusing
-  would still require `.to_vec()` into the SortRecord, saving only the capacity calculation.
-  (`wire_format.rs:61-78`)
-
-- [ ] **k-way merge allocates `Vec<u8>` per record read** — Investigated: marginal. The heap
-  holds k entries (typically 1-4 chunks for Denmark, ~20 for planet). Each `read_record()` allocates
-  a new Vec, but only k are live at once. A buffer pool would save k reallocs per record but the
-  records vary in size, so the pool would often reallocate anyway. (`sort.rs:202-221`)
+Several per-call allocations were investigated and found unavoidable — ownership required by
+the sort pipeline, or lifetime constraints prevent hoisting. See code comments at each site:
+`SortRecord.data` (`sort.rs`), `tags_vec` (`pipeline.rs:314`), `coords_e7` (`pipeline.rs:598`),
+`encode_feature_data_with_attrs` (`wire_format.rs:63`), k-way merge `read_record` (`sort.rs:208`).
 
 - [ ] **`add_feature_to_layer` allocates geom_cmds Vec per feature** — During tile assembly,
   every decoded feature creates a `Vec<u32>`. Pass a `&mut Vec<u32>` in, or reference geometry
@@ -123,15 +68,6 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
 
 ## Performance: Algorithms & Data Structures (Medium-High Impact)
 
-- [ ] **Tags linear scan called billions of times** — Binary search tried (ca6f17e) and
-  **reverted**: +55% PBF regression (20s → 31s on Denmark). `sort_unstable_by_key` per element
-  plus `binary_search_by_key` per lookup is slower than linear `.any()` for 3-15 element slices.
-  See `shortbread.rs` Tags comment and `docs/madvise-investigation.md`. Possible alternative:
-  perfect hash (`phf`) over the ~50 known tag keys, mapping to enum — eliminates string
-  comparison entirely but requires maintaining the key set.
-
-- [ ] **Simplify allocates two Vecs per call** — `simplify()` allocates a `vec![bool]` keep array and a result Vec per invocation. Accept an output buffer, use a bitset for keep array. (`geometry.rs:167-180`)
-
 - [ ] **POI `contains()` linear scan on 50-entry arrays** — `AMENITY_VALUES` (51 entries), `SHOP_VALUES` (37 entries) searched linearly. These are already sorted; use `binary_search()` or `phf` perfect hash set. (`pois.rs:93-157, 219-233`)
 
 - [ ] **Projection transcendentals called billions of times** — `project_e7` calls tan, cos, ln per node. Use a lookup table for latitude projection (180K entries for 0.001-degree steps) with linear interpolation, or polynomial approximation. (`geometry.rs:103-118`)
@@ -139,86 +75,6 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
 - [ ] **`merge_same_attr_geometries` per-tile HashMap** — Clones and sorts tags for every feature per tile, allocates Vec for hash key. Hash tags in-place or pre-sort during insertion. (`mvt.rs:454-517`)
 
 ## Performance: Parallelism & I/O (Medium Impact)
-
-- [x] **PBF callback is single-threaded + node index I/O dominates — only ~2 of 28 cores
-  utilized during phase12** — FIXED. Implemented Option A: moved node coord resolution +
-  tag matching from the serial PBF callback into rayon batches (`process_raw_way` replaces
-  `process_matched_way`). `NodeIndex::into_reader()` converts to read-only `NodeIndexReader`
-  (Sync via `Mmap`) after node phase. Raw way data (node ref IDs + owned tags) collected on
-  main thread, dispatched to rayon. Serial post-rayon phase does only `way_index.put()` +
-  `sort_writer.push()`. Results: rayon workers 3× more utilized (~3.5s → ~10.3s CPU each),
-  global alloc throughput −12% (62.6 GB → 55.1 GB), Denmark PBF phase neutral (~18s).
-  Planet-scale benefit expected to be significant (page faults spread across threads).
-
-  Investigation context preserved below for reference:
-
-  **The architecture:** pbfhogg's `for_each_pipelined` is a 3-stage pipeline:
-  (1) I/O thread reads raw blobs, (2) N threads decode zlib+protobuf in parallel,
-  (3) callback runs **sequentially on the main thread** in file order. So all of
-  `phase_read_and_process`'s callback (lines 348–427) runs single-threaded.
-
-  For each of the 6.6M ways, the main thread does: `node_index.get()` (random mmap reads),
-  `way_index.put()` (mmap write), tag collection + matching, then pushes to `way_batch`.
-  Rayon only kicks in when `flush_way_batch()` fires every 8192 ways — workers process a
-  batch quickly then idle waiting for the main thread to accumulate the next batch. Hotpath
-  shows 1.87× effective parallelism with 28 threads available.
-
-  **The I/O problem:** Hotpath shows main thread at **11.8s sys / 21.8s total = 54% kernel
-  time** on Denmark. This is mmap page faults on `node_index.get()`. The node index is
-  **102 GB** even for Denmark (OSM node IDs are globally assigned, max ~12B × 8 bytes)
-  despite only 52.5M Danish nodes (0.4% density). Each page fault blocks the thread while
-  the kernel finds/loads the 4 KB page.
-
-  **Why madvise doesn't help:** Both MADV_SEQUENTIAL (2.3× regression) and MADV_RANDOM
-  (+65% regression) were tried and reverted. Way→node references have **locality** — PBF
-  is sorted by ID, ways reference nearby nodes (delta-encoded refs, typically small deltas).
-  Default readahead (128 KB = 16K node slots) brings in neighbors that the next few ways
-  will use. MADV_RANDOM kills this useful readahead. MADV_SEQUENTIAL causes wasted
-  readahead because access isn't truly sequential. See `docs/madvise-investigation.md`.
-
-  **Why individual lookups can't be made faster:** `node_index.get()` is already a single
-  8-byte mmap read. The latency IS the page fault. The only way to reduce total wall time
-  is concurrency — overlap faults across threads so one thread blocks while others continue.
-
-  **Planet-scale projection:** At planet scale (8.5B nodes, 96 GB index, 64 GB RAM),
-  the working set far exceeds page cache. Ways from different continents interleave in
-  the PBF, destroying locality. Readahead pages get evicted before use. The single-thread
-  serialization becomes catastrophic — potentially minutes of pure fault-waiting.
-
-  **Constraint:** Elements borrow from the decoded PBF blob (`Element<'a>`) and can't outlive
-  the callback. `node_index` is `&mut` during the callback (grows during node phase, but
-  read-only during way phase). `way_index` is `&mut` (writes during way phase).
-
-  **Option A: Move node lookups into rayon batches (recommended).** Instead of resolving
-  node coords in the callback, batch raw way data (just node ID refs + owned tags) on the
-  main thread, then do `node_index.get()` + tag matching + geometry in parallel. Requires:
-  - Making `NodeIndex` safe for concurrent reads (`&NodeIndex` — it's read-only during ways,
-    mmap is `MmapMut` but reads are inherently safe, just needs `Sync`)
-  - Copying node refs out of the `Element` before it's dropped (way refs are small: ~8 i64s avg)
-  - `way_index.put()` stays serial (writes, must be `&mut`) — extract coords after parallel
-    node lookups and push to way_index on main thread before next batch
-  - Decouples the node I/O from the callback — page faults happen across rayon threads instead
-    of serializing the pipeline
-
-  **Option B: Prefetch node coordinates.** Keep current architecture but `madvise(MADV_WILLNEED)`
-  on upcoming node IDs to warm the page cache while rayon processes the current geometry batch.
-  Simpler change but limited benefit — prefetch only helps if there's enough time between hint
-  and access, and the current batch processing is fast relative to I/O latency.
-
-  **Option C: Use pbfhogg's `par_map_reduce`.** Fully parallel callback (runs on all rayon
-  threads), but: loses file order (nodes must come before ways for index building), callback
-  is `Fn` not `FnMut` (can't accumulate mutable state), and collects all compressed blobs
-  into memory first (~512 MB for Denmark, ~80 GB for planet). Not viable for the current
-  two-phase node→way design. Would require a fundamentally different architecture: separate
-  node-index-building pass, then a parallel way-processing pass.
-
-  **Recommendation:** Option A is the most promising. The main thread becomes a thin dispatcher:
-  read element, extract node refs + tags (cheap copies), push to batch. Rayon workers do the
-  expensive part: node coord lookups (spreading mmap page faults across threads), projection,
-  simplification, clipping, MVT encoding. `way_index.put()` remains serial but is fast
-  (sequential mmap writes). This should increase effective parallelism from ~2× to potentially
-  4-8× on Denmark, more on planet where the working set far exceeds page cache.
-  (`pipeline.rs:348-427, node_index.rs, docs/madvise-investigation.md`)
 
 - [ ] **Ocean processing: parallel collect then serial push** — `par_iter` collects into `Vec<Vec<SortRecord>>`, then pushes serially. Each rayon worker could flush to a thread-local sort chunk file directly. (`ocean.rs:180-203`)
 
@@ -264,9 +120,4 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
 
 ## Test Coverage Gaps
 
-- [x] **ocean.rs** — rasterize_segment, point_in_polygon tested (10 tests)
-- [x] **node_index.rs** — put/get, grow, sentinel, overwrite tested (6 tests)
-- [x] **way_index.rs** — lifecycle, sentinel, overwrite tested (7 tests)
-- [x] **pipeline.rs emit functions** — sort key/wire format decode roundtrips, cascading simplification, zoom-dependent attrs (7 tests)
-- [x] **pmtiles_writer.rs** — end-to-end write_to header validation (1 test)
 - [ ] **No integration test for PMTiles output validity** — No test verifies generated PMTiles can be read back and tiles decoded correctly (beyond header check).
