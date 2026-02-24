@@ -82,6 +82,7 @@ pub struct TilegenConfig {
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
+const LAND_MASK_FILE: &str = "land_mask.bin";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 
 // ---------------------------------------------------------------------------
@@ -111,26 +112,33 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("--- Skipping to sort (using existing chunks) ---");
         None
     } else {
-        let mut sort_writer = if skip.is_none() {
+        let (mut sort_writer, land_mask) = if skip.is_none() {
             // Full run: clean tmp dir and run PBF phase
             drop(std::fs::remove_dir_all(&config.tmp_dir));
             std::fs::create_dir_all(&config.tmp_dir)?;
 
             let phase12_start = Instant::now();
-            let (sw, bounds_out) = phase_read_and_process(config)?;
+            let (sw, bounds_out, mask) = phase_read_and_process(config)?;
             phase12_elapsed = Some(phase12_start.elapsed());
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
-            sw
+            save_land_mask(&config.tmp_dir, &mask)?;
+            (sw, Some(mask))
         } else {
             // --skip-to ocean: load checkpoint, resume from PBF chunks
             let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir)?;
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
             phase12_elapsed = None;
-            sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), 1024 * 1024 * 1024, pbf_chunks)?
+            let sw = sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), 1024 * 1024 * 1024, pbf_chunks)?;
+            let mask = load_land_mask(&config.tmp_dir);
+            if mask.is_none() {
+                eprintln!("  No land mask found — ocean filtering disabled");
+            }
+            (sw, mask)
         };
 
         // Load data_bounds (needed for ocean, always available from checkpoint or just computed)
         let (data_bounds, _) = load_checkpoint(&config.tmp_dir)?;
+        let mask_ref = land_mask.as_ref();
 
         // --- Ocean shapefile processing ---
         // When a simplified shapefile is provided, use it for z0-7 and the
@@ -145,19 +153,19 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 if config.min_zoom <= simplified_max {
                     eprintln!("  Simplified (z{}–z{}):", config.min_zoom, simplified_max);
                     ocean_features += ocean::process_ocean_shapefile(
-                        simplified_path, &data_bounds, config.min_zoom, simplified_max, &mut sort_writer,
+                        simplified_path, &data_bounds, config.min_zoom, simplified_max, mask_ref, &mut sort_writer,
                     );
                 }
                 if config.max_zoom >= 8 {
                     let full_min = config.min_zoom.max(8);
                     eprintln!("  Full-resolution (z{full_min}–z{}):", config.max_zoom);
                     ocean_features += ocean::process_ocean_shapefile(
-                        ocean_path, &data_bounds, full_min, config.max_zoom, &mut sort_writer,
+                        ocean_path, &data_bounds, full_min, config.max_zoom, mask_ref, &mut sort_writer,
                     );
                 }
             } else {
                 ocean_features = ocean::process_ocean_shapefile(
-                    ocean_path, &data_bounds, config.min_zoom, config.max_zoom, &mut sort_writer,
+                    ocean_path, &data_bounds, config.min_zoom, config.max_zoom, mask_ref, &mut sort_writer,
                 );
             }
 
@@ -220,6 +228,16 @@ fn save_checkpoint(tmp_dir: &std::path::Path, bounds: &MercBbox, chunk_count: us
     Ok(())
 }
 
+fn save_land_mask(tmp_dir: &std::path::Path, mask: &geometry::LandMask) -> Result<(), PipelineError> {
+    std::fs::write(tmp_dir.join(LAND_MASK_FILE), mask.to_bytes())?;
+    Ok(())
+}
+
+fn load_land_mask(tmp_dir: &std::path::Path) -> Option<geometry::LandMask> {
+    let data = std::fs::read(tmp_dir.join(LAND_MASK_FILE)).ok()?;
+    geometry::LandMask::from_bytes(&data)
+}
+
 fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let content = std::fs::read_to_string(&path)
@@ -247,7 +265,7 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox), PipelineError> {
+fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let mut sort_writer =
@@ -268,6 +286,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut rel_count: u64 = 0;
     let mut features_emitted: u64 = 0;
     let mut way_index_finalized = false;
+    let land_mask = geometry::LandMask::new();
 
     // Track data extent for ocean shapefile filtering
     let mut min_lat_e7: i32 = i32::MAX;
@@ -302,7 +321,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     #[allow(clippy::cast_sign_loss)]
                     let n = process_node(
                         node.id() as u64, lat_e7, lon_e7,
-                        &tags_vec, min_z, max_z, &mut node_records,
+                        &tags_vec, min_z, max_z, &land_mask, &mut node_records,
                     );
                     for r in node_records {
                         sort_writer.push(r).expect("sort push failed");
@@ -327,7 +346,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     #[allow(clippy::cast_sign_loss)]
                     let n = process_node(
                         node.id() as u64, lat_e7, lon_e7,
-                        &tags_vec, min_z, max_z, &mut node_records,
+                        &tags_vec, min_z, max_z, &land_mask, &mut node_records,
                     );
                     for r in node_records {
                         sort_writer.push(r).expect("sort push failed");
@@ -378,14 +397,14 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
                 if way_batch.len() >= WAY_BATCH_SIZE {
                     let batch = std::mem::replace(&mut way_batch, Vec::with_capacity(WAY_BATCH_SIZE));
-                    features_emitted += flush_way_batch(batch, min_z, max_z, &mut sort_writer);
+                    features_emitted += flush_way_batch(batch, min_z, max_z, &land_mask, &mut sort_writer);
                 }
             }
             Element::Relation(rel) => {
                 // Flush remaining way batch at the way→relation transition
                 if !way_batch.is_empty() {
                     let batch = std::mem::replace(&mut way_batch, Vec::with_capacity(WAY_BATCH_SIZE));
-                    features_emitted += flush_way_batch(batch, min_z, max_z, &mut sort_writer);
+                    features_emitted += flush_way_batch(batch, min_z, max_z, &land_mask, &mut sort_writer);
                 }
 
                 if !way_index_finalized {
@@ -405,7 +424,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     rel_batch.push(prepared);
                     if rel_batch.len() >= REL_BATCH_SIZE {
                         let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
-                        features_emitted += flush_rel_batch(batch, min_z, max_z, &mut sort_writer);
+                        features_emitted += flush_rel_batch(batch, min_z, max_z, &land_mask, &mut sort_writer);
                     }
                 }
             }
@@ -414,10 +433,10 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     // Flush any remaining batches
     if !way_batch.is_empty() {
-        features_emitted += flush_way_batch(way_batch, min_z, max_z, &mut sort_writer);
+        features_emitted += flush_way_batch(way_batch, min_z, max_z, &land_mask, &mut sort_writer);
     }
     if !rel_batch.is_empty() {
-        features_emitted += flush_rel_batch(rel_batch, min_z, max_z, &mut sort_writer);
+        features_emitted += flush_rel_batch(rel_batch, min_z, max_z, &land_mask, &mut sort_writer);
     }
 
     eprintln!("  Nodes: {node_count}, Ways: {way_count}, Relations: {rel_count}");
@@ -441,8 +460,9 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     };
     eprintln!("  Data bounds (merc): x[{:.4}–{:.4}] y[{:.4}–{:.4}]",
         data_bounds.min_x, data_bounds.max_x, data_bounds.min_y, data_bounds.max_y);
+    eprintln!("  Land mask: {}/65536 z8 cells populated", land_mask.count_set());
 
-    Ok((sort_writer, data_bounds))
+    Ok((sort_writer, data_bounds, land_mask))
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +476,7 @@ fn process_node(
     tags: &[(&str, &str)],
     min_zoom: u8,
     max_zoom: u8,
+    land_mask: &geometry::LandMask,
     records: &mut Vec<SortRecord>,
 ) -> u64 {
     let tag_helper = Tags(tags);
@@ -465,6 +486,8 @@ fn process_node(
     }
 
     let p = geometry::project_e7(lat_e7, lon_e7);
+    let pbbox = MercBbox { min_x: p.x, min_y: p.y, max_x: p.x, max_y: p.y };
+    land_mask.mark_bbox(&pbbox);
     let mut count: u64 = 0;
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
@@ -476,7 +499,6 @@ fn process_node(
             continue;
         }
 
-        let pbbox = MercBbox { min_x: p.x, min_y: p.y, max_x: p.x, max_y: p.y };
         for z in z_lo..=z_hi {
             encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
             geometry::for_each_tile_in_bbox(&pbbox, z, |tx, ty| {
@@ -512,13 +534,14 @@ fn flush_way_batch(
     batch: Vec<MatchedWay>,
     min_zoom: u8,
     max_zoom: u8,
+    land_mask: &geometry::LandMask,
     sort_writer: &mut SortWriter,
 ) -> u64 {
     use rayon::prelude::*;
 
     let results: Vec<Vec<SortRecord>> = batch
         .into_par_iter()
-        .map(|mut way| process_matched_way(&mut way, min_zoom, max_zoom))
+        .map(|mut way| process_matched_way(&mut way, min_zoom, max_zoom, land_mask))
         .collect();
 
     let mut count: u64 = 0;
@@ -537,6 +560,7 @@ fn process_matched_way(
     way: &mut MatchedWay,
     min_zoom: u8,
     max_zoom: u8,
+    land_mask: &geometry::LandMask,
 ) -> Vec<SortRecord> {
     // Project to Mercator
     let merc: Vec<Point> = way.coords_e7
@@ -545,6 +569,7 @@ fn process_matched_way(
         .collect();
 
     let bbox = merc_bbox(&merc);
+    land_mask.mark_bbox(&bbox);
 
     // Enrich polygon matches with area-dependent data (way_area, min_zoom overrides)
     if way.is_closed {
@@ -650,13 +675,14 @@ fn flush_rel_batch(
     batch: Vec<PreparedRelation>,
     min_zoom: u8,
     max_zoom: u8,
+    land_mask: &geometry::LandMask,
     sort_writer: &mut SortWriter,
 ) -> u64 {
     use rayon::prelude::*;
 
     let results: Vec<Vec<SortRecord>> = batch
         .into_par_iter()
-        .map(|rel| process_prepared_relation(rel, min_zoom, max_zoom))
+        .map(|rel| process_prepared_relation(rel, min_zoom, max_zoom, land_mask))
         .collect();
 
     let mut count: u64 = 0;
@@ -674,6 +700,7 @@ fn process_prepared_relation(
     rel: PreparedRelation,
     min_zoom: u8,
     max_zoom: u8,
+    land_mask: &geometry::LandMask,
 ) -> Vec<SortRecord> {
     let tags_ref: Vec<(&str, &str)> = rel.tags.iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -709,6 +736,7 @@ fn process_prepared_relation(
                         continue;
                     }
                     let bbox = merc_bbox(outer);
+                    land_mask.mark_bbox(&bbox);
                     emit_multipolygon_feature(
                         rel.osm_id, outer, inners, &bbox, m,
                         z_lo, z_hi, &mut records,
@@ -721,6 +749,7 @@ fn process_prepared_relation(
                         continue;
                     }
                     let bbox = merc_bbox(outer);
+                    land_mask.mark_bbox(&bbox);
                     emit_centroid_feature(
                         rel.osm_id, outer, &bbox, m, z_lo, z_hi, &mut records,
                     );
@@ -732,6 +761,7 @@ fn process_prepared_relation(
                         continue;
                     }
                     let bbox = merc_bbox(way_coords);
+                    land_mask.mark_bbox(&bbox);
                     emit_line_feature(
                         rel.osm_id, way_coords, &bbox, m, z_lo, z_hi, &mut records,
                     );

@@ -104,50 +104,47 @@ simplification differences. Not a significant concern.
 
 z14 alone is 222 MB (49% of output). z13+z14 = 303 MB (66%).
 
-### Problem 1: Ocean bbox flooding
+### Problem 1: Ocean bbox flooding — DONE
 
-**Root cause:** Ocean processing emits tiles for the entire PBF data bounds.
-The Denmark PBF includes the Faroe Islands (~62°N, 7°W), which stretches the
-bounding box to cover the entire North Sea. Ocean polygons fill this vast area
-with boundary tiles (each unique due to clipped polygon geometry) and fill tiles
-(deduplicated, but generating 1.2M directory entries).
+**Root cause:** Ocean processing emitted tiles for the entire polygon bounding box
+of each ocean shapefile polygon that intersected `data_bounds`. The Denmark PBF
+includes the Faroe Islands (~62°N, 7°W), stretching `data_bounds` across the
+North Sea. Ocean tiles flooded open ocean where no land features exist.
 
-This affects **any regional extract with outlier territory** — not just Denmark.
-European country extracts commonly have overseas territories or distant islands.
+**Fixed:** Z8 land tile mask. During PBF phase 1+2, a 256×256 bitset (8 KB)
+records which z8 grid cells contain at least one land feature. During ocean
+processing, both boundary and fill tiles are skipped if their z8 ancestor cell
+has no land. The mask is saved to `land_mask.bin` in the checkpoint directory
+for `--skip-to ocean` support. Missing mask file (old checkpoint) gracefully
+disables filtering.
 
-At planet scale the bbox is the whole world anyway, so no "outlier" problem —
-but the architectural issue remains: we generate ocean tiles where there are
-no land features, producing tiles that Planetiler and Tilemaker never emit.
+**Implementation:**
+- `geometry.rs`: `LandMask` struct — atomic bitset with `mark_bbox()` (hot path,
+  called per-feature from rayon threads) and `has_land(z, tx, ty)` (z≥8: check
+  z8 ancestor, z<8: check if any z8 descendant is set).
+- `pipeline.rs`: mask created in `phase_read_and_process`, populated via
+  `mark_bbox(&bbox)` in `process_matched_way`, `process_prepared_relation`,
+  and `process_node`. Saved alongside checkpoint, loaded for `--skip-to ocean`.
+- `ocean.rs`: `has_land` check before emitting boundary tiles, fill gap tiles,
+  and full-row fill tiles.
 
-**How Planetiler/Tilemaker avoid this:** They process ocean per-tile during
-assembly, not as a separate global phase. A tile only gets ocean if it also has
-(or is adjacent to) land features. They never generate standalone ocean tiles
-in empty ocean.
+**Impact (Denmark with ocean):**
 
-**Potential solutions:**
+| | Before mask | After mask | Delta |
+|---|---|---|---|
+| Output | 412 MB | 380 MB | **-32 MB (-7.8%)** |
+| Addressed tiles | 1,328,866 | 667,547 | -661K (-50%) |
+| Ocean time | 3.6s | 2.7s | -25% |
 
-- [ ] **Per-tile ocean injection at assembly time** — Instead of emitting ocean
-  as sort records in a separate phase, inject ocean geometry into tiles during
-  the assemble phase when encoding each tile. For each tile that has land features,
-  also clip the ocean shapefile to that tile. Conceptually simpler but requires
-  the ocean shapefile to be available during assembly (currently assembly only
-  reads sorted records).
+elivagar is now **smaller than Planetiler** (380 MB vs 388 MB) on Denmark with
+ocean. Without ocean: 317 MB, unchanged.
 
-- [ ] **Ocean tile mask** — After PBF processing, record which coarse-grid cells
-  (e.g. z8) have land features. During ocean processing, only emit tiles within
-  a radius of populated cells. Preserves the current architecture but adds
-  coupling between phases.
-
-**Open questions:**
-- At planet scale, how much data do standalone ocean tiles (tiles with ONLY ocean,
-  no land features) contribute? If it's significant, the architecture matters even
-  at planet scale.
-- Would per-tile ocean injection be too slow? Each tile would need a spatial lookup
-  into the ocean shapefile. An R-tree or grid index over ocean polygons could make
-  this fast.
-- Can we keep the separate ocean phase but restrict it to only tiles that exist in
-  the land feature set? This would require a two-pass approach (PBF first, then
-  ocean guided by the PBF results).
+**Open questions (planet scale):**
+- At planet scale, the mask covers the whole world — ocean tiles in the Pacific
+  etc. with no land features will still be filtered. This is correct behavior
+  (map renderers use blue background for missing ocean tiles), but means the
+  output won't contain standalone ocean tiles at all. Need to verify visual
+  quality at planet scale.
 
 ### Problem 2: Per-tile size gap vs Tilemaker
 
