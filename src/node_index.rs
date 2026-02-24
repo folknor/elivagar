@@ -27,7 +27,7 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-use memmap2::MmapMut;
+use memmap2::{Mmap, MmapMut};
 
 const ENTRY_SIZE: u64 = 8; // 4 bytes lat_e7 + 4 bytes lon_e7
 const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
@@ -134,21 +134,64 @@ impl NodeIndex {
     /// Read coordinates for a node. Returns None if entry is unset (all zeros).
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::unwrap_used)]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
-        let offset = node_id as u64 * ENTRY_SIZE;
-        let needed = offset + ENTRY_SIZE;
+        get_from_mmap(&self.mmap, self.file_len, node_id)
+    }
 
-        if needed > self.file_len {
-            return None;
-        }
+    /// Convert to a read-only reader after all nodes have been written.
+    /// Consumes the writable index — no more `put()` calls are possible.
+    ///
+    /// The returned `NodeIndexReader` wraps a read-only `Mmap` which is `Sync`,
+    /// allowing safe concurrent reads from rayon worker threads.
+    pub fn into_reader(self) -> io::Result<NodeIndexReader> {
+        let file_len = self.file_len;
+        let mmap = self.mmap.make_read_only()?;
+        Ok(NodeIndexReader { mmap, file_len })
+    }
+}
 
-        let off = offset as usize;
-        let lat_raw = i32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap());
-        let lon_raw = i32::from_le_bytes(self.mmap[off + 4..off + 8].try_into().unwrap());
+/// Shared get logic for both NodeIndex and NodeIndexReader.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::unwrap_used)]
+fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: i64) -> Option<(i32, i32)> {
+    let offset = node_id as u64 * ENTRY_SIZE;
+    let needed = offset + ENTRY_SIZE;
 
-        if lat_raw == 0 && lon_raw == 0 {
-            None // unwritten entry (mmap zero-fills)
-        } else {
-            Some((lat_raw ^ COORD_XOR, lon_raw ^ COORD_XOR))
+    if needed > file_len {
+        return None;
+    }
+
+    let off = offset as usize;
+    let lat_raw = i32::from_le_bytes(mmap[off..off + 4].try_into().unwrap());
+    let lon_raw = i32::from_le_bytes(mmap[off + 4..off + 8].try_into().unwrap());
+
+    if lat_raw == 0 && lon_raw == 0 {
+        None
+    } else {
+        Some((lat_raw ^ COORD_XOR, lon_raw ^ COORD_XOR))
+    }
+}
+
+/// Read-only node coordinate index. Safe for concurrent reads from rayon threads
+/// (`Mmap` is `Sync + Send`).
+///
+/// Created from `NodeIndex::into_reader()` after all nodes have been written.
+pub struct NodeIndexReader {
+    mmap: Mmap,
+    file_len: u64,
+}
+
+impl NodeIndexReader {
+    /// Read coordinates for a node. Returns None if entry is unset (all zeros).
+    pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
+        get_from_mmap(&self.mmap, self.file_len, node_id)
+    }
+
+    /// Switch to random-access mode if the index is large enough to benefit.
+    /// See `NodeIndex::advise_random()` for rationale and threshold logic.
+    #[allow(dead_code)]
+    pub fn advise_random(&self) {
+        let ram = ram_bytes();
+        if self.file_len > ram / 2 {
+            self.mmap.advise(memmap2::Advice::Random).ok();
         }
     }
 }
@@ -215,5 +258,19 @@ mod tests {
         idx.put(42, 111_000, 222_000);
         idx.put(42, 333_000, 444_000);
         assert_eq!(idx.get(42), Some((333_000, 444_000)));
+    }
+
+    #[test]
+    fn into_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_index_test.bin");
+        let mut idx = NodeIndex::create(&path).unwrap();
+        idx.put(10, 100_000, 200_000);
+        idx.put(20, 300_000, 400_000);
+
+        let reader = idx.into_reader().unwrap();
+        assert_eq!(reader.get(10), Some((100_000, 200_000)));
+        assert_eq!(reader.get(20), Some((300_000, 400_000)));
+        assert_eq!(reader.get(999), None);
     }
 }

@@ -55,12 +55,10 @@
 
 ## Planet-Scale Blockers
 
-- [ ] **Node index virtual memory at planet scale** — `advise_random()` method exists in
-  node_index.rs but is **not called** — it regresses Denmark by +65% because way→node lookups
-  have locality and readahead helps. The node index is 102 GB even for Denmark (OSM node IDs
-  are global). Two-level index rejected (12B/4096 blocks ≈ 93 GB, no savings). Needs
-  planet-scale testing to determine if MADV_RANDOM helps when node density is higher.
-  See `docs/madvise-investigation.md` and `node_index.rs` module comment.
+- [x] **Node index virtual memory at planet scale** — Node lookups moved to rayon (parallel
+  page faults). `NodeIndex::into_reader()` converts to read-only `NodeIndexReader` (Sync).
+  madvise tuning may still help at planet scale — see NodeIndex madvise item below.
+  See `docs/madvise-investigation.md` and `node_index.rs` module comment for madvise history.
 
 ## Profiling
 
@@ -142,7 +140,85 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
 
 ## Performance: Parallelism & I/O (Medium Impact)
 
-- [ ] **PBF callback is single-threaded** — Tag matching and tag collection happen in the serial `for_each_pipelined` callback. Move tag matching and collection into rayon batch processing. (`pipeline.rs:305`)
+- [x] **PBF callback is single-threaded + node index I/O dominates — only ~2 of 28 cores
+  utilized during phase12** — FIXED. Implemented Option A: moved node coord resolution +
+  tag matching from the serial PBF callback into rayon batches (`process_raw_way` replaces
+  `process_matched_way`). `NodeIndex::into_reader()` converts to read-only `NodeIndexReader`
+  (Sync via `Mmap`) after node phase. Raw way data (node ref IDs + owned tags) collected on
+  main thread, dispatched to rayon. Serial post-rayon phase does only `way_index.put()` +
+  `sort_writer.push()`. Results: rayon workers 3× more utilized (~3.5s → ~10.3s CPU each),
+  global alloc throughput −12% (62.6 GB → 55.1 GB), Denmark PBF phase neutral (~18s).
+  Planet-scale benefit expected to be significant (page faults spread across threads).
+
+  Investigation context preserved below for reference:
+
+  **The architecture:** pbfhogg's `for_each_pipelined` is a 3-stage pipeline:
+  (1) I/O thread reads raw blobs, (2) N threads decode zlib+protobuf in parallel,
+  (3) callback runs **sequentially on the main thread** in file order. So all of
+  `phase_read_and_process`'s callback (lines 348–427) runs single-threaded.
+
+  For each of the 6.6M ways, the main thread does: `node_index.get()` (random mmap reads),
+  `way_index.put()` (mmap write), tag collection + matching, then pushes to `way_batch`.
+  Rayon only kicks in when `flush_way_batch()` fires every 8192 ways — workers process a
+  batch quickly then idle waiting for the main thread to accumulate the next batch. Hotpath
+  shows 1.87× effective parallelism with 28 threads available.
+
+  **The I/O problem:** Hotpath shows main thread at **11.8s sys / 21.8s total = 54% kernel
+  time** on Denmark. This is mmap page faults on `node_index.get()`. The node index is
+  **102 GB** even for Denmark (OSM node IDs are globally assigned, max ~12B × 8 bytes)
+  despite only 52.5M Danish nodes (0.4% density). Each page fault blocks the thread while
+  the kernel finds/loads the 4 KB page.
+
+  **Why madvise doesn't help:** Both MADV_SEQUENTIAL (2.3× regression) and MADV_RANDOM
+  (+65% regression) were tried and reverted. Way→node references have **locality** — PBF
+  is sorted by ID, ways reference nearby nodes (delta-encoded refs, typically small deltas).
+  Default readahead (128 KB = 16K node slots) brings in neighbors that the next few ways
+  will use. MADV_RANDOM kills this useful readahead. MADV_SEQUENTIAL causes wasted
+  readahead because access isn't truly sequential. See `docs/madvise-investigation.md`.
+
+  **Why individual lookups can't be made faster:** `node_index.get()` is already a single
+  8-byte mmap read. The latency IS the page fault. The only way to reduce total wall time
+  is concurrency — overlap faults across threads so one thread blocks while others continue.
+
+  **Planet-scale projection:** At planet scale (8.5B nodes, 96 GB index, 64 GB RAM),
+  the working set far exceeds page cache. Ways from different continents interleave in
+  the PBF, destroying locality. Readahead pages get evicted before use. The single-thread
+  serialization becomes catastrophic — potentially minutes of pure fault-waiting.
+
+  **Constraint:** Elements borrow from the decoded PBF blob (`Element<'a>`) and can't outlive
+  the callback. `node_index` is `&mut` during the callback (grows during node phase, but
+  read-only during way phase). `way_index` is `&mut` (writes during way phase).
+
+  **Option A: Move node lookups into rayon batches (recommended).** Instead of resolving
+  node coords in the callback, batch raw way data (just node ID refs + owned tags) on the
+  main thread, then do `node_index.get()` + tag matching + geometry in parallel. Requires:
+  - Making `NodeIndex` safe for concurrent reads (`&NodeIndex` — it's read-only during ways,
+    mmap is `MmapMut` but reads are inherently safe, just needs `Sync`)
+  - Copying node refs out of the `Element` before it's dropped (way refs are small: ~8 i64s avg)
+  - `way_index.put()` stays serial (writes, must be `&mut`) — extract coords after parallel
+    node lookups and push to way_index on main thread before next batch
+  - Decouples the node I/O from the callback — page faults happen across rayon threads instead
+    of serializing the pipeline
+
+  **Option B: Prefetch node coordinates.** Keep current architecture but `madvise(MADV_WILLNEED)`
+  on upcoming node IDs to warm the page cache while rayon processes the current geometry batch.
+  Simpler change but limited benefit — prefetch only helps if there's enough time between hint
+  and access, and the current batch processing is fast relative to I/O latency.
+
+  **Option C: Use pbfhogg's `par_map_reduce`.** Fully parallel callback (runs on all rayon
+  threads), but: loses file order (nodes must come before ways for index building), callback
+  is `Fn` not `FnMut` (can't accumulate mutable state), and collects all compressed blobs
+  into memory first (~512 MB for Denmark, ~80 GB for planet). Not viable for the current
+  two-phase node→way design. Would require a fundamentally different architecture: separate
+  node-index-building pass, then a parallel way-processing pass.
+
+  **Recommendation:** Option A is the most promising. The main thread becomes a thin dispatcher:
+  read element, extract node refs + tags (cheap copies), push to batch. Rayon workers do the
+  expensive part: node coord lookups (spreading mmap page faults across threads), projection,
+  simplification, clipping, MVT encoding. `way_index.put()` remains serial but is fast
+  (sequential mmap writes). This should increase effective parallelism from ~2× to potentially
+  4-8× on Denmark, more on planet where the working set far exceeds page cache.
+  (`pipeline.rs:348-427, node_index.rs, docs/madvise-investigation.md`)
 
 - [ ] **Ocean processing: parallel collect then serial push** — `par_iter` collects into `Vec<Vec<SortRecord>>`, then pushes serially. Each rayon worker could flush to a thread-local sort chunk file directly. (`ocean.rs:180-203`)
 
@@ -176,17 +252,15 @@ the bottleneck is CPU (geometry) and I/O (chunk files), not allocation.
   `thread_local::ThreadLocal` and `.get_or()` inside rayon closures to guarantee one init per
   thread. Simple and works today without switching libraries.
 
-  Not a current bottleneck — hotpath shows workers are starved by serial I/O, not slow at
-  processing. But worth evaluating if we move more work into parallel batches (e.g. moving tag
-  matching off the serial PBF callback).
+  Not a current bottleneck — hotpath shows workers were starved by serial I/O, now fixed
+  (node lookups moved to rayon). Worth evaluating if further parallelism changes are needed.
 
-- [ ] **NodeIndex madvise for planet scale** — MADV_SEQUENTIAL tried (6724e0a) and reverted
-  (4e427b4, 2.3× regression). MADV_RANDOM tried (ca6f17e) and reverted (+65% regression on
-  Denmark). Key finding: the node index is 102 GB even for Denmark (node IDs are global),
-  but way→node lookups have locality so readahead helps. `advise_random()` method and
-  `ram_bytes()` exist in node_index.rs but are not called. Needs planet-scale testing.
-  Full investigation: `docs/madvise-investigation.md`. WayIndex MADV_RANDOM in
-  `finish_writing()` is fine (relation lookups are truly non-sequential).
+- [ ] **NodeIndex madvise for planet scale** — Node lookups are now parallel (rayon), but
+  madvise may still help *in combination* at planet scale (MADV_RANDOM to avoid wasted
+  readahead when locality breaks down across continents). `NodeIndexReader::advise_random()`
+  exists but is not called. WayIndex MADV_RANDOM in `finish_writing()` is fine (relation
+  lookups are truly non-sequential). Needs planet-scale testing.
+  Full investigation: `docs/madvise-investigation.md`.
 
 ## Test Coverage Gaps
 

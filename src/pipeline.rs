@@ -12,11 +12,10 @@ use crate::geometry::{
 };
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::mvt::{self, GeomType, LayerBuilder};
-use crate::node_index::NodeIndex;
+use crate::node_index::{NodeIndex, NodeIndexReader};
 use crate::ocean;
 use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter};
 use crate::shortbread::{self, AttrValue, GeomExpect, Layer, LayerMatch, OsmGeomType, Tags};
-use smallvec::SmallVec;
 use crate::sort::{self, SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add_feature_to_layer};
@@ -283,8 +282,10 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?;
 
     let idx_dir = &config.tmp_dir;
-    let mut node_index =
-        NodeIndex::create(&idx_dir.join("nodes.idx"))?;
+    // Option so we can consume it via .take() on first Way element.
+    let mut node_index_opt: Option<NodeIndex> =
+        Some(NodeIndex::create(&idx_dir.join("nodes.idx"))?);
+    let mut node_reader: Option<NodeIndexReader> = None;
     let mut way_index =
         WayIndex::create(idx_dir)?;
 
@@ -304,8 +305,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let min_z = config.min_zoom;
     let max_z = config.max_zoom;
 
-    // Batches for parallel geometry processing
-    let mut way_batch: Vec<MatchedWay> = Vec::with_capacity(WAY_BATCH_SIZE);
+    // Batches for parallel processing
+    let mut raw_way_batch: Vec<RawWay> = Vec::with_capacity(WAY_BATCH_SIZE);
     let mut rel_batch: Vec<PreparedRelation> = Vec::with_capacity(REL_BATCH_SIZE);
 
     // Reusable buffer hoisted out of the PBF closure to avoid per-element
@@ -322,7 +323,9 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             node_count += 1;
             let lat_e7 = $node.decimicro_lat();
             let lon_e7 = $node.decimicro_lon();
-            node_index.put($node.id(), lat_e7, lon_e7);
+            node_index_opt.as_mut()
+                .expect("node_index consumed before all nodes processed")
+                .put($node.id(), lat_e7, lon_e7);
 
             min_lat_e7 = min_lat_e7.min(lat_e7);
             max_lat_e7 = max_lat_e7.max(lat_e7);
@@ -352,60 +355,54 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             Element::Way(way) => {
                 way_count += 1;
 
-                // Resolve geometry (fast: mmap read)
-                let mut coords_e7: Vec<(i32, i32)> = Vec::new();
-                for node_id in way.refs() {
-                    if let Some(c) = node_index.get(node_id) {
-                        coords_e7.push(c);
-                    }
+                // Convert node index to read-only reader on first way.
+                // PBF guarantees all nodes come before ways, so writes are done.
+                if node_reader.is_none() {
+                    let ni = node_index_opt.take()
+                        .expect("node_index already consumed");
+                    let reader = ni.into_reader()
+                        .expect("failed to convert node index to reader");
+                    node_reader = Some(reader);
+                    eprintln!("  Node index finalized ({node_count} nodes), processing ways...");
                 }
-                if coords_e7.is_empty() {
+
+                // Collect raw way data — cheap copies on the main thread.
+                // Node coord resolution moves to rayon (the expensive part).
+                let node_refs: Vec<i64> = way.refs().collect();
+                if node_refs.is_empty() {
                     return;
                 }
 
-                // Store for relation resolution (fast: mmap write)
-                way_index.put(way.id(), &coords_e7);
+                let tags: Vec<(String, String)> = way.tags()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
 
-                // Tag matching (fast: ~3-5% of time, needs PBF borrowed data)
-                let tags_vec: Vec<(&str, &str)> = way.tags().collect();
-                if tags_vec.is_empty() {
-                    return;
-                }
+                raw_way_batch.push(RawWay { way_id: way.id(), node_refs, tags });
 
-                let is_closed = coords_e7.len() >= 4
-                    && coords_e7.first() == coords_e7.last();
-                let geom_type = if is_closed { OsmGeomType::ClosedWay } else { OsmGeomType::OpenWay };
-                let tag_helper = Tags(&tags_vec);
-                let matches = shortbread::match_element(&tag_helper, geom_type);
-                if matches.is_empty() {
-                    return;
-                }
-
-                // Batch for parallel geometry processing
-                #[allow(clippy::cast_sign_loss)]
-                way_batch.push(MatchedWay {
-                    osm_id: way.id() as u64,
-                    coords_e7,
-                    matches,
-                    is_closed,
-                });
-
-                if way_batch.len() >= WAY_BATCH_SIZE {
-                    let batch = std::mem::replace(&mut way_batch, Vec::with_capacity(WAY_BATCH_SIZE));
-                    features_emitted += flush_way_batch(batch, min_z, max_z, &land_mask, &mut sort_writer);
+                if raw_way_batch.len() >= WAY_BATCH_SIZE {
+                    let batch = std::mem::replace(&mut raw_way_batch, Vec::with_capacity(WAY_BATCH_SIZE));
+                    features_emitted += flush_raw_way_batch(
+                        batch,
+                        node_reader.as_ref().expect("node reader not initialized"),
+                        &mut way_index, min_z, max_z, &land_mask, &mut sort_writer,
+                    );
                 }
             }
             Element::Relation(rel) => {
-                // Flush remaining way batch at the way→relation transition
-                if !way_batch.is_empty() {
-                    let batch = std::mem::replace(&mut way_batch, Vec::with_capacity(WAY_BATCH_SIZE));
-                    features_emitted += flush_way_batch(batch, min_z, max_z, &land_mask, &mut sort_writer);
+                // Flush remaining raw way batch at the way→relation transition
+                if !raw_way_batch.is_empty() {
+                    let batch = std::mem::replace(&mut raw_way_batch, Vec::with_capacity(WAY_BATCH_SIZE));
+                    features_emitted += flush_raw_way_batch(
+                        batch,
+                        node_reader.as_ref().expect("node reader not initialized"),
+                        &mut way_index, min_z, max_z, &land_mask, &mut sort_writer,
+                    );
                 }
 
                 if !way_index_finalized {
                     way_index.finish_writing().expect("failed to finalize way index");
                     way_index_finalized = true;
-                    eprintln!("  Nodes: {node_count}, Ways: {way_count}, Features so far: {features_emitted}");
+                    eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
                     eprintln!("  Way index finalized, processing relations...");
                 }
                 rel_count += 1;
@@ -427,8 +424,18 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
 
     // Flush any remaining batches
-    if !way_batch.is_empty() {
-        features_emitted += flush_way_batch(way_batch, min_z, max_z, &land_mask, &mut sort_writer);
+    if !raw_way_batch.is_empty() {
+        // Handle degenerate PBF with ways but no prior conversion
+        if node_reader.is_none() {
+            if let Some(ni) = node_index_opt.take() {
+                node_reader = Some(ni.into_reader().expect("failed to convert node index to reader"));
+            }
+        }
+        if let Some(ref nr) = node_reader {
+            features_emitted += flush_raw_way_batch(
+                raw_way_batch, nr, &mut way_index, min_z, max_z, &land_mask, &mut sort_writer,
+            );
+        }
     }
     if !rel_batch.is_empty() {
         features_emitted += flush_rel_batch(rel_batch, min_z, max_z, &land_mask, &mut sort_writer);
@@ -513,23 +520,42 @@ fn process_node(
 }
 
 // ---------------------------------------------------------------------------
-// Way processing (line + polygon layers) — parallel batch processing (P1)
+// Way processing (line + polygon layers) — parallel batch processing
+//
+// Raw way data (node ref IDs + owned tags) is collected on the main thread,
+// then dispatched to rayon where workers do the expensive work in parallel:
+// node coord resolution (mmap reads — page faults spread across threads),
+// tag matching, projection, simplification, clipping, MVT encoding.
+// The serial post-rayon phase does only fast sequential I/O:
+// way_index.put() + sort_writer.push().
 // ---------------------------------------------------------------------------
 
-/// A way that passed tag matching, with owned data ready for parallel geometry processing.
-struct MatchedWay {
-    osm_id: u64,
+/// Raw way data copied from PBF on the main thread. Tags are owned because
+/// PBF element borrows don't survive the callback (same pattern as PreparedRelation).
+struct RawWay {
+    way_id: i64,
+    node_refs: Vec<i64>,
+    tags: Vec<(String, String)>,
+}
+
+/// Result of parallel way processing: resolved coords (needed for way_index)
+/// and sort records (geometry output).
+struct ProcessedWay {
+    way_id: i64,
     coords_e7: Vec<(i32, i32)>,
-    matches: SmallVec<[LayerMatch; 4]>,
-    is_closed: bool,
+    records: Vec<SortRecord>,
 }
 
 const WAY_BATCH_SIZE: usize = 8192;
 
-/// Process a batch of matched ways in parallel and push results to sort writer.
+/// Process a batch of raw ways in parallel: resolve coords, match tags, emit geometry.
+/// Then serially write way_index entries and push sort records.
+#[allow(clippy::too_many_arguments)]
 #[hotpath::measure]
-fn flush_way_batch(
-    batch: Vec<MatchedWay>,
+fn flush_raw_way_batch(
+    batch: Vec<RawWay>,
+    node_reader: &NodeIndexReader,
+    way_index: &mut WayIndex,
     min_zoom: u8,
     max_zoom: u8,
     land_mask: &geometry::LandMask,
@@ -537,33 +563,63 @@ fn flush_way_batch(
 ) -> u64 {
     use rayon::prelude::*;
 
-    let results: Vec<Vec<SortRecord>> = batch
+    // Phase 1: Parallel — resolve coords, match tags, process geometry.
+    // Page faults on node_reader.get() now spread across rayon threads.
+    let results: Vec<ProcessedWay> = batch
         .into_par_iter()
-        .map(|mut way| process_matched_way(&mut way, min_zoom, max_zoom, land_mask))
+        .map(|raw| process_raw_way(raw, node_reader, min_zoom, max_zoom, land_mask))
         .collect();
 
+    // Phase 2: Serial — way_index writes + sort_writer pushes (fast sequential I/O).
     let mut count: u64 = 0;
-    for way_records in results {
-        count += way_records.len() as u64;
-        for record in way_records {
+    for pw in results {
+        if !pw.coords_e7.is_empty() {
+            way_index.put(pw.way_id, &pw.coords_e7);
+        }
+        count += pw.records.len() as u64;
+        for record in pw.records {
             sort_writer.push(record).expect("sort push failed");
         }
     }
     count
 }
 
-/// Process a pre-matched way's geometry. Called from rayon worker threads.
-/// Does the CPU-heavy work: projection, simplification, clipping, MVT encoding.
+/// Process a raw way on a rayon worker thread: resolve node coordinates,
+/// match tags, and run geometry processing (projection, simplification,
+/// clipping, MVT encoding).
 #[hotpath::measure]
-fn process_matched_way(
-    way: &mut MatchedWay,
+fn process_raw_way(
+    raw: RawWay,
+    node_reader: &NodeIndexReader,
     min_zoom: u8,
     max_zoom: u8,
     land_mask: &geometry::LandMask,
-) -> Vec<SortRecord> {
+) -> ProcessedWay {
+    // Resolve node coordinates (the expensive mmap reads — now parallel)
+    let coords_e7: Vec<(i32, i32)> = raw.node_refs.iter()
+        .filter_map(|&id| node_reader.get(id))
+        .collect();
+
+    if coords_e7.is_empty() || raw.tags.is_empty() {
+        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new() };
+    }
+
+    // Tag matching — convert owned tags to borrowed refs (same pattern as
+    // process_prepared_relation, pipeline.rs PreparedRelation handling)
+    let is_closed = coords_e7.len() >= 4 && coords_e7.first() == coords_e7.last();
+    let geom_type = if is_closed { OsmGeomType::ClosedWay } else { OsmGeomType::OpenWay };
+    let tags_ref: Vec<(&str, &str)> = raw.tags.iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let tag_helper = Tags(&tags_ref);
+    let mut matches = shortbread::match_element(&tag_helper, geom_type);
+
+    if matches.is_empty() {
+        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new() };
+    }
+
     // Project to Mercator
-    let merc: Vec<Point> = way.coords_e7
-        .iter()
+    let merc: Vec<Point> = coords_e7.iter()
         .map(|&(lat, lon)| geometry::project_e7(lat, lon))
         .collect();
 
@@ -571,14 +627,16 @@ fn process_matched_way(
     land_mask.mark_bbox(&bbox);
 
     // Enrich polygon matches with area-dependent data (way_area, min_zoom overrides)
-    if way.is_closed {
+    if is_closed {
         let area_m2 = geometry::area_sq_meters(&merc);
-        enrich_polygon_matches(&mut way.matches, area_m2);
+        enrich_polygon_matches(&mut matches, area_m2);
     }
 
+    #[allow(clippy::cast_sign_loss)]
+    let osm_id = raw.way_id as u64;
     let mut records = Vec::new();
 
-    for m in &way.matches {
+    for m in &matches {
         let z_lo = m.min_zoom.max(min_zoom);
         let z_hi = m.max_zoom.min(max_zoom);
         if z_lo > z_hi {
@@ -587,17 +645,18 @@ fn process_matched_way(
 
         match m.geom_expect {
             GeomExpect::Point | GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
-                emit_point_or_centroid(way.osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
+                emit_point_or_centroid(osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
             }
             GeomExpect::Line => {
-                emit_line_feature(way.osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
+                emit_line_feature(osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
             }
             GeomExpect::Polygon => {
-                emit_polygon_feature(way.osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
+                emit_polygon_feature(osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
             }
         }
     }
-    records
+
+    ProcessedWay { way_id: raw.way_id, coords_e7, records }
 }
 
 // ---------------------------------------------------------------------------

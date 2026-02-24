@@ -81,18 +81,18 @@ effort should go into the PBF phase.
 Separate run with `--features hotpath-alloc`. Mimalloc disabled (hotpath-alloc provides its own
 `#[global_allocator]`). Wall-clock times are not meaningful — only allocation counts and bytes.
 
-Total allocated: **14.0 GB** for Denmark. Global throughput: **67.3 GB alloc, 75.4 GB dealloc.**
+Total allocated: **14.0 GB** for Denmark. Global throughput: **55.1 GB alloc, 64.0 GB dealloc.**
 
 ### Allocation by function (cumulative, top 10 of 25)
 
 | Function | Calls | Avg | P50 | P95 | P99 | Total | % |
 |---|---|---|---|---|---|---|---|
-| `process_matched_way` | 6.1M | 2.1 KB | 1.1 KB | 6.7 KB | 17.6 KB | 12.4 GB | 89% |
-| `for_each_zoom_simplified` | 6.6M | 1.9 KB | 826 B | 5.9 KB | 15.7 KB | 11.6 GB | 83% |
-| `blob::decode_blob` (pbfhogg) | 7.4K | 1.4 MB | 853 KB | 5.2 MB | 5.9 MB | 10.2 GB | 73% |
-| `emit_polygon_feature` | 4.5M | 2.0 KB | 932 B | 6.7 KB | 18.5 KB | 8.7 GB | 63% |
-| `clip_polygon` | 8.9M | 530 B | 320 B | 1.2 KB | 3.2 KB | 4.4 GB | 31% |
-| `emit_line_feature` | 2.0M | 1.5 KB | 824 B | 4.2 KB | 9.1 KB | 2.9 GB | 21% |
+| `process_raw_way` | 6.6M | 1.8 KB | 1.0 KB | 4.9 KB | 11.0 KB | 11.3 GB | 238% |
+| `blob::decode_blob` (pbfhogg) | 7.4K | 1.3 MB | 751 KB | 4.8 MB | 5.4 MB | 9.2 GB | 195% |
+| `for_each_zoom_simplified` | 6.6M | 1.4 KB | 828 B | 3.8 KB | 8.8 KB | 9.1 GB | 191% |
+| `emit_polygon_feature` | 4.5M | 1.5 KB | 800 B | 3.8 KB | 9.0 KB | 6.3 GB | 133% |
+| `emit_line_feature` | 2.0M | 1.4 KB | 828 B | 3.9 KB | 8.5 KB | 2.8 GB | 58% |
+| `clip_polygon_into` | 8.9M | 297 B | 304 B | 1.3 KB | 2.7 KB | 2.5 GB | 52% |
 
 Note: cumulative means parent includes children. Exclusive allocations are the deltas.
 
@@ -100,10 +100,10 @@ Note: cumulative means parent includes children. Exclusive allocations are the d
 
 | Thread | Alloc | Dealloc | Diff |
 |---|---|---|---|
-| Main | 15.7 GB | 25.6 GB | -9.9 GB |
-| Rayon worker ×4 | ~3.3 GB each | ~2.9 GB each | ~450 MB each |
+| Main | 5.6 GB | 15.0 GB | -9.4 GB |
+| Rayon worker ×4 | ~3.4 GB each | ~2.9 GB each | ~490 MB each |
 
-RSS: 1.6 GB. System allocator is much less memory-efficient than mimalloc.
+RSS: 2.0 GB. System allocator is much less memory-efficient than mimalloc.
 
 ### Key allocation insights
 
@@ -122,14 +122,22 @@ the zoom loop, using `swap` instead of re-allocating each level. After fix:
 `for_each_zoom_simplified` dropped 10.3 GB → **9.1 GB** (−1.2 GB). Global throughput
 63.1 GB → **62.6 GB** (−0.5 GB).
 
-#### 3. pbfhogg blob decoding is 10.2 GB — being improved upstream
+#### 3. Parallel node lookups reduced global throughput — DONE
 
-7.4K blobs × 1.4 MB avg. This is zlib decompression buffers inside pbfhogg. Work is
+Moved node coord resolution + tag matching from the serial PBF callback into rayon
+batches (`process_raw_way` replaces `process_matched_way`). `NodeIndex` converted to
+read-only `NodeIndexReader` (Sync) after node phase. Global alloc throughput dropped
+62.6 GB → **55.1 GB** (−7.5 GB, −12%). `emit_polygon_feature` dropped 8.7 GB → 6.3 GB.
+Rayon workers went from ~3.5s CPU each to **~10.3s each** (3× more utilized).
+
+#### 4. pbfhogg blob decoding is 9.2 GB — being improved upstream
+
+7.4K blobs × 1.3 MB avg. This is zlib decompression buffers inside pbfhogg. Work is
 underway in pbfhogg to reduce this.
 
-#### 4. Planet-scale projection
+#### 5. Planet-scale projection
 
-Denmark is ~1/150th of planet by PBF size. Extrapolating naively: **~2 TB of allocator
+Denmark is ~1/150th of planet by PBF size. Extrapolating naively: **~1.3 TB of allocator
 throughput** at planet scale. Even mimalloc will feel pressure at that level — contention
 across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-local heaps.
 
@@ -137,12 +145,14 @@ across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-l
 
 1. ~~**Eliminate clip_polygon per-call allocation**~~ — Done. 4.4 GB → 2.5 GB.
 2. ~~**Eliminate simplify per-call allocation**~~ — Done. 10.3 GB → 9.1 GB cumulative.
-3. **Reduce node index I/O pressure** — 54% of main thread CPU is kernel time from mmap
-   page faults. Prefetch, batch lookups, or restructure to reduce random access.
-4. **Increase PBF phase parallelism** — only ~2 of 28 cores utilized. Move tag
-   matching/collection off the serial callback into parallel batches.
-5. **Optimize simplification for large features** — the P99 tail in `for_each_zoom_simplified`
+3. ~~**Move node lookups into rayon to solve I/O + parallelism together**~~ — Done.
+   Node coord resolution + tag matching moved from serial PBF callback into rayon batches.
+   `NodeIndex` → read-only `NodeIndexReader` (Sync) after node phase. Rayon workers went
+   from ~3.5s to ~10.3s CPU each (3× more utilized). Global alloc throughput −12%.
+   Denmark PBF phase neutral (~18s); planet-scale benefit expected to be significant
+   (page faults spread across threads instead of serializing one thread).
+4. **Optimize simplification for large features** — the P99 tail in `for_each_zoom_simplified`
    is where most CPU goes. Early termination, incremental simplification, or subpixel culling
    at coarser zooms could help.
-6. **Polygon-focused optimization** — polygons are 2x the workload of lines. Any polygon-specific
+5. **Polygon-focused optimization** — polygons are 2x the workload of lines. Any polygon-specific
    improvement (e.g. ring area pre-filter before per-zoom processing) has outsized impact.
