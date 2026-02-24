@@ -81,18 +81,18 @@ effort should go into the PBF phase.
 Separate run with `--features hotpath-alloc`. Mimalloc disabled (hotpath-alloc provides its own
 `#[global_allocator]`). Wall-clock times are not meaningful — only allocation counts and bytes.
 
-Total allocated: **14.0 GB** for Denmark. Global throughput: **55.1 GB alloc, 64.0 GB dealloc.**
+Total allocated: **6.3 GB** for Denmark. Global throughput: **55.7 GB alloc, 55.7 GB dealloc.**
 
 ### Allocation by function (cumulative, top 10 of 25)
 
 | Function | Calls | Avg | P50 | P95 | P99 | Total | % |
 |---|---|---|---|---|---|---|---|
-| `process_raw_way` | 6.6M | 1.8 KB | 1.0 KB | 4.9 KB | 11.0 KB | 11.3 GB | 238% |
-| `blob::decode_blob` (pbfhogg) | 7.4K | 1.3 MB | 751 KB | 4.8 MB | 5.4 MB | 9.2 GB | 195% |
-| `for_each_zoom_simplified` | 6.6M | 1.4 KB | 828 B | 3.8 KB | 8.8 KB | 9.1 GB | 191% |
-| `emit_polygon_feature` | 4.5M | 1.5 KB | 800 B | 3.8 KB | 9.0 KB | 6.3 GB | 133% |
-| `emit_line_feature` | 2.0M | 1.4 KB | 828 B | 3.9 KB | 8.5 KB | 2.8 GB | 58% |
-| `clip_polygon_into` | 8.9M | 297 B | 304 B | 1.3 KB | 2.7 KB | 2.5 GB | 52% |
+| `process_raw_way` | 6.6M | 1.8 KB | 1.0 KB | 4.9 KB | 11.0 KB | 11.3 GB | 180% |
+| `for_each_zoom_simplified` | 6.6M | 1.4 KB | 828 B | 3.8 KB | 8.8 KB | 9.1 GB | 144% |
+| `emit_polygon_feature` | 4.5M | 1.5 KB | 800 B | 3.8 KB | 9.0 KB | 6.3 GB | 100% |
+| `emit_line_feature` | 2.0M | 1.4 KB | 828 B | 3.9 KB | 8.5 KB | 2.8 GB | 44% |
+| `clip_polygon_into` | 8.9M | 297 B | 304 B | 1.3 KB | 2.7 KB | 2.5 GB | 40% |
+| `mvt::encode_tile_with` | 55.9K | 33.9 KB | 9.3 KB | 140.4 KB | 404.0 KB | 1.8 GB | 29% |
 
 Note: cumulative means parent includes children. Exclusive allocations are the deltas.
 
@@ -100,10 +100,10 @@ Note: cumulative means parent includes children. Exclusive allocations are the d
 
 | Thread | Alloc | Dealloc | Diff |
 |---|---|---|---|
-| Main | 5.6 GB | 15.0 GB | -9.4 GB |
-| Rayon worker ×4 | ~3.4 GB each | ~2.9 GB each | ~490 MB each |
+| Main | 7.2 GB | 8.8 GB | -1.7 GB |
+| Rayon worker ×4 | ~3.2 GB each | ~2.8 GB each | ~410 MB each |
 
-RSS: 2.0 GB. System allocator is much less memory-efficient than mimalloc.
+RSS: 1.6 GB. System allocator is much less memory-efficient than mimalloc.
 
 ### Key allocation insights
 
@@ -130,14 +130,18 @@ read-only `NodeIndexReader` (Sync) after node phase. Global alloc throughput dro
 62.6 GB → **55.1 GB** (−7.5 GB, −12%). `emit_polygon_feature` dropped 8.7 GB → 6.3 GB.
 Rayon workers went from ~3.5s CPU each to **~10.3s each** (3× more utilized).
 
-#### 4. pbfhogg blob decoding is 9.2 GB — being improved upstream
+#### 4. pbfhogg wire parser eliminated protobuf Vec allocations — DONE
 
-7.4K blobs × 1.3 MB avg. This is zlib decompression buffers inside pbfhogg. Work is
-underway in pbfhogg to reduce this.
+Was 9.2 GB (7.4K blobs × 1.3 MB avg) from `blob::decode_blob`. pbfhogg's new wire parser
+eliminated ~9 GB of protobuf `Vec` allocations for packed repeated fields (node IDs, lats,
+lons, etc.) by decoding varints on-the-fly instead of materializing intermediate vectors.
+After fix: `decode_blob` dropped out of the top 10 entirely. Global dealloc throughput
+dropped 64.0 GB → **55.7 GB** (−8.3 GB, −13%). RSS: 2.0 GB → **1.6 GB** (−20%).
+At planet scale, this eliminates ~1.5 TB of cumulative allocations.
 
 #### 5. Planet-scale projection
 
-Denmark is ~1/150th of planet by PBF size. Extrapolating naively: **~1.3 TB of allocator
+Denmark is ~1/150th of planet by PBF size. Extrapolating naively: **~1.1 TB of allocator
 throughput** at planet scale. Even mimalloc will feel pressure at that level — contention
 across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-local heaps.
 
@@ -151,8 +155,12 @@ across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-l
    from ~3.5s to ~10.3s CPU each (3× more utilized). Global alloc throughput −12%.
    Denmark PBF phase neutral (~18s); planet-scale benefit expected to be significant
    (page faults spread across threads instead of serializing one thread).
-4. **Optimize simplification for large features** — the P99 tail in `for_each_zoom_simplified`
+4. ~~**Eliminate projection transcendentals**~~ — Done. 18-bit LUT (262K entries, 2 MB)
+   with linear interpolation replaces tan/cos/ln in `project_e7`. Error: 0.03 pixels at z14.
+   `process_raw_way` avg −14% (29.65→25.50µs), P99 −55% (189.82→85.31µs) in alloc profile.
+   No allocation regression. Planet-scale: eliminates ~387-775s of transcendental cost.
+5. **Optimize simplification for large features** — the P99 tail in `for_each_zoom_simplified`
    is where most CPU goes. Early termination, incremental simplification, or subpixel culling
    at coarser zooms could help.
-5. **Polygon-focused optimization** — polygons are 2x the workload of lines. Any polygon-specific
+6. **Polygon-focused optimization** — polygons are 2x the workload of lines. Any polygon-specific
    improvement (e.g. ring area pre-filter before per-zoom processing) has outsized impact.

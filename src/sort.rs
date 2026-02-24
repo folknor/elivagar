@@ -163,7 +163,7 @@ impl SortWriter {
 
         let path = self.tmp_dir.join(format!("chunk_{:04}.bin", self.chunk_count));
         let file = File::create(&path)?;
-        let mut writer = BufWriter::new(file);
+        let mut writer = BufWriter::with_capacity(1 << 20, file);
 
         let count = self.buffer.len() as u32;
         writer.write_all(&count.to_le_bytes())?;

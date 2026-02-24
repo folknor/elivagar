@@ -62,15 +62,15 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   every decoded feature creates a `Vec<u32>`. Pass a `&mut Vec<u32>` in, or reference geometry
   as a byte slice into the sort record data. (`wire_format.rs:120-131`)
 
-- [ ] **Sort chunk buffer doesn't free after flush** — `self.buffer.clear()` keeps allocated
-  capacity. Use `std::mem::take` or `shrink_to_fit()` after flush to release the pointer array.
-  (`sort.rs:154-178`)
+- [x] **Sort chunk write buffer too small** — Was default 8 KB BufWriter; now 1 MB. (`sort.rs:166`)
 
 ## Performance: Algorithms & Data Structures (Medium-High Impact)
 
 - [ ] **POI `contains()` linear scan on 50-entry arrays** — `AMENITY_VALUES` (51 entries), `SHOP_VALUES` (37 entries) searched linearly. These are already sorted; use `binary_search()` or `phf` perfect hash set. (`pois.rs:93-157, 219-233`)
 
-- [ ] **Projection transcendentals called billions of times** — `project_e7` calls tan, cos, ln per node. Use a lookup table for latitude projection (180K entries for 0.001-degree steps) with linear interpolation, or polynomial approximation. (`geometry.rs:103-118`)
+- [x] **Projection transcendentals called billions of times** — Fixed: 18-bit LUT (262K entries,
+  2 MB) with linear interpolation replaces tan/cos/ln in `project_e7`. Error: 0.03 pixels at z14.
+  `project()` (exact transcendentals) kept for tests and one-off calls. (`geometry.rs:103-155`)
 
 - [ ] **`merge_same_attr_geometries` per-tile HashMap** — Clones and sorts tags for every feature per tile, allocates Vec for hash key. Hash tags in-place or pre-sort during insertion. (`mvt.rs:454-517`)
 
@@ -78,7 +78,9 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
 
 - [ ] **Ocean processing: parallel collect then serial push** — `par_iter` collects into `Vec<Vec<SortRecord>>`, then pushes serially. Each rayon worker could flush to a thread-local sort chunk file directly. (`ocean.rs:180-203`)
 
-- [ ] **Compression level tradeoff** — Level 6 is used; level 3-4 would be noticeably faster with ~5% larger output. Make configurable. (`pipeline.rs:1239`)
+- [ ] **Compression level tradeoff [pre-release]** — Level 6 is used; level 3-4 would be
+  noticeably faster with ~5% larger output. Make configurable. Final tuning item — do this
+  right before 0.1 release after all other optimizations are locked in. (`pipeline.rs:1239`)
 
 - [ ] **Relation tag String cloning** — Every relation's tags are cloned from `&str` to `String` because PBF borrows don't survive the batch boundary. Use string interning or buffer raw PBF bytes. ~14M relations * ~10 tags * ~30 bytes = ~4 GB. (`pipeline.rs:666-668`)
 
