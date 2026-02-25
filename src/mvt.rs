@@ -84,6 +84,22 @@ impl EncodeScratch {
     }
 }
 
+/// Reusable scratch buffers for geometry merging, avoiding per-tile HashMap allocation.
+/// Created once per rayon worker via `map_init`, reused across all tiles on that worker.
+pub struct MergeScratch {
+    groups: FxHashMap<(GeomType, Vec<(u16, u16)>), Vec<usize>>,
+    geom: Vec<u32>,
+}
+
+impl MergeScratch {
+    pub fn new() -> Self {
+        Self {
+            groups: FxHashMap::default(),
+            geom: Vec::new(),
+        }
+    }
+}
+
 pub struct LayerBuilder {
     name: String,
     features: Vec<Feature>,
@@ -159,6 +175,19 @@ impl LayerBuilder {
 
     pub fn add_feature(&mut self, feature: Feature) {
         self.features.push(feature);
+    }
+
+    /// Drain all features and push their geometry/tags Vecs into pools for reuse.
+    /// Called after `encode_tile_with` to recover allocated buffers.
+    pub fn reclaim_features(
+        &mut self,
+        geom_pool: &mut Vec<Vec<u32>>,
+        tags_pool: &mut Vec<Vec<(u16, u16)>>,
+    ) {
+        for f in self.features.drain(..) {
+            geom_pool.push(f.geometry);
+            tags_pool.push(f.tags);
+        }
     }
 
     fn encode(&self, buf: &mut Vec<u8>, s: &mut EncodeScratch) {
@@ -484,80 +513,70 @@ impl LayerBuilder {
     /// feature counts in the encoded tile without losing any visual
     /// information. Point features are skipped (not merged).
     ///
-    /// Uses a HashMap keyed by (GeomType, sorted tags) to group features.
-    /// This clones + sorts tags per feature — investigated alternatives:
-    /// (1) Sorting Feature structs directly (by geom_type, tags): regressed
-    ///     assemble 3.5s→5.8s — moving Features (3 Vecs each) is expensive.
-    /// (2) Sorting indices then merging runs: still regressed 3.5s→4.7s —
-    ///     O(n log n) tag slice comparisons slower than HashMap's O(n) amortized.
-    /// (3) Pre-sorting tags at insertion + hash-based grouping: adds 16M sort
-    ///     calls per Denmark run for marginal benefit.
-    /// The clone+sort HashMap is already the right tradeoff: assemble is only
-    /// 7% of wall time, and mimalloc makes the small Vec clones cheap.
+    /// Uses a reusable `MergeScratch` (hoisted HashMap + geometry buffer) to
+    /// avoid per-tile allocation. Tags are cloned for HashMap keys but not
+    /// sorted — shortbread matching produces tags in deterministic order.
+    /// Merges in-place: appends secondary geometries into the first feature
+    /// of each group via scratch buffer + swap, tombstones secondaries with
+    /// empty geometry, then retains non-tombstone features.
     #[hotpath::measure]
-    pub fn merge_same_attr_geometries(&mut self) {
+    pub fn merge_same_attr_geometries(
+        &mut self,
+        scratch: &mut MergeScratch,
+        geom_pool: &mut Vec<Vec<u32>>,
+        tags_pool: &mut Vec<Vec<(u16, u16)>>,
+    ) {
         if self.features.len() < 2 {
             return;
         }
 
-        // Group features by (geom_type, sorted tags).
-        // Value: list of feature indices in this group.
-        type MergeKey = (GeomType, Vec<(u16, u16)>);
-        let mut groups: FxHashMap<MergeKey, Vec<usize>> = FxHashMap::default();
+        // Group features by (geom_type, tags). Tags are deterministic from
+        // shortbread matching — no sort needed. HashMap is reused across tiles
+        // (`.clear()` retains allocated capacity).
+        scratch.groups.clear();
         for (i, f) in self.features.iter().enumerate() {
             if f.geom_type == GeomType::Point {
                 continue;
             }
-            let mut sorted_tags = f.tags.clone();
-            sorted_tags.sort();
-            groups
-                .entry((f.geom_type, sorted_tags))
+            scratch.groups
+                .entry((f.geom_type, f.tags.clone()))
                 .or_default()
                 .push(i);
         }
 
         // Check if any group has >1 feature worth merging
-        let any_mergeable = groups.values().any(|v| v.len() > 1);
+        let any_mergeable = scratch.groups.values().any(|v| v.len() > 1);
         if !any_mergeable {
             return;
         }
 
-        // Track which features get absorbed into a merged feature
-        let mut merged_set: Vec<bool> = vec![false; self.features.len()];
-        let mut new_features: Vec<Feature> = Vec::new();
-
-        for ((geom_type, tags), indices) in &groups {
+        // In-place merge: for each group, concatenate all geometries into
+        // scratch.geom, swap into first feature, reclaim secondaries' Vecs.
+        for (_, indices) in &scratch.groups {
             if indices.len() < 2 {
                 continue;
             }
-            // Mark all indices as merged
-            for &idx in indices {
-                merged_set[idx] = true;
-            }
-            // Concatenate geometries with delta-encoding adjustment
-            let mut merged_geom: Vec<u32> = Vec::new();
+            // Concatenate all geometries into scratch buffer
+            scratch.geom.clear();
             let mut cx: i32 = 0;
             let mut cy: i32 = 0;
             for &idx in indices {
-                append_geometry(&mut merged_geom, &self.features[idx].geometry, &mut cx, &mut cy);
+                append_geometry(&mut scratch.geom, &self.features[idx].geometry, &mut cx, &mut cy);
             }
-            new_features.push(Feature {
-                id: None,
-                geom_type: *geom_type,
-                geometry: merged_geom,
-                tags: tags.clone(),
-            });
+            // Swap merged geometry into first feature
+            let first = indices[0];
+            std::mem::swap(&mut self.features[first].geometry, &mut scratch.geom);
+            self.features[first].id = None;
+            // Reclaim secondary features' Vecs into pools (mem::take leaves
+            // zero-capacity Vecs so retain can identify dead features).
+            for &idx in &indices[1..] {
+                geom_pool.push(std::mem::take(&mut self.features[idx].geometry));
+                tags_pool.push(std::mem::take(&mut self.features[idx].tags));
+            }
         }
 
-        // Rebuild: keep unmerged features, then append merged ones
-        let mut kept: Vec<Feature> = Vec::new();
-        for (i, f) in self.features.drain(..).enumerate() {
-            if !merged_set[i] {
-                kept.push(f);
-            }
-        }
-        kept.append(&mut new_features);
-        self.features = kept;
+        // Remove dead features (zero-capacity Vecs from mem::take)
+        self.features.retain(|f| !f.geometry.is_empty());
     }
 }
 

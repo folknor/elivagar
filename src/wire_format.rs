@@ -102,7 +102,12 @@ pub(crate) fn encode_feature_data(
 /// Logging here would add noise to a billion-call hot path.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
+pub(crate) fn add_feature_to_layer(
+    layer: &mut LayerBuilder,
+    data: &[u8],
+    geom_pool: &mut Vec<Vec<u32>>,
+    tags_pool: &mut Vec<Vec<(u16, u16)>>,
+) {
     if data.len() < 13 {
         return;
     }
@@ -123,17 +128,18 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
     };
 
     // geometry commands — bulk memcpy (little-endian wire format matches native u32 layout).
-    // Allocates per feature. Can't reuse a buffer: each Feature owns its Vec<u32> because
-    // merge_same_attr_geometries needs random access across all Features in a tile.
-    // Impact: ~1.8 GB / 3.2% of alloc — in assemble phase (7% of wall time), not worth
-    // the refactor (would require lifetimes or arena on Feature/LayerBuilder/encoder).
+    // Each Feature owns its Vec<u32> because merge_same_attr_geometries needs random
+    // access across all Features in a tile. Vecs are pooled per rayon worker — pop from
+    // pool here, reclaimed after encode via LayerBuilder::reclaim_features.
     let cmd_count = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("cmd_count")) as usize;
     pos += 4;
     let cmd_bytes = cmd_count * 4;
     if pos + cmd_bytes > data.len() {
         return;
     }
-    let mut geom_cmds = vec![0u32; cmd_count];
+    let mut geom_cmds = geom_pool.pop().unwrap_or_default();
+    geom_cmds.clear();
+    geom_cmds.resize(cmd_count, 0);
     // SAFETY: On little-endian, u32 byte layout matches the wire format.
     // We copy `cmd_bytes` bytes from the data slice into the Vec's backing memory.
     // The source slice bounds are checked above. The destination is exactly `cmd_bytes` bytes.
@@ -154,7 +160,8 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
     let attr_count = data[pos] as usize;
     pos += 1;
 
-    let mut tag_pairs: Vec<(u16, u16)> = Vec::with_capacity(attr_count);
+    let mut tag_pairs = tags_pool.pop().unwrap_or_default();
+    tag_pairs.clear();
     for _ in 0..attr_count {
         if pos >= data.len() {
             break;
@@ -250,7 +257,9 @@ mod tests {
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 14);
 
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
 
         // Exactly 1 feature
         assert_eq!(layer.test_feature_count(), 1);
@@ -310,7 +319,9 @@ mod tests {
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 10);
 
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
 
         assert_eq!(layer.test_feature_count(), 1);
         let f = layer.test_feature(0);
@@ -330,7 +341,9 @@ mod tests {
         let encoded_z12 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 12);
 
         let mut layer2 = LayerBuilder::new("test2");
-        add_feature_to_layer(&mut layer2, &encoded_z12);
+        let mut gp2 = Vec::new();
+        let mut tp2 = Vec::new();
+        add_feature_to_layer(&mut layer2, &encoded_z12, &mut gp2, &mut tp2);
 
         let f2 = layer2.test_feature(0);
         assert_eq!(f2.tags.len(), 4);

@@ -1240,19 +1240,25 @@ fn encode_tile_batch(batch: &[PendingTile]) -> Vec<EncodedTile> {
     batch
         .par_iter()
         .map_init(
-            mvt::EncodeScratch::new,
-            |scratch, tile| {
+            || (mvt::EncodeScratch::new(), mvt::MergeScratch::new(),
+                Vec::<Vec<u32>>::new(), Vec::<Vec<(u16, u16)>>::new()),
+            |(encode_scratch, merge_scratch, geom_pool, tags_pool), tile| {
             let mut layers = new_layer_slots();
             for &(layer_idx, ref data) in &tile.features {
                 if (layer_idx as usize) < layers.len() {
-                    add_feature_to_layer(get_or_create_layer(&mut layers, layer_idx as usize), data);
+                    add_feature_to_layer(
+                        get_or_create_layer(&mut layers, layer_idx as usize),
+                        data,
+                        geom_pool,
+                        tags_pool,
+                    );
                 }
             }
 
             // Merge same-attribute geometries to reduce feature count
             for layer in &mut layers {
                 if let Some(lb) = layer.as_mut() {
-                    lb.merge_same_attr_geometries();
+                    lb.merge_same_attr_geometries(merge_scratch, geom_pool, tags_pool);
                 }
             }
 
@@ -1261,10 +1267,24 @@ fn encode_tile_batch(batch: &[PendingTile]) -> Vec<EncodedTile> {
                 .filter(|l| !l.is_empty())
                 .collect();
             if non_empty.is_empty() {
+                // Reclaim feature Vecs before returning
+                for layer in &mut layers {
+                    if let Some(lb) = layer.as_mut() {
+                        lb.reclaim_features(geom_pool, tags_pool);
+                    }
+                }
                 return None;
             }
 
-            let mvt_data = mvt::encode_tile_with(&non_empty, scratch);
+            let mvt_data = mvt::encode_tile_with(&non_empty, encode_scratch);
+
+            // Reclaim feature Vecs into pools for reuse on next tile
+            for layer in &mut layers {
+                if let Some(lb) = layer.as_mut() {
+                    lb.reclaim_features(geom_pool, tags_pool);
+                }
+            }
+
             if mvt_data.is_empty() {
                 return None;
             }
@@ -1453,7 +1473,9 @@ mod tests {
     /// Decode the full record via add_feature_to_layer and return the layer builder.
     fn decode_to_layer(data: &[u8]) -> mvt::LayerBuilder {
         let mut lb = mvt::LayerBuilder::new("test");
-        crate::wire_format::add_feature_to_layer(&mut lb, data);
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        crate::wire_format::add_feature_to_layer(&mut lb, data, &mut gp, &mut tp);
         lb
     }
 
