@@ -101,7 +101,14 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   recursion tree to prune branches. Limited benefit — the first DP call (z13, full N points)
   dominates, and that call can't be pruned much. (`geometry.rs:265-289`)
 
-- [ ] **POI `contains()` linear scan on 50-entry arrays** — `AMENITY_VALUES` (51 entries), `SHOP_VALUES` (37 entries) searched linearly. These are already sorted; use `binary_search()` or `phf` perfect hash set. (`pois.rs:93-157, 219-233`)
+- [ ] **POI `contains()` linear scan on 50-entry arrays** — **Investigated, not worth it.**
+  7 arrays (5-51 entries) searched via `.contains()`. All sorted except `emergency` (7 entries).
+  But `contains()` is only reached when the element has the relevant key (`amenity`, `shop`,
+  etc.) — a tiny fraction of all elements. Hotpath profile confirms tag matching is NOT a
+  bottleneck (`match_element` not in top 10). The 51-entry `AMENITY_VALUES` is ~400 bytes —
+  fits in L1 cache, sequential scan with first-byte short-circuit. `binary_search` saves ~19
+  comparisons per hit but hits are rare. `phf` adds a dependency for zero measurable gain.
+  (`pois.rs:93-157, 219-233`)
 
 - [x] **Projection transcendentals called billions of times** — Fixed: 18-bit LUT (262K entries,
   2 MB) with linear interpolation replaces tan/cos/ln in `project_e7`. Error: 0.03 pixels at z14.
