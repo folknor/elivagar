@@ -14,7 +14,7 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 Write new scripts in `scripts/` as needed. Follow these conventions:
 - `scripts/build.sh` — build release
 - `scripts/test.sh` — run tests
-- `scripts/bench-self.sh [pbf] [runs] [--skip-to ocean|sort]` — quick self-benchmark (no comparisons)
+- `scripts/bench-self.sh [pbf] [runs] [--skip-to ocean|sort] [--compression-level N]` — quick self-benchmark (no comparisons)
 - `scripts/bench.sh [pbf] [--skip-to ocean|sort]` — benchmark elivagar vs Planetiler vs Tilemaker
 - `scripts/bench-tilemaker.sh [pbf] [runs]` — benchmark Tilemaker Shortbread (auto-builds from source, downloads shapefiles)
 - `scripts/run.sh [pbf] [out.pmtiles]` — build + run
@@ -78,6 +78,32 @@ Sequential, same PBF input:
 - `.unwrap()` forbidden by clippy — use `expect()` or propagate errors
 - Cast lints are strict — annotate with `#[allow(clippy::cast_*)]` where needed
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)
+
+## Benchmark machine: dm6
+
+- CPU: AMD Ryzen 5 5600G (6 cores / 12 threads, 4.46 GHz boost)
+- RAM: 32 GB DDR4
+- Denmark PBF baseline: ~45s total (26s pbf, 8s ocean, 0.7s sort, 5s assemble)
+
+The 29s figure in README.md was measured on a different machine (Ryzen 9 7950X, 16 cores).
+Do not chase a 29s target on dm6 — ~45s is the correct baseline for this hardware.
+
+## madvise / fadvise — do not add
+
+All madvise hints (MADV_SEQUENTIAL, MADV_RANDOM, MADV_HUGEPAGE, MADV_POPULATE_READ) and
+posix_fadvise hints (FADV_SEQUENTIAL, FADV_DONTNEED) were tried and removed. Every hint
+caused regressions because the node index file is sparse — node IDs go up to ~12B regardless
+of dataset size, so a Denmark extract produces a ~96 GB file with only ~400 MB populated.
+
+The regression was severe: 45s → 160s on dm6, a 3.5x slowdown. It was bisected to commit
+cdc382a ("Implement Tier 1 Linux I/O hints"). The MADV_HUGEPAGE hint was the primary culprit —
+the kernel tries to assemble 2 MB huge pages from a file that is 99%+ holes, causing massive
+page fault overhead. A "50% of RAM" threshold guard was in place but used file_len (~96 GB)
+instead of the actual working set (~400 MB), so the guard never triggered correctly.
+
+After removing ALL hints, performance returned to baseline. Kernel defaults (MADV_NORMAL,
+no fadvise) work best for this access pattern. Do not re-add madvise or fadvise calls
+without benchmarking on a sparse-file workload first.
 
 ## Data
 
