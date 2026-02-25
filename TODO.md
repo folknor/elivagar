@@ -165,15 +165,15 @@ From Opus code review (2026-02-25). Grouped by severity.
     data and produces slightly wrong but visually acceptable results.
   - **Not worth fixing** — single-vertex test is correct for valid OSM multipolygons.
 
-- [ ] **Greedy chain-joining can fail depending on way order** — `join_ways` is a single-pass
-  greedy algorithm. Endpoint map entries can be overwritten when chains extend, leaving other
+- [x] **Greedy chain-joining can fail depending on way order** — `join_ways` was a single-pass
+  greedy algorithm. Endpoint map entries could be overwritten when chains extend, leaving other
   chains orphaned. (`multipolygon.rs:187+`)
-  - **Latent, moderate impact.** Can cause real geometry loss on large multipolygon relations
+  - **Latent, moderate impact.** Could cause real geometry loss on large multipolygon relations
     (country borders, large forests) with many member ways in unlucky order. Unclosed chains
-    are silently discarded. Most OSM editors produce roughly sequential order, limiting
-    frequency, but the failure mode is real.
-  - **Fix**: Add a second merge pass after the greedy pass — rebuild endpoint_map from unclosed
-    chains and attempt further joins. ~15-20 lines in `join_ways`. No signature change.
+    silently discarded.
+  - **Fixed**: Added second merge pass after the greedy pass. Loops until no more progress:
+    rebuilds endpoint_map from unclosed chains, attempts pairwise joins. Test added for the
+    specific ordering-dependent failure case (`test_out_of_order_ways_joined`).
 
 - [ ] **`tile_id_to_zxy` overflows at z=31** — `n * n * 4` overflows u64 before the `z >= 31`
   guard is checked. Test-only function, max zoom is 14. (`pmtiles_writer.rs:637-640`)

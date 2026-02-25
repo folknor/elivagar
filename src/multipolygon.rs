@@ -206,6 +206,104 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
         append_way_to_chains(way, &mut chains, &mut endpoint_map, &mut closed);
     }
 
+    // Second pass: try to merge unclosed chains with each other.
+    // The greedy first pass can leave orphaned chains when endpoint_map.insert()
+    // overwrites entries for other chains. Rebuild the map from surviving chains
+    // and attempt pairwise joins until no more progress is made.
+    loop {
+        let mut merged_any = false;
+        endpoint_map.clear();
+        for (i, chain) in chains.iter().enumerate() {
+            if chain.len() < 2 {
+                continue;
+            }
+            endpoint_map.insert(quantize(&chain[0]), i);
+            endpoint_map.insert(quantize(&chain[chain.len() - 1]), i);
+        }
+
+        // Try to join each unclosed chain with another via shared endpoints.
+        let chain_count = chains.len();
+        for i in 0..chain_count {
+            if chains[i].len() < 2 {
+                continue;
+            }
+            let front = quantize(&chains[i][0]);
+            let back = quantize(&chains[i][chains[i].len() - 1]);
+
+            // Look for another chain matching our back endpoint.
+            if let Some(&j) = endpoint_map.get(&back) {
+                if j != i && chains[j].len() >= 2 {
+                    let j_front = quantize(&chains[j][0]);
+                    let j_back = quantize(&chains[j][chains[j].len() - 1]);
+
+                    let taken_j = std::mem::take(&mut chains[j]);
+                    if back == j_front {
+                        chains[i].extend_from_slice(&taken_j[1..]);
+                    } else if back == j_back {
+                        let rev: Vec<Point> = taken_j.into_iter().rev().collect();
+                        chains[i].extend_from_slice(&rev[1..]);
+                    } else {
+                        // Stale map entry, put it back.
+                        chains[j] = taken_j;
+                        continue;
+                    }
+
+                    // Check if the merged chain is now closed.
+                    let new_front = quantize(&chains[i][0]);
+                    let new_back = quantize(&chains[i][chains[i].len() - 1]);
+                    if new_front == new_back {
+                        let mut ring = std::mem::take(&mut chains[i]);
+                        ring.pop();
+                        if ring.len() >= 3 {
+                            closed.push(ring);
+                        }
+                    }
+                    merged_any = true;
+                    break; // Restart — endpoint_map is stale after merge.
+                }
+            }
+
+            // Look for another chain matching our front endpoint.
+            if let Some(&j) = endpoint_map.get(&front) {
+                if j != i && chains[j].len() >= 2 {
+                    let j_front = quantize(&chains[j][0]);
+                    let j_back = quantize(&chains[j][chains[j].len() - 1]);
+
+                    let taken_j = std::mem::take(&mut chains[j]);
+                    if front == j_back {
+                        let mut merged = taken_j;
+                        merged.extend_from_slice(&chains[i][1..]);
+                        chains[i] = merged;
+                    } else if front == j_front {
+                        let rev: Vec<Point> = taken_j.into_iter().rev().collect();
+                        let mut merged = rev;
+                        merged.extend_from_slice(&chains[i][1..]);
+                        chains[i] = merged;
+                    } else {
+                        chains[j] = taken_j;
+                        continue;
+                    }
+
+                    let new_front = quantize(&chains[i][0]);
+                    let new_back = quantize(&chains[i][chains[i].len() - 1]);
+                    if new_front == new_back {
+                        let mut ring = std::mem::take(&mut chains[i]);
+                        ring.pop();
+                        if ring.len() >= 3 {
+                            closed.push(ring);
+                        }
+                    }
+                    merged_any = true;
+                    break;
+                }
+            }
+        }
+
+        if !merged_any {
+            break;
+        }
+    }
+
     // Collect remaining unclosed chains (skip degenerate ones).
     let unclosed: Vec<Vec<Point>> = chains
         .into_iter()
@@ -605,6 +703,32 @@ mod tests {
             inner_area < 0.0,
             "inner ring should have negative signed_area, got {inner_area}",
         );
+    }
+
+    // --- Second-pass chain merging recovers from ordering failures ---
+
+    #[test]
+    fn test_out_of_order_ways_joined() {
+        // A square ring split into 4 ways, given in an order that defeats
+        // single-pass greedy joining:
+        //   way1: P1->P2  (creates chain 0)
+        //   way2: P3->P4  (creates chain 1 — no shared endpoints with chain 0)
+        //   way3: P2->P3  (joins chain 0, extending to P1->P2->P3;
+        //                   endpoint_map now maps P3->chain0, overwriting chain1's P3)
+        //   way4: P4->P1  (joins chain 1, extending to P3->P4->P1;
+        //                   endpoint_map now maps P1->chain1, overwriting chain0's P1)
+        // After the first pass, chains 0 and 1 are both unclosed but should
+        // form a single closed ring together. The second merge pass fixes this.
+        let members = vec![
+            make_member("outer", vec![pt(0.0, 0.0), pt(1.0, 0.0)]),
+            make_member("outer", vec![pt(1.0, 1.0), pt(0.0, 1.0)]),
+            make_member("outer", vec![pt(1.0, 0.0), pt(1.0, 1.0)]),
+            make_member("outer", vec![pt(0.0, 1.0), pt(0.0, 0.0)]),
+        ];
+
+        let mp = assemble(&members);
+        assert_eq!(mp.polygons.len(), 1, "out-of-order ways should form one polygon");
+        assert_eq!(mp.polygons[0].0.len(), 4, "square should have 4 vertices");
     }
 
     // --- Quantize ---
