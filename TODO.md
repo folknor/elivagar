@@ -120,21 +120,12 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   at `geometry.rs:350`. Moving before saves a full DP invocation for already-collapsed
   features. Low effort, low impact. (`geometry.rs:347-351`)
 
-- [ ] **Recompute bbox from simplified cascade per zoom** — **Investigated, promising.**
-  The bbox passed to `emit_polygon_feature` / `emit_line_feature` is computed once from
-  full-resolution coords (`pipeline.rs:630`), never recomputed after simplification. At low
-  zooms where DP aggressively reduces vertices, the simplified geometry may span far fewer
-  tiles than the original bbox suggests. This causes `clip_polygon_into` to be called on
-  tiles where the geometry can't possibly intersect, producing empty results.
-
-  Recomputing bbox from the simplified cascade inside the `for_each_zoom_simplified` callback
-  is O(n) where n is the already-small simplified vertex count. Eliminates wasted tile
-  iterations + S-H clipping calls. For a feature whose simplified form at z6 fits in 1 tile
-  but whose original bbox spans 4 tiles, this eliminates 3 full S-H clip passes.
-
-  Medium effort (callback currently receives `&[Point]` simplified coords; need to compute
-  bbox and pass to tile iteration). High impact at low zooms.
-  (`pipeline.rs:630,990-999, geometry.rs:853-869`)
+- [x] **Recompute bbox from simplified cascade per zoom** — Fixed: `emit_line_feature`,
+  `emit_polygon_feature`, and `emit_multipolygon_feature` now recompute `merc_bbox` from the
+  simplified coordinates inside the `for_each_zoom_simplified` callback. Eliminates wasted
+  tile iterations + S-H clipping at low zooms where DP reduces geometry extent. The `bbox`
+  parameter was removed from all three functions (callers still compute it for `land_mask`).
+  (`pipeline.rs:940-948,997,1046`)
 
 - [ ] **Outcode pre-test before Sutherland-Hodgman clipping** — Before running
   `clip_polygon_into`, compute bitwise AND of all vertex outcodes against the tile rect.

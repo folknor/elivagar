@@ -652,10 +652,10 @@ fn process_raw_way(
                 emit_point_or_centroid(osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
             }
             GeomExpect::Line => {
-                emit_line_feature(osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
+                emit_line_feature(osm_id, &merc, m, z_lo, z_hi, &mut records);
             }
             GeomExpect::Polygon => {
-                emit_polygon_feature(osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
+                emit_polygon_feature(osm_id, &merc, m, z_lo, z_hi, &mut records);
             }
         }
     }
@@ -800,7 +800,7 @@ fn process_prepared_relation(
                     let bbox = merc_bbox(outer);
                     land_mask.mark_bbox(&bbox);
                     emit_multipolygon_feature(
-                        rel.osm_id, outer, inners, &bbox, m,
+                        rel.osm_id, outer, inners, m,
                         z_lo, z_hi, &mut records,
                     );
                 }
@@ -833,7 +833,7 @@ fn process_prepared_relation(
                     let bbox = merc_bbox(&mw.coords);
                     land_mask.mark_bbox(&bbox);
                     emit_line_feature(
-                        rel.osm_id, &mw.coords, &bbox, m, z_lo, z_hi, &mut records,
+                        rel.osm_id, &mw.coords, m, z_lo, z_hi, &mut records,
                     );
                 }
             }
@@ -922,7 +922,6 @@ fn emit_point_or_centroid(
 fn emit_line_feature(
     osm_id: u64,
     merc: &[Point],
-    bbox: &MercBbox,
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
@@ -937,11 +936,15 @@ fn emit_line_feature(
     geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, |z, simplified| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
+        // Recompute bbox from simplified coords — at low zooms DP may reduce the
+        // geometry to far fewer tiles than the original bbox suggests.
+        let simp_bbox = merc_bbox(simplified);
+
         // Skip min-size filtering at max zoom and for boundaries/streets
         let skip_size_filter = z >= 14
             || m.layer == Layer::Boundaries
             || m.layer == Layer::Streets;
-        geometry::for_each_tile_in_bbox(bbox, z, |tx, ty| {
+        geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
             let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
             let clipped = geometry::clip_linestring(simplified, &clip);
             for segment in &clipped {
@@ -967,12 +970,10 @@ fn emit_line_feature(
     count
 }
 
-#[allow(clippy::too_many_arguments)]
 #[hotpath::measure]
 fn emit_polygon_feature(
     osm_id: u64,
     merc: &[Point],
-    bbox: &MercBbox,
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
@@ -990,8 +991,9 @@ fn emit_polygon_feature(
     geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
+        let simp_bbox = merc_bbox(simplified);
         let skip_size_filter = z >= 14;
-        geometry::for_each_tile_in_bbox(bbox, z, |tx, ty| {
+        geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
             let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
             geometry::clip_polygon_into(simplified, &clip, &mut clip_a, &mut clip_b);
             if clip_a.len() < 3 {
@@ -1017,13 +1019,11 @@ fn emit_polygon_feature(
     count
 }
 
-#[allow(clippy::too_many_arguments)]
 #[hotpath::measure]
 fn emit_multipolygon_feature(
     osm_id: u64,
     outer: &[Point],
     inners: &[Vec<Point>],
-    bbox: &MercBbox,
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
@@ -1038,8 +1038,9 @@ fn emit_multipolygon_feature(
     geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, |z, simp_outer, simp_inners| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
+        let simp_bbox = merc_bbox(simp_outer);
         let skip_size_filter = z >= 14;
-        geometry::for_each_tile_in_bbox(bbox, z, |tx, ty| {
+        geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
             let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
 
             geometry::clip_polygon_into(simp_outer, &clip, &mut clip_a, &mut clip_b);
@@ -1527,9 +1528,8 @@ mod tests {
     fn emit_line_too_few_points() {
         let m = test_layer_match(Layer::Streets, GeomExpect::Line);
         let coords = [Point { x: 0.5, y: 0.5 }];
-        let bbox = MercBbox { min_x: 0.5, min_y: 0.5, max_x: 0.5, max_y: 0.5 };
         let mut records = Vec::new();
-        let count = emit_line_feature(101, &coords, &bbox, &m, 0, 0, &mut records);
+        let count = emit_line_feature(101, &coords, &m, 0, 0, &mut records);
         assert_eq!(count, 0);
         assert!(records.is_empty());
     }
@@ -1541,9 +1541,8 @@ mod tests {
             Point { x: 0.3, y: 0.3 },
             Point { x: 0.7, y: 0.7 },
         ];
-        let bbox = MercBbox { min_x: 0.3, min_y: 0.3, max_x: 0.7, max_y: 0.7 };
         let mut records = Vec::new();
-        emit_line_feature(100, &coords, &bbox, &m, 0, 0, &mut records);
+        emit_line_feature(100, &coords, &m, 0, 0, &mut records);
         assert_eq!(records.len(), 1);
 
         let rec = &records[0];
@@ -1576,9 +1575,8 @@ mod tests {
             Point { x: 0.500_000, y: 0.500_000 },
             Point { x: 0.500_001, y: 0.500_001 },
         ];
-        let bbox = MercBbox { min_x: 0.5, min_y: 0.5, max_x: 0.500_001, max_y: 0.500_001 };
         let mut records = Vec::new();
-        emit_line_feature(99, &coords, &bbox, &m, 0, 14, &mut records);
+        emit_line_feature(99, &coords, &m, 0, 14, &mut records);
 
         // At z=14 this line is ~0.4 pixel which is sub-pixel, but Streets skips
         // the size filter, so it should still produce a record at z=14.
@@ -1603,9 +1601,8 @@ mod tests {
             Point { x: 0.7, y: 0.3 },
             Point { x: 0.5, y: 0.7 },
         ];
-        let bbox = MercBbox { min_x: 0.3, min_y: 0.3, max_x: 0.7, max_y: 0.7 };
         let mut records = Vec::new();
-        let count = emit_polygon_feature(201, &coords, &bbox, &m, 0, 0, &mut records);
+        let count = emit_polygon_feature(201, &coords, &m, 0, 0, &mut records);
         assert_eq!(count, 0);
         assert!(records.is_empty());
     }
@@ -1620,9 +1617,8 @@ mod tests {
             Point { x: 0.3, y: 0.7 },
             Point { x: 0.3, y: 0.3 },
         ];
-        let bbox = MercBbox { min_x: 0.3, min_y: 0.3, max_x: 0.7, max_y: 0.7 };
         let mut records = Vec::new();
-        emit_polygon_feature(200, &coords, &bbox, &m, 0, 0, &mut records);
+        emit_polygon_feature(200, &coords, &m, 0, 0, &mut records);
         assert_eq!(records.len(), 1);
 
         let rec = &records[0];
@@ -1673,11 +1669,9 @@ mod tests {
             Point { x: 0.3, y: 0.7 },
             Point { x: 0.3, y: 0.3 },
         ];
-        let bbox_z0 = MercBbox { min_x: 0.3, min_y: 0.3, max_x: 0.7, max_y: 0.7 };
-
         // At z=0: only 1 attr ("kind", min_zoom=0)
         let mut records = Vec::new();
-        emit_polygon_feature(300, &coords_z0, &bbox_z0, &m_z0, 0, 0, &mut records);
+        emit_polygon_feature(300, &coords_z0, &m_z0, 0, 0, &mut records);
         assert_eq!(records.len(), 1);
         let lb = decode_to_layer(&records[0].data);
         let f = lb.test_feature(0);
@@ -1701,9 +1695,8 @@ mod tests {
             Point { x: 0.500_00, y: 0.500_05 },
             Point { x: 0.500_00, y: 0.500_00 },
         ];
-        let bbox_z14 = MercBbox { min_x: 0.500_00, min_y: 0.500_00, max_x: 0.500_05, max_y: 0.500_05 };
         records.clear();
-        emit_polygon_feature(300, &coords_z14, &bbox_z14, &m_z14, 14, 14, &mut records);
+        emit_polygon_feature(300, &coords_z14, &m_z14, 14, 14, &mut records);
         assert_eq!(records.len(), 1);
         let lb = decode_to_layer(&records[0].data);
         let f = lb.test_feature(0);
