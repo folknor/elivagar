@@ -22,7 +22,7 @@
 
 - [ ] Visual verification — tracked in nidhogg TODO
 - [ ] Planet-scale test — run on full planet PBF (~73 GB), needs NVMe server
-- [ ] Generally check for updates to all dependencies
+- [ ] Check for updates to all dependencies before first release
 
 ## Performance
 
