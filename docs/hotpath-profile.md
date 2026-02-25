@@ -175,10 +175,52 @@ across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-l
    while PBF borrows alive; `PreparedRelation` stores match results instead of cloned tags.
    Early-exit for unmatched relations skips member way resolution. `prepare_relation` dropped
    from 4.0s (12%) to below top 10. `process_raw_way` avg −20% (15.73→12.64µs).
-7. **Further simplification optimization** — remaining options: Visvalingam-Whyatt (O(n log n)
-   one-time importance, then threshold per zoom), DP max-deviation tracking for cascade skip,
-   or recomputing bbox from simplified cascade to eliminate wasted tile clips at low zooms.
-8. **Polygon-focused optimization** — polygons are 2.3× the total workload of lines, but
-   per-feature cost is only 4% higher (4.31µs vs 4.13µs). The 2.3× ratio is almost entirely
-   the 2.25× feature count. Optimizations that help both paths (simplification, bbox recompute,
-   outcode pre-test) have more impact than polygon-specific work.
+7. ~~**Recompute bbox from simplified cascade**~~ — Done. `emit_line_feature`,
+   `emit_polygon_feature`, and `emit_multipolygon_feature` now recompute `merc_bbox` from
+   simplified coords per zoom. Eliminates wasted tile iterations + S-H clipping at low zooms
+   where DP reduces geometry extent. `bbox` parameter removed from all three functions.
+8. ~~**DP max-deviation tracking (Option D) + vertex pre-check (Option E)**~~ — Done.
+   `simplify_into` returns max squared deviation; cascade skips DP when deviation < next
+   zoom's tolerance (converged). Pre-check skips DP when cascade ≤ min_points.
+9. ~~**Eliminate intern_value String allocation on cache hit**~~ — Done. Added
+   `intern_string_value(&str)` with separate `string_value_map` for zero-alloc lookup by
+   borrowed `&str`. ~90% cache hit rate = ~27-40M saved alloc+dealloc cycles per Denmark run.
+10. **Further simplification** — remaining option: Visvalingam-Whyatt (O(n log n) one-time
+    importance, then threshold per zoom). Would replace DP entirely.
+11. **Polygon-focused optimization** — polygons are 2.3× the total workload of lines, but
+    per-feature cost is only 4% higher (4.31µs vs 4.13µs). The 2.3× ratio is almost entirely
+    the 2.25× feature count. Optimizations that help both paths (simplification, outcode
+    pre-test) have more impact than polygon-specific work.
+
+## Benchmark — Denmark (2026-02-25, dm6)
+
+Dataset: `denmark-latest.osm.pbf` (483 MB). Different host from earlier profiles.
+Commit: `95ddf61` — includes intern_value fix, bbox recompute, DP D+E optimizations.
+
+### Self-benchmark (best of 3)
+
+| Phase | Time |
+|---|---|
+| **Total** | **49.1s** |
+| PBF | 29.0s |
+| Ocean | 8.6s |
+| Sort | 1.0s |
+| Assemble | 5.3s |
+| Features | 16.3M |
+| Tiles | 667K |
+| Output | 375 MB |
+
+### Hotpath profile (single run, no ocean — wall 38.3s)
+
+| Function | Calls | Avg | P50 | P95 | P99 | Total | % Wall |
+|---|---|---|---|---|---|---|---|
+| `process_raw_way` | 6.6M | 5.16µs | 2.34µs | 11.34µs | 25.49µs | 34.1s | 89% |
+| `for_each_zoom_simplified` | 6.6M | 2.77µs | 1.04µs | 6.58µs | 16.03µs | 18.2s | 47.5% |
+| `emit_polygon_feature` | 4.5M | 2.92µs | 1.13µs | 7.55µs | 17.71µs | 13.3s | 34.7% |
+| `emit_line_feature` | 2.0M | 3.33µs | 1.33µs | 6.05µs | 14.21µs | 6.8s | 17.6% |
+| `flush_raw_way_batch` | 808 | 17.84ms | 12.78ms | 28.13ms | 65.96ms | 14.4s | 37.6% |
+
+Thread utilization: main 28.4s (15–101% CPU), 3 rayon workers ~4.5s each (51–81% CPU).
+
+Not directly comparable to plantasjen numbers due to different hardware, but serves as the
+baseline for future optimizations on this host.
