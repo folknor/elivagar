@@ -57,12 +57,12 @@ Denmark extract (483 MB PBF) → Shortbread PMTiles, best of 3 runs:
 <!-- BENCH:START -->
 | Tool | Total | PBF+Features | Ocean | Sort | Assembly |
 |------|-------|-------------|-------|------|----------|
-| **elivagar** | **29s** | 20s | 2.8s | 0.7s | 3.4s |
+| **elivagar** | **28s** | 17s | 3.3s | 0.7s | 4.6s |
 | Tilemaker | 29s | — | — | — | — |
 | Planetiler 0.10 | 41s | — | — | — | — |
 <!-- BENCH:END -->
 
-System: Linux 6.18, Ryzen 9 7950X.
+System: Linux 6.18, Ryzen 9 5900X.
 
 Measured with `scripts/bench.sh`. Results are logged to `benchmarks.tsv` for tracking over time.
 

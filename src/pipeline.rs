@@ -462,6 +462,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     }
                 }
             }
+            _ => {}
         })
         .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
 

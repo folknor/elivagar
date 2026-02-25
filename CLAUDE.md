@@ -79,14 +79,19 @@ Sequential, same PBF input:
 - Cast lints are strict — annotate with `#[allow(clippy::cast_*)]` where needed
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)
 
-## Benchmark machine: dm6
+## Benchmark machines
 
+### plantasjen (current)
+- CPU: AMD Ryzen 9 5900X (12 cores / 24 threads, 4.95 GHz boost)
+- RAM: 30 GB DDR4
+- Denmark PBF baseline: ~28s total (17s pbf, 3.3s ocean, 0.7s sort, 4.6s assemble)
+
+### dm6
 - CPU: AMD Ryzen 5 5600G (6 cores / 12 threads, 4.46 GHz boost)
 - RAM: 32 GB DDR4
 - Denmark PBF baseline: ~45s total (26s pbf, 8s ocean, 0.7s sort, 5s assemble)
 
-The 29s figure in README.md was measured on a different machine (Ryzen 9 7950X, 16 cores).
-Do not chase a 29s target on dm6 — ~45s is the correct baseline for this hardware.
+README.md performance numbers should always come from plantasjen (the reference host).
 
 ## madvise / fadvise — do not add
 
