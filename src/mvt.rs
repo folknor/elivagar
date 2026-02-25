@@ -77,6 +77,7 @@ pub struct Feature {
     pub geometry: Vec<u32>,
     pub tags: Vec<(u16, u16)>,
 }
+const _: () = assert!(std::mem::size_of::<Feature>() == 72);
 
 /// Reusable scratch buffers for MVT encoding, avoiding per-feature allocations.
 pub struct EncodeScratch {
@@ -177,6 +178,8 @@ impl LayerBuilder {
     /// Intern a string value by borrowed `&str`, avoiding allocation on cache hit.
     /// Same pattern as `intern_key`: `HashMap<String, u16>` supports `get(&str)`
     /// because `String: Borrow<str>`.
+    // Two owned Strings needed on miss: HashMap key + Value enum. Can't avoid
+    // without redesigning the interning data structure.
     #[allow(clippy::cast_possible_truncation)]
     pub fn intern_string_value(&mut self, s: &str) -> u16 {
         if let Some(&idx) = self.string_value_map.get(s) {

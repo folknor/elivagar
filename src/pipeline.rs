@@ -581,11 +581,13 @@ fn process_node(
 
 /// Raw way data copied from PBF on the main thread. Tags are owned because
 /// PBF element borrows don't survive the callback (same pattern as PreparedRelation).
+// Tags use String not compact-string: short-lived, mimalloc handles small allocs efficiently.
 struct RawWay {
     way_id: i64,
     node_refs: Vec<i64>,
     tags: Vec<(String, String)>,
 }
+const _: () = assert!(std::mem::size_of::<RawWay>() == 56);
 
 /// Result of parallel way processing: resolved coords (needed for way_index)
 /// and sort records (geometry output).
@@ -594,6 +596,7 @@ struct ProcessedWay {
     coords_e7: Vec<(i32, i32)>,
     records: Vec<SortRecord>,
 }
+const _: () = assert!(std::mem::size_of::<ProcessedWay>() == 56);
 
 const WAY_BATCH_SIZE: usize = 8192;
 
@@ -1086,6 +1089,7 @@ fn emit_multipolygon_feature(
     let mut attrs_buf: Vec<u8> = Vec::new();
     let mut clip_a: Vec<Point> = Vec::new();
     let mut clip_b: Vec<Point> = Vec::new();
+    let mut all_rings: Vec<Vec<(i32, i32)>> = Vec::new();
 
     geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, |z, simp_outer, simp_inners| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
@@ -1107,7 +1111,8 @@ fn emit_multipolygon_feature(
             }
             close_and_orient_cw(&mut outer_tc);
 
-            let mut all_rings: Vec<Vec<(i32, i32)>> = vec![outer_tc];
+            all_rings.clear();
+            all_rings.push(outer_tc);
             for inner in simp_inners {
                 geometry::clip_polygon_into(inner, &clip, &mut clip_a, &mut clip_b);
                 if clip_a.len() < 3 {
@@ -1122,6 +1127,7 @@ fn emit_multipolygon_feature(
                 all_rings.push(inner_tc);
             }
 
+            // ring_refs borrows all_rings — must be local (can't hoist across calls).
             let ring_refs: Vec<&[(i32, i32)]> = all_rings.iter().map(Vec::as_slice).collect();
             mvt::encode_polygon(&mut geom_buf, &ring_refs);
             if geom_buf.is_empty() {
@@ -1146,12 +1152,14 @@ struct PendingTile {
     tile_id: u64,
     features: Vec<(u8, Vec<u8>)>, // (layer_idx, feature_data)
 }
+const _: () = assert!(std::mem::size_of::<PendingTile>() == 32);
 
 /// An encoded + gzip-compressed tile ready for writing to PMTiles.
 struct EncodedTile {
     tile_id: u64,
     compressed: Vec<u8>,
 }
+const _: () = assert!(std::mem::size_of::<EncodedTile>() == 32);
 
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
@@ -1307,6 +1315,7 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
                 }
             }
 
+            // Max 26 elements (one per Shortbread layer) — with_capacity not needed.
             let non_empty: Vec<&LayerBuilder> = layers.iter()
                 .filter_map(|l| l.as_ref())
                 .filter(|l| !l.is_empty())

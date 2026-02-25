@@ -18,10 +18,12 @@ use std::collections::{HashMap, HashSet};
 // ---------------------------------------------------------------------------
 
 /// Parsed ocean polygon ready for parallel processing.
+// Vecs are ephemeral — consumed once during ocean tile emission, boxed_slice not worth it.
 struct OceanPolygon {
     outer: Vec<Point>,
     inners: Vec<Vec<Point>>,
 }
+const _: () = assert!(std::mem::size_of::<OceanPolygon>() == 48);
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -331,6 +333,9 @@ fn emit_ocean_polygon(
     // Reuse collections across zoom iterations (O4: avoid re-alloc per zoom)
     let mut boundary_tiles: HashSet<u64> = HashSet::new();
     let mut boundary_rows: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut gaps: Vec<(u32, u32)> = Vec::new();
+    let mut bt_all_rings: Vec<Vec<(i32, i32)>> = Vec::new();
+    let mut bt_geom_buf: Vec<u32> = Vec::new();
 
     geometry::for_each_zoom_simplified_multi(outer, inners, min_zoom, max_zoom, |z, simp_outer, simp_inners| {
         let scale = f64::from(1u32 << z);
@@ -388,11 +393,12 @@ fn emit_ocean_polygon(
                     emit_boundary_tile(
                         feature_id, tx, ty, z, simp_outer, simp_inners,
                         layer_idx, attrs, records,
+                        &mut bt_all_rings, &mut bt_geom_buf,
                     );
                 }
 
                 // Fill gaps between boundary tiles
-                let mut gaps: Vec<(u32, u32)> = Vec::new();
+                gaps.clear();
                 if bx_list[0] > tx_min {
                     gaps.push((tx_min, bx_list[0] - 1));
                 }
@@ -435,6 +441,8 @@ fn emit_ocean_polygon(
 }
 
 /// Clip and encode a single boundary tile (polygon edge crosses this tile).
+/// Reusable buffers (`all_rings`, `geom_buf`) are passed in to avoid per-call
+/// allocation — this function is called per boundary tile per zoom.
 #[allow(clippy::too_many_arguments)]
 fn emit_boundary_tile(
     feature_id: u64,
@@ -444,6 +452,8 @@ fn emit_boundary_tile(
     layer_idx: u8,
     attrs: &[shortbread::Attr],
     records: &mut Vec<SortRecord>,
+    all_rings: &mut Vec<Vec<(i32, i32)>>,
+    geom_buf: &mut Vec<u32>,
 ) {
     let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
 
@@ -454,7 +464,8 @@ fn emit_boundary_tile(
     let mut outer_tc = geometry::to_tile_coords(&clipped_outer, tx, ty, z);
     close_and_orient_cw(&mut outer_tc);
 
-    let mut all_rings: Vec<Vec<(i32, i32)>> = vec![outer_tc];
+    all_rings.clear();
+    all_rings.push(outer_tc);
     for inner in inners {
         let clipped_inner = geometry::clip_polygon(inner, &clip);
         if clipped_inner.len() < 3 {
@@ -465,14 +476,14 @@ fn emit_boundary_tile(
         all_rings.push(inner_tc);
     }
 
+    // ring_refs borrows all_rings — must be local (can't hoist across calls).
     let ring_refs: Vec<&[(i32, i32)]> = all_rings.iter().map(Vec::as_slice).collect();
-    let mut geom_buf: Vec<u32> = Vec::new();
-    mvt::encode_polygon(&mut geom_buf, &ring_refs);
+    mvt::encode_polygon(geom_buf, &ring_refs);
     if geom_buf.is_empty() {
         return;
     }
     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-    let data = encode_feature_data(feature_id, GeomType::Polygon, &geom_buf, attrs, z);
+    let data = encode_feature_data(feature_id, GeomType::Polygon, geom_buf, attrs, z);
     let key = sort::make_sort_key(tile_id, layer_idx, 0);
     records.push(SortRecord { key, data });
 }

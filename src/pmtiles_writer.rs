@@ -66,6 +66,7 @@ struct DirEntry {
     length: u32,
     run_length: u32,
 }
+const _: () = assert!(std::mem::size_of::<DirEntry>() == 24);
 
 /// Storage for directory entries: in-memory or streamed to a temp file.
 /// Streaming avoids accumulating all ~200M+ directory entries in RAM at
@@ -607,6 +608,7 @@ fn build_metadata(config: &PmtilesConfig) -> String {
         let name = layer.name();
         let min_z = layer.min_zoom();
         let max_z = config.max_zoom;
+        // format! is fine here — 26-iteration loop, called once per run. Cold path.
         layer_arr.push_str(&format!(
             r#"{{"id":"{name}","minzoom":{min_z},"maxzoom":{max_z}}}"#,
         ));
@@ -658,6 +660,7 @@ fn f64_to_e7(val: f64) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Convert (z, x, y) to PMTiles Hilbert tile ID.
+#[inline]
 #[allow(clippy::cast_possible_truncation)]
 pub fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
     if z == 0 {

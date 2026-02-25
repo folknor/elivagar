@@ -77,8 +77,9 @@ pub fn layer_from_key(key: SortKey) -> u8 {
 /// since mimalloc handles the small allocs efficiently.
 pub struct SortRecord {
     pub key: SortKey,
-    pub data: Vec<u8>,
+    pub data: Vec<u8>, // Ephemeral — boxed_slice not worth it (flushed in 1GB chunks).
 }
+const _: () = assert!(std::mem::size_of::<SortRecord>() == 32);
 
 // ---------------------------------------------------------------------------
 // SortWriter
@@ -310,6 +311,7 @@ struct HeapEntry {
     data: Vec<u8>,
     chunk_idx: usize,
 }
+const _: () = assert!(std::mem::size_of::<HeapEntry>() == 40);
 
 impl Eq for HeapEntry {}
 

@@ -37,12 +37,13 @@ pub struct MemberWay {
     pub role: WayRole,
     pub coords: Vec<Point>,
 }
+const _: () = assert!(std::mem::size_of::<MemberWay>() == 32);
 
 /// A fully assembled multipolygon.
 pub struct MultiPolygon {
     /// Each entry is (outer_ring, inner_rings).
     /// Rings do NOT have duplicated closing vertices.
-    pub polygons: Vec<(Vec<Point>, Vec<Vec<Point>>)>,
+    pub polygons: Box<[(Vec<Point>, Vec<Vec<Point>>)]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ pub fn assemble(members: &[MemberWay]) -> MultiPolygon {
     ensure_outer_orientation(&mut outer_rings);
     ensure_inner_orientation(&mut inner_rings);
 
-    let polygons = pair_rings(outer_rings, inner_rings);
+    let polygons = pair_rings(outer_rings, inner_rings).into_boxed_slice();
     MultiPolygon { polygons }
 }
 
@@ -75,9 +76,9 @@ pub fn assemble(members: &[MemberWay]) -> MultiPolygon {
 type RingGroups<'a> = (Vec<&'a [Point]>, Vec<&'a [Point]>, Vec<&'a [Point]>);
 
 fn separate_by_role(members: &[MemberWay]) -> RingGroups<'_> {
-    let mut outers = Vec::new();
-    let mut inners = Vec::new();
-    let mut unclassified = Vec::new();
+    let mut outers = Vec::with_capacity(members.len());
+    let mut inners = Vec::with_capacity(members.len());
+    let mut unclassified = Vec::with_capacity(members.len());
 
     for m in members {
         if m.coords.len() < 2 {
@@ -189,10 +190,10 @@ fn quantize(p: &Point) -> (i64, i64) {
 ///
 /// Returns `(closed_rings, unclosed_chains)`.
 fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
-    let mut chains: Vec<Vec<Point>> = Vec::new();
+    let mut chains: Vec<Vec<Point>> = Vec::with_capacity(ways.len());
     // Maps an endpoint (quantized) to the index in `chains` that has that endpoint.
     let mut endpoint_map: HashMap<(i64, i64), usize> = HashMap::new();
-    let mut closed: Vec<Vec<Point>> = Vec::new();
+    let mut closed: Vec<Vec<Point>> = Vec::with_capacity(ways.len());
 
     for way in ways {
         if way.len() < 2 {

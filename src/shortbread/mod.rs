@@ -206,6 +206,7 @@ pub struct LayerMatch {
     pub geom_expect: GeomExpect,
     pub attrs: SmallVec<[Attr; 8]>,
 }
+const _: () = assert!(std::mem::size_of::<LayerMatch>() == 408);
 
 // ---------------------------------------------------------------------------
 // Core dispatch

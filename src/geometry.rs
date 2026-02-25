@@ -102,6 +102,7 @@ pub struct Point {
     pub x: f64,
     pub y: f64,
 }
+const _: () = assert!(std::mem::size_of::<Point>() == 16);
 
 impl Point {
     #[inline]

@@ -72,3 +72,5 @@ hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 [profile.release]
 strip = true
 lto = true
+codegen-units = 1
+panic = "abort"
