@@ -991,6 +991,8 @@ fn emit_polygon_feature(
     geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
+        // Recompute bbox from simplified coords — at low zooms DP may reduce the
+        // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simplified);
         let skip_size_filter = z >= 14;
         geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
@@ -1038,6 +1040,8 @@ fn emit_multipolygon_feature(
     geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, |z, simp_outer, simp_inners| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
+        // Recompute bbox from simplified coords — at low zooms DP may reduce the
+        // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simp_outer);
         let skip_size_filter = z >= 14;
         geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {

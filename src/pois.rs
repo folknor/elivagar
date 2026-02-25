@@ -1,4 +1,13 @@
 // POI (Point of Interest) matching for the Shortbread schema.
+//
+// Value arrays (AMENITY_VALUES, etc.) are searched via linear `.contains()`.
+// Investigated binary_search and phf — not worth it. These arrays are only
+// reached when the element has the relevant key (amenity, shop, etc.), which
+// is a tiny fraction of all elements. Hotpath profiling confirms tag matching
+// is NOT a bottleneck. The largest array (AMENITY_VALUES, 51 entries, ~400 B)
+// fits in L1 cache; sequential scan with first-byte short-circuit is fast.
+// binary_search saves ~19 comparisons per hit but hits are rare; phf adds a
+// dependency for zero measurable gain.
 
 use crate::shortbread::{attr_str, attr_dyn, attr_bool, name_attrs, Attr, Tags, Layer, LayerMatch, GeomExpect};
 use smallvec::{SmallVec, smallvec};

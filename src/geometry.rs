@@ -765,6 +765,13 @@ pub fn reverse_ring(ring: &mut [Point]) {
 ///
 /// The ring is in Mercator [0,1] space. We scale by Earth's circumference squared
 /// and apply a latitude correction for Mercator distortion.
+///
+/// Known limitation: uses a single centroid latitude for the cos²(lat) correction.
+/// For polygons spanning many degrees of latitude (e.g. Russia, Canada), this can
+/// underestimate area by 20-30%. Safe for current thresholds (2M/700K/100K km²)
+/// because affected features are far above their thresholds, but a ~700K km² region
+/// at 70°N could be misclassified. Fix: per-edge latitude weighting or
+/// latitude-range-aware cos² averaging.
 pub fn area_sq_meters(ring: &[Point]) -> f64 {
     let merc_area = signed_area(ring).abs();
     // Find centroid y for latitude correction

@@ -3,6 +3,11 @@
 // Hand-rolled protobuf encoding — the MVT schema is simple enough that codegen
 // is unnecessary. Produces spec-compliant tiles with extent=4096.
 
+// FxHashMap (rustc-hash): non-cryptographic hash ~3× faster than std SipHash for
+// small keys. Safe here because keys are short strings and interned integers — no
+// adversarial input. Tradeoff: weaker collision resistance (irrelevant for tile
+// encoding). Already a transitive dependency via roaring. To revert, swap back to
+// std::collections::HashMap and remove the rustc-hash direct dependency.
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
