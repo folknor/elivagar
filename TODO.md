@@ -68,5 +68,6 @@ All implemented. Research notes and I/O profile analysis: `notes/linux-io.md`.
 
 ## Test Coverage Gaps
 
-- [ ] **No integration test for PMTiles output validity** — No test verifies generated
-  PMTiles can be read back and tiles decoded correctly (beyond header check).
+- [x] **No integration test for PMTiles output validity** — `tests/pmtiles_roundtrip.rs`:
+  4 always-run tests (header, data round-trip, MVT decode, deduplication) + 1 `#[ignore]`
+  full pipeline test. Uses inline sync PMTiles reader + MVT decoder.
