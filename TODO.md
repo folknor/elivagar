@@ -117,7 +117,10 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   noticeably faster with ~5% larger output. Make configurable. Final tuning item — do this
   right before 0.1 release after all other optimizations are locked in. (`pipeline.rs:1239`)
 
-- [ ] **Relation tag String cloning** — Every relation's tags are cloned from `&str` to `String` because PBF borrows don't survive the batch boundary. Use string interning or buffer raw PBF bytes. ~14M relations * ~10 tags * ~30 bytes = ~4 GB. (`pipeline.rs:666-668`)
+- [x] **Relation tag String cloning** — Fixed: moved `match_element` into `prepare_relation`
+  while PBF borrows are alive. `PreparedRelation` stores match results (`SmallVec<[LayerMatch; 4]>`)
+  instead of cloned tags. Also skips member way resolution for unmatched relations.
+  (`pipeline.rs:669-735`)
 
 - [ ] **`boundary_way_coords.push(merc.clone())` duplicates geometry** — Clones full projected geometry for boundary relations. Store indices into `member_ways` instead. (`pipeline.rs:654`)
 

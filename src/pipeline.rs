@@ -16,6 +16,7 @@ use crate::node_index::{NodeIndex, NodeIndexReader};
 use crate::ocean;
 use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter};
 use crate::shortbread::{self, AttrValue, GeomExpect, Layer, LayerMatch, OsmGeomType, Tags};
+use smallvec::SmallVec;
 use crate::sort::{self, SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add_feature_to_layer};
@@ -667,10 +668,11 @@ fn process_raw_way(
 // ---------------------------------------------------------------------------
 
 /// A relation with geometry resolved from way_index, ready for parallel processing.
-/// Tags are owned because PBF borrows don't survive the batch boundary.
+/// Matches are resolved eagerly in `prepare_relation` while PBF borrows are alive,
+/// avoiding cloning all relation tags to owned Strings.
 struct PreparedRelation {
     osm_id: u64,
-    tags: Vec<(String, String)>,
+    matches: SmallVec<[LayerMatch; 4]>,
     member_ways: Vec<MemberWay>,
     boundary_way_coords: Vec<Vec<Point>>,
 }
@@ -679,6 +681,8 @@ const REL_BATCH_SIZE: usize = 1024;
 
 /// Resolve relation geometry from way_index (serial I/O). Returns None if
 /// the relation is not a multipolygon/boundary or has no resolvable member ways.
+/// Tag matching runs here while PBF borrows are alive, eliminating the need to
+/// clone all relation tags to owned Strings.
 #[hotpath::measure]
 fn prepare_relation(
     rel: &pbfhogg::Relation<'_>,
@@ -689,6 +693,13 @@ fn prepare_relation(
 
     let rel_type = tag_helper.get("type").unwrap_or("");
     if rel_type != "multipolygon" && rel_type != "boundary" {
+        return None;
+    }
+
+    // Match while PBF borrows are alive — attrs copy only the relevant tag values
+    // into Cow::Owned, avoiding cloning ALL tags to String.
+    let matches = shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon);
+    if matches.is_empty() {
         return None;
     }
 
@@ -723,7 +734,7 @@ fn prepare_relation(
     #[allow(clippy::cast_sign_loss)]
     Some(PreparedRelation {
         osm_id: rel.id() as u64,
-        tags: tags.iter().map(|&(k, v)| (k.to_owned(), v.to_owned())).collect(),
+        matches,
         member_ways,
         boundary_way_coords,
     })
@@ -742,7 +753,7 @@ fn flush_rel_batch(
 
     let results: Vec<Vec<SortRecord>> = batch
         .into_par_iter()
-        .map(|rel| process_prepared_relation(&rel, min_zoom, max_zoom, land_mask))
+        .map(|rel| process_prepared_relation(rel, min_zoom, max_zoom, land_mask))
         .collect();
 
     let mut count: u64 = 0;
@@ -758,23 +769,18 @@ fn flush_rel_batch(
 /// Process a prepared relation's geometry (CPU-bound). Called from rayon worker threads.
 #[hotpath::measure]
 fn process_prepared_relation(
-    rel: &PreparedRelation,
+    rel: PreparedRelation,
     min_zoom: u8,
     max_zoom: u8,
     land_mask: &geometry::LandMask,
 ) -> Vec<SortRecord> {
-    let tags_ref: Vec<(&str, &str)> = rel.tags.iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    let tag_helper = Tags(&tags_ref);
-
     let multi = multipolygon::assemble(&rel.member_ways);
 
     if multi.polygons.is_empty() {
         return Vec::new();
     }
 
-    let mut matches = shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon);
+    let mut matches = rel.matches;
 
     let total_area_m2: f64 = multi.polygons.iter()
         .map(|(outer, _)| geometry::area_sq_meters(outer))
