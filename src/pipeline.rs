@@ -363,6 +363,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         .expect("node_index already consumed");
                     let reader = ni.into_reader()
                         .expect("failed to convert node index to reader");
+                    reader.advise_random();
+                    reader.advise_hugepage();
                     node_reader = Some(reader);
                     eprintln!("  Node index finalized ({node_count} nodes), processing ways...");
                 }
@@ -429,7 +431,10 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         // Handle degenerate PBF with ways but no prior conversion
         if node_reader.is_none() {
             if let Some(ni) = node_index_opt.take() {
-                node_reader = Some(ni.into_reader().expect("failed to convert node index to reader"));
+                let reader = ni.into_reader().expect("failed to convert node index to reader");
+                reader.advise_random();
+                reader.advise_hugepage();
+                node_reader = Some(reader);
             }
         }
         if let Some(ref nr) = node_reader {

@@ -11,6 +11,30 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
+// posix_fadvise helpers (Linux only, no-op on other platforms)
+// ---------------------------------------------------------------------------
+
+/// Hint sequential access — doubles kernel readahead window.
+#[cfg(target_os = "linux")]
+fn fadvise_sequential(file: &File) {
+    use std::os::unix::io::AsRawFd;
+    unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL); }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn fadvise_sequential(_file: &File) {}
+
+/// Hint that pages are no longer needed — evicts from page cache.
+#[cfg(target_os = "linux")]
+fn fadvise_dontneed(file: &File) {
+    use std::os::unix::io::AsRawFd;
+    unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED); }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn fadvise_dontneed(_file: &File) {}
+
+// ---------------------------------------------------------------------------
 // Sort key helpers
 // ---------------------------------------------------------------------------
 
@@ -225,6 +249,8 @@ struct ChunkReader {
 impl ChunkReader {
     fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
+        // Hint sequential readahead — each chunk is read front-to-back during merge.
+        fadvise_sequential(&file);
         let mut reader = BufReader::with_capacity(256 * 1024, file);
 
         let mut buf4 = [0u8; 4];
@@ -255,6 +281,12 @@ impl ChunkReader {
 
         self.remaining -= 1;
         Ok(Some((key, data)))
+    }
+
+    /// Advise the kernel to evict this chunk's pages from the page cache.
+    /// Called when the chunk is fully consumed during merge.
+    fn advise_dontneed(&self) {
+        fadvise_dontneed(self.reader.get_ref());
     }
 }
 
@@ -363,12 +395,17 @@ impl SortReader {
         };
 
         // Read the next record from the same chunk and push it onto the heap.
+        // When a chunk is fully consumed, advise the kernel to evict its pages
+        // from the page cache — at planet scale this frees 100+ GB for the
+        // assemble phase's PMTiles read-back.
         if let Some((key, data)) = self.chunk_readers[idx].read_record()? {
             self.heap.push(HeapEntry {
                 key,
                 data,
                 chunk_idx: idx,
             });
+        } else {
+            self.chunk_readers[idx].advise_dontneed();
         }
 
         Ok(Some(result))

@@ -41,8 +41,7 @@ const COORD_XOR: i32 = 0x5555_5555_u32 as i32;
 /// Return total physical RAM in bytes via /proc/meminfo (Linux-only).
 /// Returns 0 on non-Linux or if unreadable — this means advise_random()
 /// won't activate, which is the safe default (readahead helps small datasets).
-#[allow(dead_code)]
-fn ram_bytes() -> u64 {
+pub(crate) fn ram_bytes() -> u64 {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|s| {
@@ -187,12 +186,20 @@ impl NodeIndexReader {
 
     /// Switch to random-access mode if the index is large enough to benefit.
     /// See `NodeIndex::advise_random()` for rationale and threshold logic.
-    #[allow(dead_code)]
     pub fn advise_random(&self) {
         let ram = ram_bytes();
         if self.file_len > ram / 2 {
             self.mmap.advise(memmap2::Advice::Random).ok();
         }
+    }
+
+    /// Hint the kernel to use transparent huge pages (2 MB) for this mmap.
+    /// Reduces TLB entries from `file_len / 4KB` to `file_len / 2MB` — at planet
+    /// scale (96 GB) that's 24M entries down to ~48K. Always beneficial for the
+    /// read phase regardless of dataset size; no threshold needed.
+    pub fn advise_hugepage(&self) {
+        #[cfg(target_os = "linux")]
+        self.mmap.advise(memmap2::Advice::HugePage).ok();
     }
 }
 

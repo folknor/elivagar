@@ -66,37 +66,22 @@ is effectively required at planet scale.
 Prevent 200+ GB of sort/output data from evicting node index pages. Low complexity,
 high impact at planet scale.
 
-- [ ] **Wire up `NodeIndexReader::advise_random()`.** The method exists but is never
-  called. Conditionally sets `MADV_RANDOM` when index exceeds 50% of physical RAM —
-  prevents kernel from wasting I/O on readahead pages that get evicted before use.
-  +65% PBF regression on Denmark when set unconditionally (readahead helps small
-  datasets). Call after `into_reader()` in the pipeline. (`node_index.rs:88-109`,
-  `pipeline.rs:364`)
+- [x] **Wire up `NodeIndexReader::advise_random()`.** Conditionally sets `MADV_RANDOM`
+  when index exceeds 50% of physical RAM. Called after `into_reader()` in the pipeline.
 
-- [ ] **`MADV_HUGEPAGE` for node index.** 96 GB index = 24M TLB entries at 4 KB pages.
-  `madvise(MADV_HUGEPAGE)` hints the kernel to use 2 MB transparent huge pages,
-  reducing to ~48K entries. Call after `into_reader()` transitions the index to
-  read-only. Works on any kernel with THP enabled. On 6.14+, file-backed mmap gets
-  2 MB folios automatically — the hint ensures it also works on older kernels.
+- [x] **`MADV_HUGEPAGE` for node index.** `advise_hugepage()` on `NodeIndexReader`,
+  called after `into_reader()`. `#[cfg(target_os = "linux")]` gated.
 
-- [ ] **`MADV_SEQUENTIAL` for ocean shapefile mmap.** The shapefile (~500 MB) is
-  parsed sequentially record-by-record with no madvise hint. `MADV_SEQUENTIAL`
-  enables aggressive kernel readahead. (`ocean.rs:68`)
+- [x] **`MADV_SEQUENTIAL` for ocean shapefile mmap.** Applied after mmap creation.
 
-- [ ] **`fadvise(POSIX_FADV_SEQUENTIAL)` for sort chunk reads.** During k-way merge,
-  each chunk is read sequentially via BufReader (256 KB buffer). `FADV_SEQUENTIAL`
-  doubles the kernel readahead window. Apply when opening each ChunkReader.
-  (`sort.rs:198-206`)
+- [x] **`fadvise(POSIX_FADV_SEQUENTIAL)` for sort chunk reads.** Applied when opening
+  each `ChunkReader`. Linux-only via `libc::posix_fadvise`, no-op elsewhere.
 
-- [ ] **`fadvise(POSIX_FADV_DONTNEED)` after sort chunk reads.** Sort chunk data
-  (100+ GB at planet) is never re-read after merge. `FADV_DONTNEED` evicts those
-  pages, freeing cache for the assemble phase's PMTiles read-back. Apply per-chunk
-  as the merge reader drains it. (`sort.rs`)
+- [x] **`fadvise(POSIX_FADV_DONTNEED)` after sort chunk reads.** Applied per-chunk
+  when the merge reader drains it. Frees 100+ GB of cache at planet scale.
 
-- [ ] **Way index `MADV_RANDOM` threshold.** Currently unconditional — always sets
-  `MADV_RANDOM` on both mmaps. Should mirror the node index's smart threshold (only
-  when index > 50% of RAM) to preserve readahead on small datasets.
-  (`way_index.rs:121-127`)
+- [x] **Way index `MADV_RANDOM` threshold.** Now conditional on total way index size
+  exceeding 50% of RAM, matching node index threshold logic.
 
 ### Tier 2: Planet-specific (NVMe, Linux 6.14+)
 
