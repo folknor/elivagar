@@ -132,38 +132,30 @@ From Opus code review (2026-02-25). Grouped by severity.
 
 ### Minor
 
-- [ ] **`append_geometry` emits command word before validating parameters** — Command word
+- [x] **`append_geometry` emits command word before validating parameters** — Command word
   with original `cmd_count` is pushed to dest before the parameter loop. If source geometry is
   truncated, output has mismatched command count. Internal data only. (`mvt.rs:470-490`)
   - **Purely theoretical.** Geometry is always well-formed from the closed encode/serialize/
     deserialize pipeline. The `break` guard at line 487 is dead code in practice.
-  - Fix would be 3-4 lines (save position, patch command word if loop exits early).
-  - **Not worth fixing** — cannot be triggered through the existing pipeline.
+  - **Documented in code** — inline comment explains unreachability.
 
-- [ ] **Merge tombstone detection relies on `geometry.is_empty()`** — A legitimate zero-geometry
+- [x] **Merge tombstone detection relies on `geometry.is_empty()`** — A legitimate zero-geometry
   feature (if one existed) would be incorrectly dropped by `retain`. In practice, encoders
   always produce at least one command. (`mvt.rs:579`)
   - **Purely theoretical.** All pipeline emit paths filter empty geometry before serialization.
-    A feature with empty geometry cannot reach `merge_same_attr_geometries`.
-  - Comment on line 593 already documents intent.
-  - **Not worth fixing** — `is_empty()` as tombstone proxy is idiomatic.
+  - **Documented in code** — inline comment explains invariant.
 
-- [ ] **DDA rasterization misses corner-crossing tiles** — When `t_max_x == t_max_y` (segment
+- [x] **DDA rasterization misses corner-crossing tiles** — When `t_max_x == t_max_y` (segment
   crosses exact grid corner), only Y step is taken, skipping the X-direction tile. Rare in
   practice. (`ocean.rs:476-532`)
-  - **Theoretical.** Requires exact float equality on arbitrary shapefile coordinates scaled to
-    power-of-two grid — astronomically unlikely.
-  - Even if triggered, scanline PIP fallback limits damage: missed tile gets full-fill instead
-    of clip-encoded edge. One tile affected.
-  - **Not worth fixing** — adds branching to hot inner loop for zero practical benefit.
+  - **Theoretical.** Requires exact float equality — astronomically unlikely.
+  - **Documented in code** — inline comment explains unreachability and PIP fallback.
 
-- [ ] **`pair_rings` tests only first vertex, silent fallback** — Inner ring point-in-polygon
+- [x] **`pair_rings` tests only first vertex, silent fallback** — Inner ring point-in-polygon
   test uses only `inner[0]`. Orphan inner rings silently assigned to polygon[0] via
   `unwrap_or(0)`. (`multipolygon.rs:150-163`)
-  - **Latent, very low impact.** For valid OSM geometry, all inner ring vertices are inside the
-    correct outer ring, so `inner[0]` always works. `unwrap_or(0)` only fires for malformed
-    data and produces slightly wrong but visually acceptable results.
-  - **Not worth fixing** — single-vertex test is correct for valid OSM multipolygons.
+  - **Latent, very low impact.** Correct for valid OSM geometry.
+  - **Documented in code** — inline comment explains behavior and fallback.
 
 - [x] **Greedy chain-joining can fail depending on way order** — `join_ways` was a single-pass
   greedy algorithm. Endpoint map entries could be overwritten when chains extend, leaving other
@@ -175,52 +167,37 @@ From Opus code review (2026-02-25). Grouped by severity.
     rebuilds endpoint_map from unclosed chains, attempts pairwise joins. Test added for the
     specific ordering-dependent failure case (`test_out_of_order_ways_joined`).
 
-- [ ] **`tile_id_to_zxy` overflows at z=31** — `n * n * 4` overflows u64 before the `z >= 31`
+- [x] **`tile_id_to_zxy` overflows at z=31** — `n * n * 4` overflows u64 before the `z >= 31`
   guard is checked. Test-only function, max zoom is 14. (`pmtiles_writer.rs:637-640`)
-  - **Unreachable.** Max zoom validated to 14 at pipeline entry. Largest production tile_id is
-    ~358M (29 bits), well within the 48-bit field.
-  - Fix is trivial (reorder guard before arithmetic, 2-line change) but purely cosmetic.
+  - **Unreachable.** Max zoom validated to 14 at pipeline entry.
+  - **Documented in code** — inline comment explains overflow and unreachability.
 
-- [ ] **Dedup hash collision guard checks length only, not content** — Two tiles with same
+- [x] **Dedup hash collision guard checks length only, not content** — Two tiles with same
   64-bit hash AND same compressed length would be incorrectly deduplicated.
   (`pmtiles_writer.rs:154-159`)
-  - **Negligible.** Combined probability ~2^-81 per pair (SipHash-1-3 collision ~2^-64, length
-    match ~2^-17). At planet scale (~300M tiles, 1M dedup entries): ~2^-29 per run (~2 in a
-    billion). Industry standard — Planetiler and tippecanoe use hash-only dedup with no length
-    check at all.
-  - Full content comparison would require storing tile data or seeking back in blob. Not worth
-    the cost. Improve the comment to document residual risk.
+  - **Negligible.** ~2^-81 per pair. Industry standard.
+  - **Documented in code** — inline comment explains probability and design tradeoff.
 
-- [ ] **Wire format string value length truncated to u16** — String values exceeding 65535
+- [x] **Wire format string value length truncated to u16** — String values exceeding 65535
   bytes silently truncate, desynchronizing the decoder for all subsequent attributes in that
   feature. (`wire_format.rs:44`)
-  - **Very low risk.** Shortbread profile only extracts specific tag keys (name, ref, cuisine,
-    etc.) whose real-world OSM values never approach 64KB. Longest realistic values are a few
-    hundred bytes. Truncation is contained to one feature (bounds-check breaks prevent further
-    damage).
-  - Optionally add `debug_assert!(sb.len() <= u16::MAX as usize)` on encode path.
+  - **Very low risk.** OSM tag values extracted by Shortbread never approach 64KB.
+  - **Documented in code** — inline comment + `debug_assert!` on encode path.
 
-- [ ] **`sort.rs` record count truncation to u32** — `records.len() as u32` truncates silently.
+- [x] **`sort.rs` record count truncation to u32** — `records.len() as u32` truncates silently.
   Safe with 1 GB chunk budget (~89M max records). (`sort.rs:221`)
-  - **Negligible.** 1 GB chunk = max ~48.8M records (worst case 22 bytes each), 88x below u32
-    limit. Would need 94+ GB chunk budget to overflow, requiring 94+ GB RAM for in-memory sort.
-  - Safe by design. No change needed.
+  - **Negligible.** 88x below u32 limit. Safe by design.
+  - **Documented in code** — inline comment explains safety margin.
 
-- [ ] **`make_sort_key` overflows at z24+** — `tile_id << 16` overflows u64 above z23. Safe
+- [x] **`make_sort_key` overflows at z24+** — `tile_id << 16` overflows u64 above z23. Safe
   with z0-z14. (`sort.rs:46-47`)
-  - **Impossible to trigger.** `max_zoom > 14` rejected at pipeline entry. Max tile_id at z14
-    is ~358M (29 bits), shifted left 16 = 45 bits. 48-bit field has 3 bits of headroom.
-  - Safe by design. No change needed.
+  - **Impossible to trigger.** Max zoom validated to 14.
+  - **Documented in code** — doc comment explains 48-bit field width.
 
-- [ ] **Division by zero in edge intersection** — `edge_intersect` divides by `dx`/`dy`
+- [x] **Division by zero in edge intersection** — `edge_intersect` divides by `dx`/`dy`
   without checking for zero. (`geometry.rs:689-702`)
-  - **Provably impossible.** Sutherland-Hodgman and Cohen-Sutherland inside/outside
-    classifications mathematically guarantee the relevant denominator (dx for Left/Right, dy
-    for Top/Bottom) is nonzero when intersection is called. Floating-point rounding cannot
-    break this — the tested coordinate is set to exact edge values, not computed. Even a
-    near-zero denominator produces infinity (not panic), filtered by subsequent area/length
-    checks.
-  - Adding a `dx != 0` guard would mask real bugs. No change needed.
+  - **Provably impossible.** Inside/outside classification guarantees nonzero denominator.
+  - **Documented in code** — doc comment explains safety guarantee.
 
 ## Test Coverage Gaps
 
