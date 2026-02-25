@@ -86,6 +86,7 @@ pub struct LayerBuilder {
     key_map: HashMap<String, u16>,
     values: Vec<Value>,
     value_map: HashMap<Value, u16>,
+    string_value_map: HashMap<String, u16>,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +102,7 @@ impl LayerBuilder {
             key_map: HashMap::new(),
             values: Vec::new(),
             value_map: HashMap::new(),
+            string_value_map: HashMap::new(),
         }
     }
 
@@ -121,12 +123,32 @@ impl LayerBuilder {
 
     #[allow(clippy::cast_possible_truncation)]
     pub fn intern_value(&mut self, val: Value) -> u16 {
+        // Route string values through the borrowed-str path to keep
+        // string_value_map and value_map consistent.
+        if let Value::String(ref s) = val {
+            return self.intern_string_value(s);
+        }
         if let Some(&idx) = self.value_map.get(&val) {
             return idx;
         }
         let idx = self.values.len() as u16;
         self.value_map.insert(val.clone(), idx);
         self.values.push(val);
+        idx
+    }
+
+    /// Intern a string value by borrowed `&str`, avoiding allocation on cache hit.
+    /// Same pattern as `intern_key`: `HashMap<String, u16>` supports `get(&str)`
+    /// because `String: Borrow<str>`.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn intern_string_value(&mut self, s: &str) -> u16 {
+        if let Some(&idx) = self.string_value_map.get(s) {
+            return idx;
+        }
+        let idx = self.values.len() as u16;
+        let owned = s.to_string();
+        self.values.push(Value::String(owned.clone()));
+        self.string_value_map.insert(owned, idx);
         idx
     }
 

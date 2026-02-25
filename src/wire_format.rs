@@ -183,7 +183,7 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
                 if pos + slen > data.len() { break; }
                 let s = std::str::from_utf8(&data[pos..pos + slen]).unwrap_or("");
                 pos += slen;
-                layer.intern_value(Value::String(s.to_string()))
+                layer.intern_string_value(s)
             }
             1 => {
                 // int

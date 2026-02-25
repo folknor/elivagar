@@ -66,18 +66,11 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   Impact: 1.8 GB / 3.2% of alloc, in the assemble phase (7% of wall time). Not worth the
   complexity. (`wire_format.rs:131, mvt.rs:54-58`)
 
-- [ ] **`intern_value` allocates String for every cache hit** — **Investigated, easy win.**
-  `intern_value(Value::String(s.to_string()))` in `add_feature_to_layer` allocates a `String`
-  for *every* string attribute occurrence, even when the value already exists in the intern
-  table (the common case — values like "residential" repeat across thousands of features).
-  The `String` is constructed before the HashMap lookup, used for comparison, then dropped.
-
-  With ~30-45M string attribute occurrences per Denmark run and ~90% being duplicates,
-  that's ~27-40M wasted alloc+dealloc cycles at ~10-15ns each ≈ 0.3-0.6s. Fix: add
-  `intern_value_str(&str) -> u16` that looks up by borrowed `&str` (via `Borrow` trait or
-  a separate string→index map), only allocating `String` on cache miss. Touches `mvt.rs`
-  (new method) and `wire_format.rs:186` (call site). No struct changes needed.
-  (`mvt.rs:122-131, wire_format.rs:183-186`)
+- [x] **`intern_value` allocates String for every cache hit** — Fixed: added
+  `intern_string_value(&str) -> u16` with a separate `string_value_map: HashMap<String, u16>`
+  that looks up by borrowed `&str` (zero allocation on cache hit). `intern_value` routes
+  `Value::String` through it for consistency. Call site in `wire_format.rs` now calls
+  `intern_string_value(s)` directly. (`mvt.rs:123-148, wire_format.rs:186`)
 
 - [x] **Sort chunk write buffer too small** — Was default 8 KB BufWriter; now 1 MB. (`sort.rs:166`)
 
