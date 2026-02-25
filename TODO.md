@@ -123,13 +123,11 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   parameter was removed from all three functions (callers still compute it for `land_mask`).
   (`pipeline.rs:940-948,997,1046`)
 
-- [ ] **Outcode pre-test before Sutherland-Hodgman clipping** — Before running
-  `clip_polygon_into`, compute bitwise AND of all vertex outcodes against the tile rect.
-  If all vertices share a common outside bit (all left, all right, etc.), the clip must
-  produce empty — skip the full 4-edge S-H pass. One O(n) pass with 4 comparisons per
-  vertex vs S-H's 4×O(n) with intersection math. Low effort, useful when the simplified
-  bbox is still larger than the actual geometry extent (e.g. L-shaped features).
-  (`geometry.rs:575-598`)
+- [x] **Outcode pre-test before Sutherland-Hodgman clipping** — Fixed: `clip_polygon_into`
+  and `clip_linestring` now compute bitwise AND of all vertex outcodes before running the
+  full clip algorithm. If all vertices share a common outside bit, the geometry is entirely
+  outside one edge — skip S-H / Cohen-Sutherland entirely. Early-exits on first vertex that
+  clears the AND accumulator. (`geometry.rs:614-627,490-499`)
 
 - [ ] **POI `contains()` linear scan on 50-entry arrays** — **Investigated, not worth it.**
   7 arrays (5-51 entries) searched via `.contains()`. All sorted except `emergency` (7 entries).

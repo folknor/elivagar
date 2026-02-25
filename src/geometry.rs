@@ -482,6 +482,17 @@ pub fn clip_linestring(line: &[Point], rect: &ClipRect) -> SmallVec<[Vec<Point>;
     if line.len() < 2 {
         return SmallVec::new();
     }
+    // Outcode pre-test: reject entire linestring if all vertices are outside the same edge.
+    let mut and_code = 0xFFu8;
+    for p in line {
+        and_code &= outcode(p, rect);
+        if and_code == INSIDE {
+            break;
+        }
+    }
+    if and_code != INSIDE {
+        return SmallVec::new();
+    }
     let mut result: SmallVec<[Vec<Point>; 1]> = SmallVec::new();
     let mut current: Vec<Point> = Vec::new();
 
@@ -609,6 +620,20 @@ pub fn clip_polygon_into(
     buf_b.clear();
     if ring.is_empty() {
         return;
+    }
+    // Outcode pre-test: if all vertices share a common outside bit (all left,
+    // all right, etc.), the polygon is entirely outside one edge — skip S-H.
+    // One O(n) pass with 4 comparisons per vertex vs S-H's 4×O(n) with
+    // intersection math.
+    let mut and_code = 0xFFu8;
+    for p in ring {
+        and_code &= outcode(p, rect);
+        if and_code == INSIDE {
+            break; // Can't reject early, must run S-H
+        }
+    }
+    if and_code != INSIDE {
+        return; // All vertices outside the same edge — guaranteed empty
     }
     buf_a.extend_from_slice(ring);
     for edge in [
