@@ -434,14 +434,6 @@ impl SortReader {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    /// Project-relative test tmp directory. Cleaned up after each test.
-    fn test_tmp_dir(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".sort_test_tmp")
-            .join(name)
-    }
 
     #[test]
     fn sort_key_round_trip() {
@@ -471,11 +463,10 @@ mod tests {
 
     #[test]
     fn single_chunk_sort() {
-        let dir = test_tmp_dir("single_chunk");
-        drop(fs::remove_dir_all(&dir));
+        let dir = tempfile::tempdir().expect("create tempdir");
 
         // Use a large chunk size so everything fits in one chunk.
-        let mut writer = SortWriter::new(&dir, 1_000_000).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 1_000_000).unwrap();
 
         // Push 1000 records with random-ish keys.
         let mut expected_keys: Vec<u64> = Vec::with_capacity(1000);
@@ -512,18 +503,14 @@ mod tests {
         // Verify all expected keys are present.
         expected_keys.sort();
         assert_eq!(output_keys, expected_keys);
-
-
-        drop(fs::remove_dir_all(&dir));
     }
 
     #[test]
     fn multi_chunk_sort() {
-        let dir = test_tmp_dir("multi_chunk");
-        drop(fs::remove_dir_all(&dir));
+        let dir = tempfile::tempdir().expect("create tempdir");
 
         // Very small chunk size forces multiple chunks.
-        let mut writer = SortWriter::new(&dir, 100).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 100).unwrap();
 
         let mut expected_keys: Vec<u64> = Vec::with_capacity(500);
         for i in 0u64..500 {
@@ -563,32 +550,24 @@ mod tests {
 
         expected_keys.sort();
         assert_eq!(output_keys, expected_keys);
-
-
-        drop(fs::remove_dir_all(&dir));
     }
 
     #[test]
     fn empty_input() {
-        let dir = test_tmp_dir("empty");
-        drop(fs::remove_dir_all(&dir));
+        let dir = tempfile::tempdir().expect("create tempdir");
 
-        let writer = SortWriter::new(&dir, 1_000_000).unwrap();
+        let writer = SortWriter::new(dir.path(), 1_000_000).unwrap();
         let mut reader = writer.finish().unwrap();
 
         assert!(reader.next().unwrap().is_none());
-
-
-        drop(fs::remove_dir_all(&dir));
     }
 
     #[test]
     fn duplicate_keys() {
-        let dir = test_tmp_dir("dup_keys");
-        drop(fs::remove_dir_all(&dir));
+        let dir = tempfile::tempdir().expect("create tempdir");
 
         // Very small chunk size to force multi-chunk even with few records.
-        let mut writer = SortWriter::new(&dir, 50).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 50).unwrap();
 
         // 100 records all with the same key but different data.
         for i in 0u32..100 {
@@ -609,17 +588,13 @@ mod tests {
             assert_eq!(record.data.len(), 4);
         }
         assert_eq!(count, 100);
-
-
-        drop(fs::remove_dir_all(&dir));
     }
 
     #[test]
     fn data_integrity() {
-        let dir = test_tmp_dir("data_integrity");
-        drop(fs::remove_dir_all(&dir));
+        let dir = tempfile::tempdir().expect("create tempdir");
 
-        let mut writer = SortWriter::new(&dir, 200).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 200).unwrap();
 
         // Push records with keys and payload that can be verified.
         for i in 0u64..50 {
@@ -648,8 +623,5 @@ mod tests {
             assert_eq!(embedded_key, record.key);
         }
         assert_eq!(count, 50);
-
-
-        drop(fs::remove_dir_all(&dir));
     }
 }

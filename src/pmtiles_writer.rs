@@ -1092,10 +1092,8 @@ mod tests {
         assert_eq!(writer.unique_tile_count(), 3);
 
         // Write to a temporary file and verify the header.
-        let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".tilegen_tmp");
-        std::fs::create_dir_all(&out_dir).unwrap();
-        let out_path = out_dir.join("test_write_to.pmtiles");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let out_path = dir.path().join("test_write_to.pmtiles");
 
         writer.write_to(&out_path).unwrap();
 
@@ -1110,8 +1108,5 @@ mod tests {
         assert_eq!(&bytes[0..7], b"PMTiles");
         // Byte 7: version = 3
         assert_eq!(bytes[7], 3);
-
-        // Clean up
-        drop(std::fs::remove_file(&out_path));
     }
 }
