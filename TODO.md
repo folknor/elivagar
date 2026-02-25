@@ -8,10 +8,10 @@
 
 ## GitHub
 
-- [ ] Write GitHub repo description and tags (vector-tiles, openstreetmap, pmtiles, shortbread, rust)
-- [ ] Add GitHub Actions CI — clippy, tests, `cargo build --release` on Linux
-- [ ] Add GitHub Actions release pipeline — build binaries on tag push, attach to GitHub release
-- [ ] Add a CHANGELOG.md before first tagged release
+- [x] Write GitHub repo description and tags (vector-tiles, openstreetmap, pmtiles, shortbread, rust)
+- [x] Add GitHub Actions CI — `.github/workflows/ci.yml` (manual-only until pbfhogg published)
+- [x] Add GitHub Actions release pipeline — `.github/workflows/release.yml` (manual-only until pbfhogg published)
+- [x] Add a CHANGELOG.md before first tagged release
 
 ## Website
 
@@ -22,7 +22,7 @@
 
 - [ ] Visual verification — tracked in nidhogg TODO
 - [ ] Planet-scale test — run on full planet PBF (~73 GB), needs NVMe server
-- [ ] Check for updates to all dependencies before first release
+- [x] Check for updates to all dependencies before first release — done 2026-02-25
 
 ## Performance
 
