@@ -5,23 +5,17 @@
 // zero-copy access.
 //
 // Planet scale: OSM has ~8.5B nodes with IDs up to ~12B, so the index file
-// grows to ~96 GB. On a 64 GB machine this exceeds physical RAM, making
-// madvise hints critical — see `advise_random()`.
+// grows to ~96 GB.
 //
 // A two-level index (blocks of 4096 nodes) was considered but rejected:
 // 12B / 4096 = ~2.9M blocks × 32 KB = ~93 GB — nearly identical to the flat
 // index because OSM node IDs are distributed fairly continuously, not sparsely.
 //
-// madvise history:
-//   6724e0a — added MADV_SEQUENTIAL at create time + after grow
-//   4e427b4 — removed MADV_SEQUENTIAL (caused 2.3× PBF regression on Denmark,
-//             34s→74s, because the hint persisted into the way-processing phase
-//             where reads are random, triggering aggressive wasted readahead)
-//
-// Current approach: no hints during the write phase (kernel default NORMAL is
-// fine for sequential writes to fresh zero-filled pages), then MADV_RANDOM
-// before the read phase via `advise_random()`. This tells the kernel not to
-// readahead when doing billions of random node lookups during way processing.
+// madvise history: all madvise hints (MADV_SEQUENTIAL, MADV_RANDOM,
+// MADV_HUGEPAGE, MADV_POPULATE_READ) were tried and removed. Every hint
+// caused regressions because the index file is sparse — node IDs go up to
+// ~12B regardless of dataset size, so a Denmark extract produces a ~96 GB
+// file with only ~400 MB populated. Kernel default (MADV_NORMAL) works best.
 
 use std::fs::File;
 use std::io;
@@ -37,21 +31,6 @@ const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
 // 0x55555555 = 1431655765 E7 = 143.17° — outside valid latitude range [-90°, 90°],
 // so no real coordinate pair can XOR to (0, 0).
 const COORD_XOR: i32 = 0x5555_5555_u32 as i32;
-
-/// Return total physical RAM in bytes via /proc/meminfo (Linux-only).
-/// Returns 0 on non-Linux or if unreadable — this means advise_random()
-/// won't activate, which is the safe default (readahead helps small datasets).
-pub(crate) fn ram_bytes() -> u64 {
-    std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|s| {
-            // First line: "MemTotal:     65541272 kB"
-            let line = s.lines().next()?;
-            let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-            Some(kb * 1024)
-        })
-        .unwrap_or(0)
-}
 
 pub struct NodeIndex {
     file: File,
@@ -82,29 +61,6 @@ impl NodeIndex {
             mmap,
             file_len,
         })
-    }
-
-    /// Switch to random-access mode if the index is large enough to benefit.
-    /// Call once after all nodes have been written and before way processing
-    /// begins reading node coordinates.
-    ///
-    /// MADV_RANDOM tells the kernel not to readahead on each fault, limiting
-    /// I/O to the single 4 KB page actually needed. This is critical at planet
-    /// scale (~96 GB index on 64 GB RAM) where readahead pages get evicted
-    /// before use. But when the index fits in RAM (e.g. Denmark ~3 GB), default
-    /// readahead *helps* because way references have ID locality and the
-    /// prefetched neighbors will be used soon. Setting MADV_RANDOM on small
-    /// datasets causes a +65% PBF phase regression (20s → 33s on Denmark).
-    ///
-    /// Threshold: only set MADV_RANDOM when the index exceeds half of physical
-    /// RAM, since at that point the page cache can't hold it and readahead
-    /// becomes pure waste.
-    #[allow(dead_code)]
-    pub fn advise_random(&self) {
-        let ram = ram_bytes();
-        if self.file_len > ram / 2 {
-            self.mmap.advise(memmap2::Advice::Random).ok();
-        }
     }
 
     /// Write coordinates for a node. Grows the file if needed.
@@ -184,43 +140,6 @@ impl NodeIndexReader {
     /// Read coordinates for a node. Returns None if entry is unset (all zeros).
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
         get_from_mmap(&self.mmap, self.file_len, node_id)
-    }
-
-    /// Switch to random-access mode if the index is large enough to benefit.
-    /// See `NodeIndex::advise_random()` for rationale and threshold logic.
-    pub fn advise_random(&self) {
-        let ram = ram_bytes();
-        if self.file_len > ram / 2 {
-            self.mmap.advise(memmap2::Advice::Random).ok();
-        }
-    }
-
-    /// Hint the kernel to use transparent huge pages (2 MB) for this mmap.
-    /// Reduces TLB entries from `file_len / 4KB` to `file_len / 2MB` — at planet
-    /// scale (96 GB) that's 24M entries down to ~48K. Always beneficial for the
-    /// read phase regardless of dataset size; no threshold needed.
-    pub fn advise_hugepage(&self) {
-        #[cfg(target_os = "linux")]
-        self.mmap.advise(memmap2::Advice::HugePage).ok();
-    }
-
-    /// Prefault the entire mmap into the page cache via a sequential read pass.
-    /// Only activates when the index fits in RAM (file_len <= 50% of physical
-    /// RAM) — the inverse of `advise_random()`. Sequential prefaulting is faster
-    /// than random demand-faulting during parallel rayon way processing because
-    /// the kernel can optimize with readahead.
-    ///
-    /// At planet scale (96 GB > 64 GB RAM), skip: prefaulting would read the
-    /// entire index sequentially only to have pages evicted before use.
-    /// Requires Linux 5.14+; silently ignored on older kernels or non-Linux.
-    pub fn advise_populate_read(&self) {
-        #[cfg(target_os = "linux")]
-        {
-            let ram = ram_bytes();
-            if ram > 0 && self.file_len <= ram / 2 {
-                self.mmap.advise(memmap2::Advice::PopulateRead).ok();
-            }
-        }
     }
 }
 

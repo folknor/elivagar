@@ -111,33 +111,16 @@ impl WayIndex {
 
     /// Call after all ways have been written. Flushes the data writer and
     /// opens a read-only mmap over way_data.bin for random access reads.
-    ///
-    /// Conditionally sets MADV_RANDOM on both mmaps when the total way index
-    /// exceeds 50% of physical RAM — same threshold logic as node_index.
-    /// Relation member lookups are non-sequential, so MADV_RANDOM prevents
-    /// wasted readahead at planet scale. But for small datasets, readahead
-    /// helps because way IDs have locality.
     pub fn finish_writing(&mut self) -> io::Result<()> {
         // Flush and drop the BufWriter.
         if let Some(mut writer) = self.data_writer.take() {
             writer.flush()?;
         }
 
-        let total_size = self.offsets_file_len + self.data_write_pos;
-        let ram = crate::node_index::ram_bytes();
-        let use_random = total_size > ram / 2;
-
-        if use_random {
-            self.offsets_mmap.advise(memmap2::Advice::Random).ok();
-        }
-
         // Open a read-only mmap over the data file (only if non-empty).
         if self.data_write_pos > 0 {
             let data_file = File::open(&self.data_path)?;
             let mmap = unsafe { Mmap::map(&data_file)? };
-            if use_random {
-                mmap.advise(memmap2::Advice::Random)?;
-            }
             self.data_mmap = Some(mmap);
         }
 

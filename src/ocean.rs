@@ -77,8 +77,6 @@ pub(crate) fn process_ocean_shapefile(
     // --- Mmap the .shp file ---
     let shp_file = std::fs::File::open(path)?;
     let shp_mmap = unsafe { memmap2::Mmap::map(&shp_file) }?;
-    // Sequential parse: enable aggressive kernel readahead.
-    shp_mmap.advise(memmap2::Advice::Sequential).ok();
     let shp = &shp_mmap[..];
     eprintln!("  Mmapped {:.1} MB", shp.len() as f64 / (1024.0 * 1024.0));
 

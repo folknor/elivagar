@@ -11,30 +11,6 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// posix_fadvise helpers (Linux only, no-op on other platforms)
-// ---------------------------------------------------------------------------
-
-/// Hint sequential access — doubles kernel readahead window.
-#[cfg(target_os = "linux")]
-pub(crate) fn fadvise_sequential(file: &File) {
-    use std::os::unix::io::AsRawFd;
-    unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL); }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn fadvise_sequential(_file: &File) {}
-
-/// Hint that pages are no longer needed — evicts from page cache.
-#[cfg(target_os = "linux")]
-pub(crate) fn fadvise_dontneed(file: &File) {
-    use std::os::unix::io::AsRawFd;
-    unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED); }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn fadvise_dontneed(_file: &File) {}
-
-// ---------------------------------------------------------------------------
 // Sort key helpers
 // ---------------------------------------------------------------------------
 
@@ -242,10 +218,6 @@ pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path) -> io::Result
 
     writer.flush()?;
 
-    // Evict written pages from cache — prevents sort chunk data (100+ GB at
-    // planet scale) from displacing hot node index pages during the PBF phase.
-    fadvise_dontneed(writer.get_ref());
-
     Ok(())
 }
 
@@ -261,8 +233,6 @@ struct ChunkReader {
 impl ChunkReader {
     fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
-        // Hint sequential readahead — each chunk is read front-to-back during merge.
-        fadvise_sequential(&file);
         let mut reader = BufReader::with_capacity(256 * 1024, file);
 
         let mut buf4 = [0u8; 4];
@@ -295,11 +265,6 @@ impl ChunkReader {
         Ok(Some((key, data)))
     }
 
-    /// Advise the kernel to evict this chunk's pages from the page cache.
-    /// Called when the chunk is fully consumed during merge.
-    fn advise_dontneed(&self) {
-        fadvise_dontneed(self.reader.get_ref());
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -417,8 +382,6 @@ impl SortReader {
                 data,
                 chunk_idx: idx,
             });
-        } else {
-            self.chunk_readers[idx].advise_dontneed();
         }
 
         Ok(Some(result))

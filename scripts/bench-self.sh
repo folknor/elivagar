@@ -6,19 +6,21 @@ PBF="${1:-data/denmark-latest.osm.pbf}"
 RUNS="${2:-1}"
 SKIP_TO=""
 NO_OCEAN=false
+COMPRESSION_LEVEL=""
 
 shift 2 2>/dev/null || true
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-to) SKIP_TO="$2"; shift 2 ;;
         --no-ocean) NO_OCEAN=true; shift ;;
+        --compression-level) COMPRESSION_LEVEL="$2"; shift 2 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
 
 if [ ! -f "$PBF" ]; then
     echo "PBF not found: $PBF"
-    echo "Usage: scripts/bench-self.sh [pbf] [runs] [--skip-to ocean|sort] [--no-ocean]"
+    echo "Usage: scripts/bench-self.sh [pbf] [runs] [--skip-to ocean|sort] [--no-ocean] [--compression-level 0-10]"
     exit 1
 fi
 
@@ -29,6 +31,9 @@ COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 echo "=== bench-self ==="
 echo "  file: $PBF ($FILE_MB MB)"
 echo "  runs: $RUNS (best of)"
+if [ -n "$COMPRESSION_LEVEL" ]; then
+    echo "  compression: level $COMPRESSION_LEVEL"
+fi
 echo "  commit: $COMMIT"
 
 # Build
@@ -54,6 +59,11 @@ if [ -n "$SKIP_TO" ]; then
     SKIP_FLAG="--skip-to $SKIP_TO"
 fi
 
+COMPRESS_FLAG=""
+if [ -n "$COMPRESSION_LEVEL" ]; then
+    COMPRESS_FLAG="--compression-level $COMPRESSION_LEVEL"
+fi
+
 OUT="data/${NAME}.pmtiles"
 STDERR_FILE=$(mktemp .bench_stderr.XXXXXX)
 trap 'rm -f "$STDERR_FILE"' EXIT
@@ -63,9 +73,19 @@ parse() { grep -oP "^${1}=\\K.*" "$STDERR_FILE" || echo "-"; }
 echo ""
 BEST_TOTAL=999999999
 
+RUN_TIMEOUT=240
+
 for i in $(seq 1 "$RUNS"); do
     echo "  run $i/$RUNS..."
-    "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG $SKIP_FLAG 2> "$STDERR_FILE"
+    timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG $SKIP_FLAG $COMPRESS_FLAG 2> "$STDERR_FILE"
+    EXIT_CODE=$?
+    if [ "$EXIT_CODE" -eq 124 ]; then
+        echo "  KILLED: run exceeded ${RUN_TIMEOUT}s timeout"
+        continue
+    elif [ "$EXIT_CODE" -ne 0 ]; then
+        echo "  FAILED: exit code $EXIT_CODE"
+        continue
+    fi
 
     THIS_TOTAL=$(parse total_ms)
     if [ "$THIS_TOTAL" != "-" ] && [ "$THIS_TOTAL" -lt "$BEST_TOTAL" ]; then

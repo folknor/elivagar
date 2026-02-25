@@ -322,7 +322,6 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "hotpath 0.13.0",
- "libc",
  "memmap2",
  "mimalloc",
  "pbfhogg",
