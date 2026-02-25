@@ -40,7 +40,9 @@ Hotpath profile results and analysis: `docs/hotpath-profile.md`
 - [x] **`add_feature_to_layer` per-feature Vec pool** — Was 4.4 GB (317 B avg), now 4.2 GB
   (302 B avg, −5%). Per-rayon-worker Vec pools for geometry + tags, reclaimed after encode.
   Modest gain because ~70% of the 4.4 GB is intern operations (key_map, value_map,
-  string_value_map, features Vec growth) which are fresh per tile and not pooled.
+  string_value_map, features Vec growth) which are fresh per tile and not pooled. Further
+  optimization would require pooling entire `LayerBuilder`s across tiles — diminishing
+  returns given assemble phase is ~2% of wall time.
 
 - [x] **`merge_same_attr_geometries` buffer reuse + in-place merge** — Was 3.5 GB (11.8 KB
   avg), now 3.4 GB (11.7 KB avg, −3%). `MergeScratch` hoists HashMap + geom buffer. Tag sort

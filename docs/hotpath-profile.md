@@ -300,9 +300,16 @@ Assemble-phase allocators now visible in top 10:
 - `encode_tile_with` dropped out of top 10 (was 1.8 GB / 29%) — its sibling functions now rank
   higher.
 
-### Next targets
+### Assemble-phase optimization results (commit e2732e1)
 
-1. **`add_feature_to_layer`** — 14.9M × 317 B = 4.4 GB. Each call allocates a `Vec<u32>` for
-   geometry commands. Reusing a thread-local buffer could eliminate most of this.
-2. **`merge_same_attr_geometries`** — 307K × 11.8 KB = 3.5 GB. Allocates during geometry
-   merge (concatenating command vecs). Buffer reuse or in-place merging could help.
+Vec pools + MergeScratch + in-place merge:
+
+| Function | Before | After | Change |
+|---|---|---|---|
+| `add_feature_to_layer` | 4.4 GB (317 B) | 4.2 GB (302 B) | −5% |
+| `merge_same_attr_geometries` | 3.5 GB (11.8 KB) | 3.4 GB (11.7 KB) | −3% |
+
+Modest gains. ~70% of `add_feature_to_layer` cumulative allocation is intern operations
+(key_map, value_map, string_value_map, features Vec growth on fresh-per-tile LayerBuilder),
+not the pooled geometry/tags Vecs. Further optimization would require pooling entire
+LayerBuilders across tiles — diminishing returns given assemble phase is ~2% of wall time.
