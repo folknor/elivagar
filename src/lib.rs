@@ -20,6 +20,7 @@
 //!     ocean_simplified_shapefile: None,
 //!     skip_to: None,
 //!     in_memory: false,
+//!     compression_level: 6,
 //! };
 //! elivagar::run(&config).expect("pipeline failed");
 //! ```

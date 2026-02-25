@@ -127,6 +127,7 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 | `--tmp-dir` | `path` | Directory for temporary sort chunks and intermediate files. Created automatically if it does not exist. Default: `.tilegen_tmp` |
 | `--skip-to` | `ocean` or `sort` | Resume from a previous run's checkpoint, skipping earlier pipeline phases. See [Checkpointing with --skip-to](#checkpointing-with---skip-to). |
 | `--in-memory` | *(flag)* | Keep the tile data blob in RAM instead of streaming to a temporary file on disk. Faster for small extracts, but uses significantly more memory at planet scale. |
+| `--compression-level` | `0-10` | Gzip compression level. Lower values are faster but produce larger output. Default: 6. Level 3-4 is a good tradeoff for faster builds with ~5% larger output. |
 
 ### Output
 
@@ -134,7 +135,8 @@ Elivagar generates tiles at zoom levels 0 through 14. The zoom range is
 currently fixed in the pipeline and not configurable via CLI flags.
 
 The output is a PMTiles v3 archive with Hilbert-ordered tile IDs and gzip
-compression (level 6). All 26 Shortbread layers are included.
+compression (default level 6, configurable via `--compression-level`).
+All 26 Shortbread layers are included.
 
 ### Exit codes
 

@@ -19,6 +19,7 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 | `--tmp-dir path` | Directory for temporary sort files (default: `.tilegen_tmp`) |
 | `--skip-to ocean\|sort` | Resume from a previous run's checkpoint |
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |
+| `--compression-level 0-10` | Gzip compression level (default: 6). Lower = faster, larger output |
 
 ### Example
 

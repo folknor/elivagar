@@ -8,7 +8,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory]"
+            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10]"
         );
         std::process::exit(1);
     }
@@ -21,11 +21,12 @@ fn main() {
     let mut ocean_simplified_shapefile = None;
     let mut skip_to: Option<elivagar::SkipTo> = None;
     let mut in_memory = false;
+    let mut compression_level: u32 = 6;
 
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
-            "--tmp-dir" | "--ocean" | "--ocean-simplified" | "--skip-to" => {
+            "--tmp-dir" | "--ocean" | "--ocean-simplified" | "--skip-to" | "--compression-level" => {
                 let flag = &args[i];
                 i += 1;
                 if i >= args.len() {
@@ -45,6 +46,15 @@ fn main() {
                                 std::process::exit(1);
                             }
                         });
+                    }
+                    "--compression-level" => {
+                        compression_level = match args[i].parse() {
+                            Ok(v) if v <= 10 => v,
+                            _ => {
+                                eprintln!("Invalid compression level: {} (expected 0-10)", args[i]);
+                                std::process::exit(1);
+                            }
+                        };
                     }
                     _ => unreachable!(),
                 }
@@ -70,6 +80,7 @@ fn main() {
         ocean_simplified_shapefile,
         skip_to,
         in_memory,
+        compression_level,
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")

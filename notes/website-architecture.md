@@ -297,7 +297,7 @@ with `map_init` to encode tiles in parallel. Each rayon worker:
 2. Merges features with identical attributes within each layer (reducing
    feature count in the output MVT)
 3. Encodes all non-empty layers into an MVT protobuf tile
-4. Gzip-compresses the tile (level 6)
+4. Gzip-compresses the tile (configurable level, default 6)
 
 The `map_init` closure initializes per-worker scratch state that persists
 across tiles: `EncodeScratch` for protobuf encoding, `MergeScratch` for

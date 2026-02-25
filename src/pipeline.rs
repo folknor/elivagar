@@ -94,6 +94,9 @@ pub struct TilegenConfig {
     /// Keep tile blob in memory instead of streaming to a temp file.
     /// Faster for small extracts, but uses more RAM at planet scale.
     pub in_memory: bool,
+    /// Gzip compression level (0-10). Lower = faster, larger output.
+    /// Default: 6. Level 3-4 is noticeably faster with ~5% larger output.
+    pub compression_level: u32,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -1238,8 +1241,9 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
         });
 
         // --- Main thread: receive batches, encode with rayon, forward to writer ---
+        let compression_level = config.compression_level;
         for batch in read_rx {
-            let encoded = encode_tile_batch(&batch);
+            let encoded = encode_tile_batch(&batch, compression_level);
             if encode_tx.send(encoded).is_err() { break; }
         }
         drop(encode_tx);
@@ -1269,7 +1273,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
 
 /// Encode + gzip a batch of tiles in parallel using rayon.
 #[hotpath::measure]
-fn encode_tile_batch(batch: &[PendingTile]) -> Vec<EncodedTile> {
+fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 
     batch
@@ -1324,8 +1328,7 @@ fn encode_tile_batch(batch: &[PendingTile]) -> Vec<EncodedTile> {
                 return None;
             }
 
-            // Gzip level 6: good compression/speed tradeoff for MVT tiles.
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::new(compression_level));
             encoder.write_all(&mvt_data).expect("gzip write failed");
             let compressed = encoder.finish().expect("gzip finish failed");
 

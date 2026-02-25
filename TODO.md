@@ -33,9 +33,8 @@ Hotpath profile results and analysis: `notes/hotpath-profile.md`
   once in O(n log n), then each zoom level filters by threshold — no re-scanning. Would
   replace DP entirely. Requires new algorithm, tolerance recalibration, and visual verification.
 
-- [ ] **Compression level tradeoff [pre-release]** — Level 6 is used; level 3-4 would be
-  noticeably faster with ~5% larger output. Make configurable. Final tuning item — do this
-  right before 0.1 release after all other optimizations are locked in. (`pipeline.rs:1239`)
+- [x] **Compression level tradeoff** — Now configurable via `--compression-level 0-10`
+  (default 6). `TilegenConfig.compression_level` field.
 
 - [x] **`add_feature_to_layer` per-feature Vec pool** — Was 4.4 GB (317 B avg), now 4.2 GB
   (302 B avg, −5%). Per-rayon-worker Vec pools for geometry + tags, reclaimed after encode.
