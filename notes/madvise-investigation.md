@@ -142,7 +142,7 @@ After the bisect, individual changes were tested:
 - `node_records` hoist kept (the one improvement that doesn't regress)
 - `Cargo.lock` restored to current pbfhogg state
 - `TODO.md` updated — Tags and madvise items marked open with investigation notes
-- `docs/madvise-investigation.md` — this file (new)
+- `notes/madvise-investigation.md` — this file (new)
 
 ### Remaining
 1. **Run a clean 3-run bench** on a quiet system to confirm baseline is restored

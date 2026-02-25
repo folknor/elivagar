@@ -47,7 +47,7 @@ Denmark extract (483 MB PBF), gzip level 6, z0-14:
 | With ocean | **380 MB** | 406 MB | 308 MB |
 | Without ocean | **317 MB** | 406 MB | 308 MB |
 
-Full analysis: [`docs/tile-comparison-2026-02-24.md`](docs/tile-comparison-2026-02-24.md)
+Full analysis: [`notes/tile-comparison-2026-02-24.md`](notes/tile-comparison-2026-02-24.md)
 
 ## Performance
 

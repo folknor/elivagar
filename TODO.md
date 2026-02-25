@@ -27,7 +27,7 @@
 ## Performance
 
 Investigated-and-rejected optimizations are documented in code comments at each site.
-Hotpath profile results and analysis: `docs/hotpath-profile.md`
+Hotpath profile results and analysis: `notes/hotpath-profile.md`
 
 - [ ] **Visvalingam-Whyatt instead of Douglas-Peucker.** VW computes per-vertex importance
   once in O(n log n), then each zoom level filters by threshold — no re-scanning. Would
@@ -55,7 +55,7 @@ Hotpath profile results and analysis: `docs/hotpath-profile.md`
 
 ## Performance: Linux kernel features for planet-scale I/O
 
-All implemented. Research notes and I/O profile analysis: `docs/linux-io.md`.
+All implemented. Research notes and I/O profile analysis: `notes/linux-io.md`.
 
 - `MADV_RANDOM` on node index + way index (conditional on >50% RAM)
 - `MADV_HUGEPAGE` on node index
@@ -64,7 +64,7 @@ All implemented. Research notes and I/O profile analysis: `docs/linux-io.md`.
 - `FADV_SEQUENTIAL` on sort chunk reads, `FADV_DONTNEED` when drained
 - `FADV_DONTNEED` after sort chunk writes
 - `FADV_SEQUENTIAL` + `FADV_DONTNEED` on PMTiles temp blob read-back
-- io_uring: not applicable (CPU-bound, not I/O-bound). See `docs/linux-io.md`.
+- io_uring: not applicable (CPU-bound, not I/O-bound). See `notes/linux-io.md`.
 
 ## Test Coverage Gaps
 
