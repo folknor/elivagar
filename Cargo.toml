@@ -21,6 +21,7 @@ flate2 = { version = "1.0", default-features = false, features = ["zlib-ng"] }
 smallvec = "1"
 mimalloc = { version = "0.1", default-features = false }
 hotpath = "0.12"
+rustc-hash = "2"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -3,7 +3,7 @@
 // Hand-rolled protobuf encoding — the MVT schema is simple enough that codegen
 // is unnecessary. Produces spec-compliant tiles with extent=4096.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
 // ---------------------------------------------------------------------------
@@ -83,10 +83,10 @@ pub struct LayerBuilder {
     name: String,
     features: Vec<Feature>,
     keys: Vec<String>,
-    key_map: HashMap<String, u16>,
+    key_map: FxHashMap<String, u16>,
     values: Vec<Value>,
-    value_map: HashMap<Value, u16>,
-    string_value_map: HashMap<String, u16>,
+    value_map: FxHashMap<Value, u16>,
+    string_value_map: FxHashMap<String, u16>,
 }
 
 // ---------------------------------------------------------------------------
@@ -99,10 +99,10 @@ impl LayerBuilder {
             name: name.to_string(),
             features: Vec::new(),
             keys: Vec::new(),
-            key_map: HashMap::new(),
+            key_map: FxHashMap::default(),
             values: Vec::new(),
-            value_map: HashMap::new(),
-            string_value_map: HashMap::new(),
+            value_map: FxHashMap::default(),
+            string_value_map: FxHashMap::default(),
         }
     }
 
@@ -498,7 +498,7 @@ impl LayerBuilder {
         // Group features by (geom_type, sorted tags).
         // Value: list of feature indices in this group.
         type MergeKey = (GeomType, Vec<(u16, u16)>);
-        let mut groups: HashMap<MergeKey, Vec<usize>> = HashMap::new();
+        let mut groups: FxHashMap<MergeKey, Vec<usize>> = FxHashMap::default();
         for (i, f) in self.features.iter().enumerate() {
             if f.geom_type == GeomType::Point {
                 continue;

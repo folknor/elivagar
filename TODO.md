@@ -170,16 +170,10 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   available. Eliminates one `Vec<Point>` clone per member way per boundary relation.
   (`pipeline.rs:675-740,825-836`)
 
-- [ ] **MVT value interning uses SipHash** — **Investigated, low priority.**
-  `key_map` and `value_map` HashMaps in `LayerBuilder` use `DefaultHasher` (SipHash).
-  Called from `add_feature_to_layer` (14.9M calls, 274ns avg). Each call does ~3-5 hash
-  lookups (1 key + 2-4 values). SipHash costs ~15-25ns/hash → ~60-125ns per feature,
-  potentially 20-45% of the 274ns avg. FxHash at ~3-5ns/hash would save ~50-100ns per
-  feature (~1-1.5s CPU across threads, ~0.3s wall on a 29s run). But assemble is only
-  6% of wall time, so wall impact is ~1%. HashMaps are small (few dozen to few hundred
-  entries per tile) — collision resistance doesn't matter. Adds a dependency (`rustc-hash`
-  or `ahash`) for minor gain. Worth doing if already pulling in FxHash for another reason.
-  (`mvt.rs:86-88,112-131`)
+- [x] **MVT value interning uses SipHash** — Fixed: switched `key_map`, `value_map`,
+  `string_value_map`, and `merge_same_attr_geometries` grouping map from `HashMap` (SipHash)
+  to `FxHashMap` (rustc-hash). Already a transitive dependency — zero new downloads.
+  (`mvt.rs:86-89,102-105,501`)
 
 - [ ] **Rayon alternatives for slice-based parallelism** — Wild linker discussion
   ([davidlattimore/wild#1072](https://github.com/davidlattimore/wild/discussions/1072)) surveys
