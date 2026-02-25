@@ -42,6 +42,7 @@ impl std::fmt::Display for PipelineError {
 
 impl std::error::Error for PipelineError {}
 
+// Intentionally converts to String — no caller inspects .source() programmatically.
 impl From<std::io::Error> for PipelineError {
     fn from(e: std::io::Error) -> Self {
         Self(e.to_string())
@@ -158,8 +159,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     } else {
         let (mut sort_writer, land_mask) = if skip.is_none() {
             // Full run: clean tmp dir and run PBF phase
-            drop(std::fs::remove_dir_all(&config.tmp_dir));
-            std::fs::create_dir_all(&config.tmp_dir)?;
+            drop(std::fs::remove_dir_all(&config.tmp_dir)); // Best-effort: may not exist yet.
+            std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
             let (sw, bounds_out, mask) = phase_read_and_process(config)?;
@@ -198,19 +199,19 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     eprintln!("  Simplified (z{}–z{}):", config.min_zoom, simplified_max);
                     ocean_features += ocean::process_ocean_shapefile(
                         simplified_path, &data_bounds, config.min_zoom, simplified_max, mask_ref, &mut sort_writer,
-                    );
+                    )?;
                 }
                 if config.max_zoom >= 8 {
                     let full_min = config.min_zoom.max(8);
                     eprintln!("  Full-resolution (z{full_min}–z{}):", config.max_zoom);
                     ocean_features += ocean::process_ocean_shapefile(
                         ocean_path, &data_bounds, full_min, config.max_zoom, mask_ref, &mut sort_writer,
-                    );
+                    )?;
                 }
             } else {
                 ocean_features = ocean::process_ocean_shapefile(
                     ocean_path, &data_bounds, config.min_zoom, config.max_zoom, mask_ref, &mut sort_writer,
-                );
+                )?;
             }
 
             let elapsed = ocean_start.elapsed();
@@ -268,7 +269,7 @@ fn save_checkpoint(tmp_dir: &std::path::Path, bounds: &MercBbox, chunk_count: us
         "{} {} {} {} {}",
         bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y, chunk_count
     );
-    std::fs::write(path, content)?;
+    std::fs::write(path, content)?; // io::Error message is sufficient context.
     Ok(())
 }
 
@@ -285,10 +286,10 @@ fn load_land_mask(tmp_dir: &std::path::Path) -> Option<geometry::LandMask> {
 fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let content = std::fs::read_to_string(&path)
-        .map_err(|e| PipelineError(format!("No checkpoint in {}: {e}. Run a full tilegen first.", tmp_dir.display())))?;
+        .map_err(|e| PipelineError(format!("no checkpoint in {}: {e} (run a full tilegen first)", tmp_dir.display())))?;
     let parts: Vec<&str> = content.split_whitespace().collect();
     if parts.len() != 5 {
-        return Err(PipelineError(format!("Invalid checkpoint format: expected 5 fields, got {}", parts.len())));
+        return Err(PipelineError(format!("invalid checkpoint format: expected 5 fields, got {}", parts.len())));
     }
     let parse = |s: &str, name: &str| -> Result<f64, PipelineError> {
         s.parse().map_err(|e| PipelineError(format!("checkpoint parse {name}: {e}")))
@@ -379,6 +380,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     $node.id() as u64, lat_e7, lon_e7,
                     &tags_vec, min_z, max_z, &land_mask, &mut node_records,
                 );
+                // Panic: inside PBF callback — can't propagate Result. Disk I/O failure is unrecoverable.
                 for r in node_records.drain(..) {
                     sort_writer.push(r).expect("sort push failed");
                 }
@@ -399,6 +401,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                 if node_reader.is_none() {
                     let ni = node_index_opt.take()
                         .expect("node_index already consumed");
+                    // Panic: I/O remapping failure is unrecoverable.
                     let reader = ni.into_reader()
                         .expect("failed to convert node index to reader");
                     reader.advise_random();
@@ -442,7 +445,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                 }
 
                 if !way_index_finalized {
-                    way_index.finish_writing().expect("failed to finalize way index");
+                    way_index.finish_writing().expect("failed to finalize way index"); // Unrecoverable I/O.
                     way_index_finalized = true;
                     eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
                     eprintln!("  Way index finalized, processing relations...");
@@ -623,6 +626,7 @@ fn flush_raw_way_batch(
             way_index.put(pw.way_id, &pw.coords_e7);
         }
         count += pw.records.len() as u64;
+        // Panic: disk I/O failure is unrecoverable mid-pipeline.
         for record in pw.records {
             sort_writer.push(record).expect("sort push failed");
         }
@@ -797,6 +801,7 @@ fn flush_rel_batch(
         .collect();
 
     let mut count: u64 = 0;
+    // Panic: disk I/O failure is unrecoverable mid-pipeline.
     for rel_records in results {
         count += rel_records.len() as u64;
         for record in rel_records {
@@ -1225,6 +1230,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
                 for tile in batch {
                     let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
                     let tile_bytes = tile.compressed.len() as u64;
+                    // Panic: disk I/O failure is unrecoverable mid-pipeline.
                     let is_unique = pmtiles.add_tile(z, x, y, &tile.compressed)
                         .expect("failed to write tile");
                     tiles_written += 1;
@@ -1328,6 +1334,7 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
                 return None;
             }
 
+            // Infallible: GzEncoder writing to Vec<u8> can't fail on I/O.
             let mut encoder = GzEncoder::new(Vec::new(), Compression::new(compression_level));
             encoder.write_all(&mvt_data).expect("gzip write failed");
             let compressed = encoder.finish().expect("gzip finish failed");

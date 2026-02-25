@@ -42,20 +42,19 @@ pub(crate) fn process_ocean_shapefile(
     max_zoom: u8,
     land_mask: Option<&geometry::LandMask>,
     sort_writer: &mut SortWriter,
-) -> u64 {
+) -> Result<u64, std::io::Error> {
     eprintln!("  Opening {}", path.display());
 
     // --- Read .shx index to get record offsets ---
     let shx_path = path.with_extension("shx");
-    let shx_data = std::fs::read(&shx_path)
-        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", shx_path.display()));
+    let shx_data = std::fs::read(&shx_path)?;
 
     if shx_data.len() < 100 {
-        panic!(
-            "Invalid .shx file {}: expected at least 100-byte header, got {} bytes",
-            shx_path.display(),
-            shx_data.len(),
-        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid .shx file {}: expected at least 100-byte header, got {} bytes",
+                shx_path.display(), shx_data.len()),
+        ));
     }
 
     let shape_count = (shx_data.len() - 100) / 8;
@@ -74,10 +73,8 @@ pub(crate) fn process_ocean_shapefile(
     eprintln!("  Index: {shape_count} shapes");
 
     // --- Mmap the .shp file ---
-    let shp_file = std::fs::File::open(path)
-        .unwrap_or_else(|e| panic!("Failed to open {}: {e}", path.display()));
-    let shp_mmap = unsafe { memmap2::Mmap::map(&shp_file) }
-        .unwrap_or_else(|e| panic!("Failed to mmap {}: {e}", path.display()));
+    let shp_file = std::fs::File::open(path)?;
+    let shp_mmap = unsafe { memmap2::Mmap::map(&shp_file) }?;
     // Sequential parse: enable aggressive kernel readahead.
     shp_mmap.advise(memmap2::Advice::Sequential).ok();
     let shp = &shp_mmap[..];
@@ -164,8 +161,8 @@ pub(crate) fn process_ocean_shapefile(
         let mut current_outer: Option<Vec<Point>> = None;
         let mut current_inners: Vec<Vec<Point>> = Vec::new();
 
-        for w in 0..ring_starts.len() - 1 {
-            let ring = &all_points[ring_starts[w]..ring_starts[w + 1]];
+        for (w, window) in ring_starts.windows(2).enumerate() {
+            let ring = &all_points[window[0]..window[1]];
 
             let clipped = geometry::clip_polygon(ring, &bounds_clip);
             if clipped.len() < 3 {
@@ -236,6 +233,7 @@ pub(crate) fn process_ocean_shapefile(
             }
             let id = chunk_id.fetch_add(1, Ordering::Relaxed);
             let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
+            // Panic: inside rayon fold — can't propagate Result. Disk I/O failure is unrecoverable.
             sort::write_sorted_chunk(&mut self.records, &path)
                 .expect("ocean chunk write failed");
             self.chunk_paths.push(path);
@@ -283,7 +281,7 @@ pub(crate) fn process_ocean_shapefile(
     let count = result.count;
 
     eprintln!("  {poly_count} polygons, {count} features");
-    count
+    Ok(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -398,9 +396,9 @@ fn emit_ocean_polygon(
                 if bx_list[0] > tx_min {
                     gaps.push((tx_min, bx_list[0] - 1));
                 }
-                for w in 0..bx_list.len() - 1 {
-                    if bx_list[w + 1] > bx_list[w] + 1 {
-                        gaps.push((bx_list[w] + 1, bx_list[w + 1] - 1));
+                for pair in bx_list.windows(2) {
+                    if pair[1] > pair[0] + 1 {
+                        gaps.push((pair[0] + 1, pair[1] - 1));
                     }
                 }
                 if *bx_list.last().expect("nonempty") < tx_max {

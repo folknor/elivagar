@@ -152,8 +152,9 @@ impl LayerBuilder {
             return idx;
         }
         let idx = self.keys.len() as u16;
-        self.keys.push(key.to_string());
-        self.key_map.insert(key.to_string(), idx);
+        let owned = key.to_string();
+        self.key_map.insert(owned.clone(), idx);
+        self.keys.push(owned);
         idx
     }
 

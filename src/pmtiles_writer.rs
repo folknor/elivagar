@@ -153,6 +153,9 @@ impl PmtilesWriter {
     }
 
     /// Create a streaming writer (tile data written to a temp file in `tmp_dir`).
+    ///
+    /// # Errors
+    /// Returns `io::Error` if temp file creation fails.
     pub fn new_streaming(config: PmtilesConfig, tmp_dir: &Path) -> io::Result<Self> {
         let blob_path = tmp_dir.join("tiles.blob");
         let file = File::create(&blob_path)?;
@@ -176,6 +179,9 @@ impl PmtilesWriter {
     /// Add a tile. `data` must already be gzip-compressed.
     /// Tiles MUST be added in Hilbert order (tile_id monotonically non-decreasing).
     /// Returns `true` if unique, `false` if deduplicated.
+    ///
+    /// # Errors
+    /// Returns `io::Error` if writing to the tile blob file fails (streaming mode).
     #[allow(clippy::cast_possible_truncation)]
     pub fn add_tile(&mut self, z: u8, x: u32, y: u32, data: &[u8]) -> io::Result<bool> {
         let tile_id = xy_to_tile_id(z, x, y);
@@ -219,6 +225,9 @@ impl PmtilesWriter {
     }
 
     /// Write the complete PMTiles archive to a file.
+    ///
+    /// # Errors
+    /// Returns `io::Error` if file creation, directory encoding, or data copy fails.
     pub fn write_to(&mut self, path: &Path) -> io::Result<()> {
         let entries = self.collect_dir_entries()?;
         let metadata_json = build_metadata(&self.config);
@@ -227,6 +236,7 @@ impl PmtilesWriter {
         let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
 
         // Clean up streaming dir_entries temp file if it exists.
+        // Best-effort cleanup of streaming temp file — failure is harmless.
         if let DirStore::Streaming { path: dir_path, .. } = &self.dir_store {
             drop(std::fs::remove_file(dir_path));
         }

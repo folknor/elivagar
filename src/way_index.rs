@@ -79,6 +79,7 @@ impl WayIndex {
 
         // Write coordinates to the data file.
         let writer = self.data_writer.as_mut().expect("put called after finish_writing");
+        // Panic: unrecoverable I/O — disk full means the run is dead.
         for &(lat_e7, lon_e7) in coords {
             writer.write_all(&lat_e7.to_le_bytes()).expect("failed to write lat to way data");
             writer.write_all(&lon_e7.to_le_bytes()).expect("failed to write lon to way data");
@@ -94,6 +95,7 @@ impl WayIndex {
             while new_len < needed {
                 new_len += GROW_INCREMENT;
             }
+            // Panic: unrecoverable I/O — disk full or mmap failure means the run is dead.
             self.offsets_file.set_len(new_len).expect("failed to grow way offsets file");
             self.offsets_mmap = unsafe {
                 MmapMut::map_mut(&self.offsets_file).expect("failed to remap way offsets")
@@ -155,6 +157,7 @@ impl WayIndex {
         }
 
         let off = index_offset as usize;
+        // Infallible: slices are exactly 8 and 4 bytes by construction.
         let data_offset =
             u64::from_le_bytes(self.offsets_mmap[off..off + 8].try_into().unwrap());
         let coord_count =

@@ -121,7 +121,7 @@ impl SortWriter {
             if !path.exists() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("Missing chunk file: {}", path.display()),
+                    format!("missing chunk file: {}", path.display()),
                 ));
             }
             chunk_paths.push(path);

@@ -119,6 +119,7 @@ impl NodeIndex {
             while new_len < needed {
                 new_len += GROW_INCREMENT;
             }
+            // Panic: unrecoverable I/O — disk full or mmap failure means the run is dead.
             self.file.set_len(new_len).expect("failed to grow node index file");
             self.mmap = unsafe { MmapMut::map_mut(&self.file).expect("failed to remap node index") };
 
@@ -159,6 +160,7 @@ fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: i64) -> Option<(i32, i32)>
     }
 
     let off = offset as usize;
+    // Infallible: slices are exactly 4 bytes by construction.
     let lat_raw = i32::from_le_bytes(mmap[off..off + 4].try_into().unwrap());
     let lon_raw = i32::from_le_bytes(mmap[off + 4..off + 8].try_into().unwrap());
 
