@@ -100,6 +100,7 @@ pub(crate) fn encode_feature_data(
 /// Silent returns on malformed data are intentional: this is an internal format
 /// encoded by our own pipeline, so corruption means a code bug (caught by tests).
 /// Logging here would add noise to a billion-call hot path.
+#[hotpath::measure]
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
     if data.len() < 13 {

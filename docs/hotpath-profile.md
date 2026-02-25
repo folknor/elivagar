@@ -1,79 +1,88 @@
-# Hotpath Profile — Denmark (2026-02-24)
+# Hotpath Profile — Denmark (2026-02-25)
 
 Dataset: `denmark-latest.osm.pbf` (483 MB), 52.5M nodes, 6.6M ways, 46K relations.
 Machine: 64 GB RAM, system under moderate load (not a clean baseline).
 
-Wall time: 29.5s total. phase12=24.5s (83%), ocean=0.7s, sort=0.5s, assemble=2.1s.
+Wall time: 29.1s total. phase12=24.5s (84%), ocean=0.7s, sort=0.5s, assemble=1.8s.
 
-## Function Timing (top 10 of 22 measured)
+## Function Timing (top 10 of 28 measured)
 
 | Function | Calls | Avg | P50 | P95 | P99 | Total | % Wall |
 |---|---|---|---|---|---|---|---|
-| `process_raw_way` | 6.6M | 15.73µs | 2.24µs | 29.50µs | 234.62µs | 104.1s | 316% |
-| `phase_read_and_process` | 1 | 27.4s | — | — | — | 27.4s | 83% |
-| `for_each_zoom_simplified` | 6.6M | 3.09µs | 940ns | 7.47µs | 32.83µs | 20.4s | 62% |
-| `emit_polygon_feature` | 4.5M | 3.87µs | 1.02µs | 9.77µs | 53.15µs | 17.6s | 53% |
-| `flush_raw_way_batch` | 808 | 14.57ms | 9.58ms | 28.44ms | 76.41ms | 11.8s | 36% |
-| `emit_line_feature` | 2.0M | 3.80µs | 1.24µs | 7.23µs | 41.09µs | 7.7s | 23% |
-| `prepare_relation` | 46K | 86.35µs | 1.11µs | 323.07µs | 631.29µs | 4.0s | 12% |
+| `process_raw_way` | 6.6M | 12.64µs | 2.13µs | 31.31µs | 215.29µs | 83.7s | 288% |
+| `phase_read_and_process` | 1 | 24.5s | — | — | — | 24.5s | 84% |
+| `for_each_zoom_simplified` | 6.6M | 3.34µs | 890ns | 7.47µs | 39.39µs | 22.0s | 76% |
+| `emit_polygon_feature` | 4.5M | 4.31µs | 961ns | 10.02µs | 66.11µs | 19.6s | 67% |
+| `flush_raw_way_batch` | 808 | 12.85ms | 8.95ms | 21.23ms | 50.17ms | 10.4s | 36% |
+| `emit_line_feature` | 2.0M | 4.13µs | 1.22µs | 7.37µs | 53.34µs | 8.4s | 29% |
+| `add_feature_to_layer` | 14.9M | 274ns | 190ns | 620ns | 1.14µs | 4.1s | 14% |
 
 >100% totals = parallel work on rayon threads. % is CPU-time / wall-time.
+
+**Newly instrumented:** `add_feature_to_layer` (wire format decode), `multipolygon::assemble`,
+`merge_same_attr_geometries`. Only `add_feature_to_layer` ranked — the other two are below
+the top 10 threshold, confirming they are not bottlenecks.
+
+**Dropped out:** `prepare_relation` (was 4.0s / 12%) — relation tag cloning fix and early-exit
+for unmatched relations reduced it below the top 10.
 
 ## Thread Utilization
 
 | Thread | CPU% | User | Sys | Total |
 |---|---|---|---|---|
-| Main | 26–100% | 9.97s | 11.81s | 21.78s |
-| Rayon worker ×4 | 46–47% | ~3.4s | ~0.1s | ~3.5s each |
+| Main | 20–100% | 8.67s | 10.94s | 19.61s |
+| Rayon worker ×3 | 70–72% | ~3.3s | ~0.6s | ~3.9s each |
 
-RSS: 414 MB. 28 threads total, most idle.
+`process_raw_way` totals 83.7s CPU across threads, wall time 29.1s → **2.9× parallelism.**
+Lower ratio than previous profile (3.5×) because `process_raw_way` got 20% faster per call
+(pbfhogg improvements), not because parallelism regressed — same wall time, less total CPU.
+Main thread still dominates at 19.6s (67% of wall), mostly kernel time (10.9s sys = 56%)
+from mmap page faults on the node index.
 
 ## Key Insights
 
-### 1. Node index mmap I/O dominates the main thread
+### 1. Node index mmap I/O still dominates the main thread
 
-Main thread: **11.8s sys / 21.8s total = 54% kernel time.** This is mmap page faults on the
-102 GB node index. The actual PBF decoding user-time is only ~10s. The node index I/O is
-serializing the entire pipeline — rayon workers are starved.
+Main thread: **10.9s sys / 19.6s total = 56% kernel time.** Improved from 11.8s sys (was
+54%) by parallel node lookups in rayon, but still the single biggest bottleneck. Rayon
+workers at ~3.9s each — pipeline remains I/O-serialized by PBF read + node index page faults.
 
-### 2. Only ~2 cores effectively utilized during PBF phase
+### 2. Simplification dominates CPU, not clipping
 
-`process_matched_way` totals 55.3s across threads, wall time is 29.5s → 1.87x parallelism.
-With 28 threads available, workers are idle most of the time, waiting for the serial PBF
-read + node index lookups to produce batches.
+`for_each_zoom_simplified` (22.0s total) is the #1 CPU consumer among feature-processing
+functions. Pre-DP subpixel bbox check reduced it from 31.5s (−35%). Douglas-Peucker runs
+at each zoom level from z14 down to z_lo. `clip_polygon` is cheap — the inner
+Sutherland-Hodgman loop is tight.
 
-### 3. Simplification dominates CPU, not clipping
-
-`for_each_zoom_simplified` (31.5s total) is the #1 CPU consumer. It runs Douglas-Peucker
-simplification at each zoom level from z14 down to z_lo. `clip_polygon` is cheap at 331ns
-avg — the inner Sutherland-Hodgman loop is tight.
-
-### 4. P50/P99 spread is 100x — long tail matters
+### 3. P50/P99 spread — long tail is genuine complexity
 
 | Function | P50 | P99 | Ratio |
 |---|---|---|---|
-| `process_matched_way` | 1.59µs | 179µs | 112x |
-| `emit_polygon_feature` | 810ns | 130µs | 160x |
-| `emit_line_feature` | 1.20µs | 143µs | 119x |
+| `process_raw_way` | 2.13µs | 215µs | 101x |
+| `emit_polygon_feature` | 961ns | 66µs | 69x |
+| `emit_line_feature` | 1.22µs | 53µs | 43x |
 
-Most features are trivial (few nodes, few zoom levels). The P99 tail — complex coastlines,
-large buildings, long roads — is where optimization effort should go.
+P99 ratios were reduced by the subpixel check (was 112–160×). Remaining tail is genuine
+complexity — coastlines, large buildings, long roads.
 
-### 5. Tag matching is NOT a bottleneck
+### 4. Tag matching and relation processing are NOT bottlenecks
 
-`match_element` didn't make the top 10. Despite being called for every node/way/relation,
-the linear scan over 3-15 tags is fast. This confirms reverting the binary search was correct.
+`match_element` and `prepare_relation` both dropped out of the top 10. Relation tag cloning
+fix (match during prepare, store results instead of all tags) and early-exit for unmatched
+relations reduced `prepare_relation` from 4.0s to below the threshold.
 
-### 6. Polygons dominate the workload
+### 5. Polygons dominate the workload
 
-4.5M polygon features vs 2.0M line features. `emit_polygon_feature` (27.7s) is 2x
-`emit_line_feature` (14.0s). Each polygon also calls `clip_polygon` (8.9M calls total,
-~2 clips per polygon across tiles).
+4.5M polygon features vs 2.0M line features. `emit_polygon_feature` (19.6s) is 2.3×
+`emit_line_feature` (8.4s). Each polygon also calls `clip_polygon` (~2 clips per polygon
+across tiles).
 
-### 7. Assemble phase is not a bottleneck
+### 6. Assemble phase: `add_feature_to_layer` is the hot function
 
-`phase_assemble` = 2.1s (7%). MVT encoding + gzip + PMTiles write is fast. All optimization
-effort should go into the PBF phase.
+`phase_assemble` = 1.8s (6%). Within it, `add_feature_to_layer` (wire format decode →
+Feature struct) accounts for 4.1s CPU across threads (14.9M calls, 274ns avg). Mostly
+the per-feature `Vec<u32>` allocation for geometry commands. `merge_same_attr_geometries`
+and `multipolygon::assemble` are both below the top 10 — confirmed not worth optimizing.
 
 ## Allocation Profile (hotpath-alloc, system allocator — no mimalloc)
 
@@ -162,7 +171,11 @@ across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-l
    before each DP call; breaks the zoom loop when geometry is < 1 pixel. Results:
    `for_each_zoom_simplified` total CPU −35% (31.5s→20.4s), P99 −63% (89µs→33µs).
    `emit_polygon_feature` −37%, `emit_line_feature` −45%. 630K fewer feature-zoom combos (−3.7%).
-6. **Further simplification optimization** — remaining options: Visvalingam-Whyatt (O(n log n)
+6. ~~**Eliminate relation tag cloning**~~ — Done. `match_element` moved into `prepare_relation`
+   while PBF borrows alive; `PreparedRelation` stores match results instead of cloned tags.
+   Early-exit for unmatched relations skips member way resolution. `prepare_relation` dropped
+   from 4.0s (12%) to below top 10. `process_raw_way` avg −20% (15.73→12.64µs).
+7. **Further simplification optimization** — remaining options: Visvalingam-Whyatt (O(n log n)
    one-time importance, then threshold per zoom) or DP early termination in `find_farthest()`.
-7. **Polygon-focused optimization** — polygons are 2x the workload of lines. Any polygon-specific
+8. **Polygon-focused optimization** — polygons are 2.3× the workload of lines. Any polygon-specific
    improvement (e.g. ring area pre-filter before per-zoom processing) has outsized impact.

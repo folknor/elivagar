@@ -467,6 +467,7 @@ impl LayerBuilder {
     ///     calls per Denmark run for marginal benefit.
     /// The clone+sort HashMap is already the right tradeoff: assemble is only
     /// 7% of wall time, and mimalloc makes the small Vec clones cheap.
+    #[hotpath::measure]
     pub fn merge_same_attr_geometries(&mut self) {
         if self.features.len() < 2 {
             return;

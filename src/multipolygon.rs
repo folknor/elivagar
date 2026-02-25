@@ -53,6 +53,7 @@ pub struct MultiPolygon {
 ///
 /// Ways are joined end-to-end by matching endpoints, then classified into
 /// outer/inner rings and paired together.
+#[hotpath::measure]
 pub fn assemble(members: &[MemberWay]) -> MultiPolygon {
     let (outer_ways, inner_ways, unclassified_ways) = separate_by_role(members);
 
