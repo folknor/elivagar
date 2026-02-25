@@ -121,7 +121,11 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
         _ => return,
     };
 
-    // geometry commands — bulk memcpy (little-endian wire format matches native u32 layout)
+    // geometry commands — bulk memcpy (little-endian wire format matches native u32 layout).
+    // Allocates per feature. Can't reuse a buffer: each Feature owns its Vec<u32> because
+    // merge_same_attr_geometries needs random access across all Features in a tile.
+    // Impact: ~1.8 GB / 3.2% of alloc — in assemble phase (7% of wall time), not worth
+    // the refactor (would require lifetimes or arena on Feature/LayerBuilder/encoder).
     let cmd_count = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("cmd_count")) as usize;
     pos += 4;
     let cmd_bytes = cmd_count * 4;

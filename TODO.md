@@ -58,9 +58,13 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
 `SortRecord.data` (`sort.rs`), `tags_vec` (`pipeline.rs:314`), `coords_e7` (`pipeline.rs:598`),
 `encode_feature_data_with_attrs` (`wire_format.rs:63`), k-way merge `read_record` (`sort.rs:208`).
 
-- [ ] **`add_feature_to_layer` allocates geom_cmds Vec per feature** — During tile assembly,
-  every decoded feature creates a `Vec<u32>`. Pass a `&mut Vec<u32>` in, or reference geometry
-  as a byte slice into the sort record data. (`wire_format.rs:120-131`)
+- [ ] **`add_feature_to_layer` allocates geom_cmds Vec per feature** — Investigated: hard to fix.
+  Each Feature must own its `Vec<u32>` because `merge_same_attr_geometries` needs random access
+  across all Features simultaneously. Eliminating the allocation requires either lifetimes on
+  Feature/LayerBuilder (borrow from sort record data) or an arena approach (flat Vec per tile,
+  Features store offset+length). Both refactor Feature, LayerBuilder, merger, and encoder.
+  Impact: 1.8 GB / 3.2% of alloc, in the assemble phase (7% of wall time). Not worth the
+  complexity. (`wire_format.rs:131, mvt.rs:54-58`)
 
 - [x] **Sort chunk write buffer too small** — Was default 8 KB BufWriter; now 1 MB. (`sort.rs:166`)
 
