@@ -272,6 +272,7 @@ pub(crate) fn process_ocean_shapefile(
 /// 4. Rows with no boundary tiles: single PIP test, fill entire row if inside.
 ///
 /// Reduces PIP calls from O(bbox_tiles) to O(gaps × rows).
+#[hotpath::measure]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
 fn emit_ocean_polygon(
     feature_id: u64,

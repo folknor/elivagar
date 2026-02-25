@@ -37,6 +37,26 @@ Hotpath profile results and analysis: `docs/hotpath-profile.md`
   noticeably faster with ~5% larger output. Make configurable. Final tuning item — do this
   right before 0.1 release after all other optimizations are locked in. (`pipeline.rs:1239`)
 
+- [ ] **`add_feature_to_layer` per-feature Vec pool** — 14.9M calls × 317 B avg = 4.4 GB.
+  Each call allocates `Vec<u32>` (geometry) + `Vec<(u16,u16)>` (tags), dropped at tile end.
+  Fix: Vec pool in per-rayon-worker scratch (same `map_init` pattern as `EncodeScratch`).
+  Pop from pool on decode, push back after encode. Near-zero alloc after warmup.
+  Arena (bumpalo) rejected — lifetime annotations on `Feature<'a>`, `LayerBuilder<'a>` too
+  invasive. Single reusable buffer rejected — merge needs all features to coexist.
+  (`wire_format.rs`, `pipeline.rs`)
+
+- [ ] **`merge_same_attr_geometries` buffer reuse + in-place merge** — 307K calls ×
+  11.8 KB avg = 3.5 GB. Three independent improvements:
+  (a) Hoist `FxHashMap` + `merged_geom` buffer into `MergeScratch`, `.clear()` between
+      tiles. Same `map_init` pattern. Eliminates 307K HashMap allocs (~50-60%).
+  (b) Eliminate tag clone+sort — tags are already deterministic from shortbread matching,
+      sort is always a no-op. Hash `&[(u16,u16)]` directly instead of cloning into Vec key.
+      Eliminates N tag clones per call (~20-30%).
+  (c) Merge in-place — append secondary geometries into first feature of each group, then
+      `retain` to remove dead features. Eliminates `new_features`, `kept`, drain+rebuild
+      (~5-10%).
+  Combined: ~80-90% reduction. (`mvt.rs`, `pipeline.rs`)
+
 - [ ] **Rayon alternatives for slice-based parallelism** — Research notes in previous git
   history. Key options: paralight, orx-parallel, chili, forte. Not a current bottleneck.
 

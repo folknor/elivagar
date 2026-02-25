@@ -224,3 +224,85 @@ Thread utilization: main 28.4s (15–101% CPU), 3 rayon workers ~4.5s each (51�
 
 Not directly comparable to plantasjen numbers due to different hardware, but serves as the
 baseline for future optimizations on this host.
+
+## Hotpath Profile — Denmark (2026-02-25, folk-pc)
+
+Dataset: `denmark-latest.osm.pbf` (483 MB). 32 GB RAM, NVMe.
+Commit: `96274ae` — includes ocean parallel flush, I/O hints, area fix, hotpath 0.13.
+Node index: 110 GB sparse file (3.4× RAM). `MADV_RANDOM` active, `MADV_POPULATE_READ` skipped.
+
+### Timing profile (single run, with ocean — wall 289.4s)
+
+| Function | Calls | Avg | P50 | P95 | P99 | Total | % Wall |
+|---|---|---|---|---|---|---|---|
+| `process_raw_way` | 6.6M | 368.54µs | 4.88µs | 2.52ms | 7.67ms | 2438.5s | 842% |
+| `phase_read_and_process` | 1 | 279.5s | — | — | — | 279.5s | 97% |
+| `flush_raw_way_batch` | 808 | 318.31ms | 229.38ms | 789.05ms | 1.11s | 257.2s | 89% |
+| `for_each_zoom_simplified` | 6.6M | 12.61µs | 2.33µs | 20.89µs | 88.06µs | 83.0s | 29% |
+| `emit_polygon_feature` | 4.5M | 11.88µs | 2.08µs | 20.59µs | 84.03µs | 54.0s | 19% |
+| `emit_line_feature` | 2.0M | 19.38µs | 3.80µs | 25.63µs | 195.84µs | 39.4s | 14% |
+| `match_element` | 10.1M | 1.32µs | 350ns | 3.39µs | 9.11µs | 13.3s | 5% |
+| `clip_polygon_into` | 8.2M | 1.37µs | 380ns | 2.37µs | 6.77µs | 11.3s | 4% |
+
+Thread utilization:
+
+| Thread | CPU% | User | Sys | Total |
+|---|---|---|---|---|
+| Main | 11–101% | 9.7s | 57.9s | 67.6s |
+| Rayon ×3 | 55–75% | ~7.7s | ~117s | ~124s each |
+
+Ocean: 0 features (0/53305 shapes in data bounds — Denmark land-only bbox).
+
+### Key observations
+
+**I/O dominated.** 110 GB node index on 32 GB RAM → every node lookup is a cold page fault.
+Main thread 86% sys, rayon workers 94% sys. `process_raw_way` avg inflated from ~5µs (dm6,
+64 GB) to 369µs — 71× slowdown from I/O wait, not CPU regression.
+
+**CPU work unchanged.** Call counts identical to dm6 (6.6M ways, 4.5M polygons, 2.0M lines).
+The relative ordering of CPU-bound functions (`for_each_zoom_simplified` > `emit_polygon` >
+`emit_line` > `match_element` > `clip_polygon_into`) is preserved.
+
+**New annotations.** `emit_ocean_polygon` and `write_sorted_chunk` added but not exercised:
+ocean produced 0 features, `write_sorted_chunk` (808 calls from PBF flush) below top 10.
+
+### Allocation profile (single run, with ocean — system allocator, no mimalloc)
+
+Total: **6.3 GB**. Global throughput: 56.1 GB alloc, 55.8 GB dealloc. RSS: 1.7 GB.
+
+| Function | Calls | Avg | P50 | P95 | P99 | Total | % |
+|---|---|---|---|---|---|---|---|
+| `process_raw_way` | 6.6M | 1.8 KB | 1.0 KB | 5.0 KB | 11.3 KB | 11.4 GB | 181% |
+| `for_each_zoom_simplified` | 6.6M | 1.5 KB | 807 B | 3.9 KB | 9.1 KB | 9.1 GB | 145% |
+| `emit_polygon_feature` | 4.5M | 1.5 KB | 794 B | 3.8 KB | 9.2 KB | 6.3 GB | 101% |
+| `add_feature_to_layer` | 14.9M | 317 B | 56 B | 876 B | 4.5 KB | 4.4 GB | 70% |
+| `merge_same_attr_geometries` | 307K | 11.8 KB | 5.3 KB | 67.4 KB | 260.0 KB | 3.5 GB | 55% |
+| `emit_line_feature` | 2.0M | 1.4 KB | 810 B | 4.1 KB | 9.0 KB | 2.8 GB | 45% |
+| `clip_polygon_into` | 8.2M | 320 B | 304 B | 1.3 KB | 2.7 KB | 2.5 GB | 39% |
+
+Per-thread:
+
+| Thread | Alloc | Dealloc | Diff |
+|---|---|---|---|
+| Main | 7.2 GB | 8.9 GB | -1.7 GB |
+| Rayon ×4 | ~4.2 GB each | ~3.5 GB each | ~700 MB each |
+
+### Allocation comparison vs previous profile
+
+PBF-phase allocators flat (within noise): `process_raw_way` 11.4 GB (was 11.3),
+`for_each_zoom_simplified` 9.1 GB (unchanged), `clip_polygon_into` 2.5 GB (unchanged).
+
+Assemble-phase allocators now visible in top 10:
+- **`add_feature_to_layer`**: 4.4 GB (70%), 14.9M calls, 317 B avg. Per-feature `Vec<u32>`
+  for geometry commands. Biggest exclusive allocator in the assemble phase.
+- **`merge_same_attr_geometries`**: 3.5 GB (55%), 307K calls, 11.8 KB avg. Per-layer-per-tile
+  geometry merging. P99 260 KB = large layers with many same-attr features.
+- `encode_tile_with` dropped out of top 10 (was 1.8 GB / 29%) — its sibling functions now rank
+  higher.
+
+### Next targets
+
+1. **`add_feature_to_layer`** — 14.9M × 317 B = 4.4 GB. Each call allocates a `Vec<u32>` for
+   geometry commands. Reusing a thread-local buffer could eliminate most of this.
+2. **`merge_same_attr_geometries`** — 307K × 11.8 KB = 3.5 GB. Allocates during geometry
+   merge (concatenating command vecs). Buffer reuse or in-place merging could help.

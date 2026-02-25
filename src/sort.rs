@@ -216,6 +216,7 @@ impl SortWriter {
 ///
 /// Used by `SortWriter::flush_chunk` and by parallel ocean processing
 /// (each rayon worker flushes its own chunk files directly).
+#[hotpath::measure]
 #[allow(clippy::cast_possible_truncation)]
 pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path) -> io::Result<()> {
     records.sort_unstable_by_key(|r| r.key);
