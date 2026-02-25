@@ -147,35 +147,29 @@ impl SortWriter {
         SortReader::new(&self.chunk_paths)
     }
 
+    /// Read accessor for the temporary directory.
+    pub fn tmp_dir(&self) -> &Path {
+        &self.tmp_dir
+    }
+
+    /// Read accessor for the chunk size budget.
+    pub fn chunk_size_bytes(&self) -> usize {
+        self.chunk_size_bytes
+    }
+
+    /// Adopt externally-written chunk files (e.g., from parallel ocean processing).
+    /// Files must be in standard chunk format (sorted records). The chunk_count is
+    /// updated so that subsequent flushes and `from_dir` scans remain consistent.
+    pub fn adopt_chunk_files(&mut self, paths: Vec<PathBuf>) {
+        self.chunk_count += paths.len();
+        self.chunk_paths.extend(paths);
+    }
+
     /// Sort the in-memory buffer by key and write a chunk file to disk.
-    ///
-    /// Chunk file format (all little-endian):
-    /// ```text
-    /// u32 record_count
-    /// For each record:
-    ///   u64 key
-    ///   u32 data_len
-    ///   [u8; data_len] data
-    /// ```
     #[allow(clippy::cast_possible_truncation)]
     fn flush_chunk(&mut self) -> io::Result<()> {
-        self.buffer.sort_unstable_by_key(|r| r.key);
-
         let path = self.tmp_dir.join(format!("chunk_{:04}.bin", self.chunk_count));
-        let file = File::create(&path)?;
-        let mut writer = BufWriter::with_capacity(1 << 20, file);
-
-        let count = self.buffer.len() as u32;
-        writer.write_all(&count.to_le_bytes())?;
-
-        for record in &self.buffer {
-            writer.write_all(&record.key.to_le_bytes())?;
-            let data_len = record.data.len() as u32;
-            writer.write_all(&data_len.to_le_bytes())?;
-            writer.write_all(&record.data)?;
-        }
-
-        writer.flush()?;
+        write_sorted_chunk(&mut self.buffer, &path)?;
 
         self.chunk_paths.push(path);
         self.chunk_count += 1;
@@ -183,6 +177,40 @@ impl SortWriter {
         self.buffer_bytes = 0;
         Ok(())
     }
+}
+
+/// Write records as a sorted chunk file in the standard format.
+///
+/// Records are sorted in-place by key, then written as:
+/// ```text
+/// u32 record_count
+/// For each record:
+///   u64 key
+///   u32 data_len
+///   [u8; data_len] data
+/// ```
+///
+/// Used by `SortWriter::flush_chunk` and by parallel ocean processing
+/// (each rayon worker flushes its own chunk files directly).
+#[allow(clippy::cast_possible_truncation)]
+pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path) -> io::Result<()> {
+    records.sort_unstable_by_key(|r| r.key);
+
+    let file = File::create(path)?;
+    let mut writer = BufWriter::with_capacity(1 << 20, file);
+
+    let count = records.len() as u32;
+    writer.write_all(&count.to_le_bytes())?;
+
+    for record in records.iter() {
+        writer.write_all(&record.key.to_le_bytes())?;
+        let data_len = record.data.len() as u32;
+        writer.write_all(&data_len.to_le_bytes())?;
+        writer.write_all(&record.data)?;
+    }
+
+    writer.flush()?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

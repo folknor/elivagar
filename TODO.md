@@ -44,14 +44,6 @@ Investigated-and-rejected optimizations are documented in code comments at each 
   once in O(n log n), then each zoom level filters by threshold — no re-scanning. Would
   replace DP entirely. Requires new algorithm, tolerance recalibration, and visual verification.
 
-- [ ] **Early termination in `find_farthest()`.** The DP inner loop always scans all
-  intermediate points. Could prune branches via running max-distance bounds. Limited benefit —
-  the first DP call (z13, full N) dominates. (`geometry.rs:265-289`)
-
-- [ ] **Ocean processing: parallel collect then serial push** — `par_iter` collects into
-  `Vec<Vec<SortRecord>>`, then pushes serially. Each rayon worker could flush to a
-  thread-local sort chunk file directly. (`ocean.rs:180-203`)
-
 - [ ] **Compression level tradeoff [pre-release]** — Level 6 is used; level 3-4 would be
   noticeably faster with ~5% larger output. Make configurable. Final tuning item — do this
   right before 0.1 release after all other optimizations are locked in. (`pipeline.rs:1239`)

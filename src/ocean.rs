@@ -168,8 +168,16 @@ pub(crate) fn process_ocean_shapefile(
     let poly_count = polygons.len();
     eprintln!("  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons — processing in parallel");
 
-    // --- Process phase: parallel with rayon ---
+    // --- Process phase: parallel with rayon, direct chunk flushing ---
+    //
+    // Each rayon worker accumulates records in a thread-local buffer and flushes
+    // directly to a chunk file when the buffer exceeds chunk_size_bytes. This
+    // avoids holding all ocean sort records in memory simultaneously — at planet
+    // scale that could be 10-30 GB. The previous approach (par_iter().collect()
+    // into Vec<Vec<SortRecord>> + serial push) was fine for regional extracts but
+    // would blow memory and serialize sort+flush at planet scale.
     use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let ocean_layer = Layer::Ocean as u8;
     let empty_attrs: Vec<shortbread::Attr> = Vec::new();
@@ -178,27 +186,71 @@ pub(crate) fn process_ocean_shapefile(
         eprintln!("  Land mask: {}/65536 z8 cells, filtering enabled", mask.count_set());
     }
 
-    let results: Vec<Vec<SortRecord>> = polygons
-        .par_iter()
-        .enumerate()
-        .map(|(idx, poly)| {
-            let mut records = Vec::new();
-            emit_ocean_polygon(
-                idx as u64, &poly.outer, &poly.inners,
-                min_zoom, max_zoom, ocean_layer, &empty_attrs,
-                land_mask, &mut records,
-            );
-            records
-        })
-        .collect();
+    // Ocean chunks use the same chunk_NNNN.bin naming (starting after PBF chunks)
+    // so that --skip-to sort (SortReader::from_dir sequential scan) finds them.
+    let chunk_id = AtomicUsize::new(sort_writer.chunk_count());
+    let chunk_dir = sort_writer.tmp_dir().to_path_buf();
+    let chunk_size = sort_writer.chunk_size_bytes();
 
-    let mut count: u64 = 0;
-    for batch in results {
-        count += batch.len() as u64;
-        for record in batch {
-            sort_writer.push(record).expect("sort push failed");
+    struct OceanAcc {
+        records: Vec<SortRecord>,
+        bytes: usize,
+        chunk_paths: Vec<std::path::PathBuf>,
+        count: u64,
+    }
+
+    impl OceanAcc {
+        fn flush(&mut self, chunk_dir: &std::path::Path, chunk_id: &AtomicUsize) {
+            if self.records.is_empty() {
+                return;
+            }
+            let id = chunk_id.fetch_add(1, Ordering::Relaxed);
+            let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
+            sort::write_sorted_chunk(&mut self.records, &path)
+                .expect("ocean chunk write failed");
+            self.chunk_paths.push(path);
+            self.count += self.records.len() as u64;
+            self.records.clear();
+            self.bytes = 0;
         }
     }
+
+    let result = polygons
+        .par_iter()
+        .enumerate()
+        .fold(
+            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0 },
+            |mut acc, (idx, poly)| {
+                let before = acc.records.len();
+                emit_ocean_polygon(
+                    idx as u64, &poly.outer, &poly.inners,
+                    min_zoom, max_zoom, ocean_layer, &empty_attrs,
+                    land_mask, &mut acc.records,
+                );
+                for r in &acc.records[before..] {
+                    acc.bytes += r.data.len() + 8;
+                }
+                if acc.bytes >= chunk_size {
+                    acc.flush(&chunk_dir, &chunk_id);
+                }
+                acc
+            },
+        )
+        .map(|mut acc| {
+            acc.flush(&chunk_dir, &chunk_id);
+            acc
+        })
+        .reduce(
+            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0 },
+            |mut a, b| {
+                a.chunk_paths.extend(b.chunk_paths);
+                a.count += b.count;
+                a
+            },
+        );
+
+    sort_writer.adopt_chunk_files(result.chunk_paths);
+    let count = result.count;
 
     eprintln!("  {poly_count} polygons, {count} features");
     count

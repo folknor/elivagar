@@ -283,6 +283,13 @@ fn dp_recurse(points: &[Point], start: usize, end: usize, tol_sq: f64, keep: &mu
 }
 
 /// Find the point farthest from the line segment `points[start]..points[end]`.
+///
+/// Must scan all intermediate points — DP correctness requires splitting at the
+/// true maximum, not just any above-tolerance point. Early termination was
+/// investigated and rejected: there's no usable upper bound to prune against,
+/// and the loop body (one `perp_dist_sq` + compare per point) is already minimal.
+/// The real DP cost driver is the number of recursive calls, addressed by the
+/// cascade-level optimizations (subpixel skip, convergence skip, vertex pre-check).
 fn find_farthest(points: &[Point], start: usize, end: usize) -> (usize, f64) {
     let a = points[start];
     let b = points[end];
