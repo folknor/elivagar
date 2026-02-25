@@ -66,6 +66,19 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   Impact: 1.8 GB / 3.2% of alloc, in the assemble phase (7% of wall time). Not worth the
   complexity. (`wire_format.rs:131, mvt.rs:54-58`)
 
+- [ ] **`intern_value` allocates String for every cache hit** — **Investigated, easy win.**
+  `intern_value(Value::String(s.to_string()))` in `add_feature_to_layer` allocates a `String`
+  for *every* string attribute occurrence, even when the value already exists in the intern
+  table (the common case — values like "residential" repeat across thousands of features).
+  The `String` is constructed before the HashMap lookup, used for comparison, then dropped.
+
+  With ~30-45M string attribute occurrences per Denmark run and ~90% being duplicates,
+  that's ~27-40M wasted alloc+dealloc cycles at ~10-15ns each ≈ 0.3-0.6s. Fix: add
+  `intern_value_str(&str) -> u16` that looks up by borrowed `&str` (via `Borrow` trait or
+  a separate string→index map), only allocating `String` on cache miss. Touches `mvt.rs`
+  (new method) and `wire_format.rs:186` (call site). No struct changes needed.
+  (`mvt.rs:122-131, wire_format.rs:183-186`)
+
 - [x] **Sort chunk write buffer too small** — Was default 8 KB BufWriter; now 1 MB. (`sort.rs:166`)
 
 ## Performance: Algorithms & Data Structures (Medium-High Impact)
@@ -100,6 +113,43 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   intermediate points. Could maintain a running "minimum possible max distance" from the
   recursion tree to prune branches. Limited benefit — the first DP call (z13, full N points)
   dominates, and that call can't be pruned much. (`geometry.rs:265-289`)
+
+  **Option D: DP max-deviation tracking for cascade skip.** If `simplify_into` returned the
+  maximum perpendicular deviation it found, the cascade could check: "is max deviation <
+  next zoom's tolerance?" If yes, skip DP at that zoom and all coarser zooms — the cascade
+  is already optimal. Currently there's no way to know without running DP. Requires threading
+  the max deviation out of `find_farthest` → `dp_recurse` → `simplify_into`. Medium effort,
+  medium impact — eliminates DP invocations for features that have already converged.
+  (`geometry.rs:262-320`)
+
+  **Option E: Vertex count pre-check before DP.** If `cascade.len() <= min_points` before
+  calling `simplify_into`, DP can't reduce further — skip it. Currently checked *after* DP
+  at `geometry.rs:350`. Moving before saves a full DP invocation for already-collapsed
+  features. Low effort, low impact. (`geometry.rs:347-351`)
+
+- [ ] **Recompute bbox from simplified cascade per zoom** — **Investigated, promising.**
+  The bbox passed to `emit_polygon_feature` / `emit_line_feature` is computed once from
+  full-resolution coords (`pipeline.rs:630`), never recomputed after simplification. At low
+  zooms where DP aggressively reduces vertices, the simplified geometry may span far fewer
+  tiles than the original bbox suggests. This causes `clip_polygon_into` to be called on
+  tiles where the geometry can't possibly intersect, producing empty results.
+
+  Recomputing bbox from the simplified cascade inside the `for_each_zoom_simplified` callback
+  is O(n) where n is the already-small simplified vertex count. Eliminates wasted tile
+  iterations + S-H clipping calls. For a feature whose simplified form at z6 fits in 1 tile
+  but whose original bbox spans 4 tiles, this eliminates 3 full S-H clip passes.
+
+  Medium effort (callback currently receives `&[Point]` simplified coords; need to compute
+  bbox and pass to tile iteration). High impact at low zooms.
+  (`pipeline.rs:630,990-999, geometry.rs:853-869`)
+
+- [ ] **Outcode pre-test before Sutherland-Hodgman clipping** — Before running
+  `clip_polygon_into`, compute bitwise AND of all vertex outcodes against the tile rect.
+  If all vertices share a common outside bit (all left, all right, etc.), the clip must
+  produce empty — skip the full 4-edge S-H pass. One O(n) pass with 4 comparisons per
+  vertex vs S-H's 4×O(n) with intersection math. Low effort, useful when the simplified
+  bbox is still larger than the actual geometry extent (e.g. L-shaped features).
+  (`geometry.rs:575-598`)
 
 - [ ] **POI `contains()` linear scan on 50-entry arrays** — **Investigated, not worth it.**
   7 arrays (5-51 entries) searched via `.contains()`. All sorted except `emergency` (7 entries).
@@ -142,7 +192,16 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   available. Eliminates one `Vec<Point>` clone per member way per boundary relation.
   (`pipeline.rs:675-740,825-836`)
 
-- [ ] **MVT value interning uses SipHash** — `DefaultHasher` is slower than needed for non-adversarial input. Use `FxHasher` or `ahash`. (`mvt.rs:366-379`)
+- [ ] **MVT value interning uses SipHash** — **Investigated, low priority.**
+  `key_map` and `value_map` HashMaps in `LayerBuilder` use `DefaultHasher` (SipHash).
+  Called from `add_feature_to_layer` (14.9M calls, 274ns avg). Each call does ~3-5 hash
+  lookups (1 key + 2-4 values). SipHash costs ~15-25ns/hash → ~60-125ns per feature,
+  potentially 20-45% of the 274ns avg. FxHash at ~3-5ns/hash would save ~50-100ns per
+  feature (~1-1.5s CPU across threads, ~0.3s wall on a 29s run). But assemble is only
+  6% of wall time, so wall impact is ~1%. HashMaps are small (few dozen to few hundred
+  entries per tile) — collision resistance doesn't matter. Adds a dependency (`rustc-hash`
+  or `ahash`) for minor gain. Worth doing if already pulling in FxHash for another reason.
+  (`mvt.rs:86-88,112-131`)
 
 - [ ] **Rayon alternatives for slice-based parallelism** — Wild linker discussion
   ([davidlattimore/wild#1072](https://github.com/davidlattimore/wild/discussions/1072)) surveys

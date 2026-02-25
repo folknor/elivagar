@@ -176,6 +176,9 @@ across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-l
    Early-exit for unmatched relations skips member way resolution. `prepare_relation` dropped
    from 4.0s (12%) to below top 10. `process_raw_way` avg −20% (15.73→12.64µs).
 7. **Further simplification optimization** — remaining options: Visvalingam-Whyatt (O(n log n)
-   one-time importance, then threshold per zoom) or DP early termination in `find_farthest()`.
-8. **Polygon-focused optimization** — polygons are 2.3× the workload of lines. Any polygon-specific
-   improvement (e.g. ring area pre-filter before per-zoom processing) has outsized impact.
+   one-time importance, then threshold per zoom), DP max-deviation tracking for cascade skip,
+   or recomputing bbox from simplified cascade to eliminate wasted tile clips at low zooms.
+8. **Polygon-focused optimization** — polygons are 2.3× the total workload of lines, but
+   per-feature cost is only 4% higher (4.31µs vs 4.13µs). The 2.3× ratio is almost entirely
+   the 2.25× feature count. Optimizations that help both paths (simplification, bbox recompute,
+   outcode pre-test) have more impact than polygon-specific work.
