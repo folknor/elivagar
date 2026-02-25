@@ -70,6 +70,38 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
 
 ## Performance: Algorithms & Data Structures (Medium-High Impact)
 
+- [ ] **Simplification P99 tail dominates CPU** — **Investigated.** `for_each_zoom_simplified`
+  is the #1 CPU consumer (72.8s total, 182% wall). P50=800ns, P99=43µs (54× ratio). Complex
+  coastlines/boundaries with 500-1000+ vertices run Douglas-Peucker O(n²) across 9-10 zoom
+  levels. Cascading simplification is already implemented (z14→z13→...→z_lo), buffers hoisted.
+
+  **What's already optimized:**
+  - Cascading: each zoom simplifies previous zoom's output (halves input each level)
+  - Buffer reuse: `keep_buf`/`simp_buf` hoisted, `mem::swap` avoids copies
+  - Z14 skips DP entirely (`if z < 14`)
+  - Min-points early exit (loop breaks when geometry collapses below 2/4 points)
+
+  **Optimization options (ordered by bang-for-buck):**
+
+  **Option A: Pre-simplification bbox subpixel check (recommended).** Before running DP at each
+  zoom level, compute the cascade's bounding box in tile coordinates. If the bbox diagonal is
+  smaller than ~1 pixel, skip that zoom and all coarser zooms (break the loop). Currently
+  subpixel filtering only happens post-clipping in the emit functions (too late — DP already
+  ran). This eliminates entire DP calls for features that are invisible at coarse zooms. Simple,
+  zero risk, directly targets the tail. (`geometry.rs:305-327`)
+
+  **Option B: Visvalingam-Whyatt instead of Douglas-Peucker.** VW computes a per-vertex
+  "importance" (effective area) once in O(n log n) using a priority queue, then each zoom level
+  just filters vertices by importance threshold — no re-scanning. Multi-zoom cost drops from
+  ~1.33×N² to O(n log n) + O(n × zoom_levels). Larger change, different simplification
+  behavior (VW preserves shape topology better than DP for some geometries). Would require
+  new algorithm implementation, tolerance recalibration, and visual verification.
+
+  **Option C: Early termination in `find_farthest()`.** The inner loop always scans all
+  intermediate points. Could maintain a running "minimum possible max distance" from the
+  recursion tree to prune branches. Limited benefit — the first DP call (z13, full N points)
+  dominates, and that call can't be pruned much. (`geometry.rs:265-289`)
+
 - [ ] **POI `contains()` linear scan on 50-entry arrays** — `AMENITY_VALUES` (51 entries), `SHOP_VALUES` (37 entries) searched linearly. These are already sorted; use `binary_search()` or `phf` perfect hash set. (`pois.rs:93-157, 219-233`)
 
 - [x] **Projection transcendentals called billions of times** — Fixed: 18-bit LUT (262K entries,
@@ -89,8 +121,6 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
 - [ ] **Relation tag String cloning** — Every relation's tags are cloned from `&str` to `String` because PBF borrows don't survive the batch boundary. Use string interning or buffer raw PBF bytes. ~14M relations * ~10 tags * ~30 bytes = ~4 GB. (`pipeline.rs:666-668`)
 
 - [ ] **`boundary_way_coords.push(merc.clone())` duplicates geometry** — Clones full projected geometry for boundary relations. Store indices into `member_ways` instead. (`pipeline.rs:654`)
-
-- [ ] **Sort chunk write buffer too small** — Default BufWriter (8 KB) for chunk writes. Use `BufWriter::with_capacity(1 << 20, file)` (1 MB). (`sort.rs:158-159`)
 
 - [ ] **MVT value interning uses SipHash** — `DefaultHasher` is slower than needed for non-adversarial input. Use `FxHasher` or `ahash`. (`mvt.rs:366-379`)
 
