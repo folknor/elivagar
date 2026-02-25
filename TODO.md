@@ -20,8 +20,7 @@
 
 ## Bugs
 
-- [ ] **[P2]** `area_sq_meters` cos²(lat) approximation — moderate risk for high-latitude
-  regions near area thresholds. See `geometry.rs` docstring for details and fix options.
+(none)
 
 ## Quality
 

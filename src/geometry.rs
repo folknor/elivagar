@@ -768,32 +768,34 @@ pub fn reverse_ring(ring: &mut [Point]) {
 // Area calculation in square meters (approximate)
 // ---------------------------------------------------------------------------
 
-/// Approximate area of a ring in square meters.
+/// Area of a ring in square meters using per-edge latitude correction.
 ///
-/// The ring is in Mercator [0,1] space. We scale by Earth's circumference squared
-/// and apply a latitude correction for Mercator distortion.
+/// The ring is in Mercator [0,1] space. Mercator is conformal, so local scale
+/// at latitude φ is C·cos(φ) in both x and y. The real-world area element is
+/// `C² · cos²(φ(y)) · dx dy`. Via Green's theorem this becomes the line
+/// integral `∮ x · cos²(φ(y)) dy`, discretized per edge with midpoint rule.
 ///
-/// Known limitation: uses a single centroid latitude for the cos²(lat) correction.
-/// For polygons spanning many degrees of latitude (e.g. Russia, Canada), this can
-/// underestimate area by 20-30%. Safe for current thresholds (2M/700K/100K km²)
-/// because affected features are far above their thresholds, but a ~700K km² region
-/// at 70°N could be misclassified. Fix: per-edge latitude weighting or
-/// latitude-range-aware cos² averaging.
+/// cos²(φ) is computed directly from Mercator y: cos²(lat(y)) = sech²(π(1-2y)).
+/// One cosh() call per edge, O(n). Not on the hotpath.
 pub fn area_sq_meters(ring: &[Point]) -> f64 {
-    let merc_area = signed_area(ring).abs();
-    // Find centroid y for latitude correction
-    let avg_y = ring.iter().map(|p| p.y).sum::<f64>() / ring.len() as f64;
-    let lat = merc_y_to_lat(avg_y);
-    let lat_rad = lat * PI / 180.0;
-    let cos_lat = lat_rad.cos();
-    // In Mercator [0,1], x maps to C meters, y maps to C meters at equator.
-    // At latitude lat, x-scale is C * cos(lat), but Mercator y-scale compensates.
-    // The actual area is: merc_area * C^2 * cos(lat)^2 approximately.
-    // However, Mercator y already stretches by 1/cos(lat), so the y-extent in real
-    // meters is roughly C * cos(lat) * (merc_dy / cos(lat)) = C * merc_dy.
-    // Net area ≈ merc_area * C^2 is a rough first-order approximation.
-    // For better accuracy, we scale by cos²(lat) since both axes in [0,1] span C.
-    merc_area * EARTH_CIRCUMFERENCE * EARTH_CIRCUMFERENCE * cos_lat * cos_lat
+    if ring.len() < 3 {
+        return 0.0;
+    }
+    let n = ring.len();
+    let c_sq = EARTH_CIRCUMFERENCE * EARTH_CIRCUMFERENCE;
+    let mut sum = 0.0;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let dy = ring[j].y - ring[i].y;
+        let x_sum = ring[i].x + ring[j].x;
+        let y_mid = (ring[i].y + ring[j].y) * 0.5;
+        // cos²(lat(y)) = sech²(π(1 - 2y)) = 1/cosh²(π(1 - 2y))
+        let arg = PI * (1.0 - 2.0 * y_mid);
+        let cosh_val = arg.cosh();
+        let cos_sq_lat = 1.0 / (cosh_val * cosh_val);
+        sum += x_sum * dy * cos_sq_lat;
+    }
+    (sum.abs() * 0.5) * c_sq
 }
 
 // ---------------------------------------------------------------------------
@@ -1592,6 +1594,56 @@ mod tests {
         assert!(
             area_km2 > 10_000.0 && area_km2 < 15_000.0,
             "1°×1° at equator ≈ 12,000 km², got {area_km2:.0} km²",
+        );
+    }
+
+    #[test]
+    fn test_area_sq_meters_high_latitude() {
+        // A 1° × 1° box at 70°N. At 70°N, 1° longitude ≈ 38 km, 1° latitude ≈ 111 km.
+        // Expected area ≈ 38 × 111 ≈ 4,218 km².
+        let sw = project(70.0, 10.0);
+        let se = project(70.0, 11.0);
+        let ne = project(71.0, 11.0);
+        let nw = project(71.0, 10.0);
+        let ring = vec![sw, se, ne, nw];
+        let area_km2 = area_sq_meters(&ring) / 1e6;
+        assert!(
+            area_km2 > 3_500.0 && area_km2 < 5_000.0,
+            "1°×1° at 70°N ≈ 4,200 km², got {area_km2:.0} km²",
+        );
+    }
+
+    #[test]
+    fn test_area_sq_meters_wide_latitude_span() {
+        // A 10° longitude × 25° latitude box from 55°N to 80°N with vertices
+        // at every degree of latitude — simulating a real OSM polygon boundary.
+        //
+        // Reference area via spherical integration:
+        //   A = R² × Δλ × ∫cos(φ)dφ = (C/2π)² × (10°×π/180) × [sin(80°)-sin(55°)]
+        //   ≈ 1,175,000 km²
+        //
+        // With dense vertices, each edge spans ~1° of latitude, so the per-edge
+        // midpoint cos² correction is accurate.
+        let mut ring = Vec::new();
+        // Bottom edge: 55°N, west to east
+        ring.push(project(55.0, 20.0));
+        ring.push(project(55.0, 30.0));
+        // Right edge: 30°E, ascending each degree
+        for lat in 56..=80 {
+            ring.push(project(lat as f64, 30.0));
+        }
+        // Top edge: 80°N, east to west
+        ring.push(project(80.0, 20.0));
+        // Left edge: 20°E, descending each degree
+        for lat in (55..80).rev() {
+            ring.push(project(lat as f64, 20.0));
+        }
+
+        let area_km2 = area_sq_meters(&ring) / 1e6;
+        // Allow ±5% from the spherical reference value.
+        assert!(
+            area_km2 > 1_115_000.0 && area_km2 < 1_235_000.0,
+            "10°×25° at 55-80°N ≈ 1,175,000 km², got {area_km2:.0} km²",
         );
     }
 
