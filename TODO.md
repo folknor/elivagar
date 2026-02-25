@@ -107,7 +107,14 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   2 MB) with linear interpolation replaces tan/cos/ln in `project_e7`. Error: 0.03 pixels at z14.
   `project()` (exact transcendentals) kept for tests and one-off calls. (`geometry.rs:103-155`)
 
-- [ ] **`merge_same_attr_geometries` per-tile HashMap** — Clones and sorts tags for every feature per tile, allocates Vec for hash key. Hash tags in-place or pre-sort during insertion. (`mvt.rs:454-517`)
+- [ ] **`merge_same_attr_geometries` per-tile HashMap** — **Investigated, not worth it.**
+  Clones and sorts tags for every feature per tile. Tried two alternatives:
+  (1) Sort features directly by (geom_type, tags), merge adjacent runs — regressed assemble
+  3.5s→5.8s (moving Feature structs with 3 Vecs each is expensive).
+  (2) Sort indices by (geom_type, tags), merge runs — still regressed 3.5s→4.7s (O(n log n)
+  tag slice comparisons worse than HashMap's O(n) clone+hash). Pre-sorting tags during
+  insertion adds 16M sort calls per Denmark run. Assemble is only 7% of wall time;
+  the clone+sort HashMap is already the right tradeoff. (`mvt.rs:454-517`)
 
 ## Performance: Parallelism & I/O (Medium Impact)
 
@@ -122,7 +129,11 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   instead of cloned tags. Also skips member way resolution for unmatched relations.
   (`pipeline.rs:669-735`)
 
-- [ ] **`boundary_way_coords.push(merc.clone())` duplicates geometry** — Clones full projected geometry for boundary relations. Store indices into `member_ways` instead. (`pipeline.rs:654`)
+- [x] **`boundary_way_coords.push(merc.clone())` duplicates geometry** — Fixed: replaced
+  `boundary_way_coords: Vec<Vec<Point>>` with `is_boundary: bool`. Line emission iterates
+  `member_ways` directly — `multipolygon::assemble()` only borrows, so coords are still
+  available. Eliminates one `Vec<Point>` clone per member way per boundary relation.
+  (`pipeline.rs:675-740,825-836`)
 
 - [ ] **MVT value interning uses SipHash** — `DefaultHasher` is slower than needed for non-adversarial input. Use `FxHasher` or `ahash`. (`mvt.rs:366-379`)
 

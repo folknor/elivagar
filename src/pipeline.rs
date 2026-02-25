@@ -674,7 +674,7 @@ struct PreparedRelation {
     osm_id: u64,
     matches: SmallVec<[LayerMatch; 4]>,
     member_ways: Vec<MemberWay>,
-    boundary_way_coords: Vec<Vec<Point>>,
+    is_boundary: bool,
 }
 
 const REL_BATCH_SIZE: usize = 1024;
@@ -706,7 +706,6 @@ fn prepare_relation(
     let is_boundary = tag_helper.has_value("boundary", "administrative");
 
     let mut member_ways: Vec<MemberWay> = Vec::new();
-    let mut boundary_way_coords: Vec<Vec<Point>> = Vec::new();
 
     for member in rel.members() {
         let MemberId::Way(way_id) = member.id else {
@@ -718,10 +717,6 @@ fn prepare_relation(
                 .iter()
                 .map(|&(lat, lon)| geometry::project_e7(lat, lon))
                 .collect();
-
-            if is_boundary {
-                boundary_way_coords.push(merc.clone());
-            }
 
             member_ways.push(MemberWay { role, coords: merc });
         }
@@ -736,7 +731,7 @@ fn prepare_relation(
         osm_id: rel.id() as u64,
         matches,
         member_ways,
-        boundary_way_coords,
+        is_boundary,
     })
 }
 
@@ -823,14 +818,22 @@ fn process_prepared_relation(
                 }
             }
             GeomExpect::Line => {
-                for way_coords in &rel.boundary_way_coords {
-                    if way_coords.len() < 2 {
+                // Boundary line emission: iterate member_ways directly instead of
+                // a separate cloned Vec. multipolygon::assemble() only borrows
+                // &[MemberWay], so coords are still available here. GeomExpect::Line
+                // is only produced by match_boundaries_line which requires
+                // boundary=administrative — same predicate as is_boundary.
+                if !rel.is_boundary {
+                    continue;
+                }
+                for mw in &rel.member_ways {
+                    if mw.coords.len() < 2 {
                         continue;
                     }
-                    let bbox = merc_bbox(way_coords);
+                    let bbox = merc_bbox(&mw.coords);
                     land_mask.mark_bbox(&bbox);
                     emit_line_feature(
-                        rel.osm_id, way_coords, &bbox, m, z_lo, z_hi, &mut records,
+                        rel.osm_id, &mw.coords, &bbox, m, z_lo, z_hi, &mut records,
                     );
                 }
             }

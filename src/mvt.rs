@@ -456,6 +456,17 @@ impl LayerBuilder {
     /// attribute tags into a single multi-geometry feature. This reduces
     /// feature counts in the encoded tile without losing any visual
     /// information. Point features are skipped (not merged).
+    ///
+    /// Uses a HashMap keyed by (GeomType, sorted tags) to group features.
+    /// This clones + sorts tags per feature — investigated alternatives:
+    /// (1) Sorting Feature structs directly (by geom_type, tags): regressed
+    ///     assemble 3.5s→5.8s — moving Features (3 Vecs each) is expensive.
+    /// (2) Sorting indices then merging runs: still regressed 3.5s→4.7s —
+    ///     O(n log n) tag slice comparisons slower than HashMap's O(n) amortized.
+    /// (3) Pre-sorting tags at insertion + hash-based grouping: adds 16M sort
+    ///     calls per Denmark run for marginal benefit.
+    /// The clone+sort HashMap is already the right tradeoff: assemble is only
+    /// 7% of wall time, and mimalloc makes the small Vec clones cheap.
     pub fn merge_same_attr_geometries(&mut self) {
         if self.features.len() < 2 {
             return;
