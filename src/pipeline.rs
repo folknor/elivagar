@@ -365,6 +365,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         .expect("failed to convert node index to reader");
                     reader.advise_random();
                     reader.advise_hugepage();
+                    reader.advise_populate_read();
                     node_reader = Some(reader);
                     eprintln!("  Node index finalized ({node_count} nodes), processing ways...");
                 }
@@ -434,6 +435,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                 let reader = ni.into_reader().expect("failed to convert node index to reader");
                 reader.advise_random();
                 reader.advise_hugepage();
+                reader.advise_populate_read();
                 node_reader = Some(reader);
             }
         }

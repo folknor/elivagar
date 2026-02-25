@@ -201,6 +201,25 @@ impl NodeIndexReader {
         #[cfg(target_os = "linux")]
         self.mmap.advise(memmap2::Advice::HugePage).ok();
     }
+
+    /// Prefault the entire mmap into the page cache via a sequential read pass.
+    /// Only activates when the index fits in RAM (file_len <= 50% of physical
+    /// RAM) — the inverse of `advise_random()`. Sequential prefaulting is faster
+    /// than random demand-faulting during parallel rayon way processing because
+    /// the kernel can optimize with readahead.
+    ///
+    /// At planet scale (96 GB > 64 GB RAM), skip: prefaulting would read the
+    /// entire index sequentially only to have pages evicted before use.
+    /// Requires Linux 5.14+; silently ignored on older kernels or non-Linux.
+    pub fn advise_populate_read(&self) {
+        #[cfg(target_os = "linux")]
+        {
+            let ram = ram_bytes();
+            if ram > 0 && self.file_len <= ram / 2 {
+                self.mmap.advise(memmap2::Advice::PopulateRead).ok();
+            }
+        }
+    }
 }
 
 #[cfg(test)]

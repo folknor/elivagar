@@ -83,31 +83,31 @@ high impact at planet scale.
 - [x] **Way index `MADV_RANDOM` threshold.** Now conditional on total way index size
   exceeding 50% of RAM, matching node index threshold logic.
 
-### Tier 2: Planet-specific (NVMe, Linux 6.14+)
+### Tier 2: Planet-specific (NVMe, Linux 5.14+)
 
 At planet scale the node index (96 GB) exceeds typical 64 GB RAM. Every cache miss
 is a random 4 KB read — ~10µs on NVMe, ~5ms on HDD. These items assume NVMe and
 recent kernels.
 
-- [ ] **`MADV_POPULATE_READ` for node index prefaulting (Linux 5.14+).** After node
+- [x] **`MADV_POPULATE_READ` for node index prefaulting (Linux 5.14+).** After node
   write phase, prefault pages before way processing begins. Currently pages fault on
   demand during parallel rayon way processing. Prefaulting does a sequential read
   pass the kernel can optimize with readahead. **Only beneficial when the index fits
   in RAM** (regional extracts up to ~Germany). At planet scale (96 GB > 64 GB RAM),
   skip — prefaulting would just evict pages that need faulting again.
-  Use the same RAM threshold as `advise_random()`.
+  Uses the inverse of `advise_random()`'s RAM threshold.
 
-- [ ] **O_DIRECT for sort chunk writes.** Sort chunks (100+ GB) are written during
-  the PBF phase — exactly when the node index needs maximum page cache residency.
-  Without `O_DIRECT`, chunk writes pollute the cache, evicting hot node index pages.
-  `O_DIRECT` bypasses the cache entirely. Requires page-aligned buffers (replace
-  BufWriter with aligned write path, similar to pbfhogg's `DirectWriter`).
-  Feature-gate under `linux-direct-io`.
+- [x] **`FADV_DONTNEED` after sort chunk writes.** Sort chunks (100+ GB) are written
+  during the PBF phase — exactly when the node index needs maximum page cache
+  residency. Each chunk's pages are evicted from cache immediately after writing via
+  `fadvise(POSIX_FADV_DONTNEED)`. Simpler than `O_DIRECT` (no aligned-buffer
+  infrastructure) with the same net effect: chunk data doesn't accumulate in cache.
+  Applied unconditionally in `write_sorted_chunk()`.
 
-- [ ] **O_DIRECT or `FADV_DONTNEED` for PMTiles temp blob.** The tile blob temp file
-  (100-200 GB at planet) is written sequentially then read back once. Without hints
-  it consumes the entire page cache. `O_DIRECT` on the write path is cleanest;
-  alternatively interleave `FADV_DONTNEED` calls during read-back.
+- [x] **`FADV_SEQUENTIAL` + `FADV_DONTNEED` for PMTiles temp blob.** The tile blob
+  temp file (100-200 GB at planet) is written sequentially then read back once.
+  `FADV_SEQUENTIAL` on the read-back file hints aggressive readahead;
+  `FADV_DONTNEED` after the copy evicts all read-back pages from cache.
   (`pmtiles_writer.rs`)
 
 - [ ] **io_uring: not applicable.** elivagar is CPU-bound (DP simplification, S-H

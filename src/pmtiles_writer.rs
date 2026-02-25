@@ -237,8 +237,12 @@ impl PmtilesWriter {
             TileBlob::File { writer, path: blob_path, .. } => {
                 writer.flush()?;
                 let blob_file = File::open(&*blob_path)?;
+                // Hint sequential readahead for the read-back pass.
+                crate::sort::fadvise_sequential(&blob_file);
                 let mut reader = BufReader::with_capacity(1 << 20, blob_file);
                 io::copy(&mut reader, &mut w)?;
+                // Evict read-back pages from cache (100-200 GB at planet scale).
+                crate::sort::fadvise_dontneed(reader.get_ref());
                 drop(reader);
                 std::fs::remove_file(&*blob_path)?;
             }

@@ -16,23 +16,23 @@ use std::path::{Path, PathBuf};
 
 /// Hint sequential access — doubles kernel readahead window.
 #[cfg(target_os = "linux")]
-fn fadvise_sequential(file: &File) {
+pub(crate) fn fadvise_sequential(file: &File) {
     use std::os::unix::io::AsRawFd;
     unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL); }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn fadvise_sequential(_file: &File) {}
+pub(crate) fn fadvise_sequential(_file: &File) {}
 
 /// Hint that pages are no longer needed — evicts from page cache.
 #[cfg(target_os = "linux")]
-fn fadvise_dontneed(file: &File) {
+pub(crate) fn fadvise_dontneed(file: &File) {
     use std::os::unix::io::AsRawFd;
     unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED); }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn fadvise_dontneed(_file: &File) {}
+pub(crate) fn fadvise_dontneed(_file: &File) {}
 
 // ---------------------------------------------------------------------------
 // Sort key helpers
@@ -234,6 +234,11 @@ pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path) -> io::Result
     }
 
     writer.flush()?;
+
+    // Evict written pages from cache — prevents sort chunk data (100+ GB at
+    // planet scale) from displacing hot node index pages during the PBF phase.
+    fadvise_dontneed(writer.get_ref());
+
     Ok(())
 }
 
