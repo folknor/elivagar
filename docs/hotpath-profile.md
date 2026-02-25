@@ -9,14 +9,13 @@ Wall time: 29.5s total. phase12=24.5s (83%), ocean=0.7s, sort=0.5s, assemble=2.1
 
 | Function | Calls | Avg | P50 | P95 | P99 | Total | % Wall |
 |---|---|---|---|---|---|---|---|
-| `process_matched_way` | 6.1M | 9.03µs | 1.59µs | 20.78µs | 179.07µs | 55.3s | 187% |
-| `for_each_zoom_simplified` | 6.6M | 4.79µs | 800ns | 8.38µs | 89.15µs | 31.5s | 107% |
-| `emit_polygon_feature` | 4.5M | 6.08µs | 810ns | 12.14µs | 130.05µs | 27.7s | 94% |
-| `phase_read_and_process` | 1 | 24.5s | — | — | — | 24.5s | 83% |
-| `emit_line_feature` | 2.0M | 6.88µs | 1.20µs | 10.07µs | 143.36µs | 14.0s | 47% |
-| `flush_way_batch` | 748 | 7.11ms | 4.26ms | 7.26ms | 46.53ms | 5.3s | 18% |
-| `clip_polygon` | 8.9M | 331ns | 190ns | 720ns | 1.88µs | 2.9s | 10% |
-| `phase_assemble` | 1 | 2.12s | — | — | — | 2.1s | 7% |
+| `process_raw_way` | 6.6M | 15.73µs | 2.24µs | 29.50µs | 234.62µs | 104.1s | 316% |
+| `phase_read_and_process` | 1 | 27.4s | — | — | — | 27.4s | 83% |
+| `for_each_zoom_simplified` | 6.6M | 3.09µs | 940ns | 7.47µs | 32.83µs | 20.4s | 62% |
+| `emit_polygon_feature` | 4.5M | 3.87µs | 1.02µs | 9.77µs | 53.15µs | 17.6s | 53% |
+| `flush_raw_way_batch` | 808 | 14.57ms | 9.58ms | 28.44ms | 76.41ms | 11.8s | 36% |
+| `emit_line_feature` | 2.0M | 3.80µs | 1.24µs | 7.23µs | 41.09µs | 7.7s | 23% |
+| `prepare_relation` | 46K | 86.35µs | 1.11µs | 323.07µs | 631.29µs | 4.0s | 12% |
 
 >100% totals = parallel work on rayon threads. % is CPU-time / wall-time.
 
@@ -159,8 +158,11 @@ across rayon threads, TLB misses from fragmentation, and RSS bloat from thread-l
    with linear interpolation replaces tan/cos/ln in `project_e7`. Error: 0.03 pixels at z14.
    `process_raw_way` avg −14% (29.65→25.50µs), P99 −55% (189.82→85.31µs) in alloc profile.
    No allocation regression. Planet-scale: eliminates ~387-775s of transcendental cost.
-5. **Optimize simplification for large features** — the P99 tail in `for_each_zoom_simplified`
-   is where most CPU goes. Early termination, incremental simplification, or subpixel culling
-   at coarser zooms could help.
-6. **Polygon-focused optimization** — polygons are 2x the workload of lines. Any polygon-specific
+5. ~~**Pre-DP subpixel bbox check**~~ — Done. `merc_bbox_is_subpixel` checks cascade bbox
+   before each DP call; breaks the zoom loop when geometry is < 1 pixel. Results:
+   `for_each_zoom_simplified` total CPU −35% (31.5s→20.4s), P99 −63% (89µs→33µs).
+   `emit_polygon_feature` −37%, `emit_line_feature` −45%. 630K fewer feature-zoom combos (−3.7%).
+6. **Further simplification optimization** — remaining options: Visvalingam-Whyatt (O(n log n)
+   one-time importance, then threshold per zoom) or DP early termination in `find_farthest()`.
+7. **Polygon-focused optimization** — polygons are 2x the workload of lines. Any polygon-specific
    improvement (e.g. ring area pre-filter before per-zoom processing) has outsized impact.

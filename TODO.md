@@ -70,25 +70,24 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
 
 ## Performance: Algorithms & Data Structures (Medium-High Impact)
 
-- [ ] **Simplification P99 tail dominates CPU** — **Investigated.** `for_each_zoom_simplified`
-  is the #1 CPU consumer (72.8s total, 182% wall). P50=800ns, P99=43µs (54× ratio). Complex
-  coastlines/boundaries with 500-1000+ vertices run Douglas-Peucker O(n²) across 9-10 zoom
-  levels. Cascading simplification is already implemented (z14→z13→...→z_lo), buffers hoisted.
+- [ ] **Simplification P99 tail dominates CPU** — **Investigated, partially addressed.**
+  `for_each_zoom_simplified` was the #1 CPU consumer. Complex coastlines/boundaries with
+  500-1000+ vertices run Douglas-Peucker O(n²) across 9-10 zoom levels.
 
   **What's already optimized:**
   - Cascading: each zoom simplifies previous zoom's output (halves input each level)
   - Buffer reuse: `keep_buf`/`simp_buf` hoisted, `mem::swap` avoids copies
   - Z14 skips DP entirely (`if z < 14`)
   - Min-points early exit (loop breaks when geometry collapses below 2/4 points)
+  - Pre-DP subpixel bbox check (breaks loop when geometry is < 1 pixel — see below)
 
-  **Optimization options (ordered by bang-for-buck):**
+  **Done — Option A: Pre-simplification bbox subpixel check.** Before DP at each zoom,
+  `merc_bbox_is_subpixel` checks if the cascade's bbox diagonal is < 1 pixel in Mercator space.
+  If so, skips DP and all coarser zooms. Results: `for_each_zoom_simplified` total CPU −35%
+  (31.5s→20.4s), P99 −63% (89µs→33µs). `emit_polygon_feature` −37%, `emit_line_feature` −45%.
+  630K fewer feature-zoom combinations (−3.7%). (`geometry.rs:38-56,341-346`)
 
-  **Option A: Pre-simplification bbox subpixel check (recommended).** Before running DP at each
-  zoom level, compute the cascade's bounding box in tile coordinates. If the bbox diagonal is
-  smaller than ~1 pixel, skip that zoom and all coarser zooms (break the loop). Currently
-  subpixel filtering only happens post-clipping in the emit functions (too late — DP already
-  ran). This eliminates entire DP calls for features that are invisible at coarse zooms. Simple,
-  zero risk, directly targets the tail. (`geometry.rs:305-327`)
+  **Remaining options:**
 
   **Option B: Visvalingam-Whyatt instead of Douglas-Peucker.** VW computes a per-vertex
   "importance" (effective area) once in O(n log n) using a priority queue, then each zoom level

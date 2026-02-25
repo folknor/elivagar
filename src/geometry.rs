@@ -35,6 +35,28 @@ pub const MIN_LINE_EXTENT_SQ: i64 = PX * PX; // 256
 /// Polygon rings with |area| below this contribute nothing visible.
 pub const MIN_POLY_AREA: i64 = PX * PX; // 256
 
+/// Check if a geometry's Mercator bounding box diagonal is sub-pixel at the
+/// given zoom level. One pixel = 1 / (256 × 2^z) Mercator units. Used as a
+/// pre-simplification early exit: if the entire geometry is sub-pixel, DP is
+/// pointless and all coarser zooms can be skipped too.
+fn merc_bbox_is_subpixel(points: &[Point], zoom: u8) -> bool {
+    if points.len() < 2 {
+        return true;
+    }
+    let (mut min_x, mut min_y) = (points[0].x, points[0].y);
+    let (mut max_x, mut max_y) = (min_x, min_y);
+    for p in &points[1..] {
+        if p.x < min_x { min_x = p.x; }
+        if p.x > max_x { max_x = p.x; }
+        if p.y < min_y { min_y = p.y; }
+        if p.y > max_y { max_y = p.y; }
+    }
+    let pixel = 1.0 / (256.0 * f64::from(1u32 << zoom));
+    let dx = max_x - min_x;
+    let dy = max_y - min_y;
+    dx * dx + dy * dy < pixel * pixel
+}
+
 /// Check if a linestring's bounding box is sub-pixel (both dimensions < 1 px).
 /// Returns true if the feature is too small and should be dropped.
 pub fn line_is_subpixel(coords: &[(i32, i32)]) -> bool {
@@ -316,6 +338,12 @@ pub fn for_each_zoom_simplified<F>(
     let mut simp_buf: Vec<Point> = Vec::new();
     for z in (z_lo..=z_hi).rev() {
         if z < 14 {
+            // Pre-DP subpixel check: if the cascade's bbox diagonal is < 1 pixel
+            // at this zoom, the feature is invisible here and at all coarser zooms.
+            // Skips DP entirely — O(1) vs O(n²).
+            if merc_bbox_is_subpixel(&cascade, z) {
+                break;
+            }
             simplify_into(&cascade, simplify_tolerance(z), &mut keep_buf, &mut simp_buf);
             std::mem::swap(&mut cascade, &mut simp_buf);
         }
@@ -347,6 +375,9 @@ pub fn for_each_zoom_simplified_multi<F>(
     for z in (z_lo..=z_hi).rev() {
         let tol = if z < 14 { simplify_tolerance(z) } else { 0.0 };
         if tol > 0.0 {
+            if merc_bbox_is_subpixel(&cascade_outer, z) {
+                break;
+            }
             simplify_into(&cascade_outer, tol, &mut keep_buf, &mut simp_buf);
             std::mem::swap(&mut cascade_outer, &mut simp_buf);
             cascade_inners.retain_mut(|r| {
@@ -1549,6 +1580,34 @@ mod tests {
             tol_0 > tol_10,
             "tolerance at z0 ({tol_0}) should be > z10 ({tol_10})",
         );
+    }
+
+    // --- Pre-DP subpixel check ---
+
+    #[test]
+    fn test_merc_bbox_subpixel_tiny_feature() {
+        // A feature smaller than 1 pixel at z10 should be subpixel.
+        // 1 pixel at z10 = 1 / (256 × 1024) ≈ 3.8e-6 Mercator units.
+        let pixel_z10 = 1.0 / (256.0 * 1024.0);
+        let tiny = vec![
+            Point::new(0.5, 0.5),
+            Point::new(0.5 + pixel_z10 * 0.1, 0.5 + pixel_z10 * 0.1),
+        ];
+        assert!(merc_bbox_is_subpixel(&tiny, 10));
+        // Same feature should NOT be subpixel at z14 (pixel is 16× smaller).
+        assert!(!merc_bbox_is_subpixel(&tiny, 14));
+    }
+
+    #[test]
+    fn test_merc_bbox_subpixel_large_feature() {
+        // A feature spanning 0.01 Mercator units is visible at all zooms.
+        let large = vec![
+            Point::new(0.5, 0.5),
+            Point::new(0.51, 0.51),
+        ];
+        for z in 0..=14 {
+            assert!(!merc_bbox_is_subpixel(&large, z));
+        }
     }
 
     // --- LandMask tests ---
