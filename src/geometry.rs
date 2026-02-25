@@ -685,6 +685,10 @@ fn is_inside(p: &Point, edge: Edge) -> bool {
 }
 
 /// Intersect segment s→e with the clipping edge.
+///
+/// Division by dx (Left/Right) or dy (Top/Bottom) is safe: the caller only
+/// invokes this when one point is inside and the other outside the edge,
+/// which guarantees the relevant denominator is nonzero.
 #[inline]
 fn edge_intersect(s: &Point, e: &Point, edge: Edge) -> Point {
     let dx = e.x - s.x;

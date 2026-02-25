@@ -152,7 +152,11 @@ impl PmtilesWriter {
         let hash = hasher.finish();
 
         if let Some(&(dup_offset, dup_length)) = self.dedup.get(&hash) {
-            // Verify size matches to guard against 64-bit hash collisions.
+            // Guard against hash collisions by also checking compressed length.
+            // A false dedup requires both a SipHash-1-3 collision (~2^-64) AND
+            // matching length (~2^-17), giving ~2^-81 per pair — negligible at
+            // planet scale. Full content comparison would require storing tile
+            // data or seeking back in the blob file.
             if dup_length == data.len() as u32 {
                 self.push_dir_entry(tile_id, dup_offset, dup_length)?;
                 return Ok(false);
@@ -632,6 +636,10 @@ pub fn tile_id_to_zxy(tile_id: u64) -> (u8, u32, u32) {
 
     // Find zoom level z where base(z) <= tile_id < base(z+1).
     // base(z) = (4^z - 1) / 3
+    // Note: n * n * 4 would overflow u64 at z=31, but the z >= 31 guard
+    // fires first in release mode (wrapping). In debug mode the overflow
+    // would panic before the guard. Not reachable: max_zoom is validated
+    // to 14 at pipeline entry, so tile_ids never iterate past z=14.
     let mut z: u8 = 0;
     loop {
         z += 1;

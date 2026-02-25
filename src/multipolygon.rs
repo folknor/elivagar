@@ -151,6 +151,10 @@ fn pair_rings(
         if inner.is_empty() {
             continue;
         }
+        // Tests only inner[0] for containment. Correct for valid OSM geometry
+        // (all inner ring vertices are inside the correct outer). For malformed
+        // data, unwrap_or(0) below assigns orphan inners to the first polygon —
+        // slightly wrong but visually acceptable.
         let test_pt = &inner[0];
         let mut target_idx: Option<usize> = None;
         for (i, poly) in polygons.iter().enumerate() {

@@ -42,6 +42,9 @@ pub(crate) fn fadvise_dontneed(_file: &File) {}
 pub type SortKey = u64;
 
 /// Build a sort key from tile id, layer index, and priority.
+///
+/// Packs tile_id into bits 63-16 (48-bit field). Overflows above z23, but
+/// max_zoom is validated to 14 at pipeline entry (max tile_id ~358M = 29 bits).
 #[inline]
 pub fn make_sort_key(tile_id: u64, layer: u8, priority: u8) -> SortKey {
     (tile_id << 16) | (u64::from(layer) << 8) | u64::from(priority)
@@ -224,6 +227,8 @@ pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path) -> io::Result
     let file = File::create(path)?;
     let mut writer = BufWriter::with_capacity(1 << 20, file);
 
+    // Record count as u32. Safe: 1 GB chunk budget yields max ~48.8M records
+    // (minimum 22 bytes each), 88x below u32::MAX.
     let count = records.len() as u32;
     writer.write_all(&count.to_le_bytes())?;
 

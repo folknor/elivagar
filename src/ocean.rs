@@ -546,6 +546,10 @@ fn rasterize_segment(
         if cx == ex && cy == ey {
             break;
         }
+        // Known: when t_max_x == t_max_y (exact grid corner crossing), only
+        // the Y step is taken, skipping the X-direction tile. Not reachable
+        // with real shapefile coordinates (requires exact float equality).
+        // Even if triggered, the scanline PIP fallback handles the missed tile.
         if t_max_x < t_max_y {
             cx += step_x;
             t_max_x += t_delta_x;

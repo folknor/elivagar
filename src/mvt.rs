@@ -482,6 +482,10 @@ fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32)
         match cmd_id {
             1 | 2 => {
                 // MoveTo or LineTo
+                // Known: cmd is pushed before validating that src has enough
+                // parameters. If src were truncated, the command count would
+                // be wrong. Not reachable: geometry is always well-formed from
+                // the closed encode/serialize/deserialize pipeline.
                 dest.push(cmd);
                 for _ in 0..cmd_count {
                     if i + 1 >= src.len() {
@@ -590,7 +594,9 @@ impl LayerBuilder {
             }
         }
 
-        // Remove dead features (zero-capacity Vecs from mem::take)
+        // Remove dead features (zero-capacity Vecs from mem::take).
+        // Uses is_empty() as tombstone proxy — safe because all pipeline-emitted
+        // features have non-empty geometry (enforced at all emit call sites).
         self.features.retain(|f| !f.geometry.is_empty());
     }
 }

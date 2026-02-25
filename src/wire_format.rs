@@ -41,6 +41,10 @@ pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], 
             AttrValue::Str(s) => {
                 buf.push(0);
                 let sb = s.as_bytes();
+                // Length truncated to u16 (max 65535). Safe: Shortbread only
+                // extracts tag keys (name, ref, cuisine, etc.) whose real-world
+                // OSM values never approach 64KB.
+                debug_assert!(sb.len() <= u16::MAX as usize, "string value exceeds u16 length");
                 buf.extend_from_slice(&(sb.len() as u16).to_le_bytes());
                 buf.extend_from_slice(sb);
             }
