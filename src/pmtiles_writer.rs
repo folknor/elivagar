@@ -1,7 +1,28 @@
-// PMTiles v3 archive writer.
-//
-// Counterpart to the reader in `tile_server.rs`. Writes a clustered,
-// gzip-compressed PMTiles archive with Hilbert-ordered tile IDs.
+//! PMTiles v3 archive writer.
+//!
+//! Writes clustered, gzip-compressed PMTiles archives with Hilbert-ordered
+//! tile IDs and content deduplication. Supports both in-memory and streaming
+//! modes for the tile blob and directory entries.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
+//!
+//! let config = PmtilesConfig {
+//!     min_zoom: 0,
+//!     max_zoom: 14,
+//!     bounds: (8.0, 54.5, 15.2, 57.8),
+//!     center: (11.5, 56.0, 7),
+//! };
+//! let mut writer = PmtilesWriter::new(config);
+//!
+//! // Tiles must be added in Hilbert order.
+//! let gzipped_mvt = vec![0u8; 100]; // pre-compressed MVT data
+//! writer.add_tile(0, 0, 0, &gzipped_mvt).expect("add tile");
+//!
+//! writer.write_to(std::path::Path::new("output.pmtiles")).expect("write");
+//! ```
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -18,11 +39,13 @@ use flate2::Compression;
 
 /// PMTiles writer configuration.
 pub struct PmtilesConfig {
+    /// Minimum zoom level in the archive.
     pub min_zoom: u8,
+    /// Maximum zoom level in the archive.
     pub max_zoom: u8,
-    /// (min_lon, min_lat, max_lon, max_lat)
+    /// Geographic bounds as (min_lon, min_lat, max_lon, max_lat) in WGS84.
     pub bounds: (f64, f64, f64, f64),
-    /// (lon, lat, zoom)
+    /// Default map center as (lon, lat, zoom) in WGS84.
     pub center: (f64, f64, u8),
 }
 
@@ -77,6 +100,16 @@ enum TileBlob {
 // ---------------------------------------------------------------------------
 
 /// Accumulates tiles and writes a PMTiles v3 archive.
+///
+/// Tiles must be added in Hilbert order via [`add_tile()`](Self::add_tile).
+/// Duplicate tile contents are automatically deduplicated using SipHash.
+///
+/// Two storage modes are available:
+/// - [`new()`](Self::new) — in-memory (tile data in a `Vec`). Best for small
+///   extracts and tests.
+/// - [`new_streaming()`](Self::new_streaming) — file-backed (tile data and
+///   directory entries streamed to disk). Required for planet-scale runs to
+///   avoid multi-GB RAM usage.
 pub struct PmtilesWriter {
     config: PmtilesConfig,
     /// Concatenated compressed tile data (in-memory or file-backed).

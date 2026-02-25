@@ -67,12 +67,24 @@ pub enum SkipTo {
     Sort,
 }
 
+/// Configuration for the tile generation pipeline.
+///
+/// All paths are resolved relative to the current working directory.
+/// The `tmp_dir` is created automatically if it does not exist.
 pub struct TilegenConfig {
+    /// Path to the input OpenStreetMap PBF file.
     pub pbf_path: PathBuf,
+    /// Path for the output PMTiles v3 archive.
     pub output_path: PathBuf,
+    /// Directory for temporary sort chunks and intermediate files.
     pub tmp_dir: PathBuf,
+    /// Minimum zoom level (0-14).
     pub min_zoom: u8,
+    /// Maximum zoom level (0-14). Must be >= `min_zoom`.
     pub max_zoom: u8,
+    /// Ocean polygon shapefile (`water-polygons-split-3857`). Required for
+    /// water fill tiles. When combined with `ocean_simplified_shapefile`,
+    /// this is used only for z8+.
     pub ocean_shapefile: Option<PathBuf>,
     /// Simplified ocean shapefile for z0-7 (fewer vertices, faster at low zooms).
     /// When set, `ocean_shapefile` is used only for z8+.
@@ -80,6 +92,7 @@ pub struct TilegenConfig {
     /// Skip to a later phase, reusing checkpoint data from a previous run.
     pub skip_to: Option<SkipTo>,
     /// Keep tile blob in memory instead of streaming to a temp file.
+    /// Faster for small extracts, but uses more RAM at planet scale.
     pub in_memory: bool,
 }
 
@@ -94,6 +107,15 @@ const SORT_CHUNK_SIZE: usize = 1 << 30;
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Run the full tile generation pipeline.
+///
+/// Reads the PBF file, processes ocean shapefiles (if provided), sorts all
+/// feature records by Hilbert tile ID, and writes the output PMTiles archive.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] on I/O failures, invalid configuration (e.g.
+/// `max_zoom > 14`), or corrupt input data.
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {

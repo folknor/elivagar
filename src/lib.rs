@@ -1,7 +1,46 @@
-// Elivagar — Shortbread vector tile generator.
-//
-// Named after the rivers of Niflheim. Reads OSM PBF files and produces
-// PMTiles v3 archives with the Shortbread schema (26 layers).
+//! Shortbread vector tile generator.
+//!
+//! Elivagar reads OpenStreetMap PBF files and produces
+//! [PMTiles v3](https://github.com/protomaps/PMTiles) archives with the
+//! [Shortbread](https://shortbread-tiles.org/) schema (26 layers).
+//!
+//! # Usage
+//!
+//! The primary entry point is [`run()`], which takes a [`TilegenConfig`] and
+//! drives the full pipeline:
+//!
+//! ```no_run
+//! let config = elivagar::TilegenConfig {
+//!     pbf_path: "input.osm.pbf".into(),
+//!     output_path: "output.pmtiles".into(),
+//!     tmp_dir: ".tilegen_tmp".into(),
+//!     min_zoom: 0,
+//!     max_zoom: 14,
+//!     ocean_shapefile: None,
+//!     ocean_simplified_shapefile: None,
+//!     skip_to: None,
+//!     in_memory: false,
+//! };
+//! elivagar::run(&config).expect("pipeline failed");
+//! ```
+//!
+//! # Pipeline phases
+//!
+//! 1. **PBF read** — single-pass read building node/way indices and emitting
+//!    sort records for matched features.
+//! 2. **Ocean** — ocean shapefile processing (optional). Generates water polygon
+//!    tiles from an ESRI shapefile.
+//! 3. **Sort** — external merge sort of all records by Hilbert tile ID.
+//! 4. **Assembly** — MVT protobuf encode, gzip compress, and write PMTiles archive.
+//!
+//! The [`SkipTo`] enum allows resuming from a checkpoint, reusing sort chunks
+//! from a previous run.
+//!
+//! # PMTiles writer
+//!
+//! The [`pmtiles_writer`] module is also public for standalone use. It writes
+//! clustered PMTiles v3 archives with Hilbert-ordered tile IDs and content
+//! deduplication.
 
 pub(crate) mod geometry;
 pub(crate) mod multipolygon;
