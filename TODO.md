@@ -107,18 +107,14 @@ the sort pipeline, or lifetime constraints prevent hoisting. See code comments a
   recursion tree to prune branches. Limited benefit — the first DP call (z13, full N points)
   dominates, and that call can't be pruned much. (`geometry.rs:265-289`)
 
-  **Option D: DP max-deviation tracking for cascade skip.** If `simplify_into` returned the
-  maximum perpendicular deviation it found, the cascade could check: "is max deviation <
-  next zoom's tolerance?" If yes, skip DP at that zoom and all coarser zooms — the cascade
-  is already optimal. Currently there's no way to know without running DP. Requires threading
-  the max deviation out of `find_farthest` → `dp_recurse` → `simplify_into`. Medium effort,
-  medium impact — eliminates DP invocations for features that have already converged.
-  (`geometry.rs:262-320`)
+  **Done — Option D: DP max-deviation tracking for cascade skip.** `simplify_into` now
+  returns the max squared deviation of removed points. The cascade checks: if max_dev_sq <
+  next zoom's tol², DP is skipped — the cascade has converged. Eliminates redundant DP
+  invocations for features that stabilize before reaching z_lo. (`geometry.rs:231-254,268,345-358`)
 
-  **Option E: Vertex count pre-check before DP.** If `cascade.len() <= min_points` before
-  calling `simplify_into`, DP can't reduce further — skip it. Currently checked *after* DP
-  at `geometry.rs:350`. Moving before saves a full DP invocation for already-collapsed
-  features. Low effort, low impact. (`geometry.rs:347-351`)
+  **Done — Option E: Vertex count pre-check before DP.** If `cascade.len() <= min_points`
+  before calling `simplify_into`, DP is skipped — it can't reduce further. Previously
+  checked only *after* DP. (`geometry.rs:354-355`)
 
 - [x] **Recompute bbox from simplified cascade per zoom** — Fixed: `emit_line_feature`,
   `emit_polygon_feature`, and `emit_multipolygon_feature` now recompute `merc_bbox` from the

@@ -227,27 +227,32 @@ pub fn simplify_tolerance(zoom: u8) -> f64 {
 /// Points whose perpendicular distance to the line segment between endpoints
 /// is less than `tolerance` are removed. Result is left in `output`.
 /// `keep_buf` is a reusable scratch buffer for the keep-flags array.
+///
+/// Returns the maximum deviation (squared) of any removed point. If this is less
+/// than the next zoom's tolerance², the cascade has converged and further DP calls
+/// can be skipped.
 pub fn simplify_into(
     points: &[Point],
     tolerance: f64,
     keep_buf: &mut Vec<bool>,
     output: &mut Vec<Point>,
-) {
+) -> f64 {
     output.clear();
     if points.len() <= 2 {
         output.extend_from_slice(points);
-        return;
+        return 0.0;
     }
     keep_buf.clear();
     keep_buf.resize(points.len(), false);
     keep_buf[0] = true;
     keep_buf[points.len() - 1] = true;
-    dp_recurse(points, 0, points.len() - 1, tolerance * tolerance, keep_buf);
+    let max_dev_sq = dp_recurse(points, 0, points.len() - 1, tolerance * tolerance, keep_buf);
     for (i, &k) in keep_buf.iter().enumerate() {
         if k {
             output.push(points[i]);
         }
     }
+    max_dev_sq
 }
 
 /// Convenience wrapper that allocates its own buffers. Use [`simplify_into`] in hot paths.
@@ -259,15 +264,21 @@ pub fn simplify(points: &[Point], tolerance: f64) -> Vec<Point> {
 }
 
 /// Recursive step of Douglas-Peucker. Uses squared tolerance to avoid sqrt.
-fn dp_recurse(points: &[Point], start: usize, end: usize, tol_sq: f64, keep: &mut [bool]) {
+/// Returns the maximum squared deviation found across all removed points.
+fn dp_recurse(points: &[Point], start: usize, end: usize, tol_sq: f64, keep: &mut [bool]) -> f64 {
     if end <= start + 1 {
-        return;
+        return 0.0;
     }
     let (max_idx, max_dist_sq) = find_farthest(points, start, end);
     if max_dist_sq > tol_sq {
         keep[max_idx] = true;
-        dp_recurse(points, start, max_idx, tol_sq, keep);
-        dp_recurse(points, max_idx, end, tol_sq, keep);
+        let left = dp_recurse(points, start, max_idx, tol_sq, keep);
+        let right = dp_recurse(points, max_idx, end, tol_sq, keep);
+        left.max(right)
+    } else {
+        // All points in this segment are within tolerance — max_dist_sq is
+        // the largest deviation among them.
+        max_dist_sq
     }
 }
 
@@ -336,6 +347,8 @@ pub fn for_each_zoom_simplified<F>(
     let mut cascade = merc.to_vec();
     let mut keep_buf: Vec<bool> = Vec::new();
     let mut simp_buf: Vec<Point> = Vec::new();
+    // Track max deviation² from last DP run for cascade convergence check.
+    let mut last_max_dev_sq: f64 = f64::MAX;
     for z in (z_lo..=z_hi).rev() {
         if z < 14 {
             // Pre-DP subpixel check: if the cascade's bbox diagonal is < 1 pixel
@@ -344,8 +357,17 @@ pub fn for_each_zoom_simplified<F>(
             if merc_bbox_is_subpixel(&cascade, z) {
                 break;
             }
-            simplify_into(&cascade, simplify_tolerance(z), &mut keep_buf, &mut simp_buf);
-            std::mem::swap(&mut cascade, &mut simp_buf);
+            // Option E: if cascade already has ≤ min_points vertices, DP can't
+            // reduce further — skip the call entirely.
+            if cascade.len() > min_points {
+                let tol = simplify_tolerance(z);
+                // Option D: if last DP's max deviation is already below this
+                // zoom's tolerance, the cascade is optimal — skip DP.
+                if last_max_dev_sq >= tol * tol {
+                    last_max_dev_sq = simplify_into(&cascade, tol, &mut keep_buf, &mut simp_buf);
+                    std::mem::swap(&mut cascade, &mut simp_buf);
+                }
+            }
         }
         if cascade.len() < min_points {
             break;
@@ -372,19 +394,24 @@ pub fn for_each_zoom_simplified_multi<F>(
     let mut cascade_inners: Vec<Vec<Point>> = inners.to_vec();
     let mut keep_buf: Vec<bool> = Vec::new();
     let mut simp_buf: Vec<Point> = Vec::new();
+    let mut last_max_dev_sq: f64 = f64::MAX;
     for z in (z_lo..=z_hi).rev() {
         let tol = if z < 14 { simplify_tolerance(z) } else { 0.0 };
         if tol > 0.0 {
             if merc_bbox_is_subpixel(&cascade_outer, z) {
                 break;
             }
-            simplify_into(&cascade_outer, tol, &mut keep_buf, &mut simp_buf);
-            std::mem::swap(&mut cascade_outer, &mut simp_buf);
-            cascade_inners.retain_mut(|r| {
-                simplify_into(r, tol, &mut keep_buf, &mut simp_buf);
-                std::mem::swap(r, &mut simp_buf);
-                r.len() >= 4
-            });
+            let tol_sq = tol * tol;
+            // Option E: skip if outer already at minimum, Option D: skip if converged
+            if cascade_outer.len() > 4 && last_max_dev_sq >= tol_sq {
+                last_max_dev_sq = simplify_into(&cascade_outer, tol, &mut keep_buf, &mut simp_buf);
+                std::mem::swap(&mut cascade_outer, &mut simp_buf);
+                cascade_inners.retain_mut(|r| {
+                    simplify_into(r, tol, &mut keep_buf, &mut simp_buf);
+                    std::mem::swap(r, &mut simp_buf);
+                    r.len() >= 4
+                });
+            }
         }
         if cascade_outer.len() < 4 {
             break;
