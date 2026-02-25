@@ -11,6 +11,7 @@ const COORD_SIZE: u64 = 8; // 4 bytes lat_e7 + 4 bytes lon_e7
 // Safety: coords are stored as sequential LE i32 pairs matching (i32, i32) layout.
 const _: () = assert!(std::mem::size_of::<(i32, i32)>() == 8);
 const _: () = assert!(std::mem::align_of::<(i32, i32)>() == 4);
+const _: () = assert!(cfg!(target_endian = "little"), "way_index assumes little-endian");
 
 pub struct WayIndex {
     // Offset index (way_offsets.bin): mmap'd, indexed at way_id * 12

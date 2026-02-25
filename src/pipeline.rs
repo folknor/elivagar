@@ -97,6 +97,19 @@ const SORT_CHUNK_SIZE: usize = 1 << 30;
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
+    if config.max_zoom > 14 {
+        return Err(PipelineError(format!(
+            "max_zoom {} exceeds maximum supported zoom level 14",
+            config.max_zoom
+        )));
+    }
+    if config.min_zoom > config.max_zoom {
+        return Err(PipelineError(format!(
+            "min_zoom {} is greater than max_zoom {}",
+            config.min_zoom, config.max_zoom
+        )));
+    }
+
     let total_start = Instant::now();
     let skip = config.skip_to;
 

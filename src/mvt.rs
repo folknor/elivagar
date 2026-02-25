@@ -23,7 +23,7 @@ pub enum GeomType {
     Polygon = 3,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum Value {
     String(String),
@@ -35,11 +35,26 @@ pub enum Value {
     Bool(bool),
 }
 
-// Manual Eq+Hash: can't derive because f32/f64 don't impl Eq/Hash.
+// Manual PartialEq+Eq+Hash: can't derive because f32/f64 don't impl Eq/Hash.
 // Using to_bits() for floats gives bitwise equality, which is correct for
 // MVT value interning (we want exact dedup, not fuzzy float comparison).
-// This lets value_map use HashMap<Value, u16> instead of HashMap<u64, u16>,
-// eliminating silent data corruption from hash collisions.
+// This also makes PartialEq consistent with Hash (both use to_bits()),
+// satisfying the Eq contract even for NaN values.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
+            (Value::Double(a), Value::Double(b)) => a.to_bits() == b.to_bits(),
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::UInt(a), Value::UInt(b)) => a == b,
+            (Value::SInt(a), Value::SInt(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 impl Eq for Value {}
 
 impl Hash for Value {

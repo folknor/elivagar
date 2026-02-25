@@ -72,7 +72,7 @@ From Opus code review (2026-02-25). Grouped by severity.
 
 ### Bugs
 
-- [ ] **`max_zoom >= 15` panics stats arrays** — Per-zoom statistics arrays are `[u64; 15]`
+- [x] **`max_zoom >= 15` panics stats arrays** — Per-zoom statistics arrays are `[u64; 15]`
   but indexed by `config.max_zoom` with no upper bound check. User passing `--max-zoom 15`
   causes index-out-of-bounds panic. (`pipeline.rs:1183-1226`)
   - **Severity**: Low in practice — CLI hardcodes `max_zoom: 14`, no `--max-zoom` flag.
@@ -80,12 +80,11 @@ From Opus code review (2026-02-25). Grouped by severity.
   - Writer thread accumulation (line 1193) is guarded with `< 15`, but the printing loop
     at lines 1223-1226 panics unconditionally.
   - All Shortbread layers have `max_zoom: 14`, so higher is meaningless (empty tiles).
-  - **Fix**: Add validation at top of `run()`: `if config.max_zoom > 14 { return Err(...) }`.
-    Single location, no array changes needed.
+  - **Fixed**: Validation at top of `run()` rejects `max_zoom > 14` and `min_zoom > max_zoom`.
 
 ### Correctness
 
-- [ ] **NaN floats violate `Eq` contract in value interning** — `PartialEq` derives use
+- [x] **NaN floats violate `Eq` contract in value interning** — `PartialEq` derives use
   float comparison (`NaN != NaN`) but `Hash` uses `to_bits()`. If NaN were interned, HashMap
   lookups would never find existing entries, leaking memory. (`mvt.rs:26-57`)
   - **Unreachable today**: Only float source is `way_area` from `area_sq_meters()` on valid
@@ -93,48 +92,43 @@ From Opus code review (2026-02-25). Grouped by severity.
   - Secondary bug: derived `PartialEq` says `+0.0 == -0.0` but `Hash` gives different hashes
     via `to_bits()`. Could cause duplicate interning.
   - No other float-containing types used as HashMap keys in the codebase.
-  - **Fix**: Remove `PartialEq` from derive on line 26, add manual impl using `to_bits()` for
-    `Float`/`Double` variants. Matches existing `Hash` impl. Single file change.
+  - **Fixed**: Manual `PartialEq` impl using `to_bits()` for `Float`/`Double` variants.
 
-- [ ] **Ocean shapefile parsing panics on corrupt input** — Multiple unsafe casts and missing
+- [x] **Ocean shapefile parsing panics on corrupt input** — Multiple unsafe casts and missing
   bounds checks in `.shp` record parsing. (`ocean.rs:109-168`)
   - Lines 109-112: negative `num_parts`/`num_points` i32 cast `as usize` → huge values → OOM/panic.
   - Line 115: `points_start` not validated against `shp.len()`.
   - Lines 117-124: part index loop has no bounds check on `shp[b..b+4]`.
   - Line 121: negative part index value cast `as usize` → garbage ring slicing on line 140.
   - Lines 127-134: points loop has no bounds check on `shp[b..b+16]`.
-  - **Fix**: Skip corrupt records with `eprintln!` warning + `continue`. No signature change.
-    Matches existing error handling style. Ocean is supplementary — a few bad records should
-    not abort the pipeline.
+  - **Fixed**: Validate num_parts/num_points >= 0, record_end <= shp.len(), part indices
+    <= num_points. Corrupt records skipped with `eprintln!` warning.
 
-- [ ] **Ocean `.shx` parsing panics on short files** — `(shx_data.len() - 100) / 8` underflows
+- [x] **Ocean `.shx` parsing panics on short files** — `(shx_data.len() - 100) / 8` underflows
   `usize` if `.shx` file is shorter than 100 bytes, wrapping to huge value → OOM on
   `Vec::with_capacity` or out-of-bounds access. (`ocean.rs:53`)
   - `.shx` is read via `std::fs::read()` (not mmap'd). No other underflow risks in file.
   - Also: negative `offset_words` at lines 57-61 cast `as usize` wraps to huge value.
-  - **Fix**: `panic!` with descriptive message if `shx_data.len() < 100`. Matches existing
-    error handling (lines 51, 67, 69 all `panic!` on I/O errors). A corrupt `.shx` is a
-    fatal config error — silent skip would produce broken tiles with missing ocean.
+  - **Fixed**: Panic with descriptive message if `shx_data.len() < 100`. Negative
+    `offset_words` entries skipped.
 
-- [ ] **Missing endianness assert in `way_index.rs`** — `from_raw_parts` pointer cast at
+- [x] **Missing endianness assert in `way_index.rs`** — `from_raw_parts` pointer cast at
   line 177 reinterprets LE bytes as native `(i32, i32)`. Would silently produce wrong
   coordinates on big-endian. (`way_index.rs:173-177`)
   - `wire_format.rs:23` has the guard: `const _: () = assert!(cfg!(target_endian = "little"), ...)`.
   - `node_index.rs` is safe — uses `from_le_bytes`/`to_le_bytes` API, no pointer casts.
   - Only two LE-dependent pointer casts in codebase: `wire_format.rs` (guarded) and
     `way_index.rs` (missing).
-  - **Fix**: One line after existing asserts at line 13:
-    `const _: () = assert!(cfg!(target_endian = "little"), "way_index assumes little-endian");`
+  - **Fixed**: Added compile-time endianness assert after existing size/align asserts.
 
-- [ ] **`merc_bbox()` returns inverted bbox on empty input** — Initializes min/max with
+- [x] **`merc_bbox()` returns inverted bbox on empty input** — Initializes min/max with
   `f64::MAX`/`f64::MIN` (not `NEG_INFINITY`/`INFINITY`). (`geometry.rs:1017-1029`)
   - **Purely theoretical**: All 8 callers guarantee non-empty input via upstream length guards
     (len >= 2 or len >= 4). Traced every call site — none can pass empty.
   - Even with empty input, downstream `for_each_tile_in_bbox` iterates zero tiles with
     inverted bbox (min > max → empty range), so behavior is safe.
   - `ring_bbox()` at line 835 uses `f64::INFINITY`/`f64::NEG_INFINITY` — inconsistent style.
-  - **Fix**: Style-only — swap to `f64::INFINITY`/`f64::NEG_INFINITY` for consistency.
-    No functional change, no signature change.
+  - **Fixed**: Swapped to `f64::INFINITY`/`f64::NEG_INFINITY` for consistency with `ring_bbox()`.
 
 ### Minor
 

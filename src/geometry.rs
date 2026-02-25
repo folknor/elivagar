@@ -1015,10 +1015,10 @@ pub fn to_tile_coords(
 
 /// Compute a `MercBbox` bounding box from a slice of Mercator points.
 pub(crate) fn merc_bbox(points: &[Point]) -> MercBbox {
-    let mut min_x = f64::MAX;
-    let mut min_y = f64::MAX;
-    let mut max_x = f64::MIN;
-    let mut max_y = f64::MIN;
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
     for p in points {
         min_x = min_x.min(p.x);
         min_y = min_y.min(p.y);

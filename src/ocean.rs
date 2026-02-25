@@ -50,6 +50,14 @@ pub(crate) fn process_ocean_shapefile(
     let shx_data = std::fs::read(&shx_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {e}", shx_path.display()));
 
+    if shx_data.len() < 100 {
+        panic!(
+            "Invalid .shx file {}: expected at least 100-byte header, got {} bytes",
+            shx_path.display(),
+            shx_data.len(),
+        );
+    }
+
     let shape_count = (shx_data.len() - 100) / 8;
     let mut offsets: Vec<usize> = Vec::with_capacity(shape_count);
     for i in 0..shape_count {
@@ -57,6 +65,9 @@ pub(crate) fn process_ocean_shapefile(
         let offset_words = i32::from_be_bytes([
             shx_data[base], shx_data[base + 1], shx_data[base + 2], shx_data[base + 3],
         ]);
+        if offset_words < 0 {
+            continue;
+        }
         #[allow(clippy::cast_sign_loss)]
         offsets.push((offset_words as usize) * 2);
     }
@@ -106,22 +117,39 @@ pub(crate) fn process_ocean_shapefile(
 
         shapes_hit += 1;
 
+        let num_parts_i32 = i32::from_le_bytes(shp[rec + 36..rec + 40].try_into().expect("shapefile field read"));
+        let num_points_i32 = i32::from_le_bytes(shp[rec + 40..rec + 44].try_into().expect("shapefile field read"));
+        if num_parts_i32 < 0 || num_points_i32 < 0 {
+            eprintln!("  Warning: negative part/point count at offset {offset}, skipping record");
+            continue;
+        }
         #[allow(clippy::cast_sign_loss)]
-        let num_parts = i32::from_le_bytes(shp[rec + 36..rec + 40].try_into().expect("shapefile field read")) as usize;
+        let num_parts = num_parts_i32 as usize;
         #[allow(clippy::cast_sign_loss)]
-        let num_points = i32::from_le_bytes(shp[rec + 40..rec + 44].try_into().expect("shapefile field read")) as usize;
+        let num_points = num_points_i32 as usize;
 
         let parts_start = rec + 44;
         let points_start = parts_start + num_parts * 4;
+        let record_end = points_start + num_points * 16;
+        if record_end > shp.len() {
+            eprintln!("  Warning: shape record at offset {offset} extends past end of file, skipping");
+            continue;
+        }
 
         let mut ring_starts: Vec<usize> = (0..num_parts)
             .map(|j| {
                 let b = parts_start + j * 4;
-                #[allow(clippy::cast_sign_loss)]
-                let v = i32::from_le_bytes(shp[b..b + 4].try_into().expect("shapefile field read")) as usize;
-                v
+                let v = i32::from_le_bytes(shp[b..b + 4].try_into().expect("shapefile field read"));
+                if v < 0 { usize::MAX } else {
+                    #[allow(clippy::cast_sign_loss)]
+                    { v as usize }
+                }
             })
             .collect();
+        if ring_starts.iter().any(|&v| v > num_points) {
+            eprintln!("  Warning: invalid part index at offset {offset}, skipping record");
+            continue;
+        }
         ring_starts.push(num_points);
 
         let all_points: Vec<Point> = (0..num_points)
