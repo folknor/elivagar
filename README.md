@@ -34,7 +34,8 @@ elivagar denmark-latest.osm.pbf denmark.pmtiles \
 
 1. **PBF read** -- single-pass read building node/way indices and emitting sort records.
    If the PBF declares `Sort.Type_then_ID` (all major producers do), nodes are stored in a
-   compact in-RAM index (~420 MB for Denmark). Unsorted PBFs fall back to a flat mmap file.
+   compact in-RAM index with FOR compression (~420 MB for Denmark, 75% of raw for large
+   extracts). Unsorted PBFs fall back to a flat mmap file.
 2. **Ocean** -- ocean shapefile processing (optional, requires `--ocean`)
 3. **Sort** -- external merge sort by Hilbert tile ID
 4. **Assembly** -- MVT encode + gzip + PMTiles write

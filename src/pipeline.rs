@@ -590,6 +590,10 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         );
     }
 
+    // Drop way_index to release mmap pages (way_offsets.bin + way_data.bin) before
+    // ocean/sort/assemble phases. For North America this frees ~11 GB from RSS.
+    drop(way_index);
+
     eprintln!("  Nodes: {node_count}, Ways: {way_count}, Relations: {rel_count}");
     eprintln!("  Total features emitted: {features_emitted}");
 
