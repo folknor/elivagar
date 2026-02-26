@@ -57,12 +57,12 @@ A fallback path (dense packed mmap file with in-RAM bitmask index) should be des
 Profiled Germany (4.4 GB), Norway (1.3 GB), Japan (2.3 GB) on dm6.
 Full data: `notes/geographic-profiles.md`.
 
-**Key finding: ocean polygon clipping is the #1 alloc hotspot globally.**
-Norway's fjords push `clip_polygon_into` to 197 GB alloc (1729% of main!) and
-`for_each_zoom_simplified_multi` to 208 GB (1830%). These are massive multi-thousand-vertex
-ocean polygons clipped across hundreds of tiles at every zoom level. The single-tile fast path
-doesn't help — ocean polygons span many tiles by nature. At planet scale with all the world's
-coastlines, this will dwarf everything else in the pipeline.
+**Key finding: ocean polygon clipping was the #1 alloc hotspot globally.**
+Norway's fjords pushed `clip_polygon_into` to 197 GB alloc (1729% of main!) and
+`for_each_zoom_simplified_multi` to 208 GB (1830%). Three optimizations (buffer hoisting,
+scratch reuse, row-band pre-clip) brought Norway ocean from **16.6s → 7.6s** (−54%) and
+`clip_polygon_into` avg from **3.29 µs → 971 ns** (−70%). Remaining open items below target
+further gains — at planet scale with all the world's coastlines, ocean will still be significant.
 
 Profile shapes are geography-dependent, not size-dependent:
 - **Germany** (inland/urban): `process_raw_way` dominates, assemble 24%, ocean negligible
@@ -99,16 +99,25 @@ Norway: 31.8M calls × 6.5 KB avg = 197 GB. Japan: 6.0M calls × 8.1 KB avg = 46
   Results: Norway ocean **11.4s → 7.6s** (−33%), total **50.7s → 47.2s** (−7%). Japan ocean
   **7.6s → 6.8s** (−11%). Denmark ocean **4.0s → 3.0s** (−25%). `clip_polygon_into` avg
   **1.94 µs → 971 ns** (−50%). RSS 574 MB → 500 MB.
-- [ ] **Investigate**: are we clipping ocean polygons against tiles they don't intersect?
-  The outcode pre-test in `clip_polygon_into` rejects trivially-outside rings, but a coarser
-  bbox pre-check before even calling clip could skip more. Tilemaker uses a two-level spatial
-  index (RTree + bitmap at z15) for this.
+- [x] **Row X-extent skip** — after row pre-clip, compute X-extent of `row_outer` (~50 vertices)
+  and skip boundary tiles outside that X range before calling `emit_boundary_tile`. ~5 lines.
+  Investigation confirmed the DDA boundary tile set is already tight and the outcode pre-test
+  catches most X misses after Y pre-clipping. Measurable gain is negligible but free insurance.
 
-### Priority 2: Multi-polygon simplification cost
+### Priority 2: Multi-polygon simplification cost — investigated
 
 `for_each_zoom_simplified_multi` averages 249 µs/call on Norway (vs 1.5 µs for single-way
 `_simplified`). 788K calls × 277 KB avg = 208 GB alloc. This processes multi-ring polygons
 (ocean, relations) through simplification at each zoom.
+
+**Root cause: vertex count, not algorithmic overhead.** Ocean polygons have ~2000 vertices vs
+~15 for PBF ways. DP scales O(n log n), so 2000/15 × log(2000)/log(15) ≈ 360×. This alone
+explains the 100-300× gap. The 249 µs measurement also includes callback cost (scanline fill,
+boundary clipping, PIP) — not just simplification. Inner rings are rare for ocean polygons
+(usually empty), so per-inner overhead is not a factor.
+
+The only way to materially reduce `_multi` cost is to reduce the input vertex count — i.e.,
+pre-split large polygons before they enter the simplification pipeline (see Priority 4 below).
 
 - [x] **Research how Tilemaker and Planetiler handle multi-ring polygon simplification.**
   - **Planetiler**: Simplifies per-ring using selectable algorithms (Douglas-Peucker default,
@@ -121,23 +130,25 @@ Norway: 31.8M calls × 6.5 KB avg = 197 GB. Japan: 6.0M calls × 8.1 KB avg = 46
     No cross-zoom caching either.
     Source: `data/tilemaker/` `geom.cpp` (lines 16-136), `visvalingam.cpp`.
   - **Neither caches simplified geometry across zoom levels.** Both recompute per zoom.
-- [ ] **Avoid `.to_vec()` in `for_each_zoom_simplified_multi`** — `geometry.rs:405-406` clones
-  the entire outer ring and all inner rings upfront (`outer.to_vec()`, `inners.to_vec()`). For a
-  10K-vertex fjord polygon with holes, this is ~160 KB per call. The cascading design needs owned
-  data to mutate, but the ocean caller (`emit_ocean_polygon`) already has owned data — could
-  accept owned vecs to avoid the copy, or take `&mut` slices.
-- [ ] **Investigate**: why is `_multi` 100-300× more expensive per call? Is it the ring count,
-  vertex count per ring, or per-ring alloc overhead? Profile the inner loop. The `.to_vec()`
-  clone is one factor, but 249 µs avg suggests the actual simplification of large rings dominates.
-- [ ] **Reusable simplification buffers for multi variant** — the `_simplified` single-way
-  path was deferred because mimalloc handles small allocs well, but `_multi` allocs are huge
-  (277 KB avg). Worth revisiting buffer reuse here specifically.
+- [x] **Reusable simplification buffers (`SimplifyMultiScratch`)** — added `SimplifyMultiScratch`
+  struct with `cascade_outer`, `cascade_inners`, `keep_buf`, `simp_buf`. Eliminates per-call
+  `.to_vec()` clones of outer/inner rings. Ocean path: scratch lives in `OceanAcc` (per-thread).
+  Pipeline path: hoisted in `process_prepared_relation`. Alloc-neutral at Denmark/Norway scale
+  (mimalloc handles the pattern well), but architecturally correct for planet scale.
+- [x] **Investigated**: the 100-300× gap is vertex count (DP on ~2000 vs ~15 vertices). The
+  measurement includes callback cost (scanline + clipping). No algorithmic fix — need to reduce
+  input vertex count via pre-splitting (Priority 4).
+- [ ] **Per-inner convergence tracking** — `retain_mut` on inner rings (geometry.rs:464-468)
+  discards `simplify_into`'s return value, so converged inners are re-simplified every zoom.
+  Track `last_max_dev_sq` per inner ring and skip when converged. Minor for ocean (few inners),
+  potentially significant for complex multipolygon relations (Norway: 464K relation calls at
+  86 µs avg).
 
-### Priority 3: Ocean emission pipeline
+### Priority 3: Cross-zoom redundancy in ocean pipeline — investigated
 
-`emit_ocean_polygon` averages 521-733 µs/call. Norway: 317K calls, 165s cumulative.
-Japan: 118K calls, 87s. These are individual ocean shapefile polygons being projected,
-simplified, and clipped across all zoom levels.
+`emit_ocean_polygon` recomputes everything from scratch at each zoom level: edge rasterization,
+boundary tile grouping, scanline fill with PIP tests, and boundary tile clipping. There is no
+cross-zoom reuse.
 
 - [x] **Research how Tilemaker and Planetiler structure their ocean pipeline.**
   - **Planetiler**: No ocean-specific pipeline. Ocean polygons processed like any other polygon
@@ -150,16 +161,36 @@ simplified, and clipped across all zoom levels.
     processing queries the spatial index, clips from cache or parent zoom, simplifies per-tile.
     Source: `data/tilemaker/` `shp_processor.cpp`, `shp_mem_tiles.cpp`, `tile_data.cpp`.
   - **Our approach** (scanline fill with edge rasterization + gap PIP) is architecturally sound
-    and similar to Planetiler's filled tile concept. The bottleneck is alloc overhead, not the
-    algorithm itself.
-- [ ] **Investigate**: is there redundant work across zoom levels? Could we simplify once
-  and clip the simplified versions, rather than clipping first then simplifying? Currently
-  `for_each_zoom_simplified_multi` re-simplifies at each zoom (cascading), then boundary tiles
-  are clipped from the simplified geometry. This is the right order (simplify then clip).
-- [ ] **Pre-split large ocean polygons** — a 10K-vertex fjord polygon that spans 200 tiles
-  at z14 could be split at a coarser level first to reduce per-tile clip input size. Planetiler
-  doesn't do this (relies on stripe clipping). Tilemaker doesn't either (relies on clip cache).
-  May not be needed if clip buffer hoisting + clip cache close the alloc gap.
+    and similar to Planetiler's filled tile concept.
+- [x] **Investigated**: three categories of cross-zoom redundancy identified:
+  - *Interior tile fill*: a tile fully interior at z10 contains 4 guaranteed-interior children
+    at z11, but we re-rasterize edges and re-PIP to rediscover them. For large polygons, ~90%
+    of tiles at each zoom are interior.
+  - *Boundary tile set*: coarser zoom boundary tiles don't directly narrow finer zoom boundaries
+    (the finer polygon has more vertices from less simplification), but we could limit edge
+    rasterization to parent-boundary regions.
+  - *Geometry reuse*: no cross-zoom clip reuse (unlike Tilemaker's clip cache). Row pre-clip
+    helps within a zoom but not across zooms.
+- [x] **Cross-zoom interior tile propagation — investigated, not safe.** Cascading
+  simplification changes the polygon at each zoom level — removing vertices can shift edges
+  across tile boundaries, so a tile interior at z+1 is NOT guaranteed interior at z after
+  simplification. The approach would require the polygon to be identical across zoom levels,
+  which contradicts the cascading design. Rejected.
+
+### Priority 4: Pre-split large ocean polygons
+
+The highest-impact remaining optimization. A 10K-vertex fjord polygon spanning 200+ tiles at
+z14 forces every downstream operation (simplification, edge rasterization, row pre-clip,
+boundary clipping, PIP) to process all 10K vertices. Pre-splitting reduces per-polygon vertex
+count, benefiting everything.
+
+- [x] **Grid-aligned pre-split at z8** — after polygon loading (before `par_iter`), clip
+  polygons with 500+ vertices to z8 tile boundaries using `clip_polygon_into`. Each sub-polygon
+  fits within one z8 tile, reducing vertex count for all downstream ops. Split raw polygons once
+  (before simplification) — simpler than per-zoom splitting and avoids complicating the cascade.
+  Seam risk minimal: ocean is uniform blue fill, and split boundary vertices are on exact tile
+  edges. Denmark: 219K → 220K polygons (+0.4%). Norway ocean **7.7s → 6.8s** (−12%), Denmark
+  ocean **2.9s → 2.4s** (−17%). Japan ocean −1% (already small archipelago polygons).
 
 ## Performance — Denmark squeeze opportunities (completed)
 
