@@ -1077,31 +1077,52 @@ fn emit_line_feature(
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simplified);
+        let single_tile = geometry::is_single_tile(&simp_bbox, z);
 
         // Skip min-size filtering at max zoom and for boundaries/streets
         let skip_size_filter = z >= 14
             || m.layer == Layer::Boundaries
             || m.layer == Layer::Streets;
         geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
-            let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-            let clipped = geometry::clip_linestring(simplified, &clip);
-            for segment in &clipped {
-                if segment.len() < 2 {
-                    continue;
+            if single_tile {
+                // Fast path: bbox fits in one tile — clipping is a no-op.
+                if simplified.len() < 2 {
+                    return;
                 }
-                geometry::to_tile_coords_into(&mut tc_buf, segment, tx, ty, z);
+                geometry::to_tile_coords_into(&mut tc_buf, simplified, tx, ty, z);
                 if !skip_size_filter && geometry::line_is_subpixel(&tc_buf) {
-                    continue;
+                    return;
                 }
                 mvt::encode_linestring(&mut geom_buf, &tc_buf);
                 if geom_buf.is_empty() {
-                    continue;
+                    return;
                 }
                 let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
                 let data = encode_feature_data_with_attrs(osm_id, GeomType::LineString, &geom_buf, &attrs_buf);
                 let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
                 records.push(SortRecord { key, data });
                 count += 1;
+            } else {
+                let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
+                let clipped = geometry::clip_linestring(simplified, &clip);
+                for segment in &clipped {
+                    if segment.len() < 2 {
+                        continue;
+                    }
+                    geometry::to_tile_coords_into(&mut tc_buf, segment, tx, ty, z);
+                    if !skip_size_filter && geometry::line_is_subpixel(&tc_buf) {
+                        continue;
+                    }
+                    mvt::encode_linestring(&mut geom_buf, &tc_buf);
+                    if geom_buf.is_empty() {
+                        continue;
+                    }
+                    let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                    let data = encode_feature_data_with_attrs(osm_id, GeomType::LineString, &geom_buf, &attrs_buf);
+                    let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
+                    records.push(SortRecord { key, data });
+                    count += 1;
+                }
             }
         });
     });
@@ -1132,18 +1153,31 @@ fn emit_polygon_feature(
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simplified);
+        let single_tile = geometry::is_single_tile(&simp_bbox, z);
         let skip_size_filter = z >= 14;
         geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
-            let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-            geometry::clip_polygon_into(simplified, &clip, &mut clip_a, &mut clip_b);
-            if clip_a.len() < 3 {
-                return;
+            if single_tile {
+                // Fast path: bbox fits in one tile — clipping is a no-op.
+                if simplified.len() < 3 {
+                    return;
+                }
+                geometry::to_tile_coords_into(&mut tc_buf, simplified, tx, ty, z);
+                if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
+                    return;
+                }
+                close_and_orient_cw(&mut tc_buf);
+            } else {
+                let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
+                geometry::clip_polygon_into(simplified, &clip, &mut clip_a, &mut clip_b);
+                if clip_a.len() < 3 {
+                    return;
+                }
+                geometry::to_tile_coords_into(&mut tc_buf, &clip_a, tx, ty, z);
+                if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
+                    return;
+                }
+                close_and_orient_cw(&mut tc_buf);
             }
-            geometry::to_tile_coords_into(&mut tc_buf, &clip_a, tx, ty, z);
-            if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
-                return;
-            }
-            close_and_orient_cw(&mut tc_buf);
 
             mvt::encode_polygon(&mut geom_buf, &[&tc_buf]);
             if geom_buf.is_empty() {
@@ -1182,34 +1216,61 @@ fn emit_multipolygon_feature(
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simp_outer);
+        let single_tile = geometry::is_single_tile(&simp_bbox, z);
         let skip_size_filter = z >= 14;
         geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
-            let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
+            if single_tile {
+                // Fast path: bbox fits in one tile — clipping is a no-op.
+                if simp_outer.len() < 3 {
+                    return;
+                }
+                let mut outer_tc = geometry::to_tile_coords(simp_outer, tx, ty, z);
+                if !skip_size_filter && geometry::ring_is_subpixel(&outer_tc) {
+                    return;
+                }
+                close_and_orient_cw(&mut outer_tc);
 
-            geometry::clip_polygon_into(simp_outer, &clip, &mut clip_a, &mut clip_b);
-            if clip_a.len() < 3 {
-                return;
-            }
-            let mut outer_tc = geometry::to_tile_coords(&clip_a, tx, ty, z);
-            if !skip_size_filter && geometry::ring_is_subpixel(&outer_tc) {
-                return;
-            }
-            close_and_orient_cw(&mut outer_tc);
+                all_rings.clear();
+                all_rings.push(outer_tc);
+                for inner in simp_inners {
+                    if inner.len() < 3 {
+                        continue;
+                    }
+                    let mut inner_tc = geometry::to_tile_coords(inner, tx, ty, z);
+                    if !skip_size_filter && geometry::ring_is_subpixel(&inner_tc) {
+                        continue;
+                    }
+                    close_and_orient_ccw(&mut inner_tc);
+                    all_rings.push(inner_tc);
+                }
+            } else {
+                let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
 
-            all_rings.clear();
-            all_rings.push(outer_tc);
-            for inner in simp_inners {
-                geometry::clip_polygon_into(inner, &clip, &mut clip_a, &mut clip_b);
+                geometry::clip_polygon_into(simp_outer, &clip, &mut clip_a, &mut clip_b);
                 if clip_a.len() < 3 {
-                    continue;
+                    return;
                 }
-                let mut inner_tc = geometry::to_tile_coords(&clip_a, tx, ty, z);
-                // Also drop sub-pixel inner rings (holes)
-                if !skip_size_filter && geometry::ring_is_subpixel(&inner_tc) {
-                    continue;
+                let mut outer_tc = geometry::to_tile_coords(&clip_a, tx, ty, z);
+                if !skip_size_filter && geometry::ring_is_subpixel(&outer_tc) {
+                    return;
                 }
-                close_and_orient_ccw(&mut inner_tc);
-                all_rings.push(inner_tc);
+                close_and_orient_cw(&mut outer_tc);
+
+                all_rings.clear();
+                all_rings.push(outer_tc);
+                for inner in simp_inners {
+                    geometry::clip_polygon_into(inner, &clip, &mut clip_a, &mut clip_b);
+                    if clip_a.len() < 3 {
+                        continue;
+                    }
+                    let mut inner_tc = geometry::to_tile_coords(&clip_a, tx, ty, z);
+                    // Also drop sub-pixel inner rings (holes)
+                    if !skip_size_filter && geometry::ring_is_subpixel(&inner_tc) {
+                        continue;
+                    }
+                    close_and_orient_ccw(&mut inner_tc);
+                    all_rings.push(inner_tc);
+                }
             }
 
             // ring_refs borrows all_rings — must be local (can't hoist across calls).

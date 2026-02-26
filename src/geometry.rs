@@ -925,6 +925,23 @@ pub fn tiles_for_bbox(bbox: &MercBbox, zoom: u8) -> Vec<(u32, u32)> {
     tiles
 }
 
+/// Check whether a bbox falls entirely within a single tile at the given zoom.
+///
+/// When true, clipping is unnecessary — all geometry coordinates are within
+/// the tile's non-buffered bounds (a subset of the buffered clip rect).
+#[inline]
+pub fn is_single_tile(bbox: &MercBbox, zoom: u8) -> bool {
+    let z_scale = f64::from(1u32 << zoom);
+    let max_tile = (1u32 << zoom).saturating_sub(1);
+    let tx_min = clamp_tile(bbox.min_x * z_scale, max_tile);
+    let tx_max = clamp_tile(bbox.max_x * z_scale, max_tile);
+    tx_min == tx_max && {
+        let ty_min = clamp_tile(bbox.min_y * z_scale, max_tile);
+        let ty_max = clamp_tile(bbox.max_y * z_scale, max_tile);
+        ty_min == ty_max
+    }
+}
+
 /// Iterate tiles for a bbox without allocating a Vec.
 #[inline]
 pub fn for_each_tile_in_bbox<F>(bbox: &MercBbox, zoom: u8, mut f: F)
