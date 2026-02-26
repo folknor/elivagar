@@ -46,17 +46,11 @@ Hotpath profile results and analysis: `notes/hotpath-profile.md`
   `into_blocks_pipelined`. Worker thread receives owned PrimitiveBlocks, extracts + rayon
   processes. Main thread drains results between blocks. PBF phase: 13.3s → 9.3s. Total: 17s → 15s.
 
-- [ ] **Reduce serial drain cost** — `drain_processed_ways` takes 4.55s (39% of PBF phase).
-  Investigated breakdown: `sort_writer.push()` is NOT the bottleneck — just Vec::push (no
-  I/O for Denmark). `land_mask.mark_bbox()` is already thread-safe (AtomicU8, &self) and
-  already called from rayon during relations — can trivially move back to rayon. The real
-  cost is `way_index.put()`: random mmap writes to a sparse offset file (way IDs up to ~1B
-  → 12 GB file with 79 MB populated). Three approaches ranked:
-  1. **Land_mask → rayon + deeper channel** (-0.5 to -1s, trivial, risk-free)
-  2. **Dedicated drain thread** (-2 to -3s, medium complexity, ownership dance at
-     way→relation transition)
-  3. **Concurrent way_index offset writes** (-1 to -2s, medium-high, requires unsafe mmap
-     writes to non-overlapping 12-byte slots)
+- [x] ~~**Reduce serial drain cost**~~ — dedicated drain thread owns way_index + sort_writer
+  during way phase, runs concurrently with worker. land_mask.mark_bbox() moved to rayon
+  threads (AtomicU8, already Sync). Drain (4.54s) now fully overlapped with worker (~7s) —
+  no longer on the critical path. Concurrent way_index writes (approach 3) not worthwhile.
+  PBF phase: 9.3s → 8.6s. Total: 15s → 14s.
 
 - [ ] **Rayon alternatives for slice-based parallelism** — Research notes in previous git
   history. Key options: paralight, orx-parallel, chili, forte. Not a current bottleneck.

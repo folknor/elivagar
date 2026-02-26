@@ -4,51 +4,54 @@ Dataset: `denmark-latest.osm.pbf` (483 MB), 52.5M nodes, 6.6M ways, 46K relation
 Machine: plantasjen, 30 GB DDR4, NVMe, Ryzen 9 5900X (12c/24t).
 SortedNodeStore: ~420 MB in-RAM (bitmask+popcount).
 
-## Current Baseline (2026-02-26, commit 31f7c14)
+## Current Baseline (2026-02-26, commit 5c45361)
 
-Wall time: **14.6s**. phase12=11.5s (79%), ocean=16ms, sort=0.3s, assemble=2.0s.
-14.8M features, 56K tiles (54K unique), 283 MB output. RSS: 1.2 GB.
+Wall time: **13.7s**. phase12=10.9s (79%), ocean=18ms, sort=0.3s, assemble=1.8s.
+14.8M features, 56K tiles (54K unique), 283 MB output. RSS: 757 MB.
 
-Architecture: block-level dispatch via `into_blocks_pipelined`. Node blocks processed
-inline, way blocks sent to a worker thread via `sync_channel(1)`, worker extracts
-RawWay + runs rayon `par_iter`. Main thread drains results between blocks.
+Architecture: 4-thread pipeline during way phase:
+1. **pbfhogg I/O thread** — reads + decodes PBF blocks, delivers via `into_blocks_pipelined`
+2. **Main thread** — classifies blocks by `block_type()`, processes nodes inline, forwards
+   way blocks to worker, processes relations after worker+drain join
+3. **Worker thread** — receives owned PrimitiveBlocks, extracts RawWay, runs rayon `par_iter`
+4. **Drain thread** — owns way_index + sort_writer, receives `Vec<ProcessedWay>` from worker,
+   writes way_index entries + sort records concurrently with worker processing
 
-### Function Timing (top 10 of 28 measured)
+`land_mask.mark_bbox()` runs on rayon threads (AtomicU8-based, `&self`).
+
+### Function Timing (top 10 of 26 measured)
 
 | Function | Calls | Avg | P50 | P95 | P99 | Total | % Wall |
 |---|---|---|---|---|---|---|---|
-| `process_raw_way` | 6.6M | 9.12µs | 2.13µs | 22.50µs | 172.29µs | 60.3s | 414% |
-| `for_each_zoom_simplified` | 6.6M | 3.85µs | 790ns | 5.34µs | 71.49µs | 25.3s | 174% |
-| `emit_polygon_feature` | 4.5M | 4.82µs | 850ns | 7.42µs | 106.62µs | 21.9s | 150% |
-| `emit_line_feature` | 2.0M | 6.12µs | 1.08µs | 7.49µs | 128.57µs | 12.4s | 85% |
-| `drain_way_results_nonblocking` | 828 | 5.49ms | 2.41ms | 19.42ms | 27.61ms | 4.55s | 31% |
-| `drain_processed_ways` | 828 | 5.49ms | 3.99ms | 8.23ms | 13.59ms | 4.55s | 31% |
-| `match_element` | 10.1M | 291ns | 260ns | 620ns | 1.12µs | 2.95s | 20% |
-| `add_feature_to_layer` | 14.8M | ~190ns | ~130ns | ~450ns | ~860ns | ~2.8s | ~19% |
+| `process_raw_way` | 6.6M | 9.01µs | 2.18µs | 21.58µs | 167.17µs | 59.6s | 436% |
+| `for_each_zoom_simplified` | 6.6M | 3.81µs | 800ns | 5.39µs | 68.22µs | 25.1s | 184% |
+| `emit_polygon_feature` | 4.5M | 4.87µs | 870ns | 7.54µs | 104.38µs | 22.2s | 162% |
+| `emit_line_feature` | 2.0M | 5.76µs | 1.09µs | 7.22µs | 118.14µs | 11.7s | 86% |
+| `drain_processed_ways` | 828 | 5.48ms | 3.83ms | 8.68ms | 13.50ms | 4.54s | 33% |
+| `match_element` | 10.1M | 291ns | 270ns | 620ns | 1.11µs | 2.95s | 22% |
+| `add_feature_to_layer` | 14.8M | 197ns | 130ns | 470ns | 910ns | 2.91s | 21% |
 
 >100% totals = parallel work on rayon threads. % is CPU-time / wall-time.
 
 ### Drain Analysis
 
 828 way blocks from the PBF (natural batching by PBF block boundaries, ~8000 ways/block).
-`drain_way_results_nonblocking` and `drain_processed_ways` have identical totals (4.55s) —
-the non-blocking drain always finds exactly 1 result ready per call (no empty polls).
-`drain_way_results_blocking` called once at way→relation transition, negligible.
-
-The drain accounts for **39% of PBF phase time** (4.55s / 11.5s). This is the serial
-bottleneck: way_index.put() + sort_writer.push() + land_mask.mark_bbox() cannot be
-parallelized (all take `&mut self`).
+`drain_processed_ways` runs on the dedicated drain thread, receiving results via
+`sync_channel(4)`. The drain completes in 4.54s while the worker takes ~7s — the drain
+is **no longer on the critical path**. It finishes well before the worker, so further
+drain optimization (e.g., concurrent way_index writes) would not improve wall time.
 
 ### Thread Utilization
 
 | Thread | CPU% | User | Sys | Total |
 |---|---|---|---|---|
-| Main | 15–101% | 6.3s | 3.7s | 10.0s |
-| Rayon ×3 | 74–80% | ~3.8s | ~0.1s | ~3.9s each |
+| Main | 16–100% | 4.4s | 1.0s | 5.4s |
+| Drain | ~97% | 6.7s | 0.1s | 6.7s |
+| Rayon ×2 | 75% | ~3.5s | ~0.1s | ~3.6s each |
 
-Main thread 37% kernel time (sort file I/O + way index mmap writes). Rayon workers
-~98% user — pure CPU, no I/O stalls. Total CPU across all threads: ~22s on 14.6s wall
-= ~1.5× parallelism utilization (up from ~1.3× before double-buffering).
+Main thread sys time dropped from 3.7s → 1.0s (no more way_index mmap writes on main).
+The drain thread is 99% user mode — the mmap writes are cheap per-call, just many of them.
+Total CPU across active threads: ~23s on 13.7s wall = **~1.7× utilization** (was 1.5×).
 
 ### Allocation Profile (system allocator, no mimalloc)
 
@@ -77,41 +80,40 @@ Per-thread:
 
 SortedNodeStore eliminated the 96 GB sparse mmap. Rayon workers now spend ~98% of time
 in user mode (was ~97% sys with the mmap). `process_raw_way` avg dropped from 750µs
-(dm6, mmap) to 9.1µs — 82× faster per call. The remaining sys time on main thread
-(3.7s / 10.0s = 37%) is sort file I/O and way index mmap writes.
+(dm6, mmap) to 9.0µs — 83× faster per call. Main thread sys time is now just 1.0s (was
+3.7s when it owned the drain).
 
 ### 2. Simplification is the #1 CPU consumer
 
-`for_each_zoom_simplified` (25.3s total CPU, 174% wall) dominates feature processing.
+`for_each_zoom_simplified` (25.1s total CPU, 184% wall) dominates feature processing.
 Douglas-Peucker runs at each zoom level from z14 down to z_lo. Pre-DP subpixel bbox
 check and DP convergence tracking reduce unnecessary work, but DP itself is inherently
 O(n²) per level. No further algorithmic improvements available (VW tried and reverted).
 
 ### 3. Polygons dominate the workload
 
-4.5M polygon features vs 2.0M line features. `emit_polygon_feature` (21.9s) is 1.8×
-`emit_line_feature` (12.4s). Each polygon also calls `clip_polygon_into` (~2 clips per
+4.5M polygon features vs 2.0M line features. `emit_polygon_feature` (22.2s) is 1.9×
+`emit_line_feature` (11.7s). Each polygon also calls `clip_polygon_into` (~2 clips per
 polygon across tiles).
 
-### 4. Serial drain is the parallelism bottleneck
+### 4. Drain is no longer the bottleneck
 
-`drain_processed_ways` takes 4.55s (39% of PBF phase), all on the main thread. This is
-`way_index.put()` (mmap write) + `sort_writer.push()` (file I/O) + `land_mask.mark_bbox()`.
-All three require `&mut self`. The worker thread and rayon are idle while draining.
-Further overlap is limited by this serial dependency.
+With the dedicated drain thread, `drain_processed_ways` (4.54s) runs concurrently with
+worker processing (~7s). Since drain < worker, the drain completes before the worker
+finishes each cycle. The critical path is now purely worker + rayon processing time.
+Approach 3 from the investigation (concurrent way_index offset writes) is not worthwhile.
 
-### 5. Block-level dispatch improved parallelism
+### 5. Parallelism utilization improved
 
-Total CPU ~22s on 14.6s wall = **1.5× utilization** (was 1.3× before double-buffering).
-The main thread no longer does per-way extraction (String copies for tags, Vec for
-node_refs). It just classifies blocks by peeking first element and sends way blocks to
-the worker via channel. The worker does extraction + rayon processing.
+Total CPU ~23s on 13.7s wall = **1.7× utilization** (was 1.5× with main-thread drain,
+1.3× before double-buffering). Main thread is now mostly idle during way phase — it just
+forwards blocks (~0.3s of work for 828 blocks).
 
 ### 6. Planet-scale projection
 
 Denmark is ~1/150th of planet by PBF size. Extrapolating: ~6.2 TB of allocator throughput
 at planet scale. SortedNodeStore for planet (8.5B nodes × 8 bytes = 68 GB uncompressed)
-won't fit in 64 GB RAM — needs StreamVByte delta compression (~40 GB estimate).
+won't fit in 64 GB RAM — needs bitpacked coordinate compression (~51 GB estimate).
 
 ## Performance History
 
@@ -122,23 +124,25 @@ won't fit in 64 GB RAM — needs StreamVByte delta compression (~40 GB estimate)
 | 647a360 | Double-buffer way batches | 10.1s | 15.8s |
 | ca87a20 | Block-level dispatch | 9.3s | 15.1s |
 | 31f7c14 | Iterator API (no perf change) | 9.3s | 15.1s |
+| 15be3bf | Dedicated drain thread + land_mask to rayon | 8.6s | 14.4s |
+| 5c45361 | BlockType API (no perf change) | 8.6s | 14.4s |
 
 ## Remaining Opportunities
 
 1. ~~**Visvalingam-Whyatt**~~ — Tried and reverted. VW's allocation overhead (5 Vecs +
    BinaryHeap per call) exceeds DP savings for small geometries (avg ~10 vertices).
    Non-cascading VW also produces +7 MB output at low zooms. See `notes/vw-simplification-experiment.md`.
-2. **Polygon-focused optimization** — polygons are 1.8× the total CPU of lines, but
+2. **Polygon-focused optimization** — polygons are 1.9× the total CPU of lines, but
    per-feature cost is similar. The ratio is mostly feature count (2.25×).
 3. ~~**Node storage redesign**~~ — Done. SortedNodeStore replaces 96 GB sparse mmap with
    ~420 MB in-RAM hierarchical store (bitmask+popcount). PBF phase −5.2s.
-4. **StreamVByte delta compression** — needed for planet scale (68 GB uncompressed SortedNodeStore
-   won't fit in 64 GB RAM). Delta compression estimate: ~40 GB. Not needed for extracts.
+4. **Bitpacked coordinate compression** — needed for planet scale (68 GB uncompressed SortedNodeStore
+   won't fit in 64 GB RAM). FOR encoding estimate: ~51 GB. Not needed for extracts.
 5. ~~**PBF callback parallelism**~~ — Done. Block-level dispatch via `into_blocks_pipelined`.
    Way blocks sent to worker thread, main thread drains results in parallel. PBF phase: 13.3s → 9.3s.
-6. **Reduce serial drain cost** — `drain_processed_ways` takes 4.55s (39% of PBF phase).
-   `way_index.put()` and `sort_writer.push()` are `&mut self` — cannot parallelize directly.
-   Possible approaches: batch I/O writes, reduce way_index write volume, defer sort pushes.
+6. ~~**Reduce serial drain cost**~~ — Done. Dedicated drain thread runs concurrently with
+   worker. land_mask.mark_bbox() moved to rayon. Drain is no longer on the critical path
+   (4.54s drain < ~7s worker). PBF phase: 9.3s → 8.6s. Total: 15s → 14s.
 
 ## Optimization History
 
@@ -160,3 +164,4 @@ All completed. Documented here for reference.
 14. **libdeflate** — replaced flate2 (zlib-ng) with libdeflater. Thread-local compressor reuse. Assemble −0.2s.
 15. **SortedNodeStore** — replaced 96 GB sparse mmap with ~420 MB in-RAM hierarchical store (bitmask+popcount). PBF phase −5.2s. Total 24s → 17s.
 16. **Double-buffer + block dispatch** — block-level way dispatch via `into_blocks_pipelined`. Worker thread receives owned PrimitiveBlocks, extracts + rayon processes. Main thread drains results between blocks. PBF phase: 13.3s → 9.3s. Total: 17s → 15s.
+17. **Dedicated drain thread** — drain_processed_ways moved to own thread, land_mask.mark_bbox() moved to rayon. Drain fully overlaps with worker processing. PBF phase: 9.3s → 8.6s. Total: 15s → 14s.
