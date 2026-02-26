@@ -171,7 +171,7 @@ and code paths that Denmark alone doesn't stress.
 | **#2 bottleneck** | `for_each_zoom_simplified` | `emit_ocean_polygon` | `for_each_zoom_simplified_multi` |
 | **clip_polygon_into alloc** | (not in top 10) | **197 GB** | **46 GB** |
 
-### Key findings
+### Key findings (pre-optimization)
 
 1. **Ocean polygon clipping is the biggest alloc hotspot globally.** Norway's fjords push
    `clip_polygon_into` to 197 GB — more than Germany's entire pipeline. Even Japan at 46 GB.
@@ -192,3 +192,44 @@ and code paths that Denmark alone doesn't stress.
 
 5. **No crashes, no OOM across all three.** RSS stays under 2 GB with mimalloc, under 10 GB
    without. SortedNodeStore handles up to 429M nodes on 32 GB RAM.
+
+## Ocean optimization results
+
+Five optimizations applied to the ocean pipeline, measured on dm6 (release, best of 3):
+
+1. **Hoist clip buffers** — `emit_boundary_tile` was using allocating `clip_polygon` wrapper
+   instead of `clip_polygon_into` with reusable buffers.
+2. **Reusable simplification scratch** (`SimplifyMultiScratch`) — eliminates per-call `.to_vec()`
+   clones of outer/inner rings. Alloc-neutral (mimalloc handles it), architecturally correct.
+3. **Row-band pre-clip** — clip polygon to each tile row's Y-band before per-tile clipping.
+   Per-tile clips process ~50 vertices instead of ~1000.
+4. **Row X-extent skip** — compute X-extent of row-clipped polygon, skip boundary tiles outside.
+   Negligible measurable gain (DDA + outcode already tight), free insurance.
+5. **Grid-aligned pre-split at z8** — clip polygons with 500+ vertices to z8 tile boundaries
+   before processing. Reduces vertex count for all downstream ops.
+
+### Post-optimization run results (release, dm6)
+
+| Region | Ocean before | Ocean after | Change | Total before | Total after | Change |
+|--------|-------------|-------------|--------|-------------|-------------|--------|
+| **Norway** | 16.6s | 6.8s | **−59%** | 55.7s | 46.4s | **−17%** |
+| **Japan** | 8.4s | 6.7s | **−20%** | 69.6s | 70.3s | ~0% |
+| **Denmark** | 3.0s* | 2.4s | **−17%** | 19.2s* | 18.8s | −2% |
+
+\* Denmark "before" is after buffer hoisting (ocean was negligible pre-profiling).
+
+### Post-optimization cross-region comparison (release, dm6)
+
+| Metric | Norway | Japan | Denmark |
+|--------|--------|-------|---------|
+| **Total** | 46.4s | 70.3s | 18.8s |
+| **PBF** | 30.1s (65%) | 42.6s (61%) | 11.7s (62%) |
+| **Ocean** | 6.8s (15%) | 6.7s (10%) | 2.4s (13%) |
+| **Sort** | 0.3s (<1%) | 0.9s (1%) | 0.5s (3%) |
+| **Assemble** | 7.2s (16%) | 17.8s (25%) | 2.6s (14%) |
+| Features | 28.3M | 74.4M | 16.0M |
+| Tiles | 595K | 183K | 56K |
+| Output | 1.0 GB | 1.2 GB | 286 MB |
+
+Norway's ocean phase dropped from 30% to 15% of wall time. PBF processing is now the dominant
+phase across all three regions, as it should be.
