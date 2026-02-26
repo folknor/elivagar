@@ -241,7 +241,7 @@ impl SortedNodeStore {
     /// Store coordinates for a node. Node IDs MUST be strictly increasing.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
-        debug_assert!(
+        assert!(
             node_id > self.last_node_id,
             "SortedNodeStore: node IDs must be strictly increasing, got {node_id} after {}",
             self.last_node_id
@@ -659,7 +659,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
     #[should_panic(expected = "strictly increasing")]
     fn sorted_rejects_non_monotonic() {
         let mut store = SortedNodeStore::new();
@@ -668,7 +667,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
     #[should_panic(expected = "strictly increasing")]
     fn sorted_rejects_duplicate_id() {
         let mut store = SortedNodeStore::new();

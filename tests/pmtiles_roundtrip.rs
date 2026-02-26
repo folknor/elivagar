@@ -727,6 +727,7 @@ fn test_full_pipeline() {
         skip_to: None,
         in_memory: false,
         compression_level: 6,
+        force_sorted: false,
     };
 
     elivagar::run(&config).expect("pipeline should succeed");

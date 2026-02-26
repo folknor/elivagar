@@ -20,6 +20,7 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 | `--skip-to ocean\|sort` | Resume from a previous run's checkpoint |
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |
 | `--compression-level 0-10` | Gzip compression level (default: 6). Lower = faster, larger output |
+| `--force-sorted` | Use compact in-RAM node store even if PBF header lacks `Sort.Type_then_ID` |
 
 ### Example
 
@@ -31,7 +32,9 @@ elivagar denmark-latest.osm.pbf denmark.pmtiles \
 
 ## Pipeline
 
-1. **PBF read** -- single-pass read building node/way indices and emitting sort records
+1. **PBF read** -- single-pass read building node/way indices and emitting sort records.
+   If the PBF declares `Sort.Type_then_ID` (all major producers do), nodes are stored in a
+   compact in-RAM index (~420 MB for Denmark). Unsorted PBFs fall back to a flat mmap file.
 2. **Ocean** -- ocean shapefile processing (optional, requires `--ocean`)
 3. **Sort** -- external merge sort by Hilbert tile ID
 4. **Assembly** -- MVT encode + gzip + PMTiles write

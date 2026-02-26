@@ -8,7 +8,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10]"
+            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10] [--force-sorted]"
         );
         std::process::exit(1);
     }
@@ -22,6 +22,7 @@ fn main() {
     let mut skip_to: Option<elivagar::SkipTo> = None;
     let mut in_memory = false;
     let mut compression_level: u32 = 6;
+    let mut force_sorted = false;
 
     let mut i = 3;
     while i < args.len() {
@@ -62,6 +63,9 @@ fn main() {
             "--in-memory" => {
                 in_memory = true;
             }
+            "--force-sorted" => {
+                force_sorted = true;
+            }
             other => {
                 eprintln!("Unknown argument: {other}");
                 std::process::exit(1);
@@ -81,6 +85,7 @@ fn main() {
         skip_to,
         in_memory,
         compression_level,
+        force_sorted,
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")

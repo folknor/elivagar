@@ -95,6 +95,10 @@ pub struct TilegenConfig {
     /// Gzip compression level (0-10). Lower = faster, larger output.
     /// Default: 6. Level 3-4 is noticeably faster with ~5% larger output.
     pub compression_level: u32,
+    /// Force the compact in-RAM node store even if the PBF header doesn't
+    /// declare `Sort.Type_then_ID`. Useful for PBFs that are sorted in practice
+    /// but lack the header flag. Aborts with an error if nodes aren't monotonic.
+    pub force_sorted: bool,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -320,9 +324,13 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     let idx_dir = &config.tmp_dir;
     // Option so we can consume it via .take() on first Way element.
-    let is_sorted = reader.header().is_sorted();
+    let is_sorted = reader.header().is_sorted() || config.force_sorted;
     let mut node_store_opt: Option<NodeStore> = Some(if is_sorted {
-        eprintln!("  PBF declares Sort.Type_then_ID — using compact node store");
+        if config.force_sorted && !reader.header().is_sorted() {
+            eprintln!("  --force-sorted: assuming sorted PBF (will abort if not)");
+        } else {
+            eprintln!("  PBF declares Sort.Type_then_ID — using compact node store");
+        }
         NodeStore::Sorted(SortedNodeStore::new())
     } else {
         eprintln!("  PBF not sorted — using flat mmap node index");
