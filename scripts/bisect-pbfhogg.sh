@@ -12,20 +12,18 @@ cd "$PBFHOGG_DIR"
 COMMIT=$(git rev-parse --short HEAD)
 echo "=== bisect-pbfhogg at $COMMIT ==="
 
-if ! cargo build --release 2>&1 | tail -1; then
+if ! cargo build --release 2>&1; then
     echo "  pbfhogg build failed — SKIP"
     exit 125
 fi
 
 cd "$ELIVAGAR_DIR"
-source "$(dirname "$0")/lib.sh"
+source "$ELIVAGAR_DIR/scripts/lib.sh"
 git checkout -- Cargo.lock 2>/dev/null || true
 git stash --quiet 2>/dev/null || true
 git checkout "$ELIVAGAR_COMMIT" --quiet 2>/dev/null || true
 
-cargo build --release 2>&1 | tail -1
-
-if [ ! -f "$ELIVAGAR_BIN" ]; then
+if ! cargo build --release 2>&1; then
     echo "  elivagar build failed — SKIP"
     git checkout main --quiet 2>/dev/null || true
     git stash pop --quiet 2>/dev/null || true
@@ -44,8 +42,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "$ELIVAGAR_DIR/data/bisect-test.pmtiles" --tmp-dir "$ELIVAGAR_DIR/.tilegen_tmp" $OCEAN_FLAG 2> "$STDERR_FILE"
-EXIT_CODE=$?
+EXIT_CODE=0
+timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "$ELIVAGAR_DIR/data/bisect-test.pmtiles" --tmp-dir "$ELIVAGAR_DIR/.tilegen_tmp" $OCEAN_FLAG 2> "$STDERR_FILE" || EXIT_CODE=$?
 if [ "$EXIT_CODE" -eq 124 ]; then
     echo "  KILLED after ${RUN_TIMEOUT}s — BAD"
     exit 1
