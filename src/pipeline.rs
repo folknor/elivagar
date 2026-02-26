@@ -21,7 +21,7 @@ use crate::sort::{self, SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add_feature_to_layer};
 
-use pbfhogg::{Element, ElementReader, MemberId, PrimitiveBlock};
+use pbfhogg::{BlockType, Element, ElementReader, MemberId, PrimitiveBlock};
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -412,11 +412,10 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         let block = block_result
             .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
 
-        // Classify block by peeking first element. Sorted PBFs have
-        // single-type blocks (all nodes, all ways, or all relations).
-        // elements() creates a fresh iterator each call (zero-copy).
-        match block.elements().next() {
-            Some(Element::DenseNode(_)) | Some(Element::Node(_)) => {
+        // Classify block by reading first wire tag byte per group —
+        // no element decoding. Sorted PBFs have single-type blocks.
+        match block.block_type() {
+            BlockType::DenseNodes | BlockType::Nodes => {
                 // Node block — process inline
                 block.for_each_element(|element| match element {
                     Element::DenseNode(node) => handle_node!(node),
@@ -424,7 +423,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     _ => {}
                 });
             }
-            Some(Element::Way(_)) => {
+            BlockType::Ways => {
                 // Way block — send entire block to worker thread.
                 // Count ways from block (elements() re-parses from bytes, cheap).
                 way_count += block.elements()
@@ -490,7 +489,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                 block_tx.as_ref().expect("worker not initialized")
                     .send(block).expect("worker thread panicked");
             }
-            Some(Element::Relation(_)) => {
+            BlockType::Relations => {
                 // Relation block — shut down worker + drain, process inline.
                 // Drop block_tx → worker finishes → worker drops rtx →
                 // result channel closes → drain thread exits its recv loop.
@@ -537,7 +536,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     }
                 });
             }
-            None | Some(_) => {} // Empty or unknown block
+            BlockType::Empty | BlockType::Mixed => {}
         }
     }
 
