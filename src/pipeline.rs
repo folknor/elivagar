@@ -21,7 +21,7 @@ use crate::sort::{self, SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add_feature_to_layer};
 
-use pbfhogg::{BlobDecode, BlobReader, Element, ElementReader, MemberId};
+use pbfhogg::{Element, ElementReader, MemberId};
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -306,23 +306,6 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 // Phase 1+2: Single-pass PBF read + feature processing
 // ---------------------------------------------------------------------------
 
-/// Check if a PBF file declares `Sort.Type_then_ID` in its header.
-fn pbf_is_sorted(path: &std::path::Path) -> bool {
-    let Ok(reader) = BlobReader::from_path(path) else {
-        return false;
-    };
-    for blob in reader {
-        let Ok(blob) = blob else { return false };
-        match blob.decode() {
-            Ok(BlobDecode::OsmHeader(header)) => return header.is_sorted(),
-            Ok(BlobDecode::OsmData(_)) => return false, // No header found before data
-            Ok(_) => {}                                  // Skip unknown blob types
-            Err(_) => return false,
-        }
-    }
-    false
-}
-
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[hotpath::measure]
 fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask), PipelineError> {
@@ -337,7 +320,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     let idx_dir = &config.tmp_dir;
     // Option so we can consume it via .take() on first Way element.
-    let is_sorted = pbf_is_sorted(&config.pbf_path);
+    let is_sorted = reader.header().is_sorted();
     let mut node_store_opt: Option<NodeStore> = Some(if is_sorted {
         eprintln!("  PBF declares Sort.Type_then_ID — using compact node store");
         NodeStore::Sorted(SortedNodeStore::new())
