@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 // Public types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum GeomType {
     Point = 1,
@@ -100,17 +100,17 @@ impl EncodeScratch {
     }
 }
 
-/// Reusable scratch buffers for geometry merging, avoiding per-tile HashMap allocation.
+/// Reusable scratch buffers for geometry merging, avoiding per-tile allocation.
 /// Created once per rayon worker via `map_init`, reused across all tiles on that worker.
 pub struct MergeScratch {
-    groups: FxHashMap<(GeomType, Vec<(u16, u16)>), Vec<usize>>,
+    indices: Vec<usize>,
     geom: Vec<u32>,
 }
 
 impl MergeScratch {
     pub fn new() -> Self {
         Self {
-            groups: FxHashMap::default(),
+            indices: Vec::new(),
             geom: Vec::new(),
         }
     }
@@ -536,12 +536,10 @@ impl LayerBuilder {
     /// feature counts in the encoded tile without losing any visual
     /// information. Point features are skipped (not merged).
     ///
-    /// Uses a reusable `MergeScratch` (hoisted HashMap + geometry buffer) to
-    /// avoid per-tile allocation. Tags are cloned for HashMap keys but not
-    /// sorted — shortbread matching produces tags in deterministic order.
-    /// Merges in-place: appends secondary geometries into the first feature
-    /// of each group via scratch buffer + swap, tombstones secondaries with
-    /// empty geometry, then retains non-tombstone features.
+    /// Uses sort + scan instead of HashMap to avoid per-feature tag cloning.
+    /// Sort indices by (geom_type, tags), scan for consecutive runs, merge
+    /// each run in-place via scratch buffer + swap. Tombstones secondaries
+    /// with empty geometry, then retains non-tombstone features.
     #[hotpath::measure]
     pub fn merge_same_attr_geometries(
         &mut self,
@@ -549,59 +547,72 @@ impl LayerBuilder {
         geom_pool: &mut Vec<Vec<u32>>,
         tags_pool: &mut Vec<Vec<(u16, u16)>>,
     ) {
-        if self.features.len() < 2 {
-            return;
-        }
-
-        // Group features by (geom_type, tags). Tags are deterministic from
-        // shortbread matching — no sort needed. HashMap is reused across tiles
-        // (`.clear()` retains allocated capacity).
-        scratch.groups.clear();
+        // Build sorted index of non-Point features.
+        scratch.indices.clear();
         for (i, f) in self.features.iter().enumerate() {
-            if f.geom_type == GeomType::Point {
-                continue;
+            if f.geom_type != GeomType::Point {
+                scratch.indices.push(i);
             }
-            scratch.groups
-                .entry((f.geom_type, f.tags.clone()))
-                .or_default()
-                .push(i);
         }
-
-        // Check if any group has >1 feature worth merging
-        let any_mergeable = scratch.groups.values().any(|v| v.len() > 1);
-        if !any_mergeable {
+        if scratch.indices.len() < 2 {
             return;
         }
 
-        // In-place merge: for each group, concatenate all geometries into
-        // scratch.geom, swap into first feature, reclaim secondaries' Vecs.
-        for (_, indices) in &scratch.groups {
-            if indices.len() < 2 {
-                continue;
+        // Sort by (geom_type, tags). Tags are deterministic from shortbread
+        // matching — no normalization needed. Rust's sort is stable (Timsort).
+        scratch.indices.sort_by(|&a, &b| {
+            let fa = &self.features[a];
+            let fb = &self.features[b];
+            fa.geom_type.cmp(&fb.geom_type)
+                .then_with(|| fa.tags.cmp(&fb.tags))
+        });
+
+        // Scan for consecutive runs and merge each run in-place.
+        let mut any_merged = false;
+        let mut i = 0;
+        while i < scratch.indices.len() {
+            let mut j = i + 1;
+            let fi = scratch.indices[i];
+            while j < scratch.indices.len() {
+                let fj = scratch.indices[j];
+                if self.features[fj].geom_type != self.features[fi].geom_type
+                    || self.features[fj].tags != self.features[fi].tags
+                {
+                    break;
+                }
+                j += 1;
             }
-            // Concatenate all geometries into scratch buffer
-            scratch.geom.clear();
-            let mut cx: i32 = 0;
-            let mut cy: i32 = 0;
-            for &idx in indices {
-                append_geometry(&mut scratch.geom, &self.features[idx].geometry, &mut cx, &mut cy);
+            if j - i >= 2 {
+                any_merged = true;
+                // Concatenate all geometries into scratch buffer
+                scratch.geom.clear();
+                let mut cx: i32 = 0;
+                let mut cy: i32 = 0;
+                for k in i..j {
+                    let idx = scratch.indices[k];
+                    append_geometry(&mut scratch.geom, &self.features[idx].geometry, &mut cx, &mut cy);
+                }
+                // Swap merged geometry into first feature
+                let first = scratch.indices[i];
+                std::mem::swap(&mut self.features[first].geometry, &mut scratch.geom);
+                self.features[first].id = None;
+                // Reclaim secondary features' Vecs into pools (mem::take leaves
+                // zero-capacity Vecs so retain can identify dead features).
+                for k in (i + 1)..j {
+                    let idx = scratch.indices[k];
+                    geom_pool.push(std::mem::take(&mut self.features[idx].geometry));
+                    tags_pool.push(std::mem::take(&mut self.features[idx].tags));
+                }
             }
-            // Swap merged geometry into first feature
-            let first = indices[0];
-            std::mem::swap(&mut self.features[first].geometry, &mut scratch.geom);
-            self.features[first].id = None;
-            // Reclaim secondary features' Vecs into pools (mem::take leaves
-            // zero-capacity Vecs so retain can identify dead features).
-            for &idx in &indices[1..] {
-                geom_pool.push(std::mem::take(&mut self.features[idx].geometry));
-                tags_pool.push(std::mem::take(&mut self.features[idx].tags));
-            }
+            i = j;
         }
 
-        // Remove dead features (zero-capacity Vecs from mem::take).
-        // Uses is_empty() as tombstone proxy — safe because all pipeline-emitted
-        // features have non-empty geometry (enforced at all emit call sites).
-        self.features.retain(|f| !f.geometry.is_empty());
+        if any_merged {
+            // Remove dead features (zero-capacity Vecs from mem::take).
+            // Uses is_empty() as tombstone proxy — safe because all pipeline-emitted
+            // features have non-empty geometry (enforced at all emit call sites).
+            self.features.retain(|f| !f.geometry.is_empty());
+        }
     }
 }
 
