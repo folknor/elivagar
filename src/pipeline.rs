@@ -506,7 +506,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     };
     eprintln!("  Data bounds (merc): x[{:.4}–{:.4}] y[{:.4}–{:.4}]",
         data_bounds.min_x, data_bounds.max_x, data_bounds.min_y, data_bounds.max_y);
-    eprintln!("  Land mask: {}/65536 z8 cells populated", land_mask.count_set());
+    eprintln!("  Land mask: {} z14 cells populated", land_mask.count_set());
 
     Ok((sort_writer, data_bounds, land_mask))
 }
@@ -1189,11 +1189,19 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
             let mut features_read: u64 = 0;
             let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
             let mut current = PendingTile { tile_id: u64::MAX, features: Vec::new() };
+            let ocean_idx = Layer::Ocean as u8;
+
+            // Skip tiles that contain ONLY ocean features (no PBF data).
+            // Tilemaker doesn't emit ocean-only tiles; map clients render
+            // absent tiles as background. Skipping these cuts tile count by ~5x.
+            let should_emit = |tile: &PendingTile| -> bool {
+                tile.features.iter().any(|(layer, _)| *layer != ocean_idx)
+            };
 
             loop {
                 let record = sort_reader.next()?;
                 let Some(r) = record else {
-                    if current.tile_id != u64::MAX {
+                    if current.tile_id != u64::MAX && should_emit(&current) {
                         batch.push(current);
                     }
                     if !batch.is_empty() {
@@ -1207,7 +1215,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
                 let layer_idx = sort::layer_from_key(r.key);
 
                 if tile_id != current.tile_id {
-                    if current.tile_id != u64::MAX {
+                    if current.tile_id != u64::MAX && should_emit(&current) {
                         batch.push(current);
                         if batch.len() >= BATCH_SIZE {
                             if read_tx.send(batch).is_err() { break; }

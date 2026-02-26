@@ -1117,34 +1117,41 @@ pub fn point_in_polygon(p: &Point, ring: &[Point]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Land tile mask (z8 resolution bitset for ocean filtering)
+// Land tile mask (z14 resolution bitset for ocean filtering)
 // ---------------------------------------------------------------------------
 
-/// Z8-resolution bitset recording which grid cells contain land features.
+/// Z14-resolution bitset recording which grid cells contain land features.
 /// Thread-safe: uses atomic byte operations for concurrent writes from rayon.
-/// 256×256 = 65,536 cells stored in 8,192 bytes (8 KB).
+/// 16384×16384 = 268M cells stored in 32 MB.
+///
+/// Ocean fill tiles are only generated for cells where the mask is set,
+/// so higher resolution → fewer spurious ocean-only tiles.
 pub(crate) struct LandMask {
-    bits: Box<[AtomicU8; Self::BYTES]>,
+    bits: Box<[AtomicU8]>,
 }
 
 impl LandMask {
-    /// Grid dimension: 2^8 = 256 tiles per axis.
-    const DIM: u32 = 256;
-    /// Total bytes: 256*256/8 = 8192.
-    const BYTES: usize = (Self::DIM * Self::DIM / 8) as usize;
+    /// Zoom level of the mask grid.
+    const ZOOM: u8 = 14;
+    /// Grid dimension: 2^14 = 16384 tiles per axis.
+    const DIM: usize = 1 << Self::ZOOM;
+    /// Total bytes: 16384*16384/8 = 33,554,432 (32 MB).
+    const BYTES: usize = Self::DIM * Self::DIM / 8;
 
-    /// Create an empty mask (no land anywhere).
+    /// Create an empty mask (no land anywhere). Heap-allocated (32 MB).
     pub fn new() -> Self {
-        Self {
-            bits: Box::new(std::array::from_fn(|_| AtomicU8::new(0))),
-        }
+        let mut bits = Vec::with_capacity(Self::BYTES);
+        bits.resize_with(Self::BYTES, || AtomicU8::new(0));
+        Self { bits: bits.into_boxed_slice() }
     }
 
-    /// Mark all z8 cells covered by a Mercator bounding box.
+    /// Mark all z14 cells covered by a Mercator bounding box.
     /// Hot path: called per-feature during PBF processing from rayon threads.
     pub fn mark_bbox(&self, bbox: &MercBbox) {
-        let scale = f64::from(Self::DIM);
-        let max_tile = Self::DIM - 1;
+        #[allow(clippy::cast_possible_truncation)]
+        let dim = Self::DIM as u32;
+        let scale = dim as f64;
+        let max_tile = dim - 1;
         let tx_min = clamp_tile(bbox.min_x * scale, max_tile);
         let tx_max = clamp_tile(bbox.max_x * scale, max_tile);
         let ty_min = clamp_tile(bbox.min_y * scale, max_tile);
@@ -1156,15 +1163,15 @@ impl LandMask {
         }
     }
 
-    /// Check whether a tile at any zoom level overlaps a z8 cell with land.
-    /// For z ≥ 8: checks the single z8 ancestor.
-    /// For z < 8: checks if ANY z8 descendant is set.
+    /// Check whether a tile at any zoom level overlaps a z14 cell with land.
+    /// For z ≥ 14: checks the single z14 cell (ancestor lookup).
+    /// For z < 14: checks if ANY z14 descendant is set (early-exit scan).
     pub fn has_land(&self, z: u8, tx: u32, ty: u32) -> bool {
-        if z >= 8 {
-            let shift = z - 8;
+        if z >= Self::ZOOM {
+            let shift = z - Self::ZOOM;
             self.get_bit(tx >> shift, ty >> shift)
         } else {
-            let shift = 8 - z;
+            let shift = Self::ZOOM - z;
             let x0 = tx << shift;
             let y0 = ty << shift;
             let count = 1u32 << shift;
@@ -1181,7 +1188,7 @@ impl LandMask {
 
     #[inline]
     fn set_bit(&self, tx: u32, ty: u32) {
-        let idx = (ty * Self::DIM + tx) as usize;
+        let idx = ty as usize * Self::DIM + tx as usize;
         let byte_idx = idx / 8;
         let bit_idx = idx % 8;
         self.bits[byte_idx].fetch_or(1 << bit_idx, Ordering::Relaxed);
@@ -1189,13 +1196,13 @@ impl LandMask {
 
     #[inline]
     fn get_bit(&self, tx: u32, ty: u32) -> bool {
-        let idx = (ty * Self::DIM + tx) as usize;
+        let idx = ty as usize * Self::DIM + tx as usize;
         let byte_idx = idx / 8;
         let bit_idx = idx % 8;
         (self.bits[byte_idx].load(Ordering::Relaxed) >> bit_idx) & 1 != 0
     }
 
-    /// Serialize to 8,192 bytes for checkpoint persistence.
+    /// Serialize to 32 MB for checkpoint persistence.
     pub fn to_bytes(&self) -> Vec<u8> {
         self.bits.iter().map(|b| b.load(Ordering::Relaxed)).collect()
     }
@@ -1205,13 +1212,11 @@ impl LandMask {
         if data.len() != Self::BYTES {
             return None;
         }
-        let bits: Box<[AtomicU8; Self::BYTES]> = Box::new(
-            std::array::from_fn(|i| AtomicU8::new(data[i])),
-        );
-        Some(Self { bits })
+        let bits: Vec<AtomicU8> = data.iter().map(|&b| AtomicU8::new(b)).collect();
+        Some(Self { bits: bits.into_boxed_slice() })
     }
 
-    /// Count how many z8 cells have land features.
+    /// Count how many z14 cells have land features.
     pub fn count_set(&self) -> u32 {
         self.bits
             .iter()
@@ -1743,12 +1748,14 @@ mod tests {
     fn test_land_mask_mark_and_query_z8() {
         let mask = LandMask::new();
         assert!(!mask.has_land(8, 100, 100));
+        // mark_bbox uses Mercator [0,1] coords → z14 tile 100/256*16384 = 6400
         mask.mark_bbox(&MercBbox {
             min_x: 100.0 / 256.0,
             min_y: 100.0 / 256.0,
             max_x: 100.5 / 256.0,
             max_y: 100.5 / 256.0,
         });
+        // z8 tile (100,100) has z14 descendants (6400..6463, 6400..6463)
         assert!(mask.has_land(8, 100, 100));
         assert!(!mask.has_land(8, 101, 100));
     }
@@ -1756,24 +1763,26 @@ mod tests {
     #[test]
     fn test_land_mask_z14_ancestor() {
         let mask = LandMask::new();
-        // z14 tile (6400, 6400) → z8 ancestor: (6400 >> 6, 6400 >> 6) = (100, 100)
-        mask.set_bit(100, 100);
+        // Set z14 cell (6400, 6400) directly
+        mask.set_bit(6400, 6400);
         assert!(mask.has_land(14, 6400, 6400));
-        assert!(mask.has_land(14, 6401, 6401)); // same z8 cell
+        assert!(!mask.has_land(14, 6401, 6401)); // different z14 cell
+        // z8 tile (100, 100) has z14 descendant (6400, 6400) set
         assert!(mask.has_land(8, 100, 100));
-        // Different z8 cell
-        assert!(!mask.has_land(14, 6464, 6464)); // 6464 >> 6 = 101
+        // Different z8 cell → no z14 descendants set
+        assert!(!mask.has_land(8, 101, 101));
     }
 
     #[test]
     fn test_land_mask_low_zoom_descendant() {
         let mask = LandMask::new();
-        mask.set_bit(100, 100);
-        // z7 tile (50, 50) covers z8 cells (100..101, 100..101)
+        // Set z14 cell (6400, 6400)
+        mask.set_bit(6400, 6400);
+        // z7 tile (50, 50) covers z14 cells (6400..6527, 6400..6527)
         assert!(mask.has_land(7, 50, 50));
-        // z7 tile (51, 50) covers z8 cells (102..103, 100..101)
+        // z7 tile (51, 50) covers z14 cells (6528..6655, 6400..6527)
         assert!(!mask.has_land(7, 51, 50));
-        // z0 tile (0, 0) covers all z8 cells
+        // z0 tile (0, 0) covers all z14 cells
         assert!(mask.has_land(0, 0, 0));
     }
 
@@ -1781,14 +1790,14 @@ mod tests {
     fn test_land_mask_serialization_roundtrip() {
         let mask = LandMask::new();
         mask.set_bit(0, 0);
-        mask.set_bit(255, 255);
-        mask.set_bit(100, 50);
+        mask.set_bit(16383, 16383);
+        mask.set_bit(6400, 3200);
         let bytes = mask.to_bytes();
         assert_eq!(bytes.len(), LandMask::BYTES);
-        let restored = LandMask::from_bytes(&bytes).unwrap();
+        let restored = LandMask::from_bytes(&bytes).expect("deserialization failed");
         assert!(restored.get_bit(0, 0));
-        assert!(restored.get_bit(255, 255));
-        assert!(restored.get_bit(100, 50));
+        assert!(restored.get_bit(16383, 16383));
+        assert!(restored.get_bit(6400, 3200));
         assert!(!restored.get_bit(1, 0));
         assert_eq!(restored.count_set(), 3);
     }

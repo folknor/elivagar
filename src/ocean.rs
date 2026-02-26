@@ -210,7 +210,7 @@ pub(crate) fn process_ocean_shapefile(
     let empty_attrs: Vec<shortbread::Attr> = Vec::new();
 
     if let Some(mask) = land_mask {
-        eprintln!("  Land mask: {}/65536 z8 cells, filtering enabled", mask.count_set());
+        eprintln!("  Land mask: {} z14 cells, filtering enabled", mask.count_set());
     }
 
     // Ocean chunks use the same chunk_NNNN.bin naming (starting after PBF chunks)
