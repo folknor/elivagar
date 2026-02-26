@@ -336,7 +336,6 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         eprintln!("  PBF not sorted — using flat mmap node index");
         NodeStore::Flat(NodeIndex::create(&idx_dir.join("nodes.idx"))?)
     });
-    let mut node_reader: Option<NodeStoreReader> = None;
     let mut way_index =
         WayIndex::create(idx_dir)?;
 
@@ -359,6 +358,12 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     // Batches for parallel processing
     let mut raw_way_batch: Vec<RawWay> = Vec::with_capacity(WAY_BATCH_SIZE);
     let mut rel_batch: Vec<PreparedRelation> = Vec::with_capacity(REL_BATCH_SIZE);
+
+    // Double-buffer: worker thread processes way batches via rayon while main thread
+    // collects the next batch and drains previous results.
+    let mut batch_tx: Option<std::sync::mpsc::SyncSender<Vec<RawWay>>> = None;
+    let mut result_rx: Option<std::sync::mpsc::Receiver<Vec<ProcessedWay>>> = None;
+    let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
 
     // Reusable buffer hoisted out of the PBF closure to avoid per-element
     // allocation (~200M allocs at planet scale). Cleared each iteration.
@@ -407,15 +412,40 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             Element::Way(way) => {
                 way_count += 1;
 
-                // Convert node index to read-only reader on first way.
-                // PBF guarantees all nodes come before ways, so writes are done.
-                if node_reader.is_none() {
+                // Spawn double-buffer worker thread on first way.
+                // PBF guarantees all nodes come before ways, so node store is complete.
+                if batch_tx.is_none() {
                     let ns = node_store_opt.take()
                         .expect("node store already consumed");
-                    let reader = ns.into_reader()
-                        .expect("failed to convert node store to reader");
-                    node_reader = Some(reader);
+                    let nr = std::sync::Arc::new(
+                        ns.into_reader().expect("failed to convert node store to reader")
+                    );
                     eprintln!("  Node store finalized ({node_count} nodes), processing ways...");
+
+                    let (btx, brx) = std::sync::mpsc::sync_channel::<Vec<RawWay>>(1);
+                    let (rtx, rrx) = std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(1);
+                    let nr_clone = std::sync::Arc::clone(&nr);
+                    let mz = min_z;
+                    let xz = max_z;
+                    worker_handle = Some(std::thread::spawn(move || {
+                        use rayon::prelude::*;
+                        while let Ok(batch) = brx.recv() {
+                            let results: Vec<ProcessedWay> = batch
+                                .into_par_iter()
+                                .map(|raw| process_raw_way(raw, &nr_clone, mz, xz))
+                                .collect();
+                            if rtx.send(results).is_err() { break; }
+                        }
+                    }));
+                    batch_tx = Some(btx);
+                    result_rx = Some(rrx);
+                }
+
+                // Non-blocking drain of previous results while collecting
+                if let Some(ref rx) = result_rx {
+                    features_emitted += drain_way_results_nonblocking(
+                        rx, &mut way_index, &land_mask, &mut sort_writer,
+                    );
                 }
 
                 // Collect raw way data — cheap copies on the main thread.
@@ -433,22 +463,31 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
                 if raw_way_batch.len() >= WAY_BATCH_SIZE {
                     let batch = std::mem::replace(&mut raw_way_batch, Vec::with_capacity(WAY_BATCH_SIZE));
-                    features_emitted += flush_raw_way_batch(
-                        batch,
-                        node_reader.as_ref().expect("node reader not initialized"),
-                        &mut way_index, min_z, max_z, &land_mask, &mut sort_writer,
-                    );
+                    // send() blocks if worker is still processing (backpressure)
+                    batch_tx.as_ref().expect("worker not initialized")
+                        .send(batch).expect("worker thread panicked");
                 }
             }
             Element::Relation(rel) => {
-                // Flush remaining raw way batch at the way→relation transition
-                if !raw_way_batch.is_empty() {
-                    let batch = std::mem::replace(&mut raw_way_batch, Vec::with_capacity(WAY_BATCH_SIZE));
-                    features_emitted += flush_raw_way_batch(
-                        batch,
-                        node_reader.as_ref().expect("node reader not initialized"),
-                        &mut way_index, min_z, max_z, &land_mask, &mut sort_writer,
-                    );
+                // Shut down worker thread at the way→relation transition
+                if batch_tx.is_some() {
+                    // Send remaining way batch
+                    if !raw_way_batch.is_empty() {
+                        let batch = std::mem::replace(&mut raw_way_batch, Vec::with_capacity(WAY_BATCH_SIZE));
+                        batch_tx.as_ref().expect("worker not initialized")
+                            .send(batch).expect("worker thread panicked");
+                    }
+                    // Close sender to signal worker to exit, then join
+                    drop(batch_tx.take());
+                    if let Some(h) = worker_handle.take() {
+                        h.join().expect("worker thread panicked");
+                    }
+                    // Blocking drain of all remaining results
+                    if let Some(rx) = result_rx.take() {
+                        features_emitted += drain_way_results_blocking(
+                            &rx, &mut way_index, &land_mask, &mut sort_writer,
+                        );
+                    }
                 }
 
                 if !way_index_finalized {
@@ -476,18 +515,20 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         })
         .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
 
-    // Flush any remaining batches
-    if !raw_way_batch.is_empty() {
-        // Handle degenerate PBF with ways but no prior conversion
-        if node_reader.is_none() {
-            if let Some(ns) = node_store_opt.take() {
-                let reader = ns.into_reader().expect("failed to convert node store to reader");
-                node_reader = Some(reader);
-            }
+    // Flush any remaining batches (PBF with ways but no relations — worker still running)
+    if batch_tx.is_some() {
+        if !raw_way_batch.is_empty() {
+            let batch = std::mem::take(&mut raw_way_batch);
+            batch_tx.as_ref().expect("worker not initialized")
+                .send(batch).expect("worker thread panicked");
         }
-        if let Some(ref nr) = node_reader {
-            features_emitted += flush_raw_way_batch(
-                raw_way_batch, nr, &mut way_index, min_z, max_z, &land_mask, &mut sort_writer,
+        drop(batch_tx.take());
+        if let Some(h) = worker_handle.take() {
+            h.join().expect("worker thread panicked");
+        }
+        if let Some(rx) = result_rx.take() {
+            features_emitted += drain_way_results_blocking(
+                &rx, &mut way_index, &land_mask, &mut sort_writer,
             );
         }
     }
@@ -594,50 +635,66 @@ struct RawWay {
 }
 const _: () = assert!(std::mem::size_of::<RawWay>() == 56);
 
-/// Result of parallel way processing: resolved coords (needed for way_index)
-/// and sort records (geometry output).
+/// Result of parallel way processing: resolved coords (needed for way_index),
+/// sort records (geometry output), and bbox (deferred land_mask marking).
 struct ProcessedWay {
     way_id: i64,
     coords_e7: Vec<(i32, i32)>,
     records: Vec<SortRecord>,
+    bbox: Option<MercBbox>,
 }
-const _: () = assert!(std::mem::size_of::<ProcessedWay>() == 56);
 
 const WAY_BATCH_SIZE: usize = 8192;
 
-/// Process a batch of raw ways in parallel: resolve coords, match tags, emit geometry.
-/// Then serially write way_index entries and push sort records.
-#[allow(clippy::too_many_arguments)]
-#[hotpath::measure]
-fn flush_raw_way_batch(
-    batch: Vec<RawWay>,
-    node_reader: &NodeStoreReader,
+/// Drain a single batch of processed way results: write way_index entries,
+/// mark land_mask, push sort records. Returns feature count.
+fn drain_processed_ways(
+    results: Vec<ProcessedWay>,
     way_index: &mut WayIndex,
-    min_zoom: u8,
-    max_zoom: u8,
     land_mask: &geometry::LandMask,
     sort_writer: &mut SortWriter,
 ) -> u64 {
-    use rayon::prelude::*;
-
-    // Phase 1: Parallel — resolve coords, match tags, process geometry.
-    // Page faults on node_reader.get() now spread across rayon threads.
-    let results: Vec<ProcessedWay> = batch
-        .into_par_iter()
-        .map(|raw| process_raw_way(raw, node_reader, min_zoom, max_zoom, land_mask))
-        .collect();
-
-    // Phase 2: Serial — way_index writes + sort_writer pushes (fast sequential I/O).
     let mut count: u64 = 0;
     for pw in results {
         if !pw.coords_e7.is_empty() {
             way_index.put(pw.way_id, &pw.coords_e7);
+        }
+        if let Some(ref bbox) = pw.bbox {
+            land_mask.mark_bbox(bbox);
         }
         count += pw.records.len() as u64;
         // Panic: disk I/O failure is unrecoverable mid-pipeline.
         for record in pw.records {
             sort_writer.push(record).expect("sort push failed");
         }
+    }
+    count
+}
+
+/// Non-blocking drain: consume any available results from the worker channel.
+fn drain_way_results_nonblocking(
+    rx: &std::sync::mpsc::Receiver<Vec<ProcessedWay>>,
+    way_index: &mut WayIndex,
+    land_mask: &geometry::LandMask,
+    sort_writer: &mut SortWriter,
+) -> u64 {
+    let mut count: u64 = 0;
+    while let Ok(results) = rx.try_recv() {
+        count += drain_processed_ways(results, way_index, land_mask, sort_writer);
+    }
+    count
+}
+
+/// Blocking drain: consume ALL results until channel closes.
+fn drain_way_results_blocking(
+    rx: &std::sync::mpsc::Receiver<Vec<ProcessedWay>>,
+    way_index: &mut WayIndex,
+    land_mask: &geometry::LandMask,
+    sort_writer: &mut SortWriter,
+) -> u64 {
+    let mut count: u64 = 0;
+    while let Ok(results) = rx.recv() {
+        count += drain_processed_ways(results, way_index, land_mask, sort_writer);
     }
     count
 }
@@ -651,7 +708,6 @@ fn process_raw_way(
     node_reader: &NodeStoreReader,
     min_zoom: u8,
     max_zoom: u8,
-    land_mask: &geometry::LandMask,
 ) -> ProcessedWay {
     // Resolve node coordinates (the expensive mmap reads — now parallel).
     // Allocates per way (~8 coords avg). Cannot hoist: ownership transfers into
@@ -662,7 +718,7 @@ fn process_raw_way(
         .collect();
 
     if coords_e7.is_empty() || raw.tags.is_empty() {
-        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new() };
+        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new(), bbox: None };
     }
 
     // Tag matching — convert owned tags to borrowed refs (same pattern as
@@ -676,7 +732,7 @@ fn process_raw_way(
     let mut matches = shortbread::match_element(&tag_helper, geom_type);
 
     if matches.is_empty() {
-        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new() };
+        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new(), bbox: None };
     }
 
     // Project to Mercator
@@ -685,7 +741,6 @@ fn process_raw_way(
         .collect();
 
     let bbox = merc_bbox(&merc);
-    land_mask.mark_bbox(&bbox);
 
     // Enrich polygon matches with area-dependent data (way_area, min_zoom overrides)
     if is_closed {
@@ -717,7 +772,7 @@ fn process_raw_way(
         }
     }
 
-    ProcessedWay { way_id: raw.way_id, coords_e7, records }
+    ProcessedWay { way_id: raw.way_id, coords_e7, records, bbox: Some(bbox) }
 }
 
 // ---------------------------------------------------------------------------

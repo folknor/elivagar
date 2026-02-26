@@ -84,7 +84,7 @@ Sequential, same PBF input:
 ### plantasjen (current)
 - CPU: AMD Ryzen 9 5900X (12 cores / 24 threads, 4.95 GHz boost)
 - RAM: 30 GB DDR4
-- Denmark PBF baseline: ~17s total (11s pbf, 2.5s ocean, 0.4s sort, 2.3s assemble)
+- Denmark PBF baseline: ~16s total (10s pbf, 2.4s ocean, 0.4s sort, 2.3s assemble)
 
 ### dm6
 - CPU: AMD Ryzen 5 5600G (6 cores / 12 threads, 4.46 GHz boost)
