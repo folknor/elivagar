@@ -388,39 +388,82 @@ pub fn for_each_zoom_simplified<F>(
     }
 }
 
+/// Reusable scratch buffers for [`for_each_zoom_simplified_multi`].
+/// Hoist outside tight loops to avoid per-call allocation of cascade/simplification
+/// buffers. Buffers grow to accommodate the largest polygon and stay allocated.
+pub struct SimplifyMultiScratch {
+    pub cascade_outer: Vec<Point>,
+    pub cascade_inners: Vec<Vec<Point>>,
+    pub keep_buf: Vec<bool>,
+    pub simp_buf: Vec<Point>,
+}
+
+impl SimplifyMultiScratch {
+    pub fn new() -> Self {
+        Self {
+            cascade_outer: Vec::new(),
+            cascade_inners: Vec::new(),
+            keep_buf: Vec::new(),
+            simp_buf: Vec::new(),
+        }
+    }
+}
+
 /// Cascading simplification for a multipolygon (outer ring + inner holes).
 ///
 /// Same zoom-descending approach as [`for_each_zoom_simplified`], but also
 /// simplifies inner rings and drops any that fall below 4 points.
+/// Pass a [`SimplifyMultiScratch`] to reuse buffers across calls.
 #[hotpath::measure]
 pub fn for_each_zoom_simplified_multi<F>(
     outer: &[Point],
     inners: &[Vec<Point>],
     z_lo: u8,
     z_hi: u8,
+    scratch: &mut SimplifyMultiScratch,
     mut callback: F,
 ) where
     F: FnMut(u8, &[Point], &[Vec<Point>]),
 {
-    let mut cascade_outer = outer.to_vec();
-    let mut cascade_inners: Vec<Vec<Point>> = inners.to_vec();
-    let mut keep_buf: Vec<bool> = Vec::new();
-    let mut simp_buf: Vec<Point> = Vec::new();
+    // Destructure so the borrow checker sees independent fields
+    // (needed for retain_mut closure to borrow keep_buf/simp_buf
+    // while cascade_inners is mutably borrowed).
+    let SimplifyMultiScratch {
+        cascade_outer,
+        cascade_inners,
+        keep_buf,
+        simp_buf,
+    } = scratch;
+
+    cascade_outer.clear();
+    cascade_outer.extend_from_slice(outer);
+
+    // Reuse inner vecs where possible, growing the pool as needed
+    for (i, inner) in inners.iter().enumerate() {
+        if i < cascade_inners.len() {
+            cascade_inners[i].clear();
+            cascade_inners[i].extend_from_slice(inner);
+        } else {
+            cascade_inners.push(inner.to_vec());
+        }
+    }
+    cascade_inners.truncate(inners.len());
+
     let mut last_max_dev_sq: f64 = f64::MAX;
     for z in (z_lo..=z_hi).rev() {
         let tol = if z < 14 { simplify_tolerance(z) } else { 0.0 };
         if tol > 0.0 {
-            if merc_bbox_is_subpixel(&cascade_outer, z) {
+            if merc_bbox_is_subpixel(cascade_outer, z) {
                 break;
             }
             let tol_sq = tol * tol;
             // Option E: skip if outer already at minimum, Option D: skip if converged
             if cascade_outer.len() > 4 && last_max_dev_sq >= tol_sq {
-                last_max_dev_sq = simplify_into(&cascade_outer, tol, &mut keep_buf, &mut simp_buf);
-                std::mem::swap(&mut cascade_outer, &mut simp_buf);
+                last_max_dev_sq = simplify_into(cascade_outer, tol, keep_buf, simp_buf);
+                std::mem::swap(cascade_outer, simp_buf);
                 cascade_inners.retain_mut(|r| {
-                    simplify_into(r, tol, &mut keep_buf, &mut simp_buf);
-                    std::mem::swap(r, &mut simp_buf);
+                    simplify_into(r, tol, keep_buf, simp_buf);
+                    std::mem::swap(r, simp_buf);
                     r.len() >= 4
                 });
             }
@@ -428,7 +471,7 @@ pub fn for_each_zoom_simplified_multi<F>(
         if cascade_outer.len() < 4 {
             break;
         }
-        callback(z, &cascade_outer, &cascade_inners);
+        callback(z, cascade_outer, cascade_inners);
     }
 }
 

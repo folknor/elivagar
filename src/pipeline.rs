@@ -921,6 +921,7 @@ fn process_prepared_relation(
     enrich_polygon_matches(&mut matches, total_area_m2);
 
     let mut records = Vec::new();
+    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
 
     for m in &matches {
         let z_lo = m.min_zoom.max(min_zoom);
@@ -939,7 +940,7 @@ fn process_prepared_relation(
                     land_mask.mark_bbox(&bbox);
                     emit_multipolygon_feature(
                         rel.osm_id, outer, inners, m,
-                        z_lo, z_hi, &mut records,
+                        z_lo, z_hi, &mut records, &mut simp_scratch,
                     );
                 }
             }
@@ -1202,6 +1203,7 @@ fn emit_multipolygon_feature(
     z_lo: u8,
     z_hi: u8,
     records: &mut Vec<SortRecord>,
+    simp_scratch: &mut geometry::SimplifyMultiScratch,
 ) -> u64 {
     let mut count: u64 = 0;
     let mut geom_buf: Vec<u32> = Vec::new();
@@ -1210,7 +1212,7 @@ fn emit_multipolygon_feature(
     let mut clip_b: Vec<Point> = Vec::new();
     let mut all_rings: Vec<Vec<(i32, i32)>> = Vec::new();
 
-    geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, |z, simp_outer, simp_inners| {
+    geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, |z, simp_outer, simp_inners| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
         // Recompute bbox from simplified coords — at low zooms DP may reduce the

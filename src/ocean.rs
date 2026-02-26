@@ -224,6 +224,7 @@ pub(crate) fn process_ocean_shapefile(
         bytes: usize,
         chunk_paths: Vec<std::path::PathBuf>,
         count: u64,
+        simp_scratch: geometry::SimplifyMultiScratch,
     }
 
     impl OceanAcc {
@@ -247,13 +248,13 @@ pub(crate) fn process_ocean_shapefile(
         .par_iter()
         .enumerate()
         .fold(
-            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0 },
+            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, simp_scratch: geometry::SimplifyMultiScratch::new() },
             |mut acc, (idx, poly)| {
                 let before = acc.records.len();
                 emit_ocean_polygon(
                     idx as u64, &poly.outer, &poly.inners,
                     min_zoom, max_zoom, ocean_layer, &empty_attrs,
-                    land_mask, &mut acc.records,
+                    land_mask, &mut acc.records, &mut acc.simp_scratch,
                 );
                 for r in &acc.records[before..] {
                     acc.bytes += r.data.len() + 8;
@@ -269,7 +270,7 @@ pub(crate) fn process_ocean_shapefile(
             acc
         })
         .reduce(
-            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0 },
+            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, simp_scratch: geometry::SimplifyMultiScratch::new() },
             |mut a, b| {
                 a.chunk_paths.extend(b.chunk_paths);
                 a.count += b.count;
@@ -310,6 +311,7 @@ fn emit_ocean_polygon(
     attrs: &[shortbread::Attr],
     land_mask: Option<&geometry::LandMask>,
     records: &mut Vec<SortRecord>,
+    simp_scratch: &mut geometry::SimplifyMultiScratch,
 ) {
     if outer.len() < 4 {
         return;
@@ -337,7 +339,7 @@ fn emit_ocean_polygon(
     let mut clip_a: Vec<Point> = Vec::new();
     let mut clip_b: Vec<Point> = Vec::new();
 
-    geometry::for_each_zoom_simplified_multi(outer, inners, min_zoom, max_zoom, |z, simp_outer, simp_inners| {
+    geometry::for_each_zoom_simplified_multi(outer, inners, min_zoom, max_zoom, simp_scratch, |z, simp_outer, simp_inners| {
         let scale = f64::from(1u32 << z);
         let inv_scale = 1.0 / scale;
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
