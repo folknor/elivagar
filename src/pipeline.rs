@@ -404,122 +404,122 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         }};
     }
 
-    reader
-        .for_each_block_pipelined(|block| {
-            // Non-blocking drain of previous way results between blocks
-            if let Some(ref rx) = result_rx {
-                features_emitted += drain_way_results_nonblocking(
-                    rx, &mut way_index, &land_mask, &mut sort_writer,
-                );
+    for block_result in reader.into_blocks_pipelined() {
+        let block = block_result
+            .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
+
+        // Non-blocking drain of previous way results between blocks
+        if let Some(ref rx) = result_rx {
+            features_emitted += drain_way_results_nonblocking(
+                rx, &mut way_index, &land_mask, &mut sort_writer,
+            );
+        }
+
+        // Classify block by peeking first element. Sorted PBFs have
+        // single-type blocks (all nodes, all ways, or all relations).
+        // elements() creates a fresh iterator each call (zero-copy).
+        match block.elements().next() {
+            Some(Element::DenseNode(_)) | Some(Element::Node(_)) => {
+                // Node block — process inline
+                block.for_each_element(|element| match element {
+                    Element::DenseNode(node) => handle_node!(node),
+                    Element::Node(node) => handle_node!(node),
+                    _ => {}
+                });
             }
+            Some(Element::Way(_)) => {
+                // Way block — send entire block to worker thread.
+                // Count ways from block (elements() re-parses from bytes, cheap).
+                way_count += block.elements()
+                    .filter(|e| matches!(e, Element::Way(_)))
+                    .count() as u64;
 
-            // Classify block by peeking first element. Sorted PBFs have
-            // single-type blocks (all nodes, all ways, or all relations).
-            // elements() creates a fresh iterator each call (zero-copy).
-            match block.elements().next() {
-                Some(Element::DenseNode(_)) | Some(Element::Node(_)) => {
-                    // Node block — process inline
-                    block.for_each_element(|element| match element {
-                        Element::DenseNode(node) => handle_node!(node),
-                        Element::Node(node) => handle_node!(node),
-                        _ => {}
-                    });
+                // Spawn worker on first way block
+                if block_tx.is_none() {
+                    let ns = node_store_opt.take()
+                        .expect("node store already consumed");
+                    let nr = std::sync::Arc::new(
+                        ns.into_reader().expect("failed to convert node store to reader")
+                    );
+                    eprintln!("  Node store finalized ({node_count} nodes), processing ways...");
+
+                    let (btx, brx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(1);
+                    let (rtx, rrx) = std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(1);
+                    let nr_clone = std::sync::Arc::clone(&nr);
+                    let mz = min_z;
+                    let xz = max_z;
+                    worker_handle = Some(std::thread::spawn(move || {
+                        use rayon::prelude::*;
+                        while let Ok(block) = brx.recv() {
+                            // Extract ways from owned block on worker thread
+                            let raw_ways: Vec<RawWay> = block.elements()
+                                .filter_map(|e| match e {
+                                    Element::Way(way) => {
+                                        let node_refs: Vec<i64> = way.refs().collect();
+                                        if node_refs.is_empty() { return None; }
+                                        let tags: Vec<(String, String)> = way.tags()
+                                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                                            .collect();
+                                        Some(RawWay { way_id: way.id(), node_refs, tags })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            let results: Vec<ProcessedWay> = raw_ways
+                                .into_par_iter()
+                                .map(|raw| process_raw_way(raw, &nr_clone, mz, xz))
+                                .collect();
+                            if rtx.send(results).is_err() { break; }
+                        }
+                    }));
+                    block_tx = Some(btx);
+                    result_rx = Some(rrx);
                 }
-                Some(Element::Way(_)) => {
-                    // Way block — send entire block to worker thread.
-                    // Count ways from block (elements() re-parses from bytes, cheap).
-                    way_count += block.elements()
-                        .filter(|e| matches!(e, Element::Way(_)))
-                        .count() as u64;
 
-                    // Spawn worker on first way block
-                    if block_tx.is_none() {
-                        let ns = node_store_opt.take()
-                            .expect("node store already consumed");
-                        let nr = std::sync::Arc::new(
-                            ns.into_reader().expect("failed to convert node store to reader")
+                // send() blocks if worker is still processing previous block (backpressure)
+                block_tx.as_ref().expect("worker not initialized")
+                    .send(block).expect("worker thread panicked");
+            }
+            Some(Element::Relation(_)) => {
+                // Relation block — shut down worker, process inline
+                if block_tx.is_some() {
+                    drop(block_tx.take());
+                    if let Some(h) = worker_handle.take() {
+                        h.join().expect("worker thread panicked");
+                    }
+                    if let Some(rx) = result_rx.take() {
+                        features_emitted += drain_way_results_blocking(
+                            &rx, &mut way_index, &land_mask, &mut sort_writer,
                         );
-                        eprintln!("  Node store finalized ({node_count} nodes), processing ways...");
-
-                        let (btx, brx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(1);
-                        let (rtx, rrx) = std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(1);
-                        let nr_clone = std::sync::Arc::clone(&nr);
-                        let mz = min_z;
-                        let xz = max_z;
-                        worker_handle = Some(std::thread::spawn(move || {
-                            use rayon::prelude::*;
-                            while let Ok(block) = brx.recv() {
-                                // Extract ways from owned block on worker thread
-                                let raw_ways: Vec<RawWay> = block.elements()
-                                    .filter_map(|e| match e {
-                                        Element::Way(way) => {
-                                            let node_refs: Vec<i64> = way.refs().collect();
-                                            if node_refs.is_empty() { return None; }
-                                            let tags: Vec<(String, String)> = way.tags()
-                                                .map(|(k, v)| (k.to_string(), v.to_string()))
-                                                .collect();
-                                            Some(RawWay { way_id: way.id(), node_refs, tags })
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect();
-                                let results: Vec<ProcessedWay> = raw_ways
-                                    .into_par_iter()
-                                    .map(|raw| process_raw_way(raw, &nr_clone, mz, xz))
-                                    .collect();
-                                if rtx.send(results).is_err() { break; }
-                            }
-                        }));
-                        block_tx = Some(btx);
-                        result_rx = Some(rrx);
                     }
-
-                    // send() blocks if worker is still processing previous block (backpressure)
-                    block_tx.as_ref().expect("worker not initialized")
-                        .send(block).expect("worker thread panicked");
                 }
-                Some(Element::Relation(_)) => {
-                    // Relation block — shut down worker, process inline
-                    if block_tx.is_some() {
-                        drop(block_tx.take());
-                        if let Some(h) = worker_handle.take() {
-                            h.join().expect("worker thread panicked");
-                        }
-                        if let Some(rx) = result_rx.take() {
-                            features_emitted += drain_way_results_blocking(
-                                &rx, &mut way_index, &land_mask, &mut sort_writer,
-                            );
-                        }
-                    }
-                    if !way_index_finalized {
-                        way_index.finish_writing().expect("failed to finalize way index");
-                        way_index_finalized = true;
-                        eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
-                        eprintln!("  Way index finalized, processing relations...");
-                    }
-
-                    block.for_each_element(|element| {
-                        if let Element::Relation(rel) = element {
-                            rel_count += 1;
-                            let tags_vec: Vec<(&str, &str)> = rel.tags().collect();
-                            if tags_vec.is_empty() {
-                                return;
-                            }
-                            if let Some(prepared) = prepare_relation(&rel, &tags_vec, &way_index) {
-                                rel_batch.push(prepared);
-                                if rel_batch.len() >= REL_BATCH_SIZE {
-                                    let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
-                                    features_emitted += flush_rel_batch(batch, min_z, max_z, &land_mask, &mut sort_writer);
-                                }
-                            }
-                        }
-                    });
+                if !way_index_finalized {
+                    way_index.finish_writing().expect("failed to finalize way index");
+                    way_index_finalized = true;
+                    eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
+                    eprintln!("  Way index finalized, processing relations...");
                 }
-                None | Some(_) => {} // Empty or unknown block
+
+                block.for_each_element(|element| {
+                    if let Element::Relation(rel) = element {
+                        rel_count += 1;
+                        let tags_vec: Vec<(&str, &str)> = rel.tags().collect();
+                        if tags_vec.is_empty() {
+                            return;
+                        }
+                        if let Some(prepared) = prepare_relation(&rel, &tags_vec, &way_index) {
+                            rel_batch.push(prepared);
+                            if rel_batch.len() >= REL_BATCH_SIZE {
+                                let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
+                                features_emitted += flush_rel_batch(batch, min_z, max_z, &land_mask, &mut sort_writer);
+                            }
+                        }
+                    }
+                });
             }
-            Ok(())
-        })
-        .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
+            None | Some(_) => {} // Empty or unknown block
+        }
+    }
 
     // Shut down worker if PBF had ways but no relations (worker still running)
     if block_tx.is_some() {
