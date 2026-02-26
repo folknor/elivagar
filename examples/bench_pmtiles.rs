@@ -11,7 +11,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
@@ -164,10 +163,13 @@ fn make_tile_data(z: u8, x: u32, y: u32) -> Vec<u8> {
             .wrapping_add(1442695040888963407);
     }
 
-    let mut encoder =
-        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(&raw).expect("gzip encode");
-    encoder.finish().expect("gzip finish")
+    let mut compressor =
+        libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
+    let bound = compressor.gzip_compress_bound(raw.len());
+    let mut out = vec![0u8; bound];
+    let n = compressor.gzip_compress(&raw, &mut out).unwrap();
+    out.truncate(n);
+    out
 }
 
 // ---------------------------------------------------------------------------

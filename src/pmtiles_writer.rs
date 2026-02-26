@@ -30,8 +30,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, BufReader, BufWriter, Read as _, Write};
 use std::path::{Path, PathBuf};
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use libdeflater::{CompressionLvl, Compressor};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -581,9 +580,14 @@ fn decode_varint(data: &[u8], pos: &mut usize) -> u64 {
 // ---------------------------------------------------------------------------
 
 fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(data)?;
-    encoder.finish()
+    let lvl = CompressionLvl::default();
+    let mut compressor = Compressor::new(lvl);
+    let bound = compressor.gzip_compress_bound(data.len());
+    let mut out = vec![0u8; bound];
+    let n = compressor.gzip_compress(data, &mut out)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))?;
+    out.truncate(n);
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

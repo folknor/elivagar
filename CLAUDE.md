@@ -68,7 +68,7 @@ Sequential, same PBF input:
 - `pbfhogg` — PBF reader, sibling dir `../pbfhogg`
 - `rayon` — parallel processing
 - `memmap2` — memory-mapped I/O for node/way indices
-- `flate2` (zlib-ng) — gzip compression for MVT tiles
+- `libdeflater` (libdeflate) — gzip compression for MVT tiles
 - `mimalloc` — global allocator (critical for rayon performance)
 - `hotpath` — function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
 
@@ -84,7 +84,7 @@ Sequential, same PBF input:
 ### plantasjen (current)
 - CPU: AMD Ryzen 9 5900X (12 cores / 24 threads, 4.95 GHz boost)
 - RAM: 30 GB DDR4
-- Denmark PBF baseline: ~28s total (17s pbf, 3.3s ocean, 0.7s sort, 4.6s assemble)
+- Denmark PBF baseline: ~24s total (16s pbf, 3.0s ocean, 0.4s sort, 2.5s assemble)
 
 ### dm6
 - CPU: AMD Ryzen 5 5600G (6 cores / 12 threads, 4.46 GHz boost)

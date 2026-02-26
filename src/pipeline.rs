@@ -21,11 +21,8 @@ use crate::sort::{self, SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add_feature_to_layer};
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use pbfhogg::{Element, ElementReader, MemberId};
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -1290,15 +1287,21 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
 
 /// Encode + gzip a batch of tiles in parallel using rayon.
 #[hotpath::measure]
+#[allow(clippy::cast_possible_wrap)]
 fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 
     batch
         .par_iter()
         .map_init(
-            || (mvt::EncodeScratch::new(), mvt::MergeScratch::new(),
-                Vec::<Vec<u32>>::new(), Vec::<Vec<(u16, u16)>>::new()),
-            |(encode_scratch, merge_scratch, geom_pool, tags_pool), tile| {
+            || {
+                let lvl = libdeflater::CompressionLvl::new(compression_level as i32)
+                    .expect("invalid compression level");
+                (mvt::EncodeScratch::new(), mvt::MergeScratch::new(),
+                 Vec::<Vec<u32>>::new(), Vec::<Vec<(u16, u16)>>::new(),
+                 libdeflater::Compressor::new(lvl), Vec::<u8>::new())
+            },
+            |(encode_scratch, merge_scratch, geom_pool, tags_pool, compressor, gz_buf), tile| {
             let mut layers = new_layer_slots();
             for &(layer_idx, ref data) in &tile.features {
                 if (layer_idx as usize) < layers.len() {
@@ -1346,10 +1349,12 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
                 return None;
             }
 
-            // Infallible: GzEncoder writing to Vec<u8> can't fail on I/O.
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::new(compression_level));
-            encoder.write_all(&mvt_data).expect("gzip write failed");
-            let compressed = encoder.finish().expect("gzip finish failed");
+            // libdeflate: reuse compressor + output buffer per rayon thread.
+            let bound = compressor.gzip_compress_bound(mvt_data.len());
+            gz_buf.resize(bound, 0);
+            let compressed_len = compressor.gzip_compress(&mvt_data, gz_buf)
+                .expect("gzip compress failed");
+            let compressed = gz_buf[..compressed_len].to_vec();
 
             Some(EncodedTile { tile_id: tile.tile_id, compressed })
         })

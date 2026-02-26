@@ -20,7 +20,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use elivagar::pmtiles_writer::tile_id_to_zxy;
-use flate2::read::GzDecoder;
+use libdeflater::Decompressor;
 
 // ---------------------------------------------------------------------------
 // PMTiles reader (minimal, sync, read-only)
@@ -113,10 +113,7 @@ impl PmtilesReader {
         self.file.read_exact(&mut compressed)?;
 
         let raw = if self.internal_compression == 2 {
-            let mut decoder = GzDecoder::new(&compressed[..]);
-            let mut buf = Vec::new();
-            decoder.read_to_end(&mut buf)?;
-            buf
+            gzip_decompress(&compressed)?
         } else {
             compressed
         };
@@ -129,11 +126,7 @@ impl PmtilesReader {
         self.file.seek(SeekFrom::Start(abs_offset))?;
         let mut compressed = vec![0u8; entry.length as usize];
         self.file.read_exact(&mut compressed)?;
-
-        let mut decoder = GzDecoder::new(&compressed[..]);
-        let mut buf = Vec::new();
-        decoder.read_to_end(&mut buf)?;
-        Ok(buf)
+        gzip_decompress(&compressed)
     }
 }
 
@@ -392,6 +385,25 @@ fn decode_proto_varint_raw(data: &[u8], mut pos: usize) -> (u64, usize) {
         shift += 7;
     }
     (result, pos)
+}
+
+fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
+    let mut decompressor = Decompressor::new();
+    let mut buf = vec![0u8; data.len() * 8];
+    loop {
+        match decompressor.gzip_decompress(data, &mut buf) {
+            Ok(n) => {
+                buf.truncate(n);
+                return Ok(buf);
+            }
+            Err(libdeflater::DecompressionError::InsufficientSpace) => {
+                buf.resize(buf.len() * 2, 0);
+            }
+            Err(e) => {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
