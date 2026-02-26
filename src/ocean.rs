@@ -409,6 +409,9 @@ fn emit_ocean_polygon(
                 row_outer.clear();
                 row_outer.extend_from_slice(&row_clip_a);
 
+                // X-extent of row-clipped polygon — skip boundary tiles outside this range
+                let (row_x_min, row_x_max) = row_outer.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
+
                 // Pre-clip inners to row band (rare for ocean, usually empty)
                 let mut row_inner_count = 0;
                 for inner in simp_inners {
@@ -426,6 +429,9 @@ fn emit_ocean_polygon(
 
                 // Row has boundary tiles — clip+emit them, then fill gaps
                 for &tx in bx_list {
+                    let tile_x_min = f64::from(tx) * inv_scale - tile_buf;
+                    let tile_x_max = f64::from(tx + 1) * inv_scale + tile_buf;
+                    if row_x_max < tile_x_min || row_x_min > tile_x_max { continue; }
                     if let Some(mask) = land_mask
                         && !mask.has_land(z, tx, ty) { continue; }
                     emit_boundary_tile(
