@@ -53,7 +53,7 @@ A fallback path (dense packed mmap file with in-RAM bitmask index) should be des
 
 ## Performance — squeeze opportunities
 
-Denmark 13.8s wall (bench-self best of 3). Profile: `notes/hotpath-profile.md`.
+Denmark 13.7s wall (bench-self), 12.2s hotpath. Profile: `notes/hotpath-profile.md`.
 
 ### ~~Priority 1: More rayon concurrency~~ — Done
 
@@ -64,34 +64,33 @@ Denmark 13.8s wall (bench-self best of 3). Profile: `notes/hotpath-profile.md`.
 - [x] `-j` / `--threads` CLI flag controlling rayon global pool + pbfhogg decode threads.
 - [x] pbfhogg `decode_threads()` API to control decode pool size (set to threads/3).
 
-### Priority 2: Single-tile fast path (est. 0.5-1s)
+### ~~Priority 2: Single-tile fast path~~ — Done
 
-- [ ] Skip clipping for features whose bbox fits entirely within one tile at a given zoom.
-  `emit_polygon_feature` (21.5s CPU) and `emit_line_feature` (11.6s CPU) both call into
-  clip routines. Small features (majority of calls) that land in a single tile can bypass
-  clip entirely.
+- [x] Skip clipping for features whose bbox fits entirely within one tile at a given zoom.
+  `is_single_tile()` check before clip — when true, geometry is already inside the clip
+  rect, so clipping is a no-op. Rayon CPU −30% (`emit_polygon_feature` −47%,
+  `emit_line_feature` −43%). Wall time modest at Denmark (−0.3s) because cores were
+  already saturated. Alloc throughput −3.3 GB (clip_polygon_into eliminated for single-tile).
 
-### Priority 3: Assemble merge alloc reduction (est. 0.3-0.5s)
+### ~~Priority 3: Assemble merge alloc reduction~~ — Done
 
-- [ ] `merge_same_attr_geometries` — 306K calls, 11.5 KB avg, 3.3 GB total alloc.
-  Pre-sized buffers or merge-in-place could cut the Vec churn. Fat P99 (282 KB) suggests
-  a few large tiles dominate the allocation.
+- [x] Replaced FxHashMap (tag Vec cloning on every `.entry()`) with sort+scan in
+  `merge_same_attr_geometries`. Eliminates all tag cloning and HashMap overhead.
+  Assemble phase −70ms, −100 MB alloc. Modest win — tag clones were smaller than
+  estimated (~32 bytes/clone).
 
-### Priority 4: Thread-local arenas (est. 0.2-0.5s, bigger at planet)
+### Not worth pursuing — investigated and rejected
 
-- [ ] Per-feature allocation is 1.7 KB avg × 6.6M calls = 10.5 GB in `process_raw_way`.
-  Resolved coordinate Vecs, clipped geometry Vecs, wire format buffers. Thread-local bump
-  allocator or arena per rayon task would turn millions of small allocs into pointer bumps.
-  Mimalloc already hides most of this at Denmark scale, but planet-scale (150× more features)
-  will feel the pressure.
-
-### Priority 5: Pre-size wire format buffers (est. 0.1-0.2s)
-
-- [ ] `add_feature_to_layer` — 14.8M calls, 302 B avg, 4.2 GB total. Sort record buffers
-  grow via `Vec::push`. Pre-sizing based on vertex count could cut realloc churn.
-
-### Not worth pursuing
-
+- **Thread-local arenas / hoisted simplification buffers** — Remaining per-feature allocs
+  (1.3 KB avg × 6.6M = 8.1 GB) are: coords_e7 (ownership transfer to ProcessedWay),
+  merc projection (read-only after creation), cascade/keep_buf/simp_buf in
+  `for_each_zoom_simplified` (~1.5 GB, hoistable via `map_init` but requires threading
+  buffers through 5-6 function signatures). Mimalloc handles these at Denmark scale but
+  planet (150× features → ~1.2 TB alloc throughput) will stress the allocator harder.
+  Estimated wall-time gain 0.1-0.3s Denmark, potentially larger at planet. Deferred until
+  planet hardware is available for profiling — implement if allocator shows up in the profile.
+- **Pre-size wire format buffers** — `add_feature_to_layer` already uses `with_capacity()`
+  pre-sizing. 303 B avg, no realloc churn to cut.
 - **Simplification algorithm** — already exhausted (DP + convergence + subpixel bbox, VW tried/reverted)
 - **Sort phase** — 0.3s, negligible
 - **match_element** — 296ns/call, very tight
@@ -99,7 +98,7 @@ Denmark 13.8s wall (bench-self best of 3). Profile: `notes/hotpath-profile.md`.
 
 ## Performance — Denmark history
 
-Denmark extract: 242s → 14s (17×). PBF phase is CPU-bound in rayon
+Denmark extract: 242s → 13.7s (18×). PBF phase is CPU-bound in rayon
 (simplification, clipping, MVT encoding). Drain is off the critical path.
 Hotpath profile: `notes/hotpath-profile.md`.
 
@@ -126,6 +125,16 @@ Investigated-and-rejected optimizations are documented in code comments at each 
   threads (AtomicU8, already Sync). Drain (4.54s) now fully overlapped with worker (~7s) —
   no longer on the critical path. Concurrent way_index writes (approach 3) not worthwhile.
   PBF phase: 9.3s → 8.6s. Total: 15s → 14s.
+
+- [x] ~~**Single-tile clipping fast path**~~ — `is_single_tile()` check skips clip when
+  feature bbox fits in one tile (clipping is a no-op). Rayon CPU −30%
+  (`emit_polygon_feature` −47%, `emit_line_feature` −43%). Global alloc −3.3 GB
+  (clip_polygon_into eliminated). Wall time modest at Denmark (−0.3s hotpath) because
+  rayon cores already saturated. Total: 14s → 13.7s.
+
+- [x] ~~**Sort-based geometry merge**~~ — replaced FxHashMap (tag Vec cloning) with
+  sort+scan in `merge_same_attr_geometries`. Eliminates all tag cloning and HashMap
+  overhead. Assemble phase −70ms, −100 MB alloc.
 
 ### Not pursued
 
