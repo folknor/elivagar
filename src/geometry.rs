@@ -17,8 +17,10 @@ const MAX_LATITUDE: f64 = 85.051_129;
 /// MVT tile extent (pixels per tile axis).
 pub const EXTENT: f64 = 4096.0;
 
-/// Sub-pixel simplification factor (1 pixel = 1/256 of tile width).
-const PIXEL_FACTOR: f64 = 1.0;
+/// Simplification tolerance in rendered pixels (one tile = 256×256 px).
+/// 1.0 = vertices within 1 pixel of the simplified line are removed.
+/// Industry standard is 1.0; Tilemaker uses ~0.58 for comparison.
+const SIMPLIFY_PIXELS: f64 = 1.0;
 
 /// Buffer fraction of tile size for clipping (8 pixels / 4096 extent).
 pub(crate) const BUFFER_FRACTION: f64 = 8.0 / EXTENT;
@@ -213,10 +215,12 @@ pub fn merc_to_tile_px(p: &Point, tile_x: u32, tile_y: u32, zoom: u8) -> (i32, i
 }
 
 /// Compute the simplification tolerance for a given zoom level.
+/// Returns the tolerance in Mercator [0,1] units corresponding to
+/// `SIMPLIFY_PIXELS` rendered pixels at the given zoom.
 #[inline]
 pub fn simplify_tolerance(zoom: u8) -> f64 {
     let z_scale = f64::from(1u32 << zoom);
-    PIXEL_FACTOR / (EXTENT * z_scale)
+    SIMPLIFY_PIXELS / (256.0 * z_scale)
 }
 
 // ---------------------------------------------------------------------------
