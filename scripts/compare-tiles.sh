@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+cd "$(dirname "$0")/.."
+source "$(dirname "$0")/lib.sh"
 
 # Compare feature counts between two PMTiles archives.
 # Usage: scripts/compare-tiles.sh [file_a] [file_b] [--sample N]
@@ -17,4 +19,4 @@ echo "Building (release)..."
 cargo build --release --example compare_tiles 2>&1 | tail -1
 
 echo ""
-exec ./target/release/examples/compare_tiles "$FILE_A" "$FILE_B" "$@"
+exec "$CARGO_TARGET_DIR/release/examples/compare_tiles" "$FILE_A" "$FILE_B" "$@"

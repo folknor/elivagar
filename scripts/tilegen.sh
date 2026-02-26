@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source "$(dirname "$0")/lib.sh"
 
 PBF="${1:-data/denmark-latest.osm.pbf}"
 NAME="$(basename "${PBF%.osm.pbf}")"
@@ -10,13 +11,9 @@ scripts/build.sh
 echo ""
 echo "=== Running elivagar ==="
 
-OCEAN_SHP="data/water-polygons-split-3857/water_polygons.shp"
-OCEAN_FLAG=""
-if [ -f "$OCEAN_SHP" ]; then
-    OCEAN_FLAG="--ocean $OCEAN_SHP"
-fi
+detect_ocean
 
-time ./target/release/elivagar "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG
+time "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG
 
 echo ""
 ls -lh "$OUT"

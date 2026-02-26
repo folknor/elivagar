@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source "$(dirname "$0")/lib.sh"
 
 PBF="${1:-data/denmark-latest.osm.pbf}"
 RUNS="${2:-3}"
@@ -18,7 +19,7 @@ for cmd in jq curl; do
     fi
 done
 
-FILE_MB=$(( $(stat -c%s "$PBF") / 1000000 ))
+FILE_MB=$(file_size_mb "$PBF")
 OUT="data/planetiler-bench.pmtiles"
 
 # --- Temurin JDK setup ---
@@ -27,9 +28,21 @@ JDK_DIR="data/jdk"
 JDK_VERSION_FILE="data/.jdk-version"
 JAVA="$JDK_DIR/bin/java"
 
+case "$(uname -m)" in
+    x86_64)  JDK_ARCH="x64" ;;
+    aarch64) JDK_ARCH="aarch64" ;;
+    arm64)   JDK_ARCH="aarch64" ;;
+    *)       echo "ERROR: Unsupported architecture: $(uname -m)"; exit 1 ;;
+esac
+case "$(uname -s)" in
+    Linux)  JDK_OS="linux" ;;
+    Darwin) JDK_OS="mac" ;;
+    *)      echo "ERROR: Unsupported OS: $(uname -s)"; exit 1 ;;
+esac
+
 ensure_jdk() {
     echo "Checking Temurin JDK ${JDK_MAJOR}..."
-    local api_url="https://api.adoptium.net/v3/assets/latest/${JDK_MAJOR}/hotspot?architecture=x64&image_type=jdk&os=linux&vendor=eclipse"
+    local api_url="https://api.adoptium.net/v3/assets/latest/${JDK_MAJOR}/hotspot?architecture=${JDK_ARCH}&image_type=jdk&os=${JDK_OS}&vendor=eclipse"
     local api_json
     api_json=$(curl -sfL "$api_url") || { echo "Error: failed to query Adoptium API"; exit 1; }
 
@@ -126,7 +139,7 @@ BEST_BYTES=0
 for i in $(seq 1 "$RUNS"); do
     echo "  run $i/$RUNS..."
     rm -f "$OUT"
-    START=$(date +%s%N)
+    START=$(epoch_ms)
     "$JAVA" "-Xmx${HEAP_MB}m" -jar "$PLANETILER_JAR" shortbread \
         --osm-path="$PBF" \
         --output="$OUT" \
@@ -135,12 +148,12 @@ for i in $(seq 1 "$RUNS"); do
         --tmpdir=.planetiler_tmp \
         --download \
         &>/dev/null
-    END=$(date +%s%N)
-    MS=$(( (END - START) / 1000000 ))
+    END=$(epoch_ms)
+    MS=$(( END - START ))
 
     OUTPUT_BYTES=0
     if [ -f "$OUT" ]; then
-        OUTPUT_BYTES=$(stat -c%s "$OUT")
+        OUTPUT_BYTES=$(file_size_bytes "$OUT")
     fi
 
     echo "    ${MS}ms ($(( OUTPUT_BYTES / 1000000 )) MB output)"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source "$(dirname "$0")/lib.sh"
 
 PBF="${1:-data/denmark-latest.osm.pbf}"
 RUNS="${2:-1}"
@@ -25,7 +26,7 @@ if [ ! -f "$PBF" ]; then
 fi
 
 NAME="$(basename "${PBF%.osm.pbf}")"
-FILE_MB=$(( $(stat -c%s "$PBF") / 1000000 ))
+FILE_MB=$(file_size_mb "$PBF")
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
 echo "=== bench-self ==="
@@ -39,19 +40,12 @@ echo "  commit: $COMMIT"
 # Build
 echo ""
 echo "Building (release)..."
-cargo build --release 2>&1 | tail -1
-ELIVAGAR_BIN=$(cargo build --release --message-format=json 2>/dev/null \
-    | grep '"executable"' | grep -oP '"executable":"\K[^"]+')
+scripts/build.sh
 
 # Ocean shapefile detection
-OCEAN_SHP="data/water-polygons-split-3857/water_polygons.shp"
-OCEAN_SIMPLIFIED_SHP="data/simplified-water-polygons-split-3857/simplified_water_polygons.shp"
 OCEAN_FLAG=""
-if [ "$NO_OCEAN" = false ] && [ -f "$OCEAN_SHP" ]; then
-    OCEAN_FLAG="--ocean $OCEAN_SHP"
-    if [ -f "$OCEAN_SIMPLIFIED_SHP" ]; then
-        OCEAN_FLAG="$OCEAN_FLAG --ocean-simplified $OCEAN_SIMPLIFIED_SHP"
-    fi
+if [ "$NO_OCEAN" = false ]; then
+    detect_ocean
 fi
 
 SKIP_FLAG=""
@@ -65,13 +59,13 @@ if [ -n "$COMPRESSION_LEVEL" ]; then
 fi
 
 OUT="data/${NAME}.pmtiles"
-STDERR_FILE=$(mktemp .bench_stderr.XXXXXX)
+STDERR_FILE=$(mktemp "$CARGO_TARGET_DIR/.bench_stderr.XXXXXX")
 trap 'rm -f "$STDERR_FILE"' EXIT
-
-parse() { grep -oP "^${1}=\\K.*" "$STDERR_FILE" || echo "-"; }
 
 echo ""
 BEST_TOTAL=999999999
+BEST_PHASE12="-" BEST_OCEAN="-" BEST_PHASE3="-" BEST_PHASE4="-"
+BEST_FEATURES="-" BEST_TILES="-" BEST_BYTES="-"
 
 RUN_TIMEOUT=240
 
@@ -87,16 +81,16 @@ for i in $(seq 1 "$RUNS"); do
         continue
     fi
 
-    THIS_TOTAL=$(parse total_ms)
+    THIS_TOTAL=$(parse_kv total_ms "$STDERR_FILE")
     if [ "$THIS_TOTAL" != "-" ] && [ "$THIS_TOTAL" -lt "$BEST_TOTAL" ]; then
         BEST_TOTAL=$THIS_TOTAL
-        BEST_PHASE12=$(parse phase12_ms)
-        BEST_OCEAN=$(parse ocean_ms)
-        BEST_PHASE3=$(parse phase3_ms)
-        BEST_PHASE4=$(parse phase4_ms)
-        BEST_FEATURES=$(parse features)
-        BEST_TILES=$(parse tiles)
-        BEST_BYTES=$(parse output_bytes)
+        BEST_PHASE12=$(parse_kv phase12_ms "$STDERR_FILE")
+        BEST_OCEAN=$(parse_kv ocean_ms "$STDERR_FILE")
+        BEST_PHASE3=$(parse_kv phase3_ms "$STDERR_FILE")
+        BEST_PHASE4=$(parse_kv phase4_ms "$STDERR_FILE")
+        BEST_FEATURES=$(parse_kv features "$STDERR_FILE")
+        BEST_TILES=$(parse_kv tiles "$STDERR_FILE")
+        BEST_BYTES=$(parse_kv output_bytes "$STDERR_FILE")
     fi
 done
 

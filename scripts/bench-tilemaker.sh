@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source "$(dirname "$0")/lib.sh"
 
 PBF="${1:-data/denmark-latest.osm.pbf}"
 RUNS="${2:-3}"
@@ -11,13 +12,14 @@ if [ ! -f "$PBF" ]; then
     exit 1
 fi
 
-FILE_MB=$(( $(stat -c%s "$PBF") / 1000000 ))
+FILE_MB=$(file_size_mb "$PBF")
 OUT="data/tilemaker-bench.pmtiles"
 
 # --- Tilemaker build from source ---
 TILEMAKER_DIR="data/tilemaker"
 TILEMAKER_BIN="$TILEMAKER_DIR/build/tilemaker"
 TILEMAKER_VERSION_FILE="data/.tilemaker-version"
+NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 ensure_tilemaker() {
     echo "Checking Tilemaker..."
@@ -52,7 +54,7 @@ ensure_tilemaker() {
     echo "  Building tilemaker ($current_commit)..."
     mkdir -p "$TILEMAKER_DIR/build"
     cmake -S "$TILEMAKER_DIR" -B "$TILEMAKER_DIR/build" -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -3
-    cmake --build "$TILEMAKER_DIR/build" -j "$(nproc)" 2>&1 | tail -3
+    cmake --build "$TILEMAKER_DIR/build" -j "$NPROC" 2>&1 | tail -3
     echo "$current_commit" > "$TILEMAKER_VERSION_FILE"
     echo "  Built: $current_commit"
 }
@@ -175,7 +177,7 @@ BEST_BYTES=0
 for i in $(seq 1 "$RUNS"); do
     echo "  run $i/$RUNS..."
     rm -f "$OUT"
-    START=$(date +%s%N)
+    START=$(epoch_ms)
     "$TILEMAKER_BIN" \
         --input "$PBF" \
         --output "$OUT" \
@@ -183,12 +185,12 @@ for i in $(seq 1 "$RUNS"); do
         --process "$SHORTBREAD_PROCESS" \
         --fast \
         &>/dev/null
-    END=$(date +%s%N)
-    MS=$(( (END - START) / 1000000 ))
+    END=$(epoch_ms)
+    MS=$(( END - START ))
 
     OUTPUT_BYTES=0
     if [ -f "$OUT" ]; then
-        OUTPUT_BYTES=$(stat -c%s "$OUT")
+        OUTPUT_BYTES=$(file_size_bytes "$OUT")
     fi
 
     echo "    ${MS}ms ($(( OUTPUT_BYTES / 1000000 )) MB output)"
