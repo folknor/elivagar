@@ -192,6 +192,64 @@ pub(crate) fn process_ocean_shapefile(
         }
     }
 
+    // Pre-split large polygons along grid-aligned tile boundaries to reduce
+    // per-polygon vertex count. Splitting at zoom SPLIT_Z means each sub-polygon
+    // fits within one tile at SPLIT_Z, spanning at most 2^(z-SPLIT_Z)² tiles at
+    // finer zooms. This dramatically reduces DP simplification cost (O(n log n))
+    // and per-row clip input size. Only split polygons above a vertex threshold.
+    const SPLIT_Z: u8 = 8;
+    const SPLIT_MIN_VERTICES: usize = 500;
+    if max_zoom >= SPLIT_Z {
+        let orig_count = polygons.len();
+        let mut split_out: Vec<OceanPolygon> = Vec::with_capacity(polygons.len());
+        let mut clip_a: Vec<Point> = Vec::new();
+        let mut clip_b: Vec<Point> = Vec::new();
+        let split_scale = f64::from(1u32 << SPLIT_Z);
+        let split_inv = 1.0 / split_scale;
+        for poly in polygons.drain(..) {
+            if poly.outer.len() < SPLIT_MIN_VERTICES {
+                split_out.push(poly);
+                continue;
+            }
+            let bb = merc_bbox(&poly.outer);
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let stx_min = (bb.min_x * split_scale).floor().max(0.0) as u32;
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let sty_min = (bb.min_y * split_scale).floor().max(0.0) as u32;
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let stx_max = ((bb.max_x * split_scale).floor() as u32).min((1u32 << SPLIT_Z) - 1);
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let sty_max = ((bb.max_y * split_scale).floor() as u32).min((1u32 << SPLIT_Z) - 1);
+            if stx_min == stx_max && sty_min == sty_max {
+                // Already fits in one tile at SPLIT_Z
+                split_out.push(poly);
+                continue;
+            }
+            for sty in sty_min..=sty_max {
+                for stx in stx_min..=stx_max {
+                    let tile_rect = ClipRect::new(
+                        f64::from(stx) * split_inv,
+                        f64::from(sty) * split_inv,
+                        f64::from(stx + 1) * split_inv,
+                        f64::from(sty + 1) * split_inv,
+                    );
+                    geometry::clip_polygon_into(&poly.outer, &tile_rect, &mut clip_a, &mut clip_b);
+                    if clip_a.len() < 4 { continue; }
+                    let sub_outer = clip_a.clone();
+                    let sub_inners: Vec<Vec<Point>> = poly.inners.iter().filter_map(|inner| {
+                        geometry::clip_polygon_into(inner, &tile_rect, &mut clip_a, &mut clip_b);
+                        if clip_a.len() >= 4 { Some(clip_a.clone()) } else { None }
+                    }).collect();
+                    split_out.push(OceanPolygon { outer: sub_outer, inners: sub_inners });
+                }
+            }
+        }
+        polygons = split_out;
+        if polygons.len() != orig_count {
+            eprintln!("  Pre-split at z{SPLIT_Z}: {orig_count} → {} polygons", polygons.len());
+        }
+    }
+
     let poly_count = polygons.len();
     eprintln!("  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons — processing in parallel");
 
