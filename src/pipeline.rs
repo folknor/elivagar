@@ -99,6 +99,9 @@ pub struct TilegenConfig {
     /// declare `Sort.Type_then_ID`. Useful for PBFs that are sorted in practice
     /// but lack the header flag. Aborts with an error if nodes aren't monotonic.
     pub force_sorted: bool,
+    /// Thread budget. Controls the rayon global pool size and pbfhogg decode pool.
+    /// Default: `std::thread::available_parallelism()` (logical CPUs).
+    pub threads: usize,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -320,9 +323,12 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         SortWriter::new(&config.tmp_dir.join(SORT_CHUNKS_DIR), SORT_CHUNK_SIZE)?
     );
 
+    // Decode threads: give 1/3 of budget to pbfhogg decode, rest to rayon processing.
+    let decode_threads = (config.threads / 3).max(1);
     let reader =
         ElementReader::from_path(&config.pbf_path)
-            .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?;
+            .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?
+            .decode_threads(decode_threads);
 
     let idx_dir = &config.tmp_dir;
     // Option so we can consume it via .take() on first Way element.
@@ -445,29 +451,54 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let lm_clone = std::sync::Arc::clone(&land_mask);
                     let mz = min_z;
                     let xz = max_z;
+                    // Multi-block overlap: rayon::scope allows multiple blocks' ways
+                    // in the pool simultaneously. Token semaphore limits in-flight
+                    // blocks to MAX_INFLIGHT (~1.8 MB of RawWay data).
+                    const MAX_INFLIGHT: usize = 4;
                     worker_handle = Some(std::thread::spawn(move || {
                         use rayon::prelude::*;
-                        while let Ok(block) = brx.recv() {
-                            // Extract ways from owned block on worker thread
-                            let raw_ways: Vec<RawWay> = block.elements()
-                                .filter_map(|e| match e {
-                                    Element::Way(way) => {
-                                        let node_refs: Vec<i64> = way.refs().collect();
-                                        if node_refs.is_empty() { return None; }
-                                        let tags: Vec<(String, String)> = way.tags()
-                                            .map(|(k, v)| (k.to_string(), v.to_string()))
-                                            .collect();
-                                        Some(RawWay { way_id: way.id(), node_refs, tags })
-                                    }
-                                    _ => None,
-                                })
-                                .collect();
-                            let results: Vec<ProcessedWay> = raw_ways
-                                .into_par_iter()
-                                .map(|raw| process_raw_way(raw, &nr_clone, &lm_clone, mz, xz))
-                                .collect();
-                            if rtx.send(results).is_err() { break; }
+                        let (token_tx, token_rx) =
+                            std::sync::mpsc::sync_channel::<()>(MAX_INFLIGHT);
+                        for _ in 0..MAX_INFLIGHT {
+                            token_tx.send(()).expect("token prefill");
                         }
+                        // Take refs outside loop — Copy into each move closure,
+                        // avoids Arc::clone per spawn.
+                        let nr_ref = &*nr_clone;
+                        let lm_ref = &*lm_clone;
+                        rayon::in_place_scope(|s| {
+                            while let Ok(block) = brx.recv() {
+                                let raw_ways: Vec<RawWay> = block.elements()
+                                    .filter_map(|e| match e {
+                                        Element::Way(way) => {
+                                            let node_refs: Vec<i64> = way.refs().collect();
+                                            if node_refs.is_empty() { return None; }
+                                            let tags: Vec<(String, String)> = way.tags()
+                                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                                .collect();
+                                            Some(RawWay { way_id: way.id(), node_refs, tags })
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect();
+                                // Wait for a slot — blocks if MAX_INFLIGHT tasks in-flight
+                                if token_rx.recv().is_err() { break; }
+                                let tx = rtx.clone();
+                                let token_ret = token_tx.clone();
+                                s.spawn(move |_| {
+                                    let results: Vec<ProcessedWay> = raw_ways
+                                        .into_par_iter()
+                                        .map(|raw| process_raw_way(
+                                            raw, nr_ref, lm_ref, mz, xz,
+                                        ))
+                                        .collect();
+                                    let _ = tx.send(results);
+                                    let _ = token_ret.send(());
+                                });
+                            }
+                        });
+                        // Scope waits for all spawned tasks. rtx drops here →
+                        // drain's rrx.recv() returns Err → drain exits.
                     }));
 
                     // Drain thread: owns way_index + sort_writer, writes results as they arrive.

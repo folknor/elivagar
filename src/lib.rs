@@ -22,6 +22,7 @@
 //!     in_memory: false,
 //!     compression_level: 6,
 //!     force_sorted: false,
+//!     threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
 //! };
 //! elivagar::run(&config).expect("pipeline failed");
 //! ```

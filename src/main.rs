@@ -8,7 +8,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10] [--force-sorted]"
+            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10] [--force-sorted] [-j N | --threads N]"
         );
         std::process::exit(1);
     }
@@ -23,11 +23,15 @@ fn main() {
     let mut in_memory = false;
     let mut compression_level: u32 = 6;
     let mut force_sorted = false;
+    let mut threads: usize = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
 
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
-            "--tmp-dir" | "--ocean" | "--ocean-simplified" | "--skip-to" | "--compression-level" => {
+            "--tmp-dir" | "--ocean" | "--ocean-simplified" | "--skip-to"
+            | "--compression-level" | "-j" | "--threads" => {
                 let flag = &args[i];
                 i += 1;
                 if i >= args.len() {
@@ -57,6 +61,15 @@ fn main() {
                             }
                         };
                     }
+                    "-j" | "--threads" => {
+                        threads = match args[i].parse() {
+                            Ok(v) if v >= 1 => v,
+                            _ => {
+                                eprintln!("Invalid thread count: {} (expected >= 1)", args[i]);
+                                std::process::exit(1);
+                            }
+                        };
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -74,6 +87,12 @@ fn main() {
         i += 1;
     }
 
+    // Configure rayon's global thread pool before any rayon work.
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .expect("failed to configure rayon thread pool");
+
     let config = elivagar::TilegenConfig {
         pbf_path,
         output_path,
@@ -86,6 +105,7 @@ fn main() {
         in_memory,
         compression_level,
         force_sorted,
+        threads,
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")

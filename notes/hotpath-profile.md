@@ -4,75 +4,84 @@ Dataset: `denmark-latest.osm.pbf` (483 MB), 52.5M nodes, 6.6M ways, 46K relation
 Machine: plantasjen, 30 GB DDR4, NVMe, Ryzen 9 5900X (12c/24t).
 SortedNodeStore: ~420 MB in-RAM (bitmask+popcount).
 
-## Current Baseline (2026-02-26, commit 5c45361)
+## Current Baseline (2026-02-26, multi-block overlap)
 
-Wall time: **13.7s**. phase12=10.9s (79%), ocean=18ms, sort=0.3s, assemble=1.8s.
-14.8M features, 56K tiles (54K unique), 283 MB output. RSS: 757 MB.
+Wall time: **12.4s** (hotpath), **13.8s** (bench-self best of 3). phase12=9.5s, ocean=16ms, sort=0.3s, assemble=2.0s.
+14.8M features, 56K tiles (54K unique), 283 MB output. RSS: 795 MB.
 
-Architecture: 4-thread pipeline during way phase:
+Architecture: multi-block overlapping pipeline during way phase:
 1. **pbfhogg I/O thread** — reads + decodes PBF blocks, delivers via `into_blocks_pipelined`
 2. **Main thread** — classifies blocks by `block_type()`, processes nodes inline, forwards
    way blocks to worker, processes relations after worker+drain join
-3. **Worker thread** — receives owned PrimitiveBlocks, extracts RawWay, runs rayon `par_iter`
+3. **Worker thread** — receives owned PrimitiveBlocks, extracts RawWay, spawns rayon tasks
+   via `rayon::in_place_scope` + `s.spawn()`. Up to MAX_INFLIGHT (4) blocks in rayon pool
+   simultaneously — eliminates inter-block idle gaps and improves load balancing.
 4. **Drain thread** — owns way_index + sort_writer, receives `Vec<ProcessedWay>` from worker,
    writes way_index entries + sort records concurrently with worker processing
 
+Token-based semaphore (sync_channel) limits in-flight blocks to 4, bounding memory.
 `land_mask.mark_bbox()` runs on rayon threads (AtomicU8-based, `&self`).
+pbfhogg decode pool set to `threads/3` (reduced from `avail_parallelism-2`) to avoid
+oversubscription with elivagar's rayon pool.
 
 ### Function Timing (top 10 of 26 measured)
 
 | Function | Calls | Avg | P50 | P95 | P99 | Total | % Wall |
 |---|---|---|---|---|---|---|---|
-| `process_raw_way` | 6.6M | 9.01µs | 2.18µs | 21.58µs | 167.17µs | 59.6s | 436% |
-| `for_each_zoom_simplified` | 6.6M | 3.81µs | 800ns | 5.39µs | 68.22µs | 25.1s | 184% |
-| `emit_polygon_feature` | 4.5M | 4.87µs | 870ns | 7.54µs | 104.38µs | 22.2s | 162% |
-| `emit_line_feature` | 2.0M | 5.76µs | 1.09µs | 7.22µs | 118.14µs | 11.7s | 86% |
-| `drain_processed_ways` | 828 | 5.48ms | 3.83ms | 8.68ms | 13.50ms | 4.54s | 33% |
-| `match_element` | 10.1M | 291ns | 270ns | 620ns | 1.11µs | 2.95s | 22% |
-| `add_feature_to_layer` | 14.8M | 197ns | 130ns | 470ns | 910ns | 2.91s | 21% |
+| `process_raw_way` | 6.6M | 7.74µs | 2.32µs | 18.30µs | 113.28µs | 51.2s | 414% |
+| `for_each_zoom_simplified` | 6.6M | 3.35µs | 850ns | 5.36µs | 50.88µs | 22.1s | 178% |
+| `emit_polygon_feature` | 4.5M | 4.01µs | 920ns | 7.26µs | 71.30µs | 18.2s | 147% |
+| `emit_line_feature` | 2.0M | 5.20µs | 1.13µs | 6.70µs | 78.14µs | 10.6s | 85% |
+| `drain_processed_ways` | 828 | 6.02ms | 4.60ms | 8.54ms | 13.98ms | 4.99s | 40% |
+| `match_element` | 10.1M | 322ns | 300ns | 690ns | 1.19µs | 3.26s | 26% |
+| `add_feature_to_layer` | 14.8M | 195ns | 130ns | 470ns | 910ns | 2.89s | 23% |
 
 >100% totals = parallel work on rayon threads. % is CPU-time / wall-time.
 
+### Multi-block Overlap Analysis
+
+The multi-block overlap reduced `process_raw_way` P99 from 156µs → 113µs (−28%). Fat-tail
+ways no longer stall entire block completion — rayon steals work from other in-flight blocks.
+Total rayon CPU dropped from 58.2s → 51.2s (−12%), indicating less scheduling overhead and
+better cache utilization with multiple blocks interleaved.
+
 ### Drain Analysis
 
-828 way blocks from the PBF (natural batching by PBF block boundaries, ~8000 ways/block).
-`drain_processed_ways` runs on the dedicated drain thread, receiving results via
-`sync_channel(4)`. The drain completes in 4.54s while the worker takes ~7s — the drain
-is **no longer on the critical path**. It finishes well before the worker, so further
-drain optimization (e.g., concurrent way_index writes) would not improve wall time.
+828 way blocks from the PBF. `drain_processed_ways` runs on the dedicated drain thread,
+receiving results via `sync_channel(4)`. The drain takes 4.99s (slightly more than before
+due to out-of-order results), but still under the ~7s worker time — **not on the critical
+path**.
 
 ### Thread Utilization
 
 | Thread | CPU% | User | Sys | Total |
 |---|---|---|---|---|
-| Main | 16–100% | 4.4s | 1.0s | 5.4s |
-| Drain | ~97% | 6.7s | 0.1s | 6.7s |
-| Rayon ×2 | 75% | ~3.5s | ~0.1s | ~3.6s each |
+| Main | 17–101% | 4.65s | 0.89s | 5.54s |
+| Rayon ×3 | 71–73% | ~2.9s | ~0.1s | ~2.9s each |
 
-Main thread sys time dropped from 3.7s → 1.0s (no more way_index mmap writes on main).
-The drain thread is 99% user mode — the mmap writes are cheap per-call, just many of them.
-Total CPU across active threads: ~23s on 13.7s wall = **~1.7× utilization** (was 1.5×).
+Rayon thread utilization improved from 37-47% → 71-73% due to multi-block overlap keeping
+more work available in the pool.
 
 ### Allocation Profile (system allocator, no mimalloc)
 
-Total allocated: **9.1 GB**. Global throughput: 41.6 GB alloc, 41.5 GB dealloc. RSS: 2.2 GB.
+Total allocated: **5.0 GB**. Global throughput: 35.6 GB alloc, 37.0 GB dealloc. RSS: 2.0 GB.
 
 | Function | Calls | Avg | P50 | P95 | P99 | Total | % |
 |---|---|---|---|---|---|---|---|
-| `process_raw_way` | 6.6M | 1.7 KB | 1.0 KB | 4.1 KB | 9.2 KB | 10.5 GB | 115% |
-| `for_each_zoom_simplified` | 6.6M | 1.3 KB | 800 B | 3.1 KB | 7.0 KB | 8.2 GB | 90% |
-| `emit_polygon_feature` | 4.5M | 1.4 KB | 794 B | 3.2 KB | 7.4 KB | 6.0 GB | 65% |
-| `add_feature_to_layer` | 14.8M | 303 B | 60 B | 898 B | 4.5 KB | 4.2 GB | 46% |
-| `merge_same_attr_geometries` | 306K | 11.5 KB | 3.4 KB | 63.8 KB | 282.2 KB | 3.4 GB | 37% |
-| `clip_polygon_into` | 8.1M | 327 B | 304 B | 1.3 KB | 2.7 KB | 2.5 GB | 27% |
-| `emit_line_feature` | 2.0M | 1.2 KB | 808 B | 3.0 KB | 6.0 KB | 2.3 GB | 25% |
+| `process_raw_way` | 6.6M | 1.7 KB | 1.0 KB | 4.1 KB | 9.2 KB | 10.5 GB | 210% |
+| `for_each_zoom_simplified` | 6.6M | 1.3 KB | 800 B | 3.1 KB | 7.0 KB | 8.2 GB | 164% |
+| `emit_polygon_feature` | 4.5M | 1.4 KB | 794 B | 3.2 KB | 7.4 KB | 6.0 GB | 119% |
+| `add_feature_to_layer` | 14.8M | 302 B | 60 B | 902 B | 4.5 KB | 4.2 GB | 83% |
+| `merge_same_attr_geometries` | 306K | 11.5 KB | 3.4 KB | 63.9 KB | 282.0 KB | 3.3 GB | 67% |
+| `clip_polygon_into` | 8.1M | 327 B | 304 B | 1.3 KB | 2.7 KB | 2.5 GB | 49% |
+| `emit_line_feature` | 2.0M | 1.2 KB | 808 B | 3.0 KB | 6.0 KB | 2.3 GB | 46% |
 
 Per-thread:
 
 | Thread | Alloc | Dealloc | Diff |
 |---|---|---|---|
-| Main | 10.0 GB | 11.4 GB | −1.4 GB |
-| Rayon ×3 | ~2.4 GB each | ~1.6 GB each | ~0.6 GB each |
+| Main | 5.9 GB | 7.1 GB | −1.2 GB |
+| Rayon ×3 | ~2.1 GB each | ~1.5 GB each | ~0.6 GB each |
 
 ## Key Observations
 
@@ -126,6 +135,7 @@ won't fit in 64 GB RAM — needs bitpacked coordinate compression (~51 GB estima
 | 31f7c14 | Iterator API (no perf change) | 9.3s | 15.1s |
 | 15be3bf | Dedicated drain thread + land_mask to rayon | 8.6s | 14.4s |
 | 5c45361 | BlockType API (no perf change) | 8.6s | 14.4s |
+| (pending) | Multi-block overlap + `-j` + decode thread control | 8.1s | 13.8s |
 
 ## Remaining Opportunities
 
