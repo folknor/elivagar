@@ -138,17 +138,12 @@ pre-split large polygons before they enter the simplification pipeline (see Prio
 - [x] **Investigated**: the 100-300× gap is vertex count (DP on ~2000 vs ~15 vertices). The
   measurement includes callback cost (scanline + clipping). No algorithmic fix — need to reduce
   input vertex count via pre-splitting (Priority 4).
-- [ ] **Per-inner convergence tracking** — `retain_mut` on inner rings (geometry.rs:464-468)
-  discards `simplify_into`'s return value, so converged inners are re-simplified every zoom.
-  Track `last_max_dev_sq` per inner ring and skip when converged. The single-way `_simplified`
-  path already has this optimization for the outer ring (geometry.rs:378) and it's effective —
-  once max deviation is below tolerance, all coarser zoom DP calls are skipped entirely.
-  For inner rings, a small ring (e.g. 20-vertex lake cutout) that converges at z12 still gets
-  11 wasted `simplify_into` calls at z11..z0. Each is cheap (~20-vertex DP) but multiplied
-  across many inners and many relations it adds up. Norway has 464K `process_prepared_relation`
-  calls at 86 µs avg. Ocean polygons rarely have inners (not a factor there).
-  Fix: add `Vec<f64>` to `SimplifyMultiScratch` for per-inner `last_max_dev_sq` tracking.
-  Check `inner_max_dev_sq[i] >= tol_sq` before calling `simplify_into` on each inner.
+- [x] **Per-inner convergence tracking** — added `inner_max_dev_sq: Vec<f64>` to
+  `SimplifyMultiScratch`. Each inner ring tracks its own max deviation; `simplify_into` is
+  skipped when already converged (`inner_max_dev_sq[i] < tol_sq`). Replaced `retain_mut` with
+  a manual read/write loop that preserves per-inner convergence state across the swap-compact.
+  Wall-clock neutral at regional scale (mimalloc handles small DP calls well), architecturally
+  correct for planet scale.
 
 ### Priority 3: Cross-zoom redundancy in ocean pipeline — investigated
 
