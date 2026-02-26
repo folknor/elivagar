@@ -109,12 +109,15 @@ machine where the node index fits in RAM.
 
 ## Remaining Opportunities
 
-1. **Visvalingam-Whyatt** — O(n log n) one-time importance, then threshold per zoom.
-   Would replace DP entirely. Biggest potential CPU win.
+1. ~~**Visvalingam-Whyatt**~~ — Tried and reverted. VW's allocation overhead (5 Vecs +
+   BinaryHeap per call) exceeds DP savings for small geometries (avg ~10 vertices).
+   Non-cascading VW also produces +7 MB output at low zooms. See `notes/vw-simplification-experiment.md`.
 2. **Polygon-focused optimization** — polygons are 1.3× the total CPU of lines, but
    per-feature cost is similar. The ratio is mostly feature count (2.25×).
 3. **Planet-scale I/O** — on this machine, everything is I/O-bound. Faster storage or
    more RAM would have more impact than any code change.
+4. ~~**Node storage redesign**~~ — Done. SortedNodeStore replaces 96 GB sparse mmap with
+   ~420 MB in-RAM hierarchical store. PBF phase: 16s → 10.8s on plantasjen. Total: 24s → 17s.
 
 ## Optimization History
 
@@ -133,3 +136,5 @@ All completed. Documented here for reference.
 11. **Assemble-phase Vec pools** — `add_feature_to_layer` 4.4→4.2 GB (−5%), `merge_same_attr_geometries` 3.5→3.4 GB (−3%).
 12. **Buffer hoisting (batch 2)** — gaps Vec, emit_boundary_tile buffers, emit_multipolygon_feature all_rings.
 13. **Compiler opts (batch 2)** — `codegen-units=1`, `panic=abort`, `#[inline]` on hot small fns.
+14. **libdeflate** — replaced flate2 (zlib-ng) with libdeflater. Thread-local compressor reuse. Assemble −0.2s.
+15. **SortedNodeStore** — replaced 96 GB sparse mmap with ~420 MB in-RAM hierarchical store (bitmask+popcount). PBF phase −5.2s. Total 24s → 17s.

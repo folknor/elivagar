@@ -49,7 +49,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`.
 **Infrastructure:**
 - `sort.rs` — external merge sort (chunk files, k-way merge via binary heap)
 - `pmtiles_writer.rs` — PMTiles v3 writer with Hilbert tile IDs
-- `node_index.rs` — flat mmap'd node coordinate index
+- `node_index.rs` — node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
 - `way_index.rs` — flat mmap'd way geometry index
 
 ### Pipeline phases
@@ -67,7 +67,7 @@ Sequential, same PBF input:
 
 - `pbfhogg` — PBF reader, sibling dir `../pbfhogg`
 - `rayon` — parallel processing
-- `memmap2` — memory-mapped I/O for node/way indices
+- `memmap2` — memory-mapped I/O for way index (and flat node index fallback)
 - `libdeflater` (libdeflate) — gzip compression for MVT tiles
 - `mimalloc` — global allocator (critical for rayon performance)
 - `hotpath` — function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
@@ -84,7 +84,7 @@ Sequential, same PBF input:
 ### plantasjen (current)
 - CPU: AMD Ryzen 9 5900X (12 cores / 24 threads, 4.95 GHz boost)
 - RAM: 30 GB DDR4
-- Denmark PBF baseline: ~24s total (16s pbf, 3.0s ocean, 0.4s sort, 2.5s assemble)
+- Denmark PBF baseline: ~17s total (11s pbf, 2.5s ocean, 0.4s sort, 2.3s assemble)
 
 ### dm6
 - CPU: AMD Ryzen 5 5600G (6 cores / 12 threads, 4.46 GHz boost)

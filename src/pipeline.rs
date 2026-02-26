@@ -12,7 +12,7 @@ use crate::geometry::{
 };
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::mvt::{self, GeomType, LayerBuilder};
-use crate::node_index::{NodeIndex, NodeIndexReader};
+use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
 use crate::ocean;
 use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter};
 use crate::shortbread::{self, AttrValue, GeomExpect, Layer, LayerMatch, OsmGeomType, Tags};
@@ -21,7 +21,7 @@ use crate::sort::{self, SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add_feature_to_layer};
 
-use pbfhogg::{Element, ElementReader, MemberId};
+use pbfhogg::{BlobDecode, BlobReader, Element, ElementReader, MemberId};
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -306,6 +306,23 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 // Phase 1+2: Single-pass PBF read + feature processing
 // ---------------------------------------------------------------------------
 
+/// Check if a PBF file declares `Sort.Type_then_ID` in its header.
+fn pbf_is_sorted(path: &std::path::Path) -> bool {
+    let Ok(reader) = BlobReader::from_path(path) else {
+        return false;
+    };
+    for blob in reader {
+        let Ok(blob) = blob else { return false };
+        match blob.decode() {
+            Ok(BlobDecode::OsmHeader(header)) => return header.is_sorted(),
+            Ok(BlobDecode::OsmData(_)) => return false, // No header found before data
+            Ok(_) => {}                                  // Skip unknown blob types
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[hotpath::measure]
 fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask), PipelineError> {
@@ -320,9 +337,15 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     let idx_dir = &config.tmp_dir;
     // Option so we can consume it via .take() on first Way element.
-    let mut node_index_opt: Option<NodeIndex> =
-        Some(NodeIndex::create(&idx_dir.join("nodes.idx"))?);
-    let mut node_reader: Option<NodeIndexReader> = None;
+    let is_sorted = pbf_is_sorted(&config.pbf_path);
+    let mut node_store_opt: Option<NodeStore> = Some(if is_sorted {
+        eprintln!("  PBF declares Sort.Type_then_ID — using compact node store");
+        NodeStore::Sorted(SortedNodeStore::new())
+    } else {
+        eprintln!("  PBF not sorted — using flat mmap node index");
+        NodeStore::Flat(NodeIndex::create(&idx_dir.join("nodes.idx"))?)
+    });
+    let mut node_reader: Option<NodeStoreReader> = None;
     let mut way_index =
         WayIndex::create(idx_dir)?;
 
@@ -360,8 +383,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             node_count += 1;
             let lat_e7 = $node.decimicro_lat();
             let lon_e7 = $node.decimicro_lon();
-            node_index_opt.as_mut()
-                .expect("node_index consumed before all nodes processed")
+            node_store_opt.as_mut()
+                .expect("node store consumed before all nodes processed")
                 .put($node.id(), lat_e7, lon_e7);
 
             min_lat_e7 = min_lat_e7.min(lat_e7);
@@ -396,13 +419,12 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                 // Convert node index to read-only reader on first way.
                 // PBF guarantees all nodes come before ways, so writes are done.
                 if node_reader.is_none() {
-                    let ni = node_index_opt.take()
-                        .expect("node_index already consumed");
-                    // Panic: I/O remapping failure is unrecoverable.
-                    let reader = ni.into_reader()
-                        .expect("failed to convert node index to reader");
+                    let ns = node_store_opt.take()
+                        .expect("node store already consumed");
+                    let reader = ns.into_reader()
+                        .expect("failed to convert node store to reader");
                     node_reader = Some(reader);
-                    eprintln!("  Node index finalized ({node_count} nodes), processing ways...");
+                    eprintln!("  Node store finalized ({node_count} nodes), processing ways...");
                 }
 
                 // Collect raw way data — cheap copies on the main thread.
@@ -467,8 +489,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     if !raw_way_batch.is_empty() {
         // Handle degenerate PBF with ways but no prior conversion
         if node_reader.is_none() {
-            if let Some(ni) = node_index_opt.take() {
-                let reader = ni.into_reader().expect("failed to convert node index to reader");
+            if let Some(ns) = node_store_opt.take() {
+                let reader = ns.into_reader().expect("failed to convert node store to reader");
                 node_reader = Some(reader);
             }
         }
@@ -598,7 +620,7 @@ const WAY_BATCH_SIZE: usize = 8192;
 #[hotpath::measure]
 fn flush_raw_way_batch(
     batch: Vec<RawWay>,
-    node_reader: &NodeIndexReader,
+    node_reader: &NodeStoreReader,
     way_index: &mut WayIndex,
     min_zoom: u8,
     max_zoom: u8,
@@ -635,7 +657,7 @@ fn flush_raw_way_batch(
 #[hotpath::measure]
 fn process_raw_way(
     raw: RawWay,
-    node_reader: &NodeIndexReader,
+    node_reader: &NodeStoreReader,
     min_zoom: u8,
     max_zoom: u8,
     land_mask: &geometry::LandMask,

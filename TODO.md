@@ -21,22 +21,24 @@
 Investigated-and-rejected optimizations are documented in code comments at each site.
 Hotpath profile results and analysis: `notes/hotpath-profile.md`
 
-- [ ] **Visvalingam-Whyatt instead of Douglas-Peucker.** VW computes per-vertex importance
-  once in O(n log n), then each zoom level filters by threshold — no re-scanning. Would
-  replace DP entirely. Requires new algorithm, tolerance recalibration, and visual verification.
+- [x] ~~**Visvalingam-Whyatt instead of Douglas-Peucker.**~~ Tried and reverted — VW's
+  allocation overhead exceeds DP savings for small geometries (avg ~10 vertices). Non-cascading
+  VW also produces more output at low zooms. See `notes/vw-simplification-experiment.md`.
+
+- [x] ~~**SortedNodeStore**~~ — replaced 96 GB sparse mmap with compact in-RAM hierarchical
+  store (bitmask+popcount, ~420 MB for Denmark). PBF phase: 16s → 11s. Total: 24s → 17s.
+
+- [x] ~~**libdeflate**~~ — replaced flate2 with libdeflater for gzip compression. Assemble
+  phase: 2.5s → 2.3s.
+
+- [ ] **StreamVByte delta compression for SortedNodeStore** — needed for planet scale
+  (8.5B nodes × 8 bytes = 68 GB uncompressed, target 64 GB RAM). Denmark doesn't need it.
 
 - [ ] **Rayon alternatives for slice-based parallelism** — Research notes in previous git
   history. Key options: paralight, orx-parallel, chili, forte. Not a current bottleneck.
 
-## Performance: Linux kernel features for planet-scale I/O
+## Performance: Linux kernel features — all reverted
 
-All implemented. Research notes and I/O profile analysis: `notes/linux-io.md`.
-
-- `MADV_RANDOM` on node index + way index (conditional on >50% RAM)
-- `MADV_HUGEPAGE` on node index
-- `MADV_POPULATE_READ` on node index (conditional on ≤50% RAM, Linux 5.14+)
-- `MADV_SEQUENTIAL` on ocean shapefile mmap
-- `FADV_SEQUENTIAL` on sort chunk reads, `FADV_DONTNEED` when drained
-- `FADV_DONTNEED` after sort chunk writes
-- `FADV_SEQUENTIAL` + `FADV_DONTNEED` on PMTiles temp blob read-back
-- io_uring: not applicable (CPU-bound, not I/O-bound). See `notes/linux-io.md`.
+All madvise/fadvise hints were tried and removed. Every hint caused regressions because the
+node index was a sparse file. Now that SortedNodeStore is in-RAM, the madvise concern is moot
+for the node index. See CLAUDE.md for full history.
