@@ -8,7 +8,8 @@ OUT="${2:-data/hotpath-alloc-output.pmtiles}"
 
 echo "NOTE: mimalloc is disabled for alloc profiling — wall-clock times are not meaningful."
 cargo build --release --features hotpath-alloc
+detect_ocean
 
 HOTPATH_METRICS_SERVER_OFF=true "$ELIVAGAR_BIN" \
     "$PBF" "$OUT" \
-    --ocean "data/water-polygons-split-4326/water_polygons.shp"
+    --tmp-dir .tilegen_tmp $OCEAN_FLAG

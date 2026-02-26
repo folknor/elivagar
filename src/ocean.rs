@@ -334,6 +334,8 @@ fn emit_ocean_polygon(
     let mut gaps: Vec<(u32, u32)> = Vec::new();
     let mut bt_all_rings: Vec<Vec<(i32, i32)>> = Vec::new();
     let mut bt_geom_buf: Vec<u32> = Vec::new();
+    let mut clip_a: Vec<Point> = Vec::new();
+    let mut clip_b: Vec<Point> = Vec::new();
 
     geometry::for_each_zoom_simplified_multi(outer, inners, min_zoom, max_zoom, |z, simp_outer, simp_inners| {
         let scale = f64::from(1u32 << z);
@@ -392,6 +394,7 @@ fn emit_ocean_polygon(
                         feature_id, tx, ty, z, simp_outer, simp_inners,
                         layer_idx, attrs, records,
                         &mut bt_all_rings, &mut bt_geom_buf,
+                        &mut clip_a, &mut clip_b,
                     );
                 }
 
@@ -439,8 +442,8 @@ fn emit_ocean_polygon(
 }
 
 /// Clip and encode a single boundary tile (polygon edge crosses this tile).
-/// Reusable buffers (`all_rings`, `geom_buf`) are passed in to avoid per-call
-/// allocation — this function is called per boundary tile per zoom.
+/// Reusable buffers (`all_rings`, `geom_buf`, `clip_a`, `clip_b`) are passed in
+/// to avoid per-call allocation — this function is called per boundary tile per zoom.
 #[allow(clippy::too_many_arguments)]
 fn emit_boundary_tile(
     feature_id: u64,
@@ -452,24 +455,26 @@ fn emit_boundary_tile(
     records: &mut Vec<SortRecord>,
     all_rings: &mut Vec<Vec<(i32, i32)>>,
     geom_buf: &mut Vec<u32>,
+    clip_a: &mut Vec<Point>,
+    clip_b: &mut Vec<Point>,
 ) {
     let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
 
-    let clipped_outer = geometry::clip_polygon(outer, &clip);
-    if clipped_outer.len() < 3 {
+    geometry::clip_polygon_into(outer, &clip, clip_a, clip_b);
+    if clip_a.len() < 3 {
         return;
     }
-    let mut outer_tc = geometry::to_tile_coords(&clipped_outer, tx, ty, z);
+    let mut outer_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
     close_and_orient_cw(&mut outer_tc);
 
     all_rings.clear();
     all_rings.push(outer_tc);
     for inner in inners {
-        let clipped_inner = geometry::clip_polygon(inner, &clip);
-        if clipped_inner.len() < 3 {
+        geometry::clip_polygon_into(inner, &clip, clip_a, clip_b);
+        if clip_a.len() < 3 {
             continue;
         }
-        let mut inner_tc = geometry::to_tile_coords(&clipped_inner, tx, ty, z);
+        let mut inner_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
         close_and_orient_ccw(&mut inner_tc);
         all_rings.push(inner_tc);
     }

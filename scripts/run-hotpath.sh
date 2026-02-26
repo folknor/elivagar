@@ -7,7 +7,8 @@ PBF="${1:-data/denmark-latest.osm.pbf}"
 OUT="${2:-data/hotpath-output.pmtiles}"
 
 cargo build --release --features hotpath
+detect_ocean
 
 HOTPATH_METRICS_SERVER_OFF=true "$ELIVAGAR_BIN" \
     "$PBF" "$OUT" \
-    --ocean "data/water-polygons-split-4326/water_polygons.shp"
+    --tmp-dir .tilegen_tmp $OCEAN_FLAG
