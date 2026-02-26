@@ -396,6 +396,7 @@ pub struct SimplifyMultiScratch {
     pub cascade_inners: Vec<Vec<Point>>,
     pub keep_buf: Vec<bool>,
     pub simp_buf: Vec<Point>,
+    pub inner_max_dev_sq: Vec<f64>,
 }
 
 impl SimplifyMultiScratch {
@@ -405,6 +406,7 @@ impl SimplifyMultiScratch {
             cascade_inners: Vec::new(),
             keep_buf: Vec::new(),
             simp_buf: Vec::new(),
+            inner_max_dev_sq: Vec::new(),
         }
     }
 }
@@ -433,6 +435,7 @@ pub fn for_each_zoom_simplified_multi<F>(
         cascade_inners,
         keep_buf,
         simp_buf,
+        inner_max_dev_sq,
     } = scratch;
 
     cascade_outer.clear();
@@ -449,6 +452,11 @@ pub fn for_each_zoom_simplified_multi<F>(
     }
     cascade_inners.truncate(inners.len());
 
+    // Per-inner convergence tracking: skip simplify_into when max deviation
+    // is already below tolerance (same optimization as outer ring at line 461).
+    inner_max_dev_sq.clear();
+    inner_max_dev_sq.resize(inners.len(), f64::MAX);
+
     let mut last_max_dev_sq: f64 = f64::MAX;
     for z in (z_lo..=z_hi).rev() {
         let tol = if z < 14 { simplify_tolerance(z) } else { 0.0 };
@@ -461,11 +469,22 @@ pub fn for_each_zoom_simplified_multi<F>(
             if cascade_outer.len() > 4 && last_max_dev_sq >= tol_sq {
                 last_max_dev_sq = simplify_into(cascade_outer, tol, keep_buf, simp_buf);
                 std::mem::swap(cascade_outer, simp_buf);
-                cascade_inners.retain_mut(|r| {
-                    simplify_into(r, tol, keep_buf, simp_buf);
-                    std::mem::swap(r, simp_buf);
-                    r.len() >= 4
-                });
+                let mut write = 0;
+                for read in 0..cascade_inners.len() {
+                    if inner_max_dev_sq[read] >= tol_sq {
+                        inner_max_dev_sq[read] = simplify_into(&cascade_inners[read], tol, keep_buf, simp_buf);
+                        std::mem::swap(&mut cascade_inners[read], simp_buf);
+                    }
+                    if cascade_inners[read].len() >= 4 {
+                        if write != read {
+                            cascade_inners.swap(write, read);
+                            inner_max_dev_sq.swap(write, read);
+                        }
+                        write += 1;
+                    }
+                }
+                cascade_inners.truncate(write);
+                inner_max_dev_sq.truncate(write);
             }
         }
         if cascade_outer.len() < 4 {
