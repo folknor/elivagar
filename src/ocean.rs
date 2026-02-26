@@ -338,6 +338,13 @@ fn emit_ocean_polygon(
     let mut bt_geom_buf: Vec<u32> = Vec::new();
     let mut clip_a: Vec<Point> = Vec::new();
     let mut clip_b: Vec<Point> = Vec::new();
+    // Row pre-clip buffers: clip polygon to each tile row's Y-band before
+    // per-tile clipping. Reduces input vertex count for individual tile clips
+    // dramatically for large ocean polygons spanning many rows.
+    let mut row_clip_a: Vec<Point> = Vec::new();
+    let mut row_clip_b: Vec<Point> = Vec::new();
+    let mut row_outer: Vec<Point> = Vec::new();
+    let mut row_inners: Vec<Vec<Point>> = Vec::new();
 
     geometry::for_each_zoom_simplified_multi(outer, inners, min_zoom, max_zoom, simp_scratch, |z, simp_outer, simp_inners| {
         let scale = f64::from(1u32 << z);
@@ -384,16 +391,45 @@ fn emit_ocean_polygon(
         };
 
         // Scanline: process row by row
+        let tile_buf = BUFFER_FRACTION * inv_scale;
         for ty in ty_min..=ty_max {
             let cy = (f64::from(ty) + 0.5) * inv_scale;
 
             if let Some(bx_list) = boundary_rows.get(&ty) {
+                // Row pre-clip: restrict polygon to this row's Y-band.
+                // Per-tile clips then process a much smaller polygon
+                // (e.g. ~50 vertices instead of ~1000 for large fjord polygons).
+                let row_rect = ClipRect::new(
+                    0.0,
+                    f64::from(ty) * inv_scale - tile_buf,
+                    1.0,
+                    f64::from(ty + 1) * inv_scale + tile_buf,
+                );
+                geometry::clip_polygon_into(simp_outer, &row_rect, &mut row_clip_a, &mut row_clip_b);
+                row_outer.clear();
+                row_outer.extend_from_slice(&row_clip_a);
+
+                // Pre-clip inners to row band (rare for ocean, usually empty)
+                let mut row_inner_count = 0;
+                for inner in simp_inners {
+                    geometry::clip_polygon_into(inner, &row_rect, &mut row_clip_a, &mut row_clip_b);
+                    if row_clip_a.len() >= 3 {
+                        if row_inner_count < row_inners.len() {
+                            row_inners[row_inner_count].clear();
+                            row_inners[row_inner_count].extend_from_slice(&row_clip_a);
+                        } else {
+                            row_inners.push(row_clip_a.to_vec());
+                        }
+                        row_inner_count += 1;
+                    }
+                }
+
                 // Row has boundary tiles — clip+emit them, then fill gaps
                 for &tx in bx_list {
                     if let Some(mask) = land_mask
                         && !mask.has_land(z, tx, ty) { continue; }
                     emit_boundary_tile(
-                        feature_id, tx, ty, z, simp_outer, simp_inners,
+                        feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
                         layer_idx, attrs, records,
                         &mut bt_all_rings, &mut bt_geom_buf,
                         &mut clip_a, &mut clip_b,

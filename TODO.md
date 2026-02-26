@@ -92,11 +92,13 @@ Norway: 31.8M calls × 6.5 KB avg = 197 GB. Japan: 6.0M calls × 8.1 KB avg = 46
   Results: `clip_polygon_into` alloc dropped from **197 GB → 0** (out of top 10). Thread alloc
   **296 GB → 110 GB** (−63%). Norway ocean phase **16.6s → 11.4s** (−31%). Norway wall
   **55.7s → 50.7s** (−9%). Japan ocean **8.4s → 7.6s** (−10%). Denmark unchanged (ocean negligible).
-- [ ] **Tilemaker-style clip cache** — clip at parent zoom, reuse clipped result for child
-  tiles at the next zoom. `clip_cache.h` shows the pattern: keyed by (zoom, tile_xy, object_id),
-  FIFO eviction at 1024 entries/shard. For ocean polygons that span many tiles across many zooms,
-  clipping a z13 result is much cheaper than re-clipping the full simplified polygon. More
-  complex than buffer hoisting — defer unless #1 doesn't close the gap.
+- [x] **Row-band pre-clip** — instead of a full Tilemaker-style clip cache, pre-clip ocean
+  polygons to each tile row's Y-band before per-tile clipping. Simpler than a cache, fits the
+  existing row-based scanline processing. Per-tile clips then operate on ~50 vertices instead of
+  ~1000 for large fjord polygons. Hoisted `row_clip_a/b`, `row_outer`, `row_inners` buffers.
+  Results: Norway ocean **11.4s → 7.6s** (−33%), total **50.7s → 47.2s** (−7%). Japan ocean
+  **7.6s → 6.8s** (−11%). Denmark ocean **4.0s → 3.0s** (−25%). `clip_polygon_into` avg
+  **1.94 µs → 971 ns** (−50%). RSS 574 MB → 500 MB.
 - [ ] **Investigate**: are we clipping ocean polygons against tiles they don't intersect?
   The outcode pre-test in `clip_polygon_into` rejects trivially-outside rings, but a coarser
   bbox pre-check before even calling clip could skip more. Tilemaker uses a two-level spatial
