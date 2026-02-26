@@ -647,6 +647,7 @@ struct ProcessedWay {
 
 /// Drain a single batch of processed way results: write way_index entries,
 /// mark land_mask, push sort records. Returns feature count.
+#[hotpath::measure]
 fn drain_processed_ways(
     results: Vec<ProcessedWay>,
     way_index: &mut WayIndex,
@@ -671,6 +672,7 @@ fn drain_processed_ways(
 }
 
 /// Non-blocking drain: consume any available results from the worker channel.
+#[hotpath::measure]
 fn drain_way_results_nonblocking(
     rx: &std::sync::mpsc::Receiver<Vec<ProcessedWay>>,
     way_index: &mut WayIndex,
@@ -685,6 +687,7 @@ fn drain_way_results_nonblocking(
 }
 
 /// Blocking drain: consume ALL results until channel closes.
+#[hotpath::measure]
 fn drain_way_results_blocking(
     rx: &std::sync::mpsc::Receiver<Vec<ProcessedWay>>,
     way_index: &mut WayIndex,
