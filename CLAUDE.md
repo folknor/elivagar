@@ -23,6 +23,8 @@ Write new scripts in `scripts/` as needed. Follow these conventions:
 - `scripts/run-hotpath.sh [pbf] [out.pmtiles]` — build + run with hotpath profiling (prints function timing report on exit)
 - `scripts/run-hotpath-alloc.sh [pbf] [out.pmtiles]` — build + run with allocation profiling (disables mimalloc, wall-clock times meaningless)
 
+**NEVER run two elivagar processes at the same time.** They share `.tilegen_tmp/` (causes crashes) and hotpath scripts use conflicting cargo feature flags (causes build conflicts). Always run sequentially.
+
 If you need something these scripts don't cover, write a new script.
 
 ## Architecture
@@ -84,7 +86,7 @@ Sequential, same PBF input:
 ### plantasjen (current)
 - CPU: AMD Ryzen 9 5900X (12 cores / 24 threads, 4.95 GHz boost)
 - RAM: 30 GB DDR4
-- Denmark PBF baseline: ~14s total (8s pbf, 2.5s ocean, 0.4s sort, 2.2s assemble)
+- Denmark PBF baseline: ~14.7s total (9.3s pbf, 1.5s ocean, 0.4s sort, 2.7s assemble)
 
 ### dm6
 - CPU: AMD Ryzen 5 5600G (6 cores / 12 threads, 4.46 GHz boost)

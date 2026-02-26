@@ -11,6 +11,13 @@
 - [ ] Write a small 1-page project website (what it does, benchmark, usage, link to repo)
 - [ ] Host via GitHub Pages
 
+## Performance
+
+- [ ] **PBF phase regression +1.3s** (8.0s → 9.3s on Denmark) — likely caused by `b866306` (FOR bitpacking SortedNodeStore). Node lookup hot path changed. Needs bisect between `d22b507` and `b866306` to confirm.
+- [ ] **Assemble phase regression +0.5s** (2.2s → 2.7s on Denmark) — investigate alongside PBF regression.
+
+Current Denmark baseline (plantasjen, best of 3): 14.7s total (9.3s pbf, 1.5s ocean, 0.4s sort, 2.7s assemble). 16.0M features, 53.9K unique tiles, 273 MB output.
+
 ## Quality
 
 - [ ] Visual verification — tracked in nidhogg TODO
