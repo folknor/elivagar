@@ -34,6 +34,14 @@ Hotpath profile results and analysis: `notes/hotpath-profile.md`
 - [ ] **StreamVByte delta compression for SortedNodeStore** — needed for planet scale
   (8.5B nodes × 8 bytes = 68 GB uncompressed, target 64 GB RAM). Denmark doesn't need it.
 
+- [x] ~~**Double-buffer + block-level way dispatch**~~ — block-level dispatch via
+  `into_blocks_pipelined`. Worker thread receives owned PrimitiveBlocks, extracts + rayon
+  processes. Main thread drains results between blocks. PBF phase: 13.3s → 9.3s. Total: 17s → 15s.
+
+- [ ] **Reduce serial drain cost** — `drain_processed_ways` takes 4.55s (39% of PBF phase).
+  `way_index.put()` and `sort_writer.push()` are `&mut self` — cannot parallelize directly.
+  Possible approaches: batch I/O writes, reduce way_index write volume, defer sort pushes.
+
 - [ ] **Rayon alternatives for slice-based parallelism** — Research notes in previous git
   history. Key options: paralight, orx-parallel, chili, forte. Not a current bottleneck.
 
