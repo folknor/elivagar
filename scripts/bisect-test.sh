@@ -11,18 +11,24 @@ echo "=== bisect test at $(git rev-parse --short HEAD) ==="
 
 git checkout -- Cargo.lock 2>/dev/null || true
 
-cargo build --release 2>&1 | tail -1
+if ! cargo build --release 2>&1; then
+    echo "  build failed — SKIP"
+    exit 125
+fi
 
 detect_ocean
 
 STDERR_FILE=$(mktemp "$CARGO_TARGET_DIR/.bisect_stderr.XXXXXX")
 trap 'rm -f "$STDERR_FILE"; git checkout -- Cargo.lock 2>/dev/null || true' EXIT
 
-timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "data/bisect-test.pmtiles" --tmp-dir .tilegen_tmp $OCEAN_FLAG 2> "$STDERR_FILE"
-EXIT_CODE=$?
+EXIT_CODE=0
+timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "data/bisect-test.pmtiles" --tmp-dir .tilegen_tmp $OCEAN_FLAG 2> "$STDERR_FILE" || EXIT_CODE=$?
 if [ "$EXIT_CODE" -eq 124 ]; then
     echo "  KILLED after ${RUN_TIMEOUT}s — BAD"
     exit 1
+elif [ "$EXIT_CODE" -ne 0 ]; then
+    echo "  elivagar run failed (exit $EXIT_CODE) — SKIP"
+    exit 125
 fi
 
 TOTAL=$(parse_kv total_ms "$STDERR_FILE")
