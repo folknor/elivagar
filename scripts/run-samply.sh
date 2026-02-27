@@ -47,7 +47,7 @@ detect_ocean
 echo ""
 echo "Recording profile..."
 samply record --save-only -o "$PROFILE_OUT" \
-    "$PROFILING_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG "$@"
+    "$PROFILING_BIN" "$PBF" "$OUT" --tmp-dir data/tilegen_tmp $OCEAN_FLAG "$@"
 
 echo ""
 echo "Profile saved to $PROFILE_OUT"

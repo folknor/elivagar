@@ -4,7 +4,7 @@
 // the external merge sort between PBF processing and tile assembly.
 //
 // No version byte: this is an internal ephemeral format used within a single
-// pipeline run (in .tilegen_tmp/). Never persisted across versions or shared.
+// pipeline run (in data/tilegen_tmp/). Never persisted across versions or shared.
 //
 // Format:
 //   u64   osm_id

@@ -16,7 +16,7 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 |------|-------------|
 | `--ocean path.shp` | Ocean shapefile (`water-polygons-split-3857`) |
 | `--ocean-simplified path.shp` | Simplified ocean shapefile for z0-7 (fewer vertices) |
-| `--tmp-dir path` | Directory for temporary sort files (default: `.tilegen_tmp`) |
+| `--tmp-dir path` | Directory for temporary sort files (default: `data/tilegen_tmp`) |
 | `--skip-to ocean\|sort` | Resume from a previous run's checkpoint |
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |
 | `--compression-level 0-10` | Gzip compression level (default: 6). Lower = faster, larger output |

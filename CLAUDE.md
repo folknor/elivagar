@@ -27,7 +27,7 @@ Write new scripts in `scripts/` as needed. Follow these conventions:
 - `scripts/run-samply.sh [pbf] [out.pmtiles] [extra args...]` — sampling profiler via samply (saves profile for later viewing with `samply load`)
 - `scripts/run-perf.sh [pbf] [out.pmtiles] [extra args...]` — sampling profiler via perf (CLI-friendly, view with `perf report`)
 
-**NEVER run two elivagar processes at the same time.** They share `.tilegen_tmp/` (causes crashes) and hotpath scripts use conflicting cargo feature flags (causes build conflicts). Always run sequentially.
+**NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath scripts use conflicting cargo feature flags (causes build conflicts). Always run sequentially.
 
 If you need something these scripts don't cover, write a new script.
 
@@ -127,7 +127,7 @@ without benchmarking on a sparse-file workload first.
 
 ## Data
 
-- `.tilegen_tmp/` — temporary sort chunks (gitignored)
+- `data/tilegen_tmp/` — temporary sort chunks (inside gitignored `data/`)
 - Ocean shapefile not included — pass via `--ocean` flag
 
 ## Subagents

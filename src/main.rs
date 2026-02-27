@@ -17,7 +17,7 @@ fn main() {
     let pbf_path = std::path::PathBuf::from(&args[1]);
     let output_path = std::path::PathBuf::from(&args[2]);
 
-    let mut tmp_dir = std::path::PathBuf::from(".tilegen_tmp");
+    let mut tmp_dir = std::path::PathBuf::from("data/tilegen_tmp");
     let mut ocean_shapefile = None;
     let mut ocean_simplified_shapefile = None;
     let mut skip_to: Option<elivagar::SkipTo> = None;

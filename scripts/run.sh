@@ -11,4 +11,4 @@ shift 2 2>/dev/null || true
 scripts/build.sh
 detect_ocean
 
-"$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG "$@"
+"$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir data/tilegen_tmp $OCEAN_FLAG "$@"

@@ -46,14 +46,14 @@ estimate_memory() {
     pbfhogg_bin=$(find_pbfhogg) || return 0
 
     echo "Scanning PBF for node count..."
-    mkdir -p .tilegen_tmp
-    "$pbfhogg_bin" fileinfo --extended "$pbf" > .tilegen_tmp/fileinfo.txt
+    mkdir -p data/tilegen_tmp
+    "$pbfhogg_bin" fileinfo --extended "$pbf" > data/tilegen_tmp/fileinfo.txt
 
     python3 -c "
 import sys
 
 node_count = None
-with open('.tilegen_tmp/fileinfo.txt') as f:
+with open('data/tilegen_tmp/fileinfo.txt') as f:
     for line in f:
         if line.startswith('Nodes:'):
             node_count = int(line.split(':')[1].strip())
@@ -120,4 +120,4 @@ echo "Output:     $OUT"
 echo ""
 
 systemd-run --scope -p MemoryMax="$MEM_LIMIT" -p MemorySwapMax=0 \
-    "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG "$@"
+    "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir data/tilegen_tmp $OCEAN_FLAG "$@"

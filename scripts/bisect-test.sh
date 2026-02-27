@@ -22,7 +22,7 @@ STDERR_FILE=$(mktemp "$CARGO_TARGET_DIR/.bisect_stderr.XXXXXX")
 trap 'rm -f "$STDERR_FILE"; git checkout -- Cargo.lock 2>/dev/null || true' EXIT
 
 EXIT_CODE=0
-timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "data/bisect-test.pmtiles" --tmp-dir .tilegen_tmp $OCEAN_FLAG 2> "$STDERR_FILE" || EXIT_CODE=$?
+timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "data/bisect-test.pmtiles" --tmp-dir data/tilegen_tmp $OCEAN_FLAG 2> "$STDERR_FILE" || EXIT_CODE=$?
 if [ "$EXIT_CODE" -eq 124 ]; then
     echo "  KILLED after ${RUN_TIMEOUT}s — BAD"
     exit 1

@@ -18,14 +18,14 @@ shift 2 2>/dev/null || true
 scripts/build.sh
 detect_ocean
 
-mkdir -p .tilegen_tmp
+mkdir -p data/tilegen_tmp
 
 echo "PBF:    $PBF"
 echo "Output: $OUT"
 echo ""
 
-/usr/bin/time -v "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG "$@" 2>&1 | tee .tilegen_tmp/time-output.txt
+/usr/bin/time -v "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir data/tilegen_tmp $OCEAN_FLAG "$@" 2>&1 | tee data/tilegen_tmp/time-output.txt
 
 echo ""
 echo "=== Peak memory ==="
-grep "Maximum resident" .tilegen_tmp/time-output.txt
+grep "Maximum resident" data/tilegen_tmp/time-output.txt

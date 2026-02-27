@@ -43,7 +43,7 @@ cleanup() {
 trap cleanup EXIT
 
 EXIT_CODE=0
-timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "$ELIVAGAR_DIR/data/bisect-test.pmtiles" --tmp-dir "$ELIVAGAR_DIR/.tilegen_tmp" $OCEAN_FLAG 2> "$STDERR_FILE" || EXIT_CODE=$?
+timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "$ELIVAGAR_DIR/data/bisect-test.pmtiles" --tmp-dir "$ELIVAGAR_DIR/data/tilegen_tmp" $OCEAN_FLAG 2> "$STDERR_FILE" || EXIT_CODE=$?
 if [ "$EXIT_CODE" -eq 124 ]; then
     echo "  KILLED after ${RUN_TIMEOUT}s — BAD"
     exit 1

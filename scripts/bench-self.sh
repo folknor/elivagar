@@ -73,7 +73,7 @@ RUN_TIMEOUT=240
 
 for i in $(seq 1 "$RUNS"); do
     echo "  run $i/$RUNS..."
-    timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG $SKIP_FLAG $COMPRESS_FLAG 2> "$STDERR_FILE"
+    timeout "$RUN_TIMEOUT" "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir data/tilegen_tmp $OCEAN_FLAG $SKIP_FLAG $COMPRESS_FLAG 2> "$STDERR_FILE"
     EXIT_CODE=$?
     if [ "$EXIT_CODE" -eq 124 ]; then
         echo "  KILLED: run exceeded ${RUN_TIMEOUT}s timeout"

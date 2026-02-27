@@ -13,7 +13,7 @@
 //! let config = elivagar::TilegenConfig {
 //!     pbf_path: "input.osm.pbf".into(),
 //!     output_path: "output.pmtiles".into(),
-//!     tmp_dir: ".tilegen_tmp".into(),
+//!     tmp_dir: "data/tilegen_tmp".into(),
 //!     min_zoom: 0,
 //!     max_zoom: 14,
 //!     ocean_shapefile: None,

@@ -11,4 +11,4 @@ detect_ocean
 
 HOTPATH_METRICS_SERVER_OFF=true "$ELIVAGAR_BIN" \
     "$PBF" "$OUT" \
-    --tmp-dir .tilegen_tmp $OCEAN_FLAG
+    --tmp-dir data/tilegen_tmp $OCEAN_FLAG

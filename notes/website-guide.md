@@ -124,7 +124,7 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 |------|-------|-------------|
 | `--ocean` | `path.shp` | Path to the full-resolution ocean polygon shapefile (`water-polygons-split-3857`). Used for z8-14 when combined with `--ocean-simplified`, or all zoom levels if used alone. |
 | `--ocean-simplified` | `path.shp` | Path to the simplified ocean polygon shapefile (`simplified-water-polygons-split-3857`). Used for z0-7 to reduce vertex count at low zoom levels. Requires `--ocean` to also be set. |
-| `--tmp-dir` | `path` | Directory for temporary sort chunks and intermediate files. Created automatically if it does not exist. Default: `.tilegen_tmp` |
+| `--tmp-dir` | `path` | Directory for temporary sort chunks and intermediate files. Created automatically if it does not exist. Default: `data/tilegen_tmp` |
 | `--skip-to` | `ocean` or `sort` | Resume from a previous run's checkpoint, skipping earlier pipeline phases. See [Checkpointing with --skip-to](#checkpointing-with---skip-to). |
 | `--in-memory` | *(flag)* | Keep the tile data blob in RAM instead of streaming to a temporary file on disk. Faster for small extracts, but uses significantly more memory at planet scale. |
 | `--compression-level` | `0-10` | Gzip compression level. Lower values are faster but produce larger output. Default: 6. Level 3-4 is a good tradeoff for faster builds with ~5% larger output. |
@@ -176,7 +176,7 @@ PBF read  ──>  Ocean  ──>  Sort  ──>  Assembly
    IDs and content deduplication.
 
 Temporary sort chunks are stored in the `--tmp-dir` directory (default:
-`.tilegen_tmp`). These files can be large -- roughly 2-4x the input PBF size.
+`data/tilegen_tmp`). These files can be large -- roughly 2-4x the input PBF size.
 
 ## Ocean Shapefiles
 
@@ -330,7 +330,7 @@ Then iterate on the sort and assembly phases without re-reading the PBF:
 ## Temporary files
 
 Elivagar writes intermediate sort chunk files to the `--tmp-dir` directory
-(default: `.tilegen_tmp`). These can be large:
+(default: `data/tilegen_tmp`). These can be large:
 
 | Dataset | PBF size | Approximate tmp size |
 |---------|----------|---------------------|
@@ -345,7 +345,7 @@ it may be needed for subsequent `--skip-to` runs. To reclaim disk space after
 you are done iterating:
 
 ```sh
-rm -rf .tilegen_tmp
+rm -rf data/tilegen_tmp
 ```
 
 ## Memory usage

@@ -13,7 +13,7 @@ echo "=== Running elivagar ==="
 
 detect_ocean
 
-time "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG
+time "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir data/tilegen_tmp $OCEAN_FLAG
 
 echo ""
 ls -lh "$OUT"

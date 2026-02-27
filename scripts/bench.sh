@@ -79,7 +79,7 @@ BEST_STDERR=""
 
 for i in $(seq 1 "$RUNS"); do
     echo "  run $i/$RUNS..."
-    "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir .tilegen_tmp $OCEAN_FLAG 2> "$STDERR_FILE"
+    "$ELIVAGAR_BIN" "$PBF" "$OUT" --tmp-dir data/tilegen_tmp $OCEAN_FLAG 2> "$STDERR_FILE"
 
     THIS_TOTAL=$(parse_kv total_ms "$STDERR_FILE")
     if [ "$THIS_TOTAL" != "-" ] && [ "$THIS_TOTAL" -lt "$BEST_TOTAL" ]; then
