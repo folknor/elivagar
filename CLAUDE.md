@@ -19,6 +19,7 @@ Write new scripts in `scripts/` as needed. Follow these conventions:
 - `scripts/bench-tilemaker.sh [pbf] [runs]` — benchmark Tilemaker Shortbread (auto-builds from source, downloads shapefiles)
 - `scripts/run.sh [pbf] [out.pmtiles]` — build + run
 - `scripts/bench-pmtiles.sh [tiles] [runs]` — benchmark PMTiles writer vs pmtiles-rs (default: 500K tiles, 5 runs)
+- `scripts/bench-node-store.sh [nodes_millions] [runs]` — benchmark SortedNodeStore build + read (hotpath profiling, default: 50M nodes, 5 runs)
 - `scripts/build-hotpath.sh` — build release with hotpath profiling enabled
 - `scripts/run-hotpath.sh [pbf] [out.pmtiles]` — build + run with hotpath profiling (prints function timing report on exit)
 - `scripts/run-hotpath-alloc.sh [pbf] [out.pmtiles]` — build + run with allocation profiling (disables mimalloc, wall-clock times meaningless)

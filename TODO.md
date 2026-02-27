@@ -13,10 +13,13 @@
 
 ## Performance
 
-- [ ] **PBF phase regression +1.3s** (8.0s → 9.3s on Denmark) — likely caused by `b866306` (FOR bitpacking SortedNodeStore). Node lookup hot path changed. Needs bisect between `d22b507` and `b866306` to confirm.
-- [ ] **Assemble phase regression +0.5s** (2.2s → 2.7s on Denmark) — investigate alongside PBF regression.
+Known regressions from SortedNodeStore compression (`b866306`). These code paths are required for planet-scale ingestion and cannot be reverted.
 
-Current Denmark baseline (plantasjen, best of 3): 14.7s total (9.3s pbf, 1.5s ocean, 0.4s sort, 2.7s assemble). 16.0M features, 53.9K unique tiles, 273 MB output.
+- [ ] **PBF phase +1.3s** (8.0s → 9.3s on plantasjen Denmark) — new FOR-bitpacked node lookup is slower than the old flat array. Optimize the `find_chunk_in_blob()` / decompression hot path.
+- [ ] **Assemble phase +0.5s** (2.2s → 2.7s on plantasjen Denmark) — NOT from node lookups (assemble phase does not use the node store). Separate root cause to investigate.
+- [ ] **Re-measure on dm6** — the above numbers are from plantasjen. Establish dm6 baseline before/after to have actionable local numbers.
+
+Plantasjen Denmark baseline (best of 3): 14.7s total (9.3s pbf, 1.5s ocean, 0.4s sort, 2.7s assemble). 16.0M features, 53.9K unique tiles, 273 MB output.
 
 ## Quality
 

@@ -266,6 +266,7 @@ struct Group {
 /// Compress coordinates with exact-size FOR and append to `dest`.
 /// Format: [lat_min:4][lon_min:4][lat_bits:1][lon_bits:1][packed lat][packed lon]
 /// Packs exactly N values — no padding to block boundaries.
+#[hotpath::measure]
 #[allow(clippy::cast_possible_truncation)]
 fn compress_coords_into(
     lats: &[i32],
@@ -309,6 +310,7 @@ fn compress_coords_into(
 /// `node_mask` and `packed` come from the flat blob; `compressed` from flags_and_len.
 /// For compressed: [lat_min:4][lon_min:4][lat_bits:1][lon_bits:1][packed lat][packed lon]
 /// For raw: sequential (i32, i32) pairs.
+#[hotpath::measure]
 #[allow(clippy::unwrap_used)]
 fn decompress_chunk(
     node_mask: &[u8; BITMASK_BYTES],
@@ -371,6 +373,7 @@ struct ChunkRef<'a> {
 
 /// Scan the group's flat data blob to find the chunk at `chunk_idx`
 /// (0-based index among present chunks in this group).
+#[hotpath::measure]
 #[allow(clippy::unwrap_used)]
 fn find_chunk_in_blob(data: &[u8], chunk_idx: usize) -> ChunkRef<'_> {
     let mut offset = 0;
@@ -423,6 +426,7 @@ thread_local! {
 }
 
 /// Look up a node within a finalized Group, using the thread-local cache.
+#[hotpath::measure]
 #[inline]
 fn get_from_group_cached(
     group: &Group,
@@ -521,6 +525,7 @@ impl SortedNodeStore {
     }
 
     /// Store coordinates for a node. Node IDs MUST be strictly increasing.
+    #[hotpath::measure]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
         assert!(
@@ -568,6 +573,7 @@ impl SortedNodeStore {
         self.current_coords.push((lat_e7, lon_e7));
     }
 
+    #[hotpath::measure]
     fn flush_chunk(&mut self) {
         if self.current_coords.is_empty() {
             return;
@@ -721,6 +727,7 @@ pub struct SortedNodeStoreReader {
 impl SortedNodeStoreReader {
     /// Look up coordinates for a node. O(1) via bitmask popcount.
     /// Uses a thread-local decompression cache for amortized lookups.
+    #[hotpath::measure]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
         let id = node_id as u64;
