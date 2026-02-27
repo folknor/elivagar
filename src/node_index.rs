@@ -271,6 +271,8 @@ struct Group {
 fn compress_coords_into(
     lats: &[i32],
     lons: &[i32],
+    lat_offsets: &mut Vec<u32>,
+    lon_offsets: &mut Vec<u32>,
     dest: &mut Vec<u8>,
 ) {
     let n = lats.len();
@@ -294,16 +296,16 @@ fn compress_coords_into(
     dest.push(lon_bits);
 
     // Build offset arrays and pack
-    let mut lat_offsets = Vec::with_capacity(n);
-    let mut lon_offsets = Vec::with_capacity(n);
+    lat_offsets.clear();
+    lon_offsets.clear();
     #[allow(clippy::cast_sign_loss)]
     for i in 0..n {
         lat_offsets.push((lats[i] - lat_min) as u32);
         lon_offsets.push((lons[i] - lon_min) as u32);
     }
 
-    bitpack_values_into(&lat_offsets, lat_bits, dest);
-    bitpack_values_into(&lon_offsets, lon_bits, dest);
+    bitpack_values_into(lat_offsets, lat_bits, dest);
+    bitpack_values_into(lon_offsets, lon_bits, dest);
 }
 
 /// Decompress all coordinates from a chunk into the output slice.
@@ -509,6 +511,10 @@ pub struct SortedNodeStore {
     current_chunk_mask: [u8; BITMASK_BYTES],
     current_group_data: Vec<u8>,  // flat blob being built for current group
     compress_buf: Vec<u8>,        // scratch buffer for compression, reused
+    scratch_lats: Vec<i32>,       // scratch buffer for flush_chunk, reused
+    scratch_lons: Vec<i32>,       // scratch buffer for flush_chunk, reused
+    scratch_lat_offsets: Vec<u32>, // scratch buffer for compress_coords_into, reused
+    scratch_lon_offsets: Vec<u32>, // scratch buffer for compress_coords_into, reused
 
     // Builder state for the chunk being accumulated.
     current_chunk_id: u8,
@@ -527,6 +533,10 @@ impl SortedNodeStore {
             current_chunk_mask: [0u8; BITMASK_BYTES],
             current_group_data: Vec::new(),
             compress_buf: Vec::new(),
+            scratch_lats: Vec::with_capacity(NODES_PER_CHUNK),
+            scratch_lons: Vec::with_capacity(NODES_PER_CHUNK),
+            scratch_lat_offsets: Vec::with_capacity(NODES_PER_CHUNK),
+            scratch_lon_offsets: Vec::with_capacity(NODES_PER_CHUNK),
             current_chunk_id: 0,
             current_node_mask: [0u8; BITMASK_BYTES],
             current_coords: Vec::with_capacity(NODES_PER_CHUNK),
@@ -594,12 +604,22 @@ impl SortedNodeStore {
         let n = self.current_coords.len();
         let raw_size = n * 8; // 4 bytes lat + 4 bytes lon
 
-        let lats: Vec<i32> = self.current_coords.iter().map(|c| c.0).collect();
-        let lons: Vec<i32> = self.current_coords.iter().map(|c| c.1).collect();
+        self.scratch_lats.clear();
+        self.scratch_lons.clear();
+        for &(lat, lon) in &self.current_coords {
+            self.scratch_lats.push(lat);
+            self.scratch_lons.push(lon);
+        }
 
         // Compress into scratch buffer
         self.compress_buf.clear();
-        compress_coords_into(&lats, &lons, &mut self.compress_buf);
+        compress_coords_into(
+            &self.scratch_lats,
+            &self.scratch_lons,
+            &mut self.scratch_lat_offsets,
+            &mut self.scratch_lon_offsets,
+            &mut self.compress_buf,
+        );
         let compressed = self.compress_buf.len() < raw_size;
 
         // Write chunk into flat blob: [node_mask:32][flags_and_len:2][packed_data]
