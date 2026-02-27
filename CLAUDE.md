@@ -25,6 +25,7 @@ Write new scripts in `scripts/` as needed. Follow these conventions:
 - `scripts/run-hotpath.sh [pbf] [out.pmtiles]` — build + run with hotpath profiling (prints function timing report on exit)
 - `scripts/run-hotpath-alloc.sh [pbf] [out.pmtiles]` — build + run with allocation profiling (disables mimalloc, wall-clock times meaningless)
 - `scripts/run-samply.sh [pbf] [out.pmtiles] [extra args...]` — sampling profiler via samply (saves profile for later viewing with `samply load`)
+- `scripts/run-perf.sh [pbf] [out.pmtiles] [extra args...]` — sampling profiler via perf (CLI-friendly, view with `perf report`)
 
 **NEVER run two elivagar processes at the same time.** They share `.tilegen_tmp/` (causes crashes) and hotpath scripts use conflicting cargo feature flags (causes build conflicts). Always run sequentially.
 
