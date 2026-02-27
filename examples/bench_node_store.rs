@@ -48,25 +48,53 @@ fn main() {
     );
 
     // -----------------------------------------------------------------------
-    // Phase 2: Build SortedNodeStore
+    // Phase 2: Build SortedNodeStore (multiple runs in build-only mode)
     // -----------------------------------------------------------------------
-    eprint!("  Building SortedNodeStore... ");
-    let build_start = Instant::now();
-    let mut store = SortedNodeStore::new();
-    for i in 0..node_ids.len() {
-        store.put(node_ids[i], coords[i].0, coords[i].1);
+    let build_runs = if config.build_only { config.runs } else { 1 };
+    let mut best_build_ms = u128::MAX;
+    let mut reader = None;
+    for run in 0..build_runs {
+        eprint!("  Building SortedNodeStore (run {}/{build_runs})... ", run + 1);
+        let build_start = Instant::now();
+        let mut store = SortedNodeStore::new();
+        for i in 0..node_ids.len() {
+            store.put(node_ids[i], coords[i].0, coords[i].1);
+        }
+        let ms = build_start.elapsed().as_millis();
+        eprintln!("done in {ms} ms");
+        if ms < best_build_ms {
+            best_build_ms = ms;
+        }
+        // Keep the last store for reader conversion
+        if run == build_runs - 1 {
+            eprint!("  Converting to reader... ");
+            let convert_start = Instant::now();
+            reader = Some(store.into_reader());
+            eprintln!("done in {} ms", convert_start.elapsed().as_millis());
+        }
     }
-    let build_ms = build_start.elapsed().as_millis();
-    eprintln!("done in {build_ms} ms");
+    let build_ms = best_build_ms;
+    let reader = reader.expect("reader must be built");
 
-    // -----------------------------------------------------------------------
-    // Phase 3: Convert to reader
-    // -----------------------------------------------------------------------
-    eprint!("  Converting to reader... ");
-    let convert_start = Instant::now();
-    let reader = store.into_reader();
-    let convert_ms = convert_start.elapsed().as_millis();
-    eprintln!("done in {convert_ms} ms");
+    if config.build_only {
+        // -----------------------------------------------------------------------
+        // Build-only summary
+        // -----------------------------------------------------------------------
+        eprintln!();
+        eprintln!("=== Summary (build-only, best of {}) ===", config.runs);
+        eprintln!(
+            "  {:14} {:>8} {:>12} {:>10}",
+            "", "ms", "nodes/sec", "ns/node"
+        );
+        eprintln!(
+            "  {:14} {:>8} {:>12.0} {:>10.1}",
+            "build",
+            build_ms,
+            node_ids.len() as f64 / (build_ms as f64 / 1000.0),
+            build_ms as f64 * 1_000_000.0 / node_ids.len() as f64,
+        );
+        return;
+    }
 
     // -----------------------------------------------------------------------
     // Phase 4: Generate lookup patterns
@@ -177,6 +205,7 @@ struct BenchConfig {
     ways: usize,
     random_lookups: usize,
     runs: usize,
+    build_only: bool,
 }
 
 fn parse_args() -> BenchConfig {
@@ -185,6 +214,7 @@ fn parse_args() -> BenchConfig {
     let mut ways_k = 4000usize;
     let mut random_m = 10usize;
     let mut runs = 5usize;
+    let mut build_only = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -204,6 +234,9 @@ fn parse_args() -> BenchConfig {
                 i += 1;
                 runs = args[i].parse().expect("invalid --runs value");
             }
+            "--build-only" => {
+                build_only = true;
+            }
             _ => {}
         }
         i += 1;
@@ -213,6 +246,7 @@ fn parse_args() -> BenchConfig {
         ways: ways_k * 1_000,
         random_lookups: random_m * 1_000_000,
         runs,
+        build_only,
     }
 }
 
