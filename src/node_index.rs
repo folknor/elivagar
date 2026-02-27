@@ -14,7 +14,7 @@
 //
 // Flat mmap history: all madvise hints were tried and removed. See CLAUDE.md.
 
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -424,7 +424,7 @@ impl DecompressCache {
 }
 
 thread_local! {
-    static DECOMPRESS_CACHE: RefCell<DecompressCache> = RefCell::new(DecompressCache::new());
+    static DECOMPRESS_CACHE: UnsafeCell<DecompressCache> = UnsafeCell::new(DecompressCache::new());
 }
 
 /// Look up a node within a finalized Group, using the thread-local cache.
@@ -441,8 +441,9 @@ fn get_from_group_cached(
     }
     let chunk_idx = count_bits_before(&group.chunk_mask, chunk_id);
 
+    // SAFETY: thread_local! guarantees single-threaded access — no concurrent borrows possible.
     DECOMPRESS_CACHE.with(|cell| {
-        let mut cache = cell.borrow_mut();
+        let cache = unsafe { &mut *cell.get() };
         if cache.group_id == group_id && cache.chunk_idx == chunk_idx && cache.count != 0 {
             // Cache hit — use cached node_mask, skip blob scan
             if !test_bit(&cache.node_mask, node_in_chunk) {
