@@ -1,0 +1,4 @@
+date	commit	subject	tool	total_ms	phase12_ms	ocean_ms	phase3_ms	phase4_ms	features	tiles	output_bytes	pbf
+2026-02-24	77c217f	Final output size report, update README, trim TODO	elivagar	26794	18617	2453	681	3167	16886125	667547	379898395	denmark-latest
+2026-02-24	77c217f	Final output size report, update README, trim TODO	planetiler	40890	-	-	-	-	-	-	406064947	denmark-latest
+2026-02-24	77c217f	Final output size report, update README, trim TODO	tilemaker	28887	-	-	-	-	-	-	307675876	denmark-latest
