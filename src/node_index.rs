@@ -429,7 +429,6 @@ thread_local! {
 
 /// Look up a node within a finalized Group, using the thread-local cache.
 /// On cache hit, skips the blob scan entirely — uses cached node_mask.
-#[hotpath::measure]
 #[inline]
 fn get_from_group_cached(
     group: &Group,
@@ -738,7 +737,6 @@ pub struct SortedNodeStoreReader {
 impl SortedNodeStoreReader {
     /// Look up coordinates for a node. O(1) via bitmask popcount.
     /// Uses a thread-local decompression cache for amortized lookups.
-    #[hotpath::measure]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
         let id = node_id as u64;
