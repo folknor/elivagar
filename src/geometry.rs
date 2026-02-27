@@ -141,10 +141,10 @@ static LAT_LUT: OnceLock<Box<[f64]>> = OnceLock::new();
 fn init_lat_lut() -> Box<[f64]> {
     let mut table = vec![0.0f64; LUT_SIZE];
     let scale = 1.0 / (LUT_SIZE - 1) as f64;
-    for i in 0..LUT_SIZE {
+    for (i, entry) in table.iter_mut().enumerate() {
         let lat_e7 = LAT_E7_MIN as f64 + (i as f64 * scale) * LAT_E7_RANGE;
         let lat_rad = lat_e7 * 1e-7 * PI / 180.0;
-        table[i] = 0.5 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / (2.0 * PI);
+        *entry = 0.5 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / (2.0 * PI);
     }
     table.into_boxed_slice()
 }

@@ -221,7 +221,7 @@ fn bitpack_values_into(values: &[u32], bit_width: u8, dest: &mut Vec<u8>) {
 /// regressed synthetic by ~10% due to branch misprediction on the refill loop.
 /// Doesn't matter anyway — decompress_chunk is DRAM-latency-bound on real data
 /// (820ns avg on 270 MB blob vs 25ns synthetic with L1-hot data).
-#[allow(clippy::cast_possible_truncation, clippy::explicit_iter_loop, clippy::unwrap_used)]
+#[allow(clippy::cast_possible_truncation, clippy::unwrap_used, clippy::needless_range_loop)]
 fn bitunpack_values(packed: &[u8], n: usize, bit_width: u8, out: &mut [u32]) {
     if bit_width == 0 {
         for o in out[..n].iter_mut() {
@@ -337,7 +337,7 @@ fn compress_coords_into(
 ///   Compute optimizations (accumulator unpacking, etc.) don't help because
 ///   the CPU is waiting on memory, not on arithmetic.
 #[hotpath::measure]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::needless_range_loop)]
 fn decompress_chunk(
     node_mask: &[u8; BITMASK_BYTES],
     compressed: bool,
@@ -364,7 +364,7 @@ fn decompress_chunk(
     let lon_bits = packed[9];
 
     // Unpack lat offsets
-    let lat_packed_bytes = (n * lat_bits as usize + 7) / 8;
+    let lat_packed_bytes = (n * lat_bits as usize).div_ceil(8);
     let lat_packed = &packed[10..10 + lat_packed_bytes];
     let mut lat_buf = [0u32; NODES_PER_CHUNK];
     bitunpack_values(lat_packed, n, lat_bits, &mut lat_buf);
@@ -601,6 +601,12 @@ pub struct SortedNodeStore {
     node_count: u64,
 }
 
+impl Default for SortedNodeStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SortedNodeStore {
     pub fn new() -> Self {
         SortedNodeStore {
@@ -749,26 +755,24 @@ impl SortedNodeStore {
         let mut total_chunks: usize = 0;
         let mut groups_used: usize = 0;
         let mut uncompressed_chunks: usize = 0;
-        for group in &self.groups {
-            if let Some(g) = group {
-                groups_used += 1;
-                total_blob_bytes += g.data.len();
-                // Count chunks by scanning the blob
-                let mut offset = 0;
-                while offset < g.data.len() {
-                    total_chunks += 1;
-                    let fl = u16::from_le_bytes(
-                        g.data[offset + BITMASK_BYTES..offset + BITMASK_BYTES + 2]
-                            .try_into()
-                            .unwrap(),
-                    );
-                    let compressed = fl & 0x8000 != 0;
-                    let packed_len = (fl & 0x7FFF) as usize;
-                    if !compressed {
-                        uncompressed_chunks += 1;
-                    }
-                    offset += CHUNK_HEADER_SIZE + packed_len;
+        for g in self.groups.iter().flatten() {
+            groups_used += 1;
+            total_blob_bytes += g.data.len();
+            // Count chunks by scanning the blob
+            let mut offset = 0;
+            while offset < g.data.len() {
+                total_chunks += 1;
+                let fl = u16::from_le_bytes(
+                    g.data[offset + BITMASK_BYTES..offset + BITMASK_BYTES + 2]
+                        .try_into()
+                        .unwrap(),
+                );
+                let compressed = fl & 0x8000 != 0;
+                let packed_len = (fl & 0x7FFF) as usize;
+                if !compressed {
+                    uncompressed_chunks += 1;
                 }
+                offset += CHUNK_HEADER_SIZE + packed_len;
             }
         }
         let groups_vec_bytes = self.groups.len() * std::mem::size_of::<Option<Box<Group>>>();

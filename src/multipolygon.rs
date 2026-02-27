@@ -39,11 +39,13 @@ pub struct MemberWay {
 }
 const _: () = assert!(std::mem::size_of::<MemberWay>() == 32);
 
+/// A single polygon: (outer_ring, inner_rings).
+/// Rings do NOT have duplicated closing vertices.
+pub type Polygon = (Vec<Point>, Vec<Vec<Point>>);
+
 /// A fully assembled multipolygon.
 pub struct MultiPolygon {
-    /// Each entry is (outer_ring, inner_rings).
-    /// Rings do NOT have duplicated closing vertices.
-    pub polygons: Box<[(Vec<Point>, Vec<Vec<Point>>)]>,
+    pub polygons: Box<[Polygon]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,67 +240,63 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
             let back = quantize(&chains[i][chains[i].len() - 1]);
 
             // Look for another chain matching our back endpoint.
-            if let Some(&j) = endpoint_map.get(&back) {
-                if j != i && chains[j].len() >= 2 {
-                    let (j_front, j_back) = (quantize(&chains[j][0]), quantize(&chains[j][chains[j].len() - 1]));
-                    let taken_j = std::mem::take(&mut chains[j]);
-                    if back == j_front {
-                        chains[i].extend_from_slice(&taken_j[1..]);
-                    } else if back == j_back {
-                        let rev: Vec<Point> = taken_j.into_iter().rev().collect();
-                        chains[i].extend_from_slice(&rev[1..]);
-                    } else {
-                        // Stale map entry, put it back.
-                        chains[j] = taken_j;
-                        continue;
-                    }
-
-                    // Check if the merged chain is now closed.
-                    let new_front = quantize(&chains[i][0]);
-                    let new_back = quantize(&chains[i][chains[i].len() - 1]);
-                    if new_front == new_back {
-                        let mut ring = std::mem::take(&mut chains[i]);
-                        ring.pop();
-                        if ring.len() >= 3 {
-                            closed.push(ring);
-                        }
-                    }
-                    merged_any = true;
-                    break; // Restart — endpoint_map is stale after merge.
+            if let Some(&j) = endpoint_map.get(&back)
+                && j != i && chains[j].len() >= 2
+            {
+                let (j_front, j_back) = (quantize(&chains[j][0]), quantize(&chains[j][chains[j].len() - 1]));
+                let taken_j = std::mem::take(&mut chains[j]);
+                if back == j_front {
+                    chains[i].extend_from_slice(&taken_j[1..]);
+                } else if back == j_back {
+                    let rev: Vec<Point> = taken_j.into_iter().rev().collect();
+                    chains[i].extend_from_slice(&rev[1..]);
+                } else {
+                    chains[j] = taken_j;
+                    continue;
                 }
+                let new_front = quantize(&chains[i][0]);
+                let new_back = quantize(&chains[i][chains[i].len() - 1]);
+                if new_front == new_back {
+                    let mut ring = std::mem::take(&mut chains[i]);
+                    ring.pop();
+                    if ring.len() >= 3 {
+                        closed.push(ring);
+                    }
+                }
+                merged_any = true;
+                break;
             }
 
             // Look for another chain matching our front endpoint.
-            if let Some(&j) = endpoint_map.get(&front) {
-                if j != i && chains[j].len() >= 2 {
-                    let (j_front, j_back) = (quantize(&chains[j][0]), quantize(&chains[j][chains[j].len() - 1]));
-                    let taken_j = std::mem::take(&mut chains[j]);
-                    if front == j_back {
-                        let mut merged = taken_j;
-                        merged.extend_from_slice(&chains[i][1..]);
-                        chains[i] = merged;
-                    } else if front == j_front {
-                        let rev: Vec<Point> = taken_j.into_iter().rev().collect();
-                        let mut merged = rev;
-                        merged.extend_from_slice(&chains[i][1..]);
-                        chains[i] = merged;
-                    } else {
-                        chains[j] = taken_j;
-                        continue;
-                    }
-
-                    let new_front = quantize(&chains[i][0]);
-                    let new_back = quantize(&chains[i][chains[i].len() - 1]);
-                    if new_front == new_back {
-                        let mut ring = std::mem::take(&mut chains[i]);
-                        ring.pop();
-                        if ring.len() >= 3 {
-                            closed.push(ring);
-                        }
-                    }
-                    merged_any = true;
-                    break;
+            if let Some(&j) = endpoint_map.get(&front)
+                && j != i && chains[j].len() >= 2
+            {
+                let (j_front, j_back) = (quantize(&chains[j][0]), quantize(&chains[j][chains[j].len() - 1]));
+                let taken_j = std::mem::take(&mut chains[j]);
+                if front == j_back {
+                    let mut merged = taken_j;
+                    merged.extend_from_slice(&chains[i][1..]);
+                    chains[i] = merged;
+                } else if front == j_front {
+                    let rev: Vec<Point> = taken_j.into_iter().rev().collect();
+                    let mut merged = rev;
+                    merged.extend_from_slice(&chains[i][1..]);
+                    chains[i] = merged;
+                } else {
+                    chains[j] = taken_j;
+                    continue;
                 }
+                let new_front = quantize(&chains[i][0]);
+                let new_back = quantize(&chains[i][chains[i].len() - 1]);
+                if new_front == new_back {
+                    let mut ring = std::mem::take(&mut chains[i]);
+                    ring.pop();
+                    if ring.len() >= 3 {
+                        closed.push(ring);
+                    }
+                }
+                merged_any = true;
+                break;
             }
         }
 

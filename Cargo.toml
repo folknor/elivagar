@@ -63,6 +63,13 @@ cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 unwrap_used = "deny"
 too_many_lines = "deny"
+needless_range_loop = "deny"
+type_complexity = "deny"
+collapsible_if = "deny"
+manual_div_ceil = "deny"
+new_without_default = "deny"
+manual_flatten = "deny"
+io_other_error = "deny"
 
 [features]
 hotpath = ["hotpath/hotpath"]

@@ -585,7 +585,7 @@ fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
     let bound = compressor.gzip_compress_bound(data.len());
     let mut out = vec![0u8; bound];
     let n = compressor.gzip_compress(data, &mut out)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))?;
+        .map_err(|e| io::Error::other(format!("{e:?}")))?;
     out.truncate(n);
     Ok(out)
 }
