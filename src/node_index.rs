@@ -145,6 +145,9 @@ impl NodeIndexReader {
 // SortedNodeStore — compact hierarchical store for sorted PBF files
 // ---------------------------------------------------------------------------
 
+// Tried NODES_PER_CHUNK = 512 (halving chunk count to reduce decompress_chunk calls).
+// Result: 6.5% fewer decompress calls but each 2x slower (decompressing 512 vs 256 nodes),
+// blob grew 270→294 MB increasing DRAM pressure. Net PBF phase +800ms regression. Reverted.
 const NODES_PER_CHUNK: usize = 256;
 const NODES_PER_GROUP: u64 = 256 * 256; // 65536
 const BITMASK_BYTES: usize = 32; // 256 bits
@@ -209,6 +212,12 @@ fn bitpack_values_into(values: &[u32], bit_width: u8, dest: &mut Vec<u8>) {
 }
 
 /// Unpack `n` values at `bit_width` bits each from `packed` into `out[..n]`.
+///
+/// Uses a single u64 unaligned read per value (fast path) to avoid byte-by-byte
+/// assembly. Tried accumulator-based approach (refill loop with `while bits_in_acc < bw`):
+/// regressed synthetic by ~10% due to branch misprediction on the refill loop.
+/// Doesn't matter anyway — decompress_chunk is DRAM-latency-bound on real data
+/// (820ns avg on 270 MB blob vs 25ns synthetic with L1-hot data).
 fn bitunpack_values(packed: &[u8], n: usize, bit_width: u8, out: &mut [u32]) {
     if bit_width == 0 {
         for o in out[..n].iter_mut() {
@@ -316,6 +325,13 @@ fn compress_coords_into(
 /// `node_mask` and `packed` come from the flat blob; `compressed` from flags_and_len.
 /// For compressed: [lat_min:4][lon_min:4][lat_bits:1][lon_bits:1][packed lat][packed lon]
 /// For raw: sequential (i32, i32) pairs.
+///
+/// This is the dominant cost in the PBF read phase. On Denmark (dm6):
+///   ~24M calls, 820ns avg, ~20s cumulative (with 4-entry LRU cache).
+///   The 270 MB blob doesn't fit in L2 cache, so each miss fetches from DRAM.
+///   Synthetic benchmarks show 25ns/call (L1-hot) — NOT representative.
+///   Compute optimizations (accumulator unpacking, etc.) don't help because
+///   the CPU is waiting on memory, not on arithmetic.
 #[hotpath::measure]
 #[allow(clippy::unwrap_used)]
 fn decompress_chunk(
@@ -379,6 +395,11 @@ struct ChunkRef<'a> {
 
 /// Scan the group's flat data blob to find the chunk at `chunk_idx`
 /// (0-based index among present chunks in this group).
+///
+/// Linear scan through variable-length chunks. Tried adding an offset table
+/// (pre-computed byte offsets per chunk) to make this O(1) — reverted because
+/// cache hit rate is ~76%, so this function only runs on ~24% of lookups,
+/// and Denmark averages ~7 chunks/group so the scan is short anyway.
 #[hotpath::measure]
 #[allow(clippy::unwrap_used)]
 fn find_chunk_in_blob(data: &[u8], chunk_idx: usize) -> ChunkRef<'_> {
@@ -428,9 +449,15 @@ impl CacheEntry {
     }
 }
 
-/// Thread-local decompression cache. Multiple entries avoid ping-ponging
-/// when ways span 2-3 nearby chunks. LRU eviction: hit moves entry to
-/// front, miss evicts the last entry.
+/// Thread-local decompression cache with LRU eviction.
+///
+/// Started with 1 entry — ways that span 2 nearby chunks caused constant
+/// eviction (ping-ponging). 4 entries cut decompress_chunk calls by 17%
+/// (28.7M→23.8M on Denmark) and avg latency by 42% (1.41µs→820ns).
+/// Total decompress_chunk time: 40.4s→19.5s (-52%). PBF phase -800ms.
+///
+/// LRU policy: on hit, swap entry to front; on miss, evict last entry.
+/// `entries.swap()` avoids memcpy of the large coords arrays.
 const CACHE_ENTRIES: usize = 4;
 
 struct DecompressCache {
@@ -450,12 +477,18 @@ impl DecompressCache {
     }
 }
 
+// UnsafeCell instead of RefCell: eliminates runtime borrow-check overhead on every
+// cache access (~48M calls on Denmark). Measured -3.1% on synthetic way-like lookups.
+// SAFETY: thread_local! guarantees single-threaded access — no concurrent borrows.
 thread_local! {
     static DECOMPRESS_CACHE: UnsafeCell<DecompressCache> = UnsafeCell::new(DecompressCache::new());
 }
 
 /// Look up a node within a finalized Group, using the thread-local cache.
 /// On cache hit, skips the blob scan entirely — uses cached node_mask.
+///
+/// No #[hotpath::measure] — at ~48M calls on Denmark, the two clock_gettime
+/// syscalls per call added >50% overhead. Removed in 178ca73.
 #[inline]
 fn get_from_group_cached(
     group: &Group,
@@ -633,6 +666,9 @@ impl SortedNodeStore {
         self.current_coords.push((lat_e7, lon_e7));
     }
 
+    // scratch_lats, scratch_lons, scratch_lat_offsets, scratch_lon_offsets are hoisted
+    // onto the struct to avoid alloc/dealloc per call (~205K calls on Denmark).
+    // Hoisting gave -5.3% build time, -6.8% way-like lookup time (9e014d1).
     #[hotpath::measure]
     fn flush_chunk(&mut self) {
         if self.current_coords.is_empty() {
@@ -797,6 +833,9 @@ pub struct SortedNodeStoreReader {
 impl SortedNodeStoreReader {
     /// Look up coordinates for a node. O(1) via bitmask popcount.
     /// Uses a thread-local decompression cache for amortized lookups.
+    ///
+    /// No #[hotpath::measure] — same reason as get_from_group_cached. At ~48M
+    /// calls on Denmark, the instrumentation overhead (>50%) dwarfs actual cost.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
         let id = node_id as u64;

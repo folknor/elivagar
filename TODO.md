@@ -33,10 +33,14 @@ Known regressions from SortedNodeStore compression (`b866306`). These code paths
     - `process_raw_way`: 85.9s cumulative across threads (geometry simplification, tag matching, node lookups).
     - Conclusion: **the regression is entirely in the read path**, specifically `decompress_chunk` cache misses. Write path optimizations don't move the needle on real data.
 
-  Next — optimize `decompress_chunk`:
-  - [ ] Profile `decompress_chunk` internals — the function does FOR bitunpacking (bit shifts + masks) and coordinate reconstruction (add base values). At 1.41 µs per call with cache misses, the cost may be memory-latency-dominated (270 MB blob → DRAM fetches). Determine whether computation or memory access is the bottleneck.
-  - [ ] Consider larger chunk size — currently 256 nodes per chunk. Larger chunks = fewer cache misses (each miss decompresses more nodes). Trade-off: more wasted decompression when only one node is needed. Ways average ~15 nodes from the same neighborhood, so larger chunks that cover more nearby nodes could improve amortization.
-  - [ ] Consider pre-decompressed hot cache — instead of decompressing on every cache miss, keep a small LRU of decompressed chunks. Current cache holds exactly 1 chunk per thread. A 2–4 entry cache could help when ways span multiple nearby chunks.
+  Done (decompress_chunk optimizations):
+  - [x] Profile `decompress_chunk` internals (`a06caa1`). u64 unaligned read in bitunpack_values. Bottleneck is DRAM latency, not compute (270 MB blob → cache misses). Synthetic 25ns vs real 1.41µs = 56x gap.
+  - [x] 4-entry LRU decompression cache (`18b13e4`). decompress_chunk calls 28.7M→23.8M (-17%), avg 1.41µs→820ns (-42%), total 40.4s→19.5s (-52%). PBF phase 23.2s→22.4s on dm6.
+  - [x] Tried larger chunk size (256→512 nodes) — reverted, clear regression. Fewer decompress calls (22.3M vs 23.8M, -6.5%) but each call 2x slower (1.73µs vs 820ns). Blob grew 270→294 MB. PBF phase 22.4s→23.2s (+800ms). The 6.5% fewer calls can't overcome 2x slower decompression + larger working set.
+  - [x] Tried accumulator-based bit unpacking — reverted, -10% regression on synthetic. Memory latency dominates, not compute.
+
+  Remaining:
+  - [ ] The decompress_chunk bottleneck is fundamentally DRAM-latency-bound (270 MB blob, 820ns avg per miss). Further optimization requires either reducing blob size or improving access locality.
 
 - [ ] **Assemble phase +0.5s** (2.2s → 2.7s on plantasjen Denmark) — NOT from node lookups (assemble phase does not use the node store). Separate root cause. Diagnose by comparing `run-hotpath.sh` output at `b866306` vs prior commit to see which assemble sub-function got slower.
 
