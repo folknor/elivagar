@@ -5,7 +5,7 @@ source "$(dirname "$0")/lib.sh"
 
 PBF="${1:-data/denmark-latest.osm.pbf}"
 RUNS="${2:-3}"
-LOG="benchmarks.tsv"
+LOG="benchmarks/bench.tsv"
 
 if [ ! -f "$PBF" ]; then
     echo "PBF not found: $PBF"
@@ -18,6 +18,7 @@ FILE_MB=$(file_size_mb "$PBF")
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE=$(date +%Y-%m-%d)
 SUBJECT=$(git log -1 --format=%s 2>/dev/null || echo "-")
+HOST=$(hostname 2>/dev/null || echo "unknown")
 
 echo "=== elivagar benchmark ==="
 echo "  file: $PBF ($FILE_MB MB)"
@@ -41,8 +42,9 @@ fi
 OUT="data/${NAME}.pmtiles"
 
 # Create TSV header if needed
+mkdir -p "$(dirname "$LOG")"
 if [ ! -f "$LOG" ]; then
-    printf "date\tcommit\tsubject\ttool\ttotal_ms\tphase12_ms\tocean_ms\tphase3_ms\tphase4_ms\tfeatures\ttiles\toutput_bytes\tpbf\n" > "$LOG"
+    printf "date\tcommit\tsubject\ttool\ttotal_ms\tphase12_ms\tocean_ms\tphase3_ms\tphase4_ms\tfeatures\ttiles\toutput_bytes\tpbf\thost\n" > "$LOG"
 fi
 
 STDERR_FILE=$(mktemp "$CARGO_TARGET_DIR/.bench_stderr.XXXXXX")
@@ -60,10 +62,10 @@ record_result() {
     tiles=$(parse_kv tiles "$STDERR_FILE")
     output_bytes=$(parse_kv output_bytes "$STDERR_FILE")
 
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
         "$DATE" "$COMMIT" "$SUBJECT" "$tool" \
         "$total" "$phase12" "$ocean" "$phase3" "$phase4" \
-        "$features" "$tiles" "$output_bytes" "$NAME" >> "$LOG"
+        "$features" "$tiles" "$output_bytes" "$NAME" "$HOST" >> "$LOG"
 
     printf "  %-12s %6s ms  (pbf=%s ocean=%s sort=%s asm=%s)\n" \
         "$tool" "$total" "$phase12" "$ocean" "$phase3" "$phase4"

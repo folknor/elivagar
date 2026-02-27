@@ -65,7 +65,7 @@ acceleration was irrelevant — decompression is behind a thread-local cache.
 - Selective compression: skip FOR when compressed ≥ raw (20% of chunks in final version)
 - Drop way_index after phase12: explicit `drop(way_index)` releases mmap pages (~11 GB for N.A.)
 
-**Iteration results on Germany (429M nodes, 11.6M chunks, dm6):**
+**Iteration results on Germany (429M nodes, 11.6M chunks, dm6, commit `b866306`):**
 
 | Variant                              | Node store total | Ratio | Uncompressed chunks |
 |--------------------------------------|------------------|-------|---------------------|
@@ -80,8 +80,8 @@ acceleration was irrelevant — decompression is behind a thread-local cache.
 **Planet projection at 75% ratio:** 8.5B nodes × 8 bytes × 0.75 = **51 GB** (fits in 64 GB
 with 13 GB headroom).
 
-**Verified on Germany:** identical output (146,832,380 features, 225,644 unique tiles,
-2,609,358,314 output bytes). All 182 tests pass. `bitpacking` crate removed.
+**Verified on Germany (dm6, commit `b866306`):** identical output (146,832,380 features,
+225,644 unique tiles, 2,609,358,314 output bytes). All 182 tests pass. `bitpacking` crate removed.
 
 ### Step 4: Full pipeline on North America (~17 GB)
 

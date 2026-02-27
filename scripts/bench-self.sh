@@ -28,10 +28,12 @@ fi
 NAME="$(basename "${PBF%.osm.pbf}")"
 FILE_MB=$(file_size_mb "$PBF")
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+HOST=$(hostname 2>/dev/null || echo "unknown")
 
 echo "=== bench-self ==="
 echo "  file: $PBF ($FILE_MB MB)"
 echo "  runs: $RUNS (best of)"
+echo "  host: $HOST"
 if [ -n "$COMPRESSION_LEVEL" ]; then
     echo "  compression: level $COMPRESSION_LEVEL"
 fi

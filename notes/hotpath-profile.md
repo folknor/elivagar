@@ -4,7 +4,7 @@ Dataset: `denmark-latest.osm.pbf` (483 MB), 52.5M nodes, 6.6M ways, 46K relation
 Machine: plantasjen, 30 GB DDR4, NVMe, Ryzen 9 5900X (12c/24t).
 SortedNodeStore: ~420 MB in-RAM (bitmask+popcount).
 
-## Current Baseline (2026-02-26, multi-block overlap)
+## Current Baseline (2026-02-26, commit `d22b507`, multi-block overlap)
 
 Wall time: **12.4s** (hotpath), **13.8s** (bench-self best of 3). phase12=9.5s, ocean=16ms, sort=0.3s, assemble=2.0s.
 14.8M features, 56K tiles (54K unique), 283 MB output. RSS: 795 MB.
@@ -126,16 +126,17 @@ won't fit in 64 GB RAM — needs bitpacked coordinate compression (~51 GB estima
 
 ## Performance History
 
-| Commit | Change | PBF Phase | Total |
-|---|---|---|---|
-| dm6/mmap baseline | 96 GB sparse mmap | — | 242s |
-| d65ee36 | SortedNodeStore | 13.3s | 17.2s |
-| 647a360 | Double-buffer way batches | 10.1s | 15.8s |
-| ca87a20 | Block-level dispatch | 9.3s | 15.1s |
-| 31f7c14 | Iterator API (no perf change) | 9.3s | 15.1s |
-| 15be3bf | Dedicated drain thread + land_mask to rayon | 8.6s | 14.4s |
-| 5c45361 | BlockType API (no perf change) | 8.6s | 14.4s |
-| (pending) | Multi-block overlap + `-j` + decode thread control | 8.1s | 13.8s |
+| Commit | Change | PBF Phase | Total | Host |
+|---|---|---|---|---|
+| 2ba4c0f | 96 GB sparse mmap (baseline) | — | 242s | dm6 |
+| | *(host switch — all rows below are plantasjen)* | | | |
+| d65ee36 | SortedNodeStore | 13.3s | 17.2s | plantasjen |
+| 647a360 | Double-buffer way batches | 10.1s | 15.8s | plantasjen |
+| ca87a20 | Block-level dispatch | 9.3s | 15.1s | plantasjen |
+| 31f7c14 | Iterator API (no perf change) | 9.3s | 15.1s | plantasjen |
+| 15be3bf | Dedicated drain thread + land_mask to rayon | 8.6s | 14.4s | plantasjen |
+| 5c45361 | BlockType API (no perf change) | 8.6s | 14.4s | plantasjen |
+| d22b507 | Multi-block overlap + `-j` + decode thread control | 8.1s | 13.8s | plantasjen |
 
 ## Remaining Opportunities
 

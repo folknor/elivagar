@@ -81,6 +81,15 @@ Sequential, same PBF input:
 - Cast lints are strict — annotate with `#[allow(clippy::cast_*)]` where needed
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)
 
+## Benchmark discipline
+
+All performance numbers (wall time, phase splits, allocation profiles) MUST include:
+1. **Host name** (plantasjen, dm6, etc.)
+2. **Git commit hash** of the code that was measured
+
+Workflow: commit code first, THEN benchmark, THEN update docs with the commit hash.
+Never write benchmark numbers for uncommitted code — the hash is the anchor.
+
 ## Benchmark machines
 
 ### plantasjen (current)

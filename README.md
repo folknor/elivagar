@@ -45,7 +45,7 @@ elivagar denmark-latest.osm.pbf denmark.pmtiles \
 
 ## Output size
 
-Denmark extract (483 MB PBF), gzip level 6, z0-14:
+Denmark extract (483 MB PBF), gzip level 6, z0-14 (plantasjen, commit `175435c`):
 
 | | elivagar | Planetiler | Tilemaker |
 |---|---|---|---|
@@ -66,14 +66,15 @@ Denmark extract (483 MB PBF) → Shortbread PMTiles, best of 3 runs:
 | Planetiler 0.10 | 41s | — | — | — | — |
 <!-- BENCH:END -->
 
-System: Linux 6.18, Ryzen 9 5900X.
+System: plantasjen (Ryzen 9 5900X, Linux 6.18). Commit: `d22b507`.
 
-Measured with `scripts/bench.sh`. Results are logged to `benchmarks.tsv` for tracking over time.
+Measured with `scripts/bench.sh`. Results are logged to `benchmarks/bench.tsv` for tracking over time.
 
 ### PMTiles writer
 
 Elivagar's hand-rolled PMTiles v3 writer vs [pmtiles-rs](https://github.com/stadiamaps/pmtiles-rs) 0.20,
-synthetic tiles (unique gzipped payloads, Hilbert-ordered), best of 5 runs:
+synthetic tiles (unique gzipped payloads, Hilbert-ordered), best of 5 runs
+(plantasjen, commit `4a9b2d5`):
 
 | Tiles | elivagar | pmtiles-rs | Speedup |
 |------:|---------:|-----------:|--------:|
