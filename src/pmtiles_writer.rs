@@ -31,6 +31,7 @@ use std::io::{self, BufReader, BufWriter, Read as _, Write};
 use std::path::{Path, PathBuf};
 
 use libdeflater::{CompressionLvl, Compressor};
+use protohoggr::encode_varint;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -540,40 +541,6 @@ fn encode_offset_column(buf: &mut Vec<u8>, entries: &[DirEntry]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Varint encoding
-// ---------------------------------------------------------------------------
-
-/// Encode a u64 as a variable-length integer (LEB128).
-fn encode_varint(buf: &mut Vec<u8>, mut val: u64) {
-    loop {
-        if val < 0x80 {
-            #[allow(clippy::cast_possible_truncation)]
-            buf.push(val as u8);
-            break;
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        buf.push((val as u8 & 0x7F) | 0x80);
-        val >>= 7;
-    }
-}
-
-/// Decode a varint (for tests). Same logic as `tile_server::decode_varint`.
-#[cfg(test)]
-fn decode_varint(data: &[u8], pos: &mut usize) -> u64 {
-    let mut result: u64 = 0;
-    let mut shift = 0u32;
-    loop {
-        let byte = data[*pos];
-        *pos += 1;
-        result |= u64::from(byte & 0x7F) << shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    result
-}
 
 // ---------------------------------------------------------------------------
 // Gzip compression helper
@@ -853,14 +820,15 @@ mod tests {
 
     #[test]
     fn test_varint_roundtrip() {
+        use protohoggr::Cursor;
         let test_values: &[u64] = &[0, 1, 127, 128, 255, 256, 300, 16383, 16384, u64::MAX];
         for &val in test_values {
             let mut buf = Vec::new();
             encode_varint(&mut buf, val);
-            let mut pos = 0;
-            let decoded = decode_varint(&buf, &mut pos);
+            let mut c = Cursor::new(&buf);
+            let decoded = c.read_varint().unwrap();
             assert_eq!(val, decoded, "varint roundtrip failed for {val}");
-            assert_eq!(pos, buf.len(), "varint did not consume all bytes for {val}");
+            assert!(c.is_empty(), "varint did not consume all bytes for {val}");
         }
     }
 
@@ -881,6 +849,7 @@ mod tests {
 
     #[test]
     fn test_directory_encode_decode() {
+        use protohoggr::Cursor;
         let entries = vec![
             DirEntry {
                 tile_id: 5,
@@ -897,38 +866,39 @@ mod tests {
         ];
 
         let encoded = encode_directory(&entries);
-        let mut pos = 0;
+        let mut c = Cursor::new(&encoded);
 
-        let count = decode_varint(&encoded, &mut pos);
+        let count = c.read_varint().unwrap();
         assert_eq!(count, 2);
 
         // Tile IDs (delta): first=5, delta=5
-        let id0 = decode_varint(&encoded, &mut pos);
-        let id1 = decode_varint(&encoded, &mut pos);
+        let id0 = c.read_varint().unwrap();
+        let id1 = c.read_varint().unwrap();
         assert_eq!(id0, 5);
         assert_eq!(id1, 5);
 
         // Run lengths: 3, 1
-        let r0 = decode_varint(&encoded, &mut pos);
-        let r1 = decode_varint(&encoded, &mut pos);
+        let r0 = c.read_varint().unwrap();
+        let r1 = c.read_varint().unwrap();
         assert_eq!(r0, 3);
         assert_eq!(r1, 1);
 
         // Lengths: 100, 50
-        let l0 = decode_varint(&encoded, &mut pos);
-        let l1 = decode_varint(&encoded, &mut pos);
+        let l0 = c.read_varint().unwrap();
+        let l1 = c.read_varint().unwrap();
         assert_eq!(l0, 100);
         assert_eq!(l1, 50);
 
         // Offsets: first=0+1=1, second=0 (contiguous: 0+100=100)
-        let o0 = decode_varint(&encoded, &mut pos);
-        let o1 = decode_varint(&encoded, &mut pos);
+        let o0 = c.read_varint().unwrap();
+        let o1 = c.read_varint().unwrap();
         assert_eq!(o0, 1);
         assert_eq!(o1, 0);
     }
 
     #[test]
     fn test_directory_non_contiguous_offset() {
+        use protohoggr::Cursor;
         let entries = vec![
             DirEntry {
                 tile_id: 1,
@@ -945,19 +915,19 @@ mod tests {
         ];
 
         let encoded = encode_directory(&entries);
-        let mut pos = 0;
+        let mut c = Cursor::new(&encoded);
 
         // Skip count, tile_ids, run_lengths, lengths
-        let _count = decode_varint(&encoded, &mut pos);
-        let _id0 = decode_varint(&encoded, &mut pos);
-        let _id1 = decode_varint(&encoded, &mut pos);
-        let _r0 = decode_varint(&encoded, &mut pos);
-        let _r1 = decode_varint(&encoded, &mut pos);
-        let _l0 = decode_varint(&encoded, &mut pos);
-        let _l1 = decode_varint(&encoded, &mut pos);
+        let _count = c.read_varint().unwrap();
+        let _id0 = c.read_varint().unwrap();
+        let _id1 = c.read_varint().unwrap();
+        let _r0 = c.read_varint().unwrap();
+        let _r1 = c.read_varint().unwrap();
+        let _l0 = c.read_varint().unwrap();
+        let _l1 = c.read_varint().unwrap();
 
-        let o0 = decode_varint(&encoded, &mut pos);
-        let o1 = decode_varint(&encoded, &mut pos);
+        let o0 = c.read_varint().unwrap();
+        let o1 = c.read_varint().unwrap();
         assert_eq!(o0, 1); // offset 0 + 1
         assert_eq!(o1, 501); // offset 500 + 1 (not contiguous)
     }

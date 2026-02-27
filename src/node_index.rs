@@ -224,7 +224,7 @@ fn bitpack_values_into(values: &[u32], bit_width: u8, dest: &mut Vec<u8>) {
 #[allow(clippy::cast_possible_truncation, clippy::unwrap_used, clippy::needless_range_loop)]
 fn bitunpack_values(packed: &[u8], n: usize, bit_width: u8, out: &mut [u32]) {
     if bit_width == 0 {
-        for o in out[..n].iter_mut() {
+        for o in &mut out[..n] {
             *o = 0;
         }
         return;

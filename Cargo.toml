@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 pbfhogg = { path = "../pbfhogg", default-features = false, features = ["zlib-ng"] }
+protohoggr = { path = "../protohoggr" }
 rayon = "1.5"
 memmap2 = "0.9"
 libdeflater = "1.25"

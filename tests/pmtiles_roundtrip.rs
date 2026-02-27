@@ -17,6 +17,9 @@ use std::path::Path;
 
 use elivagar::pmtiles_writer::{tile_id_to_zxy, xy_to_tile_id, PmtilesConfig, PmtilesWriter};
 use libdeflater::{CompressionLvl, Compressor, Decompressor};
+use protohoggr::{
+    Cursor, encode_bytes_field_always, encode_varint, encode_varint_field_always, WIRE_LEN,
+};
 
 // ---------------------------------------------------------------------------
 // PMTiles reader (minimal, sync) — adapted from examples/compare_tiles.rs
@@ -173,30 +176,30 @@ fn expand_single(e: &RawDirEntry, out: &mut Vec<TileEntry>) {
 }
 
 fn decode_directory(data: &[u8]) -> Vec<RawDirEntry> {
-    let mut pos = 0;
-    let count = decode_varint(data, &mut pos) as usize;
+    let mut c = Cursor::new(data);
+    let count = c.read_varint().unwrap() as usize;
 
     let mut tile_ids = Vec::with_capacity(count);
     let mut prev: u64 = 0;
     for _ in 0..count {
-        let delta = decode_varint(data, &mut pos);
+        let delta = c.read_varint().unwrap();
         prev += delta;
         tile_ids.push(prev);
     }
 
     let mut run_lengths = Vec::with_capacity(count);
     for _ in 0..count {
-        run_lengths.push(decode_varint(data, &mut pos) as u32);
+        run_lengths.push(c.read_varint().unwrap() as u32);
     }
 
     let mut lengths = Vec::with_capacity(count);
     for _ in 0..count {
-        lengths.push(decode_varint(data, &mut pos) as u32);
+        lengths.push(c.read_varint().unwrap() as u32);
     }
 
     let mut entries = Vec::with_capacity(count);
     for i in 0..count {
-        let v = decode_varint(data, &mut pos);
+        let v = c.read_varint().unwrap();
         let offset = if v == 0 && i > 0 {
             let prev: &RawDirEntry = &entries[i - 1];
             // Contiguous: prev.offset + prev.length (NOT multiplied by run_length,
@@ -216,24 +219,6 @@ fn decode_directory(data: &[u8]) -> Vec<RawDirEntry> {
     entries
 }
 
-fn decode_varint(data: &[u8], pos: &mut usize) -> u64 {
-    let mut result: u64 = 0;
-    let mut shift = 0u32;
-    loop {
-        if *pos >= data.len() {
-            return result;
-        }
-        let byte = data[*pos];
-        *pos += 1;
-        result |= u64::from(byte & 0x7F) << shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    result
-}
-
 fn read_u64_le(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
 }
@@ -249,35 +234,15 @@ struct MvtLayer {
 
 fn decode_mvt_layers(data: &[u8]) -> Vec<MvtLayer> {
     let mut layers = Vec::new();
-    let mut pos = 0;
-
-    while pos < data.len() {
-        let (field, wire_type, new_pos) = decode_proto_tag(data, pos);
-        pos = new_pos;
-
-        if wire_type == 2 {
-            let (len, new_pos) = decode_proto_varint(data, pos);
-            pos = new_pos;
-            let end = pos + len as usize;
-            if end > data.len() {
-                break;
-            }
-            if field == 3 {
-                layers.push(decode_mvt_layer(&data[pos..end]));
-            }
-            pos = end;
-        } else if wire_type == 0 {
-            let (_, new_pos) = decode_proto_varint(data, pos);
-            pos = new_pos;
-        } else if wire_type == 1 {
-            pos += 8;
-        } else if wire_type == 5 {
-            pos += 4;
+    let mut cursor = Cursor::new(data);
+    while let Ok(Some((field, wire_type))) = cursor.read_tag() {
+        if field == 3 && wire_type == WIRE_LEN {
+            let sub = cursor.read_len_delimited().unwrap();
+            layers.push(decode_mvt_layer(sub));
         } else {
-            break;
+            cursor.skip_field(wire_type).unwrap();
         }
     }
-
     layers
 }
 
@@ -286,63 +251,20 @@ fn decode_mvt_layer(data: &[u8]) -> MvtLayer {
         name: String::new(),
         feature_count: 0,
     };
-
-    let mut pos = 0;
-    while pos < data.len() {
-        let (field, wire_type, new_pos) = decode_proto_tag(data, pos);
-        pos = new_pos;
-
-        if wire_type == 2 {
-            let (len, new_pos) = decode_proto_varint(data, pos);
-            pos = new_pos;
-            let end = pos + len as usize;
-            if end > data.len() {
-                break;
-            }
+    let mut cursor = Cursor::new(data);
+    while let Ok(Some((field, wire_type))) = cursor.read_tag() {
+        if wire_type == WIRE_LEN {
+            let sub = cursor.read_len_delimited().unwrap();
             match field {
-                1 => layer.name = String::from_utf8_lossy(&data[pos..end]).to_string(),
+                1 => layer.name = String::from_utf8_lossy(sub).to_string(),
                 2 => layer.feature_count += 1,
                 _ => {}
             }
-            pos = end;
-        } else if wire_type == 0 {
-            let (_, new_pos) = decode_proto_varint(data, pos);
-            pos = new_pos;
-        } else if wire_type == 1 {
-            pos += 8;
-        } else if wire_type == 5 {
-            pos += 4;
         } else {
-            break;
+            cursor.skip_field(wire_type).unwrap();
         }
     }
-
     layer
-}
-
-fn decode_proto_tag(data: &[u8], pos: usize) -> (u32, u8, usize) {
-    let (val, new_pos) = decode_proto_varint(data, pos);
-    let field = (val >> 3) as u32;
-    let wire_type = (val & 7) as u8;
-    (field, wire_type, new_pos)
-}
-
-fn decode_proto_varint(data: &[u8], mut pos: usize) -> (u64, usize) {
-    let mut result: u64 = 0;
-    let mut shift = 0u32;
-    loop {
-        if pos >= data.len() {
-            return (result, pos);
-        }
-        let byte = data[pos];
-        pos += 1;
-        result |= u64::from(byte & 0x7F) << shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    (result, pos)
 }
 
 // ---------------------------------------------------------------------------
@@ -355,8 +277,7 @@ fn encode_mvt_tile(layer_names: &[&str]) -> Vec<u8> {
     let mut tile = Vec::new();
     for name in layer_names {
         let layer_bytes = encode_mvt_layer(name);
-        // field 3 (Tile.layers), wire type 2 (length-delimited)
-        encode_proto_field(&mut tile, 3, &layer_bytes);
+        encode_bytes_field_always(&mut tile, 3, &layer_bytes);
     }
     tile
 }
@@ -365,17 +286,17 @@ fn encode_mvt_layer(name: &str) -> Vec<u8> {
     let mut layer = Vec::new();
 
     // field 1: name (string)
-    encode_proto_field(&mut layer, 1, name.as_bytes());
+    encode_bytes_field_always(&mut layer, 1, name.as_bytes());
 
     // field 2: feature (one point at 0,0)
     let feature = encode_mvt_point_feature();
-    encode_proto_field(&mut layer, 2, &feature);
+    encode_bytes_field_always(&mut layer, 2, &feature);
 
     // field 5: extent (varint) = 4096
-    encode_proto_varint_field(&mut layer, 5, 4096);
+    encode_varint_field_always(&mut layer, 5, 4096);
 
     // field 15: version (varint) = 2
-    encode_proto_varint_field(&mut layer, 15, 2);
+    encode_varint_field_always(&mut layer, 15, 2);
 
     layer
 }
@@ -384,43 +305,19 @@ fn encode_mvt_point_feature() -> Vec<u8> {
     let mut feature = Vec::new();
 
     // field 3: type = POINT (1)
-    encode_proto_varint_field(&mut feature, 3, 1);
+    encode_varint_field_always(&mut feature, 3, 1);
 
     // field 4: geometry (packed uint32) — MoveTo(1, dx=0, dy=0)
     // MoveTo command: (1 << 3) | 1 = 9
     // param 0 (zigzag): 0
     // param 1 (zigzag): 0
     let mut geom = Vec::new();
-    encode_proto_varint_raw(&mut geom, 9); // MoveTo, count=1
-    encode_proto_varint_raw(&mut geom, 0); // dx=0
-    encode_proto_varint_raw(&mut geom, 0); // dy=0
-    encode_proto_field(&mut feature, 4, &geom);
+    encode_varint(&mut geom, 9); // MoveTo, count=1
+    encode_varint(&mut geom, 0); // dx=0
+    encode_varint(&mut geom, 0); // dy=0
+    encode_bytes_field_always(&mut feature, 4, &geom);
 
     feature
-}
-
-fn encode_proto_field(buf: &mut Vec<u8>, field_number: u32, data: &[u8]) {
-    let tag = (u64::from(field_number) << 3) | 2; // wire type 2 = length-delimited
-    encode_proto_varint_raw(buf, tag);
-    encode_proto_varint_raw(buf, data.len() as u64);
-    buf.extend_from_slice(data);
-}
-
-fn encode_proto_varint_field(buf: &mut Vec<u8>, field_number: u32, value: u64) {
-    let tag = (u64::from(field_number) << 3) | 0; // wire type 0 = varint
-    encode_proto_varint_raw(buf, tag);
-    encode_proto_varint_raw(buf, value);
-}
-
-fn encode_proto_varint_raw(buf: &mut Vec<u8>, mut val: u64) {
-    loop {
-        if val < 0x80 {
-            buf.push(val as u8);
-            break;
-        }
-        buf.push((val as u8 & 0x7F) | 0x80);
-        val >>= 7;
-    }
 }
 
 // ---------------------------------------------------------------------------

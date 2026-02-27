@@ -8,6 +8,10 @@
 // adversarial input. Tradeoff: weaker collision resistance (irrelevant for tile
 // encoding). Already a transitive dependency via roaring. To revert, swap back to
 // std::collections::HashMap and remove the rustc-hash direct dependency.
+use protohoggr::{
+    encode_bytes_field_always, encode_packed_uint32, encode_tag, encode_varint,
+    encode_varint_field_always, zigzag_encode_64, WIRE_32BIT, WIRE_64BIT, WIRE_VARINT,
+};
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
@@ -213,17 +217,17 @@ impl LayerBuilder {
         s.layer_buf.clear();
 
         // field 15: version = 2
-        encode_field_varint(&mut s.layer_buf, 15, 2);
+        encode_varint_field_always(&mut s.layer_buf, 15, 2);
         // field 1: name
-        encode_field_bytes(&mut s.layer_buf, 1, self.name.as_bytes());
+        encode_bytes_field_always(&mut s.layer_buf, 1, self.name.as_bytes());
         // field 5: extent = 4096
-        encode_field_varint(&mut s.layer_buf, 5, 4096);
+        encode_varint_field_always(&mut s.layer_buf, 5, 4096);
 
         // field 2: features
         for f in &self.features {
             s.feat_buf.clear();
             if let Some(id) = f.id {
-                encode_field_varint(&mut s.feat_buf, 1, id);
+                encode_varint_field_always(&mut s.feat_buf, 1, id);
             }
             if !f.tags.is_empty() {
                 s.tag_vals.clear();
@@ -232,29 +236,29 @@ impl LayerBuilder {
                         .iter()
                         .flat_map(|&(k, v)| [u32::from(k), u32::from(v)]),
                 );
-                encode_packed_u32(&mut s.feat_buf, 2, &s.tag_vals, &mut s.packed);
+                encode_packed_uint32(&mut s.feat_buf, &mut s.packed, 2, &s.tag_vals);
             }
-            encode_field_varint(&mut s.feat_buf, 3, f.geom_type as u64);
+            encode_varint_field_always(&mut s.feat_buf, 3, f.geom_type as u64);
             if !f.geometry.is_empty() {
-                encode_packed_u32(&mut s.feat_buf, 4, &f.geometry, &mut s.packed);
+                encode_packed_uint32(&mut s.feat_buf, &mut s.packed, 4, &f.geometry);
             }
-            encode_field_bytes(&mut s.layer_buf, 2, &s.feat_buf);
+            encode_bytes_field_always(&mut s.layer_buf, 2, &s.feat_buf);
         }
 
         // field 3: keys
         for k in &self.keys {
-            encode_field_bytes(&mut s.layer_buf, 3, k.as_bytes());
+            encode_bytes_field_always(&mut s.layer_buf, 3, k.as_bytes());
         }
 
         // field 4: values
         for v in &self.values {
             s.val_buf.clear();
             encode_value(&mut s.val_buf, v);
-            encode_field_bytes(&mut s.layer_buf, 4, &s.val_buf);
+            encode_bytes_field_always(&mut s.layer_buf, 4, &s.val_buf);
         }
 
         // Write as field 3 (Tile.layers) length-delimited
-        encode_field_bytes(buf, 3, &s.layer_buf);
+        encode_bytes_field_always(buf, 3, &s.layer_buf);
     }
 }
 
@@ -378,62 +382,25 @@ pub fn encode_polygon(buf: &mut Vec<u32>, rings: &[&[(i32, i32)]]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Low-level protobuf encoding
-// ---------------------------------------------------------------------------
-
-fn encode_varint(buf: &mut Vec<u8>, mut val: u64) {
-    loop {
-        #[allow(clippy::cast_possible_truncation)]
-        if val < 0x80 {
-            buf.push(val as u8);
-            break;
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        buf.push((val as u8 & 0x7F) | 0x80);
-        val >>= 7;
-    }
-}
-
-fn encode_field_varint(buf: &mut Vec<u8>, field: u32, val: u64) {
-    encode_varint(buf, u64::from(field << 3)); // wire type 0
-    encode_varint(buf, val);
-}
-
-fn encode_field_bytes(buf: &mut Vec<u8>, field: u32, data: &[u8]) {
-    encode_varint(buf, u64::from(field << 3 | 2)); // wire type 2
-    #[allow(clippy::cast_possible_truncation)]
-    encode_varint(buf, data.len() as u64);
-    buf.extend_from_slice(data);
-}
-
-fn encode_packed_u32(buf: &mut Vec<u8>, field: u32, vals: &[u32], packed: &mut Vec<u8>) {
-    packed.clear();
-    for &v in vals {
-        encode_varint(packed, u64::from(v));
-    }
-    encode_field_bytes(buf, field, packed);
-}
-
 fn encode_value(buf: &mut Vec<u8>, val: &Value) {
     match val {
-        Value::String(s) => encode_field_bytes(buf, 1, s.as_bytes()),
+        Value::String(s) => encode_bytes_field_always(buf, 1, s.as_bytes()),
         Value::Float(f) => {
-            encode_varint(buf, u64::from(2u32 << 3 | 5)); // field 2, wire type 5 (32-bit)
+            encode_tag(buf, 2, WIRE_32BIT);
             buf.extend_from_slice(&f.to_le_bytes());
         }
         Value::Double(d) => {
-            encode_varint(buf, u64::from(3u32 << 3 | 1)); // field 3, wire type 1 (64-bit)
+            encode_tag(buf, 3, WIRE_64BIT);
             buf.extend_from_slice(&d.to_le_bytes());
         }
         #[allow(clippy::cast_sign_loss)]
-        Value::Int(i) => encode_field_varint(buf, 4, *i as u64),
-        Value::UInt(u) => encode_field_varint(buf, 5, *u),
+        Value::Int(i) => encode_varint_field_always(buf, 4, *i as u64),
+        Value::UInt(u) => encode_varint_field_always(buf, 5, *u),
         Value::SInt(i) => {
-            encode_varint(buf, u64::from(6u32 << 3)); // field 6, wire type 0
-            encode_varint(buf, zigzag_i64(*i));
+            encode_tag(buf, 6, WIRE_VARINT);
+            encode_varint(buf, zigzag_encode_64(*i));
         }
-        Value::Bool(b) => encode_field_varint(buf, 7, u64::from(*b)),
+        Value::Bool(b) => encode_varint_field_always(buf, 7, u64::from(*b)),
     }
 }
 
@@ -445,12 +412,6 @@ fn encode_value(buf: &mut Vec<u8>, val: &Value) {
 fn zigzag(v: i32) -> u32 {
     #[allow(clippy::cast_sign_loss)]
     { ((v << 1) ^ (v >> 31)) as u32 }
-}
-
-#[inline]
-fn zigzag_i64(v: i64) -> u64 {
-    #[allow(clippy::cast_sign_loss)]
-    { ((v << 1) ^ (v >> 63)) as u64 }
 }
 
 #[inline]
