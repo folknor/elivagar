@@ -42,7 +42,11 @@ Known regressions from SortedNodeStore compression (`b866306`). These code paths
   Remaining:
   - [ ] The decompress_chunk bottleneck is fundamentally DRAM-latency-bound (270 MB blob, 820ns avg per miss). Further optimization requires either reducing blob size or improving access locality.
 
-- [ ] **Assemble phase +0.5s** (2.2s → 2.7s on plantasjen Denmark) — NOT from node lookups (assemble phase does not use the node store). Separate root cause. Diagnose by comparing `run-hotpath.sh` output at `b866306` vs prior commit to see which assemble sub-function got slower.
+- [x] **Assemble phase +0.5s** (2.2s → 2.7s on plantasjen Denmark) — investigated on dm6 (`2db9494`).
+  Compared HEAD (2877ms) vs pre-regression `2378159` (2795ms) = +82ms, within noise.
+  The +500ms on plantasjen is machine-specific and not reproducible on dm6.
+  The only pipeline.rs change in `b866306` was an early `drop(way_index)` — no assemble code changed.
+  Feature count and output size are identical between commits. No action needed.
 
 - [x] **Re-measure on dm6** — done, see baselines below.
 
