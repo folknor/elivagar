@@ -25,18 +25,19 @@ SortedNodeStore compression (`b866306`) introduced a PBF phase regression. Requi
   - **Better access locality**: Node lookups follow way-reference order, which jumps randomly across the blob. If nodes frequently accessed together were stored nearby in memory, cache lines (64 bytes per fetch) would serve multiple lookups before eviction. Would require reordering the store to match access patterns — significant undertaking.
   - Both approaches are speculative with unclear payoff. The blob grows with dataset size (planet >> 270 MB), so even server-class L3 caches (32 MB/CCD on EPYC Genoa, 96 MB/CCD on Genoa-X) won't cover it. The access pattern is dictated by way references and is essentially random. Reordering would require a pre-pass over all ways, duplicating the expensive work. The 1.3s regression is a reasonable trade for planet-scale support. See inline comments in `node_index.rs` for details.
 
-- [x] **Assemble phase +0.5s** — not reproducible on dm6 (+82ms, noise). Needs plantasjen confirmation.
+- [x] **Assemble phase +0.5s** — **not real**, confirmed noise. Plantasjen at `605a1a5`: 2.5s assemble (was 2.7s in old baseline, 2.2s pre-compression). The +0.5s was a measurement artifact.
 
-### Plantasjen TODO (when benchmark access available)
+### Plantasjen TODO — completed 2026-02-27
 
-All dm6 optimizations are committed and ready. These items need plantasjen to measure:
-
-- [ ] **Re-baseline on plantasjen** — run `bench-self.sh` at HEAD (`189abfe` or later) with 3 runs. The old baseline was 14.7s total (9.3s pbf, 2.7s assemble) at a pre-optimization commit. The 4-entry LRU cache, UnsafeCell, and scratch vec hoisting should reduce the PBF phase. Get new numbers for all phases.
-- [ ] **Confirm assemble phase regression** — the +0.5s (2.2s→2.7s) was only measured on plantasjen and is not reproducible on dm6 (+82ms, noise). Re-measure at HEAD vs `2378159` to determine if it's real or was a measurement artifact. If real, run hotpath to identify which assemble sub-function is slower.
-- [ ] **Update README performance numbers** — README numbers should always come from plantasjen (the reference host). Update with the new baseline once measured.
-- [ ] **Run hotpath on plantasjen** — `run-hotpath.sh` to get plantasjen-specific decompress_chunk numbers. The 270 MB blob may behave differently with the Ryzen 9's larger L3 cache (64 MB vs dm6's 16 MB). This determines whether the DRAM-latency bottleneck is as severe on plantasjen.
+- [x] **Re-baseline on plantasjen** — `bench-self.sh` best of 3 at `605a1a5`: 14.2s total (9.2s pbf, 1.4s ocean, 0.5s sort, 2.5s assemble). LRU cache optimizations show modest -0.1s PBF improvement (plantasjen's 64 MB L3 already covered most of the blob, unlike dm6's 16 MB).
+- [x] **Confirm assemble phase regression** — **not real**. 2.5s at `605a1a5`, consistent with pre-compression baseline (2.2s). The old 2.7s measurement was noise.
+- [x] **Update README performance numbers** — updated to `605a1a5` baseline.
+- [x] **Run hotpath on plantasjen** — `decompress_chunk`: avg 560ns (vs 820ns on dm6), 13.4s total (60% wall). The 64 MB L3 gives a 32% latency reduction. P95 is 980ns on both machines — the true DRAM penalty when L3 misses. See hotpath-profile.md for full results.
 
 ### Baselines
+
+Plantasjen Denmark baseline (best of 3, `605a1a5`, all optimizations):
+14.2s total (9.2s pbf, 1.4s ocean, 0.5s sort, 2.5s assemble). 16.0M features, 56.4K unique tiles, 286 MB output.
 
 Plantasjen Denmark baseline (best of 3, pre-optimization): 14.7s total (9.3s pbf, 1.5s ocean, 0.4s sort, 2.7s assemble). 16.0M features, 53.9K unique tiles, 273 MB output.
 

@@ -4,10 +4,18 @@ Dataset: `denmark-latest.osm.pbf` (483 MB), 52.5M nodes, 6.6M ways, 46K relation
 Machine: plantasjen, 30 GB DDR4, NVMe, Ryzen 9 5900X (12c/24t).
 SortedNodeStore: ~420 MB in-RAM (bitmask+popcount).
 
-## Current Baseline (2026-02-26, commit `d22b507`, multi-block overlap)
+## Current Baseline (2026-02-27, commit `605a1a5`, all optimizations)
+
+Wall time: **22.3s** (hotpath), **14.2s** (bench-self best of 3). phase12=17.4s(hotpath)/9.2s(bench), ocean=1.6s/1.4s, sort=0.4s/0.5s, assemble=2.2s/2.5s.
+16.0M features, 56K tiles (54K unique), 286 MB output. RSS: 869 MB.
+
+Note: hotpath overhead is significant (~60% wall time increase) due to per-call measurement on 24M `decompress_chunk` calls. Bench-self numbers are the true performance baseline.
+
+### Previous Baseline (2026-02-26, commit `d22b507`, multi-block overlap)
 
 Wall time: **12.4s** (hotpath), **13.8s** (bench-self best of 3). phase12=9.5s, ocean=16ms, sort=0.3s, assemble=2.0s.
 14.8M features, 56K tiles (54K unique), 283 MB output. RSS: 795 MB.
+Note: This was measured before ocean shapefiles were included and before SortedNodeStore compression.
 
 Architecture: multi-block overlapping pipeline during way phase:
 1. **pbfhogg I/O thread** — reads + decodes PBF blocks, delivers via `into_blocks_pipelined`
@@ -24,17 +32,31 @@ Token-based semaphore (sync_channel) limits in-flight blocks to 4, bounding memo
 pbfhogg decode pool set to `threads/3` (reduced from `avail_parallelism-2`) to avoid
 oversubscription with elivagar's rayon pool.
 
-### Function Timing (top 10 of 26 measured)
+### Function Timing — `605a1a5` (top 10, with SortedNodeStore compression + ocean)
 
 | Function | Calls | Avg | P50 | P95 | P99 | Total | % Wall |
 |---|---|---|---|---|---|---|---|
-| `process_raw_way` | 6.6M | 7.74µs | 2.32µs | 18.30µs | 113.28µs | 51.2s | 414% |
-| `for_each_zoom_simplified` | 6.6M | 3.35µs | 850ns | 5.36µs | 50.88µs | 22.1s | 178% |
-| `emit_polygon_feature` | 4.5M | 4.01µs | 920ns | 7.26µs | 71.30µs | 18.2s | 147% |
-| `emit_line_feature` | 2.0M | 5.20µs | 1.13µs | 6.70µs | 78.14µs | 10.6s | 85% |
-| `drain_processed_ways` | 828 | 6.02ms | 4.60ms | 8.54ms | 13.98ms | 4.99s | 40% |
-| `match_element` | 10.1M | 322ns | 300ns | 690ns | 1.19µs | 3.26s | 26% |
-| `add_feature_to_layer` | 14.8M | 195ns | 130ns | 470ns | 910ns | 2.89s | 23% |
+| `process_raw_way` | 6.6M | 18.05µs | 4.54µs | 81.98µs | 238.97µs | 119.4s | 535% |
+| `for_each_zoom_simplified_multi` | 257K | 91.00µs | 4.56µs | 38.34µs | 191.49µs | 23.4s | 105% |
+| `emit_ocean_polygon` | 229K | 100.60µs | 5.15µs | 37.70µs | 195.97µs | 23.1s | 103% |
+| `decompress_chunk` | 23.8M | 560ns | 560ns | 980ns | 1.04µs | 13.4s | 60% |
+| `for_each_zoom_simplified` | 6.6M | 1.78µs | 580ns | 3.34µs | 10.15µs | 11.7s | 52% |
+| `emit_polygon_feature` | 4.5M | 2.48µs | 650ns | 4.33µs | 34.14µs | 11.3s | 51% |
+| `emit_line_feature` | 2.0M | 3.90µs | 830ns | 4.04µs | 48.22µs | 7.9s | 36% |
+
+### `decompress_chunk` — plantasjen vs dm6
+
+| Metric | dm6 (16 MB L3) | plantasjen (64 MB L3) |
+|---|---|---|
+| Avg | ~820 ns | 560 ns |
+| P50 | ~820 ns | 560 ns |
+| P95 | 980 ns | 980 ns |
+| Total | ~19.6s | 13.4s |
+| % Wall | ~88% | 60% |
+
+The 64 MB L3 on plantasjen reduces average latency by 32%. P95 is identical on both (980ns) — that's the true DRAM penalty when all caches miss. The blob is 270 MB so it doesn't fully fit in either L3, but plantasjen keeps more of it cached.
+
+### Function Timing — `d22b507` (pre-compression, no ocean)
 
 >100% totals = parallel work on rayon threads. % is CPU-time / wall-time.
 
@@ -137,6 +159,7 @@ won't fit in 64 GB RAM — needs bitpacked coordinate compression (~51 GB estima
 | 15be3bf | Dedicated drain thread + land_mask to rayon | 8.6s | 14.4s | plantasjen |
 | 5c45361 | BlockType API (no perf change) | 8.6s | 14.4s | plantasjen |
 | d22b507 | Multi-block overlap + `-j` + decode thread control | 8.1s | 13.8s | plantasjen |
+| 605a1a5 | SortedNodeStore compression + LRU cache + all opts | 9.2s | 14.2s | plantasjen |
 
 ## Remaining Opportunities
 
