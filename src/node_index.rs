@@ -407,24 +407,45 @@ fn find_chunk_in_blob(data: &[u8], chunk_idx: usize) -> ChunkRef<'_> {
 // Lookup functions
 // ---------------------------------------------------------------------------
 
-/// Thread-local decompression cache. Avoids re-decompressing the same chunk
-/// on consecutive lookups (ways' node refs often cluster in the same chunk).
-struct DecompressCache {
+/// Single cache entry: one decompressed chunk.
+struct CacheEntry {
     group_id: usize,
     chunk_idx: usize,
     node_mask: [u8; BITMASK_BYTES],
     coords: [(i32, i32); NODES_PER_CHUNK],
-    count: u16, // 0 = cache empty/miss
+    count: u16, // 0 = empty
 }
 
-impl DecompressCache {
+impl CacheEntry {
     fn new() -> Self {
-        DecompressCache {
+        CacheEntry {
             group_id: usize::MAX,
             chunk_idx: usize::MAX,
             node_mask: [0u8; BITMASK_BYTES],
             coords: [(0, 0); NODES_PER_CHUNK],
             count: 0,
+        }
+    }
+}
+
+/// Thread-local decompression cache. Multiple entries avoid ping-ponging
+/// when ways span 2-3 nearby chunks. LRU eviction: hit moves entry to
+/// front, miss evicts the last entry.
+const CACHE_ENTRIES: usize = 4;
+
+struct DecompressCache {
+    entries: [CacheEntry; CACHE_ENTRIES],
+}
+
+impl DecompressCache {
+    fn new() -> Self {
+        DecompressCache {
+            entries: [
+                CacheEntry::new(),
+                CacheEntry::new(),
+                CacheEntry::new(),
+                CacheEntry::new(),
+            ],
         }
     }
 }
@@ -450,26 +471,40 @@ fn get_from_group_cached(
     // SAFETY: thread_local! guarantees single-threaded access — no concurrent borrows possible.
     DECOMPRESS_CACHE.with(|cell| {
         let cache = unsafe { &mut *cell.get() };
-        if cache.group_id == group_id && cache.chunk_idx == chunk_idx && cache.count != 0 {
-            // Cache hit — use cached node_mask, skip blob scan
-            if !test_bit(&cache.node_mask, node_in_chunk) {
-                return None;
+
+        // Search cache entries for a hit
+        for i in 0..CACHE_ENTRIES {
+            let entry = &cache.entries[i];
+            if entry.group_id == group_id && entry.chunk_idx == chunk_idx && entry.count != 0 {
+                if !test_bit(&entry.node_mask, node_in_chunk) {
+                    return None;
+                }
+                let node_idx = count_bits_before(&entry.node_mask, node_in_chunk);
+                let result = entry.coords[node_idx];
+                // LRU promote: swap hit entry to front (no memcpy of large coords arrays)
+                if i > 0 {
+                    cache.entries.swap(0, i);
+                }
+                return Some(result);
             }
-            let node_idx = count_bits_before(&cache.node_mask, node_in_chunk);
-            return Some(cache.coords[node_idx]);
         }
-        // Cache miss — scan blob, decompress, populate cache
+
+        // Cache miss — scan blob, decompress, evict LRU (last) entry
         let chunk = find_chunk_in_blob(&group.data, chunk_idx);
         if !test_bit(chunk.node_mask, node_in_chunk) {
             return None;
         }
         let node_idx = count_bits_before(chunk.node_mask, node_in_chunk);
-        decompress_chunk(chunk.node_mask, chunk.compressed, chunk.packed, &mut cache.coords);
-        cache.node_mask = *chunk.node_mask;
-        cache.group_id = group_id;
-        cache.chunk_idx = chunk_idx;
-        cache.count = count_set_bits(chunk.node_mask);
-        Some(cache.coords[node_idx])
+
+        // Evict last entry: swap it to front, then overwrite
+        cache.entries.swap(0, CACHE_ENTRIES - 1);
+        let entry = &mut cache.entries[0];
+        decompress_chunk(chunk.node_mask, chunk.compressed, chunk.packed, &mut entry.coords);
+        entry.node_mask = *chunk.node_mask;
+        entry.group_id = group_id;
+        entry.chunk_idx = chunk_idx;
+        entry.count = count_set_bits(chunk.node_mask);
+        Some(entry.coords[node_idx])
     })
 }
 
