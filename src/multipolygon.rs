@@ -189,6 +189,11 @@ fn quantize(p: &Point) -> (i64, i64) {
 /// Join a list of coordinate sequences end-to-end to form closed rings.
 ///
 /// Returns `(closed_rings, unclosed_chains)`.
+///
+/// Two-pass algorithm: the first pass greedily appends ways to chains via an
+/// endpoint map. This can leave orphaned chains when `endpoint_map.insert()`
+/// overwrites entries for other chains. A second pass rebuilds the map from
+/// surviving chains and attempts pairwise joins until no more progress is made.
 fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
     let mut chains: Vec<Vec<Point>> = Vec::with_capacity(ways.len());
     // Maps an endpoint (quantized) to the index in `chains` that has that endpoint.
@@ -211,10 +216,7 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
         append_way_to_chains(way, &mut chains, &mut endpoint_map, &mut closed);
     }
 
-    // Second pass: try to merge unclosed chains with each other.
-    // The greedy first pass can leave orphaned chains when endpoint_map.insert()
-    // overwrites entries for other chains. Rebuild the map from surviving chains
-    // and attempt pairwise joins until no more progress is made.
+    // Second pass: merge unclosed chains pairwise until no more progress.
     loop {
         let mut merged_any = false;
         endpoint_map.clear();
@@ -238,9 +240,7 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
             // Look for another chain matching our back endpoint.
             if let Some(&j) = endpoint_map.get(&back) {
                 if j != i && chains[j].len() >= 2 {
-                    let j_front = quantize(&chains[j][0]);
-                    let j_back = quantize(&chains[j][chains[j].len() - 1]);
-
+                    let (j_front, j_back) = (quantize(&chains[j][0]), quantize(&chains[j][chains[j].len() - 1]));
                     let taken_j = std::mem::take(&mut chains[j]);
                     if back == j_front {
                         chains[i].extend_from_slice(&taken_j[1..]);
@@ -271,9 +271,7 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
             // Look for another chain matching our front endpoint.
             if let Some(&j) = endpoint_map.get(&front) {
                 if j != i && chains[j].len() >= 2 {
-                    let j_front = quantize(&chains[j][0]);
-                    let j_back = quantize(&chains[j][chains[j].len() - 1]);
-
+                    let (j_front, j_back) = (quantize(&chains[j][0]), quantize(&chains[j][chains[j].len() - 1]));
                     let taken_j = std::mem::take(&mut chains[j]);
                     if front == j_back {
                         let mut merged = taken_j;

@@ -35,7 +35,7 @@ const _: () = assert!(std::mem::size_of::<OceanPolygon>() == 48);
 /// For each record, reads only the 32-byte bbox from the mmap. Only shapes
 /// intersecting data_bounds get their full geometry parsed.
 /// Then all polygons are processed in parallel with rayon.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::unwrap_in_result)]
 #[hotpath::measure]
 pub(crate) fn process_ocean_shapefile(
     path: &std::path::Path,
@@ -479,7 +479,7 @@ fn emit_ocean_polygon(
                             row_inners[row_inner_count].clear();
                             row_inners[row_inner_count].extend_from_slice(&row_clip_a);
                         } else {
-                            row_inners.push(row_clip_a.to_vec());
+                            row_inners.push(row_clip_a.clone());
                         }
                         row_inner_count += 1;
                     }

@@ -313,7 +313,7 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 // Phase 1+2: Single-pass PBF read + feature processing
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::unwrap_in_result)]
 #[hotpath::measure]
 fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
@@ -485,11 +485,12 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                 if token_rx.recv().is_err() { break; }
                                 let tx = rtx.clone();
                                 let token_ret = token_tx.clone();
+                                #[allow(clippy::let_underscore_must_use)]
                                 s.spawn(move |_| {
                                     let results: Vec<ProcessedWay> = raw_ways
                                         .into_par_iter()
                                         .map(|raw| process_raw_way(
-                                            raw, nr_ref, lm_ref, mz, xz,
+                                            &raw, nr_ref, lm_ref, mz, xz,
                                         ))
                                         .collect();
                                     let _ = tx.send(results);
@@ -730,7 +731,7 @@ fn drain_processed_ways(
 /// clipping, MVT encoding).
 #[hotpath::measure]
 fn process_raw_way(
-    raw: RawWay,
+    raw: &RawWay,
     node_reader: &NodeStoreReader,
     land_mask: &geometry::LandMask,
     min_zoom: u8,
@@ -1199,6 +1200,7 @@ fn emit_polygon_feature(
 }
 
 #[hotpath::measure]
+#[allow(clippy::too_many_arguments)]
 fn emit_multipolygon_feature(
     osm_id: u64,
     outer: &[Point],

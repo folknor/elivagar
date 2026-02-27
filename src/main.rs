@@ -4,6 +4,7 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -24,7 +25,7 @@ fn main() {
     let mut compression_level: u32 = 6;
     let mut force_sorted = false;
     let mut threads: usize = std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZeroUsize::get)
         .unwrap_or(4);
 
     let mut i = 3;

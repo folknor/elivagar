@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 const EARTH_CIRCUMFERENCE: f64 = 40_075_016.686;
 
 /// Maximum latitude for Web Mercator (beyond this, projection diverges).
+#[cfg(test)]
 const MAX_LATITUDE: f64 = 85.051_129;
 
 /// MVT tile extent (pixels per tile axis).
@@ -151,6 +152,7 @@ fn init_lat_lut() -> Box<[f64]> {
 /// Project a single WGS84 coordinate (lat_deg, lon_deg) to Mercator [0,1].
 /// Uses exact transcendentals — for tests and one-off calls. Hot path uses
 /// `project_e7` which goes through the LUT.
+#[cfg(test)]
 #[inline]
 pub fn project(lat_deg: f64, lon_deg: f64) -> Point {
     let lat_clamped = lat_deg.clamp(-MAX_LATITUDE, MAX_LATITUDE);
@@ -193,6 +195,7 @@ pub fn from_epsg3857(x: f64, y: f64) -> Point {
 }
 
 /// Inverse projection: Mercator y → latitude in degrees.
+#[cfg(test)]
 #[inline]
 pub fn merc_y_to_lat(y: f64) -> f64 {
     let lat_rad = (PI * (1.0 - 2.0 * y)).sinh().atan();
@@ -261,6 +264,7 @@ pub fn simplify_into(
 }
 
 /// Convenience wrapper that allocates its own buffers. Use [`simplify_into`] in hot paths.
+#[cfg(test)]
 pub fn simplify(points: &[Point], tolerance: f64) -> Vec<Point> {
     let mut keep = Vec::new();
     let mut output = Vec::new();
@@ -447,7 +451,7 @@ pub fn for_each_zoom_simplified_multi<F>(
             cascade_inners[i].clear();
             cascade_inners[i].extend_from_slice(inner);
         } else {
-            cascade_inners.push(inner.to_vec());
+            cascade_inners.push(inner.clone());
         }
     }
     cascade_inners.truncate(inners.len());

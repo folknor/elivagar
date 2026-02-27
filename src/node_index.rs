@@ -28,6 +28,7 @@ const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
 // while a real node at lat=0, lon=0 stores as non-zero.
 // 0x55555555 = 1431655765 E7 = 143.17° — outside valid latitude range [-90°, 90°],
 // so no real coordinate pair can XOR to (0, 0).
+#[allow(clippy::cast_possible_wrap)]
 const COORD_XOR: i32 = 0x5555_5555_u32 as i32;
 
 pub struct NodeIndex {
@@ -177,6 +178,7 @@ fn count_bits_before(mask: &[u8; BITMASK_BYTES], pos: u8) -> usize {
 
 /// Count total set bits in a 256-bit mask.
 #[inline]
+#[allow(clippy::cast_possible_truncation)]
 fn count_set_bits(mask: &[u8; BITMASK_BYTES]) -> u16 {
     mask.iter().map(|b| u16::from(b.count_ones() as u8)).sum()
 }
@@ -189,6 +191,7 @@ fn count_set_bits(mask: &[u8; BITMASK_BYTES]) -> u16 {
 
 /// Pack `values` at `bit_width` bits each, appending to `dest`.
 /// Output size: ⌈values.len() × bit_width / 8⌉ bytes.
+#[allow(clippy::cast_possible_truncation)]
 fn bitpack_values_into(values: &[u32], bit_width: u8, dest: &mut Vec<u8>) {
     if bit_width == 0 {
         return;
@@ -218,6 +221,7 @@ fn bitpack_values_into(values: &[u32], bit_width: u8, dest: &mut Vec<u8>) {
 /// regressed synthetic by ~10% due to branch misprediction on the refill loop.
 /// Doesn't matter anyway — decompress_chunk is DRAM-latency-bound on real data
 /// (820ns avg on 270 MB blob vs 25ns synthetic with L1-hot data).
+#[allow(clippy::cast_possible_truncation, clippy::explicit_iter_loop, clippy::unwrap_used)]
 fn bitunpack_values(packed: &[u8], n: usize, bit_width: u8, out: &mut [u32]) {
     if bit_width == 0 {
         for o in out[..n].iter_mut() {
@@ -729,6 +733,7 @@ impl SortedNodeStore {
             chunk_mask: self.current_chunk_mask,
             data,
         };
+        #[allow(clippy::cast_possible_truncation)]
         let gid = self.current_group_id as usize;
         self.groups[gid] = Some(Box::new(group));
     }
@@ -853,6 +858,7 @@ impl SortedNodeStoreReader {
 // ---------------------------------------------------------------------------
 
 /// Unified node store for the write phase.
+#[allow(clippy::large_enum_variant)]
 pub enum NodeStore {
     Flat(NodeIndex),
     Sorted(SortedNodeStore),
