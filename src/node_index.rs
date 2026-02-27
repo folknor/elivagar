@@ -406,6 +406,7 @@ fn find_chunk_in_blob(data: &[u8], chunk_idx: usize) -> ChunkRef<'_> {
 struct DecompressCache {
     group_id: usize,
     chunk_idx: usize,
+    node_mask: [u8; BITMASK_BYTES],
     coords: [(i32, i32); NODES_PER_CHUNK],
     count: u16, // 0 = cache empty/miss
 }
@@ -415,6 +416,7 @@ impl DecompressCache {
         DecompressCache {
             group_id: usize::MAX,
             chunk_idx: usize::MAX,
+            node_mask: [0u8; BITMASK_BYTES],
             coords: [(0, 0); NODES_PER_CHUNK],
             count: 0,
         }
@@ -426,6 +428,7 @@ thread_local! {
 }
 
 /// Look up a node within a finalized Group, using the thread-local cache.
+/// On cache hit, skips the blob scan entirely — uses cached node_mask.
 #[hotpath::measure]
 #[inline]
 fn get_from_group_cached(
@@ -438,20 +441,28 @@ fn get_from_group_cached(
         return None;
     }
     let chunk_idx = count_bits_before(&group.chunk_mask, chunk_id);
-    let chunk = find_chunk_in_blob(&group.data, chunk_idx);
-    if !test_bit(chunk.node_mask, node_in_chunk) {
-        return None;
-    }
-    let node_idx = count_bits_before(chunk.node_mask, node_in_chunk);
 
     DECOMPRESS_CACHE.with(|cell| {
         let mut cache = cell.borrow_mut();
-        if cache.group_id != group_id || cache.chunk_idx != chunk_idx || cache.count == 0 {
-            decompress_chunk(chunk.node_mask, chunk.compressed, chunk.packed, &mut cache.coords);
-            cache.group_id = group_id;
-            cache.chunk_idx = chunk_idx;
-            cache.count = count_set_bits(chunk.node_mask);
+        if cache.group_id == group_id && cache.chunk_idx == chunk_idx && cache.count != 0 {
+            // Cache hit — use cached node_mask, skip blob scan
+            if !test_bit(&cache.node_mask, node_in_chunk) {
+                return None;
+            }
+            let node_idx = count_bits_before(&cache.node_mask, node_in_chunk);
+            return Some(cache.coords[node_idx]);
         }
+        // Cache miss — scan blob, decompress, populate cache
+        let chunk = find_chunk_in_blob(&group.data, chunk_idx);
+        if !test_bit(chunk.node_mask, node_in_chunk) {
+            return None;
+        }
+        let node_idx = count_bits_before(chunk.node_mask, node_in_chunk);
+        decompress_chunk(chunk.node_mask, chunk.compressed, chunk.packed, &mut cache.coords);
+        cache.node_mask = *chunk.node_mask;
+        cache.group_id = group_id;
+        cache.chunk_idx = chunk_idx;
+        cache.count = count_set_bits(chunk.node_mask);
         Some(cache.coords[node_idx])
     })
 }
