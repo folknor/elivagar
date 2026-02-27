@@ -13,46 +13,34 @@
 
 ## Performance
 
-Known regressions from SortedNodeStore compression (`b866306`). These code paths are required for planet-scale ingestion and cannot be reverted.
+SortedNodeStore compression (`b866306`) introduced a PBF phase regression. Required for planet-scale, cannot be reverted.
 
-- [ ] **PBF phase +1.3s** (8.0s → 9.3s on plantasjen Denmark) — SortedNodeStore compression is slower than old flat mmap.
+- [ ] **PBF phase regression** (8.0s → 9.3s on plantasjen Denmark). Root cause: `decompress_chunk` DRAM latency on the 270 MB compressed blob. Partially mitigated on dm6 (14.6s→13.7s PBF phase) via:
+  - 4-entry LRU decompression cache (`18b13e4`) — decompress_chunk total -52%
+  - UnsafeCell replacing RefCell (`4ac8c11`) — -3.1%
+  - Scratch vec hoisting (`9e014d1`) — -5-7%
+  - Tried and rejected: larger chunks (512, +800ms), accumulator unpacking (-10%), offset table (irrelevant at 76% cache hit rate)
+  - Remaining bottleneck is fundamentally DRAM-latency-bound (820ns avg per miss). Further gains need smaller blob or better access locality. See inline comments in `node_index.rs` for details.
 
-  Done:
-  - [x] Add hotpath instrumentation to node_index.rs — 7 functions annotated (`205aa41`)
-  - [x] Build synthetic benchmark (`bench_node_store.rs`) — 5M-50M nodes, way-like + random lookups (`205aa41`)
-  - [x] Cache `node_mask` in `DecompressCache` — skip `find_chunk_in_blob` on cache hits (`d90d4a1`). Synthetic: -18% way-like lookups. Real Denmark: in the noise.
-  - [x] Offset table for `find_chunk_in_blob` — tried, reverted. Cache hit rate ~95% means miss path is irrelevant.
-  - [x] Remove `#[hotpath::measure]` from `get` and `get_from_group_cached` (`178ca73`). Instrumentation at 23M calls added >50% overhead.
-  - [x] Replace `RefCell<DecompressCache>` with `UnsafeCell<DecompressCache>` (`4ac8c11`). Way-like: -3.1%.
-  - [x] Add `--build-only` mode to `bench_node_store.rs` (`da78f60`). Write path profile: put 53%, flush_chunk 24%, compress_coords_into 8%.
-  - [x] Hoist scratch Vecs in `flush_chunk()` and `compress_coords_into()` (`9e014d1`). Build: -5.3%. Way-like: -6.8%.
-  - [x] Run `scripts/run-hotpath.sh` on Denmark (`4ca36d9`, dm6). Key findings:
-    - `decompress_chunk`: **40.4s cumulative** (28.7M calls, 1.41 µs avg) — dominant node-store cost. 56x slower than synthetic bench (25 ns) due to cache misses on 270 MB blob.
-    - `find_chunk_in_blob`: not in top 10 — fast relative to decompression.
-    - `put`/`flush_chunk`/`compress_coords_into`: not in top 10 — write path is NOT a significant contributor.
-    - `process_raw_way`: 85.9s cumulative across threads (geometry simplification, tag matching, node lookups).
-    - Conclusion: **the regression is entirely in the read path**, specifically `decompress_chunk` cache misses. Write path optimizations don't move the needle on real data.
+- [x] **Assemble phase +0.5s** — not reproducible on dm6 (+82ms, noise). Needs plantasjen confirmation.
 
-  Done (decompress_chunk optimizations):
-  - [x] Profile `decompress_chunk` internals (`a06caa1`). u64 unaligned read in bitunpack_values. Bottleneck is DRAM latency, not compute (270 MB blob → cache misses). Synthetic 25ns vs real 1.41µs = 56x gap.
-  - [x] 4-entry LRU decompression cache (`18b13e4`). decompress_chunk calls 28.7M→23.8M (-17%), avg 1.41µs→820ns (-42%), total 40.4s→19.5s (-52%). PBF phase 23.2s→22.4s on dm6.
-  - [x] Tried larger chunk size (256→512 nodes) — reverted, clear regression. Fewer decompress calls (22.3M vs 23.8M, -6.5%) but each call 2x slower (1.73µs vs 820ns). Blob grew 270→294 MB. PBF phase 22.4s→23.2s (+800ms). The 6.5% fewer calls can't overcome 2x slower decompression + larger working set.
-  - [x] Tried accumulator-based bit unpacking — reverted, -10% regression on synthetic. Memory latency dominates, not compute.
+### Plantasjen TODO (when benchmark access available)
 
-  Remaining:
-  - [ ] The decompress_chunk bottleneck is fundamentally DRAM-latency-bound (270 MB blob, 820ns avg per miss). Further optimization requires either reducing blob size or improving access locality.
+All dm6 optimizations are committed and ready. These items need plantasjen to measure:
 
-- [x] **Assemble phase +0.5s** (2.2s → 2.7s on plantasjen Denmark) — investigated on dm6 (`2db9494`).
-  Compared HEAD (2877ms) vs pre-regression `2378159` (2795ms) = +82ms, within noise.
-  The +500ms on plantasjen is machine-specific and not reproducible on dm6.
-  The only pipeline.rs change in `b866306` was an early `drop(way_index)` — no assemble code changed.
-  Feature count and output size are identical between commits. No action needed.
+- [ ] **Re-baseline on plantasjen** — run `bench-self.sh` at HEAD (`189abfe` or later) with 3 runs. The old baseline was 14.7s total (9.3s pbf, 2.7s assemble) at a pre-optimization commit. The 4-entry LRU cache, UnsafeCell, and scratch vec hoisting should reduce the PBF phase. Get new numbers for all phases.
+- [ ] **Confirm assemble phase regression** — the +0.5s (2.2s→2.7s) was only measured on plantasjen and is not reproducible on dm6 (+82ms, noise). Re-measure at HEAD vs `2378159` to determine if it's real or was a measurement artifact. If real, run hotpath to identify which assemble sub-function is slower.
+- [ ] **Update README performance numbers** — README numbers should always come from plantasjen (the reference host). Update with the new baseline once measured.
+- [ ] **Run hotpath on plantasjen** — `run-hotpath.sh` to get plantasjen-specific decompress_chunk numbers. The 270 MB blob may behave differently with the Ryzen 9's larger L3 cache (64 MB vs dm6's 16 MB). This determines whether the DRAM-latency bottleneck is as severe on plantasjen.
 
-- [x] **Re-measure on dm6** — done, see baselines below.
+### Baselines
 
-Plantasjen Denmark baseline (best of 3): 14.7s total (9.3s pbf, 1.5s ocean, 0.4s sort, 2.7s assemble). 16.0M features, 53.9K unique tiles, 273 MB output.
+Plantasjen Denmark baseline (best of 3, pre-optimization): 14.7s total (9.3s pbf, 1.5s ocean, 0.4s sort, 2.7s assemble). 16.0M features, 53.9K unique tiles, 273 MB output.
 
-dm6 Denmark baseline (best of 3, `d90d4a1`, includes node_mask cache optimization):
+dm6 Denmark baseline (best of 3, `2db9494`, all optimizations applied):
+21.2s total (13.7s pbf, 2.6s ocean, 0.5s sort, 2.9s assemble). 16.0M features, 56.4K unique tiles, 286 MB output.
+
+dm6 Denmark baseline (best of 3, `d90d4a1`, pre-LRU-cache):
 22.9s total (14.6s pbf, 2.9s ocean, 0.5s sort, 2.6s assemble). 16.0M features, 56.4K unique tiles, 286 MB output.
 
 ## Quality
