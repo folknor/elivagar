@@ -22,18 +22,13 @@ Known regressions from SortedNodeStore compression (`b866306`). These code paths
   - [x] Build synthetic benchmark (`bench_node_store.rs`) — 5M-50M nodes, way-like + random lookups (`205aa41`)
   - [x] Cache `node_mask` in `DecompressCache` — skip `find_chunk_in_blob` on cache hits (`d90d4a1`). Synthetic: -18% way-like lookups. Real Denmark: in the noise.
   - [x] Offset table for `find_chunk_in_blob` — tried, reverted. Cache hit rate ~95% means miss path is irrelevant.
+  - [x] Remove `#[hotpath::measure]` from `get` and `get_from_group_cached` (`178ca73`). Instrumentation at 23M calls added >50% overhead, distorting the profile. Way-like: 2187ms → 938ms (-57%).
+  - [x] Replace `RefCell<DecompressCache>` with `UnsafeCell<DecompressCache>` (`4ac8c11`). Way-like: 938ms → 909ms (-3.1%).
+  - [x] Add `--build-only` mode to `bench_node_store.rs` (`da78f60`). Write path profile: put 53%, flush_chunk 24%, compress_coords_into 8%.
+  - [x] Hoist scratch Vecs in `flush_chunk()` and `compress_coords_into()` (`9e014d1`). Build: 986ms → 934ms (-5.3%). Way-like: 909ms → 847ms (-6.8%).
 
-  Next — diagnose where time actually goes:
-  - [ ] Remove `#[hotpath::measure]` from `get` and `get_from_group_cached` — at 23M calls the instrumentation adds ~30% overhead, distorting the profile. Keep annotations on `find_chunk_in_blob`, `decompress_chunk`, `put`, `flush_chunk`, `compress_coords_into` (called less frequently, overhead acceptable). Re-run `bench-node-store-5m.sh` to see true costs.
+  Next:
   - [ ] Run `scripts/run-hotpath.sh` on Denmark — see what fraction of PBF phase is node lookups vs PBF parsing vs tag matching vs geometry. This tells us whether optimizing node_index further has any ROI.
-
-  Next — optimize read path (`get`):
-  - [ ] Replace `RefCell<DecompressCache>` with `UnsafeCell<DecompressCache>` in the thread-local — eliminates runtime borrow checking on every lookup. The thread-local guarantees single-threaded access so the RefCell is unnecessary overhead. Measure with `bench-node-store-5m.sh`.
-
-  Next — optimize write path (`put`):
-  - [ ] Profile `put()` in isolation — the old flat store was `mmap[offset] = bytes` (one memcpy per node). The new `put()` does bitmask ops, Vec pushes, and periodic `flush_chunk()` which runs FOR compression + blob appends. Add a build-only mode to `bench_node_store.rs` (skip lookups) to isolate write path cost.
-  - [ ] Hoist scratch Vecs in `flush_chunk()` — `lats` and `lons` are allocated every call (~205K calls for Denmark). Move them to `SortedNodeStore` fields like `compress_buf` already is.
-  - [ ] Hoist scratch Vecs in `compress_coords_into()` — `lat_offsets` and `lon_offsets` allocated every call. Same fix: reusable scratch buffers on the store.
 
 - [ ] **Assemble phase +0.5s** (2.2s → 2.7s on plantasjen Denmark) — NOT from node lookups (assemble phase does not use the node store). Separate root cause. Diagnose by comparing `run-hotpath.sh` output at `b866306` vs prior commit to see which assemble sub-function got slower.
 
