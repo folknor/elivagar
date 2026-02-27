@@ -222,13 +222,17 @@ fn bitunpack_values(packed: &[u8], n: usize, bit_width: u8, out: &mut [u32]) {
     for i in 0..n {
         let byte_idx = bit_offset / 8;
         let bit_idx = bit_offset % 8;
-        // Read up to 5 bytes (32-bit value can span 5 bytes if not aligned)
-        let mut raw: u64 = 0;
-        let bytes_avail = packed.len() - byte_idx;
-        let bytes_to_read = 5.min(bytes_avail);
-        for b in 0..bytes_to_read {
-            raw |= u64::from(packed[byte_idx + b]) << (b * 8);
-        }
+        // Read a u64 covering the bits we need. Fast path: single unaligned load
+        // when ≥8 bytes remain. Slow path: byte-by-byte near end of buffer.
+        let raw = if byte_idx + 8 <= packed.len() {
+            u64::from_le_bytes(packed[byte_idx..byte_idx + 8].try_into().unwrap())
+        } else {
+            let mut r: u64 = 0;
+            for b in byte_idx..packed.len() {
+                r |= u64::from(packed[b]) << ((b - byte_idx) * 8);
+            }
+            r
+        };
         out[i] = ((raw >> bit_idx) & mask) as u32;
         bit_offset += bw as usize;
     }
