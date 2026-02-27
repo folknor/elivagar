@@ -15,12 +15,15 @@
 
 SortedNodeStore compression (`b866306`) introduced a PBF phase regression. Required for planet-scale, cannot be reverted.
 
-- [ ] **PBF phase regression** (8.0s → 9.3s on plantasjen Denmark). Root cause: `decompress_chunk` DRAM latency on the 270 MB compressed blob. Partially mitigated on dm6 (14.6s→13.7s PBF phase) via:
+- [x] **PBF phase regression** (8.0s → 9.3s on plantasjen Denmark) — **accepted cost**. The regression is the price of SortedNodeStore compression, which is required for planet-scale (51 GB vs 200+ GB uncompressed). Root cause: `decompress_chunk` DRAM latency on the 270 MB compressed blob. Partially mitigated on dm6 (14.6s→13.7s PBF phase) via:
   - 4-entry LRU decompression cache (`18b13e4`) — decompress_chunk total -52%
   - UnsafeCell replacing RefCell (`4ac8c11`) — -3.1%
   - Scratch vec hoisting (`9e014d1`) — -5-7%
   - Tried and rejected: larger chunks (512, +800ms), accumulator unpacking (-10%), offset table (irrelevant at 76% cache hit rate)
-  - Remaining bottleneck is fundamentally DRAM-latency-bound (820ns avg per miss). Further gains need smaller blob or better access locality. See inline comments in `node_index.rs` for details.
+  - Remaining bottleneck is fundamentally DRAM-latency-bound. The 270 MB blob doesn't fit in L3 cache (16 MB on dm6, 64 MB on plantasjen), so ~24% of lookups miss all caches and wait ~820ns for DRAM (vs 25ns when L1-hot in synthetic benchmarks). Compute optimizations don't help — the CPU is waiting on memory, not arithmetic.
+  - **Smaller blob**: Better compression ratio → more of the blob fits in L3 → fewer cache misses. Current ratio is 75% on Denmark. Unclear how much further it can shrink without losing decode speed.
+  - **Better access locality**: Node lookups follow way-reference order, which jumps randomly across the blob. If nodes frequently accessed together were stored nearby in memory, cache lines (64 bytes per fetch) would serve multiple lookups before eviction. Would require reordering the store to match access patterns — significant undertaking.
+  - Both approaches are speculative with unclear payoff. The blob grows with dataset size (planet >> 270 MB), so even server-class L3 caches (32 MB/CCD on EPYC Genoa, 96 MB/CCD on Genoa-X) won't cover it. The access pattern is dictated by way references and is essentially random. Reordering would require a pre-pass over all ways, duplicating the expensive work. The 1.3s regression is a reasonable trade for planet-scale support. See inline comments in `node_index.rs` for details.
 
 - [x] **Assemble phase +0.5s** — not reproducible on dm6 (+82ms, noise). Needs plantasjen confirmation.
 
