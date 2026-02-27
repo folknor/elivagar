@@ -8,6 +8,7 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 - Never pipe commands with |. Write a script instead.
 - Never read or write from /tmp. All data lives in the project.
 - Never run raw cargo, curl, pkill. Use the scripts below.
+- **Never run the full pipeline on real PBF data (bench-self.sh, bench.sh, run.sh, run-hotpath.sh) unless the user explicitly asks.** Use synthetic benchmarks (bench-node-store.sh, bench-pmtiles.sh) for iteration. Full pipeline runs are expensive and should only happen when the user decides it's time.
 
 ## Scripts
 

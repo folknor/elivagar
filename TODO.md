@@ -15,11 +15,34 @@
 
 Known regressions from SortedNodeStore compression (`b866306`). These code paths are required for planet-scale ingestion and cannot be reverted.
 
-- [ ] **PBF phase +1.3s** (8.0s → 9.3s on plantasjen Denmark) — new FOR-bitpacked node lookup is slower than the old flat array. Optimize the `find_chunk_in_blob()` / decompression hot path.
-- [ ] **Assemble phase +0.5s** (2.2s → 2.7s on plantasjen Denmark) — NOT from node lookups (assemble phase does not use the node store). Separate root cause to investigate.
-- [ ] **Re-measure on dm6** — the above numbers are from plantasjen. Establish dm6 baseline before/after to have actionable local numbers.
+- [ ] **PBF phase +1.3s** (8.0s → 9.3s on plantasjen Denmark) — SortedNodeStore compression is slower than old flat mmap. Two cost centers: `put()` (write path, runs during node parsing) and `get()` (read path, runs during way processing).
+
+  Done:
+  - [x] Add hotpath instrumentation to node_index.rs — 7 functions annotated (`205aa41`)
+  - [x] Build synthetic benchmark (`bench_node_store.rs`) — 5M-50M nodes, way-like + random lookups (`205aa41`)
+  - [x] Cache `node_mask` in `DecompressCache` — skip `find_chunk_in_blob` on cache hits (`d90d4a1`). Synthetic: -18% way-like lookups. Real Denmark: in the noise.
+  - [x] Offset table for `find_chunk_in_blob` — tried, reverted. Cache hit rate ~95% means miss path is irrelevant.
+
+  Next — diagnose where time actually goes:
+  - [ ] Remove `#[hotpath::measure]` from `get` and `get_from_group_cached` — at 23M calls the instrumentation adds ~30% overhead, distorting the profile. Keep annotations on `find_chunk_in_blob`, `decompress_chunk`, `put`, `flush_chunk`, `compress_coords_into` (called less frequently, overhead acceptable). Re-run `bench-node-store-5m.sh` to see true costs.
+  - [ ] Run `scripts/run-hotpath.sh` on Denmark — see what fraction of PBF phase is node lookups vs PBF parsing vs tag matching vs geometry. This tells us whether optimizing node_index further has any ROI.
+
+  Next — optimize read path (`get`):
+  - [ ] Replace `RefCell<DecompressCache>` with `UnsafeCell<DecompressCache>` in the thread-local — eliminates runtime borrow checking on every lookup. The thread-local guarantees single-threaded access so the RefCell is unnecessary overhead. Measure with `bench-node-store-5m.sh`.
+
+  Next — optimize write path (`put`):
+  - [ ] Profile `put()` in isolation — the old flat store was `mmap[offset] = bytes` (one memcpy per node). The new `put()` does bitmask ops, Vec pushes, and periodic `flush_chunk()` which runs FOR compression + blob appends. Add a build-only mode to `bench_node_store.rs` (skip lookups) to isolate write path cost.
+  - [ ] Hoist scratch Vecs in `flush_chunk()` — `lats` and `lons` are allocated every call (~205K calls for Denmark). Move them to `SortedNodeStore` fields like `compress_buf` already is.
+  - [ ] Hoist scratch Vecs in `compress_coords_into()` — `lat_offsets` and `lon_offsets` allocated every call. Same fix: reusable scratch buffers on the store.
+
+- [ ] **Assemble phase +0.5s** (2.2s → 2.7s on plantasjen Denmark) — NOT from node lookups (assemble phase does not use the node store). Separate root cause. Diagnose by comparing `run-hotpath.sh` output at `b866306` vs prior commit to see which assemble sub-function got slower.
+
+- [x] **Re-measure on dm6** — done, see baselines below.
 
 Plantasjen Denmark baseline (best of 3): 14.7s total (9.3s pbf, 1.5s ocean, 0.4s sort, 2.7s assemble). 16.0M features, 53.9K unique tiles, 273 MB output.
+
+dm6 Denmark baseline (best of 3, `d90d4a1`, includes node_mask cache optimization):
+22.9s total (14.6s pbf, 2.9s ocean, 0.5s sort, 2.6s assemble). 16.0M features, 56.4K unique tiles, 286 MB output.
 
 ## Quality
 
