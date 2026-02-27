@@ -320,7 +320,7 @@ dependencies = [
  "mimalloc",
  "pbfhogg",
  "pmtiles",
- "protohoggr 0.2.0",
+ "protohoggr",
  "rayon",
  "rustc-hash",
  "serde",
@@ -786,7 +786,7 @@ dependencies = [
  "flate2",
  "hotpath 0.12.0",
  "memmap2",
- "protohoggr 0.2.0 (git+https://github.com/folknor/protohoggr.git)",
+ "protohoggr",
  "quick-xml",
  "rayon",
  "rustc-hash",
@@ -856,11 +856,6 @@ dependencies = [
 [[package]]
 name = "protohoggr"
 version = "0.2.0"
-
-[[package]]
-name = "protohoggr"
-version = "0.2.0"
-source = "git+https://github.com/folknor/protohoggr.git#a8c050d71d065998b6fee8469a6a11fa4e4cf788"
 
 [[package]]
 name = "quanta"

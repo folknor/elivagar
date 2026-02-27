@@ -41,8 +41,8 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`.
 - `pipeline.rs` — PBF → ocean → sort → assemble → PMTiles
 
 **Shortbread profile:**
-- `shortbread.rs` — tag matching, layer definitions, 26 layers
-- `shortbread_tests.rs` — spec test cases (65+), loaded via `#[path]` from shortbread.rs
+- `shortbread/` — tag matching, layer definitions, 26 layers (mod.rs, boundaries.rs, land.rs, streets.rs, transport.rs, water.rs)
+- `shortbread_tests.rs` — spec test cases (65+), loaded via `#[path]` from shortbread/mod.rs
 - `pois.rs` — POI tag matching
 - `wire_format.rs` — sort record binary serialization
 
