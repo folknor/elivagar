@@ -92,7 +92,7 @@ Sequential, same PBF input:
 - `.unwrap()` forbidden by clippy — use `expect()` or propagate errors
 - Cast lints are strict — annotate with `#[allow(clippy::cast_*)]` where needed
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)
-- `ELIVAGAR_NODE_STATS=1` — enables SortedNodeStore diagnostic scan (node/chunk counts, compression ratio). Off by default because it does a full scan of all group blobs, which is slow at planet scale.
+- `ELIVAGAR_NODE_STATS=1` — enables detailed SortedNodeStore diagnostic scan (chunk counts, compression ratio, blob bytes). Runs during PBF phase so it adds to `phase12_ms` — safe for hotpath runs but not for bench timing. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after all timing kv pairs and never affect benchmarks.
 
 ## Benchmark discipline
 

@@ -26,7 +26,7 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 
 | Variable | Description |
 |----------|-------------|
-| `ELIVAGAR_NODE_STATS=1` | Print detailed SortedNodeStore diagnostics (node count, chunk count, compression ratio). Requires a full scan of the node store at the end of the PBF phase — fast on regional extracts, slow at planet scale. |
+| `ELIVAGAR_NODE_STATS=1` | Print detailed SortedNodeStore diagnostics (chunk count, compression ratio, blob bytes). Requires a full scan of the node store during the PBF phase — fast on regional extracts, slow at planet scale. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after timing, without this variable. |
 
 ### Example
 
