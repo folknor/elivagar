@@ -59,6 +59,7 @@ See [notes/planet-scale.md](notes/planet-scale.md) for the full roadmap.
 
 Extracted from [`.plans/theoretical-performance-review-v1.md`](.plans/theoretical-performance-review-v1.md).
 Deep-dive investigations completed 2026-02-28 on the top 3 items. Findings inline below.
+Box-level investigations (Batch 1: Boxes 2, 4, 5, 8) launched 2026-02-28. Results in `.plans/investigations/`.
 
 ### INVESTIGATED: Sort payload width amplification (Boxes 3, 6) — CONFIRMED, high leverage
 
