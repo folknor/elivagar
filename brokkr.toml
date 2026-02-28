@@ -25,6 +25,12 @@ data = "data"
 scratch = "data/tilegen_tmp"
 target = "target"
 
+[dm6.drives]
+source = "nvme"
+data = "nvme"
+scratch = "nvme"
+target = "nvme"
+
 [dm6.datasets.denmark]
 pbf = "denmark-20260220-seq4704.osm.pbf"
 sha256_pbf = "aa5bb8658c9526f2d904c8131b519d02d8c1099e2cf0ed60f4a6067a50048c6b"
