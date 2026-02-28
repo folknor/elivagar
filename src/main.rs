@@ -111,6 +111,7 @@ fn main() {
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")
         .percentiles(&[50, 95, 99])
+        .with_functions_limit(0)
         .build();
 
     if let Err(e) = elivagar::run(&config) {

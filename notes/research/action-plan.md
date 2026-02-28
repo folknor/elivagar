@@ -39,25 +39,45 @@ Denmark -1.5%, Norway -4.3%, Japan -4.4% vs `61a85b0` baseline.
 These also reduce peak memory during sort (smaller chunks = more headroom for node store).
 Directly alleviates F1 by proxy.
 
-## Tier 2 — Safety guardrails (half day)
+## Tier 2 — Safety guardrails (half day) ✅ DONE
 
-| # | Finding | Change |
-|---|---------|--------|
-| 1 | F36 | PBF size guard on flat fallback — abort with clear message |
-| 2 | F38 | Make `into_reader()` diagnostic scan optional/skip in release |
+Committed as `24b9b20`.
 
-No performance impact. Prevents catastrophic planet-scale failure modes.
+| # | Finding | Change | Status |
+|---|---------|--------|--------|
+| 1 | F36 | PBF size guard on flat fallback — abort if >1 GB unsorted | ✅ |
+| 2 | F38 | Diagnostic scan gated behind `ELIVAGAR_NODE_STATS=1` | ✅ |
+
+Cheap stats (`node_store_nodes`, `node_store_groups`) always emitted after timing — no
+benchmark contamination. Expensive scan only runs with env var, acceptable for hotpath runs.
 
 ## Tier 3 — Geometry allocation reduction (1-2 days)
 
-Targets the 5.8 GB `for_each_zoom_simplified` alloc number.
+| # | Finding | Change | Denmark savings | Status |
+|---|---------|--------|-----------------|--------|
+| 1 | F26 | `SimplifySingleScratch` via thread_local | 1.3 GB (23.6%) | ✅ `c02f951` |
+| 2 | F27 | `clip_linestring_into` buffer-reuse variant | ~1.5 GB | |
+| 3 | F28 | `to_tile_coords_into` in multipolygon emission | per-tile allocs eliminated | |
+| 4 | F35 | Way reversal in-place (`.reverse()`) | minor | |
 
-| # | Finding | Change | Denmark savings |
-|---|---------|--------|-----------------|
-| 1 | F26 | `SimplifySingleScratch` — eliminate cascade copy | ~2 GB |
-| 2 | F27 | `clip_linestring_into` buffer-reuse variant | ~1.5 GB |
-| 3 | F28 | `to_tile_coords_into` in multipolygon emission | per-tile allocs eliminated |
-| 4 | F35 | Way reversal in-place (`.reverse()`) | minor |
+### F26 notes
+
+First attempt used rayon `map_init` to thread scratch buffers through `process_raw_way`.
+Reduced per-function alloc by 14.5% but **regressed wall-clock by 5.4%** on Japan (74.3→78.3s).
+Root cause: `map_init` increased total thread allocations by 1.2 GB despite reducing per-function
+alloc — rayon scheduling overhead outweighed the savings. mimalloc already handles small
+alloc/free cycles efficiently, so avoiding them didn't help.
+
+Second attempt used `thread_local!` inside `for_each_zoom_simplified` directly. No signature
+changes, no `map_init`, plain `map`. Results on dm6:
+
+| Dataset | Bench | `for_each_zoom_simplified` alloc | Total thread alloc |
+|---------|-------|----------------------------------|-------------------|
+| Denmark | 19748 ms (-1.0% vs baseline) | 4.2 GB (-23.6%) | 47.9 GB (-2.8%) |
+| Japan | 75718 ms (+1.9% vs baseline) | 23.9 GB | 211.3 GB |
+
+Lesson: prefer `thread_local!` over `map_init` for per-worker scratch in rayon. The TLS
+lookup cost is negligible; `map_init` changes rayon's work distribution and adds overhead.
 
 ## Tier 4 — Assembly worker persistence (1 day)
 
@@ -104,10 +124,10 @@ High-risk or needs benchmarking before deciding:
 
 ## Sequencing rationale
 
-Tiers 0-1 are complete. ~63 GB sort I/O reduction banked.
+Tiers 0-2 complete, Tier 3 F26 done. ~63 GB sort I/O reduction + ~1.3 GB geometry alloc
+reduction banked (Denmark). Japan total thread alloc: 211 GB.
 
-Next: Tier 2 (safety guardrails — half day), then benchmark North America (~17 GB PBF) to
-validate memory headroom before committing to Tier 3+ work.
+Next: remaining Tier 3 items (F27, F28, F35), then North America gate.
 
 ## Milestone: North America gate
 
