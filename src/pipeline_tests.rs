@@ -218,7 +218,7 @@ fn emit_line_too_few_points() {
     let m = test_layer_match(Layer::Streets, GeomExpect::Line);
     let coords = [Point { x: 0.5, y: 0.5 }];
     let mut records = Vec::new();
-    let count = emit_line_feature(101, &coords, &m, 0, 0, &mut records);
+    let count = emit_line_feature(101, &coords, &m, 0, 0, &mut records, &mut geometry::SimplifySingleScratch::new());
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -231,7 +231,7 @@ fn emit_line_decodes_correctly() {
         Point { x: 0.7, y: 0.7 },
     ];
     let mut records = Vec::new();
-    emit_line_feature(100, &coords, &m, 0, 0, &mut records);
+    emit_line_feature(100, &coords, &m, 0, 0, &mut records, &mut geometry::SimplifySingleScratch::new());
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -265,7 +265,7 @@ fn emit_line_cascading_simplification() {
         Point { x: 0.500_001, y: 0.500_001 },
     ];
     let mut records = Vec::new();
-    emit_line_feature(99, &coords, &m, 0, 14, &mut records);
+    emit_line_feature(99, &coords, &m, 0, 14, &mut records, &mut geometry::SimplifySingleScratch::new());
 
     // At z=14 this line is ~0.4 pixel which is sub-pixel, but Streets skips
     // the size filter, so it should still produce a record at z=14.
@@ -291,7 +291,7 @@ fn emit_polygon_too_few_points() {
         Point { x: 0.5, y: 0.7 },
     ];
     let mut records = Vec::new();
-    let count = emit_polygon_feature(201, &coords, &m, 0, 0, &mut records);
+    let count = emit_polygon_feature(201, &coords, &m, 0, 0, &mut records, &mut geometry::SimplifySingleScratch::new());
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -307,7 +307,7 @@ fn emit_polygon_decodes_correctly() {
         Point { x: 0.3, y: 0.3 },
     ];
     let mut records = Vec::new();
-    emit_polygon_feature(200, &coords, &m, 0, 0, &mut records);
+    emit_polygon_feature(200, &coords, &m, 0, 0, &mut records, &mut geometry::SimplifySingleScratch::new());
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -360,7 +360,7 @@ fn emit_polygon_zoom_dependent_attrs() {
     ];
     // At z=0: only 1 attr ("kind", min_zoom=0)
     let mut records = Vec::new();
-    emit_polygon_feature(300, &coords_z0, &m_z0, 0, 0, &mut records);
+    emit_polygon_feature(300, &coords_z0, &m_z0, 0, 0, &mut records, &mut geometry::SimplifySingleScratch::new());
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -385,7 +385,7 @@ fn emit_polygon_zoom_dependent_attrs() {
         Point { x: 0.500_00, y: 0.500_00 },
     ];
     records.clear();
-    emit_polygon_feature(300, &coords_z14, &m_z14, 14, 14, &mut records);
+    emit_polygon_feature(300, &coords_z14, &m_z14, 14, 14, &mut records, &mut geometry::SimplifySingleScratch::new());
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);

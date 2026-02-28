@@ -345,24 +345,45 @@ fn perp_dist_sq(p: &Point, a: &Point, dx: f64, dy: f64, len_sq: f64) -> f64 {
 // and emit_ocean_polygon. Douglas-Peucker simplification is hierarchical,
 // so each zoom's result is always a subset of the previous zoom's.
 
+/// Reusable scratch buffers for [`for_each_zoom_simplified`].
+/// Hoist outside tight loops to avoid per-call allocation of cascade/simplification
+/// buffers. Buffers grow to accommodate the largest geometry and stay allocated.
+pub struct SimplifySingleScratch {
+    pub cascade: Vec<Point>,
+    pub keep_buf: Vec<bool>,
+    pub simp_buf: Vec<Point>,
+}
+
+impl SimplifySingleScratch {
+    pub fn new() -> Self {
+        Self {
+            cascade: Vec::new(),
+            keep_buf: Vec::new(),
+            simp_buf: Vec::new(),
+        }
+    }
+}
+
 /// Cascading simplification for a single geometry (line or polygon ring).
 ///
 /// Iterates from `z_hi` down to `z_lo`, simplifying the geometry at each zoom
 /// using the previous zoom's result. Calls `callback(z, &simplified)` at each
 /// zoom level. Stops early if the simplified geometry drops below `min_points`.
+/// Pass a [`SimplifySingleScratch`] to reuse buffers across calls.
 #[hotpath::measure]
 pub fn for_each_zoom_simplified<F>(
     merc: &[Point],
     z_lo: u8,
     z_hi: u8,
     min_points: usize,
+    scratch: &mut SimplifySingleScratch,
     mut callback: F,
 ) where
     F: FnMut(u8, &[Point]),
 {
-    let mut cascade = merc.to_vec();
-    let mut keep_buf: Vec<bool> = Vec::new();
-    let mut simp_buf: Vec<Point> = Vec::new();
+    let SimplifySingleScratch { cascade, keep_buf, simp_buf } = scratch;
+    cascade.clear();
+    cascade.extend_from_slice(merc);
     // Track max deviation² from last DP run for cascade convergence check.
     let mut last_max_dev_sq: f64 = f64::MAX;
     for z in (z_lo..=z_hi).rev() {
@@ -370,7 +391,7 @@ pub fn for_each_zoom_simplified<F>(
             // Pre-DP subpixel check: if the cascade's bbox diagonal is < 1 pixel
             // at this zoom, the feature is invisible here and at all coarser zooms.
             // Skips DP entirely — O(1) vs O(n²).
-            if merc_bbox_is_subpixel(&cascade, z) {
+            if merc_bbox_is_subpixel(cascade, z) {
                 break;
             }
             // Option E: if cascade already has ≤ min_points vertices, DP can't
@@ -380,15 +401,15 @@ pub fn for_each_zoom_simplified<F>(
                 // Option D: if last DP's max deviation is already below this
                 // zoom's tolerance, the cascade is optimal — skip DP.
                 if last_max_dev_sq >= tol * tol {
-                    last_max_dev_sq = simplify_into(&cascade, tol, &mut keep_buf, &mut simp_buf);
-                    std::mem::swap(&mut cascade, &mut simp_buf);
+                    last_max_dev_sq = simplify_into(cascade, tol, keep_buf, simp_buf);
+                    std::mem::swap(cascade, simp_buf);
                 }
             }
         }
         if cascade.len() < min_points {
             break;
         }
-        callback(z, &cascade);
+        callback(z, cascade);
     }
 }
 
