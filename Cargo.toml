@@ -75,6 +75,7 @@ io_other_error = "deny"
 [features]
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
+# linux-io-uring = ["dep:io-uring", "dep:libc"]
 
 [profile.release]
 strip = true
