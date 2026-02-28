@@ -9,7 +9,7 @@
 // Format:
 //   u64   osm_id
 //   u8    geom_type (1=point, 2=line, 3=polygon)
-//   u32   geometry command count
+//   u16   geometry command count
 //   u32×  geometry commands
 //   u8    attribute count
 //   per attribute:
@@ -75,11 +75,11 @@ pub(crate) fn encode_feature_data_with_attrs(
     geom_cmds: &[u32],
     attrs_bytes: &[u8],
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(13 + geom_cmds.len() * 4 + attrs_bytes.len());
+    let mut buf = Vec::with_capacity(11 + geom_cmds.len() * 4 + attrs_bytes.len());
     buf.extend_from_slice(&osm_id.to_le_bytes());
     buf.push(geom_type as u8);
     #[allow(clippy::cast_possible_truncation)]
-    let cmd_count = geom_cmds.len() as u32;
+    let cmd_count = geom_cmds.len() as u16;
     buf.extend_from_slice(&cmd_count.to_le_bytes());
     for &cmd in geom_cmds {
         buf.extend_from_slice(&cmd.to_le_bytes());
@@ -112,7 +112,7 @@ pub(crate) fn add_feature_to_layer(
     geom_pool: &mut Vec<Vec<u32>>,
     tags_pool: &mut Vec<Vec<(u16, u16)>>,
 ) {
-    if data.len() < 13 {
+    if data.len() < 11 {
         return;
     }
 
@@ -135,8 +135,8 @@ pub(crate) fn add_feature_to_layer(
     // Each Feature owns its Vec<u32> because merge_same_attr_geometries needs random
     // access across all Features in a tile. Vecs are pooled per rayon worker — pop from
     // pool here, reclaimed after encode via LayerBuilder::reclaim_features.
-    let cmd_count = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("cmd_count")) as usize;
-    pos += 4;
+    let cmd_count = u16::from_le_bytes(data[pos..pos + 2].try_into().expect("cmd_count")) as usize;
+    pos += 2;
     let cmd_bytes = cmd_count * 4;
     if pos + cmd_bytes > data.len() {
         return;

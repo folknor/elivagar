@@ -1282,7 +1282,7 @@ fn emit_multipolygon_feature(
             }
 
             // ring_refs borrows all_rings — must be local (can't hoist across calls).
-            let ring_refs: Vec<&[(i32, i32)]> = all_rings.iter().map(Vec::as_slice).collect();
+            let ring_refs: SmallVec<[&[(i32, i32)]; 4]> = all_rings.iter().map(Vec::as_slice).collect();
             mvt::encode_polygon(&mut geom_buf, &ring_refs);
             if geom_buf.is_empty() {
                 return;

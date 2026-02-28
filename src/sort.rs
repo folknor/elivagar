@@ -134,7 +134,7 @@ impl SortWriter {
     /// Add a record to the buffer. If the buffer exceeds `chunk_size_bytes`,
     /// the current buffer is sorted and flushed to a chunk file on disk.
     pub fn push(&mut self, record: SortRecord) -> io::Result<()> {
-        self.buffer_bytes += record.data.len() + 8; // 8 for the key
+        self.buffer_bytes += record.data.len() + std::mem::size_of::<SortRecord>();
         self.buffer.push(record);
         if self.buffer_bytes >= self.chunk_size_bytes {
             self.flush_chunk()?;

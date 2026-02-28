@@ -460,9 +460,12 @@ impl CacheEntry {
 /// (28.7M→23.8M on Denmark) and avg latency by 42% (1.41µs→820ns).
 /// Total decompress_chunk time: 40.4s→19.5s (-52%). PBF phase -800ms.
 ///
+/// 8 entries improves hit rate for larger ways (20+ nodes spanning 5+ chunks)
+/// and inter-way cross-pollination within PBF blocks. Memory cost: ~17 KB/thread.
+///
 /// LRU policy: on hit, swap entry to front; on miss, evict last entry.
 /// `entries.swap()` avoids memcpy of the large coords arrays.
-const CACHE_ENTRIES: usize = 4;
+const CACHE_ENTRIES: usize = 8;
 
 struct DecompressCache {
     entries: [CacheEntry; CACHE_ENTRIES],
@@ -472,6 +475,10 @@ impl DecompressCache {
     fn new() -> Self {
         DecompressCache {
             entries: [
+                CacheEntry::new(),
+                CacheEntry::new(),
+                CacheEntry::new(),
+                CacheEntry::new(),
                 CacheEntry::new(),
                 CacheEntry::new(),
                 CacheEntry::new(),
@@ -663,13 +670,13 @@ impl SortedNodeStore {
             // current_group_data already cleared by flush_group
             self.current_chunk_id = chunk_id;
             self.current_node_mask = [0u8; BITMASK_BYTES];
-            self.current_coords = Vec::with_capacity(NODES_PER_CHUNK);
+            self.current_coords.clear();
         } else if chunk_id != self.current_chunk_id {
             // Same group, new chunk: flush current chunk.
             self.flush_chunk();
             self.current_chunk_id = chunk_id;
             self.current_node_mask = [0u8; BITMASK_BYTES];
-            self.current_coords = Vec::with_capacity(NODES_PER_CHUNK);
+            self.current_coords.clear();
         }
 
         set_bit(&mut self.current_node_mask, node_in_chunk);

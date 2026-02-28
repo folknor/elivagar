@@ -164,7 +164,7 @@ impl PmtilesWriter {
 
         let dir_path = tmp_dir.join("dir_entries.bin");
         let dir_file = File::create(&dir_path)?;
-        let dir_writer = BufWriter::new(dir_file);
+        let dir_writer = BufWriter::with_capacity(1 << 16, dir_file);
 
         Ok(PmtilesWriter {
             config,
@@ -230,6 +230,9 @@ impl PmtilesWriter {
     /// # Errors
     /// Returns `io::Error` if file creation, directory encoding, or data copy fails.
     pub fn write_to(&mut self, path: &Path) -> io::Result<()> {
+        // Free dedup map — no longer needed after all tiles are added.
+        drop(std::mem::take(&mut self.dedup));
+
         let entries = self.collect_dir_entries()?;
         let metadata_json = build_metadata(&self.config);
 
@@ -257,7 +260,9 @@ impl PmtilesWriter {
         let leaf_dirs_length = leaf_bytes.len() as u64;
         let data_offset = leaf_dirs_offset + leaf_dirs_length;
 
+        // Save count before dropping entries to free ~120 MB at planet scale.
         let num_entries = entries.len() as u64;
+        drop(entries);
         let header = self.build_header(
             root_dir_offset,
             root_dir_length,
@@ -271,7 +276,7 @@ impl PmtilesWriter {
         );
 
         let file = File::create(path)?;
-        let mut w = BufWriter::new(file);
+        let mut w = BufWriter::with_capacity(1 << 20, file);
         w.write_all(&header)?;
         w.write_all(&root_bytes)?;
         w.write_all(&metadata_compressed)?;
@@ -454,6 +459,11 @@ fn build_leaf_directories(
     let mut leaf_blob: Vec<u8> = Vec::new();
     let mut root_entries: Vec<DirEntry> = Vec::new();
 
+    // Reuse compressor + output buffer across all leaf chunks.
+    let lvl = CompressionLvl::default();
+    let mut compressor = Compressor::new(lvl);
+    let mut gz_buf: Vec<u8> = Vec::new();
+
     for chunk in entries.chunks(leaf_size) {
         let first_tile_id = match chunk.first() {
             Some(e) => e.tile_id,
@@ -461,12 +471,15 @@ fn build_leaf_directories(
         };
 
         let leaf_raw = encode_directory(chunk);
-        let leaf_compressed = gzip_compress(&leaf_raw)?;
+        let bound = compressor.gzip_compress_bound(leaf_raw.len());
+        gz_buf.resize(bound, 0);
+        let n = compressor.gzip_compress(&leaf_raw, &mut gz_buf)
+            .map_err(|e| io::Error::other(format!("{e:?}")))?;
 
         #[allow(clippy::cast_possible_truncation)]
-        let leaf_len = leaf_compressed.len() as u32;
+        let leaf_len = n as u32;
         let leaf_offset = leaf_blob.len() as u64;
-        leaf_blob.extend_from_slice(&leaf_compressed);
+        leaf_blob.extend_from_slice(&gz_buf[..n]);
 
         // run_length=0 marks a leaf directory pointer
         root_entries.push(DirEntry {
