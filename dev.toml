@@ -1,0 +1,29 @@
+project = "elivagar"
+
+# ---------------------------------------------------------------------------
+# Datasets
+# ---------------------------------------------------------------------------
+
+[datasets.denmark]
+pbf = "denmark-latest.osm.pbf"
+origin = "Geofabrik"
+
+# ---------------------------------------------------------------------------
+# Per-machine configuration
+# ---------------------------------------------------------------------------
+
+[plantasjen]
+data = "data"
+scratch = "data/tilegen_tmp"
+target = "target"
+
+[plantasjen.drives]
+source = "nvme"
+data = "ssd"
+scratch = "ssd"
+target = "hdd"
+
+[dm6]
+data = "data"
+scratch = "data/tilegen_tmp"
+target = "target"
