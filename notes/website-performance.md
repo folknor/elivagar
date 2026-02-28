@@ -1,3 +1,5 @@
+*Note: Script references below predate the dev tool. Use dev for current equivalents.*
+
 # Performance
 
 Elivagar processes Denmark (483 MB PBF, 52.5M nodes, 6.6M ways) in under

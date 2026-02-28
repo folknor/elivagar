@@ -68,7 +68,7 @@ Denmark extract (483 MB PBF) → Shortbread PMTiles, best of 3 runs:
 
 System: plantasjen (Ryzen 9 5900X, Linux 6.18). Commit: `605a1a5`.
 
-Measured with `scripts/bench.sh`. Results are logged to `benchmarks/bench.tsv` for tracking over time.
+Measured with `dev bench self`. Results stored in `.dev/results.db`.
 
 ### PMTiles writer
 
@@ -82,7 +82,7 @@ synthetic tiles (unique gzipped payloads, Hilbert-ordered), best of 5 runs
 | 500K | 110 ms | 309 ms | 2.8x |
 | 1M | 223 ms | 646 ms | 2.9x |
 
-Run with `scripts/bench-pmtiles.sh [tiles] [runs]`.
+Run with `dev bench pmtiles [--tiles N] [--runs N]`.
 
 ## Building
 

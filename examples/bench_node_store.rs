@@ -6,7 +6,7 @@
 //! and benchmarks way-like (clustered) and random lookup patterns.
 //!
 //! Run:  cargo run --release --features hotpath --example bench_node_store -- [--nodes N] [--runs R]
-//! Or:   scripts/bench-node-store.sh [nodes_millions] [runs]
+//! Or:   dev bench node-store [--nodes N] [--runs N]
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -33,12 +33,25 @@ fn main() {
     eprintln!("  Runs:        {} (best of)", config.runs);
     eprintln!();
 
-    // -----------------------------------------------------------------------
-    // Phase 1: Generate synthetic node data
-    // -----------------------------------------------------------------------
+    let (node_ids, coords) = generate_and_print_nodes(config.nodes);
+    let (build_ms, reader) = build_store(&node_ids, &coords, &config);
+
+    if config.build_only {
+        print_build_only_summary(&config, build_ms, node_ids.len());
+        return;
+    }
+
+    let (way_lookups, total_way_lookups, random_lookups) = generate_lookups(&node_ids, &config);
+    let best_way_ms = bench_way_lookups(&reader, &way_lookups, total_way_lookups, config.runs);
+    let best_rand_ms = bench_random_lookups(&reader, &random_lookups, config.runs);
+
+    print_summary(&config, build_ms, node_ids.len(), best_way_ms, total_way_lookups, best_rand_ms, random_lookups.len());
+}
+
+fn generate_and_print_nodes(count: usize) -> (Vec<i64>, Vec<(i32, i32)>) {
     eprint!("  Generating node IDs + coords... ");
     let gen_start = Instant::now();
-    let (node_ids, coords) = generate_nodes(config.nodes);
+    let (node_ids, coords) = generate_nodes(count);
     eprintln!(
         "done in {:.1?} ({} nodes, ID range {}..{})",
         gen_start.elapsed(),
@@ -46,10 +59,14 @@ fn main() {
         node_ids.first().unwrap(),
         node_ids.last().unwrap(),
     );
+    (node_ids, coords)
+}
 
-    // -----------------------------------------------------------------------
-    // Phase 2: Build SortedNodeStore (multiple runs in build-only mode)
-    // -----------------------------------------------------------------------
+fn build_store(
+    node_ids: &[i64],
+    coords: &[(i32, i32)],
+    config: &BenchConfig,
+) -> (u128, elivagar::node_index::SortedNodeStoreReader) {
     let build_runs = if config.build_only { config.runs } else { 1 };
     let mut best_build_ms = u128::MAX;
     let mut reader = None;
@@ -65,7 +82,6 @@ fn main() {
         if ms < best_build_ms {
             best_build_ms = ms;
         }
-        // Keep the last store for reader conversion
         if run == build_runs - 1 {
             eprint!("  Converting to reader... ");
             let convert_start = Instant::now();
@@ -73,36 +89,31 @@ fn main() {
             eprintln!("done in {} ms", convert_start.elapsed().as_millis());
         }
     }
-    let build_ms = best_build_ms;
-    let reader = reader.expect("reader must be built");
+    (best_build_ms, reader.expect("reader must be built"))
+}
 
-    if config.build_only {
-        // -----------------------------------------------------------------------
-        // Build-only summary
-        // -----------------------------------------------------------------------
-        eprintln!();
-        eprintln!("=== Summary (build-only, best of {}) ===", config.runs);
-        eprintln!(
-            "  {:14} {:>8} {:>12} {:>10}",
-            "", "ms", "nodes/sec", "ns/node"
-        );
-        eprintln!(
-            "  {:14} {:>8} {:>12.0} {:>10.1}",
-            "build",
-            build_ms,
-            node_ids.len() as f64 / (build_ms as f64 / 1000.0),
-            build_ms as f64 * 1_000_000.0 / node_ids.len() as f64,
-        );
-        return;
-    }
+fn print_build_only_summary(config: &BenchConfig, build_ms: u128, num_nodes: usize) {
+    eprintln!();
+    eprintln!("=== Summary (build-only, best of {}) ===", config.runs);
+    eprintln!(
+        "  {:14} {:>8} {:>12} {:>10}",
+        "", "ms", "nodes/sec", "ns/node"
+    );
+    eprintln!(
+        "  {:14} {:>8} {:>12.0} {:>10.1}",
+        "build",
+        build_ms,
+        num_nodes as f64 / (build_ms as f64 / 1000.0),
+        build_ms as f64 * 1_000_000.0 / num_nodes as f64,
+    );
+}
 
-    // -----------------------------------------------------------------------
-    // Phase 4: Generate lookup patterns
-    // -----------------------------------------------------------------------
+#[allow(clippy::type_complexity)]
+fn generate_lookups(node_ids: &[i64], config: &BenchConfig) -> (Vec<Vec<i64>>, usize, Vec<i64>) {
     eprint!("  Generating way-like lookups... ");
     let way_start = Instant::now();
-    let way_lookups = generate_way_lookups(&node_ids, config.ways);
-    let total_way_lookups: usize = way_lookups.iter().map(|w| w.len()).sum();
+    let way_lookups = generate_way_lookups(node_ids, config.ways);
+    let total_way_lookups: usize = way_lookups.iter().map(Vec::len).sum();
     eprintln!(
         "done in {:.1?} ({} ways, {} lookups)",
         way_start.elapsed(),
@@ -112,7 +123,7 @@ fn main() {
 
     eprint!("  Generating random lookups... ");
     let rand_start = Instant::now();
-    let random_lookups = generate_random_lookups(&node_ids, config.random_lookups);
+    let random_lookups = generate_random_lookups(node_ids, config.random_lookups);
     eprintln!(
         "done in {:.1?} ({} lookups)",
         rand_start.elapsed(),
@@ -120,14 +131,20 @@ fn main() {
     );
     eprintln!();
 
-    // -----------------------------------------------------------------------
-    // Phase 5: Benchmark way-like lookups
-    // -----------------------------------------------------------------------
-    let mut best_way_ms = u128::MAX;
-    for run in 0..config.runs {
+    (way_lookups, total_way_lookups, random_lookups)
+}
+
+fn bench_way_lookups(
+    reader: &elivagar::node_index::SortedNodeStoreReader,
+    way_lookups: &[Vec<i64>],
+    total_way_lookups: usize,
+    runs: usize,
+) -> u128 {
+    let mut best_ms = u128::MAX;
+    for run in 0..runs {
         let start = Instant::now();
         let mut found = 0u64;
-        for way in &way_lookups {
+        for way in way_lookups {
             for &id in way {
                 if black_box(reader.get(id)).is_some() {
                     found += 1;
@@ -138,19 +155,23 @@ fn main() {
         if run == 0 {
             eprintln!("  Way-like:  {found}/{total_way_lookups} hits");
         }
-        if ms < best_way_ms {
-            best_way_ms = ms;
+        if ms < best_ms {
+            best_ms = ms;
         }
     }
+    best_ms
+}
 
-    // -----------------------------------------------------------------------
-    // Phase 6: Benchmark random lookups
-    // -----------------------------------------------------------------------
-    let mut best_rand_ms = u128::MAX;
-    for run in 0..config.runs {
+fn bench_random_lookups(
+    reader: &elivagar::node_index::SortedNodeStoreReader,
+    random_lookups: &[i64],
+    runs: usize,
+) -> u128 {
+    let mut best_ms = u128::MAX;
+    for run in 0..runs {
         let start = Instant::now();
         let mut found = 0u64;
-        for &id in &random_lookups {
+        for &id in random_lookups {
             if black_box(reader.get(id)).is_some() {
                 found += 1;
             }
@@ -159,14 +180,22 @@ fn main() {
         if run == 0 {
             eprintln!("  Random:    {found}/{} hits", random_lookups.len());
         }
-        if ms < best_rand_ms {
-            best_rand_ms = ms;
+        if ms < best_ms {
+            best_ms = ms;
         }
     }
+    best_ms
+}
 
-    // -----------------------------------------------------------------------
-    // Summary
-    // -----------------------------------------------------------------------
+fn print_summary(
+    config: &BenchConfig,
+    build_ms: u128,
+    num_nodes: usize,
+    best_way_ms: u128,
+    total_way_lookups: usize,
+    best_rand_ms: u128,
+    num_random: usize,
+) {
     eprintln!();
     eprintln!("=== Summary (best of {}) ===", config.runs);
     eprintln!(
@@ -177,8 +206,8 @@ fn main() {
         "  {:14} {:>8} {:>12.0} {:>10.1}",
         "build",
         build_ms,
-        node_ids.len() as f64 / (build_ms as f64 / 1000.0),
-        build_ms as f64 * 1_000_000.0 / node_ids.len() as f64,
+        num_nodes as f64 / (build_ms as f64 / 1000.0),
+        build_ms as f64 * 1_000_000.0 / num_nodes as f64,
     );
     eprintln!(
         "  {:14} {:>8} {:>12.0} {:>10.1}",
@@ -191,8 +220,8 @@ fn main() {
         "  {:14} {:>8} {:>12.0} {:>10.1}",
         "random",
         best_rand_ms,
-        random_lookups.len() as f64 / (best_rand_ms as f64 / 1000.0),
-        best_rand_ms as f64 * 1_000_000.0 / random_lookups.len() as f64,
+        num_random as f64 / (best_rand_ms as f64 / 1000.0),
+        best_rand_ms as f64 * 1_000_000.0 / num_random as f64,
     );
 }
 
@@ -286,12 +315,12 @@ fn generate_nodes(count: usize) -> (Vec<i64>, Vec<(i32, i32)>) {
         coords.push((lat, lon));
 
         let r = rng.next();
-        if r % 5 == 0 {
+        if r.is_multiple_of(5) {
             // Large gap: new edit band
-            current_id += 10_000 + (rng.next() % 1_000_000) as i64;
+            current_id += 10_000 + (rng.next() % 1_000_000).cast_signed();
         } else {
             // Small gap: within same band
-            current_id += 1 + (rng.next() % 50) as i64;
+            current_id += 1 + (rng.next() % 50).cast_signed();
         }
     }
 

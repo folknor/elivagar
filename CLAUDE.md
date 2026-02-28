@@ -5,6 +5,7 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 ## Bash rules
 - Never use sed, find, awk, or complex bash commands. Write a script instead.
 - Never chain commands with &&. Write a script instead.
+- Never chain commands with ;. Write a script instead.
 - Never pipe commands with |. Write a script instead.
 - Never read or write from /tmp. All data lives in the project.
 - Never run raw cargo, curl, pkill. Use `dev`.
@@ -16,7 +17,7 @@ Standalone development tool at `~/Programs/dev`. Installed via `cargo install --
 
 - `dev check [-- args]` — run clippy + tests
 - `dev env` — show environment info
-- `dev run [args]` — build release and run with passthrough args
+- `dev run [args]` — build release and run with auto-injected flags: `--tmp-dir` (from scratch_dir config), `--ocean`/`--ocean-simplified` (auto-detected from data_dir), `HOTPATH_METRICS_SERVER_OFF=true` env var. Use `--no-ocean` to suppress ocean injection. Use `--mem 8G` to wrap with `systemd-run --scope -p MemoryMax=8G` for OOM protection on large datasets
 - `dev bench self [--dataset name] [--pbf path] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark
 - `dev bench planetiler [--dataset name] [--pbf path] [--runs N]` — Planetiler comparison benchmark
 - `dev bench tilemaker [--dataset name] [--pbf path] [--runs N]` — Tilemaker comparison benchmark (stub)
@@ -30,7 +31,7 @@ Standalone development tool at `~/Programs/dev`. Installed via `cargo install --
 - `dev results [--commit X] [--compare A B]` — query benchmark results from SQLite
 - `dev clean` — remove tilegen_tmp and scratch files
 
-Benchmark results stored in `.dev/results.db` (SQLite, gitignored).
+Benchmark results stored in `.dev/results.db` (SQLite, tracked in git for cross-host access).
 
 **NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath uses conflicting cargo feature flags (causes build conflicts). Always run sequentially.
 

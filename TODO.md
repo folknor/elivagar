@@ -40,6 +40,8 @@ dm6 Denmark baseline (best of 3, `d90d4a1`, pre-LRU-cache):
 
 ## Planet scale
 
+- notes/research/action-plan.md
+
 See [notes/planet-scale.md](notes/planet-scale.md) for the full roadmap.
 
 - [x] Step 1: `pbfhogg node-stats` tool
@@ -213,7 +215,7 @@ P0 — **Hard cap on flat index size** (node_index.rs:71, inside `if needed > se
 Add `const MAX_FLAT_INDEX_SIZE: u64 = 16 * 1024 * 1024 * 1024` (16 GB). Panic with clear message
 if growth would exceed this. Prevents runaway even if decision-point guard is bypassed.
 
-P1 — **Fix `run-safe.sh` estimation** (scripts/run-safe.sh:65-66):
+P1 — **Fix memory estimation in `dev run --mem`**:
 The pre-flight formula `store_gb = (node_count * 8 + 1.5G) / 1e9` assumes SortedNodeStore.
 If flat path is taken, estimate should use `max_node_id * 8` instead. Check sorted flag via
 `pbfhogg fileinfo` or just always assume sorted (since we're adding the PBF size guard above).

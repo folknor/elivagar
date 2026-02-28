@@ -1,3 +1,5 @@
+*Note: Script references below predate the dev tool. Use dev for current equivalents.*
+
 # Planet scale roadmap
 
 Denmark-only performance work is exhausted at 14s (18× from 242s). Geographic profiling

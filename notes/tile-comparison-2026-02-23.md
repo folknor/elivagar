@@ -1,3 +1,5 @@
+*Note: Script references below predate the dev tool. Use dev for current equivalents.*
+
 # Tile comparison: elivagar vs Planetiler vs Tilemaker (Denmark, 2026-02-23)
 
 Comparison tool: `examples/compare_tiles.rs` / `scripts/compare-tiles.sh`

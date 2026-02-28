@@ -1,3 +1,5 @@
+*Note: Script references below predate the dev tool. Use dev for current equivalents.*
+
 # Guide
 
 Elivagar is a fast Shortbread vector tile generator. It reads OpenStreetMap PBF

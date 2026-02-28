@@ -5,8 +5,9 @@ project = "elivagar"
 # ---------------------------------------------------------------------------
 
 [datasets.denmark]
-pbf = "denmark-latest.osm.pbf"
-origin = "Geofabrik"
+pbf = "denmark-20260220-seq4704.osm.pbf"
+sha256_pbf = "aa5bb8658c9526f2d904c8131b519d02d8c1099e2cf0ed60f4a6067a50048c6b"
+origin = "Geofabrik 2026-02-20 seq 4704"
 
 # ---------------------------------------------------------------------------
 # Per-machine configuration

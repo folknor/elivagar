@@ -1,5 +1,7 @@
 target
 data
+.dev/*
+!.dev/results.db
 .plans/
 .planetiler_tmp/
 .bench_stderr.*

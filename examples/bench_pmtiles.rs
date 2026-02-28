@@ -6,7 +6,7 @@
 //! data to both writers, and compares wall-clock throughput.
 //!
 //! Run:  cargo run --release --example bench_pmtiles -- [--tiles N] [--runs R]
-//! Or:   scripts/bench-pmtiles.sh [tiles] [runs]
+//! Or:   dev bench pmtiles [--tiles N] [--runs N]
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File};

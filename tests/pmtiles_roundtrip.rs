@@ -85,10 +85,6 @@ impl PmtilesReader {
         read_u64_le(&self.header, 72)
     }
 
-    fn num_entries(&self) -> u64 {
-        read_u64_le(&self.header, 80)
-    }
-
     fn num_unique(&self) -> u64 {
         read_u64_le(&self.header, 88)
     }
@@ -625,7 +621,7 @@ fn test_full_pipeline() {
         in_memory: false,
         compression_level: 6,
         force_sorted: false,
-        threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+        threads: std::thread::available_parallelism().map(std::num::NonZero::get).unwrap_or(4),
     };
 
     elivagar::run(&config).expect("pipeline should succeed");

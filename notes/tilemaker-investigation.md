@@ -1,3 +1,5 @@
+*Note: Script references below predate the dev tool. Use dev for current equivalents.*
+
 # Tilemaker Performance Investigation
 
 Goal: understand why elivagar (28s) is not 30%+ faster than Tilemaker (29s) on Denmark.
