@@ -154,6 +154,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let phase12_elapsed;
     let ocean_elapsed;
 
+    let mut node_store_stats: Option<(u64, usize)> = None;
+
     let sort_reader = if skip == Some(SkipTo::Sort) {
         // Skip straight to sort — read all existing chunks
         phase12_elapsed = None;
@@ -167,7 +169,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
-            let (sw, bounds_out, mask) = phase_read_and_process(config)?;
+            let (sw, bounds_out, mask, ns_stats) = phase_read_and_process(config)?;
+            node_store_stats = ns_stats;
             phase12_elapsed = Some(phase12_start.elapsed());
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
             save_land_mask(&config.tmp_dir, &mask)?;
@@ -264,6 +267,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if let Ok(meta) = std::fs::metadata(&config.output_path) {
         eprintln!("output_bytes={}", meta.len());
     }
+    if let Some((nodes, groups)) = node_store_stats {
+        eprintln!("node_store_nodes={nodes}");
+        eprintln!("node_store_groups={groups}");
+    }
     Ok(())
 }
 
@@ -313,9 +320,9 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 // Phase 1+2: Single-pass PBF read + feature processing
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::unwrap_in_result)]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::unwrap_in_result, clippy::type_complexity)]
 #[hotpath::measure]
-fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask), PipelineError> {
+fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     // Option so we can move to drain thread during way phase and get back after.
@@ -341,6 +348,24 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         }
         NodeStore::Sorted(SortedNodeStore::new())
     } else {
+        // Guard: flat mmap index creates a sparse file sized by max node ID (~96 GB at planet
+        // scale). On machines with <128 GB RAM this causes catastrophic page eviction. Abort
+        // with a helpful message if the PBF is large enough to be dangerous.
+        const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+        let pbf_size = std::fs::metadata(&config.pbf_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if pbf_size > MAX_FLAT_PBF_SIZE {
+            return Err(PipelineError(format!(
+                "PBF file is {:.1} GB but does not declare Sort.Type_then_ID.\n\
+                 The flat node index would create a ~96 GB sparse file, causing severe\n\
+                 performance degradation on machines with <128 GB RAM. Options:\n\
+                 1. Use --force-sorted if the PBF is actually sorted (most Geofabrik extracts are)\n\
+                 2. Sort the PBF first with: osmium sort input.pbf -o sorted.pbf\n\
+                 3. Use a sorted PBF from Geofabrik or planet.openstreetmap.org",
+                pbf_size as f64 / (1024.0 * 1024.0 * 1024.0),
+            )));
+        }
         eprintln!("  PBF not sorted — using flat mmap node index");
         NodeStore::Flat(NodeIndex::create(&idx_dir.join("nodes.idx"))?)
     });
@@ -352,6 +377,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut rel_count: u64 = 0;
     let mut features_emitted: u64 = 0;
     let mut way_index_finalized = false;
+    let mut node_store_stats: Option<(u64, usize)> = None;
     let land_mask = std::sync::Arc::new(geometry::LandMask::new());
 
     // Track data extent for ocean shapefile filtering
@@ -443,6 +469,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let nr = std::sync::Arc::new(
                         ns.into_reader().expect("failed to convert node store to reader")
                     );
+                    node_store_stats = nr.sorted_stats();
                     eprintln!("  Node store finalized ({node_count} nodes), processing ways...");
 
                     let (btx, brx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(1);
@@ -620,7 +647,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         .unwrap_or_else(|_| panic!("land_mask Arc should have single owner after worker join"));
     eprintln!("  Land mask: {} z14 cells populated", land_mask.count_set());
 
-    Ok((sort_writer.expect("sort_writer not returned from drain"), data_bounds, land_mask))
+    Ok((sort_writer.expect("sort_writer not returned from drain"), data_bounds, land_mask, node_store_stats))
 }
 
 // ---------------------------------------------------------------------------

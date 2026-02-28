@@ -92,6 +92,7 @@ Sequential, same PBF input:
 - `.unwrap()` forbidden by clippy — use `expect()` or propagate errors
 - Cast lints are strict — annotate with `#[allow(clippy::cast_*)]` where needed
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)
+- `ELIVAGAR_NODE_STATS=1` — enables SortedNodeStore diagnostic scan (node/chunk counts, compression ratio). Off by default because it does a full scan of all group blobs, which is slow at planet scale.
 
 ## Benchmark discipline
 

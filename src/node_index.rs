@@ -757,49 +757,51 @@ impl SortedNodeStore {
         self.flush_chunk();
         self.flush_group();
 
-        // Diagnostic: measure actual node store memory usage
-        let mut total_blob_bytes: usize = 0;
-        let mut total_chunks: usize = 0;
-        let mut groups_used: usize = 0;
-        let mut uncompressed_chunks: usize = 0;
-        for g in self.groups.iter().flatten() {
-            groups_used += 1;
-            total_blob_bytes += g.data.len();
-            // Count chunks by scanning the blob
-            let mut offset = 0;
-            while offset < g.data.len() {
-                total_chunks += 1;
-                let fl = u16::from_le_bytes(
-                    g.data[offset + BITMASK_BYTES..offset + BITMASK_BYTES + 2]
-                        .try_into()
-                        .unwrap(),
-                );
-                let compressed = fl & 0x8000 != 0;
-                let packed_len = (fl & 0x7FFF) as usize;
-                if !compressed {
-                    uncompressed_chunks += 1;
+        let node_count = self.node_count;
+        let group_count = self.groups.len();
+
+        // Detailed diagnostic scan: walks every group blob to count chunks and measure bytes.
+        // At planet scale (51 GB, millions of chunks) this is slow, so gate behind env var.
+        // Enable with: ELIVAGAR_NODE_STATS=1
+        if std::env::var_os("ELIVAGAR_NODE_STATS").is_some() {
+            let mut total_blob_bytes: usize = 0;
+            let mut total_chunks: usize = 0;
+            let mut groups_used: usize = 0;
+            let mut uncompressed_chunks: usize = 0;
+            for g in self.groups.iter().flatten() {
+                groups_used += 1;
+                total_blob_bytes += g.data.len();
+                let mut offset = 0;
+                while offset < g.data.len() {
+                    total_chunks += 1;
+                    let fl = u16::from_le_bytes(
+                        g.data[offset + BITMASK_BYTES..offset + BITMASK_BYTES + 2]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    let compressed = fl & 0x8000 != 0;
+                    let packed_len = (fl & 0x7FFF) as usize;
+                    if !compressed {
+                        uncompressed_chunks += 1;
+                    }
+                    offset += CHUNK_HEADER_SIZE + packed_len;
                 }
-                offset += CHUNK_HEADER_SIZE + packed_len;
             }
+            let groups_vec_bytes = group_count * std::mem::size_of::<Option<Box<Group>>>();
+            let raw_bytes = node_count as usize * 8;
+            let total_bytes = total_blob_bytes + groups_vec_bytes;
+            eprintln!("node_store_groups_used={groups_used}");
+            eprintln!("node_store_chunks={total_chunks}");
+            eprintln!("node_store_uncompressed_chunks={uncompressed_chunks}");
+            eprintln!("node_store_blob_bytes={total_blob_bytes}");
+            eprintln!("node_store_total_bytes={total_bytes}");
+            eprintln!("node_store_raw_bytes={raw_bytes}");
         }
-        let groups_vec_bytes = self.groups.len() * std::mem::size_of::<Option<Box<Group>>>();
-        let raw_bytes = self.node_count as usize * 8;
-        let total_bytes = total_blob_bytes + groups_vec_bytes;
-        eprintln!(
-            "  SortedNodeStore: {} nodes, {} groups ({} used), {} chunks ({} uncompressed)",
-            self.node_count, self.groups.len(), groups_used, total_chunks, uncompressed_chunks,
-        );
-        eprintln!(
-            "  Blob data: {:.1} MB, Groups vec: {:.1} MB = {:.1} MB total (raw would be {:.1} MB, ratio {:.0}%)",
-            total_blob_bytes as f64 / 1048576.0,
-            groups_vec_bytes as f64 / 1048576.0,
-            total_bytes as f64 / 1048576.0,
-            raw_bytes as f64 / 1048576.0,
-            100.0 * total_bytes as f64 / raw_bytes as f64,
-        );
 
         SortedNodeStoreReader {
             groups: self.groups,
+            node_count,
+            group_count,
         }
     }
 
@@ -844,9 +846,14 @@ impl SortedNodeStore {
 /// from rayon threads (all interior data is immutable).
 pub struct SortedNodeStoreReader {
     groups: Vec<Option<Box<Group>>>,
+    node_count: u64,
+    group_count: usize,
 }
 
 impl SortedNodeStoreReader {
+    pub fn node_count(&self) -> u64 { self.node_count }
+    pub fn group_count(&self) -> usize { self.group_count }
+
     /// Look up coordinates for a node. O(1) via bitmask popcount.
     /// Uses a thread-local decompression cache for amortized lookups.
     ///
@@ -902,6 +909,14 @@ impl NodeStoreReader {
         match self {
             NodeStoreReader::Flat(reader) => reader.get(node_id),
             NodeStoreReader::Sorted(reader) => reader.get(node_id),
+        }
+    }
+
+    /// Return (node_count, group_count) for sorted store, None for flat.
+    pub fn sorted_stats(&self) -> Option<(u64, usize)> {
+        match self {
+            NodeStoreReader::Flat(_) => None,
+            NodeStoreReader::Sorted(r) => Some((r.node_count(), r.group_count())),
         }
     }
 }

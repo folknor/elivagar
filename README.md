@@ -22,6 +22,12 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 | `--compression-level 0-10` | Gzip compression level (default: 6). Lower = faster, larger output |
 | `--force-sorted` | Use compact in-RAM node store even if PBF header lacks `Sort.Type_then_ID` |
 
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `ELIVAGAR_NODE_STATS=1` | Print detailed SortedNodeStore diagnostics (node count, chunk count, compression ratio). Requires a full scan of the node store at the end of the PBF phase — fast on regional extracts, slow at planet scale. |
+
 ### Example
 
 ```
