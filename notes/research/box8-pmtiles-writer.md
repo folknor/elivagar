@@ -261,7 +261,7 @@ Both temp files are created in `config.tmp_dir` (typically `data/tilegen_tmp/`).
 
 No `fsync` is called at any point. This is correct for temp files -- if the process crashes,
 the output is incomplete anyway, and the temp files are in a known temp directory that gets
-cleaned up by `dev clean`.
+cleaned up by `brokkr clean`.
 
 ---
 
@@ -586,7 +586,7 @@ There is no crash resilience. If the process is killed during `write_to`:
 - The output file may be partially written and corrupt.
 - The temp files (blob, dir) may remain on disk in `tilegen_tmp/`.
 
-The `dev clean` command handles temp file cleanup. The output file should be checked for
+The `brokkr clean` command handles temp file cleanup. The output file should be checked for
 completeness after a run (e.g., verify the header is present and tile count matches).
 This is not a performance concern but a correctness note.
 

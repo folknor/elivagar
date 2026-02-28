@@ -196,7 +196,7 @@ The pipeline orchestrator (`src/pipeline.rs`) sequences four phases through a si
 **Resources released:**
 - SortReader (k file handles) — consumed during reader thread.
 - PmtilesWriter temp files cleaned up after write_to.
-- All sort chunk files on disk remain (not cleaned up by pipeline — `dev clean` handles this).
+- All sort chunk files on disk remain (not cleaned up by pipeline — `brokkr clean` handles this).
 
 **Parallelism:**
 - Reader thread: 1 dedicated thread (k-way merge is sequential).

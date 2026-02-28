@@ -215,7 +215,7 @@ P0 — **Hard cap on flat index size** (node_index.rs:71, inside `if needed > se
 Add `const MAX_FLAT_INDEX_SIZE: u64 = 16 * 1024 * 1024 * 1024` (16 GB). Panic with clear message
 if growth would exceed this. Prevents runaway even if decision-point guard is bypassed.
 
-P1 — **Fix memory estimation in `dev run --mem`**:
+P1 — **Fix memory estimation in `brokkr run --mem`**:
 The pre-flight formula `store_gb = (node_count * 8 + 1.5G) / 1e9` assumes SortedNodeStore.
 If flat path is taken, estimate should use `max_node_id * 8` instead. Check sorted flag via
 `pbfhogg fileinfo` or just always assume sorted (since we're adding the PBF size guard above).

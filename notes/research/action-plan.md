@@ -111,7 +111,7 @@ before committing to Tier 7 architectural work.
 
 ## Milestone: North America gate
 
-After completing Tiers 0-2, run `dev bench self --pbf north-america.osm.pbf` on a ≥32 GB
+After completing Tiers 0-2, run `brokkr bench self --pbf north-america.osm.pbf` on a ≥32 GB
 machine. This validates:
 - Sort payload reduction actually delivers projected I/O savings
 - Memory headroom is sufficient for a mid-scale dataset

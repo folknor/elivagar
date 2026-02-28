@@ -8,36 +8,36 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 - Never chain commands with ;. Write a script instead.
 - Never pipe commands with |. Write a script instead.
 - Never read or write from /tmp. All data lives in the project.
-- Never run raw cargo, curl, pkill. Use `dev`.
-- **Never run the full pipeline on real PBF data (dev bench self, dev run) unless the user explicitly asks.** Use synthetic benchmarks (dev bench node-store, dev bench pmtiles) for iteration. Full pipeline runs are expensive and should only happen when the user decides it's time.
+- Never run raw cargo, curl, pkill. Use `brokkr`.
+- **Never run the full pipeline on real PBF data (brokkr bench self, brokkr run) unless the user explicitly asks.** Use synthetic benchmarks (brokkr bench node-store, brokkr bench pmtiles) for iteration. Full pipeline runs are expensive and should only happen when the user decides it's time.
 
-## Dev tool
+## Brokkr tool
 
-Standalone development tool at `~/Programs/dev`. Installed via `cargo install --path ~/Programs/dev`. Invoked as `dev` from the project root (reads `./dev.toml` for project detection).
+Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install --path ~/Programs/brokkr`. Invoked as `brokkr` from the project root (reads `./brokkr.toml` for project detection).
 
-- `dev check [-- args]` — run clippy + tests
-- `dev env` — show environment info
-- `dev run [args]` — build release and run with auto-injected flags: `--tmp-dir` (from scratch_dir config), `--ocean`/`--ocean-simplified` (auto-detected from data_dir), `HOTPATH_METRICS_SERVER_OFF=true` env var. Use `--no-ocean` to suppress ocean injection. Use `--mem 8G` to wrap with `systemd-run --scope -p MemoryMax=8G` for OOM protection on large datasets
-- `dev bench self [--dataset name] [--pbf path] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark
-- `dev bench planetiler [--dataset name] [--pbf path] [--runs N]` — Planetiler comparison benchmark
-- `dev bench tilemaker [--dataset name] [--pbf path] [--runs N]` — Tilemaker comparison benchmark (stub)
-- `dev bench node-store [--nodes N] [--runs N]` — SortedNodeStore benchmark (default: 50M nodes, 5 runs)
-- `dev bench pmtiles [--tiles N] [--runs N]` — PMTiles writer benchmark (default: 500K tiles, 5 runs)
-- `dev bench eliv-all [--dataset name] [--pbf path] [--runs N]` — full benchmark suite
-- `dev hotpath [--dataset name] [--pbf path] [--alloc]` — hotpath profiling (timing or allocation)
-- `dev profile [--dataset name] [--pbf path] [--tool perf|samply]` — sampling profiler (perf or samply)
-- `dev compare-tiles <a> <b> [--sample N]` — compare feature counts between PMTiles archives
-- `dev download ocean` — download ocean shapefiles
-- `dev results [--commit X] [--compare A B]` — query benchmark results from SQLite
-- `dev clean` — remove tilegen_tmp and scratch files
+- `brokkr check [-- args]` — run clippy + tests
+- `brokkr env` — show environment info
+- `brokkr run [args]` — build release and run with auto-injected flags: `--tmp-dir` (from scratch_dir config), `--ocean`/`--ocean-simplified` (auto-detected from data_dir), `HOTPATH_METRICS_SERVER_OFF=true` env var. Use `--no-ocean` to suppress ocean injection. Use `--mem 8G` to wrap with `systemd-run --scope -p MemoryMax=8G` for OOM protection on large datasets
+- `brokkr bench self [--dataset name] [--pbf path] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark
+- `brokkr bench planetiler [--dataset name] [--pbf path] [--runs N]` — Planetiler comparison benchmark
+- `brokkr bench tilemaker [--dataset name] [--pbf path] [--runs N]` — Tilemaker comparison benchmark (stub)
+- `brokkr bench node-store [--nodes N] [--runs N]` — SortedNodeStore benchmark (default: 50M nodes, 5 runs)
+- `brokkr bench pmtiles [--tiles N] [--runs N]` — PMTiles writer benchmark (default: 500K tiles, 5 runs)
+- `brokkr bench eliv-all [--dataset name] [--pbf path] [--runs N]` — full benchmark suite
+- `brokkr hotpath [--dataset name] [--pbf path] [--alloc]` — hotpath profiling (timing or allocation)
+- `brokkr profile [--dataset name] [--pbf path] [--tool perf|samply]` — sampling profiler (perf or samply)
+- `brokkr compare-tiles <a> <b> [--sample N]` — compare feature counts between PMTiles archives
+- `brokkr download ocean` — download ocean shapefiles
+- `brokkr results [--commit X] [--compare A B]` — query benchmark results from SQLite
+- `brokkr clean` — remove tilegen_tmp and scratch files
 
-Benchmark results stored in `.dev/results.db` (SQLite, tracked in git for cross-host access).
+Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access).
 
 **NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath uses conflicting cargo feature flags (causes build conflicts). Always run sequentially.
 
 ## Scripts
 
-No shell scripts remain. All development tooling is in `dev`.
+No shell scripts remain. All development tooling is in `brokkr`.
 
 ## Architecture
 
