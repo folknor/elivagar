@@ -13,7 +13,7 @@
 //   u32×  geometry commands
 //   u8    attribute count
 //   per attribute:
-//     u8   key_len, key bytes
+//     u8   key_id (index into KEY_NAMES table)
 //     u8   value_type (0=string, 1=int, 2=bool, 3=float)
 //     value bytes
 
@@ -21,6 +21,62 @@ use crate::mvt::{self, GeomType, LayerBuilder, Value};
 use crate::shortbread::{self, AttrValue};
 
 const _: () = assert!(cfg!(target_endian = "little"), "wire format assumes little-endian");
+
+/// Static key ID table. All attribute key strings used in the Shortbread schema.
+/// Index = key_id (u8), used in wire format. New keys MUST be appended (never reorder).
+const KEY_NAMES: &[&str] = &[
+    "kind",                    // 0
+    "name",                    // 1
+    "name_en",                 // 2
+    "name_de",                 // 3
+    "admin_level",             // 4
+    "bridge",                  // 5
+    "tunnel",                  // 6
+    "link",                    // 7
+    "rail",                    // 8
+    "surface",                 // 9
+    "tracktype",               // 10
+    "service",                 // 11
+    "oneway",                  // 12
+    "oneway_reverse",          // 13
+    "bicycle",                 // 14
+    "horse",                   // 15
+    "ref",                     // 16
+    "ref_rows",                // 17
+    "ref_cols",                // 18
+    "population",              // 19
+    "maritime",                // 20
+    "disputed",                // 21
+    "iata",                    // 22
+    "housenumber",             // 23
+    "housename",               // 24
+    "amenity",                 // 25
+    "highway",                 // 26
+    "office",                  // 27
+    "leisure",                 // 28
+    "man_made",                // 29
+    "tourism",                 // 30
+    "cuisine",                 // 31
+    "vending",                 // 32
+    "religion",                // 33
+    "denomination",            // 34
+    "sport",                   // 35
+    "tower:type",              // 36
+    "information",             // 37
+    "atm",                     // 38
+    "recycling:glass_bottles", // 39
+    "recycling:paper",         // 40
+    "recycling:clothes",       // 41
+    "recycling:scrap_metal",   // 42
+    "way_area",                // 43 (test-only: Float roundtrip)
+    "height",                  // 44 (test-only: zoom-dependent Float)
+];
+
+#[allow(clippy::cast_possible_truncation)]
+fn key_to_id(key: &str) -> u8 {
+    KEY_NAMES.iter().position(|&k| k == key)
+        .unwrap_or_else(|| panic!("unknown wire format key: {key:?}")) as u8
+}
 
 /// Pre-encode the attribute portion for a given zoom level into `buf`.
 /// The buffer is cleared and filled with bytes that can be appended to
@@ -34,9 +90,7 @@ pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], 
         if zoom < *attr_zoom {
             continue;
         }
-        let kb = key.as_bytes();
-        buf.push(kb.len() as u8);
-        buf.extend_from_slice(kb);
+        buf.push(key_to_id(key));
         match val {
             AttrValue::Str(s) => {
                 buf.push(0);
@@ -170,13 +224,12 @@ pub(crate) fn add_feature_to_layer(
         if pos >= data.len() {
             break;
         }
-        let key_len = data[pos] as usize;
+        let key_id = data[pos] as usize;
         pos += 1;
-        if pos + key_len >= data.len() {
+        if key_id >= KEY_NAMES.len() {
             break;
         }
-        let key = std::str::from_utf8(&data[pos..pos + key_len]).unwrap_or("");
-        pos += key_len;
+        let key = KEY_NAMES[key_id];
 
         if pos >= data.len() {
             break;
