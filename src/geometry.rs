@@ -576,10 +576,32 @@ impl ClipRect {
 ///
 /// Returns zero or more sub-linestrings (the line may enter and exit multiple times).
 /// SmallVec<[_; 1]>: most clips produce exactly one segment, avoiding the outer heap alloc.
-#[hotpath::measure]
 pub fn clip_linestring(line: &[Point], rect: &ClipRect) -> SmallVec<[Vec<Point>; 1]> {
+    let mut result: SmallVec<[Vec<Point>; 1]> = SmallVec::new();
+    for_each_clipped_segment(line, rect, |segment| {
+        result.push(segment.to_vec());
+    });
+    result
+}
+
+thread_local! {
+    static CLIP_LINE_SCRATCH: std::cell::RefCell<Vec<Point>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Clip a linestring and call `callback` for each visible sub-segment.
+///
+/// Uses a thread-local scratch buffer to avoid per-call allocation. The callback
+/// receives a borrowed slice of the segment points.
+#[hotpath::measure]
+pub fn for_each_clipped_segment<F>(
+    line: &[Point],
+    rect: &ClipRect,
+    mut callback: F,
+) where
+    F: FnMut(&[Point]),
+{
     if line.len() < 2 {
-        return SmallVec::new();
+        return;
     }
     // Outcode pre-test: reject entire linestring if all vertices are outside the same edge.
     let mut and_code = 0xFFu8;
@@ -590,60 +612,38 @@ pub fn clip_linestring(line: &[Point], rect: &ClipRect) -> SmallVec<[Vec<Point>;
         }
     }
     if and_code != INSIDE {
-        return SmallVec::new();
+        return;
     }
-    let mut result: SmallVec<[Vec<Point>; 1]> = SmallVec::new();
-    let mut current: Vec<Point> = Vec::new();
+    CLIP_LINE_SCRATCH.with(|cell| {
+    let current = &mut *cell.borrow_mut();
+    current.clear();
 
     for i in 0..(line.len() - 1) {
-        clip_segment_and_collect(
-            line[i], line[i + 1], rect, &mut current, &mut result,
-        );
-    }
+        if let Some((a, b)) = clip_segment(line[i], line[i + 1], rect) {
+            let enters_from_outside = !points_near(&a, &line[i]);
+            let exits_to_outside = !points_near(&b, &line[i + 1]);
 
-    if current.len() >= 2 {
-        result.push(current);
-    }
-    result
-}
+            if enters_from_outside {
+                if current.len() >= 2 { callback(current); }
+                current.clear();
+                current.push(a);
+            } else if current.is_empty() {
+                current.push(a);
+            }
+            current.push(b);
 
-/// Clip one segment and append visible portions to `current` / `result`.
-fn clip_segment_and_collect(
-    p0: Point,
-    p1: Point,
-    rect: &ClipRect,
-    current: &mut Vec<Point>,
-    result: &mut SmallVec<[Vec<Point>; 1]>,
-) {
-    if let Some((a, b)) = clip_segment(p0, p1, rect) {
-        let enters_from_outside = !points_near(&a, &p0);
-        let exits_to_outside = !points_near(&b, &p1);
-
-        if enters_from_outside {
-            // Start a new sub-line at the entry point
-            flush_segment(current, result);
-            current.push(a);
-        } else if current.is_empty() {
-            current.push(a);
+            if exits_to_outside {
+                if current.len() >= 2 { callback(current); }
+                current.clear();
+            }
+        } else {
+            if current.len() >= 2 { callback(current); }
+            current.clear();
         }
-        current.push(b);
-
-        if exits_to_outside {
-            flush_segment(current, result);
-        }
-    } else {
-        // Segment entirely outside — flush any in-progress sub-line
-        flush_segment(current, result);
     }
-}
 
-/// Move the contents of `current` into `result` if it has at least 2 points.
-fn flush_segment(current: &mut Vec<Point>, result: &mut SmallVec<[Vec<Point>; 1]>) {
-    if current.len() >= 2 {
-        result.push(std::mem::take(current));
-    } else {
-        current.clear();
-    }
+    if current.len() >= 2 { callback(current); }
+    }); // CLIP_LINE_SCRATCH.with
 }
 
 /// Test whether two points are essentially the same (within floating-point tolerance).
