@@ -51,14 +51,25 @@ Committed as `24b9b20`.
 Cheap stats (`node_store_nodes`, `node_store_groups`) always emitted after timing — no
 benchmark contamination. Expensive scan only runs with env var, acceptable for hotpath runs.
 
-## Tier 3 — Geometry allocation reduction (1-2 days)
+## Tier 3 — Geometry allocation reduction (1-2 days) ✅ DONE
+
+Cumulative vs `aa5cdff` baseline on Denmark (dm6):
+
+| Function | Before | After | Change |
+|---|---|---|---|
+| `for_each_zoom_simplified` | 5.5 GB | 4.0 GB | -27.3% |
+| `process_raw_way` | 7.8 GB | 6.3 GB | -19.2% |
+| `emit_polygon_feature` | 3.8 GB | 2.9 GB | -23.7% |
+| `emit_multipolygon_feature` | 276 MB | 208 MB | -24.6% |
+| `main` total | 4.2 GB | 4.1 GB | -2.4% |
+| Bench | 19944 ms | 20089 ms | +0.7% (noise) |
 
 | # | Finding | Change | Denmark savings | Status |
 |---|---------|--------|-----------------|--------|
 | 1 | F26 | `SimplifySingleScratch` via thread_local | 1.3 GB (23.6%) | ✅ `c02f951` |
-| 2 | F27 | `clip_linestring_into` buffer-reuse variant | ~1.5 GB | |
-| 3 | F28 | `to_tile_coords_into` in multipolygon emission | per-tile allocs eliminated | |
-| 4 | F35 | Way reversal in-place (`.reverse()`) | minor | |
+| 2 | F27 | `for_each_clipped_segment` thread_local + callback | 200 MB (15.4%) | ✅ `bd19649` |
+| 3 | F28 | `all_rings` pool with `to_tile_coords_into` | 68 MB (24.6%) | ✅ `bd19649` |
+| 4 | F35 | Way reversal in-place | minor, skipped | ❌ Not worth it (220 MB total in assemble) |
 
 ### F26 notes
 
@@ -86,7 +97,8 @@ lookup cost is negligible; `map_init` changes rayon's work distribution and adds
 | 1 | F3 | Persist compressor + pools across batches (thread-local or worker struct) | ~288 GB churn |
 | 2 | F32 | Pool LayerBuilders per worker, `.clear()` instead of drop | ~500M alloc cycles |
 
-These two are the same refactor — replace `map_init` with persistent per-worker state.
+These two are the same refactor — use `thread_local!` for persistent per-worker state
+(NOT `map_init`, which regressed — see F26 notes above).
 
 ## Tier 5 — Geometry CPU (2-3 days)
 
@@ -124,10 +136,10 @@ High-risk or needs benchmarking before deciding:
 
 ## Sequencing rationale
 
-Tiers 0-2 complete, Tier 3 F26 done. ~63 GB sort I/O reduction + ~1.3 GB geometry alloc
-reduction banked (Denmark). Japan total thread alloc: 211 GB.
+Tiers 0-3 complete. ~63 GB sort I/O reduction + ~1.5 GB geometry alloc reduction banked
+(Denmark). Zero wall-clock regression on any dataset.
 
-Next: remaining Tier 3 items (F27, F28, F35), then North America gate.
+Next: North America gate, then Tier 4 (assembly worker persistence).
 
 ## Milestone: North America gate
 
