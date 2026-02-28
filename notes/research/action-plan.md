@@ -7,9 +7,9 @@ Seven tiers, ordered by "do this first because it unblocks or de-risks everythin
 
 ---
 
-## Tier 0 — Trivials (< 1 hour, zero risk)
+## Tier 0 — Trivials (< 1 hour, zero risk) ✅ DONE
 
-All one-line or few-line changes. No benchmarking needed.
+All 11 changes committed as `f41e433`. Benchmarked on dm6: Denmark -2.4%, Japan -2.6%.
 
 | # | Finding | Change | Planet savings |
 |---|---------|--------|----------------|
@@ -25,14 +25,16 @@ All one-line or few-line changes. No benchmarking needed.
 | 10 | F39 | Reuse Compressor for leaf directories | minor |
 | 11 | F8 | Fix `buffer_bytes` accounting (+32B per record) | accurate 1GB target |
 
-## Tier 1 — Sort payload reduction (1-2 days, highest leverage)
+## Tier 1 — Sort payload reduction (1-2 days, highest leverage) ✅ DONE
 
-Reduces planet sort I/O from ~240 GB to ~177 GB. Already designed in TODO.
+| # | Finding | Change | Planet savings | Status |
+|---|---------|--------|----------------|--------|
+| 1 | F18 | Key string → u8 key_id | ~44 GB | ✅ `a6b1977` + fix `6de3e1a` |
+| 2 | F18b | Kind value → u8 value_id (129-entry table) | ~19 GB | ✅ `aa5cdff` |
+| 3 | F20 | Remove osm_id (or make optional) | ~19 GB | ❌ Dismissed — osm_id flows to MVT Feature.id |
 
-| # | Finding | Change | Planet savings |
-|---|---------|--------|----------------|
-| 1 | F18 | Key string → u8 key_id | ~44 GB |
-| 2 | F20 | Remove osm_id (or make optional) | ~19 GB |
+F18+F18b combined: ~63 GB sort I/O reduction at planet scale. Benchmarked on dm6:
+Denmark -1.5%, Norway -4.3%, Japan -4.4% vs `61a85b0` baseline.
 
 These also reduce peak memory during sort (smaller chunks = more headroom for node store).
 Directly alleviates F1 by proxy.
@@ -102,12 +104,10 @@ High-risk or needs benchmarking before deciding:
 
 ## Sequencing rationale
 
-Tiers 0-2 are "do before anything else" — they're either free, or they're safety, or they
-directly reduce the memory pressure that makes planet runs risky. Tier 1 in particular buys
-~63 GB of sort I/O reduction which translates to real RAM headroom.
+Tiers 0-1 are complete. ~63 GB sort I/O reduction banked.
 
-After Tiers 0-2, benchmark a North America run (~17 GB PBF) and see where you actually stand
-before committing to Tier 7 architectural work.
+Next: Tier 2 (safety guardrails — half day), then benchmark North America (~17 GB PBF) to
+validate memory headroom before committing to Tier 3+ work.
 
 ## Milestone: North America gate
 

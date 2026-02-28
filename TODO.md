@@ -59,9 +59,25 @@ See [notes/planet-scale.md](notes/planet-scale.md) for the full roadmap.
 
 ## Planet-scale performance squeeze
 
-Extracted from [`.plans/theoretical-performance-review-v1.md`](.plans/theoretical-performance-review-v1.md).
+Master plan: `notes/research/action-plan.md` (7 tiers, 41 findings).
 Deep-dive investigations completed 2026-02-28 on the top 3 items. Findings inline below.
 Box-level investigations (Batch 1: Boxes 2, 4, 5, 8) launched 2026-02-28. Results in `.plans/investigations/`.
+
+### Completed
+
+- [x] **Tier 0** — 11 trivial optimizations (`f41e433`). Denmark -2.4%, Japan -2.6%.
+- [x] **Tier 1, F18** — Key string → u8 key_id interning (`a6b1977`, fix `6de3e1a`). ~44 GB planet savings.
+- [x] **Tier 1, F18b** — Kind value → u8 value_id interning, 129-entry table (`aa5cdff`). ~19 GB planet savings.
+- [x] **Tier 1, F20** — Dismissed: osm_id flows to MVT Feature.id, cannot be removed.
+
+Cumulative dm6 results at `aa5cdff` vs baseline `61a85b0` (powersave governor):
+| Dataset | Baseline | Current | Delta |
+|---------|----------|---------|-------|
+| Denmark (461 MB) | 20.5s | 20.2s | -1.5% |
+| Norway (1.3 GB) | 53.8s | 51.5s | -4.3% |
+| Japan (2.3 GB) | 77.7s | 74.3s | -4.4% |
+
+### Next up: Tier 2 (safety guardrails), then Tier 3 (geometry alloc reduction)
 
 ### INVESTIGATED: Sort payload width amplification (Boxes 3, 6) — CONFIRMED, high leverage
 
