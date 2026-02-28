@@ -14,7 +14,7 @@
 //   u8    attribute count
 //   per attribute:
 //     u8   key_id (index into KEY_NAMES table)
-//     u8   value_type (0=string, 1=int, 2=bool, 3=float)
+//     u8   value_type (0=string, 1=int, 2=bool, 3=float, 4=interned string)
 //     value bytes
 
 use crate::mvt::{self, GeomType, LayerBuilder, Value};
@@ -81,6 +81,151 @@ fn key_to_id(key: &str) -> u8 {
         .unwrap_or_else(|| panic!("unknown wire format key: {key:?}")) as u8
 }
 
+/// Static value ID table for "kind" attribute values from the Shortbread schema.
+/// Index = value_id (u8). Unknown values fall back to raw string encoding (type 0).
+/// New values MUST be appended (never reorder).
+const KIND_VALUES: &[&str] = &[
+    // Water (14)
+    "water",             // 0
+    "glacier",           // 1
+    "riverbank",         // 2
+    "dock",              // 3
+    "canal",             // 4
+    "reservoir",         // 5
+    "basin",             // 6
+    "river",             // 7
+    "stream",            // 8
+    "ditch",             // 9
+    "dam",               // 10
+    "pier",              // 11
+    "breakwater",        // 12
+    "groyne",            // 13
+    // Land (45)
+    "forest",            // 14
+    "farmland",          // 15
+    "farmyard",          // 16
+    "meadow",            // 17
+    "orchard",           // 18
+    "vineyard",          // 19
+    "allotments",        // 20
+    "brownfield",        // 21
+    "cemetery",          // 22
+    "commercial",        // 23
+    "garages",           // 24
+    "grass",             // 25
+    "greenfield",        // 26
+    "greenhouse_horticulture", // 27
+    "industrial",        // 28
+    "landfill",          // 29
+    "plant_nursery",     // 30
+    "quarry",            // 31
+    "railway",           // 32
+    "recreation_ground", // 33
+    "residential",       // 34
+    "retail",            // 35
+    "village_green",     // 36
+    "garden",            // 37
+    "golf_course",       // 38
+    "miniature_golf",    // 39
+    "park",              // 40
+    "playground",        // 41
+    "bare_rock",         // 42
+    "beach",             // 43
+    "grassland",         // 44
+    "heath",             // 45
+    "sand",              // 46
+    "scree",             // 47
+    "scrub",             // 48
+    "shingle",           // 49
+    "bog",               // 50
+    "marsh",             // 51
+    "string_bog",        // 52
+    "swamp",             // 53
+    "wet_meadow",        // 54
+    "grave_yard",        // 55
+    "danger_area",       // 56
+    "sports_centre",     // 57
+    "construction",      // 58
+    "bicycle_parking",   // 59
+    "college",           // 60
+    "hospital",          // 61
+    "parking",           // 62
+    "prison",            // 63
+    "university",        // 64
+    // Streets (28 + 5 _link)
+    "motorway",          // 65
+    "trunk",             // 66
+    "primary",           // 67
+    "secondary",         // 68
+    "tertiary",          // 69
+    "unclassified",      // 70
+    "busway",            // 71
+    "bus_guideway",      // 72
+    "living_street",     // 73
+    "service",           // 74
+    "pedestrian",        // 75
+    "track",             // 76
+    "footway",           // 77
+    "steps",             // 78
+    "path",              // 79
+    "cycleway",          // 80
+    "runway",            // 81
+    "taxiway",           // 82
+    "rail",              // 83
+    "narrow_gauge",      // 84
+    "light_rail",        // 85
+    "subway",            // 86
+    "tram",              // 87
+    "funicular",         // 88
+    "monorail",          // 89
+    "motorway_junction", // 90
+    "bridge",            // 91
+    "motorway_link",     // 92
+    "trunk_link",        // 93
+    "primary_link",      // 94
+    "secondary_link",    // 95
+    "tertiary_link",     // 96
+    // Transport (19)
+    "cable_car",         // 97
+    "gondola",           // 98
+    "goods",             // 99
+    "chair_lift",        // 100
+    "drag_lift",         // 101
+    "t-bar",             // 102
+    "j-bar",             // 103
+    "platter",           // 104
+    "rope_tow",          // 105
+    "ferry",             // 106
+    "aerialway_station", // 107
+    "aerodrome",         // 108
+    "helipad",           // 109
+    "bus_station",       // 110
+    "ferry_terminal",    // 111
+    "station",           // 112
+    "halt",              // 113
+    "tram_stop",         // 114
+    "bus_stop",          // 115
+    // Place labels (13)
+    "capital",           // 116
+    "state_capital",     // 117
+    "city",              // 118
+    "town",              // 119
+    "village",           // 120
+    "hamlet",            // 121
+    "suburb",            // 122
+    "quarter",           // 123
+    "neighbourhood",     // 124
+    "isolated_dwelling", // 125
+    "farm",              // 126
+    "island",            // 127
+    "locality",          // 128
+];
+
+#[allow(clippy::cast_possible_truncation)]
+fn kind_value_to_id(s: &str) -> Option<u8> {
+    KIND_VALUES.iter().position(|&v| v == s).map(|i| i as u8)
+}
+
 /// Pre-encode the attribute portion for a given zoom level into `buf`.
 /// The buffer is cleared and filled with bytes that can be appended to
 /// the geometry portion via `encode_feature_data_with_attrs`.
@@ -93,17 +238,32 @@ pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], 
         if zoom < *attr_zoom {
             continue;
         }
-        buf.push(key_to_id(key));
+        let kid = key_to_id(key);
+        buf.push(kid);
         match val {
             AttrValue::Str(s) => {
-                buf.push(0);
-                let sb = s.as_bytes();
-                // Length truncated to u16 (max 65535). Safe: Shortbread only
-                // extracts tag keys (name, ref, cuisine, etc.) whose real-world
-                // OSM values never approach 64KB.
-                debug_assert!(sb.len() <= u16::MAX as usize, "string value exceeds u16 length");
-                buf.extend_from_slice(&(sb.len() as u16).to_le_bytes());
-                buf.extend_from_slice(sb);
+                // For the "kind" key (id 0), try interning the value
+                if kid == 0 {
+                    if let Some(vid) = kind_value_to_id(s) {
+                        buf.push(4);
+                        buf.push(vid);
+                    } else {
+                        buf.push(0);
+                        let sb = s.as_bytes();
+                        debug_assert!(sb.len() <= u16::MAX as usize, "string value exceeds u16 length");
+                        buf.extend_from_slice(&(sb.len() as u16).to_le_bytes());
+                        buf.extend_from_slice(sb);
+                    }
+                } else {
+                    buf.push(0);
+                    let sb = s.as_bytes();
+                    // Length truncated to u16 (max 65535). Safe: Shortbread only
+                    // extracts tag keys (name, ref, cuisine, etc.) whose real-world
+                    // OSM values never approach 64KB.
+                    debug_assert!(sb.len() <= u16::MAX as usize, "string value exceeds u16 length");
+                    buf.extend_from_slice(&(sb.len() as u16).to_le_bytes());
+                    buf.extend_from_slice(sb);
+                }
             }
             AttrValue::Int(i) => {
                 buf.push(1);
@@ -272,6 +432,14 @@ pub(crate) fn add_feature_to_layer(
                 let f = f64::from_le_bytes(data[pos..pos + 8].try_into().expect("float"));
                 pos += 8;
                 layer.intern_value(Value::Double(f))
+            }
+            4 => {
+                // interned string (kind value)
+                if pos >= data.len() { break; }
+                let vid = data[pos] as usize;
+                pos += 1;
+                if vid >= KIND_VALUES.len() { break; }
+                layer.intern_string_value(KIND_VALUES[vid])
             }
             _ => break,
         };
