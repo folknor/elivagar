@@ -68,8 +68,11 @@ const KEY_NAMES: &[&str] = &[
     "recycling:paper",         // 40
     "recycling:clothes",       // 41
     "recycling:scrap_metal",   // 42
-    "way_area",                // 43 (test-only: Float roundtrip)
-    "height",                  // 44 (test-only: zoom-dependent Float)
+    "shop",                    // 43
+    "emergency",               // 44
+    "historic",                // 45
+    "way_area",                // 46 (test-only: Float roundtrip)
+    "height",                  // 47 (test-only: zoom-dependent Float)
 ];
 
 #[allow(clippy::cast_possible_truncation)]
