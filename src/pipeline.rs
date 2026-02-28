@@ -516,12 +516,9 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                 s.spawn(move |_| {
                                     let results: Vec<ProcessedWay> = raw_ways
                                         .into_par_iter()
-                                        .map_init(
-                                            geometry::SimplifySingleScratch::new,
-                                            |scratch, raw| process_raw_way(
-                                                &raw, nr_ref, lm_ref, mz, xz, scratch,
-                                            ),
-                                        )
+                                        .map(|raw| process_raw_way(
+                                            &raw, nr_ref, lm_ref, mz, xz,
+                                        ))
                                         .collect();
                                     let _ = tx.send(results);
                                     let _ = token_ret.send(());
@@ -766,7 +763,6 @@ fn process_raw_way(
     land_mask: &geometry::LandMask,
     min_zoom: u8,
     max_zoom: u8,
-    simp_scratch: &mut geometry::SimplifySingleScratch,
 ) -> ProcessedWay {
     // Resolve node coordinates (the expensive mmap reads — now parallel).
     // Allocates per way (~8 coords avg). Cannot hoist: ownership transfers into
@@ -823,10 +819,10 @@ fn process_raw_way(
                 emit_point_or_centroid(osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
             }
             GeomExpect::Line => {
-                emit_line_feature(osm_id, &merc, m, z_lo, z_hi, &mut records, simp_scratch);
+                emit_line_feature(osm_id, &merc, m, z_lo, z_hi, &mut records);
             }
             GeomExpect::Polygon => {
-                emit_polygon_feature(osm_id, &merc, m, z_lo, z_hi, &mut records, simp_scratch);
+                emit_polygon_feature(osm_id, &merc, m, z_lo, z_hi, &mut records);
             }
         }
     }
@@ -958,7 +954,6 @@ fn process_prepared_relation(
 
     let mut records = Vec::new();
     let mut simp_scratch = geometry::SimplifyMultiScratch::new();
-    let mut simp_single_scratch = geometry::SimplifySingleScratch::new();
 
     for m in &matches {
         let z_lo = m.min_zoom.max(min_zoom);
@@ -1010,7 +1005,6 @@ fn process_prepared_relation(
                     land_mask.mark_bbox(&bbox);
                     emit_line_feature(
                         rel.osm_id, &mw.coords, m, z_lo, z_hi, &mut records,
-                        &mut simp_single_scratch,
                     );
                 }
             }
@@ -1103,7 +1097,6 @@ fn emit_line_feature(
     z_lo: u8,
     z_hi: u8,
     records: &mut Vec<SortRecord>,
-    simp_scratch: &mut geometry::SimplifySingleScratch,
 ) -> u64 {
     let mut count: u64 = 0;
     // Reusable buffers: hoisted outside the zoom×tile loops to avoid per-tile allocation.
@@ -1111,7 +1104,7 @@ fn emit_line_feature(
     let mut attrs_buf: Vec<u8> = Vec::new();
     let mut tc_buf: Vec<(i32, i32)> = Vec::new();
 
-    geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, simp_scratch, |z, simplified| {
+    geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, |z, simplified| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
@@ -1177,7 +1170,6 @@ fn emit_polygon_feature(
     z_lo: u8,
     z_hi: u8,
     records: &mut Vec<SortRecord>,
-    simp_scratch: &mut geometry::SimplifySingleScratch,
 ) -> u64 {
     // Single-ring polygon (no holes)
     let mut count: u64 = 0;
@@ -1188,7 +1180,7 @@ fn emit_polygon_feature(
     let mut clip_a: Vec<Point> = Vec::new();
     let mut clip_b: Vec<Point> = Vec::new();
 
-    geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, simp_scratch, |z, simplified| {
+    geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
 
         // Recompute bbox from simplified coords — at low zooms DP may reduce the

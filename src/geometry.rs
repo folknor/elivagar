@@ -345,23 +345,21 @@ fn perp_dist_sq(p: &Point, a: &Point, dx: f64, dy: f64, len_sq: f64) -> f64 {
 // and emit_ocean_polygon. Douglas-Peucker simplification is hierarchical,
 // so each zoom's result is always a subset of the previous zoom's.
 
-/// Reusable scratch buffers for [`for_each_zoom_simplified`].
-/// Hoist outside tight loops to avoid per-call allocation of cascade/simplification
-/// buffers. Buffers grow to accommodate the largest geometry and stay allocated.
-pub struct SimplifySingleScratch {
-    pub cascade: Vec<Point>,
-    pub keep_buf: Vec<bool>,
-    pub simp_buf: Vec<Point>,
+/// Scratch buffers for [`for_each_zoom_simplified`], reused via thread-local storage.
+/// Buffers grow to accommodate the largest geometry seen by each thread and stay allocated.
+struct SimplifySingleScratch {
+    cascade: Vec<Point>,
+    keep_buf: Vec<bool>,
+    simp_buf: Vec<Point>,
 }
 
-impl SimplifySingleScratch {
-    pub fn new() -> Self {
-        Self {
+thread_local! {
+    static SIMPLIFY_SINGLE_SCRATCH: std::cell::RefCell<SimplifySingleScratch> =
+        std::cell::RefCell::new(SimplifySingleScratch {
             cascade: Vec::new(),
             keep_buf: Vec::new(),
             simp_buf: Vec::new(),
-        }
-    }
+        });
 }
 
 /// Cascading simplification for a single geometry (line or polygon ring).
@@ -369,18 +367,19 @@ impl SimplifySingleScratch {
 /// Iterates from `z_hi` down to `z_lo`, simplifying the geometry at each zoom
 /// using the previous zoom's result. Calls `callback(z, &simplified)` at each
 /// zoom level. Stops early if the simplified geometry drops below `min_points`.
-/// Pass a [`SimplifySingleScratch`] to reuse buffers across calls.
+/// Uses thread-local scratch buffers to avoid per-call allocation.
 #[hotpath::measure]
 pub fn for_each_zoom_simplified<F>(
     merc: &[Point],
     z_lo: u8,
     z_hi: u8,
     min_points: usize,
-    scratch: &mut SimplifySingleScratch,
     mut callback: F,
 ) where
     F: FnMut(u8, &[Point]),
 {
+    SIMPLIFY_SINGLE_SCRATCH.with(|cell| {
+    let scratch = &mut *cell.borrow_mut();
     let SimplifySingleScratch { cascade, keep_buf, simp_buf } = scratch;
     cascade.clear();
     cascade.extend_from_slice(merc);
@@ -411,6 +410,7 @@ pub fn for_each_zoom_simplified<F>(
         }
         callback(z, cascade);
     }
+    }); // SIMPLIFY_SINGLE_SCRATCH.with
 }
 
 /// Reusable scratch buffers for [`for_each_zoom_simplified_multi`].
