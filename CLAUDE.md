@@ -7,29 +7,36 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 - Never chain commands with &&. Write a script instead.
 - Never pipe commands with |. Write a script instead.
 - Never read or write from /tmp. All data lives in the project.
-- Never run raw cargo, curl, pkill. Use the scripts below.
-- **Never run the full pipeline on real PBF data (bench-self.sh, bench.sh, run.sh, run-hotpath.sh) unless the user explicitly asks.** Use synthetic benchmarks (bench-node-store.sh, bench-pmtiles.sh) for iteration. Full pipeline runs are expensive and should only happen when the user decides it's time.
+- Never run raw cargo, curl, pkill. Use `dev`.
+- **Never run the full pipeline on real PBF data (dev bench self, dev run) unless the user explicitly asks.** Use synthetic benchmarks (dev bench node-store, dev bench pmtiles) for iteration. Full pipeline runs are expensive and should only happen when the user decides it's time.
+
+## Dev tool
+
+Standalone development tool at `~/Programs/dev`. Installed via `cargo install --path ~/Programs/dev`. Invoked as `dev` from the project root (reads `./dev.toml` for project detection).
+
+- `dev check [-- args]` — run clippy + tests
+- `dev env` — show environment info
+- `dev run [args]` — build release and run with passthrough args
+- `dev bench self [--dataset name] [--pbf path] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark
+- `dev bench planetiler [--dataset name] [--pbf path] [--runs N]` — Planetiler comparison benchmark
+- `dev bench tilemaker [--dataset name] [--pbf path] [--runs N]` — Tilemaker comparison benchmark (stub)
+- `dev bench node-store [--nodes N] [--runs N]` — SortedNodeStore benchmark (default: 50M nodes, 5 runs)
+- `dev bench pmtiles [--tiles N] [--runs N]` — PMTiles writer benchmark (default: 500K tiles, 5 runs)
+- `dev bench eliv-all [--dataset name] [--pbf path] [--runs N]` — full benchmark suite
+- `dev hotpath [--dataset name] [--pbf path] [--alloc]` — hotpath profiling (timing or allocation)
+- `dev profile [--dataset name] [--pbf path] [--tool perf|samply]` — sampling profiler (perf or samply)
+- `dev compare-tiles <a> <b> [--sample N]` — compare feature counts between PMTiles archives
+- `dev download ocean` — download ocean shapefiles
+- `dev results [--commit X] [--compare A B]` — query benchmark results from SQLite
+- `dev clean` — remove tilegen_tmp and scratch files
+
+Benchmark results stored in `.dev/results.db` (SQLite, gitignored).
+
+**NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath uses conflicting cargo feature flags (causes build conflicts). Always run sequentially.
 
 ## Scripts
 
-Write new scripts in `scripts/` as needed. Follow these conventions:
-- `scripts/build.sh` — build release
-- `scripts/test.sh` — run tests
-- `scripts/bench-self.sh [pbf] [runs] [--skip-to ocean|sort] [--compression-level N]` — quick self-benchmark (no comparisons)
-- `scripts/bench.sh [pbf] [--skip-to ocean|sort]` — benchmark elivagar vs Planetiler vs Tilemaker
-- `scripts/bench-tilemaker.sh [pbf] [runs]` — benchmark Tilemaker Shortbread (auto-builds from source, downloads shapefiles)
-- `scripts/run.sh [pbf] [out.pmtiles]` — build + run
-- `scripts/bench-pmtiles.sh [tiles] [runs]` — benchmark PMTiles writer vs pmtiles-rs (default: 500K tiles, 5 runs)
-- `scripts/bench-node-store.sh [nodes_millions] [runs]` — benchmark SortedNodeStore build + read (hotpath profiling, default: 50M nodes, 5 runs)
-- `scripts/build-hotpath.sh` — build release with hotpath profiling enabled
-- `scripts/run-hotpath.sh [pbf] [out.pmtiles]` — build + run with hotpath profiling (prints function timing report on exit)
-- `scripts/run-hotpath-alloc.sh [pbf] [out.pmtiles]` — build + run with allocation profiling (disables mimalloc, wall-clock times meaningless)
-- `scripts/run-samply.sh [pbf] [out.pmtiles] [extra args...]` — sampling profiler via samply (saves profile for later viewing with `samply load`)
-- `scripts/run-perf.sh [pbf] [out.pmtiles] [extra args...]` — sampling profiler via perf (CLI-friendly, view with `perf report`)
-
-**NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath scripts use conflicting cargo feature flags (causes build conflicts). Always run sequentially.
-
-If you need something these scripts don't cover, write a new script.
+No shell scripts remain. All development tooling is in `dev`.
 
 ## Architecture
 
