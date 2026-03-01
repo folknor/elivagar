@@ -327,6 +327,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if let Some(kb) = assemble_rss {
         eprintln!("assemble_rss_kb={kb}");
     }
+    let peak_rss = [phase12_rss, ocean_rss, sort_rss, assemble_rss]
+        .iter()
+        .filter_map(|v| *v)
+        .max();
+    if let Some(kb) = peak_rss {
+        eprintln!("peak_rss_kb={kb}");
+    }
     if let Some(bytes) = max_way_inflight_bytes {
         eprintln!("max_way_inflight_bytes={bytes}");
     }
