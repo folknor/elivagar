@@ -90,15 +90,28 @@ changes, no `map_init`, plain `map`. Results on dm6:
 Lesson: prefer `thread_local!` over `map_init` for per-worker scratch in rayon. The TLS
 lookup cost is negligible; `map_init` changes rayon's work distribution and adds overhead.
 
-## Tier 4 — Assembly worker persistence (1 day)
+## Tier 4 — Assembly worker persistence (1 day) ✅ DONE
 
-| # | Finding | Change | Planet savings |
-|---|---------|--------|----------------|
-| 1 | F3 | Persist compressor + pools across batches (thread-local or worker struct) | ~288 GB churn |
-| 2 | F32 | Pool LayerBuilders per worker, `.clear()` instead of drop | ~500M alloc cycles |
+Committed as `e0cabcb`. Replaced `map_init` with `thread_local!` in `encode_tile_batch`.
+`LayerBuilder::prepare_for_reuse()` clears interning state while keeping HashMap capacity.
 
-These two are the same refactor — use `thread_local!` for persistent per-worker state
-(NOT `map_init`, which regressed — see F26 notes above).
+| # | Finding | Change | Status |
+|---|---------|--------|--------|
+| 1 | F3 | Persist compressor + pools across batches via thread_local | ✅ |
+| 2 | F32 | Pool LayerBuilders per worker, `prepare_for_reuse()` instead of drop | ✅ |
+
+Results on dm6 vs `bd19649` baseline:
+
+| Metric | Before | After | Change |
+|---|---|---|---|
+| Denmark bench | 20089 ms | 19791 ms | -1.5% |
+| Japan bench | 74705 ms | 74107 ms | -0.8% |
+| `add_feature_to_layer` alloc (DK) | 4.0 GB | 153 MB | -96.3% |
+| `merge_same_attr_geometries` alloc (DK) | 2.7 GB | 1.3 GB | -51.9% |
+| Thread total alloc (JP) | 211.3 GB | 168.6 GB | -20.2% |
+
+The HashMap bucket arrays survive across tiles — interning no longer needs to reallocate
+on each tile. `add_feature_to_layer` dropped out of the top-15 allocators on Japan.
 
 ## Tier 5 — Geometry CPU (2-3 days)
 
