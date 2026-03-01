@@ -41,8 +41,6 @@ Remaining (contingent — only if planet runs still OOM):
 
 ## Planet scale
 
-See [notes/planet-scale.md](notes/planet-scale.md) for the full roadmap.
-
 - [x] Step 1: `pbfhogg node-stats` tool
 - [x] Step 2: Validate compression on Germany/Norway/Japan (worst case 72%, planet fits under 64 GB)
 - [x] Step 3: SortedNodeStore compression — 75% ratio (planet: 51 GB, fits in 64 GB)
