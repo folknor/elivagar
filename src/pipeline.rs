@@ -1031,7 +1031,34 @@ fn prepare_relation(
     })
 }
 
-/// Process a batch of prepared relations in parallel and push results to sort writer.
+/// Per-worker accumulator for streaming relation outputs to chunk files.
+/// Modeled on `OceanAcc` in ocean.rs — each rayon worker flushes directly
+/// to disk, eliminating the `Vec<Vec<SortRecord>>` double-materialization.
+struct RelAcc {
+    records: Vec<SortRecord>,
+    bytes: usize,
+    chunk_paths: Vec<std::path::PathBuf>,
+    count: u64,
+    simp_scratch: geometry::SimplifyMultiScratch,
+}
+
+impl RelAcc {
+    fn flush(&mut self, chunk_dir: &std::path::Path, chunk_id: &std::sync::atomic::AtomicUsize) {
+        if self.records.is_empty() {
+            return;
+        }
+        let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
+        sort::write_sorted_chunk(&mut self.records, &path)
+            .expect("relation chunk write failed");
+        self.chunk_paths.push(path);
+        self.count += self.records.len() as u64;
+        self.records.clear();
+        self.bytes = 0;
+    }
+}
+
+/// Process a batch of prepared relations in parallel, streaming outputs to chunk files.
 #[hotpath::measure]
 fn flush_rel_batch(
     batch: Vec<PreparedRelation>,
@@ -1042,34 +1069,79 @@ fn flush_rel_batch(
 ) -> u64 {
     use rayon::prelude::*;
 
-    let results: Vec<Vec<SortRecord>> = batch
-        .into_par_iter()
-        .map(|rel| process_prepared_relation(rel, min_zoom, max_zoom, land_mask))
-        .collect();
+    let chunk_id = std::sync::atomic::AtomicUsize::new(sort_writer.chunk_count());
+    let chunk_dir = sort_writer.tmp_dir().to_path_buf();
+    let chunk_size = sort_writer.chunk_size_bytes();
 
-    let mut count: u64 = 0;
-    // Panic: disk I/O failure is unrecoverable mid-pipeline.
-    for rel_records in results {
-        count += rel_records.len() as u64;
-        for record in rel_records {
-            sort_writer.push(record).expect("sort push failed");
-        }
+    let result = batch
+        .into_par_iter()
+        .fold(
+            || RelAcc {
+                records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0,
+                simp_scratch: geometry::SimplifyMultiScratch::new(),
+            },
+            |mut acc, rel| {
+                let before = acc.records.len();
+                process_prepared_relation_into(
+                    rel, min_zoom, max_zoom, land_mask,
+                    &mut acc.records, &mut acc.simp_scratch,
+                );
+                for r in &acc.records[before..] {
+                    acc.bytes += r.data.len() + std::mem::size_of::<SortRecord>();
+                }
+                if acc.bytes >= chunk_size {
+                    acc.flush(&chunk_dir, &chunk_id);
+                }
+                acc
+            },
+        )
+        // Don't flush in .map() — collect remaining records back for sort_writer
+        // to avoid creating many tiny chunk files (one per rayon accumulator).
+        .reduce(
+            || RelAcc {
+                records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0,
+                simp_scratch: geometry::SimplifyMultiScratch::new(),
+            },
+            |mut a, mut b| {
+                a.chunk_paths.extend(b.chunk_paths);
+                a.count += b.count;
+                a.records.append(&mut b.records);
+                a.bytes += b.bytes;
+                a
+            },
+        );
+
+    sort_writer.adopt_chunk_files(result.chunk_paths);
+    let mut count = result.count;
+    // Push remaining records (below chunk_size threshold) through sort_writer's
+    // normal buffering, so they merge with way records instead of creating
+    // tiny standalone chunk files.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        count += result.records.len() as u64;
+    }
+    for record in result.records {
+        sort_writer.push(record).expect("sort push failed");
     }
     count
 }
 
-/// Process a prepared relation's geometry (CPU-bound). Called from rayon worker threads.
+/// Process a prepared relation's geometry into an external buffer (CPU-bound).
+/// Called from rayon worker threads via `RelAcc` fold. Reuses the caller's
+/// `records` vec and `simp_scratch` to avoid per-relation allocation.
 #[hotpath::measure]
-fn process_prepared_relation(
+fn process_prepared_relation_into(
     rel: PreparedRelation,
     min_zoom: u8,
     max_zoom: u8,
     land_mask: &geometry::LandMask,
-) -> Vec<SortRecord> {
+    records: &mut Vec<SortRecord>,
+    simp_scratch: &mut geometry::SimplifyMultiScratch,
+) {
     let multi = multipolygon::assemble(&rel.member_ways);
 
     if multi.polygons.is_empty() {
-        return Vec::new();
+        return;
     }
 
     let mut matches = rel.matches;
@@ -1078,9 +1150,6 @@ fn process_prepared_relation(
         .map(|(outer, _)| geometry::area_sq_meters(outer))
         .sum();
     enrich_polygon_matches(&mut matches, total_area_m2);
-
-    let mut records = Vec::new();
-    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
 
     for m in &matches {
         let z_lo = m.min_zoom.max(min_zoom);
@@ -1099,7 +1168,7 @@ fn process_prepared_relation(
                     land_mask.mark_bbox(&bbox);
                     emit_multipolygon_feature(
                         rel.osm_id, outer, inners, m,
-                        z_lo, z_hi, &mut records, &mut simp_scratch,
+                        z_lo, z_hi, records, simp_scratch,
                     );
                 }
             }
@@ -1111,16 +1180,11 @@ fn process_prepared_relation(
                     let bbox = merc_bbox(outer);
                     land_mask.mark_bbox(&bbox);
                     emit_point_or_centroid(
-                        rel.osm_id, outer, &bbox, m, z_lo, z_hi, &mut records,
+                        rel.osm_id, outer, &bbox, m, z_lo, z_hi, records,
                     );
                 }
             }
             GeomExpect::Line => {
-                // Boundary line emission: iterate member_ways directly instead of
-                // a separate cloned Vec. multipolygon::assemble() only borrows
-                // &[MemberWay], so coords are still available here. GeomExpect::Line
-                // is only produced by match_boundaries_line which requires
-                // boundary=administrative — same predicate as is_boundary.
                 if !rel.is_boundary {
                     continue;
                 }
@@ -1131,14 +1195,13 @@ fn process_prepared_relation(
                     let bbox = merc_bbox(&mw.coords);
                     land_mask.mark_bbox(&bbox);
                     emit_line_feature(
-                        rel.osm_id, &mw.coords, m, z_lo, z_hi, &mut records,
+                        rel.osm_id, &mw.coords, m, z_lo, z_hi, records,
                     );
                 }
             }
             _ => {}
         }
     }
-    records
 }
 
 // ---------------------------------------------------------------------------
