@@ -84,7 +84,7 @@ Sequential, same PBF input:
 - `pbfhogg` — PBF reader, sibling dir `../pbfhogg`
 - `rayon` — parallel processing
 - `memmap2` — memory-mapped I/O for way index (and flat node index fallback)
-- `libdeflater` (libdeflate) — gzip compression for MVT tiles
+- `libdeflater` (libdeflate) — gzip compression for MVT tiles. elivagar uses libdeflater directly, NOT flate2. The pmtiles-rs dev-dependency uses flate2, which depends on whatever zlib backend is available. After switching pbfhogg from zlib-ng to zlib-rs, pmtiles-rs lost access to zlib-ng and regressed ~10x in the bench. README pmtiles-rs numbers are from before that switch (commit `3d9b777`). Do not update pmtiles-rs numbers without ensuring it has a fair zlib backend.
 - `mimalloc` — global allocator (critical for rayon performance)
 - `hotpath` — function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
 
@@ -111,6 +111,8 @@ Never write benchmark numbers for uncommitted code — the hash is the anchor.
 - CPU: AMD Ryzen 9 5900X (12 cores / 24 threads, 4.95 GHz boost)
 - RAM: 30 GB DDR4
 - Denmark PBF baseline: ~12.3s total (8s pbf, 1.5s ocean, 0.6s sort, 2s assemble)
+- Node store baseline (50M nodes, commit `cb2cd29`): build 1.7s, way-like 77 ns/lookup, random 394 ns/lookup
+- PMTiles writer baseline (500K tiles, commit `cb2cd29`): 164 ms
 
 ### dm6
 - CPU: AMD Ryzen 5 5600G (6 cores / 12 threads, 4.46 GHz boost)
