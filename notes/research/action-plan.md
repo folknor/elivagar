@@ -117,13 +117,15 @@ on each tile. `add_feature_to_layer` dropped out of the top-15 allocators on Jap
 
 Targets the 23.4s multipolygon clipping cost (105% of Denmark wall time).
 
-| # | Finding | Change | Impact |
-|---|---------|--------|--------|
-| 1 | F11 | Inner ring bbox prefilter | O(1) reject, low effort |
-| 2 | F10 | Interior tile detection (4-corner PIP) | skip S-H for ~298K tiles on Germany z14 |
-| 3 | F14 | Row pre-clipping for PBF polygons (port from ocean) | ~rows_covered reduction |
+| # | Finding | Change | Impact | Status |
+|---|---------|--------|--------|--------|
+| 1 | F11 | Inner ring bbox prefilter | O(1) reject, low effort | ✅ `9867c38` |
+| 2 | F10 | Interior tile detection (4-corner PIP) | skip S-H for ~298K tiles on Germany z14 | |
+| 3 | F14 | Row pre-clipping for PBF polygons (port from ocean) | ~rows_covered reduction | |
 
-Do F11 first — cheapest and helps most relations. F10 and F14 are independent of each other.
+F11 committed as `9867c38`. Neutral on Denmark/Japan benchmarks (few large multipolygons
+with many inners). Will show at planet scale on country boundaries and large forests.
+F10 and F14 are independent of each other.
 
 ## Tier 6 — Compression strategy (half day) ✅ DONE
 
