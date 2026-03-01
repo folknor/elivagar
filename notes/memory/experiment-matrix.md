@@ -26,56 +26,54 @@
 - `S4` Planet full run with streaming PMTiles.
 - `S5` Planet resume paths (`--skip-to ocean`, `--skip-to sort`) to isolate phase memory.
 
-## Phase 0: Baseline Attribution
-### E0.1 Per-phase memory attribution
-- Hypothesis: largest peaks occur in relation batching, sort buffering, and assemble batches.
-- Method: instrument high-water marks at phase and subphase boundaries.
-- Exit criteria: top-2 memory contributors quantified.
+## Phase 0: Baseline Attribution — ✓ COMPLETE (2026-03-01)
 
-### E0.2 In-flight queue/batch sensitivity
-- Hypothesis: fixed queue sizes and batch sizes dominate peak variability.
-- Method: log live sizes of:
-- way pipeline queues (`PrimitiveBlock`, `Vec<ProcessedWay>`)
-- relation batch occupancy
-- assemble batches (`PendingTile`, `EncodedTile`)
-- Exit criteria: identify which in-flight structures correlate with RSS spikes.
+Instrumentation: `3a729ab` (elivagar), brokkr v3 schema (2026-03-01).
 
-## Phase 1: High-ROI Controls
-### E1.1 Byte-budgeted sort buffering
-- Current: fixed 1 GB chunk target in sort writer.
-- Hypothesis: adaptive budget tied to host/phase pressure reduces global RSS peaks.
-- Change: introduce configurable/auto chunk budget (not hardcoded only).
-- Exit criteria: lower peak RSS with acceptable sort overhead.
+### E0.1 Per-phase memory attribution — ✓ ANSWERED
+Top-2 contributors: (1) SortedNodeStore (dominates RSS envelope, flat across phases),
+(2) assemble batch buffer (263 MB Denmark, 1.4 GB Germany).
 
-### E1.2 Relation batch memory cap
-- Current: `REL_BATCH_SIZE=1024` with `Vec<Vec<SortRecord>>` materialization.
-- Hypothesis: relation batches can burst due to multipolygon complexity.
-- Change: flush by byte budget (estimated geometry+record bytes), not count only.
-- Exit criteria: reduced relation-phase spikes without major throughput loss.
+Baselines captured (dm6, `f275d10`):
+- Denmark: 1.9 GB RSS, 15.8s total
+- Germany: 10.7 GB RSS, 123.8s total
+- North America: OOM (thrashes for ~3 hours during way processing)
 
-### E1.3 Assemble batch memory cap
-- Current: `BATCH_SIZE=4096` in assemble with one batch ahead.
-- Hypothesis: feature-heavy tiles make fixed count unstable.
-- Change: replace count cap with byte-aware cap for `PendingTile` and encoded output.
-- Exit criteria: phase4 RSS flattening across dense urban windows.
+### E0.2 In-flight queue/batch sensitivity — ✓ ANSWERED
+- `max_assemble_batch_bytes` is the scaling driver (263 MB → 1.4 GB, 5.5x DK→DE)
+- `max_way_inflight_bytes` stable at 23-27 MB — not a concern
+- `max_rel_batch_bytes` stable at 9-18 MB — not a concern
+- RSS flat across all 4 phases — node store dominates the envelope
+
+## Phase 1: High-ROI Controls — ✓ COMPLETE (`c88cfc0`, `862d0b7`)
+
+See `p1-byte-budgeted-inflight.md` for full details.
+
+### E1.1 Byte-budgeted sort buffering — DEFERRED
+Sort chunk size (1 GB) is already byte-based and not a scaling concern. Configurable
+via TilegenConfig if needed later.
+
+### E1.2 Relation batch memory cap — ✓ DONE
+REL_BATCH_BUDGET=64 MB alongside REL_BATCH_SIZE=1024. Denmark: no change (batches
+stay under budget at this scale). Germany validation pending.
+
+### E1.3 Assemble batch memory cap — ✓ DONE
+ASSEMBLE_BATCH_BUDGET=32 MB alongside BATCH_SIZE=4096. Denmark: 263 MB → 34 MB (-87%).
+Assemble phase 15.5% faster (clone fix contributed). Germany validation pending.
 
 ## Phase 2: Refactor Hot Spots
-### E2.1 Remove redundant compressed tile cloning in assembly
-- Current behavior suggests compressed tile bytes are cloned into thread-local scratch before return.
-- Hypothesis: this duplicates large buffers per tile and inflates transient memory.
-- Change: reuse/move strategy that avoids full clone per tile.
-- Exit criteria: measurable allocator and RSS drop in phase4.
+### E2.1 Remove redundant compressed tile cloning in assembly — ✓ DONE (`c88cfc0`)
+Replaced `compressed.clone()` with `Vec::with_capacity(compressed.len())`.
+Contributed to 15.5% assemble phase speedup on Denmark.
 
 ### E2.2 Stream relation outputs instead of full `Vec<Vec<SortRecord>>` collect
 - Hypothesis: collecting all parallel relation outputs before push creates avoidable peak.
 - Change: incremental drain from workers into sort writer with ordering-neutral merge.
 - Exit criteria: lower peak in relation-heavy windows.
 
-### E2.3 Way pipeline byte-based inflight limits
-- Current: token count (`MAX_INFLIGHT`) approximates memory.
-- Hypothesis: way complexity variance breaks count-based assumptions.
-- Change: bound in-flight way work by estimated bytes (refs, tags, coords, records).
-- Exit criteria: tighter way-phase RSS envelope.
+### E2.3 Way pipeline byte-based inflight limits — ✓ DONE (`c88cfc0`)
+Replaced token semaphore (MAX_INFLIGHT=4) with Mutex+Condvar byte budget (128 MB,
+10x output multiplier). Count ceiling raised to 8. Denmark: 23 MB → 13 MB (-43%).
 
 ## Phase 3: Structural Redesign (if needed)
 ### E3.1 Streaming root/leaf directory construction without full entry materialization

@@ -1,6 +1,39 @@
 # P1: Byte-Budgeted In-Flight Controls
 
-## Detailed Implementation Plan
+## Status: IMPLEMENTED
+
+Commits: `c88cfc0` (controls + clone fix), `862d0b7` (TilegenConfig exposure).
+
+All 6 steps completed. Migration Phase 1 (non-breaking) is live: byte budgets run
+alongside existing count limits, flush triggers on whichever hits first.
+
+### Denmark verification (dm6, `c88cfc0` dirty-tree run vs `f275d10` baseline):
+
+| Metric | Baseline | P1 | Delta |
+|--------|----------|-----|-------|
+| Total | 15,785 ms | 15,637 ms | -0.9% |
+| Assemble | 2,486 ms | 2,100 ms | **-15.5%** |
+| max_way_inflight | 23 MB | 13 MB | **-43%** |
+| max_assemble_batch | 263 MB | 34 MB | **-87%** |
+| max_rel_batch | 9.3 MB | 9.3 MB | unchanged |
+| Features | 16,015,530 | 16,015,530 | identical |
+| Output bytes | 288 MB | 288 MB | identical |
+
+### Budgets implemented:
+
+| Control | Default | Config field | Constant |
+|---------|---------|-------------|----------|
+| Way in-flight | 128 MB (10x multiplier) | `way_inflight_budget` | MAX_INFLIGHT=8 ceiling |
+| Relation batch | 64 MB | `rel_batch_budget` | REL_BATCH_SIZE=1024 ceiling |
+| Assemble batch | 32 MB | `assemble_batch_budget` | BATCH_SIZE=4096 ceiling |
+
+### Remaining migration phases (future work):
+- Phase 2: Tune count ceilings higher (safety nets only)
+- Phase 3: Validate at planet scale, document count limits as pure safety nets
+
+---
+
+## Detailed Implementation Plan (reference)
 
 ### 1. Current State Analysis
 
