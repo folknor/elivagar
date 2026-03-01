@@ -63,8 +63,10 @@ impl NodeIndex {
     }
 
     /// Write coordinates for a node. Grows the file if needed.
+    /// Negative node IDs are silently ignored (invalid in OSM data).
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
+        if node_id < 0 { return; }
         let offset = node_id as u64 * ENTRY_SIZE;
         let needed = offset + ENTRY_SIZE;
 
@@ -107,6 +109,7 @@ impl NodeIndex {
 /// Shared get logic for both NodeIndex and NodeIndexReader.
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::unwrap_used)]
 fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: i64) -> Option<(i32, i32)> {
+    if node_id < 0 { return None; }
     let offset = node_id as u64 * ENTRY_SIZE;
     let needed = offset + ENTRY_SIZE;
 

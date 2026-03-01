@@ -326,6 +326,13 @@ impl PmtilesWriter {
 
     /// Record a directory entry, extending the current run if possible.
     fn push_dir_entry(&mut self, tile_id: u64, offset: u64, length: u32) -> io::Result<()> {
+        if let Some(ref run) = self.current_run {
+            debug_assert!(
+                tile_id >= run.tile_id,
+                "PMTiles tiles must be added in Hilbert order: got {tile_id} after {}",
+                run.tile_id,
+            );
+        }
         self.num_addressed += 1;
         if let Some(ref run) = self.current_run {
             let next_id = run.tile_id + u64::from(run.run_length);

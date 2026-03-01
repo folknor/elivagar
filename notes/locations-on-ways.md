@@ -103,8 +103,8 @@ On an indexdata PBF (from `pbfhogg cat`), the passthrough optimization skips dec
 
 1. ~~Wait for pbfhogg way API~~ — already landed (`Way::node_locations()`)
 2. Wait for `pbfhogg add-locations-to-ways` command to land
-3. Add detection (first way probe + CLI flag `--locations-on-ways`)
-4. Add coord extraction from way elements in worker thread
-5. Skip node store construction when locations detected
+3. ~~Add detection (header auto-detect + CLI flag `--locations-on-ways`)~~ — done (`8a5bf55`)
+4. ~~Add coord extraction from way elements in worker thread~~ — done (`8a5bf55`)
+5. ~~Skip node store construction when locations detected~~ — done (`8a5bf55`)
 6. Validate: Denmark with locations-on-ways PBF, compare output byte-for-byte against standard path
 7. Benchmark NA, then planet
