@@ -1,6 +1,10 @@
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+
+use memmap2::Mmap;
 
 const OFFSET_ENTRY_SIZE: usize = 16; // 8 bytes way_id + 8 bytes data_offset
 
@@ -9,6 +13,11 @@ struct WayEntry {
     data_offset: u64,
 }
 const _: () = assert!(std::mem::size_of::<WayEntry>() == OFFSET_ENTRY_SIZE);
+
+/// 256 MB sort budget = 16M entries per chunk.
+/// North America (210M ways) ≈ 13 chunks. Denmark fits in 1 chunk.
+const OFFSETS_SORT_BUDGET: usize = 256 * 1024 * 1024;
+const ENTRIES_PER_CHUNK: usize = OFFSETS_SORT_BUDGET / OFFSET_ENTRY_SIZE;
 
 // --- Varint helpers ---
 
@@ -87,6 +96,239 @@ fn decode_way(data: &[u8], offset: usize) -> Vec<(i32, i32)> {
     coords
 }
 
+// --- Offset entry I/O helpers ---
+
+/// Read way_id from a sorted offsets mmap at entry index `idx`.
+fn mmap_way_id(mmap: &[u8], idx: usize) -> i64 {
+    let off = idx * OFFSET_ENTRY_SIZE;
+    i64::from_le_bytes(
+        mmap[off..off + 8].try_into().expect("offset mmap too short"),
+    )
+}
+
+/// Read data_offset from a sorted offsets mmap at entry index `idx`.
+#[allow(clippy::cast_possible_truncation)]
+fn mmap_data_offset(mmap: &[u8], idx: usize) -> usize {
+    let off = idx * OFFSET_ENTRY_SIZE + 8;
+    u64::from_le_bytes(
+        mmap[off..off + 8].try_into().expect("offset mmap too short"),
+    ) as usize
+}
+
+/// Binary search for `way_id` in a sorted offsets mmap with `count` entries.
+fn mmap_binary_search(mmap: &[u8], count: usize, way_id: i64) -> Option<usize> {
+    let mut lo: usize = 0;
+    let mut hi: usize = count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match mmap_way_id(mmap, mid).cmp(&way_id) {
+            Ordering::Less => lo = mid + 1,
+            Ordering::Greater => hi = mid,
+            Ordering::Equal => return Some(mid),
+        }
+    }
+    None
+}
+
+/// Read `count` WayEntry records from a BufReader.
+fn read_entries(reader: &mut BufReader<File>, count: usize) -> io::Result<Vec<WayEntry>> {
+    let mut entries = Vec::with_capacity(count);
+    let mut buf = [0u8; OFFSET_ENTRY_SIZE];
+    for _ in 0..count {
+        reader.read_exact(&mut buf)?;
+        let way_id = i64::from_le_bytes([
+            buf[0], buf[1], buf[2], buf[3],
+            buf[4], buf[5], buf[6], buf[7],
+        ]);
+        let data_offset = u64::from_le_bytes([
+            buf[8], buf[9], buf[10], buf[11],
+            buf[12], buf[13], buf[14], buf[15],
+        ]);
+        entries.push(WayEntry { way_id, data_offset });
+    }
+    Ok(entries)
+}
+
+/// Write WayEntry records as raw 16-byte LE pairs.
+fn write_entries(writer: &mut BufWriter<File>, entries: &[WayEntry]) -> io::Result<()> {
+    for e in entries {
+        writer.write_all(&e.way_id.to_le_bytes())?;
+        writer.write_all(&e.data_offset.to_le_bytes())?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+// --- External sort for offset entries ---
+
+/// Sequential reader for a sorted chunk of 16-byte offset entries.
+struct OffsetChunkReader {
+    reader: BufReader<File>,
+    remaining: usize,
+}
+
+impl OffsetChunkReader {
+    fn open(path: &Path) -> io::Result<Self> {
+        let file = File::open(path)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let len = file.metadata()?.len() as usize;
+        let remaining = len / OFFSET_ENTRY_SIZE;
+        Ok(OffsetChunkReader {
+            reader: BufReader::with_capacity(1 << 20, file),
+            remaining,
+        })
+    }
+
+    fn read_entry(&mut self) -> io::Result<Option<(i64, u64)>> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        let mut buf = [0u8; OFFSET_ENTRY_SIZE];
+        self.reader.read_exact(&mut buf)?;
+        self.remaining -= 1;
+        let way_id = i64::from_le_bytes([
+            buf[0], buf[1], buf[2], buf[3],
+            buf[4], buf[5], buf[6], buf[7],
+        ]);
+        let data_offset = u64::from_le_bytes([
+            buf[8], buf[9], buf[10], buf[11],
+            buf[12], buf[13], buf[14], buf[15],
+        ]);
+        Ok(Some((way_id, data_offset)))
+    }
+}
+
+/// Merge heap entry — smallest way_id wins (reverse Ord for max-heap).
+struct OffsetHeapEntry {
+    way_id: i64,
+    data_offset: u64,
+    chunk_idx: usize,
+}
+
+impl Eq for OffsetHeapEntry {}
+
+impl PartialEq for OffsetHeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.way_id == other.way_id && self.chunk_idx == other.chunk_idx
+    }
+}
+
+impl Ord for OffsetHeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse: smallest way_id first from max-heap
+        other.way_id.cmp(&self.way_id)
+            .then_with(|| other.chunk_idx.cmp(&self.chunk_idx))
+    }
+}
+
+impl PartialOrd for OffsetHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// K-way merge of sorted chunk files into a single sorted output.
+fn merge_offset_chunks(chunk_paths: &[PathBuf], sorted_path: &Path) -> io::Result<()> {
+    let mut readers: Vec<OffsetChunkReader> = Vec::with_capacity(chunk_paths.len());
+    let mut heap = BinaryHeap::with_capacity(chunk_paths.len());
+
+    for (idx, path) in chunk_paths.iter().enumerate() {
+        let mut cr = OffsetChunkReader::open(path)?;
+        if let Some((way_id, data_offset)) = cr.read_entry()? {
+            heap.push(OffsetHeapEntry { way_id, data_offset, chunk_idx: idx });
+        }
+        readers.push(cr);
+    }
+
+    let out_file = File::options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(sorted_path)?;
+    let mut writer = BufWriter::with_capacity(1 << 20, out_file);
+
+    while let Some(entry) = heap.pop() {
+        writer.write_all(&entry.way_id.to_le_bytes())?;
+        writer.write_all(&entry.data_offset.to_le_bytes())?;
+
+        let idx = entry.chunk_idx;
+        if let Some((way_id, data_offset)) = readers[idx].read_entry()? {
+            heap.push(OffsetHeapEntry { way_id, data_offset, chunk_idx: idx });
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+/// External sort of the unsorted offsets file by way_id.
+/// Uses a 256 MB memory budget: reads chunks, sorts in RAM, writes temp files,
+/// then k-way merges. Fast path for single-chunk datasets (no temp files).
+fn sort_offsets_file(unsorted_path: &Path, sorted_path: &Path) -> io::Result<usize> {
+    let file = File::open(unsorted_path)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let file_len = file.metadata()?.len() as usize;
+    let entry_count = file_len / OFFSET_ENTRY_SIZE;
+
+    if entry_count == 0 {
+        File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(sorted_path)?;
+        return Ok(0);
+    }
+
+    let mut reader = BufReader::with_capacity(1 << 20, file);
+
+    if entry_count <= ENTRIES_PER_CHUNK {
+        // Fast path: everything fits in one chunk — sort in memory, write directly
+        let mut entries = read_entries(&mut reader, entry_count)?;
+        entries.sort_unstable_by_key(|e| e.way_id);
+        let out_file = File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(sorted_path)?;
+        let mut writer = BufWriter::with_capacity(1 << 20, out_file);
+        write_entries(&mut writer, &entries)?;
+        return Ok(entry_count);
+    }
+
+    // Multi-chunk external sort
+    let dir = unsorted_path.parent().expect("offsets file has no parent dir");
+    let mut chunk_paths: Vec<PathBuf> = Vec::new();
+    let mut remaining = entry_count;
+
+    while remaining > 0 {
+        let chunk_size = remaining.min(ENTRIES_PER_CHUNK);
+        let mut entries = read_entries(&mut reader, chunk_size)?;
+        entries.sort_unstable_by_key(|e| e.way_id);
+
+        let chunk_path = dir.join(format!("way_offsets_chunk_{}.bin", chunk_paths.len()));
+        let chunk_file = File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&chunk_path)?;
+        let mut writer = BufWriter::with_capacity(1 << 20, chunk_file);
+        write_entries(&mut writer, &entries)?;
+        chunk_paths.push(chunk_path);
+        remaining -= chunk_size;
+    }
+    // Drop reader to close unsorted file before merge
+    drop(reader);
+
+    merge_offset_chunks(&chunk_paths, sorted_path)?;
+
+    // Cleanup temp chunk files
+    for p in &chunk_paths {
+        drop(std::fs::remove_file(p));
+    }
+
+    Ok(entry_count)
+}
+
 // --- WayIndex ---
 
 pub struct WayIndex {
@@ -98,10 +340,12 @@ pub struct WayIndex {
     way_count: u64,
     offsets_path: PathBuf,
     data_path: PathBuf,
+    sorted_offsets_path: PathBuf,
 
-    // Read phase: populated by finish_writing()
-    entries: Vec<WayEntry>,
-    data: Vec<u8>,
+    // Read phase: mmap'd files populated by finish_writing()
+    offsets_mmap: Option<Mmap>,
+    data_mmap: Option<Mmap>,
+    entry_count: usize,
 }
 
 impl WayIndex {
@@ -111,6 +355,7 @@ impl WayIndex {
     pub fn create(dir: &Path) -> io::Result<Self> {
         let offsets_path = dir.join("way_offsets.bin");
         let data_path = dir.join("way_data.bin");
+        let sorted_offsets_path = dir.join("way_offsets_sorted.bin");
 
         let offsets_file = File::options()
             .write(true)
@@ -132,8 +377,10 @@ impl WayIndex {
             way_count: 0,
             offsets_path,
             data_path,
-            entries: Vec::new(),
-            data: Vec::new(),
+            sorted_offsets_path,
+            offsets_mmap: None,
+            data_mmap: None,
+            entry_count: 0,
         })
     }
 
@@ -173,8 +420,9 @@ impl WayIndex {
         self.way_count += 1;
     }
 
-    /// Call after all ways have been written. Loads compressed data and offset index
-    /// into memory, sorts entries by way_id for binary search during relation processing.
+    /// Call after all ways have been written. Sorts offset entries by way_id on disk
+    /// via external merge sort, then mmaps both sorted offsets and compressed data
+    /// for zero-heap-allocation reads during relation processing.
     pub fn finish_writing(&mut self) -> io::Result<()> {
         // Flush and drop writers
         if let Some(mut w) = self.offsets_writer.take() {
@@ -190,40 +438,27 @@ impl WayIndex {
             return Ok(());
         }
 
-        // Read compressed data into memory
-        self.data = std::fs::read(&self.data_path)?;
+        // External sort offsets by way_id → sorted file
+        self.entry_count = sort_offsets_file(&self.offsets_path, &self.sorted_offsets_path)?;
 
-        // Stream offset entries into Vec<WayEntry>, sort by way_id.
-        // Reads 16 bytes at a time via BufReader — never holds the raw bytes
-        // in memory alongside the parsed entries. Saves ~14.4 GB transient
-        // peak at planet scale (900M ways × 16 bytes).
-        let offsets_file = File::open(&self.offsets_path)?;
-        #[allow(clippy::cast_possible_truncation)]
-        let file_len = offsets_file.metadata()?.len() as usize;
-        let entry_count = file_len / OFFSET_ENTRY_SIZE;
-        let mut reader = io::BufReader::with_capacity(1 << 20, offsets_file);
-        let mut entries = Vec::with_capacity(entry_count);
-        let mut buf = [0u8; OFFSET_ENTRY_SIZE];
-        for _ in 0..entry_count {
-            io::Read::read_exact(&mut reader, &mut buf)?;
-            let way_id = i64::from_le_bytes([
-                buf[0], buf[1], buf[2], buf[3],
-                buf[4], buf[5], buf[6], buf[7],
-            ]);
-            let data_offset = u64::from_le_bytes([
-                buf[8], buf[9], buf[10], buf[11],
-                buf[12], buf[13], buf[14], buf[15],
-            ]);
-            entries.push(WayEntry { way_id, data_offset });
-        }
+        // Remove unsorted offsets — no longer needed
+        drop(std::fs::remove_file(&self.offsets_path));
 
-        entries.sort_unstable_by_key(|e| e.way_id);
-        self.entries = entries;
+        // Mmap sorted offsets (read-only) for binary search
+        let offsets_file = File::open(&self.sorted_offsets_path)?;
+        // SAFETY: file is written and flushed by sort_offsets_file above,
+        // no other process modifies it.
+        self.offsets_mmap = Some(unsafe { Mmap::map(&offsets_file)? });
 
-        let data_mb = self.data.len() as f64 / (1024.0 * 1024.0);
-        let index_mb = (self.entries.len() * OFFSET_ENTRY_SIZE) as f64 / (1024.0 * 1024.0);
+        // Mmap compressed data (read-only) for decode
+        let data_file = File::open(&self.data_path)?;
+        // SAFETY: file is written and flushed above, no other process modifies it.
+        self.data_mmap = Some(unsafe { Mmap::map(&data_file)? });
+
+        let data_mb = self.data_mmap.as_ref().map_or(0, |m| m.len()) as f64 / (1024.0 * 1024.0);
+        let index_mb = (self.entry_count * OFFSET_ENTRY_SIZE) as f64 / (1024.0 * 1024.0);
         eprintln!(
-            "  Way index: {} ways, {data_mb:.1} MB compressed data, {index_mb:.1} MB index",
+            "  Way index: {} ways, {data_mb:.1} MB compressed data, {index_mb:.1} MB index (mmap'd)",
             self.way_count
         );
 
@@ -232,14 +467,12 @@ impl WayIndex {
 
     /// Look up geometry for a way by ID. Only valid after `finish_writing()`.
     /// Returns decoded coordinates, or None if way_id was never stored.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn get(&self, way_id: i64) -> Option<Vec<(i32, i32)>> {
-        let idx = self
-            .entries
-            .binary_search_by_key(&way_id, |e| e.way_id)
-            .ok()?;
-        let offset = self.entries[idx].data_offset as usize;
-        Some(decode_way(&self.data, offset))
+        let offsets = self.offsets_mmap.as_ref()?;
+        let idx = mmap_binary_search(offsets, self.entry_count, way_id)?;
+        let data_offset = mmap_data_offset(offsets, idx);
+        let data = self.data_mmap.as_ref()?;
+        Some(decode_way(data, data_offset))
     }
 }
 
@@ -291,7 +524,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndex::create(dir.path()).unwrap();
         idx.put(7, &[(1, 2), (3, 4)]);
-        // entries is empty before finish_writing, so binary search returns None.
+        // offsets_mmap is None before finish_writing, so get returns None.
         assert!(idx.get(7).is_none());
     }
 
