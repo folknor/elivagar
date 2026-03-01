@@ -29,6 +29,7 @@ use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add
 use pbfhogg::{BlockType, Element, ElementReader, MemberId, PrimitiveBlock};
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// Pipeline error type. Stringly-typed because no caller inspects variants —
@@ -125,6 +126,18 @@ const SORT_CHUNK_SIZE: usize = 1 << 30;
 /// Reads the PBF file, processes ocean shapefiles (if provided), sorts all
 /// feature records by Hilbert tile ID, and writes the output PMTiles archive.
 ///
+/// Read peak resident set size (VmHWM) from `/proc/self/status`.
+/// Returns `None` on non-Linux platforms or if parsing fails.
+fn peak_rss_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            return rest.trim().strip_suffix("kB")?.trim().parse().ok();
+        }
+    }
+    None
+}
+
 /// # Errors
 ///
 /// Returns [`PipelineError`] on I/O failures, invalid configuration (e.g.
@@ -158,6 +171,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // --- Phase 1+2: PBF read + feature processing ---
     let phase12_elapsed;
     let ocean_elapsed;
+    let mut phase12_rss: Option<u64> = None;
+    let mut ocean_rss: Option<u64> = None;
+    let mut max_way_inflight_bytes: Option<usize> = None;
+    let mut max_rel_batch_bytes: Option<usize> = None;
 
     let mut node_store_stats: Option<(u64, usize)> = None;
 
@@ -174,9 +191,12 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
-            let (sw, bounds_out, mask, ns_stats) = phase_read_and_process(config)?;
+            let (sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm) = phase_read_and_process(config)?;
             node_store_stats = ns_stats;
+            max_way_inflight_bytes = Some(way_hwm);
+            max_rel_batch_bytes = Some(rel_hwm);
             phase12_elapsed = Some(phase12_start.elapsed());
+            phase12_rss = peak_rss_kb();
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
             save_land_mask(&config.tmp_dir, &mask)?;
             (sw, Some(mask))
@@ -228,6 +248,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
             let elapsed = ocean_start.elapsed();
             eprintln!("  {ocean_features} features in {elapsed:.2?}");
+            ocean_rss = peak_rss_kb();
             Some((elapsed, ocean_features))
         } else {
             None
@@ -237,6 +258,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     };
 
     // --- Phase 3: Sort ---
+    let sort_chunks = sort_reader.as_ref().map(sort::SortWriter::chunk_count);
     let phase3_start = Instant::now();
     eprintln!("--- Sort ---");
     let mut sort_reader = if let Some(sw) = sort_reader {
@@ -245,12 +267,14 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         sort::SortReader::from_dir(&config.tmp_dir.join(SORT_CHUNKS_DIR))?
     };
     let phase3_elapsed = phase3_start.elapsed();
+    let sort_rss = peak_rss_kb();
 
     // --- Phase 4: Tile assembly + PMTiles write ---
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
-    let (features_read, tiles_written, unique_tiles) = phase_assemble(&mut sort_reader, config)?;
+    let (features_read, tiles_written, unique_tiles, max_assemble_batch_bytes) = phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
+    let assemble_rss = peak_rss_kb();
 
     let total = total_start.elapsed();
 
@@ -276,6 +300,28 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("node_store_nodes={nodes}");
         eprintln!("node_store_groups={groups}");
     }
+    if let Some(n) = sort_chunks {
+        eprintln!("sort_chunks={n}");
+    }
+    if let Some(kb) = phase12_rss {
+        eprintln!("phase12_rss_kb={kb}");
+    }
+    if let Some(kb) = ocean_rss {
+        eprintln!("ocean_rss_kb={kb}");
+    }
+    if let Some(kb) = sort_rss {
+        eprintln!("sort_rss_kb={kb}");
+    }
+    if let Some(kb) = assemble_rss {
+        eprintln!("assemble_rss_kb={kb}");
+    }
+    if let Some(bytes) = max_way_inflight_bytes {
+        eprintln!("max_way_inflight_bytes={bytes}");
+    }
+    if let Some(bytes) = max_rel_batch_bytes {
+        eprintln!("max_rel_batch_bytes={bytes}");
+    }
+    eprintln!("max_assemble_batch_bytes={max_assemble_batch_bytes}");
     Ok(())
 }
 
@@ -327,7 +373,7 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::unwrap_in_result, clippy::type_complexity)]
 #[hotpath::measure]
-fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>), PipelineError> {
+fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     // Option so we can move to drain thread during way phase and get back after.
@@ -403,6 +449,11 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
     let mut drain_handle: Option<std::thread::JoinHandle<(WayIndex, SortWriter, u64)>> = None;
+
+    // High-water-mark counters for in-flight memory tracking.
+    let way_hwm = std::sync::Arc::new(AtomicUsize::new(0));
+    let mut rel_batch_bytes: usize = 0;
+    let mut max_rel_batch_bytes: usize = 0;
 
     // Reusable buffer hoisted out of the PBF closure to avoid per-element
     // allocation (~200M allocs at planet scale). Cleared each iteration.
@@ -481,6 +532,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let (rtx, rrx) = std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(4);
                     let nr_clone = std::sync::Arc::clone(&nr);
                     let lm_clone = std::sync::Arc::clone(&land_mask);
+                    let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
                     let mz = min_z;
                     let xz = max_z;
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
@@ -498,6 +550,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         // avoids Arc::clone per spawn.
                         let nr_ref = &*nr_clone;
                         let lm_ref = &*lm_clone;
+                        let way_inflight = AtomicUsize::new(0);
+                        let way_inflight_ref = &way_inflight;
                         rayon::in_place_scope(|s| {
                             while let Ok(block) = brx.recv() {
                                 let raw_ways: Vec<RawWay> = block.elements()
@@ -513,6 +567,11 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                         _ => None,
                                     })
                                     .collect();
+                                let block_bytes = estimate_raw_ways_bytes(&raw_ways);
+                                way_inflight_ref.fetch_add(block_bytes, Ordering::Relaxed);
+                                way_hwm_clone.fetch_max(
+                                    way_inflight_ref.load(Ordering::Relaxed), Ordering::Relaxed,
+                                );
                                 // Wait for a slot — blocks if MAX_INFLIGHT tasks in-flight
                                 if token_rx.recv().is_err() { break; }
                                 let tx = rtx.clone();
@@ -527,6 +586,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                         .collect();
                                     let _ = tx.send(results);
                                     let _ = token_ret.send(());
+                                    way_inflight_ref.fetch_sub(block_bytes, Ordering::Relaxed);
                                 });
                             }
                         });
@@ -588,9 +648,14 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                             &rel, &tags_vec,
                             way_index.as_ref().expect("way_index not returned from drain"),
                         ) {
+                            rel_batch_bytes += estimate_prepared_rel_bytes(&prepared);
                             rel_batch.push(prepared);
+                            if rel_batch_bytes > max_rel_batch_bytes {
+                                max_rel_batch_bytes = rel_batch_bytes;
+                            }
                             if rel_batch.len() >= REL_BATCH_SIZE {
                                 let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
+                                rel_batch_bytes = 0;
                                 features_emitted += flush_rel_batch(
                                     batch, min_z, max_z, &land_mask,
                                     sort_writer.as_mut().expect("sort_writer not returned from drain"),
@@ -652,7 +717,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         .unwrap_or_else(|_| panic!("land_mask Arc should have single owner after worker join"));
     eprintln!("  Land mask: {} z14 cells populated", land_mask.count_set());
 
-    Ok((sort_writer.expect("sort_writer not returned from drain"), data_bounds, land_mask, node_store_stats))
+    let max_way_inflight_bytes = way_hwm.load(Ordering::Relaxed);
+    Ok((sort_writer.expect("sort_writer not returned from drain"), data_bounds, land_mask, node_store_stats, max_way_inflight_bytes, max_rel_batch_bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -727,6 +793,15 @@ struct RawWay {
     tags: Vec<(String, String)>,
 }
 const _: () = assert!(std::mem::size_of::<RawWay>() == 56);
+
+/// Estimate heap bytes for a block of raw ways (struct + node_refs + tag strings).
+fn estimate_raw_ways_bytes(ways: &[RawWay]) -> usize {
+    ways.iter().map(|w| {
+        56 + w.node_refs.len() * 8
+            + w.tags.len() * 48
+            + w.tags.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
+    }).sum()
+}
 
 /// Result of parallel way processing: resolved coords (needed for way_index),
 /// sort records (geometry output). Land mask is marked on rayon threads directly.
@@ -852,6 +927,12 @@ struct PreparedRelation {
 }
 
 const REL_BATCH_SIZE: usize = 1024;
+
+/// Estimate heap bytes for a single prepared relation (struct + member way coords).
+fn estimate_prepared_rel_bytes(r: &PreparedRelation) -> usize {
+    std::mem::size_of::<PreparedRelation>()
+        + r.member_ways.iter().map(|mw| 32 + mw.coords.len() * 16).sum::<usize>()
+}
 
 /// Resolve relation geometry from way_index (serial I/O). Returns None if
 /// the relation is not a multipolygon/boundary or has no resolvable member ways.
@@ -1478,7 +1559,7 @@ const _: () = assert!(std::mem::size_of::<EncodedTile>() == 32);
 
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
-fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64, u64), PipelineError> {
+fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64, u64, usize), PipelineError> {
     use std::sync::mpsc::sync_channel;
 
     let pmtiles_config = PmtilesConfig {
@@ -1505,11 +1586,16 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
 
     let scope_result: Result<_, PipelineError> = std::thread::scope(|s| {
         // --- Reader thread: k-way merge → PendingTile batches ---
-        let reader = s.spawn(move || -> Result<u64, PipelineError> {
+        let reader = s.spawn(move || -> Result<(u64, usize), PipelineError> {
             let mut features_read: u64 = 0;
             let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
             let mut current = PendingTile { tile_id: u64::MAX, features: Vec::new() };
             let ocean_idx = Layer::Ocean as u8;
+
+            // Incremental byte tracking for assemble batch HWM.
+            let mut current_tile_bytes: usize = 0;
+            let mut batch_bytes: usize = 0;
+            let mut max_batch_bytes: usize = 0;
 
             // Skip tiles that contain ONLY ocean features (no PBF data).
             // Tilemaker doesn't emit ocean-only tiles; map clients render
@@ -1522,9 +1608,11 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
                 let record = sort_reader.next()?;
                 let Some(r) = record else {
                     if current.tile_id != u64::MAX && should_emit(&current) {
+                        batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
                     }
                     if !batch.is_empty() {
+                        if batch_bytes > max_batch_bytes { max_batch_bytes = batch_bytes; }
                         drop(read_tx.send(batch)); // ignore: encoder may have exited
                     }
                     break;
@@ -1536,17 +1624,23 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
 
                 if tile_id != current.tile_id {
                     if current.tile_id != u64::MAX && should_emit(&current) {
+                        batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
                         if batch.len() >= BATCH_SIZE {
+                            if batch_bytes > max_batch_bytes { max_batch_bytes = batch_bytes; }
                             if read_tx.send(batch).is_err() { break; }
                             batch = Vec::with_capacity(BATCH_SIZE);
+                            batch_bytes = 0;
                         }
                     }
                     current = PendingTile { tile_id, features: Vec::new() };
+                    current_tile_bytes = 0;
                 }
+                let data_len = r.data.len();
                 current.features.push((layer_idx, r.data));
+                current_tile_bytes += 32 + data_len;
             }
-            Ok(features_read)
+            Ok((features_read, max_batch_bytes))
         });
 
         // --- Writer thread: encoded tiles → PMTiles ---
@@ -1585,12 +1679,12 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
         }
         drop(encode_tx);
 
-        let features_read = reader.join().expect("reader panicked")?;
+        let (features_read, max_batch_bytes) = reader.join().expect("reader panicked")?;
         let (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom) = writer.join().expect("writer panicked");
-        Ok((features_read, tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom))
+        Ok((features_read, tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes))
     });
 
-    let (features_read, tiles_written, mut pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom) = scope_result?;
+    let (features_read, tiles_written, mut pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes) = scope_result?;
     let unique_tiles = pmtiles.unique_tile_count();
     pmtiles.write_to(&config.output_path)?;
 
@@ -1605,7 +1699,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
         }
     }
 
-    Ok((features_read, tiles_written, unique_tiles))
+    Ok((features_read, tiles_written, unique_tiles, max_batch_bytes))
 }
 
 /// Per-worker assembly state, persisted across batches via `thread_local!`.

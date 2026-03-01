@@ -7,12 +7,12 @@ Blocked on brokkr v3 schema (`~/Programs/brokkr/SCHEMA_REDESIGN.md`) which adds
 `peak_rss_mb`, `run_kv`, and `project` column. Do that first.
 
 ### Elivagar-side instrumentation (after brokkr v3)
-- [ ] Add `peak_rss_kb()` helper — read `/proc/self/status` for `VmHWM`
-- [ ] Emit per-phase RSS: `phase12_rss_kb=`, `ocean_rss_kb=`, `sort_rss_kb=`, `assemble_rss_kb=`
-- [ ] Emit `final_rss_kb=` at pipeline end
-- [ ] Add `AtomicUsize` high-water-mark counters for in-flight structures
-- [ ] Emit: `max_way_inflight_bytes=`, `max_rel_batch_bytes=`, `max_assemble_batch_bytes=`
-- [ ] Emit `sort_chunks=` in final kv summary (already tracked internally, just not printed)
+- [x] Add `peak_rss_kb()` helper — read `/proc/self/status` for `VmHWM`
+- [x] Emit per-phase RSS: `phase12_rss_kb=`, `ocean_rss_kb=`, `sort_rss_kb=`, `assemble_rss_kb=`
+- [x] Emit `final_rss_kb=` at pipeline end (covered by `assemble_rss_kb` — VmHWM is cumulative peak)
+- [x] Add `AtomicUsize` high-water-mark counters for in-flight structures
+- [x] Emit: `max_way_inflight_bytes=`, `max_rel_batch_bytes=`, `max_assemble_batch_bytes=`
+- [x] Emit `sort_chunks=` in final kv summary (already tracked internally, just not printed)
 
 ### Already instrumented (sufficient)
 - Phase timings: `total_ms`, `phase12_ms`, `ocean_ms`, `phase3_ms`, `phase4_ms`
