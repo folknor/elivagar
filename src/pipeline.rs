@@ -1474,6 +1474,33 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
     Ok((features_read, tiles_written, unique_tiles))
 }
 
+/// Per-worker assembly state, persisted across batches via `thread_local!`.
+/// Avoids re-creating Compressor + pools on every batch boundary and keeps
+/// LayerBuilder HashMap capacity alive across tiles.
+struct AssemblyScratch {
+    encode_scratch: mvt::EncodeScratch,
+    merge_scratch: mvt::MergeScratch,
+    geom_pool: Vec<Vec<u32>>,
+    tags_pool: Vec<Vec<(u16, u16)>>,
+    compressor: Option<libdeflater::Compressor>,
+    gz_buf: Vec<u8>,
+    layers: [Option<LayerBuilder>; LAYER_COUNT],
+}
+
+thread_local! {
+    static ASSEMBLY_SCRATCH: std::cell::RefCell<AssemblyScratch> = std::cell::RefCell::new(
+        AssemblyScratch {
+            encode_scratch: mvt::EncodeScratch::new(),
+            merge_scratch: mvt::MergeScratch::new(),
+            geom_pool: Vec::new(),
+            tags_pool: Vec::new(),
+            compressor: None,
+            gz_buf: Vec::new(),
+            layers: [const { None }; LAYER_COUNT],
+        }
+    );
+}
+
 /// Encode + gzip a batch of tiles in parallel using rayon.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_wrap)]
@@ -1482,81 +1509,73 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
 
     batch
         .par_iter()
-        .map_init(
-            || {
+        .map(|tile| {
+            ASSEMBLY_SCRATCH.with(|cell| {
+            let s = &mut *cell.borrow_mut();
+
+            // Lazy-init compressor on first use per thread.
+            if s.compressor.is_none() {
                 let lvl = libdeflater::CompressionLvl::new(compression_level as i32)
                     .expect("invalid compression level");
-                (mvt::EncodeScratch::new(), mvt::MergeScratch::new(),
-                 Vec::<Vec<u32>>::new(), Vec::<Vec<(u16, u16)>>::new(),
-                 libdeflater::Compressor::new(lvl), Vec::<u8>::new())
-            },
-            |(encode_scratch, merge_scratch, geom_pool, tags_pool, compressor, gz_buf), tile| {
-            let mut layers = new_layer_slots();
+                s.compressor = Some(libdeflater::Compressor::new(lvl));
+            }
+
+            // Reset persisted layers from previous tile (reclaim features + clear interning).
+            for slot in &mut s.layers {
+                if let Some(lb) = slot.as_mut() {
+                    lb.prepare_for_reuse(&mut s.geom_pool, &mut s.tags_pool);
+                }
+            }
+
             for &(layer_idx, ref data) in &tile.features {
-                if (layer_idx as usize) < layers.len() {
+                if (layer_idx as usize) < s.layers.len() {
                     add_feature_to_layer(
-                        get_or_create_layer(&mut layers, layer_idx as usize),
+                        get_or_create_layer(&mut s.layers, layer_idx as usize),
                         data,
-                        geom_pool,
-                        tags_pool,
+                        &mut s.geom_pool,
+                        &mut s.tags_pool,
                     );
                 }
             }
 
             // Merge same-attribute geometries to reduce feature count
-            for layer in &mut layers {
+            for layer in &mut s.layers {
                 if let Some(lb) = layer.as_mut() {
-                    lb.merge_same_attr_geometries(merge_scratch, geom_pool, tags_pool);
+                    lb.merge_same_attr_geometries(&mut s.merge_scratch, &mut s.geom_pool, &mut s.tags_pool);
                 }
             }
 
             // Max 26 elements (one per Shortbread layer) — with_capacity not needed.
-            let non_empty: Vec<&LayerBuilder> = layers.iter()
+            let non_empty: Vec<&LayerBuilder> = s.layers.iter()
                 .filter_map(|l| l.as_ref())
                 .filter(|l| !l.is_empty())
                 .collect();
             if non_empty.is_empty() {
-                // Reclaim feature Vecs before returning
-                for layer in &mut layers {
-                    if let Some(lb) = layer.as_mut() {
-                        lb.reclaim_features(geom_pool, tags_pool);
-                    }
-                }
                 return None;
             }
 
-            let mvt_data = mvt::encode_tile_with(&non_empty, encode_scratch);
-
-            // Reclaim feature Vecs into pools for reuse on next tile
-            for layer in &mut layers {
-                if let Some(lb) = layer.as_mut() {
-                    lb.reclaim_features(geom_pool, tags_pool);
-                }
-            }
+            let mvt_data = mvt::encode_tile_with(&non_empty, &mut s.encode_scratch);
 
             if mvt_data.is_empty() {
                 return None;
             }
 
-            // libdeflate: reuse compressor + output buffer per rayon thread.
+            // libdeflate: reuse compressor + output buffer per thread.
+            let compressor = s.compressor.as_mut().expect("compressor initialized");
             let bound = compressor.gzip_compress_bound(mvt_data.len());
-            gz_buf.resize(bound, 0);
-            let compressed_len = compressor.gzip_compress(&mvt_data, gz_buf)
+            s.gz_buf.resize(bound, 0);
+            let compressed_len = compressor.gzip_compress(&mvt_data, &mut s.gz_buf)
                 .expect("gzip compress failed");
-            let compressed = gz_buf[..compressed_len].to_vec();
+            let compressed = s.gz_buf[..compressed_len].to_vec();
 
             Some(EncodedTile { tile_id: tile.tile_id, compressed })
+            })
         })
         .flatten()
         .collect()
 }
 
 const LAYER_COUNT: usize = Layer::count();
-
-/// Create an empty slot array for lazy layer builder initialization.
-fn new_layer_slots() -> [Option<LayerBuilder>; LAYER_COUNT] {
-    [const { None }; LAYER_COUNT]
-}
 
 /// Get or create a LayerBuilder at the given index.
 fn get_or_create_layer(layers: &mut [Option<LayerBuilder>], idx: usize) -> &mut LayerBuilder {

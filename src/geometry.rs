@@ -355,11 +355,11 @@ struct SimplifySingleScratch {
 
 thread_local! {
     static SIMPLIFY_SINGLE_SCRATCH: std::cell::RefCell<SimplifySingleScratch> =
-        std::cell::RefCell::new(SimplifySingleScratch {
+        const { std::cell::RefCell::new(SimplifySingleScratch {
             cascade: Vec::new(),
             keep_buf: Vec::new(),
             simp_buf: Vec::new(),
-        });
+        }) };
 }
 
 /// Cascading simplification for a single geometry (line or polygon ring).
@@ -585,7 +585,7 @@ pub fn clip_linestring(line: &[Point], rect: &ClipRect) -> SmallVec<[Vec<Point>;
 }
 
 thread_local! {
-    static CLIP_LINE_SCRATCH: std::cell::RefCell<Vec<Point>> = std::cell::RefCell::new(Vec::new());
+    static CLIP_LINE_SCRATCH: std::cell::RefCell<Vec<Point>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Clip a linestring and call `callback` for each visible sub-segment.
