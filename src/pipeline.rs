@@ -1709,14 +1709,14 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
             // Skip tiles that contain ONLY ocean features (no PBF data).
             // Tilemaker doesn't emit ocean-only tiles; map clients render
             // absent tiles as background. Skipping these cuts tile count by ~5x.
-            let should_emit = |tile: &PendingTile| -> bool {
-                tile.features.iter().any(|(layer, _)| *layer != ocean_idx)
-            };
+            // Tracked incrementally via has_non_ocean flag instead of scanning
+            // all features at tile boundary.
+            let mut has_non_ocean = false;
 
             loop {
                 let record = sort_reader.next()?;
                 let Some(r) = record else {
-                    if current.tile_id != u64::MAX && should_emit(&current) {
+                    if current.tile_id != u64::MAX && has_non_ocean {
                         batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
                     }
@@ -1732,7 +1732,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
                 let layer_idx = sort::layer_from_key(r.key);
 
                 if tile_id != current.tile_id {
-                    if current.tile_id != u64::MAX && should_emit(&current) {
+                    if current.tile_id != u64::MAX && has_non_ocean {
                         batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
                         if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
@@ -1744,7 +1744,9 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
                     }
                     current = PendingTile { tile_id, features: Vec::new() };
                     current_tile_bytes = 0;
+                    has_non_ocean = false;
                 }
+                if layer_idx != ocean_idx { has_non_ocean = true; }
                 let data_len = r.data.len();
                 current.features.push((layer_idx, r.data));
                 current_tile_bytes += 32 + data_len;
@@ -1821,6 +1823,7 @@ struct AssemblyScratch {
     tags_pool: Vec<Vec<(u16, u16)>>,
     compression_levels: [Option<flate2::Compression>; 11],
     gz_buf: Vec<u8>,
+    mvt_buf: Vec<u8>,
     layers: [Option<LayerBuilder>; LAYER_COUNT],
 }
 
@@ -1833,6 +1836,7 @@ thread_local! {
             tags_pool: Vec::new(),
             compression_levels: [const { None }; 11],
             gz_buf: Vec::new(),
+            mvt_buf: Vec::new(),
             layers: [const { None }; LAYER_COUNT],
         }
     );
@@ -1884,9 +1888,9 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
                 return None;
             }
 
-            let mvt_data = mvt::encode_tile_with(&non_empty, &mut s.encode_scratch);
+            mvt::encode_tile_into(&mut s.mvt_buf, &non_empty, &mut s.encode_scratch);
 
-            if mvt_data.is_empty() {
+            if s.mvt_buf.is_empty() {
                 return None;
             }
 
@@ -1905,7 +1909,7 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
             let mut gz_buf = std::mem::take(&mut s.gz_buf);
             gz_buf.clear();
             let mut encoder = flate2::write::GzEncoder::new(gz_buf, lvl);
-            std::io::Write::write_all(&mut encoder, &mvt_data)
+            std::io::Write::write_all(&mut encoder, &s.mvt_buf)
                 .expect("gzip compress failed");
             let compressed = encoder.finish().expect("gzip finish failed");
             s.gz_buf = Vec::with_capacity(compressed.len());

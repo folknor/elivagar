@@ -281,12 +281,19 @@ pub fn encode_tile(layers: &[&LayerBuilder]) -> Vec<u8> {
 #[hotpath::measure]
 pub fn encode_tile_with(layers: &[&LayerBuilder], scratch: &mut EncodeScratch) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1 << 16);
+    encode_tile_into(&mut buf, layers, scratch);
+    buf
+}
+
+/// Encode layers into a caller-provided buffer, avoiding per-tile allocation.
+#[hotpath::measure]
+pub fn encode_tile_into(buf: &mut Vec<u8>, layers: &[&LayerBuilder], scratch: &mut EncodeScratch) {
+    buf.clear();
     for layer in layers {
         if !layer.is_empty() {
-            layer.encode(&mut buf, scratch);
+            layer.encode(buf, scratch);
         }
     }
-    buf
 }
 
 // ---------------------------------------------------------------------------
