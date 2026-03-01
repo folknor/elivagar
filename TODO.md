@@ -103,29 +103,18 @@ insurance (~160-320 MB). Add telemetry when cap is hit.
 - [ ] **Dedup correctness is probabilistic:** Hash match + length match without byte validation.
   Ref: `pmtiles_writer.rs:196`. Collision risk ~2^-81 per pair — negligible but non-zero.
 
-- [ ] **Way index finalize reads full offsets file:** Ref: `way_index.rs:197`. Transient memory
-  spike, not the top RSS driver but relevant at planet scale.
-
-- [ ] **Double decode/iteration on way blocks:** Ways counted then re-iterated.
-  Ref: `pipeline.rs:466`, `pipeline.rs:503`.
-
-- [ ] **Alloc churn in tag handling:** Owned tags copied to `Vec<(String, String)>` then
-  re-borrowed. Ref: `pipeline.rs:508`, `pipeline.rs:788`.
+- [x] **Way index finalize reads full offsets file:** Fixed — streaming BufReader, no intermediate
+  `Vec<u8>`. Transient peak halved (28.8 GB → 14.4 GB at planet scale). Further optimization:
+  `WayEntry` has identical layout to the file (i64 + u64 LE, 16 bytes, no padding — static
+  assert verified), so the raw bytes could be reinterpreted directly via bytemuck/transmute,
+  eliminating the parse loop and the 14.4 GB `Vec<WayEntry>` entirely (just sort in-place on
+  the raw allocation). Only matters if planet finalize is still a bottleneck.
 
 - [ ] **Flat node-index safety guardrails:** PBF size guard + hard cap on flat index.
   See investigation summary above.
 
-- [ ] **Sort buffer memory accounting off:** `buffer_bytes` counts `data.len() + 8` but actual
-  is `data.len() + 32` (struct + Vec overhead). Chunks exceed 1 GB target by 24-38%.
-
-- [ ] **`cmd_count` u32 → u16:** Max commands per feature ~2000, well under 65K. Saves 4.8 GB
-  planet sort I/O.
-
 - [ ] **`find_chunk_in_blob` linear scan:** 254 chunks/group at planet vs 7 on Denmark. Consider
   offset table or binary search for planet-scale lookup.
-
-- [ ] **Output BufWriter 8 KB:** Multi-GB blob copy uses default 8 KB buffer. Asymmetric with
-  1 MB BufReader — bump to match.
 
 - [ ] **Ocean `fill_data` cloning:** 10M-100M clones of identical ~50-byte data per planet run.
   Use Arc or sentinel to avoid per-tile copies.

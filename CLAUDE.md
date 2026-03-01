@@ -24,13 +24,14 @@ Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install
 - `brokkr bench node-store [--nodes N] [--runs N]` — SortedNodeStore benchmark (default: 50M nodes, 5 runs)
 - `brokkr bench pmtiles [--tiles N] [--runs N]` — PMTiles writer benchmark (default: 500K tiles, 5 runs)
 - `brokkr bench eliv-all [--dataset name] [--pbf path] [--runs N]` — full benchmark suite
-- `brokkr hotpath [--dataset name] [--pbf path] [--alloc]` — hotpath profiling of main tilegen pipeline (timing or allocation)
+- `brokkr hotpath [--dataset name] [--pbf path] [--alloc] [--verbose]` — hotpath profiling of main tilegen pipeline (timing or allocation). Returns a UUID; use `brokkr results <UUID> [--top 0]` to view the full report.
 - `brokkr hotpath pmtiles [--tiles N] [--alloc]` — hotpath profiling of PMTiles micro-benchmark
 - `brokkr hotpath node-store [--nodes N] [--alloc]` — hotpath profiling of node store micro-benchmark
 - `brokkr profile [--dataset name] [--pbf path] [--tool perf|samply]` — sampling profiler (perf or samply)
 - `brokkr compare-tiles <a> <b> [--sample N]` — compare feature counts between PMTiles archives
 - `brokkr download ocean` — download ocean shapefiles
-- `brokkr results [--commit X] [--compare A B]` — query benchmark results from SQLite
+- `brokkr results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)
+- `brokkr results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [--top N]` — query/compare benchmark results from SQLite. Use `--top 0` to show all hotpath functions. Use `--compare-last --command hotpath` to diff two most recent hotpath runs.
 - `brokkr clean` — remove tilegen_tmp and scratch files
 
 Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access).

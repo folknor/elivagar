@@ -193,39 +193,29 @@ impl WayIndex {
         // Read compressed data into memory
         self.data = std::fs::read(&self.data_path)?;
 
-        // Read offset entries into Vec<WayEntry>, sort by way_id
-        let offsets_bytes = std::fs::read(&self.offsets_path)?;
-        let entry_count = offsets_bytes.len() / OFFSET_ENTRY_SIZE;
+        // Stream offset entries into Vec<WayEntry>, sort by way_id.
+        // Reads 16 bytes at a time via BufReader — never holds the raw bytes
+        // in memory alongside the parsed entries. Saves ~14.4 GB transient
+        // peak at planet scale (900M ways × 16 bytes).
+        let offsets_file = File::open(&self.offsets_path)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let file_len = offsets_file.metadata()?.len() as usize;
+        let entry_count = file_len / OFFSET_ENTRY_SIZE;
+        let mut reader = io::BufReader::with_capacity(1 << 20, offsets_file);
         let mut entries = Vec::with_capacity(entry_count);
-        for i in 0..entry_count {
-            let off = i * OFFSET_ENTRY_SIZE;
-            // Infallible: slices are exactly 8 bytes by construction (file is N * 16 bytes).
+        let mut buf = [0u8; OFFSET_ENTRY_SIZE];
+        for _ in 0..entry_count {
+            io::Read::read_exact(&mut reader, &mut buf)?;
             let way_id = i64::from_le_bytes([
-                offsets_bytes[off],
-                offsets_bytes[off + 1],
-                offsets_bytes[off + 2],
-                offsets_bytes[off + 3],
-                offsets_bytes[off + 4],
-                offsets_bytes[off + 5],
-                offsets_bytes[off + 6],
-                offsets_bytes[off + 7],
+                buf[0], buf[1], buf[2], buf[3],
+                buf[4], buf[5], buf[6], buf[7],
             ]);
             let data_offset = u64::from_le_bytes([
-                offsets_bytes[off + 8],
-                offsets_bytes[off + 9],
-                offsets_bytes[off + 10],
-                offsets_bytes[off + 11],
-                offsets_bytes[off + 12],
-                offsets_bytes[off + 13],
-                offsets_bytes[off + 14],
-                offsets_bytes[off + 15],
+                buf[8], buf[9], buf[10], buf[11],
+                buf[12], buf[13], buf[14], buf[15],
             ]);
-            entries.push(WayEntry {
-                way_id,
-                data_offset,
-            });
+            entries.push(WayEntry { way_id, data_offset });
         }
-        drop(offsets_bytes);
 
         entries.sort_unstable_by_key(|e| e.way_id);
         self.entries = entries;
