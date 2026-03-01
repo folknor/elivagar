@@ -116,5 +116,8 @@ insurance (~160-320 MB). Add telemetry when cap is hit.
 - [ ] **`find_chunk_in_blob` linear scan:** 254 chunks/group at planet vs 7 on Denmark. Consider
   offset table or binary search for planet-scale lookup.
 
-- [ ] **Ocean `fill_data` cloning:** 10M-100M clones of identical ~50-byte data per planet run.
-  Use Arc or sentinel to avoid per-tile copies.
+- [x] **Ocean `fill_data` cloning:** Partially addressed — `SortRecord.data` changed from `Vec<u8>`
+  to `Box<[u8]>` (`e779759`). Clones now allocate exactly `len` bytes (no excess capacity),
+  struct shrunk 32→24 bytes. RSS -7.4% on Denmark. Full elimination (Arc/sentinel) would
+  require changing `SortRecord.data` to an enum or shared type — not worth the complexity
+  unless planet alloc profiles show fill clones as a top contributor.
