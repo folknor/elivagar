@@ -46,7 +46,13 @@ fn main() {
     // Ensure output dir exists
     fs::create_dir_all("data").expect("create data dir");
 
-    // Benchmark elivagar writer
+    // Benchmark elivagar writer (with hotpath timing when feature is enabled)
+    #[cfg(feature = "hotpath")]
+    let _guard = hotpath::HotpathGuardBuilder::new("bench_pmtiles")
+        .percentiles(&[50, 95, 99])
+        .with_functions_limit(0)
+        .build();
+
     eprint!("  elivagar:   ");
     let (eli_ms, eli_size) = bench_elivagar(&tiles, runs);
     eprintln!("{eli_ms} ms ({:.1} MB)", eli_size as f64 / 1_000_000.0);

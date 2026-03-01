@@ -67,26 +67,26 @@ Denmark extract (483 MB PBF) → Shortbread PMTiles, best of 3 runs:
 <!-- BENCH:START -->
 | Tool | Total | PBF+Features | Ocean | Sort | Assembly |
 |------|-------|-------------|-------|------|----------|
-| **elivagar** | **14s** | 9s | 1.4s | 0.5s | 2.5s |
+| **elivagar** | **12s** | 8s | 1.5s | 0.6s | 2s |
 | Tilemaker | 30s | — | — | — | — |
 | Planetiler 0.10 | 41s | — | — | — | — |
 <!-- BENCH:END -->
 
-System: plantasjen (Ryzen 9 5900X, Linux 6.18). Commit: `605a1a5`.
+System: plantasjen (Ryzen 9 5900X, Linux 6.18). Commit: `3d9b777`.
 
 Measured with `brokkr bench self`. Results stored in `.brokkr/results.db`.
 
 ### PMTiles writer
 
-Elivagar's hand-rolled PMTiles v3 writer vs [pmtiles-rs](https://github.com/stadiamaps/pmtiles-rs) 0.20,
+Elivagar's hand-rolled PMTiles v3 writer vs [pmtiles-rs](https://github.com/stadiamaps/pmtiles-rs),
 synthetic tiles (unique gzipped payloads, Hilbert-ordered), best of 5 runs
-(plantasjen, commit `4a9b2d5`):
+(plantasjen, commit `3d9b777`):
 
 | Tiles | elivagar | pmtiles-rs | Speedup |
 |------:|---------:|-----------:|--------:|
-| 100K | 28 ms | 68 ms | 2.4x |
-| 500K | 110 ms | 309 ms | 2.8x |
-| 1M | 223 ms | 646 ms | 2.9x |
+| 100K | 35 ms | 74 ms | 2.1x |
+| 500K | 163 ms | 356 ms | 2.2x |
+| 1M | 298 ms | 686 ms | 2.3x |
 
 Run with `brokkr bench pmtiles [--tiles N] [--runs N]`.
 

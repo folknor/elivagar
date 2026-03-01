@@ -184,6 +184,7 @@ impl PmtilesWriter {
     /// # Errors
     /// Returns `io::Error` if writing to the tile blob file fails (streaming mode).
     #[allow(clippy::cast_possible_truncation)]
+    #[hotpath::measure]
     pub fn add_tile(&mut self, z: u8, x: u32, y: u32, data: &[u8]) -> io::Result<bool> {
         let tile_id = xy_to_tile_id(z, x, y);
 
@@ -229,6 +230,7 @@ impl PmtilesWriter {
     ///
     /// # Errors
     /// Returns `io::Error` if file creation, directory encoding, or data copy fails.
+    #[hotpath::measure]
     pub fn write_to(&mut self, path: &Path) -> io::Result<()> {
         // Free dedup map — no longer needed after all tiles are added.
         drop(std::mem::take(&mut self.dedup));
@@ -342,6 +344,7 @@ impl PmtilesWriter {
 
     /// Collect all directory entries (flushing the current run and reading back
     /// from the streaming temp file if necessary).
+    #[hotpath::measure]
     fn collect_dir_entries(&mut self) -> io::Result<Vec<DirEntry>> {
         self.flush_run()?;
         match &mut self.dir_store {
@@ -368,6 +371,7 @@ impl PmtilesWriter {
     }
 
     /// Build root and leaf directory bytes. Returns (root_compressed, leaf_compressed).
+    #[hotpath::measure]
     fn build_directories(&self, entries: &[DirEntry]) -> io::Result<(Vec<u8>, Vec<u8>)> {
         const MAX_ROOT_ENTRIES: usize = 16384;
         const LEAF_SIZE: usize = 4096;
@@ -452,6 +456,7 @@ fn write_header_bounds(h: &mut [u8; 127], config: &PmtilesConfig) {
 
 /// Build leaf directories when entries exceed the root limit.
 /// Returns (root_compressed, all_leaves_compressed).
+#[hotpath::measure]
 fn build_leaf_directories(
     entries: &[DirEntry],
     leaf_size: usize,
@@ -501,6 +506,7 @@ fn build_leaf_directories(
 // ---------------------------------------------------------------------------
 
 /// Encode directory entries in PMTiles v3 columnar format.
+#[hotpath::measure]
 fn encode_directory(entries: &[DirEntry]) -> Vec<u8> {
     let mut buf = Vec::new();
 
