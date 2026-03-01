@@ -160,9 +160,32 @@ Results on dm6 vs `e0cabcb` baseline:
 Negligible output size increase (+0.2%). Full savings at planet scale where assemble phase
 is a larger fraction of total wall time.
 
-## Tier 7 — Architectural / needs measurement
+## Tier 7 — Way index compression ✅ DONE
 
-High-risk or needs benchmarking before deciding:
+Committed as `1f4955c`. Replaced sparse mmap'd way index with delta-varint compressed
+in-memory structure. Coordinates encoded as first-coord-raw + zigzag-varint deltas.
+Offset entries loaded into sorted Vec for binary search lookup.
+
+| # | Finding | Change | Status |
+|---|---------|--------|--------|
+| 1 | Way index compression | Delta-varint encoding, sorted in-memory index | ✅ |
+
+Results on dm6 vs `8ca350c` baseline:
+
+| Metric | Before | After | Change |
+|---|---|---|---|
+| Denmark bench | 20044 ms | 15610 ms | -22.1% |
+| Japan bench | 71392 ms | 65648 ms | -8.0% |
+| Germany bench | 142076 ms | 122417 ms | -13.8% |
+| Denmark output | 273.3 MB | 273.3 MB | +0.0% |
+| Japan output | 1168.4 MB | 1168.1 MB | -0.0% |
+| Germany output | 2494.5 MB | 2494.3 MB | -0.0% |
+
+Surprising speed improvement even on small datasets — delta-varint decode from RAM is
+faster than mmap page table overhead. Eliminates the NA blocker: projected ~15 GB way
+index for NA (was 38 GB mmap'd), ~41 GB for planet (fits in 64 GB after node store drop).
+
+### Remaining architectural items
 
 | # | Finding | Question |
 |---|---------|----------|
@@ -170,21 +193,20 @@ High-risk or needs benchmarking before deciding:
 | F1 | SortedNodeStore spilling/streaming | Resolved — compression keeps node store under 8.5 GB for NA. No longer the planet blocker. |
 | F16 | `find_chunk_in_blob` offset table | 254 chunks/group at planet. Linear scan may matter. Need planet-scale measurement. |
 | F7 | Streaming ocean polygon parse | 1-5 GB at planet. Only matters if memory headroom is tight. |
-| **NEW** | Way index compression/streaming | **The real planet blocker.** See NA gate results below. |
 
 ---
 
 ## Sequencing rationale
 
-Tiers 0-3 complete. ~63 GB sort I/O reduction + ~1.5 GB geometry alloc reduction banked
-(Denmark). Zero wall-clock regression on any dataset.
+All tiers 0-7 complete. Total banked savings vs original baseline:
+- ~63 GB sort I/O reduction (F18 + F18b)
+- ~1.5 GB geometry alloc reduction (F26 + F27 + F28)
+- Way index: mmap thrash eliminated, 22% wall-clock improvement on Denmark
+- Per-zoom compression levels tuned
 
-NA gate revealed the way index as the new bottleneck — must be solved before planet scale.
-Tiers 4-6 are still valuable for CPU/alloc but won't fix the way index problem.
+Next: NA gate re-test with compressed way index.
 
-Next: way index architecture (compress or stream), then Tiers 4-6.
-
-## Milestone: North America gate — FAILED
+## Milestone: North America gate — FAILED (pre-compression)
 
 Ran `brokkr bench self --dataset north-america --runs 1` on dm6 (32 GB RAM), commit `b5bc00e`.
 Killed after ~2 hours with no completion in sight.
@@ -206,18 +228,6 @@ Killed after ~2 hours with no completion in sight.
   2 hours with no new sort chunks emitted.
 - **vmstat confirmed**: swap-in 57-96/s, 85-97% idle CPU. Classic mmap thrash pattern.
 
-### Conclusion
-The way index needs the same treatment the node store got — compression, streaming, or
-a fundamentally different architecture. The current flat mmap approach works up to ~8 GB
-PBFs (Japan) but fails at NA scale (17.8 GB). Planet (~70 GB) is impossible without
-fixing this.
-
-Options:
-1. **Compress way index** — FOR bitpacking like node store. Way coords are (lat_e7, lon_e7)
-   pairs, delta-encodable. Could reduce 38 GB → ~10-15 GB.
-2. **Stream way index** — don't mmap, read sequentially during relation phase. Requires
-   sorting relation member lookups by way ID.
-3. **Eliminate way index** — two-pass PBF reading. First pass builds node+way indices,
-   second pass resolves relations directly. Avoids storing way geometry entirely.
-4. **Run on bigger hardware** — 64 GB machine would handle NA comfortably. Planet would
-   still need option 1-3.
+### Resolution
+Way index compressed in `1f4955c`. Delta-varint encoding reduces 38 GB → ~15 GB (projected).
+Loaded into RAM after node store drop. NA gate should be re-tested.
