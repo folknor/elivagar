@@ -53,9 +53,9 @@ pub fn layer_from_key(key: SortKey) -> u8 {
 /// since mimalloc handles the small allocs efficiently.
 pub struct SortRecord {
     pub key: SortKey,
-    pub data: Vec<u8>, // Ephemeral — boxed_slice not worth it (flushed in 1GB chunks).
+    pub data: Box<[u8]>,
 }
-const _: () = assert!(std::mem::size_of::<SortRecord>() == 32);
+const _: () = assert!(std::mem::size_of::<SortRecord>() == 24);
 
 // ---------------------------------------------------------------------------
 // SortWriter
@@ -245,7 +245,7 @@ impl ChunkReader {
     // Allocates a Vec per record. A reusable buffer was considered but the heap
     // holds only k entries (1-4 chunks for Denmark, ~20 for planet) and records
     // vary in size, so a pool would often reallocate anyway. Not a bottleneck.
-    fn read_record(&mut self) -> io::Result<Option<(SortKey, Vec<u8>)>> {
+    fn read_record(&mut self) -> io::Result<Option<(SortKey, Box<[u8]>)>> {
         if self.remaining == 0 {
             return Ok(None);
         }
@@ -258,7 +258,7 @@ impl ChunkReader {
         self.reader.read_exact(&mut buf4)?;
         let data_len = u32::from_le_bytes(buf4);
 
-        let mut data = vec![0u8; data_len as usize];
+        let mut data = vec![0u8; data_len as usize].into_boxed_slice();
         self.reader.read_exact(&mut data)?;
 
         self.remaining -= 1;
@@ -273,10 +273,10 @@ impl ChunkReader {
 
 struct HeapEntry {
     key: SortKey,
-    data: Vec<u8>,
+    data: Box<[u8]>,
     chunk_idx: usize,
 }
-const _: () = assert!(std::mem::size_of::<HeapEntry>() == 40);
+const _: () = assert!(std::mem::size_of::<HeapEntry>() == 32);
 
 impl Eq for HeapEntry {}
 
@@ -440,7 +440,7 @@ mod tests {
             writer
                 .push(SortRecord {
                     key,
-                    data: i.to_le_bytes().to_vec(),
+                    data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
         }
@@ -482,7 +482,7 @@ mod tests {
             writer
                 .push(SortRecord {
                     key,
-                    data: i.to_le_bytes().to_vec(),
+                    data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
         }
@@ -537,7 +537,7 @@ mod tests {
             writer
                 .push(SortRecord {
                     key: 42,
-                    data: i.to_le_bytes().to_vec(),
+                    data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
         }
@@ -566,7 +566,7 @@ mod tests {
             data.extend_from_slice(&key.to_le_bytes());
             data.extend_from_slice(b"payload_");
             data.extend_from_slice(&i.to_le_bytes());
-            writer.push(SortRecord { key, data }).unwrap();
+            writer.push(SortRecord { key, data: data.into_boxed_slice() }).unwrap();
         }
 
         let mut reader = writer.finish().unwrap();

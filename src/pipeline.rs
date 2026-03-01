@@ -1666,7 +1666,7 @@ fn emit_multipolygon_feature(
 /// A tile's features collected from the sort reader, ready for parallel encoding.
 struct PendingTile {
     tile_id: u64,
-    features: Vec<(u8, Vec<u8>)>, // (layer_idx, feature_data)
+    features: Vec<(u8, Box<[u8]>)>, // (layer_idx, feature_data)
 }
 const _: () = assert!(std::mem::size_of::<PendingTile>() == 32);
 

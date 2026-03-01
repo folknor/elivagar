@@ -282,16 +282,14 @@ pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], 
 }
 
 /// Encode feature data with pre-encoded attribute bytes (P3 optimization).
-/// Returns an owned Vec because the caller stores it as `SortRecord.data` which
-/// must own its bytes for the chunk file → k-way merge pipeline. Passing a
-/// `&mut Vec<u8>` would still require `.to_vec()` into the SortRecord, saving
-/// only the capacity calculation.
+/// Returns an owned `Box<[u8]>` because the caller stores it as `SortRecord.data`
+/// which must own its bytes for the chunk file → k-way merge pipeline.
 pub(crate) fn encode_feature_data_with_attrs(
     osm_id: u64,
     geom_type: GeomType,
     geom_cmds: &[u32],
     attrs_bytes: &[u8],
-) -> Vec<u8> {
+) -> Box<[u8]> {
     let mut buf = Vec::with_capacity(11 + geom_cmds.len() * 4 + attrs_bytes.len());
     buf.extend_from_slice(&osm_id.to_le_bytes());
     buf.push(geom_type as u8);
@@ -302,7 +300,7 @@ pub(crate) fn encode_feature_data_with_attrs(
         buf.extend_from_slice(&cmd.to_le_bytes());
     }
     buf.extend_from_slice(attrs_bytes);
-    buf
+    buf.into_boxed_slice()
 }
 
 pub(crate) fn encode_feature_data(
@@ -311,7 +309,7 @@ pub(crate) fn encode_feature_data(
     geom_cmds: &[u32],
     attrs: &[shortbread::Attr],
     zoom: u8,
-) -> Vec<u8> {
+) -> Box<[u8]> {
     let mut attrs_bytes = Vec::with_capacity(64);
     encode_attrs_bytes(&mut attrs_bytes, attrs, zoom);
     encode_feature_data_with_attrs(osm_id, geom_type, geom_cmds, &attrs_bytes)
