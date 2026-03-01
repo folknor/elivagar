@@ -1,5 +1,13 @@
 # P4: Configurable Sort Chunk Memory Profile
 
+## Status: IMPLEMENTED (`b82afae`)
+
+All steps complete:
+- Renamed `SORT_CHUNK_SIZE` → `DEFAULT_SORT_CHUNK_SIZE`, added `sort_chunk_size` to `TilegenConfig`
+- Added `--sort-budget <size>` CLI flag with `parse_byte_size()` (accepts `256M`, `1G`, raw bytes; minimum 64 MB)
+- Fixed ocean byte accounting (`+8` → `+sizeof::<SortRecord>()`)
+- Updated lib.rs doc example and CLAUDE.md CLI flags section
+
 ## Detailed Analysis and Implementation Plan
 
 ### 1. Current State: How Sort Chunk Memory Works

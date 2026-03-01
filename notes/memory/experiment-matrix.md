@@ -78,12 +78,13 @@ Germany: correctness identical, no regression.
 Replaced token semaphore (MAX_INFLIGHT=4) with Mutex+Condvar byte budget (128 MB,
 10x output multiplier). Count ceiling raised to 8. Denmark: 23 MB → 13 MB (-43%).
 
-## Phase 3: Structural Redesign (if needed)
-### E3.1 Streaming root/leaf directory construction without full entry materialization
-- Current streaming mode still materializes all dir entries during `write_to`.
-- Hypothesis: large directory vectors create late-phase memory spikes.
-- Change: externalized multi-pass or on-disk merge strategy for PMTiles directories.
-- Exit criteria: remove `write_to` memory spike while preserving output correctness.
+## Phase 3: Structural Redesign
+### E3.1 Streaming root/leaf directory construction without full entry materialization — ✓ DONE (`d11744e`)
+Replaced `collect_dir_entries` + `build_directories` with `finalize_directories` that reads
+streaming `dir_entries.bin` in 4096-entry chunks, building leaf directories incrementally.
+Never materializes the full `Vec<DirEntry>`. Also fixed double-buffer in `collect_dir_entries`
+(replaced `read_to_end` with `BufReader` + `read_exact`). Planet-scale finalization peak:
+~240 MB → ~30 MB. Added streaming-mode tests including byte-identity check vs in-memory mode.
 
 ### E3.2 Way index offset loading strategy
 - Current finalize path reads offsets file fully then builds sorted entries vector.

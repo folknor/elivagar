@@ -1,5 +1,17 @@
 # P3: Tighten Assemble Phase Memory Behavior
 
+## Status: IMPLEMENTED
+
+| Change | Commit | Notes |
+|--------|--------|-------|
+| 1. Eliminate `compressed.clone()` | `c88cfc0` (P1) | Done as part of P1 byte-budgeted in-flight controls |
+| 2. Reuse MVT encode buffer | `2442343` | `encode_tile_into()` writes to caller-provided `&mut Vec<u8>` via `AssemblyScratch.mvt_buf` |
+| 3. Adaptive byte-budget batching | `c88cfc0` (P1) | Done as part of P1 assemble batch budget (32 MB cap) |
+| 4. `should_emit` flag optimization | `2442343` | Replaced closure scan with incremental `has_non_ocean` bool |
+
+Denmark (dm6, `2442343`): peak RSS 2019 → 1907 MB (-5.5%). Output byte-identical.
+Germany (dm6, `2442343`): stable, no regression.
+
 ## Detailed Analysis and Implementation Plan
 
 ### 1. Current Architecture Summary

@@ -1,5 +1,20 @@
 # P5: PMTiles Directory Finalization Streaming Redesign
 
+## Status: IMPLEMENTED (`d11744e`)
+
+Both steps complete:
+- **Step 1**: Fixed double-buffer in `collect_dir_entries` — replaced `read_to_end` + manual parse
+  with `read_dir_entries()` helper using `BufReader` + `read_exact` (24 bytes at a time)
+- **Step 2**: Added `finalize_directories()` — streaming mode reads `dir_entries.bin` in chunks of
+  4096 entries, builds leaf directories incrementally, never materializes full `Vec<DirEntry>`.
+  In-memory mode delegates to existing `build_leaf_directories()`. Small datasets (≤16384 entries)
+  fall through to root-only path.
+- Removed dead `read_u64_le`/`read_u32_le` helpers and old `build_directories` method
+- Added tests: `write_to_streaming_produces_valid_header`, `write_to_streaming_matches_in_memory`
+
+Planet-scale finalization peak: ~240 MB → ~30 MB (leaf blob only).
+Denmark/Germany benchmarks (dm6, `d11744e`): no regression, output byte-identical.
+
 ## Detailed Analysis and Implementation Plan
 
 ### 1. Current Architecture Summary
