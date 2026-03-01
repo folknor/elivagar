@@ -125,14 +125,26 @@ Targets the 23.4s multipolygon clipping cost (105% of Denmark wall time).
 
 Do F11 first — cheapest and helps most relations. F10 and F14 are independent of each other.
 
-## Tier 6 — Compression strategy (half day)
+## Tier 6 — Compression strategy (half day) ✅ DONE
 
-| # | Finding | Change | Planet savings |
-|---|---------|--------|----------------|
-| 1 | F9 | Per-zoom compression levels (z13-z14 at level 3) | ~150-400s CPU |
+Committed as `af902d9`. Per-zoom levels: z0-8 → level 9, z9-12 → configured (default 6),
+z13-14 → capped at 3. `--compression-level` flag anchors the middle tier.
 
-Already designed in TODO. ~20 lines. Do after Tier 4 since assembly worker persistence
-changes the same code.
+| # | Finding | Change | Status |
+|---|---------|--------|--------|
+| 1 | F9 | Per-zoom compression levels (z13-z14 at level 3) | ✅ |
+
+Results on dm6 vs `e0cabcb` baseline:
+
+| Metric | Before | After | Change |
+|---|---|---|---|
+| Denmark bench | 19791 ms | 19695 ms | -0.5% |
+| Japan bench | 71992 ms | 72439 ms | +0.6% (noise) |
+| Denmark output | 272.8 MB | 273.4 MB | +0.2% |
+| Japan output | 1166.3 MB | 1168.2 MB | +0.2% |
+
+Negligible output size increase (+0.2%). Full savings at planet scale where assemble phase
+is a larger fraction of total wall time.
 
 ## Tier 7 — Architectural / needs measurement
 
