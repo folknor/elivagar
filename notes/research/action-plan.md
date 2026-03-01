@@ -113,19 +113,31 @@ Results on dm6 vs `bd19649` baseline:
 The HashMap bucket arrays survive across tiles — interning no longer needs to reallocate
 on each tile. `add_feature_to_layer` dropped out of the top-15 allocators on Japan.
 
-## Tier 5 — Geometry CPU (2-3 days)
+## Tier 5 — Geometry CPU (2-3 days) ✅ DONE
 
 Targets the 23.4s multipolygon clipping cost (105% of Denmark wall time).
 
 | # | Finding | Change | Impact | Status |
 |---|---------|--------|--------|--------|
 | 1 | F11 | Inner ring bbox prefilter | O(1) reject, low effort | ✅ `9867c38` |
-| 2 | F10 | Interior tile detection (4-corner PIP) | skip S-H for ~298K tiles on Germany z14 | |
-| 3 | F14 | Row pre-clipping for PBF polygons (port from ocean) | ~rows_covered reduction | |
+| 2 | F10 | Interior tile detection (4-corner PIP) | skip S-H for ~298K tiles on Germany z14 | ✅ `83902cc` |
+| 3 | F14 | Row pre-clipping for PBF polygons (port from ocean) | ~rows_covered reduction | ✅ `8ca350c` |
 
-F11 committed as `9867c38`. Neutral on Denmark/Japan benchmarks (few large multipolygons
-with many inners). Will show at planet scale on country boundaries and large forests.
-F10 and F14 are independent of each other.
+Results on dm6 vs `9867c38` baseline:
+
+| Metric | Before | After | Change |
+|---|---|---|---|
+| Denmark bench | 20041 ms | 20044 ms | +0.0% |
+| Japan bench | 72483 ms | 71392 ms | -1.5% |
+| Germany bench | -- | 142076 ms | (first run, no baseline) |
+| Output size (all) | unchanged | unchanged | +0.0% |
+
+F10 uses single-pass O(n) combining 4-corner PIP with edge-bbox overlap check.
+Interior tiles emit a pre-computed full-tile rectangle. F14 pre-clips polygons to each
+row's Y-band before per-tile S-H clipping — reduces per-tile vertex count for large
+polygons. Both optimizations scale with polygon size; Denmark/Japan too small to show
+significant improvement. Germany (first run) at 142s establishes baseline for future
+comparison.
 
 ## Tier 6 — Compression strategy (half day) ✅ DONE
 
