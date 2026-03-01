@@ -236,10 +236,10 @@ impl PmtilesWriter {
         // Free dedup map — no longer needed after all tiles are added.
         drop(std::mem::take(&mut self.dedup));
 
-        let entries = self.collect_dir_entries()?;
+        // Build directories: streaming mode reads entries from temp file in
+        // LEAF_SIZE chunks (O(1) memory), in-memory mode collects all entries.
+        let (root_bytes, leaf_bytes, num_entries) = self.finalize_directories()?;
         let metadata_json = build_metadata(&self.config);
-
-        let (root_bytes, leaf_bytes) = self.build_directories(&entries)?;
         let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
 
         // Clean up streaming dir_entries temp file if it exists.
@@ -263,9 +263,6 @@ impl PmtilesWriter {
         let leaf_dirs_length = leaf_bytes.len() as u64;
         let data_offset = leaf_dirs_offset + leaf_dirs_length;
 
-        // Save count before dropping entries to free ~120 MB at planet scale.
-        let num_entries = entries.len() as u64;
-        drop(entries);
         let header = self.build_header(
             root_dir_offset,
             root_dir_length,
@@ -354,36 +351,90 @@ impl PmtilesWriter {
                 writer.flush()?;
                 #[allow(clippy::cast_possible_truncation)]
                 let num = *count as usize;
-                let mut data = Vec::new();
-                let mut file = File::open(path)?;
-                file.read_to_end(&mut data)?;
-                let mut entries = Vec::with_capacity(num);
-                let mut pos = 0;
-                for _ in 0..num {
-                    let tile_id = read_u64_le(&data, &mut pos);
-                    let offset = read_u64_le(&data, &mut pos);
-                    let length = read_u32_le(&data, &mut pos);
-                    let run_length = read_u32_le(&data, &mut pos);
-                    entries.push(DirEntry { tile_id, offset, length, run_length });
-                }
-                Ok(entries)
+                let file = File::open(path)?;
+                let mut reader = BufReader::with_capacity(1 << 16, file);
+                read_dir_entries(&mut reader, num)
             }
         }
     }
 
-    /// Build root and leaf directory bytes. Returns (root_compressed, leaf_compressed).
+    /// Build root and leaf directory bytes from the dir store.
+    ///
+    /// For in-memory mode, collects entries and delegates to `build_leaf_directories`.
+    /// For streaming mode, reads entries from the temp file in chunks of 4096,
+    /// building leaf directories incrementally without materializing all entries
+    /// (O(1) memory vs O(n)).
+    ///
+    /// Returns `(root_compressed, leaf_compressed, num_entries)`.
     #[hotpath::measure]
-    fn build_directories(&self, entries: &[DirEntry]) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    fn finalize_directories(&mut self) -> io::Result<(Vec<u8>, Vec<u8>, u64)> {
         const MAX_ROOT_ENTRIES: usize = 16384;
         const LEAF_SIZE: usize = 4096;
 
-        if entries.len() <= MAX_ROOT_ENTRIES {
-            let root_raw = encode_directory(entries);
-            let root_compressed = gzip_compress(&root_raw)?;
-            return Ok((root_compressed, Vec::new()));
-        }
+        self.flush_run()?;
 
-        build_leaf_directories(entries, LEAF_SIZE)
+        match &mut self.dir_store {
+            DirStore::Memory(entries) => {
+                let entries = std::mem::take(entries);
+                #[allow(clippy::cast_possible_truncation)]
+                let num = entries.len() as u64;
+                let (root, leaf) = if entries.len() <= MAX_ROOT_ENTRIES {
+                    let root_raw = encode_directory(&entries);
+                    (gzip_compress(&root_raw)?, Vec::new())
+                } else {
+                    build_leaf_directories(&entries, LEAF_SIZE)?
+                };
+                Ok((root, leaf, num))
+            }
+            DirStore::Streaming { writer, path, count } => {
+                writer.flush()?;
+                #[allow(clippy::cast_possible_truncation)]
+                let count = *count as usize;
+                let path = path.clone();
+
+                let file = File::open(&path)?;
+                let mut reader = BufReader::with_capacity(1 << 16, file);
+
+                if count <= MAX_ROOT_ENTRIES {
+                    // Small dataset: read all (at most 393 KB), single root directory.
+                    let entries = read_dir_entries(&mut reader, count)?;
+                    let root_raw = encode_directory(&entries);
+                    let root_compressed = gzip_compress(&root_raw)?;
+                    return Ok((root_compressed, Vec::new(), count as u64));
+                }
+
+                // Stream entries in LEAF_SIZE chunks, building leaves incrementally.
+                let mut leaf_blob: Vec<u8> = Vec::new();
+                let mut root_entries: Vec<DirEntry> = Vec::new();
+                let mut remaining = count;
+
+                while remaining > 0 {
+                    let chunk_size = remaining.min(LEAF_SIZE);
+                    let chunk = read_dir_entries(&mut reader, chunk_size)?;
+                    remaining -= chunk_size;
+
+                    let first_tile_id = chunk[0].tile_id;
+                    let leaf_raw = encode_directory(&chunk);
+                    let compressed = gzip_compress(&leaf_raw)?;
+
+                    #[allow(clippy::cast_possible_truncation)]
+                    let leaf_len = compressed.len() as u32;
+                    let leaf_offset = leaf_blob.len() as u64;
+                    leaf_blob.extend_from_slice(&compressed);
+
+                    root_entries.push(DirEntry {
+                        tile_id: first_tile_id,
+                        offset: leaf_offset,
+                        length: leaf_len,
+                        run_length: 0,
+                    });
+                }
+
+                let root_raw = encode_directory(&root_entries);
+                let root_compressed = gzip_compress(&root_raw)?;
+                Ok((root_compressed, leaf_blob, count as u64))
+            }
+        }
     }
 
     /// Build the 127-byte header.
@@ -599,20 +650,21 @@ fn build_metadata(config: &PmtilesConfig) -> String {
 // Binary helpers
 // ---------------------------------------------------------------------------
 
-/// Read a u64 from a byte buffer at the given position, advancing the position.
-fn read_u64_le(data: &[u8], pos: &mut usize) -> u64 {
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&data[*pos..*pos + 8]);
-    *pos += 8;
-    u64::from_le_bytes(bytes)
-}
-
-/// Read a u32 from a byte buffer at the given position, advancing the position.
-fn read_u32_le(data: &[u8], pos: &mut usize) -> u32 {
-    let mut bytes = [0u8; 4];
-    bytes.copy_from_slice(&data[*pos..*pos + 4]);
-    *pos += 4;
-    u32::from_le_bytes(bytes)
+/// Read `count` directory entries from a reader, 24 bytes at a time.
+/// Eliminates the double-buffer from the old `read_to_end` + parse approach.
+fn read_dir_entries<R: io::Read>(reader: &mut R, count: usize) -> io::Result<Vec<DirEntry>> {
+    let mut entries = Vec::with_capacity(count);
+    let mut buf = [0u8; 24];
+    for _ in 0..count {
+        reader.read_exact(&mut buf)?;
+        entries.push(DirEntry {
+            tile_id: u64::from_le_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]),
+            offset: u64::from_le_bytes([buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]]),
+            length: u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]),
+            run_length: u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]),
+        });
+    }
+    Ok(entries)
 }
 
 fn write_u64_le(buf: &mut [u8], offset: usize, val: u64) {

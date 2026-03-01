@@ -312,6 +312,74 @@ fn test_no_run_for_different_data() {
 // -----------------------------------------------------------------------
 
 #[test]
+fn write_to_streaming_produces_valid_header() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 1,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new_streaming(config, dir.path()).unwrap();
+
+    let tile_a = gzip_compress(b"tile-a").unwrap();
+    let tile_b = gzip_compress(b"tile-b").unwrap();
+    let tile_c = gzip_compress(b"tile-c").unwrap();
+
+    writer.add_tile(0, 0, 0, &tile_a).unwrap();
+    writer.add_tile(1, 0, 0, &tile_b).unwrap();
+    writer.add_tile(1, 1, 0, &tile_c).unwrap();
+
+    assert_eq!(writer.tile_count(), 3);
+    assert_eq!(writer.unique_tile_count(), 3);
+
+    let out_path = dir.path().join("test_streaming.pmtiles");
+    writer.write_to(&out_path).unwrap();
+
+    let bytes = std::fs::read(&out_path).unwrap();
+    assert!(bytes.len() > 127);
+    assert_eq!(&bytes[0..7], b"PMTiles");
+    assert_eq!(bytes[7], 3);
+}
+
+#[test]
+fn write_to_streaming_matches_in_memory() {
+    // Both modes should produce byte-identical archives for the same input.
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let make_config = || PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 2,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 1),
+    };
+
+    let tile_a = gzip_compress(b"tile-a").unwrap();
+    let tile_b = gzip_compress(b"tile-b").unwrap();
+    let tile_c = gzip_compress(b"tile-c").unwrap();
+
+    // In-memory writer
+    let mut mem_writer = PmtilesWriter::new(make_config());
+    mem_writer.add_tile(0, 0, 0, &tile_a).unwrap();
+    mem_writer.add_tile(1, 0, 0, &tile_b).unwrap();
+    mem_writer.add_tile(1, 1, 0, &tile_c).unwrap();
+    let mem_path = dir.path().join("mem.pmtiles");
+    mem_writer.write_to(&mem_path).unwrap();
+
+    // Streaming writer
+    let mut stream_writer = PmtilesWriter::new_streaming(make_config(), dir.path()).unwrap();
+    stream_writer.add_tile(0, 0, 0, &tile_a).unwrap();
+    stream_writer.add_tile(1, 0, 0, &tile_b).unwrap();
+    stream_writer.add_tile(1, 1, 0, &tile_c).unwrap();
+    let stream_path = dir.path().join("stream.pmtiles");
+    stream_writer.write_to(&stream_path).unwrap();
+
+    let mem_bytes = std::fs::read(&mem_path).unwrap();
+    let stream_bytes = std::fs::read(&stream_path).unwrap();
+    assert_eq!(mem_bytes, stream_bytes, "streaming and in-memory archives should be byte-identical");
+}
+
+#[test]
 fn write_to_produces_valid_header() {
     let config = PmtilesConfig {
         min_zoom: 0,
