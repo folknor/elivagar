@@ -1,5 +1,20 @@
 # P2: Stream Relation Outputs Incrementally
 
+## Status: IMPLEMENTED
+
+- Commit: `a8627be` (Option D: ocean-style parallel chunk flushing)
+- Verification (dm6, `a8627be`):
+
+| Dataset | Features | Unique Tiles | Sort Chunks | Peak RSS | Total |
+|---------|----------|-------------|-------------|----------|-------|
+| Denmark | 16,015,530 (=) | 53,921 (=) | 2,750 | 2.0 GB | 15.4s |
+| Germany | 146,832,407 (=) | 225,637 (=) | 1,749 | 10.5 GB | 120.1s |
+
+- Correctness: features and unique_tiles identical to P1 baseline on both datasets
+- No throughput regression
+- Key design choice: remaining records (below chunk_size threshold) drain through
+  sort_writer's normal buffering instead of creating tiny per-worker chunk files
+
 ## Detailed Analysis and Implementation Plan
 
 ### 1. Current Architecture (What Exists)

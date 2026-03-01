@@ -66,10 +66,13 @@ Assemble phase 15.5% faster (clone fix contributed). Germany validation pending.
 Replaced `compressed.clone()` with `Vec::with_capacity(compressed.len())`.
 Contributed to 15.5% assemble phase speedup on Denmark.
 
-### E2.2 Stream relation outputs instead of full `Vec<Vec<SortRecord>>` collect
-- Hypothesis: collecting all parallel relation outputs before push creates avoidable peak.
-- Change: incremental drain from workers into sort writer with ordering-neutral merge.
-- Exit criteria: lower peak in relation-heavy windows.
+### E2.2 Stream relation outputs instead of full `Vec<Vec<SortRecord>>` collect — ✓ DONE (`a8627be`)
+Replaced `par_iter().map().collect()` with ocean-style `par_iter().fold()` + `RelAcc`
+per-worker accumulators. Each worker flushes to chunk files at chunk_size threshold;
+remaining records drain through sort_writer's normal buffering. Eliminates
+double-materialization of input geometry + output records. Reuses `SimplifyMultiScratch`
+across relations within each worker. Denmark: correctness identical, sort_chunks stable.
+Germany: correctness identical, no regression.
 
 ### E2.3 Way pipeline byte-based inflight limits — ✓ DONE (`c88cfc0`)
 Replaced token semaphore (MAX_INFLIGHT=4) with Mutex+Condvar byte budget (128 MB,
