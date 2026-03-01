@@ -92,6 +92,7 @@ win but complex. Measure on North America first.
 
 **Compression** (Box 7) — Per-zoom compression levels (~20 lines, -20-30% assemble time).
 `--compression-level 3` already works for iteration builds. zstd blocked by client-side support.
+Suggested thresholds: z0-8 → level 9, z9-12 → configured, z13-14 → capped at 3 (86.5% of tiles).
 
 **Ocean split policy** (Box 5) — DISMISSED. z8 split with 500-vertex threshold is well-tuned.
 
@@ -104,8 +105,6 @@ insurance (~160-320 MB). Add telemetry when cap is hit.
 - [ ] **Dedup correctness is probabilistic:** Hash match + length match without byte validation.
   Ref: `pmtiles_writer.rs:196`. Collision risk ~2^-81 per pair — negligible but non-zero.
 
-- [x] ~~**`compressed.clone()` per tile in encode path.**~~ Fixed in P1 (`c88cfc0`).
-
 - [ ] **Way index finalize reads full offsets file:** Ref: `way_index.rs:197`. Transient memory
   spike, not the top RSS driver but relevant at planet scale.
 
@@ -115,7 +114,20 @@ insurance (~160-320 MB). Add telemetry when cap is hit.
 - [ ] **Alloc churn in tag handling:** Owned tags copied to `Vec<(String, String)>` then
   re-borrowed. Ref: `pipeline.rs:508`, `pipeline.rs:788`.
 
-- [x] ~~**`write_to` materializes full directory entries in streaming mode.**~~ Fixed in P5 (`d11744e`).
-
 - [ ] **Flat node-index safety guardrails:** PBF size guard + hard cap on flat index.
   See investigation summary above.
+
+- [ ] **Sort buffer memory accounting off:** `buffer_bytes` counts `data.len() + 8` but actual
+  is `data.len() + 32` (struct + Vec overhead). Chunks exceed 1 GB target by 24-38%.
+
+- [ ] **`cmd_count` u32 → u16:** Max commands per feature ~2000, well under 65K. Saves 4.8 GB
+  planet sort I/O.
+
+- [ ] **`find_chunk_in_blob` linear scan:** 254 chunks/group at planet vs 7 on Denmark. Consider
+  offset table or binary search for planet-scale lookup.
+
+- [ ] **Output BufWriter 8 KB:** Multi-GB blob copy uses default 8 KB buffer. Asymmetric with
+  1 MB BufReader — bump to match.
+
+- [ ] **Ocean `fill_data` cloning:** 10M-100M clones of identical ~50-byte data per planet run.
+  Use Arc or sentinel to avoid per-tile copies.
