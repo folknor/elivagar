@@ -1,4 +1,41 @@
-# elivagar TODO
+# elivagar TODO.
+
+## Memory work — instrumentation prerequisites
+
+Before any memory optimization work (P1-P5), we need measurement infrastructure.
+
+### Missing: Peak RSS tracking
+- No code reads `/proc/self/status` for `VmHWM` anywhere
+- Need a `peak_rss_kb()` helper function
+- Call at each phase boundary to emit `phase12_rss_kb=`, `ocean_rss_kb=`, `sort_rss_kb=`, `assemble_rss_kb=`
+- Also emit `final_rss_kb=` at pipeline end
+- This is the single most important measurement for the 64 GB target work
+
+### Missing: In-flight high-water marks
+- No tracking of max way-queue occupancy (bytes or count)
+- No tracking of max relation batch bytes
+- No tracking of max assemble batch bytes
+- Need `AtomicUsize` high-water-mark counters for each in-flight structure
+- Emit as kv pairs in the final summary: `max_way_inflight_bytes=`, `max_rel_batch_bytes=`, `max_assemble_batch_bytes=`
+- Required for E0.2 (in-flight queue/batch sensitivity) in the experiment matrix
+
+### Missing: Chunk count in final output
+- Chunk count is tracked internally (`sort_writer.chunk_count()`) but not printed in the kv summary
+- Add `sort_chunks=` to the final output block
+
+### Already instrumented (sufficient)
+- Phase timings: `total_ms`, `phase12_ms`, `ocean_ms`, `phase3_ms`, `phase4_ms`
+- Feature/tile counts: `features`, `ocean_features`, `tiles`, `unique_tiles`, `output_bytes`
+- Node store stats: `node_store_nodes`, `node_store_groups`
+
+### Research documents
+- `notes/memory/p1-byte-budgeted-inflight.md`
+- `notes/memory/p2-stream-relation-outputs.md`
+- `notes/memory/p3-tighten-assemble-memory.md`
+- `notes/memory/p4-configurable-sort-chunk.md`
+- `notes/memory/p5-pmtiles-directory-streaming.md`
+- `notes/memory/research-conclusions.md` — theoretical overview
+- `notes/memory/experiment-matrix.md` — testing methodology
 
 ## Release prep
 
@@ -638,3 +675,33 @@ at end of run. Lets planet runs quantify actual impact without algorithmic chang
 `pmtiles_writer.rs:187-226` (add_tile with dedup), `pmtiles_writer.rs:190-192` (hashing),
 `pmtiles_writer.rs:194-203` (dedup check), `pmtiles_writer.rs:220-222` (cap guard),
 `pmtiles_writer.rs:414` (gzip header byte), `pipeline.rs:1353-1358` (ocean-only skip).
+
+## Code TODOs
+
+- [ ] **Dedup correctness is probabilistic in PMTiles writer:** Dedup accepts
+  hash match + length match without byte-for-byte validation.
+  Ref: `src/pmtiles_writer.rs:196`. Collision risk is very low, but non-zero;
+  if strict correctness guarantees are needed, this is the place.
+
+- [ ] **Clear perf bug/opportunity in tile assembly:** `compressed.clone()` is
+  done per tile in encode path. Ref: `src/pipeline.rs:1708`. Unnecessary
+  copy/allocation pressure; should be fixable without behavior changes.
+
+- [ ] **Potentially expensive finalize step in way index:** Finalization reads
+  full offsets file into memory and sorts. Ref: `src/way_index.rs:197`. Can
+  create a big late-phase cost (time + transient memory), even if not the top
+  RSS driver.
+
+- [ ] **Double decode/iteration on way blocks:** Ways are counted via one
+  iteration, then iterated again for extraction. Ref: `src/pipeline.rs:466`,
+  `src/pipeline.rs:503`. Pure throughput waste on large runs.
+
+- [ ] **Small-but-frequent alloc churn in tag handling:** Owned tags are copied
+  to `Vec<(String, String)>` for ways, then converted again to borrowed vec.
+  Ref: `src/pipeline.rs:508`, `src/pipeline.rs:788`. Good candidate for
+  CPU/alloc cleanup independent of memory envelope work.
+
+- [ ] **`write_to` does a full directory collection pass in streaming mode:**
+  Streaming still materializes full directory entries vector later.
+  Ref: `src/pmtiles_writer.rs:349`. Mostly memory-related, but also
+  architecture/correctness complexity for very large outputs.
