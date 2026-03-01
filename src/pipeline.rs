@@ -1482,7 +1482,7 @@ struct AssemblyScratch {
     merge_scratch: mvt::MergeScratch,
     geom_pool: Vec<Vec<u32>>,
     tags_pool: Vec<Vec<(u16, u16)>>,
-    compressor: Option<libdeflater::Compressor>,
+    compressors: [Option<libdeflater::Compressor>; 11],
     gz_buf: Vec<u8>,
     layers: [Option<LayerBuilder>; LAYER_COUNT],
 }
@@ -1494,7 +1494,7 @@ thread_local! {
             merge_scratch: mvt::MergeScratch::new(),
             geom_pool: Vec::new(),
             tags_pool: Vec::new(),
-            compressor: None,
+            compressors: [const { None }; 11],
             gz_buf: Vec::new(),
             layers: [const { None }; LAYER_COUNT],
         }
@@ -1512,13 +1512,6 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
         .map(|tile| {
             ASSEMBLY_SCRATCH.with(|cell| {
             let s = &mut *cell.borrow_mut();
-
-            // Lazy-init compressor on first use per thread.
-            if s.compressor.is_none() {
-                let lvl = libdeflater::CompressionLvl::new(compression_level as i32)
-                    .expect("invalid compression level");
-                s.compressor = Some(libdeflater::Compressor::new(lvl));
-            }
 
             // Reset persisted layers from previous tile (reclaim features + clear interning).
             for slot in &mut s.layers {
@@ -1560,8 +1553,20 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
                 return None;
             }
 
-            // libdeflate: reuse compressor + output buffer per thread.
-            let compressor = s.compressor.as_mut().expect("compressor initialized");
+            // Per-zoom compression: boost low zooms, speed up high zooms.
+            let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+            #[allow(clippy::cast_possible_truncation)]
+            let level = match z {
+                0..=8 => compression_level.clamp(9, 10),
+                13..=14 => compression_level.min(3),
+                _ => compression_level,
+            } as usize;
+            let compressor = s.compressors[level].get_or_insert_with(|| {
+                #[allow(clippy::cast_possible_truncation)]
+                let lvl = libdeflater::CompressionLvl::new(level as i32)
+                    .expect("invalid compression level");
+                libdeflater::Compressor::new(lvl)
+            });
             let bound = compressor.gzip_compress_bound(mvt_data.len());
             s.gz_buf.resize(bound, 0);
             let compressed_len = compressor.gzip_compress(&mvt_data, &mut s.gz_buf)
