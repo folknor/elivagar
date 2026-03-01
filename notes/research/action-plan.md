@@ -128,9 +128,10 @@ High-risk or needs benchmarking before deciding:
 | # | Finding | Question |
 |---|---------|----------|
 | F22 | Geometry varint encoding | Saves ~115 GB sort I/O but loses memcpy decode. Need to benchmark decode cost. |
-| F1 | SortedNodeStore spilling/streaming | The real planet blocker. After Tiers 0-6, re-evaluate: does sort payload reduction + trivial memory wins buy enough headroom, or do we still need architectural changes? |
+| F1 | SortedNodeStore spilling/streaming | Resolved — compression keeps node store under 8.5 GB for NA. No longer the planet blocker. |
 | F16 | `find_chunk_in_blob` offset table | 254 chunks/group at planet. Linear scan may matter. Need planet-scale measurement. |
-| F7 | Streaming ocean polygon parse | 1-5 GB at planet. Only matters if F1 headroom is still tight. |
+| F7 | Streaming ocean polygon parse | 1-5 GB at planet. Only matters if memory headroom is tight. |
+| **NEW** | Way index compression/streaming | **The real planet blocker.** See NA gate results below. |
 
 ---
 
@@ -139,15 +140,45 @@ High-risk or needs benchmarking before deciding:
 Tiers 0-3 complete. ~63 GB sort I/O reduction + ~1.5 GB geometry alloc reduction banked
 (Denmark). Zero wall-clock regression on any dataset.
 
-Next: North America gate, then Tier 4 (assembly worker persistence).
+NA gate revealed the way index as the new bottleneck — must be solved before planet scale.
+Tiers 4-6 are still valuable for CPU/alloc but won't fix the way index problem.
 
-## Milestone: North America gate
+Next: way index architecture (compress or stream), then Tiers 4-6.
 
-After completing Tiers 0-2, run `brokkr bench self --pbf north-america.osm.pbf` on a ≥32 GB
-machine. This validates:
-- Sort payload reduction actually delivers projected I/O savings
-- Memory headroom is sufficient for a mid-scale dataset
-- Flat fallback guard fires correctly on unsorted PBFs
+## Milestone: North America gate — FAILED
 
-If North America succeeds cleanly, proceed with Tiers 3-6 and then attempt Europe (~28 GB).
-If it OOMs or regresses, escalate Tier 7 (node store architecture) immediately.
+Ran `brokkr bench self --dataset north-america --runs 1` on dm6 (32 GB RAM), commit `b5bc00e`.
+Killed after ~2 hours with no completion in sight.
+
+### What passed
+- **SortedNodeStore: PASS** — 8.5 GB RSS, rock solid throughout. FOR compression works
+  exactly as designed. Node store is no longer the planet blocker.
+- **PBF phase completed** — 55 sort chunks written (55 × 870 MB = ~48 GB sort data),
+  all within the first ~7 minutes of wall time.
+- **No OOM** — 24 GB available throughout, no memory pressure from node store or sort chunks.
+
+### What failed
+- **Way index: 38 GB mmap'd** (20 GB way_data.bin + 17 GB way_offsets.bin) on a 32 GB
+  machine. The way index stores resolved geometry for all ways so relations can look up
+  member coordinates.
+- **Relation processing thrashed** — after PBF phase, relation processing reads from the
+  way index to resolve member geometries. With 38 GB mmap'd and 32 GB RAM, every way
+  index lookup is a page fault. Process dropped to 10-14% CPU (I/O bound), stuck for
+  2 hours with no new sort chunks emitted.
+- **vmstat confirmed**: swap-in 57-96/s, 85-97% idle CPU. Classic mmap thrash pattern.
+
+### Conclusion
+The way index needs the same treatment the node store got — compression, streaming, or
+a fundamentally different architecture. The current flat mmap approach works up to ~8 GB
+PBFs (Japan) but fails at NA scale (17.8 GB). Planet (~70 GB) is impossible without
+fixing this.
+
+Options:
+1. **Compress way index** — FOR bitpacking like node store. Way coords are (lat_e7, lon_e7)
+   pairs, delta-encodable. Could reduce 38 GB → ~10-15 GB.
+2. **Stream way index** — don't mmap, read sequentially during relation phase. Requires
+   sorting relation member lookups by way ID.
+3. **Eliminate way index** — two-pass PBF reading. First pass builds node+way indices,
+   second pass resolves relations directly. Avoids storing way geometry entirely.
+4. **Run on bigger hardware** — 64 GB machine would handle NA comfortably. Planet would
+   still need option 1-3.
