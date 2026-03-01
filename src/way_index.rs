@@ -2,166 +2,254 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use memmap2::{Mmap, MmapMut};
+const OFFSET_ENTRY_SIZE: usize = 16; // 8 bytes way_id + 8 bytes data_offset
 
-const ENTRY_SIZE: u64 = 12; // 8 bytes data_offset + 4 bytes coord_count
-const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
-const COORD_SIZE: u64 = 8; // 4 bytes lat_e7 + 4 bytes lon_e7
+struct WayEntry {
+    way_id: i64,
+    data_offset: u64,
+}
+const _: () = assert!(std::mem::size_of::<WayEntry>() == OFFSET_ENTRY_SIZE);
 
-// Safety: coords are stored as sequential LE i32 pairs matching (i32, i32) layout.
-const _: () = assert!(std::mem::size_of::<(i32, i32)>() == 8);
-const _: () = assert!(std::mem::align_of::<(i32, i32)>() == 4);
-const _: () = assert!(cfg!(target_endian = "little"), "way_index assumes little-endian");
+// --- Varint helpers ---
+
+#[allow(clippy::cast_possible_wrap)]
+fn zigzag_encode(v: i32) -> u32 {
+    ((v << 1) ^ (v >> 31)).cast_unsigned()
+}
+
+#[allow(clippy::cast_possible_wrap)]
+fn zigzag_decode(v: u32) -> i32 {
+    (v >> 1) as i32 ^ -((v & 1) as i32)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn write_varint(buf: &mut Vec<u8>, mut v: u32) {
+    while v >= 0x80 {
+        buf.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+    buf.push(v as u8);
+}
+
+fn read_varint(data: &[u8], pos: &mut usize) -> u32 {
+    let mut result: u32 = 0;
+    let mut shift = 0;
+    loop {
+        let b = data[*pos];
+        *pos += 1;
+        result |= u32::from(b & 0x7F) << shift;
+        if b & 0x80 == 0 {
+            return result;
+        }
+        shift += 7;
+    }
+}
+
+/// Encode a way's coordinates: varint coord_count + first coord raw + deltas as zigzag varints.
+#[allow(clippy::cast_possible_truncation)]
+fn encode_way(buf: &mut Vec<u8>, coords: &[(i32, i32)]) {
+    write_varint(buf, coords.len() as u32);
+    let (mut prev_lat, mut prev_lon) = coords[0];
+    buf.extend_from_slice(&prev_lat.to_le_bytes());
+    buf.extend_from_slice(&prev_lon.to_le_bytes());
+    for &(lat, lon) in &coords[1..] {
+        write_varint(buf, zigzag_encode(lat - prev_lat));
+        write_varint(buf, zigzag_encode(lon - prev_lon));
+        prev_lat = lat;
+        prev_lon = lon;
+    }
+}
+
+/// Decode a way's coordinates from the compressed data buffer at the given offset.
+fn decode_way(data: &[u8], offset: usize) -> Vec<(i32, i32)> {
+    let mut pos = offset;
+    let count = read_varint(data, &mut pos) as usize;
+    let mut coords = Vec::with_capacity(count);
+
+    let lat = i32::from_le_bytes(
+        data[pos..pos + 4].try_into().expect("truncated way data"),
+    );
+    let lon = i32::from_le_bytes(
+        data[pos + 4..pos + 8].try_into().expect("truncated way data"),
+    );
+    pos += 8;
+    coords.push((lat, lon));
+
+    let mut prev_lat = lat;
+    let mut prev_lon = lon;
+    for _ in 1..count {
+        let dlat = zigzag_decode(read_varint(data, &mut pos));
+        let dlon = zigzag_decode(read_varint(data, &mut pos));
+        prev_lat += dlat;
+        prev_lon += dlon;
+        coords.push((prev_lat, prev_lon));
+    }
+    coords
+}
+
+// --- WayIndex ---
 
 pub struct WayIndex {
-    // Offset index (way_offsets.bin): mmap'd, indexed at way_id * 12
-    offsets_file: File,
-    offsets_mmap: MmapMut,
-    offsets_file_len: u64,
-
-    // Data file (way_data.bin): buffered writer during write phase, mmap after finish
+    // Write phase: sequential BufWriters to temp files
+    offsets_writer: Option<BufWriter<File>>,
     data_writer: Option<BufWriter<File>>,
     data_write_pos: u64,
+    encode_buf: Vec<u8>,
+    way_count: u64,
+    offsets_path: PathBuf,
     data_path: PathBuf,
 
-    // Read-only mmap over way_data.bin, set after finish_writing()
-    data_mmap: Option<Mmap>,
+    // Read phase: populated by finish_writing()
+    entries: Vec<WayEntry>,
+    data: Vec<u8>,
 }
 
 impl WayIndex {
-    /// Create a new writable way index. Creates two files in `dir`:
-    /// - `way_offsets.bin` -- indexed at way_id * 12, stores (u64 data_offset, u32 coord_count)
-    /// - `way_data.bin` -- append-only packed coordinates
+    /// Create a new writable way index. Creates two sequential temp files in `dir`:
+    /// - `way_offsets.bin` — (way_id, data_offset) entries, 16 bytes each
+    /// - `way_data.bin` — delta-varint compressed coordinates
     pub fn create(dir: &Path) -> io::Result<Self> {
         let offsets_path = dir.join("way_offsets.bin");
         let data_path = dir.join("way_data.bin");
 
         let offsets_file = File::options()
-            .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(&offsets_path)?;
 
-        let offsets_file_len = GROW_INCREMENT;
-        offsets_file.set_len(offsets_file_len)?;
-
-        let offsets_mmap = unsafe { MmapMut::map_mut(&offsets_file)? };
-
-
         let data_file = File::options()
-            .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(&data_path)?;
 
-        let data_writer = Some(BufWriter::new(data_file));
-
         Ok(WayIndex {
-            offsets_file,
-            offsets_mmap,
-            offsets_file_len,
-            data_writer,
+            offsets_writer: Some(BufWriter::with_capacity(65536, offsets_file)),
+            data_writer: Some(BufWriter::with_capacity(65536, data_file)),
             data_write_pos: 0,
+            encode_buf: Vec::with_capacity(256),
+            way_count: 0,
+            offsets_path,
             data_path,
-            data_mmap: None,
+            entries: Vec::new(),
+            data: Vec::new(),
         })
     }
 
-    /// Write geometry for a way. Appends coords to data file, records offset in index.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    /// Write geometry for a way. Delta-varint encodes coords and appends to data file,
+    /// records (way_id, offset) in the offsets file.
     pub fn put(&mut self, way_id: i64, coords: &[(i32, i32)]) {
-        let coord_count = coords.len() as u32;
+        if coords.is_empty() {
+            return;
+        }
 
-        // Record the current data write position as the offset for this way.
         let data_offset = self.data_write_pos;
 
-        // Write coordinates to the data file.
+        // Encode compressed way into scratch buffer
+        self.encode_buf.clear();
+        encode_way(&mut self.encode_buf, coords);
+
+        // Write compressed data
         let writer = self.data_writer.as_mut().expect("put called after finish_writing");
         // Panic: unrecoverable I/O — disk full means the run is dead.
-        for &(lat_e7, lon_e7) in coords {
-            writer.write_all(&lat_e7.to_le_bytes()).expect("failed to write lat to way data");
-            writer.write_all(&lon_e7.to_le_bytes()).expect("failed to write lon to way data");
-        }
-        self.data_write_pos += coord_count as u64 * COORD_SIZE;
+        writer
+            .write_all(&self.encode_buf)
+            .expect("failed to write way data");
+        self.data_write_pos += self.encode_buf.len() as u64;
 
-        // Write the offset entry in the index file.
-        let index_offset = way_id as u64 * ENTRY_SIZE;
-        let needed = index_offset + ENTRY_SIZE;
+        // Write offset entry: way_id (i64 LE) + data_offset (u64 LE) = 16 bytes
+        let owriter = self
+            .offsets_writer
+            .as_mut()
+            .expect("put called after finish_writing");
+        owriter
+            .write_all(&way_id.to_le_bytes())
+            .expect("failed to write way offset");
+        owriter
+            .write_all(&data_offset.to_le_bytes())
+            .expect("failed to write way offset");
 
-        if needed > self.offsets_file_len {
-            let mut new_len = self.offsets_file_len;
-            while new_len < needed {
-                new_len += GROW_INCREMENT;
-            }
-            // Panic: unrecoverable I/O — disk full or mmap failure means the run is dead.
-            self.offsets_file.set_len(new_len).expect("failed to grow way offsets file");
-            self.offsets_mmap = unsafe {
-                MmapMut::map_mut(&self.offsets_file).expect("failed to remap way offsets")
-            };
-
-            self.offsets_file_len = new_len;
-        }
-
-        let off = index_offset as usize;
-        self.offsets_mmap[off..off + 8].copy_from_slice(&data_offset.to_le_bytes());
-        self.offsets_mmap[off + 8..off + 12].copy_from_slice(&coord_count.to_le_bytes());
+        self.way_count += 1;
     }
 
-    /// Call after all ways have been written. Flushes the data writer and
-    /// opens a read-only mmap over way_data.bin for random access reads.
+    /// Call after all ways have been written. Loads compressed data and offset index
+    /// into memory, sorts entries by way_id for binary search during relation processing.
     pub fn finish_writing(&mut self) -> io::Result<()> {
-        // Flush and drop the BufWriter.
-        if let Some(mut writer) = self.data_writer.take() {
-            writer.flush()?;
+        // Flush and drop writers
+        if let Some(mut w) = self.offsets_writer.take() {
+            w.flush()?;
+        }
+        if let Some(mut w) = self.data_writer.take() {
+            w.flush()?;
+        }
+        // Release encode scratch buffer
+        self.encode_buf = Vec::new();
+
+        if self.way_count == 0 {
+            return Ok(());
         }
 
-        // Open a read-only mmap over the data file (only if non-empty).
-        if self.data_write_pos > 0 {
-            let data_file = File::open(&self.data_path)?;
-            let mmap = unsafe { Mmap::map(&data_file)? };
-            self.data_mmap = Some(mmap);
+        // Read compressed data into memory
+        self.data = std::fs::read(&self.data_path)?;
+
+        // Read offset entries into Vec<WayEntry>, sort by way_id
+        let offsets_bytes = std::fs::read(&self.offsets_path)?;
+        let entry_count = offsets_bytes.len() / OFFSET_ENTRY_SIZE;
+        let mut entries = Vec::with_capacity(entry_count);
+        for i in 0..entry_count {
+            let off = i * OFFSET_ENTRY_SIZE;
+            // Infallible: slices are exactly 8 bytes by construction (file is N * 16 bytes).
+            let way_id = i64::from_le_bytes([
+                offsets_bytes[off],
+                offsets_bytes[off + 1],
+                offsets_bytes[off + 2],
+                offsets_bytes[off + 3],
+                offsets_bytes[off + 4],
+                offsets_bytes[off + 5],
+                offsets_bytes[off + 6],
+                offsets_bytes[off + 7],
+            ]);
+            let data_offset = u64::from_le_bytes([
+                offsets_bytes[off + 8],
+                offsets_bytes[off + 9],
+                offsets_bytes[off + 10],
+                offsets_bytes[off + 11],
+                offsets_bytes[off + 12],
+                offsets_bytes[off + 13],
+                offsets_bytes[off + 14],
+                offsets_bytes[off + 15],
+            ]);
+            entries.push(WayEntry {
+                way_id,
+                data_offset,
+            });
         }
+        drop(offsets_bytes);
+
+        entries.sort_unstable_by_key(|e| e.way_id);
+        self.entries = entries;
+
+        let data_mb = self.data.len() as f64 / (1024.0 * 1024.0);
+        let index_mb = (self.entries.len() * OFFSET_ENTRY_SIZE) as f64 / (1024.0 * 1024.0);
+        eprintln!(
+            "  Way index: {} ways, {data_mb:.1} MB compressed data, {index_mb:.1} MB index",
+            self.way_count
+        );
 
         Ok(())
     }
 
-    /// Read geometry for a way as a zero-copy slice into the mmap.
-    /// Only valid after `finish_writing()`.
-    /// Returns `None` if entry is unset (offset and count both zero).
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::unwrap_used)]
-    pub fn get(&self, way_id: i64) -> Option<&[(i32, i32)]> {
-        let index_offset = way_id as u64 * ENTRY_SIZE;
-        let needed = index_offset + ENTRY_SIZE;
-
-        if needed > self.offsets_file_len {
-            return None;
-        }
-
-        let off = index_offset as usize;
-        // Infallible: slices are exactly 8 and 4 bytes by construction.
-        let data_offset =
-            u64::from_le_bytes(self.offsets_mmap[off..off + 8].try_into().unwrap());
-        let coord_count =
-            u32::from_le_bytes(self.offsets_mmap[off + 8..off + 12].try_into().unwrap());
-
-        // Unset detection: both zero means no entry.
-        if data_offset == 0 && coord_count == 0 {
-            return None;
-        }
-
-        let mmap = self.data_mmap.as_ref()?;
-
-        let start = data_offset as usize;
-        let byte_len = coord_count as usize * COORD_SIZE as usize;
-        let bytes = &mmap[start..start + byte_len];
-
-        // Safety: data was written as sequential LE i32 pairs via put().
-        // (i32, i32) is 8 bytes / 4-byte aligned (const-asserted above).
-        // Mmap is page-aligned, data_offset is always a multiple of 8.
-        let ptr = bytes.as_ptr().cast::<(i32, i32)>();
-        Some(unsafe { std::slice::from_raw_parts(ptr, coord_count as usize) })
+    /// Look up geometry for a way by ID. Only valid after `finish_writing()`.
+    /// Returns decoded coordinates, or None if way_id was never stored.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn get(&self, way_id: i64) -> Option<Vec<(i32, i32)>> {
+        let idx = self
+            .entries
+            .binary_search_by_key(&way_id, |e| e.way_id)
+            .ok()?;
+        let offset = self.entries[idx].data_offset as usize;
+        Some(decode_way(&self.data, offset))
     }
 }
 
@@ -186,7 +274,7 @@ mod tests {
         idx.put(100, &coords);
         idx.finish_writing().unwrap();
         let result = idx.get(100).unwrap();
-        assert_eq!(result, &coords);
+        assert_eq!(result, coords);
     }
 
     #[test]
@@ -203,9 +291,9 @@ mod tests {
         idx.put(999, &coords_c);
         idx.finish_writing().unwrap();
 
-        assert_eq!(idx.get(5).unwrap(), &coords_a);
-        assert_eq!(idx.get(42).unwrap(), &coords_b);
-        assert_eq!(idx.get(999).unwrap(), &coords_c);
+        assert_eq!(idx.get(5).unwrap(), coords_a);
+        assert_eq!(idx.get(42).unwrap(), coords_b);
+        assert_eq!(idx.get(999).unwrap(), coords_c);
     }
 
     #[test]
@@ -213,8 +301,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndex::create(dir.path()).unwrap();
         idx.put(7, &[(1, 2), (3, 4)]);
-        // data_mmap is None because finish_writing was never called,
-        // so get returns None even though the offset entry exists.
+        // entries is empty before finish_writing, so binary search returns None.
         assert!(idx.get(7).is_none());
     }
 
@@ -224,39 +311,57 @@ mod tests {
         let mut idx = WayIndex::create(dir.path()).unwrap();
         idx.put(1, &[(1, 2)]);
         idx.finish_writing().unwrap();
-        // way_id 9999 was never written; its offset slot is zeroed out.
+        // way_id 9999 was never written.
         assert!(idx.get(9999).is_none());
     }
 
     #[test]
     fn empty_way() {
-        // Known edge case: putting an empty coords slice writes offset=current_pos
-        // and count=0 into the offset entry. However, because data_write_pos starts
-        // at 0 for the first insertion (and no bytes are appended), the entry is
-        // (offset=0, count=0) which matches the sentinel for "unset". So get
-        // returns None for an empty way that was the first insertion.
+        // put() with empty coords is a no-op — no entry written.
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndex::create(dir.path()).unwrap();
         idx.put(50, &[]);
         idx.finish_writing().unwrap();
-        // Sentinel (0, 0) is indistinguishable from unset — returns None.
         assert!(idx.get(50).is_none());
     }
 
     #[test]
-    fn overwrite_way() {
+    fn roundtrip_delta_heavy() {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndex::create(dir.path()).unwrap();
+        let coords = [
+            (550_000_000, 120_000_000),
+            (550_000_001, 120_000_000),   // tiny delta
+            (550_000_001, 120_000_000),   // zero delta
+            (-200_000_000, -400_000_000), // large negative jump
+            (0, 0),                       // jump to origin
+        ];
+        idx.put(1, &coords);
+        idx.finish_writing().unwrap();
+        assert_eq!(idx.get(1).unwrap(), coords);
+    }
 
-        let first = [(1, 1), (2, 2)];
-        let second = [(10, 10), (20, 20), (30, 30)];
+    #[test]
+    fn zigzag_roundtrip() {
+        for v in [0, 1, -1, 127, -128, i32::MAX, i32::MIN] {
+            assert_eq!(zigzag_decode(zigzag_encode(v)), v);
+        }
+    }
 
-        idx.put(77, &first);
-        idx.put(77, &second);
+    #[test]
+    fn unsorted_way_ids() {
+        // Ways may arrive out of order from parallel processing.
+        // finish_writing sorts them for binary search.
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = WayIndex::create(dir.path()).unwrap();
+        idx.put(500, &[(50, 60)]);
+        idx.put(100, &[(10, 20)]);
+        idx.put(300, &[(30, 40)]);
         idx.finish_writing().unwrap();
 
-        // The second put overwrites the offset entry, so get returns the second value.
-        let result = idx.get(77).unwrap();
-        assert_eq!(result, &second);
+        assert_eq!(idx.get(100).unwrap(), [(10, 20)]);
+        assert_eq!(idx.get(300).unwrap(), [(30, 40)]);
+        assert_eq!(idx.get(500).unwrap(), [(50, 60)]);
+        assert!(idx.get(200).is_none());
     }
 }
