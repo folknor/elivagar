@@ -23,6 +23,9 @@
 //!     compression_level: 6,
 //!     force_sorted: false,
 //!     threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+//!     way_inflight_budget: 0,
+//!     rel_batch_budget: 0,
+//!     assemble_batch_budget: 0,
 //! };
 //! elivagar::run(&config).expect("pipeline failed");
 //! ```

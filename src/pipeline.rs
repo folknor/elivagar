@@ -108,6 +108,18 @@ pub struct TilegenConfig {
     /// Thread budget. Controls the rayon global pool size and pbfhogg decode pool.
     /// Default: `std::thread::available_parallelism()` (logical CPUs).
     pub threads: usize,
+    /// Byte budget for in-flight way processing (0 = default 128 MB).
+    /// Controls memory during the PBF way phase. Lower values reduce peak RSS
+    /// at the cost of less parallelism.
+    pub way_inflight_budget: usize,
+    /// Byte budget for relation batch accumulation (0 = default 64 MB).
+    /// Controls memory during relation processing. Flush triggers when either
+    /// the count limit or byte budget is reached.
+    pub rel_batch_budget: usize,
+    /// Byte budget for assemble tile batches (0 = default 32 MB).
+    /// Controls memory during tile assembly. Dense urban tiles at z14 can
+    /// make fixed-count batches very large.
+    pub assemble_batch_budget: usize,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -441,6 +453,11 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let max_z = config.max_zoom;
 
     let mut rel_batch: Vec<PreparedRelation> = Vec::with_capacity(REL_BATCH_SIZE);
+    let rel_budget = if config.rel_batch_budget > 0 {
+        config.rel_batch_budget
+    } else {
+        REL_BATCH_BUDGET_DEFAULT
+    };
 
     // Block-level dispatch: worker thread receives entire PrimitiveBlocks containing
     // ways, extracts RawWay data and processes via rayon. Main thread sends blocks
@@ -539,10 +556,12 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
                     const MAX_INFLIGHT: usize = 8;
-                    /// Byte budget for in-flight way processing. Input bytes * 10
-                    /// approximates output expansion (coords + sort records across zooms).
-                    const WAY_INFLIGHT_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
                     const WAY_OUTPUT_MULTIPLIER: usize = 10;
+                    let way_budget = if config.way_inflight_budget > 0 {
+                        config.way_inflight_budget
+                    } else {
+                        128 * 1024 * 1024 // 128 MB default
+                    };
                     worker_handle = Some(std::thread::spawn(move || {
                         use rayon::prelude::*;
                         // Take refs outside loop — Copy into each move closure,
@@ -577,7 +596,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                     let mut guard = inflight_ref.lock()
                                         .expect("inflight lock");
                                     guard = inflight_cvar.wait_while(guard, |&mut (count, bytes)| {
-                                        count >= MAX_INFLIGHT || bytes + block_cost > WAY_INFLIGHT_BUDGET
+                                        count >= MAX_INFLIGHT || bytes + block_cost > way_budget
                                     }).expect("condvar wait");
                                     guard.0 += 1;
                                     guard.1 += block_cost;
@@ -667,7 +686,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                             if rel_batch_bytes > max_rel_batch_bytes {
                                 max_rel_batch_bytes = rel_batch_bytes;
                             }
-                            if rel_batch.len() >= REL_BATCH_SIZE || rel_batch_bytes >= REL_BATCH_BUDGET {
+                            if rel_batch.len() >= REL_BATCH_SIZE || rel_batch_bytes >= rel_budget {
                                 let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
                                 rel_batch_bytes = 0;
                                 features_emitted += flush_rel_batch(
@@ -941,10 +960,7 @@ struct PreparedRelation {
 }
 
 const REL_BATCH_SIZE: usize = 1024;
-/// Byte budget for relation batch accumulation. Flush when either REL_BATCH_SIZE
-/// or this budget is reached. Bounds the `collect()` output expansion from complex
-/// multipolygon relations.
-const REL_BATCH_BUDGET: usize = 64 * 1024 * 1024; // 64 MB
+const REL_BATCH_BUDGET_DEFAULT: usize = 64 * 1024 * 1024; // 64 MB
 
 /// Estimate heap bytes for a single prepared relation (struct + member way coords).
 fn estimate_prepared_rel_bytes(r: &PreparedRelation) -> usize {
@@ -1593,9 +1609,11 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
     };
 
     const BATCH_SIZE: usize = 4096;
-    /// Byte budget for assemble tile batches. Flush when either BATCH_SIZE or this
-    /// budget is reached. Limits peak in-flight memory for dense urban tiles.
-    const ASSEMBLE_BATCH_BUDGET: usize = 32 * 1024 * 1024; // 32 MB
+    let assemble_budget = if config.assemble_batch_budget > 0 {
+        config.assemble_batch_budget
+    } else {
+        32 * 1024 * 1024 // 32 MB default
+    };
 
     // Double-buffer pipeline: reader → encoder (main/rayon) → writer.
     // sync_channel(1) allows one batch ahead, overlapping read/write I/O
@@ -1647,7 +1665,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
                     if current.tile_id != u64::MAX && should_emit(&current) {
                         batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
-                        if batch.len() >= BATCH_SIZE || batch_bytes >= ASSEMBLE_BATCH_BUDGET {
+                        if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
                             if batch_bytes > max_batch_bytes { max_batch_bytes = batch_bytes; }
                             if read_tx.send(batch).is_err() { break; }
                             batch = Vec::with_capacity(BATCH_SIZE);

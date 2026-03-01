@@ -107,6 +107,9 @@ fn main() {
         compression_level,
         force_sorted,
         threads,
+        way_inflight_budget: 0,
+        rel_batch_budget: 0,
+        assemble_batch_budget: 0,
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")
