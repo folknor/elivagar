@@ -1243,6 +1243,7 @@ fn emit_multipolygon_feature(
     let mut clip_a: Vec<Point> = Vec::new();
     let mut clip_b: Vec<Point> = Vec::new();
     let mut all_rings: Vec<Vec<(i32, i32)>> = Vec::new();
+    let mut inner_bboxes: Vec<geometry::MercBbox> = Vec::new();
 
     geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, |z, simp_outer, simp_inners| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
@@ -1250,6 +1251,10 @@ fn emit_multipolygon_feature(
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simp_outer);
+
+        // F11: Precompute inner ring bboxes for O(1) tile rejection.
+        inner_bboxes.clear();
+        inner_bboxes.extend(simp_inners.iter().map(|r| merc_bbox(r)));
         let single_tile = geometry::is_single_tile(&simp_bbox, z);
         let skip_size_filter = z >= 14;
         geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
@@ -1292,7 +1297,8 @@ fn emit_multipolygon_feature(
                 }
                 close_and_orient_cw(&mut all_rings[ring_count]);
                 ring_count += 1;
-                for inner in simp_inners {
+                for (inner, inner_bbox) in simp_inners.iter().zip(&inner_bboxes) {
+                    if !geometry::bbox_intersects_clip(inner_bbox, &clip) { continue; }
                     geometry::clip_polygon_into(inner, &clip, &mut clip_a, &mut clip_b);
                     if clip_a.len() < 3 {
                         continue;
