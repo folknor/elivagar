@@ -10,6 +10,11 @@
 use crate::geometry::{
     self, ClipRect, MercBbox, Point, BUFFER_FRACTION, close_and_orient_cw, close_and_orient_ccw, merc_bbox,
 };
+
+/// Full-tile rectangle in tile coordinates (CW, closed). Buffer = 8px.
+/// Used for interior tiles where the polygon fully covers the tile.
+const INTERIOR_TILE_RING: [(i32, i32); 5] =
+    [(-8, -8), (4104, -8), (4104, 4104), (-8, 4104), (-8, -8)];
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::mvt::{self, GeomType, LayerBuilder};
 use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
@@ -1200,15 +1205,22 @@ fn emit_polygon_feature(
                 close_and_orient_cw(&mut tc_buf);
             } else {
                 let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-                geometry::clip_polygon_into(simplified, &clip, &mut clip_a, &mut clip_b);
-                if clip_a.len() < 3 {
-                    return;
+                if geometry::tile_is_interior(simplified, &clip) {
+                    // Interior tile: polygon fully covers tile. Emit buffered
+                    // tile rectangle instead of running S-H clip.
+                    tc_buf.clear();
+                    tc_buf.extend_from_slice(&INTERIOR_TILE_RING);
+                } else {
+                    geometry::clip_polygon_into(simplified, &clip, &mut clip_a, &mut clip_b);
+                    if clip_a.len() < 3 {
+                        return;
+                    }
+                    geometry::to_tile_coords_into(&mut tc_buf, &clip_a, tx, ty, z);
+                    if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
+                        return;
+                    }
+                    close_and_orient_cw(&mut tc_buf);
                 }
-                geometry::to_tile_coords_into(&mut tc_buf, &clip_a, tx, ty, z);
-                if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
-                    return;
-                }
-                close_and_orient_cw(&mut tc_buf);
             }
 
             mvt::encode_polygon(&mut geom_buf, &[&tc_buf]);
@@ -1286,17 +1298,26 @@ fn emit_multipolygon_feature(
             } else {
                 let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
 
-                geometry::clip_polygon_into(simp_outer, &clip, &mut clip_a, &mut clip_b);
-                if clip_a.len() < 3 {
-                    return;
+                if geometry::tile_is_interior(simp_outer, &clip) {
+                    // Interior tile: outer ring covers entire tile.
+                    if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
+                    all_rings[ring_count].clear();
+                    all_rings[ring_count].extend_from_slice(&INTERIOR_TILE_RING);
+                    ring_count += 1;
+                } else {
+                    geometry::clip_polygon_into(simp_outer, &clip, &mut clip_a, &mut clip_b);
+                    if clip_a.len() < 3 {
+                        return;
+                    }
+                    if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
+                    geometry::to_tile_coords_into(&mut all_rings[ring_count], &clip_a, tx, ty, z);
+                    if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
+                        return;
+                    }
+                    close_and_orient_cw(&mut all_rings[ring_count]);
+                    ring_count += 1;
                 }
-                if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                geometry::to_tile_coords_into(&mut all_rings[ring_count], &clip_a, tx, ty, z);
-                if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
-                    return;
-                }
-                close_and_orient_cw(&mut all_rings[ring_count]);
-                ring_count += 1;
+                // Inner rings: still need per-tile clipping (holes may be visible).
                 for (inner, inner_bbox) in simp_inners.iter().zip(&inner_bboxes) {
                     if !geometry::bbox_intersects_clip(inner_bbox, &clip) { continue; }
                     geometry::clip_polygon_into(inner, &clip, &mut clip_a, &mut clip_b);

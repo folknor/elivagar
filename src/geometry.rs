@@ -1058,6 +1058,20 @@ where
     }
 }
 
+/// Compute tile range for a Mercator bbox at a given zoom level.
+/// Returns `(tx_min, tx_max, ty_min, ty_max)`.
+#[inline]
+pub fn tile_range_in_bbox(bbox: &MercBbox, zoom: u8) -> (u32, u32, u32, u32) {
+    let z_scale = f64::from(1u32 << zoom);
+    let max_tile = (1u32 << zoom).saturating_sub(1);
+    (
+        clamp_tile(bbox.min_x * z_scale, max_tile),
+        clamp_tile(bbox.max_x * z_scale, max_tile),
+        clamp_tile(bbox.min_y * z_scale, max_tile),
+        clamp_tile(bbox.max_y * z_scale, max_tile),
+    )
+}
+
 /// Clamp a floating-point tile coordinate to `[0, max_tile]` and floor to u32.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn clamp_tile(val: f64, max_tile: u32) -> u32 {
@@ -1226,6 +1240,61 @@ pub fn point_in_polygon(p: &Point, ring: &[Point]) -> bool {
         j = i;
     }
     inside
+}
+
+// ---------------------------------------------------------------------------
+// Interior tile detection
+// ---------------------------------------------------------------------------
+
+/// Check if a tile (given by its buffered `ClipRect`) is entirely interior to a polygon ring.
+///
+/// Single O(n) pass combining 4-corner PIP ray-cast with edge-bbox overlap check.
+/// Returns true when no edge bbox overlaps the clip rect AND all 4 corners of the
+/// clip rect are inside the ring. Conservative: may return false for tiles that are
+/// truly interior but have a nearby edge bbox.
+pub fn tile_is_interior(ring: &[Point], clip: &ClipRect) -> bool {
+    let n = ring.len();
+    if n < 3 {
+        return false;
+    }
+
+    let corners: [(f64, f64); 4] = [
+        (clip.min_x, clip.min_y),
+        (clip.max_x, clip.min_y),
+        (clip.max_x, clip.max_y),
+        (clip.min_x, clip.max_y),
+    ];
+    let mut inside = [false; 4];
+
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (ring[i].x, ring[i].y);
+        let (xj, yj) = (ring[j].x, ring[j].y);
+
+        // Edge bbox overlap with clip rect — if any edge might cross the tile,
+        // the polygon boundary could intersect it, so bail out conservatively.
+        if xi.min(xj) <= clip.max_x
+            && xi.max(xj) >= clip.min_x
+            && yi.min(yj) <= clip.max_y
+            && yi.max(yj) >= clip.min_y
+        {
+            return false;
+        }
+
+        // PIP ray-casting for all 4 corners simultaneously.
+        for (k, &(cx, cy)) in corners.iter().enumerate() {
+            if (yi > cy) != (yj > cy) {
+                let intersect_x = xi + (cy - yi) / (yj - yi) * (xj - xi);
+                if cx < intersect_x {
+                    inside[k] = !inside[k];
+                }
+            }
+        }
+
+        j = i;
+    }
+
+    inside[0] && inside[1] && inside[2] && inside[3]
 }
 
 // ---------------------------------------------------------------------------

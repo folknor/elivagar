@@ -585,3 +585,63 @@ fn test_land_mask_from_bytes_wrong_length() {
     assert!(LandMask::from_bytes(&[0; 100]).is_none());
     assert!(LandMask::from_bytes(&[]).is_none());
 }
+
+// --- Interior tile detection tests ---
+
+#[test]
+fn tile_is_interior_inside_large_square() {
+    // Large square [0.1, 0.1] to [0.9, 0.9]. Tile (1, 1) at z=2 spans
+    // [0.25, 0.25] to [0.5, 0.5] — clearly inside the square.
+    let ring = vec![
+        Point::new(0.1, 0.1),
+        Point::new(0.9, 0.1),
+        Point::new(0.9, 0.9),
+        Point::new(0.1, 0.9),
+    ];
+    let clip = ClipRect::for_tile(1, 1, 2, BUFFER_FRACTION);
+    assert!(tile_is_interior(&ring, &clip));
+}
+
+#[test]
+fn tile_is_interior_boundary_tile() {
+    // Same square, tile (0, 0) at z=2 spans [0, 0] to [0.25, 0.25].
+    // The polygon edge at x=0.1, y=0.1 crosses this tile.
+    let ring = vec![
+        Point::new(0.1, 0.1),
+        Point::new(0.9, 0.1),
+        Point::new(0.9, 0.9),
+        Point::new(0.1, 0.9),
+    ];
+    let clip = ClipRect::for_tile(0, 0, 2, BUFFER_FRACTION);
+    assert!(!tile_is_interior(&ring, &clip));
+}
+
+#[test]
+fn tile_is_interior_outside_tile() {
+    // Small square [0.1, 0.1] to [0.3, 0.3]. Tile (3, 3) at z=2 spans
+    // [0.75, 0.75] to [1.0, 1.0] — completely outside.
+    let ring = vec![
+        Point::new(0.1, 0.1),
+        Point::new(0.3, 0.1),
+        Point::new(0.3, 0.3),
+        Point::new(0.1, 0.3),
+    ];
+    let clip = ClipRect::for_tile(3, 3, 2, BUFFER_FRACTION);
+    assert!(!tile_is_interior(&ring, &clip));
+}
+
+#[test]
+fn tile_is_interior_concave_polygon() {
+    // L-shaped polygon: tile in the concave cutout should return false.
+    let ring = vec![
+        Point::new(0.1, 0.1),
+        Point::new(0.9, 0.1),
+        Point::new(0.9, 0.5),
+        Point::new(0.5, 0.5),
+        Point::new(0.5, 0.9),
+        Point::new(0.1, 0.9),
+    ];
+    // Tile (3, 3) at z=2: [0.75, 0.75] to [1.0, 1.0] — inside the cutout.
+    let clip = ClipRect::for_tile(3, 3, 2, BUFFER_FRACTION);
+    assert!(!tile_is_interior(&ring, &clip));
+}
