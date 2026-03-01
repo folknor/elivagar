@@ -118,6 +118,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
+name = "bytemuck"
+version = "1.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -192,15 +198,6 @@ name = "clap_lex"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
-
-[[package]]
-name = "cmake"
-version = "0.1.57"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "colorchoice"
@@ -387,8 +384,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
- "libz-ng-sys",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -680,16 +677,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libz-ng-sys"
-version = "1.1.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ff028f347c6ed1b98e17cede6f36b5e2706afde598914c87d2da04f86029ba"
-dependencies = [
- "cmake",
- "libc",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -773,7 +760,9 @@ dependencies = [
  "protohoggr",
  "quick-xml",
  "rayon",
+ "roaring",
  "rustc-hash",
+ "serde_json",
  "zstd",
 ]
 
@@ -948,6 +937,16 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[package]]
+name = "roaring"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ba9ce64a8f45d7fc86358410bb1a82e8c987504c0d4900e9141d69a9f26c885"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+]
 
 [[package]]
 name = "rustc-hash"
@@ -1447,6 +1446,12 @@ dependencies = [
  "unicode-xid",
  "wasmparser",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c745c48e1007337ed136dc99df34128b9faa6ed542d80a1c673cf55a6d7236c8"
 
 [[package]]
 name = "zmij"

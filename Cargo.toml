@@ -14,7 +14,7 @@ name = "elivagar"
 path = "src/main.rs"
 
 [dependencies]
-pbfhogg = { path = "../pbfhogg", default-features = false, features = ["zlib-ng"] }
+pbfhogg = { path = "../pbfhogg" }
 protohoggr = { path = "../protohoggr" }
 rayon = "1.5"
 memmap2 = "0.9"
