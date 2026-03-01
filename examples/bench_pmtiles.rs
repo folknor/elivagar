@@ -46,7 +46,7 @@ fn main() {
     // Ensure output dir exists
     fs::create_dir_all("data").expect("create data dir");
 
-    // Benchmark elivagar writer (with hotpath timing when feature is enabled)
+    // Benchmark elivagar writer (hotpath guard prints timing report on drop)
     #[cfg(feature = "hotpath")]
     let _guard = hotpath::HotpathGuardBuilder::new("bench_pmtiles")
         .percentiles(&[50, 95, 99])

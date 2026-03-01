@@ -24,7 +24,9 @@ Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install
 - `brokkr bench node-store [--nodes N] [--runs N]` — SortedNodeStore benchmark (default: 50M nodes, 5 runs)
 - `brokkr bench pmtiles [--tiles N] [--runs N]` — PMTiles writer benchmark (default: 500K tiles, 5 runs)
 - `brokkr bench eliv-all [--dataset name] [--pbf path] [--runs N]` — full benchmark suite
-- `brokkr hotpath [--dataset name] [--pbf path] [--alloc]` — hotpath profiling (timing or allocation)
+- `brokkr hotpath [--dataset name] [--pbf path] [--alloc]` — hotpath profiling of main tilegen pipeline (timing or allocation)
+- `brokkr hotpath pmtiles [--tiles N] [--alloc]` — hotpath profiling of PMTiles micro-benchmark
+- `brokkr hotpath node-store [--nodes N] [--alloc]` — hotpath profiling of node store micro-benchmark
 - `brokkr profile [--dataset name] [--pbf path] [--tool perf|samply]` — sampling profiler (perf or samply)
 - `brokkr compare-tiles <a> <b> [--sample N]` — compare feature counts between PMTiles archives
 - `brokkr download ocean` — download ocean shapefiles
