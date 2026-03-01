@@ -1616,7 +1616,7 @@ struct AssemblyScratch {
     merge_scratch: mvt::MergeScratch,
     geom_pool: Vec<Vec<u32>>,
     tags_pool: Vec<Vec<(u16, u16)>>,
-    compressors: [Option<libdeflater::Compressor>; 11],
+    compression_levels: [Option<flate2::Compression>; 11],
     gz_buf: Vec<u8>,
     layers: [Option<LayerBuilder>; LAYER_COUNT],
 }
@@ -1628,7 +1628,7 @@ thread_local! {
             merge_scratch: mvt::MergeScratch::new(),
             geom_pool: Vec::new(),
             tags_pool: Vec::new(),
-            compressors: [const { None }; 11],
+            compression_levels: [const { None }; 11],
             gz_buf: Vec::new(),
             layers: [const { None }; LAYER_COUNT],
         }
@@ -1695,17 +1695,17 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
                 13..=14 => compression_level.min(3),
                 _ => compression_level,
             } as usize;
-            let compressor = s.compressors[level].get_or_insert_with(|| {
-                #[allow(clippy::cast_possible_truncation)]
-                let lvl = libdeflater::CompressionLvl::new(level as i32)
-                    .expect("invalid compression level");
-                libdeflater::Compressor::new(lvl)
+            #[allow(clippy::cast_possible_truncation)]
+            let lvl = *s.compression_levels[level].get_or_insert_with(|| {
+                flate2::Compression::new(level as u32)
             });
-            let bound = compressor.gzip_compress_bound(mvt_data.len());
-            s.gz_buf.resize(bound, 0);
-            let compressed_len = compressor.gzip_compress(&mvt_data, &mut s.gz_buf)
+            let mut gz_buf = std::mem::take(&mut s.gz_buf);
+            gz_buf.clear();
+            let mut encoder = flate2::write::GzEncoder::new(gz_buf, lvl);
+            std::io::Write::write_all(&mut encoder, &mvt_data)
                 .expect("gzip compress failed");
-            let compressed = s.gz_buf[..compressed_len].to_vec();
+            let compressed = encoder.finish().expect("gzip finish failed");
+            s.gz_buf = compressed.clone();
 
             Some(EncodedTile { tile_id: tile.tile_id, compressed })
             })

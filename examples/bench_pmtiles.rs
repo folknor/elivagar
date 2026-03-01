@@ -169,13 +169,10 @@ fn make_tile_data(z: u8, x: u32, y: u32) -> Vec<u8> {
             .wrapping_add(1442695040888963407);
     }
 
-    let mut compressor =
-        libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
-    let bound = compressor.gzip_compress_bound(raw.len());
-    let mut out = vec![0u8; bound];
-    let n = compressor.gzip_compress(&raw, &mut out).unwrap();
-    out.truncate(n);
-    out
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(1));
+    encoder.write_all(&raw).unwrap();
+    encoder.finish().unwrap()
 }
 
 // ---------------------------------------------------------------------------

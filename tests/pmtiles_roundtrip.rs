@@ -16,7 +16,9 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use elivagar::pmtiles_writer::{tile_id_to_zxy, xy_to_tile_id, PmtilesConfig, PmtilesWriter};
-use libdeflater::{CompressionLvl, Compressor, Decompressor};
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use flate2::read::GzDecoder;
 use protohoggr::{
     Cursor, encode_bytes_field_always, encode_varint, encode_varint_field_always, WIRE_LEN,
 };
@@ -321,31 +323,17 @@ fn encode_mvt_point_feature() -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn gzip_bytes(data: &[u8]) -> Vec<u8> {
-    let mut compressor = Compressor::new(CompressionLvl::default());
-    let bound = compressor.gzip_compress_bound(data.len());
-    let mut out = vec![0u8; bound];
-    let n = compressor.gzip_compress(data, &mut out).unwrap();
-    out.truncate(n);
-    out
+    use std::io::Write;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
 }
 
 fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
-    let mut decompressor = Decompressor::new();
-    let mut buf = vec![0u8; data.len() * 8];
-    loop {
-        match decompressor.gzip_decompress(data, &mut buf) {
-            Ok(n) => {
-                buf.truncate(n);
-                return Ok(buf);
-            }
-            Err(libdeflater::DecompressionError::InsufficientSpace) => {
-                buf.resize(buf.len() * 2, 0);
-            }
-            Err(e) => {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")));
-            }
-        }
-    }
+    let mut decoder = GzDecoder::new(data);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out)?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

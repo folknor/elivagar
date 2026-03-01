@@ -23,7 +23,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use elivagar::pmtiles_writer::tile_id_to_zxy;
-use libdeflater::Decompressor;
+use flate2::read::GzDecoder;
 
 // ---------------------------------------------------------------------------
 // PMTiles reader (minimal, sync, read-only)
@@ -391,22 +391,11 @@ fn decode_proto_varint_raw(data: &[u8], mut pos: usize) -> (u64, usize) {
 }
 
 fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
-    let mut decompressor = Decompressor::new();
-    let mut buf = vec![0u8; data.len() * 8];
-    loop {
-        match decompressor.gzip_decompress(data, &mut buf) {
-            Ok(n) => {
-                buf.truncate(n);
-                return Ok(buf);
-            }
-            Err(libdeflater::DecompressionError::InsufficientSpace) => {
-                buf.resize(buf.len() * 2, 0);
-            }
-            Err(e) => {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")));
-            }
-        }
-    }
+    use std::io::Read;
+    let mut decoder = GzDecoder::new(data);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out)?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

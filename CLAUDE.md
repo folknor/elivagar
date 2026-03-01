@@ -84,7 +84,7 @@ Sequential, same PBF input:
 - `pbfhogg` — PBF reader, sibling dir `../pbfhogg`
 - `rayon` — parallel processing
 - `memmap2` — memory-mapped I/O for way index (and flat node index fallback)
-- `libdeflater` (libdeflate) — gzip compression for MVT tiles. elivagar uses libdeflater directly, NOT flate2. The pmtiles-rs dev-dependency uses flate2, which depends on whatever zlib backend is available. After switching pbfhogg from zlib-ng to zlib-rs, pmtiles-rs lost access to zlib-ng and regressed ~10x in the bench. README pmtiles-rs numbers are from before that switch (commit `3d9b777`). Do not update pmtiles-rs numbers without ensuring it has a fair zlib backend.
+- `flate2` (zlib-rs backend) — gzip compression for MVT tiles. Same zlib backend as pbfhogg.
 - `mimalloc` — global allocator (critical for rayon performance)
 - `hotpath` — function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
 

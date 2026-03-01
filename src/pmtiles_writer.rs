@@ -30,7 +30,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, BufReader, BufWriter, Read as _, Write};
 use std::path::{Path, PathBuf};
 
-use libdeflater::{CompressionLvl, Compressor};
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use protohoggr::encode_varint;
 
 // ---------------------------------------------------------------------------
@@ -464,11 +465,6 @@ fn build_leaf_directories(
     let mut leaf_blob: Vec<u8> = Vec::new();
     let mut root_entries: Vec<DirEntry> = Vec::new();
 
-    // Reuse compressor + output buffer across all leaf chunks.
-    let lvl = CompressionLvl::default();
-    let mut compressor = Compressor::new(lvl);
-    let mut gz_buf: Vec<u8> = Vec::new();
-
     for chunk in entries.chunks(leaf_size) {
         let first_tile_id = match chunk.first() {
             Some(e) => e.tile_id,
@@ -476,15 +472,12 @@ fn build_leaf_directories(
         };
 
         let leaf_raw = encode_directory(chunk);
-        let bound = compressor.gzip_compress_bound(leaf_raw.len());
-        gz_buf.resize(bound, 0);
-        let n = compressor.gzip_compress(&leaf_raw, &mut gz_buf)
-            .map_err(|e| io::Error::other(format!("{e:?}")))?;
+        let compressed = gzip_compress(&leaf_raw)?;
 
         #[allow(clippy::cast_possible_truncation)]
-        let leaf_len = n as u32;
+        let leaf_len = compressed.len() as u32;
         let leaf_offset = leaf_blob.len() as u64;
-        leaf_blob.extend_from_slice(&gz_buf[..n]);
+        leaf_blob.extend_from_slice(&compressed);
 
         // run_length=0 marks a leaf directory pointer
         root_entries.push(DirEntry {
@@ -566,14 +559,9 @@ fn encode_offset_column(buf: &mut Vec<u8>, entries: &[DirEntry]) {
 // ---------------------------------------------------------------------------
 
 fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
-    let lvl = CompressionLvl::default();
-    let mut compressor = Compressor::new(lvl);
-    let bound = compressor.gzip_compress_bound(data.len());
-    let mut out = vec![0u8; bound];
-    let n = compressor.gzip_compress(data, &mut out)
-        .map_err(|e| io::Error::other(format!("{e:?}")))?;
-    out.truncate(n);
-    Ok(out)
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data)?;
+    encoder.finish()
 }
 
 // ---------------------------------------------------------------------------
