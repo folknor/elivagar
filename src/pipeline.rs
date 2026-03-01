@@ -1183,6 +1183,9 @@ fn emit_polygon_feature(
     let mut tc_buf: Vec<(i32, i32)> = Vec::new();
     let mut clip_a: Vec<Point> = Vec::new();
     let mut clip_b: Vec<Point> = Vec::new();
+    // F14: row pre-clip buffers.
+    let mut row_clip_a: Vec<Point> = Vec::new();
+    let mut row_clip_b: Vec<Point> = Vec::new();
 
     geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
@@ -1192,36 +1195,19 @@ fn emit_polygon_feature(
         let simp_bbox = merc_bbox(simplified);
         let single_tile = geometry::is_single_tile(&simp_bbox, z);
         let skip_size_filter = z >= 14;
-        geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
-            if single_tile {
-                // Fast path: bbox fits in one tile — clipping is a no-op.
-                if simplified.len() < 3 {
-                    return;
-                }
-                geometry::to_tile_coords_into(&mut tc_buf, simplified, tx, ty, z);
-                if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
-                    return;
-                }
-                close_and_orient_cw(&mut tc_buf);
-            } else {
-                let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-                if geometry::tile_is_interior(simplified, &clip) {
-                    // Interior tile: polygon fully covers tile. Emit buffered
-                    // tile rectangle instead of running S-H clip.
-                    tc_buf.clear();
-                    tc_buf.extend_from_slice(&INTERIOR_TILE_RING);
-                } else {
-                    geometry::clip_polygon_into(simplified, &clip, &mut clip_a, &mut clip_b);
-                    if clip_a.len() < 3 {
-                        return;
-                    }
-                    geometry::to_tile_coords_into(&mut tc_buf, &clip_a, tx, ty, z);
-                    if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
-                        return;
-                    }
-                    close_and_orient_cw(&mut tc_buf);
-                }
+        let (tx_min, tx_max, ty_min, ty_max) = geometry::tile_range_in_bbox(&simp_bbox, z);
+
+        if single_tile {
+            // Fast path: bbox fits in one tile — clipping is a no-op.
+            let (tx, ty) = (tx_min, ty_min);
+            if simplified.len() < 3 {
+                return;
             }
+            geometry::to_tile_coords_into(&mut tc_buf, simplified, tx, ty, z);
+            if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
+                return;
+            }
+            close_and_orient_cw(&mut tc_buf);
 
             mvt::encode_polygon(&mut geom_buf, &[&tc_buf]);
             if geom_buf.is_empty() {
@@ -1232,13 +1218,65 @@ fn emit_polygon_feature(
             let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
             records.push(SortRecord { key, data });
             count += 1;
-        });
+        } else {
+            let inv_z = 1.0 / f64::from(1u32 << z);
+            let tile_buf = BUFFER_FRACTION * inv_z;
+            let multi_row = ty_max > ty_min;
+
+            for ty in ty_min..=ty_max {
+                // F14: row pre-clip — restrict polygon to this row's Y-band.
+                // Per-tile clips then process far fewer vertices.
+                let row_source: &[Point] = if multi_row {
+                    let row_rect = ClipRect::new(
+                        0.0,
+                        f64::from(ty) * inv_z - tile_buf,
+                        1.0,
+                        f64::from(ty + 1) * inv_z + tile_buf,
+                    );
+                    geometry::clip_polygon_into(simplified, &row_rect, &mut row_clip_a, &mut row_clip_b);
+                    if row_clip_a.len() < 3 {
+                        continue;
+                    }
+                    &row_clip_a
+                } else {
+                    simplified
+                };
+
+                for tx in tx_min..=tx_max {
+                    let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
+                    if geometry::tile_is_interior(row_source, &clip) {
+                        tc_buf.clear();
+                        tc_buf.extend_from_slice(&INTERIOR_TILE_RING);
+                    } else {
+                        geometry::clip_polygon_into(row_source, &clip, &mut clip_a, &mut clip_b);
+                        if clip_a.len() < 3 {
+                            continue;
+                        }
+                        geometry::to_tile_coords_into(&mut tc_buf, &clip_a, tx, ty, z);
+                        if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
+                            continue;
+                        }
+                        close_and_orient_cw(&mut tc_buf);
+                    }
+
+                    mvt::encode_polygon(&mut geom_buf, &[&tc_buf]);
+                    if geom_buf.is_empty() {
+                        continue;
+                    }
+                    let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                    let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_buf, &attrs_buf);
+                    let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
+                    records.push(SortRecord { key, data });
+                    count += 1;
+                }
+            }
+        }
     });
     count
 }
 
 #[hotpath::measure]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
 fn emit_multipolygon_feature(
     osm_id: u64,
     outer: &[Point],
@@ -1256,6 +1294,12 @@ fn emit_multipolygon_feature(
     let mut clip_b: Vec<Point> = Vec::new();
     let mut all_rings: Vec<Vec<(i32, i32)>> = Vec::new();
     let mut inner_bboxes: Vec<geometry::MercBbox> = Vec::new();
+    // F14: row pre-clip buffers.
+    let mut row_clip_a: Vec<Point> = Vec::new();
+    let mut row_clip_b: Vec<Point> = Vec::new();
+    let mut row_outer: Vec<Point> = Vec::new();
+    let mut row_inners: Vec<Vec<Point>> = Vec::new();
+    let mut row_inner_bboxes: Vec<geometry::MercBbox> = Vec::new();
 
     geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, |z, simp_outer, simp_inners| {
         encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
@@ -1269,73 +1313,35 @@ fn emit_multipolygon_feature(
         inner_bboxes.extend(simp_inners.iter().map(|r| merc_bbox(r)));
         let single_tile = geometry::is_single_tile(&simp_bbox, z);
         let skip_size_filter = z >= 14;
-        geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
+        let (tx_min, tx_max, ty_min, ty_max) = geometry::tile_range_in_bbox(&simp_bbox, z);
+
+        if single_tile {
+            // Fast path: bbox fits in one tile — clipping is a no-op.
+            let (tx, ty) = (tx_min, ty_min);
             let mut ring_count: usize = 0;
-            if single_tile {
-                // Fast path: bbox fits in one tile — clipping is a no-op.
-                if simp_outer.len() < 3 {
-                    return;
+            if simp_outer.len() < 3 {
+                return;
+            }
+            if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
+            geometry::to_tile_coords_into(&mut all_rings[ring_count], simp_outer, tx, ty, z);
+            if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
+                return;
+            }
+            close_and_orient_cw(&mut all_rings[ring_count]);
+            ring_count += 1;
+            for inner in simp_inners {
+                if inner.len() < 3 {
+                    continue;
                 }
                 if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                geometry::to_tile_coords_into(&mut all_rings[ring_count], simp_outer, tx, ty, z);
+                geometry::to_tile_coords_into(&mut all_rings[ring_count], inner, tx, ty, z);
                 if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
-                    return;
+                    continue;
                 }
-                close_and_orient_cw(&mut all_rings[ring_count]);
+                close_and_orient_ccw(&mut all_rings[ring_count]);
                 ring_count += 1;
-                for inner in simp_inners {
-                    if inner.len() < 3 {
-                        continue;
-                    }
-                    if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                    geometry::to_tile_coords_into(&mut all_rings[ring_count], inner, tx, ty, z);
-                    if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
-                        continue;
-                    }
-                    close_and_orient_ccw(&mut all_rings[ring_count]);
-                    ring_count += 1;
-                }
-            } else {
-                let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-
-                if geometry::tile_is_interior(simp_outer, &clip) {
-                    // Interior tile: outer ring covers entire tile.
-                    if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                    all_rings[ring_count].clear();
-                    all_rings[ring_count].extend_from_slice(&INTERIOR_TILE_RING);
-                    ring_count += 1;
-                } else {
-                    geometry::clip_polygon_into(simp_outer, &clip, &mut clip_a, &mut clip_b);
-                    if clip_a.len() < 3 {
-                        return;
-                    }
-                    if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                    geometry::to_tile_coords_into(&mut all_rings[ring_count], &clip_a, tx, ty, z);
-                    if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
-                        return;
-                    }
-                    close_and_orient_cw(&mut all_rings[ring_count]);
-                    ring_count += 1;
-                }
-                // Inner rings: still need per-tile clipping (holes may be visible).
-                for (inner, inner_bbox) in simp_inners.iter().zip(&inner_bboxes) {
-                    if !geometry::bbox_intersects_clip(inner_bbox, &clip) { continue; }
-                    geometry::clip_polygon_into(inner, &clip, &mut clip_a, &mut clip_b);
-                    if clip_a.len() < 3 {
-                        continue;
-                    }
-                    if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                    geometry::to_tile_coords_into(&mut all_rings[ring_count], &clip_a, tx, ty, z);
-                    // Also drop sub-pixel inner rings (holes)
-                    if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
-                        continue;
-                    }
-                    close_and_orient_ccw(&mut all_rings[ring_count]);
-                    ring_count += 1;
-                }
             }
 
-            // ring_refs borrows all_rings — must be local (can't hoist across calls).
             let ring_refs: SmallVec<[&[(i32, i32)]; 4]> = all_rings[..ring_count].iter().map(Vec::as_slice).collect();
             mvt::encode_polygon(&mut geom_buf, &ring_refs);
             if geom_buf.is_empty() {
@@ -1346,7 +1352,108 @@ fn emit_multipolygon_feature(
             let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
             records.push(SortRecord { key, data });
             count += 1;
-        });
+        } else {
+            let inv_z = 1.0 / f64::from(1u32 << z);
+            let tile_buf = BUFFER_FRACTION * inv_z;
+            let multi_row = ty_max > ty_min;
+
+            for ty in ty_min..=ty_max {
+                // F14: row pre-clip — restrict polygon to this row's Y-band.
+                let (outer_src, inners_src, inners_bbox_src): (&[Point], &[Vec<Point>], &[geometry::MercBbox]) =
+                    if multi_row {
+                        let row_rect = ClipRect::new(
+                            0.0,
+                            f64::from(ty) * inv_z - tile_buf,
+                            1.0,
+                            f64::from(ty + 1) * inv_z + tile_buf,
+                        );
+                        // Pre-clip outer to row.
+                        geometry::clip_polygon_into(simp_outer, &row_rect, &mut row_clip_a, &mut row_clip_b);
+                        if row_clip_a.len() < 3 {
+                            continue;
+                        }
+                        row_outer.clear();
+                        row_outer.extend_from_slice(&row_clip_a);
+
+                        // Pre-clip inners to row.
+                        let row_y_min = f64::from(ty) * inv_z - tile_buf;
+                        let row_y_max = f64::from(ty + 1) * inv_z + tile_buf;
+                        let mut row_inner_count = 0;
+                        for (inner, ib) in simp_inners.iter().zip(&inner_bboxes) {
+                            if ib.max_y < row_y_min || ib.min_y > row_y_max {
+                                continue;
+                            }
+                            geometry::clip_polygon_into(inner, &row_rect, &mut row_clip_a, &mut row_clip_b);
+                            if row_clip_a.len() < 3 {
+                                continue;
+                            }
+                            if row_inner_count < row_inners.len() {
+                                row_inners[row_inner_count].clear();
+                                row_inners[row_inner_count].extend_from_slice(&row_clip_a);
+                            } else {
+                                row_inners.push(row_clip_a.clone());
+                            }
+                            row_inner_count += 1;
+                        }
+                        row_inner_bboxes.clear();
+                        row_inner_bboxes.extend(row_inners[..row_inner_count].iter().map(|r| merc_bbox(r)));
+                        (&row_outer, &row_inners[..row_inner_count], &row_inner_bboxes)
+                    } else {
+                        (simp_outer, simp_inners, inner_bboxes.as_slice())
+                    };
+
+                for tx in tx_min..=tx_max {
+                    let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
+                    let mut ring_count: usize = 0;
+
+                    if geometry::tile_is_interior(outer_src, &clip) {
+                        // Interior tile: outer ring covers entire tile.
+                        if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
+                        all_rings[ring_count].clear();
+                        all_rings[ring_count].extend_from_slice(&INTERIOR_TILE_RING);
+                        ring_count += 1;
+                    } else {
+                        geometry::clip_polygon_into(outer_src, &clip, &mut clip_a, &mut clip_b);
+                        if clip_a.len() < 3 {
+                            continue;
+                        }
+                        if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
+                        geometry::to_tile_coords_into(&mut all_rings[ring_count], &clip_a, tx, ty, z);
+                        if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
+                            continue;
+                        }
+                        close_and_orient_cw(&mut all_rings[ring_count]);
+                        ring_count += 1;
+                    }
+                    // Inner rings: still need per-tile clipping (holes may be visible).
+                    for (inner, ib) in inners_src.iter().zip(inners_bbox_src) {
+                        if !geometry::bbox_intersects_clip(ib, &clip) { continue; }
+                        geometry::clip_polygon_into(inner, &clip, &mut clip_a, &mut clip_b);
+                        if clip_a.len() < 3 {
+                            continue;
+                        }
+                        if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
+                        geometry::to_tile_coords_into(&mut all_rings[ring_count], &clip_a, tx, ty, z);
+                        if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
+                            continue;
+                        }
+                        close_and_orient_ccw(&mut all_rings[ring_count]);
+                        ring_count += 1;
+                    }
+
+                    let ring_refs: SmallVec<[&[(i32, i32)]; 4]> = all_rings[..ring_count].iter().map(Vec::as_slice).collect();
+                    mvt::encode_polygon(&mut geom_buf, &ring_refs);
+                    if geom_buf.is_empty() {
+                        continue;
+                    }
+                    let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                    let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_buf, &attrs_buf);
+                    let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
+                    records.push(SortRecord { key, data });
+                    count += 1;
+                }
+            }
+        }
     });
     count
 }
