@@ -100,6 +100,9 @@ Sequential, same PBF input:
 - `--force-sorted` — force compact node store even without PBF header flag
 - `-j N` / `--threads N` — thread count (default: logical CPUs)
 - `--sort-budget <size>` — sort chunk memory budget (default 1G). Accepts `256M`, `512M`, `1G`, or raw bytes. Minimum 64M. Lower values reduce peak RSS during PBF processing at the cost of more merge chunks.
+- `--way-budget <size>` — in-flight way processing budget (default 128M). Minimum 1M.
+- `--rel-budget <size>` — relation batch accumulation budget (default 64M). Minimum 1M.
+- `--assemble-budget <size>` — tile assembly batch budget (default 32M). Minimum 1M.
 
 ## Key conventions
 

@@ -21,7 +21,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10] [--force-sorted] [-j N | --threads N] [--sort-budget bytes]"
+            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10] [--force-sorted] [-j N | --threads N] [--sort-budget bytes] [--way-budget bytes] [--rel-budget bytes] [--assemble-budget bytes]"
         );
         std::process::exit(1);
     }
@@ -40,12 +40,16 @@ fn main() {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(4);
     let mut sort_chunk_size: usize = 0;
+    let mut way_inflight_budget: usize = 0;
+    let mut rel_batch_budget: usize = 0;
+    let mut assemble_batch_budget: usize = 0;
 
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
             "--tmp-dir" | "--ocean" | "--ocean-simplified" | "--skip-to"
-            | "--compression-level" | "-j" | "--threads" | "--sort-budget" => {
+            | "--compression-level" | "-j" | "--threads" | "--sort-budget"
+            | "--way-budget" | "--rel-budget" | "--assemble-budget" => {
                 let flag = &args[i];
                 i += 1;
                 if i >= args.len() {
@@ -93,6 +97,33 @@ fn main() {
                             }
                         };
                     }
+                    "--way-budget" => {
+                        way_inflight_budget = match parse_byte_size(&args[i]) {
+                            Some(v) if v >= 1024 * 1024 => v,
+                            _ => {
+                                eprintln!("Invalid way budget: {} (expected >= 1M, e.g. 32M, 128M)", args[i]);
+                                std::process::exit(1);
+                            }
+                        };
+                    }
+                    "--rel-budget" => {
+                        rel_batch_budget = match parse_byte_size(&args[i]) {
+                            Some(v) if v >= 1024 * 1024 => v,
+                            _ => {
+                                eprintln!("Invalid rel budget: {} (expected >= 1M, e.g. 16M, 64M)", args[i]);
+                                std::process::exit(1);
+                            }
+                        };
+                    }
+                    "--assemble-budget" => {
+                        assemble_batch_budget = match parse_byte_size(&args[i]) {
+                            Some(v) if v >= 1024 * 1024 => v,
+                            _ => {
+                                eprintln!("Invalid assemble budget: {} (expected >= 1M, e.g. 16M, 32M)", args[i]);
+                                std::process::exit(1);
+                            }
+                        };
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -129,9 +160,9 @@ fn main() {
         compression_level,
         force_sorted,
         threads,
-        way_inflight_budget: 0,
-        rel_batch_budget: 0,
-        assemble_batch_budget: 0,
+        way_inflight_budget,
+        rel_batch_budget,
+        assemble_batch_budget,
         sort_chunk_size,
     };
 
