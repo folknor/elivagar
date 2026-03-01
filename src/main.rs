@@ -4,12 +4,24 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Parse a byte size string like "256M", "1G", or raw bytes "268435456".
+fn parse_byte_size(s: &str) -> Option<usize> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
+        n.trim().parse::<usize>().ok().map(|v| v * 1024 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
+        n.trim().parse::<usize>().ok().map(|v| v * 1024 * 1024)
+    } else {
+        s.parse::<usize>().ok()
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10] [--force-sorted] [-j N | --threads N]"
+            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10] [--force-sorted] [-j N | --threads N] [--sort-budget bytes]"
         );
         std::process::exit(1);
     }
@@ -27,12 +39,13 @@ fn main() {
     let mut threads: usize = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(4);
+    let mut sort_chunk_size: usize = 0;
 
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
             "--tmp-dir" | "--ocean" | "--ocean-simplified" | "--skip-to"
-            | "--compression-level" | "-j" | "--threads" => {
+            | "--compression-level" | "-j" | "--threads" | "--sort-budget" => {
                 let flag = &args[i];
                 i += 1;
                 if i >= args.len() {
@@ -67,6 +80,15 @@ fn main() {
                             Ok(v) if v >= 1 => v,
                             _ => {
                                 eprintln!("Invalid thread count: {} (expected >= 1)", args[i]);
+                                std::process::exit(1);
+                            }
+                        };
+                    }
+                    "--sort-budget" => {
+                        sort_chunk_size = match parse_byte_size(&args[i]) {
+                            Some(v) if v >= 64 * 1024 * 1024 => v,
+                            _ => {
+                                eprintln!("Invalid sort budget: {} (expected >= 64M, e.g. 256M, 1G)", args[i]);
                                 std::process::exit(1);
                             }
                         };
@@ -110,6 +132,7 @@ fn main() {
         way_inflight_budget: 0,
         rel_batch_budget: 0,
         assemble_batch_budget: 0,
+        sort_chunk_size,
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")

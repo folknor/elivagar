@@ -120,14 +120,18 @@ pub struct TilegenConfig {
     /// Controls memory during tile assembly. Dense urban tiles at z14 can
     /// make fixed-count batches very large.
     pub assemble_batch_budget: usize,
+    /// Byte budget per sort chunk (0 = default 1 GB).
+    /// Records buffer in memory up to this limit, then flush as a sorted
+    /// chunk file to disk. Lower values reduce peak RSS during PBF processing
+    /// at the cost of more chunk files in the merge phase.
+    pub sort_chunk_size: usize,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
 const LAND_MASK_FILE: &str = "land_mask.bin";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
-/// Target memory budget per sort chunk (1 GB). Records buffer in memory up to
-/// this limit, then flush as a sorted chunk file to disk.
-const SORT_CHUNK_SIZE: usize = 1 << 30;
+/// Default memory budget per sort chunk (1 GB).
+const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -169,6 +173,12 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             config.min_zoom, config.max_zoom
         )));
     }
+
+    let sort_chunk_size = if config.sort_chunk_size > 0 {
+        config.sort_chunk_size
+    } else {
+        DEFAULT_SORT_CHUNK_SIZE
+    };
 
     let total_start = Instant::now();
     let skip = config.skip_to;
@@ -217,7 +227,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir)?;
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
             phase12_elapsed = None;
-            let sw = sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), SORT_CHUNK_SIZE, pbf_chunks)?;
+            let sw = sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_size, pbf_chunks)?;
             let mask = load_land_mask(&config.tmp_dir);
             if mask.is_none() {
                 eprintln!("  No land mask found — ocean filtering disabled");
@@ -395,9 +405,15 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
+    let sort_chunk_budget = if config.sort_chunk_size > 0 {
+        config.sort_chunk_size
+    } else {
+        DEFAULT_SORT_CHUNK_SIZE
+    };
+
     // Option so we can move to drain thread during way phase and get back after.
     let mut sort_writer: Option<SortWriter> = Some(
-        SortWriter::new(&config.tmp_dir.join(SORT_CHUNKS_DIR), SORT_CHUNK_SIZE)?
+        SortWriter::new(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_budget)?
     );
 
     // Decode threads: give 1/3 of budget to pbfhogg decode, rest to rayon processing.

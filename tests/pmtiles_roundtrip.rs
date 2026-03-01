@@ -582,6 +582,7 @@ fn test_deduplication() {
 /// Run with: cargo test --test pmtiles_roundtrip -- --ignored
 #[test]
 #[ignore]
+#[allow(clippy::too_many_lines)]
 fn test_full_pipeline() {
     let pbf_path = std::env::var("ELIVAGAR_TEST_PBF")
         .unwrap_or_else(|_| "data/denmark-latest.osm.pbf".to_string());
@@ -613,6 +614,7 @@ fn test_full_pipeline() {
         way_inflight_budget: 0,
         rel_batch_budget: 0,
         assemble_batch_budget: 0,
+        sort_chunk_size: 0,
     };
 
     elivagar::run(&config).expect("pipeline should succeed");

@@ -88,6 +88,18 @@ Sequential, same PBF input:
 - `mimalloc` — global allocator (critical for rayon performance)
 - `hotpath` — function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
 
+## CLI flags
+
+- `--tmp-dir path` — temporary directory for sort chunks
+- `--ocean path.shp` — ocean polygon shapefile (water-polygons-split-3857)
+- `--ocean-simplified path.shp` — simplified ocean shapefile for z0-7
+- `--skip-to ocean|sort` — resume from checkpoint
+- `--in-memory` — keep tile blob in RAM (faster for small extracts)
+- `--compression-level 0-10` — gzip level (default 6)
+- `--force-sorted` — force compact node store even without PBF header flag
+- `-j N` / `--threads N` — thread count (default: logical CPUs)
+- `--sort-budget <size>` — sort chunk memory budget (default 1G). Accepts `256M`, `512M`, `1G`, or raw bytes. Minimum 64M. Lower values reduce peak RSS during PBF processing at the cost of more merge chunks.
+
 ## Key conventions
 
 - `#[global_allocator]` mimalloc in main.rs — do not remove

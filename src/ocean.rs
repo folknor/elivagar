@@ -315,7 +315,7 @@ pub(crate) fn process_ocean_shapefile(
                     land_mask, &mut acc.records, &mut acc.simp_scratch,
                 );
                 for r in &acc.records[before..] {
-                    acc.bytes += r.data.len() + 8;
+                    acc.bytes += r.data.len() + std::mem::size_of::<sort::SortRecord>();
                 }
                 if acc.bytes >= chunk_size {
                     acc.flush(&chunk_dir, &chunk_id);

@@ -26,6 +26,7 @@
 //!     way_inflight_budget: 0,
 //!     rel_batch_budget: 0,
 //!     assemble_batch_budget: 0,
+//!     sort_chunk_size: 0,
 //! };
 //! elivagar::run(&config).expect("pipeline failed");
 //! ```
