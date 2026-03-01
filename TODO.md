@@ -1,10 +1,10 @@
 # elivagar TODO.
 
-## Memory work — instrumentation prerequisites
+## Memory work — instrumentation ✓ COMPLETE
 
-Before any memory optimization work (P1-P5), we need measurement infrastructure.
-Brokkr v3 schema (`~/Programs/brokkr/SCHEMA_REDESIGN.md`) needed to *store* these
-in the results DB. Elivagar-side emission is done — brokkr storage is the remaining blocker.
+Measurement infrastructure is fully operational. Elivagar emits per-phase RSS, in-flight HWM
+counters, and sort chunk counts. Brokkr v3 schema stores all metrics in `run_kv` table.
+Verified on dm6 Denmark run (`f275d10`): all 7 memory kv pairs captured successfully.
 
 ### Elivagar-side instrumentation — done (`3a729ab`, always-on, not feature-gated)
 - [x] Add `peak_rss_kb()` helper — read `/proc/self/status` for `VmHWM`

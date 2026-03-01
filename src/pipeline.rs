@@ -536,22 +536,25 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let mz = min_z;
                     let xz = max_z;
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
-                    // in the pool simultaneously. Token semaphore limits in-flight
-                    // blocks to MAX_INFLIGHT (~1.8 MB of RawWay data).
-                    const MAX_INFLIGHT: usize = 4;
+                    // in the pool simultaneously. Byte-budgeted in-flight control
+                    // limits total estimated memory, with a count ceiling as safety net.
+                    const MAX_INFLIGHT: usize = 8;
+                    /// Byte budget for in-flight way processing. Input bytes * 10
+                    /// approximates output expansion (coords + sort records across zooms).
+                    const WAY_INFLIGHT_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
+                    const WAY_OUTPUT_MULTIPLIER: usize = 10;
                     worker_handle = Some(std::thread::spawn(move || {
                         use rayon::prelude::*;
-                        let (token_tx, token_rx) =
-                            std::sync::mpsc::sync_channel::<()>(MAX_INFLIGHT);
-                        for _ in 0..MAX_INFLIGHT {
-                            token_tx.send(()).expect("token prefill");
-                        }
                         // Take refs outside loop — Copy into each move closure,
                         // avoids Arc::clone per spawn.
                         let nr_ref = &*nr_clone;
                         let lm_ref = &*lm_clone;
-                        let way_inflight = AtomicUsize::new(0);
-                        let way_inflight_ref = &way_inflight;
+                        // Byte-budgeted throttle: (count, estimated_bytes).
+                        // Condvar wakes dispatcher when a task completes.
+                        let inflight = std::sync::Mutex::new((0usize, 0usize));
+                        let inflight_cvar = std::sync::Condvar::new();
+                        let inflight_ref = &inflight;
+                        let cvar_ref = &inflight_cvar;
                         rayon::in_place_scope(|s| {
                             while let Ok(block) = brx.recv() {
                                 let raw_ways: Vec<RawWay> = block.elements()
@@ -568,14 +571,22 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                     })
                                     .collect();
                                 let block_bytes = estimate_raw_ways_bytes(&raw_ways);
-                                way_inflight_ref.fetch_add(block_bytes, Ordering::Relaxed);
-                                way_hwm_clone.fetch_max(
-                                    way_inflight_ref.load(Ordering::Relaxed), Ordering::Relaxed,
-                                );
-                                // Wait for a slot — blocks if MAX_INFLIGHT tasks in-flight
-                                if token_rx.recv().is_err() { break; }
+                                let block_cost = block_bytes * WAY_OUTPUT_MULTIPLIER;
+                                // Wait for capacity: both count and byte budget must have room.
+                                {
+                                    let mut guard = inflight_ref.lock()
+                                        .expect("inflight lock");
+                                    guard = inflight_cvar.wait_while(guard, |&mut (count, bytes)| {
+                                        count >= MAX_INFLIGHT || bytes + block_cost > WAY_INFLIGHT_BUDGET
+                                    }).expect("condvar wait");
+                                    guard.0 += 1;
+                                    guard.1 += block_cost;
+                                    // Update HWM with current in-flight bytes (raw, not multiplied).
+                                    way_hwm_clone.fetch_max(
+                                        guard.1 / WAY_OUTPUT_MULTIPLIER, Ordering::Relaxed,
+                                    );
+                                }
                                 let tx = rtx.clone();
-                                let token_ret = token_tx.clone();
                                 #[allow(clippy::let_underscore_must_use)]
                                 s.spawn(move |_| {
                                     let results: Vec<ProcessedWay> = raw_ways
@@ -585,8 +596,11 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                         ))
                                         .collect();
                                     let _ = tx.send(results);
-                                    let _ = token_ret.send(());
-                                    way_inflight_ref.fetch_sub(block_bytes, Ordering::Relaxed);
+                                    let mut guard = inflight_ref.lock()
+                                        .expect("inflight lock");
+                                    guard.0 -= 1;
+                                    guard.1 -= block_cost;
+                                    cvar_ref.notify_one();
                                 });
                             }
                         });
@@ -653,7 +667,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                             if rel_batch_bytes > max_rel_batch_bytes {
                                 max_rel_batch_bytes = rel_batch_bytes;
                             }
-                            if rel_batch.len() >= REL_BATCH_SIZE {
+                            if rel_batch.len() >= REL_BATCH_SIZE || rel_batch_bytes >= REL_BATCH_BUDGET {
                                 let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
                                 rel_batch_bytes = 0;
                                 features_emitted += flush_rel_batch(
@@ -927,6 +941,10 @@ struct PreparedRelation {
 }
 
 const REL_BATCH_SIZE: usize = 1024;
+/// Byte budget for relation batch accumulation. Flush when either REL_BATCH_SIZE
+/// or this budget is reached. Bounds the `collect()` output expansion from complex
+/// multipolygon relations.
+const REL_BATCH_BUDGET: usize = 64 * 1024 * 1024; // 64 MB
 
 /// Estimate heap bytes for a single prepared relation (struct + member way coords).
 fn estimate_prepared_rel_bytes(r: &PreparedRelation) -> usize {
@@ -1575,6 +1593,9 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
     };
 
     const BATCH_SIZE: usize = 4096;
+    /// Byte budget for assemble tile batches. Flush when either BATCH_SIZE or this
+    /// budget is reached. Limits peak in-flight memory for dense urban tiles.
+    const ASSEMBLE_BATCH_BUDGET: usize = 32 * 1024 * 1024; // 32 MB
 
     // Double-buffer pipeline: reader → encoder (main/rayon) → writer.
     // sync_channel(1) allows one batch ahead, overlapping read/write I/O
@@ -1626,7 +1647,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
                     if current.tile_id != u64::MAX && should_emit(&current) {
                         batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
-                        if batch.len() >= BATCH_SIZE {
+                        if batch.len() >= BATCH_SIZE || batch_bytes >= ASSEMBLE_BATCH_BUDGET {
                             if batch_bytes > max_batch_bytes { max_batch_bytes = batch_bytes; }
                             if read_tx.send(batch).is_err() { break; }
                             batch = Vec::with_capacity(BATCH_SIZE);
@@ -1799,7 +1820,7 @@ fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<Encod
             std::io::Write::write_all(&mut encoder, &mvt_data)
                 .expect("gzip compress failed");
             let compressed = encoder.finish().expect("gzip finish failed");
-            s.gz_buf = compressed.clone();
+            s.gz_buf = Vec::with_capacity(compressed.len());
 
             Some(EncodedTile { tile_id: tile.tile_id, compressed })
             })
