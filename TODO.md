@@ -3,10 +3,10 @@
 ## Memory work — instrumentation prerequisites
 
 Before any memory optimization work (P1-P5), we need measurement infrastructure.
-Blocked on brokkr v3 schema (`~/Programs/brokkr/SCHEMA_REDESIGN.md`) which adds
-`peak_rss_mb`, `run_kv`, and `project` column. Do that first.
+Brokkr v3 schema (`~/Programs/brokkr/SCHEMA_REDESIGN.md`) needed to *store* these
+in the results DB. Elivagar-side emission is done — brokkr storage is the remaining blocker.
 
-### Elivagar-side instrumentation (after brokkr v3)
+### Elivagar-side instrumentation — done (`3a729ab`, always-on, not feature-gated)
 - [x] Add `peak_rss_kb()` helper — read `/proc/self/status` for `VmHWM`
 - [x] Emit per-phase RSS: `phase12_rss_kb=`, `ocean_rss_kb=`, `sort_rss_kb=`, `assemble_rss_kb=`
 - [x] Emit `final_rss_kb=` at pipeline end (covered by `assemble_rss_kb` — VmHWM is cumulative peak)
