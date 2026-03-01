@@ -16,6 +16,36 @@ Observed facts from current code and local runs:
 
 Main conclusion: this is primarily an elivagar in-memory working-set problem, not an I/O backend problem (`io_uring`/`O_DIRECT` do not remove in-memory state).
 
+## First successful NA run
+
+Commit `8704b11`, 2026-03-01, plantasjen (30 GB RAM, Ryzen 9 5900X).
+
+| Metric | Value |
+|--------|-------|
+| Wall time | 605s (~10 min) |
+| Peak RSS | 22.8 GB (of ~25 GB available) |
+| Phase 1+2 (PBF) | 413s |
+| Ocean | 37s |
+| Sort | 0.7s |
+| Assemble | 155s |
+| Features | 512M |
+| Tiles | 19.2M (12.5M unique) |
+| Output | 12.5 GB |
+| Sort chunks | 12,379 |
+
+Key enabler: WayIndex out-of-core (step 3) converted ~6+ GB anonymous heap to file-backed mmap. Without it, the run OOMed during phase12 way processing.
+
+### Planet extrapolation (~3.5-4x NA)
+
+| Metric | NA (measured) | Planet (estimated) |
+|--------|---------------|-------------------|
+| Node store | ~12.4 GB | ~44 GB |
+| Peak RSS | 22.8 GB | ~65-75 GB |
+| Wall time | 605s | ~2400s (~40 min) |
+| Output | 12.5 GB | ~40-50 GB |
+
+Node store (~44 GB) is the bottleneck for planet on 64 GB hosts. The path forward is **pbfhogg `add-locations-to-ways`** — pre-resolving node coordinates into way elements eliminates the node store entirely, reducing planet peak RSS to an estimated ~15-20 GB.
+
 ---
 
 ## Concrete Steps (High Confidence)

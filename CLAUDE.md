@@ -127,7 +127,8 @@ Never write benchmark numbers for uncommitted code — the hash is the anchor.
 ### plantasjen (current)
 - CPU: AMD Ryzen 9 5900X (12 cores / 24 threads, 4.95 GHz boost)
 - RAM: 30 GB DDR4
-- Denmark PBF baseline: ~12.3s total (8s pbf, 1.5s ocean, 0.6s sort, 2s assemble)
+- Denmark PBF baseline: ~12.4s total (8s pbf, 1.5s ocean, 0.5s sort, 2.3s assemble), 1.8 GB RSS
+- North America baseline (commit `8704b11`): 605s total (413s pbf, 37s ocean, 0.7s sort, 155s assemble), 22.8 GB RSS, 12.5 GB output
 - Node store baseline (50M nodes, commit `cb2cd29`): build 1.7s, way-like 77 ns/lookup, random 394 ns/lookup
 - PMTiles writer baseline (500K tiles, commit `cb2cd29`): 164 ms
 
