@@ -3,25 +3,16 @@
 ## Memory work — instrumentation prerequisites
 
 Before any memory optimization work (P1-P5), we need measurement infrastructure.
+Blocked on brokkr v3 schema (`~/Programs/brokkr/SCHEMA_REDESIGN.md`) which adds
+`peak_rss_mb`, `run_kv`, and `project` column. Do that first.
 
-### Missing: Peak RSS tracking
-- No code reads `/proc/self/status` for `VmHWM` anywhere
-- Need a `peak_rss_kb()` helper function
-- Call at each phase boundary to emit `phase12_rss_kb=`, `ocean_rss_kb=`, `sort_rss_kb=`, `assemble_rss_kb=`
-- Also emit `final_rss_kb=` at pipeline end
-- This is the single most important measurement for the 64 GB target work
-
-### Missing: In-flight high-water marks
-- No tracking of max way-queue occupancy (bytes or count)
-- No tracking of max relation batch bytes
-- No tracking of max assemble batch bytes
-- Need `AtomicUsize` high-water-mark counters for each in-flight structure
-- Emit as kv pairs in the final summary: `max_way_inflight_bytes=`, `max_rel_batch_bytes=`, `max_assemble_batch_bytes=`
-- Required for E0.2 (in-flight queue/batch sensitivity) in the experiment matrix
-
-### Missing: Chunk count in final output
-- Chunk count is tracked internally (`sort_writer.chunk_count()`) but not printed in the kv summary
-- Add `sort_chunks=` to the final output block
+### Elivagar-side instrumentation (after brokkr v3)
+- [ ] Add `peak_rss_kb()` helper — read `/proc/self/status` for `VmHWM`
+- [ ] Emit per-phase RSS: `phase12_rss_kb=`, `ocean_rss_kb=`, `sort_rss_kb=`, `assemble_rss_kb=`
+- [ ] Emit `final_rss_kb=` at pipeline end
+- [ ] Add `AtomicUsize` high-water-mark counters for in-flight structures
+- [ ] Emit: `max_way_inflight_bytes=`, `max_rel_batch_bytes=`, `max_assemble_batch_bytes=`
+- [ ] Emit `sort_chunks=` in final kv summary (already tracked internally, just not printed)
 
 ### Already instrumented (sufficient)
 - Phase timings: `total_ms`, `phase12_ms`, `ocean_ms`, `phase3_ms`, `phase4_ms`
