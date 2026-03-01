@@ -43,6 +43,7 @@ fn main() {
     let mut way_inflight_budget: usize = 0;
     let mut rel_batch_budget: usize = 0;
     let mut assemble_batch_budget: usize = 0;
+    let mut locations_on_ways = false;
 
     let mut i = 3;
     while i < args.len() {
@@ -133,6 +134,9 @@ fn main() {
             "--force-sorted" => {
                 force_sorted = true;
             }
+            "--locations-on-ways" => {
+                locations_on_ways = true;
+            }
             other => {
                 eprintln!("Unknown argument: {other}");
                 std::process::exit(1);
@@ -164,6 +168,7 @@ fn main() {
         rel_batch_budget,
         assemble_batch_budget,
         sort_chunk_size,
+        locations_on_ways,
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")

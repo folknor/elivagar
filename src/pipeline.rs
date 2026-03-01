@@ -125,6 +125,11 @@ pub struct TilegenConfig {
     /// chunk file to disk. Lower values reduce peak RSS during PBF processing
     /// at the cost of more chunk files in the merge phase.
     pub sort_chunk_size: usize,
+    /// Use pre-resolved node coordinates from way elements instead of building
+    /// a node store. Requires a PBF produced by `pbfhogg add-locations-to-ways`.
+    /// Auto-detected from the PBF header's `LocationsOnWays` optional feature
+    /// when not set explicitly.
+    pub locations_on_ways: bool,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -425,36 +430,44 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     let idx_dir = &config.tmp_dir;
     // Option so we can consume it via .take() on first Way element.
-    let is_sorted = reader.header().is_sorted() || config.force_sorted;
-    let mut node_store_opt: Option<NodeStore> = Some(if is_sorted {
-        if config.force_sorted && !reader.header().is_sorted() {
-            eprintln!("  --force-sorted: assuming sorted PBF (will abort if not)");
-        } else {
-            eprintln!("  PBF declares Sort.Type_then_ID — using compact node store");
-        }
-        NodeStore::Sorted(SortedNodeStore::new())
+    let locations_on_ways = config.locations_on_ways
+        || reader.header().optional_features().iter().any(|f| f == "LocationsOnWays");
+
+    let mut node_store_opt: Option<NodeStore> = if locations_on_ways {
+        eprintln!("  LocationsOnWays — skipping node store");
+        None
     } else {
-        // Guard: flat mmap index creates a sparse file sized by max node ID (~96 GB at planet
-        // scale). On machines with <128 GB RAM this causes catastrophic page eviction. Abort
-        // with a helpful message if the PBF is large enough to be dangerous.
-        const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
-        let pbf_size = std::fs::metadata(&config.pbf_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if pbf_size > MAX_FLAT_PBF_SIZE {
-            return Err(PipelineError(format!(
-                "PBF file is {:.1} GB but does not declare Sort.Type_then_ID.\n\
-                 The flat node index would create a ~96 GB sparse file, causing severe\n\
-                 performance degradation on machines with <128 GB RAM. Options:\n\
-                 1. Use --force-sorted if the PBF is actually sorted (most Geofabrik extracts are)\n\
-                 2. Sort the PBF first with: osmium sort input.pbf -o sorted.pbf\n\
-                 3. Use a sorted PBF from Geofabrik or planet.openstreetmap.org",
-                pbf_size as f64 / (1024.0 * 1024.0 * 1024.0),
-            )));
-        }
-        eprintln!("  PBF not sorted — using flat mmap node index");
-        NodeStore::Flat(NodeIndex::create(&idx_dir.join("nodes.idx"))?)
-    });
+        let is_sorted = reader.header().is_sorted() || config.force_sorted;
+        Some(if is_sorted {
+            if config.force_sorted && !reader.header().is_sorted() {
+                eprintln!("  --force-sorted: assuming sorted PBF (will abort if not)");
+            } else {
+                eprintln!("  PBF declares Sort.Type_then_ID — using compact node store");
+            }
+            NodeStore::Sorted(SortedNodeStore::new())
+        } else {
+            // Guard: flat mmap index creates a sparse file sized by max node ID (~96 GB at planet
+            // scale). On machines with <128 GB RAM this causes catastrophic page eviction. Abort
+            // with a helpful message if the PBF is large enough to be dangerous.
+            const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+            let pbf_size = std::fs::metadata(&config.pbf_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if pbf_size > MAX_FLAT_PBF_SIZE {
+                return Err(PipelineError(format!(
+                    "PBF file is {:.1} GB but does not declare Sort.Type_then_ID.\n\
+                     The flat node index would create a ~96 GB sparse file, causing severe\n\
+                     performance degradation on machines with <128 GB RAM. Options:\n\
+                     1. Use --force-sorted if the PBF is actually sorted (most Geofabrik extracts are)\n\
+                     2. Sort the PBF first with: osmium sort input.pbf -o sorted.pbf\n\
+                     3. Use a sorted PBF from Geofabrik or planet.openstreetmap.org",
+                    pbf_size as f64 / (1024.0 * 1024.0 * 1024.0),
+                )));
+            }
+            eprintln!("  PBF not sorted — using flat mmap node index");
+            NodeStore::Flat(NodeIndex::create(&idx_dir.join("nodes.idx"))?)
+        })
+    };
     // Option so we can move to drain thread during way phase and get back after.
     let mut way_index: Option<WayIndex> = Some(WayIndex::create(idx_dir)?);
 
@@ -509,9 +522,9 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             node_count += 1;
             let lat_e7 = $node.decimicro_lat();
             let lon_e7 = $node.decimicro_lon();
-            node_store_opt.as_mut()
-                .expect("node store consumed before all nodes processed")
-                .put($node.id(), lat_e7, lon_e7);
+            if let Some(ns) = node_store_opt.as_mut() {
+                ns.put($node.id(), lat_e7, lon_e7);
+            }
 
             min_lat_e7 = min_lat_e7.min(lat_e7);
             max_lat_e7 = max_lat_e7.max(lat_e7);
@@ -560,17 +573,26 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
                 // Spawn worker + drain threads on first way block
                 if block_tx.is_none() {
-                    let ns = node_store_opt.take()
-                        .expect("node store already consumed");
-                    let nr = std::sync::Arc::new(
-                        ns.into_reader().expect("failed to convert node store to reader")
-                    );
-                    node_store_stats = nr.sorted_stats();
-                    eprintln!("  Node store finalized ({node_count} nodes), processing ways...");
+                    let nr: Option<std::sync::Arc<NodeStoreReader>> = if locations_on_ways {
+                        None
+                    } else {
+                        let ns = node_store_opt.take()
+                            .expect("node store already consumed");
+                        let r = std::sync::Arc::new(
+                            ns.into_reader().expect("failed to convert node store to reader")
+                        );
+                        node_store_stats = r.sorted_stats();
+                        Some(r)
+                    };
+                    if locations_on_ways {
+                        eprintln!("  LocationsOnWays mode — processing ways (no node store)...");
+                    } else {
+                        eprintln!("  Node store finalized ({node_count} nodes), processing ways...");
+                    }
 
                     let (btx, brx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(1);
                     let (rtx, rrx) = std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(4);
-                    let nr_clone = std::sync::Arc::clone(&nr);
+                    let nr_clone = nr.clone();
                     let lm_clone = std::sync::Arc::clone(&land_mask);
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
                     let mz = min_z;
@@ -589,7 +611,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         use rayon::prelude::*;
                         // Take refs outside loop — Copy into each move closure,
                         // avoids Arc::clone per spawn.
-                        let nr_ref = &*nr_clone;
+                        let nr_ref: Option<&NodeStoreReader> = nr_clone.as_deref();
                         let lm_ref = &*lm_clone;
                         // Byte-budgeted throttle: (count, estimated_bytes).
                         // Condvar wakes dispatcher when a task completes.
@@ -602,12 +624,22 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                 let raw_ways: Vec<RawWay> = block.elements()
                                     .filter_map(|e| match e {
                                         Element::Way(way) => {
-                                            let node_refs: Vec<i64> = way.refs().collect();
-                                            if node_refs.is_empty() { return None; }
                                             let tags: Vec<(String, String)> = way.tags()
                                                 .map(|(k, v)| (k.to_string(), v.to_string()))
                                                 .collect();
-                                            Some(RawWay { way_id: way.id(), node_refs, tags })
+                                            if nr_ref.is_some() {
+                                                // Standard PBF: collect node refs
+                                                let node_refs: Vec<i64> = way.refs().collect();
+                                                if node_refs.is_empty() { return None; }
+                                                Some(RawWay { way_id: way.id(), node_refs, coords_e7: Vec::new(), tags })
+                                            } else {
+                                                // Locations-on-ways: collect coords directly
+                                                let coords_e7: Vec<(i32, i32)> = way.node_locations()
+                                                    .map(|loc| (loc.decimicro_lat(), loc.decimicro_lon()))
+                                                    .collect();
+                                                if coords_e7.is_empty() { return None; }
+                                                Some(RawWay { way_id: way.id(), node_refs: Vec::new(), coords_e7, tags })
+                                            }
                                         }
                                         _ => None,
                                     })
@@ -846,14 +878,16 @@ fn process_node(
 struct RawWay {
     way_id: i64,
     node_refs: Vec<i64>,
+    coords_e7: Vec<(i32, i32)>,
     tags: Vec<(String, String)>,
 }
-const _: () = assert!(std::mem::size_of::<RawWay>() == 56);
+const _: () = assert!(std::mem::size_of::<RawWay>() == 80);
 
 /// Estimate heap bytes for a block of raw ways (struct + node_refs + tag strings).
 fn estimate_raw_ways_bytes(ways: &[RawWay]) -> usize {
     ways.iter().map(|w| {
-        56 + w.node_refs.len() * 8
+        80 + w.node_refs.len() * 8
+            + w.coords_e7.len() * 8
             + w.tags.len() * 48
             + w.tags.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
     }).sum()
@@ -895,18 +929,22 @@ fn drain_processed_ways(
 #[hotpath::measure]
 fn process_raw_way(
     raw: &RawWay,
-    node_reader: &NodeStoreReader,
+    node_reader: Option<&NodeStoreReader>,
     land_mask: &geometry::LandMask,
     min_zoom: u8,
     max_zoom: u8,
 ) -> ProcessedWay {
-    // Resolve node coordinates (the expensive mmap reads — now parallel).
-    // Allocates per way (~8 coords avg). Cannot hoist: ownership transfers into
-    // ProcessedWay for the serial way_index.put() phase, so a reusable buffer
-    // would need .to_vec()/.clone() anyway, defeating the purpose.
-    let coords_e7: Vec<(i32, i32)> = raw.node_refs.iter()
-        .filter_map(|&id| node_reader.get(id))
-        .collect();
+    // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
+    // or looked up via node store (the expensive mmap reads — now parallel).
+    let coords_e7: Vec<(i32, i32)> = if !raw.coords_e7.is_empty() {
+        raw.coords_e7.clone()
+    } else if let Some(nr) = node_reader {
+        raw.node_refs.iter()
+            .filter_map(|&id| nr.get(id))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     if coords_e7.is_empty() || raw.tags.is_empty() {
         return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new() };
