@@ -44,7 +44,7 @@ No shell scripts remain. All development tooling is in `brokkr`.
 
 ## Architecture
 
-Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`.
+Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`).
 
 ### Modules
 
@@ -66,6 +66,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`.
 **Infrastructure:**
 - `sort.rs` — external merge sort (chunk files, k-way merge via binary heap)
 - `pmtiles_writer.rs` — PMTiles v3 writer with Hilbert tile IDs
+- `inspect.rs` — PMTiles v3 archive inspector (header + metadata reader)
 - `node_index.rs` — node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
 - `way_index.rs` — flat mmap'd way geometry index
 
@@ -87,22 +88,33 @@ Sequential, same PBF input:
 - `memmap2` — memory-mapped I/O for way index (and flat node index fallback)
 - `flate2` (zlib-rs backend) — gzip compression for MVT tiles. Same zlib backend as pbfhogg.
 - `mimalloc` — global allocator (critical for rayon performance)
+- `clap` (derive) — CLI argument parsing with subcommands
 - `hotpath` — function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
 
-## CLI flags
+## CLI
 
-- `--tmp-dir path` — temporary directory for sort chunks
+Uses clap derive with two subcommands:
+
+### `elivagar run <INPUT> -o <OUTPUT> [flags]`
+
+- `-o` / `--output` — output PMTiles path (required)
+- `--tmp-dir path` — temporary directory for sort chunks (default: `data/tilegen_tmp`)
 - `--ocean path.shp` — ocean polygon shapefile (water-polygons-split-3857)
 - `--ocean-simplified path.shp` — simplified ocean shapefile for z0-7
 - `--skip-to ocean|sort` — resume from checkpoint
 - `--in-memory` — keep tile blob in RAM (faster for small extracts)
 - `--compression-level 0-10` — gzip level (default 6)
 - `--force-sorted` — force compact node store even without PBF header flag
+- `--locations-on-ways` — PBF has node coordinates embedded in ways
 - `-j N` / `--threads N` — thread count (default: logical CPUs)
 - `--sort-budget <size>` — sort chunk memory budget (default 1G). Accepts `256M`, `512M`, `1G`, or raw bytes. Minimum 64M. Lower values reduce peak RSS during PBF processing at the cost of more merge chunks.
 - `--way-budget <size>` — in-flight way processing budget (default 128M). Minimum 1M.
 - `--rel-budget <size>` — relation batch accumulation budget (default 64M). Minimum 1M.
 - `--assemble-budget <size>` — tile assembly batch budget (default 32M). Minimum 1M.
+
+### `elivagar inspect <FILE>`
+
+Reads a PMTiles archive and prints header info, tile statistics, section layout, and metadata (layer list with zoom ranges).
 
 ## Key conventions
 
@@ -189,7 +201,7 @@ Embed resolved node coordinates into ways. This is the PBF variant elivagar's ti
 brokkr run add-locations-to-ways merged.osm.pbf -o locations.osm.pbf
 ```
 
-Options: `--keep-untagged-nodes` (retain untagged nodes in output), `-n dense` (mmap node index for planet-scale datasets, default: `hash`).
+Options: `--keep-untagged-nodes` (retain untagged nodes in output). Node index is always file-backed mmap (scales to planet).
 
 Steps 2 and 3 (and `sort`) expect indexed PBFs by default and will error if indexdata is missing. Use `--force` to override the check and run with raw PBFs (slower).
 

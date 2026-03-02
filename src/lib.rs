@@ -51,6 +51,7 @@
 //! deduplication.
 
 pub(crate) mod geometry;
+pub mod inspect;
 pub(crate) mod multipolygon;
 pub(crate) mod mvt;
 pub mod node_index;

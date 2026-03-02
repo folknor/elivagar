@@ -311,6 +311,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 name = "elivagar"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "flate2",
  "hotpath",
  "memmap2",

@@ -4,7 +4,103 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Parse a byte size string like "256M", "1G", or raw bytes "268435456".
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// Shortbread vector tile generator.
+#[derive(Parser)]
+#[command(name = "elivagar")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Generate PMTiles from an OSM PBF file.
+    Run(RunArgs),
+    /// Inspect a PMTiles archive.
+    Inspect(InspectArgs),
+}
+
+/// Arguments for the `run` subcommand.
+#[derive(Parser)]
+struct RunArgs {
+    /// Input OSM PBF file.
+    input: PathBuf,
+
+    /// Output PMTiles path.
+    #[arg(short, long)]
+    output: PathBuf,
+
+    /// Temporary directory for sort chunks.
+    #[arg(long, default_value = "data/tilegen_tmp")]
+    tmp_dir: PathBuf,
+
+    /// Ocean polygon shapefile (water-polygons-split-3857).
+    #[arg(long)]
+    ocean: Option<PathBuf>,
+
+    /// Simplified ocean shapefile for z0-7.
+    #[arg(long)]
+    ocean_simplified: Option<PathBuf>,
+
+    /// Resume from a checkpoint.
+    #[arg(long)]
+    skip_to: Option<SkipToArg>,
+
+    /// Keep tile blob in RAM (faster for small extracts).
+    #[arg(long)]
+    in_memory: bool,
+
+    /// Gzip compression level (0-10).
+    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(0..=10))]
+    compression_level: u32,
+
+    /// Force compact node store even without PBF header flag.
+    #[arg(long)]
+    force_sorted: bool,
+
+    /// Thread count.
+    #[arg(short = 'j', long = "threads")]
+    threads: Option<usize>,
+
+    /// Sort chunk memory budget (e.g. 256M, 1G). Minimum 64M.
+    #[arg(long, value_parser = parse_byte_size_min_64m)]
+    sort_budget: Option<usize>,
+
+    /// In-flight way processing budget (e.g. 128M). Minimum 1M.
+    #[arg(long, value_parser = parse_byte_size_min_1m)]
+    way_budget: Option<usize>,
+
+    /// Relation batch accumulation budget (e.g. 64M). Minimum 1M.
+    #[arg(long, value_parser = parse_byte_size_min_1m)]
+    rel_budget: Option<usize>,
+
+    /// Tile assembly batch budget (e.g. 32M). Minimum 1M.
+    #[arg(long, value_parser = parse_byte_size_min_1m)]
+    assemble_budget: Option<usize>,
+
+    /// PBF has node coordinates embedded in ways.
+    #[arg(long)]
+    locations_on_ways: bool,
+}
+
+/// Arguments for the `inspect` subcommand.
+#[derive(Parser)]
+struct InspectArgs {
+    /// PMTiles file to inspect.
+    file: PathBuf,
+}
+
+#[derive(Clone, ValueEnum)]
+enum SkipToArg {
+    Ocean,
+    Sort,
+}
+
+/// Parse a byte size string like "256M", "1G", or raw bytes.
 fn parse_byte_size(s: &str) -> Option<usize> {
     let s = s.trim();
     if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
@@ -16,134 +112,42 @@ fn parse_byte_size(s: &str) -> Option<usize> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!(
-            "Usage: elivagar <pbf> <out.pmtiles> [--tmp-dir path] [--ocean path.shp] [--ocean-simplified path.shp] [--skip-to ocean|sort] [--in-memory] [--compression-level 0-10] [--force-sorted] [-j N | --threads N] [--sort-budget bytes] [--way-budget bytes] [--rel-budget bytes] [--assemble-budget bytes]"
-        );
-        std::process::exit(1);
+fn parse_byte_size_min_64m(s: &str) -> Result<usize, String> {
+    let min = 64 * 1024 * 1024;
+    match parse_byte_size(s) {
+        Some(v) if v >= min => Ok(v),
+        _ => Err(format!("expected >= 64M (e.g. 256M, 1G), got '{s}'")),
     }
+}
 
-    let pbf_path = std::path::PathBuf::from(&args[1]);
-    let output_path = std::path::PathBuf::from(&args[2]);
+fn parse_byte_size_min_1m(s: &str) -> Result<usize, String> {
+    let min = 1024 * 1024;
+    match parse_byte_size(s) {
+        Some(v) if v >= min => Ok(v),
+        _ => Err(format!("expected >= 1M (e.g. 32M, 128M), got '{s}'")),
+    }
+}
 
-    let mut tmp_dir = std::path::PathBuf::from("data/tilegen_tmp");
-    let mut ocean_shapefile = None;
-    let mut ocean_simplified_shapefile = None;
-    let mut skip_to: Option<elivagar::SkipTo> = None;
-    let mut in_memory = false;
-    let mut compression_level: u32 = 6;
-    let mut force_sorted = false;
-    let mut threads: usize = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(4);
-    let mut sort_chunk_size: usize = 0;
-    let mut way_inflight_budget: usize = 0;
-    let mut rel_batch_budget: usize = 0;
-    let mut assemble_batch_budget: usize = 0;
-    let mut locations_on_ways = false;
+fn main() {
+    let cli = Cli::parse();
 
-    let mut i = 3;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--tmp-dir" | "--ocean" | "--ocean-simplified" | "--skip-to"
-            | "--compression-level" | "-j" | "--threads" | "--sort-budget"
-            | "--way-budget" | "--rel-budget" | "--assemble-budget" => {
-                let flag = &args[i];
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("{flag} requires a value");
-                    std::process::exit(1);
-                }
-                match flag.as_str() {
-                    "--tmp-dir" => tmp_dir = std::path::PathBuf::from(&args[i]),
-                    "--ocean" => ocean_shapefile = Some(std::path::PathBuf::from(&args[i])),
-                    "--ocean-simplified" => ocean_simplified_shapefile = Some(std::path::PathBuf::from(&args[i])),
-                    "--skip-to" => {
-                        skip_to = Some(match args[i].as_str() {
-                            "ocean" => elivagar::SkipTo::Ocean,
-                            "sort" => elivagar::SkipTo::Sort,
-                            other => {
-                                eprintln!("Unknown skip-to value: {other} (expected ocean or sort)");
-                                std::process::exit(1);
-                            }
-                        });
-                    }
-                    "--compression-level" => {
-                        compression_level = match args[i].parse() {
-                            Ok(v) if v <= 10 => v,
-                            _ => {
-                                eprintln!("Invalid compression level: {} (expected 0-10)", args[i]);
-                                std::process::exit(1);
-                            }
-                        };
-                    }
-                    "-j" | "--threads" => {
-                        threads = match args[i].parse() {
-                            Ok(v) if v >= 1 => v,
-                            _ => {
-                                eprintln!("Invalid thread count: {} (expected >= 1)", args[i]);
-                                std::process::exit(1);
-                            }
-                        };
-                    }
-                    "--sort-budget" => {
-                        sort_chunk_size = match parse_byte_size(&args[i]) {
-                            Some(v) if v >= 64 * 1024 * 1024 => v,
-                            _ => {
-                                eprintln!("Invalid sort budget: {} (expected >= 64M, e.g. 256M, 1G)", args[i]);
-                                std::process::exit(1);
-                            }
-                        };
-                    }
-                    "--way-budget" => {
-                        way_inflight_budget = match parse_byte_size(&args[i]) {
-                            Some(v) if v >= 1024 * 1024 => v,
-                            _ => {
-                                eprintln!("Invalid way budget: {} (expected >= 1M, e.g. 32M, 128M)", args[i]);
-                                std::process::exit(1);
-                            }
-                        };
-                    }
-                    "--rel-budget" => {
-                        rel_batch_budget = match parse_byte_size(&args[i]) {
-                            Some(v) if v >= 1024 * 1024 => v,
-                            _ => {
-                                eprintln!("Invalid rel budget: {} (expected >= 1M, e.g. 16M, 64M)", args[i]);
-                                std::process::exit(1);
-                            }
-                        };
-                    }
-                    "--assemble-budget" => {
-                        assemble_batch_budget = match parse_byte_size(&args[i]) {
-                            Some(v) if v >= 1024 * 1024 => v,
-                            _ => {
-                                eprintln!("Invalid assemble budget: {} (expected >= 1M, e.g. 16M, 32M)", args[i]);
-                                std::process::exit(1);
-                            }
-                        };
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            "--in-memory" => {
-                in_memory = true;
-            }
-            "--force-sorted" => {
-                force_sorted = true;
-            }
-            "--locations-on-ways" => {
-                locations_on_ways = true;
-            }
-            other => {
-                eprintln!("Unknown argument: {other}");
+    match cli.command {
+        Command::Run(args) => run(args),
+        Command::Inspect(args) => {
+            if let Err(e) = elivagar::inspect::inspect(&args.file) {
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
-        i += 1;
     }
+}
+
+fn run(args: RunArgs) {
+    let threads = args.threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4)
+    });
 
     // Configure rayon's global thread pool before any rayon work.
     rayon::ThreadPoolBuilder::new()
@@ -151,24 +155,29 @@ fn main() {
         .build_global()
         .expect("failed to configure rayon thread pool");
 
+    let skip_to = args.skip_to.map(|s| match s {
+        SkipToArg::Ocean => elivagar::SkipTo::Ocean,
+        SkipToArg::Sort => elivagar::SkipTo::Sort,
+    });
+
     let config = elivagar::TilegenConfig {
-        pbf_path,
-        output_path,
-        tmp_dir,
+        pbf_path: args.input,
+        output_path: args.output,
+        tmp_dir: args.tmp_dir,
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile,
-        ocean_simplified_shapefile,
+        ocean_shapefile: args.ocean,
+        ocean_simplified_shapefile: args.ocean_simplified,
         skip_to,
-        in_memory,
-        compression_level,
-        force_sorted,
+        in_memory: args.in_memory,
+        compression_level: args.compression_level,
+        force_sorted: args.force_sorted,
         threads,
-        way_inflight_budget,
-        rel_batch_budget,
-        assemble_batch_budget,
-        sort_chunk_size,
-        locations_on_ways,
+        way_inflight_budget: args.way_budget.unwrap_or(0),
+        rel_batch_budget: args.rel_budget.unwrap_or(0),
+        assemble_batch_budget: args.assemble_budget.unwrap_or(0),
+        sort_chunk_size: args.sort_budget.unwrap_or(0),
+        locations_on_ways: args.locations_on_ways,
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")

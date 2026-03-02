@@ -6,14 +6,15 @@ Shortbread vector tile generator. Reads OSM PBF files and produces
 
 ## Usage
 
-```
-elivagar <input.osm.pbf> <output.pmtiles> [options]
-```
+### Generate tiles
 
-### Options
+```
+elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
+```
 
 | Flag | Description |
 |------|-------------|
+| `-o path` / `--output path` | Output PMTiles path (required) |
 | `--ocean path.shp` | Ocean shapefile (`water-polygons-split-3857`) |
 | `--ocean-simplified path.shp` | Simplified ocean shapefile for z0-7 (fewer vertices) |
 | `--tmp-dir path` | Directory for temporary sort files (default: `data/tilegen_tmp`) |
@@ -21,11 +22,20 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |
 | `--compression-level 0-10` | Gzip compression level (default: 6). Lower = faster, larger output |
 | `--force-sorted` | Use compact in-RAM node store even if PBF header lacks `Sort.Type_then_ID` |
+| `--locations-on-ways` | PBF has node coordinates embedded in ways |
 | `--sort-budget size` | Sort chunk memory budget (default: 1G, min: 64M). Accepts `256M`, `1G`, or raw bytes |
 | `--way-budget size` | In-flight way processing budget (default: 128M, min: 1M) |
 | `--rel-budget size` | Relation batch accumulation budget (default: 64M, min: 1M) |
 | `--assemble-budget size` | Tile assembly batch budget (default: 32M, min: 1M) |
 | `-j N` / `--threads N` | Thread count (default: logical CPUs) |
+
+### Inspect a PMTiles archive
+
+```
+elivagar inspect <file.pmtiles>
+```
+
+Prints header info, tile statistics, section layout, and metadata (layer list with zoom ranges).
 
 ### Environment variables
 
@@ -36,7 +46,7 @@ elivagar <input.osm.pbf> <output.pmtiles> [options]
 ### Example
 
 ```
-elivagar denmark-latest.osm.pbf denmark.pmtiles \
+elivagar run denmark-latest.osm.pbf -o denmark.pmtiles \
   --ocean water-polygons-split-3857/water_polygons.shp \
   --ocean-simplified simplified-water-polygons-split-3857/simplified_water_polygons.shp
 ```
