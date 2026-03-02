@@ -3,10 +3,10 @@
 Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 archives with 26 layers.
 
 ## Bash rules
-- Never use sed, find, awk, or complex bash commands. Write a script instead.
-- Never chain commands with &&. Write a script instead.
-- Never chain commands with ;. Write a script instead.
-- Never pipe commands with |. Write a script instead.
+- Never use sed, find, awk, or complex bash commands
+- Never chain commands with &&
+- Never chain commands with ;
+- Never pipe commands with |
 - Never read or write from /tmp. All data lives in the project.
 - Never run raw cargo, curl, pkill. Use `brokkr`.
 - **Never run the full pipeline on real PBF data (brokkr bench self, brokkr run) unless the user explicitly asks.** Use synthetic benchmarks (brokkr bench node-store, brokkr bench pmtiles) for iteration. Full pipeline runs are expensive and should only happen when the user decides it's time.

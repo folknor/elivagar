@@ -55,16 +55,7 @@ Remaining (contingent — only if planet runs still OOM):
 Plantasjen Denmark (`605a1a5`): 14.2s (9.2s pbf, 1.4s ocean, 0.5s sort, 2.5s assemble).
 dm6 Denmark (`2db9494`): 21.2s (13.7s pbf, 2.6s ocean, 0.5s sort, 2.9s assemble).
 
-### Completed optimizations
-
-- [x] Tier 0 — 11 trivial optimizations (`f41e433`). Denmark -2.4%, Japan -2.6%.
-- [x] Tier 1, F18 — Key string → u8 key_id interning (`a6b1977`). ~44 GB planet savings.
-- [x] Tier 1, F18b — Kind value → u8 value_id interning (`aa5cdff`). ~19 GB planet savings.
-- [x] Tier 1, F20 — Dismissed: osm_id flows to MVT Feature.id.
-
-### Next up: Tier 2 (safety guardrails), then Tier 3 (geometry alloc reduction)
-
-### Investigation summaries (2026-02-28)
+### Tier 2 (safety guardrails)
 
 **Sort payload width** (Boxes 3, 6) — ✓ DONE (`a6b1977`, `aa5cdff`).
 Key+kind interning saves ~63 GB planet sort I/O.
@@ -113,8 +104,10 @@ insurance (~160-320 MB). Add telemetry when cap is hit.
 - [ ] **Flat node-index safety guardrails:** PBF size guard + hard cap on flat index.
   See investigation summary above.
 
-- [ ] **`find_chunk_in_blob` linear scan:** 254 chunks/group at planet vs 7 on Denmark. Consider
-  offset table or binary search for planet-scale lookup.
+- [ ] **Measure relation block buffering impact:** Relation blocks are now buffered in memory
+  during PBF reading (fix for non-strict block ordering in locations-on-ways PBFs). Measure
+  peak RSS delta on Denmark and North America — relation blocks should be a tiny fraction of
+  total data but worth verifying at scale.
 
 - [x] **Ocean `fill_data` cloning:** Partially addressed — `SortRecord.data` changed from `Vec<u8>`
   to `Box<[u8]>` (`e779759`). Clones now allocate exactly `len` bytes (no excess capacity),

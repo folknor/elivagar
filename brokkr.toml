@@ -24,6 +24,54 @@ file = "denmark-20260220-seq4704.osm.pbf"
 sha256 = "aa5bb8658c9526f2d904c8131b519d02d8c1099e2cf0ed60f4a6067a50048c6b"
 seq = 4704
 
+[plantasjen.datasets.denmark.pbf.indexed]
+file = "denmark-20260220-seq4704-with-indexdata.osm.pbf"
+sha256 = "3f1977fd7825812ed0f2602c01d3b8cf0bfded36cda7d2287e91ac2e160540b8"
+seq = 4704
+
+[plantasjen.datasets.denmark.pbf.locations]
+file = "denmark-20260220-seq4704-locations.osm.pbf"
+sha256 = "2c4745352c0a0d2f46fcbd619eef49cc7d55409742de7899303e3ac3d1f64c64"
+seq = 4704
+
+[plantasjen.datasets.norway]
+origin = "Geofabrik"
+download_date = "2026-02-25"
+
+[plantasjen.datasets.norway.pbf.raw]
+file = "norway-20260225-seq4709.osm.pbf"
+sha256 = "b11ee1afb8e5c5b2c9a621045ef8b12e91088c271a0f45c6ef795f9d891fd3cb"
+seq = 4709
+
+[plantasjen.datasets.norway.pbf.indexed]
+file = "norway-20260225-seq4709-with-indexdata.osm.pbf"
+sha256 = "c501937a0318b82872db9c3be1f967647a05cc59e68cf682f8ee9b7341d75031"
+seq = 4709
+
+[plantasjen.datasets.norway.pbf.locations]
+file = "norway-20260225-seq4709-locations.osm.pbf"
+sha256 = "ab790a2ede1c43b258d728f5d57e1bb3400922b19279352d9cc2e2472b78dd84"
+seq = 4709
+
+[plantasjen.datasets.germany]
+origin = "Geofabrik"
+download_date = "2026-02-24"
+
+[plantasjen.datasets.germany.pbf.raw]
+file = "germany-20260224-seq4704.osm.pbf"
+sha256 = "ef27075bd400a499bcb3f39ea872ef133c9cbae1bf0d1e472fcda72363b4e642"
+seq = 4704
+
+[plantasjen.datasets.germany.pbf.indexed]
+file = "germany-20260224-seq4704-with-indexdata.osm.pbf"
+sha256 = "6cc377ee78b8d7ba8dedd072defd870b5ec0b3b1104fd73212fbf4cc24977916"
+seq = 4704
+
+[plantasjen.datasets.germany.pbf.locations]
+file = "germany-20260224-seq4704-locations.osm.pbf"
+sha256 = "036142bc9a429be14e8433c55868acc22297d530a0c43d3f063df289eef1cfdc"
+seq = 4704
+
 [dm6]
 data = "data"
 scratch = "data/tilegen_tmp"

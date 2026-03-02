@@ -503,6 +503,10 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
     let mut drain_handle: Option<std::thread::JoinHandle<(WayIndex, SortWriter, u64)>> = None;
 
+    // Buffer relation blocks — processed after all PBF blocks are consumed so that
+    // late way blocks (common in locations-on-ways PBFs) don't hit a finalized way_index.
+    let mut relation_blocks: Vec<PrimitiveBlock> = Vec::new();
+
     // High-water-mark counters for in-flight memory tracking.
     let way_hwm = std::sync::Arc::new(AtomicUsize::new(0));
     let mut rel_batch_bytes: usize = 0;
@@ -702,73 +706,72 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     .send(block).expect("worker thread panicked");
             }
             BlockType::Relations => {
-                // Relation block — shut down worker + drain, process inline.
-                // Drop block_tx → worker finishes → worker drops rtx →
-                // result channel closes → drain thread exits its recv loop.
-                if block_tx.is_some() {
-                    drop(block_tx.take());
-                    if let Some(h) = worker_handle.take() {
-                        h.join().expect("worker thread panicked");
-                    }
-                    if let Some(h) = drain_handle.take() {
-                        let (wi, sw, count) = h.join().expect("drain thread panicked");
-                        way_index = Some(wi);
-                        sort_writer = Some(sw);
-                        features_emitted += count;
-                    }
-                }
-                if !way_index_finalized {
-                    way_index.as_mut().expect("way_index not returned from drain")
-                        .finish_writing().expect("failed to finalize way index");
-                    way_index_finalized = true;
-                    eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
-                    eprintln!("  Way index finalized, processing relations...");
-                }
-
-                block.for_each_element(|element| {
-                    if let Element::Relation(rel) = element {
-                        rel_count += 1;
-                        let tags_vec: Vec<(&str, &str)> = rel.tags().collect();
-                        if tags_vec.is_empty() {
-                            return;
-                        }
-                        if let Some(prepared) = prepare_relation(
-                            &rel, &tags_vec,
-                            way_index.as_ref().expect("way_index not returned from drain"),
-                        ) {
-                            rel_batch_bytes += estimate_prepared_rel_bytes(&prepared);
-                            rel_batch.push(prepared);
-                            if rel_batch_bytes > max_rel_batch_bytes {
-                                max_rel_batch_bytes = rel_batch_bytes;
-                            }
-                            if rel_batch.len() >= REL_BATCH_SIZE || rel_batch_bytes >= rel_budget {
-                                let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
-                                rel_batch_bytes = 0;
-                                features_emitted += flush_rel_batch(
-                                    batch, min_z, max_z, &land_mask,
-                                    sort_writer.as_mut().expect("sort_writer not returned from drain"),
-                                );
-                            }
-                        }
-                    }
-                });
+                // Buffer relation blocks — defer processing until all PBF blocks
+                // are consumed. Locations-on-ways PBFs can have way blocks after
+                // relation blocks; processing relations inline would finalize the
+                // way_index too early.
+                relation_blocks.push(block);
             }
             BlockType::Empty | BlockType::Mixed => {}
         }
     }
 
-    // Shut down worker + drain if PBF had ways but no relations (still running)
+    // Shut down worker + drain after all PBF blocks consumed.
     if block_tx.is_some() {
         drop(block_tx.take());
         if let Some(h) = worker_handle.take() {
             h.join().expect("worker thread panicked");
         }
         if let Some(h) = drain_handle.take() {
-            let (_wi, sw, count) = h.join().expect("drain thread panicked");
+            let (wi, sw, count) = h.join().expect("drain thread panicked");
+            way_index = Some(wi);
             sort_writer = Some(sw);
             features_emitted += count;
         }
     }
+
+    // Finalize way index after all way blocks are processed.
+    if !way_index_finalized {
+        if let Some(ref mut wi) = way_index {
+            wi.finish_writing().expect("failed to finalize way index");
+        }
+        way_index_finalized = true;
+        eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
+        eprintln!("  Way index finalized, processing relations...");
+    }
+
+    // Process buffered relation blocks.
+    for block in &relation_blocks {
+        block.for_each_element(|element| {
+            if let Element::Relation(rel) = element {
+                rel_count += 1;
+                let tags_vec: Vec<(&str, &str)> = rel.tags().collect();
+                if tags_vec.is_empty() {
+                    return;
+                }
+                if let Some(prepared) = prepare_relation(
+                    &rel, &tags_vec,
+                    way_index.as_ref().expect("way_index not returned from drain"),
+                ) {
+                    rel_batch_bytes += estimate_prepared_rel_bytes(&prepared);
+                    rel_batch.push(prepared);
+                    if rel_batch_bytes > max_rel_batch_bytes {
+                        max_rel_batch_bytes = rel_batch_bytes;
+                    }
+                    if rel_batch.len() >= REL_BATCH_SIZE || rel_batch_bytes >= rel_budget {
+                        let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
+                        rel_batch_bytes = 0;
+                        features_emitted += flush_rel_batch(
+                            batch, min_z, max_z, &land_mask,
+                            sort_writer.as_mut().expect("sort_writer not returned from drain"),
+                        );
+                    }
+                }
+            }
+        });
+    }
+    drop(relation_blocks);
+
     if !rel_batch.is_empty() {
         features_emitted += flush_rel_batch(
             rel_batch, min_z, max_z, &land_mask,
