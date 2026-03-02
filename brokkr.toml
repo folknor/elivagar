@@ -16,9 +16,13 @@ scratch = "ssd"
 target = "hdd"
 
 [plantasjen.datasets.denmark]
-pbf = "denmark-20260220-seq4704.osm.pbf"
-sha256_pbf = "aa5bb8658c9526f2d904c8131b519d02d8c1099e2cf0ed60f4a6067a50048c6b"
-origin = "Geofabrik 2026-02-20 seq 4704"
+origin = "Geofabrik"
+download_date = "2026-02-20"
+
+[plantasjen.datasets.denmark.pbf.raw]
+file = "denmark-20260220-seq4704.osm.pbf"
+sha256 = "aa5bb8658c9526f2d904c8131b519d02d8c1099e2cf0ed60f4a6067a50048c6b"
+seq = 4704
 
 [dm6]
 data = "data"
@@ -32,26 +36,46 @@ scratch = "nvme"
 target = "nvme"
 
 [dm6.datasets.denmark]
-pbf = "denmark-20260220-seq4704.osm.pbf"
-sha256_pbf = "aa5bb8658c9526f2d904c8131b519d02d8c1099e2cf0ed60f4a6067a50048c6b"
-origin = "Geofabrik 2026-02-20 seq 4704"
+origin = "Geofabrik"
+download_date = "2026-02-20"
+
+[dm6.datasets.denmark.pbf.raw]
+file = "denmark-20260220-seq4704.osm.pbf"
+sha256 = "aa5bb8658c9526f2d904c8131b519d02d8c1099e2cf0ed60f4a6067a50048c6b"
+seq = 4704
 
 [dm6.datasets.norway]
-pbf = "norway-20260225-seq4709.osm.pbf"
-sha256_pbf = "b11ee1afb8e5c5b2c9a621045ef8b12e91088c271a0f45c6ef795f9d891fd3cb"
-origin = "Geofabrik 2026-02-25 seq 4709"
+origin = "Geofabrik"
+download_date = "2026-02-25"
+
+[dm6.datasets.norway.pbf.raw]
+file = "norway-20260225-seq4709.osm.pbf"
+sha256 = "b11ee1afb8e5c5b2c9a621045ef8b12e91088c271a0f45c6ef795f9d891fd3cb"
+seq = 4709
 
 [dm6.datasets.japan]
-pbf = "japan-20260225-seq4706.osm.pbf"
-sha256_pbf = "25cfd4bad5345964580b0741d1926fa55ece83dede24b8d5e148fa4ae24ad0cf"
-origin = "Geofabrik 2026-02-25 seq 4706"
+origin = "Geofabrik"
+download_date = "2026-02-25"
+
+[dm6.datasets.japan.pbf.raw]
+file = "japan-20260225-seq4706.osm.pbf"
+sha256 = "25cfd4bad5345964580b0741d1926fa55ece83dede24b8d5e148fa4ae24ad0cf"
+seq = 4706
 
 [dm6.datasets.germany]
-pbf = "germany-20260225-seq4705.osm.pbf"
-sha256_pbf = "e92e67cc3548f187db50fab53bcd79e9ac42620851afe28dc801ca5c4723b5de"
-origin = "Geofabrik 2026-02-25 seq 4705"
+origin = "Geofabrik"
+download_date = "2026-02-25"
+
+[dm6.datasets.germany.pbf.raw]
+file = "germany-20260225-seq4705.osm.pbf"
+sha256 = "e92e67cc3548f187db50fab53bcd79e9ac42620851afe28dc801ca5c4723b5de"
+seq = 4705
 
 [dm6.datasets.north-america]
-pbf = "north-america-20260220-seq4705.osm.pbf"
-sha256_pbf = "04013cdd97473c463c880388ad3b20124f85a937626f061e361f84b7e818a024"
-origin = "Geofabrik 2026-02-20 seq 4705"
+origin = "Geofabrik"
+download_date = "2026-02-20"
+
+[dm6.datasets.north-america.pbf.raw]
+file = "north-america-20260220-seq4705.osm.pbf"
+sha256 = "04013cdd97473c463c880388ad3b20124f85a937626f061e361f84b7e818a024"
+seq = 4705

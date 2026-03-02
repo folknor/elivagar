@@ -18,16 +18,16 @@ Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install
 - `brokkr check [-- args]` — run clippy + tests
 - `brokkr env` — show environment info
 - `brokkr run [args]` — build release and run with auto-injected flags: `--tmp-dir` (from scratch_dir config), `--ocean`/`--ocean-simplified` (auto-detected from data_dir), `HOTPATH_METRICS_SERVER_OFF=true` env var. Use `--no-ocean` to suppress ocean injection. Use `--mem 8G` to wrap with `systemd-run --scope -p MemoryMax=8G` for OOM protection on large datasets
-- `brokkr bench self [--dataset name] [--pbf path] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark
-- `brokkr bench planetiler [--dataset name] [--pbf path] [--runs N]` — Planetiler comparison benchmark
-- `brokkr bench tilemaker [--dataset name] [--pbf path] [--runs N]` — Tilemaker comparison benchmark (stub)
+- `brokkr bench self [--dataset name] [--variant V] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark. Default variant: raw.
+- `brokkr bench planetiler [--dataset name] [--variant V] [--runs N]` — Planetiler comparison benchmark. Default variant: raw.
+- `brokkr bench tilemaker [--dataset name] [--variant V] [--runs N]` — Tilemaker comparison benchmark (stub). Default variant: raw.
 - `brokkr bench node-store [--nodes N] [--runs N]` — SortedNodeStore benchmark (default: 50M nodes, 5 runs)
 - `brokkr bench pmtiles [--tiles N] [--runs N]` — PMTiles writer benchmark (default: 500K tiles, 5 runs)
-- `brokkr bench eliv-all [--dataset name] [--pbf path] [--runs N]` — full benchmark suite
-- `brokkr hotpath [--dataset name] [--pbf path] [--alloc] [--verbose]` — hotpath profiling of main tilegen pipeline (timing or allocation). Returns a UUID; use `brokkr results <UUID> [--top 0]` to view the full report.
+- `brokkr bench eliv-all [--dataset name] [--variant V] [--runs N]` — full benchmark suite. Default variant: raw.
+- `brokkr hotpath [--dataset name] [--variant V] [--alloc] [--verbose]` — hotpath profiling of main tilegen pipeline (timing or allocation). Returns a UUID; use `brokkr results <UUID> [--top 0]` to view the full report. Default variant: raw.
 - `brokkr hotpath pmtiles [--tiles N] [--alloc]` — hotpath profiling of PMTiles micro-benchmark
 - `brokkr hotpath node-store [--nodes N] [--alloc]` — hotpath profiling of node store micro-benchmark
-- `brokkr profile [--dataset name] [--pbf path] [--tool perf|samply]` — sampling profiler (perf or samply)
+- `brokkr profile [--dataset name] [--variant V] [--tool perf|samply]` — sampling profiler (perf or samply). Default variant: raw.
 - `brokkr compare-tiles <a> <b> [--sample N]` — compare feature counts between PMTiles archives
 - `brokkr download ocean` — download ocean shapefiles
 - `brokkr results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)
@@ -160,6 +160,38 @@ without benchmarking on a sparse-file workload first.
 
 - `data/tilegen_tmp/` — temporary sort chunks (inside gitignored `data/`)
 - Ocean shapefile not included — pass via `--ocean` flag
+
+## Data preparation (pbfhogg commands)
+
+Elivagar reads PBF files produced by pbfhogg. The production pipeline has three stages, each run from the **pbfhogg** project root via `brokkr run`:
+
+### 1. Generate indexed PBF (cat)
+
+`cat` embeds blob-level indexdata automatically when writing. Steps 2 and 3 are much faster with indexed PBFs.
+
+```
+brokkr run cat raw.osm.pbf --type node,way,relation -o indexed.osm.pbf
+```
+
+### 2. Apply OSC diffs (merge)
+
+Merge an OSC changeset into the indexed PBF. Uses indexdata for fast blob-level passthrough.
+
+```
+brokkr run merge indexed.osm.pbf changes.osc.gz -o merged.osm.pbf
+```
+
+### 3. Generate locations PBF (add-locations-to-ways)
+
+Embed resolved node coordinates into ways. This is the PBF variant elivagar's tile pipeline reads — ways arrive with geometry already resolved, avoiding a separate node lookup pass.
+
+```
+brokkr run add-locations-to-ways merged.osm.pbf -o locations.osm.pbf
+```
+
+Options: `--keep-untagged-nodes` (retain untagged nodes in output), `-n dense` (mmap node index for planet-scale datasets, default: `hash`).
+
+Steps 2 and 3 (and `sort`) expect indexed PBFs by default and will error if indexdata is missing. Use `--force` to override the check and run with raw PBFs (slower).
 
 ## Subagents
 Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.
