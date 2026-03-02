@@ -215,6 +215,7 @@ fn test_dedup() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
+
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -239,6 +240,7 @@ fn test_metadata_json() {
         max_zoom: 14,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 2),
+
     };
     let json = build_metadata(&config);
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -264,6 +266,7 @@ fn test_run_length_dedup() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 1),
+
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -290,6 +293,7 @@ fn test_no_run_for_different_data() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 1),
+
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -319,6 +323,7 @@ fn write_to_streaming_produces_valid_header() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
+
     };
 
     let mut writer = PmtilesWriter::new_streaming(config, dir.path()).unwrap();
@@ -352,6 +357,7 @@ fn write_to_streaming_matches_in_memory() {
         max_zoom: 2,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 1),
+
     };
 
     let tile_a = gzip_compress(b"tile-a").unwrap();
@@ -386,6 +392,7 @@ fn write_to_produces_valid_header() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
+
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -418,4 +425,32 @@ fn write_to_produces_valid_header() {
     assert_eq!(&bytes[0..7], b"PMTiles");
     // Byte 7: version = 3
     assert_eq!(bytes[7], 3);
+}
+
+// -----------------------------------------------------------------------
+// Data section 4K alignment (always-on for O_DIRECT serving)
+// -----------------------------------------------------------------------
+
+#[test]
+fn data_section_is_4k_aligned() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 1,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+    let tile_a = gzip_compress(b"tile-a").unwrap();
+    let tile_b = gzip_compress(b"tile-b").unwrap();
+    writer.add_tile(0, 0, 0, &tile_a).unwrap();
+    writer.add_tile(1, 0, 0, &tile_b).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("aligned.pmtiles");
+    writer.write_to(&path).unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    let data_offset = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
+    assert_eq!(data_offset % 4096, 0, "data_offset {data_offset} should be 4K-aligned");
 }

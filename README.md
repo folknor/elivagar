@@ -81,6 +81,13 @@ System: plantasjen (Ryzen 9 5900X, Linux 6.18). Commit: `cb2cd29`.
 
 Measured with `brokkr bench self`. Results stored in `.brokkr/results.db`.
 
+### O_DIRECT-friendly layout
+
+The data section of the output PMTiles archive is 4K-aligned, allowing tile
+serving via `O_DIRECT` / `io_uring` without page cache pollution. This is
+fully backwards-compatible with all PMTiles readers — the spec does not
+constrain the data section offset.
+
 ### PMTiles writer
 
 Elivagar's hand-rolled PMTiles v3 writer vs [pmtiles-rs](https://github.com/stadiamaps/pmtiles-rs),

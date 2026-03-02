@@ -347,6 +347,7 @@ fn test_header_fields() {
         max_zoom: 10,
         bounds: (8.0, 54.5, 15.2, 57.8),
         center: (11.5, 56.0, 7),
+
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -409,6 +410,7 @@ fn test_tile_roundtrip() {
         max_zoom: 2,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
+
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -457,6 +459,7 @@ fn test_mvt_layer_decode() {
         max_zoom: 5,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
+
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -529,6 +532,7 @@ fn test_deduplication() {
         max_zoom: 2,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
+
     };
 
     let mut writer = PmtilesWriter::new(config);

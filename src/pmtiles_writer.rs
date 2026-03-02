@@ -261,7 +261,12 @@ impl PmtilesWriter {
         let metadata_length = metadata_compressed.len() as u64;
         let leaf_dirs_offset = metadata_offset + metadata_length;
         let leaf_dirs_length = leaf_bytes.len() as u64;
-        let data_offset = leaf_dirs_offset + leaf_dirs_length;
+        let raw_data_offset = leaf_dirs_offset + leaf_dirs_length;
+
+        // 4K-align the data section start for O_DIRECT / io_uring tile serving.
+        let data_offset = raw_data_offset.div_ceil(4096) * 4096;
+        #[allow(clippy::cast_possible_truncation)]
+        let data_pad = (data_offset - raw_data_offset) as usize;
 
         let header = self.build_header(
             root_dir_offset,
@@ -281,6 +286,9 @@ impl PmtilesWriter {
         w.write_all(&root_bytes)?;
         w.write_all(&metadata_compressed)?;
         w.write_all(&leaf_bytes)?;
+        if data_pad > 0 {
+            w.write_all(&vec![0u8; data_pad])?;
+        }
 
         // Write tile data from the appropriate backend.
         match &mut self.blob {
