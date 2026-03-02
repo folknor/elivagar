@@ -31,7 +31,7 @@ seq = 4704
 
 [plantasjen.datasets.denmark.pbf.locations]
 file = "denmark-20260220-seq4704-locations.osm.pbf"
-sha256 = "2c4745352c0a0d2f46fcbd619eef49cc7d55409742de7899303e3ac3d1f64c64"
+sha256 = "5c73392c27905d64ffb30b912a29790af8769a5d4a15a4a16f33abf1622f88f2"
 seq = 4704
 
 [plantasjen.datasets.norway]
@@ -50,7 +50,7 @@ seq = 4709
 
 [plantasjen.datasets.norway.pbf.locations]
 file = "norway-20260225-seq4709-locations.osm.pbf"
-sha256 = "ab790a2ede1c43b258d728f5d57e1bb3400922b19279352d9cc2e2472b78dd84"
+sha256 = "9efb74909532e768f6a61e9d5905a5c268240d21aa5308586f85bae232b968d6"
 seq = 4709
 
 [plantasjen.datasets.germany]
@@ -69,7 +69,7 @@ seq = 4704
 
 [plantasjen.datasets.germany.pbf.locations]
 file = "germany-20260224-seq4704-locations.osm.pbf"
-sha256 = "036142bc9a429be14e8433c55868acc22297d530a0c43d3f063df289eef1cfdc"
+sha256 = "17ccf15b24d8d5bd2b4a0223642b3cabf2ffe4a435c9f3b2906e5359c74c0dd2"
 seq = 4704
 
 [dm6]
