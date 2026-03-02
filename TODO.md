@@ -44,7 +44,10 @@ Remaining (contingent — only if planet runs still OOM):
 - [x] Step 1: `pbfhogg node-stats` tool
 - [x] Step 2: Validate compression on Germany/Norway/Japan (worst case 72%, planet fits under 64 GB)
 - [x] Step 3: SortedNodeStore compression — 75% ratio (planet: 51 GB, fits in 64 GB)
-- [ ] Step 4: Full pipeline on North America (~17 GB) — needs ≥32 GB RAM
+- [x] Step 4: Full pipeline on North America (18.2 GB locations PBF, plantasjen, uncommitted)
+  462.6s total (283s pbf, 15s ocean, 0.5s sort, 164s assemble), 19.4 GB RSS, 12.4 GB output
+  510M features, 12.5M unique tiles. LocationsOnWays mode (no node store).
+- [ ] Step 4b: Hotpath alloc profile on North America locations-on-ways — identify top allocators at scale
 - [ ] Step 5: Full pipeline on Europe (~28 GB) — needs ≥64 GB RAM
 - [ ] Step 6: Planet (~75 GB) — needs ≥64 GB RAM hardware
 
@@ -88,6 +91,21 @@ Suggested thresholds: z0-8 → level 9, z9-12 → configured, z13-14 → capped 
 **PMTiles dedup cap** (Box 8) — LOW IMPACT.
 1M cap fills at z11; z12-z14 tiles are almost always unique. Raising to 5-10M is cheap
 insurance (~160-320 MB). Add telemetry when cap is hit.
+
+## Bugs
+
+- [ ] **Way pipeline condvar deadlock on oversized blocks.** When a single PBF block's
+  estimated cost (`estimate_raw_ways_bytes * WAY_OUTPUT_MULTIPLIER`) exceeds `way_budget`
+  (default 128 MB), the condvar predicate `bytes + block_cost > way_budget` is permanently
+  true even when `count == 0`. With no in-flight tasks, no `notify_one()` fires and the
+  worker thread sleeps forever. Discovered on North America locations-on-ways (18 GB, 209M
+  ways) — long highways/rivers/coastlines produce blocks where ways average 200+ coords,
+  pushing `block_cost` over 128 MB. Germany (5 GB) never hits this because ways are shorter.
+  **Fixed:** added `count > 0` guard so at least one task always proceeds. The underlying
+  issue is that `WAY_OUTPUT_MULTIPLIER = 10` makes the effective per-block budget only 12.8 MB
+  of raw way data — tight for locations-on-ways blocks. Consider whether the multiplier is
+  still appropriate now that locations-on-ways skips the node store (the multiplier was
+  calibrated for the node-lookup path where output expands significantly).
 
 ## Code TODOs
 

@@ -595,7 +595,11 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     }
 
                     let (btx, brx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(1);
-                    let (rtx, rrx) = std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(4);
+                    // Capacity must be >= MAX_INFLIGHT: rayon tasks block on send()
+                    // while holding a rayon thread. If capacity < inflight tasks,
+                    // blocked senders tie up all rayon threads → worker (which runs
+                    // inside rayon::in_place_scope) can't make progress → deadlock.
+                    let (rtx, rrx) = std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(MAX_INFLIGHT);
                     let nr_clone = nr.clone();
                     let lm_clone = std::sync::Arc::clone(&land_mask);
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
@@ -650,12 +654,16 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                     .collect();
                                 let block_bytes = estimate_raw_ways_bytes(&raw_ways);
                                 let block_cost = block_bytes * WAY_OUTPUT_MULTIPLIER;
-                                // Wait for capacity: both count and byte budget must have room.
+                                // Wait for capacity: count limit and byte budget.
+                                // Always allow at least one task — a single block that
+                                // exceeds the byte budget must not deadlock the condvar
+                                // (no in-flight tasks → no notify_one → permanent sleep).
                                 {
                                     let mut guard = inflight_ref.lock()
                                         .expect("inflight lock");
                                     guard = inflight_cvar.wait_while(guard, |&mut (count, bytes)| {
-                                        count >= MAX_INFLIGHT || bytes + block_cost > way_budget
+                                        count >= MAX_INFLIGHT
+                                            || (count > 0 && bytes + block_cost > way_budget)
                                     }).expect("condvar wait");
                                     guard.0 += 1;
                                     guard.1 += block_cost;

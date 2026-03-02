@@ -72,6 +72,25 @@ file = "germany-20260224-seq4704-locations.osm.pbf"
 sha256 = "17ccf15b24d8d5bd2b4a0223642b3cabf2ffe4a435c9f3b2906e5359c74c0dd2"
 seq = 4704
 
+[plantasjen.datasets.north-america]
+origin = "Geofabrik"
+download_date = "2026-02-20"
+
+[plantasjen.datasets.north-america.pbf.raw]
+file = "north-america-latest.osm.pbf"
+sha256 = "25838ac9cbe62752879b739c1d48aa471fbe6de949ba2f0b6d64665428b5e294"
+seq = 4710
+
+[plantasjen.datasets.north-america.pbf.indexed]
+file = "north-america-seq4710-with-indexdata.osm.pbf"
+sha256 = "09ad61d6bd537a1b2b6e2dd3380eb1b9778b5bb28bd3300dc695ec2bbe6dd904"
+seq = 4710
+
+[plantasjen.datasets.north-america.pbf.locations]
+file = "north-america-seq4710-locations.osm.pbf"
+sha256 = "fc8606ebfa16e4bf6560c2452e630ae21b86af6f778142c74cf6d3de0cabcc64"
+seq = 4710
+
 [dm6]
 data = "data"
 scratch = "data/tilegen_tmp"
