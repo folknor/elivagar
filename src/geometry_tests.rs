@@ -645,3 +645,131 @@ fn tile_is_interior_concave_polygon() {
     let clip = ClipRect::for_tile(3, 3, 2, BUFFER_FRACTION);
     assert!(!tile_is_interior(&ring, &clip));
 }
+
+// ---------------------------------------------------------------------------
+// for_each_zoom_simplified_multi tests
+// ---------------------------------------------------------------------------
+
+/// Helper: make a square polygon ring centered at (cx, cy) with half-width hw.
+fn square_ring(cx: f64, cy: f64, hw: f64) -> Vec<Point> {
+    vec![
+        Point::new(cx - hw, cy - hw),
+        Point::new(cx + hw, cy - hw),
+        Point::new(cx + hw, cy + hw),
+        Point::new(cx - hw, cy + hw),
+        Point::new(cx - hw, cy - hw),
+    ]
+}
+
+#[test]
+fn multi_simplify_no_inners_all_zooms() {
+    // Large outer ring at z14 only — no simplification needed.
+    let outer = square_ring(0.5, 0.5, 0.1);
+    let inners: Vec<Vec<Point>> = vec![];
+    let mut scratch = SimplifyMultiScratch::new();
+    let mut results: Vec<(u8, usize, usize)> = Vec::new();
+    for_each_zoom_simplified_multi(&outer, &inners, 14, 14, &mut scratch, |z, o, i| {
+        results.push((z, o.len(), i.len()));
+    });
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], (14, 5, 0)); // 5-point square, 0 inners
+}
+
+#[test]
+fn multi_simplify_callback_per_zoom() {
+    // Outer large enough to survive multiple zoom levels.
+    let outer = square_ring(0.5, 0.5, 0.1);
+    let inners: Vec<Vec<Point>> = vec![];
+    let mut scratch = SimplifyMultiScratch::new();
+    let mut zooms: Vec<u8> = Vec::new();
+    for_each_zoom_simplified_multi(&outer, &inners, 10, 14, &mut scratch, |z, _o, _i| {
+        zooms.push(z);
+    });
+    // Should iterate z14, z13, z12, z11, z10 (high to low)
+    assert_eq!(zooms, vec![14, 13, 12, 11, 10]);
+}
+
+#[test]
+fn multi_simplify_inner_count_non_increasing() {
+    // Inner count should never increase as zoom decreases (inners can only be
+    // dropped, never added). Use a detailed inner with collinear points that
+    // will simplify away at low zoom.
+    let outer = square_ring(0.5, 0.5, 0.2);
+    // Inner: elongated sliver with many collinear-ish points.
+    let inner = vec![
+        Point::new(0.49, 0.50),
+        Point::new(0.495, 0.500_001),
+        Point::new(0.50, 0.500_002),
+        Point::new(0.505, 0.500_001),
+        Point::new(0.51, 0.50),
+        Point::new(0.505, 0.499_999),
+        Point::new(0.50, 0.499_998),
+        Point::new(0.495, 0.499_999),
+        Point::new(0.49, 0.50),
+    ];
+    let inners = vec![inner];
+    let mut scratch = SimplifyMultiScratch::new();
+    let mut inner_counts: Vec<(u8, usize)> = Vec::new();
+    for_each_zoom_simplified_multi(&outer, &inners, 4, 14, &mut scratch, |z, _o, i| {
+        inner_counts.push((z, i.len()));
+    });
+    // At z14, inner should be present
+    assert_eq!(inner_counts[0], (14, 1));
+    // Inner count should be monotonically non-increasing
+    for w in inner_counts.windows(2) {
+        assert!(w[0].1 >= w[1].1, "inner count increased from z{} ({}) to z{} ({})",
+            w[0].0, w[0].1, w[1].0, w[1].1);
+    }
+}
+
+#[test]
+fn multi_simplify_subpixel_outer_stops_early() {
+    // Outer is tiny — should become subpixel and stop iterating before z0.
+    let outer = square_ring(0.5, 0.5, 0.00001); // ~1 meter
+    let inners: Vec<Vec<Point>> = vec![];
+    let mut scratch = SimplifyMultiScratch::new();
+    let mut zoom_count = 0;
+    for_each_zoom_simplified_multi(&outer, &inners, 0, 14, &mut scratch, |_z, _o, _i| {
+        zoom_count += 1;
+    });
+    // Should NOT reach all 15 zooms — subpixel check should bail out early
+    assert!(zoom_count < 15, "subpixel outer should stop early, got {zoom_count} zooms");
+}
+
+#[test]
+fn multi_simplify_z14_preserves_all_inners() {
+    // At z14 (no simplification), all inners should be present unchanged.
+    let outer = square_ring(0.5, 0.5, 0.3);
+    let inner1 = square_ring(0.3, 0.5, 0.05);
+    let inner2 = square_ring(0.7, 0.5, 0.02);
+    let inners = vec![inner1.clone(), inner2.clone()];
+    let mut scratch = SimplifyMultiScratch::new();
+    let mut z14_data: Option<(Vec<Point>, Vec<Vec<Point>>)> = None;
+    for_each_zoom_simplified_multi(&outer, &inners, 14, 14, &mut scratch, |_z, o, i| {
+        z14_data = Some((o.to_vec(), i.to_vec()));
+    });
+    let (out_outer, out_inners) = z14_data.expect("should have z14 callback");
+    assert_eq!(out_outer.len(), outer.len(), "outer should be unchanged at z14");
+    assert_eq!(out_inners.len(), 2, "both inners should be present at z14");
+    assert_eq!(out_inners[0].len(), inner1.len(), "inner1 unchanged at z14");
+    assert_eq!(out_inners[1].len(), inner2.len(), "inner2 unchanged at z14");
+}
+
+#[test]
+fn multi_simplify_outer_vertex_count_non_increasing() {
+    // Outer vertex count should never increase as zoom decreases.
+    let outer = square_ring(0.5, 0.5, 0.1);
+    let inners: Vec<Vec<Point>> = vec![];
+    let mut scratch = SimplifyMultiScratch::new();
+    let mut vertex_counts: Vec<(u8, usize)> = Vec::new();
+    for_each_zoom_simplified_multi(&outer, &inners, 4, 14, &mut scratch, |z, o, _i| {
+        vertex_counts.push((z, o.len()));
+    });
+    // Vertex count should be monotonically non-increasing
+    for w in vertex_counts.windows(2) {
+        assert!(w[0].1 >= w[1].1, "vertex count increased from z{} ({}) to z{} ({})",
+            w[0].0, w[0].1, w[1].0, w[1].1);
+    }
+    // At z14, should have original 5 vertices (no simplification at z14)
+    assert_eq!(vertex_counts[0], (14, 5));
+}
