@@ -156,8 +156,8 @@ fn pair_rings(
         }
         // Tests only inner[0] for containment. Correct for valid OSM geometry
         // (all inner ring vertices are inside the correct outer). For malformed
-        // data, unwrap_or(0) below assigns orphan inners to the first polygon —
-        // slightly wrong but visually acceptable.
+        // data where the inner isn't inside any outer, promote it to an outer
+        // ring (shell) — matches Planetiler's behavior.
         let test_pt = &inner[0];
         let mut target_idx: Option<usize> = None;
         for (i, poly) in polygons.iter().enumerate() {
@@ -166,8 +166,12 @@ fn pair_rings(
                 break;
             }
         }
-        let idx = target_idx.unwrap_or(0);
-        polygons[idx].1.push(inner);
+        if let Some(idx) = target_idx {
+            polygons[idx].1.push(inner);
+        } else {
+            // Orphan inner ring: promote to outer (shell).
+            polygons.push((inner, Vec::new()));
+        }
     }
 
     polygons

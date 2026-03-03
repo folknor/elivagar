@@ -91,7 +91,11 @@ fn place_label_info(
     tags: &Tags<'_>,
     place: &str,
 ) -> Option<(&'static str, u8, i64)> {
-    // Capital detection
+    // Capital detection.
+    // NOTE: OSM also uses capital=2 for national capitals (admin_level=2),
+    // but neither Planetiler nor Tilemaker handle it — consistent gap across
+    // all Shortbread implementations. Rarely used in practice (capital=yes
+    // is the standard tagging for national capitals).
     let is_capital = tags.has_value("capital", "yes");
     let is_state_capital = tags.has_value("capital", "4");
 

@@ -198,7 +198,7 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
         let ref_rows = replaced.lines().count();
         let ref_cols = replaced
             .lines()
-            .map(str::len)
+            .map(|s| s.chars().count())
             .max()
             .unwrap_or(0);
         attrs.push(attr_dyn("ref", &replaced));

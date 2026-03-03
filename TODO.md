@@ -149,12 +149,16 @@
 - [ ] `append_geometry` defensive bounds check produces silently malformed MVT.
   - On truncated input, pushes command header with wrong param count then breaks.
   - Ref: `mvt.rs:462-464`.
-- [ ] Orphan inner rings silently assigned to first polygon in `pair_rings`.
+- [x] Orphan inner rings silently assigned to first polygon in `pair_rings`.
   - When inner ring's first vertex isn't inside any outer ring, falls back to `polygons[0]`.
+  - Fix: promote orphan inners to outer rings (shells), matching Planetiler.
   - Ref: `multipolygon.rs:169`.
-- [ ] `ref_cols` counts bytes, not characters — wrong for non-Latin road refs.
+- [x] `ref_cols` counts bytes, not characters — wrong for non-Latin road refs.
+  - Fix: changed `str::len` to `s.chars().count()`.
   - Ref: `streets.rs:201`.
-- [ ] `capital=2` not handled for national capitals (only `capital=yes` and `capital=4`).
+- [x] `capital=2` not handled for national capitals (only `capital=yes` and `capital=4`).
+  - All three Shortbread implementations (Planetiler, Tilemaker, elivagar) miss it — consistent gap.
+  - Added code comment documenting the gap. Not fixing since it's rarely used in practice.
   - Ref: `boundaries.rs:95-96`.
 - [ ] `has_name` doesn't filter `name=””` — features with empty names match label layers.
   - `name_attrs` correctly omits them, so only wasted sort record space.
