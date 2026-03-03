@@ -751,4 +751,374 @@ mod tests {
         let buf = encode_tile(&[&layer]);
         assert!(buf.is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // append_geometry tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_append_geometry_single_linestring() {
+        // Encode a linestring: (10,20) -> (30,40)
+        let mut src = Vec::new();
+        encode_linestring(&mut src, &[(10, 20), (30, 40)]);
+        let mut dest = Vec::new();
+        let mut cx: i32 = 0;
+        let mut cy: i32 = 0;
+        append_geometry(&mut dest, &src, &mut cx, &mut cy);
+        // First geometry appended with cursor at (0,0) should be identical to source
+        assert_eq!(dest, src);
+        assert_eq!(cx, 30);
+        assert_eq!(cy, 40);
+    }
+
+    #[test]
+    fn test_append_geometry_two_linestrings() {
+        // First linestring: (10,20) -> (30,40)
+        let mut src1 = Vec::new();
+        encode_linestring(&mut src1, &[(10, 20), (30, 40)]);
+        // Second linestring: (5,5) -> (15,15)
+        let mut src2 = Vec::new();
+        encode_linestring(&mut src2, &[(5, 5), (15, 15)]);
+
+        let mut dest = Vec::new();
+        let mut cx: i32 = 0;
+        let mut cy: i32 = 0;
+        append_geometry(&mut dest, &src1, &mut cx, &mut cy);
+        assert_eq!(cx, 30);
+        assert_eq!(cy, 40);
+        append_geometry(&mut dest, &src2, &mut cx, &mut cy);
+        assert_eq!(cx, 15);
+        assert_eq!(cy, 15);
+
+        // Decode the concatenated geometry back to absolute coordinates
+        let coords = decode_commands_to_abs(&dest);
+        // Should have: MoveTo(10,20), LineTo(30,40), MoveTo(5,5), LineTo(15,15)
+        assert_eq!(coords, vec![(10, 20), (30, 40), (5, 5), (15, 15)]);
+    }
+
+    #[test]
+    fn test_append_geometry_polygon_closepath() {
+        // Triangle polygon: (0,0) -> (100,0) -> (50,100) -> close
+        let ring = [(0, 0), (100, 0), (50, 100), (0, 0)];
+        let mut src = Vec::new();
+        encode_polygon(&mut src, &[&ring]);
+
+        let mut dest = Vec::new();
+        let mut cx: i32 = 0;
+        let mut cy: i32 = 0;
+        append_geometry(&mut dest, &src, &mut cx, &mut cy);
+        // After ClosePath, cursor resets to the MoveTo position (0,0)
+        assert_eq!(cx, 0);
+        assert_eq!(cy, 0);
+    }
+
+    #[test]
+    fn test_append_geometry_two_polygons_cursor_reset() {
+        // Polygon 1: square at (0,0)
+        let ring1 = [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+        let mut src1 = Vec::new();
+        encode_polygon(&mut src1, &[&ring1]);
+
+        // Polygon 2: square at (100,100)
+        let ring2 = [(100, 100), (110, 100), (110, 110), (100, 110), (100, 100)];
+        let mut src2 = Vec::new();
+        encode_polygon(&mut src2, &[&ring2]);
+
+        let mut dest = Vec::new();
+        let mut cx: i32 = 0;
+        let mut cy: i32 = 0;
+        append_geometry(&mut dest, &src1, &mut cx, &mut cy);
+        // After close, cursor is at ring1's MoveTo = (0,0)
+        assert_eq!(cx, 0);
+        assert_eq!(cy, 0);
+        append_geometry(&mut dest, &src2, &mut cx, &mut cy);
+        // After close, cursor is at ring2's MoveTo = (100,100)
+        assert_eq!(cx, 100);
+        assert_eq!(cy, 100);
+
+        // Decode and verify all absolute positions are correct
+        let coords = decode_commands_to_abs(&dest);
+        // ring1: MoveTo(0,0), LineTo(10,0), LineTo(10,10), LineTo(0,10)
+        // ring2: MoveTo(100,100), LineTo(110,100), LineTo(110,110), LineTo(100,110)
+        assert_eq!(coords[0], (0, 0));
+        assert_eq!(coords[1], (10, 0));
+        assert_eq!(coords[4], (100, 100));
+        assert_eq!(coords[5], (110, 100));
+    }
+
+    /// Decode MVT commands into absolute (x,y) coordinates (ignoring ClosePath).
+    fn decode_commands_to_abs(cmds: &[u32]) -> Vec<(i32, i32)> {
+        let mut result = Vec::new();
+        let mut cx: i32 = 0;
+        let mut cy: i32 = 0;
+        let mut last_move_x: i32 = 0;
+        let mut last_move_y: i32 = 0;
+        let mut i = 0;
+        while i < cmds.len() {
+            let cmd = cmds[i];
+            let cmd_id = cmd & 0x7;
+            let cmd_count = cmd >> 3;
+            i += 1;
+            match cmd_id {
+                1 | 2 => {
+                    for _ in 0..cmd_count {
+                        let dx = decode_zigzag(cmds[i]);
+                        let dy = decode_zigzag(cmds[i + 1]);
+                        cx += dx;
+                        cy += dy;
+                        result.push((cx, cy));
+                        if cmd_id == 1 {
+                            last_move_x = cx;
+                            last_move_y = cy;
+                        }
+                        i += 2;
+                    }
+                }
+                7 => {
+                    // ClosePath resets cursor to last MoveTo position
+                    cx = last_move_x;
+                    cy = last_move_y;
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // merge_same_attr_geometries tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_merge_no_features() {
+        let mut layer = LayerBuilder::new("test");
+        let mut scratch = MergeScratch::new();
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+        assert_eq!(layer.test_feature_count(), 0);
+    }
+
+    #[test]
+    fn test_merge_single_feature() {
+        let mut layer = LayerBuilder::new("test");
+        let ki = layer.intern_key("kind");
+        let vi = layer.intern_value(Value::String("motorway".into()));
+        let mut geom = Vec::new();
+        encode_linestring(&mut geom, &[(0, 0), (10, 10)]);
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::LineString,
+            geometry: geom,
+            tags: vec![(ki, vi)],
+        });
+        let mut scratch = MergeScratch::new();
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+        assert_eq!(layer.test_feature_count(), 1);
+    }
+
+    #[test]
+    fn test_merge_two_lines_same_attrs() {
+        let mut layer = LayerBuilder::new("test");
+        let ki = layer.intern_key("kind");
+        let vi = layer.intern_value(Value::String("residential".into()));
+
+        let mut geom1 = Vec::new();
+        encode_linestring(&mut geom1, &[(0, 0), (10, 10)]);
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::LineString,
+            geometry: geom1,
+            tags: vec![(ki, vi)],
+        });
+
+        let mut geom2 = Vec::new();
+        encode_linestring(&mut geom2, &[(20, 20), (30, 30)]);
+        layer.add_feature(Feature {
+            id: Some(2),
+            geom_type: GeomType::LineString,
+            geometry: geom2,
+            tags: vec![(ki, vi)],
+        });
+
+        let mut scratch = MergeScratch::new();
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+
+        // Should merge into 1 feature
+        assert_eq!(layer.test_feature_count(), 1);
+        // Merged feature should have no ID
+        assert_eq!(layer.test_feature(0).id, None);
+        // Geometry should contain both linestrings
+        let coords = decode_commands_to_abs(&layer.test_feature(0).geometry);
+        assert_eq!(coords.len(), 4); // 2 points from each linestring
+        assert_eq!(coords[0], (0, 0));
+        assert_eq!(coords[1], (10, 10));
+        assert_eq!(coords[2], (20, 20));
+        assert_eq!(coords[3], (30, 30));
+    }
+
+    #[test]
+    fn test_merge_different_attrs_not_merged() {
+        let mut layer = LayerBuilder::new("test");
+        let ki = layer.intern_key("kind");
+        let v1 = layer.intern_value(Value::String("residential".into()));
+        let v2 = layer.intern_value(Value::String("motorway".into()));
+
+        let mut geom1 = Vec::new();
+        encode_linestring(&mut geom1, &[(0, 0), (10, 10)]);
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::LineString,
+            geometry: geom1,
+            tags: vec![(ki, v1)],
+        });
+
+        let mut geom2 = Vec::new();
+        encode_linestring(&mut geom2, &[(20, 20), (30, 30)]);
+        layer.add_feature(Feature {
+            id: Some(2),
+            geom_type: GeomType::LineString,
+            geometry: geom2,
+            tags: vec![(ki, v2)],
+        });
+
+        let mut scratch = MergeScratch::new();
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+
+        // Different attrs → no merge
+        assert_eq!(layer.test_feature_count(), 2);
+    }
+
+    #[test]
+    fn test_merge_points_not_merged() {
+        let mut layer = LayerBuilder::new("test");
+        let ki = layer.intern_key("kind");
+        let vi = layer.intern_value(Value::String("city".into()));
+
+        let mut geom1 = Vec::new();
+        encode_point(&mut geom1, 10, 20);
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::Point,
+            geometry: geom1,
+            tags: vec![(ki, vi)],
+        });
+
+        let mut geom2 = Vec::new();
+        encode_point(&mut geom2, 30, 40);
+        layer.add_feature(Feature {
+            id: Some(2),
+            geom_type: GeomType::Point,
+            geometry: geom2,
+            tags: vec![(ki, vi)],
+        });
+
+        let mut scratch = MergeScratch::new();
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+
+        // Points are explicitly skipped
+        assert_eq!(layer.test_feature_count(), 2);
+    }
+
+    #[test]
+    fn test_merge_mixed_geom_types_separate() {
+        let mut layer = LayerBuilder::new("test");
+        let ki = layer.intern_key("kind");
+        let vi = layer.intern_value(Value::String("residential".into()));
+
+        // A linestring
+        let mut geom1 = Vec::new();
+        encode_linestring(&mut geom1, &[(0, 0), (10, 10)]);
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::LineString,
+            geometry: geom1,
+            tags: vec![(ki, vi)],
+        });
+
+        // A polygon with same attrs
+        let ring = [(0, 0), (10, 0), (10, 10), (0, 0)];
+        let mut geom2 = Vec::new();
+        encode_polygon(&mut geom2, &[&ring]);
+        layer.add_feature(Feature {
+            id: Some(2),
+            geom_type: GeomType::Polygon,
+            geometry: geom2,
+            tags: vec![(ki, vi)],
+        });
+
+        let mut scratch = MergeScratch::new();
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+
+        // Different geom types → no merge (even with same tags)
+        assert_eq!(layer.test_feature_count(), 2);
+    }
+
+    #[test]
+    fn test_merge_three_lines_same_attrs() {
+        let mut layer = LayerBuilder::new("test");
+        let ki = layer.intern_key("kind");
+        let vi = layer.intern_value(Value::String("path".into()));
+
+        for i in 0..3 {
+            let mut geom = Vec::new();
+            let base = i * 100;
+            encode_linestring(&mut geom, &[(base, base), (base + 10, base + 10)]);
+            layer.add_feature(Feature {
+                #[allow(clippy::cast_sign_loss)]
+                id: Some(i as u64),
+                geom_type: GeomType::LineString,
+                geometry: geom,
+                tags: vec![(ki, vi)],
+            });
+        }
+
+        let mut scratch = MergeScratch::new();
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+
+        // 3 features → 1 merged feature
+        assert_eq!(layer.test_feature_count(), 1);
+        let coords = decode_commands_to_abs(&layer.test_feature(0).geometry);
+        assert_eq!(coords.len(), 6); // 2 points × 3 linestrings
+    }
+
+    #[test]
+    fn test_merge_reclaims_to_pools() {
+        let mut layer = LayerBuilder::new("test");
+        let ki = layer.intern_key("kind");
+        let vi = layer.intern_value(Value::String("residential".into()));
+
+        for i in 0..3 {
+            let mut geom = Vec::new();
+            encode_linestring(&mut geom, &[(i * 10, 0), (i * 10 + 5, 5)]);
+            layer.add_feature(Feature {
+                #[allow(clippy::cast_sign_loss)]
+                id: Some(i as u64),
+                geom_type: GeomType::LineString,
+                geometry: geom,
+                tags: vec![(ki, vi)],
+            });
+        }
+
+        let mut scratch = MergeScratch::new();
+        let mut gp: Vec<Vec<u32>> = Vec::new();
+        let mut tp: Vec<Vec<(u16, u16)>> = Vec::new();
+        layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+
+        // Secondary features' vecs should be reclaimed into pools
+        assert_eq!(gp.len(), 2); // 2 secondaries reclaimed
+        assert_eq!(tp.len(), 2);
+    }
 }

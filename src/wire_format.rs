@@ -582,4 +582,88 @@ mod tests {
         assert_eq!(layer2.test_key(k3), "surface");
         assert_eq!(*layer2.test_value(v3), Value::String("asphalt".to_string()));
     }
+
+    /// Test 3: Interned kind value roundtrip — "kind" attributes with values in
+    /// KIND_VALUES should be encoded as type 4 (interned ID) and decoded back
+    /// to the original string.
+    #[test]
+    fn interned_kind_value_roundtrip() {
+        let osm_id: u64 = 100;
+        let geom_type = GeomType::Polygon;
+        let geom_cmds: Vec<u32> = vec![9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15];
+
+        // Use a known interned kind value
+        let attrs: Vec<shortbread::Attr> = vec![
+            ("kind", AttrValue::Str(Cow::Borrowed("residential")), 0),
+        ];
+
+        let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 14);
+
+        let mut layer = LayerBuilder::new("test");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+
+        assert_eq!(layer.test_feature_count(), 1);
+        let f = layer.test_feature(0);
+        assert_eq!(f.tags.len(), 1);
+
+        let (k0, v0) = f.tags[0];
+        assert_eq!(layer.test_key(k0), "kind");
+        assert_eq!(*layer.test_value(v0), Value::String("residential".to_string()));
+    }
+
+    /// Test 4: Multiple interned kind values from different categories roundtrip.
+    #[test]
+    fn interned_kind_values_multiple_categories() {
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+
+        // Test values from different KIND_VALUES categories
+        let test_kinds = ["water", "forest", "motorway", "park", "river"];
+
+        for kind in test_kinds {
+            let attrs: Vec<shortbread::Attr> = vec![
+                ("kind", AttrValue::Str(Cow::Borrowed(kind)), 0),
+            ];
+
+            let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
+
+            let mut layer = LayerBuilder::new("test");
+            let mut gp = Vec::new();
+            let mut tp = Vec::new();
+            add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+
+            let f = layer.test_feature(0);
+            let (_, v0) = f.tags[0];
+            assert_eq!(
+                *layer.test_value(v0),
+                Value::String(kind.to_string()),
+                "kind={kind} should roundtrip through interned encoding"
+            );
+        }
+    }
+
+    /// Test 5: Non-interned kind value falls back to raw string encoding.
+    #[test]
+    fn non_interned_kind_value_fallback() {
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+
+        // "custom_kind" is not in KIND_VALUES
+        let attrs: Vec<shortbread::Attr> = vec![
+            ("kind", AttrValue::Str(Cow::Borrowed("custom_kind")), 0),
+        ];
+
+        let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
+
+        let mut layer = LayerBuilder::new("test");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+
+        let f = layer.test_feature(0);
+        let (k0, v0) = f.tags[0];
+        assert_eq!(layer.test_key(k0), "kind");
+        assert_eq!(*layer.test_value(v0), Value::String("custom_kind".to_string()));
+    }
+
 }

@@ -245,3 +245,58 @@ fn env_var_true(name: &str) -> bool {
         })
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_byte_size_megabytes() {
+        assert_eq!(parse_byte_size("256M"), Some(256 * 1024 * 1024));
+        assert_eq!(parse_byte_size("512m"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_byte_size("1M"), Some(1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_byte_size_gigabytes() {
+        assert_eq!(parse_byte_size("1G"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_byte_size("2g"), Some(2 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_byte_size_raw_bytes() {
+        assert_eq!(parse_byte_size("67108864"), Some(67108864));
+        assert_eq!(parse_byte_size("0"), Some(0));
+    }
+
+    #[test]
+    fn test_parse_byte_size_whitespace() {
+        assert_eq!(parse_byte_size("  256M  "), Some(256 * 1024 * 1024));
+        assert_eq!(parse_byte_size(" 1G"), Some(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_byte_size_invalid() {
+        assert_eq!(parse_byte_size("abc"), None);
+        assert_eq!(parse_byte_size(""), None);
+        assert_eq!(parse_byte_size("M"), None);
+        assert_eq!(parse_byte_size("G"), None);
+    }
+
+    #[test]
+    fn test_parse_byte_size_min_64m() {
+        assert!(parse_byte_size_min_64m("64M").is_ok());
+        assert!(parse_byte_size_min_64m("1G").is_ok());
+        assert!(parse_byte_size_min_64m("32M").is_err());
+        assert!(parse_byte_size_min_64m("abc").is_err());
+    }
+
+    #[test]
+    fn test_parse_byte_size_min_1m() {
+        assert!(parse_byte_size_min_1m("1M").is_ok());
+        assert!(parse_byte_size_min_1m("128M").is_ok());
+        assert!(parse_byte_size_min_1m("512").is_err()); // 512 bytes < 1M
+        assert!(parse_byte_size_min_1m("abc").is_err());
+    }
+}

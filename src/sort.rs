@@ -661,4 +661,59 @@ mod tests {
         let reader = SortReader::from_dir(dir.path(), None);
         assert!(reader.is_ok());
     }
+
+    #[test]
+    fn flush_makes_chunk_count_accurate() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut writer = SortWriter::new(dir.path(), 10_000_000).unwrap();
+
+        // Push some records (below chunk threshold)
+        for i in 0u64..100 {
+            writer.push(SortRecord { key: i, data: Box::from(i.to_le_bytes().as_slice()) }).unwrap();
+        }
+        assert_eq!(writer.chunk_count(), 0, "no auto-flush yet");
+
+        // Explicit flush
+        writer.flush().unwrap();
+        assert_eq!(writer.chunk_count(), 1, "flush should create a chunk");
+
+        // Double flush is a no-op
+        writer.flush().unwrap();
+        assert_eq!(writer.chunk_count(), 1, "flush on empty buffer is no-op");
+
+        // finish() after flush doesn't add another chunk
+        let count_before = writer.chunk_count();
+        let _ = writer.finish().unwrap();
+        // Can't check count after finish (consumed), but from_dir validates
+        let reader = SortReader::from_dir(dir.path(), Some(count_before));
+        assert!(reader.is_ok(), "count before finish should match disk");
+    }
+
+    #[test]
+    fn flush_then_push_then_finish() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut writer = SortWriter::new(dir.path(), 10_000_000).unwrap();
+
+        // First batch
+        for i in 0u64..50 {
+            writer.push(SortRecord { key: i, data: Box::from(i.to_le_bytes().as_slice()) }).unwrap();
+        }
+        writer.flush().unwrap();
+        assert_eq!(writer.chunk_count(), 1);
+
+        // Second batch
+        for i in 50u64..100 {
+            writer.push(SortRecord { key: i, data: Box::from(i.to_le_bytes().as_slice()) }).unwrap();
+        }
+
+        // finish() flushes the second batch
+        let mut reader = writer.finish().unwrap();
+
+        // All 100 records should be readable in sorted order
+        let mut count = 0;
+        while reader.next().unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 100);
+    }
 }
