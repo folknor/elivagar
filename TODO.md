@@ -2,8 +2,11 @@
 
 ## Active priorities
 
-1. [ ] Measure relation block buffering RSS impact on Denmark + Germany.
-   - Goal: confirm whether buffering is materially affecting peak RSS.
+1. [x] Measure relation block buffering RSS impact on Denmark + Germany.
+   - 2026-03-03 (`brokkr bench self`, locations variant):
+     - Denmark: `relation_blocks_buffered=6`, `relation_blocks_drop_rss_kb=0`, `peak_rss_kb=2691584`
+     - Germany: `relation_blocks_buffered=111`, `relation_blocks_drop_rss_kb=0`, `peak_rss_kb=8616648`
+   - Result: no observable VmRSS drop when buffered relation blocks are released; no evidence this is a material RSS driver at these scales.
    - Ref: `notes/north-america-memory-plan.md`.
 2. [ ] Scale validation: run Europe full pipeline (locations-on-ways path).
    - Ref: Planet scale milestone below.

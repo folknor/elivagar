@@ -32,9 +32,26 @@ For benchmark UUIDs/commit-level deltas, use `TODO.md` and:
 
 ## Open Memory Risks (Still Worth Measuring)
 
-1. Relation block buffering RSS impact at larger scales.
+1. Relation block buffering RSS impact at larger scales (North America/Europe).
 2. Europe and planet scale validation milestones (hardware-gated).
 3. Flat node-index safety guardrails (operational protection, not hotpath speed).
+
+## Relation Buffering Measurement (2026-03-03)
+
+Method:
+
+- Added `relation_blocks_drop_rss_kb` metric (VmRSS delta before/after releasing buffered relation blocks).
+- Ran `brokkr bench self` with locations variant on Denmark and Germany.
+
+Results:
+
+- Denmark: `relation_blocks_buffered=6`, `relation_blocks_drop_rss_kb=0`, `peak_rss_kb=2691584`
+- Germany: `relation_blocks_buffered=111`, `relation_blocks_drop_rss_kb=0`, `peak_rss_kb=8616648`
+
+Interpretation:
+
+- At Denmark/Germany scale, relation block buffering does not show a measurable VmRSS release event, and is unlikely to be a dominant peak RSS source.
+- Keep this as an open item only for larger datasets where relation buffering volume may be materially higher.
 
 ## Decision Guidance
 

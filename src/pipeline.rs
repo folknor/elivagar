@@ -166,6 +166,18 @@ fn peak_rss_kb() -> Option<u64> {
     None
 }
 
+/// Read current resident set size (VmRSS) from `/proc/self/status`.
+/// Returns `None` on non-Linux platforms or if parsing fails.
+fn current_rss_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            return rest.trim().strip_suffix("kB")?.trim().parse().ok();
+        }
+    }
+    None
+}
+
 /// # Errors
 ///
 /// Returns [`PipelineError`] on I/O failures, invalid configuration (e.g.
@@ -210,6 +222,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let mut max_way_inflight_bytes: Option<usize> = None;
     let mut max_rel_batch_bytes: Option<usize> = None;
     let mut relation_blocks_buffered: Option<usize> = None;
+    let mut relation_blocks_drop_rss_kb: Option<u64> = None;
 
     let mut node_store_stats: Option<(u64, usize)> = None;
 
@@ -226,11 +239,12 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
-            let (sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks) = phase_read_and_process(config)?;
+            let (sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks, rel_drop_rss) = phase_read_and_process(config)?;
             node_store_stats = ns_stats;
             max_way_inflight_bytes = Some(way_hwm);
             max_rel_batch_bytes = Some(rel_hwm);
             relation_blocks_buffered = Some(rel_blocks);
+            relation_blocks_drop_rss_kb = rel_drop_rss;
             phase12_elapsed = Some(phase12_start.elapsed());
             phase12_rss = peak_rss_kb();
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
@@ -367,6 +381,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if let Some(n) = relation_blocks_buffered {
         eprintln!("relation_blocks_buffered={n}");
     }
+    if let Some(kb) = relation_blocks_drop_rss_kb {
+        eprintln!("relation_blocks_drop_rss_kb={kb}");
+    }
     eprintln!("max_assemble_batch_bytes={max_assemble_batch_bytes}");
     Ok(())
 }
@@ -419,7 +436,7 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::unwrap_in_result, clippy::type_complexity)]
 #[hotpath::measure]
-fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize, usize), PipelineError> {
+fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize, usize, Option<u64>), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let sort_chunk_budget = if config.sort_chunk_size > 0 {
@@ -789,7 +806,11 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             }
         });
     }
+    let rss_before_relation_drop = current_rss_kb();
     drop(relation_blocks);
+    let rss_after_relation_drop = current_rss_kb();
+    let relation_blocks_drop_rss_kb = rss_before_relation_drop.zip(rss_after_relation_drop)
+        .map(|(before, after)| before.saturating_sub(after));
 
     if !rel_batch.is_empty() {
         features_emitted += flush_rel_batch(
@@ -836,6 +857,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         max_way_inflight_bytes,
         max_rel_batch_bytes,
         relation_blocks_buffered,
+        relation_blocks_drop_rss_kb,
     ))
 }
 
