@@ -161,9 +161,11 @@ fn print_metadata_json(json: &str) {
                     let name_start = pos + id_pos + 6;
                     if let Some(name_end) = layers_section[name_start..].find('"') {
                         let name = &layers_section[name_start..name_start + name_end];
-                        // Try to find minzoom for this layer
-                        let chunk_end =
-                            (name_start + name_end + 200).min(layers_section.len());
+                        // Try to find minzoom for this layer.
+                        // Clamp to a char boundary to avoid panics on non-ASCII metadata.
+                        let chunk_end = layers_section.ceil_char_boundary(
+                            (name_start + name_end + 200).min(layers_section.len()),
+                        );
                         let chunk = &layers_section[name_start..chunk_end];
                         let minzoom = extract_number(chunk, "\"minzoom\":");
                         let maxzoom = extract_number(chunk, "\"maxzoom\":");

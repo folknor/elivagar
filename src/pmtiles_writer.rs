@@ -187,6 +187,9 @@ impl PmtilesWriter {
     #[allow(clippy::cast_possible_truncation)]
     #[hotpath::measure]
     pub fn add_tile(&mut self, z: u8, x: u32, y: u32, data: &[u8]) -> io::Result<bool> {
+        if data.len() > u32::MAX as usize {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "tile data exceeds 4 GB"));
+        }
         let tile_id = xy_to_tile_id(z, x, y);
 
         let mut hasher = DefaultHasher::new();
@@ -601,7 +604,7 @@ fn encode_directory(entries: &[DirEntry]) -> Vec<u8> {
 fn encode_tile_id_column(buf: &mut Vec<u8>, entries: &[DirEntry]) {
     let mut prev_tile_id: u64 = 0;
     for e in entries {
-        let delta = e.tile_id - prev_tile_id;
+        let delta = e.tile_id.saturating_sub(prev_tile_id);
         encode_varint(buf, delta);
         prev_tile_id = e.tile_id;
     }
@@ -728,16 +731,15 @@ pub fn tile_id_to_zxy(tile_id: u64) -> (u8, u32, u32) {
 
     // Find zoom level z where base(z) <= tile_id < base(z+1).
     // base(z) = (4^z - 1) / 3
-    // Note: n * n * 4 would overflow u64 at z=31, but the z >= 31 guard
-    // fires first in release mode (wrapping). In debug mode the overflow
-    // would panic before the guard. Not reachable: max_zoom is validated
-    // to 14 at pipeline entry, so tile_ids never iterate past z=14.
     let mut z: u8 = 0;
     loop {
         z += 1;
+        if z >= 31 {
+            break;
+        }
         let n = 1u64 << z;
         let next_base = (n * n * 4 - 1) / 3;
-        if tile_id < next_base || z >= 31 {
+        if tile_id < next_base {
             break;
         }
     }

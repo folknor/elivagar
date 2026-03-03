@@ -44,6 +44,9 @@ fn read_varint(data: &[u8], pos: &mut usize) -> u32 {
     let mut result: u32 = 0;
     let mut shift = 0;
     loop {
+        if *pos >= data.len() {
+            return result;
+        }
         let b = data[*pos];
         *pos += 1;
         result |= u32::from(b & 0x7F) << shift;
@@ -51,6 +54,9 @@ fn read_varint(data: &[u8], pos: &mut usize) -> u32 {
             return result;
         }
         shift += 7;
+        if shift > 28 {
+            return result;
+        }
     }
 }
 
@@ -62,8 +68,8 @@ fn encode_way(buf: &mut Vec<u8>, coords: &[(i32, i32)]) {
     buf.extend_from_slice(&prev_lat.to_le_bytes());
     buf.extend_from_slice(&prev_lon.to_le_bytes());
     for &(lat, lon) in &coords[1..] {
-        write_varint(buf, zigzag_encode(lat - prev_lat));
-        write_varint(buf, zigzag_encode(lon - prev_lon));
+        write_varint(buf, zigzag_encode(lat.wrapping_sub(prev_lat)));
+        write_varint(buf, zigzag_encode(lon.wrapping_sub(prev_lon)));
         prev_lat = lat;
         prev_lon = lon;
     }
@@ -73,24 +79,27 @@ fn encode_way(buf: &mut Vec<u8>, coords: &[(i32, i32)]) {
 fn decode_way(data: &[u8], offset: usize) -> Vec<(i32, i32)> {
     let mut pos = offset;
     let count = read_varint(data, &mut pos) as usize;
-    let mut coords = Vec::with_capacity(count);
+    let mut coords = Vec::with_capacity(count.min(1 << 20));
 
-    let lat = i32::from_le_bytes(
-        data[pos..pos + 4].try_into().expect("truncated way data"),
-    );
-    let lon = i32::from_le_bytes(
-        data[pos + 4..pos + 8].try_into().expect("truncated way data"),
-    );
+    if pos + 8 > data.len() || count == 0 {
+        return coords;
+    }
+
+    let lat = i32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+    let lon = i32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
     pos += 8;
     coords.push((lat, lon));
 
     let mut prev_lat = lat;
     let mut prev_lon = lon;
     for _ in 1..count {
+        if pos >= data.len() {
+            break;
+        }
         let dlat = zigzag_decode(read_varint(data, &mut pos));
         let dlon = zigzag_decode(read_varint(data, &mut pos));
-        prev_lat += dlat;
-        prev_lon += dlon;
+        prev_lat = prev_lat.saturating_add(dlat);
+        prev_lon = prev_lon.saturating_add(dlon);
         coords.push((prev_lat, prev_lon));
     }
     coords

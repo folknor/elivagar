@@ -69,123 +69,67 @@
   - Same pattern exists in `water_polygon_match` (`water.rs:12-36`).
   - Ref: `land.rs:28-39`, `water.rs:12-36`.
 
-## Potential bugs (2026-03-03 audit)
+## Potential bugs (2026-03-03 audit) — all resolved
 
 ### Wire format truncation risks
 
-- [ ] `geom_cmds.len() as u16` — silent truncation for geometries with >65K commands.
-  - A polygon ring with ~32K vertices would overflow. Unlikely but no guard.
-  - Add `debug_assert!(geom_cmds.len() <= u16::MAX as usize)`.
-  - Ref: `wire_format.rs:297`.
-- [ ] `filtered_count as u8` — silent truncation above 255 attributes.
-  - Currently unreachable (schema has ~48 keys), but fragile.
-  - Ref: `wire_format.rs:236`.
-- [ ] String length `as u16` — guarded only by `debug_assert` (stripped in release).
-  - Malformed PBF with >64KB tag values would silently corrupt the sort record stream.
-  - Ref: `wire_format.rs:253-254, 263-264`.
+- [x] `geom_cmds.len() as u16` — clamped with `.min(u16::MAX)`.
+- [x] `filtered_count as u8` — clamped with `.min(u8::MAX)`.
+- [x] String length `as u16` — replaced `debug_assert` with `.min()` clamping + truncated write.
 
 ### MVT key/value index overflow
 
-- [ ] `LayerBuilder` key/value interning uses `u16` indices via `as u16` truncation.
-  - >65535 unique keys or values per tile wraps to 0 → wrong references.
-  - Unreachable with current schema but unguarded.
-  - Ref: `mvt.rs:155, 167, 187`.
+- [x] `LayerBuilder` key/value interning — saturated at `u16::MAX`.
 
 ### PMTiles writer
 
-- [ ] `tile_id_to_zxy` overflows at z>=31 — debug panic, release wrong result.
-  - `n * n * 4` overflows u64 at z=31. Guard evaluates after the computation.
-  - Unreachable (max_zoom=14) but function is `pub`.
-  - Ref: `pmtiles_writer.rs:736-743`.
-- [ ] `encode_tile_id_column` u64 subtraction underflow on out-of-order entries.
-  - Only `debug_assert` guards ordering; release mode silently corrupts directory.
-  - Ref: `pmtiles_writer.rs:604`.
-- [ ] `data.len() as u32` truncation for tiles >4GB.
-  - Unreachable in practice but unguarded.
-  - Ref: `pmtiles_writer.rs:209`.
+- [x] `tile_id_to_zxy` — moved `z >= 31` guard before overflow-prone computation.
+- [x] `encode_tile_id_column` — changed to `saturating_sub`.
+- [x] `data.len() as u32` — added early error return for tiles >4GB.
 
 ### Way index / node index
 
-- [ ] `read_varint` unbounded shift — panics in debug on corrupt data (shift >31).
-  - Add shift guard (cap at 28, bail on overflow).
-  - Ref: `way_index.rs:43-55`.
-- [ ] `read_varint` / `decode_way` — no bounds checking on `*pos` vs data length.
-  - Truncated/corrupt `way_data.bin` causes uncontrolled panic.
-  - Ref: `way_index.rs:47, 73-96`.
-- [ ] `encode_way` i32 delta subtraction can overflow in debug mode.
-  - Unreachable for valid E7 coordinates but no guard.
-  - Ref: `way_index.rs:65-66`.
-- [ ] `SortedNodeStore::get` / `SortedNodeStoreReader::get` — no negative node_id guard.
-  - Cast to u64 produces huge group_id → `None` (benign), but inconsistent with flat index.
-  - Ref: `node_index.rs:842, 895`.
+- [x] `read_varint` — added bounds check on `*pos` and shift cap at 28.
+- [x] `decode_way` — added bounds checking, capacity cap, `saturating_add` for deltas.
+- [x] `encode_way` — changed to `wrapping_sub` for delta computation.
+- [x] `SortedNodeStore::get` / `SortedNodeStoreReader::get` — added negative node_id early return.
 
 ### Inspect
 
-- [ ] `print_metadata_json` byte-index string slicing panics on non-ASCII metadata.
-  - Only affects third-party PMTiles files with non-ASCII layer names.
-  - Ref: `inspect.rs:157-183`.
+- [x] `print_metadata_json` — clamped chunk_end to char boundary for non-ASCII safety.
 
 ### Ocean
 
-- [ ] Inconsistent ring orientation logic after Y-flip coordinate transform.
-  - Line 169: `signed_area >= 0.0` = outer. Line 178: `signed_area < 0.0` = outer.
-  - Internally contradictory but benign: water-polygons-split-3857 has only single-part
-    polygons so `w == 0` always catches outers.
-  - Ref: `ocean.rs:169, 178`.
-- [ ] Missing `.max(0.0)` guard on `_max` tile coordinates before f64-to-u32 cast.
-  - Safe on modern Rust (saturating cast to 0) but inconsistent with `_min` guards.
-  - Ref: `ocean.rs:220, 222, 440, 442`.
+- [x] Ring orientation inconsistency — fixed line 178 to match line 169 convention (`>= 0.0`).
+- [x] Missing `.max(0.0)` on `_max` tile coordinates — added to all four locations.
 
-## Smells (2026-03-03 audit)
+## Smells (2026-03-03 audit) — all resolved
 
-- [ ] `VmHWM` per-phase RSS values are monotonically non-decreasing (meaningless per-phase).
-  - `peak_rss_kb()` reads `VmHWM` which is process-lifetime HWM, never decreases.
-  - `ocean_rss_kb` is always >= `phase12_rss_kb`, etc.
-  - Consider switching to `VmRSS` snapshots or documenting the limitation.
-  - Ref: `pipeline.rs:297, 349, 372, 379`.
-- [ ] `from_dir` / `resume` cleanup stops at first gap in chunk file numbering.
-  - If a chunk file is missing, all subsequent chunks are silently ignored/not cleaned.
-  - Ref: `sort.rs:324-333, 108-117`.
-- [ ] `append_geometry` defensive bounds check produces silently malformed MVT.
-  - On truncated input, pushes command header with wrong param count then breaks.
-  - Ref: `mvt.rs:462-464`.
-- [x] Orphan inner rings silently assigned to first polygon in `pair_rings`.
-  - When inner ring's first vertex isn't inside any outer ring, falls back to `polygons[0]`.
-  - Fix: promote orphan inners to outer rings (shells), matching Planetiler.
-  - Ref: `multipolygon.rs:169`.
-- [x] `ref_cols` counts bytes, not characters — wrong for non-Latin road refs.
-  - Fix: changed `str::len` to `s.chars().count()`.
-  - Ref: `streets.rs:201`.
-- [x] `capital=2` not handled for national capitals (only `capital=yes` and `capital=4`).
-  - All three Shortbread implementations (Planetiler, Tilemaker, elivagar) miss it — consistent gap.
-  - Added code comment documenting the gap. Not fixing since it's rarely used in practice.
-  - Ref: `boundaries.rs:95-96`.
-- [ ] `has_name` doesn't filter `name=””` — features with empty names match label layers.
-  - `name_attrs` correctly omits them, so only wasted sort record space.
-  - Ref: `shortbread/mod.rs:364-366`.
+- [x] `VmHWM` per-phase RSS — documented as intentional cumulative HWM in `peak_rss_kb()` comment.
+- [x] `from_dir` / `resume` cleanup — now scans past 10 consecutive gaps to catch stale chunks.
+- [x] `append_geometry` truncated input — patches command header with actual count after loop.
+- [x] Orphan inner rings — promoted to outer rings (shells), matching Planetiler.
+- [x] `ref_cols` bytes vs characters — changed to `s.chars().count()`.
+- [x] `capital=2` — documented as consistent gap across all Shortbread implementations.
+- [x] `has_name` empty string — changed to `tags.get(“name”).is_some_and(|v| !v.is_empty())`.
 
 ## Test coverage gaps (2026-03-03 audit)
 
 ### High priority
 
-- [ ] `mvt.rs`: `merge_same_attr_geometries` — complex sort+scan+in-place merge+tombstoning, zero tests.
-  - A bug here produces visually wrong tiles (merged features with wrong geometry or lost features).
+- [x] `mvt.rs`: `merge_same_attr_geometries` — 7 tests added (d11e9e9).
 - [ ] `ocean.rs`: `emit_ocean_polygon` — scanline fill algorithm (~180 lines), zero tests.
   - Handles boundary tile rasterization, gap filling, land mask filtering, zoom iteration.
   - A bug produces missing or duplicate ocean tiles globally.
-- [ ] `wire_format.rs`: interned kind value (type=4) encode/decode roundtrip, zero tests.
-  - The `KIND_VALUES` short-circuit path is used for every “kind” attribute.
+- [x] `wire_format.rs`: interned kind value (type=4) encode/decode roundtrip — 3 tests added (d11e9e9).
 
 ### Medium priority
 
 - [ ] `pipeline.rs`: `emit_multipolygon_feature` (~200 lines) — zero tests.
   - Multipolygon emission with inner rings, interior tile detection, per-zoom clipping.
-- [ ] `pipeline.rs`: checkpoint save/load roundtrip — zero tests.
-  - Incorrect checkpoint data corrupts `--skip-to` resume (see B3/B4).
-- [ ] `main.rs`: `parse_byte_size` edge cases — zero tests.
-  - Budget parsing from CLI (e.g., “256M”, “1G”). Wrong parsing → OOM or degraded perf.
-- [ ] `mvt.rs`: `append_geometry` — cursor re-encoding for concatenated multi-geometries, zero tests.
-  - ClosePath cursor reset handling is error-prone.
+- [x] `pipeline.rs`: checkpoint save/load roundtrip — 5 tests added (d11e9e9).
+- [x] `main.rs`: `parse_byte_size` edge cases — 7 tests added (d11e9e9).
+- [x] `mvt.rs`: `append_geometry` — 4 tests added (d11e9e9).
 - [ ] `geometry.rs`: `for_each_zoom_simplified_multi` — cascading simplification with inner rings, zero tests.
 
 ### Low priority

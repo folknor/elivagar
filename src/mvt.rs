@@ -156,7 +156,7 @@ impl LayerBuilder {
         if let Some(&idx) = self.key_map.get(key) {
             return idx;
         }
-        let idx = self.keys.len() as u16;
+        let idx = self.keys.len().min(u16::MAX as usize) as u16;
         let owned = key.to_string();
         self.key_map.insert(owned.clone(), idx);
         self.keys.push(owned);
@@ -173,7 +173,7 @@ impl LayerBuilder {
         if let Some(&idx) = self.value_map.get(&val) {
             return idx;
         }
-        let idx = self.values.len() as u16;
+        let idx = self.values.len().min(u16::MAX as usize) as u16;
         self.value_map.insert(val.clone(), idx);
         self.values.push(val);
         idx
@@ -189,7 +189,7 @@ impl LayerBuilder {
         if let Some(&idx) = self.string_value_map.get(s) {
             return idx;
         }
-        let idx = self.values.len() as u16;
+        let idx = self.values.len().min(u16::MAX as usize) as u16;
         let owned = s.to_string();
         self.values.push(Value::String(owned.clone()));
         self.string_value_map.insert(owned, idx);
@@ -455,15 +455,14 @@ fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32)
         match cmd_id {
             1 | 2 => {
                 // MoveTo or LineTo
-                // Known: cmd is pushed before validating that src has enough
-                // parameters. If src were truncated, the command count would
-                // be wrong. Not reachable: geometry is always well-formed from
-                // the closed encode/serialize/deserialize pipeline.
+                let cmd_pos = dest.len();
                 dest.push(cmd);
+                let mut actual_count = 0u32;
                 for _ in 0..cmd_count {
                     if i + 1 >= src.len() {
                         break;
                     }
+                    actual_count += 1;
                     let dx = decode_zigzag(src[i]);
                     let dy = decode_zigzag(src[i + 1]);
                     // Absolute position in source coordinate space
@@ -479,6 +478,10 @@ fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32)
                         last_move_y = src_cy;
                     }
                     i += 2;
+                }
+                // Patch command header with actual count if truncated.
+                if actual_count != cmd_count {
+                    dest[cmd_pos] = (actual_count << 3) | cmd_id;
                 }
             }
             7 => {

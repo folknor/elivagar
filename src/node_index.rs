@@ -839,6 +839,9 @@ impl SortedNodeStore {
     /// Read coordinates (used by tests; not performance-critical).
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
+        if node_id < 0 {
+            return None;
+        }
         let id = node_id as u64;
         let group_id = id / NODES_PER_GROUP;
         let chunk_id = ((id % NODES_PER_GROUP) / NODES_PER_CHUNK as u64) as u8;
@@ -892,6 +895,9 @@ impl SortedNodeStoreReader {
     /// calls on Denmark, the instrumentation overhead (>50%) dwarfs actual cost.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
+        if node_id < 0 {
+            return None;
+        }
         let id = node_id as u64;
         let group_id = (id / NODES_PER_GROUP) as usize;
         let chunk_id = ((id % NODES_PER_GROUP) / NODES_PER_CHUNK as u64) as u8;

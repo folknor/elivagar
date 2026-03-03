@@ -363,7 +363,7 @@ pub(crate) fn name_attrs(tags: &Tags<'_>) -> SmallVec<[Attr; 8]> {
 }
 
 fn has_name(tags: &Tags<'_>) -> bool {
-    tags.has("name")
+    tags.get("name").is_some_and(|v| !v.is_empty())
 }
 
 /// Strip _link suffix for street kind.

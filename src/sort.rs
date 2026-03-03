@@ -104,15 +104,20 @@ impl SortWriter {
             chunk_paths.push(path);
         }
 
-        // Delete leftover chunks from a previous run of later phases
-        let mut i = start_chunk;
-        loop {
-            let path = tmp_dir.join(format!("chunk_{i:04}.bin"));
-            if path.exists() {
-                fs::remove_file(&path)?;
+        // Delete leftover chunks from a previous run. Scan beyond gaps to
+        // catch stale chunks that would otherwise contaminate a later sort.
+        {
+            let mut i = start_chunk;
+            let mut gap_count = 0;
+            while gap_count < 10 {
+                let path = tmp_dir.join(format!("chunk_{i:04}.bin"));
+                if path.exists() {
+                    fs::remove_file(&path)?;
+                    gap_count = 0;
+                } else {
+                    gap_count += 1;
+                }
                 i += 1;
-            } else {
-                break;
             }
         }
 

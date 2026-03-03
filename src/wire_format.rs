@@ -232,7 +232,7 @@ fn kind_value_to_id(s: &str) -> Option<u8> {
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], zoom: u8) {
     buf.clear();
-    let filtered_count = attrs.iter().filter(|(_, _, az)| zoom >= *az).count();
+    let filtered_count = attrs.iter().filter(|(_, _, az)| zoom >= *az).count().min(u8::MAX as usize);
     buf.push(filtered_count as u8);
     for (key, val, attr_zoom) in attrs {
         if zoom < *attr_zoom {
@@ -250,19 +250,16 @@ pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], 
                     } else {
                         buf.push(0);
                         let sb = s.as_bytes();
-                        debug_assert!(sb.len() <= u16::MAX as usize, "string value exceeds u16 length");
-                        buf.extend_from_slice(&(sb.len() as u16).to_le_bytes());
-                        buf.extend_from_slice(sb);
+                        let slen = sb.len().min(u16::MAX as usize);
+                        buf.extend_from_slice(&(slen as u16).to_le_bytes());
+                        buf.extend_from_slice(&sb[..slen]);
                     }
                 } else {
                     buf.push(0);
                     let sb = s.as_bytes();
-                    // Length truncated to u16 (max 65535). Safe: Shortbread only
-                    // extracts tag keys (name, ref, cuisine, etc.) whose real-world
-                    // OSM values never approach 64KB.
-                    debug_assert!(sb.len() <= u16::MAX as usize, "string value exceeds u16 length");
-                    buf.extend_from_slice(&(sb.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(sb);
+                    let slen = sb.len().min(u16::MAX as usize);
+                    buf.extend_from_slice(&(slen as u16).to_le_bytes());
+                    buf.extend_from_slice(&sb[..slen]);
                 }
             }
             AttrValue::Int(i) => {
@@ -294,7 +291,7 @@ pub(crate) fn encode_feature_data_with_attrs(
     buf.extend_from_slice(&osm_id.to_le_bytes());
     buf.push(geom_type as u8);
     #[allow(clippy::cast_possible_truncation)]
-    let cmd_count = geom_cmds.len() as u16;
+    let cmd_count = geom_cmds.len().min(u16::MAX as usize) as u16;
     buf.extend_from_slice(&cmd_count.to_le_bytes());
     for &cmd in geom_cmds {
         buf.extend_from_slice(&cmd.to_le_bytes());

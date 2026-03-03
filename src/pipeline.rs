@@ -204,6 +204,11 @@ fn select_node_store_mode(
 ///
 /// Read peak resident set size (VmHWM) from `/proc/self/status`.
 /// Returns `None` on non-Linux platforms or if parsing fails.
+///
+/// NOTE: VmHWM is the process-lifetime high-water mark — it never decreases.
+/// Per-phase values (phase12_rss_kb, ocean_rss_kb, etc.) are therefore
+/// monotonically non-decreasing. This is intentional: each value shows the
+/// cumulative peak RSS up to that phase, not the phase's isolated contribution.
 fn peak_rss_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {

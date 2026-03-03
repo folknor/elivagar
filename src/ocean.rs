@@ -175,7 +175,7 @@ pub(crate) fn process_ocean_shapefile(
                 continue;
             }
 
-            let is_outer = w == 0 || geometry::signed_area(ring) < 0.0;
+            let is_outer = w == 0 || geometry::signed_area(ring) >= 0.0;
 
             if is_outer {
                 if let Some(outer) = current_outer.take() {
@@ -217,9 +217,9 @@ pub(crate) fn process_ocean_shapefile(
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             let sty_min = (bb.min_y * split_scale).floor().max(0.0) as u32;
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            let stx_max = ((bb.max_x * split_scale).floor() as u32).min((1u32 << SPLIT_Z) - 1);
+            let stx_max = ((bb.max_x * split_scale).floor().max(0.0) as u32).min((1u32 << SPLIT_Z) - 1);
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            let sty_max = ((bb.max_y * split_scale).floor() as u32).min((1u32 << SPLIT_Z) - 1);
+            let sty_max = ((bb.max_y * split_scale).floor().max(0.0) as u32).min((1u32 << SPLIT_Z) - 1);
             if stx_min == stx_max && sty_min == sty_max {
                 // Already fits in one tile at SPLIT_Z
                 split_out.push(poly);
@@ -437,9 +437,9 @@ fn emit_ocean_polygon(
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let ty_min = (bbox.min_y * scale).floor().max(0.0) as u32;
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let tx_max = ((bbox.max_x * scale).floor() as u32).min(max_tile);
+        let tx_max = ((bbox.max_x * scale).floor().max(0.0) as u32).min(max_tile);
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let ty_max = ((bbox.max_y * scale).floor() as u32).min(max_tile);
+        let ty_max = ((bbox.max_y * scale).floor().max(0.0) as u32).min(max_tile);
 
         // PIP helper: inside outer and not in any hole
         let pip = |px: f64, py: f64| -> bool {
