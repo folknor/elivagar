@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{self, BufReader, BufWriter, Read as _, Write};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use flate2::Compression;
@@ -357,6 +357,7 @@ impl PmtilesWriter {
 
     /// Collect all directory entries (flushing the current run and reading back
     /// from the streaming temp file if necessary).
+    #[cfg(test)]
     #[hotpath::measure]
     fn collect_dir_entries(&mut self) -> io::Result<Vec<DirEntry>> {
         self.flush_run()?;

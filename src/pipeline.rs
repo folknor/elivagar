@@ -115,6 +115,7 @@ pub struct TilegenConfig {
     /// 0 = mode-aware default:
     /// - 128 MB (standard node-store path)
     /// - 256 MB (`locations_on_ways` mode)
+    ///
     /// Controls memory during the PBF way phase. Lower values reduce peak RSS
     /// at the cost of less parallelism.
     pub way_inflight_budget: usize,
@@ -552,7 +553,6 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut way_count: u64 = 0;
     let mut rel_count: u64 = 0;
     let mut features_emitted: u64 = 0;
-    let mut way_index_finalized = false;
     let mut node_store_stats: Option<(u64, usize)> = None;
     let land_mask = std::sync::Arc::new(geometry::LandMask::new());
 
@@ -818,14 +818,11 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     }
 
     // Finalize way index after all way blocks are processed.
-    if !way_index_finalized {
-        if let Some(ref mut wi) = way_index {
-            wi.finish_writing().expect("failed to finalize way index");
-        }
-        way_index_finalized = true;
-        eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
-        eprintln!("  Way index finalized, processing relations...");
+    if let Some(ref mut wi) = way_index {
+        wi.finish_writing().expect("failed to finalize way index");
     }
+    eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
+    eprintln!("  Way index finalized, processing relations...");
 
     let relation_blocks_buffered = relation_blocks.len();
     // Process buffered relation blocks.

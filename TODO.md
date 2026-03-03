@@ -32,7 +32,43 @@
    - Include explicit guidance for 32 GB vs 64 GB hosts.
 9. [ ] PMTiles dedup correctness hardening.
    - Current dedup uses hash+len without byte-compare.
+   - Probability is ~2^-81 per pair (SipHash-64 + length match) — negligible, but failure
+     mode is silent wrong tile content with no detection mechanism.
    - Ref: `pmtiles_writer.rs:196`.
+
+## Code review findings (2026-03-03)
+
+Items from external code review, triaged by severity.
+
+### Medium: stale sort chunks in `--skip-to sort`
+
+- [ ] Add chunk-count integrity check for `--skip-to sort`.
+  - `--skip-to sort` reads chunks via `SortReader::from_dir()` with no validation.
+    If old chunks survive a failed `remove_dir_all`, they get silently merged.
+  - Fix: save total chunk count (PBF + ocean) to checkpoint before sort phase;
+    validate on `--skip-to sort` that discovered count matches expected.
+  - Ref: `pipeline.rs:275`, `sort.rs:318`.
+
+### Low: robustness
+
+- [x] Fix clippy errors and warnings (collapsible-if, cast_possible_wrap, unused import,
+  unused assignment, dead code, doc continuation).
+  - Fixed: 2026-03-03.
+
+### Refactoring opportunities
+
+- [ ] Extract shared "emit feature → sort record" helper in `pipeline.rs`.
+  - 6+ near-identical 4-line blocks: encode_feature_data_with_attrs → make_sort_key → push → count.
+  - Ref: `pipeline.rs:955`, `pipeline.rs:1567`, `pipeline.rs:1617`, `pipeline.rs:1691`,
+    `pipeline.rs:1821`, `pipeline.rs:1942`.
+- [ ] Unify point/centroid matcher bodies in `pois.rs` and `transport.rs`.
+  - Each pair differs only in `GeomExpect::Point` vs `GeomExpect::PolygonPointOnSurface`.
+  - Ref: `pois.rs:19`/`pois.rs:32`, `transport.rs:66`/`transport.rs:86`.
+- [ ] Relation-geometry scratch-based decode/project (if profiling warrants).
+  - `way_index.get()` allocates fresh `Vec<(i32, i32)>` per call; caller allocates
+    another `Vec<Point>` for projection. A decode-into-scratch API could cut alloc pressure.
+  - Only worth doing if relation processing shows up as a hotpath bottleneck.
+  - Ref: `pipeline.rs:1285`, `way_index.rs:470`.
 
 ## Planet scale milestones
 

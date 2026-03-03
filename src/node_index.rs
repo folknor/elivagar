@@ -85,17 +85,17 @@ impl NodeIndex {
         let offset = node_id as u64 * ENTRY_SIZE;
         let needed = offset + ENTRY_SIZE;
 
-        if let Some(max_file_size) = self.max_file_size {
-            if needed > max_file_size {
-                panic!(
-                    "flat node index safety cap exceeded: requested {:.1} GB for node_id={} (cap: {:.1} GB). \
-                     Input is likely unsorted. Use a sorted PBF, run `pbfhogg sort input.pbf -o sorted.pbf`, \
-                     or use --force-sorted only if the PBF is actually sorted.",
-                    needed as f64 / (1024.0 * 1024.0 * 1024.0),
-                    node_id,
-                    max_file_size as f64 / (1024.0 * 1024.0 * 1024.0),
-                );
-            }
+        if let Some(max_file_size) = self.max_file_size
+            && needed > max_file_size
+        {
+            panic!(
+                "flat node index safety cap exceeded: requested {:.1} GB for node_id={} (cap: {:.1} GB). \
+                 Input is likely unsorted. Use a sorted PBF, run `pbfhogg sort input.pbf -o sorted.pbf`, \
+                 or use --force-sorted only if the PBF is actually sorted.",
+                needed as f64 / (1024.0 * 1024.0 * 1024.0),
+                node_id,
+                max_file_size as f64 / (1024.0 * 1024.0 * 1024.0),
+            );
         }
 
         if needed > self.file_len {
@@ -1230,6 +1230,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_cap.bin");
         let mut idx = NodeIndex::create(&path).unwrap();
+        #[allow(clippy::cast_possible_wrap)]
         let node_id = ((MAX_FLAT_INDEX_SIZE / ENTRY_SIZE) + 1) as i64;
         idx.put(node_id, 1, 1);
     }

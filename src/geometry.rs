@@ -584,6 +584,7 @@ pub fn bbox_intersects_clip(bbox: &MercBbox, clip: &ClipRect) -> bool {
 ///
 /// Returns zero or more sub-linestrings (the line may enter and exit multiple times).
 /// SmallVec<[_; 1]>: most clips produce exactly one segment, avoiding the outer heap alloc.
+#[cfg(test)]
 pub fn clip_linestring(line: &[Point], rect: &ClipRect) -> SmallVec<[Vec<Point>; 1]> {
     let mut result: SmallVec<[Vec<Point>; 1]> = SmallVec::new();
     for_each_clipped_segment(line, rect, |segment| {
