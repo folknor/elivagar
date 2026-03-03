@@ -933,6 +933,23 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 // Node processing (point layers)
 // ---------------------------------------------------------------------------
 
+/// Push a single encoded feature into the sort record buffer.
+/// Shared by all geometry emitters (point, line, polygon, multipolygon).
+#[inline]
+fn push_sort_record(
+    tile_id: u64,
+    osm_id: u64,
+    layer: Layer,
+    geom_type: GeomType,
+    geom_buf: &[u32],
+    attrs_buf: &[u8],
+    records: &mut Vec<SortRecord>,
+) {
+    let data = encode_feature_data_with_attrs(osm_id, geom_type, geom_buf, attrs_buf);
+    let key = sort::make_sort_key(tile_id, layer as u8, 0);
+    records.push(SortRecord { key, data });
+}
+
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure]
 fn process_node(
@@ -971,9 +988,7 @@ fn process_node(
                 let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
                 let (px, py) = geometry::merc_to_tile_px(&p, tx, ty, z);
                 mvt::encode_point(&mut geom_buf, px, py);
-                let data = encode_feature_data_with_attrs(osm_id, GeomType::Point, &geom_buf, &attrs_buf);
-                let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
-                records.push(SortRecord { key, data });
+                push_sort_record(tile_id, osm_id, m.layer, GeomType::Point, &geom_buf, &attrs_buf, records);
                 count += 1;
             });
         }
@@ -1581,11 +1596,7 @@ fn emit_point_or_centroid(
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
             let (px, py) = geometry::merc_to_tile_px(&p, tx, ty, z);
             mvt::encode_point(&mut scratch.geom_buf, px, py);
-            let data = encode_feature_data_with_attrs(
-                osm_id, GeomType::Point, &scratch.geom_buf, &scratch.attrs_buf,
-            );
-            let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
-            records.push(SortRecord { key, data });
+            push_sort_record(tile_id, osm_id, m.layer, GeomType::Point, &scratch.geom_buf, &scratch.attrs_buf, records);
             count += 1;
         });
     }
@@ -1631,11 +1642,7 @@ fn emit_line_feature(
                     return;
                 }
                 let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                let data = encode_feature_data_with_attrs(
-                    osm_id, GeomType::LineString, &scratch.geom_buf, &scratch.attrs_buf,
-                );
-                let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
-                records.push(SortRecord { key, data });
+                push_sort_record(tile_id, osm_id, m.layer, GeomType::LineString, &scratch.geom_buf, &scratch.attrs_buf, records);
                 count += 1;
             } else {
                 let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
@@ -1652,11 +1659,7 @@ fn emit_line_feature(
                         return;
                     }
                     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                    let data = encode_feature_data_with_attrs(
-                        osm_id, GeomType::LineString, &scratch.geom_buf, &scratch.attrs_buf,
-                    );
-                    let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
-                    records.push(SortRecord { key, data });
+                    push_sort_record(tile_id, osm_id, m.layer, GeomType::LineString, &scratch.geom_buf, &scratch.attrs_buf, records);
                     count += 1;
                 });
             }
@@ -1705,11 +1708,7 @@ fn emit_polygon_feature(
                 return;
             }
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            let data = encode_feature_data_with_attrs(
-                osm_id, GeomType::Polygon, &scratch.geom_buf, &scratch.attrs_buf,
-            );
-            let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
-            records.push(SortRecord { key, data });
+            push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, &scratch.geom_buf, &scratch.attrs_buf, records);
             count += 1;
         } else {
             let inv_z = 1.0 / f64::from(1u32 << z);
@@ -1761,11 +1760,7 @@ fn emit_polygon_feature(
                         continue;
                     }
                     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                    let data = encode_feature_data_with_attrs(
-                        osm_id, GeomType::Polygon, &scratch.geom_buf, &scratch.attrs_buf,
-                    );
-                    let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
-                    records.push(SortRecord { key, data });
+                    push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, &scratch.geom_buf, &scratch.attrs_buf, records);
                     count += 1;
                 }
             }
@@ -1835,11 +1830,7 @@ fn emit_multipolygon_feature(
                 return;
             }
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            let data = encode_feature_data_with_attrs(
-                osm_id, GeomType::Polygon, &emit_scratch.geom_buf, &emit_scratch.attrs_buf,
-            );
-            let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
-            records.push(SortRecord { key, data });
+            push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, &emit_scratch.geom_buf, &emit_scratch.attrs_buf, records);
             count += 1;
         } else {
             let inv_z = 1.0 / f64::from(1u32 << z);
@@ -1956,11 +1947,7 @@ fn emit_multipolygon_feature(
                         continue;
                     }
                     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                    let data = encode_feature_data_with_attrs(
-                        osm_id, GeomType::Polygon, &emit_scratch.geom_buf, &emit_scratch.attrs_buf,
-                    );
-                    let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
-                    records.push(SortRecord { key, data });
+                    push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, &emit_scratch.geom_buf, &emit_scratch.attrs_buf, records);
                     count += 1;
                 }
             }

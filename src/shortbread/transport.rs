@@ -67,24 +67,19 @@ pub(super) fn match_public_transport_point(
     tags: &Tags<'_>,
     out: &mut SmallVec<[LayerMatch; 4]>,
 ) {
-    if let Some((kind, min_zoom)) = public_transport_match(tags) {
-        let mut attrs = smallvec![attr_str("kind", kind)];
-        attrs.extend(name_attrs(tags));
-        if let Some(v) = tags.get("iata") {
-            attrs.push(attr_dyn("iata", v));
-        }
-        out.push(LayerMatch {
-            layer: Layer::PublicTransport,
-            min_zoom,
-            max_zoom: 14,
-            geom_expect: GeomExpect::Point,
-            attrs,
-        });
-    }
+    match_public_transport(tags, GeomExpect::Point, out);
 }
 
 pub(super) fn match_public_transport_centroid(
     tags: &Tags<'_>,
+    out: &mut SmallVec<[LayerMatch; 4]>,
+) {
+    match_public_transport(tags, GeomExpect::PolygonPointOnSurface, out);
+}
+
+fn match_public_transport(
+    tags: &Tags<'_>,
+    geom_expect: GeomExpect,
     out: &mut SmallVec<[LayerMatch; 4]>,
 ) {
     if let Some((kind, min_zoom)) = public_transport_match(tags) {
@@ -97,7 +92,7 @@ pub(super) fn match_public_transport_centroid(
             layer: Layer::PublicTransport,
             min_zoom,
             max_zoom: 14,
-            geom_expect: GeomExpect::PolygonPointOnSurface,
+            geom_expect,
             attrs,
         });
     }

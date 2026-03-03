@@ -57,11 +57,11 @@ Items from external code review, triaged by severity.
 
 ### Refactoring opportunities
 
-- [ ] Extract shared "emit feature → sort record" helper in `pipeline.rs`.
+- [x] Extract shared "emit feature → sort record" helper in `pipeline.rs`.
   - 6+ near-identical 4-line blocks: encode_feature_data_with_attrs → make_sort_key → push → count.
   - Ref: `pipeline.rs:955`, `pipeline.rs:1567`, `pipeline.rs:1617`, `pipeline.rs:1691`,
     `pipeline.rs:1821`, `pipeline.rs:1942`.
-- [ ] Unify point/centroid matcher bodies in `pois.rs` and `transport.rs`.
+- [x] Unify point/centroid matcher bodies in `pois.rs` and `transport.rs`.
   - Each pair differs only in `GeomExpect::Point` vs `GeomExpect::PolygonPointOnSurface`.
   - Ref: `pois.rs:19`/`pois.rs:32`, `transport.rs:66`/`transport.rs:86`.
 - [ ] Relation-geometry scratch-based decode/project (if profiling warrants).

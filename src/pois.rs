@@ -17,26 +17,21 @@ use smallvec::{SmallVec, smallvec};
 // ---------------------------------------------------------------------------
 
 pub(crate) fn match_pois_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    if let Some(mut attrs) = pois_match(tags) {
-        attrs.extend(pois_common_attrs(tags));
-        out.push(LayerMatch {
-            layer: Layer::Pois,
-            min_zoom: 14,
-            max_zoom: 14,
-            geom_expect: GeomExpect::Point,
-            attrs,
-        });
-    }
+    match_pois(tags, GeomExpect::Point, out);
 }
 
 pub(crate) fn match_pois_centroid(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+    match_pois(tags, GeomExpect::PolygonPointOnSurface, out);
+}
+
+fn match_pois(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some(mut attrs) = pois_match(tags) {
         attrs.extend(pois_common_attrs(tags));
         out.push(LayerMatch {
             layer: Layer::Pois,
             min_zoom: 14,
             max_zoom: 14,
-            geom_expect: GeomExpect::PolygonPointOnSurface,
+            geom_expect,
             attrs,
         });
     }
