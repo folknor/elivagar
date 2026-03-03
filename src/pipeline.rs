@@ -147,6 +147,49 @@ const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
 /// Default way in-flight budget for locations-on-ways mode.
 const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 256 * 1024 * 1024; // 256 MB
+/// Reject unsorted flat-index path above this input size unless explicitly overridden.
+const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeStoreMode {
+    None,
+    Sorted,
+    Flat { unsafe_override: bool },
+}
+
+fn unsorted_flat_guard_error(pbf_size: u64) -> PipelineError {
+    PipelineError(format!(
+        "PBF file is {:.1} GB but does not declare Sort.Type_then_ID.\n\
+         The flat node index would create a ~96 GB sparse file, causing severe\n\
+         performance degradation on machines with <128 GB RAM. Options:\n\
+         1. Use --force-sorted if the PBF is actually sorted (most Geofabrik extracts are)\n\
+         2. Sort the PBF first with: pbfhogg sort input.pbf -o sorted.pbf\n\
+         3. Alternative sorter: osmium sort input.pbf -o sorted.pbf\n\
+         4. Use a sorted PBF from Geofabrik or planet.openstreetmap.org",
+        pbf_size as f64 / (1024.0 * 1024.0 * 1024.0),
+    ))
+}
+
+fn select_node_store_mode(
+    locations_on_ways: bool,
+    header_sorted: bool,
+    force_sorted: bool,
+    pbf_size: u64,
+    allow_unsafe_flat_index: bool,
+) -> Result<NodeStoreMode, PipelineError> {
+    if locations_on_ways {
+        return Ok(NodeStoreMode::None);
+    }
+    if header_sorted || force_sorted {
+        return Ok(NodeStoreMode::Sorted);
+    }
+    if pbf_size > MAX_FLAT_PBF_SIZE && !allow_unsafe_flat_index {
+        return Err(unsorted_flat_guard_error(pbf_size));
+    }
+    Ok(NodeStoreMode::Flat {
+        unsafe_override: allow_unsafe_flat_index,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -465,50 +508,42 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let locations_on_ways = config.locations_on_ways
         || reader.header().optional_features().iter().any(|f| f == "LocationsOnWays");
 
-    let mut node_store_opt: Option<NodeStore> = if locations_on_ways {
-        eprintln!("  LocationsOnWays — skipping node store");
-        None
-    } else {
-        let is_sorted = reader.header().is_sorted() || config.force_sorted;
-        Some(if is_sorted {
+    let pbf_size = std::fs::metadata(&config.pbf_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let node_store_mode = select_node_store_mode(
+        locations_on_ways,
+        reader.header().is_sorted(),
+        config.force_sorted,
+        pbf_size,
+        config.allow_unsafe_flat_index,
+    )?;
+    let mut node_store_opt: Option<NodeStore> = match node_store_mode {
+        NodeStoreMode::None => {
+            eprintln!("  LocationsOnWays — skipping node store");
+            None
+        }
+        NodeStoreMode::Sorted => {
             if config.force_sorted && !reader.header().is_sorted() {
                 eprintln!("  --force-sorted: assuming sorted PBF (will abort if not)");
             } else {
                 eprintln!("  PBF declares Sort.Type_then_ID — using compact node store");
             }
-            NodeStore::Sorted(SortedNodeStore::new())
-        } else {
-            // Guard: flat mmap index creates a sparse file sized by max node ID (~96 GB at planet
-            // scale). On machines with <128 GB RAM this causes catastrophic page eviction. Abort
-            // with a helpful message if the PBF is large enough to be dangerous.
-            const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
-            let pbf_size = std::fs::metadata(&config.pbf_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            if pbf_size > MAX_FLAT_PBF_SIZE && !config.allow_unsafe_flat_index {
-                return Err(PipelineError(format!(
-                    "PBF file is {:.1} GB but does not declare Sort.Type_then_ID.\n\
-                     The flat node index would create a ~96 GB sparse file, causing severe\n\
-                     performance degradation on machines with <128 GB RAM. Options:\n\
-                     1. Use --force-sorted if the PBF is actually sorted (most Geofabrik extracts are)\n\
-                     2. Sort the PBF first with: pbfhogg sort input.pbf -o sorted.pbf\n\
-                     3. Alternative sorter: osmium sort input.pbf -o sorted.pbf\n\
-                     4. Use a sorted PBF from Geofabrik or planet.openstreetmap.org",
-                    pbf_size as f64 / (1024.0 * 1024.0 * 1024.0),
-                )));
-            }
-            if config.allow_unsafe_flat_index {
+            Some(NodeStore::Sorted(SortedNodeStore::new()))
+        }
+        NodeStoreMode::Flat { unsafe_override } => {
+            if unsafe_override {
                 eprintln!(
                     "  WARNING: unsafe flat index override enabled; bypassing unsorted-size and flat-index-size safety guardrails"
                 );
             }
             eprintln!("  PBF not sorted — using flat mmap node index");
-            NodeStore::Flat(if config.allow_unsafe_flat_index {
+            Some(NodeStore::Flat(if unsafe_override {
                 NodeIndex::create_unbounded(&idx_dir.join("nodes.idx"))?
             } else {
                 NodeIndex::create(&idx_dir.join("nodes.idx"))?
-            })
-        })
+            }))
+        }
     };
     // Option so we can move to drain thread during way phase and get back after.
     let mut way_index: Option<WayIndex> = Some(WayIndex::create(idx_dir)?);

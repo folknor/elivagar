@@ -3,6 +3,57 @@ use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
 use smallvec::smallvec;
 use std::borrow::Cow;
 
+#[test]
+fn flat_index_guard_sorted_large_allowed() {
+    let mode = select_node_store_mode(
+        false,
+        true,
+        false,
+        50 * 1024 * 1024 * 1024,
+        false,
+    ).expect("sorted input should be allowed");
+    assert_eq!(mode, NodeStoreMode::Sorted);
+}
+
+#[test]
+fn flat_index_guard_unsorted_small_allowed() {
+    let mode = select_node_store_mode(
+        false,
+        false,
+        false,
+        512 * 1024 * 1024,
+        false,
+    ).expect("small unsorted input should be allowed");
+    assert_eq!(mode, NodeStoreMode::Flat { unsafe_override: false });
+}
+
+#[test]
+fn flat_index_guard_unsorted_large_rejected_with_stable_error() {
+    let err = select_node_store_mode(
+        false,
+        false,
+        false,
+        2 * 1024 * 1024 * 1024,
+        false,
+    ).expect_err("large unsorted input should be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("does not declare Sort.Type_then_ID"));
+    assert!(msg.contains("pbfhogg sort input.pbf -o sorted.pbf"));
+    assert!(msg.contains("--force-sorted"));
+}
+
+#[test]
+fn flat_index_guard_override_path_works() {
+    let mode = select_node_store_mode(
+        false,
+        false,
+        false,
+        2 * 1024 * 1024 * 1024,
+        true,
+    ).expect("override should allow large unsorted input");
+    assert_eq!(mode, NodeStoreMode::Flat { unsafe_override: true });
+}
+
 /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
 fn boundary_labels_match(admin_level: i64) -> LayerMatch {
     LayerMatch {

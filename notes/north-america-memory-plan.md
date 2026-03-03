@@ -59,6 +59,18 @@ Interpretation:
 2. Use Germany as default optimization dataset for iterative work.
 3. Prioritize peak RSS risk reduction and scale validation over additional allocator micro-optimizations.
 
+## Operator Guidance (Flat Index Guardrails)
+
+- Unsorted large inputs now fail early by default to prevent pathological flat-index runs.
+- Primary remediation command:
+  - `pbfhogg sort input.pbf -o sorted.pbf`
+- Alternative sorter:
+  - `osmium sort input.pbf -o sorted.pbf`
+- 32 GB hosts:
+  - do not use unsafe flat-index override except for short controlled debugging.
+- 64 GB hosts:
+  - still prefer sorted inputs; unsafe flat-index override remains a last-resort/debug setting.
+
 ## Source of Truth
 
 - Primary tracker: `TODO.md`

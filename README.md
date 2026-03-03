@@ -91,6 +91,11 @@ osmium sort input.pbf -o sorted.pbf
 If you intentionally want to bypass guardrails for expert debugging/CI, use
 `--allow-unsafe-flat-index` (or `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1`).
 
+Host guidance:
+
+- 32 GB hosts: avoid unsafe flat index mode. Use sorted PBFs or locations-on-ways input.
+- 64 GB hosts: still prefer sorted PBFs. Unsafe flat index mode is for controlled/debug use only.
+
 ## Output size
 
 Denmark extract (483 MB PBF), gzip level 6, z0-14 (plantasjen, commit `175435c`):

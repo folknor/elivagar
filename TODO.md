@@ -24,10 +24,10 @@
    - UX requirement: warning states that override may cause severe IO/memory degradation.
    - Delivered: `--allow-unsafe-flat-index` and `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1`;
      CLI flag takes precedence in intent (effective behavior is logical OR).
-7. [ ] Flat index guardrail: integration tests for rejection and allow paths.
+7. [x] Flat index guardrail: integration tests for rejection and allow paths.
    - Tests: sorted large input allowed; unsorted small input allowed; unsorted large input rejected with stable error text; override path works.
    - Success criterion: deterministic failures before heavy work starts.
-8. [ ] Flat index guardrail: docs update for operators.
+8. [x] Flat index guardrail: docs update for operators.
    - Update README/notes with a short “why this fails early” section and copy-paste remediation commands.
    - Include explicit guidance for 32 GB vs 64 GB hosts.
 9. [ ] PMTiles dedup correctness hardening.
