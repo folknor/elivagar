@@ -108,7 +108,7 @@ Uses clap derive with two subcommands:
 - `--locations-on-ways` — PBF has node coordinates embedded in ways
 - `-j N` / `--threads N` — thread count (default: logical CPUs)
 - `--sort-budget <size>` — sort chunk memory budget (default 1G). Accepts `256M`, `512M`, `1G`, or raw bytes. Minimum 64M. Lower values reduce peak RSS during PBF processing at the cost of more merge chunks.
-- `--way-budget <size>` — in-flight way processing budget (default 128M). Minimum 1M.
+- `--way-budget <size>` — in-flight way processing budget (default 128M standard, 256M in `--locations-on-ways` mode). Minimum 1M.
 - `--rel-budget <size>` — relation batch accumulation budget (default 64M). Minimum 1M.
 - `--assemble-budget <size>` — tile assembly batch budget (default 32M). Minimum 1M.
 

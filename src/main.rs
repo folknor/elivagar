@@ -70,7 +70,8 @@ struct RunArgs {
     #[arg(long, value_parser = parse_byte_size_min_64m)]
     sort_budget: Option<usize>,
 
-    /// In-flight way processing budget (e.g. 128M). Minimum 1M.
+    /// In-flight way processing budget (e.g. 128M or 256M). Minimum 1M.
+    /// Default when omitted: 128M (standard) or 256M (`--locations-on-ways`).
     #[arg(long, value_parser = parse_byte_size_min_1m)]
     way_budget: Option<usize>,
 

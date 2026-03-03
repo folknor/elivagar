@@ -108,7 +108,10 @@ pub struct TilegenConfig {
     /// Thread budget. Controls the rayon global pool size and pbfhogg decode pool.
     /// Default: `std::thread::available_parallelism()` (logical CPUs).
     pub threads: usize,
-    /// Byte budget for in-flight way processing (0 = default 128 MB).
+    /// Byte budget for in-flight way processing.
+    /// 0 = mode-aware default:
+    /// - 128 MB (standard node-store path)
+    /// - 256 MB (`locations_on_ways` mode)
     /// Controls memory during the PBF way phase. Lower values reduce peak RSS
     /// at the cost of less parallelism.
     pub way_inflight_budget: usize,
@@ -137,6 +140,10 @@ const LAND_MASK_FILE: &str = "land_mask.bin";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
 const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
+/// Default way in-flight budget for the standard node-store path.
+const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
+/// Default way in-flight budget for locations-on-ways mode.
+const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 256 * 1024 * 1024; // 256 MB
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -612,8 +619,10 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     const WAY_OUTPUT_MULTIPLIER: usize = 10;
                     let way_budget = if config.way_inflight_budget > 0 {
                         config.way_inflight_budget
+                    } else if locations_on_ways {
+                        DEFAULT_WAY_BUDGET_LOCATIONS
                     } else {
-                        128 * 1024 * 1024 // 128 MB default
+                        DEFAULT_WAY_BUDGET
                     };
                     worker_handle = Some(std::thread::spawn(move || {
                         use rayon::prelude::*;
@@ -2024,4 +2033,3 @@ fn centroid_of(points: &[Point]) -> Point {
 #[allow(clippy::unwrap_used)]
 #[path = "pipeline_tests.rs"]
 mod tests;
-

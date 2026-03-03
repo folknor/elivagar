@@ -24,7 +24,7 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--force-sorted` | Use compact in-RAM node store even if PBF header lacks `Sort.Type_then_ID` |
 | `--locations-on-ways` | PBF has node coordinates embedded in ways |
 | `--sort-budget size` | Sort chunk memory budget (default: 1G, min: 64M). Accepts `256M`, `1G`, or raw bytes |
-| `--way-budget size` | In-flight way processing budget (default: 128M, min: 1M) |
+| `--way-budget size` | In-flight way processing budget (default: 128M standard / 256M with `--locations-on-ways`, min: 1M) |
 | `--rel-budget size` | Relation batch accumulation budget (default: 64M, min: 1M) |
 | `--assemble-budget size` | Tile assembly batch budget (default: 32M, min: 1M) |
 | `-j N` / `--threads N` | Thread count (default: logical CPUs) |
