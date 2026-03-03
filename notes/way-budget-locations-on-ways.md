@@ -2,7 +2,8 @@
 
 Date: 2026-03-03  
 Repo: `elivagar`  
-Code under test: `f70cd1a` (includes deadlock fix `90ad2ef`)
+Calibration code under test: `f70cd1a` (includes deadlock fix `90ad2ef`)  
+Applied default change commit: `1e22411`
 
 ## Scope
 
@@ -60,6 +61,23 @@ Finding: 128M is not best. 256M is fastest in this sample.
 | 512M | 271190 | 52864214 | 21228992 |
 
 Finding: 256M improves `phase12_ms` by ~3.4% vs 128M. 512M does not improve further.
+
+## Post-Change Verification
+
+Full production-style run with ocean, commit-anchored in brokkr DB:
+
+- UUID: `604f7f0e`
+- Commit: `1e22411`
+- Command: `brokkr bench self --dataset north-america --variant locations --runs 1`
+- Total: `454436 ms` (454.4s)
+- `phase12_ms`: `270966` (271.0s)
+- `ocean_ms`: `14498`
+- `phase3_ms`: `1359`
+- `phase4_ms`: `167229`
+- `peak_rss`: `21317.5 MB`
+- `max_way_inflight_bytes`: `26822279`
+
+Compared to the earlier North America full run noted in TODO (`90ad2ef`: 462.6s total, 283s pbf), this verifies improvement after adopting the mode-aware default.
 
 ## Interpretation
 
