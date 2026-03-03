@@ -47,7 +47,9 @@ Remaining (contingent — only if planet runs still OOM):
 - [x] Step 4: Full pipeline on North America (18.2 GB locations PBF, plantasjen, `90ad2ef`)
   462.6s total (283s pbf, 15s ocean, 0.5s sort, 164s assemble), 19.4 GB RSS, 12.4 GB output
   510M features, 12.5M unique tiles. LocationsOnWays mode (no node store).
-- [ ] Step 4b: Hotpath alloc profile on North America locations-on-ways — identify top allocators at scale
+- [x] Step 4b: Hotpath alloc profile on North America locations-on-ways — identify top allocators at scale
+  Completed 2026-03-03 on `fb0c5e3` (UUID `2acb944c`).
+  See `notes/north-america-hotpath-alloc-2026-03-03.md` for top allocators and next optimization targets.
 - [x] Way-budget calibration investigation for locations-on-ways completed (2026-03-03).
   See `notes/way-budget-locations-on-ways.md` for Denmark/Germany/North America sweep results and recommendations.
 - [ ] Step 5: Full pipeline on Europe (~28 GB) — needs ≥64 GB RAM
