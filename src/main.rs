@@ -4,7 +4,7 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -86,6 +86,10 @@ struct RunArgs {
     /// PBF has node coordinates embedded in ways.
     #[arg(long)]
     locations_on_ways: bool,
+
+    /// Disable ocean shapefile processing (skip auto-detection).
+    #[arg(long)]
+    no_ocean: bool,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -129,7 +133,31 @@ fn parse_byte_size_min_1m(s: &str) -> Result<usize, String> {
     }
 }
 
+/// Detect ocean shapefiles in the given data directory.
+///
+/// Returns (full-resolution, simplified) paths if they exist on disk.
+fn detect_ocean(data_dir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
+    let full = data_dir
+        .join("water-polygons-split-3857")
+        .join("water_polygons.shp");
+    let simplified = data_dir
+        .join("simplified-water-polygons-split-3857")
+        .join("simplified_water_polygons.shp");
+    (
+        full.exists().then_some(full),
+        simplified.exists().then_some(simplified),
+    )
+}
+
 fn main() {
+    // Disable hotpath metrics server by default — elivagar is a sync binary
+    // with no async runtime, so the metrics server is never useful.
+    // Override with HOTPATH_METRICS_SERVER_OFF=false if needed.
+    if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
+        // SAFETY: called before any threads are spawned.
+        unsafe { std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "true") };
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -161,14 +189,23 @@ fn run(args: RunArgs) {
         SkipToArg::Sort => elivagar::SkipTo::Sort,
     });
 
+    // Resolve ocean shapefiles: explicit flags take priority, then auto-detect
+    // from data/ relative to cwd, unless --no-ocean suppresses it entirely.
+    let (ocean, ocean_simplified) = if args.no_ocean {
+        (None, None)
+    } else {
+        let auto = detect_ocean(Path::new("data"));
+        (args.ocean.or(auto.0), args.ocean_simplified.or(auto.1))
+    };
+
     let config = elivagar::TilegenConfig {
         pbf_path: args.input,
         output_path: args.output,
         tmp_dir: args.tmp_dir,
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: args.ocean,
-        ocean_simplified_shapefile: args.ocean_simplified,
+        ocean_shapefile: ocean,
+        ocean_simplified_shapefile: ocean_simplified,
         skip_to,
         in_memory: args.in_memory,
         compression_level: args.compression_level,

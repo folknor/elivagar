@@ -99,8 +99,9 @@ Uses clap derive with two subcommands:
 
 - `-o` / `--output` — output PMTiles path (required)
 - `--tmp-dir path` — temporary directory for sort chunks (default: `data/tilegen_tmp`)
-- `--ocean path.shp` — ocean polygon shapefile (water-polygons-split-3857)
-- `--ocean-simplified path.shp` — simplified ocean shapefile for z0-7
+- `--ocean path.shp` — ocean polygon shapefile (water-polygons-split-3857). Auto-detected from `data/` when omitted.
+- `--ocean-simplified path.shp` — simplified ocean shapefile for z0-7. Auto-detected from `data/` when omitted.
+- `--no-ocean` — disable ocean shapefile processing (skip auto-detection)
 - `--skip-to ocean|sort` — resume from checkpoint
 - `--in-memory` — keep tile blob in RAM (faster for small extracts)
 - `--compression-level 0-10` — gzip level (default 6)

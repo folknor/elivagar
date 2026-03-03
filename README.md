@@ -15,8 +15,9 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | Flag | Description |
 |------|-------------|
 | `-o path` / `--output path` | Output PMTiles path (required) |
-| `--ocean path.shp` | Ocean shapefile (`water-polygons-split-3857`) |
-| `--ocean-simplified path.shp` | Simplified ocean shapefile for z0-7 (fewer vertices) |
+| `--ocean path.shp` | Ocean shapefile (`water-polygons-split-3857`). Auto-detected from `data/` when omitted |
+| `--ocean-simplified path.shp` | Simplified ocean shapefile for z0-7. Auto-detected from `data/` when omitted |
+| `--no-ocean` | Disable ocean shapefile processing (skip auto-detection) |
 | `--tmp-dir path` | Directory for temporary sort files (default: `data/tilegen_tmp`) |
 | `--skip-to ocean\|sort` | Resume from a previous run's checkpoint |
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |
@@ -46,10 +47,11 @@ Prints header info, tile statistics, section layout, and metadata (layer list wi
 ### Example
 
 ```
-elivagar run denmark-latest.osm.pbf -o denmark.pmtiles \
-  --ocean water-polygons-split-3857/water_polygons.shp \
-  --ocean-simplified simplified-water-polygons-split-3857/simplified_water_polygons.shp
+elivagar run denmark-latest.osm.pbf -o denmark.pmtiles
 ```
+
+Ocean shapefiles are auto-detected from `data/water-polygons-split-3857/` and
+`data/simplified-water-polygons-split-3857/` if present. Use `--no-ocean` to skip.
 
 ## Pipeline
 
@@ -57,7 +59,7 @@ elivagar run denmark-latest.osm.pbf -o denmark.pmtiles \
    If the PBF declares `Sort.Type_then_ID` (all major producers do), nodes are stored in a
    compact in-RAM index with FOR compression (~420 MB for Denmark, 75% of raw for large
    extracts). Unsorted PBFs fall back to a flat mmap file.
-2. **Ocean** -- ocean shapefile processing (optional, requires `--ocean`)
+2. **Ocean** -- ocean shapefile processing (auto-detected from `data/`, or explicit `--ocean`)
 3. **Sort** -- external merge sort by Hilbert tile ID
 4. **Assembly** -- MVT encode + gzip + PMTiles write
 
