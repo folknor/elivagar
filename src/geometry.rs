@@ -3,6 +3,7 @@
 // All operations work in Mercator [0,1] coordinate space unless stated otherwise.
 // Pure Rust aside from smallvec for inline small-vec returns.
 
+#[cfg(test)]
 use smallvec::SmallVec;
 use std::f64::consts::PI;
 use std::sync::OnceLock;

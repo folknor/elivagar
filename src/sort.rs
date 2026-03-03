@@ -315,7 +315,11 @@ pub struct SortReader {
 
 impl SortReader {
     /// Open all chunk files found in a directory and create a merge reader.
-    pub fn from_dir(tmp_dir: &Path) -> io::Result<Self> {
+    ///
+    /// `expected_chunks`: if `Some(n)`, verifies exactly `n` contiguous chunk files exist.
+    /// Detects stale leftover chunks from a previous run that could silently contaminate
+    /// the merge. Pass `None` to skip validation (not recommended for `--skip-to sort`).
+    pub fn from_dir(tmp_dir: &Path, expected_chunks: Option<usize>) -> io::Result<Self> {
         let mut chunk_paths: Vec<PathBuf> = Vec::new();
         let mut i = 0;
         loop {
@@ -326,6 +330,20 @@ impl SortReader {
             } else {
                 break;
             }
+        }
+        if let Some(expected) = expected_chunks
+            && chunk_paths.len() != expected
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "chunk count mismatch: found {} but checkpoint expects {}. \
+                     Stale chunks from a previous run may be present — \
+                     run a full pipeline (without --skip-to) to regenerate.",
+                    chunk_paths.len(),
+                    expected,
+                ),
+            ));
         }
         Self::new(&chunk_paths)
     }
@@ -586,5 +604,54 @@ mod tests {
             assert_eq!(embedded_key, record.key);
         }
         assert_eq!(count, 50);
+    }
+
+    #[test]
+    fn from_dir_accepts_matching_chunk_count() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut writer = SortWriter::new(dir.path(), 100).unwrap();
+        for i in 0u64..200 {
+            writer.push(SortRecord { key: i, data: Box::from(i.to_le_bytes().as_slice()) }).unwrap();
+        }
+        let n = writer.chunk_count();
+        assert!(n > 1, "need multiple chunks for meaningful test");
+        // finish() consumes writer but chunks remain on disk
+        let _ = writer.finish().unwrap();
+
+        // Exact match passes
+        let reader = SortReader::from_dir(dir.path(), Some(n));
+        assert!(reader.is_ok());
+    }
+
+    #[test]
+    fn from_dir_rejects_chunk_count_mismatch() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut writer = SortWriter::new(dir.path(), 100).unwrap();
+        for i in 0u64..200 {
+            writer.push(SortRecord { key: i, data: Box::from(i.to_le_bytes().as_slice()) }).unwrap();
+        }
+        let n = writer.chunk_count();
+        let _ = writer.finish().unwrap();
+
+        // Wrong count is rejected
+        let result = SortReader::from_dir(dir.path(), Some(n + 5));
+        let err = result.err().expect("expected error for mismatched chunk count");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let msg = err.to_string();
+        assert!(msg.contains("chunk count mismatch"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn from_dir_skips_validation_when_none() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut writer = SortWriter::new(dir.path(), 100).unwrap();
+        for i in 0u64..200 {
+            writer.push(SortRecord { key: i, data: Box::from(i.to_le_bytes().as_slice()) }).unwrap();
+        }
+        let _ = writer.finish().unwrap();
+
+        // None skips validation — always succeeds
+        let reader = SortReader::from_dir(dir.path(), None);
+        assert!(reader.is_ok());
     }
 }

@@ -42,7 +42,7 @@ Items from external code review, triaged by severity.
 
 ### Medium: stale sort chunks in `--skip-to sort`
 
-- [ ] Add chunk-count integrity check for `--skip-to sort`.
+- [x] Add chunk-count integrity check for `--skip-to sort`.
   - `--skip-to sort` reads chunks via `SortReader::from_dir()` with no validation.
     If old chunks survive a failed `remove_dir_all`, they get silently merged.
   - Fix: save total chunk count (PBF + ocean) to checkpoint before sort phase;

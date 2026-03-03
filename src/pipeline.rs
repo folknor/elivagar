@@ -140,6 +140,7 @@ pub struct TilegenConfig {
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
+const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const LAND_MASK_FILE: &str = "land_mask.bin";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
@@ -356,12 +357,16 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     // --- Phase 3: Sort ---
     let sort_chunks = sort_reader.as_ref().map(sort::SortWriter::chunk_count);
+    save_sort_chunk_count(&config.tmp_dir, sort_chunks)?;
     let phase3_start = Instant::now();
     eprintln!("--- Sort ---");
     let mut sort_reader = if let Some(sw) = sort_reader {
         sw.finish()?
     } else {
-        sort::SortReader::from_dir(&config.tmp_dir.join(SORT_CHUNKS_DIR))?
+        sort::SortReader::from_dir(
+            &config.tmp_dir.join(SORT_CHUNKS_DIR),
+            load_sort_chunk_count(&config.tmp_dir),
+        )?
     };
     let phase3_elapsed = phase3_start.elapsed();
     let sort_rss = peak_rss_kb();
@@ -443,6 +448,24 @@ fn save_checkpoint(tmp_dir: &std::path::Path, bounds: &MercBbox, chunk_count: us
     );
     std::fs::write(path, content)?; // io::Error message is sufficient context.
     Ok(())
+}
+
+/// Save total chunk count so --skip-to sort can validate against stale leftovers.
+fn save_sort_chunk_count(tmp_dir: &std::path::Path, count: Option<usize>) -> Result<(), PipelineError> {
+    if let Some(n) = count {
+        std::fs::write(tmp_dir.join(SORT_CHECKPOINT_FILE), n.to_string())?;
+    }
+    Ok(())
+}
+
+fn load_sort_chunk_count(tmp_dir: &std::path::Path) -> Option<usize> {
+    match std::fs::read_to_string(tmp_dir.join(SORT_CHECKPOINT_FILE)) {
+        Ok(content) => content.trim().parse().ok(),
+        Err(_) => {
+            eprintln!("  Warning: no sort checkpoint found — cannot verify chunk integrity");
+            None
+        }
+    }
 }
 
 fn save_land_mask(tmp_dir: &std::path::Path, mask: &geometry::LandMask) -> Result<(), PipelineError> {
