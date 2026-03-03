@@ -11,9 +11,25 @@
 2. [ ] Scale validation: run Europe full pipeline (locations-on-ways path).
    - Ref: Planet scale milestone below.
 3. [ ] Scale validation: run planet full pipeline when hardware is available.
-4. [ ] Flat node-index safety guardrails.
-   - Add PBF-size guard for unsorted input and hard cap on flat index size.
-5. [ ] PMTiles dedup correctness hardening.
+4. [x] Flat index guardrail: enforce unsorted-input size gate before creating `nodes.idx`.
+   - User-facing behavior: fail fast when header is not `Sort.Type_then_ID` and input PBF is above threshold (target: `>1 GB`), instead of allowing pathological sparse-index runs.
+   - Error UX: include exact input size and concrete fixes (`--force-sorted` when true, or sort first with `pbfhogg sort`; `osmium sort` as fallback).
+   - Code context: pipeline preflight near current unsorted node-store branch in `src/pipeline.rs`.
+5. [x] Flat index guardrail: hard-cap flat node-index file size.
+   - User-facing behavior: abort with actionable error once projected/actual index growth crosses cap (target: `16 GB`) to prevent machine-wide thrash.
+   - Error UX: explain cap rationale and recovery path (sorted PBF or locations-on-ways input).
+   - Code context: `NodeIndex::put` growth path (`MAX_FLAT_INDEX_SIZE = 16 GB`) with unit test coverage.
+6. [ ] Flat index guardrail: CLI/config surface for controlled override.
+   - User-facing behavior: sensible default safety on, with explicit override for expert/CI scenarios.
+   - UX requirement: warning must state that override may cause severe IO/memory degradation.
+   - Deliverable: define flag/env naming and precedence, document in `--help`.
+7. [ ] Flat index guardrail: integration tests for rejection and allow paths.
+   - Tests: sorted large input allowed; unsorted small input allowed; unsorted large input rejected with stable error text; override path works.
+   - Success criterion: deterministic failures before heavy work starts.
+8. [ ] Flat index guardrail: docs update for operators.
+   - Update README/notes with a short “why this fails early” section and copy-paste remediation commands.
+   - Include explicit guidance for 32 GB vs 64 GB hosts.
+9. [ ] PMTiles dedup correctness hardening.
    - Current dedup uses hash+len without byte-compare.
    - Ref: `pmtiles_writer.rs:196`.
 

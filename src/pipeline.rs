@@ -488,8 +488,9 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                      The flat node index would create a ~96 GB sparse file, causing severe\n\
                      performance degradation on machines with <128 GB RAM. Options:\n\
                      1. Use --force-sorted if the PBF is actually sorted (most Geofabrik extracts are)\n\
-                     2. Sort the PBF first with: osmium sort input.pbf -o sorted.pbf\n\
-                     3. Use a sorted PBF from Geofabrik or planet.openstreetmap.org",
+                     2. Sort the PBF first with: pbfhogg sort input.pbf -o sorted.pbf\n\
+                     3. Alternative sorter: osmium sort input.pbf -o sorted.pbf\n\
+                     4. Use a sorted PBF from Geofabrik or planet.openstreetmap.org",
                     pbf_size as f64 / (1024.0 * 1024.0 * 1024.0),
                 )));
             }

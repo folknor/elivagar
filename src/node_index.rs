@@ -23,6 +23,7 @@ use memmap2::{Mmap, MmapMut};
 
 const ENTRY_SIZE: u64 = 8; // 4 bytes lat_e7 + 4 bytes lon_e7
 const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
+const MAX_FLAT_INDEX_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 GB safety cap
 
 // XOR mask applied to stored coordinates so that (0,0) on disk means "unset"
 // while a real node at lat=0, lon=0 stores as non-zero.
@@ -69,6 +70,17 @@ impl NodeIndex {
         if node_id < 0 { return; }
         let offset = node_id as u64 * ENTRY_SIZE;
         let needed = offset + ENTRY_SIZE;
+
+        if needed > MAX_FLAT_INDEX_SIZE {
+            panic!(
+                "flat node index safety cap exceeded: requested {:.1} GB for node_id={} (cap: {:.1} GB). \
+                 Input is likely unsorted. Use a sorted PBF, run `pbfhogg sort input.pbf -o sorted.pbf`, \
+                 or use --force-sorted only if the PBF is actually sorted.",
+                needed as f64 / (1024.0 * 1024.0 * 1024.0),
+                node_id,
+                MAX_FLAT_INDEX_SIZE as f64 / (1024.0 * 1024.0 * 1024.0),
+            );
+        }
 
         if needed > self.file_len {
             // Grow in 1 GB increments until large enough.
@@ -1194,5 +1206,15 @@ mod tests {
         let reader = store.into_reader().unwrap();
         assert_eq!(reader.get(100), Some((555_000_000, 133_000_000)));
         assert_eq!(reader.get(999), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "flat node index safety cap exceeded")]
+    fn flat_index_safety_cap_triggers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_index_cap.bin");
+        let mut idx = NodeIndex::create(&path).unwrap();
+        let node_id = ((MAX_FLAT_INDEX_SIZE / ENTRY_SIZE) + 1) as i64;
+        idx.put(node_id, 1, 1);
     }
 }
