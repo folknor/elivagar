@@ -105,6 +105,9 @@ pub struct TilegenConfig {
     /// declare `Sort.Type_then_ID`. Useful for PBFs that are sorted in practice
     /// but lack the header flag. Aborts with an error if nodes aren't monotonic.
     pub force_sorted: bool,
+    /// Allow unsafe flat node-index operation by bypassing unsorted-size and
+    /// flat-index-size safety guardrails. Intended only for expert debugging.
+    pub allow_unsafe_flat_index: bool,
     /// Thread budget. Controls the rayon global pool size and pbfhogg decode pool.
     /// Default: `std::thread::available_parallelism()` (logical CPUs).
     pub threads: usize,
@@ -482,7 +485,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             let pbf_size = std::fs::metadata(&config.pbf_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            if pbf_size > MAX_FLAT_PBF_SIZE {
+            if pbf_size > MAX_FLAT_PBF_SIZE && !config.allow_unsafe_flat_index {
                 return Err(PipelineError(format!(
                     "PBF file is {:.1} GB but does not declare Sort.Type_then_ID.\n\
                      The flat node index would create a ~96 GB sparse file, causing severe\n\
@@ -494,8 +497,17 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     pbf_size as f64 / (1024.0 * 1024.0 * 1024.0),
                 )));
             }
+            if config.allow_unsafe_flat_index {
+                eprintln!(
+                    "  WARNING: unsafe flat index override enabled; bypassing unsorted-size and flat-index-size safety guardrails"
+                );
+            }
             eprintln!("  PBF not sorted — using flat mmap node index");
-            NodeStore::Flat(NodeIndex::create(&idx_dir.join("nodes.idx"))?)
+            NodeStore::Flat(if config.allow_unsafe_flat_index {
+                NodeIndex::create_unbounded(&idx_dir.join("nodes.idx"))?
+            } else {
+                NodeIndex::create(&idx_dir.join("nodes.idx"))?
+            })
         })
     };
     // Option so we can move to drain thread during way phase and get back after.

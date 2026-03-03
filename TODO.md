@@ -19,10 +19,11 @@
    - User-facing behavior: abort with actionable error once projected/actual index growth crosses cap (target: `16 GB`) to prevent machine-wide thrash.
    - Error UX: explain cap rationale and recovery path (sorted PBF or locations-on-ways input).
    - Code context: `NodeIndex::put` growth path (`MAX_FLAT_INDEX_SIZE = 16 GB`) with unit test coverage.
-6. [ ] Flat index guardrail: CLI/config surface for controlled override.
+6. [x] Flat index guardrail: CLI/config surface for controlled override.
    - User-facing behavior: sensible default safety on, with explicit override for expert/CI scenarios.
-   - UX requirement: warning must state that override may cause severe IO/memory degradation.
-   - Deliverable: define flag/env naming and precedence, document in `--help`.
+   - UX requirement: warning states that override may cause severe IO/memory degradation.
+   - Delivered: `--allow-unsafe-flat-index` and `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1`;
+     CLI flag takes precedence in intent (effective behavior is logical OR).
 7. [ ] Flat index guardrail: integration tests for rejection and allow paths.
    - Tests: sorted large input allowed; unsorted small input allowed; unsorted large input rejected with stable error text; override path works.
    - Success criterion: deterministic failures before heavy work starts.

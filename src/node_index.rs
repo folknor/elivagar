@@ -36,6 +36,7 @@ pub struct NodeIndex {
     file: File,
     mmap: MmapMut,
     file_len: u64,
+    max_file_size: Option<u64>,
 }
 
 impl NodeIndex {
@@ -44,6 +45,18 @@ impl NodeIndex {
     /// No madvise hints are set during the write phase — see module-level
     /// comment for history on why MADV_SEQUENTIAL was removed.
     pub fn create(path: &Path) -> io::Result<Self> {
+        Self::create_internal(path, Some(MAX_FLAT_INDEX_SIZE))
+    }
+
+    /// Create a new writable node index file at `path` with no safety cap.
+    ///
+    /// This is intentionally unsafe and should only be used when callers
+    /// explicitly opt in to bypass guardrails.
+    pub fn create_unbounded(path: &Path) -> io::Result<Self> {
+        Self::create_internal(path, None)
+    }
+
+    fn create_internal(path: &Path, max_file_size: Option<u64>) -> io::Result<Self> {
         let file = File::options()
             .read(true)
             .write(true)
@@ -60,6 +73,7 @@ impl NodeIndex {
             file,
             mmap,
             file_len,
+            max_file_size,
         })
     }
 
@@ -71,15 +85,17 @@ impl NodeIndex {
         let offset = node_id as u64 * ENTRY_SIZE;
         let needed = offset + ENTRY_SIZE;
 
-        if needed > MAX_FLAT_INDEX_SIZE {
-            panic!(
-                "flat node index safety cap exceeded: requested {:.1} GB for node_id={} (cap: {:.1} GB). \
-                 Input is likely unsorted. Use a sorted PBF, run `pbfhogg sort input.pbf -o sorted.pbf`, \
-                 or use --force-sorted only if the PBF is actually sorted.",
-                needed as f64 / (1024.0 * 1024.0 * 1024.0),
-                node_id,
-                MAX_FLAT_INDEX_SIZE as f64 / (1024.0 * 1024.0 * 1024.0),
-            );
+        if let Some(max_file_size) = self.max_file_size {
+            if needed > max_file_size {
+                panic!(
+                    "flat node index safety cap exceeded: requested {:.1} GB for node_id={} (cap: {:.1} GB). \
+                     Input is likely unsorted. Use a sorted PBF, run `pbfhogg sort input.pbf -o sorted.pbf`, \
+                     or use --force-sorted only if the PBF is actually sorted.",
+                    needed as f64 / (1024.0 * 1024.0 * 1024.0),
+                    node_id,
+                    max_file_size as f64 / (1024.0 * 1024.0 * 1024.0),
+                );
+            }
         }
 
         if needed > self.file_len {

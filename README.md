@@ -23,6 +23,7 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |
 | `--compression-level 0-10` | Gzip compression level (default: 6). Lower = faster, larger output |
 | `--force-sorted` | Use compact in-RAM node store even if PBF header lacks `Sort.Type_then_ID` |
+| `--allow-unsafe-flat-index` | Bypass flat-index safety guardrails (unsafe; may cause severe IO/RSS degradation) |
 | `--locations-on-ways` | PBF has node coordinates embedded in ways |
 | `--sort-budget size` | Sort chunk memory budget (default: 1G, min: 64M). Accepts `256M`, `1G`, or raw bytes |
 | `--way-budget size` | In-flight way processing budget (default: 128M standard / 256M with `--locations-on-ways`, min: 1M) |
@@ -43,6 +44,7 @@ Prints header info, tile statistics, section layout, and metadata (layer list wi
 | Variable | Description |
 |----------|-------------|
 | `ELIVAGAR_NODE_STATS=1` | Print detailed SortedNodeStore diagnostics (chunk count, compression ratio, blob bytes). Requires a full scan of the node store during the PBF phase — fast on regional extracts, slow at planet scale. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after timing, without this variable. |
+| `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1` | Same as `--allow-unsafe-flat-index`. Bypasses unsorted-size and flat-index-size guardrails. |
 
 ### Example
 
@@ -65,6 +67,29 @@ Ocean shapefiles are auto-detected from `data/water-polygons-split-3857/` and
 
 `--skip-to ocean` reuses PBF chunks from a previous full run.
 `--skip-to sort` reuses all chunks (PBF + ocean).
+
+### Flat index safety guardrails
+
+When input does not declare `Sort.Type_then_ID`, elivagar falls back to the flat mmap node index.
+That path can be dangerous at large scale, so guardrails are enabled by default:
+
+1. Unsorted inputs larger than `1 GB` fail fast before heavy work starts.
+2. Flat index growth is hard-capped at `16 GB`.
+
+Recommended remediation:
+
+```
+pbfhogg sort input.pbf -o sorted.pbf
+```
+
+Alternative sorter:
+
+```
+osmium sort input.pbf -o sorted.pbf
+```
+
+If you intentionally want to bypass guardrails for expert debugging/CI, use
+`--allow-unsafe-flat-index` (or `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1`).
 
 ## Output size
 
