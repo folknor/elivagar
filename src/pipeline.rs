@@ -209,6 +209,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let mut ocean_rss: Option<u64> = None;
     let mut max_way_inflight_bytes: Option<usize> = None;
     let mut max_rel_batch_bytes: Option<usize> = None;
+    let mut relation_blocks_buffered: Option<usize> = None;
 
     let mut node_store_stats: Option<(u64, usize)> = None;
 
@@ -225,10 +226,11 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
-            let (sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm) = phase_read_and_process(config)?;
+            let (sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks) = phase_read_and_process(config)?;
             node_store_stats = ns_stats;
             max_way_inflight_bytes = Some(way_hwm);
             max_rel_batch_bytes = Some(rel_hwm);
+            relation_blocks_buffered = Some(rel_blocks);
             phase12_elapsed = Some(phase12_start.elapsed());
             phase12_rss = peak_rss_kb();
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
@@ -362,6 +364,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if let Some(bytes) = max_rel_batch_bytes {
         eprintln!("max_rel_batch_bytes={bytes}");
     }
+    if let Some(n) = relation_blocks_buffered {
+        eprintln!("relation_blocks_buffered={n}");
+    }
     eprintln!("max_assemble_batch_bytes={max_assemble_batch_bytes}");
     Ok(())
 }
@@ -414,7 +419,7 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::unwrap_in_result, clippy::type_complexity)]
 #[hotpath::measure]
-fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize), PipelineError> {
+fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize, usize), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let sort_chunk_budget = if config.sort_chunk_size > 0 {
@@ -757,17 +762,14 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         eprintln!("  Way index finalized, processing relations...");
     }
 
+    let relation_blocks_buffered = relation_blocks.len();
     // Process buffered relation blocks.
     for block in &relation_blocks {
         block.for_each_element(|element| {
             if let Element::Relation(rel) = element {
                 rel_count += 1;
-                let tags_vec: Vec<(&str, &str)> = rel.tags().collect();
-                if tags_vec.is_empty() {
-                    return;
-                }
                 if let Some(prepared) = prepare_relation(
-                    &rel, &tags_vec,
+                    &rel,
                     way_index.as_ref().expect("way_index not returned from drain"),
                 ) {
                     rel_batch_bytes += estimate_prepared_rel_bytes(&prepared);
@@ -826,7 +828,15 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     eprintln!("  Land mask: {} z14 cells populated", land_mask.count_set());
 
     let max_way_inflight_bytes = way_hwm.load(Ordering::Relaxed);
-    Ok((sort_writer.expect("sort_writer not returned from drain"), data_bounds, land_mask, node_store_stats, max_way_inflight_bytes, max_rel_batch_bytes))
+    Ok((
+        sort_writer.expect("sort_writer not returned from drain"),
+        data_bounds,
+        land_mask,
+        node_store_stats,
+        max_way_inflight_bytes,
+        max_rel_batch_bytes,
+        relation_blocks_buffered,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -921,6 +931,114 @@ struct ProcessedWay {
     records: Vec<SortRecord>,
 }
 
+struct PointEmitScratch {
+    geom_buf: Vec<u32>,
+    attrs_buf: Vec<u8>,
+}
+
+impl PointEmitScratch {
+    fn new() -> Self {
+        Self {
+            geom_buf: Vec::new(),
+            attrs_buf: Vec::new(),
+        }
+    }
+}
+
+struct LineEmitScratch {
+    geom_buf: Vec<u32>,
+    attrs_buf: Vec<u8>,
+    tc_buf: Vec<(i32, i32)>,
+}
+
+impl LineEmitScratch {
+    fn new() -> Self {
+        Self {
+            geom_buf: Vec::new(),
+            attrs_buf: Vec::new(),
+            tc_buf: Vec::new(),
+        }
+    }
+}
+
+struct PolygonEmitScratch {
+    geom_buf: Vec<u32>,
+    attrs_buf: Vec<u8>,
+    tc_buf: Vec<(i32, i32)>,
+    clip_a: Vec<Point>,
+    clip_b: Vec<Point>,
+    row_clip_a: Vec<Point>,
+    row_clip_b: Vec<Point>,
+}
+
+impl PolygonEmitScratch {
+    fn new() -> Self {
+        Self {
+            geom_buf: Vec::new(),
+            attrs_buf: Vec::new(),
+            tc_buf: Vec::new(),
+            clip_a: Vec::new(),
+            clip_b: Vec::new(),
+            row_clip_a: Vec::new(),
+            row_clip_b: Vec::new(),
+        }
+    }
+}
+
+struct MultipolygonEmitScratch {
+    geom_buf: Vec<u32>,
+    attrs_buf: Vec<u8>,
+    clip_a: Vec<Point>,
+    clip_b: Vec<Point>,
+    all_rings: Vec<Vec<(i32, i32)>>,
+    inner_bboxes: Vec<geometry::MercBbox>,
+    row_clip_a: Vec<Point>,
+    row_clip_b: Vec<Point>,
+    row_outer: Vec<Point>,
+    row_inners: Vec<Vec<Point>>,
+    row_inner_bboxes: Vec<geometry::MercBbox>,
+}
+
+impl MultipolygonEmitScratch {
+    fn new() -> Self {
+        Self {
+            geom_buf: Vec::new(),
+            attrs_buf: Vec::new(),
+            clip_a: Vec::new(),
+            clip_b: Vec::new(),
+            all_rings: Vec::new(),
+            inner_bboxes: Vec::new(),
+            row_clip_a: Vec::new(),
+            row_clip_b: Vec::new(),
+            row_outer: Vec::new(),
+            row_inners: Vec::new(),
+            row_inner_bboxes: Vec::new(),
+        }
+    }
+}
+
+struct WayWorkerScratch {
+    merc: Vec<Point>,
+    point_emit: PointEmitScratch,
+    line_emit: LineEmitScratch,
+    polygon_emit: PolygonEmitScratch,
+}
+
+impl WayWorkerScratch {
+    fn new() -> Self {
+        Self {
+            merc: Vec::new(),
+            point_emit: PointEmitScratch::new(),
+            line_emit: LineEmitScratch::new(),
+            polygon_emit: PolygonEmitScratch::new(),
+        }
+    }
+}
+
+thread_local! {
+    static WAY_WORKER_SCRATCH: std::cell::RefCell<WayWorkerScratch> = std::cell::RefCell::new(WayWorkerScratch::new());
+}
+
 /// Drain a single batch of processed way results: write way_index entries,
 /// push sort records. Returns feature count. Land mask marking moved to rayon threads.
 #[hotpath::measure]
@@ -984,44 +1102,50 @@ fn process_raw_way(
         return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new() };
     }
 
-    // Project to Mercator
-    let merc: Vec<Point> = coords_e7.iter()
-        .map(|&(lat, lon)| geometry::project_e7(lat, lon))
-        .collect();
-
-    let bbox = merc_bbox(&merc);
-
-    // Enrich polygon matches with area-dependent data (way_area, min_zoom overrides)
-    if is_closed {
-        let area_m2 = geometry::area_sq_meters(&merc);
-        enrich_polygon_matches(&mut matches, area_m2);
-    }
-
     #[allow(clippy::cast_sign_loss)]
     let osm_id = raw.way_id as u64;
     let mut records = Vec::new();
+    let mut bbox: Option<MercBbox> = None;
 
-    for m in &matches {
-        let z_lo = m.min_zoom.max(min_zoom);
-        let z_hi = m.max_zoom.min(max_zoom);
-        if z_lo > z_hi {
-            continue;
+    WAY_WORKER_SCRATCH.with(|cell| {
+        let scratch = &mut *cell.borrow_mut();
+        scratch.merc.clear();
+        scratch.merc.extend(coords_e7.iter().map(|&(lat, lon)| geometry::project_e7(lat, lon)));
+
+        let merc = scratch.merc.as_slice();
+        let merc_bbox_val = merc_bbox(merc);
+        bbox = Some(merc_bbox_val);
+
+        // Enrich polygon matches with area-dependent data (way_area, min_zoom overrides)
+        if is_closed {
+            let area_m2 = geometry::area_sq_meters(merc);
+            enrich_polygon_matches(&mut matches, area_m2);
         }
 
-        match m.geom_expect {
-            GeomExpect::Point | GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
-                emit_point_or_centroid(osm_id, &merc, &bbox, m, z_lo, z_hi, &mut records);
+        for m in &matches {
+            let z_lo = m.min_zoom.max(min_zoom);
+            let z_hi = m.max_zoom.min(max_zoom);
+            if z_lo > z_hi {
+                continue;
             }
-            GeomExpect::Line => {
-                emit_line_feature(osm_id, &merc, m, z_lo, z_hi, &mut records);
-            }
-            GeomExpect::Polygon => {
-                emit_polygon_feature(osm_id, &merc, m, z_lo, z_hi, &mut records);
+
+            match m.geom_expect {
+                GeomExpect::Point | GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
+                    emit_point_or_centroid(
+                        osm_id, merc, &merc_bbox_val, m, z_lo, z_hi, &mut records, &mut scratch.point_emit,
+                    );
+                }
+                GeomExpect::Line => {
+                    emit_line_feature(osm_id, merc, m, z_lo, z_hi, &mut records, &mut scratch.line_emit);
+                }
+                GeomExpect::Polygon => {
+                    emit_polygon_feature(osm_id, merc, m, z_lo, z_hi, &mut records, &mut scratch.polygon_emit);
+                }
             }
         }
-    }
+    });
 
-    land_mask.mark_bbox(&bbox);
+    land_mask.mark_bbox(&bbox.expect("bbox set from merc coords"));
 
     ProcessedWay { way_id: raw.way_id, coords_e7, records }
 }
@@ -1056,15 +1180,21 @@ fn estimate_prepared_rel_bytes(r: &PreparedRelation) -> usize {
 #[hotpath::measure]
 fn prepare_relation(
     rel: &pbfhogg::Relation<'_>,
-    tags: &[(&str, &str)],
     way_index: &WayIndex,
 ) -> Option<PreparedRelation> {
-    let tag_helper = Tags(tags);
-
-    let rel_type = tag_helper.get("type").unwrap_or("");
+    // Fast reject without tag allocation: most relations are not multipolygon/boundary.
+    let mut rel_type = "";
+    for (k, v) in rel.tags() {
+        if k == "type" {
+            rel_type = v;
+            break;
+        }
+    }
     if rel_type != "multipolygon" && rel_type != "boundary" {
         return None;
     }
+    let tags: SmallVec<[(&str, &str); 16]> = rel.tags().collect();
+    let tag_helper = Tags(&tags);
 
     // Match while PBF borrows are alive — attrs copy only the relevant tag values
     // into Cow::Owned, avoiding cloning ALL tags to String.
@@ -1113,6 +1243,9 @@ struct RelAcc {
     bytes: usize,
     chunk_paths: Vec<std::path::PathBuf>,
     count: u64,
+    point_emit: PointEmitScratch,
+    line_emit: LineEmitScratch,
+    multipolygon_emit: MultipolygonEmitScratch,
     simp_scratch: geometry::SimplifyMultiScratch,
 }
 
@@ -1152,13 +1285,20 @@ fn flush_rel_batch(
         .fold(
             || RelAcc {
                 records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0,
+                point_emit: PointEmitScratch::new(),
+                line_emit: LineEmitScratch::new(),
+                multipolygon_emit: MultipolygonEmitScratch::new(),
                 simp_scratch: geometry::SimplifyMultiScratch::new(),
             },
             |mut acc, rel| {
                 let before = acc.records.len();
                 process_prepared_relation_into(
                     rel, min_zoom, max_zoom, land_mask,
-                    &mut acc.records, &mut acc.simp_scratch,
+                    &mut acc.records,
+                    &mut acc.point_emit,
+                    &mut acc.line_emit,
+                    &mut acc.multipolygon_emit,
+                    &mut acc.simp_scratch,
                 );
                 for r in &acc.records[before..] {
                     acc.bytes += r.data.len() + std::mem::size_of::<SortRecord>();
@@ -1174,6 +1314,9 @@ fn flush_rel_batch(
         .reduce(
             || RelAcc {
                 records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0,
+                point_emit: PointEmitScratch::new(),
+                line_emit: LineEmitScratch::new(),
+                multipolygon_emit: MultipolygonEmitScratch::new(),
                 simp_scratch: geometry::SimplifyMultiScratch::new(),
             },
             |mut a, mut b| {
@@ -1204,12 +1347,16 @@ fn flush_rel_batch(
 /// Called from rayon worker threads via `RelAcc` fold. Reuses the caller's
 /// `records` vec and `simp_scratch` to avoid per-relation allocation.
 #[hotpath::measure]
+#[allow(clippy::too_many_arguments)]
 fn process_prepared_relation_into(
     rel: PreparedRelation,
     min_zoom: u8,
     max_zoom: u8,
     land_mask: &geometry::LandMask,
     records: &mut Vec<SortRecord>,
+    point_emit: &mut PointEmitScratch,
+    line_emit: &mut LineEmitScratch,
+    multipolygon_emit: &mut MultipolygonEmitScratch,
     simp_scratch: &mut geometry::SimplifyMultiScratch,
 ) {
     let multi = multipolygon::assemble(&rel.member_ways);
@@ -1242,7 +1389,7 @@ fn process_prepared_relation_into(
                     land_mask.mark_bbox(&bbox);
                     emit_multipolygon_feature(
                         rel.osm_id, outer, inners, m,
-                        z_lo, z_hi, records, simp_scratch,
+                        z_lo, z_hi, records, multipolygon_emit, simp_scratch,
                     );
                 }
             }
@@ -1254,7 +1401,7 @@ fn process_prepared_relation_into(
                     let bbox = merc_bbox(outer);
                     land_mask.mark_bbox(&bbox);
                     emit_point_or_centroid(
-                        rel.osm_id, outer, &bbox, m, z_lo, z_hi, records,
+                        rel.osm_id, outer, &bbox, m, z_lo, z_hi, records, point_emit,
                     );
                 }
             }
@@ -1269,7 +1416,7 @@ fn process_prepared_relation_into(
                     let bbox = merc_bbox(&mw.coords);
                     land_mask.mark_bbox(&bbox);
                     emit_line_feature(
-                        rel.osm_id, &mw.coords, m, z_lo, z_hi, records,
+                        rel.osm_id, &mw.coords, m, z_lo, z_hi, records, line_emit,
                     );
                 }
             }
@@ -1315,6 +1462,7 @@ fn enrich_polygon_matches(matches: &mut [LayerMatch], area_m2: f64) {
 // ---------------------------------------------------------------------------
 
 #[hotpath::measure]
+#[allow(clippy::too_many_arguments)]
 fn emit_point_or_centroid(
     osm_id: u64,
     coords: &[Point],
@@ -1323,6 +1471,7 @@ fn emit_point_or_centroid(
     z_lo: u8,
     z_hi: u8,
     records: &mut Vec<SortRecord>,
+    scratch: &mut PointEmitScratch,
 ) -> u64 {
     if coords.is_empty() {
         return 0;
@@ -1336,15 +1485,15 @@ fn emit_point_or_centroid(
 
     let cbbox = MercBbox { min_x: p.x, min_y: p.y, max_x: p.x, max_y: p.y };
     let mut count: u64 = 0;
-    let mut geom_buf: Vec<u32> = Vec::new();
-    let mut attrs_buf: Vec<u8> = Vec::new();
     for z in z_lo..=z_hi {
-        encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
+        encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
         geometry::for_each_tile_in_bbox(&cbbox, z, |tx, ty| {
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
             let (px, py) = geometry::merc_to_tile_px(&p, tx, ty, z);
-            mvt::encode_point(&mut geom_buf, px, py);
-            let data = encode_feature_data_with_attrs(osm_id, GeomType::Point, &geom_buf, &attrs_buf);
+            mvt::encode_point(&mut scratch.geom_buf, px, py);
+            let data = encode_feature_data_with_attrs(
+                osm_id, GeomType::Point, &scratch.geom_buf, &scratch.attrs_buf,
+            );
             let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
             records.push(SortRecord { key, data });
             count += 1;
@@ -1361,15 +1510,12 @@ fn emit_line_feature(
     z_lo: u8,
     z_hi: u8,
     records: &mut Vec<SortRecord>,
+    scratch: &mut LineEmitScratch,
 ) -> u64 {
     let mut count: u64 = 0;
-    // Reusable buffers: hoisted outside the zoom×tile loops to avoid per-tile allocation.
-    let mut geom_buf: Vec<u32> = Vec::new();
-    let mut attrs_buf: Vec<u8> = Vec::new();
-    let mut tc_buf: Vec<(i32, i32)> = Vec::new();
 
     geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, |z, simplified| {
-        encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
+        encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
 
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
@@ -1386,16 +1532,18 @@ fn emit_line_feature(
                 if simplified.len() < 2 {
                     return;
                 }
-                geometry::to_tile_coords_into(&mut tc_buf, simplified, tx, ty, z);
-                if !skip_size_filter && geometry::line_is_subpixel(&tc_buf) {
+                geometry::to_tile_coords_into(&mut scratch.tc_buf, simplified, tx, ty, z);
+                if !skip_size_filter && geometry::line_is_subpixel(&scratch.tc_buf) {
                     return;
                 }
-                mvt::encode_linestring(&mut geom_buf, &tc_buf);
-                if geom_buf.is_empty() {
+                mvt::encode_linestring(&mut scratch.geom_buf, &scratch.tc_buf);
+                if scratch.geom_buf.is_empty() {
                     return;
                 }
                 let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                let data = encode_feature_data_with_attrs(osm_id, GeomType::LineString, &geom_buf, &attrs_buf);
+                let data = encode_feature_data_with_attrs(
+                    osm_id, GeomType::LineString, &scratch.geom_buf, &scratch.attrs_buf,
+                );
                 let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
                 records.push(SortRecord { key, data });
                 count += 1;
@@ -1405,16 +1553,18 @@ fn emit_line_feature(
                     if segment.len() < 2 {
                         return;
                     }
-                    geometry::to_tile_coords_into(&mut tc_buf, segment, tx, ty, z);
-                    if !skip_size_filter && geometry::line_is_subpixel(&tc_buf) {
+                    geometry::to_tile_coords_into(&mut scratch.tc_buf, segment, tx, ty, z);
+                    if !skip_size_filter && geometry::line_is_subpixel(&scratch.tc_buf) {
                         return;
                     }
-                    mvt::encode_linestring(&mut geom_buf, &tc_buf);
-                    if geom_buf.is_empty() {
+                    mvt::encode_linestring(&mut scratch.geom_buf, &scratch.tc_buf);
+                    if scratch.geom_buf.is_empty() {
                         return;
                     }
                     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                    let data = encode_feature_data_with_attrs(osm_id, GeomType::LineString, &geom_buf, &attrs_buf);
+                    let data = encode_feature_data_with_attrs(
+                        osm_id, GeomType::LineString, &scratch.geom_buf, &scratch.attrs_buf,
+                    );
                     let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
                     records.push(SortRecord { key, data });
                     count += 1;
@@ -1433,21 +1583,13 @@ fn emit_polygon_feature(
     z_lo: u8,
     z_hi: u8,
     records: &mut Vec<SortRecord>,
+    scratch: &mut PolygonEmitScratch,
 ) -> u64 {
     // Single-ring polygon (no holes)
     let mut count: u64 = 0;
-    // Reusable buffers: hoisted outside the zoom×tile loops to avoid per-tile allocation.
-    let mut geom_buf: Vec<u32> = Vec::new();
-    let mut attrs_buf: Vec<u8> = Vec::new();
-    let mut tc_buf: Vec<(i32, i32)> = Vec::new();
-    let mut clip_a: Vec<Point> = Vec::new();
-    let mut clip_b: Vec<Point> = Vec::new();
-    // F14: row pre-clip buffers.
-    let mut row_clip_a: Vec<Point> = Vec::new();
-    let mut row_clip_b: Vec<Point> = Vec::new();
 
     geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
-        encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
+        encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
 
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
@@ -1462,18 +1604,20 @@ fn emit_polygon_feature(
             if simplified.len() < 3 {
                 return;
             }
-            geometry::to_tile_coords_into(&mut tc_buf, simplified, tx, ty, z);
-            if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
+            geometry::to_tile_coords_into(&mut scratch.tc_buf, simplified, tx, ty, z);
+            if !skip_size_filter && geometry::ring_is_subpixel(&scratch.tc_buf) {
                 return;
             }
-            close_and_orient_cw(&mut tc_buf);
+            close_and_orient_cw(&mut scratch.tc_buf);
 
-            mvt::encode_polygon(&mut geom_buf, &[&tc_buf]);
-            if geom_buf.is_empty() {
+            mvt::encode_polygon(&mut scratch.geom_buf, &[&scratch.tc_buf]);
+            if scratch.geom_buf.is_empty() {
                 return;
             }
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_buf, &attrs_buf);
+            let data = encode_feature_data_with_attrs(
+                osm_id, GeomType::Polygon, &scratch.geom_buf, &scratch.attrs_buf,
+            );
             let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
             records.push(SortRecord { key, data });
             count += 1;
@@ -1492,11 +1636,13 @@ fn emit_polygon_feature(
                         1.0,
                         f64::from(ty + 1) * inv_z + tile_buf,
                     );
-                    geometry::clip_polygon_into(simplified, &row_rect, &mut row_clip_a, &mut row_clip_b);
-                    if row_clip_a.len() < 3 {
+                    geometry::clip_polygon_into(
+                        simplified, &row_rect, &mut scratch.row_clip_a, &mut scratch.row_clip_b,
+                    );
+                    if scratch.row_clip_a.len() < 3 {
                         continue;
                     }
-                    &row_clip_a
+                    &scratch.row_clip_a
                 } else {
                     simplified
                 };
@@ -1504,26 +1650,30 @@ fn emit_polygon_feature(
                 for tx in tx_min..=tx_max {
                     let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
                     if geometry::tile_is_interior(row_source, &clip) {
-                        tc_buf.clear();
-                        tc_buf.extend_from_slice(&INTERIOR_TILE_RING);
+                        scratch.tc_buf.clear();
+                        scratch.tc_buf.extend_from_slice(&INTERIOR_TILE_RING);
                     } else {
-                        geometry::clip_polygon_into(row_source, &clip, &mut clip_a, &mut clip_b);
-                        if clip_a.len() < 3 {
+                        geometry::clip_polygon_into(
+                            row_source, &clip, &mut scratch.clip_a, &mut scratch.clip_b,
+                        );
+                        if scratch.clip_a.len() < 3 {
                             continue;
                         }
-                        geometry::to_tile_coords_into(&mut tc_buf, &clip_a, tx, ty, z);
-                        if !skip_size_filter && geometry::ring_is_subpixel(&tc_buf) {
+                        geometry::to_tile_coords_into(&mut scratch.tc_buf, &scratch.clip_a, tx, ty, z);
+                        if !skip_size_filter && geometry::ring_is_subpixel(&scratch.tc_buf) {
                             continue;
                         }
-                        close_and_orient_cw(&mut tc_buf);
+                        close_and_orient_cw(&mut scratch.tc_buf);
                     }
 
-                    mvt::encode_polygon(&mut geom_buf, &[&tc_buf]);
-                    if geom_buf.is_empty() {
+                    mvt::encode_polygon(&mut scratch.geom_buf, &[&scratch.tc_buf]);
+                    if scratch.geom_buf.is_empty() {
                         continue;
                     }
                     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                    let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_buf, &attrs_buf);
+                    let data = encode_feature_data_with_attrs(
+                        osm_id, GeomType::Polygon, &scratch.geom_buf, &scratch.attrs_buf,
+                    );
                     let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
                     records.push(SortRecord { key, data });
                     count += 1;
@@ -1544,32 +1694,20 @@ fn emit_multipolygon_feature(
     z_lo: u8,
     z_hi: u8,
     records: &mut Vec<SortRecord>,
+    emit_scratch: &mut MultipolygonEmitScratch,
     simp_scratch: &mut geometry::SimplifyMultiScratch,
 ) -> u64 {
     let mut count: u64 = 0;
-    let mut geom_buf: Vec<u32> = Vec::new();
-    let mut attrs_buf: Vec<u8> = Vec::new();
-    let mut clip_a: Vec<Point> = Vec::new();
-    let mut clip_b: Vec<Point> = Vec::new();
-    let mut all_rings: Vec<Vec<(i32, i32)>> = Vec::new();
-    let mut inner_bboxes: Vec<geometry::MercBbox> = Vec::new();
-    // F14: row pre-clip buffers.
-    let mut row_clip_a: Vec<Point> = Vec::new();
-    let mut row_clip_b: Vec<Point> = Vec::new();
-    let mut row_outer: Vec<Point> = Vec::new();
-    let mut row_inners: Vec<Vec<Point>> = Vec::new();
-    let mut row_inner_bboxes: Vec<geometry::MercBbox> = Vec::new();
-
     geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, |z, simp_outer, simp_inners| {
-        encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
+        encode_attrs_bytes(&mut emit_scratch.attrs_buf, &m.attrs, z);
 
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simp_outer);
 
         // F11: Precompute inner ring bboxes for O(1) tile rejection.
-        inner_bboxes.clear();
-        inner_bboxes.extend(simp_inners.iter().map(|r| merc_bbox(r)));
+        emit_scratch.inner_bboxes.clear();
+        emit_scratch.inner_bboxes.extend(simp_inners.iter().map(|r| merc_bbox(r)));
         let single_tile = geometry::is_single_tile(&simp_bbox, z);
         let skip_size_filter = z >= 14;
         let (tx_min, tx_max, ty_min, ty_max) = geometry::tile_range_in_bbox(&simp_bbox, z);
@@ -1581,33 +1719,35 @@ fn emit_multipolygon_feature(
             if simp_outer.len() < 3 {
                 return;
             }
-            if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-            geometry::to_tile_coords_into(&mut all_rings[ring_count], simp_outer, tx, ty, z);
-            if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
+            if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
+            geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], simp_outer, tx, ty, z);
+            if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                 return;
             }
-            close_and_orient_cw(&mut all_rings[ring_count]);
+            close_and_orient_cw(&mut emit_scratch.all_rings[ring_count]);
             ring_count += 1;
             for inner in simp_inners {
                 if inner.len() < 3 {
                     continue;
                 }
-                if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                geometry::to_tile_coords_into(&mut all_rings[ring_count], inner, tx, ty, z);
-                if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
+                if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
+                geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], inner, tx, ty, z);
+                if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                     continue;
                 }
-                close_and_orient_ccw(&mut all_rings[ring_count]);
+                close_and_orient_ccw(&mut emit_scratch.all_rings[ring_count]);
                 ring_count += 1;
             }
 
-            let ring_refs: SmallVec<[&[(i32, i32)]; 4]> = all_rings[..ring_count].iter().map(Vec::as_slice).collect();
-            mvt::encode_polygon(&mut geom_buf, &ring_refs);
-            if geom_buf.is_empty() {
+            let ring_refs: SmallVec<[&[(i32, i32)]; 4]> = emit_scratch.all_rings[..ring_count].iter().map(Vec::as_slice).collect();
+            mvt::encode_polygon(&mut emit_scratch.geom_buf, &ring_refs);
+            if emit_scratch.geom_buf.is_empty() {
                 return;
             }
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_buf, &attrs_buf);
+            let data = encode_feature_data_with_attrs(
+                osm_id, GeomType::Polygon, &emit_scratch.geom_buf, &emit_scratch.attrs_buf,
+            );
             let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
             records.push(SortRecord { key, data });
             count += 1;
@@ -1627,38 +1767,53 @@ fn emit_multipolygon_feature(
                             f64::from(ty + 1) * inv_z + tile_buf,
                         );
                         // Pre-clip outer to row.
-                        geometry::clip_polygon_into(simp_outer, &row_rect, &mut row_clip_a, &mut row_clip_b);
-                        if row_clip_a.len() < 3 {
+                        geometry::clip_polygon_into(
+                            simp_outer, &row_rect, &mut emit_scratch.row_clip_a, &mut emit_scratch.row_clip_b,
+                        );
+                        if emit_scratch.row_clip_a.len() < 3 {
                             continue;
                         }
-                        row_outer.clear();
-                        row_outer.extend_from_slice(&row_clip_a);
+                        std::mem::swap(&mut emit_scratch.row_outer, &mut emit_scratch.row_clip_a);
 
                         // Pre-clip inners to row.
                         let row_y_min = f64::from(ty) * inv_z - tile_buf;
                         let row_y_max = f64::from(ty + 1) * inv_z + tile_buf;
                         let mut row_inner_count = 0;
-                        for (inner, ib) in simp_inners.iter().zip(&inner_bboxes) {
+                        for (inner, ib) in simp_inners.iter().zip(&emit_scratch.inner_bboxes) {
                             if ib.max_y < row_y_min || ib.min_y > row_y_max {
                                 continue;
                             }
-                            geometry::clip_polygon_into(inner, &row_rect, &mut row_clip_a, &mut row_clip_b);
-                            if row_clip_a.len() < 3 {
+                            geometry::clip_polygon_into(
+                                inner, &row_rect, &mut emit_scratch.row_clip_a, &mut emit_scratch.row_clip_b,
+                            );
+                            if emit_scratch.row_clip_a.len() < 3 {
                                 continue;
                             }
-                            if row_inner_count < row_inners.len() {
-                                row_inners[row_inner_count].clear();
-                                row_inners[row_inner_count].extend_from_slice(&row_clip_a);
+                            if row_inner_count < emit_scratch.row_inners.len() {
+                                std::mem::swap(
+                                    &mut emit_scratch.row_inners[row_inner_count],
+                                    &mut emit_scratch.row_clip_a,
+                                );
                             } else {
-                                row_inners.push(row_clip_a.clone());
+                                emit_scratch.row_inners.push(Vec::new());
+                                std::mem::swap(
+                                    emit_scratch.row_inners.last_mut().expect("just pushed"),
+                                    &mut emit_scratch.row_clip_a,
+                                );
                             }
                             row_inner_count += 1;
                         }
-                        row_inner_bboxes.clear();
-                        row_inner_bboxes.extend(row_inners[..row_inner_count].iter().map(|r| merc_bbox(r)));
-                        (&row_outer, &row_inners[..row_inner_count], &row_inner_bboxes)
+                        emit_scratch.row_inner_bboxes.clear();
+                        emit_scratch.row_inner_bboxes.extend(
+                            emit_scratch.row_inners[..row_inner_count].iter().map(|r| merc_bbox(r))
+                        );
+                        (
+                            &emit_scratch.row_outer,
+                            &emit_scratch.row_inners[..row_inner_count],
+                            &emit_scratch.row_inner_bboxes,
+                        )
                     } else {
-                        (simp_outer, simp_inners, inner_bboxes.as_slice())
+                        (simp_outer, simp_inners, emit_scratch.inner_bboxes.as_slice())
                     };
 
                 for tx in tx_min..=tx_max {
@@ -1667,46 +1822,53 @@ fn emit_multipolygon_feature(
 
                     if geometry::tile_is_interior(outer_src, &clip) {
                         // Interior tile: outer ring covers entire tile.
-                        if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                        all_rings[ring_count].clear();
-                        all_rings[ring_count].extend_from_slice(&INTERIOR_TILE_RING);
+                        if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
+                        emit_scratch.all_rings[ring_count].clear();
+                        emit_scratch.all_rings[ring_count].extend_from_slice(&INTERIOR_TILE_RING);
                         ring_count += 1;
                     } else {
-                        geometry::clip_polygon_into(outer_src, &clip, &mut clip_a, &mut clip_b);
-                        if clip_a.len() < 3 {
+                        geometry::clip_polygon_into(
+                            outer_src, &clip, &mut emit_scratch.clip_a, &mut emit_scratch.clip_b,
+                        );
+                        if emit_scratch.clip_a.len() < 3 {
                             continue;
                         }
-                        if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                        geometry::to_tile_coords_into(&mut all_rings[ring_count], &clip_a, tx, ty, z);
-                        if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
+                        if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
+                        geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], &emit_scratch.clip_a, tx, ty, z);
+                        if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                             continue;
                         }
-                        close_and_orient_cw(&mut all_rings[ring_count]);
+                        close_and_orient_cw(&mut emit_scratch.all_rings[ring_count]);
                         ring_count += 1;
                     }
                     // Inner rings: still need per-tile clipping (holes may be visible).
                     for (inner, ib) in inners_src.iter().zip(inners_bbox_src) {
                         if !geometry::bbox_intersects_clip(ib, &clip) { continue; }
-                        geometry::clip_polygon_into(inner, &clip, &mut clip_a, &mut clip_b);
-                        if clip_a.len() < 3 {
+                        geometry::clip_polygon_into(
+                            inner, &clip, &mut emit_scratch.clip_a, &mut emit_scratch.clip_b,
+                        );
+                        if emit_scratch.clip_a.len() < 3 {
                             continue;
                         }
-                        if ring_count >= all_rings.len() { all_rings.push(Vec::new()); }
-                        geometry::to_tile_coords_into(&mut all_rings[ring_count], &clip_a, tx, ty, z);
-                        if !skip_size_filter && geometry::ring_is_subpixel(&all_rings[ring_count]) {
+                        if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
+                        geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], &emit_scratch.clip_a, tx, ty, z);
+                        if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                             continue;
                         }
-                        close_and_orient_ccw(&mut all_rings[ring_count]);
+                        close_and_orient_ccw(&mut emit_scratch.all_rings[ring_count]);
                         ring_count += 1;
                     }
 
-                    let ring_refs: SmallVec<[&[(i32, i32)]; 4]> = all_rings[..ring_count].iter().map(Vec::as_slice).collect();
-                    mvt::encode_polygon(&mut geom_buf, &ring_refs);
-                    if geom_buf.is_empty() {
+                    let ring_refs: SmallVec<[&[(i32, i32)]; 4]> =
+                        emit_scratch.all_rings[..ring_count].iter().map(Vec::as_slice).collect();
+                    mvt::encode_polygon(&mut emit_scratch.geom_buf, &ring_refs);
+                    if emit_scratch.geom_buf.is_empty() {
                         continue;
                     }
                     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                    let data = encode_feature_data_with_attrs(osm_id, GeomType::Polygon, &geom_buf, &attrs_buf);
+                    let data = encode_feature_data_with_attrs(
+                        osm_id, GeomType::Polygon, &emit_scratch.geom_buf, &emit_scratch.attrs_buf,
+                    );
                     let key = sort::make_sort_key(tile_id, m.layer as u8, 0);
                     records.push(SortRecord { key, data });
                     count += 1;

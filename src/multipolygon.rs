@@ -248,8 +248,7 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
                 if back == j_front {
                     chains[i].extend_from_slice(&taken_j[1..]);
                 } else if back == j_back {
-                    let rev: Vec<Point> = taken_j.into_iter().rev().collect();
-                    chains[i].extend_from_slice(&rev[1..]);
+                    chains[i].extend(taken_j.iter().rev().skip(1).copied());
                 } else {
                     chains[j] = taken_j;
                     continue;
@@ -278,8 +277,8 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
                     merged.extend_from_slice(&chains[i][1..]);
                     chains[i] = merged;
                 } else if front == j_front {
-                    let rev: Vec<Point> = taken_j.into_iter().rev().collect();
-                    let mut merged = rev;
+                    let mut merged = Vec::with_capacity(taken_j.len() + chains[i].len().saturating_sub(1));
+                    merged.extend(taken_j.iter().rev().copied());
                     merged.extend_from_slice(&chains[i][1..]);
                     chains[i] = merged;
                 } else {
@@ -380,14 +379,14 @@ fn attach_way(
     } else if chain_front == way_front {
         // Prepend reversed way to front of chain.
         endpoint_map.remove(&chain_front);
-        let mut new_chain: Vec<Point> = way.iter().copied().rev().collect();
+        let mut new_chain: Vec<Point> = Vec::with_capacity(way.len() + chains[idx].len().saturating_sub(1));
+        new_chain.extend(way.iter().rev().copied());
         new_chain.extend_from_slice(&chains[idx][1..]);
         chains[idx] = new_chain;
     } else if chain_back == way_back {
         // Append reversed way to end of chain.
         endpoint_map.remove(&chain_back);
-        let reversed: Vec<Point> = way.iter().copied().rev().collect();
-        chains[idx].extend_from_slice(&reversed[1..]);
+        chains[idx].extend(way.iter().rev().skip(1).copied());
     } else {
         // Endpoint map was stale -- start a new chain.
         start_new_chain(way, chains, endpoint_map);

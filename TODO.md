@@ -39,6 +39,61 @@ Remaining (contingent — only if planet runs still OOM):
 - [ ] Visual verification — tracked in nidhogg TODO
 - [ ] Planet-scale test — run on full planet PBF (~73 GB), needs NVMe server
 
+## Next Steps (Current)
+
+1. [x] **Locations-on-ways correctness gate (Denmark semantic parity).**
+   Validate locations-on-ways output against standard path output on Denmark.
+   2026-03-03 run status:
+   - `--no-ocean` Denmark outputs are **not** byte-identical (`cmp`/SHA mismatch),
+     which is acceptable.
+   - `brokkr compare-tiles --sample 1000000` shows sampled/common tile content parity
+     (matching per-layer feature and command totals across all sampled tiles).
+   Gate decision: semantic tile parity is the correctness criterion.
+   Ref: `notes/locations-on-ways.md` (migrated), `notes/north-america-memory-plan.md`.
+2. [ ] **Allocation hotspot reduction (way/relation geometry paths).**
+   Prioritize scratch-buffer reuse and `_into` API coverage in:
+   `process_raw_way`, simplify, clip, and emit paths.
+   2026-03-03 run status (commit `ff87135`, UUID `dcc4102f`, compared to `fb0c5e3`):
+   - Allocation drops:
+     - `process_raw_way`: `224.9 GB -> 102.8 GB` (`-54.3%`)
+     - `for_each_zoom_simplified`: `148.4 GB -> 59.9 GB` (`-59.6%`)
+     - `emit_polygon_feature`: `85.2 GB -> 30.8 GB` (`-63.8%`)
+     - `emit_line_feature`: `63.2 GB -> 29.2 GB` (`-53.8%`)
+   - Hotpath wall regressed (`900190 ms -> 942449 ms`, `+4.7%`) and peak RSS increased
+     (`23346 MB -> 25389 MB`, `+8.7%`), so this needs confirmation with `bench self`
+     timing (hotpath alloc mode is intrusive).
+   Bench confirmation (`bench self` North America locations):
+   - Baseline `604f7f0e` (`1e22411`) vs new `b47b95e3` (`ff87135`):
+     - wall: `454436 ms -> 456151 ms` (`+0.38%`, effectively flat)
+     - `phase12_ms`: `270966 -> 276162` (`+1.9%`)
+     - `phase4_ms`: `167229 -> 163136` (`-2.4%`)
+     - peak RSS: `21317.5 MB -> 20909.1 MB` (`-1.9%`)
+   Relation-path pass 1 (multipolygon row preclip copy elimination via buffer swaps):
+   - Germany hotpath alloc baseline `c4c87193` (`ae6bb39`) vs new `412b8a84` (`86b9fe8`):
+     - wall: `259725 ms -> 249269 ms` (`-4.0%`)
+     - peak RSS: `10727.3 MB -> 7237.5 MB` (`-32.5%`)
+     - `phase12_ms`: `221028 -> 213801` (`-3.3%`)
+   - Allocation totals in top relation functions were mostly flat or mixed in hotpath accounting
+     (`process_prepared_relation_into` slightly up), so this likely reduces transient copy pressure
+     more than cumulative allocation volume.
+   Relation-path pass 2 (multipolygon reverse-copy allocation removal in join paths):
+   - Germany hotpath alloc `412b8a84` (`86b9fe8`) vs `c1072381` (`1d270e5`):
+     - wall: `249269 ms -> 248094 ms` (`-0.5%`)
+     - peak RSS: `7237.5 MB -> 7240.7 MB` (`~flat`)
+     - `phase12_ms`: `213801 -> 210703` (`-1.4%`)
+   - Net: small throughput gain, negligible RSS change.
+   Relation-path pass 3 (single-outer `pair_rings` fast path) — REJECTED.
+   - Germany hotpath alloc `c1072381` (`1d270e5`) vs `aa134b22` (`9b7b046`):
+     - wall regressed `248094 ms -> 257714 ms` (`+3.9%`) with no RSS benefit.
+   - Reverted in commit `4382006`.
+   Ref: `notes/north-america-hotpath-alloc-2026-03-03.md`.
+3. [ ] **Measure relation block buffering RSS impact.**
+   Record Denmark + North America deltas and decide whether further work is needed.
+   Ref: existing Code TODO item, `notes/north-america-memory-plan.md`.
+4. [ ] **Scale validation milestones.**
+   Run Europe then planet once steps 1-3 are in a good state.
+   Ref: Planet scale Step 5/6 below.
+
 ## Planet scale
 
 - [x] Step 1: `pbfhogg node-stats` tool
@@ -52,6 +107,7 @@ Remaining (contingent — only if planet runs still OOM):
   See `notes/north-america-hotpath-alloc-2026-03-03.md` for top allocators and next optimization targets.
 - [x] Way-budget calibration investigation for locations-on-ways completed (2026-03-03).
   See `notes/way-budget-locations-on-ways.md` for Denmark/Germany/North America sweep results and recommendations.
+- [ ] Locations-on-ways validation: Denmark output must match standard path byte-for-byte.
 - [ ] Step 5: Full pipeline on Europe (~28 GB) — needs ≥64 GB RAM
 - [ ] Step 6: Planet (~75 GB) — needs ≥64 GB RAM hardware
 
