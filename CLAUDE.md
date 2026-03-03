@@ -17,7 +17,7 @@ Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install
 
 - `brokkr check [-- args]` — run clippy + tests
 - `brokkr env` — show environment info
-- `brokkr run [--time] [--json] [--runs N] [--no-build] [args]` — build release (or skip with `--no-build`) and run with auto-injected flags: `--tmp-dir` (from scratch_dir config), `--ocean`/`--ocean-simplified` (auto-detected from data_dir), `HOTPATH_METRICS_SERVER_OFF=true` env var. Use `--no-ocean` to suppress ocean injection. Use `--mem 8G` to wrap with `systemd-run --scope -p MemoryMax=8G` for OOM protection on large datasets. `--time` prints stable `key=value` timing, `--json` prints structured timing, and `--runs N` reports min/median/p95 across repeated runs (single build).
+- `brokkr run [--time] [--json] [--runs N] [--no-build] [-- args]` — build release (or skip with `--no-build`) and run with passthrough args. `--time` prints stable `key=value` timing, `--json` prints structured timing, and `--runs N` reports min/median/p95 across repeated runs (single build). Elivagar handles its own defaults (`--tmp-dir`, `--ocean`/`--ocean-simplified` auto-detection, `HOTPATH_METRICS_SERVER_OFF`). Example: `brokkr run -- run input.pbf -o output.pmtiles`.
 - `brokkr bench self [--dataset name] [--variant V] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark. Default variant: raw.
 - `brokkr bench planetiler [--dataset name] [--variant V] [--runs N]` — Planetiler comparison benchmark. Default variant: raw.
 - `brokkr bench tilemaker [--dataset name] [--variant V] [--runs N]` — Tilemaker comparison benchmark (stub). Default variant: raw.
