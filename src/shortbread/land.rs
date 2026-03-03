@@ -25,14 +25,20 @@ fn land_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
     {
         return Some(("grave_yard", 13));
     }
-    if let Some(v) = tags.get("landuse") {
-        return land_match_landuse(v);
+    if let Some(v) = tags.get("landuse")
+        && let r @ Some(_) = land_match_landuse(v)
+    {
+        return r;
     }
-    if let Some(v) = tags.get("leisure") {
-        return land_match_leisure(v);
+    if let Some(v) = tags.get("leisure")
+        && let r @ Some(_) = land_match_leisure(v)
+    {
+        return r;
     }
-    if let Some(v) = tags.get("natural") {
-        return land_match_natural(v);
+    if let Some(v) = tags.get("natural")
+        && let r @ Some(_) = land_match_natural(v)
+    {
+        return r;
     }
     if let Some(v) = tags.get("wetland") {
         return land_match_wetland(v);
@@ -169,12 +175,10 @@ pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
 // ---------------------------------------------------------------------------
 
 /// Check if the element qualifies as a POI (excludes from address layer).
+/// Uses specific value matching (via `pois::would_match_poi`) rather than bare
+/// key presence, so that e.g. `office=company` does not suppress addresses.
 fn is_poi_element(tags: &Tags<'_>) -> bool {
-    tags.has("amenity")
-        || tags.has("shop")
-        || tags.has("tourism")
-        || tags.has("leisure")
-        || tags.has("office")
+    crate::pois::would_match_poi(tags)
 }
 
 fn match_addresses(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<[LayerMatch; 4]>) {

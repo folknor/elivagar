@@ -780,3 +780,189 @@ fn shortbread_spec_yaml() {
         panic!("{failed} test cases failed out of {}", passed + failed);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bug regression tests (2026-03-03 audit)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_b1_wetland_with_natural_tag() {
+    // B1: natural=wetland + wetland=bog must match land layer as "bog".
+    // Previously, the early-return on natural= blocked the wetland= check.
+    let tags = Tags(&[("natural", "wetland"), ("wetland", "bog")]);
+    let matches = match_element(&tags, OsmGeomType::ClosedWay);
+    let land = matches
+        .iter()
+        .find(|m| m.layer == Layer::Land)
+        .expect("natural=wetland + wetland=bog should match Land");
+    let kind = land
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "kind")
+        .expect("should have kind attr");
+    assert_eq!(kind.1, AttrValue::Str(Cow::Borrowed("bog")));
+    assert_eq!(land.min_zoom, 11);
+}
+
+#[test]
+fn test_b1_all_wetland_subtypes() {
+    // All 5 wetland subtypes should match when accompanied by natural=wetland.
+    for subtype in &["bog", "marsh", "swamp", "string_bog", "wet_meadow"] {
+        let tags = Tags(&[("natural", "wetland"), ("wetland", subtype)]);
+        let matches = match_element(&tags, OsmGeomType::ClosedWay);
+        let land = matches
+            .iter()
+            .find(|m| m.layer == Layer::Land);
+        assert!(
+            land.is_some(),
+            "natural=wetland + wetland={subtype} should match Land"
+        );
+    }
+}
+
+#[test]
+fn test_b2_maritime_no() {
+    // B2: maritime=no must NOT set maritime=true on boundaries.
+    let tags = Tags(&[
+        ("boundary", "administrative"),
+        ("admin_level", "2"),
+        ("maritime", "no"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::OpenWay);
+    let boundary = matches
+        .iter()
+        .find(|m| m.layer == Layer::Boundaries)
+        .expect("should match Boundaries");
+    let maritime = boundary
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "maritime")
+        .expect("should have maritime attr");
+    assert_eq!(
+        maritime.1,
+        AttrValue::Bool(false),
+        "maritime=no should produce maritime=false"
+    );
+}
+
+#[test]
+fn test_b2_maritime_yes() {
+    // Ensure maritime=yes still works.
+    let tags = Tags(&[
+        ("boundary", "administrative"),
+        ("admin_level", "2"),
+        ("maritime", "yes"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::OpenWay);
+    let boundary = matches
+        .iter()
+        .find(|m| m.layer == Layer::Boundaries)
+        .expect("should match Boundaries");
+    let maritime = boundary
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "maritime")
+        .expect("should have maritime attr");
+    assert_eq!(
+        maritime.1,
+        AttrValue::Bool(true),
+        "maritime=yes should produce maritime=true"
+    );
+}
+
+#[test]
+fn test_b5_multipolygon_address() {
+    // B5: multipolygon relations with addr:housenumber should produce address features.
+    let tags = Tags(&[
+        ("building", "yes"),
+        ("addr:housenumber", "7"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::MultiPolygon);
+    let addr = matches.iter().find(|m| m.layer == Layer::Addresses);
+    assert!(
+        addr.is_some(),
+        "multipolygon with addr:housenumber should match Addresses"
+    );
+}
+
+#[test]
+fn test_b6_unrecognized_amenity_gets_address() {
+    // B6: amenity=parking_entrance is not a POI — address should not be suppressed.
+    let tags = Tags(&[
+        ("amenity", "parking_entrance"),
+        ("addr:housenumber", "5"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::Node);
+    let addr = matches.iter().find(|m| m.layer == Layer::Addresses);
+    assert!(
+        addr.is_some(),
+        "non-POI amenity should not suppress address"
+    );
+    let poi = matches.iter().find(|m| m.layer == Layer::Pois);
+    assert!(poi.is_none(), "parking_entrance is not a POI");
+}
+
+#[test]
+fn test_b6_office_company_gets_address() {
+    // B6: office=company is not a POI — address should not be suppressed.
+    let tags = Tags(&[
+        ("office", "company"),
+        ("addr:housenumber", "10"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::Node);
+    let addr = matches.iter().find(|m| m.layer == Layer::Addresses);
+    assert!(
+        addr.is_some(),
+        "office=company should not suppress address"
+    );
+}
+
+#[test]
+fn test_b6_recognized_amenity_still_excludes_address() {
+    // Ensure recognized POI values still suppress addresses.
+    let tags = Tags(&[
+        ("amenity", "restaurant"),
+        ("addr:housenumber", "42"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::Node);
+    let addr = matches.iter().find(|m| m.layer == Layer::Addresses);
+    assert!(addr.is_none(), "restaurant should suppress address");
+    let poi = matches.iter().find(|m| m.layer == Layer::Pois);
+    assert!(poi.is_some(), "restaurant should match POI");
+}
+
+#[test]
+fn test_b7_land_fallthrough_multi_tag() {
+    // B7: An element with an unrecognized landuse + recognized leisure should
+    // fall through and match via leisure.
+    let tags = Tags(&[("landuse", "military"), ("leisure", "park")]);
+    let matches = match_element(&tags, OsmGeomType::ClosedWay);
+    let land = matches
+        .iter()
+        .find(|m| m.layer == Layer::Land)
+        .expect("landuse=military + leisure=park should match Land via leisure");
+    let kind = land
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "kind")
+        .expect("should have kind attr");
+    assert_eq!(kind.1, AttrValue::Str(Cow::Borrowed("park")));
+}
+
+#[test]
+fn test_b7_water_fallthrough_multi_tag() {
+    // B7: An element with an unrecognized natural + recognized waterway should
+    // fall through and match via waterway.
+    let tags = Tags(&[("natural", "cliff"), ("waterway", "riverbank")]);
+    let matches = match_element(&tags, OsmGeomType::ClosedWay);
+    let water = matches
+        .iter()
+        .find(|m| m.layer == Layer::WaterPolygons)
+        .expect("natural=cliff + waterway=riverbank should match WaterPolygons via waterway");
+    let kind = water
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "kind")
+        .expect("should have kind attr");
+    assert_eq!(kind.1, AttrValue::Str(Cow::Borrowed("riverbank")));
+}

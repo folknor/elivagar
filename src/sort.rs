@@ -142,12 +142,19 @@ impl SortWriter {
         Ok(())
     }
 
-    /// Flush the remaining buffer and return a `SortReader` for the k-way
-    /// merge phase.
-    pub fn finish(mut self) -> io::Result<SortReader> {
+    /// Flush the in-memory buffer to a chunk file if non-empty.
+    /// Call this before saving a checkpoint so `chunk_count()` is accurate.
+    pub fn flush(&mut self) -> io::Result<()> {
         if !self.buffer.is_empty() {
             self.flush_chunk()?;
         }
+        Ok(())
+    }
+
+    /// Flush the remaining buffer and return a `SortReader` for the k-way
+    /// merge phase.
+    pub fn finish(mut self) -> io::Result<SortReader> {
+        self.flush()?;
         SortReader::new(&self.chunk_paths)
     }
 

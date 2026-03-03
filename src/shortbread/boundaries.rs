@@ -24,7 +24,7 @@ fn boundary_match(tags: &Tags<'_>) -> Option<(i64, u8)> {
 pub(super) fn match_boundaries_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some((admin_level, min_zoom)) = boundary_match(tags) {
         let maritime =
-            tags.has("maritime") || tags.has_value("natural", "coastline");
+            tags.has_value("maritime", "yes") || tags.has_value("natural", "coastline");
         let disputed = tags.has_value("disputed", "yes");
         out.push(LayerMatch {
             layer: Layer::Boundaries,

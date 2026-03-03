@@ -283,6 +283,7 @@ fn match_multipolygon(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     land::match_land(tags, out);
     land::match_sites(tags, out);
     land::match_buildings(tags, out);
+    land::match_addresses_centroid(tags, out);
     streets::match_street_polygons(tags, out);
     streets::match_streets_polygons_labels(tags, out);
     streets::match_bridges(tags, out);

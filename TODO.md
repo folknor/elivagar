@@ -2,68 +2,208 @@
 
 ## Active priorities
 
-1. [x] Measure relation block buffering RSS impact on Denmark + Germany.
-   - 2026-03-03 (`brokkr bench self`, locations variant):
-     - Denmark: `relation_blocks_buffered=6`, `relation_blocks_drop_rss_kb=0`, `peak_rss_kb=2691584`
-     - Germany: `relation_blocks_buffered=111`, `relation_blocks_drop_rss_kb=0`, `peak_rss_kb=8616648`
-   - Result: no observable VmRSS drop when buffered relation blocks are released; no evidence this is a material RSS driver at these scales.
-   - Ref: `notes/north-america-memory-plan.md`.
-2. [ ] Scale validation: run Europe full pipeline (locations-on-ways path).
+1. [ ] Scale validation: run Europe full pipeline (locations-on-ways path).
    - Ref: Planet scale milestone below.
-3. [ ] Scale validation: run planet full pipeline when hardware is available.
-4. [x] Flat index guardrail: enforce unsorted-input size gate before creating `nodes.idx`.
-   - User-facing behavior: fail fast when header is not `Sort.Type_then_ID` and input PBF is above threshold (target: `>1 GB`), instead of allowing pathological sparse-index runs.
-   - Error UX: include exact input size and concrete fixes (`--force-sorted` when true, or sort first with `pbfhogg sort`; `osmium sort` as fallback).
-   - Code context: pipeline preflight near current unsorted node-store branch in `src/pipeline.rs`.
-5. [x] Flat index guardrail: hard-cap flat node-index file size.
-   - User-facing behavior: abort with actionable error once projected/actual index growth crosses cap (target: `16 GB`) to prevent machine-wide thrash.
-   - Error UX: explain cap rationale and recovery path (sorted PBF or locations-on-ways input).
-   - Code context: `NodeIndex::put` growth path (`MAX_FLAT_INDEX_SIZE = 16 GB`) with unit test coverage.
-6. [x] Flat index guardrail: CLI/config surface for controlled override.
-   - User-facing behavior: sensible default safety on, with explicit override for expert/CI scenarios.
-   - UX requirement: warning states that override may cause severe IO/memory degradation.
-   - Delivered: `--allow-unsafe-flat-index` and `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1`;
-     CLI flag takes precedence in intent (effective behavior is logical OR).
-7. [x] Flat index guardrail: integration tests for rejection and allow paths.
-   - Tests: sorted large input allowed; unsorted small input allowed; unsorted large input rejected with stable error text; override path works.
-   - Success criterion: deterministic failures before heavy work starts.
-8. [x] Flat index guardrail: docs update for operators.
-   - Update README/notes with a short “why this fails early” section and copy-paste remediation commands.
-   - Include explicit guidance for 32 GB vs 64 GB hosts.
-9. [ ] PMTiles dedup correctness hardening.
+2. [ ] Scale validation: run planet full pipeline when hardware is available.
+3. [ ] PMTiles dedup correctness hardening.
    - Current dedup uses hash+len without byte-compare.
    - Probability is ~2^-81 per pair (SipHash-64 + length match) — negligible, but failure
      mode is silent wrong tile content with no detection mechanism.
    - Ref: `pmtiles_writer.rs:196`.
 
-## Code review findings (2026-03-03)
+## Bugs (2026-03-03 audit)
 
-Items from external code review, triaged by severity.
+### B1. `natural=wetland` silently dropped from land layer
+- **Severity:** bug (data loss — affects real OSM data)
+- [x] Fix early-return in `land_match` that prevents fallthrough to `wetland` tag check.
+  - `land_match` does `if let Some(v) = tags.get(“natural”) { return land_match_natural(v); }`.
+  - `land_match_natural` has no arm for `”wetland”` → returns `None` → function returns `None`.
+  - The `wetland` tag check on lines 37-39 is never reached when `natural=wetland` is present.
+  - All 5 wetland subtypes (bog, marsh, swamp, string_bog, wet_meadow) are unreachable
+    under standard OSM tagging (`natural=wetland` + `wetland=<subtype>`).
+  - Fix: fall through on `None` instead of returning.
+  - Ref: `land.rs:34-36`.
 
-### Medium: stale sort chunks in `--skip-to sort`
+### B2. `maritime=no` treated as maritime boundary
+- **Severity:** bug (wrong attribute on output features)
+- [x] Fix `tags.has(“maritime”)` to `tags.has_value(“maritime”, “yes”)`.
+  - `has()` returns true for any value including `”no”`.
+  - Boundaries explicitly tagged `maritime=no` get `maritime: true` in output.
+  - Ref: `boundaries.rs:27`.
 
-- [x] Add chunk-count integrity check for `--skip-to sort`.
-  - `--skip-to sort` reads chunks via `SortReader::from_dir()` with no validation.
-    If old chunks survive a failed `remove_dir_all`, they get silently merged.
-  - Fix: save total chunk count (PBF + ocean) to checkpoint before sort phase;
-    validate on `--skip-to sort` that discovered count matches expected.
-  - Ref: `pipeline.rs:275`, `sort.rs:318`.
+### B3. Sort chunk count saved before `finish()` — breaks `--skip-to sort`
+- **Severity:** bug (breaks the integrity check added in `c1f7da2`)
+- [x] Move `save_sort_chunk_count` to after `sw.finish()`.
+  - `finish()` flushes the final in-memory chunk, incrementing count by 1.
+  - The checkpoint records N, but disk has N+1 chunks → spurious mismatch error.
+  - Ref: `pipeline.rs:359-360`.
 
-### Low: robustness
+### B4. `--skip-to ocean` loses unflushed PBF records
+- **Severity:** bug (silent data loss on checkpoint resume)
+- [x] Flush `SortWriter` buffer before saving checkpoint.
+  - `save_checkpoint` records `sw.chunk_count()` (flushed chunks only).
+  - Records still in the in-memory buffer (up to ~1GB) are lost on resume.
+  - Ref: `pipeline.rs:298`.
 
-- [x] Fix clippy errors and warnings (collapsible-if, cast_possible_wrap, unused import,
-  unused assignment, dead code, doc continuation).
-  - Fixed: 2026-03-03.
+### B5. Multipolygon relations missing address matching
+- **Severity:** potential-bug (missing features)
+- [x] Add `land::match_addresses_centroid(tags, out)` to `match_multipolygon`.
+  - `match_closed_way` calls it (line 258), `match_multipolygon` does not (lines 277-294).
+  - Complex building multipolygons with `addr:housenumber` won't produce address features.
+  - Ref: `shortbread/mod.rs:277-294`.
+
+### B6. `is_poi_element` overly broad — drops addresses for unrecognized POI-key values
+- **Severity:** potential-bug (missing features)
+- [x] Tighten `is_poi_element` to check specific values, not just key presence.
+  - Checks for key *presence* (`amenity`, `shop`, `office`, etc.) but `pois_match`
+    only handles *specific* values. Elements with unrecognized values (e.g.,
+    `office=company`, `amenity=parking_entrance`) are excluded from addresses
+    AND don't appear as POIs — their address info is lost entirely.
+  - Ref: `land.rs:172-178`.
+
+### B7. Early-return pattern in `land_match` blocks cross-tag matching
+- **Severity:** smell (root cause of B1, also affects other tag combos)
+- [x] Restructured `land_match` and `water_polygon_match` to fall through on `None`.
+  - An element with `landuse=military` + `leisure=park` only checks `landuse` (unrecognized),
+    returns `None`, and misses the `leisure=park` match.
+  - Same pattern exists in `water_polygon_match` (`water.rs:12-36`).
+  - Ref: `land.rs:28-39`, `water.rs:12-36`.
+
+## Potential bugs (2026-03-03 audit)
+
+### Wire format truncation risks
+
+- [ ] `geom_cmds.len() as u16` — silent truncation for geometries with >65K commands.
+  - A polygon ring with ~32K vertices would overflow. Unlikely but no guard.
+  - Add `debug_assert!(geom_cmds.len() <= u16::MAX as usize)`.
+  - Ref: `wire_format.rs:297`.
+- [ ] `filtered_count as u8` — silent truncation above 255 attributes.
+  - Currently unreachable (schema has ~48 keys), but fragile.
+  - Ref: `wire_format.rs:236`.
+- [ ] String length `as u16` — guarded only by `debug_assert` (stripped in release).
+  - Malformed PBF with >64KB tag values would silently corrupt the sort record stream.
+  - Ref: `wire_format.rs:253-254, 263-264`.
+
+### MVT key/value index overflow
+
+- [ ] `LayerBuilder` key/value interning uses `u16` indices via `as u16` truncation.
+  - >65535 unique keys or values per tile wraps to 0 → wrong references.
+  - Unreachable with current schema but unguarded.
+  - Ref: `mvt.rs:155, 167, 187`.
+
+### PMTiles writer
+
+- [ ] `tile_id_to_zxy` overflows at z>=31 — debug panic, release wrong result.
+  - `n * n * 4` overflows u64 at z=31. Guard evaluates after the computation.
+  - Unreachable (max_zoom=14) but function is `pub`.
+  - Ref: `pmtiles_writer.rs:736-743`.
+- [ ] `encode_tile_id_column` u64 subtraction underflow on out-of-order entries.
+  - Only `debug_assert` guards ordering; release mode silently corrupts directory.
+  - Ref: `pmtiles_writer.rs:604`.
+- [ ] `data.len() as u32` truncation for tiles >4GB.
+  - Unreachable in practice but unguarded.
+  - Ref: `pmtiles_writer.rs:209`.
+
+### Way index / node index
+
+- [ ] `read_varint` unbounded shift — panics in debug on corrupt data (shift >31).
+  - Add shift guard (cap at 28, bail on overflow).
+  - Ref: `way_index.rs:43-55`.
+- [ ] `read_varint` / `decode_way` — no bounds checking on `*pos` vs data length.
+  - Truncated/corrupt `way_data.bin` causes uncontrolled panic.
+  - Ref: `way_index.rs:47, 73-96`.
+- [ ] `encode_way` i32 delta subtraction can overflow in debug mode.
+  - Unreachable for valid E7 coordinates but no guard.
+  - Ref: `way_index.rs:65-66`.
+- [ ] `SortedNodeStore::get` / `SortedNodeStoreReader::get` — no negative node_id guard.
+  - Cast to u64 produces huge group_id → `None` (benign), but inconsistent with flat index.
+  - Ref: `node_index.rs:842, 895`.
+
+### Inspect
+
+- [ ] `print_metadata_json` byte-index string slicing panics on non-ASCII metadata.
+  - Only affects third-party PMTiles files with non-ASCII layer names.
+  - Ref: `inspect.rs:157-183`.
+
+### Ocean
+
+- [ ] Inconsistent ring orientation logic after Y-flip coordinate transform.
+  - Line 169: `signed_area >= 0.0` = outer. Line 178: `signed_area < 0.0` = outer.
+  - Internally contradictory but benign: water-polygons-split-3857 has only single-part
+    polygons so `w == 0` always catches outers.
+  - Ref: `ocean.rs:169, 178`.
+- [ ] Missing `.max(0.0)` guard on `_max` tile coordinates before f64-to-u32 cast.
+  - Safe on modern Rust (saturating cast to 0) but inconsistent with `_min` guards.
+  - Ref: `ocean.rs:220, 222, 440, 442`.
+
+## Smells (2026-03-03 audit)
+
+- [ ] `VmHWM` per-phase RSS values are monotonically non-decreasing (meaningless per-phase).
+  - `peak_rss_kb()` reads `VmHWM` which is process-lifetime HWM, never decreases.
+  - `ocean_rss_kb` is always >= `phase12_rss_kb`, etc.
+  - Consider switching to `VmRSS` snapshots or documenting the limitation.
+  - Ref: `pipeline.rs:297, 349, 372, 379`.
+- [ ] `from_dir` / `resume` cleanup stops at first gap in chunk file numbering.
+  - If a chunk file is missing, all subsequent chunks are silently ignored/not cleaned.
+  - Ref: `sort.rs:324-333, 108-117`.
+- [ ] `append_geometry` defensive bounds check produces silently malformed MVT.
+  - On truncated input, pushes command header with wrong param count then breaks.
+  - Ref: `mvt.rs:462-464`.
+- [ ] Orphan inner rings silently assigned to first polygon in `pair_rings`.
+  - When inner ring's first vertex isn't inside any outer ring, falls back to `polygons[0]`.
+  - Ref: `multipolygon.rs:169`.
+- [ ] `ref_cols` counts bytes, not characters — wrong for non-Latin road refs.
+  - Ref: `streets.rs:201`.
+- [ ] `capital=2` not handled for national capitals (only `capital=yes` and `capital=4`).
+  - Ref: `boundaries.rs:95-96`.
+- [ ] `has_name` doesn't filter `name=””` — features with empty names match label layers.
+  - `name_attrs` correctly omits them, so only wasted sort record space.
+  - Ref: `shortbread/mod.rs:364-366`.
+
+## Test coverage gaps (2026-03-03 audit)
+
+### High priority
+
+- [ ] `mvt.rs`: `merge_same_attr_geometries` — complex sort+scan+in-place merge+tombstoning, zero tests.
+  - A bug here produces visually wrong tiles (merged features with wrong geometry or lost features).
+- [ ] `ocean.rs`: `emit_ocean_polygon` — scanline fill algorithm (~180 lines), zero tests.
+  - Handles boundary tile rasterization, gap filling, land mask filtering, zoom iteration.
+  - A bug produces missing or duplicate ocean tiles globally.
+- [ ] `wire_format.rs`: interned kind value (type=4) encode/decode roundtrip, zero tests.
+  - The `KIND_VALUES` short-circuit path is used for every “kind” attribute.
+
+### Medium priority
+
+- [ ] `pipeline.rs`: `emit_multipolygon_feature` (~200 lines) — zero tests.
+  - Multipolygon emission with inner rings, interior tile detection, per-zoom clipping.
+- [ ] `pipeline.rs`: checkpoint save/load roundtrip — zero tests.
+  - Incorrect checkpoint data corrupts `--skip-to` resume (see B3/B4).
+- [ ] `main.rs`: `parse_byte_size` edge cases — zero tests.
+  - Budget parsing from CLI (e.g., “256M”, “1G”). Wrong parsing → OOM or degraded perf.
+- [ ] `mvt.rs`: `append_geometry` — cursor re-encoding for concatenated multi-geometries, zero tests.
+  - ClosePath cursor reset handling is error-prone.
+- [ ] `geometry.rs`: `for_each_zoom_simplified_multi` — cascading simplification with inner rings, zero tests.
+
+### Low priority
+
+- [ ] `inspect.rs`: entire module untested (read-only diagnostic tool).
+- [ ] `sort.rs`: `SortWriter::resume` and `adopt_chunk_files` (checkpoint/resume features).
+- [ ] `pois.rs`: individual match functions (`pois_match_shop`, `pois_match_tourism`, etc.) —
+  covered by YAML spec test but no targeted edge case tests.
+
+## Previously completed
+
+### Code review findings (2026-03-03)
+
+- [x] Add chunk-count integrity check for `--skip-to sort` (has bug B3 — count saved too early).
+- [x] Fix clippy errors and warnings.
+- [x] Extract shared “emit feature → sort record” helper in `pipeline.rs`.
+- [x] Unify point/centroid matcher bodies in `pois.rs` and `transport.rs`.
+- [x] Measure relation block buffering RSS impact on Denmark + Germany (no impact found).
+- [x] Flat index guardrails (enforce, cap, CLI override, integration tests, docs).
 
 ### Refactoring opportunities
 
-- [x] Extract shared "emit feature → sort record" helper in `pipeline.rs`.
-  - 6+ near-identical 4-line blocks: encode_feature_data_with_attrs → make_sort_key → push → count.
-  - Ref: `pipeline.rs:955`, `pipeline.rs:1567`, `pipeline.rs:1617`, `pipeline.rs:1691`,
-    `pipeline.rs:1821`, `pipeline.rs:1942`.
-- [x] Unify point/centroid matcher bodies in `pois.rs` and `transport.rs`.
-  - Each pair differs only in `GeomExpect::Point` vs `GeomExpect::PolygonPointOnSurface`.
-  - Ref: `pois.rs:19`/`pois.rs:32`, `transport.rs:66`/`transport.rs:86`.
 - [ ] Relation-geometry scratch-based decode/project (if profiling warrants).
   - `way_index.get()` allocates fresh `Vec<(i32, i32)>` per call; caller allocates
     another `Vec<Point>` for projection. A decode-into-scratch API could cut alloc pressure.

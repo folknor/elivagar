@@ -230,7 +230,7 @@ fn current_rss_kb() -> Option<u64> {
 ///
 /// Returns [`PipelineError`] on I/O failures, invalid configuration (e.g.
 /// `max_zoom > 14`), or corrupt input data.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[hotpath::measure]
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if config.max_zoom > 14 {
@@ -274,7 +274,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     let mut node_store_stats: Option<(u64, usize)> = None;
 
-    let sort_reader = if skip == Some(SkipTo::Sort) {
+    let mut sort_reader = if skip == Some(SkipTo::Sort) {
         // Skip straight to sort — read all existing chunks
         phase12_elapsed = None;
         ocean_elapsed = None;
@@ -287,7 +287,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
-            let (sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks, rel_drop_rss) = phase_read_and_process(config)?;
+            let (mut sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks, rel_drop_rss) = phase_read_and_process(config)?;
             node_store_stats = ns_stats;
             max_way_inflight_bytes = Some(way_hwm);
             max_rel_batch_bytes = Some(rel_hwm);
@@ -295,6 +295,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             relation_blocks_drop_rss_kb = rel_drop_rss;
             phase12_elapsed = Some(phase12_start.elapsed());
             phase12_rss = peak_rss_kb();
+            sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
             save_land_mask(&config.tmp_dir, &mask)?;
             (sw, Some(mask))
@@ -356,6 +357,11 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     };
 
     // --- Phase 3: Sort ---
+    // Flush any trailing buffer so chunk_count() reflects all chunks on disk,
+    // then save the count for --skip-to sort validation.
+    if let Some(ref mut sw) = sort_reader {
+        sw.flush()?;
+    }
     let sort_chunks = sort_reader.as_ref().map(sort::SortWriter::chunk_count);
     save_sort_chunk_count(&config.tmp_dir, sort_chunks)?;
     let phase3_start = Instant::now();

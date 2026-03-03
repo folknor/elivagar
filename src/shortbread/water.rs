@@ -11,26 +11,26 @@ use smallvec::{SmallVec, smallvec};
 /// Determine water polygon kind and min_zoom. Returns (kind, min_zoom).
 fn water_polygon_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
     if let Some(v) = tags.get("natural") {
-        return match v {
-            "water" => Some(("water", 4)),
-            "glacier" => Some(("glacier", 4)),
-            _ => None,
-        };
+        match v {
+            "water" => return Some(("water", 4)),
+            "glacier" => return Some(("glacier", 4)),
+            _ => {}
+        }
     }
     if let Some(v) = tags.get("waterway") {
-        return match v {
-            "riverbank" => Some(("riverbank", 4)),
-            "dock" => Some(("dock", 10)),
-            "canal" => Some(("canal", 10)),
-            _ => None,
-        };
+        match v {
+            "riverbank" => return Some(("riverbank", 4)),
+            "dock" => return Some(("dock", 10)),
+            "canal" => return Some(("canal", 10)),
+            _ => {}
+        }
     }
     if let Some(v) = tags.get("landuse") {
-        return match v {
-            "reservoir" => Some(("reservoir", 4)),
-            "basin" => Some(("basin", 4)),
-            _ => None,
-        };
+        match v {
+            "reservoir" => return Some(("reservoir", 4)),
+            "basin" => return Some(("basin", 4)),
+            _ => {}
+        }
     }
     None
 }

@@ -24,6 +24,13 @@ pub(crate) fn match_pois_centroid(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatc
     match_pois(tags, GeomExpect::PolygonPointOnSurface, out);
 }
 
+/// Returns true if the tags would match a POI (used by address layer to exclude POI elements).
+/// Uses the same matching logic as `pois_match` — only specific values are considered POIs,
+/// not bare key presence.
+pub(crate) fn would_match_poi(tags: &Tags<'_>) -> bool {
+    pois_match(tags).is_some()
+}
+
 fn match_pois(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some(mut attrs) = pois_match(tags) {
         attrs.extend(pois_common_attrs(tags));
