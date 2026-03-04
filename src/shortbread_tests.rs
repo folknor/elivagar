@@ -261,6 +261,51 @@ fn test_pois_ev_charging_station() {
 }
 
 #[test]
+fn test_pois_peak_with_ele_meters() {
+    let tags = Tags(&[
+        ("natural", "peak"),
+        ("name", "Peak One"),
+        ("ele", "2469"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::Node);
+    let poi = matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("peak should match Pois");
+    let natural = poi
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "natural")
+        .expect("should have natural");
+    assert_eq!(natural.1, AttrValue::Str(Cow::Borrowed("peak")));
+    let ele = poi
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "ele")
+        .expect("should have ele");
+    assert_eq!(ele.1, AttrValue::Int(2469));
+}
+
+#[test]
+fn test_pois_peak_with_ele_feet_conversion() {
+    let tags = Tags(&[
+        ("natural", "peak"),
+        ("ele", "3281 ft"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::Node);
+    let poi = matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("peak should match Pois");
+    let ele = poi
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "ele")
+        .expect("should have ele");
+    assert_eq!(ele.1, AttrValue::Int(1000));
+}
+
+#[test]
 fn test_aerialway_cable_car() {
     let tags = Tags(&[("aerialway", "cable_car")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);

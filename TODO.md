@@ -160,7 +160,7 @@
   urban areas. MLT's 2.5D basemap support makes this more relevant if we adopt that format.
   Also consider `building:part=yes` sub-components (tilemaker #692) — needed for proper 3D
   rendering of complex buildings with towers, wings, etc.
-- [ ] Elevation attribute on peaks/passes: elivagar's POI layer does not match `natural=peak`
+- [x] Elevation attribute on peaks/passes: elivagar's POI layer does not match `natural=peak`
   or `natural=volcano`, and does not emit the `ele` (elevation) tag. Investigate whether
   Shortbread 1.0 specifies these, and add with proper unit conversion — OSM `ele` is
   nominally meters but sometimes tagged in feet (Planetiler #224 had a unit-conversion bug

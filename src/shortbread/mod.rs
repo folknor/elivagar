@@ -312,7 +312,7 @@ fn attr_dyn_z(key: &'static str, val: &str, min_zoom: u8) -> Attr {
     (key, AttrValue::Str(Cow::Owned(val.to_string())), min_zoom)
 }
 
-fn attr_int(key: &'static str, val: i64) -> Attr {
+pub(crate) fn attr_int(key: &'static str, val: i64) -> Attr {
     (key, AttrValue::Int(val), 0)
 }
 

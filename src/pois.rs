@@ -9,7 +9,7 @@
 // binary_search saves ~19 comparisons per hit but hits are rare; phf adds a
 // dependency for zero measurable gain.
 
-use crate::shortbread::{attr_str, attr_dyn, attr_bool, name_attrs, Attr, Tags, Layer, LayerMatch, GeomExpect};
+use crate::shortbread::{attr_str, attr_dyn, attr_int, attr_bool, name_attrs, Attr, Tags, Layer, LayerMatch, GeomExpect};
 use smallvec::{SmallVec, smallvec};
 
 // ---------------------------------------------------------------------------
@@ -84,6 +84,9 @@ fn pois_match(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
         return Some(attrs);
     }
     if let Some(attrs) = pois_match_man_made(tags) {
+        return Some(attrs);
+    }
+    if let Some(attrs) = pois_match_natural(tags) {
         return Some(attrs);
     }
     if tags.has_value("office", "diplomatic") {
@@ -315,6 +318,70 @@ fn pois_match_man_made(
         attrs.push(attr_dyn("tower:type", tt));
     }
     Some(attrs)
+}
+
+fn parse_ele_meters(raw: &str) -> Option<i64> {
+    let mut s = raw.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some((first, _)) = s.split_once(';') {
+        s = first.trim().to_string();
+    }
+    if s.is_empty() {
+        return None;
+    }
+
+    let mut is_feet = false;
+    if s.ends_with("feet") {
+        is_feet = true;
+        s.truncate(s.len().saturating_sub(4));
+    } else if s.ends_with("ft") {
+        is_feet = true;
+        s.truncate(s.len().saturating_sub(2));
+    } else if s.ends_with('\'') {
+        is_feet = true;
+        s.truncate(s.len().saturating_sub(1));
+    } else if s.ends_with("meters") {
+        s.truncate(s.len().saturating_sub(6));
+    } else if s.ends_with("meter") {
+        s.truncate(s.len().saturating_sub(5));
+    } else if s.ends_with('m') {
+        s.truncate(s.len().saturating_sub(1));
+    }
+
+    let num = s.split_whitespace().next()?.replace(',', "");
+    let value = num.parse::<f64>().ok()?;
+    let meters = if is_feet { value * 0.3048 } else { value };
+    let rounded = meters.round();
+    if !rounded.is_finite() {
+        return None;
+    }
+    rounded.to_string().parse::<i64>().ok()
+}
+
+fn pois_match_natural(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
+    if let Some(v) = tags.get("natural")
+        && (v == "peak" || v == "volcano")
+    {
+        let mut attrs = smallvec![attr_dyn("natural", v)];
+        if let Some(ele) = tags.get("ele")
+            && let Some(meters) = parse_ele_meters(ele)
+        {
+            attrs.push(attr_int("ele", meters));
+        }
+        return Some(attrs);
+    }
+    if tags.has_value("mountain_pass", "yes") {
+        let mut attrs = smallvec![attr_str("natural", "pass")];
+        if let Some(ele) = tags.get("ele")
+            && let Some(meters) = parse_ele_meters(ele)
+        {
+            attrs.push(attr_int("ele", meters));
+        }
+        return Some(attrs);
+    }
+    None
 }
 
 fn pois_match_shop(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {

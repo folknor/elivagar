@@ -73,6 +73,7 @@ const KEY_NAMES: &[&str] = &[
     "historic",                // 45
     "way_area",                // 46 (test-only: Float roundtrip)
     "height",                  // 47 (test-only: zoom-dependent Float)
+    "ele",                     // 48 (POI elevation in meters)
 ];
 
 #[allow(clippy::cast_possible_truncation)]
