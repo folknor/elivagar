@@ -42,7 +42,7 @@
   invalid JSON, missing `vector_layers`, and invalid `vector_layers` entry schema.
   Remaining gap: fuzz testing for attribute/value edge cases that could produce malformed JSON
   (tippecanoe #181).
-- [ ] Per-attribute minzoom filtering: `encode_attrs_bytes()` in wire_format.rs filters
+- [x] Per-attribute minzoom filtering: `encode_attrs_bytes()` in wire_format.rs filters
   attributes by zoom. Verify with tests that per-attribute zoom gates actually take effect
   and don't leak attributes to wrong zoom levels (tilemaker #671).
 

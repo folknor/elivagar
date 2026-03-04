@@ -746,4 +746,41 @@ mod tests {
         assert_eq!(layer.test_key(f.tags[0].0), "kind");
     }
 
+    /// Test 9: If all attrs are above zoom, encoded attr section must be empty.
+    #[test]
+    fn minzoom_filtering_all_attrs_gated_out() {
+        let attrs: Vec<shortbread::Attr> = vec![
+            ("kind", AttrValue::Str(Cow::Borrowed("city")), 5),
+            ("bridge", AttrValue::Bool(true), 5),
+        ];
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+
+        let encoded = encode_feature_data(42, GeomType::Point, &geom_cmds, &attrs, 4);
+        let mut layer = LayerBuilder::new("test");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+
+        let f = layer.test_feature(0);
+        assert_eq!(f.tags.len(), 0, "z4 should include no attrs when all min_zoom=5");
+    }
+
+    /// Test 10: Attr count byte is capped at u8::MAX for very large attr lists.
+    #[test]
+    fn attrs_count_is_capped_to_u8_max() {
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+        let attrs: Vec<shortbread::Attr> = (0..300)
+            .map(|_| ("kind", AttrValue::Str(Cow::Borrowed("city")), 0))
+            .collect();
+
+        let encoded = encode_feature_data(7, GeomType::Point, &geom_cmds, &attrs, 14);
+        let mut layer = LayerBuilder::new("test");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+
+        let f = layer.test_feature(0);
+        assert_eq!(f.tags.len(), 255, "attrs must be capped to u8::MAX entries");
+    }
+
 }
