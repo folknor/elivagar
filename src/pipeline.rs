@@ -1737,6 +1737,63 @@ fn enrich_polygon_matches(matches: &mut [LayerMatch], area_m2: f64) {
     }
 }
 
+fn orient2d(a: (i32, i32), b: (i32, i32), c: (i32, i32)) -> i64 {
+    let abx = i64::from(b.0) - i64::from(a.0);
+    let aby = i64::from(b.1) - i64::from(a.1);
+    let acx = i64::from(c.0) - i64::from(a.0);
+    let acy = i64::from(c.1) - i64::from(a.1);
+    abx * acy - aby * acx
+}
+
+fn on_segment(a: (i32, i32), b: (i32, i32), p: (i32, i32)) -> bool {
+    let (min_x, max_x) = if a.0 <= b.0 { (a.0, b.0) } else { (b.0, a.0) };
+    let (min_y, max_y) = if a.1 <= b.1 { (a.1, b.1) } else { (b.1, a.1) };
+    p.0 >= min_x && p.0 <= max_x && p.1 >= min_y && p.1 <= max_y
+}
+
+fn segments_intersect(a1: (i32, i32), a2: (i32, i32), b1: (i32, i32), b2: (i32, i32)) -> bool {
+    let o1 = orient2d(a1, a2, b1);
+    let o2 = orient2d(a1, a2, b2);
+    let o3 = orient2d(b1, b2, a1);
+    let o4 = orient2d(b1, b2, a2);
+
+    if o1 == 0 && on_segment(a1, a2, b1) {
+        return true;
+    }
+    if o2 == 0 && on_segment(a1, a2, b2) {
+        return true;
+    }
+    if o3 == 0 && on_segment(b1, b2, a1) {
+        return true;
+    }
+    if o4 == 0 && on_segment(b1, b2, a2) {
+        return true;
+    }
+    (o1 > 0) != (o2 > 0) && (o3 > 0) != (o4 > 0)
+}
+
+fn is_valid_simple_tile_ring(ring: &[(i32, i32)]) -> bool {
+    if ring.len() < 4 || ring.first() != ring.last() {
+        return false;
+    }
+    let edge_count = ring.len() - 1;
+    for i in 0..edge_count {
+        let a1 = ring[i];
+        let a2 = ring[i + 1];
+        for j in (i + 1)..edge_count {
+            if j == i || j == i + 1 || (i == 0 && j == edge_count - 1) {
+                continue;
+            }
+            let b1 = ring[j];
+            let b2 = ring[j + 1];
+            if segments_intersect(a1, a2, b1, b2) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Feature emission helpers
 // ---------------------------------------------------------------------------
@@ -1877,6 +1934,9 @@ fn emit_polygon_feature(
                 return;
             }
             close_and_orient_cw(&mut scratch.tc_buf);
+            if z < 14 && !is_valid_simple_tile_ring(&scratch.tc_buf) {
+                return;
+            }
 
             mvt::encode_polygon(&mut scratch.geom_buf, &[&scratch.tc_buf]);
             if scratch.geom_buf.is_empty() {
@@ -1928,6 +1988,9 @@ fn emit_polygon_feature(
                             continue;
                         }
                         close_and_orient_cw(&mut scratch.tc_buf);
+                        if z < 14 && !is_valid_simple_tile_ring(&scratch.tc_buf) {
+                            continue;
+                        }
                     }
 
                     mvt::encode_polygon(&mut scratch.geom_buf, &[&scratch.tc_buf]);
@@ -1985,6 +2048,9 @@ fn emit_multipolygon_feature(
                 return;
             }
             close_and_orient_cw(&mut emit_scratch.all_rings[ring_count]);
+            if z < 14 && !is_valid_simple_tile_ring(&emit_scratch.all_rings[ring_count]) {
+                return;
+            }
             ring_count += 1;
             for inner in simp_inners {
                 if inner.len() < 3 {
@@ -1996,6 +2062,9 @@ fn emit_multipolygon_feature(
                     continue;
                 }
                 close_and_orient_ccw(&mut emit_scratch.all_rings[ring_count]);
+                if z < 14 && !is_valid_simple_tile_ring(&emit_scratch.all_rings[ring_count]) {
+                    continue;
+                }
                 ring_count += 1;
             }
 
@@ -2095,6 +2164,9 @@ fn emit_multipolygon_feature(
                             continue;
                         }
                         close_and_orient_cw(&mut emit_scratch.all_rings[ring_count]);
+                        if z < 14 && !is_valid_simple_tile_ring(&emit_scratch.all_rings[ring_count]) {
+                            continue;
+                        }
                         ring_count += 1;
                     }
                     // Inner rings: still need per-tile clipping (holes may be visible).
@@ -2112,6 +2184,9 @@ fn emit_multipolygon_feature(
                             continue;
                         }
                         close_and_orient_ccw(&mut emit_scratch.all_rings[ring_count]);
+                        if z < 14 && !is_valid_simple_tile_ring(&emit_scratch.all_rings[ring_count]) {
+                            continue;
+                        }
                         ring_count += 1;
                     }
 

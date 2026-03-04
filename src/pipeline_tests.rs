@@ -104,6 +104,12 @@ fn oversize_top_list_keeps_largest_tiles_sorted() {
     assert_eq!(top[2].bytes, 100);
 }
 
+#[test]
+fn invalid_tile_ring_detected() {
+    let bowtie = vec![(0, 0), (10, 10), (0, 10), (10, 0), (0, 0)];
+    assert!(!is_valid_simple_tile_ring(&bowtie));
+}
+
 /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
 fn boundary_labels_match(admin_level: i64) -> LayerMatch {
     LayerMatch {
@@ -503,6 +509,25 @@ fn emit_polygon_zoom_dependent_attrs() {
     let (k1, v1) = f.tags[1];
     assert_eq!(lb.test_key(k1), "height");
     assert_eq!(*lb.test_value(v1), mvt::Value::Double(15.0));
+}
+
+#[test]
+fn emit_polygon_skips_self_intersecting_ring_below_z14() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    // Bow-tie ring (self-intersecting).
+    let coords = [
+        Point { x: 0.3, y: 0.3 },
+        Point { x: 0.7, y: 0.7 },
+        Point { x: 0.3, y: 0.7 },
+        Point { x: 0.7, y: 0.3 },
+        Point { x: 0.3, y: 0.3 },
+    ];
+
+    let mut records = Vec::new();
+    let mut scratch = PolygonEmitScratch::new();
+    let count = emit_polygon_feature(500, &coords, &m, 0, 0, &mut records, &mut scratch);
+    assert_eq!(count, 0);
+    assert!(records.is_empty());
 }
 
 // -----------------------------------------------------------------------

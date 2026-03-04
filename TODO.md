@@ -115,7 +115,7 @@
 
 ## Geometry correctness
 
-- [ ] Post-simplification ring validity: Douglas-Peucker can produce self-intersecting rings.
+- [x] Post-simplification ring validity: Douglas-Peucker can produce self-intersecting rings.
   Low risk but no safety net currently. Planetiler hit this with VW+smoothing (#1263, #1192).
   Tippecanoe (#164) is rewriting their polygon cleaner (replacing Wagyu) for robustness on
   messy/self-contradictory input geometry — same problem class. High pixel tolerance can also
