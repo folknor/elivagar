@@ -141,11 +141,13 @@
   (Planetiler #237). Current algorithm is a simple 5-scan horizontal sweep; Planetiler #723
   implements pole of inaccessibility (max inscribed circle) which gives better results for
   irregular polygons but is more expensive.
-- [ ] Shared-node simplification: Douglas-Peucker simplifies all points uniformly and can
-  remove road intersections or boundary junctions if they fall below the tolerance threshold.
-  Tippecanoe (#99) had bugs in their shared-node preservation mode. For polygons, independent
-  simplification of adjacent polygons sharing an edge produces slivers/gaps along the shared
-  boundary (tippecanoe #105).
+- [x] Shared-node simplification (line features): preserve block-local shared interior way
+  nodes during DP simplification so common road/boundary junction vertices survive
+  generalization. Implemented via block-local shared-node detection + required-vertex DP.
+  Tippecanoe (#99) had bugs in shared-node preservation mode; this adds explicit coverage.
+- [ ] Shared-edge simplification (adjacent polygons): independent simplification of polygons
+  that share an edge can still produce slivers/gaps along shared boundaries
+  (tippecanoe #105). Needs topology-aware simplification across polygon groups.
 - [ ] Antimeridian handling: no special-casing for features or datasets crossing 180°/-180°
   longitude. Matters for planet output — archive metadata bbox and geometry wrapping both
   need attention (tippecanoe #82, #205). Tippecanoe #254 also fixes bbox for geometries

@@ -43,7 +43,7 @@ pub const MIN_POLY_AREA: i64 = PX * PX; // 256
 /// given zoom level. One pixel = 1 / (256 × 2^z) Mercator units. Used as a
 /// pre-simplification early exit: if the entire geometry is sub-pixel, DP is
 /// pointless and all coarser zooms can be skipped too.
-fn merc_bbox_is_subpixel(points: &[Point], zoom: u8) -> bool {
+pub(crate) fn merc_bbox_is_subpixel(points: &[Point], zoom: u8) -> bool {
     if points.len() < 2 {
         return true;
     }
@@ -264,6 +264,47 @@ pub fn simplify_into(
     max_dev_sq
 }
 
+/// Simplify with required vertex indices that must survive simplification.
+///
+/// `required_indices` are indices into `points`; out-of-range indices are ignored.
+/// Endpoints are always preserved regardless of `required_indices`.
+pub fn simplify_into_with_required(
+    points: &[Point],
+    tolerance: f64,
+    required_indices: &[usize],
+    keep_buf: &mut Vec<bool>,
+    output: &mut Vec<Point>,
+) -> f64 {
+    output.clear();
+    if points.len() <= 2 {
+        output.extend_from_slice(points);
+        return 0.0;
+    }
+    keep_buf.clear();
+    keep_buf.resize(points.len(), false);
+    keep_buf[0] = true;
+    keep_buf[points.len() - 1] = true;
+    for &idx in required_indices {
+        if idx < points.len() {
+            keep_buf[idx] = true;
+        }
+    }
+
+    let max_dev_sq = dp_recurse_with_required(
+        points,
+        0,
+        points.len() - 1,
+        tolerance * tolerance,
+        keep_buf,
+    );
+    for (i, &k) in keep_buf.iter().enumerate() {
+        if k {
+            output.push(points[i]);
+        }
+    }
+    max_dev_sq
+}
+
 /// Convenience wrapper that allocates its own buffers. Use [`simplify_into`] in hot paths.
 #[cfg(test)]
 pub fn simplify(points: &[Point], tolerance: f64) -> Vec<Point> {
@@ -288,6 +329,34 @@ fn dp_recurse(points: &[Point], start: usize, end: usize, tol_sq: f64, keep: &mu
     } else {
         // All points in this segment are within tolerance — max_dist_sq is
         // the largest deviation among them.
+        max_dist_sq
+    }
+}
+
+fn dp_recurse_with_required(
+    points: &[Point],
+    start: usize,
+    end: usize,
+    tol_sq: f64,
+    keep: &mut [bool],
+) -> f64 {
+    if end <= start + 1 {
+        return 0.0;
+    }
+
+    if let Some(split_idx) = (start + 1..end).find(|&i| keep[i]) {
+        let left = dp_recurse_with_required(points, start, split_idx, tol_sq, keep);
+        let right = dp_recurse_with_required(points, split_idx, end, tol_sq, keep);
+        return left.max(right);
+    }
+
+    let (max_idx, max_dist_sq) = find_farthest(points, start, end);
+    if max_dist_sq > tol_sq {
+        keep[max_idx] = true;
+        let left = dp_recurse_with_required(points, start, max_idx, tol_sq, keep);
+        let right = dp_recurse_with_required(points, max_idx, end, tol_sq, keep);
+        left.max(right)
+    } else {
         max_dist_sq
     }
 }

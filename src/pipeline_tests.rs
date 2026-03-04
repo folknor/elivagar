@@ -204,6 +204,39 @@ fn non_boundary_labels_unchanged() {
     assert_eq!(matches[0].attrs.len(), original_attr_count, "attrs should not be modified");
 }
 
+#[test]
+fn block_shared_node_annotation_marks_only_shared_interiors() {
+    let mut raw = vec![
+        RawWay {
+            way_id: 1,
+            node_refs: vec![10, 20, 30],
+            preserve_node_refs: Vec::new(),
+            coords_e7: Vec::new(),
+            tags: Vec::new(),
+        },
+        RawWay {
+            way_id: 2,
+            node_refs: vec![99, 20, 88],
+            preserve_node_refs: Vec::new(),
+            coords_e7: Vec::new(),
+            tags: Vec::new(),
+        },
+        RawWay {
+            way_id: 3,
+            node_refs: vec![20, 777], // shared, but endpoint only => ignored
+            preserve_node_refs: Vec::new(),
+            coords_e7: Vec::new(),
+            tags: Vec::new(),
+        },
+    ];
+
+    annotate_block_shared_node_refs(&mut raw);
+
+    assert_eq!(raw[0].preserve_node_refs, vec![20]);
+    assert_eq!(raw[1].preserve_node_refs, vec![20]);
+    assert!(raw[2].preserve_node_refs.is_empty());
+}
+
 // -----------------------------------------------------------------------
 // Helpers for emit tests — decode SortRecord payloads
 // -----------------------------------------------------------------------
@@ -340,7 +373,7 @@ fn emit_line_too_few_points() {
     let coords = [Point { x: 0.5, y: 0.5 }];
     let mut records = Vec::new();
     let mut scratch = LineEmitScratch::new();
-    let count = emit_line_feature(101, &coords, &m, 0, 0, &mut records, &mut scratch);
+    let count = emit_line_feature(101, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -354,7 +387,7 @@ fn emit_line_decodes_correctly() {
     ];
     let mut records = Vec::new();
     let mut scratch = LineEmitScratch::new();
-    emit_line_feature(100, &coords, &m, 0, 0, &mut records, &mut scratch);
+    emit_line_feature(100, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -389,7 +422,7 @@ fn emit_line_cascading_simplification() {
     ];
     let mut records = Vec::new();
     let mut scratch = LineEmitScratch::new();
-    emit_line_feature(99, &coords, &m, 0, 14, &mut records, &mut scratch);
+    emit_line_feature(99, &coords, &[], &m, 0, 14, &mut records, &mut scratch);
 
     // At z=14 this line is ~0.4 pixel which is sub-pixel, but Streets skips
     // the size filter, so it should still produce a record at z=14.

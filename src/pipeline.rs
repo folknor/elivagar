@@ -27,6 +27,7 @@ use crate::way_index::WayIndex;
 use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add_feature_to_layer};
 
 use pbfhogg::{BlockType, Element, ElementReader, MemberId, PrimitiveBlock};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -886,19 +887,35 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                                 // Standard PBF: collect node refs
                                                 let node_refs: Vec<i64> = way.refs().collect();
                                                 if node_refs.is_empty() { return None; }
-                                                Some(RawWay { way_id: way.id(), node_refs, coords_e7: Vec::new(), tags })
+                                                Some(RawWay {
+                                                    way_id: way.id(),
+                                                    node_refs,
+                                                    preserve_node_refs: Vec::new(),
+                                                    coords_e7: Vec::new(),
+                                                    tags,
+                                                })
                                             } else {
-                                                // Locations-on-ways: collect coords directly
-                                                let coords_e7: Vec<(i32, i32)> = way.node_locations()
+                                                // Locations-on-ways: collect refs + coords directly
+                                                let node_refs: Vec<i64> = way.refs().collect();
+                                                let coords_e7: Vec<(i32, i32)> = way
+                                                    .node_locations()
                                                     .map(|loc| (loc.decimicro_lat(), loc.decimicro_lon()))
                                                     .collect();
                                                 if coords_e7.is_empty() { return None; }
-                                                Some(RawWay { way_id: way.id(), node_refs: Vec::new(), coords_e7, tags })
+                                                Some(RawWay {
+                                                    way_id: way.id(),
+                                                    node_refs,
+                                                    preserve_node_refs: Vec::new(),
+                                                    coords_e7,
+                                                    tags,
+                                                })
                                             }
                                         }
                                         _ => None,
                                     })
                                     .collect();
+                                let mut raw_ways = raw_ways;
+                                annotate_block_shared_node_refs(&mut raw_ways);
                                 let block_bytes = estimate_raw_ways_bytes(&raw_ways);
                                 let block_cost = block_bytes * WAY_OUTPUT_MULTIPLIER;
                                 // Wait for capacity: count limit and byte budget.
@@ -1161,19 +1178,53 @@ fn process_node(
 struct RawWay {
     way_id: i64,
     node_refs: Vec<i64>,
+    preserve_node_refs: Vec<i64>,
     coords_e7: Vec<(i32, i32)>,
     tags: Vec<(String, String)>,
 }
-const _: () = assert!(std::mem::size_of::<RawWay>() == 80);
+const _: () = assert!(std::mem::size_of::<RawWay>() == 104);
 
 /// Estimate heap bytes for a block of raw ways (struct + node_refs + tag strings).
 fn estimate_raw_ways_bytes(ways: &[RawWay]) -> usize {
     ways.iter().map(|w| {
-        80 + w.node_refs.len() * 8
+        std::mem::size_of::<RawWay>() + w.node_refs.len() * 8
+            + w.preserve_node_refs.len() * 8
             + w.coords_e7.len() * 8
             + w.tags.len() * 48
             + w.tags.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
     }).sum()
+}
+
+/// Mark interior node refs that are shared by at least 2 ways in the same block.
+///
+/// This preserves common junction vertices during DP simplification without global
+/// topology indexing. Block-local detection catches most local road intersections
+/// because OSM PBF primitive blocks are spatially clustered.
+fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
+    let mut counts: FxHashMap<i64, u8> = FxHashMap::default();
+    for w in raw_ways.iter() {
+        if w.node_refs.len() <= 2 {
+            continue;
+        }
+        for &node_id in &w.node_refs[1..w.node_refs.len() - 1] {
+            counts
+                .entry(node_id)
+                .and_modify(|c| *c = c.saturating_add(1))
+                .or_insert(1);
+        }
+    }
+
+    for w in raw_ways.iter_mut() {
+        w.preserve_node_refs.clear();
+        if w.node_refs.len() <= 2 {
+            continue;
+        }
+        for &node_id in &w.node_refs[1..w.node_refs.len() - 1] {
+            if counts.get(&node_id).is_some_and(|&c| c >= 2) {
+                w.preserve_node_refs.push(node_id);
+            }
+        }
+    }
 }
 
 /// Result of parallel way processing: resolved coords (needed for way_index),
@@ -1202,6 +1253,9 @@ struct LineEmitScratch {
     geom_buf: Vec<u32>,
     attrs_buf: Vec<u8>,
     tc_buf: Vec<(i32, i32)>,
+    simplify_keep: Vec<bool>,
+    simplify_buf: Vec<Point>,
+    pinned_idxs: Vec<usize>,
 }
 
 impl LineEmitScratch {
@@ -1210,6 +1264,9 @@ impl LineEmitScratch {
             geom_buf: Vec::new(),
             attrs_buf: Vec::new(),
             tc_buf: Vec::new(),
+            simplify_keep: Vec::new(),
+            simplify_buf: Vec::new(),
+            pinned_idxs: Vec::new(),
         }
     }
 }
@@ -1328,14 +1385,16 @@ fn process_raw_way(
 ) -> ProcessedWay {
     // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
     // or looked up via node store (the expensive mmap reads — now parallel).
-    let coords_e7: Vec<(i32, i32)> = if !raw.coords_e7.is_empty() {
-        raw.coords_e7.clone()
+    let (coords_e7, resolved_node_refs): (Vec<(i32, i32)>, Vec<i64>) = if !raw.coords_e7.is_empty() {
+        (raw.coords_e7.clone(), raw.node_refs.clone())
     } else if let Some(nr) = node_reader {
         let mut missing_refs: usize = 0;
         let mut resolved: Vec<(i32, i32)> = Vec::with_capacity(raw.node_refs.len());
+        let mut resolved_refs: Vec<i64> = Vec::with_capacity(raw.node_refs.len());
         for &id in &raw.node_refs {
             if let Some(coord) = nr.get(id) {
                 resolved.push(coord);
+                resolved_refs.push(id);
             } else {
                 missing_refs += 1;
             }
@@ -1343,9 +1402,9 @@ fn process_raw_way(
         if missing_refs > 0 {
             missing_ref_stats.record_way_missing_nodes(missing_refs);
         }
-        resolved
+        (resolved, resolved_refs)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     if coords_e7.is_empty() || raw.tags.is_empty() {
@@ -1370,6 +1429,15 @@ fn process_raw_way(
     let osm_id = raw.way_id as u64;
     let mut records = Vec::new();
     let mut bbox: Option<MercBbox> = None;
+    let mut preserve_vertex_mask: Vec<bool> = vec![false; coords_e7.len()];
+    if !raw.preserve_node_refs.is_empty() {
+        let preserve_nodes: FxHashSet<i64> = raw.preserve_node_refs.iter().copied().collect();
+        for (i, node_id) in resolved_node_refs.iter().enumerate() {
+            if preserve_nodes.contains(node_id) {
+                preserve_vertex_mask[i] = true;
+            }
+        }
+    }
 
     WAY_WORKER_SCRATCH.with(|cell| {
         let scratch = &mut *cell.borrow_mut();
@@ -1400,7 +1468,16 @@ fn process_raw_way(
                     );
                 }
                 GeomExpect::Line => {
-                    emit_line_feature(osm_id, merc, m, z_lo, z_hi, &mut records, &mut scratch.line_emit);
+                    emit_line_feature(
+                        osm_id,
+                        merc,
+                        &preserve_vertex_mask,
+                        m,
+                        z_lo,
+                        z_hi,
+                        &mut records,
+                        &mut scratch.line_emit,
+                    );
                 }
                 GeomExpect::Polygon => {
                     emit_polygon_feature(osm_id, merc, m, z_lo, z_hi, &mut records, &mut scratch.polygon_emit);
@@ -1698,7 +1775,14 @@ fn process_prepared_relation_into(
                     let bbox = merc_bbox(&mw.coords);
                     land_mask.mark_bbox(&bbox);
                     emit_line_feature(
-                        rel.osm_id, &mw.coords, m, z_lo, z_hi, records, line_emit,
+                        rel.osm_id,
+                        &mw.coords,
+                        &[],
+                        m,
+                        z_lo,
+                        z_hi,
+                        records,
+                        line_emit,
                     );
                 }
             }
@@ -1911,9 +1995,11 @@ fn emit_point_or_centroid(
 }
 
 #[hotpath::measure]
+#[allow(clippy::too_many_arguments)]
 fn emit_line_feature(
     osm_id: u64,
     merc: &[Point],
+    preserve_vertex_mask: &[bool],
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
@@ -1921,8 +2007,15 @@ fn emit_line_feature(
     scratch: &mut LineEmitScratch,
 ) -> u64 {
     let mut count: u64 = 0;
-
-    geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, |z, simplified| {
+    scratch.pinned_idxs.clear();
+    scratch.pinned_idxs.extend(
+        preserve_vertex_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &keep)| keep.then_some(i)),
+    );
+    let has_pins = !scratch.pinned_idxs.is_empty();
+    let mut run_for_zoom = |z: u8, simplified: &[Point]| {
         encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
 
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
@@ -1971,7 +2064,35 @@ fn emit_line_feature(
                 });
             }
         });
-    });
+    };
+
+    if has_pins {
+        for z in (z_lo..=z_hi).rev() {
+            if z < 14 && geometry::merc_bbox_is_subpixel(merc, z) {
+                break;
+            }
+            if z < 14 {
+                let tol = geometry::simplify_tolerance(z);
+                let _ = geometry::simplify_into_with_required(
+                    merc,
+                    tol,
+                    &scratch.pinned_idxs,
+                    &mut scratch.simplify_keep,
+                    &mut scratch.simplify_buf,
+                );
+                if scratch.simplify_buf.len() < 2 {
+                    break;
+                }
+                run_for_zoom(z, &scratch.simplify_buf);
+            } else {
+                run_for_zoom(z, merc);
+            }
+        }
+    } else {
+        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, |z, simplified| {
+            run_for_zoom(z, simplified);
+        });
+    }
     count
 }
 
