@@ -217,7 +217,7 @@
 ## Quality
 
 - [ ] Visual verification (tracked in nidhogg TODO)
-- [ ] Missing-ref diagnostics: when ways reference missing nodes or relations reference missing
+- [x] Missing-ref diagnostics: when ways reference missing nodes or relations reference missing
   ways (common in regional extracts), elivagar silently skips them. Should emit a summary
   count so users know data is incomplete rather than wondering why features are missing
   (tilemaker #332). Also applies to nested relations: `prepare_relation()` skips non-way

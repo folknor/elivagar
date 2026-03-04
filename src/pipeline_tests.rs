@@ -54,6 +54,26 @@ fn flat_index_guard_override_path_works() {
     assert_eq!(mode, NodeStoreMode::Flat { unsafe_override: true });
 }
 
+#[test]
+fn missing_ref_stats_accumulates_and_snapshots() {
+    let stats = MissingRefStatsAtomic::default();
+    stats.record_way_missing_nodes(3);
+    stats.record_way_missing_nodes(2);
+    stats.record_relation_missing_way_ref();
+    stats.record_relation_missing_way_ref();
+    stats.record_relation_with_missing_way_refs();
+    stats.record_relation_non_way_member();
+    stats.record_relation_nested_member();
+
+    let snap = stats.snapshot();
+    assert_eq!(snap.missing_way_node_refs, 5);
+    assert_eq!(snap.ways_with_missing_node_refs, 2);
+    assert_eq!(snap.missing_relation_way_refs, 2);
+    assert_eq!(snap.relations_with_missing_way_refs, 1);
+    assert_eq!(snap.relation_non_way_members, 1);
+    assert_eq!(snap.relation_nested_members, 1);
+}
+
 /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
 fn boundary_labels_match(admin_level: i64) -> LayerMatch {
     LayerMatch {

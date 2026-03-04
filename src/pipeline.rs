@@ -29,7 +29,7 @@ use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs, add
 use pbfhogg::{BlockType, Element, ElementReader, MemberId, PrimitiveBlock};
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// Pipeline error type. Stringly-typed because no caller inspects variants —
@@ -193,6 +193,64 @@ fn select_node_store_mode(
     })
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct MissingRefStats {
+    missing_way_node_refs: u64,
+    ways_with_missing_node_refs: u64,
+    missing_relation_way_refs: u64,
+    relations_with_missing_way_refs: u64,
+    relation_non_way_members: u64,
+    relation_nested_members: u64,
+}
+
+#[derive(Debug, Default)]
+struct MissingRefStatsAtomic {
+    missing_way_node_refs: AtomicU64,
+    ways_with_missing_node_refs: AtomicU64,
+    missing_relation_way_refs: AtomicU64,
+    relations_with_missing_way_refs: AtomicU64,
+    relation_non_way_members: AtomicU64,
+    relation_nested_members: AtomicU64,
+}
+
+impl MissingRefStatsAtomic {
+    fn record_way_missing_nodes(&self, missing_refs: usize) {
+        self.missing_way_node_refs
+            .fetch_add(missing_refs as u64, Ordering::Relaxed);
+        self.ways_with_missing_node_refs.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_relation_missing_way_ref(&self) {
+        self.missing_relation_way_refs.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_relation_with_missing_way_refs(&self) {
+        self.relations_with_missing_way_refs
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_relation_non_way_member(&self) {
+        self.relation_non_way_members.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_relation_nested_member(&self) {
+        self.relation_nested_members.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> MissingRefStats {
+        MissingRefStats {
+            missing_way_node_refs: self.missing_way_node_refs.load(Ordering::Relaxed),
+            ways_with_missing_node_refs: self.ways_with_missing_node_refs.load(Ordering::Relaxed),
+            missing_relation_way_refs: self.missing_relation_way_refs.load(Ordering::Relaxed),
+            relations_with_missing_way_refs: self
+                .relations_with_missing_way_refs
+                .load(Ordering::Relaxed),
+            relation_non_way_members: self.relation_non_way_members.load(Ordering::Relaxed),
+            relation_nested_members: self.relation_nested_members.load(Ordering::Relaxed),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -278,6 +336,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let mut relation_blocks_drop_rss_kb: Option<u64> = None;
 
     let mut node_store_stats: Option<(u64, usize)> = None;
+    let mut missing_ref_summary: Option<MissingRefStats> = None;
 
     let mut sort_reader = if skip == Some(SkipTo::Sort) {
         // Skip straight to sort — read all existing chunks
@@ -292,12 +351,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
-            let (mut sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks, rel_drop_rss) = phase_read_and_process(config)?;
+            let (mut sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks, rel_drop_rss, missing_refs) = phase_read_and_process(config)?;
             node_store_stats = ns_stats;
             max_way_inflight_bytes = Some(way_hwm);
             max_rel_batch_bytes = Some(rel_hwm);
             relation_blocks_buffered = Some(rel_blocks);
             relation_blocks_drop_rss_kb = rel_drop_rss;
+            missing_ref_summary = Some(missing_refs);
             phase12_elapsed = Some(phase12_start.elapsed());
             phase12_rss = peak_rss_kb();
             sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
@@ -455,6 +515,14 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("dedup_reject_fp_mismatch={}", dedup_stats.reject_fp_mismatch);
     eprintln!("dedup_insert_skipped_cap={}", dedup_stats.insert_skipped_cap);
     eprintln!("dedup_hash_bucket_collisions={}", dedup_stats.hash_bucket_collisions);
+    if let Some(m) = missing_ref_summary {
+        eprintln!("missing_way_node_refs={}", m.missing_way_node_refs);
+        eprintln!("ways_with_missing_node_refs={}", m.ways_with_missing_node_refs);
+        eprintln!("missing_relation_way_refs={}", m.missing_relation_way_refs);
+        eprintln!("relations_with_missing_way_refs={}", m.relations_with_missing_way_refs);
+        eprintln!("relation_non_way_members={}", m.relation_non_way_members);
+        eprintln!("relation_nested_members={}", m.relation_nested_members);
+    }
     Ok(())
 }
 
@@ -524,7 +592,7 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::unwrap_in_result, clippy::type_complexity)]
 #[hotpath::measure]
-fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize, usize, Option<u64>), PipelineError> {
+fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize, usize, Option<u64>, MissingRefStats), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let sort_chunk_budget = if config.sort_chunk_size > 0 {
@@ -595,6 +663,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut rel_count: u64 = 0;
     let mut features_emitted: u64 = 0;
     let mut node_store_stats: Option<(u64, usize)> = None;
+    let missing_ref_stats = std::sync::Arc::new(MissingRefStatsAtomic::default());
     let land_mask = std::sync::Arc::new(geometry::LandMask::new());
 
     // Track data extent for ocean shapefile filtering
@@ -721,6 +790,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let nr_clone = nr.clone();
                     let lm_clone = std::sync::Arc::clone(&land_mask);
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
+                    let missing_ref_stats_clone = std::sync::Arc::clone(&missing_ref_stats);
                     let mz = min_z;
                     let xz = max_z;
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
@@ -741,6 +811,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         // avoids Arc::clone per spawn.
                         let nr_ref: Option<&NodeStoreReader> = nr_clone.as_deref();
                         let lm_ref = &*lm_clone;
+                        let mr_ref = &*missing_ref_stats_clone;
                         // Byte-budgeted throttle: (count, estimated_bytes).
                         // Condvar wakes dispatcher when a task completes.
                         let inflight = std::sync::Mutex::new((0usize, 0usize));
@@ -798,7 +869,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                     let results: Vec<ProcessedWay> = raw_ways
                                         .into_par_iter()
                                         .map(|raw| process_raw_way(
-                                            &raw, nr_ref, lm_ref, mz, xz,
+                                            &raw, nr_ref, lm_ref, mz, xz, mr_ref,
                                         ))
                                         .collect();
                                     let _ = tx.send(results);
@@ -874,6 +945,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                 if let Some(prepared) = prepare_relation(
                     &rel,
                     way_index.as_ref().expect("way_index not returned from drain"),
+                    &missing_ref_stats,
                 ) {
                     rel_batch_bytes += estimate_prepared_rel_bytes(&prepared);
                     rel_batch.push(prepared);
@@ -935,6 +1007,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     eprintln!("  Land mask: {} z14 cells populated", land_mask.count_set());
 
     let max_way_inflight_bytes = way_hwm.load(Ordering::Relaxed);
+    let missing_ref_snapshot = missing_ref_stats.snapshot();
     Ok((
         sort_writer.expect("sort_writer not returned from drain"),
         data_bounds,
@@ -944,6 +1017,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         max_rel_batch_bytes,
         relation_blocks_buffered,
         relation_blocks_drop_rss_kb,
+        missing_ref_snapshot,
     ))
 }
 
@@ -1194,15 +1268,26 @@ fn process_raw_way(
     land_mask: &geometry::LandMask,
     min_zoom: u8,
     max_zoom: u8,
+    missing_ref_stats: &MissingRefStatsAtomic,
 ) -> ProcessedWay {
     // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
     // or looked up via node store (the expensive mmap reads — now parallel).
     let coords_e7: Vec<(i32, i32)> = if !raw.coords_e7.is_empty() {
         raw.coords_e7.clone()
     } else if let Some(nr) = node_reader {
-        raw.node_refs.iter()
-            .filter_map(|&id| nr.get(id))
-            .collect()
+        let mut missing_refs: usize = 0;
+        let mut resolved: Vec<(i32, i32)> = Vec::with_capacity(raw.node_refs.len());
+        for &id in &raw.node_refs {
+            if let Some(coord) = nr.get(id) {
+                resolved.push(coord);
+            } else {
+                missing_refs += 1;
+            }
+        }
+        if missing_refs > 0 {
+            missing_ref_stats.record_way_missing_nodes(missing_refs);
+        }
+        resolved
     } else {
         Vec::new()
     };
@@ -1304,6 +1389,7 @@ fn estimate_prepared_rel_bytes(r: &PreparedRelation) -> usize {
 fn prepare_relation(
     rel: &pbfhogg::Relation<'_>,
     way_index: &WayIndex,
+    missing_ref_stats: &MissingRefStatsAtomic,
 ) -> Option<PreparedRelation> {
     // Fast reject without tag allocation: most relations are not multipolygon/boundary.
     let mut rel_type = "";
@@ -1329,20 +1415,37 @@ fn prepare_relation(
     let is_boundary = tag_helper.has_value("boundary", "administrative");
 
     let mut member_ways: Vec<MemberWay> = Vec::new();
+    let mut had_missing_way_ref = false;
 
     for member in rel.members() {
-        let MemberId::Way(way_id) = member.id else {
-            continue;
-        };
-        let role = WayRole::from_str(member.role().unwrap_or(""));
-        if let Some(coords_e7) = way_index.get(way_id) {
-            let merc: Vec<Point> = coords_e7
-                .iter()
-                .map(|&(lat, lon)| geometry::project_e7(lat, lon))
-                .collect();
-
-            member_ways.push(MemberWay { role, coords: merc });
+        match member.id {
+            MemberId::Way(way_id) => {
+                let role = WayRole::from_str(member.role().unwrap_or(""));
+                if let Some(coords_e7) = way_index.get(way_id) {
+                    let merc: Vec<Point> = coords_e7
+                        .iter()
+                        .map(|&(lat, lon)| geometry::project_e7(lat, lon))
+                        .collect();
+                    member_ways.push(MemberWay { role, coords: merc });
+                } else {
+                    had_missing_way_ref = true;
+                    missing_ref_stats.record_relation_missing_way_ref();
+                }
+            }
+            MemberId::Relation(_) => {
+                missing_ref_stats.record_relation_non_way_member();
+                missing_ref_stats.record_relation_nested_member();
+            }
+            MemberId::Node(_) => {
+                missing_ref_stats.record_relation_non_way_member();
+            }
+            _ => {
+                missing_ref_stats.record_relation_non_way_member();
+            }
         }
+    }
+    if had_missing_way_ref {
+        missing_ref_stats.record_relation_with_missing_way_refs();
     }
 
     if member_ways.is_empty() {
