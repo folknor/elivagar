@@ -54,12 +54,30 @@ pub fn inspect(path: &Path) -> io::Result<()> {
         0.0
     };
 
+    let metadata_json = if metadata_length > 0 && metadata_length <= 10 * 1024 * 1024 {
+        reader.read_metadata().ok()
+    } else {
+        None
+    };
+    let metadata_payload_format = metadata_json
+        .as_deref()
+        .and_then(|j| extract_json_string(j, "\"tile_payload_format\":\""));
+    let metadata_tile_compression = metadata_json
+        .as_deref()
+        .and_then(|j| extract_json_string(j, "\"tile_compression\":\""));
+
     println!("PMTiles v{version}  {}", path.display());
     println!("  File size:  {}", format_bytes(file_size));
     println!();
     println!("  Tile type:          {tile_type}");
     println!("  Tile compression:   {tile_compression}");
     println!("  Internal compress:  {internal_compression}");
+    if let Some(payload) = metadata_payload_format.as_deref() {
+        println!("  Payload format:     {payload} (metadata)");
+    }
+    if let Some(comp) = metadata_tile_compression.as_deref() {
+        println!("  Payload compress:   {comp} (metadata)");
+    }
     println!("  Clustered:          {clustered}");
     println!();
     println!("  Zoom:    {min_zoom}..{max_zoom}");
@@ -97,11 +115,7 @@ pub fn inspect(path: &Path) -> io::Result<()> {
         format_bytes(data_length),
     );
 
-    // Read and decompress metadata JSON.
-    if metadata_length > 0
-        && metadata_length <= 10 * 1024 * 1024
-        && let Ok(json) = reader.read_metadata()
-    {
+    if let Some(json) = metadata_json {
         println!();
         println!("  Metadata:");
         // Try to pretty-print if it's valid JSON-like, otherwise raw.
@@ -185,6 +199,13 @@ fn extract_number(s: &str, key: &str) -> Option<u8> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(after.len());
     after[..end].parse().ok()
+}
+
+fn extract_json_string(s: &str, key: &str) -> Option<String> {
+    let pos = s.find(key)?;
+    let start = pos + key.len();
+    let end = s[start..].find('"')?;
+    Some(s[start..start + end].to_string())
 }
 
 fn format_bytes(bytes: u64) -> String {

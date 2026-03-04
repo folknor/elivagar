@@ -257,10 +257,18 @@ fn test_metadata_json() {
         center: (0.0, 0.0, 2),
 
     };
-    let json = build_metadata(&config, None, None);
+    let json = build_metadata(
+        &config,
+        TileDataFormat::Mvt,
+        TileDataCompression::Gzip,
+        None,
+        None,
+    );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["name"], "Shortbread");
     assert_eq!(parsed["format"], "pbf");
+    assert_eq!(parsed["tile_payload_format"], "mvt");
+    assert_eq!(parsed["tile_compression"], "gzip");
     let layers = parsed["vector_layers"].as_array().unwrap();
     assert_eq!(layers.len(), 26);
     assert_eq!(layers[0]["id"], "water_polygons");
@@ -278,10 +286,37 @@ fn test_metadata_json_with_source_provenance() {
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 2),
     };
-    let json = build_metadata(&config, Some("denmark-latest.osm.pbf"), Some(1_708_000_000));
+    let json = build_metadata(
+        &config,
+        TileDataFormat::Mvt,
+        TileDataCompression::Gzip,
+        Some("denmark-latest.osm.pbf"),
+        Some(1_708_000_000),
+    );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["source_pbf"], "denmark-latest.osm.pbf");
     assert_eq!(parsed["osmosis_replication_timestamp"], 1_708_000_000);
+}
+
+#[test]
+fn test_metadata_json_mlt_contract() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let json = build_metadata(
+        &config,
+        TileDataFormat::Mlt,
+        TileDataCompression::None,
+        None,
+        None,
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["format"], "mlt");
+    assert_eq!(parsed["tile_payload_format"], "mlt");
+    assert_eq!(parsed["tile_compression"], "none");
 }
 
 // -----------------------------------------------------------------------
@@ -456,6 +491,27 @@ fn write_to_produces_valid_header() {
     assert_eq!(&bytes[0..7], b"PMTiles");
     // Byte 7: version = 3
     assert_eq!(bytes[7], 3);
+}
+
+#[test]
+fn write_to_respects_tile_contract_in_header() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 0,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+    let mut writer = PmtilesWriter::new(config);
+    writer.set_tile_contract(TileDataFormat::Mlt, TileDataCompression::None);
+    writer.add_tile(0, 0, 0, b"raw-mlt-payload").unwrap();
+
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let out_path = dir.path().join("test_contract_header.pmtiles");
+    writer.write_to(&out_path).unwrap();
+    let bytes = std::fs::read(&out_path).unwrap();
+
+    assert_eq!(bytes[98], 1, "tile_compression should be none");
+    assert_eq!(bytes[99], 0, "tile_type should be unknown for mlt payload");
 }
 
 // -----------------------------------------------------------------------

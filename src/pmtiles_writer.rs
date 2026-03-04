@@ -50,6 +50,65 @@ pub struct PmtilesConfig {
     pub center: (f64, f64, u8),
 }
 
+/// Tile payload format stored in PMTiles tile data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileDataFormat {
+    Mvt,
+    Mlt,
+}
+
+impl TileDataFormat {
+    fn header_tile_type(self) -> u8 {
+        match self {
+            Self::Mvt => 1, // MVT
+            Self::Mlt => 0, // Unknown in PMTiles header; explicit metadata carries mlt marker.
+        }
+    }
+
+    fn metadata_format(self) -> &'static str {
+        match self {
+            Self::Mvt => "pbf",
+            Self::Mlt => "mlt",
+        }
+    }
+
+    fn metadata_payload(self) -> &'static str {
+        match self {
+            Self::Mvt => "mvt",
+            Self::Mlt => "mlt",
+        }
+    }
+}
+
+/// Compression mode for tile payload blobs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileDataCompression {
+    None,
+    Gzip,
+    Brotli,
+    Zstd,
+}
+
+impl TileDataCompression {
+    fn header_value(self) -> u8 {
+        match self {
+            Self::None => 1,
+            Self::Gzip => 2,
+            Self::Brotli => 3,
+            Self::Zstd => 4,
+        }
+    }
+
+    fn metadata_value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Gzip => "gzip",
+            Self::Brotli => "brotli",
+            Self::Zstd => "zstd",
+        }
+    }
+}
+
 /// Maximum number of entries in the dedup map before we stop inserting.
 /// At planet scale, unlimited dedup grows to ~7 GB. Capping at 1M entries
 /// keeps the map under ~60 MB while still deduplicating the ocean fill tiles
@@ -143,6 +202,8 @@ enum TileBlob {
 ///   avoid multi-GB RAM usage.
 pub struct PmtilesWriter {
     config: PmtilesConfig,
+    tile_data_format: TileDataFormat,
+    tile_data_compression: TileDataCompression,
     source_pbf_filename: Option<String>,
     osmosis_replication_timestamp: Option<i64>,
     /// Concatenated compressed tile data (in-memory or file-backed).
@@ -191,6 +252,16 @@ impl PmtilesWriter {
     pub fn set_osmosis_replication_timestamp(&mut self, ts: i64) {
         self.osmosis_replication_timestamp = Some(ts);
     }
+
+    /// Set tile payload format/compression contract written into PMTiles header + metadata.
+    pub fn set_tile_contract(
+        &mut self,
+        tile_data_format: TileDataFormat,
+        tile_data_compression: TileDataCompression,
+    ) {
+        self.tile_data_format = tile_data_format;
+        self.tile_data_compression = tile_data_compression;
+    }
 }
 
 impl PmtilesWriter {
@@ -198,6 +269,8 @@ impl PmtilesWriter {
     pub fn new(config: PmtilesConfig) -> Self {
         PmtilesWriter {
             config,
+            tile_data_format: TileDataFormat::Mvt,
+            tile_data_compression: TileDataCompression::Gzip,
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
             blob: TileBlob::Memory(Vec::new()),
@@ -227,6 +300,8 @@ impl PmtilesWriter {
 
         Ok(PmtilesWriter {
             config,
+            tile_data_format: TileDataFormat::Mvt,
+            tile_data_compression: TileDataCompression::Gzip,
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
             blob: TileBlob::File { writer, path: blob_path, offset: 0 },
@@ -333,6 +408,8 @@ impl PmtilesWriter {
         let (root_bytes, leaf_bytes, num_entries) = self.finalize_directories()?;
         let metadata_json = build_metadata(
             &self.config,
+            self.tile_data_format,
+            self.tile_data_compression,
             self.source_pbf_filename.as_deref(),
             self.osmosis_replication_timestamp,
         );
@@ -617,10 +694,9 @@ impl PmtilesWriter {
         h[96] = 1;
         // Internal compression: gzip
         h[97] = 2;
-        // Tile compression: gzip
-        h[98] = 2;
-        // Tile type: MVT
-        h[99] = 1;
+        // Tile compression + payload type are format dependent.
+        h[98] = self.tile_data_compression.header_value();
+        h[99] = self.tile_data_format.header_tile_type();
 
         h[100] = self.config.min_zoom;
         h[101] = self.config.max_zoom;
@@ -770,6 +846,8 @@ fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
 /// Validated by test_metadata_json which round-trips through serde_json.
 fn build_metadata(
     config: &PmtilesConfig,
+    tile_data_format: TileDataFormat,
+    tile_data_compression: TileDataCompression,
     source_pbf_filename: Option<&str>,
     osmosis_replication_timestamp: Option<i64>,
 ) -> String {
@@ -791,8 +869,12 @@ fn build_metadata(
     layer_arr.push(']');
 
     let mut json = format!(
-        r#"{{"name":"Shortbread","format":"pbf","type":"baselayer","minzoom":{},"maxzoom":{},"vector_layers":{layer_arr}"#,
-        config.min_zoom, config.max_zoom,
+        r#"{{"name":"Shortbread","format":"{}","tile_payload_format":"{}","tile_compression":"{}","type":"baselayer","minzoom":{},"maxzoom":{},"vector_layers":{layer_arr}"#,
+        tile_data_format.metadata_format(),
+        tile_data_format.metadata_payload(),
+        tile_data_compression.metadata_value(),
+        config.min_zoom,
+        config.max_zoom,
     );
     if let Some(filename) = source_pbf_filename {
         json.push_str(r#","source_pbf":"#);

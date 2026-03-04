@@ -20,7 +20,9 @@ use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::mvt::{self, GeomType, LayerBuilder};
 use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
 use crate::ocean;
-use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter};
+use crate::pmtiles_writer::{
+    self, PmtilesConfig, PmtilesWriter, TileDataCompression, TileDataFormat,
+};
 use crate::shortbread::{self, AttrValue, GeomExpect, Layer, LayerMatch, OsmGeomType, Tags};
 use smallvec::SmallVec;
 use crate::sort::{self, SortRecord, SortWriter};
@@ -2837,11 +2839,15 @@ fn phase_assemble(
         bounds: (-180.0, -85.05, 180.0, 85.05),
         center: (0.0, 0.0, 2),
     };
-    let pmtiles = if config.in_memory {
+    let mut pmtiles = if config.in_memory {
         PmtilesWriter::new(pmtiles_config)
     } else {
         PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir)?
     };
+    match config.tile_format {
+        TilePayloadFormat::Mvt => pmtiles.set_tile_contract(TileDataFormat::Mvt, TileDataCompression::Gzip),
+        TilePayloadFormat::Mlt => pmtiles.set_tile_contract(TileDataFormat::Mlt, TileDataCompression::None),
+    }
 
     const BATCH_SIZE: usize = 4096;
     let assemble_budget = if config.assemble_batch_budget > 0 {
