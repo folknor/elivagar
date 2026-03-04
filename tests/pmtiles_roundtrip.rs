@@ -11,6 +11,8 @@
 //! runs the full pipeline on a real PBF.
 
 use std::collections::HashSet;
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use elivagar::pmtiles_reader::{decode_mvt_layers, PmtilesReader};
@@ -81,6 +83,27 @@ fn gzip_bytes(data: &[u8]) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(data).unwrap();
     encoder.finish().unwrap()
+}
+
+fn rewrite_metadata_json_in_place(path: &Path, json: &str) {
+    let mut reader = PmtilesReader::open(path).unwrap();
+    let metadata_offset = reader.metadata_offset();
+    let metadata_length = reader.metadata_length();
+    let replacement = gzip_bytes(json.as_bytes());
+    assert!(
+        replacement.len() <= metadata_length as usize,
+        "replacement metadata must fit existing section ({} > {})",
+        replacement.len(),
+        metadata_length
+    );
+
+    let mut file = OpenOptions::new().read(true).write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(metadata_offset)).unwrap();
+    file.write_all(&replacement).unwrap();
+    let pad = metadata_length as usize - replacement.len();
+    if pad > 0 {
+        file.write_all(&vec![0u8; pad]).unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -516,4 +539,83 @@ fn test_verify_fail_truncated_tile() {
     let report = elivagar::verify::verify(&path).unwrap();
     assert!(!report.passed, "expected verify to fail");
     assert!(!report.tile_errors.is_empty());
+}
+
+#[test]
+fn test_verify_fail_invalid_metadata_json() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 0,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+    let mvt = encode_mvt_tile(&["streets"]);
+    writer.add_tile(0, 0, 0, &gzip_bytes(&mvt)).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("verify_bad_metadata_json.pmtiles");
+    writer.write_to(&path).unwrap();
+
+    rewrite_metadata_json_in_place(&path, "{");
+
+    let err = elivagar::verify::verify(&path).err().expect("verify should fail");
+    let msg = err.to_string();
+    assert!(msg.contains("metadata error"), "unexpected error: {msg}");
+    assert!(msg.contains("invalid JSON"), "unexpected error: {msg}");
+}
+
+#[test]
+fn test_verify_fail_metadata_missing_vector_layers() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 0,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+    let mvt = encode_mvt_tile(&["streets"]);
+    writer.add_tile(0, 0, 0, &gzip_bytes(&mvt)).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("verify_missing_vector_layers.pmtiles");
+    writer.write_to(&path).unwrap();
+
+    rewrite_metadata_json_in_place(&path, "{\"name\":\"Shortbread\",\"format\":\"pbf\"}");
+
+    let err = elivagar::verify::verify(&path).err().expect("verify should fail");
+    let msg = err.to_string();
+    assert!(msg.contains("metadata error"), "unexpected error: {msg}");
+    assert!(msg.contains("missing 'vector_layers'"), "unexpected error: {msg}");
+}
+
+#[test]
+fn test_verify_fail_metadata_vector_layers_schema() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 0,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+    let mvt = encode_mvt_tile(&["streets"]);
+    writer.add_tile(0, 0, 0, &gzip_bytes(&mvt)).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("verify_bad_vector_layers_schema.pmtiles");
+    writer.write_to(&path).unwrap();
+
+    // vector_layers exists, but entry is missing string "id".
+    rewrite_metadata_json_in_place(&path, "{\"vector_layers\":[{\"id\":1}]}");
+
+    let err = elivagar::verify::verify(&path).err().expect("verify should fail");
+    let msg = err.to_string();
+    assert!(msg.contains("metadata error"), "unexpected error: {msg}");
+    assert!(
+        msg.contains("vector_layers entry missing 'id' string"),
+        "unexpected error: {msg}"
+    );
 }

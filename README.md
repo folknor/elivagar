@@ -152,6 +152,21 @@ Requires Rust nightly (edition 2024) and [pbfhogg](https://github.com/folknor/pb
 cargo build --release
 ```
 
+## Test fixture refresh
+
+MVT conformance fixtures live in `tests/fixtures/mvt_fixtures/` and are checked
+into git. CI and local tests do not download them.
+
+To refresh from upstream Mapbox `mvt-fixtures`:
+
+1. Clone upstream to local scratch (for example `.cache/mvt-fixtures-upstream`).
+2. Copy the selected fixture directories into `tests/fixtures/mvt_fixtures/`.
+3. Update `tests/fixtures/mvt_fixtures/README.md` with the upstream commit hash
+   and imported fixture IDs.
+
+The scratch clone directory (for example `.cache/`) is optional maintenance
+workspace and should remain untracked.
+
 ## License
 
 Apache-2.0
