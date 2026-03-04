@@ -19,7 +19,7 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--ocean-simplified path.shp` | Simplified ocean shapefile for z0-7. Auto-detected from `data/` when omitted |
 | `--no-ocean` | Disable ocean shapefile processing (skip auto-detection) |
 | `--tmp-dir path` | Directory for temporary sort files (default: `data/tilegen_tmp`) |
-| `--skip-to ocean\|sort` | Resume from a previous run's checkpoint |
+| `--skip-to ocean\|sort\|assemble` | Resume from a previous run's checkpoint |
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |
 | `--compression-level 0-10` | Gzip compression level (default: 6). Lower = faster, larger output |
 | `--force-sorted` | Use compact in-RAM node store even if PBF header lacks `Sort.Type_then_ID` |
@@ -67,6 +67,7 @@ Ocean shapefiles are auto-detected from `data/water-polygons-split-3857/` and
 
 `--skip-to ocean` reuses PBF chunks from a previous full run.
 `--skip-to sort` reuses all chunks (PBF + ocean).
+`--skip-to assemble` reuses all chunks and jumps straight to tile assembly.
 
 ### Flat index safety guardrails
 

@@ -48,9 +48,9 @@
 
 ## Refactoring opportunities
 
-- [ ] Expand checkpoint/skip-to for faster profile iteration: currently supports `--skip-to
-  ocean` and `--skip-to sort`. A `--skip-to assemble` mode that reuses sorted chunks but
-  re-runs MVT encoding with different profile settings would speed up Shortbread tuning on
+- [x] Expand checkpoint/skip-to for faster profile iteration: now supports `--skip-to
+  ocean`, `--skip-to sort`, and `--skip-to assemble`. Assemble mode reuses sorted chunks and
+  re-runs MVT encoding with different profile settings to speed up Shortbread tuning on
   large extracts. Planetiler #1497/#1468 adds exactly this (reuse feature DB for post-
   processing iteration).
 - [ ] Early simplification as memory pressure valve: simplify geometry during PBF processing
@@ -147,10 +147,25 @@
   Tippecanoe (#99) had bugs in shared-node preservation mode; this adds explicit coverage.
 - [ ] Shared-edge simplification (adjacent polygons): independent simplification of polygons
   that share an edge can still produce slivers/gaps along shared boundaries
-  (tippecanoe #105). Partial mitigation landed: closed-way polygons and
-  relation-derived multipolygons now preserve block-local shared ring vertices
-  during simplification. Remaining work is full topology-aware simplification
-  across neighboring polygon features so shared edges simplify in lockstep.
+  (tippecanoe #105).
+  Context: this is still a geometry-correctness issue (not just visual polish).
+  Current behavior simplifies each polygon/ring independently; when neighboring
+  features share an edge, DP can choose different kept vertices on each side.
+  That creates tiny gaps/overlaps ("seams"), especially at low zoom and along
+  long administrative/landuse boundaries.
+  Implemented mitigation so far: preserve detected shared vertices during
+  simplification for (1) line features, (2) closed-way polygons, and
+  (3) relation-derived multipolygons. This reduces catastrophic drift but does
+  not guarantee edge-identical output between neighboring polygons.
+  Remaining work: topology-aware lockstep simplification across polygon groups:
+  detect shared edge chains, simplify each shared chain once, and reuse that
+  exact chain in all incident polygons before rebuilding rings.
+  Suggested scope split:
+  Phase A: boundary/admin polygons only (highest visibility, narrower schema).
+  Phase B: land/water polygons and general multipolygons.
+  Acceptance checks: no shared-edge divergence after simplification within a
+  tolerance threshold, no ring-validity regressions, and no large planet-scale
+  runtime/RSS regression.
 - [ ] Antimeridian handling: no special-casing for features or datasets crossing 180°/-180°
   longitude. Matters for planet output — archive metadata bbox and geometry wrapping both
   need attention (tippecanoe #82, #205). Tippecanoe #254 also fixes bbox for geometries

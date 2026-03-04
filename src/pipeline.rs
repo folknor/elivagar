@@ -70,6 +70,8 @@ pub enum SkipTo {
     Ocean,
     /// Skip PBF + ocean, reuse all chunks, re-run sort + assemble.
     Sort,
+    /// Skip PBF + ocean + sort setup, reuse existing chunks, run assemble only.
+    Assemble,
 }
 
 /// Configuration for the tile generation pipeline.
@@ -372,11 +374,15 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let mut node_store_stats: Option<(u64, usize)> = None;
     let mut missing_ref_summary: Option<MissingRefStats> = None;
 
-    let mut sort_reader = if skip == Some(SkipTo::Sort) {
-        // Skip straight to sort — read all existing chunks
+    let mut sort_writer = if matches!(skip, Some(SkipTo::Sort | SkipTo::Assemble)) {
+        // Skip straight to later phases — reuse existing chunks on disk.
         phase12_elapsed = None;
         ocean_elapsed = None;
-        eprintln!("--- Skipping to sort (using existing chunks) ---");
+        if skip == Some(SkipTo::Sort) {
+            eprintln!("--- Skipping to sort (using existing chunks) ---");
+        } else {
+            eprintln!("--- Skipping to assemble (using existing chunks) ---");
+        }
         None
     } else {
         let (mut sort_writer, land_mask) = if skip.is_none() {
@@ -458,23 +464,30 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // --- Phase 3: Sort ---
     // Flush any trailing buffer so chunk_count() reflects all chunks on disk,
     // then save the count for --skip-to sort validation.
-    if let Some(ref mut sw) = sort_reader {
+    if let Some(ref mut sw) = sort_writer {
         sw.flush()?;
     }
-    let sort_chunks = sort_reader.as_ref().map(sort::SortWriter::chunk_count);
+    let sort_chunks = sort_writer.as_ref().map(sort::SortWriter::chunk_count);
     save_sort_chunk_count(&config.tmp_dir, sort_chunks)?;
-    let phase3_start = Instant::now();
-    eprintln!("--- Sort ---");
-    let mut sort_reader = if let Some(sw) = sort_reader {
-        sw.finish()?
-    } else {
-        sort::SortReader::from_dir(
+    let (mut sort_reader, phase3_elapsed, sort_rss) = if skip == Some(SkipTo::Assemble) {
+        let sr = sort::SortReader::from_dir(
             &config.tmp_dir.join(SORT_CHUNKS_DIR),
             load_sort_chunk_count(&config.tmp_dir),
-        )?
+        )?;
+        (sr, None, peak_rss_kb())
+    } else {
+        let phase3_start = Instant::now();
+        eprintln!("--- Sort ---");
+        let sr = if let Some(sw) = sort_writer {
+            sw.finish()?
+        } else {
+            sort::SortReader::from_dir(
+                &config.tmp_dir.join(SORT_CHUNKS_DIR),
+                load_sort_chunk_count(&config.tmp_dir),
+            )?
+        };
+        (sr, Some(phase3_start.elapsed()), peak_rss_kb())
     };
-    let phase3_elapsed = phase3_start.elapsed();
-    let sort_rss = peak_rss_kb();
 
     // --- Phase 4: Tile assembly + PMTiles write ---
     let phase4_start = Instant::now();
@@ -496,7 +509,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("ocean_ms={}", oe.as_millis());
         eprintln!("ocean_features={of}");
     }
-    eprintln!("phase3_ms={}", phase3_elapsed.as_millis());
+    if let Some(p3) = phase3_elapsed {
+        eprintln!("phase3_ms={}", p3.as_millis());
+    }
     eprintln!("phase4_ms={}", phase4_elapsed.as_millis());
     eprintln!("features={features_read}");
     eprintln!("tiles={tiles_written}");

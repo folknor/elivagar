@@ -117,6 +117,7 @@ struct VerifyArgs {
 enum SkipToArg {
     Ocean,
     Sort,
+    Assemble,
 }
 
 /// Parse a byte size string like "256M", "1G", or raw bytes.
@@ -215,6 +216,7 @@ fn run(args: RunArgs) {
     let skip_to = args.skip_to.map(|s| match s {
         SkipToArg::Ocean => elivagar::SkipTo::Ocean,
         SkipToArg::Sort => elivagar::SkipTo::Sort,
+        SkipToArg::Assemble => elivagar::SkipTo::Assemble,
     });
 
     // Resolve ocean shapefiles: explicit flags take priority, then auto-detect
