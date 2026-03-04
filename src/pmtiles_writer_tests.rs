@@ -428,6 +428,182 @@ fn write_to_produces_valid_header() {
 }
 
 // -----------------------------------------------------------------------
+// Dedup metrics
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_dedup_metrics_basic() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 2,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+    let data_a = gzip_compress(b"content-a").unwrap();
+    let data_b = gzip_compress(b"content-b").unwrap();
+
+    // First tile: unique, no candidates.
+    writer.add_tile(0, 0, 0, &data_a).unwrap();
+    assert_eq!(writer.dedup_stats.candidates, 0);
+    assert_eq!(writer.dedup_stats.tiles_reused, 0);
+
+    // Second tile: same content → dedup.
+    writer.add_tile(1, 0, 0, &data_a).unwrap();
+    assert_eq!(writer.dedup_stats.candidates, 1);
+    assert_eq!(writer.dedup_stats.tiles_reused, 1);
+    assert_eq!(writer.dedup_stats.bytes_saved, data_a.len() as u64);
+
+    // Third tile: different content → no candidate hit (different hash1).
+    writer.add_tile(1, 0, 1, &data_b).unwrap();
+    assert_eq!(writer.dedup_stats.candidates, 1); // unchanged
+    assert_eq!(writer.dedup_stats.tiles_reused, 1); // unchanged
+
+    // Fourth tile: same as first again → another dedup.
+    writer.add_tile(1, 1, 1, &data_a).unwrap();
+    assert_eq!(writer.dedup_stats.candidates, 2);
+    assert_eq!(writer.dedup_stats.tiles_reused, 2);
+    assert_eq!(writer.dedup_stats.bytes_saved, 2 * data_a.len() as u64);
+
+    assert_eq!(writer.unique_count, 2);
+}
+
+#[test]
+fn test_dedup_cap_overflow() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 5,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+    writer.set_dedup_cap(2);
+
+    // Add 3 unique tiles. First 2 fit in the cap, third is skipped.
+    let data_a = gzip_compress(b"aaa").unwrap();
+    let data_b = gzip_compress(b"bbb").unwrap();
+    let data_c = gzip_compress(b"ccc").unwrap();
+
+    writer.add_tile(0, 0, 0, &data_a).unwrap(); // inserted
+    writer.add_tile(1, 0, 0, &data_b).unwrap(); // inserted
+    writer.add_tile(1, 0, 1, &data_c).unwrap(); // skipped (cap=2)
+
+    assert_eq!(writer.dedup_stats.insert_skipped_cap, 1);
+    assert_eq!(writer.dedup_count, 2);
+
+    // Copy of tile A → should still dedup (it's in the map).
+    let dup_a = writer.add_tile(1, 1, 1, &data_a).unwrap();
+    assert!(!dup_a, "tile A copy should dedup");
+    assert_eq!(writer.dedup_stats.tiles_reused, 1);
+
+    // Copy of tile C → should NOT dedup (was never inserted).
+    let dup_c = writer.add_tile(1, 1, 0, &data_c).unwrap();
+    assert!(dup_c, "tile C copy should be unique (not in map)");
+    assert_eq!(writer.dedup_stats.insert_skipped_cap, 2); // another skip
+}
+
+#[test]
+fn test_dedup_fingerprint_rejection() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 1,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+
+    // Compute real hashes for a tile we'll add.
+    let data = gzip_compress(b"real-tile").unwrap();
+    let (hash1, _real_fp2) = PmtilesWriter::compute_dedup_hashes(&data);
+
+    // Inject a fake entry under the same hash1 but with a wrong fingerprint
+    // and matching length — simulates a primary hash collision.
+    let fake_fp2 = 0xDEAD_BEEF_CAFE_BABE;
+    #[allow(clippy::cast_possible_truncation)]
+    writer.inject_dedup_entry(hash1, 0, data.len() as u32, fake_fp2);
+
+    // Now add the real tile — hash1 matches, length matches, but fp2 differs.
+    let is_unique = writer.add_tile(0, 0, 0, &data).unwrap();
+    assert!(is_unique, "should NOT dedup when fingerprint differs");
+    assert_eq!(writer.dedup_stats.candidates, 1);
+    assert_eq!(writer.dedup_stats.reject_fp_mismatch, 1);
+    assert_eq!(writer.dedup_stats.tiles_reused, 0);
+}
+
+#[test]
+fn test_dedup_bucket_collision() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 1,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+
+    let data_a = gzip_compress(b"tile-a-bucket").unwrap();
+    let (hash1_a, fp2_a) = PmtilesWriter::compute_dedup_hashes(&data_a);
+
+    // Add tile A normally.
+    writer.add_tile(0, 0, 0, &data_a).unwrap();
+    assert_eq!(writer.dedup_stats.hash_bucket_collisions, 0);
+
+    // Inject a second entry under the same hash1 (different tile).
+    writer.inject_dedup_entry(hash1_a, 999, 42, 0x1234);
+    // The inject itself won't increment the collision counter — that only
+    // happens during add_tile insertion. But we can verify the bucket has 2 entries.
+
+    // Add tile A again — should find the correct match (first entry in bucket).
+    let dup = writer.add_tile(1, 0, 0, &data_a).unwrap();
+    assert!(!dup, "should dedup with correct bucket entry");
+    assert_eq!(writer.dedup_stats.tiles_reused, 1);
+
+    // The lookup should have seen 1 candidate (the bucket had entries).
+    assert_eq!(writer.dedup_stats.candidates, 1);
+
+    // Verify length mismatch was counted for the injected entry (len=42 vs data_a.len()).
+    // The scan checks the injected entry first or second depending on order.
+    // One entry matches (tile A), the other has len=42 → reject_len_mismatch.
+    let total_rejects = writer.dedup_stats.reject_len_mismatch + writer.dedup_stats.reject_fp_mismatch;
+    // We matched on one entry but may have checked the other first.
+    // The exact count depends on iteration order, but total_rejects should be 0 or 1.
+    assert!(total_rejects <= 1);
+
+    // Now verify a tile that hits the bucket but matches only the injected entry's
+    // hash1 (not fp2) — should be unique.
+    // We can't easily manufacture this, so just verify the counters are sane.
+    assert_eq!(writer.dedup_stats.bytes_saved, data_a.len() as u64);
+}
+
+#[test]
+fn test_dedup_len_mismatch_counter() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 1,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+
+    // Compute hashes for a tile and inject an entry with same hash1 but different length.
+    let data = gzip_compress(b"len-test").unwrap();
+    let (hash1, fp2) = PmtilesWriter::compute_dedup_hashes(&data);
+
+    // Inject entry with same hash1/fp2 but wrong length.
+    writer.inject_dedup_entry(hash1, 0, 999, fp2);
+
+    let is_unique = writer.add_tile(0, 0, 0, &data).unwrap();
+    assert!(is_unique, "should NOT dedup when length differs");
+    assert_eq!(writer.dedup_stats.candidates, 1);
+    assert_eq!(writer.dedup_stats.reject_len_mismatch, 1);
+    assert_eq!(writer.dedup_stats.reject_fp_mismatch, 0);
+}
+
+// -----------------------------------------------------------------------
 // Data section 4K alignment (always-on for O_DIRECT serving)
 // -----------------------------------------------------------------------
 

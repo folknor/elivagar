@@ -385,7 +385,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // --- Phase 4: Tile assembly + PMTiles write ---
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
-    let (features_read, tiles_written, unique_tiles, max_assemble_batch_bytes) = phase_assemble(&mut sort_reader, config)?;
+    let (features_read, tiles_written, unique_tiles, max_assemble_batch_bytes, dedup_stats) = phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
     let assemble_rss = peak_rss_kb();
 
@@ -448,6 +448,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("relation_blocks_drop_rss_kb={kb}");
     }
     eprintln!("max_assemble_batch_bytes={max_assemble_batch_bytes}");
+    eprintln!("dedup_candidates={}", dedup_stats.candidates);
+    eprintln!("dedup_tiles_reused={}", dedup_stats.tiles_reused);
+    eprintln!("dedup_bytes_saved={}", dedup_stats.bytes_saved);
+    eprintln!("dedup_reject_len_mismatch={}", dedup_stats.reject_len_mismatch);
+    eprintln!("dedup_reject_fp_mismatch={}", dedup_stats.reject_fp_mismatch);
+    eprintln!("dedup_insert_skipped_cap={}", dedup_stats.insert_skipped_cap);
+    eprintln!("dedup_hash_bucket_collisions={}", dedup_stats.hash_bucket_collisions);
     Ok(())
 }
 
@@ -1987,7 +1994,7 @@ const _: () = assert!(std::mem::size_of::<EncodedTile>() == 32);
 
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
-fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64, u64, usize), PipelineError> {
+fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64, u64, usize, pmtiles_writer::DedupStats), PipelineError> {
     use std::sync::mpsc::sync_channel;
 
     let pmtiles_config = PmtilesConfig {
@@ -2121,6 +2128,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
 
     let (features_read, tiles_written, mut pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes) = scope_result?;
     let unique_tiles = pmtiles.unique_tile_count();
+    let dedup_stats = pmtiles.dedup_stats().clone();
     pmtiles.write_to(&config.output_path)?;
 
     // Per-zoom tile breakdown
@@ -2134,7 +2142,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
         }
     }
 
-    Ok((features_read, tiles_written, unique_tiles, max_batch_bytes))
+    Ok((features_read, tiles_written, unique_tiles, max_batch_bytes, dedup_stats))
 }
 
 /// Per-worker assembly state, persisted across batches via `thread_local!`.

@@ -4,20 +4,17 @@
 
 1. [ ] Scale validation: run Europe full pipeline (locations-on-ways path).
 2. [ ] Scale validation: run planet full pipeline when hardware is available.
-3. [ ] PMTiles dedup correctness hardening.
-   - Current dedup uses hash+len without byte-compare.
-   - Probability is ~2^-81 per pair (SipHash-64 + length match) — negligible, but failure
-     mode is silent wrong tile content with no detection mechanism.
-   - Planetiler's skip_filled_tiles optimization had a bug where the dedup path silently
-     didn't take effect (#1292) — need verifiable metrics when dedup is active.
-   - Planetiler #167 highlights that dedup is critical for I/O and output size at scale.
-   - Planetiler #436 fixed a hash-based dedup bug that still allowed duplicate tile storage
-     in some cases — validates that hash+len alone is insufficient without edge-case testing.
-   - Tippecanoe #98 brought in PMTiles OOB/off-by-one fixes for index bounds and entry-set
-     edge lengths — worth regression-testing our directory/index writing.
-   - Tilemaker #794 had incorrect header offsets for root-directory-only PMTiles layouts
-     (small archives) — test both small and large archive layouts.
-   - Ref: `pmtiles_writer.rs:196`.
+3. [x] PMTiles dedup correctness hardening.
+   - Dual-fingerprint dedup: two salted SipHash passes + length match (was single hash + length).
+   - Bucketed dedup map: `HashMap<u64, Vec<...>>` prevents silent entry eviction on hash collisions.
+   - Full observability via `DedupStats`: candidates, tiles_reused, bytes_saved,
+     reject_len_mismatch, reject_fp_mismatch, insert_skipped_cap, hash_bucket_collisions.
+   - Stats emitted as key=value metrics in pipeline output.
+   - Tests: metrics accounting, cap overflow, fingerprint rejection via injected entries,
+     bucket collision handling, length mismatch counting.
+   - Remaining items from upstream review (separate scope):
+     - Tippecanoe #98: PMTiles directory index OOB edge cases — worth regression-testing.
+     - Tilemaker #794: header offsets for small archives — test both layouts.
 
 ## Test coverage gaps
 
@@ -28,13 +25,13 @@
   Large lakes/water bodies at low zoom are particularly vulnerable to simplification + clipping
   producing visible topology artifacts (tilemaker #191). Very large polygons ("monster polygons")
   also stress the clipping path specifically (tilemaker #607).
-- [ ] `inspect.rs`: untested read-only diagnostic tool.
+- [ ] `inspect.rs`: untested read-only diagnostic tool. Consider migrating to use `pmtiles_reader.rs` shared helpers.
 - [ ] `sort.rs`: `SortWriter::resume` / `adopt_chunk_files` — indirectly tested via checkpoint tests.
 - [ ] Import targeted cases from Mapbox's `mvt_fixtures` corpus for `mvt.rs` conformance testing
   (tilemaker #103).
-- [ ] PMTiles metadata JSON validation: test that metadata JSON is always well-formed across
-  all attribute/value edge cases. Tippecanoe #181 reports occasionally invalid metadata JSON
-  (unterminated strings).
+- [x] PMTiles metadata JSON validation: `elivagar verify` now validates metadata JSON
+  structure and `vector_layers` schema. Remaining gap: fuzz testing for attribute/value edge
+  cases that could produce malformed JSON (tippecanoe #181).
 - [ ] Per-attribute minzoom filtering: `encode_attrs_bytes()` in wire_format.rs filters
   attributes by zoom. Verify with tests that per-attribute zoom gates actually take effect
   and don't leak attributes to wrong zoom levels (tilemaker #671).
@@ -226,17 +223,6 @@
 
 - [ ] Write a one-page project website (what it does, benchmarks, usage, repo link)
 - [ ] Host via GitHub Pages
-
-## Recently completed
-
-- 2026-03-03 code audit: 7 bugs fixed (wetland, maritime, checkpoint flush, multipolygon
-  addresses, POI exclusion, tag fallthrough), defensive hardening across wire format, MVT,
-  PMTiles, way/node index, inspect, ocean. 25+ new tests added. Spec deviations fixed
-  (ref_cols, orphan rings). All potential bugs and smells resolved.
-- Memory optimization phases P1-P5 complete.
-- Locations-on-ways pipeline (eliminates node store).
-- Allocation hotspot reduction passes.
-- Way index finalize/load memory work.
 
 ## Notes index
 

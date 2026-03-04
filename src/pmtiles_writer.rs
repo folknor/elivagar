@@ -50,11 +50,39 @@ pub struct PmtilesConfig {
     pub center: (f64, f64, u8),
 }
 
-/// Maximum number of entries in the dedup HashMap before we stop inserting.
+/// Maximum number of entries in the dedup map before we stop inserting.
 /// At planet scale, unlimited dedup grows to ~7 GB. Capping at 1M entries
-/// keeps the map under ~50 MB while still deduplicating the ocean fill tiles
+/// keeps the map under ~60 MB while still deduplicating the ocean fill tiles
 /// (which are added early and remain cached).
 const MAX_DEDUP_ENTRIES: usize = 1_000_000;
+
+/// Fixed salt for the secondary fingerprint hasher. Domain-separates the two
+/// SipHash passes so they produce different outputs for the same input.
+const DEDUP_FP2_SALT: u64 = 0xA5A5_A5A5_A5A5_A5A5;
+
+// ---------------------------------------------------------------------------
+// Dedup statistics
+// ---------------------------------------------------------------------------
+
+/// Counters tracking deduplication behavior for observability.
+#[derive(Debug, Default, Clone)]
+pub struct DedupStats {
+    /// Number of hash-map lookups that found a matching primary hash.
+    pub candidates: u64,
+    /// Number of tiles successfully deduplicated (hash + length + fingerprint all matched).
+    pub tiles_reused: u64,
+    /// Cumulative compressed bytes saved by dedup.
+    pub bytes_saved: u64,
+    /// Hash matched but compressed length differed.
+    pub reject_len_mismatch: u64,
+    /// Hash and length matched but secondary fingerprint differed.
+    pub reject_fp_mismatch: u64,
+    /// Tiles that bypassed dedup insertion because the map hit its cap.
+    pub insert_skipped_cap: u64,
+    /// Number of times a new entry was added to a bucket that already had entries
+    /// (different tiles sharing the same primary hash).
+    pub hash_bucket_collisions: u64,
+}
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -104,7 +132,8 @@ enum TileBlob {
 /// Accumulates tiles and writes a PMTiles v3 archive.
 ///
 /// Tiles must be added in Hilbert order via [`add_tile()`](Self::add_tile).
-/// Duplicate tile contents are automatically deduplicated using SipHash.
+/// Duplicate tile contents are automatically deduplicated using dual SipHash
+/// fingerprints plus compressed length matching.
 ///
 /// Two storage modes are available:
 /// - [`new()`](Self::new) — in-memory (tile data in a `Vec`). Best for small
@@ -122,10 +151,17 @@ pub struct PmtilesWriter {
     current_run: Option<DirEntry>,
     /// Directory entries (in-memory or streamed to disk).
     dir_store: DirStore,
-    /// Content hash -> (offset, length) for dedup.
-    dedup: HashMap<u64, (u64, u32)>,
+    /// Primary hash → Vec<(offset, length, fingerprint2)> for dedup.
+    /// Bucketed so primary-hash collisions don't silently evict entries.
+    dedup: HashMap<u64, Vec<(u64, u32, u64)>>,
+    /// Total entries across all dedup buckets.
+    dedup_count: usize,
+    /// Maximum dedup entries (defaults to MAX_DEDUP_ENTRIES).
+    dedup_cap: usize,
     /// Number of unique tile contents (after dedup).
     unique_count: u64,
+    /// Dedup behavior counters.
+    dedup_stats: DedupStats,
 }
 
 impl PmtilesWriter {
@@ -137,6 +173,11 @@ impl PmtilesWriter {
     /// Unique tile data blobs (after dedup).
     pub fn unique_tile_count(&self) -> u64 {
         self.unique_count
+    }
+
+    /// Dedup behavior counters for observability.
+    pub fn dedup_stats(&self) -> &DedupStats {
+        &self.dedup_stats
     }
 }
 
@@ -150,7 +191,10 @@ impl PmtilesWriter {
             current_run: None,
             dir_store: DirStore::Memory(Vec::new()),
             dedup: HashMap::new(),
+            dedup_count: 0,
+            dedup_cap: MAX_DEDUP_ENTRIES,
             unique_count: 0,
+            dedup_stats: DedupStats::default(),
         }
     }
 
@@ -174,7 +218,10 @@ impl PmtilesWriter {
             current_run: None,
             dir_store: DirStore::Streaming { writer: dir_writer, path: dir_path, count: 0 },
             dedup: HashMap::new(),
+            dedup_count: 0,
+            dedup_cap: MAX_DEDUP_ENTRIES,
             unique_count: 0,
+            dedup_stats: DedupStats::default(),
         })
     }
 
@@ -192,24 +239,43 @@ impl PmtilesWriter {
         }
         let tile_id = xy_to_tile_id(z, x, y);
 
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        let hash = hasher.finish();
+        // Dual-fingerprint dedup: two salted SipHash passes plus length check.
+        // Dramatically reduces false-dedup risk compared to single hash + length.
+        let mut h1 = DefaultHasher::new();
+        data.hash(&mut h1);
+        let hash1 = h1.finish();
 
-        if let Some(&(dup_offset, dup_length)) = self.dedup.get(&hash) {
-            // Guard against hash collisions by also checking compressed length.
-            // A false dedup requires both a SipHash-1-3 collision (~2^-64) AND
-            // matching length (~2^-17), giving ~2^-81 per pair — negligible at
-            // planet scale. Full content comparison would require storing tile
-            // data or seeking back in the blob file.
-            if dup_length == data.len() as u32 {
-                self.push_dir_entry(tile_id, dup_offset, dup_length)?;
+        let mut h2 = DefaultHasher::new();
+        DEDUP_FP2_SALT.hash(&mut h2);
+        data.hash(&mut h2);
+        let hash2 = h2.finish();
+
+        let data_len = data.len() as u32;
+
+        if let Some(candidates) = self.dedup.get(&hash1) {
+            self.dedup_stats.candidates += 1;
+            let mut matched = false;
+            for &(dup_offset, dup_length, dup_fp2) in candidates {
+                if dup_length == data_len {
+                    if dup_fp2 == hash2 {
+                        // All three match: primary hash, length, secondary fingerprint.
+                        self.dedup_stats.tiles_reused += 1;
+                        self.dedup_stats.bytes_saved += u64::from(dup_length);
+                        self.push_dir_entry(tile_id, dup_offset, dup_length)?;
+                        matched = true;
+                        break;
+                    }
+                    self.dedup_stats.reject_fp_mismatch += 1;
+                } else {
+                    self.dedup_stats.reject_len_mismatch += 1;
+                }
+            }
+            if matched {
                 return Ok(false);
             }
         }
 
         let offset;
-        let length = data.len() as u32;
         match &mut self.blob {
             TileBlob::Memory(vec) => {
                 offset = vec.len() as u64;
@@ -222,10 +288,17 @@ impl PmtilesWriter {
             }
         }
 
-        if self.dedup.len() < MAX_DEDUP_ENTRIES {
-            self.dedup.insert(hash, (offset, length));
+        if self.dedup_count < self.dedup_cap {
+            let bucket = self.dedup.entry(hash1).or_default();
+            if !bucket.is_empty() {
+                self.dedup_stats.hash_bucket_collisions += 1;
+            }
+            bucket.push((offset, data_len, hash2));
+            self.dedup_count += 1;
+        } else {
+            self.dedup_stats.insert_skipped_cap += 1;
         }
-        self.push_dir_entry(tile_id, offset, length)?;
+        self.push_dir_entry(tile_id, offset, data_len)?;
         self.unique_count += 1;
         Ok(true)
     }
@@ -379,6 +452,36 @@ impl PmtilesWriter {
                 read_dir_entries(&mut reader, num)
             }
         }
+    }
+
+    /// Override the dedup map capacity (test-only).
+    #[cfg(test)]
+    fn set_dedup_cap(&mut self, cap: usize) {
+        self.dedup_cap = cap;
+    }
+
+    /// Inject a dedup entry with specific hash/fingerprint values (test-only).
+    /// Used to test fingerprint rejection without needing real hash collisions.
+    #[cfg(test)]
+    fn inject_dedup_entry(&mut self, hash1: u64, offset: u64, length: u32, fp2: u64) {
+        self.dedup.entry(hash1).or_default().push((offset, length, fp2));
+        self.dedup_count += 1;
+    }
+
+    /// Compute the primary hash and secondary fingerprint for the given data (test-only).
+    /// Returns (hash1, hash2).
+    #[cfg(test)]
+    fn compute_dedup_hashes(data: &[u8]) -> (u64, u64) {
+        let mut h1 = DefaultHasher::new();
+        data.hash(&mut h1);
+        let hash1 = h1.finish();
+
+        let mut h2 = DefaultHasher::new();
+        DEDUP_FP2_SALT.hash(&mut h2);
+        data.hash(&mut h2);
+        let hash2 = h2.finish();
+
+        (hash1, hash2)
     }
 
     /// Build root and leaf directory bytes from the dir store.
