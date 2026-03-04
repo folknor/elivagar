@@ -191,7 +191,7 @@
   are well-tagged in mountainous areas and useful for topographic rendering. Would need a new
   landform line layer or extension to an existing layer. Tilemaker #265 hit rendering issues
   with cliff classification.
-- [ ] EV charging stations as POIs: `amenity=charging_station` is not in elivagar's POI list
+- [x] EV charging stations as POIs: `amenity=charging_station` is not in elivagar's POI list
   because Shortbread 1.0 doesn't include it, but EV charging infrastructure is increasingly
   important for map consumers. OSM has good coverage in Europe. Investigate adding as a
   schema extension alongside other beyond-Shortbread POI types (Planetiler #765 hit a bug

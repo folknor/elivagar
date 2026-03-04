@@ -234,6 +234,33 @@ fn test_pois_restaurant_cuisine() {
 }
 
 #[test]
+fn test_pois_ev_charging_station() {
+    let tags = Tags(&[
+        ("amenity", "charging_station"),
+        ("name", "FastCharge"),
+        ("addr:housenumber", "12"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::Node);
+    let poi = matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("should match Pois");
+    let amenity = poi
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "amenity")
+        .expect("should have amenity");
+    assert_eq!(
+        amenity.1,
+        AttrValue::Str(Cow::Borrowed("charging_station"))
+    );
+    assert!(
+        matches.iter().all(|m| m.layer != Layer::Addresses),
+        "recognized POI amenity should suppress address output",
+    );
+}
+
+#[test]
 fn test_aerialway_cable_car() {
     let tags = Tags(&[("aerialway", "cable_car")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);

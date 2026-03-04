@@ -116,6 +116,7 @@ fn pois_match_amenity(
         "car_sharing",
         "cinema",
         "clinic",
+        "charging_station",
         "college",
         "community_centre",
         "courthouse",
