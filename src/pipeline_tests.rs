@@ -262,6 +262,36 @@ fn block_shared_node_annotation_marks_closed_ring_shared_vertices() {
     assert_eq!(raw[1].preserve_node_refs, vec![3, 4]);
 }
 
+#[test]
+fn relation_shared_vertex_keys_detects_shared_closed_way_vertices() {
+    let member_ways = vec![
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 1.0, y: 0.0 },
+                Point { x: 1.0, y: 1.0 },
+                Point { x: 0.0, y: 1.0 },
+                Point { x: 0.0, y: 0.0 },
+            ],
+        },
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![
+                Point { x: 1.0, y: 0.0 },
+                Point { x: 2.0, y: 0.0 },
+                Point { x: 2.0, y: 1.0 },
+                Point { x: 1.0, y: 1.0 },
+                Point { x: 1.0, y: 0.0 },
+            ],
+        },
+    ];
+    let keys = relation_shared_vertex_keys(&member_ways);
+    assert!(keys.contains(&merc_point_key(&Point { x: 1.0, y: 0.0 })));
+    assert!(keys.contains(&merc_point_key(&Point { x: 1.0, y: 1.0 })));
+    assert_eq!(keys.len(), 2);
+}
+
 // -----------------------------------------------------------------------
 // Helpers for emit tests — decode SortRecord payloads
 // -----------------------------------------------------------------------
@@ -649,6 +679,62 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
     );
 }
 
+#[test]
+fn emit_multipolygon_preserve_keys_keep_required_vertices() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let outer = vec![
+        Point { x: 0.1, y: 0.1 },
+        Point { x: 0.3, y: 0.10001 },
+        Point { x: 0.5, y: 0.10002 }, // keep
+        Point { x: 0.7, y: 0.10001 },
+        Point { x: 0.9, y: 0.1 },
+        Point { x: 0.9, y: 0.9 },
+        Point { x: 0.1, y: 0.9 },
+        Point { x: 0.1, y: 0.1 },
+    ];
+    let inners: Vec<Vec<Point>> = Vec::new();
+    let mut keys = rustc_hash::FxHashSet::default();
+    keys.insert(merc_point_key(&Point { x: 0.5, y: 0.10002 }));
+
+    let mut records_plain = Vec::new();
+    let mut records_pinned = Vec::new();
+    let mut emit_plain = MultipolygonEmitScratch::new();
+    let mut emit_pinned = MultipolygonEmitScratch::new();
+    let mut simp_plain = geometry::SimplifyMultiScratch::new();
+    let mut simp_pinned = geometry::SimplifyMultiScratch::new();
+
+    emit_multipolygon_feature(
+        990,
+        &outer,
+        &inners,
+        None,
+        &m,
+        0,
+        0,
+        &mut records_plain,
+        &mut emit_plain,
+        &mut simp_plain,
+    );
+    emit_multipolygon_feature(
+        990,
+        &outer,
+        &inners,
+        Some(&keys),
+        &m,
+        0,
+        0,
+        &mut records_pinned,
+        &mut emit_pinned,
+        &mut simp_pinned,
+    );
+
+    assert_eq!(records_plain.len(), 1);
+    assert_eq!(records_pinned.len(), 1);
+    let (_, _, plain_cmd_count) = decode_data_header(&records_plain[0].data);
+    let (_, _, pinned_cmd_count) = decode_data_header(&records_pinned[0].data);
+    assert!(pinned_cmd_count > plain_cmd_count);
+}
+
 // -----------------------------------------------------------------------
 // emit_multipolygon_feature tests
 // -----------------------------------------------------------------------
@@ -664,6 +750,7 @@ fn emit_multipolygon_empty_outer() {
         401,
         &[],
         &[],
+        None,
         &m,
         0,
         0,
@@ -701,6 +788,7 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
         402,
         &outer,
         &inners,
+        None,
         &m,
         0,
         0,
@@ -755,6 +843,7 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
         403,
         &outer,
         &inners,
+        None,
         &m,
         2,
         2,

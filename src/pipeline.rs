@@ -1248,6 +1248,46 @@ fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
     }
 }
 
+#[inline]
+fn merc_point_key(p: &Point) -> (i64, i64) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let x = (p.x * 1_000_000_000_000.0).round() as i64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let y = (p.y * 1_000_000_000_000.0).round() as i64;
+    (x, y)
+}
+
+fn relation_shared_vertex_keys(member_ways: &[MemberWay]) -> FxHashSet<(i64, i64)> {
+    let mut counts: FxHashMap<(i64, i64), u8> = FxHashMap::default();
+    let mut local: FxHashSet<(i64, i64)> = FxHashSet::default();
+    for mw in member_ways {
+        local.clear();
+        if mw.coords.len() < 2 {
+            continue;
+        }
+        let is_closed = mw.coords.len() >= 4
+            && merc_point_key(&mw.coords[0]) == merc_point_key(&mw.coords[mw.coords.len() - 1]);
+        let end = if is_closed {
+            mw.coords.len().saturating_sub(1)
+        } else {
+            mw.coords.len()
+        };
+        for p in &mw.coords[..end] {
+            local.insert(merc_point_key(p));
+        }
+        for key in &local {
+            counts
+                .entry(*key)
+                .and_modify(|c| *c = c.saturating_add(1))
+                .or_insert(1);
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(k, c)| (c >= 2).then_some(k))
+        .collect()
+}
+
 /// Result of parallel way processing: resolved coords (needed for way_index),
 /// sort records (geometry output). Land mask is marked on rayon threads directly.
 struct ProcessedWay {
@@ -1325,6 +1365,7 @@ impl PolygonEmitScratch {
 struct MultipolygonEmitScratch {
     geom_buf: Vec<u32>,
     attrs_buf: Vec<u8>,
+    required_idxs: Vec<usize>,
     clip_a: Vec<Point>,
     clip_b: Vec<Point>,
     all_rings: Vec<Vec<(i32, i32)>>,
@@ -1341,6 +1382,7 @@ impl MultipolygonEmitScratch {
         Self {
             geom_buf: Vec::new(),
             attrs_buf: Vec::new(),
+            required_idxs: Vec::new(),
             clip_a: Vec::new(),
             clip_b: Vec::new(),
             all_rings: Vec::new(),
@@ -1755,6 +1797,7 @@ fn process_prepared_relation_into(
     simp_scratch: &mut geometry::SimplifyMultiScratch,
 ) {
     let multi = multipolygon::assemble(&rel.member_ways);
+    let shared_vertex_keys = relation_shared_vertex_keys(&rel.member_ways);
 
     if multi.polygons.is_empty() {
         return;
@@ -1783,7 +1826,11 @@ fn process_prepared_relation_into(
                     let bbox = merc_bbox(outer);
                     land_mask.mark_bbox(&bbox);
                     emit_multipolygon_feature(
-                        rel.osm_id, outer, inners, m,
+                        rel.osm_id,
+                        outer,
+                        inners,
+                        Some(&shared_vertex_keys),
+                        m,
                         z_lo, z_hi, records, multipolygon_emit, simp_scratch,
                     );
                 }
@@ -2288,6 +2335,7 @@ fn emit_multipolygon_feature(
     osm_id: u64,
     outer: &[Point],
     inners: &[Vec<Point>],
+    preserve_vertex_keys: Option<&FxHashSet<(i64, i64)>>,
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
@@ -2296,7 +2344,7 @@ fn emit_multipolygon_feature(
     simp_scratch: &mut geometry::SimplifyMultiScratch,
 ) -> u64 {
     let mut count: u64 = 0;
-    geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, |z, simp_outer, simp_inners| {
+    let mut emit_for_zoom = |z: u8, simp_outer: &[Point], simp_inners: &[Vec<Point>]| {
         encode_attrs_bytes(&mut emit_scratch.attrs_buf, &m.attrs, z);
 
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
@@ -2489,7 +2537,71 @@ fn emit_multipolygon_feature(
                 }
             }
         }
-    });
+    };
+    if let Some(keys) = preserve_vertex_keys
+        && !keys.is_empty()
+    {
+        simp_scratch.cascade_outer.clear();
+        simp_scratch.cascade_outer.extend_from_slice(outer);
+        simp_scratch.cascade_inners.clear();
+        simp_scratch.cascade_inners.extend(inners.iter().cloned());
+
+        for z in (z_lo..=z_hi).rev() {
+            if z < 14 {
+                if geometry::merc_bbox_is_subpixel(&simp_scratch.cascade_outer, z) {
+                    break;
+                }
+                let tol = geometry::simplify_tolerance(z);
+                if simp_scratch.cascade_outer.len() > 4 {
+                    emit_scratch.required_idxs.clear();
+                    let outer_end = simp_scratch.cascade_outer.len().saturating_sub(1);
+                    for (i, p) in simp_scratch.cascade_outer.iter().take(outer_end).enumerate() {
+                        if keys.contains(&merc_point_key(p)) {
+                            emit_scratch.required_idxs.push(i);
+                        }
+                    }
+                    let _ = geometry::simplify_into_with_required(
+                        &simp_scratch.cascade_outer,
+                        tol,
+                        &emit_scratch.required_idxs,
+                        &mut simp_scratch.keep_buf,
+                        &mut simp_scratch.simp_buf,
+                    );
+                    std::mem::swap(&mut simp_scratch.cascade_outer, &mut simp_scratch.simp_buf);
+                }
+
+                for inner in &mut simp_scratch.cascade_inners {
+                    if inner.len() <= 4 {
+                        continue;
+                    }
+                    emit_scratch.required_idxs.clear();
+                    let inner_end = inner.len().saturating_sub(1);
+                    for (i, p) in inner.iter().take(inner_end).enumerate() {
+                        if keys.contains(&merc_point_key(p)) {
+                            emit_scratch.required_idxs.push(i);
+                        }
+                    }
+                    let _ = geometry::simplify_into_with_required(
+                        inner,
+                        tol,
+                        &emit_scratch.required_idxs,
+                        &mut simp_scratch.keep_buf,
+                        &mut simp_scratch.simp_buf,
+                    );
+                    std::mem::swap(inner, &mut simp_scratch.simp_buf);
+                }
+                simp_scratch.cascade_inners.retain(|r| r.len() >= 4);
+            }
+            if simp_scratch.cascade_outer.len() < 4 {
+                break;
+            }
+            emit_for_zoom(z, &simp_scratch.cascade_outer, &simp_scratch.cascade_inners);
+        }
+    } else {
+        geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, |z, simp_outer, simp_inners| {
+            emit_for_zoom(z, simp_outer, simp_inners);
+        });
+    }
     count
 }
 
