@@ -97,6 +97,10 @@ struct RunArgs {
     /// Disable ocean shapefile processing (skip auto-detection).
     #[arg(long)]
     no_ocean: bool,
+
+    /// Tile payload format.
+    #[arg(long, value_enum, default_value_t = TileFormatArg::Mvt)]
+    tile_format: TileFormatArg,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -118,6 +122,12 @@ enum SkipToArg {
     Ocean,
     Sort,
     Assemble,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TileFormatArg {
+    Mvt,
+    Mlt,
 }
 
 /// Parse a byte size string like "256M", "1G", or raw bytes.
@@ -249,6 +259,10 @@ fn run(args: RunArgs) {
         assemble_batch_budget: args.assemble_budget.unwrap_or(0),
         sort_chunk_size: args.sort_budget.unwrap_or(0),
         locations_on_ways: args.locations_on_ways,
+        tile_format: match args.tile_format {
+            TileFormatArg::Mvt => elivagar::TilePayloadFormat::Mvt,
+            TileFormatArg::Mlt => elivagar::TilePayloadFormat::Mlt,
+        },
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")

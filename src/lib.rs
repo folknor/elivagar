@@ -29,6 +29,7 @@
 //!     assemble_batch_budget: 0,
 //!     sort_chunk_size: 0,
 //!     locations_on_ways: false,
+//!     tile_format: elivagar::TilePayloadFormat::Mvt,
 //! };
 //! elivagar::run(&config).expect("pipeline failed");
 //! ```
@@ -68,3 +69,4 @@ pub(crate) mod way_index;
 pub(crate) mod wire_format;
 
 pub use pipeline::{run, PipelineError, SkipTo, TilegenConfig};
+pub use pipeline::TilePayloadFormat;

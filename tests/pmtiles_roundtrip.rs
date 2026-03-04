@@ -426,6 +426,7 @@ fn test_full_pipeline() {
         assemble_batch_budget: 0,
         sort_chunk_size: 0,
         locations_on_ways: false,
+        tile_format: elivagar::TilePayloadFormat::Mvt,
     };
 
     elivagar::run(&config).expect("pipeline should succeed");

@@ -74,6 +74,13 @@ pub enum SkipTo {
     Assemble,
 }
 
+/// Tile payload encoding format stored in PMTiles tile data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TilePayloadFormat {
+    Mvt,
+    Mlt,
+}
+
 /// Configuration for the tile generation pipeline.
 ///
 /// All paths are resolved relative to the current working directory.
@@ -140,6 +147,8 @@ pub struct TilegenConfig {
     /// Auto-detected from the PBF header's `LocationsOnWays` optional feature
     /// when not set explicitly.
     pub locations_on_ways: bool,
+    /// Tile payload format (`mvt` default, `mlt` planned).
+    pub tile_format: TilePayloadFormat,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -357,6 +366,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("=== Tilegen: {} → {}", config.pbf_path.display(), config.output_path.display());
     eprintln!("    Zoom range: z{}–z{}", config.min_zoom, config.max_zoom);
     eprintln!("    Tmp dir:    {}", config.tmp_dir.display());
+    eprintln!("    Tile format:{:?}", config.tile_format);
     if let Some(s) = skip {
         eprintln!("    Skip to:    {s:?}");
     }
@@ -492,6 +502,12 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // --- Phase 4: Tile assembly + PMTiles write ---
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
+    if config.tile_format == TilePayloadFormat::Mlt {
+        return Err(PipelineError(
+            "tile format 'mlt' is not implemented yet (see notes/mlt-integration-plan.md)"
+                .to_string(),
+        ));
+    }
     let (features_read, tiles_written, unique_tiles, max_assemble_batch_bytes, dedup_stats, tile_size_diag) =
         phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
@@ -516,6 +532,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("features={features_read}");
     eprintln!("tiles={tiles_written}");
     eprintln!("unique_tiles={unique_tiles}");
+    eprintln!(
+        "tile_format={}",
+        match config.tile_format {
+            TilePayloadFormat::Mvt => "mvt",
+            TilePayloadFormat::Mlt => "mlt",
+        }
+    );
     if let Ok(meta) = std::fs::metadata(&config.output_path) {
         eprintln!("output_bytes={}", meta.len());
     }
