@@ -993,3 +993,20 @@ fn test_b7_water_fallthrough_multi_tag() {
         .expect("should have kind attr");
     assert_eq!(kind.1, AttrValue::Str(Cow::Borrowed("riverbank")));
 }
+
+#[test]
+fn test_land_line_cliff_matches() {
+    let tags = Tags(&[("natural", "cliff")]);
+    let matches = match_element(&tags, OsmGeomType::OpenWay);
+    let cliff = matches
+        .iter()
+        .find(|m| m.layer == Layer::Land && m.geom_expect == GeomExpect::Line)
+        .expect("natural=cliff should match land line extension");
+    assert_eq!(cliff.min_zoom, 12);
+    let kind = cliff
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "kind")
+        .expect("should have kind");
+    assert_eq!(kind.1, AttrValue::Str(Cow::Borrowed("cliff")));
+}

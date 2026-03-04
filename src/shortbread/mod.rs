@@ -243,6 +243,7 @@ fn match_open_way(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     streets::match_street_labels_line(tags, out);
     transport::match_aerialways(tags, out);
     transport::match_ferries(tags, out);
+    land::match_land_lines(tags, out);
 }
 
 fn match_closed_way(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
@@ -269,6 +270,7 @@ fn match_closed_way(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     streets::match_street_labels_line(tags, out);
     transport::match_aerialways(tags, out);
     transport::match_ferries(tags, out);
+    land::match_land_lines(tags, out);
     // Point layers on closed ways
     transport::match_public_transport_centroid(tags, out);
     pois::match_pois_centroid(tags, out);

@@ -186,7 +186,7 @@
   expensive simplification of detailed OSM geometry. Planetiler uses this extensively for its
   low-zoom layers (#431). Implementation: add a Natural Earth ingest phase (similar to ocean
   phase) that reads shapefiles and emits features to the sort stream.
-- [ ] Cliff/landform line features: `natural=cliff` is a linear feature not in Shortbread 1.0.
+- [x] Cliff/landform line features: `natural=cliff` is a linear feature not in Shortbread 1.0.
   Elivagar's land layer only matches polygon natural features (bare_rock, beach, etc.). Cliffs
   are well-tagged in mountainous areas and useful for topographic rendering. Would need a new
   landform line layer or extension to an existing layer. Tilemaker #265 hit rendering issues

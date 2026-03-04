@@ -19,6 +19,18 @@ pub(super) fn match_land(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     }
 }
 
+pub(super) fn match_land_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+    if tags.has_value("natural", "cliff") {
+        out.push(LayerMatch {
+            layer: Layer::Land,
+            min_zoom: 12,
+            max_zoom: 14,
+            geom_expect: GeomExpect::Line,
+            attrs: smallvec![attr_str("kind", "cliff")],
+        });
+    }
+}
+
 fn land_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
     if let Some(v) = tags.get("amenity")
         && v == "grave_yard"
