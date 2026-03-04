@@ -592,6 +592,8 @@ fn value_type(value: &Value) -> MltColumnType {
 mod tests {
     use super::*;
     use crate::mvt::{Feature, GeomType, LayerBuilder};
+    use geo_types::Geometry;
+    use serde::Deserialize;
 
     fn point_geom() -> Vec<u32> {
         vec![9, 50, 50]
@@ -764,5 +766,69 @@ mod tests {
             cols.iter().find(|c| c.key == "b").map(|c| c.column_type),
             Some(MltColumnType::Bool)
         );
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GeometryFixture {
+        id: String,
+        description: String,
+        geom_type: String,
+        geometry: Vec<u32>,
+        expected_geojson_type: String,
+    }
+
+    fn fixture_geom_type(raw: &str) -> GeomType {
+        match raw {
+            "point" => GeomType::Point,
+            "line" => GeomType::LineString,
+            "polygon" => GeomType::Polygon,
+            _ => panic!("unknown fixture geom_type"),
+        }
+    }
+
+    fn geometry_name(geom: &Geometry<i32>) -> &'static str {
+        match geom {
+            Geometry::Point(_) => "Point",
+            Geometry::LineString(_) => "LineString",
+            Geometry::Polygon(_) => "Polygon",
+            Geometry::MultiPoint(_) => "MultiPoint",
+            Geometry::MultiLineString(_) => "MultiLineString",
+            Geometry::MultiPolygon(_) => "MultiPolygon",
+            Geometry::Line(_) => "Line",
+            Geometry::Rect(_) => "Rect",
+            Geometry::Triangle(_) => "Triangle",
+            Geometry::GeometryCollection(_) => "GeometryCollection",
+        }
+    }
+
+    #[test]
+    fn mlt_geometry_fixtures_roundtrip() {
+        let fixtures_json = include_str!("../tests/fixtures/mlt_fixtures/geometry_fixtures.json");
+        let fixtures: Vec<GeometryFixture> = serde_json::from_str(fixtures_json).unwrap();
+
+        for fixture in fixtures {
+            let mut layer = LayerBuilder::new("fixture");
+            let key = layer.intern_key("kind");
+            let val = layer.intern_value(Value::String("fixture".to_string()));
+            layer.add_feature(Feature {
+                id: Some(1),
+                geom_type: fixture_geom_type(&fixture.geom_type),
+                geometry: fixture.geometry,
+                tags: vec![(key, val)],
+            });
+
+            let encoded = encode_tile(&[&layer]).unwrap();
+            let mut parsed = mlt_core::parse_layers(&encoded).unwrap();
+            assert_eq!(parsed.len(), 1, "fixture {}", fixture.id);
+            parsed[0].decode_all().unwrap();
+            let fc = mlt_core::geojson::FeatureCollection::from_layers(&parsed).unwrap();
+            assert_eq!(fc.features.len(), 1, "fixture {}", fixture.id);
+            let got = geometry_name(&fc.features[0].geometry);
+            assert_eq!(
+                got, fixture.expected_geojson_type,
+                "fixture {} ({})",
+                fixture.id, fixture.description
+            );
+        }
     }
 }

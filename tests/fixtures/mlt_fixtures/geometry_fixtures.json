@@ -1,0 +1,48 @@
+[
+  {
+    "id": "017",
+    "description": "valid point geometry",
+    "geom_type": "point",
+    "geometry": [9, 50, 34],
+    "expected_geojson_type": "Point"
+  },
+  {
+    "id": "018",
+    "description": "valid linestring geometry",
+    "geom_type": "line",
+    "geometry": [9, 4, 4, 18, 0, 16, 16, 0],
+    "expected_geojson_type": "LineString"
+  },
+  {
+    "id": "019",
+    "description": "valid polygon geometry",
+    "geom_type": "polygon",
+    "geometry": [9, 6, 12, 18, 10, 12, 24, 44, 15],
+    "expected_geojson_type": "Polygon"
+  },
+  {
+    "id": "020",
+    "description": "valid multipoint geometry",
+    "geom_type": "point",
+    "geometry": [17, 10, 14, 3, 9],
+    "expected_geojson_type": "MultiPoint"
+  },
+  {
+    "id": "021",
+    "description": "valid multilinestring geometry",
+    "geom_type": "line",
+    "geometry": [9, 4, 4, 18, 0, 16, 16, 0, 9, 17, 17, 10, 4, 8],
+    "expected_geojson_type": "MultiLineString"
+  },
+  {
+    "id": "022",
+    "description": "valid multipolygon geometry",
+    "geom_type": "polygon",
+    "geometry": [
+      9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15,
+      9, 22, 2, 26, 18, 0, 0, 18, 17, 0, 15,
+      9, 4, 13, 26, 0, 8, 8, 0, 0, 7, 15
+    ],
+    "expected_geojson_type": "MultiPolygon"
+  }
+]
