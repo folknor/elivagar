@@ -143,6 +143,8 @@ enum TileBlob {
 ///   avoid multi-GB RAM usage.
 pub struct PmtilesWriter {
     config: PmtilesConfig,
+    source_pbf_filename: Option<String>,
+    osmosis_replication_timestamp: Option<i64>,
     /// Concatenated compressed tile data (in-memory or file-backed).
     blob: TileBlob,
     /// Total number of tiles addressed (including deduped references).
@@ -179,6 +181,16 @@ impl PmtilesWriter {
     pub fn dedup_stats(&self) -> &DedupStats {
         &self.dedup_stats
     }
+
+    /// Set source PBF filename to include in PMTiles metadata JSON.
+    pub fn set_source_pbf_filename(&mut self, filename: impl Into<String>) {
+        self.source_pbf_filename = Some(filename.into());
+    }
+
+    /// Set OSM replication timestamp (seconds since UNIX epoch) for metadata JSON.
+    pub fn set_osmosis_replication_timestamp(&mut self, ts: i64) {
+        self.osmosis_replication_timestamp = Some(ts);
+    }
 }
 
 impl PmtilesWriter {
@@ -186,6 +198,8 @@ impl PmtilesWriter {
     pub fn new(config: PmtilesConfig) -> Self {
         PmtilesWriter {
             config,
+            source_pbf_filename: None,
+            osmosis_replication_timestamp: None,
             blob: TileBlob::Memory(Vec::new()),
             num_addressed: 0,
             current_run: None,
@@ -213,6 +227,8 @@ impl PmtilesWriter {
 
         Ok(PmtilesWriter {
             config,
+            source_pbf_filename: None,
+            osmosis_replication_timestamp: None,
             blob: TileBlob::File { writer, path: blob_path, offset: 0 },
             num_addressed: 0,
             current_run: None,
@@ -315,7 +331,11 @@ impl PmtilesWriter {
         // Build directories: streaming mode reads entries from temp file in
         // LEAF_SIZE chunks (O(1) memory), in-memory mode collects all entries.
         let (root_bytes, leaf_bytes, num_entries) = self.finalize_directories()?;
-        let metadata_json = build_metadata(&self.config);
+        let metadata_json = build_metadata(
+            &self.config,
+            self.source_pbf_filename.as_deref(),
+            self.osmosis_replication_timestamp,
+        );
         let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
 
         // Clean up streaming dir_entries temp file if it exists.
@@ -748,7 +768,11 @@ fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
 /// Build PMTiles metadata JSON. Hand-rolled rather than serde_json to avoid
 /// a runtime dependency for ~20 lines of fixed-schema formatting.
 /// Validated by test_metadata_json which round-trips through serde_json.
-fn build_metadata(config: &PmtilesConfig) -> String {
+fn build_metadata(
+    config: &PmtilesConfig,
+    source_pbf_filename: Option<&str>,
+    osmosis_replication_timestamp: Option<i64>,
+) -> String {
     use crate::shortbread::Layer;
 
     let mut layer_arr = String::from("[");
@@ -766,10 +790,37 @@ fn build_metadata(config: &PmtilesConfig) -> String {
     }
     layer_arr.push(']');
 
-    format!(
-        r#"{{"name":"Shortbread","format":"pbf","type":"baselayer","minzoom":{},"maxzoom":{},"vector_layers":{layer_arr}}}"#,
+    let mut json = format!(
+        r#"{{"name":"Shortbread","format":"pbf","type":"baselayer","minzoom":{},"maxzoom":{},"vector_layers":{layer_arr}"#,
         config.min_zoom, config.max_zoom,
-    )
+    );
+    if let Some(filename) = source_pbf_filename {
+        json.push_str(r#","source_pbf":"#);
+        json.push('"');
+        json.push_str(&escape_json_string(filename));
+        json.push('"');
+    }
+    if let Some(ts) = osmosis_replication_timestamp {
+        json.push_str(&format!(r#","osmosis_replication_timestamp":{ts}"#));
+    }
+    json.push('}');
+    json
+}
+
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c <= '\u{1F}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

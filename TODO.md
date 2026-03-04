@@ -224,7 +224,7 @@
   members (`MemberId::Relation`), so relation-members-of-relations are silently dropped
   (tilemaker #638). Correct for multipolygon relations (way-only per OSM spec) but worth
   counting.
-- [ ] Source provenance in PMTiles metadata: include OSM replication timestamp and source
+- [x] Source provenance in PMTiles metadata: include OSM replication timestamp and source
   PBF filename in the metadata JSON so consumers can trace data freshness. Currently only
   emits schema info (name, format, layers). Planetiler #120 added this for MBTiles; same
   applies to PMTiles.

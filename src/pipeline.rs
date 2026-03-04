@@ -2230,6 +2230,16 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
     });
 
     let (features_read, tiles_written, mut pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes) = scope_result?;
+    if let Some(filename) = config.pbf_path.file_name().and_then(|s| s.to_str()) {
+        pmtiles.set_source_pbf_filename(filename.to_string());
+    } else {
+        pmtiles.set_source_pbf_filename(config.pbf_path.display().to_string());
+    }
+    if let Ok(reader) = ElementReader::from_path(&config.pbf_path)
+        && let Some(ts) = reader.header().osmosis_replication_timestamp()
+    {
+        pmtiles.set_osmosis_replication_timestamp(ts);
+    }
     let unique_tiles = pmtiles.unique_tile_count();
     let dedup_stats = pmtiles.dedup_stats().clone();
     pmtiles.write_to(&config.output_path)?;

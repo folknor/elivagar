@@ -257,7 +257,7 @@ fn test_metadata_json() {
         center: (0.0, 0.0, 2),
 
     };
-    let json = build_metadata(&config);
+    let json = build_metadata(&config, None, None);
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["name"], "Shortbread");
     assert_eq!(parsed["format"], "pbf");
@@ -266,6 +266,22 @@ fn test_metadata_json() {
     assert_eq!(layers[0]["id"], "water_polygons");
     assert_eq!(layers[15]["id"], "streets");
     assert_eq!(layers[25]["id"], "ocean");
+    assert!(parsed.get("source_pbf").is_none());
+    assert!(parsed.get("osmosis_replication_timestamp").is_none());
+}
+
+#[test]
+fn test_metadata_json_with_source_provenance() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let json = build_metadata(&config, Some("denmark-latest.osm.pbf"), Some(1_708_000_000));
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["source_pbf"], "denmark-latest.osm.pbf");
+    assert_eq!(parsed["osmosis_replication_timestamp"], 1_708_000_000);
 }
 
 // -----------------------------------------------------------------------
