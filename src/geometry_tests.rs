@@ -449,6 +449,25 @@ fn test_point_on_surface_degenerate() {
     assert!(point_on_surface(&ring).is_none());
 }
 
+#[test]
+fn test_point_on_surface_with_holes_avoids_hole() {
+    let outer = vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ];
+    let hole = vec![
+        Point::new(2.0, 2.0),
+        Point::new(8.0, 2.0),
+        Point::new(8.0, 8.0),
+        Point::new(2.0, 8.0),
+    ];
+    let p = point_on_surface_with_holes(&outer, std::slice::from_ref(&hole)).expect("should find a point");
+    assert!(point_in_polygon(&p, &outer));
+    assert!(!point_in_polygon(&p, &hole));
+}
+
 // --- ClipRect for tile ---
 
 #[test]

@@ -263,7 +263,7 @@ fn emit_point_empty_coords() {
     let bbox = MercBbox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 };
     let mut records = Vec::new();
     let mut scratch = PointEmitScratch::new();
-    let count = emit_point_or_centroid(1, &[], &bbox, &m, 0, 0, &mut records, &mut scratch);
+    let count = emit_point_or_centroid(1, &[], None, &bbox, &m, 0, 0, &mut records, &mut scratch);
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -275,7 +275,7 @@ fn emit_point_decodes_correctly() {
     let bbox = MercBbox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 };
     let mut records = Vec::new();
     let mut scratch = PointEmitScratch::new();
-    emit_point_or_centroid(42, &coords, &bbox, &m, 0, 0, &mut records, &mut scratch);
+    emit_point_or_centroid(42, &coords, None, &bbox, &m, 0, 0, &mut records, &mut scratch);
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -313,7 +313,7 @@ fn emit_point_multi_zoom_tile_ids_differ() {
     let bbox = MercBbox { min_x: 0.25, min_y: 0.25, max_x: 0.25, max_y: 0.25 };
     let mut records = Vec::new();
     let mut scratch = PointEmitScratch::new();
-    emit_point_or_centroid(7, &coords, &bbox, &m, 0, 1, &mut records, &mut scratch);
+    emit_point_or_centroid(7, &coords, None, &bbox, &m, 0, 1, &mut records, &mut scratch);
 
     // Should get 1 record at z=0 and 1 record at z=1 = 2 total
     assert_eq!(records.len(), 2);

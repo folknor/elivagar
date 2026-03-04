@@ -133,7 +133,7 @@
   spikes/self-intersections introduced during coordinate scaling. The interplay between
   simplification and rounding specifically produces visible artifacts (Planetiler #324).
   Planetiler #1493 is actively exploring optimistic naive polygon snapping approaches.
-- [ ] Label points in polygon holes: `point_on_surface()` scans outer ring only and does not
+- [x] Label points in polygon holes: `point_on_surface()` scans outer ring only and does not
   avoid placing points inside inner rings. Multipolygons with large holes could get label
   points in the wrong place (tippecanoe #62). Tilemaker #461 hit centroid exceptions on
   problematic geometry — need robust fallbacks for edge-case polygons. Also affects address

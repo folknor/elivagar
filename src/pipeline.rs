@@ -1396,7 +1396,7 @@ fn process_raw_way(
             match m.geom_expect {
                 GeomExpect::Point | GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
                     emit_point_or_centroid(
-                        osm_id, merc, &merc_bbox_val, m, z_lo, z_hi, &mut records, &mut scratch.point_emit,
+                        osm_id, merc, None, &merc_bbox_val, m, z_lo, z_hi, &mut records, &mut scratch.point_emit,
                     );
                 }
                 GeomExpect::Line => {
@@ -1676,14 +1676,14 @@ fn process_prepared_relation_into(
                 }
             }
             GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
-                for (outer, _inners) in &multi.polygons {
+                for (outer, inners) in &multi.polygons {
                     if outer.len() < 4 {
                         continue;
                     }
                     let bbox = merc_bbox(outer);
                     land_mask.mark_bbox(&bbox);
                     emit_point_or_centroid(
-                        rel.osm_id, outer, &bbox, m, z_lo, z_hi, records, point_emit,
+                        rel.osm_id, outer, Some(inners), &bbox, m, z_lo, z_hi, records, point_emit,
                     );
                 }
             }
@@ -1873,6 +1873,7 @@ fn is_valid_simple_ring_points(ring: &[Point]) -> bool {
 fn emit_point_or_centroid(
     osm_id: u64,
     coords: &[Point],
+    inners: Option<&[Vec<Point>]>,
     _bbox: &MercBbox,
     m: &LayerMatch,
     z_lo: u8,
@@ -1884,7 +1885,11 @@ fn emit_point_or_centroid(
         return 0;
     }
     let pt = if m.geom_expect == GeomExpect::PolygonPointOnSurface {
-        geometry::point_on_surface(coords)
+        if let Some(holes) = inners {
+            geometry::point_on_surface_with_holes(coords, holes)
+        } else {
+            geometry::point_on_surface(coords)
+        }
     } else {
         Some(centroid_of(coords))
     };
