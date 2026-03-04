@@ -81,6 +81,16 @@ pub enum TilePayloadFormat {
     Mlt,
 }
 
+fn tile_format_not_implemented_error(tile_format: TilePayloadFormat) -> PipelineError {
+    let format_name = match tile_format {
+        TilePayloadFormat::Mvt => "mvt",
+        TilePayloadFormat::Mlt => "mlt",
+    };
+    PipelineError(format!(
+        "tile format '{format_name}' is not implemented yet (see notes/mlt-integration-plan.md)"
+    ))
+}
+
 /// Configuration for the tile generation pipeline.
 ///
 /// All paths are resolved relative to the current working directory.
@@ -502,12 +512,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // --- Phase 4: Tile assembly + PMTiles write ---
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
-    if config.tile_format == TilePayloadFormat::Mlt {
-        return Err(PipelineError(
-            "tile format 'mlt' is not implemented yet (see notes/mlt-integration-plan.md)"
-                .to_string(),
-        ));
-    }
     let (features_read, tiles_written, unique_tiles, max_assemble_batch_bytes, dedup_stats, tile_size_diag) =
         phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
@@ -2975,8 +2979,9 @@ fn phase_assemble(
 
         // --- Main thread: receive batches, encode with rayon, forward to writer ---
         let compression_level = config.compression_level;
+        let tile_format = config.tile_format;
         for batch in read_rx {
-            let encoded = encode_tile_batch(&batch, compression_level);
+            let encoded = encode_tile_batch(&batch, compression_level, tile_format)?;
             if encode_tx.send(encoded).is_err() { break; }
         }
         drop(encode_tx);
@@ -3047,7 +3052,21 @@ thread_local! {
 /// Encode + gzip a batch of tiles in parallel using rayon.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_wrap)]
-fn encode_tile_batch(batch: &[PendingTile], compression_level: u32) -> Vec<EncodedTile> {
+fn encode_tile_batch(
+    batch: &[PendingTile],
+    compression_level: u32,
+    tile_format: TilePayloadFormat,
+) -> Result<Vec<EncodedTile>, PipelineError> {
+    match tile_format {
+        TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(batch, compression_level)),
+        TilePayloadFormat::Mlt => Err(tile_format_not_implemented_error(tile_format)),
+    }
+}
+
+/// Encode + gzip a batch of MVT tiles in parallel using rayon.
+#[hotpath::measure]
+#[allow(clippy::cast_possible_wrap)]
+fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 
     batch

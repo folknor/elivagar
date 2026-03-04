@@ -321,6 +321,24 @@ fn antimeridian_shifts_for_bbox_returns_wrap_shifts() {
     assert!(shifts.contains(&-1.0));
 }
 
+#[test]
+fn encode_tile_batch_rejects_unimplemented_mlt_format() {
+    match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt) {
+        Ok(_) => panic!("mlt format should return not-implemented error"),
+        Err(err) => assert!(
+            err.to_string()
+                .contains("tile format 'mlt' is not implemented yet")
+        ),
+    }
+}
+
+#[test]
+fn encode_tile_batch_mvt_empty_batch_is_empty() {
+    let encoded = encode_tile_batch(&[], 6, TilePayloadFormat::Mvt)
+        .expect("mvt format should encode successfully");
+    assert!(encoded.is_empty());
+}
+
 // -----------------------------------------------------------------------
 // Helpers for emit tests — decode SortRecord payloads
 // -----------------------------------------------------------------------
