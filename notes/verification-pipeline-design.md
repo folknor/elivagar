@@ -2,443 +2,182 @@
 
 ## Status
 
-Draft proposal for a standalone output verification subsystem for elivagar.
-
-Goals:
-- Keep verification separate from generation code paths.
-- Verify produced archives as an external consumer would.
-- Support future tile payload formats (MVT, MLT, others).
-- Support future compression codecs (gzip, brotli, none, others).
-- Provide stable CLI and CI integration for pass/fail gating.
-
-## Problem Statement
-
-Elivagar has strong unit and integration coverage in core modules, but no dedicated verifier command that enforces output contracts across container, metadata, compression, and payload semantics.
-
-We need:
-- A reusable verifier engine.
-- Pluggable payload and codec verification.
-- Structured reporting for local debugging and CI.
-
-## Non-Goals
-
-- Replacing existing unit tests for internal logic.
-- Byte-for-byte output reproducibility checks as a default gate.
-- Tight coupling to any single payload format or codec.
-
-## High-Level Architecture
-
-Verification runs in layers:
-
-1. PMTiles/container verification
-- Header magic/version.
-- Section offsets/lengths bounds checks.
-- Directory decode and entry invariants.
-- Dedup invariants (`num_unique <= num_addressed`, etc.).
-
-2. Metadata verification
-- Metadata JSON parseability.
-- Required keys and value type checks.
-- Vector layer declarations and schema sanity.
-
-3. Tile payload pipeline
-- Select codec decoder (`auto` or explicit).
-- Decode compressed tile bytes into payload bytes.
-- Select payload verifier (`auto` or explicit).
-- Run per-tile semantic checks.
-
-4. Final aggregation/reporting
-- Error/warning aggregation.
-- Coverage stats (tiles scanned, sampled, skipped).
-- Format/codec summaries.
-- Exit code and optional JSON report.
-
-## Module Layout
-
-Proposed new module tree:
-
-- `src/verify/mod.rs`
-- `src/verify/engine.rs`
-- `src/verify/error.rs`
-- `src/verify/report.rs`
-- `src/verify/config.rs`
-- `src/verify/container.rs`
-- `src/verify/metadata.rs`
-- `src/verify/codec/mod.rs`
-- `src/verify/codec/gzip.rs`
-- `src/verify/codec/none.rs`
-- `src/verify/codec/brotli.rs` (stub until enabled)
-- `src/verify/format/mod.rs`
-- `src/verify/format/mvt.rs`
-- `src/verify/format/mlt.rs` (stub initially)
-
-## Core Interfaces
-
-Two plugin axes: codec and payload format.
-
-```rust
-pub trait CodecDecoder {
-    fn id(&self) -> &'static str;
-    fn decode(&self, input: &[u8]) -> Result<Vec<u8>, VerifyError>;
-}
-
-pub trait PayloadVerifier {
-    fn id(&self) -> &'static str;
-    fn verify_tile(&mut self, tile_payload: &[u8], ctx: &TileContext) -> Result<(), VerifyError>;
-    fn finish(&self) -> FormatSummary;
-}
-```
-
-Notes:
-- `PayloadVerifier` receives decompressed payload bytes only.
-- The engine is responsible for codec decode + dispatch.
-- New combinations (for example `MLT + brotli`) require no engine redesign.
-
-## Detection and Overrides
-
-CLI and engine support both auto-detect and explicit selection.
-
-Inputs:
-- PMTiles header tile type.
-- Metadata `format` token.
-- PMTiles internal compression fields where available.
-
-Rules:
-- Default: `--format auto --codec auto`.
-- If explicit override is passed, use override and report mismatch as warning/error based on strictness profile.
+Implementation-ready, lean plan.
 
-## Verification Profiles
+## Why This Exists
 
-Profiles tune scope and strictness:
+We want a release-confidence check for generated PMTiles output.
+This is not a new framework. It is a concrete verifier command that validates current output contracts.
 
-1. `basic` (default local)
-- Container + metadata checks.
-- Small deterministic sample of tiles.
-- Fast feedback.
-
-2. `ci`
-- Container + metadata checks.
-- Deterministic larger sample.
-- Strict schema and layer invariants.
-
-3. `release`
-- Full scan or very large sample.
-- Strict mode enabled.
-- JSON report artifact required.
-
-## CLI Design
-
-Add subcommand:
+## Scope
 
-`elivagar verify <FILE>`
-
-Flags:
-- `--format auto|mvt|mlt`
-- `--codec auto|gzip|brotli|none`
-- `--profile basic|ci|release`
-- `--sample N`
-- `--strict`
-- `--max-errors N`
-- `--json` (machine-readable output)
-- `--json-out <PATH>` (optional report artifact file)
-
-Optional run integration:
-- `elivagar run ... --verify`
-- Uses same verifier engine post-write.
-- Must not duplicate verification logic in pipeline code.
-
-## Report Model
-
-`VerificationReport` should include:
-- File path.
-- Selected profile, format, codec.
-- Tile population stats (`addressed`, `unique`, scanned/sample size).
-- Error list (bounded by `max-errors`).
-- Warning list.
-- Derived metrics (layer counts, decode failures, metadata issues).
-- Pass/fail summary.
+`elivagar verify <FILE.pmtiles>` will:
 
-Exit codes:
-- `0`: pass.
-- non-zero: failed checks, decode failures, or fatal I/O.
+1. Validate PMTiles header and section bounds.
+2. Parse metadata JSON and validate required schema fields.
+3. Traverse all addressed tiles (no sampling initially).
+4. Decompress tile payloads (current output: gzip).
+5. Parse MVT payload structure.
+6. Enforce core invariants:
+- archive is readable end-to-end
+- declared schema matches observed tiles
+- expected layer set is present
 
-## Initial Rule Set (Phase 1)
+## Design Decisions (Closed)
 
-Container:
-- PMTiles magic/version valid.
-- Offsets/lengths in file bounds.
-- Directory decodes without truncation/overflow.
-- Tile entries decode to valid z/x/y ranges.
+1. Reuse existing code, do not rebuild from scratch.
+- Promote/adapt reader logic from `tests/pmtiles_roundtrip.rs`.
+- Reuse metadata/header parsing patterns from `src/inspect.rs`.
 
-Metadata:
-- Valid JSON.
-- Required keys present (`name`, `format`, `vector_layers` where applicable).
-- Layer declarations parse and are internally consistent.
+2. No plugin architecture yet.
+- No `CodecDecoder`/`PayloadVerifier` traits in v1.
+- Single concrete implementation for current production path: PMTiles + gzip + MVT.
 
-Codec:
-- gzip and none supported initially.
-- brotli returns clear "unsupported in this build" until implemented.
+3. No profiles in v1.
+- One strict mode of operation.
+- Split modes only if real usage shows need.
 
-Payload format:
-- MVT verifier decodes protobuf layer/feature structure.
-- MLT verifier stub with explicit unsupported status.
+4. No sampling in v1.
+- Verify all tiles.
+- If runtime becomes an issue, add sampling later based on measurements.
 
-## Testing Strategy
-
-1. Unit tests
-- Container invariant checks.
-- Metadata parser/validator edge cases.
-- Codec decoder error handling.
-- Format verifier edge cases.
-
-2. Integration tests (synthetic)
-- Build tiny PMTiles fixtures and run `verify`.
-- Assert pass/fail and key diagnostics.
-
-3. Optional heavy integration
-- Existing ignored full-pipeline real-PBF validation remains explicit/manual.
-- Verifier can be applied to those outputs without special-case logic.
-
-## CI Integration
-
-Current CI already runs clippy/tests.
-Add:
-- `elivagar verify` on one or more synthetic fixture archives as gating signal.
-- Optional scheduled/manual job for larger verification profile.
-
-Do not run full real-dataset pipeline in default CI path.
-
-## Rollout Plan
-
-Phase 1:
-- Add `verify` module skeleton.
-- Implement container + metadata checks.
-- Implement codec: gzip, none.
-- Implement payload: MVT.
-- Wire CLI `verify`.
-
-Phase 2:
-- Add `run --verify`.
-- Improve report output and JSON schema.
-- Expand integration fixtures.
-
-Phase 3:
-- Add brotli codec decoder.
-- Add MLT payload verifier.
-- Add profile hardening for release gates.
-
-## Open Questions
-
-1. Where should strict schema expectations live?
-- Hardcoded in verifier.
-- Loaded from schema descriptor.
-- Hybrid.
-
-2. Sampling policy default:
-- Fixed count.
-- Percentage with cap.
-- Zoom-stratified sample.
-
-3. Failure policy for declared-vs-observed layer mismatch:
-- Warning in `basic`.
-- Error in `ci`/`release`.
-
-4. JSON report stability:
-- Internal only.
-- Versioned public contract for tooling.
-
-## Acceptance Criteria
-
-Design is complete when:
-- `elivagar verify` validates current MVT+gzip archives end-to-end.
-- Verifier implementation does not depend on mutable generation state.
-- Format and codec extension points are exercised by at least one implementation each.
-- CI can fail on verification regressions from synthetic fixtures.
-
-## Concrete File-by-File Plan
-
-Implementation should be done in this order to keep compile state stable and enable small reviewable commits.
-
-### Step 0: CLI and module scaffolding
-
-1. `src/lib.rs`
-- Add `pub mod verify;`
-- Keep verifier API externally callable from integration tests and future tooling.
-
-2. `src/main.rs`
-- Extend `Command` enum with `Verify(VerifyArgs)`.
-- Add `VerifyArgs` clap struct:
-  - `file: PathBuf`
-  - `format`, `codec`, `profile`
-  - `sample`, `strict`, `max_errors`, `json`, `json_out`
-- Route `Command::Verify` to `elivagar::verify::run_verify(...)`.
-
-### Step 1: Core verify module
-
-3. `src/verify/mod.rs` (new)
-- Public module entrypoint.
-- Re-export primary config/report/error types.
-- Add `pub fn run_verify(cfg: VerifyConfig) -> Result<VerificationReport, VerifyError>`.
-
-4. `src/verify/error.rs` (new)
-- Define `VerifyError` enum with variants:
-  - `Io`
-  - `Container`
-  - `Metadata`
-  - `Codec`
-  - `Format`
-  - `Config`
-- Implement `Display` and `From<io::Error>`.
-
-5. `src/verify/config.rs` (new)
-- Define:
-  - `VerifyConfig`
-  - `VerifyProfile` (`Basic`, `Ci`, `Release`)
-  - `FormatChoice` (`Auto`, `Mvt`, `Mlt`)
-  - `CodecChoice` (`Auto`, `Gzip`, `Brotli`, `None`)
-- Add profile defaults:
-  - sample size
-  - strict flag defaults
-  - max errors default
-
-6. `src/verify/report.rs` (new)
-- Define:
-  - `VerificationReport`
-  - `VerificationIssue` (severity + code + message + tile context optional)
-  - `VerificationStats`
-  - `FormatSummary`
-- Add helpers:
-  - `is_pass()`
-  - bounded issue append with `max_errors`
-  - optional JSON serialization shape
-
-### Step 2: Container and metadata validators
-
-7. `src/verify/container.rs` (new)
-- PMTiles header parse helpers for verify path.
-- Validate:
-  - magic/version
-  - offsets/lengths bounds
-  - directory decodability
-  - z/x/y decode validity
-  - dedup header invariants
-- Return typed container model for engine use (entries + metadata offsets + header fields).
-
-8. `src/verify/metadata.rs` (new)
-- Load metadata section as string.
-- Parse JSON and validate required keys.
-- Parse `vector_layers` for schema checks.
-- Return `MetadataModel` used by engine and format verifiers.
-
-### Step 3: Codec plugin axis
-
-9. `src/verify/codec/mod.rs` (new)
-- Define `CodecDecoder` trait.
-- Expose registry/selector for `auto` and explicit choices.
-- Define `decode_tile(...)` helper with issue mapping.
-
-10. `src/verify/codec/gzip.rs` (new)
-- Implement gzip decode using current project dependency stack.
-- Return `VerifyError::Codec` on decode failure with tile context.
-
-11. `src/verify/codec/none.rs` (new)
-- Pass-through decoder.
-
-12. `src/verify/codec/brotli.rs` (new stub)
-- Implement trait but return unsupported error.
-- Keep wiring in selector so CLI contract is already stable.
-
-### Step 4: Payload format plugin axis
-
-13. `src/verify/format/mod.rs` (new)
-- Define `PayloadVerifier` trait.
-- Define `TileContext` (z/x/y + tile_id + offsets).
-- Selector for format verifier (`auto` and explicit).
-
-14. `src/verify/format/mvt.rs` (new)
-- Decode MVT payload using existing protobuf logic patterns.
-- Validate layer and feature envelope:
-  - layer name non-empty
-  - feature geometry type valid
-  - counts and table structure coherent
-- Accumulate format metrics for report summary.
-
-15. `src/verify/format/mlt.rs` (new stub)
-- Trait implementation returning unsupported status for now.
-- Keep compile-time extension point for later MLT integration.
-
-### Step 5: Engine orchestration
-
-16. `src/verify/engine.rs` (new)
-- Orchestrate full flow:
-  - parse config/profile
-  - run container checks
-  - run metadata checks
-  - select codec + format verifier
-  - tile iteration (full or sampled)
-  - per-tile decode + payload verify
-  - final summary and pass/fail
-- Ensure deterministic sampling:
-  - stable order over directory entries
-  - fixed seed derived from file hash or header constants
-
-### Step 6: Run integration
-
-17. `src/pipeline.rs`
-- No logic changes required for verifier core.
-- Phase 2 only: if `run --verify` is added, call verifier after successful write using output path.
-
-### Step 7: Tests
-
-18. `tests/verify_cli.rs` (new)
-- End-to-end CLI tests for:
-  - passing synthetic PMTiles
-  - metadata failure
-  - codec mismatch override
-  - unsupported format/codec behavior
-
-19. `tests/verify_engine.rs` (new)
-- Direct engine tests against synthetic fixtures:
-  - profile behavior
-  - sample size behavior
-  - max error truncation
-  - strict vs non-strict mismatch policy
-
-20. `tests/pmtiles_roundtrip.rs` (existing)
-- Add verifier invocation tests on generated fixtures.
-- Keep ignored full-pipeline test unchanged, but assert verifier pass when enabled.
-
-21. `src/verify/*` unit tests (inline per module)
-- Header decode edge cases, metadata edge cases, decode failures, stub behavior.
-
-### Step 8: CI wiring
-
-22. `.github/workflows/ci.yml`
-- Add verify job step after tests:
-  - build synthetic fixture in-test or from test helper
-  - run `elivagar verify ... --profile ci`
-- Keep real PBF pipeline out of default CI.
-
-### Step 9: Documentation
-
-23. `README.md`
-- Add `verify` command usage and examples.
-- Document profiles and exit codes.
-
-24. `CLAUDE.md`
-- Add short verifier usage discipline:
-  - use `verify` for output contract checks
-  - keep heavy full-pipeline runs explicitly user-triggered
+5. No JSON report schema in v1.
+- Human-readable CLI output + exit code.
+- Add `--json` only when there is a concrete consumer.
+
+6. Keep verification separate from generation.
+- Add `verify` subcommand only.
+- Do not add `run --verify` now.
+
+## Concrete Failure Modes This Targets
+
+This verifier is meant to catch regressions in:
+
+1. PMTiles container correctness
+- invalid offsets/lengths
+- broken directory encoding/decoding
+- tile addressability mismatches
+
+2. Metadata correctness
+- invalid JSON
+- missing/invalid `format`, `vector_layers`, schema info
+
+3. Compression/payload readability
+- tiles that fail gzip decompression
+- tiles that fail MVT structural parsing
+
+4. Schema drift in generated output
+- missing expected layers
+- mismatch between declared and observed layers
+
+## File-by-File Implementation Plan
+
+Target: 2-3 implementation files, minimal structural overhead.
+
+### 1) `src/verify.rs` (new)
+
+Single entry module for v1.
+
+Responsibilities:
+- `pub fn verify(path: &Path) -> Result<(), VerifyError>`
+- PMTiles open + header checks
+- metadata checks
+- full tile traversal
+- gzip decompress + MVT structural checks
+- aggregate failures and print summary
+
+Types in this file:
+- `VerifyError`
+- lightweight `VerifyStats`
+- minimal helper structs for tile entries/context as needed
+
+### 2) `src/main.rs` (edit)
+
+Responsibilities:
+- Add CLI subcommand:
+  - `Verify { file: PathBuf }`
+- Dispatch to `elivagar::verify::verify(&file)`
+- non-zero exit on verification failure
+
+### 3) `src/lib.rs` (edit)
+
+Responsibilities:
+- Export new module: `pub mod verify;`
+
+### Optional 4) `src/pmtiles_reader.rs` (new, only if needed)
+
+Create only if `src/verify.rs` gets too large.
+
+Responsibilities:
+- Shared PMTiles read helpers migrated from `tests/pmtiles_roundtrip.rs`.
+- Keep API minimal and internal.
+
+## Reuse Plan (Explicit)
+
+### From `tests/pmtiles_roundtrip.rs`
+- PMTiles directory decode and expansion
+- tile read helpers
+- gzip decompress helper
+- minimal MVT layer decode primitives
+
+Action:
+- Move shared logic into `src/verify.rs` (or `src/pmtiles_reader.rs`), then update integration tests to use shared helpers where practical.
+
+### From `src/inspect.rs`
+- header field decoding helpers
+- metadata handling patterns
+
+Action:
+- Reuse logic directly where possible; avoid duplicate parsing code paths.
+
+## Verification Rules (v1)
+
+Pass criteria:
+
+1. PMTiles header is valid (`PMTiles`, version 3).
+2. Directory and metadata sections are within file bounds.
+3. Metadata JSON parses.
+4. `format` indicates MVT/PBF payload expectation.
+5. All addressed tiles can be read.
+6. All tile payloads decompress as gzip.
+7. All decompressed payloads parse as valid MVT structure.
+8. Observed layers are consistent with metadata-declared vector layers.
+9. Required Shortbread layer set is present in archive output.
+
+Fail fast:
+- Hard I/O or container corruption can terminate early.
+- Otherwise accumulate errors up to a fixed cap and then stop with summary.
+
+## Testing Plan
+
+### Unit tests
+- Add focused unit tests in `src/verify.rs` for:
+  - malformed headers
+  - invalid metadata JSON
+  - gzip failures
+  - invalid MVT payload bytes
+
+### Integration tests
+- Extend `tests/pmtiles_roundtrip.rs`:
+  - run verifier on synthetic generated archives (pass case)
+  - inject broken archive variants (fail cases)
+
+### Full pipeline test
+- Keep existing ignored full-pipeline integration test.
+- Add optional verifier invocation on its output.
+
+## CI Plan
+
+Keep CI simple:
+
+1. Existing test suite remains.
+2. Add one integration test path that exercises `verify` on synthetic fixtures.
+3. No real PBF full-pipeline run in default CI.
 
 ## Commit Plan
 
-Suggested commit slicing:
+Three commits max:
 
-1. CLI + verify module scaffolding (`lib.rs`, `main.rs`, `verify/{mod,error,config,report}`).
-2. Container + metadata validation.
-3. Codec and format trait axes with MVT + gzip/none and stubs.
-4. Engine orchestration and deterministic sampling.
-5. Tests (unit + integration + CLI).
-6. CI + docs updates.
-
-Each commit should pass `brokkr check`.
+1. Working `verify` command (readable end-to-end checks).
+2. Tests for pass/fail cases.
+3. CI/docs updates.
