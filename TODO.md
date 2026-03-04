@@ -12,9 +12,13 @@
    - Stats emitted as key=value metrics in pipeline output.
    - Tests: metrics accounting, cap overflow, fingerprint rejection via injected entries,
      bucket collision handling, length mismatch counting.
-   - Remaining items from upstream review (separate scope):
-     - Tippecanoe #98: PMTiles directory index OOB edge cases — worth regression-testing.
-     - Tilemaker #794: header offsets for small archives — test both layouts.
+   - Follow-up regression hardening completed:
+     - Tippecanoe #98-style PMTiles directory index OOB/off-by-one edge cases now covered
+       in `pmtiles_reader` decode tests (truncated streams, invalid first-entry offset sentinel,
+       contiguous offset overflow).
+     - Tilemaker #794-style small-archive/root-directory-only layout now covered via
+       root-only offset/layout tests plus root/leaf threshold boundary tests.
+     - `inspect.rs` now has coverage for both root-only and leaf-directory archive layouts.
 
 ## Test coverage gaps
 
@@ -25,7 +29,8 @@
   Large lakes/water bodies at low zoom are particularly vulnerable to simplification + clipping
   producing visible topology artifacts (tilemaker #191). Very large polygons ("monster polygons")
   also stress the clipping path specifically (tilemaker #607).
-- [ ] `inspect.rs`: untested read-only diagnostic tool. Consider migrating to use `pmtiles_reader.rs` shared helpers.
+- [x] `inspect.rs`: read-only diagnostic tool now tested on root-only and leaf-directory layouts.
+  Follow-up: migrate to `pmtiles_reader.rs` shared helpers to reduce parsing duplication.
 - [ ] `sort.rs`: `SortWriter::resume` / `adopt_chunk_files` — indirectly tested via checkpoint tests.
 - [ ] Import targeted cases from Mapbox's `mvt_fixtures` corpus for `mvt.rs` conformance testing
   (tilemaker #103).

@@ -313,9 +313,17 @@ pub fn decode_directory(data: &[u8]) -> io::Result<Vec<RawDirEntry>> {
         let v = c
             .read_varint()
             .map_err(|e| io::Error::other(format!("offset: {e}")))?;
-        let offset = if v == 0 && i > 0 {
+        let offset = if v == 0 {
+            if i == 0 {
+                return Err(io::Error::other(
+                    "offset: zero sentinel is invalid for first entry",
+                ));
+            }
             let prev_entry: &RawDirEntry = &entries[i - 1];
-            prev_entry.offset + u64::from(prev_entry.length)
+            prev_entry
+                .offset
+                .checked_add(u64::from(prev_entry.length))
+                .ok_or_else(|| io::Error::other("offset: contiguous addition overflow"))?
         } else {
             v - 1
         };
@@ -378,4 +386,73 @@ fn decode_mvt_layer(data: &[u8]) -> MvtLayer {
         }
     }
     layer
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::decode_directory;
+    use protohoggr::encode_varint;
+
+    fn encode_directory_raw(
+        tile_deltas: &[u64],
+        run_lengths: &[u64],
+        lengths: &[u64],
+        offsets: &[u64],
+    ) -> Vec<u8> {
+        assert_eq!(tile_deltas.len(), run_lengths.len());
+        assert_eq!(tile_deltas.len(), lengths.len());
+        assert_eq!(tile_deltas.len(), offsets.len());
+        let mut out = Vec::new();
+        encode_varint(&mut out, tile_deltas.len() as u64);
+        for &v in tile_deltas {
+            encode_varint(&mut out, v);
+        }
+        for &v in run_lengths {
+            encode_varint(&mut out, v);
+        }
+        for &v in lengths {
+            encode_varint(&mut out, v);
+        }
+        for &v in offsets {
+            encode_varint(&mut out, v);
+        }
+        out
+    }
+
+    #[test]
+    fn decode_directory_rejects_truncated_stream() {
+        // count=1 and one tile_id delta, but missing remaining columns.
+        let mut raw = Vec::new();
+        encode_varint(&mut raw, 1);
+        encode_varint(&mut raw, 5);
+        let err = decode_directory(&raw)
+            .err()
+            .expect("should fail on truncated directory");
+        assert!(
+            err.to_string().contains("run_length")
+                || err.to_string().contains("length")
+                || err.to_string().contains("offset")
+        );
+    }
+
+    #[test]
+    fn decode_directory_rejects_zero_offset_for_first_entry() {
+        let raw = encode_directory_raw(&[5], &[1], &[10], &[0]);
+        let err = decode_directory(&raw)
+            .err()
+            .expect("first entry offset sentinel must fail");
+        assert!(err.to_string().contains("invalid for first entry"));
+    }
+
+    #[test]
+    fn decode_directory_rejects_contiguous_offset_overflow() {
+        // Entry 0: explicit offset v=u64::MAX => offset=u64::MAX-1, length=10.
+        // Entry 1: contiguous sentinel (v=0) => (u64::MAX-1)+10 overflows.
+        let raw = encode_directory_raw(&[5, 1], &[1, 1], &[10, 1], &[u64::MAX, 0]);
+        let err = decode_directory(&raw)
+            .err()
+            .expect("contiguous offset overflow should fail");
+        assert!(err.to_string().contains("overflow"));
+    }
 }

@@ -263,3 +263,59 @@ fn tile_type_name(val: u8) -> &'static str {
         _ => "unrecognized",
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::inspect;
+    use crate::pmtiles_writer::{tile_id_to_zxy, xy_to_tile_id, PmtilesConfig, PmtilesWriter};
+
+    fn add_monotonic_unique_tiles(writer: &mut PmtilesWriter, z: u8, count: usize) {
+        let base = xy_to_tile_id(z, 0, 0);
+        for i in 0..count {
+            let tile_id = base + i as u64;
+            let (z2, x, y) = tile_id_to_zxy(tile_id);
+            assert_eq!(z2, z);
+            let payload = (i as u64).to_le_bytes();
+            writer.add_tile(z2, x, y, &payload).unwrap();
+        }
+    }
+
+    #[test]
+    fn inspect_handles_root_only_archive() {
+        let config = PmtilesConfig {
+            min_zoom: 0,
+            max_zoom: 0,
+            bounds: (-180.0, -85.0, 180.0, 85.0),
+            center: (0.0, 0.0, 0),
+        };
+        let mut writer = PmtilesWriter::new(config);
+        writer.add_tile(0, 0, 0, &[1, 2, 3]).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inspect_root_only.pmtiles");
+        writer.write_to(&path).unwrap();
+
+        inspect(&path).unwrap();
+    }
+
+    #[test]
+    fn inspect_handles_leaf_directory_archive() {
+        // Above MAX_ROOT_ENTRIES (16384) to force leaf directory layout.
+        const ROOT_THRESHOLD: usize = 16384;
+        let config = PmtilesConfig {
+            min_zoom: 8,
+            max_zoom: 8,
+            bounds: (-180.0, -85.0, 180.0, 85.0),
+            center: (0.0, 0.0, 8),
+        };
+        let mut writer = PmtilesWriter::new(config);
+        add_monotonic_unique_tiles(&mut writer, 8, ROOT_THRESHOLD + 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inspect_leaf.pmtiles");
+        writer.write_to(&path).unwrap();
+
+        inspect(&path).unwrap();
+    }
+}

@@ -1,5 +1,20 @@
 use super::*;
 
+fn read_u64_le(buf: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
+}
+
+fn add_monotonic_unique_tiles(writer: &mut PmtilesWriter, z: u8, count: usize) {
+    let base = xy_to_tile_id(z, 0, 0);
+    for i in 0..count {
+        let tile_id = base + i as u64;
+        let (z2, x, y) = tile_id_to_zxy(tile_id);
+        assert_eq!(z2, z, "tile_id {tile_id} should decode back to z={z}");
+        let payload = (i as u64).to_le_bytes();
+        writer.add_tile(z2, x, y, &payload).unwrap();
+    }
+}
+
 // -----------------------------------------------------------------------
 // Hilbert round-trip
 // -----------------------------------------------------------------------
@@ -545,7 +560,7 @@ fn test_dedup_bucket_collision() {
     let mut writer = PmtilesWriter::new(config);
 
     let data_a = gzip_compress(b"tile-a-bucket").unwrap();
-    let (hash1_a, fp2_a) = PmtilesWriter::compute_dedup_hashes(&data_a);
+    let (hash1_a, _fp2_a) = PmtilesWriter::compute_dedup_hashes(&data_a);
 
     // Add tile A normally.
     writer.add_tile(0, 0, 0, &data_a).unwrap();
@@ -629,4 +644,84 @@ fn data_section_is_4k_aligned() {
     let bytes = std::fs::read(&path).unwrap();
     let data_offset = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
     assert_eq!(data_offset % 4096, 0, "data_offset {data_offset} should be 4K-aligned");
+}
+
+#[test]
+fn root_only_layout_offsets_are_consistent() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 0,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+    let mut writer = PmtilesWriter::new(config);
+    writer.add_tile(0, 0, 0, &[1, 2, 3, 4]).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("root_only.pmtiles");
+    writer.write_to(&path).unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.len() > 127, "archive should be larger than header");
+
+    let root_dir_offset = read_u64_le(&bytes, 8);
+    let root_dir_length = read_u64_le(&bytes, 16);
+    let metadata_offset = read_u64_le(&bytes, 24);
+    let metadata_length = read_u64_le(&bytes, 32);
+    let leaf_dirs_offset = read_u64_le(&bytes, 40);
+    let leaf_dirs_length = read_u64_le(&bytes, 48);
+    let data_offset = read_u64_le(&bytes, 56);
+    let data_length = read_u64_le(&bytes, 64);
+
+    assert_eq!(root_dir_offset, 127);
+    assert!(root_dir_length > 0);
+    assert_eq!(metadata_offset, root_dir_offset + root_dir_length);
+    assert!(metadata_length > 0);
+    assert_eq!(leaf_dirs_offset, metadata_offset + metadata_length);
+    assert_eq!(leaf_dirs_length, 0, "single-tile archive should be root-only");
+    assert!(data_offset >= leaf_dirs_offset + leaf_dirs_length);
+
+    let file_len = bytes.len() as u64;
+    assert!(root_dir_offset + root_dir_length <= file_len);
+    assert!(metadata_offset + metadata_length <= file_len);
+    assert!(data_offset + data_length <= file_len);
+}
+
+#[test]
+fn root_leaf_boundary_switches_at_threshold() {
+    // finalize_directories() uses MAX_ROOT_ENTRIES=16384.
+    const ROOT_THRESHOLD: usize = 16384;
+    let make_config = || PmtilesConfig {
+        min_zoom: 8,
+        max_zoom: 8,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 8),
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut at_threshold = PmtilesWriter::new(make_config());
+    add_monotonic_unique_tiles(&mut at_threshold, 8, ROOT_THRESHOLD);
+    let at_threshold_path = dir.path().join("root_threshold.pmtiles");
+    at_threshold.write_to(&at_threshold_path).unwrap();
+    let at_threshold_bytes = std::fs::read(&at_threshold_path).unwrap();
+
+    let mut over_threshold = PmtilesWriter::new(make_config());
+    add_monotonic_unique_tiles(&mut over_threshold, 8, ROOT_THRESHOLD + 1);
+    let over_threshold_path = dir.path().join("leaf_threshold.pmtiles");
+    over_threshold.write_to(&over_threshold_path).unwrap();
+    let over_threshold_bytes = std::fs::read(&over_threshold_path).unwrap();
+
+    let threshold_num_entries = read_u64_le(&at_threshold_bytes, 80);
+    let threshold_leaf_dirs_length = read_u64_le(&at_threshold_bytes, 48);
+    assert_eq!(threshold_num_entries, ROOT_THRESHOLD as u64);
+    assert_eq!(threshold_leaf_dirs_length, 0, "threshold case should remain root-only");
+
+    let over_num_entries = read_u64_le(&over_threshold_bytes, 80);
+    let over_leaf_dirs_length = read_u64_le(&over_threshold_bytes, 48);
+    assert_eq!(over_num_entries, (ROOT_THRESHOLD + 1) as u64);
+    assert!(
+        over_leaf_dirs_length > 0,
+        "threshold+1 case should use leaf directories"
+    );
 }
