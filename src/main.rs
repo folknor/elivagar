@@ -22,6 +22,8 @@ enum Command {
     Run(RunArgs),
     /// Inspect a PMTiles archive.
     Inspect(InspectArgs),
+    /// Verify a PMTiles archive.
+    Verify(VerifyArgs),
 }
 
 /// Arguments for the `run` subcommand.
@@ -104,6 +106,13 @@ struct InspectArgs {
     file: PathBuf,
 }
 
+/// Arguments for the `verify` subcommand.
+#[derive(Parser)]
+struct VerifyArgs {
+    /// PMTiles file to verify.
+    file: PathBuf,
+}
+
 #[derive(Clone, ValueEnum)]
 enum SkipToArg {
     Ocean,
@@ -171,6 +180,20 @@ fn main() {
             if let Err(e) = elivagar::inspect::inspect(&args.file) {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
+            }
+        }
+        Command::Verify(args) => {
+            match elivagar::verify::verify(&args.file) {
+                Ok(report) => {
+                    report.print_summary();
+                    if !report.passed {
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
     }

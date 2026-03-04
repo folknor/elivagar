@@ -11,259 +11,13 @@
 //! runs the full pipeline on a real PBF.
 
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use elivagar::pmtiles_reader::{decode_mvt_layers, PmtilesReader};
 use elivagar::pmtiles_writer::{tile_id_to_zxy, xy_to_tile_id, PmtilesConfig, PmtilesWriter};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use flate2::read::GzDecoder;
-use protohoggr::{
-    Cursor, encode_bytes_field_always, encode_varint, encode_varint_field_always, WIRE_LEN,
-};
-
-// ---------------------------------------------------------------------------
-// PMTiles reader (minimal, sync) — adapted from examples/compare_tiles.rs
-// ---------------------------------------------------------------------------
-
-struct PmtilesReader {
-    file: File,
-    header: [u8; 127],
-    root_dir_offset: u64,
-    root_dir_length: u64,
-    leaf_dirs_offset: u64,
-    data_offset: u64,
-    internal_compression: u8,
-}
-
-struct TileEntry {
-    tile_id: u64,
-    offset: u64,
-    length: u32,
-}
-
-struct RawDirEntry {
-    tile_id: u64,
-    offset: u64,
-    length: u32,
-    run_length: u32,
-}
-
-impl PmtilesReader {
-    fn open(path: &Path) -> io::Result<Self> {
-        let mut file = File::open(path)?;
-        let mut header = [0u8; 127];
-        file.read_exact(&mut header)?;
-
-        if &header[0..7] != b"PMTiles" || header[7] != 3 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "not PMTiles v3"));
-        }
-
-        Ok(PmtilesReader {
-            file,
-            header,
-            root_dir_offset: read_u64_le(&header, 8),
-            root_dir_length: read_u64_le(&header, 16),
-            leaf_dirs_offset: read_u64_le(&header, 40),
-            data_offset: read_u64_le(&header, 56),
-            internal_compression: header[97],
-        })
-    }
-
-    fn min_zoom(&self) -> u8 {
-        self.header[100]
-    }
-
-    fn max_zoom(&self) -> u8 {
-        self.header[101]
-    }
-
-    fn tile_type(&self) -> u8 {
-        self.header[99]
-    }
-
-    fn num_addressed(&self) -> u64 {
-        read_u64_le(&self.header, 72)
-    }
-
-    fn num_unique(&self) -> u64 {
-        read_u64_le(&self.header, 88)
-    }
-
-    fn metadata_offset(&self) -> u64 {
-        read_u64_le(&self.header, 24)
-    }
-
-    fn metadata_length(&self) -> u64 {
-        read_u64_le(&self.header, 32)
-    }
-
-    fn read_metadata(&mut self) -> io::Result<String> {
-        let offset = self.metadata_offset();
-        let length = self.metadata_length();
-        self.file.seek(SeekFrom::Start(offset))?;
-        let mut compressed = vec![0u8; length as usize];
-        self.file.read_exact(&mut compressed)?;
-
-        if self.internal_compression == 2 {
-            let buf = gzip_decompress(&compressed)?;
-            Ok(String::from_utf8_lossy(&buf).to_string())
-        } else {
-            Ok(String::from_utf8_lossy(&compressed).to_string())
-        }
-    }
-
-    fn read_all_entries(&mut self) -> io::Result<Vec<TileEntry>> {
-        let root_entries = self.read_directory(self.root_dir_offset, self.root_dir_length)?;
-        let mut all_entries = Vec::new();
-
-        for entry in &root_entries {
-            if entry.run_length == 0 {
-                let leaf_offset = self.leaf_dirs_offset + entry.offset;
-                let leaf_entries = self.read_directory(leaf_offset, entry.length as u64)?;
-                expand_entries(&leaf_entries, &mut all_entries);
-            } else {
-                expand_single(entry, &mut all_entries);
-            }
-        }
-
-        Ok(all_entries)
-    }
-
-    fn read_directory(&mut self, offset: u64, length: u64) -> io::Result<Vec<RawDirEntry>> {
-        self.file.seek(SeekFrom::Start(offset))?;
-        let mut compressed = vec![0u8; length as usize];
-        self.file.read_exact(&mut compressed)?;
-
-        let raw = if self.internal_compression == 2 {
-            gzip_decompress(&compressed)?
-        } else {
-            compressed
-        };
-
-        Ok(decode_directory(&raw))
-    }
-
-    fn read_tile(&mut self, entry: &TileEntry) -> io::Result<Vec<u8>> {
-        let abs_offset = self.data_offset + entry.offset;
-        self.file.seek(SeekFrom::Start(abs_offset))?;
-        let mut compressed = vec![0u8; entry.length as usize];
-        self.file.read_exact(&mut compressed)?;
-        gzip_decompress(&compressed)
-    }
-}
-
-fn expand_entries(dir_entries: &[RawDirEntry], out: &mut Vec<TileEntry>) {
-    for e in dir_entries {
-        if e.run_length == 0 {
-            continue;
-        }
-        expand_single(e, out);
-    }
-}
-
-fn expand_single(e: &RawDirEntry, out: &mut Vec<TileEntry>) {
-    for r in 0..e.run_length {
-        out.push(TileEntry {
-            tile_id: e.tile_id + u64::from(r),
-            offset: e.offset,
-            length: e.length,
-        });
-    }
-}
-
-fn decode_directory(data: &[u8]) -> Vec<RawDirEntry> {
-    let mut c = Cursor::new(data);
-    let count = c.read_varint().unwrap() as usize;
-
-    let mut tile_ids = Vec::with_capacity(count);
-    let mut prev: u64 = 0;
-    for _ in 0..count {
-        let delta = c.read_varint().unwrap();
-        prev += delta;
-        tile_ids.push(prev);
-    }
-
-    let mut run_lengths = Vec::with_capacity(count);
-    for _ in 0..count {
-        run_lengths.push(c.read_varint().unwrap() as u32);
-    }
-
-    let mut lengths = Vec::with_capacity(count);
-    for _ in 0..count {
-        lengths.push(c.read_varint().unwrap() as u32);
-    }
-
-    let mut entries = Vec::with_capacity(count);
-    for i in 0..count {
-        let v = c.read_varint().unwrap();
-        let offset = if v == 0 && i > 0 {
-            let prev: &RawDirEntry = &entries[i - 1];
-            // Contiguous: prev.offset + prev.length (NOT multiplied by run_length,
-            // since all tiles in a run share the same data blob).
-            prev.offset + u64::from(prev.length)
-        } else {
-            v - 1
-        };
-        entries.push(RawDirEntry {
-            tile_id: tile_ids[i],
-            offset,
-            length: lengths[i],
-            run_length: run_lengths[i],
-        });
-    }
-
-    entries
-}
-
-fn read_u64_le(buf: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
-}
-
-// ---------------------------------------------------------------------------
-// MVT protobuf decoder (minimal) — adapted from examples/compare_tiles.rs
-// ---------------------------------------------------------------------------
-
-struct MvtLayer {
-    name: String,
-    feature_count: usize,
-}
-
-fn decode_mvt_layers(data: &[u8]) -> Vec<MvtLayer> {
-    let mut layers = Vec::new();
-    let mut cursor = Cursor::new(data);
-    while let Ok(Some((field, wire_type))) = cursor.read_tag() {
-        if field == 3 && wire_type == WIRE_LEN {
-            let sub = cursor.read_len_delimited().unwrap();
-            layers.push(decode_mvt_layer(sub));
-        } else {
-            cursor.skip_field(wire_type).unwrap();
-        }
-    }
-    layers
-}
-
-fn decode_mvt_layer(data: &[u8]) -> MvtLayer {
-    let mut layer = MvtLayer {
-        name: String::new(),
-        feature_count: 0,
-    };
-    let mut cursor = Cursor::new(data);
-    while let Ok(Some((field, wire_type))) = cursor.read_tag() {
-        if wire_type == WIRE_LEN {
-            let sub = cursor.read_len_delimited().unwrap();
-            match field {
-                1 => layer.name = String::from_utf8_lossy(sub).to_string(),
-                2 => layer.feature_count += 1,
-                _ => {}
-            }
-        } else {
-            cursor.skip_field(wire_type).unwrap();
-        }
-    }
-    layer
-}
+use protohoggr::{encode_bytes_field_always, encode_varint, encode_varint_field_always};
 
 // ---------------------------------------------------------------------------
 // MVT protobuf encoder (minimal — builds tiles with named layers)
@@ -329,13 +83,6 @@ fn gzip_bytes(data: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
-    let mut decoder = GzDecoder::new(data);
-    let mut out = Vec::new();
-    decoder.read_to_end(&mut out)?;
-    Ok(out)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -361,8 +108,8 @@ fn test_header_fields() {
     let reader = PmtilesReader::open(&path).unwrap();
 
     // Magic + version
-    assert_eq!(&reader.header[0..7], b"PMTiles");
-    assert_eq!(reader.header[7], 3);
+    assert_eq!(&reader.header()[0..7], b"PMTiles");
+    assert_eq!(reader.header()[7], 3);
 
     // Zoom range
     assert_eq!(reader.min_zoom(), 2);
@@ -372,32 +119,32 @@ fn test_header_fields() {
     assert_eq!(reader.tile_type(), 1);
 
     // Clustered = 1
-    assert_eq!(reader.header[96], 1);
+    assert_eq!(reader.header()[96], 1);
 
     // Internal compression = gzip (2)
-    assert_eq!(reader.header[97], 2);
+    assert_eq!(reader.header()[97], 2);
 
     // Tile compression = gzip (2)
-    assert_eq!(reader.header[98], 2);
+    assert_eq!(reader.header()[98], 2);
 
     // Tile counts
     assert_eq!(reader.num_addressed(), 1);
     assert_eq!(reader.num_unique(), 1);
 
     // Bounds (E7 encoding): 8.0 -> 80000000, 54.5 -> 545000000, etc.
-    let min_lon = i32::from_le_bytes(reader.header[102..106].try_into().unwrap());
-    let min_lat = i32::from_le_bytes(reader.header[106..110].try_into().unwrap());
-    let max_lon = i32::from_le_bytes(reader.header[110..114].try_into().unwrap());
-    let max_lat = i32::from_le_bytes(reader.header[114..118].try_into().unwrap());
+    let min_lon = i32::from_le_bytes(reader.header()[102..106].try_into().unwrap());
+    let min_lat = i32::from_le_bytes(reader.header()[106..110].try_into().unwrap());
+    let max_lon = i32::from_le_bytes(reader.header()[110..114].try_into().unwrap());
+    let max_lat = i32::from_le_bytes(reader.header()[114..118].try_into().unwrap());
     assert_eq!(min_lon, 80_000_000);
     assert_eq!(min_lat, 545_000_000);
     assert_eq!(max_lon, 152_000_000);
     assert_eq!(max_lat, 578_000_000);
 
     // Center
-    let center_zoom = reader.header[118];
-    let center_lon = i32::from_le_bytes(reader.header[119..123].try_into().unwrap());
-    let center_lat = i32::from_le_bytes(reader.header[123..127].try_into().unwrap());
+    let center_zoom = reader.header()[118];
+    let center_lon = i32::from_le_bytes(reader.header()[119..123].try_into().unwrap());
+    let center_lat = i32::from_le_bytes(reader.header()[123..127].try_into().unwrap());
     assert_eq!(center_zoom, 7);
     assert_eq!(center_lon, 115_000_000);
     assert_eq!(center_lat, 560_000_000);
@@ -491,7 +238,7 @@ fn test_mvt_layer_decode() {
 
     for (i, entry) in entries.iter().enumerate() {
         let raw = reader.read_tile(entry).unwrap();
-        let layers = decode_mvt_layers(&raw);
+        let layers = decode_mvt_layers(&raw).unwrap();
 
         let expected = &layer_names_per_tile[i];
         assert_eq!(
@@ -566,7 +313,7 @@ fn test_deduplication() {
 
     for entry in &entries {
         let raw = reader.read_tile(entry).unwrap();
-        let layers = decode_mvt_layers(&raw);
+        let layers = decode_mvt_layers(&raw).unwrap();
         assert!(!layers.is_empty(), "tile should have at least one layer");
     }
 
@@ -574,7 +321,7 @@ fn test_deduplication() {
     // z1/1/1 is tile_id = xy_to_tile_id(1,1,1) = 3
     let unique_id = xy_to_tile_id(1, 1, 1);
     let unique_entry = entries.iter().find(|e| e.tile_id == unique_id).unwrap();
-    let layers = decode_mvt_layers(&reader.read_tile(unique_entry).unwrap());
+    let layers = decode_mvt_layers(&reader.read_tile(unique_entry).unwrap()).unwrap();
     assert_eq!(layers.len(), 2);
     assert_eq!(layers[0].name, "streets");
     assert_eq!(layers[1].name, "buildings");
@@ -670,7 +417,7 @@ fn test_full_pipeline() {
 
     for entry in entries.iter().step_by(step.max(1)).take(sample_count) {
         let raw = reader.read_tile(entry).unwrap();
-        let layers = decode_mvt_layers(&raw);
+        let layers = decode_mvt_layers(&raw).unwrap();
 
         assert!(
             !layers.is_empty(),
@@ -711,4 +458,62 @@ fn test_full_pipeline() {
     assert_eq!(parsed["format"], "pbf");
     let vector_layers = parsed["vector_layers"].as_array().unwrap();
     assert_eq!(vector_layers.len(), 26);
+}
+
+// ---------------------------------------------------------------------------
+// Verify integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_verify_pass_synthetic() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 2,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+
+    let coords = [(0u8, 0u32, 0u32), (1, 0, 0), (1, 0, 1)];
+    for &(z, x, y) in &coords {
+        let mvt = encode_mvt_tile(&["streets", "water_polygons"]);
+        let gzipped = gzip_bytes(&mvt);
+        writer.add_tile(z, x, y, &gzipped).unwrap();
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("verify_pass.pmtiles");
+    writer.write_to(&path).unwrap();
+
+    let report = elivagar::verify::verify(&path).unwrap();
+    assert!(report.passed, "expected verify to pass");
+    assert_eq!(report.tiles_checked, 3);
+    assert!(report.tile_errors.is_empty());
+    assert!(report.layers_observed.contains("streets"));
+    assert!(report.layers_observed.contains("water_polygons"));
+}
+
+#[test]
+fn test_verify_fail_truncated_tile() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 0,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+
+    // Write a valid gzip header but truncated content — will fail decompression.
+    let broken_gzip = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff];
+    writer.add_tile(0, 0, 0, &broken_gzip).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("verify_fail.pmtiles");
+    writer.write_to(&path).unwrap();
+
+    let report = elivagar::verify::verify(&path).unwrap();
+    assert!(!report.passed, "expected verify to fail");
+    assert!(!report.tile_errors.is_empty());
 }

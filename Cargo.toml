@@ -24,11 +24,11 @@ mimalloc = { version = "0.1", default-features = false }
 hotpath = "0.13"
 rustc-hash = "2"
 clap = { version = "4", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
-serde_json = "1"
 pmtiles = { version = "0.20", default-features = false, features = ["write"] }
 tempfile = "3.26.0"
 

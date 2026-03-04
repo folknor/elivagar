@@ -54,6 +54,7 @@
 pub(crate) mod geometry;
 pub mod inspect;
 pub(crate) mod multipolygon;
+pub mod pmtiles_reader;
 pub(crate) mod mvt;
 pub mod node_index;
 pub(crate) mod ocean;
@@ -62,6 +63,7 @@ pub mod pmtiles_writer;
 pub(crate) mod pois;
 pub(crate) mod shortbread;
 pub(crate) mod sort;
+pub mod verify;
 pub(crate) mod way_index;
 pub(crate) mod wire_format;
 
