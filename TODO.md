@@ -166,11 +166,11 @@
   Acceptance checks: no shared-edge divergence after simplification within a
   tolerance threshold, no ring-validity regressions, and no large planet-scale
   runtime/RSS regression.
-- [ ] Antimeridian handling: no special-casing for features or datasets crossing 180°/-180°
-  longitude. Matters for planet output — archive metadata bbox and geometry wrapping both
-  need attention (tippecanoe #82, #205). Tippecanoe #254 also fixes bbox for geometries
-  extending beyond strict mercator-plane limits in buffered areas. Wraparound detection
-  heuristics should be disabled when geometry becomes contradictory (tippecanoe #176).
+- [x] Antimeridian handling: added dateline-aware unwrapping/wrapping for geometry crossing
+  180°/-180° so line/polygon/multipolygon emission does not take the "long way" around.
+  Implemented wrapped-copy emission on seam-crossing bboxes and wrapped land-mask marking.
+  Also hardened data-bounds checkpoint handling for antimeridian-spanning extracts to avoid
+  invalid narrow/wide bbox metadata behavior.
 
 ## Schema extensions (beyond Shortbread 1.0)
 

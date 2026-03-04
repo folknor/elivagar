@@ -1074,14 +1074,18 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     // Compute data extent in Mercator [0,1] with generous buffer for ocean overlap
     let data_bounds = if min_lat_e7 < max_lat_e7 {
-        let sw = geometry::project_e7(min_lat_e7, min_lon_e7);
-        let ne = geometry::project_e7(max_lat_e7, max_lon_e7);
+        let lon_span_e7 = i64::from(max_lon_e7) - i64::from(min_lon_e7);
+        let crosses_antimeridian = lon_span_e7 > 1_800_000_000;
+        let west_lon_e7 = if crosses_antimeridian { -1_800_000_000 } else { min_lon_e7 };
+        let east_lon_e7 = if crosses_antimeridian { 1_800_000_000 } else { max_lon_e7 };
+        let sw = geometry::project_e7(min_lat_e7, west_lon_e7);
+        let ne = geometry::project_e7(max_lat_e7, east_lon_e7);
         // Add ~1 degree buffer (in Mercator space, roughly 1/360 ≈ 0.003)
         let buf = 0.01;
         MercBbox {
-            min_x: (sw.x - buf).max(0.0),
+            min_x: if crosses_antimeridian { 0.0 } else { (sw.x - buf).max(0.0) },
             min_y: (ne.y - buf).max(0.0),  // ne.y < sw.y in Mercator [0,1]
-            max_x: (ne.x + buf).min(1.0),
+            max_x: if crosses_antimeridian { 1.0 } else { (ne.x + buf).min(1.0) },
             max_y: (sw.y + buf).min(1.0),
         }
     } else {
@@ -1303,6 +1307,61 @@ fn relation_shared_vertex_keys(member_ways: &[MemberWay]) -> FxHashSet<(i64, i64
         .collect()
 }
 
+#[inline]
+fn wrap_unit_x(x: f64) -> f64 {
+    x.rem_euclid(1.0)
+}
+
+fn unwrap_antimeridian_path(points: &mut [Point], closed: bool) -> bool {
+    if points.len() < 2 {
+        return false;
+    }
+    let mut changed = false;
+    for i in 1..points.len() {
+        let prev = points[i - 1].x;
+        let mut x = points[i].x;
+        while x - prev > 0.5 {
+            x -= 1.0;
+            changed = true;
+        }
+        while prev - x > 0.5 {
+            x += 1.0;
+            changed = true;
+        }
+        points[i].x = x;
+    }
+    if closed {
+        let last = points.len() - 1;
+        points[last].x = points[0].x;
+        points[last].y = points[0].y;
+    }
+    changed
+}
+
+fn antimeridian_shifts_for_bbox(bbox: &MercBbox) -> SmallVec<[f64; 3]> {
+    let mut shifts = SmallVec::new();
+    shifts.push(0.0);
+    if bbox.min_x < 0.0 {
+        shifts.push(1.0);
+    }
+    if bbox.max_x > 1.0 {
+        shifts.push(-1.0);
+    }
+    shifts
+}
+
+fn mark_bbox_wrapped(mask: &geometry::LandMask, bbox: &MercBbox) {
+    for shift in antimeridian_shifts_for_bbox(bbox) {
+        let shifted = MercBbox {
+            min_x: bbox.min_x + shift,
+            max_x: bbox.max_x + shift,
+            min_y: bbox.min_y,
+            max_y: bbox.max_y,
+        };
+        mask.mark_bbox(&shifted);
+    }
+}
+
 /// Result of parallel way processing: resolved coords (needed for way_index),
 /// sort records (geometry output). Land mask is marked on rayon threads directly.
 struct ProcessedWay {
@@ -1459,6 +1518,7 @@ fn drain_processed_ways(
 /// match tags, and run geometry processing (projection, simplification,
 /// clipping, MVT encoding).
 #[hotpath::measure]
+#[allow(clippy::too_many_lines)]
 fn process_raw_way(
     raw: &RawWay,
     node_reader: Option<&NodeStoreReader>,
@@ -1527,6 +1587,7 @@ fn process_raw_way(
         let scratch = &mut *cell.borrow_mut();
         scratch.merc.clear();
         scratch.merc.extend(coords_e7.iter().map(|&(lat, lon)| geometry::project_e7(lat, lon)));
+        let _ = unwrap_antimeridian_path(&mut scratch.merc, is_closed);
 
         let merc = scratch.merc.as_slice();
         let merc_bbox_val = merc_bbox(merc);
@@ -1552,34 +1613,72 @@ fn process_raw_way(
                     );
                 }
                 GeomExpect::Line => {
-                    emit_line_feature(
-                        osm_id,
-                        merc,
-                        &preserve_vertex_mask,
-                        m,
-                        z_lo,
-                        z_hi,
-                        &mut records,
-                        &mut scratch.line_emit,
-                    );
+                    for shift in antimeridian_shifts_for_bbox(&merc_bbox_val) {
+                        if shift == 0.0 {
+                            emit_line_feature(
+                                osm_id,
+                                merc,
+                                &preserve_vertex_mask,
+                                m,
+                                z_lo,
+                                z_hi,
+                                &mut records,
+                                &mut scratch.line_emit,
+                            );
+                        } else {
+                            let shifted: Vec<Point> = merc
+                                .iter()
+                                .map(|p| Point { x: p.x + shift, y: p.y })
+                                .collect();
+                            emit_line_feature(
+                                osm_id,
+                                &shifted,
+                                &preserve_vertex_mask,
+                                m,
+                                z_lo,
+                                z_hi,
+                                &mut records,
+                                &mut scratch.line_emit,
+                            );
+                        }
+                    }
                 }
                 GeomExpect::Polygon => {
-                    emit_polygon_feature(
-                        osm_id,
-                        merc,
-                        &preserve_vertex_mask,
-                        m,
-                        z_lo,
-                        z_hi,
-                        &mut records,
-                        &mut scratch.polygon_emit,
-                    );
+                    for shift in antimeridian_shifts_for_bbox(&merc_bbox_val) {
+                        if shift == 0.0 {
+                            emit_polygon_feature(
+                                osm_id,
+                                merc,
+                                &preserve_vertex_mask,
+                                m,
+                                z_lo,
+                                z_hi,
+                                &mut records,
+                                &mut scratch.polygon_emit,
+                            );
+                        } else {
+                            let shifted: Vec<Point> = merc
+                                .iter()
+                                .map(|p| Point { x: p.x + shift, y: p.y })
+                                .collect();
+                            emit_polygon_feature(
+                                osm_id,
+                                &shifted,
+                                &preserve_vertex_mask,
+                                m,
+                                z_lo,
+                                z_hi,
+                                &mut records,
+                                &mut scratch.polygon_emit,
+                            );
+                        }
+                    }
                 }
             }
         }
     });
 
-    land_mask.mark_bbox(&bbox.expect("bbox set from merc coords"));
+    mark_bbox_wrapped(land_mask, &bbox.expect("bbox set from merc coords"));
 
     ProcessedWay { way_id: raw.way_id, coords_e7, records }
 }
@@ -1800,6 +1899,7 @@ fn flush_rel_batch(
 /// `records` vec and `simp_scratch` to avoid per-relation allocation.
 #[hotpath::measure]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn process_prepared_relation_into(
     rel: PreparedRelation,
     min_zoom: u8,
@@ -1838,16 +1938,47 @@ fn process_prepared_relation_into(
                     if outer.len() < 4 {
                         continue;
                     }
-                    let bbox = merc_bbox(outer);
-                    land_mask.mark_bbox(&bbox);
-                    emit_multipolygon_feature(
-                        rel.osm_id,
-                        outer,
-                        inners,
-                        Some(&shared_vertex_keys),
-                        m,
-                        z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                    );
+                    let mut outer_unwrapped = outer.clone();
+                    let mut inners_unwrapped = inners.clone();
+                    let _ = unwrap_antimeridian_path(&mut outer_unwrapped, true);
+                    for inner in &mut inners_unwrapped {
+                        let _ = unwrap_antimeridian_path(inner, true);
+                    }
+                    let bbox = merc_bbox(&outer_unwrapped);
+                    mark_bbox_wrapped(land_mask, &bbox);
+                    for shift in antimeridian_shifts_for_bbox(&bbox) {
+                        if shift == 0.0 {
+                            emit_multipolygon_feature(
+                                rel.osm_id,
+                                &outer_unwrapped,
+                                &inners_unwrapped,
+                                Some(&shared_vertex_keys),
+                                m,
+                                z_lo, z_hi, records, multipolygon_emit, simp_scratch,
+                            );
+                        } else {
+                            let outer_shifted: Vec<Point> = outer_unwrapped
+                                .iter()
+                                .map(|p| Point { x: p.x + shift, y: p.y })
+                                .collect();
+                            let inners_shifted: Vec<Vec<Point>> = inners_unwrapped
+                                .iter()
+                                .map(|ring| {
+                                    ring.iter()
+                                        .map(|p| Point { x: p.x + shift, y: p.y })
+                                        .collect()
+                                })
+                                .collect();
+                            emit_multipolygon_feature(
+                                rel.osm_id,
+                                &outer_shifted,
+                                &inners_shifted,
+                                Some(&shared_vertex_keys),
+                                m,
+                                z_lo, z_hi, records, multipolygon_emit, simp_scratch,
+                            );
+                        }
+                    }
                 }
             }
             GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
@@ -1855,10 +1986,24 @@ fn process_prepared_relation_into(
                     if outer.len() < 4 {
                         continue;
                     }
-                    let bbox = merc_bbox(outer);
-                    land_mask.mark_bbox(&bbox);
+                    let mut outer_unwrapped = outer.clone();
+                    let mut inners_unwrapped = inners.clone();
+                    let _ = unwrap_antimeridian_path(&mut outer_unwrapped, true);
+                    for inner in &mut inners_unwrapped {
+                        let _ = unwrap_antimeridian_path(inner, true);
+                    }
+                    let bbox = merc_bbox(&outer_unwrapped);
+                    mark_bbox_wrapped(land_mask, &bbox);
                     emit_point_or_centroid(
-                        rel.osm_id, outer, Some(inners), &bbox, m, z_lo, z_hi, records, point_emit,
+                        rel.osm_id,
+                        &outer_unwrapped,
+                        Some(&inners_unwrapped),
+                        &bbox,
+                        m,
+                        z_lo,
+                        z_hi,
+                        records,
+                        point_emit,
                     );
                 }
             }
@@ -1870,18 +2015,39 @@ fn process_prepared_relation_into(
                     if mw.coords.len() < 2 {
                         continue;
                     }
-                    let bbox = merc_bbox(&mw.coords);
-                    land_mask.mark_bbox(&bbox);
-                    emit_line_feature(
-                        rel.osm_id,
-                        &mw.coords,
-                        &[],
-                        m,
-                        z_lo,
-                        z_hi,
-                        records,
-                        line_emit,
-                    );
+                    let mut coords = mw.coords.clone();
+                    let _ = unwrap_antimeridian_path(&mut coords, false);
+                    let bbox = merc_bbox(&coords);
+                    mark_bbox_wrapped(land_mask, &bbox);
+                    for shift in antimeridian_shifts_for_bbox(&bbox) {
+                        if shift == 0.0 {
+                            emit_line_feature(
+                                rel.osm_id,
+                                &coords,
+                                &[],
+                                m,
+                                z_lo,
+                                z_hi,
+                                records,
+                                line_emit,
+                            );
+                        } else {
+                            let shifted: Vec<Point> = coords
+                                .iter()
+                                .map(|p| Point { x: p.x + shift, y: p.y })
+                                .collect();
+                            emit_line_feature(
+                                rel.osm_id,
+                                &shifted,
+                                &[],
+                                m,
+                                z_lo,
+                                z_hi,
+                                records,
+                                line_emit,
+                            );
+                        }
+                    }
                 }
             }
             _ => {}
@@ -2075,7 +2241,8 @@ fn emit_point_or_centroid(
     } else {
         Some(centroid_of(coords))
     };
-    let Some(p) = pt else { return 0 };
+    let Some(mut p) = pt else { return 0 };
+    p.x = wrap_unit_x(p.x);
 
     let cbbox = MercBbox { min_x: p.x, min_y: p.y, max_x: p.x, max_y: p.y };
     let mut count: u64 = 0;

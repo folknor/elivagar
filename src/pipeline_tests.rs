@@ -292,6 +292,35 @@ fn relation_shared_vertex_keys_detects_shared_closed_way_vertices() {
     assert_eq!(keys.len(), 2);
 }
 
+#[test]
+fn unwrap_antimeridian_path_keeps_crossing_segment_local() {
+    let mut pts = vec![
+        Point { x: 0.995, y: 0.4 },
+        Point { x: 0.005, y: 0.4 },
+    ];
+    let changed = unwrap_antimeridian_path(&mut pts, false);
+    assert!(changed);
+    assert!(pts[1].x > 1.0, "second point should unwrap across +1 seam");
+    assert!(
+        (pts[1].x - pts[0].x).abs() < 0.05,
+        "segment should stay short after unwrapping"
+    );
+}
+
+#[test]
+fn antimeridian_shifts_for_bbox_returns_wrap_shifts() {
+    let bbox = MercBbox {
+        min_x: 0.99,
+        min_y: 0.1,
+        max_x: 1.01,
+        max_y: 0.2,
+    };
+    let shifts = antimeridian_shifts_for_bbox(&bbox);
+    assert_eq!(shifts.len(), 2);
+    assert!(shifts.contains(&0.0));
+    assert!(shifts.contains(&-1.0));
+}
+
 // -----------------------------------------------------------------------
 // Helpers for emit tests — decode SortRecord payloads
 // -----------------------------------------------------------------------
