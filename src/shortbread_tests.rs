@@ -41,6 +41,63 @@ fn test_building_no_does_not_match() {
 }
 
 #[test]
+fn test_building_emits_height_level_attrs() {
+    let tags = Tags(&[
+        ("building", "yes"),
+        ("height", "24.5"),
+        ("min_height", "10 ft"),
+        ("building:levels", "7.5"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::ClosedWay);
+    let bldg = matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+    assert_eq!(bldg.attrs.len(), 3);
+
+    let height = bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "height")
+        .expect("should have height");
+    assert_eq!(height.1, AttrValue::Float(24.5));
+
+    let min_height = bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "min_height")
+        .expect("should have min_height");
+    if let AttrValue::Float(v) = min_height.1 {
+        assert!((v - 3.048).abs() < 1e-9, "expected 10 ft => 3.048 m, got {v}");
+    } else {
+        panic!("min_height should be float");
+    }
+
+    let levels = bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "building:levels")
+        .expect("should have building:levels");
+    assert_eq!(levels.1, AttrValue::Float(7.5));
+}
+
+#[test]
+fn test_building_ignores_unparseable_height_level_attrs() {
+    let tags = Tags(&[
+        ("building", "yes"),
+        ("height", "unknown"),
+        ("min_height", "NaN"),
+        ("building:levels", "N/A"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::ClosedWay);
+    let bldg = matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+    assert!(bldg.attrs.is_empty(), "invalid numeric tags should be ignored");
+}
+
+#[test]
 fn test_place_city_capital() {
     let tags = Tags(&[
         ("place", "city"),

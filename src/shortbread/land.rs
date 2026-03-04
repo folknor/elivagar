@@ -172,14 +172,76 @@ pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
     if let Some(v) = tags.get("building")
         && v != "no"
     {
+        let mut attrs = SmallVec::new();
+        if let Some(height) = tags.get("height").and_then(parse_building_measurement_meters) {
+            attrs.push(("height", AttrValue::Float(height), 0));
+        }
+        if let Some(min_height) = tags.get("min_height").and_then(parse_building_measurement_meters) {
+            attrs.push(("min_height", AttrValue::Float(min_height), 0));
+        }
+        if let Some(levels) = tags.get("building:levels").and_then(parse_building_levels) {
+            attrs.push(("building:levels", AttrValue::Float(levels), 0));
+        }
         out.push(LayerMatch {
             layer: Layer::Buildings,
             min_zoom: 14,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
-            attrs: smallvec![],
+            attrs,
         });
     }
+}
+
+fn parse_building_measurement_meters(raw: &str) -> Option<f64> {
+    let mut s = raw.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some((first, _)) = s.split_once(';') {
+        s = first.trim().to_string();
+    }
+    if s.is_empty() {
+        return None;
+    }
+
+    let mut feet = false;
+    if s.ends_with("feet") {
+        feet = true;
+        s.truncate(s.len().saturating_sub(4));
+    } else if s.ends_with("ft") {
+        feet = true;
+        s.truncate(s.len().saturating_sub(2));
+    } else if s.ends_with('\'') {
+        feet = true;
+        s.truncate(s.len().saturating_sub(1));
+    } else if s.ends_with("meters") {
+        s.truncate(s.len().saturating_sub(6));
+    } else if s.ends_with("meter") {
+        s.truncate(s.len().saturating_sub(5));
+    } else if s.ends_with('m') {
+        s.truncate(s.len().saturating_sub(1));
+    }
+
+    let num = s.split_whitespace().next()?.replace(',', "");
+    let value = num.parse::<f64>().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    let meters = if feet { value * 0.3048 } else { value };
+    meters.is_finite().then_some(meters)
+}
+
+fn parse_building_levels(raw: &str) -> Option<f64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let token = s.split(';').next()?.trim().replace(',', "");
+    if token.is_empty() {
+        return None;
+    }
+    let levels = token.parse::<f64>().ok()?;
+    (levels.is_finite() && levels >= 0.0).then_some(levels)
 }
 
 // ---------------------------------------------------------------------------

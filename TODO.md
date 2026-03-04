@@ -154,7 +154,7 @@
 
 ## Schema extensions (beyond Shortbread 1.0)
 
-- [ ] Building height/levels attributes: emit `height`, `min_height`, `building:levels` from
+- [x] Building height/levels attributes: emit `height`, `min_height`, `building:levels` from
   OSM tags on building polygons. Shortbread 1.0 only specifies `dummy=1` for buildings, but
   the data is in PBFs and useful for 2.5D/3D rendering in nidhogg. Well-tagged in European
   urban areas. MLT's 2.5D basemap support makes this more relevant if we adopt that format.
