@@ -3,58 +3,49 @@
 //! Reads the 127-byte header and optional gzip-compressed metadata from a
 //! PMTiles file and prints a human-readable summary.
 
-use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
-use flate2::read::GzDecoder;
+use crate::pmtiles_reader::PmtilesReader;
 
 /// Inspect a PMTiles file and print its header and metadata.
 pub fn inspect(path: &Path) -> io::Result<()> {
-    let mut file = File::open(path)?;
-    let file_size = file.metadata()?.len();
-
-    // Read 127-byte header.
-    let mut h = [0u8; 127];
-    file.read_exact(&mut h)?;
-
-    // Validate magic.
-    if &h[0..7] != b"PMTiles" {
-        return Err(io::Error::other("not a PMTiles file (bad magic)"));
-    }
+    let mut reader = PmtilesReader::open(path)?;
+    let file_size = reader.file_size()?;
+    let h = reader.header();
     let version = h[7];
 
     // Section offsets + lengths.
-    let root_dir_offset = read_u64_le(&h, 8);
-    let root_dir_length = read_u64_le(&h, 16);
-    let metadata_offset = read_u64_le(&h, 24);
-    let metadata_length = read_u64_le(&h, 32);
-    let leaf_dirs_offset = read_u64_le(&h, 40);
-    let leaf_dirs_length = read_u64_le(&h, 48);
-    let data_offset = read_u64_le(&h, 56);
-    let data_length = read_u64_le(&h, 64);
+    let root_dir_offset = reader.root_dir_offset();
+    let root_dir_length = reader.root_dir_length();
+    let metadata_offset = reader.metadata_offset();
+    let metadata_length = reader.metadata_length();
+    let leaf_dirs_offset = reader.leaf_dirs_offset();
+    let leaf_dirs_length = reader.leaf_dirs_length();
+    let data_offset = reader.data_offset();
+    let data_length = reader.data_length();
 
     // Tile counts.
-    let num_addressed = read_u64_le(&h, 72);
-    let num_entries = read_u64_le(&h, 80);
-    let unique_tiles = read_u64_le(&h, 88);
+    let num_addressed = reader.num_addressed();
+    let num_entries = reader.num_entries();
+    let unique_tiles = reader.num_unique();
 
     // Flags.
     let clustered = h[96] == 1;
-    let internal_compression = compression_name(h[97]);
-    let tile_compression = compression_name(h[98]);
-    let tile_type = tile_type_name(h[99]);
+    let internal_compression = compression_name(reader.internal_compression());
+    let tile_compression = compression_name(reader.tile_compression());
+    let tile_type = tile_type_name(reader.tile_type());
 
     // Zoom + bounds.
-    let min_zoom = h[100];
-    let max_zoom = h[101];
-    let min_lon = e7_to_f64(read_i32_le(&h, 102));
-    let min_lat = e7_to_f64(read_i32_le(&h, 106));
-    let max_lon = e7_to_f64(read_i32_le(&h, 110));
-    let max_lat = e7_to_f64(read_i32_le(&h, 114));
+    let min_zoom = reader.min_zoom();
+    let max_zoom = reader.max_zoom();
+    let min_lon = e7_to_f64(read_i32_le(h, 102));
+    let min_lat = e7_to_f64(read_i32_le(h, 106));
+    let max_lon = e7_to_f64(read_i32_le(h, 110));
+    let max_lat = e7_to_f64(read_i32_le(h, 114));
     let center_zoom = h[118];
-    let center_lon = e7_to_f64(read_i32_le(&h, 119));
-    let center_lat = e7_to_f64(read_i32_le(&h, 123));
+    let center_lon = e7_to_f64(read_i32_le(h, 119));
+    let center_lat = e7_to_f64(read_i32_le(h, 123));
 
     let dedup_count = num_addressed.saturating_sub(unique_tiles);
     let dedup_pct = if num_addressed > 0 {
@@ -107,21 +98,14 @@ pub fn inspect(path: &Path) -> io::Result<()> {
     );
 
     // Read and decompress metadata JSON.
-    if metadata_length > 0 && metadata_length <= 10 * 1024 * 1024 {
-        use std::io::Seek;
-        #[allow(clippy::cast_possible_truncation)]
-        let mut compressed = vec![0u8; metadata_length as usize];
-        file.seek(io::SeekFrom::Start(metadata_offset))?;
-        file.read_exact(&mut compressed)?;
-
-        let mut decoder = GzDecoder::new(&compressed[..]);
-        let mut json = String::new();
-        if decoder.read_to_string(&mut json).is_ok() {
-            println!();
-            println!("  Metadata:");
-            // Try to pretty-print if it's valid JSON-like, otherwise raw.
-            print_metadata_json(&json);
-        }
+    if metadata_length > 0
+        && metadata_length <= 10 * 1024 * 1024
+        && let Ok(json) = reader.read_metadata()
+    {
+        println!();
+        println!("  Metadata:");
+        // Try to pretty-print if it's valid JSON-like, otherwise raw.
+        print_metadata_json(&json);
     }
 
     Ok(())
@@ -213,19 +197,6 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
-}
-
-fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        buf[offset],
-        buf[offset + 1],
-        buf[offset + 2],
-        buf[offset + 3],
-        buf[offset + 4],
-        buf[offset + 5],
-        buf[offset + 6],
-        buf[offset + 7],
-    ])
 }
 
 fn read_i32_le(buf: &[u8], offset: usize) -> i32 {

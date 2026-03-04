@@ -29,8 +29,8 @@
   Large lakes/water bodies at low zoom are particularly vulnerable to simplification + clipping
   producing visible topology artifacts (tilemaker #191). Very large polygons ("monster polygons")
   also stress the clipping path specifically (tilemaker #607).
-- [x] `inspect.rs`: read-only diagnostic tool now tested on root-only and leaf-directory layouts.
-  Follow-up: migrate to `pmtiles_reader.rs` shared helpers to reduce parsing duplication.
+- [x] `inspect.rs`: read-only diagnostic tool tested on root-only and leaf-directory layouts,
+  and migrated to use `pmtiles_reader.rs` shared helpers to reduce parsing duplication.
 - [x] `sort.rs`: `SortWriter::resume` / `adopt_chunk_files` now directly tested.
   Coverage includes: checkpoint resume success, missing required chunk failure,
   stale leftover deletion on resume, empty checkpoint resume, and adopted chunk merge correctness.
