@@ -594,6 +594,7 @@ mod tests {
     use crate::mvt::{Feature, GeomType, LayerBuilder};
     use geo_types::Geometry;
     use serde::Deserialize;
+    use std::collections::HashMap;
 
     fn point_geom() -> Vec<u32> {
         vec![9, 50, 50]
@@ -777,6 +778,36 @@ mod tests {
         expected_geojson_type: String,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct PropertyFixtureCase {
+        id: String,
+        features: Vec<PropertyFeatureFixture>,
+        expected: Vec<PropertyExpectation>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PropertyFeatureFixture {
+        id: u64,
+        geom_type: String,
+        geometry: Vec<u32>,
+        tags: Vec<PropertyTagFixture>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PropertyTagFixture {
+        key: String,
+        #[serde(rename = "type")]
+        value_type: String,
+        value: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PropertyExpectation {
+        key: String,
+        kind: String,
+        non_null: usize,
+    }
+
     fn fixture_geom_type(raw: &str) -> GeomType {
         match raw {
             "point" => GeomType::Point,
@@ -828,6 +859,126 @@ mod tests {
                 got, fixture.expected_geojson_type,
                 "fixture {} ({})",
                 fixture.id, fixture.description
+            );
+        }
+    }
+
+    fn decode_fixture_value(tag: &PropertyTagFixture) -> Value {
+        match tag.value_type.as_str() {
+            "string" => Value::String(tag.value.clone()),
+            "float" => Value::Float(
+                tag.value
+                    .parse::<f32>()
+                    .expect("fixture float must parse as f32"),
+            ),
+            "double" => Value::Double(
+                tag.value
+                    .parse::<f64>()
+                    .expect("fixture double must parse as f64"),
+            ),
+            "int" => Value::Int(
+                tag.value
+                    .parse::<i64>()
+                    .expect("fixture int must parse as i64"),
+            ),
+            "uint" => Value::UInt(
+                tag.value
+                    .parse::<u64>()
+                    .expect("fixture uint must parse as u64"),
+            ),
+            "sint" => Value::SInt(
+                tag.value
+                    .parse::<i64>()
+                    .expect("fixture sint must parse as i64"),
+            ),
+            "bool" => Value::Bool(
+                tag.value
+                    .parse::<bool>()
+                    .expect("fixture bool must parse as bool"),
+            ),
+            _ => panic!("unknown fixture value type"),
+        }
+    }
+
+    fn decoded_property_kind_and_count(
+        values: &mlt_core::v01::PropValue,
+    ) -> (&'static str, usize) {
+        match values {
+            mlt_core::v01::PropValue::Bool(v) => ("bool", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::I8(v) => ("i8", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::U8(v) => ("u8", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::I32(v) => ("i32", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::U32(v) => ("u32", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::I64(v) => ("i64", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::U64(v) => ("u64", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::F32(v) => ("f32", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::F64(v) => ("f64", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::Str(v) => ("str", v.iter().filter(|x| x.is_some()).count()),
+            mlt_core::v01::PropValue::Struct => ("struct", 0),
+        }
+    }
+
+    #[test]
+    fn mlt_property_fixtures_roundtrip() {
+        let fixtures_json = include_str!("../tests/fixtures/mlt_fixtures/property_fixtures.json");
+        let cases: Vec<PropertyFixtureCase> = serde_json::from_str(fixtures_json).unwrap();
+
+        for case in cases {
+            let mut layer = LayerBuilder::new("props_fixture");
+
+            for f in &case.features {
+                let mut tags = Vec::new();
+                for tag in &f.tags {
+                    let k = layer.intern_key(&tag.key);
+                    let v = layer.intern_value(decode_fixture_value(tag));
+                    tags.push((k, v));
+                }
+                layer.add_feature(Feature {
+                    id: Some(f.id),
+                    geom_type: fixture_geom_type(&f.geom_type),
+                    geometry: f.geometry.clone(),
+                    tags,
+                });
+            }
+
+            let encoded = encode_tile(&[&layer]).expect("mlt encode should succeed");
+            let mut parsed = mlt_core::parse_layers(&encoded).expect("mlt parse should succeed");
+            assert_eq!(parsed.len(), 1, "case {}", case.id);
+            parsed[0].decode_all().expect("decode_all should succeed");
+            let l01 = parsed[0].as_layer01().expect("expected tag01 layer");
+
+            let expected: HashMap<&str, (&str, usize)> = case
+                .expected
+                .iter()
+                .map(|e| (e.key.as_str(), (e.kind.as_str(), e.non_null)))
+                .collect();
+
+            let mut seen = 0usize;
+            for prop in &l01.properties {
+                let decoded = match prop {
+                    mlt_core::v01::Property::Decoded(v) => v,
+                    mlt_core::v01::Property::Encoded(_) => panic!("property should be decoded"),
+                };
+                if let Some((want_kind, want_non_null)) = expected.get(decoded.name.as_str()) {
+                    let (got_kind, got_non_null) = decoded_property_kind_and_count(&decoded.values);
+                    assert_eq!(
+                        got_kind, *want_kind,
+                        "case {} property '{}' kind mismatch",
+                        case.id, decoded.name
+                    );
+                    assert_eq!(
+                        got_non_null, *want_non_null,
+                        "case {} property '{}' non_null mismatch",
+                        case.id, decoded.name
+                    );
+                    seen += 1;
+                }
+            }
+            assert_eq!(
+                seen,
+                case.expected.len(),
+                "case {} did not observe all expected properties",
+                case.id
             );
         }
     }

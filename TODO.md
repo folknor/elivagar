@@ -222,17 +222,22 @@
 - [ ] Investigate OGC TileMatrixSet v2 / non-Mercator tiling schemes. Nidhogg's API surface
   is expanding, and consumers may need non-WebMercator projections (EPSG:4326, polar, etc.).
   Tippecanoe has an open request for this (tippecanoe #286).
-- [ ] MLT (MapLibre Tile) output format. Column-oriented successor to MVT, spec stable since
-  October 2025, first release January 2026. Up to 6x better compression on large tiles and
-  3x faster decoding vs MVT+gzip. Supported by MapLibre GL JS 5.12+, Native (Android 12.1,
-  iOS 6.2), Planetiler, PMTiles, and Martin. Rust encoder+decoder exists in the
-  maplibre-tile-spec repo (not yet on crates.io). Migration path: replace MVT encoding in
-  assemble phase, PMTiles writer stays the same (opaque tile blobs). Elivagar's sorted-by-tile
-  feature stream is a natural fit for columnar encoding. Since nidhogg controls the full stack
-  (elivagar → tile serving → MapLibre client), we can adopt MLT without waiting for broad
-  ecosystem maturity — we're our own first consumer. Caveat: Planetiler #1491 reports
-  MLT-in-PMTiles archives failing in MapLibre 5.19, so compatibility is not yet solid.
-  Planetiler #1463 adds `--mlt-shared-dict` for compression tuning (tippecanoe #380).
+- [x] MLT (MapLibre Tile) output format baseline integration.
+  Implemented:
+  - `elivagar run --tile-format mvt|mlt` CLI selection and pipeline wiring.
+  - Real upstream `mlt-core` encoder integration in `src/mlt.rs` (not a local stub).
+  - PMTiles tile contract made format-aware (`tile_payload_format`, `tile_compression`) with
+    metadata + inspect fallback reporting for legacy archives.
+  - Committed MLT geometry fixtures + roundtrip decode tests (`mlt_core::parse_layers` +
+    decode path) covering point/line/polygon and multi-geometries.
+  Remaining follow-ups:
+  - [ ] Add MLT feature-order controls and evaluate default behavior:
+    `--no-mlt-feature-sort` equivalent semantics and compression/size impact.
+  - [ ] Add MLT polygon tessellation mode:
+    `--pretessellate` equivalent for polygon-only layers and benchmark render/size tradeoffs.
+  - [ ] Add MLT compression/encoding tuning flags (e.g. shared dictionary mode),
+    with benchmark-guided defaults.
+  - [ ] End-to-end client compatibility validation in nidhogg/MapLibre and rollout guidance.
 
 ## Quality
 

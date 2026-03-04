@@ -6,6 +6,7 @@ adapter consumes, then encodes via upstream `mlt-core`.
 Scope:
 - Single point, line, polygon
 - MultiPoint, MultiLineString, MultiPolygon
+- Property-column behavior: mixed-type fallback, sparse columns, typed numeric/bool columns
 
 Runtime/CI note:
 - Tests read these committed fixture files directly.
