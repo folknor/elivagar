@@ -122,7 +122,7 @@
   invalidate multipolygon topology specifically (Planetiler #496). Tilemaker #828 confirmed
   that DP-simplified polygons break MapLibre's earcut triangulation — concrete downstream
   failure mode for elivagar's current simplifier.
-- [ ] Deterministic multipolygon assembly: `join_ways()` in multipolygon.rs uses
+- [x] Deterministic multipolygon assembly: `join_ways()` in multipolygon.rs uses
   `std::collections::HashMap` which has random iteration order. For well-formed multipolygons
   the two-pass algorithm converges, but broken/ambiguous ones can produce different ring
   assignments between runs. Replace with `FxHashMap` (already used in mvt.rs) or sort chains

@@ -6,7 +6,7 @@
 //
 // All coordinates are in Mercator [0,1] space.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::geometry::{self, signed_area, Point};
 
@@ -67,8 +67,15 @@ pub fn assemble(members: &[MemberWay]) -> MultiPolygon {
 
     ensure_outer_orientation(&mut outer_rings);
     ensure_inner_orientation(&mut inner_rings);
+    sort_rings_deterministic(&mut outer_rings);
+    sort_rings_deterministic(&mut inner_rings);
 
-    let polygons = pair_rings(outer_rings, inner_rings).into_boxed_slice();
+    let mut polygons = pair_rings(outer_rings, inner_rings);
+    for (_, inners) in &mut polygons {
+        sort_rings_deterministic(inners);
+    }
+    polygons.sort_by_key(|(outer, _)| ring_sort_key(outer));
+    let polygons = polygons.into_boxed_slice();
     MultiPolygon { polygons }
 }
 
@@ -203,7 +210,7 @@ fn quantize(p: &Point) -> (i64, i64) {
 fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
     let mut chains: Vec<Vec<Point>> = Vec::with_capacity(ways.len());
     // Maps an endpoint (quantized) to the index in `chains` that has that endpoint.
-    let mut endpoint_map: HashMap<(i64, i64), usize> = HashMap::new();
+    let mut endpoint_map: FxHashMap<(i64, i64), usize> = FxHashMap::default();
     let mut closed: Vec<Vec<Point>> = Vec::with_capacity(ways.len());
 
     for way in ways {
@@ -323,7 +330,7 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
 fn append_way_to_chains(
     way: &[Point],
     chains: &mut Vec<Vec<Point>>,
-    endpoint_map: &mut HashMap<(i64, i64), usize>,
+    endpoint_map: &mut FxHashMap<(i64, i64), usize>,
     closed: &mut Vec<Vec<Point>>,
 ) {
     let way_front = quantize(&way[0]);
@@ -362,7 +369,7 @@ fn attach_way(
     idx: usize,
     way: &[Point],
     chains: &mut Vec<Vec<Point>>,
-    endpoint_map: &mut HashMap<(i64, i64), usize>,
+    endpoint_map: &mut FxHashMap<(i64, i64), usize>,
     closed: &mut Vec<Vec<Point>>,
 ) {
     let chain_front = quantize(&chains[idx][0]);
@@ -404,7 +411,7 @@ fn attach_way(
 fn start_new_chain(
     way: &[Point],
     chains: &mut Vec<Vec<Point>>,
-    endpoint_map: &mut HashMap<(i64, i64), usize>,
+    endpoint_map: &mut FxHashMap<(i64, i64), usize>,
 ) {
     let new_idx = chains.len();
     chains.push(way.to_vec());
@@ -419,7 +426,7 @@ fn start_new_chain(
 fn finalize_chain(
     idx: usize,
     chains: &mut [Vec<Point>],
-    endpoint_map: &mut HashMap<(i64, i64), usize>,
+    endpoint_map: &mut FxHashMap<(i64, i64), usize>,
     closed: &mut Vec<Vec<Point>>,
 ) {
     let new_front = quantize(&chains[idx][0]);
@@ -438,6 +445,25 @@ fn finalize_chain(
         endpoint_map.insert(new_front, idx);
         endpoint_map.insert(new_back, idx);
     }
+}
+
+fn ring_sort_key(ring: &[Point]) -> (i64, i64, i64, i64, usize) {
+    let mut min_x = i64::MAX;
+    let mut min_y = i64::MAX;
+    let mut max_x = i64::MIN;
+    let mut max_y = i64::MIN;
+    for p in ring {
+        let (x, y) = quantize(p);
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    (min_x, min_y, max_x, max_y, ring.len())
+}
+
+fn sort_rings_deterministic(rings: &mut [Vec<Point>]) {
+    rings.sort_by_key(|r| ring_sort_key(r));
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +759,34 @@ mod tests {
         let mp = assemble(&members);
         assert_eq!(mp.polygons.len(), 1, "out-of-order ways should form one polygon");
         assert_eq!(mp.polygons[0].0.len(), 4, "square should have 4 vertices");
+    }
+
+    #[test]
+    fn test_assembly_is_deterministic_across_member_order() {
+        let members_a = vec![
+            make_member("outer", vec![pt(0.0, 0.0), pt(2.0, 0.0), pt(2.0, 2.0)]),
+            make_member("outer", vec![pt(2.0, 2.0), pt(0.0, 2.0), pt(0.0, 0.0)]),
+            make_member("inner", vec![pt(0.5, 0.5), pt(1.5, 0.5), pt(1.5, 1.5)]),
+            make_member("inner", vec![pt(1.5, 1.5), pt(0.5, 1.5), pt(0.5, 0.5)]),
+        ];
+        let members_b = vec![
+            make_member("inner", vec![pt(1.5, 1.5), pt(0.5, 1.5), pt(0.5, 0.5)]),
+            make_member("outer", vec![pt(2.0, 2.0), pt(0.0, 2.0), pt(0.0, 0.0)]),
+            make_member("inner", vec![pt(0.5, 0.5), pt(1.5, 0.5), pt(1.5, 1.5)]),
+            make_member("outer", vec![pt(0.0, 0.0), pt(2.0, 0.0), pt(2.0, 2.0)]),
+        ];
+
+        let a = assemble(&members_a);
+        let b = assemble(&members_b);
+
+        assert_eq!(a.polygons.len(), b.polygons.len());
+        for ((a_outer, a_inners), (b_outer, b_inners)) in a.polygons.iter().zip(b.polygons.iter()) {
+            assert_eq!(ring_sort_key(a_outer), ring_sort_key(b_outer));
+            assert_eq!(a_inners.len(), b_inners.len());
+            for (ai, bi) in a_inners.iter().zip(b_inners.iter()) {
+                assert_eq!(ring_sort_key(ai), ring_sort_key(bi));
+            }
+        }
     }
 
     // --- Quantize ---
