@@ -455,6 +455,131 @@ fn emit_polygon_zoom_dependent_attrs() {
     assert_eq!(*lb.test_value(v1), mvt::Value::Double(15.0));
 }
 
+// -----------------------------------------------------------------------
+// emit_multipolygon_feature tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn emit_multipolygon_empty_outer() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let mut records = Vec::new();
+    let mut emit_scratch = MultipolygonEmitScratch::new();
+    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+
+    let count = emit_multipolygon_feature(
+        401,
+        &[],
+        &[],
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut emit_scratch,
+        &mut simp_scratch,
+    );
+
+    assert_eq!(count, 0);
+    assert!(records.is_empty());
+}
+
+#[test]
+fn emit_multipolygon_with_hole_decodes_correctly() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let outer = vec![
+        Point { x: 0.20, y: 0.20 },
+        Point { x: 0.80, y: 0.20 },
+        Point { x: 0.80, y: 0.80 },
+        Point { x: 0.20, y: 0.80 },
+        Point { x: 0.20, y: 0.20 },
+    ];
+    let inners = vec![vec![
+        Point { x: 0.40, y: 0.40 },
+        Point { x: 0.60, y: 0.40 },
+        Point { x: 0.60, y: 0.60 },
+        Point { x: 0.40, y: 0.60 },
+        Point { x: 0.40, y: 0.40 },
+    ]];
+
+    let mut records = Vec::new();
+    let mut emit_scratch = MultipolygonEmitScratch::new();
+    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let count = emit_multipolygon_feature(
+        402,
+        &outer,
+        &inners,
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut emit_scratch,
+        &mut simp_scratch,
+    );
+
+    assert_eq!(count, 1);
+    assert_eq!(records.len(), 1);
+
+    let rec = &records[0];
+    let (tile_id, layer_idx) = decode_key(rec);
+    assert_eq!(tile_id, pmtiles_writer::xy_to_tile_id(0, 0, 0));
+    assert_eq!(layer_idx, Layer::Buildings as u8);
+
+    let (osm_id, gt, cmd_count) = decode_data_header(&rec.data);
+    assert_eq!(osm_id, 402);
+    assert_eq!(gt, 3);
+    assert!(cmd_count >= 6, "multipolygon with hole should encode multiple ring commands");
+
+    let lb = decode_to_layer(&rec.data);
+    assert_eq!(lb.test_feature_count(), 1);
+    let f = lb.test_feature(0);
+    assert_eq!(f.id, Some(402));
+    assert_eq!(f.geom_type, mvt::GeomType::Polygon);
+    assert_eq!(f.tags.len(), 1);
+}
+
+#[test]
+fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let outer = vec![
+        Point { x: 0.10, y: 0.10 },
+        Point { x: 0.90, y: 0.10 },
+        Point { x: 0.90, y: 0.90 },
+        Point { x: 0.10, y: 0.90 },
+        Point { x: 0.10, y: 0.10 },
+    ];
+    let inners = vec![vec![
+        Point { x: 0.45, y: 0.45 },
+        Point { x: 0.55, y: 0.45 },
+        Point { x: 0.55, y: 0.55 },
+        Point { x: 0.45, y: 0.55 },
+        Point { x: 0.45, y: 0.45 },
+    ]];
+
+    let mut records = Vec::new();
+    let mut emit_scratch = MultipolygonEmitScratch::new();
+    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let count = emit_multipolygon_feature(
+        403,
+        &outer,
+        &inners,
+        &m,
+        2,
+        2,
+        &mut records,
+        &mut emit_scratch,
+        &mut simp_scratch,
+    );
+
+    assert_eq!(usize::try_from(count).unwrap(), records.len());
+    assert!(records.len() > 1, "large multipolygon should clip into multiple z2 tiles");
+
+    for rec in &records {
+        let (osm_id, gt, cmd_count) = decode_data_header(&rec.data);
+        assert_eq!(osm_id, 403);
+        assert_eq!(gt, 3);
+        assert!(cmd_count > 0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Checkpoint roundtrip tests
 // ---------------------------------------------------------------------------

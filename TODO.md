@@ -25,7 +25,7 @@
 - [x] `ocean.rs`: `emit_ocean_polygon` — scanline fill, needs integration test with shapefile.
   Coastline correctness matters for regional extracts where the boundary cuts through
   ocean polygons (tilemaker #16).
-- [ ] `pipeline.rs`: `emit_multipolygon_feature` — glue code, needs full pipeline context.
+- [x] `pipeline.rs`: `emit_multipolygon_feature` — glue code, needs full pipeline context.
   Large lakes/water bodies at low zoom are particularly vulnerable to simplification + clipping
   producing visible topology artifacts (tilemaker #191). Very large polygons ("monster polygons")
   also stress the clipping path specifically (tilemaker #607).
