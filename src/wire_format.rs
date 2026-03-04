@@ -663,4 +663,87 @@ mod tests {
         assert_eq!(*layer.test_value(v0), Value::String("custom_kind".to_string()));
     }
 
+    /// Test 6: Attributes appear exactly at their minzoom boundary (no early leak).
+    #[test]
+    fn minzoom_boundary_mixed_types() {
+        let osm_id: u64 = 999;
+        let geom_type = GeomType::Point;
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+
+        let attrs: Vec<shortbread::Attr> = vec![
+            ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
+            ("bridge", AttrValue::Bool(true), 5),
+            ("admin_level", AttrValue::Int(6), 10),
+            ("height", AttrValue::Float(42.0), 10),
+        ];
+
+        // Below boundary: only min_zoom <= 9 attrs survive.
+        let encoded_z9 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 9);
+        let mut layer_z9 = LayerBuilder::new("z9");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer_z9, &encoded_z9, &mut gp, &mut tp);
+        let f9 = layer_z9.test_feature(0);
+        assert_eq!(f9.tags.len(), 2, "z9 must not include min_zoom=10 attrs");
+        assert_eq!(layer_z9.test_key(f9.tags[0].0), "kind");
+        assert_eq!(layer_z9.test_key(f9.tags[1].0), "bridge");
+
+        // At boundary: min_zoom=10 attrs appear.
+        let encoded_z10 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 10);
+        let mut layer_z10 = LayerBuilder::new("z10");
+        let mut gp2 = Vec::new();
+        let mut tp2 = Vec::new();
+        add_feature_to_layer(&mut layer_z10, &encoded_z10, &mut gp2, &mut tp2);
+        let f10 = layer_z10.test_feature(0);
+        assert_eq!(f10.tags.len(), 4, "z10 should include all attrs");
+        assert_eq!(layer_z10.test_key(f10.tags[2].0), "admin_level");
+        assert_eq!(*layer_z10.test_value(f10.tags[2].1), Value::Int(6));
+        assert_eq!(layer_z10.test_key(f10.tags[3].0), "height");
+        assert_eq!(*layer_z10.test_value(f10.tags[3].1), Value::Double(42.0));
+    }
+
+    /// Test 7: Filtered attributes do not leak when the first attr in input is gated out.
+    #[test]
+    fn minzoom_filtering_leading_attr_gated_out() {
+        let attrs: Vec<shortbread::Attr> = vec![
+            ("surface", AttrValue::Str(Cow::Borrowed("asphalt")), 12),
+            ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
+            ("bridge", AttrValue::Bool(false), 0),
+        ];
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+
+        let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 11);
+        let mut layer = LayerBuilder::new("test");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+
+        let f = layer.test_feature(0);
+        assert_eq!(f.tags.len(), 2, "gated leading attr should be excluded");
+        assert_eq!(layer.test_key(f.tags[0].0), "kind");
+        assert_eq!(layer.test_key(f.tags[1].0), "bridge");
+    }
+
+    /// Test 8: Pre-encoded attrs path preserves minzoom filtering semantics.
+    #[test]
+    fn preencoded_attrs_respect_minzoom() {
+        let attrs: Vec<shortbread::Attr> = vec![
+            ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
+            ("tunnel", AttrValue::Bool(true), 12),
+        ];
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+
+        let mut attrs_bytes = Vec::new();
+        encode_attrs_bytes(&mut attrs_bytes, &attrs, 11);
+        let encoded = encode_feature_data_with_attrs(7, GeomType::Point, &geom_cmds, &attrs_bytes);
+
+        let mut layer = LayerBuilder::new("test");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        let f = layer.test_feature(0);
+        assert_eq!(f.tags.len(), 1);
+        assert_eq!(layer.test_key(f.tags[0].0), "kind");
+    }
+
 }
