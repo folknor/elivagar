@@ -151,6 +151,9 @@ const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
 const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 256 * 1024 * 1024; // 256 MB
 /// Reject unsorted flat-index path above this input size unless explicitly overridden.
 const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+const TILE_OVERSIZE_WARN_BYTES: u64 = 500 * 1024;
+const TILE_OVERSIZE_SEVERE_BYTES: u64 = 1024 * 1024;
+const TILE_OVERSIZE_TOP_N: usize = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NodeStoreMode {
@@ -249,6 +252,36 @@ impl MissingRefStatsAtomic {
             relation_nested_members: self.relation_nested_members.load(Ordering::Relaxed),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OversizeTile {
+    tile_id: u64,
+    bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct TileSizeDiagnostics {
+    total_tile_bytes: u64,
+    max_tile: OversizeTile,
+    oversize_warn_count: u64,
+    oversize_severe_count: u64,
+    top_oversized: [OversizeTile; TILE_OVERSIZE_TOP_N],
+}
+
+fn insert_top_oversized(top: &mut [OversizeTile; TILE_OVERSIZE_TOP_N], tile: OversizeTile) {
+    let mut pos = None;
+    for (i, t) in top.iter().enumerate() {
+        if tile.bytes > t.bytes {
+            pos = Some(i);
+            break;
+        }
+    }
+    let Some(i) = pos else { return };
+    for j in (i + 1..top.len()).rev() {
+        top[j] = top[j - 1];
+    }
+    top[i] = tile;
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +478,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // --- Phase 4: Tile assembly + PMTiles write ---
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
-    let (features_read, tiles_written, unique_tiles, max_assemble_batch_bytes, dedup_stats) = phase_assemble(&mut sort_reader, config)?;
+    let (features_read, tiles_written, unique_tiles, max_assemble_batch_bytes, dedup_stats, tile_size_diag) =
+        phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
     let assemble_rss = peak_rss_kb();
 
@@ -515,6 +549,26 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("dedup_reject_fp_mismatch={}", dedup_stats.reject_fp_mismatch);
     eprintln!("dedup_insert_skipped_cap={}", dedup_stats.insert_skipped_cap);
     eprintln!("dedup_hash_bucket_collisions={}", dedup_stats.hash_bucket_collisions);
+    eprintln!("tile_bytes_total={}", tile_size_diag.total_tile_bytes);
+    if tiles_written > 0 {
+        eprintln!("tile_bytes_avg={}", tile_size_diag.total_tile_bytes / tiles_written);
+    } else {
+        eprintln!("tile_bytes_avg=0");
+    }
+    eprintln!("tile_max_bytes={}", tile_size_diag.max_tile.bytes);
+    if tile_size_diag.max_tile.bytes > 0 {
+        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile_size_diag.max_tile.tile_id);
+        eprintln!("tile_max_zxy={z}/{x}/{y}");
+    }
+    eprintln!("oversize_tiles_warn={}", tile_size_diag.oversize_warn_count);
+    eprintln!("oversize_tiles_severe={}", tile_size_diag.oversize_severe_count);
+    for (i, t) in tile_size_diag.top_oversized.iter().enumerate() {
+        if t.bytes == 0 {
+            continue;
+        }
+        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(t.tile_id);
+        eprintln!("oversize_top_{}={z}/{x}/{y}:{}", i + 1, t.bytes);
+    }
     if let Some(m) = missing_ref_summary {
         eprintln!("missing_way_node_refs={}", m.missing_way_node_refs);
         eprintln!("ways_with_missing_node_refs={}", m.ways_with_missing_node_refs);
@@ -2097,7 +2151,10 @@ const _: () = assert!(std::mem::size_of::<EncodedTile>() == 32);
 
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
-fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) -> Result<(u64, u64, u64, usize, pmtiles_writer::DedupStats), PipelineError> {
+fn phase_assemble(
+    sort_reader: &mut sort::SortReader,
+    config: &TilegenConfig,
+) -> Result<(u64, u64, u64, usize, pmtiles_writer::DedupStats, TileSizeDiagnostics), PipelineError> {
     use std::sync::mpsc::sync_channel;
 
     let pmtiles_config = PmtilesConfig {
@@ -2190,16 +2247,37 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
 
         // --- Writer thread: encoded tiles → PMTiles ---
         // move takes ownership of pmtiles; returned via join handle for write_to().
-        let writer = s.spawn(move || -> (u64, PmtilesWriter, [u64; 15], [u64; 15], [u64; 15]) {
+        let writer = s.spawn(move || -> (u64, PmtilesWriter, [u64; 15], [u64; 15], [u64; 15], TileSizeDiagnostics) {
             let mut pmtiles = pmtiles;
             let mut tiles_written: u64 = 0;
             let mut tiles_per_zoom = [0u64; 15];
             let mut unique_per_zoom = [0u64; 15];
             let mut bytes_per_zoom = [0u64; 15];
+            let mut size_diag = TileSizeDiagnostics::default();
             while let Ok(batch) = encode_rx.recv() {
                 for tile in batch {
                     let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
                     let tile_bytes = tile.compressed.len() as u64;
+                    size_diag.total_tile_bytes += tile_bytes;
+                    if tile_bytes > size_diag.max_tile.bytes {
+                        size_diag.max_tile = OversizeTile {
+                            tile_id: tile.tile_id,
+                            bytes: tile_bytes,
+                        };
+                    }
+                    if tile_bytes > TILE_OVERSIZE_WARN_BYTES {
+                        size_diag.oversize_warn_count += 1;
+                    }
+                    if tile_bytes > TILE_OVERSIZE_SEVERE_BYTES {
+                        size_diag.oversize_severe_count += 1;
+                    }
+                    insert_top_oversized(
+                        &mut size_diag.top_oversized,
+                        OversizeTile {
+                            tile_id: tile.tile_id,
+                            bytes: tile_bytes,
+                        },
+                    );
                     // Panic: disk I/O failure is unrecoverable mid-pipeline.
                     let is_unique = pmtiles.add_tile(z, x, y, &tile.compressed)
                         .expect("failed to write tile");
@@ -2213,7 +2291,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
                     }
                 }
             }
-            (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom)
+            (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, size_diag)
         });
 
         // --- Main thread: receive batches, encode with rayon, forward to writer ---
@@ -2225,11 +2303,11 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
         drop(encode_tx);
 
         let (features_read, max_batch_bytes) = reader.join().expect("reader panicked")?;
-        let (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom) = writer.join().expect("writer panicked");
-        Ok((features_read, tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes))
+        let (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, size_diag) = writer.join().expect("writer panicked");
+        Ok((features_read, tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes, size_diag))
     });
 
-    let (features_read, tiles_written, mut pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes) = scope_result?;
+    let (features_read, tiles_written, mut pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes, size_diag) = scope_result?;
     if let Some(filename) = config.pbf_path.file_name().and_then(|s| s.to_str()) {
         pmtiles.set_source_pbf_filename(filename.to_string());
     } else {
@@ -2255,7 +2333,7 @@ fn phase_assemble(sort_reader: &mut sort::SortReader, config: &TilegenConfig) ->
         }
     }
 
-    Ok((features_read, tiles_written, unique_tiles, max_batch_bytes, dedup_stats))
+    Ok((features_read, tiles_written, unique_tiles, max_batch_bytes, dedup_stats, size_diag))
 }
 
 /// Per-worker assembly state, persisted across batches via `thread_local!`.

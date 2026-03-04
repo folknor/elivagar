@@ -101,7 +101,7 @@
   hit an infinite loop bug here — need a guaranteed convergence invariant (also #340, #45).
   Low-zoom dropping must be profile-aware to avoid overaggressive removal (tippecanoe #201).
   Prerequisite: tile size diagnostics (see below) to identify which tiles need dropping.
-- [ ] Tile size diagnostics: report per-tile size stats, flag oversized tiles, expose
+- [x] Tile size diagnostics: report per-tile size stats, flag oversized tiles, expose
   layer-level breakdowns. Needed for feature dropping tuning and profile regression triage
   (Planetiler #391).
 - [ ] Compressed sort chunks: gzip-compress temp sort files to reduce I/O during sort phase.

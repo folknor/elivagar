@@ -74,6 +74,36 @@ fn missing_ref_stats_accumulates_and_snapshots() {
     assert_eq!(snap.relation_nested_members, 1);
 }
 
+#[test]
+fn oversize_top_list_keeps_largest_tiles_sorted() {
+    let mut top = [OversizeTile::default(); TILE_OVERSIZE_TOP_N];
+    insert_top_oversized(
+        &mut top,
+        OversizeTile {
+            tile_id: pmtiles_writer::xy_to_tile_id(1, 0, 0),
+            bytes: 100,
+        },
+    );
+    insert_top_oversized(
+        &mut top,
+        OversizeTile {
+            tile_id: pmtiles_writer::xy_to_tile_id(1, 1, 0),
+            bytes: 900,
+        },
+    );
+    insert_top_oversized(
+        &mut top,
+        OversizeTile {
+            tile_id: pmtiles_writer::xy_to_tile_id(1, 1, 1),
+            bytes: 500,
+        },
+    );
+
+    assert_eq!(top[0].bytes, 900);
+    assert_eq!(top[1].bytes, 500);
+    assert_eq!(top[2].bytes, 100);
+}
+
 /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
 fn boundary_labels_match(admin_level: i64) -> LayerMatch {
     LayerMatch {
