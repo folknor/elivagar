@@ -1206,11 +1206,24 @@ fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
         if w.node_refs.len() <= 2 {
             continue;
         }
-        for &node_id in &w.node_refs[1..w.node_refs.len() - 1] {
-            counts
-                .entry(node_id)
-                .and_modify(|c| *c = c.saturating_add(1))
-                .or_insert(1);
+        let is_closed = w.node_refs.len() >= 4 && w.node_refs.first() == w.node_refs.last();
+        if is_closed {
+            // Closed ring: shared-edge vertices can appear anywhere in the ring
+            // except the duplicated closing vertex.
+            for &node_id in &w.node_refs[..w.node_refs.len() - 1] {
+                counts
+                    .entry(node_id)
+                    .and_modify(|c| *c = c.saturating_add(1))
+                    .or_insert(1);
+            }
+        } else {
+            // Open line: preserve interior junctions, but not endpoints.
+            for &node_id in &w.node_refs[1..w.node_refs.len() - 1] {
+                counts
+                    .entry(node_id)
+                    .and_modify(|c| *c = c.saturating_add(1))
+                    .or_insert(1);
+            }
         }
     }
 
@@ -1219,8 +1232,16 @@ fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
         if w.node_refs.len() <= 2 {
             continue;
         }
-        for &node_id in &w.node_refs[1..w.node_refs.len() - 1] {
-            if counts.get(&node_id).is_some_and(|&c| c >= 2) {
+        let is_closed = w.node_refs.len() >= 4 && w.node_refs.first() == w.node_refs.last();
+        let scan_slice = if is_closed {
+            &w.node_refs[..w.node_refs.len() - 1]
+        } else {
+            &w.node_refs[1..w.node_refs.len() - 1]
+        };
+        for &node_id in scan_slice {
+            if counts.get(&node_id).is_some_and(|&c| c >= 2)
+                && !w.preserve_node_refs.contains(&node_id)
+            {
                 w.preserve_node_refs.push(node_id);
             }
         }
@@ -1275,6 +1296,9 @@ struct PolygonEmitScratch {
     geom_buf: Vec<u32>,
     attrs_buf: Vec<u8>,
     tc_buf: Vec<(i32, i32)>,
+    simplify_keep: Vec<bool>,
+    simplify_buf: Vec<Point>,
+    pinned_idxs: Vec<usize>,
     clip_a: Vec<Point>,
     clip_b: Vec<Point>,
     row_clip_a: Vec<Point>,
@@ -1287,6 +1311,9 @@ impl PolygonEmitScratch {
             geom_buf: Vec::new(),
             attrs_buf: Vec::new(),
             tc_buf: Vec::new(),
+            simplify_keep: Vec::new(),
+            simplify_buf: Vec::new(),
+            pinned_idxs: Vec::new(),
             clip_a: Vec::new(),
             clip_b: Vec::new(),
             row_clip_a: Vec::new(),
@@ -1480,7 +1507,16 @@ fn process_raw_way(
                     );
                 }
                 GeomExpect::Polygon => {
-                    emit_polygon_feature(osm_id, merc, m, z_lo, z_hi, &mut records, &mut scratch.polygon_emit);
+                    emit_polygon_feature(
+                        osm_id,
+                        merc,
+                        &preserve_vertex_mask,
+                        m,
+                        z_lo,
+                        z_hi,
+                        &mut records,
+                        &mut scratch.polygon_emit,
+                    );
                 }
             }
         }
@@ -2097,9 +2133,12 @@ fn emit_line_feature(
 }
 
 #[hotpath::measure]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn emit_polygon_feature(
     osm_id: u64,
     merc: &[Point],
+    preserve_vertex_mask: &[bool],
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
@@ -2108,8 +2147,15 @@ fn emit_polygon_feature(
 ) -> u64 {
     // Single-ring polygon (no holes)
     let mut count: u64 = 0;
-
-    geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
+    scratch.pinned_idxs.clear();
+    scratch.pinned_idxs.extend(
+        preserve_vertex_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &keep)| keep.then_some(i)),
+    );
+    let has_pins = !scratch.pinned_idxs.is_empty();
+    let mut run_for_zoom = |z: u8, simplified: &[Point]| {
         encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
 
         // Recompute bbox from simplified coords — at low zooms DP may reduce the
@@ -2205,7 +2251,34 @@ fn emit_polygon_feature(
                 }
             }
         }
-    });
+    };
+    if has_pins {
+        for z in (z_lo..=z_hi).rev() {
+            if z < 14 && geometry::merc_bbox_is_subpixel(merc, z) {
+                break;
+            }
+            if z < 14 {
+                let tol = geometry::simplify_tolerance(z);
+                let _ = geometry::simplify_into_with_required(
+                    merc,
+                    tol,
+                    &scratch.pinned_idxs,
+                    &mut scratch.simplify_keep,
+                    &mut scratch.simplify_buf,
+                );
+                if scratch.simplify_buf.len() < 4 {
+                    break;
+                }
+                run_for_zoom(z, &scratch.simplify_buf);
+            } else {
+                run_for_zoom(z, merc);
+            }
+        }
+    } else {
+        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
+            run_for_zoom(z, simplified);
+        });
+    }
     count
 }
 

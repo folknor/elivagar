@@ -237,6 +237,31 @@ fn block_shared_node_annotation_marks_only_shared_interiors() {
     assert!(raw[2].preserve_node_refs.is_empty());
 }
 
+#[test]
+fn block_shared_node_annotation_marks_closed_ring_shared_vertices() {
+    let mut raw = vec![
+        RawWay {
+            way_id: 10,
+            node_refs: vec![1, 2, 3, 4, 1],
+            preserve_node_refs: Vec::new(),
+            coords_e7: Vec::new(),
+            tags: Vec::new(),
+        },
+        RawWay {
+            way_id: 11,
+            node_refs: vec![3, 4, 5, 6, 3],
+            preserve_node_refs: Vec::new(),
+            coords_e7: Vec::new(),
+            tags: Vec::new(),
+        },
+    ];
+
+    annotate_block_shared_node_refs(&mut raw);
+
+    assert_eq!(raw[0].preserve_node_refs, vec![3, 4]);
+    assert_eq!(raw[1].preserve_node_refs, vec![3, 4]);
+}
+
 // -----------------------------------------------------------------------
 // Helpers for emit tests — decode SortRecord payloads
 // -----------------------------------------------------------------------
@@ -449,7 +474,7 @@ fn emit_polygon_too_few_points() {
     ];
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    let count = emit_polygon_feature(201, &coords, &m, 0, 0, &mut records, &mut scratch);
+    let count = emit_polygon_feature(201, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -466,7 +491,7 @@ fn emit_polygon_decodes_correctly() {
     ];
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    emit_polygon_feature(200, &coords, &m, 0, 0, &mut records, &mut scratch);
+    emit_polygon_feature(200, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -520,7 +545,7 @@ fn emit_polygon_zoom_dependent_attrs() {
     // At z=0: only 1 attr ("kind", min_zoom=0)
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    emit_polygon_feature(300, &coords_z0, &m_z0, 0, 0, &mut records, &mut scratch);
+    emit_polygon_feature(300, &coords_z0, &[], &m_z0, 0, 0, &mut records, &mut scratch);
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -545,7 +570,7 @@ fn emit_polygon_zoom_dependent_attrs() {
         Point { x: 0.500_00, y: 0.500_00 },
     ];
     records.clear();
-    emit_polygon_feature(300, &coords_z14, &m_z14, 14, 14, &mut records, &mut scratch);
+    emit_polygon_feature(300, &coords_z14, &[], &m_z14, 14, 14, &mut records, &mut scratch);
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -569,9 +594,59 @@ fn emit_polygon_skips_self_intersecting_ring_below_z14() {
 
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    let count = emit_polygon_feature(500, &coords, &m, 0, 0, &mut records, &mut scratch);
+    let count = emit_polygon_feature(500, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
     assert_eq!(count, 0);
     assert!(records.is_empty());
+}
+
+#[test]
+fn emit_polygon_preserve_mask_keeps_required_vertices() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let coords = [
+        Point { x: 0.1, y: 0.1 },
+        Point { x: 0.3, y: 0.10001 },
+        Point { x: 0.5, y: 0.10002 }, // pin this vertex
+        Point { x: 0.7, y: 0.10001 },
+        Point { x: 0.9, y: 0.1 },
+        Point { x: 0.9, y: 0.9 },
+        Point { x: 0.1, y: 0.9 },
+        Point { x: 0.1, y: 0.1 },
+    ];
+
+    let mut records_plain = Vec::new();
+    let mut records_pinned = Vec::new();
+    let mut scratch_plain = PolygonEmitScratch::new();
+    let mut scratch_pinned = PolygonEmitScratch::new();
+    emit_polygon_feature(
+        900,
+        &coords,
+        &[false; 8],
+        &m,
+        0,
+        0,
+        &mut records_plain,
+        &mut scratch_plain,
+    );
+    emit_polygon_feature(
+        900,
+        &coords,
+        &[false, false, true, false, false, false, false, false],
+        &m,
+        0,
+        0,
+        &mut records_pinned,
+        &mut scratch_pinned,
+    );
+
+    assert_eq!(records_plain.len(), 1);
+    assert_eq!(records_pinned.len(), 1);
+
+    let (_, _, plain_cmd_count) = decode_data_header(&records_plain[0].data);
+    let (_, _, pinned_cmd_count) = decode_data_header(&records_pinned[0].data);
+    assert!(
+        pinned_cmd_count > plain_cmd_count,
+        "pinned polygon vertex should increase retained geometry detail"
+    );
 }
 
 // -----------------------------------------------------------------------

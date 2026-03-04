@@ -147,7 +147,10 @@
   Tippecanoe (#99) had bugs in shared-node preservation mode; this adds explicit coverage.
 - [ ] Shared-edge simplification (adjacent polygons): independent simplification of polygons
   that share an edge can still produce slivers/gaps along shared boundaries
-  (tippecanoe #105). Needs topology-aware simplification across polygon groups.
+  (tippecanoe #105). Partial mitigation landed: closed-way polygons now preserve
+  block-local shared ring vertices during simplification. Remaining work is
+  topology-aware simplification across polygon groups (including relation-derived
+  multipolygons) so shared edges simplify in lockstep.
 - [ ] Antimeridian handling: no special-casing for features or datasets crossing 180°/-180°
   longitude. Matters for planet output — archive metadata bbox and geometry wrapping both
   need attention (tippecanoe #82, #205). Tippecanoe #254 also fixes bbox for geometries
