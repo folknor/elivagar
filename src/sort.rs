@@ -428,6 +428,14 @@ impl SortReader {
 mod tests {
     use super::*;
 
+    fn collect_keys(mut reader: SortReader) -> Vec<u64> {
+        let mut out = Vec::new();
+        while let Some(rec) = reader.next().unwrap() {
+            out.push(rec.key);
+        }
+        out
+    }
+
     #[test]
     fn sort_key_round_trip() {
         let cases: Vec<(u64, u8, u8)> = vec![
@@ -720,5 +728,91 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 100);
+    }
+
+    #[test]
+    fn resume_keeps_checkpoint_chunks_and_deletes_leftovers() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        // Create 3 chunks on disk.
+        let mut writer = SortWriter::new(dir.path(), 120).unwrap();
+        for i in 0u64..300 {
+            writer.push(SortRecord { key: i, data: Box::from(i.to_le_bytes().as_slice()) }).unwrap();
+        }
+        let total_chunks = writer.chunk_count();
+        assert!(total_chunks >= 3, "expected >=3 chunks, got {total_chunks}");
+        let _ = writer.finish().unwrap();
+
+        // Resume from checkpoint that keeps only first 2 chunks.
+        let resumed = SortWriter::resume(dir.path(), 120, 2).unwrap();
+        assert_eq!(resumed.chunk_count(), 2);
+
+        // chunk_0002.bin should have been deleted as stale leftover.
+        assert!(!dir.path().join("chunk_0002.bin").exists());
+        // checkpoint chunks must still exist.
+        assert!(dir.path().join("chunk_0000.bin").exists());
+        assert!(dir.path().join("chunk_0001.bin").exists());
+    }
+
+    #[test]
+    fn resume_fails_if_required_chunk_missing() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        // Create two chunks, then remove chunk_0001 to simulate corrupted checkpoint state.
+        let mut writer = SortWriter::new(dir.path(), 120).unwrap();
+        for i in 0u64..200 {
+            writer.push(SortRecord { key: i, data: Box::from(i.to_le_bytes().as_slice()) }).unwrap();
+        }
+        assert!(writer.chunk_count() >= 2);
+        let _ = writer.finish().unwrap();
+        std::fs::remove_file(dir.path().join("chunk_0001.bin")).unwrap();
+
+        let err = SortWriter::resume(dir.path(), 120, 2).err().expect("resume should fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("missing chunk file"));
+    }
+
+    #[test]
+    fn resume_allows_empty_checkpoint() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let writer = SortWriter::resume(dir.path(), 1024, 0).unwrap();
+        assert_eq!(writer.chunk_count(), 0);
+        let reader = writer.finish().unwrap();
+        let keys = collect_keys(reader);
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn adopt_chunk_files_updates_count_and_merges_records() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        // Main writer with one in-memory batch.
+        let mut writer = SortWriter::new(dir.path(), 10_000_000).unwrap();
+        writer.push(SortRecord { key: 40, data: Box::from(40u64.to_le_bytes().as_slice()) }).unwrap();
+        writer.push(SortRecord { key: 20, data: Box::from(20u64.to_le_bytes().as_slice()) }).unwrap();
+
+        // External chunk A.
+        let ext_a = dir.path().join("external_a.bin");
+        let mut recs_a = vec![
+            SortRecord { key: 10, data: Box::from(10u64.to_le_bytes().as_slice()) },
+            SortRecord { key: 30, data: Box::from(30u64.to_le_bytes().as_slice()) },
+        ];
+        write_sorted_chunk(&mut recs_a, &ext_a).unwrap();
+
+        // External chunk B.
+        let ext_b = dir.path().join("external_b.bin");
+        let mut recs_b = vec![
+            SortRecord { key: 5, data: Box::from(5u64.to_le_bytes().as_slice()) },
+            SortRecord { key: 50, data: Box::from(50u64.to_le_bytes().as_slice()) },
+        ];
+        write_sorted_chunk(&mut recs_b, &ext_b).unwrap();
+
+        writer.adopt_chunk_files(vec![ext_a, ext_b]);
+        assert_eq!(writer.chunk_count(), 2, "adopted chunks should count immediately");
+
+        // finish flushes writer buffer as chunk_0002.bin
+        let reader = writer.finish().unwrap();
+        let keys = collect_keys(reader);
+        assert_eq!(keys, vec![5, 10, 20, 30, 40, 50]);
     }
 }

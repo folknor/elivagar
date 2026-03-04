@@ -31,7 +31,9 @@
   also stress the clipping path specifically (tilemaker #607).
 - [x] `inspect.rs`: read-only diagnostic tool now tested on root-only and leaf-directory layouts.
   Follow-up: migrate to `pmtiles_reader.rs` shared helpers to reduce parsing duplication.
-- [ ] `sort.rs`: `SortWriter::resume` / `adopt_chunk_files` — indirectly tested via checkpoint tests.
+- [x] `sort.rs`: `SortWriter::resume` / `adopt_chunk_files` now directly tested.
+  Coverage includes: checkpoint resume success, missing required chunk failure,
+  stale leftover deletion on resume, empty checkpoint resume, and adopted chunk merge correctness.
 - [ ] Import targeted cases from Mapbox's `mvt_fixtures` corpus for `mvt.rs` conformance testing
   (tilemaker #103).
 - [x] PMTiles metadata JSON validation: `elivagar verify` now validates metadata JSON
