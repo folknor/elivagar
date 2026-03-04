@@ -687,7 +687,102 @@ fn pack_tile(tx: u32, ty: u32) -> u64 {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::fs;
+    use std::path::Path;
     use crate::geometry::Point;
+    use crate::sort::SortWriter;
+
+    fn write_u32_be(buf: &mut [u8], off: usize, v: u32) {
+        buf[off..off + 4].copy_from_slice(&v.to_be_bytes());
+    }
+
+    fn write_u32_le(buf: &mut [u8], off: usize, v: u32) {
+        buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    fn write_f64_le(buf: &mut [u8], off: usize, v: f64) {
+        buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    fn write_test_polygon_shapefile(path: &Path) {
+        // One polygon record: world-sized square in EPSG:3857 meters.
+        // Closed ring with 5 points.
+        let half_c = 20_037_508.343;
+        let points = [
+            (-half_c, -half_c),
+            (half_c, -half_c),
+            (half_c, half_c),
+            (-half_c, half_c),
+            (-half_c, -half_c),
+        ];
+
+        // Record content length (bytes):
+        // shape_type(4) + bbox(32) + num_parts(4) + num_points(4) + parts(4) + points(5*16)
+        let record_content_bytes = 4 + 32 + 4 + 4 + 4 + points.len() * 16;
+        let record_content_words =
+            u32::try_from(record_content_bytes / 2).expect("record content length fits u32");
+        let shp_file_len_words =
+            u32::try_from((100 + 8 + record_content_bytes) / 2).expect("shp length fits u32");
+        let shx_file_len_words = ((100 + 8) / 2) as u32;
+
+        let mut shp = vec![0u8; 100 + 8 + record_content_bytes];
+        let mut shx = vec![0u8; 108];
+
+        // Common 100-byte file header (shp + shx)
+        // Big-endian section
+        write_u32_be(&mut shp, 0, 9994);
+        write_u32_be(&mut shp, 24, shp_file_len_words);
+        write_u32_be(&mut shx, 0, 9994);
+        write_u32_be(&mut shx, 24, shx_file_len_words);
+        // Little-endian section
+        write_u32_le(&mut shp, 28, 1000); // version
+        write_u32_le(&mut shp, 32, 5); // Polygon
+        write_u32_le(&mut shx, 28, 1000);
+        write_u32_le(&mut shx, 32, 5);
+        // Header bbox
+        write_f64_le(&mut shp, 36, -half_c);
+        write_f64_le(&mut shp, 44, -half_c);
+        write_f64_le(&mut shp, 52, half_c);
+        write_f64_le(&mut shp, 60, half_c);
+        write_f64_le(&mut shx, 36, -half_c);
+        write_f64_le(&mut shx, 44, -half_c);
+        write_f64_le(&mut shx, 52, half_c);
+        write_f64_le(&mut shx, 60, half_c);
+
+        // shx index record
+        write_u32_be(&mut shx, 100, 50); // .shp record offset in 16-bit words (100 bytes)
+        write_u32_be(&mut shx, 104, record_content_words);
+
+        // shp record header
+        let rec_header = 100;
+        write_u32_be(&mut shp, rec_header, 1); // record number
+        write_u32_be(&mut shp, rec_header + 4, record_content_words);
+
+        // shp record content
+        let rec = rec_header + 8;
+        write_u32_le(&mut shp, rec, 5); // Polygon
+        write_f64_le(&mut shp, rec + 4, -half_c); // xmin
+        write_f64_le(&mut shp, rec + 12, -half_c); // ymin
+        write_f64_le(&mut shp, rec + 20, half_c); // xmax
+        write_f64_le(&mut shp, rec + 28, half_c); // ymax
+        write_u32_le(&mut shp, rec + 36, 1); // num_parts
+        write_u32_le(
+            &mut shp,
+            rec + 40,
+            u32::try_from(points.len()).expect("point count fits u32"),
+        ); // num_points
+        write_u32_le(&mut shp, rec + 44, 0); // first part starts at point 0
+
+        let mut p = rec + 48;
+        for (x, y) in points {
+            write_f64_le(&mut shp, p, x);
+            write_f64_le(&mut shp, p + 8, y);
+            p += 16;
+        }
+
+        fs::write(path, shp).unwrap();
+        fs::write(path.with_extension("shx"), shx).unwrap();
+    }
 
     // -----------------------------------------------------------------------
     // rasterize_segment tests
@@ -858,5 +953,67 @@ mod tests {
 
         // Inside the concavity (the cut-out region) — should be false
         assert!(!geometry::point_in_polygon(&Point::new(1.5, 2.0), &l_shape));
+    }
+
+    #[test]
+    fn process_ocean_shapefile_emits_features_when_bbox_overlaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let shp_path = dir.path().join("ocean_test.shp");
+        write_test_polygon_shapefile(&shp_path);
+
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20).unwrap();
+        let bounds = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+
+        let emitted = process_ocean_shapefile(
+            &shp_path,
+            &bounds,
+            0,
+            0,
+            None,
+            &mut sort_writer,
+        )
+        .unwrap();
+
+        assert!(emitted > 0, "expected ocean features to be emitted");
+
+        let mut reader = sort_writer.finish().unwrap();
+        let mut count = 0u64;
+        while reader.next().unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, emitted, "emitted count should match sorted records");
+    }
+
+    #[test]
+    fn process_ocean_shapefile_emits_nothing_when_bbox_disjoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let shp_path = dir.path().join("ocean_test_disjoint.shp");
+        write_test_polygon_shapefile(&shp_path);
+
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20).unwrap();
+        // Mercator data bounds outside [0,1] should not intersect any valid projected shape.
+        let disjoint_bounds = MercBbox {
+            min_x: 2.0,
+            min_y: 2.0,
+            max_x: 3.0,
+            max_y: 3.0,
+        };
+
+        let emitted = process_ocean_shapefile(
+            &shp_path,
+            &disjoint_bounds,
+            0,
+            0,
+            None,
+            &mut sort_writer,
+        )
+        .unwrap();
+
+        assert_eq!(emitted, 0, "expected no ocean features for disjoint bounds");
     }
 }
