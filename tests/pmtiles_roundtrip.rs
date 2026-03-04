@@ -55,6 +55,23 @@ fn encode_mvt_layer(name: &str) -> Vec<u8> {
     layer
 }
 
+fn encode_mvt_layer_with_feature(name: &str, feature: &[u8]) -> Vec<u8> {
+    let mut layer = Vec::new();
+    encode_bytes_field_always(&mut layer, 1, name.as_bytes());
+    encode_bytes_field_always(&mut layer, 2, feature);
+    encode_varint_field_always(&mut layer, 5, 4096);
+    encode_varint_field_always(&mut layer, 15, 2);
+    layer
+}
+
+fn encode_mvt_tile_with_layers(layers: &[Vec<u8>]) -> Vec<u8> {
+    let mut tile = Vec::new();
+    for layer in layers {
+        encode_bytes_field_always(&mut tile, 3, layer);
+    }
+    tile
+}
+
 fn encode_mvt_point_feature() -> Vec<u8> {
     let mut feature = Vec::new();
 
@@ -71,6 +88,24 @@ fn encode_mvt_point_feature() -> Vec<u8> {
     encode_varint(&mut geom, 0); // dy=0
     encode_bytes_field_always(&mut feature, 4, &geom);
 
+    feature
+}
+
+fn zigzag_encode_i64(n: i64) -> u64 {
+    ((n << 1) ^ (n >> 63)) as u64
+}
+
+fn encode_mvt_linestring_feature_with_delta(dx: i64, dy: i64) -> Vec<u8> {
+    let mut feature = Vec::new();
+    encode_varint_field_always(&mut feature, 3, 2); // LineString
+    let mut geom = Vec::new();
+    encode_varint(&mut geom, 9); // MoveTo, count=1
+    encode_varint(&mut geom, 0);
+    encode_varint(&mut geom, 0);
+    encode_varint(&mut geom, 10); // LineTo, count=1
+    encode_varint(&mut geom, zigzag_encode_i64(dx));
+    encode_varint(&mut geom, zigzag_encode_i64(dy));
+    encode_bytes_field_always(&mut feature, 4, &geom);
     feature
 }
 
@@ -617,5 +652,36 @@ fn test_verify_fail_metadata_vector_layers_schema() {
     assert!(
         msg.contains("vector_layers entry missing 'id' string"),
         "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn test_verify_fail_suspicious_geometry_delta() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 0,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+    let feature = encode_mvt_linestring_feature_with_delta(500_000, 0);
+    let layer = encode_mvt_layer_with_feature("streets", &feature);
+    let tile = encode_mvt_tile_with_layers(&[layer]);
+    writer.add_tile(0, 0, 0, &gzip_bytes(&tile)).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("verify_bad_geom_delta.pmtiles");
+    writer.write_to(&path).unwrap();
+
+    let report = elivagar::verify::verify(&path).unwrap();
+    assert!(!report.passed, "expected verify to fail");
+    assert!(
+        report
+            .tile_errors
+            .iter()
+            .any(|e| e.contains("suspicious geometry delta")),
+        "expected geometry delta error, got {:?}",
+        report.tile_errors
     );
 }

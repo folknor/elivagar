@@ -11,9 +11,14 @@ use std::path::Path;
 use crate::pmtiles_reader::{self, PmtilesReader};
 use crate::pmtiles_writer::tile_id_to_zxy;
 use crate::shortbread::Layer;
+use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
 /// Maximum number of tile-level errors before aborting traversal.
 const MAX_TILE_ERRORS: usize = 100;
+const MVT_EXTENT: i64 = 4096;
+const MVT_COORD_ABS_LIMIT: i64 = MVT_EXTENT * 32; // 131072
+const MVT_DELTA_LIMIT: i64 = MVT_EXTENT * 16; // 65536
+const MVT_DELTA_LIMIT_SEAM: i64 = MVT_EXTENT * 4; // 16384
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -230,6 +235,11 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
                 tile_errors.push(format!("z{z}/{x}/{y}: MVT decode failed: {e}"));
             }
         }
+        if tile_errors.len() < MAX_TILE_ERRORS
+            && let Err(msg) = validate_mvt_geometry(&decompressed, z, x)
+        {
+            tile_errors.push(format!("z{z}/{x}/{y}: {msg}"));
+        }
 
         tiles_checked += 1;
     }
@@ -243,6 +253,189 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
         layers_declared,
         passed,
     })
+}
+
+fn validate_mvt_geometry(data: &[u8], z: u8, x: u32) -> Result<(), String> {
+    let mut tile_cursor = Cursor::new(data);
+    while let Ok(Some((field, wire_type))) = tile_cursor.read_tag() {
+        if field == 3 && wire_type == WIRE_LEN {
+            let layer = tile_cursor
+                .read_len_delimited()
+                .map_err(|e| format!("layer decode failed: {e}"))?;
+            validate_mvt_layer_geometry(layer, z, x)?;
+        } else {
+            tile_cursor
+                .skip_field(wire_type)
+                .map_err(|e| format!("tile parse failed: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_mvt_layer_geometry(layer: &[u8], z: u8, x: u32) -> Result<(), String> {
+    let mut layer_cursor = Cursor::new(layer);
+    while let Ok(Some((field, wire_type))) = layer_cursor.read_tag() {
+        if field == 2 && wire_type == WIRE_LEN {
+            let feature = layer_cursor
+                .read_len_delimited()
+                .map_err(|e| format!("feature decode failed: {e}"))?;
+            validate_mvt_feature_geometry(feature, z, x)?;
+        } else {
+            layer_cursor
+                .skip_field(wire_type)
+                .map_err(|e| format!("layer parse failed: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_mvt_feature_geometry(feature: &[u8], z: u8, x: u32) -> Result<(), String> {
+    let mut geom_type: u64 = 0;
+    let mut geom_bytes: Option<&[u8]> = None;
+    let mut feature_cursor = Cursor::new(feature);
+    while let Ok(Some((field, wire_type))) = feature_cursor.read_tag() {
+        match (field, wire_type) {
+            (3, WIRE_VARINT) => {
+                geom_type = feature_cursor
+                    .read_varint()
+                    .map_err(|e| format!("feature type decode failed: {e}"))?;
+            }
+            (4, WIRE_LEN) => {
+                geom_bytes = Some(
+                    feature_cursor
+                        .read_len_delimited()
+                        .map_err(|e| format!("feature geometry decode failed: {e}"))?,
+                );
+            }
+            _ => {
+                feature_cursor
+                    .skip_field(wire_type)
+                    .map_err(|e| format!("feature parse failed: {e}"))?;
+            }
+        }
+    }
+
+    let Some(geom_bytes) = geom_bytes else {
+        return Err("feature missing geometry".to_string());
+    };
+    let commands = decode_packed_varints(geom_bytes)?;
+    validate_geometry_commands(&commands, geom_type, z, x)
+}
+
+fn decode_packed_varints(data: &[u8]) -> Result<Vec<u32>, String> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < data.len() {
+        let mut shift = 0u32;
+        let mut value: u64 = 0;
+        loop {
+            if i >= data.len() {
+                return Err("geometry varint truncated".to_string());
+            }
+            let b = data[i];
+            i += 1;
+            value |= u64::from(b & 0x7f) << shift;
+            if (b & 0x80) == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 63 {
+                return Err("geometry varint too long".to_string());
+            }
+        }
+        let v = u32::try_from(value).map_err(|_| "geometry command > u32".to_string())?;
+        out.push(v);
+    }
+    Ok(out)
+}
+
+fn zigzag_decode_u32(v: u32) -> i64 {
+    i64::from(v >> 1) ^ -i64::from(v & 1)
+}
+
+fn validate_geometry_commands(
+    commands: &[u32],
+    geom_type: u64,
+    z: u8,
+    x: u32,
+) -> Result<(), String> {
+    if commands.is_empty() {
+        return Err("feature has empty geometry command stream".to_string());
+    }
+    let seam_tile = {
+        let max_x = (1u32 << z).saturating_sub(1);
+        x == 0 || x == max_x
+    };
+    let delta_limit = if seam_tile {
+        MVT_DELTA_LIMIT_SEAM
+    } else {
+        MVT_DELTA_LIMIT
+    };
+
+    let mut i = 0usize;
+    let mut cx: i64 = 0;
+    let mut cy: i64 = 0;
+    let mut ring_points = 0usize;
+    while i < commands.len() {
+        let op = commands[i];
+        i += 1;
+        let id = op & 0x7;
+        let count = op >> 3;
+        if count == 0 {
+            return Err("geometry command with zero repeat count".to_string());
+        }
+        match id {
+            1 | 2 => {
+                if geom_type == 3 && id == 1 && count != 1 {
+                    return Err("polygon ring MoveTo count must be 1".to_string());
+                }
+                for n in 0..count {
+                    if i + 1 >= commands.len() {
+                        return Err("geometry command missing parameters".to_string());
+                    }
+                    let dx = zigzag_decode_u32(commands[i]);
+                    let dy = zigzag_decode_u32(commands[i + 1]);
+                    i += 2;
+                    if dx.abs() > delta_limit || dy.abs() > delta_limit {
+                        return Err(format!(
+                            "suspicious geometry delta ({dx},{dy}) exceeds limit {delta_limit}"
+                        ));
+                    }
+                    cx += dx;
+                    cy += dy;
+                    if cx.abs() > MVT_COORD_ABS_LIMIT || cy.abs() > MVT_COORD_ABS_LIMIT {
+                        return Err(format!(
+                            "geometry coordinate ({cx},{cy}) exceeds absolute limit {MVT_COORD_ABS_LIMIT}"
+                        ));
+                    }
+                    if geom_type == 3 {
+                        if id == 1 && n == 0 {
+                            ring_points = 1;
+                        } else if id == 2 {
+                            ring_points += 1;
+                        }
+                    }
+                }
+            }
+            7 => {
+                if geom_type != 3 {
+                    return Err("ClosePath in non-polygon geometry".to_string());
+                }
+                for _ in 0..count {
+                    if ring_points < 3 {
+                        return Err("polygon ClosePath without enough ring points".to_string());
+                    }
+                    ring_points = 0;
+                }
+            }
+            _ => return Err(format!("unknown geometry command id {id}")),
+        }
+    }
+
+    if geom_type == 3 && ring_points != 0 {
+        return Err("polygon ring missing ClosePath".to_string());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
