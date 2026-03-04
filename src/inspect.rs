@@ -65,6 +65,13 @@ pub fn inspect(path: &Path) -> io::Result<()> {
     let metadata_tile_compression = metadata_json
         .as_deref()
         .and_then(|j| extract_json_string(j, "\"tile_compression\":\""));
+    let (payload_format_display, payload_compression_display, payload_format_src, payload_compress_src) =
+        payload_contract_display(
+            reader.tile_type(),
+            tile_compression,
+            metadata_payload_format.as_deref(),
+            metadata_tile_compression.as_deref(),
+        );
 
     println!("PMTiles v{version}  {}", path.display());
     println!("  File size:  {}", format_bytes(file_size));
@@ -72,12 +79,8 @@ pub fn inspect(path: &Path) -> io::Result<()> {
     println!("  Tile type:          {tile_type}");
     println!("  Tile compression:   {tile_compression}");
     println!("  Internal compress:  {internal_compression}");
-    if let Some(payload) = metadata_payload_format.as_deref() {
-        println!("  Payload format:     {payload} (metadata)");
-    }
-    if let Some(comp) = metadata_tile_compression.as_deref() {
-        println!("  Payload compress:   {comp} (metadata)");
-    }
+    println!("  Payload format:     {payload_format_display} ({payload_format_src})");
+    println!("  Payload compress:   {payload_compression_display} ({payload_compress_src})");
     println!("  Clustered:          {clustered}");
     println!();
     println!("  Zoom:    {min_zoom}..{max_zoom}");
@@ -90,29 +93,15 @@ pub fn inspect(path: &Path) -> io::Result<()> {
     println!("  Unique tiles:     {unique_tiles:>14}");
     println!("  Deduplicated:     {dedup_count:>14} ({dedup_pct:.1}%)");
     println!("  Directory entries: {num_entries:>13}");
-    println!();
-    println!("  Section layout:");
-    println!(
-        "    Header:      {:>13}  offset {root_dir_offset:>13}",
-        format_bytes(127),
-    );
-    println!(
-        "    Root dir:    {:>13}  offset {root_dir_offset:>13}",
-        format_bytes(root_dir_length),
-    );
-    println!(
-        "    Metadata:    {:>13}  offset {metadata_offset:>13}",
-        format_bytes(metadata_length),
-    );
-    if leaf_dirs_length > 0 {
-        println!(
-            "    Leaf dirs:   {:>13}  offset {leaf_dirs_offset:>13}",
-            format_bytes(leaf_dirs_length),
-        );
-    }
-    println!(
-        "    Tile data:   {:>13}  offset {data_offset:>13}",
-        format_bytes(data_length),
+    print_section_layout(
+        root_dir_offset,
+        root_dir_length,
+        metadata_offset,
+        metadata_length,
+        leaf_dirs_offset,
+        leaf_dirs_length,
+        data_offset,
+        data_length,
     );
 
     if let Some(json) = metadata_json {
@@ -208,6 +197,81 @@ fn extract_json_string(s: &str, key: &str) -> Option<String> {
     Some(s[start..start + end].to_string())
 }
 
+fn infer_payload_format_from_header(tile_type: u8) -> &'static str {
+    match tile_type {
+        1 => "mvt",
+        0 => "unknown",
+        _ => "unknown",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_section_layout(
+    root_dir_offset: u64,
+    root_dir_length: u64,
+    metadata_offset: u64,
+    metadata_length: u64,
+    leaf_dirs_offset: u64,
+    leaf_dirs_length: u64,
+    data_offset: u64,
+    data_length: u64,
+) {
+    println!();
+    println!("  Section layout:");
+    println!(
+        "    Header:      {:>13}  offset {root_dir_offset:>13}",
+        format_bytes(127),
+    );
+    println!(
+        "    Root dir:    {:>13}  offset {root_dir_offset:>13}",
+        format_bytes(root_dir_length),
+    );
+    println!(
+        "    Metadata:    {:>13}  offset {metadata_offset:>13}",
+        format_bytes(metadata_length),
+    );
+    if leaf_dirs_length > 0 {
+        println!(
+            "    Leaf dirs:   {:>13}  offset {leaf_dirs_offset:>13}",
+            format_bytes(leaf_dirs_length),
+        );
+    }
+    println!(
+        "    Tile data:   {:>13}  offset {data_offset:>13}",
+        format_bytes(data_length),
+    );
+}
+
+fn payload_contract_display(
+    tile_type: u8,
+    header_tile_compression: &str,
+    metadata_payload_format: Option<&str>,
+    metadata_tile_compression: Option<&str>,
+) -> (String, String, &'static str, &'static str) {
+    let payload_format_src = if metadata_payload_format.is_some() {
+        "metadata"
+    } else {
+        "header"
+    };
+    let payload_compress_src = if metadata_tile_compression.is_some() {
+        "metadata"
+    } else {
+        "header"
+    };
+    let payload_format_display = metadata_payload_format
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| infer_payload_format_from_header(tile_type).to_string());
+    let payload_compression_display = metadata_tile_compression
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| header_tile_compression.to_string());
+    (
+        payload_format_display,
+        payload_compression_display,
+        payload_format_src,
+        payload_compress_src,
+    )
+}
+
 fn format_bytes(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
@@ -260,6 +324,7 @@ fn tile_type_name(val: u8) -> &'static str {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::inspect;
+    use super::{extract_json_string, infer_payload_format_from_header, payload_contract_display};
     use crate::pmtiles_writer::{tile_id_to_zxy, xy_to_tile_id, PmtilesConfig, PmtilesWriter};
 
     fn add_monotonic_unique_tiles(writer: &mut PmtilesWriter, z: u8, count: usize) {
@@ -309,5 +374,49 @@ mod tests {
         writer.write_to(&path).unwrap();
 
         inspect(&path).unwrap();
+    }
+
+    #[test]
+    fn extract_json_string_returns_expected_value() {
+        let json = r#"{"tile_payload_format":"mlt","tile_compression":"none"}"#;
+        assert_eq!(
+            extract_json_string(json, "\"tile_payload_format\":\"").as_deref(),
+            Some("mlt")
+        );
+        assert_eq!(
+            extract_json_string(json, "\"tile_compression\":\"").as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            extract_json_string(json, "\"missing\":\"").as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn header_payload_format_inference_handles_legacy_and_unknown() {
+        assert_eq!(infer_payload_format_from_header(1), "mvt");
+        assert_eq!(infer_payload_format_from_header(0), "unknown");
+        assert_eq!(infer_payload_format_from_header(5), "unknown");
+    }
+
+    #[test]
+    fn payload_contract_display_prefers_metadata_when_present() {
+        let (fmt, comp, fmt_src, comp_src) =
+            payload_contract_display(1, "gzip", Some("mlt"), Some("none"));
+        assert_eq!(fmt, "mlt");
+        assert_eq!(comp, "none");
+        assert_eq!(fmt_src, "metadata");
+        assert_eq!(comp_src, "metadata");
+    }
+
+    #[test]
+    fn payload_contract_display_falls_back_to_header_for_legacy() {
+        let (fmt, comp, fmt_src, comp_src) =
+            payload_contract_display(1, "gzip", None, None);
+        assert_eq!(fmt, "mvt");
+        assert_eq!(comp, "gzip");
+        assert_eq!(fmt_src, "header");
+        assert_eq!(comp_src, "header");
     }
 }
