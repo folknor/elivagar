@@ -550,11 +550,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("dedup_insert_skipped_cap={}", dedup_stats.insert_skipped_cap);
     eprintln!("dedup_hash_bucket_collisions={}", dedup_stats.hash_bucket_collisions);
     eprintln!("tile_bytes_total={}", tile_size_diag.total_tile_bytes);
-    if tiles_written > 0 {
-        eprintln!("tile_bytes_avg={}", tile_size_diag.total_tile_bytes / tiles_written);
-    } else {
-        eprintln!("tile_bytes_avg=0");
-    }
+    eprintln!(
+        "tile_bytes_avg={}",
+        tile_size_diag
+            .total_tile_bytes
+            .checked_div(tiles_written)
+            .unwrap_or(0)
+    );
     eprintln!("tile_max_bytes={}", tile_size_diag.max_tile.bytes);
     if tile_size_diag.max_tile.bytes > 0 {
         let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile_size_diag.max_tile.tile_id);
@@ -1794,6 +1796,74 @@ fn is_valid_simple_tile_ring(ring: &[(i32, i32)]) -> bool {
     true
 }
 
+fn orient2d_f64(a: &Point, b: &Point, c: &Point) -> f64 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+fn on_segment_f64(a: &Point, b: &Point, p: &Point) -> bool {
+    let min_x = a.x.min(b.x);
+    let max_x = a.x.max(b.x);
+    let min_y = a.y.min(b.y);
+    let max_y = a.y.max(b.y);
+    p.x >= min_x && p.x <= max_x && p.y >= min_y && p.y <= max_y
+}
+
+fn segments_intersect_f64(a1: &Point, a2: &Point, b1: &Point, b2: &Point) -> bool {
+    let o1 = orient2d_f64(a1, a2, b1);
+    let o2 = orient2d_f64(a1, a2, b2);
+    let o3 = orient2d_f64(b1, b2, a1);
+    let o4 = orient2d_f64(b1, b2, a2);
+    let eps = 1e-15;
+
+    if o1.abs() <= eps && on_segment_f64(a1, a2, b1) {
+        return true;
+    }
+    if o2.abs() <= eps && on_segment_f64(a1, a2, b2) {
+        return true;
+    }
+    if o3.abs() <= eps && on_segment_f64(b1, b2, a1) {
+        return true;
+    }
+    if o4.abs() <= eps && on_segment_f64(b1, b2, a2) {
+        return true;
+    }
+    (o1 > eps) != (o2 > eps) && (o3 > eps) != (o4 > eps)
+}
+
+fn is_valid_simple_ring_points(ring: &[Point]) -> bool {
+    if ring.len() < 3 {
+        return false;
+    }
+    // Accept both open rings [A,B,C] and closed rings [A,B,C,A].
+    let is_closed = if ring.len() >= 4 {
+        let first = &ring[0];
+        let last = &ring[ring.len() - 1];
+        (first.x - last.x).abs() < 1e-15 && (first.y - last.y).abs() < 1e-15
+    } else {
+        false
+    };
+    let n = if is_closed { ring.len() - 1 } else { ring.len() };
+    if n < 3 {
+        return false;
+    }
+
+    for i in 0..n {
+        let a1 = &ring[i];
+        let a2 = &ring[(i + 1) % n];
+        for j in (i + 1)..n {
+            if j == i || j == (i + 1) % n || (i == 0 && j == n - 1) {
+                continue;
+            }
+            let b1 = &ring[j];
+            let b2 = &ring[(j + 1) % n];
+            if segments_intersect_f64(a1, a2, b1, b2) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Feature emission helpers
 // ---------------------------------------------------------------------------
@@ -1929,6 +1999,9 @@ fn emit_polygon_feature(
             if simplified.len() < 3 {
                 return;
             }
+            if z < 14 && !is_valid_simple_ring_points(simplified) {
+                return;
+            }
             geometry::to_tile_coords_into(&mut scratch.tc_buf, simplified, tx, ty, z);
             if !skip_size_filter && geometry::ring_is_subpixel(&scratch.tc_buf) {
                 return;
@@ -1981,6 +2054,9 @@ fn emit_polygon_feature(
                             row_source, &clip, &mut scratch.clip_a, &mut scratch.clip_b,
                         );
                         if scratch.clip_a.len() < 3 {
+                            continue;
+                        }
+                        if z < 14 && !is_valid_simple_ring_points(&scratch.clip_a) {
                             continue;
                         }
                         geometry::to_tile_coords_into(&mut scratch.tc_buf, &scratch.clip_a, tx, ty, z);
@@ -2042,6 +2118,9 @@ fn emit_multipolygon_feature(
             if simp_outer.len() < 3 {
                 return;
             }
+            if z < 14 && !is_valid_simple_ring_points(simp_outer) {
+                return;
+            }
             if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
             geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], simp_outer, tx, ty, z);
             if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
@@ -2054,6 +2133,9 @@ fn emit_multipolygon_feature(
             ring_count += 1;
             for inner in simp_inners {
                 if inner.len() < 3 {
+                    continue;
+                }
+                if z < 14 && !is_valid_simple_ring_points(inner) {
                     continue;
                 }
                 if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
@@ -2158,6 +2240,9 @@ fn emit_multipolygon_feature(
                         if emit_scratch.clip_a.len() < 3 {
                             continue;
                         }
+                        if z < 14 && !is_valid_simple_ring_points(&emit_scratch.clip_a) {
+                            continue;
+                        }
                         if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
                         geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], &emit_scratch.clip_a, tx, ty, z);
                         if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
@@ -2176,6 +2261,9 @@ fn emit_multipolygon_feature(
                             inner, &clip, &mut emit_scratch.clip_a, &mut emit_scratch.clip_b,
                         );
                         if emit_scratch.clip_a.len() < 3 {
+                            continue;
+                        }
+                        if z < 14 && !is_valid_simple_ring_points(&emit_scratch.clip_a) {
                             continue;
                         }
                         if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }

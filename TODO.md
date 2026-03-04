@@ -127,7 +127,7 @@
   the two-pass algorithm converges, but broken/ambiguous ones can produce different ring
   assignments between runs. Replace with `FxHashMap` (already used in mvt.rs) or sort chains
   before joining (Planetiler #788).
-- [ ] Pre-quantization polygon validity: validate/repair polygon rings before snapping to tile
+- [x] Pre-quantization polygon validity: validate/repair polygon rings before snapping to tile
   grid coordinates. Invalid polygons that survive clipping+simplification can cascade into
   tile artifacts after integer quantization (Planetiler #566). Tilemaker #602 hit this as
   spikes/self-intersections introduced during coordinate scaling. The interplay between

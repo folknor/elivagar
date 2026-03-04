@@ -110,6 +110,17 @@ fn invalid_tile_ring_detected() {
     assert!(!is_valid_simple_tile_ring(&bowtie));
 }
 
+#[test]
+fn invalid_merc_ring_detected_pre_quantization() {
+    let bowtie = vec![
+        Point { x: 0.3, y: 0.3 },
+        Point { x: 0.7, y: 0.7 },
+        Point { x: 0.3, y: 0.7 },
+        Point { x: 0.7, y: 0.3 },
+    ];
+    assert!(!is_valid_simple_ring_points(&bowtie));
+}
+
 /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
 fn boundary_labels_match(admin_level: i64) -> LayerMatch {
     LayerMatch {
