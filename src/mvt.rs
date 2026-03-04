@@ -623,6 +623,113 @@ impl LayerBuilder {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use protohoggr::{Cursor, WIRE_LEN};
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ParsedFixtureTile {
+        layer_name: String,
+        layer_version: u64,
+        layer_extent: Option<u64>,
+        key: String,
+        string_value: String,
+        feature_id: Option<u64>,
+        feature_type: u64,
+        feature_tags: Vec<u32>,
+        feature_geometry: Vec<u32>,
+    }
+
+    fn parse_single_layer_single_feature(bytes: &[u8]) -> ParsedFixtureTile {
+        let mut tile_cursor = Cursor::new(bytes);
+        let mut layer_buf: Option<&[u8]> = None;
+        while let Ok(Some((field, wire))) = tile_cursor.read_tag() {
+            if field == 3 && wire == WIRE_LEN {
+                layer_buf = Some(tile_cursor.read_len_delimited().unwrap());
+                break;
+            }
+            tile_cursor.skip_field(wire).unwrap();
+        }
+        let layer_buf = layer_buf.expect("tile must contain one layer");
+
+        let mut layer_name = String::new();
+        let mut layer_version = 0u64;
+        let mut layer_extent: Option<u64> = None;
+        let mut key = String::new();
+        let mut string_value = String::new();
+        let mut feature_id = None;
+        let mut feature_type = 0u64;
+        let mut feature_tags = Vec::new();
+        let mut feature_geometry = Vec::new();
+
+        let mut layer_cursor = Cursor::new(layer_buf);
+        while let Ok(Some((field, wire))) = layer_cursor.read_tag() {
+            match (field, wire) {
+                (15, WIRE_VARINT) => layer_version = layer_cursor.read_varint().unwrap(),
+                (1, WIRE_LEN) => {
+                    layer_name = String::from_utf8_lossy(layer_cursor.read_len_delimited().unwrap()).to_string();
+                }
+                (5, WIRE_VARINT) => layer_extent = Some(layer_cursor.read_varint().unwrap()),
+                (3, WIRE_LEN) => {
+                    key = String::from_utf8_lossy(layer_cursor.read_len_delimited().unwrap()).to_string();
+                }
+                (4, WIRE_LEN) => {
+                    let value_msg = layer_cursor.read_len_delimited().unwrap();
+                    let mut vcur = Cursor::new(value_msg);
+                    while let Ok(Some((vf, vw))) = vcur.read_tag() {
+                        if vf == 1 && vw == WIRE_LEN {
+                            string_value =
+                                String::from_utf8_lossy(vcur.read_len_delimited().unwrap()).to_string();
+                            break;
+                        }
+                        vcur.skip_field(vw).unwrap();
+                    }
+                }
+                (2, WIRE_LEN) => {
+                    let feature_msg = layer_cursor.read_len_delimited().unwrap();
+                    let mut fcur = Cursor::new(feature_msg);
+                    while let Ok(Some((ff, fw))) = fcur.read_tag() {
+                        match (ff, fw) {
+                            (1, WIRE_VARINT) => feature_id = Some(fcur.read_varint().unwrap()),
+                            (2, WIRE_LEN) => {
+                                let packed = fcur.read_len_delimited().unwrap();
+                                let mut p = Cursor::new(packed);
+                                while !p.is_empty() {
+                                    feature_tags.push(
+                                        u32::try_from(p.read_varint().unwrap())
+                                            .expect("fixture tags must fit in u32"),
+                                    );
+                                }
+                            }
+                            (3, WIRE_VARINT) => feature_type = fcur.read_varint().unwrap(),
+                            (4, WIRE_LEN) => {
+                                let packed = fcur.read_len_delimited().unwrap();
+                                let mut p = Cursor::new(packed);
+                                while !p.is_empty() {
+                                    feature_geometry.push(
+                                        u32::try_from(p.read_varint().unwrap())
+                                            .expect("fixture geometry must fit in u32"),
+                                    );
+                                }
+                            }
+                            _ => fcur.skip_field(fw).unwrap(),
+                        }
+                    }
+                }
+                _ => layer_cursor.skip_field(wire).unwrap(),
+            }
+        }
+
+        ParsedFixtureTile {
+            layer_name,
+            layer_version,
+            layer_extent,
+            key,
+            string_value,
+            feature_id,
+            feature_type,
+            feature_tags,
+            feature_geometry,
+        }
+    }
 
     #[test]
     fn test_zigzag() {
@@ -753,6 +860,95 @@ mod tests {
         let layer = LayerBuilder::new("empty");
         let buf = encode_tile(&[&layer]);
         assert!(buf.is_empty());
+    }
+
+    fn assert_matches_mvt_fixture(fixture_id: &str, geom_type: GeomType, geometry: &[u32]) {
+        let mut layer = LayerBuilder::new("hello");
+        let key_idx = layer.intern_key("hello");
+        let val_idx = layer.intern_value(Value::String("world".to_string()));
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type,
+            geometry: geometry.to_vec(),
+            tags: vec![(key_idx, val_idx)],
+        });
+        let encoded = encode_tile(&[&layer]);
+
+        let expected: &[u8] = match fixture_id {
+            "017" => include_bytes!("../tests/fixtures/mvt_fixtures/017/tile.mvt"),
+            "018" => include_bytes!("../tests/fixtures/mvt_fixtures/018/tile.mvt"),
+            "019" => include_bytes!("../tests/fixtures/mvt_fixtures/019/tile.mvt"),
+            "020" => include_bytes!("../tests/fixtures/mvt_fixtures/020/tile.mvt"),
+            "021" => include_bytes!("../tests/fixtures/mvt_fixtures/021/tile.mvt"),
+            "022" => include_bytes!("../tests/fixtures/mvt_fixtures/022/tile.mvt"),
+            _ => panic!("unknown fixture id: {fixture_id}"),
+        };
+
+        let expected_parsed = parse_single_layer_single_feature(expected);
+        let actual_parsed = parse_single_layer_single_feature(&encoded);
+
+        // Upstream fixtures sometimes omit default-encoded fields like extent.
+        assert_eq!(actual_parsed.layer_name, expected_parsed.layer_name, "fixture {fixture_id} layer_name");
+        assert_eq!(actual_parsed.layer_version, expected_parsed.layer_version, "fixture {fixture_id} version");
+        assert_eq!(actual_parsed.key, expected_parsed.key, "fixture {fixture_id} key");
+        assert_eq!(actual_parsed.string_value, expected_parsed.string_value, "fixture {fixture_id} value");
+        assert_eq!(actual_parsed.feature_id, expected_parsed.feature_id, "fixture {fixture_id} id");
+        assert_eq!(actual_parsed.feature_type, expected_parsed.feature_type, "fixture {fixture_id} type");
+        assert_eq!(actual_parsed.feature_tags, expected_parsed.feature_tags, "fixture {fixture_id} tags");
+        assert_eq!(
+            actual_parsed.feature_geometry, expected_parsed.feature_geometry,
+            "fixture {fixture_id} geometry"
+        );
+
+        // Our encoder always writes extent=4096 for spec compliance.
+        assert_eq!(actual_parsed.layer_extent, Some(4096), "fixture {fixture_id} extent");
+    }
+
+    #[test]
+    fn conformance_fixture_017_valid_point_geometry() {
+        // mapbox/mvt-fixtures#017
+        assert_matches_mvt_fixture("017", GeomType::Point, &[9, 50, 34]);
+    }
+
+    #[test]
+    fn conformance_fixture_018_valid_linestring_geometry() {
+        // mapbox/mvt-fixtures#018
+        assert_matches_mvt_fixture("018", GeomType::LineString, &[9, 4, 4, 18, 0, 16, 16, 0]);
+    }
+
+    #[test]
+    fn conformance_fixture_019_valid_polygon_geometry() {
+        // mapbox/mvt-fixtures#019
+        assert_matches_mvt_fixture("019", GeomType::Polygon, &[9, 6, 12, 18, 10, 12, 24, 44, 15]);
+    }
+
+    #[test]
+    fn conformance_fixture_020_valid_multipoint_geometry() {
+        // mapbox/mvt-fixtures#020
+        assert_matches_mvt_fixture("020", GeomType::Point, &[17, 10, 14, 3, 9]);
+    }
+
+    #[test]
+    fn conformance_fixture_021_valid_multilinestring_geometry() {
+        // mapbox/mvt-fixtures#021
+        assert_matches_mvt_fixture(
+            "021",
+            GeomType::LineString,
+            &[9, 4, 4, 18, 0, 16, 16, 0, 9, 17, 17, 10, 4, 8],
+        );
+    }
+
+    #[test]
+    fn conformance_fixture_022_valid_multipolygon_geometry() {
+        // mapbox/mvt-fixtures#022
+        assert_matches_mvt_fixture(
+            "022",
+            GeomType::Polygon,
+            &[
+                9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15, 9, 22, 2, 26, 18, 0, 0, 18, 17, 0, 15,
+                9, 4, 13, 26, 0, 8, 8, 0, 0, 7, 15,
+            ],
+        );
     }
 
     // -----------------------------------------------------------------------

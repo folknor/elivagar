@@ -34,8 +34,9 @@
 - [x] `sort.rs`: `SortWriter::resume` / `adopt_chunk_files` now directly tested.
   Coverage includes: checkpoint resume success, missing required chunk failure,
   stale leftover deletion on resume, empty checkpoint resume, and adopted chunk merge correctness.
-- [ ] Import targeted cases from Mapbox's `mvt_fixtures` corpus for `mvt.rs` conformance testing
-  (tilemaker #103).
+- [x] Import targeted cases from Mapbox's `mvt_fixtures` corpus for `mvt.rs` conformance testing.
+  Added fixture-backed conformance tests for canonical valid geometries:
+  point/line/polygon + multipoint/multilinestring/multipolygon (fixture IDs 017-022).
 - [x] PMTiles metadata JSON validation: `elivagar verify` now validates metadata JSON
   structure and `vector_layers` schema. Remaining gap: fuzz testing for attribute/value edge
   cases that could produce malformed JSON (tippecanoe #181).
