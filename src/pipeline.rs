@@ -10,6 +10,7 @@
 use crate::geometry::{
     self, ClipRect, MercBbox, Point, BUFFER_FRACTION, close_and_orient_cw, close_and_orient_ccw, merc_bbox,
 };
+use crate::mlt;
 
 /// Full-tile rectangle in tile coordinates (CW, closed). Buffer = 8px.
 /// Used for interior tiles where the polygon fully covers the tile.
@@ -79,16 +80,6 @@ pub enum SkipTo {
 pub enum TilePayloadFormat {
     Mvt,
     Mlt,
-}
-
-fn tile_format_not_implemented_error(tile_format: TilePayloadFormat) -> PipelineError {
-    let format_name = match tile_format {
-        TilePayloadFormat::Mvt => "mvt",
-        TilePayloadFormat::Mlt => "mlt",
-    };
-    PipelineError(format!(
-        "tile format '{format_name}' is not implemented yet (see notes/mlt-integration-plan.md)"
-    ))
 }
 
 /// Configuration for the tile generation pipeline.
@@ -3059,7 +3050,7 @@ fn encode_tile_batch(
 ) -> Result<Vec<EncodedTile>, PipelineError> {
     match tile_format {
         TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(batch, compression_level)),
-        TilePayloadFormat::Mlt => Err(tile_format_not_implemented_error(tile_format)),
+        TilePayloadFormat::Mlt => encode_tile_batch_mlt(batch),
     }
 }
 
@@ -3140,6 +3131,65 @@ fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32) -> Vec<E
         })
         .flatten()
         .collect()
+}
+
+/// Build non-empty per-layer builders for one tile.
+fn prepare_non_empty_layers<'a>(
+    s: &'a mut AssemblyScratch,
+    tile: &PendingTile,
+) -> Vec<&'a LayerBuilder> {
+    // Reset persisted layers from previous tile (reclaim features + clear interning).
+    for slot in &mut s.layers {
+        if let Some(lb) = slot.as_mut() {
+            lb.prepare_for_reuse(&mut s.geom_pool, &mut s.tags_pool);
+        }
+    }
+
+    for &(layer_idx, ref data) in &tile.features {
+        if (layer_idx as usize) < s.layers.len() {
+            add_feature_to_layer(
+                get_or_create_layer(&mut s.layers, layer_idx as usize),
+                data,
+                &mut s.geom_pool,
+                &mut s.tags_pool,
+            );
+        }
+    }
+
+    // Merge same-attribute geometries to reduce feature count.
+    for layer in &mut s.layers {
+        if let Some(lb) = layer.as_mut() {
+            lb.merge_same_attr_geometries(&mut s.merge_scratch, &mut s.geom_pool, &mut s.tags_pool);
+        }
+    }
+
+    // Max 26 elements (one per Shortbread layer) — with_capacity not needed.
+    s.layers
+        .iter()
+        .filter_map(|l| l.as_ref())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Encode an MLT batch (currently scaffolded, returns not-implemented error with tile context).
+#[hotpath::measure]
+fn encode_tile_batch_mlt(batch: &[PendingTile]) -> Result<Vec<EncodedTile>, PipelineError> {
+    if let Some(tile) = batch.first() {
+        let err = ASSEMBLY_SCRATCH.with(|cell| {
+            let s = &mut *cell.borrow_mut();
+            let non_empty = prepare_non_empty_layers(s, tile);
+            match mlt::encode_tile(&non_empty) {
+                Ok(_) => PipelineError("unexpected success from unimplemented mlt encoder".to_string()),
+                Err(err) => PipelineError(err.to_string()),
+            }
+        });
+        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+        return Err(PipelineError(format!(
+            "mlt encode failed for tile {z}/{x}/{y}: {}",
+            err.0
+        )));
+    }
+    Ok(Vec::new())
 }
 
 const LAYER_COUNT: usize = Layer::count();

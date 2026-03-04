@@ -151,6 +151,22 @@ impl LayerBuilder {
         self.features.is_empty()
     }
 
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn features(&self) -> &[Feature] {
+        &self.features
+    }
+
+    pub(crate) fn key(&self, idx: u16) -> Option<&str> {
+        self.keys.get(idx as usize).map(String::as_str)
+    }
+
+    pub(crate) fn value(&self, idx: u16) -> Option<&Value> {
+        self.values.get(idx as usize)
+    }
+
     #[allow(clippy::cast_possible_truncation)]
     pub fn intern_key(&mut self, key: &str) -> u16 {
         if let Some(&idx) = self.key_map.get(key) {

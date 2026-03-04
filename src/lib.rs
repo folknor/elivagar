@@ -55,6 +55,7 @@
 pub(crate) mod geometry;
 pub mod inspect;
 pub(crate) mod multipolygon;
+pub(crate) mod mlt;
 pub mod pmtiles_reader;
 pub(crate) mod mvt;
 pub mod node_index;
