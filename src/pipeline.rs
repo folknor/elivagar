@@ -3180,22 +3180,36 @@ fn prepare_non_empty_layers<'a>(
 /// Encode an MLT batch (currently scaffolded, returns not-implemented error with tile context).
 #[hotpath::measure]
 fn encode_tile_batch_mlt(batch: &[PendingTile]) -> Result<Vec<EncodedTile>, PipelineError> {
-    if let Some(tile) = batch.first() {
-        let err = ASSEMBLY_SCRATCH.with(|cell| {
-            let s = &mut *cell.borrow_mut();
-            let non_empty = prepare_non_empty_layers(s, tile);
-            match mlt::encode_tile(&non_empty) {
-                Ok(_) => PipelineError("unexpected success from unimplemented mlt encoder".to_string()),
-                Err(err) => PipelineError(err.to_string()),
-            }
-        });
-        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-        return Err(PipelineError(format!(
-            "mlt encode failed for tile {z}/{x}/{y}: {}",
-            err.0
-        )));
+    use rayon::prelude::*;
+
+    let results: Vec<Result<Option<EncodedTile>, PipelineError>> = batch
+        .par_iter()
+        .map(|tile| {
+            ASSEMBLY_SCRATCH.with(|cell| {
+                let s = &mut *cell.borrow_mut();
+                let non_empty = prepare_non_empty_layers(s, tile);
+                if non_empty.is_empty() {
+                    return Ok(None);
+                }
+                let encoded = mlt::encode_tile(&non_empty).map_err(|err| {
+                    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+                    PipelineError(format!("mlt encode failed for tile {z}/{x}/{y}: {err}"))
+                })?;
+                Ok(Some(EncodedTile {
+                    tile_id: tile.tile_id,
+                    compressed: encoded, // MLT path currently uses no per-tile compression.
+                }))
+            })
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for item in results {
+        if let Some(tile) = item? {
+            out.push(tile);
+        }
     }
-    Ok(Vec::new())
+    Ok(out)
 }
 
 const LAYER_COUNT: usize = Layer::count();

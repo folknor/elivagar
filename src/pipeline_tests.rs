@@ -322,7 +322,7 @@ fn antimeridian_shifts_for_bbox_returns_wrap_shifts() {
 }
 
 #[test]
-fn encode_tile_batch_rejects_unimplemented_mlt_format() {
+fn encode_tile_batch_mlt_empty_batch_is_empty() {
     match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty batches should remain empty"),
         Err(err) => panic!("empty mlt batch should not fail: {err}"),
@@ -337,18 +337,14 @@ fn encode_tile_batch_mvt_empty_batch_is_empty() {
 }
 
 #[test]
-fn encode_tile_batch_mlt_reports_tile_context() {
+fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
     let tile = PendingTile {
         tile_id: pmtiles_writer::xy_to_tile_id(3, 4, 5),
         features: Vec::new(),
     };
     match encode_tile_batch(&[tile], 6, TilePayloadFormat::Mlt) {
-        Ok(_) => panic!("mlt format should fail for non-empty batch"),
-        Err(err) => {
-            let msg = err.to_string();
-            assert!(msg.contains("mlt encode failed for tile 3/4/5"));
-            assert!(msg.contains("mlt encoder is not implemented yet"));
-        }
+        Ok(encoded) => assert!(encoded.is_empty(), "empty tiles should be skipped"),
+        Err(err) => panic!("mlt format should not fail for empty tile: {err}"),
     }
 }
 
