@@ -16,12 +16,22 @@ pub(crate) enum MltColumnType {
 pub(crate) struct MltColumnModel {
     pub key: String,
     pub column_type: MltColumnType,
+    pub value_count: usize,
+    pub observed_type_count: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MltGeometryMix {
+    pub points: usize,
+    pub lines: usize,
+    pub polygons: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MltLayerModel {
     pub name: String,
     pub feature_count: usize,
+    pub geometry_mix: MltGeometryMix,
     pub columns: Vec<MltColumnModel>,
 }
 
@@ -73,7 +83,13 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
         total_features += feature_count;
 
         let mut columns: Vec<MltColumnModel> = Vec::new();
+        let mut geometry_mix = MltGeometryMix::default();
         for feature in layer.features() {
+            match feature.geom_type {
+                crate::mvt::GeomType::Point => geometry_mix.points += 1,
+                crate::mvt::GeomType::LineString => geometry_mix.lines += 1,
+                crate::mvt::GeomType::Polygon => geometry_mix.polygons += 1,
+            }
             for &(k_idx, v_idx) in &feature.tags {
                 let Some(key) = layer.key(k_idx) else { continue };
                 let Some(value) = layer.value(v_idx) else {
@@ -81,13 +97,17 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
                 };
                 let value_ty = value_type(value);
                 if let Some(existing) = columns.iter_mut().find(|c| c.key == key) {
+                    existing.value_count += 1;
                     if existing.column_type != value_ty {
                         existing.column_type = MltColumnType::Mixed;
+                        existing.observed_type_count = 2;
                     }
                 } else {
                     columns.push(MltColumnModel {
                         key: key.to_string(),
                         column_type: value_ty,
+                        value_count: 1,
+                        observed_type_count: 1,
                     });
                 }
             }
@@ -97,6 +117,7 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
         out_layers.push(MltLayerModel {
             name: layer.name().to_string(),
             feature_count,
+            geometry_mix,
             columns,
         });
     }
@@ -158,14 +179,21 @@ mod tests {
         assert_eq!(model.feature_count, 2);
         assert_eq!(model.layers[0].name, "places");
         assert_eq!(model.layers[0].feature_count, 2);
+        assert_eq!(model.layers[0].geometry_mix.points, 2);
+        assert_eq!(model.layers[0].geometry_mix.lines, 0);
+        assert_eq!(model.layers[0].geometry_mix.polygons, 0);
         assert_eq!(model.layers[0].columns.len(), 2);
         assert_eq!(model.layers[0].columns[0].key, "kind");
         assert_eq!(model.layers[0].columns[0].column_type, MltColumnType::String);
+        assert_eq!(model.layers[0].columns[0].value_count, 2);
+        assert_eq!(model.layers[0].columns[0].observed_type_count, 1);
         assert_eq!(model.layers[0].columns[1].key, "population");
         assert_eq!(
             model.layers[0].columns[1].column_type,
             MltColumnType::Mixed
         );
+        assert_eq!(model.layers[0].columns[1].value_count, 2);
+        assert_eq!(model.layers[0].columns[1].observed_type_count, 2);
     }
 
     #[test]
@@ -188,5 +216,111 @@ mod tests {
                 assert_eq!(feature_count, 1);
             }
         }
+    }
+
+    #[test]
+    fn build_tile_model_tracks_geometry_mix_and_sparse_columns() {
+        let mut layer = LayerBuilder::new("mixed");
+        let key_name = layer.intern_key("name");
+        let key_level = layer.intern_key("level");
+        let v_name = layer.intern_value(Value::String("main".to_string()));
+        let v_level = layer.intern_value(Value::UInt(5));
+
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::Point,
+            geometry: point_geom(),
+            tags: vec![(key_name, v_name)],
+        });
+        layer.add_feature(Feature {
+            id: Some(2),
+            geom_type: GeomType::LineString,
+            geometry: vec![9, 0, 0, 10, 2, 0],
+            tags: vec![(key_level, v_level)],
+        });
+        layer.add_feature(Feature {
+            id: Some(3),
+            geom_type: GeomType::Polygon,
+            geometry: vec![9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15],
+            tags: vec![],
+        });
+
+        let model = build_tile_model(&[&layer]);
+        let lm = &model.layers[0];
+        assert_eq!(lm.geometry_mix.points, 1);
+        assert_eq!(lm.geometry_mix.lines, 1);
+        assert_eq!(lm.geometry_mix.polygons, 1);
+        // Columns sorted by key.
+        assert_eq!(lm.columns[0].key, "level");
+        assert_eq!(lm.columns[1].key, "name");
+        // Each key appears on one feature only.
+        assert_eq!(lm.columns[0].value_count, 1);
+        assert_eq!(lm.columns[1].value_count, 1);
+    }
+
+    #[test]
+    fn build_tile_model_maps_all_value_types() {
+        let mut layer = LayerBuilder::new("types");
+        let ks = layer.intern_key("s");
+        let kf = layer.intern_key("f");
+        let kd = layer.intern_key("d");
+        let ki = layer.intern_key("i");
+        let ku = layer.intern_key("u");
+        let ksi = layer.intern_key("si");
+        let kb = layer.intern_key("b");
+
+        let vs = layer.intern_value(Value::String("a".to_string()));
+        let vf = layer.intern_value(Value::Float(1.5));
+        let vd = layer.intern_value(Value::Double(2.5));
+        let vi = layer.intern_value(Value::Int(-3));
+        let vu = layer.intern_value(Value::UInt(4));
+        let vsi = layer.intern_value(Value::SInt(-5));
+        let vb = layer.intern_value(Value::Bool(true));
+
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::Point,
+            geometry: point_geom(),
+            tags: vec![
+                (ks, vs),
+                (kf, vf),
+                (kd, vd),
+                (ki, vi),
+                (ku, vu),
+                (ksi, vsi),
+                (kb, vb),
+            ],
+        });
+
+        let model = build_tile_model(&[&layer]);
+        let cols = &model.layers[0].columns;
+        assert_eq!(
+            cols.iter().find(|c| c.key == "s").map(|c| c.column_type),
+            Some(MltColumnType::String)
+        );
+        assert_eq!(
+            cols.iter().find(|c| c.key == "f").map(|c| c.column_type),
+            Some(MltColumnType::Float)
+        );
+        assert_eq!(
+            cols.iter().find(|c| c.key == "d").map(|c| c.column_type),
+            Some(MltColumnType::Double)
+        );
+        assert_eq!(
+            cols.iter().find(|c| c.key == "i").map(|c| c.column_type),
+            Some(MltColumnType::Int)
+        );
+        assert_eq!(
+            cols.iter().find(|c| c.key == "u").map(|c| c.column_type),
+            Some(MltColumnType::UInt)
+        );
+        assert_eq!(
+            cols.iter().find(|c| c.key == "si").map(|c| c.column_type),
+            Some(MltColumnType::SInt)
+        );
+        assert_eq!(
+            cols.iter().find(|c| c.key == "b").map(|c| c.column_type),
+            Some(MltColumnType::Bool)
+        );
     }
 }
