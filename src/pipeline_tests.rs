@@ -338,6 +338,86 @@ fn relation_shared_vertex_keys_detects_shared_closed_way_vertices() {
 }
 
 #[test]
+fn relation_shared_vertex_keys_quantization_near_equal_points_share_key() {
+    let base = Point { x: 0.500_000_000_000, y: 0.2 };
+    let near = Point { x: 0.500_000_000_000_4, y: 0.2 }; // +0.4e-12
+    assert_eq!(
+        merc_point_key(&base),
+        merc_point_key(&near),
+        "near-equal points should quantize to same key"
+    );
+
+    let member_ways = vec![
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![
+                Point { x: 0.1, y: 0.1 },
+                base,
+                Point { x: 0.1, y: 0.3 },
+                Point { x: 0.1, y: 0.1 },
+            ],
+        },
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![
+                Point { x: 0.9, y: 0.1 },
+                near,
+                Point { x: 0.9, y: 0.3 },
+                Point { x: 0.9, y: 0.1 },
+            ],
+        },
+    ];
+    let keys = relation_shared_vertex_keys(&member_ways);
+    assert!(
+        keys.contains(&merc_point_key(&base)),
+        "shared key should include quantized near-equal vertex"
+    );
+    assert_eq!(keys.len(), 1);
+}
+
+#[test]
+fn relation_shared_vertex_keys_quantization_boundary_distinguishes_points() {
+    let base = Point { x: 0.500_000_000_000, y: 0.2 };
+    let far = Point { x: 0.500_000_000_000_6, y: 0.2 }; // +0.6e-12
+    assert_ne!(
+        merc_point_key(&base),
+        merc_point_key(&far),
+        "points beyond rounding half-step should quantize differently"
+    );
+
+    let member_ways = vec![
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![
+                Point { x: 0.1, y: 0.1 },
+                base,
+                Point { x: 0.1, y: 0.3 },
+                Point { x: 0.1, y: 0.1 },
+            ],
+        },
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![
+                Point { x: 0.9, y: 0.1 },
+                far,
+                Point { x: 0.9, y: 0.3 },
+                Point { x: 0.9, y: 0.1 },
+            ],
+        },
+    ];
+    let keys = relation_shared_vertex_keys(&member_ways);
+    assert!(
+        !keys.contains(&merc_point_key(&base)),
+        "non-shared quantized vertex should not be marked shared"
+    );
+    assert!(
+        !keys.contains(&merc_point_key(&far)),
+        "non-shared quantized vertex should not be marked shared"
+    );
+    assert!(keys.is_empty());
+}
+
+#[test]
 fn unwrap_antimeridian_path_keeps_crossing_segment_local() {
     let mut pts = vec![
         Point { x: 0.995, y: 0.4 },

@@ -240,10 +240,10 @@
   the two-pass algorithm converges, but broken/ambiguous ones can produce different ring
   assignments between runs. Replace with `FxHashMap` (already used in mvt.rs) or sort chains
   before joining (Planetiler #788).
-- [ ] `multipolygon.rs` determinism hardening follow-up: current `ring_sort_key`
+- [x] `multipolygon.rs` determinism hardening follow-up: current `ring_sort_key`
   (bbox + ring length) is not unique, so tied rings can still preserve input-order
   differences. Use a canonical full-ring comparator/fingerprint for stable ordering.
-- [ ] Strengthen multipolygon determinism tests: compare full assembled ring coordinate
+- [x] Strengthen multipolygon determinism tests: compare full assembled ring coordinate
   sequences (or canonical fingerprints), not only coarse `ring_sort_key` equality.
 - [x] Pre-quantization polygon validity: validate/repair polygon rings before snapping to tile
   grid coordinates. Invalid polygons that survive clipping+simplification can cascade into
@@ -293,7 +293,7 @@
   vertex identity retention, not only increased encoded command counts.
 - [x] Relation multipolygon shared-vertex preservation tests still infer success mostly via
   command-count deltas; add direct emitted-geometry vertex identity assertions.
-- [ ] Add precision-boundary tests for `relation_shared_vertex_keys` quantization to verify
+- [x] Add precision-boundary tests for `relation_shared_vertex_keys` quantization to verify
   near-equal coordinate handling and avoid accidental shared-key collisions.
   Remaining work: topology-aware lockstep simplification across polygon groups:
   detect shared edge chains, simplify each shared chain once, and reuse that

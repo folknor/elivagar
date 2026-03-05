@@ -462,8 +462,54 @@ fn ring_sort_key(ring: &[Point]) -> (i64, i64, i64, i64, usize) {
     (min_x, min_y, max_x, max_y, ring.len())
 }
 
+fn compare_ring_rotations(ring: &[Point], i: usize, j: usize) -> std::cmp::Ordering {
+    let n = ring.len();
+    for k in 0..n {
+        let a = quantize(&ring[(i + k) % n]);
+        let b = quantize(&ring[(j + k) % n]);
+        let ord = a.cmp(&b);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn normalize_ring_start(ring: &mut [Point]) {
+    if ring.len() < 2 {
+        return;
+    }
+    let mut best = 0usize;
+    for i in 1..ring.len() {
+        if compare_ring_rotations(ring, i, best) == std::cmp::Ordering::Less {
+            best = i;
+        }
+    }
+    if best > 0 {
+        ring.rotate_left(best);
+    }
+}
+
+fn compare_rings_lex(a: &[Point], b: &[Point]) -> std::cmp::Ordering {
+    let n = a.len().min(b.len());
+    for i in 0..n {
+        let ord = quantize(&a[i]).cmp(&quantize(&b[i]));
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
 fn sort_rings_deterministic(rings: &mut [Vec<Point>]) {
-    rings.sort_by_key(|r| ring_sort_key(r));
+    for ring in rings.iter_mut() {
+        normalize_ring_start(ring);
+    }
+    rings.sort_by(|a, b| {
+        ring_sort_key(a)
+            .cmp(&ring_sort_key(b))
+            .then_with(|| compare_rings_lex(a, b))
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +530,10 @@ mod tests {
             role: WayRole::from_str(role),
             coords,
         }
+    }
+
+    fn ring_keys(ring: &[Point]) -> Vec<(i64, i64)> {
+        ring.iter().map(quantize).collect()
     }
 
     // --- point_in_polygon ---
@@ -782,9 +832,11 @@ mod tests {
         assert_eq!(a.polygons.len(), b.polygons.len());
         for ((a_outer, a_inners), (b_outer, b_inners)) in a.polygons.iter().zip(b.polygons.iter()) {
             assert_eq!(ring_sort_key(a_outer), ring_sort_key(b_outer));
+            assert_eq!(ring_keys(a_outer), ring_keys(b_outer));
             assert_eq!(a_inners.len(), b_inners.len());
             for (ai, bi) in a_inners.iter().zip(b_inners.iter()) {
                 assert_eq!(ring_sort_key(ai), ring_sort_key(bi));
+                assert_eq!(ring_keys(ai), ring_keys(bi));
             }
         }
     }
