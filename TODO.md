@@ -273,7 +273,7 @@
   Tippecanoe (#99) had bugs in shared-node preservation mode; this adds explicit coverage.
 - [x] Add end-to-end line-emission tests that assert pinned shared nodes survive
   zoom-level simplification in emitted geometry.
-- [ ] Shared-node detection is block-local by design; add explicit coverage/docs for
+- [x] Shared-node detection is block-local by design; add explicit coverage/docs for
   cross-block junction behavior limits so regression expectations are clear.
 - [ ] Shared-edge simplification (adjacent polygons): independent simplification of polygons
   that share an edge can still produce slivers/gaps along shared boundaries
@@ -287,7 +287,7 @@
   simplification for (1) line features, (2) closed-way polygons, and
   (3) relation-derived multipolygons. This reduces catastrophic drift but does
   not guarantee edge-identical output between neighboring polygons.
-- [ ] Add explicit relation-derived multipolygon shared-vertex preservation tests
+- [x] Add explicit relation-derived multipolygon shared-vertex preservation tests
   (closed-way polygon coverage exists; relation path needs direct regression checks).
 - [x] Strengthen shared-vertex simplification assertions to validate specific pinned
   vertex identity retention, not only increased encoded command counts.

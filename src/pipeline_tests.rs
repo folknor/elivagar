@@ -398,6 +398,45 @@ fn block_shared_node_annotation_marks_closed_ring_shared_vertices() {
 }
 
 #[test]
+fn block_shared_node_annotation_does_not_detect_cross_block_junctions() {
+    let mut block_a = vec![RawWay {
+        way_id: 100,
+        node_refs: vec![1, 20, 2],
+        preserve_node_refs: Vec::new(),
+        coords_e7: Vec::new(),
+        tags: Vec::new(),
+    }];
+    let mut block_b = vec![RawWay {
+        way_id: 101,
+        node_refs: vec![3, 20, 4],
+        preserve_node_refs: Vec::new(),
+        coords_e7: Vec::new(),
+        tags: Vec::new(),
+    }];
+
+    annotate_block_shared_node_refs(&mut block_a);
+    annotate_block_shared_node_refs(&mut block_b);
+
+    assert!(
+        block_a[0].preserve_node_refs.is_empty(),
+        "cross-block shared interior junctions are intentionally not detected"
+    );
+    assert!(
+        block_b[0].preserve_node_refs.is_empty(),
+        "cross-block shared interior junctions are intentionally not detected"
+    );
+
+    let mut combined = vec![block_a.remove(0), block_b.remove(0)];
+    annotate_block_shared_node_refs(&mut combined);
+    assert_eq!(
+        combined[0].preserve_node_refs,
+        vec![20],
+        "same data in one block should detect the shared interior node"
+    );
+    assert_eq!(combined[1].preserve_node_refs, vec![20]);
+}
+
+#[test]
 fn relation_shared_vertex_keys_detects_shared_closed_way_vertices() {
     let member_ways = vec![
         MemberWay {
@@ -1441,6 +1480,100 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     assert!(
         !plain_pts.contains(&expected),
         "un-pinned geometry should be allowed to drop non-required vertex {expected:?}"
+    );
+}
+
+#[test]
+fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let outer = vec![
+        Point { x: 0.1, y: 0.1 },
+        Point { x: 0.3, y: 0.10001 },
+        Point { x: 0.5, y: 0.10002 }, // should be preserved via relation-derived key
+        Point { x: 0.7, y: 0.10001 },
+        Point { x: 0.9, y: 0.1 },
+        Point { x: 0.9, y: 0.9 },
+        Point { x: 0.1, y: 0.9 },
+        Point { x: 0.1, y: 0.1 },
+    ];
+    let relation_members = vec![
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 0.5, y: 0.10002 },
+                Point { x: 0.0, y: 0.2 },
+            ],
+        },
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![
+                Point { x: 1.0, y: 0.0 },
+                Point { x: 0.5, y: 0.10002 },
+                Point { x: 1.0, y: 0.2 },
+            ],
+        },
+    ];
+    let shared_keys = relation_shared_vertex_keys(&relation_members);
+    assert!(
+        shared_keys.contains(&merc_point_key(&Point { x: 0.5, y: 0.10002 })),
+        "relation-derived shared key should include the target outer vertex"
+    );
+
+    let mut records_plain = Vec::new();
+    let mut records_pinned = Vec::new();
+    let mut emit_plain = MultipolygonEmitScratch::new();
+    let mut emit_pinned = MultipolygonEmitScratch::new();
+    let mut simp_plain = geometry::SimplifyMultiScratch::new();
+    let mut simp_pinned = geometry::SimplifyMultiScratch::new();
+
+    emit_multipolygon_feature(
+        991,
+        &outer,
+        &[],
+        None,
+        &m,
+        0,
+        0,
+        &mut records_plain,
+        &mut emit_plain,
+        &mut simp_plain,
+    );
+    emit_multipolygon_feature(
+        991,
+        &outer,
+        &[],
+        Some(&shared_keys),
+        &m,
+        0,
+        0,
+        &mut records_pinned,
+        &mut emit_pinned,
+        &mut simp_pinned,
+    );
+
+    assert_eq!(records_plain.len(), 1);
+    assert_eq!(records_pinned.len(), 1);
+    let plain_lb = decode_to_layer(&records_plain[0].data);
+    let pinned_lb = decode_to_layer(&records_pinned[0].data);
+    let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
+    let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
+    let mut target_tc = Vec::new();
+    geometry::to_tile_coords_into(
+        &mut target_tc,
+        &[Point { x: 0.5, y: 0.10002 }],
+        0,
+        0,
+        0,
+    );
+    let expected = target_tc[0];
+    assert!(
+        pinned_pts.contains(&expected),
+        "relation-derived pinned geometry should retain shared vertex {expected:?}"
+    );
+    assert!(
+        !plain_pts.contains(&expected),
+        "without relation-derived shared keys, vertex may be simplified away"
     );
 }
 

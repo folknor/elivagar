@@ -1272,6 +1272,7 @@ fn estimate_raw_ways_bytes(ways: &[RawWay]) -> usize {
 /// This preserves common junction vertices during DP simplification without global
 /// topology indexing. Block-local detection catches most local road intersections
 /// because OSM PBF primitive blocks are spatially clustered.
+/// Limitation: cross-block shared nodes are intentionally not detected here.
 fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
     let mut counts: FxHashMap<i64, u8> = FxHashMap::default();
     for w in raw_ways.iter() {
