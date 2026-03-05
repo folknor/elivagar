@@ -88,11 +88,11 @@
   Add multi-zoom simplification/retention checks to guard zoom-dependent behavior.
 - [x] `inspect.rs`: read-only diagnostic tool tested on root-only and leaf-directory layouts,
   and migrated to use `pmtiles_reader.rs` shared helpers to reduce parsing duplication.
-- [ ] `inspect.rs`: strengthen tests beyond "no error" smoke coverage. Add output assertions
+- [x] `inspect.rs`: strengthen tests beyond "no error" smoke coverage. Add output assertions
   for header/section reporting so formatting/field regressions are caught.
-- [ ] `inspect.rs`: add malformed metadata payload tests (e.g., non-gzip bytes with
+- [x] `inspect.rs`: add malformed metadata payload tests (e.g., non-gzip bytes with
   non-zero metadata length) to lock down graceful error-tolerant inspect behavior.
-- [ ] `inspect.rs`: add payload-contract fallback tests for cases where metadata is absent
+- [x] `inspect.rs`: add payload-contract fallback tests for cases where metadata is absent
   or unreadable, ensuring header-vs-metadata source reporting stays correct.
 - [x] `sort.rs`: `SortWriter::resume` / `adopt_chunk_files` now directly tested.
   Coverage includes: checkpoint resume success, missing required chunk failure,
@@ -125,7 +125,7 @@
   absolute-coordinate limit checks.
 - [ ] `verify.rs` geometry anomaly checks: add seam-tile vs non-seam threshold tests
   to lock `MVT_DELTA_LIMIT_SEAM` and `MVT_DELTA_LIMIT` behavior.
-- [ ] `tests/pmtiles_roundtrip.rs` metadata corruption helper only supports in-place
+- [x] `tests/pmtiles_roundtrip.rs` metadata corruption helper only supports in-place
   replacements that fit the existing metadata section. Add explicit oversize-replacement
   negative-path coverage for future corruption test scenarios.
 - [ ] `pmtiles_reader.rs`: add decode-directory malformed `tile_id` delta overflow test.
@@ -134,16 +134,16 @@
 - [x] Per-attribute minzoom filtering: `encode_attrs_bytes()` in wire_format.rs filters
   attributes by zoom. Verify with tests that per-attribute zoom gates actually take effect
   and don't leak attributes to wrong zoom levels (tilemaker #671).
-- [ ] `wire_format.rs` attr-count cap test checks `tags.len()==255` but not full stream
+- [x] `wire_format.rs` attr-count cap test checks `tags.len()==255` but not full stream
   consistency under >255 attrs. Add decode-boundary assertions for capped payload parsing.
-- [ ] `wire_format.rs`: add combined cap+minzoom interaction test (large attr list with
+- [x] `wire_format.rs`: add combined cap+minzoom interaction test (large attr list with
   mixed gated/ungated attrs) to lock down filtering behavior under truncation.
-- [ ] `wire_format.rs` minzoom tests currently assert some attributes by positional tag index.
+- [x] `wire_format.rs` minzoom tests currently assert some attributes by positional tag index.
   Make these assertions order-insensitive (key/value membership) so benign tag-order changes
   don't cause false regressions in filtering tests.
-- [ ] `sort.rs`: add resume coverage for `start_chunk=0` with pre-existing stale chunks
+- [x] `sort.rs`: add resume coverage for `start_chunk=0` with pre-existing stale chunks
   present on disk. Current empty-checkpoint test uses an empty directory only.
-- [ ] `sort.rs`: add adopt-chunk negative-path tests (missing/corrupt adopted chunk files)
+- [x] `sort.rs`: add adopt-chunk negative-path tests (missing/corrupt adopted chunk files)
   to lock down merge-phase error surfacing behavior.
 
 ## Refactoring opportunities
@@ -419,9 +419,9 @@
   PBF filename in the metadata JSON so consumers can trace data freshness. Currently only
   emits schema info (name, format, layers). Planetiler #120 added this for MBTiles; same
   applies to PMTiles.
-- [ ] `pmtiles_writer.rs`: add metadata JSON escape-path tests for `source_pbf` values with
+- [x] `pmtiles_writer.rs`: add metadata JSON escape-path tests for `source_pbf` values with
   quotes, backslashes, and control characters.
-- [ ] Add end-to-end coverage for provenance propagation through `phase_assemble` (source
+- [x] Add end-to-end coverage for provenance propagation through `phase_assemble` (source
   filename + replication timestamp) rather than only `build_metadata` unit tests.
 - [ ] Add end-to-end pipeline assertions that selected `tile_format` produces consistent
   PMTiles header + metadata tile contract fields in generated archives.

@@ -783,6 +783,32 @@ mod tests {
     }
 
     #[test]
+    fn resume_start_chunk_zero_deletes_stale_chunks() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        // Seed stale chunks from a previous interrupted run.
+        let mut seeded = SortWriter::new(dir.path(), 120).unwrap();
+        for i in 0u64..200 {
+            seeded.push(SortRecord { key: i, data: Box::from(i.to_le_bytes().as_slice()) }).unwrap();
+        }
+        assert!(seeded.chunk_count() >= 2, "expected stale chunks to exist");
+        let _ = seeded.finish().unwrap();
+        assert!(dir.path().join("chunk_0000.bin").exists());
+
+        // Empty-checkpoint resume should prune all stale chunks and start clean.
+        let resumed = SortWriter::resume(dir.path(), 120, 0).unwrap();
+        assert_eq!(resumed.chunk_count(), 0);
+        assert!(!dir.path().join("chunk_0000.bin").exists());
+        assert!(!dir.path().join("chunk_0001.bin").exists());
+
+        // New writes should restart naming from chunk_0000.bin.
+        let mut resumed = resumed;
+        resumed.push(SortRecord { key: 7, data: Box::from(7u64.to_le_bytes().as_slice()) }).unwrap();
+        resumed.flush().unwrap();
+        assert!(dir.path().join("chunk_0000.bin").exists());
+    }
+
+    #[test]
     fn adopt_chunk_files_updates_count_and_merges_records() {
         let dir = tempfile::tempdir().expect("create tempdir");
 
@@ -814,5 +840,27 @@ mod tests {
         let reader = writer.finish().unwrap();
         let keys = collect_keys(reader);
         assert_eq!(keys, vec![5, 10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn adopt_chunk_files_missing_or_corrupt_surfaces_error() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut writer = SortWriter::new(dir.path(), 10_000_000).unwrap();
+        writer.push(SortRecord { key: 1, data: Box::from(1u64.to_le_bytes().as_slice()) }).unwrap();
+
+        let missing = dir.path().join("does_not_exist.bin");
+        writer.adopt_chunk_files(vec![missing]);
+        let missing_err = writer.finish().err().expect("missing adopted chunk should fail");
+        assert_eq!(missing_err.kind(), io::ErrorKind::NotFound);
+
+        let mut writer2 = SortWriter::new(dir.path(), 10_000_000).unwrap();
+        writer2.push(SortRecord { key: 2, data: Box::from(2u64.to_le_bytes().as_slice()) }).unwrap();
+
+        // Corrupt chunk header (too short for u32 record count).
+        let corrupt = dir.path().join("corrupt.bin");
+        std::fs::write(&corrupt, [0xAA, 0xBB]).unwrap();
+        writer2.adopt_chunk_files(vec![corrupt]);
+        let corrupt_err = writer2.finish().err().expect("corrupt adopted chunk should fail");
+        assert_eq!(corrupt_err.kind(), io::ErrorKind::UnexpectedEof);
     }
 }

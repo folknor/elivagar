@@ -299,6 +299,28 @@ fn test_metadata_json_with_source_provenance() {
 }
 
 #[test]
+fn test_metadata_json_escapes_source_pbf_special_chars() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let source = "input\\\"name\nline\twith\rcontrols\\path.osm.pbf";
+    let json = build_metadata(
+        &config,
+        TileDataFormat::Mvt,
+        TileDataCompression::Gzip,
+        Some(source),
+        None,
+    );
+
+    // Escaped JSON should parse and roundtrip to the exact original filename.
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["source_pbf"], source);
+}
+
+#[test]
 fn test_metadata_json_mlt_contract() {
     let config = PmtilesConfig {
         min_zoom: 0,

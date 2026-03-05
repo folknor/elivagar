@@ -463,6 +463,16 @@ mod tests {
     use crate::mvt::{GeomType, LayerBuilder, Value};
     use crate::shortbread::AttrValue;
     use std::borrow::Cow;
+    use std::collections::HashMap;
+
+    fn feature_tag_map(layer: &LayerBuilder, feature_idx: usize) -> HashMap<String, Value> {
+        let mut out = HashMap::new();
+        let f = layer.test_feature(feature_idx);
+        for (k, v) in &f.tags {
+            out.insert(layer.test_key(*k).to_string(), layer.test_value(*v).clone());
+        }
+        out
+    }
 
     /// Test 1: Full roundtrip — encode a feature with all 4 attribute types,
     /// decode it via `add_feature_to_layer`, and verify every field matches.
@@ -686,10 +696,12 @@ mod tests {
         let mut gp = Vec::new();
         let mut tp = Vec::new();
         add_feature_to_layer(&mut layer_z9, &encoded_z9, &mut gp, &mut tp);
-        let f9 = layer_z9.test_feature(0);
-        assert_eq!(f9.tags.len(), 2, "z9 must not include min_zoom=10 attrs");
-        assert_eq!(layer_z9.test_key(f9.tags[0].0), "kind");
-        assert_eq!(layer_z9.test_key(f9.tags[1].0), "bridge");
+        let z9_tags = feature_tag_map(&layer_z9, 0);
+        assert_eq!(z9_tags.len(), 2, "z9 must not include min_zoom=10 attrs");
+        assert_eq!(z9_tags.get("kind"), Some(&Value::String("city".to_string())));
+        assert_eq!(z9_tags.get("bridge"), Some(&Value::Bool(true)));
+        assert!(!z9_tags.contains_key("admin_level"));
+        assert!(!z9_tags.contains_key("height"));
 
         // At boundary: min_zoom=10 attrs appear.
         let encoded_z10 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 10);
@@ -697,12 +709,12 @@ mod tests {
         let mut gp2 = Vec::new();
         let mut tp2 = Vec::new();
         add_feature_to_layer(&mut layer_z10, &encoded_z10, &mut gp2, &mut tp2);
-        let f10 = layer_z10.test_feature(0);
-        assert_eq!(f10.tags.len(), 4, "z10 should include all attrs");
-        assert_eq!(layer_z10.test_key(f10.tags[2].0), "admin_level");
-        assert_eq!(*layer_z10.test_value(f10.tags[2].1), Value::Int(6));
-        assert_eq!(layer_z10.test_key(f10.tags[3].0), "height");
-        assert_eq!(*layer_z10.test_value(f10.tags[3].1), Value::Double(42.0));
+        let z10_tags = feature_tag_map(&layer_z10, 0);
+        assert_eq!(z10_tags.len(), 4, "z10 should include all attrs");
+        assert_eq!(z10_tags.get("kind"), Some(&Value::String("city".to_string())));
+        assert_eq!(z10_tags.get("bridge"), Some(&Value::Bool(true)));
+        assert_eq!(z10_tags.get("admin_level"), Some(&Value::Int(6)));
+        assert_eq!(z10_tags.get("height"), Some(&Value::Double(42.0)));
     }
 
     /// Test 7: Filtered attributes do not leak when the first attr in input is gated out.
@@ -721,10 +733,11 @@ mod tests {
         let mut tp = Vec::new();
         add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
 
-        let f = layer.test_feature(0);
-        assert_eq!(f.tags.len(), 2, "gated leading attr should be excluded");
-        assert_eq!(layer.test_key(f.tags[0].0), "kind");
-        assert_eq!(layer.test_key(f.tags[1].0), "bridge");
+        let tags = feature_tag_map(&layer, 0);
+        assert_eq!(tags.len(), 2, "gated leading attr should be excluded");
+        assert_eq!(tags.get("kind"), Some(&Value::String("city".to_string())));
+        assert_eq!(tags.get("bridge"), Some(&Value::Bool(false)));
+        assert!(!tags.contains_key("surface"));
     }
 
     /// Test 8: Pre-encoded attrs path preserves minzoom filtering semantics.
@@ -784,6 +797,80 @@ mod tests {
 
         let f = layer.test_feature(0);
         assert_eq!(f.tags.len(), 255, "attrs must be capped to u8::MAX entries");
+    }
+
+    #[test]
+    fn attrs_cap_boundaries_remain_decodeable_with_mixed_values() {
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+        let attrs: Vec<shortbread::Attr> = (0..300)
+            .map(|i| {
+                if i < 255 {
+                    ("bridge", AttrValue::Bool(false), 0)
+                } else {
+                    ("bridge", AttrValue::Bool(true), 0)
+                }
+            })
+            .collect();
+
+        let encoded = encode_feature_data(77, GeomType::Point, &geom_cmds, &attrs, 14);
+        let mut layer = LayerBuilder::new("test");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+
+        let f = layer.test_feature(0);
+        assert_eq!(f.tags.len(), 255);
+        for (_, v) in &f.tags {
+            assert_eq!(*layer.test_value(*v), Value::Bool(false));
+        }
+    }
+
+    #[test]
+    fn attrs_cap_and_minzoom_interaction_keeps_expected_prefix() {
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+        let mut attrs: Vec<shortbread::Attr> = Vec::new();
+
+        // 220 base attrs always present.
+        for _ in 0..220 {
+            attrs.push(("kind", AttrValue::Str(Cow::Borrowed("city")), 0));
+        }
+        // 120 attrs gated to z12.
+        for _ in 0..120 {
+            attrs.push(("name", AttrValue::Str(Cow::Borrowed("late")), 12));
+        }
+
+        // At z11, gated attrs are excluded and no cap is hit.
+        let encoded_z11 = encode_feature_data(10, GeomType::Point, &geom_cmds, &attrs, 11);
+        let mut layer_z11 = LayerBuilder::new("z11");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer_z11, &encoded_z11, &mut gp, &mut tp);
+        let f11 = layer_z11.test_feature(0);
+        assert_eq!(f11.tags.len(), 220);
+        for (k, _) in &f11.tags {
+            assert_eq!(layer_z11.test_key(*k), "kind");
+        }
+
+        // At z12, both groups are eligible but capped at 255 total entries.
+        let encoded_z12 = encode_feature_data(11, GeomType::Point, &geom_cmds, &attrs, 12);
+        let mut layer_z12 = LayerBuilder::new("z12");
+        let mut gp2 = Vec::new();
+        let mut tp2 = Vec::new();
+        add_feature_to_layer(&mut layer_z12, &encoded_z12, &mut gp2, &mut tp2);
+        let f12 = layer_z12.test_feature(0);
+        assert_eq!(f12.tags.len(), 255);
+        let kind_count = f12
+            .tags
+            .iter()
+            .filter(|(k, _)| layer_z12.test_key(*k) == "kind")
+            .count();
+        let name_count = f12
+            .tags
+            .iter()
+            .filter(|(k, _)| layer_z12.test_key(*k) == "name")
+            .count();
+        assert_eq!(kind_count, 220);
+        assert_eq!(name_count, 35);
     }
 
 }

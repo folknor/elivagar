@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use elivagar::pmtiles_reader::{decode_mvt_layers, PmtilesReader};
@@ -120,25 +120,34 @@ fn gzip_bytes(data: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-fn rewrite_metadata_json_in_place(path: &Path, json: &str) {
-    let mut reader = PmtilesReader::open(path).unwrap();
+fn try_rewrite_metadata_json_in_place(path: &Path, json: &str) -> io::Result<()> {
+    let reader = PmtilesReader::open(path)?;
     let metadata_offset = reader.metadata_offset();
     let metadata_length = reader.metadata_length();
     let replacement = gzip_bytes(json.as_bytes());
-    assert!(
-        replacement.len() <= metadata_length as usize,
-        "replacement metadata must fit existing section ({} > {})",
-        replacement.len(),
-        metadata_length
-    );
+    if replacement.len() > metadata_length as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "replacement metadata must fit existing section ({} > {})",
+                replacement.len(),
+                metadata_length
+            ),
+        ));
+    }
 
-    let mut file = OpenOptions::new().read(true).write(true).open(path).unwrap();
-    file.seek(SeekFrom::Start(metadata_offset)).unwrap();
-    file.write_all(&replacement).unwrap();
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    file.seek(SeekFrom::Start(metadata_offset))?;
+    file.write_all(&replacement)?;
     let pad = metadata_length as usize - replacement.len();
     if pad > 0 {
-        file.write_all(&vec![0u8; pad]).unwrap();
+        file.write_all(&vec![0u8; pad])?;
     }
+    Ok(())
+}
+
+fn rewrite_metadata_json_in_place(path: &Path, json: &str) {
+    try_rewrite_metadata_json_in_place(path, json).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -653,6 +662,51 @@ fn test_verify_fail_metadata_vector_layers_schema() {
     assert!(
         msg.contains("vector_layers entry missing 'id' string"),
         "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn test_metadata_rewrite_rejects_oversized_replacement() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 0,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+
+    let mut writer = PmtilesWriter::new(config);
+    let mvt = encode_mvt_tile(&["streets"]);
+    writer.add_tile(0, 0, 0, &gzip_bytes(&mvt)).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("verify_oversize_metadata_rewrite.pmtiles");
+    writer.write_to(&path).unwrap();
+
+    let reader = PmtilesReader::open(&path).unwrap();
+    let metadata_length = reader.metadata_length() as usize;
+
+    // Build increasingly larger low-compressibility JSON until the gzipped
+    // replacement exceeds the archive's metadata section.
+    let mut item_count = 512usize;
+    let oversized_json = loop {
+        let mut items = String::new();
+        for i in 0..item_count {
+            let ch = char::from_u32(33 + ((i % 90) as u32)).unwrap();
+            items.push_str(&format!(r#""{:08x}-{}-{:08x}","#, i, ch, i.wrapping_mul(1_048_583)));
+        }
+        let candidate = format!(r#"{{"vector_layers":[{{"id":"streets"}}],"pad":[{items}]}}"#);
+        if gzip_bytes(candidate.as_bytes()).len() > metadata_length {
+            break candidate;
+        }
+        item_count *= 2;
+    };
+
+    let err = try_rewrite_metadata_json_in_place(&path, &oversized_json)
+        .expect_err("oversize replacement should fail");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string().contains("replacement metadata must fit existing section"),
+        "unexpected error: {err}"
     );
 }
 

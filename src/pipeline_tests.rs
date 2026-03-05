@@ -1,7 +1,29 @@
 use super::*;
 use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
+use pbfhogg::block_builder;
+use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 use smallvec::smallvec;
 use std::borrow::Cow;
+use std::fs::File;
+
+fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
+    let mut writer = sort::SortWriter::new(chunks_dir, 1024).expect("create sort writer");
+    let attrs: Vec<crate::shortbread::Attr> = vec![
+        ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
+    ];
+    let feature = crate::wire_format::encode_feature_data(
+        1,
+        mvt::GeomType::Point,
+        &[9, 0, 0],
+        &attrs,
+        14,
+    );
+    writer.push(SortRecord {
+        key: sort::make_sort_key(pmtiles_writer::xy_to_tile_id(0, 0, 0), Layer::Pois as u8, 0),
+        data: feature,
+    }).expect("push sort record");
+    writer.finish().expect("finish sort writer")
+}
 
 #[test]
 fn flat_index_guard_sorted_large_allowed() {
@@ -346,6 +368,100 @@ fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
         Ok(encoded) => assert!(encoded.is_empty(), "empty tiles should be skipped"),
         Err(err) => panic!("mlt format should not fail for empty tile: {err}"),
     }
+}
+
+#[test]
+fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let chunks_dir = dir.path().join("chunks");
+    let output_path = dir.path().join("phase_assemble_meta.pmtiles");
+    let tmp_dir = dir.path().join("tmp");
+    std::fs::create_dir_all(&tmp_dir).expect("create tmp dir");
+    let mut sort_reader = one_tile_sort_reader(&chunks_dir);
+
+    let config = TilegenConfig {
+        pbf_path: dir.path().join("source-file.osm.pbf"),
+        output_path: output_path.clone(),
+        tmp_dir,
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean_shapefile: None,
+        ocean_simplified_shapefile: None,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: false,
+        allow_unsafe_flat_index: false,
+        threads: 1,
+        way_inflight_budget: 0,
+        rel_batch_budget: 0,
+        assemble_batch_budget: 0,
+        sort_chunk_size: 0,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mvt,
+    };
+
+    let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
+        phase_assemble(&mut sort_reader, &config).expect("assemble should succeed");
+
+    let mut reader = crate::pmtiles_reader::PmtilesReader::open(&output_path)
+        .expect("open generated pmtiles");
+    let metadata = reader.read_metadata().expect("read metadata");
+    let parsed: serde_json::Value = serde_json::from_str(&metadata).expect("parse metadata json");
+    assert_eq!(parsed["source_pbf"], "source-file.osm.pbf");
+    assert!(parsed.get("osmosis_replication_timestamp").is_none());
+}
+
+#[test]
+fn phase_assemble_propagates_replication_timestamp_to_metadata() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let chunks_dir = dir.path().join("chunks");
+    let output_path = dir.path().join("phase_assemble_meta_ts.pmtiles");
+    let tmp_dir = dir.path().join("tmp");
+    std::fs::create_dir_all(&tmp_dir).expect("create tmp dir");
+    let mut sort_reader = one_tile_sort_reader(&chunks_dir);
+
+    let pbf_path = dir.path().join("replication-source.osm.pbf");
+    let mut pbf_file = File::create(&pbf_path).expect("create pbf file");
+    let mut pbf_writer = PbfWriter::new(&mut pbf_file, PbfCompression::default());
+    let header = block_builder::HeaderBuilder::new()
+        .replication_timestamp(1_700_000_123)
+        .build()
+        .expect("build pbf header");
+    pbf_writer.write_header(&header).expect("write pbf header");
+    pbf_writer.flush().expect("flush pbf");
+
+    let config = TilegenConfig {
+        pbf_path,
+        output_path: output_path.clone(),
+        tmp_dir,
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean_shapefile: None,
+        ocean_simplified_shapefile: None,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: false,
+        allow_unsafe_flat_index: false,
+        threads: 1,
+        way_inflight_budget: 0,
+        rel_batch_budget: 0,
+        assemble_batch_budget: 0,
+        sort_chunk_size: 0,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mvt,
+    };
+
+    let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
+        phase_assemble(&mut sort_reader, &config).expect("assemble should succeed");
+
+    let mut reader = crate::pmtiles_reader::PmtilesReader::open(&output_path)
+        .expect("open generated pmtiles");
+    let metadata = reader.read_metadata().expect("read metadata");
+    let parsed: serde_json::Value = serde_json::from_str(&metadata).expect("parse metadata json");
+    assert_eq!(parsed["source_pbf"], "replication-source.osm.pbf");
+    assert_eq!(parsed["osmosis_replication_timestamp"], 1_700_000_123);
 }
 
 // -----------------------------------------------------------------------
