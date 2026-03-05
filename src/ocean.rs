@@ -704,21 +704,28 @@ mod tests {
         buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
     }
 
-    fn write_test_polygon_shapefile(path: &Path) {
-        // One polygon record: world-sized square in EPSG:3857 meters.
-        // Closed ring with 5 points.
-        let half_c = 20_037_508.343;
-        let points = [
-            (-half_c, -half_c),
-            (half_c, -half_c),
-            (half_c, half_c),
-            (-half_c, half_c),
-            (-half_c, -half_c),
-        ];
+    fn write_single_record_polygon_shapefile(path: &Path, parts: &[Vec<(f64, f64)>]) {
+        let num_parts = parts.len();
+        let num_points: usize = parts.iter().map(std::vec::Vec::len).sum();
+        assert!(num_parts > 0);
+        assert!(num_points > 0);
+
+        let mut xmin = f64::INFINITY;
+        let mut ymin = f64::INFINITY;
+        let mut xmax = f64::NEG_INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        for ring in parts {
+            for &(x, y) in ring {
+                xmin = xmin.min(x);
+                ymin = ymin.min(y);
+                xmax = xmax.max(x);
+                ymax = ymax.max(y);
+            }
+        }
 
         // Record content length (bytes):
-        // shape_type(4) + bbox(32) + num_parts(4) + num_points(4) + parts(4) + points(5*16)
-        let record_content_bytes = 4 + 32 + 4 + 4 + 4 + points.len() * 16;
+        // shape_type(4) + bbox(32) + num_parts(4) + num_points(4) + parts(num_parts*4) + points(num_points*16)
+        let record_content_bytes = 4 + 32 + 4 + 4 + num_parts * 4 + num_points * 16;
         let record_content_words =
             u32::try_from(record_content_bytes / 2).expect("record content length fits u32");
         let shp_file_len_words =
@@ -740,14 +747,14 @@ mod tests {
         write_u32_le(&mut shx, 28, 1000);
         write_u32_le(&mut shx, 32, 5);
         // Header bbox
-        write_f64_le(&mut shp, 36, -half_c);
-        write_f64_le(&mut shp, 44, -half_c);
-        write_f64_le(&mut shp, 52, half_c);
-        write_f64_le(&mut shp, 60, half_c);
-        write_f64_le(&mut shx, 36, -half_c);
-        write_f64_le(&mut shx, 44, -half_c);
-        write_f64_le(&mut shx, 52, half_c);
-        write_f64_le(&mut shx, 60, half_c);
+        write_f64_le(&mut shp, 36, xmin);
+        write_f64_le(&mut shp, 44, ymin);
+        write_f64_le(&mut shp, 52, xmax);
+        write_f64_le(&mut shp, 60, ymax);
+        write_f64_le(&mut shx, 36, xmin);
+        write_f64_le(&mut shx, 44, ymin);
+        write_f64_le(&mut shx, 52, xmax);
+        write_f64_le(&mut shx, 60, ymax);
 
         // shx index record
         write_u32_be(&mut shx, 100, 50); // .shp record offset in 16-bit words (100 bytes)
@@ -761,27 +768,70 @@ mod tests {
         // shp record content
         let rec = rec_header + 8;
         write_u32_le(&mut shp, rec, 5); // Polygon
-        write_f64_le(&mut shp, rec + 4, -half_c); // xmin
-        write_f64_le(&mut shp, rec + 12, -half_c); // ymin
-        write_f64_le(&mut shp, rec + 20, half_c); // xmax
-        write_f64_le(&mut shp, rec + 28, half_c); // ymax
-        write_u32_le(&mut shp, rec + 36, 1); // num_parts
+        write_f64_le(&mut shp, rec + 4, xmin); // xmin
+        write_f64_le(&mut shp, rec + 12, ymin); // ymin
+        write_f64_le(&mut shp, rec + 20, xmax); // xmax
+        write_f64_le(&mut shp, rec + 28, ymax); // ymax
+        write_u32_le(&mut shp, rec + 36, u32::try_from(num_parts).expect("part count fits u32")); // num_parts
         write_u32_le(
             &mut shp,
             rec + 40,
-            u32::try_from(points.len()).expect("point count fits u32"),
+            u32::try_from(num_points).expect("point count fits u32"),
         ); // num_points
-        write_u32_le(&mut shp, rec + 44, 0); // first part starts at point 0
+        let mut part_start = 0usize;
+        for (i, ring) in parts.iter().enumerate() {
+            write_u32_le(
+                &mut shp,
+                rec + 44 + i * 4,
+                u32::try_from(part_start).expect("part start fits u32"),
+            );
+            part_start += ring.len();
+        }
 
-        let mut p = rec + 48;
-        for (x, y) in points {
-            write_f64_le(&mut shp, p, x);
-            write_f64_le(&mut shp, p + 8, y);
-            p += 16;
+        let mut p = rec + 44 + num_parts * 4;
+        for ring in parts {
+            for &(x, y) in ring {
+                write_f64_le(&mut shp, p, x);
+                write_f64_le(&mut shp, p + 8, y);
+                p += 16;
+            }
         }
 
         fs::write(path, shp).unwrap();
         fs::write(path.with_extension("shx"), shx).unwrap();
+    }
+
+    fn write_test_polygon_shapefile(path: &Path) {
+        // One world-sized square in EPSG:3857 meters.
+        let half_c = 20_037_508.343;
+        let outer = vec![
+            (-half_c, -half_c),
+            (half_c, -half_c),
+            (half_c, half_c),
+            (-half_c, half_c),
+            (-half_c, -half_c),
+        ];
+        write_single_record_polygon_shapefile(path, &[outer]);
+    }
+
+    fn write_test_polygon_with_hole_shapefile(path: &Path) {
+        let half_c = 20_037_508.343;
+        let outer = vec![
+            (-half_c, -half_c),
+            (half_c, -half_c),
+            (half_c, half_c),
+            (-half_c, half_c),
+            (-half_c, -half_c),
+        ];
+        // Clockwise inner ring so parser classifies it as a hole.
+        let hole = vec![
+            (-half_c * 0.5, -half_c * 0.5),
+            (-half_c * 0.5, half_c * 0.5),
+            (half_c * 0.5, half_c * 0.5),
+            (half_c * 0.5, -half_c * 0.5),
+            (-half_c * 0.5, -half_c * 0.5),
+        ];
+        write_single_record_polygon_shapefile(path, &[outer, hole]);
     }
 
     // -----------------------------------------------------------------------
@@ -1015,5 +1065,121 @@ mod tests {
         .unwrap();
 
         assert_eq!(emitted, 0, "expected no ocean features for disjoint bounds");
+    }
+
+    #[test]
+    fn process_ocean_shapefile_handles_polygon_with_hole() {
+        let dir = tempfile::tempdir().unwrap();
+        let shp_path = dir.path().join("ocean_test_hole.shp");
+        write_test_polygon_with_hole_shapefile(&shp_path);
+
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20).unwrap();
+        let bounds = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+
+        let emitted = process_ocean_shapefile(
+            &shp_path,
+            &bounds,
+            0,
+            0,
+            None,
+            &mut sort_writer,
+        )
+        .unwrap();
+        assert!(emitted > 0, "expected ocean features to be emitted");
+
+        let mut reader = sort_writer.finish().unwrap();
+        let rec = reader.next().unwrap().expect("expected at least one record");
+        let cmd_count = u16::from_le_bytes(rec.data[9..11].try_into().unwrap());
+        assert!(
+            cmd_count >= 6,
+            "polygon with hole should encode multiple rings (cmd_count={cmd_count})"
+        );
+    }
+
+    #[test]
+    fn process_ocean_shapefile_rejects_short_shx_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let shp_path = dir.path().join("ocean_bad_shx.shp");
+        write_test_polygon_shapefile(&shp_path);
+        fs::write(shp_path.with_extension("shx"), [0u8; 64]).unwrap();
+
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20).unwrap();
+        let bounds = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+        let err = process_ocean_shapefile(
+            &shp_path,
+            &bounds,
+            0,
+            0,
+            None,
+            &mut sort_writer,
+        )
+        .expect_err("short .shx header should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("invalid .shx file"));
+    }
+
+    #[test]
+    fn process_ocean_shapefile_errors_when_shx_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let shp_path = dir.path().join("ocean_missing_shx.shp");
+        write_test_polygon_shapefile(&shp_path);
+        fs::remove_file(shp_path.with_extension("shx")).unwrap();
+
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20).unwrap();
+        let bounds = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+        let err = process_ocean_shapefile(
+            &shp_path,
+            &bounds,
+            0,
+            0,
+            None,
+            &mut sort_writer,
+        )
+        .expect_err("missing .shx should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn process_ocean_shapefile_skips_truncated_shp_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let shp_path = dir.path().join("ocean_truncated_shp.shp");
+        write_test_polygon_shapefile(&shp_path);
+
+        let mut shp_data = fs::read(&shp_path).unwrap();
+        shp_data.truncate(120);
+        fs::write(&shp_path, shp_data).unwrap();
+
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20).unwrap();
+        let bounds = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+        let emitted = process_ocean_shapefile(
+            &shp_path,
+            &bounds,
+            0,
+            0,
+            None,
+            &mut sort_writer,
+        )
+        .unwrap();
+        assert_eq!(emitted, 0, "truncated record should be skipped");
     }
 }

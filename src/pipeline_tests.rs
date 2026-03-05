@@ -978,6 +978,74 @@ fn emit_line_cascading_simplification() {
     assert!(!z14_records.is_empty(), "line should survive at z=14 for Streets layer");
 }
 
+#[test]
+fn emit_line_preserve_mask_keeps_required_vertices() {
+    let m = test_layer_match(Layer::Streets, GeomExpect::Line);
+    let coords = [
+        Point { x: 0.1, y: 0.10000 },
+        Point { x: 0.3, y: 0.10001 },
+        Point { x: 0.5, y: 0.10002 }, // pin this vertex
+        Point { x: 0.7, y: 0.10001 },
+        Point { x: 0.9, y: 0.10000 },
+    ];
+
+    let mut records_plain = Vec::new();
+    let mut records_pinned = Vec::new();
+    let mut scratch_plain = LineEmitScratch::new();
+    let mut scratch_pinned = LineEmitScratch::new();
+    emit_line_feature(
+        1099,
+        &coords,
+        &[false; 5],
+        &m,
+        0,
+        0,
+        &mut records_plain,
+        &mut scratch_plain,
+    );
+    emit_line_feature(
+        1099,
+        &coords,
+        &[false, false, true, false, false],
+        &m,
+        0,
+        0,
+        &mut records_pinned,
+        &mut scratch_pinned,
+    );
+
+    assert_eq!(records_plain.len(), 1);
+    assert_eq!(records_pinned.len(), 1);
+    let (_, _, plain_cmd_count) = decode_data_header(&records_plain[0].data);
+    let (_, _, pinned_cmd_count) = decode_data_header(&records_pinned[0].data);
+    assert!(
+        pinned_cmd_count > plain_cmd_count,
+        "pinned shared line vertex should increase retained geometry detail"
+    );
+
+    let plain_lb = decode_to_layer(&records_plain[0].data);
+    let pinned_lb = decode_to_layer(&records_pinned[0].data);
+    let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
+    let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
+    let mut target_tc = Vec::new();
+    geometry::to_tile_coords_into(
+        &mut target_tc,
+        &[Point { x: 0.5, y: 0.10002 }],
+        0,
+        0,
+        0,
+    );
+    let expected = target_tc[0];
+    assert!(
+        pinned_pts.contains(&expected),
+        "pinned line geometry should retain required shared vertex {expected:?}"
+    );
+    assert!(
+        !plain_pts.contains(&expected),
+        "un-pinned line geometry should be allowed to drop non-required vertex {expected:?}"
+    );
+}
+
 // -----------------------------------------------------------------------
 // emit_polygon_feature tests
 // -----------------------------------------------------------------------

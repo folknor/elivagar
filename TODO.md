@@ -74,9 +74,9 @@
 - [x] `ocean.rs`: `emit_ocean_polygon` — scanline fill, needs integration test with shapefile.
   Coastline correctness matters for regional extracts where the boundary cuts through
   ocean polygons (tilemaker #16).
-- [ ] `ocean.rs` shapefile integration tests currently cover only a single simple polygon.
+- [x] `ocean.rs` shapefile integration tests currently cover only a single simple polygon.
   Add multipart + inner-hole fixture cases to exercise ring assembly and clipping behavior.
-- [ ] `ocean.rs` lacks malformed `.shp/.shx` negative-path tests in integration coverage.
+- [x] `ocean.rs` lacks malformed `.shp/.shx` negative-path tests in integration coverage.
   Add targeted broken-header/index/record cases to verify robust error handling.
 - [x] `pipeline.rs`: `emit_multipolygon_feature` — glue code, needs full pipeline context.
   Large lakes/water bodies at low zoom are particularly vulnerable to simplification + clipping
@@ -271,7 +271,7 @@
   nodes during DP simplification so common road/boundary junction vertices survive
   generalization. Implemented via block-local shared-node detection + required-vertex DP.
   Tippecanoe (#99) had bugs in shared-node preservation mode; this adds explicit coverage.
-- [ ] Add end-to-end line-emission tests that assert pinned shared nodes survive
+- [x] Add end-to-end line-emission tests that assert pinned shared nodes survive
   zoom-level simplification in emitted geometry.
 - [ ] Shared-node detection is block-local by design; add explicit coverage/docs for
   cross-block junction behavior limits so regression expectations are clear.
@@ -410,10 +410,10 @@
   members (`MemberId::Relation`), so relation-members-of-relations are silently dropped
   (tilemaker #638). Correct for multipolygon relations (way-only per OSM spec) but worth
   counting.
-- [ ] Missing-ref diagnostics currently have unit coverage for counter accumulation only.
+- [x] Missing-ref diagnostics currently have unit coverage for counter accumulation only.
   Add end-to-end pipeline-path tests that assert emitted summary metrics from real way/relation
   processing with missing references.
-- [ ] Missing-ref diagnostics: add explicit skip/resume behavior coverage (e.g. `--skip-to sort`)
+- [x] Missing-ref diagnostics: add explicit skip/resume behavior coverage (e.g. `--skip-to sort`)
   to document/lock whether metrics are omitted or printed as zero when phase12 is skipped.
 - [x] Source provenance in PMTiles metadata: include OSM replication timestamp and source
   PBF filename in the metadata JSON so consumers can trace data freshness. Currently only
