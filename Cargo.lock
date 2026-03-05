@@ -916,9 +916,9 @@ dependencies = [
 
 [[package]]
 name = "mlt-core"
-version = "0.1.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb3af9b6ca2132fe44a47ab87d0b28008e6c9a96409877a105d73a8a6903ea5"
+checksum = "116540467df8afa812be7d3b217686471b4dd59f086b280cba01c0444477cc4e"
 dependencies = [
  "borrowme",
  "fastpfor",

@@ -3,9 +3,9 @@ use crate::mvt::{Feature, GeomType, LayerBuilder, Value};
 use geo_types::{Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon};
 use mlt_core::Encodable;
 use mlt_core::v01::{
-    DecodedGeometry, DecodedId, DecodedProperty, Encoder, GeometryEncoder, IdEncoder, IdWidth,
+    DecodedGeometry, DecodedId, DecodedProperty, GeometryEncoder, IdEncoder, IdWidth, IntEncoder,
     LogicalEncoder, OwnedGeometry, OwnedId, OwnedLayer01, OwnedProperty, PhysicalEncoder,
-    PresenceStream, PropValue, PropertyEncoder,
+    PresenceStream, PropValue, ScalarEncoder,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +132,7 @@ fn encode_layer_geometry(layer_name: &str, features: &[Feature]) -> Result<Owned
 
     let mut geometry = OwnedGeometry::Decoded(decoded);
     geometry
-        .encode_with(GeometryEncoder::all(Encoder::varint()))
+        .encode_with(GeometryEncoder::all(IntEncoder::varint()))
         .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
     Ok(geometry)
 }
@@ -160,33 +160,20 @@ fn encode_layer_properties(
     Ok(properties)
 }
 
-fn property_encoder_for(prop: &OwnedProperty) -> PropertyEncoder {
+fn property_encoder_for(prop: &OwnedProperty) -> ScalarEncoder {
     let values = match prop {
         OwnedProperty::Decoded(decoded) => &decoded.values,
-        OwnedProperty::Encoded(_) => {
-            return PropertyEncoder::new(
-                PresenceStream::Present,
-                LogicalEncoder::None,
-                PhysicalEncoder::VarInt,
-            );
-        }
+        OwnedProperty::Encoded(_) => return ScalarEncoder::int(PresenceStream::Present, IntEncoder::varint()),
     };
     match values {
-        PropValue::Str(_) => PropertyEncoder::with_fsst(
+        PropValue::Str(_) => ScalarEncoder::str_fsst(
             PresenceStream::Present,
-            LogicalEncoder::None,
-            PhysicalEncoder::VarInt,
+            IntEncoder::varint(),
+            IntEncoder::varint(),
         ),
-        PropValue::F32(_) | PropValue::F64(_) => PropertyEncoder::new(
-            PresenceStream::Present,
-            LogicalEncoder::None,
-            PhysicalEncoder::None,
-        ),
-        _ => PropertyEncoder::new(
-            PresenceStream::Present,
-            LogicalEncoder::None,
-            PhysicalEncoder::VarInt,
-        ),
+        PropValue::F32(_) | PropValue::F64(_) => ScalarEncoder::float(PresenceStream::Present),
+        PropValue::Bool(_) => ScalarEncoder::bool(PresenceStream::Present),
+        _ => ScalarEncoder::int(PresenceStream::Present, IntEncoder::varint()),
     }
 }
 
@@ -914,7 +901,7 @@ mod tests {
             mlt_core::v01::PropValue::F32(v) => ("f32", v.iter().filter(|x| x.is_some()).count()),
             mlt_core::v01::PropValue::F64(v) => ("f64", v.iter().filter(|x| x.is_some()).count()),
             mlt_core::v01::PropValue::Str(v) => ("str", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::Struct => ("struct", 0),
+            mlt_core::v01::PropValue::SharedDict => ("shared_dict", 0),
         }
     }
 
