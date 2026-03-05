@@ -106,14 +106,14 @@
   Generalize helper/assertions for future multi-layer and multi-feature fixture imports.
 - [ ] Add parity tests for shared tile-model preparation used by MLT scaffolding to ensure
   layer/feature assembly stays consistent with MVT path as code evolves.
-- [ ] `mlt.rs`: clarify `observed_type_count` semantics (currently saturates effectively at 2
+- [x] `mlt.rs`: clarify `observed_type_count` semantics (currently saturates effectively at 2
   for mixed columns). Either track true distinct type cardinality or rename/reshape field
   to a boolean mixed-flag model with explicit tests/docs.
 - [ ] Add MLT semantic roundtrip tests that compare decoded geometry/properties against
   source features, not only parse/decode success.
 - [ ] MLT fixture roundtrip currently asserts geometry type only; add coordinate/ring-content
   equality checks to catch subtle geometry corruption that preserves type.
-- [ ] Add explicit MLT size/perf guard checks (or benchmarks) for no-compression tile payloads
+- [x] Add explicit MLT size/perf guard checks (or benchmarks) for no-compression tile payloads
   to catch unintended regressions versus equivalent MVT tiles.
 - [x] PMTiles metadata JSON validation: `elivagar verify` now validates metadata JSON
   structure and `vector_layers` schema. Added regression tests for malformed metadata payloads:
@@ -253,7 +253,7 @@
   Planetiler #1493 is actively exploring optimistic naive polygon snapping approaches.
 - [ ] Pre-quantization ring-validity checks are O(n^2) intersection scans.
   Add perf/scale coverage for large rings to confirm acceptable overhead in worst-case geometry.
-- [ ] Add borderline-valid ring coverage for pre-quantization validity checks
+- [x] Add borderline-valid ring coverage for pre-quantization validity checks
   (collinear segments, repeated vertices, near-touching edges) to avoid false positives.
 - [x] Label points in polygon holes: `point_on_surface()` scans outer ring only and does not
   avoid placing points inside inner rings. Multipolygons with large holes could get label

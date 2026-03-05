@@ -193,6 +193,68 @@ fn invalid_merc_ring_detected_pre_quantization() {
     assert!(!is_valid_simple_ring_points(&bowtie));
 }
 
+#[test]
+fn pre_quantization_ring_accepts_collinear_segments() {
+    let ring = vec![
+        Point { x: 0.1, y: 0.1 },
+        Point { x: 0.5, y: 0.1 }, // collinear
+        Point { x: 0.9, y: 0.1 }, // collinear
+        Point { x: 0.9, y: 0.9 },
+        Point { x: 0.1, y: 0.9 },
+        Point { x: 0.1, y: 0.1 },
+    ];
+    assert!(is_valid_simple_ring_points(&ring));
+}
+
+#[test]
+fn pre_quantization_ring_rejects_repeated_non_adjacent_vertex() {
+    let ring = vec![
+        Point { x: 0.1, y: 0.1 },
+        Point { x: 0.9, y: 0.1 },
+        Point { x: 0.9, y: 0.9 },
+        Point { x: 0.5, y: 0.5 },
+        Point { x: 0.9, y: 0.9 }, // repeated non-adjacent vertex
+        Point { x: 0.1, y: 0.9 },
+        Point { x: 0.1, y: 0.1 },
+    ];
+    assert!(!is_valid_simple_ring_points(&ring));
+}
+
+#[test]
+fn pre_quantization_ring_near_touching_gap_is_valid_but_touching_is_not() {
+    let near_touching = vec![
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 1.0, y: 0.0 },
+        Point { x: 1.0, y: 1.0 },
+        Point { x: 0.51, y: 1.0 },
+        Point { x: 0.51, y: 0.000_000_002 },
+        Point { x: 0.49, y: 0.000_000_002 },
+        Point { x: 0.49, y: 1.0 },
+        Point { x: 0.0, y: 1.0 },
+        Point { x: 0.0, y: 0.0 },
+    ];
+    assert!(
+        is_valid_simple_ring_points(&near_touching),
+        "tiny non-zero gaps should remain valid"
+    );
+
+    let touching = vec![
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 1.0, y: 0.0 },
+        Point { x: 1.0, y: 1.0 },
+        Point { x: 0.51, y: 1.0 },
+        Point { x: 0.51, y: 0.0 }, // exact touch with bottom edge
+        Point { x: 0.49, y: 0.0 }, // exact touch with bottom edge
+        Point { x: 0.49, y: 1.0 },
+        Point { x: 0.0, y: 1.0 },
+        Point { x: 0.0, y: 0.0 },
+    ];
+    assert!(
+        !is_valid_simple_ring_points(&touching),
+        "edge-touching rings should be rejected"
+    );
+}
+
 /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
 fn boundary_labels_match(admin_level: i64) -> LayerMatch {
     LayerMatch {
