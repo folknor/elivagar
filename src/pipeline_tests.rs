@@ -482,6 +482,141 @@ fn crosses_antimeridian_rejects_wide_non_crossing_interval() {
 }
 
 #[test]
+fn antimeridian_wrapped_line_emits_both_seam_tiles_without_duplicates() {
+    let m = test_layer_match(Layer::Streets, GeomExpect::Line);
+    let coords = vec![
+        Point { x: 0.995, y: 0.25 },
+        Point { x: 1.005, y: 0.25 },
+    ];
+    let bbox = merc_bbox(&coords);
+    let mut records = Vec::new();
+    let mut scratch = LineEmitScratch::new();
+    for shift in antimeridian_shifts_for_bbox(&bbox) {
+        if shift == 0.0 {
+            let _ = emit_line_feature(7001, &coords, &[], &m, 1, 1, &mut records, &mut scratch);
+        } else {
+            let shifted: Vec<Point> = coords
+                .iter()
+                .map(|p| Point { x: p.x + shift, y: p.y })
+                .collect();
+            let _ = emit_line_feature(7001, &shifted, &[], &m, 1, 1, &mut records, &mut scratch);
+        }
+    }
+
+    let mut counts = std::collections::BTreeMap::new();
+    for rec in &records {
+        let tile_id = sort::tile_id_from_key(rec.key);
+        *counts.entry(tile_id).or_insert(0usize) += 1;
+    }
+
+    let left = pmtiles_writer::xy_to_tile_id(1, 0, 0);
+    let right = pmtiles_writer::xy_to_tile_id(1, 1, 0);
+    assert_eq!(counts.len(), 2, "seam-crossing line should hit exactly two z1 seam tiles");
+    assert_eq!(counts.get(&left), Some(&1));
+    assert_eq!(counts.get(&right), Some(&1));
+}
+
+#[test]
+fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let coords = vec![
+        Point { x: 0.995, y: 0.24 },
+        Point { x: 1.005, y: 0.24 },
+        Point { x: 1.005, y: 0.26 },
+        Point { x: 0.995, y: 0.26 },
+        Point { x: 0.995, y: 0.24 },
+    ];
+    let bbox = merc_bbox(&coords);
+    let mut records = Vec::new();
+    let mut scratch = PolygonEmitScratch::new();
+    for shift in antimeridian_shifts_for_bbox(&bbox) {
+        if shift == 0.0 {
+            let _ = emit_polygon_feature(7002, &coords, &[], &m, 1, 1, &mut records, &mut scratch);
+        } else {
+            let shifted: Vec<Point> = coords
+                .iter()
+                .map(|p| Point { x: p.x + shift, y: p.y })
+                .collect();
+            let _ = emit_polygon_feature(7002, &shifted, &[], &m, 1, 1, &mut records, &mut scratch);
+        }
+    }
+
+    let mut counts = std::collections::BTreeMap::new();
+    for rec in &records {
+        let tile_id = sort::tile_id_from_key(rec.key);
+        *counts.entry(tile_id).or_insert(0usize) += 1;
+    }
+
+    let left = pmtiles_writer::xy_to_tile_id(1, 0, 0);
+    let right = pmtiles_writer::xy_to_tile_id(1, 1, 0);
+    assert_eq!(counts.len(), 2, "seam-crossing polygon should hit exactly two z1 seam tiles");
+    assert_eq!(counts.get(&left), Some(&1));
+    assert_eq!(counts.get(&right), Some(&1));
+}
+
+#[test]
+fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let outer = vec![
+        Point { x: 0.995, y: 0.24 },
+        Point { x: 1.005, y: 0.24 },
+        Point { x: 1.005, y: 0.26 },
+        Point { x: 0.995, y: 0.26 },
+        Point { x: 0.995, y: 0.24 },
+    ];
+    let inners: Vec<Vec<Point>> = Vec::new();
+    let bbox = merc_bbox(&outer);
+    let mut records = Vec::new();
+    let mut emit_scratch = MultipolygonEmitScratch::new();
+    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    for shift in antimeridian_shifts_for_bbox(&bbox) {
+        if shift == 0.0 {
+            let _ = emit_multipolygon_feature(
+                7003,
+                &outer,
+                &inners,
+                None,
+                &m,
+                1,
+                1,
+                &mut records,
+                &mut emit_scratch,
+                &mut simp_scratch,
+            );
+        } else {
+            let outer_shifted: Vec<Point> = outer
+                .iter()
+                .map(|p| Point { x: p.x + shift, y: p.y })
+                .collect();
+            let _ = emit_multipolygon_feature(
+                7003,
+                &outer_shifted,
+                &inners,
+                None,
+                &m,
+                1,
+                1,
+                &mut records,
+                &mut emit_scratch,
+                &mut simp_scratch,
+            );
+        }
+    }
+
+    let mut counts = std::collections::BTreeMap::new();
+    for rec in &records {
+        let tile_id = sort::tile_id_from_key(rec.key);
+        *counts.entry(tile_id).or_insert(0usize) += 1;
+    }
+
+    let left = pmtiles_writer::xy_to_tile_id(1, 0, 0);
+    let right = pmtiles_writer::xy_to_tile_id(1, 1, 0);
+    assert_eq!(counts.len(), 2, "seam-crossing multipolygon should hit exactly two z1 seam tiles");
+    assert_eq!(counts.get(&left), Some(&1));
+    assert_eq!(counts.get(&right), Some(&1));
+}
+
+#[test]
 fn encode_tile_batch_mlt_empty_batch_is_empty() {
     match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty batches should remain empty"),

@@ -309,12 +309,12 @@
   Implemented wrapped-copy emission on seam-crossing bboxes and wrapped land-mask marking.
   Also hardened data-bounds checkpoint handling for antimeridian-spanning extracts to avoid
   invalid narrow/wide bbox metadata behavior.
-- [ ] Antimeridian crossing detection currently uses a wide-span heuristic (`lon_span > 180°`)
+- [x] Antimeridian crossing detection currently uses a wide-span heuristic (`lon_span > 180°`)
   that can misclassify wide but non-crossing extracts as crossing. Refine detection to avoid
   forced world-wide x-bounds on non-crossing bboxes.
-- [ ] Add end-to-end antimeridian emission tests verifying wrapped-copy behavior does not
+- [x] Add end-to-end antimeridian emission tests verifying wrapped-copy behavior does not
   introduce duplicate or missing features on seam-crossing geometries.
-- [ ] Add explicit tests for wide-but-non-crossing longitude spans to lock expected
+- [x] Add explicit tests for wide-but-non-crossing longitude spans to lock expected
   antimeridian detection behavior.
 
 ## Schema extensions (beyond Shortbread 1.0)
