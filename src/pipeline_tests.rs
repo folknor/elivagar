@@ -536,6 +536,49 @@ fn decode_to_layer(data: &[u8]) -> mvt::LayerBuilder {
     lb
 }
 
+fn decode_zigzag(v: u32) -> i32 {
+    let n = i32::try_from(v >> 1).unwrap_or(i32::MAX);
+    if (v & 1) == 0 { n } else { -n - 1 }
+}
+
+fn decode_commands_to_abs_coords(cmds: &[u32]) -> Vec<(i32, i32)> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut cx = 0i32;
+    let mut cy = 0i32;
+    let mut move_x = 0i32;
+    let mut move_y = 0i32;
+    while i < cmds.len() {
+        let cmd = cmds[i];
+        i += 1;
+        let id = cmd & 0x7;
+        let count = cmd >> 3;
+        match id {
+            1 | 2 => {
+                for _ in 0..count {
+                    if i + 1 >= cmds.len() {
+                        return out;
+                    }
+                    cx += decode_zigzag(cmds[i]);
+                    cy += decode_zigzag(cmds[i + 1]);
+                    i += 2;
+                    if id == 1 {
+                        move_x = cx;
+                        move_y = cy;
+                    }
+                    out.push((cx, cy));
+                }
+            }
+            7 => {
+                cx = move_x;
+                cy = move_y;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
 // -----------------------------------------------------------------------
 // emit_point_or_centroid tests (formerly emit_point_feature)
 // -----------------------------------------------------------------------
@@ -928,6 +971,28 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     let (_, _, plain_cmd_count) = decode_data_header(&records_plain[0].data);
     let (_, _, pinned_cmd_count) = decode_data_header(&records_pinned[0].data);
     assert!(pinned_cmd_count > plain_cmd_count);
+
+    let plain_lb = decode_to_layer(&records_plain[0].data);
+    let pinned_lb = decode_to_layer(&records_pinned[0].data);
+    let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
+    let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
+    let mut target_tc = Vec::new();
+    geometry::to_tile_coords_into(
+        &mut target_tc,
+        &[Point { x: 0.5, y: 0.10002 }],
+        0,
+        0,
+        0,
+    );
+    let expected = target_tc[0];
+    assert!(
+        pinned_pts.contains(&expected),
+        "pinned geometry should retain required shared vertex {expected:?}"
+    );
+    assert!(
+        !plain_pts.contains(&expected),
+        "un-pinned geometry should be allowed to drop non-required vertex {expected:?}"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1056,6 +1121,167 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
         assert_eq!(gt, 3);
         assert!(cmd_count > 0);
     }
+}
+
+#[test]
+fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let outer = vec![
+        Point { x: 0.20, y: 0.20 },
+        Point { x: 0.80, y: 0.20 },
+        Point { x: 0.80, y: 0.80 },
+        Point { x: 0.20, y: 0.80 },
+        Point { x: 0.20, y: 0.20 },
+    ];
+    let inners = vec![
+        vec![
+            Point { x: 0.30, y: 0.30 },
+            Point { x: 0.50, y: 0.30 },
+        ], // too short
+        vec![
+            Point { x: 0.35, y: 0.35 },
+            Point { x: 0.65, y: 0.65 },
+            Point { x: 0.35, y: 0.65 },
+            Point { x: 0.65, y: 0.35 },
+            Point { x: 0.35, y: 0.35 },
+        ], // self-intersecting
+    ];
+
+    let mut outer_only = Vec::new();
+    let mut with_bad_holes = Vec::new();
+    let mut emit_a = MultipolygonEmitScratch::new();
+    let mut emit_b = MultipolygonEmitScratch::new();
+    let mut simp_a = geometry::SimplifyMultiScratch::new();
+    let mut simp_b = geometry::SimplifyMultiScratch::new();
+    emit_multipolygon_feature(
+        404,
+        &outer,
+        &[],
+        None,
+        &m,
+        0,
+        0,
+        &mut outer_only,
+        &mut emit_a,
+        &mut simp_a,
+    );
+    emit_multipolygon_feature(
+        404,
+        &outer,
+        &inners,
+        None,
+        &m,
+        0,
+        0,
+        &mut with_bad_holes,
+        &mut emit_b,
+        &mut simp_b,
+    );
+    assert_eq!(outer_only.len(), 1);
+    assert_eq!(with_bad_holes.len(), 1);
+    let (_, _, outer_cmd_count) = decode_data_header(&outer_only[0].data);
+    let (_, _, bad_holes_cmd_count) = decode_data_header(&with_bad_holes[0].data);
+    assert_eq!(
+        bad_holes_cmd_count, outer_cmd_count,
+        "invalid/degenerate inners should be dropped and not change emitted geometry"
+    );
+}
+
+#[test]
+fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let outer = vec![
+        Point { x: 0.20, y: 0.20 },
+        Point { x: 0.80, y: 0.20 },
+        Point { x: 0.80, y: 0.80 },
+        Point { x: 0.20, y: 0.80 },
+        Point { x: 0.20, y: 0.20 },
+    ];
+    let bowtie_inner = vec![vec![
+        Point { x: 0.35, y: 0.35 },
+        Point { x: 0.65, y: 0.65 },
+        Point { x: 0.35, y: 0.65 },
+        Point { x: 0.65, y: 0.35 },
+        Point { x: 0.35, y: 0.35 },
+    ]];
+
+    let mut z13_records = Vec::new();
+    let mut z14_records = Vec::new();
+    let mut emit_13 = MultipolygonEmitScratch::new();
+    let mut emit_14 = MultipolygonEmitScratch::new();
+    let mut simp_13 = geometry::SimplifyMultiScratch::new();
+    let mut simp_14 = geometry::SimplifyMultiScratch::new();
+    emit_multipolygon_feature(
+        405,
+        &outer,
+        &bowtie_inner,
+        None,
+        &m,
+        13,
+        13,
+        &mut z13_records,
+        &mut emit_13,
+        &mut simp_13,
+    );
+    emit_multipolygon_feature(
+        405,
+        &outer,
+        &bowtie_inner,
+        None,
+        &m,
+        14,
+        14,
+        &mut z14_records,
+        &mut emit_14,
+        &mut simp_14,
+    );
+    assert_eq!(z13_records.len(), 1);
+    assert_eq!(z14_records.len(), 1);
+    let (_, _, z13_cmd_count) = decode_data_header(&z13_records[0].data);
+    let (_, _, z14_cmd_count) = decode_data_header(&z14_records[0].data);
+    assert!(
+        z14_cmd_count > z13_cmd_count,
+        "z<14 should reject invalid inner rings while z=14 keeps them"
+    );
+}
+
+#[test]
+fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let outer = vec![
+        Point { x: 0.10, y: 0.10 },
+        Point { x: 0.90, y: 0.10 },
+        Point { x: 0.90, y: 0.90 },
+        Point { x: 0.10, y: 0.90 },
+        Point { x: 0.10, y: 0.10 },
+    ];
+    let mut records = Vec::new();
+    let mut emit_scratch = MultipolygonEmitScratch::new();
+    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let count = emit_multipolygon_feature(
+        406,
+        &outer,
+        &[],
+        None,
+        &m,
+        0,
+        2,
+        &mut records,
+        &mut emit_scratch,
+        &mut simp_scratch,
+    );
+    assert_eq!(usize::try_from(count).unwrap(), records.len());
+    assert!(!records.is_empty());
+
+    let mut zooms = std::collections::BTreeSet::new();
+    for rec in &records {
+        let (tile_id, _) = decode_key(rec);
+        let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile_id);
+        zooms.insert(z);
+    }
+    assert!(zooms.contains(&0));
+    assert!(zooms.contains(&1));
+    assert!(zooms.contains(&2));
 }
 
 // ---------------------------------------------------------------------------

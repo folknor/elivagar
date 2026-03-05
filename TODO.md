@@ -82,9 +82,9 @@
   Large lakes/water bodies at low zoom are particularly vulnerable to simplification + clipping
   producing visible topology artifacts (tilemaker #191). Very large polygons ("monster polygons")
   also stress the clipping path specifically (tilemaker #607).
-- [ ] `pipeline_tests.rs` multipolygon coverage lacks invalid/degenerate inner-ring cases
+- [x] `pipeline_tests.rs` multipolygon coverage lacks invalid/degenerate inner-ring cases
   (too-short/self-intersecting holes). Add targeted negative-path tests for hole handling.
-- [ ] `pipeline_tests.rs` multipolygon coverage is mostly single-zoom assertions.
+- [x] `pipeline_tests.rs` multipolygon coverage is mostly single-zoom assertions.
   Add multi-zoom simplification/retention checks to guard zoom-dependent behavior.
 - [x] `inspect.rs`: read-only diagnostic tool tested on root-only and leaf-directory layouts,
   and migrated to use `pmtiles_reader.rs` shared helpers to reduce parsing duplication.
@@ -233,7 +233,7 @@
   failure mode for elivagar's current simplifier.
 - [ ] Add explicit multipolygon-path tests for post-simplification invalid ring rejection
   (current regression coverage is stronger for single polygon emission than multipolygon).
-- [ ] Add boundary-policy tests for invalid ring guard at `z=14` cutoff
+- [x] Add boundary-policy tests for invalid ring guard at `z=14` cutoff
   (`z<14` reject behavior vs `z=14` behavior) to lock intended semantics.
 - [x] Deterministic multipolygon assembly: `join_ways()` in multipolygon.rs uses
   `std::collections::HashMap` which has random iteration order. For well-formed multipolygons
@@ -289,9 +289,9 @@
   not guarantee edge-identical output between neighboring polygons.
 - [ ] Add explicit relation-derived multipolygon shared-vertex preservation tests
   (closed-way polygon coverage exists; relation path needs direct regression checks).
-- [ ] Strengthen shared-vertex simplification assertions to validate specific pinned
+- [x] Strengthen shared-vertex simplification assertions to validate specific pinned
   vertex identity retention, not only increased encoded command counts.
-- [ ] Relation multipolygon shared-vertex preservation tests still infer success mostly via
+- [x] Relation multipolygon shared-vertex preservation tests still infer success mostly via
   command-count deltas; add direct emitted-geometry vertex identity assertions.
 - [ ] Add precision-boundary tests for `relation_shared_vertex_keys` quantization to verify
   near-equal coordinate handling and avoid accidental shared-key collisions.
