@@ -364,18 +364,18 @@
   are well-tagged in mountainous areas and useful for topographic rendering. Would need a new
   landform line layer or extension to an existing layer. Tilemaker #265 hit rendering issues
   with cliff classification.
-- [ ] Add explicit closed-way coverage for `natural=cliff` line matching (current regression
+- [x] Add explicit closed-way coverage for `natural=cliff` line matching (current regression
   test is open-way focused despite both open/closed wiring).
-- [ ] Add tag-conflict/priority tests for `natural=cliff` alongside other matching line tags
+- [x] Add tag-conflict/priority tests for `natural=cliff` alongside other matching line tags
   to lock expected classification behavior.
 - [x] EV charging stations as POIs: `amenity=charging_station` is not in elivagar's POI list
   because Shortbread 1.0 doesn't include it, but EV charging infrastructure is increasingly
   important for map consumers. OSM has good coverage in Europe. Investigate adding as a
   schema extension alongside other beyond-Shortbread POI types (Planetiler #765 hit a bug
   where charging stations were silently dropped).
-- [ ] Add POI coverage for non-node charging stations (way/area geometries) to lock
+- [x] Add POI coverage for non-node charging stations (way/area geometries) to lock
   geometry-path behavior for `amenity=charging_station`.
-- [ ] Add richer tag-matrix tests for charging stations (additional tags present) to ensure
+- [x] Add richer tag-matrix tests for charging stations (additional tags present) to ensure
   classification remains stable and address suppression behavior stays correct.
 
 ## Future architecture
