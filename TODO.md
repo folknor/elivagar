@@ -325,18 +325,18 @@
   urban areas. MLT's 2.5D basemap support makes this more relevant if we adopt that format.
   Also consider `building:part=yes` sub-components (tilemaker #692) — needed for proper 3D
   rendering of complex buildings with towers, wings, etc.
-- [ ] Add building measurement parser coverage for more real-world formats
+- [x] Add building measurement parser coverage for more real-world formats
   (`24m`, `24 meters`, locale comma decimals, semicolon variants) to pin normalization behavior.
-- [ ] Add explicit `building:levels` policy tests (zero, negative, fractional edge cases)
+- [x] Add explicit `building:levels` policy tests (zero, negative, fractional edge cases)
   to lock intended acceptance/rejection semantics.
 - [x] Elevation attribute on peaks/passes: elivagar's POI layer does not match `natural=peak`
   or `natural=volcano`, and does not emit the `ele` (elevation) tag. Investigate whether
   Shortbread 1.0 specifies these, and add with proper unit conversion — OSM `ele` is
   nominally meters but sometimes tagged in feet (Planetiler #224 had a unit-conversion bug
   here). Useful for topographic labeling in nidhogg.
-- [ ] `pois.rs` elevation parser needs broader format coverage tests
+- [x] `pois.rs` elevation parser needs broader format coverage tests
   (`1000m`, `1,234 m`, `1000;1200`, negatives, malformed strings) to pin normalization behavior.
-- [ ] Add explicit POI tests for `natural=volcano` and `mountain_pass=yes` branches
+- [x] Add explicit POI tests for `natural=volcano` and `mountain_pass=yes` branches
   in peak/pass matching logic.
 - [ ] Lake/river centerlines: generate centerline geometries for elongated water features to
   improve label placement. Current `point_on_surface()` works for compact polygons but

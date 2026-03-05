@@ -98,6 +98,85 @@ fn test_building_ignores_unparseable_height_level_attrs() {
 }
 
 #[test]
+fn test_building_parses_real_world_measurement_variants() {
+    let tags = Tags(&[
+        ("building", "yes"),
+        ("height", "24,5 m"),
+        ("min_height", "24 meters"),
+        ("building:levels", "3,5"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::ClosedWay);
+    let bldg = matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+
+    let height = bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "height")
+        .expect("should have height");
+    assert_eq!(height.1, AttrValue::Float(24.5));
+
+    let min_height = bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "min_height")
+        .expect("should have min_height");
+    assert_eq!(min_height.1, AttrValue::Float(24.0));
+
+    let levels = bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "building:levels")
+        .expect("should have building:levels");
+    assert_eq!(levels.1, AttrValue::Float(3.5));
+}
+
+#[test]
+fn test_building_levels_policy_edges() {
+    let zero = Tags(&[("building", "yes"), ("building:levels", "0")]);
+    let zero_matches = match_element(&zero, OsmGeomType::ClosedWay);
+    let zero_bldg = zero_matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+    let levels = zero_bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "building:levels")
+        .expect("zero levels should be retained");
+    assert_eq!(levels.1, AttrValue::Float(0.0));
+
+    let negative = Tags(&[("building", "yes"), ("building:levels", "-1")]);
+    let negative_matches = match_element(&negative, OsmGeomType::ClosedWay);
+    let negative_bldg = negative_matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+    assert!(
+        negative_bldg
+            .attrs
+            .iter()
+            .all(|(k, _, _)| *k != "building:levels"),
+        "negative levels should be rejected",
+    );
+
+    let fractional = Tags(&[("building", "yes"), ("building:levels", "7.5")]);
+    let fractional_matches = match_element(&fractional, OsmGeomType::ClosedWay);
+    let fractional_bldg = fractional_matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+    let levels = fractional_bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "building:levels")
+        .expect("fractional levels should be retained");
+    assert_eq!(levels.1, AttrValue::Float(7.5));
+}
+
+#[test]
 fn test_place_city_capital() {
     let tags = Tags(&[
         ("place", "city"),
@@ -360,6 +439,82 @@ fn test_pois_peak_with_ele_feet_conversion() {
         .find(|(k, _, _)| *k == "ele")
         .expect("should have ele");
     assert_eq!(ele.1, AttrValue::Int(1000));
+}
+
+#[test]
+fn test_pois_elevation_parser_format_coverage() {
+    let cases = [
+        ("1000m", Some(1000)),
+        ("1,234 m", Some(1234)),
+        ("1000;1200", Some(1000)),
+        ("-50", Some(-50)),
+        ("bad-value", None),
+    ];
+    for (raw, expected_ele) in cases {
+        let tags = Tags(&[("natural", "peak"), ("ele", raw)]);
+        let matches = match_element(&tags, OsmGeomType::Node);
+        let poi = matches
+            .iter()
+            .find(|m| m.layer == Layer::Pois)
+            .expect("peak should match Pois");
+        let got = poi
+            .attrs
+            .iter()
+            .find(|(k, _, _)| *k == "ele")
+            .map(|(_, v, _)| v.clone());
+        match (expected_ele, got) {
+            (Some(exp), Some(AttrValue::Int(actual))) => assert_eq!(actual, exp, "ele='{raw}'"),
+            (None, None) => {}
+            _ => panic!("unexpected ele parse outcome for '{raw}'"),
+        }
+    }
+}
+
+#[test]
+fn test_pois_volcano_and_mountain_pass_branches() {
+    let volcano_tags = Tags(&[
+        ("natural", "volcano"),
+        ("ele", "2,500"),
+    ]);
+    let volcano_matches = match_element(&volcano_tags, OsmGeomType::Node);
+    let volcano = volcano_matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("volcano should match Pois");
+    let natural = volcano
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "natural")
+        .expect("volcano should have natural attr");
+    assert_eq!(natural.1, AttrValue::Str(Cow::Borrowed("volcano")));
+    let ele = volcano
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "ele")
+        .expect("volcano should have ele attr");
+    assert_eq!(ele.1, AttrValue::Int(2500));
+
+    let pass_tags = Tags(&[
+        ("mountain_pass", "yes"),
+        ("ele", "1500"),
+    ]);
+    let pass_matches = match_element(&pass_tags, OsmGeomType::Node);
+    let pass = pass_matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("mountain_pass=yes should match Pois");
+    let natural = pass
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "natural")
+        .expect("pass should have natural attr");
+    assert_eq!(natural.1, AttrValue::Str(Cow::Borrowed("pass")));
+    let ele = pass
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "ele")
+        .expect("pass should have ele attr");
+    assert_eq!(ele.1, AttrValue::Int(1500));
 }
 
 #[test]
