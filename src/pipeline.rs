@@ -158,6 +158,7 @@ const CHECKPOINT_FILE: &str = "checkpoint.txt";
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const LAND_MASK_FILE: &str = "land_mask.bin";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
+const LON_E7_FULL_CIRCLE: i64 = 3_600_000_000;
 /// Default memory budget per sort chunk (1 GB).
 const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 /// Default way in-flight budget for the standard node-store path.
@@ -786,6 +787,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut max_lat_e7: i32 = i32::MIN;
     let mut min_lon_e7: i32 = i32::MAX;
     let mut max_lon_e7: i32 = i32::MIN;
+    let mut min_lon_shifted_e7: i64 = i64::MAX;
+    let mut max_lon_shifted_e7: i64 = i64::MIN;
 
     let min_z = config.min_zoom;
     let max_z = config.max_zoom;
@@ -836,6 +839,9 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             max_lat_e7 = max_lat_e7.max(lat_e7);
             min_lon_e7 = min_lon_e7.min(lon_e7);
             max_lon_e7 = max_lon_e7.max(lon_e7);
+            let shifted_lon_e7 = lon_e7_shifted_360(lon_e7);
+            min_lon_shifted_e7 = min_lon_shifted_e7.min(shifted_lon_e7);
+            max_lon_shifted_e7 = max_lon_shifted_e7.max(shifted_lon_e7);
 
             if $node.tags().next().is_some() {
                 let tags_vec: Vec<(&str, &str)> = $node.tags().collect();
@@ -1117,18 +1123,22 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     // Compute data extent in Mercator [0,1] with generous buffer for ocean overlap
     let data_bounds = if min_lat_e7 < max_lat_e7 {
-        let lon_span_e7 = i64::from(max_lon_e7) - i64::from(min_lon_e7);
-        let crosses_antimeridian = lon_span_e7 > 1_800_000_000;
-        let west_lon_e7 = if crosses_antimeridian { -1_800_000_000 } else { min_lon_e7 };
-        let east_lon_e7 = if crosses_antimeridian { 1_800_000_000 } else { max_lon_e7 };
+        let crosses_dateline = crosses_antimeridian(
+            min_lon_e7,
+            max_lon_e7,
+            min_lon_shifted_e7,
+            max_lon_shifted_e7,
+        );
+        let west_lon_e7 = if crosses_dateline { -1_800_000_000 } else { min_lon_e7 };
+        let east_lon_e7 = if crosses_dateline { 1_800_000_000 } else { max_lon_e7 };
         let sw = geometry::project_e7(min_lat_e7, west_lon_e7);
         let ne = geometry::project_e7(max_lat_e7, east_lon_e7);
         // Add ~1 degree buffer (in Mercator space, roughly 1/360 ≈ 0.003)
         let buf = 0.01;
         MercBbox {
-            min_x: if crosses_antimeridian { 0.0 } else { (sw.x - buf).max(0.0) },
+            min_x: if crosses_dateline { 0.0 } else { (sw.x - buf).max(0.0) },
             min_y: (ne.y - buf).max(0.0),  // ne.y < sw.y in Mercator [0,1]
-            max_x: if crosses_antimeridian { 1.0 } else { (ne.x + buf).min(1.0) },
+            max_x: if crosses_dateline { 1.0 } else { (ne.x + buf).min(1.0) },
             max_y: (sw.y + buf).min(1.0),
         }
     } else {
@@ -1353,6 +1363,24 @@ fn relation_shared_vertex_keys(member_ways: &[MemberWay]) -> FxHashSet<(i64, i64
 #[inline]
 fn wrap_unit_x(x: f64) -> f64 {
     x.rem_euclid(1.0)
+}
+
+#[inline]
+fn lon_e7_shifted_360(lon_e7: i32) -> i64 {
+    let lon = i64::from(lon_e7);
+    if lon < 0 { lon + LON_E7_FULL_CIRCLE } else { lon }
+}
+
+#[inline]
+fn crosses_antimeridian(
+    min_lon_e7: i32,
+    max_lon_e7: i32,
+    min_lon_shifted_e7: i64,
+    max_lon_shifted_e7: i64,
+) -> bool {
+    let raw_span_e7 = i64::from(max_lon_e7) - i64::from(min_lon_e7);
+    let shifted_span_e7 = max_lon_shifted_e7 - min_lon_shifted_e7;
+    shifted_span_e7 < raw_span_e7
 }
 
 fn unwrap_antimeridian_path(points: &mut [Point], closed: bool) -> bool {

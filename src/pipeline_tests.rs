@@ -447,6 +447,41 @@ fn antimeridian_shifts_for_bbox_returns_wrap_shifts() {
 }
 
 #[test]
+fn crosses_antimeridian_detects_true_dateline_crossing() {
+    // Tight dateline-spanning interval: [170, 180] U [-180, -170].
+    let min_lon_e7 = -1_700_000_000;
+    let max_lon_e7 = 1_700_000_000;
+    let min_shifted = lon_e7_shifted_360(-1_700_000_000);
+    let max_shifted = lon_e7_shifted_360(1_700_000_000);
+    assert!(crosses_antimeridian(
+        min_lon_e7,
+        max_lon_e7,
+        min_shifted.min(max_shifted),
+        min_shifted.max(max_shifted),
+    ));
+}
+
+#[test]
+fn crosses_antimeridian_rejects_wide_non_crossing_interval() {
+    // Wide but non-crossing interval: [-170, 20].
+    let min_lon_e7 = -1_700_000_000;
+    let max_lon_e7 = 200_000_000;
+    let shifted_lons = [
+        lon_e7_shifted_360(-1_700_000_000),
+        lon_e7_shifted_360(200_000_000),
+        lon_e7_shifted_360(0),
+    ];
+    let min_shifted = *shifted_lons.iter().min().expect("non-empty shifted sample");
+    let max_shifted = *shifted_lons.iter().max().expect("non-empty shifted sample");
+    assert!(!crosses_antimeridian(
+        min_lon_e7,
+        max_lon_e7,
+        min_shifted,
+        max_shifted,
+    ));
+}
+
+#[test]
 fn encode_tile_batch_mlt_empty_batch_is_empty() {
     match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty batches should remain empty"),
@@ -1271,18 +1306,20 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
 fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
     let outer = vec![
-        Point { x: 0.20, y: 0.20 },
-        Point { x: 0.80, y: 0.20 },
-        Point { x: 0.80, y: 0.80 },
-        Point { x: 0.20, y: 0.80 },
-        Point { x: 0.20, y: 0.20 },
+        // Keep this polygon within one z14 tile so the test checks
+        // invalid-inner handling, not multi-tile fanout.
+        Point { x: 0.500_010, y: 0.500_010 },
+        Point { x: 0.500_040, y: 0.500_010 },
+        Point { x: 0.500_040, y: 0.500_040 },
+        Point { x: 0.500_010, y: 0.500_040 },
+        Point { x: 0.500_010, y: 0.500_010 },
     ];
     let bowtie_inner = vec![vec![
-        Point { x: 0.35, y: 0.35 },
-        Point { x: 0.65, y: 0.65 },
-        Point { x: 0.35, y: 0.65 },
-        Point { x: 0.65, y: 0.35 },
-        Point { x: 0.35, y: 0.35 },
+        Point { x: 0.500_018, y: 0.500_018 },
+        Point { x: 0.500_032, y: 0.500_032 },
+        Point { x: 0.500_018, y: 0.500_032 },
+        Point { x: 0.500_032, y: 0.500_018 },
+        Point { x: 0.500_018, y: 0.500_018 },
     ]];
 
     let mut z13_records = Vec::new();
