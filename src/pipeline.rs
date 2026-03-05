@@ -270,6 +270,26 @@ impl MissingRefStatsAtomic {
     }
 }
 
+fn missing_ref_summary_lines(summary: MissingRefStats) -> [String; 6] {
+    [
+        format!("missing_way_node_refs={}", summary.missing_way_node_refs),
+        format!(
+            "ways_with_missing_node_refs={}",
+            summary.ways_with_missing_node_refs
+        ),
+        format!(
+            "missing_relation_way_refs={}",
+            summary.missing_relation_way_refs
+        ),
+        format!(
+            "relations_with_missing_way_refs={}",
+            summary.relations_with_missing_way_refs
+        ),
+        format!("relation_non_way_members={}", summary.relation_non_way_members),
+        format!("relation_nested_members={}", summary.relation_nested_members),
+    ]
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct OversizeTile {
     tile_id: u64,
@@ -632,12 +652,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("oversize_top_{}={z}/{x}/{y}:{}", i + 1, t.bytes);
     }
     if let Some(m) = missing_ref_summary {
-        eprintln!("missing_way_node_refs={}", m.missing_way_node_refs);
-        eprintln!("ways_with_missing_node_refs={}", m.ways_with_missing_node_refs);
-        eprintln!("missing_relation_way_refs={}", m.missing_relation_way_refs);
-        eprintln!("relations_with_missing_way_refs={}", m.relations_with_missing_way_refs);
-        eprintln!("relation_non_way_members={}", m.relation_non_way_members);
-        eprintln!("relation_nested_members={}", m.relation_nested_members);
+        for line in missing_ref_summary_lines(m) {
+            eprintln!("{line}");
+        }
     }
     Ok(())
 }

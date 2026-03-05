@@ -32,7 +32,7 @@
 - [ ] `031151b` Shared vertices in relation multipolygons
 
 ### Pipeline features (3 commits)
-- [ ] `43e614f` Missing-ref diagnostics
+- [x] `43e614f` Missing-ref diagnostics
 - [ ] `19cd941` PMTiles metadata source provenance
 - [ ] `4a7a92e` Tile size diagnostics
 

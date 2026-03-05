@@ -125,6 +125,43 @@ fn missing_ref_stats_accumulates_and_snapshots() {
 }
 
 #[test]
+fn missing_ref_summary_lines_include_all_counters() {
+    let lines = missing_ref_summary_lines(MissingRefStats {
+        missing_way_node_refs: 5,
+        ways_with_missing_node_refs: 2,
+        missing_relation_way_refs: 3,
+        relations_with_missing_way_refs: 1,
+        relation_non_way_members: 4,
+        relation_nested_members: 2,
+    });
+    assert_eq!(
+        lines,
+        [
+            "missing_way_node_refs=5".to_string(),
+            "ways_with_missing_node_refs=2".to_string(),
+            "missing_relation_way_refs=3".to_string(),
+            "relations_with_missing_way_refs=1".to_string(),
+            "relation_non_way_members=4".to_string(),
+            "relation_nested_members=2".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn missing_ref_summary_omitted_when_phase12_is_skipped() {
+    let maybe_summary: Option<MissingRefStats> = None;
+    let lines: Vec<String> = maybe_summary
+        .map(missing_ref_summary_lines)
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(
+        lines.is_empty(),
+        "skip/resume paths without phase12 stats should emit no missing-ref metrics"
+    );
+}
+
+#[test]
 fn oversize_top_list_keeps_largest_tiles_sorted() {
     let mut top = [OversizeTile::default(); TILE_OVERSIZE_TOP_N];
     insert_top_oversized(
