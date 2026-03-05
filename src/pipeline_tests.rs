@@ -127,6 +127,29 @@ fn oversize_top_list_keeps_largest_tiles_sorted() {
 }
 
 #[test]
+fn tile_size_diag_thresholds_are_strictly_greater_than_boundaries() {
+    let mut diag = TileSizeDiagnostics::default();
+    let warn = TILE_OVERSIZE_WARN_BYTES;
+    let severe = TILE_OVERSIZE_SEVERE_BYTES;
+
+    record_tile_size_diagnostics(&mut diag, pmtiles_writer::xy_to_tile_id(0, 0, 0), warn);
+    assert_eq!(diag.oversize_warn_count, 0);
+    assert_eq!(diag.oversize_severe_count, 0);
+
+    record_tile_size_diagnostics(&mut diag, pmtiles_writer::xy_to_tile_id(1, 0, 0), warn + 1);
+    assert_eq!(diag.oversize_warn_count, 1);
+    assert_eq!(diag.oversize_severe_count, 0);
+
+    record_tile_size_diagnostics(&mut diag, pmtiles_writer::xy_to_tile_id(2, 0, 0), severe);
+    assert_eq!(diag.oversize_warn_count, 2);
+    assert_eq!(diag.oversize_severe_count, 0);
+
+    record_tile_size_diagnostics(&mut diag, pmtiles_writer::xy_to_tile_id(3, 0, 0), severe + 1);
+    assert_eq!(diag.oversize_warn_count, 3);
+    assert_eq!(diag.oversize_severe_count, 1);
+}
+
+#[test]
 fn invalid_tile_ring_detected() {
     let bowtie = vec![(0, 0), (10, 10), (0, 10), (10, 0), (0, 0)];
     assert!(!is_valid_simple_tile_ring(&bowtie));

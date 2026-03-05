@@ -378,6 +378,12 @@ mod tests {
         metadata_length
     }
 
+    fn set_header_u64(path: &Path, offset: u64, value: u64) {
+        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(&value.to_le_bytes()).unwrap();
+    }
+
     #[test]
     fn inspect_handles_root_only_archive() {
         let config = PmtilesConfig {
@@ -487,6 +493,30 @@ mod tests {
         assert!(output.contains("Payload compress:"));
         assert!(output.contains("Payload format:     mvt (header)"));
         assert!(output.contains("(header)"));
+        assert!(!output.contains("  Metadata:\n"));
+    }
+
+    #[test]
+    fn inspect_absent_metadata_uses_header_payload_fallback() {
+        let config = PmtilesConfig {
+            min_zoom: 0,
+            max_zoom: 0,
+            bounds: (-180.0, -85.0, 180.0, 85.0),
+            center: (0.0, 0.0, 0),
+        };
+        let mut writer = PmtilesWriter::new(config);
+        writer.add_tile(0, 0, 0, &[9, 9, 9]).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inspect_no_metadata.pmtiles");
+        writer.write_to(&path).unwrap();
+
+        // PMTiles v3 header offset 32 stores metadata_length (u64 LE).
+        set_header_u64(&path, 32, 0);
+
+        let output = inspect_output(&path);
+        assert!(output.contains("Payload format:     mvt (header)"));
+        assert!(output.contains("Payload compress:   gzip (header)"));
         assert!(!output.contains("  Metadata:\n"));
     }
 

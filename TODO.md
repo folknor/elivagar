@@ -128,7 +128,7 @@
 - [x] `tests/pmtiles_roundtrip.rs` metadata corruption helper only supports in-place
   replacements that fit the existing metadata section. Add explicit oversize-replacement
   negative-path coverage for future corruption test scenarios.
-- [ ] `pmtiles_reader.rs`: add decode-directory malformed `tile_id` delta overflow test.
+- [x] `pmtiles_reader.rs`: add decode-directory malformed `tile_id` delta overflow test.
   Current hardening covers truncated columns and offset sentinel/overflow, but not cumulative
   tile-id delta overflow behavior.
 - [x] Per-attribute minzoom filtering: `encode_attrs_bytes()` in wire_format.rs filters
@@ -153,9 +153,9 @@
   re-runs MVT encoding with different profile settings to speed up Shortbread tuning on
   large extracts. Planetiler #1497/#1468 adds exactly this (reuse feature DB for post-
   processing iteration).
-- [ ] Add explicit `--skip-to assemble` control-flow coverage (CLI parse + pipeline behavior),
+- [x] Add explicit `--skip-to assemble` control-flow coverage (CLI parse + pipeline behavior),
   including expected metric emission differences when phase3 is skipped.
-- [ ] Add `--skip-to assemble` negative-path tests for missing/stale chunk state to pin
+- [x] Add `--skip-to assemble` negative-path tests for missing/stale chunk state to pin
   mode-specific failure/reporting behavior.
 - [ ] Early simplification as memory pressure valve: simplify geometry during PBF processing
   when batch memory exceeds budget, rather than deferring all simplification to the assemble
@@ -208,10 +208,10 @@
 - [x] Tile size diagnostics: report per-tile size stats, flag oversized tiles, expose
   layer-level breakdowns. Needed for feature dropping tuning and profile regression triage
   (Planetiler #391).
-- [ ] Tile size diagnostics currently have helper-level ordering tests only.
+- [x] Tile size diagnostics currently have helper-level ordering tests only.
   Add end-to-end metric emission assertions for `tile_bytes_*`, `tile_max_*`, and
   `oversize_top_*` summary lines on a controlled pipeline run.
-- [ ] Tile size diagnostics: add boundary-value tests at exact warn/severe thresholds
+- [x] Tile size diagnostics: add boundary-value tests at exact warn/severe thresholds
   (500KB and 1MB) to lock down classification semantics.
 - [ ] Compressed sort chunks: gzip-compress temp sort files to reduce I/O during sort phase.
   Tippecanoe (#56) saw wins from this. Low priority since sort is already fast.

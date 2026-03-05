@@ -299,6 +299,29 @@ fn insert_top_oversized(top: &mut [OversizeTile; TILE_OVERSIZE_TOP_N], tile: Ove
     top[i] = tile;
 }
 
+fn record_tile_size_diagnostics(size_diag: &mut TileSizeDiagnostics, tile_id: u64, tile_bytes: u64) {
+    size_diag.total_tile_bytes += tile_bytes;
+    if tile_bytes > size_diag.max_tile.bytes {
+        size_diag.max_tile = OversizeTile {
+            tile_id,
+            bytes: tile_bytes,
+        };
+    }
+    if tile_bytes > TILE_OVERSIZE_WARN_BYTES {
+        size_diag.oversize_warn_count += 1;
+    }
+    if tile_bytes > TILE_OVERSIZE_SEVERE_BYTES {
+        size_diag.oversize_severe_count += 1;
+    }
+    insert_top_oversized(
+        &mut size_diag.top_oversized,
+        OversizeTile {
+            tile_id,
+            bytes: tile_bytes,
+        },
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -2938,26 +2961,7 @@ fn phase_assemble(
                 for tile in batch {
                     let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
                     let tile_bytes = tile.compressed.len() as u64;
-                    size_diag.total_tile_bytes += tile_bytes;
-                    if tile_bytes > size_diag.max_tile.bytes {
-                        size_diag.max_tile = OversizeTile {
-                            tile_id: tile.tile_id,
-                            bytes: tile_bytes,
-                        };
-                    }
-                    if tile_bytes > TILE_OVERSIZE_WARN_BYTES {
-                        size_diag.oversize_warn_count += 1;
-                    }
-                    if tile_bytes > TILE_OVERSIZE_SEVERE_BYTES {
-                        size_diag.oversize_severe_count += 1;
-                    }
-                    insert_top_oversized(
-                        &mut size_diag.top_oversized,
-                        OversizeTile {
-                            tile_id: tile.tile_id,
-                            bytes: tile_bytes,
-                        },
-                    );
+                    record_tile_size_diagnostics(&mut size_diag, tile.tile_id, tile_bytes);
                     // Panic: disk I/O failure is unrecoverable mid-pipeline.
                     let is_unique = pmtiles.add_tile(z, x, y, &tile.compressed)
                         .expect("failed to write tile");

@@ -286,7 +286,9 @@ pub fn decode_directory(data: &[u8]) -> io::Result<Vec<RawDirEntry>> {
         let delta = c
             .read_varint()
             .map_err(|e| io::Error::other(format!("tile_id delta: {e}")))?;
-        prev += delta;
+        prev = prev
+            .checked_add(delta)
+            .ok_or_else(|| io::Error::other("tile_id delta: cumulative overflow"))?;
         tile_ids.push(prev);
     }
 
@@ -453,6 +455,17 @@ mod tests {
         let err = decode_directory(&raw)
             .err()
             .expect("contiguous offset overflow should fail");
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn decode_directory_rejects_tile_id_delta_overflow() {
+        // Entry 0 sets cumulative tile_id to u64::MAX; entry 1 overflows by +1.
+        let raw = encode_directory_raw(&[u64::MAX, 1], &[1, 1], &[1, 1], &[1, 2]);
+        let err = decode_directory(&raw)
+            .err()
+            .expect("tile_id overflow should fail");
+        assert!(err.to_string().contains("tile_id delta"));
         assert!(err.to_string().contains("overflow"));
     }
 }
