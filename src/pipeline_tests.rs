@@ -7,6 +7,7 @@ use smallvec::smallvec;
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
+use std::time::{Duration, Instant};
 
 fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
     let mut writer = sort::SortWriter::new(chunks_dir, 1024).expect("create sort writer");
@@ -1696,6 +1697,60 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
 }
 
 #[test]
+fn emit_multipolygon_invalid_outer_rejected_below_z14_but_allowed_at_z14() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let bowtie_outer = vec![
+        Point { x: 0.500_010, y: 0.500_010 },
+        Point { x: 0.500_040, y: 0.500_040 },
+        Point { x: 0.500_010, y: 0.500_040 },
+        Point { x: 0.500_040, y: 0.500_010 },
+        Point { x: 0.500_010, y: 0.500_010 },
+    ];
+
+    let mut z13_records = Vec::new();
+    let mut z14_records = Vec::new();
+    let mut emit_13 = MultipolygonEmitScratch::new();
+    let mut emit_14 = MultipolygonEmitScratch::new();
+    let mut simp_13 = geometry::SimplifyMultiScratch::new();
+    let mut simp_14 = geometry::SimplifyMultiScratch::new();
+
+    emit_multipolygon_feature(
+        4051,
+        &bowtie_outer,
+        &[],
+        None,
+        &m,
+        13,
+        13,
+        &mut z13_records,
+        &mut emit_13,
+        &mut simp_13,
+    );
+    emit_multipolygon_feature(
+        4051,
+        &bowtie_outer,
+        &[],
+        None,
+        &m,
+        14,
+        14,
+        &mut z14_records,
+        &mut emit_14,
+        &mut simp_14,
+    );
+
+    assert!(
+        z13_records.is_empty(),
+        "z<14 should reject invalid outer rings in multipolygon path"
+    );
+    assert_eq!(
+        z14_records.len(),
+        1,
+        "z=14 should keep invalid outer rings per current guard policy"
+    );
+}
+
+#[test]
 fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
     let outer = vec![
@@ -1732,6 +1787,30 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
     assert!(zooms.contains(&0));
     assert!(zooms.contains(&1));
     assert!(zooms.contains(&2));
+}
+
+#[test]
+fn pre_quantization_ring_validity_large_ring_scale() {
+    const N: u32 = 1200;
+    let mut ring = Vec::with_capacity((N as usize) + 1);
+    for i in 0..N {
+        let theta = f64::from(i) * std::f64::consts::TAU / f64::from(N);
+        ring.push(Point {
+            x: 0.5 + 0.4 * theta.cos(),
+            y: 0.5 + 0.4 * theta.sin(),
+        });
+    }
+    ring.push(ring[0]);
+
+    let start = Instant::now();
+    let valid = is_valid_simple_ring_points(&ring);
+    let elapsed = start.elapsed();
+
+    assert!(valid, "large simple ring should validate as simple");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "large-ring validity check took too long: {elapsed:?}",
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -231,7 +231,7 @@
   invalidate multipolygon topology specifically (Planetiler #496). Tilemaker #828 confirmed
   that DP-simplified polygons break MapLibre's earcut triangulation — concrete downstream
   failure mode for elivagar's current simplifier.
-- [ ] Add explicit multipolygon-path tests for post-simplification invalid ring rejection
+- [x] Add explicit multipolygon-path tests for post-simplification invalid ring rejection
   (current regression coverage is stronger for single polygon emission than multipolygon).
 - [x] Add boundary-policy tests for invalid ring guard at `z=14` cutoff
   (`z<14` reject behavior vs `z=14` behavior) to lock intended semantics.
@@ -251,7 +251,7 @@
   spikes/self-intersections introduced during coordinate scaling. The interplay between
   simplification and rounding specifically produces visible artifacts (Planetiler #324).
   Planetiler #1493 is actively exploring optimistic naive polygon snapping approaches.
-- [ ] Pre-quantization ring-validity checks are O(n^2) intersection scans.
+- [x] Pre-quantization ring-validity checks are O(n^2) intersection scans.
   Add perf/scale coverage for large rings to confirm acceptable overhead in worst-case geometry.
 - [x] Add borderline-valid ring coverage for pre-quantization validity checks
   (collinear segments, repeated vertices, near-touching edges) to avoid false positives.
