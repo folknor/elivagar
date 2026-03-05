@@ -1,10 +1,12 @@
 use super::*;
 use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
+use flate2::read::GzDecoder;
 use pbfhogg::block_builder;
 use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 use smallvec::smallvec;
 use std::borrow::Cow;
 use std::fs::File;
+use std::io::Read;
 
 fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
     let mut writer = sort::SortWriter::new(chunks_dir, 1024).expect("create sort writer");
@@ -23,6 +25,31 @@ fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
         data: feature,
     }).expect("push sort record");
     writer.finish().expect("finish sort writer")
+}
+
+fn parity_pending_tile(tile_id: u64) -> PendingTile {
+    let point_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("city")), 0)];
+    let line_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("street")), 0)];
+
+    PendingTile {
+        tile_id,
+        features: vec![
+            (
+                Layer::Pois as u8,
+                crate::wire_format::encode_feature_data(11, mvt::GeomType::Point, &[9, 0, 0], &point_attrs, 14),
+            ),
+            (
+                Layer::Streets as u8,
+                crate::wire_format::encode_feature_data(
+                    21,
+                    mvt::GeomType::LineString,
+                    &[9, 4, 4, 18, 0, 16, 16, 0],
+                    &line_attrs,
+                    14,
+                ),
+            ),
+        ],
+    }
 }
 
 #[test]
@@ -641,6 +668,47 @@ fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
         Ok(encoded) => assert!(encoded.is_empty(), "empty tiles should be skipped"),
         Err(err) => panic!("mlt format should not fail for empty tile: {err}"),
     }
+}
+
+#[test]
+fn shared_layer_prep_model_matches_mvt_layer_assembly() {
+    let tile_id = pmtiles_writer::xy_to_tile_id(4, 8, 9);
+    let tile = parity_pending_tile(tile_id);
+
+    let mut scratch = AssemblyScratch {
+        encode_scratch: mvt::EncodeScratch::new(),
+        merge_scratch: mvt::MergeScratch::new(),
+        geom_pool: Vec::new(),
+        tags_pool: Vec::new(),
+        compression_levels: [const { None }; 11],
+        gz_buf: Vec::new(),
+        mvt_buf: Vec::new(),
+        layers: [const { None }; LAYER_COUNT],
+    };
+    let non_empty = prepare_non_empty_layers(&mut scratch, &tile);
+    let model = mlt::build_tile_model(&non_empty);
+    let mut expected: Vec<(String, usize)> = model
+        .layers
+        .iter()
+        .map(|l| (l.name.clone(), l.feature_count))
+        .collect();
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mvt_encoded = encode_tile_batch(&[parity_pending_tile(tile_id)], 6, TilePayloadFormat::Mvt)
+        .expect("mvt batch encode should succeed");
+    assert_eq!(mvt_encoded.len(), 1, "expected one encoded mvt tile");
+
+    let mut decoder = GzDecoder::new(mvt_encoded[0].compressed.as_slice());
+    let mut raw = Vec::new();
+    decoder.read_to_end(&mut raw).expect("gunzip mvt tile");
+    let mut actual: Vec<(String, usize)> = crate::pmtiles_reader::decode_mvt_layers(&raw)
+        .expect("decode mvt layers")
+        .into_iter()
+        .map(|l| (l.name, l.feature_count))
+        .collect();
+    actual.sort_by(|a, b| a.0.cmp(&b.0));
+
+    assert_eq!(actual, expected, "shared prep model should match mvt layer assembly");
 }
 
 #[test]

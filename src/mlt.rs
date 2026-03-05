@@ -4,8 +4,8 @@ use geo_types::{Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiP
 use mlt_core::Encodable;
 use mlt_core::v01::{
     DecodedGeometry, DecodedId, DecodedProperty, GeometryEncoder, IdEncoder, IdWidth, IntEncoder,
-    LogicalEncoder, OwnedGeometry, OwnedId, OwnedLayer01, OwnedProperty, PhysicalEncoder,
-    PresenceStream, PropValue, ScalarEncoder,
+    LogicalEncoder, OwnedGeometry, OwnedId, OwnedLayer01, OwnedProperty, PresenceStream,
+    PropValue, ScalarEncoder,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -581,6 +581,8 @@ mod tests {
     use crate::mvt::{Feature, GeomType, LayerBuilder};
     use geo_types::Geometry;
     use serde::Deserialize;
+    use serde_json::{Number, Value as JsonValue};
+    use std::collections::BTreeMap;
     use std::collections::HashMap;
 
     fn point_geom() -> Vec<u32> {
@@ -819,6 +821,97 @@ mod tests {
         }
     }
 
+    fn mvt_value_to_json(value: &Value) -> JsonValue {
+        match value {
+            Value::String(v) => JsonValue::String(v.clone()),
+            Value::Float(v) => Number::from_f64(f64::from(*v))
+                .map_or(JsonValue::Null, JsonValue::Number),
+            Value::Double(v) => Number::from_f64(*v).map_or(JsonValue::Null, JsonValue::Number),
+            Value::Int(v) => JsonValue::Number((*v).into()),
+            Value::UInt(v) => JsonValue::Number((*v).into()),
+            Value::SInt(v) => JsonValue::Number((*v).into()),
+            Value::Bool(v) => JsonValue::Bool(*v),
+        }
+    }
+
+    fn expected_feature_properties(layer: &LayerBuilder, feature: &Feature) -> BTreeMap<String, JsonValue> {
+        let mut props = BTreeMap::new();
+        for &(k_idx, v_idx) in &feature.tags {
+            let key = layer.key(k_idx).expect("key index should resolve");
+            let value = layer.value(v_idx).expect("value index should resolve");
+            props.insert(key.to_string(), mvt_value_to_json(value));
+        }
+        props.insert("_layer".to_string(), JsonValue::String(layer.name().to_string()));
+        props.insert("_extent".to_string(), JsonValue::Number(4096.into()));
+        props
+    }
+
+    #[test]
+    fn mlt_semantic_roundtrip_preserves_geometry_and_properties() {
+        let mut layer = LayerBuilder::new("semantic");
+        let k_kind = layer.intern_key("kind");
+        let k_name = layer.intern_key("name");
+        let k_pop = layer.intern_key("population");
+        let k_ratio = layer.intern_key("ratio");
+        let k_rank = layer.intern_key("rank");
+        let k_visible = layer.intern_key("visible");
+
+        let v_kind_city = layer.intern_value(Value::String("city".to_string()));
+        let v_kind_road = layer.intern_value(Value::String("road".to_string()));
+        let v_kind_land = layer.intern_value(Value::String("landuse".to_string()));
+        let v_name_oslo = layer.intern_value(Value::String("Oslo".to_string()));
+        let v_pop = layer.intern_value(Value::UInt(700_000));
+        let v_ratio = layer.intern_value(Value::Double(1.25));
+        let v_rank = layer.intern_value(Value::SInt(-2));
+        let v_visible = layer.intern_value(Value::Bool(true));
+
+        layer.add_feature(Feature {
+            id: Some(101),
+            geom_type: GeomType::Point,
+            geometry: vec![9, 50, 34],
+            tags: vec![(k_kind, v_kind_city), (k_name, v_name_oslo), (k_pop, v_pop)],
+        });
+        layer.add_feature(Feature {
+            id: Some(102),
+            geom_type: GeomType::LineString,
+            geometry: vec![9, 4, 4, 18, 0, 16, 16, 0],
+            tags: vec![(k_kind, v_kind_road), (k_ratio, v_ratio), (k_rank, v_rank)],
+        });
+        layer.add_feature(Feature {
+            id: Some(103),
+            geom_type: GeomType::Polygon,
+            geometry: vec![9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15],
+            tags: vec![(k_kind, v_kind_land), (k_visible, v_visible)],
+        });
+
+        let expected_by_id: HashMap<u64, (Geometry<i32>, BTreeMap<String, JsonValue>)> = layer
+            .features()
+            .iter()
+            .map(|feature| {
+                let id = feature.id.expect("semantic fixture features must have ids");
+                let geom = decode_feature_geometry(feature).expect("source geometry should decode");
+                let props = expected_feature_properties(&layer, feature);
+                (id, (geom, props))
+            })
+            .collect();
+
+        let encoded = encode_tile(&[&layer]).expect("mlt encode should succeed");
+        let mut parsed = mlt_core::parse_layers(&encoded).expect("mlt parse should succeed");
+        assert_eq!(parsed.len(), 1);
+        parsed[0].decode_all().expect("decode_all should succeed");
+        let fc = mlt_core::geojson::FeatureCollection::from_layers(&parsed).expect("feature collection conversion");
+        assert_eq!(fc.features.len(), expected_by_id.len());
+
+        for got in &fc.features {
+            let id = got.id.expect("decoded feature should have id");
+            let (want_geom, want_props) = expected_by_id
+                .get(&id)
+                .expect("decoded feature id should exist in source");
+            assert_eq!(&got.geometry, want_geom, "geometry mismatch for id {id}");
+            assert_eq!(&got.properties, want_props, "properties mismatch for id {id}");
+        }
+    }
+
     #[test]
     fn mlt_geometry_fixtures_roundtrip() {
         let fixtures_json = include_str!("../tests/fixtures/mlt_fixtures/geometry_fixtures.json");
@@ -831,7 +924,7 @@ mod tests {
             layer.add_feature(Feature {
                 id: Some(1),
                 geom_type: fixture_geom_type(&fixture.geom_type),
-                geometry: fixture.geometry,
+                geometry: fixture.geometry.clone(),
                 tags: vec![(key, val)],
             });
 
@@ -842,9 +935,21 @@ mod tests {
             let fc = mlt_core::geojson::FeatureCollection::from_layers(&parsed).unwrap();
             assert_eq!(fc.features.len(), 1, "fixture {}", fixture.id);
             let got = geometry_name(&fc.features[0].geometry);
+            let source_geom = decode_feature_geometry(&Feature {
+                id: Some(1),
+                geom_type: fixture_geom_type(&fixture.geom_type),
+                geometry: fixture.geometry.clone(),
+                tags: Vec::new(),
+            })
+            .expect("fixture source geometry should decode");
             assert_eq!(
                 got, fixture.expected_geojson_type,
                 "fixture {} ({})",
+                fixture.id, fixture.description
+            );
+            assert_eq!(
+                fc.features[0].geometry, source_geom,
+                "fixture {} ({}) geometry coordinates/rings mismatch",
                 fixture.id, fixture.description
             );
         }
