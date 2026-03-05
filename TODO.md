@@ -1,5 +1,43 @@
 # elivagar TODO
 
+## Commit review backlog (after `f39344892fb9c5e94596fa4412d24901e1605853`, 35 commits)
+
+- [ ] `3972789` Add MLT property fixtures and refresh TODO status
+- [ ] `a1ff829` Add committed MLT geometry fixtures and roundtrip test
+- [ ] `1d3fd6d` Integrate upstream mlt-core encoder into MLT tile path
+- [ ] `0550018` Harden MLT tile model validation and test coverage
+- [ ] `cea838d` Improve inspect payload contract reporting with legacy fallback
+- [ ] `d848c71` Make PMTiles tile contract format-aware for MLT path
+- [ ] `312d3b8` Add MLT encoder scaffold and tile-model extraction
+- [ ] `3ed8a65` Refactor assembly encoding behind tile-format dispatch
+- [ ] `f9269e1` Add tile-format selection plumbing for MLT
+- [ ] `1691056` Harden verifier with MVT geometry anomaly checks
+- [ ] `244f4a9` Add antimeridian-aware geometry wrapping
+- [ ] `52d51e4` Add --skip-to assemble resume mode
+- [ ] `031151b` Preserve shared vertices in relation multipolygons
+- [ ] `0de6fb1` Preserve shared vertices in polygon simplification
+- [ ] `b08c360` Harden shared-node line simplification
+- [ ] `8653f93` Emit building height and levels attributes
+- [ ] `9de9bf0` Add peak/pass POIs with ele normalization
+- [ ] `a8d8f6b` Add natural=cliff line support in land layer
+- [ ] `eab1cb4` Add EV charging stations to POI matching
+- [ ] `3aca1d6` Make point-on-surface hole-aware for multipolygons
+- [ ] `9c56786` Validate polygon rings before tile quantization
+- [ ] `74b74d8` Guard against invalid simplified polygon rings
+- [ ] `639def2` Make multipolygon assembly deterministic
+- [ ] `4a7a92e` Add tile size diagnostics to pipeline summary
+- [ ] `19cd941` Add PMTiles metadata source provenance
+- [ ] `43e614f` Add missing-ref diagnostics to pipeline summary
+- [ ] `5400bcc` Harden minzoom attribute filtering tests
+- [ ] `0d9366e` Add multipolygon emission coverage tests
+- [ ] `5f65fd1` Add ocean shapefile integration tests
+- [ ] `143d583` Add metadata verification edge-case tests and docs
+- [ ] `b237a3c` Add Mapbox MVT fixture conformance tests
+- [ ] `9831ca0` Refactor inspect to use shared PMTiles reader helpers
+- [ ] `6063edd` Add direct resume/adopt sort chunk regression tests
+- [ ] `6a56464` Add targeted minzoom attribute filtering tests
+- [ ] `3e99f9b` Add PMTiles layout and decode regression hardening tests
+
 ## Active priorities
 
 1. [ ] Scale validation: run Europe full pipeline (locations-on-ways path).
@@ -25,26 +63,77 @@
 - [x] `ocean.rs`: `emit_ocean_polygon` — scanline fill, needs integration test with shapefile.
   Coastline correctness matters for regional extracts where the boundary cuts through
   ocean polygons (tilemaker #16).
+- [ ] `ocean.rs` shapefile integration tests currently cover only a single simple polygon.
+  Add multipart + inner-hole fixture cases to exercise ring assembly and clipping behavior.
+- [ ] `ocean.rs` lacks malformed `.shp/.shx` negative-path tests in integration coverage.
+  Add targeted broken-header/index/record cases to verify robust error handling.
 - [x] `pipeline.rs`: `emit_multipolygon_feature` — glue code, needs full pipeline context.
   Large lakes/water bodies at low zoom are particularly vulnerable to simplification + clipping
   producing visible topology artifacts (tilemaker #191). Very large polygons ("monster polygons")
   also stress the clipping path specifically (tilemaker #607).
+- [ ] `pipeline_tests.rs` multipolygon coverage lacks invalid/degenerate inner-ring cases
+  (too-short/self-intersecting holes). Add targeted negative-path tests for hole handling.
+- [ ] `pipeline_tests.rs` multipolygon coverage is mostly single-zoom assertions.
+  Add multi-zoom simplification/retention checks to guard zoom-dependent behavior.
 - [x] `inspect.rs`: read-only diagnostic tool tested on root-only and leaf-directory layouts,
   and migrated to use `pmtiles_reader.rs` shared helpers to reduce parsing duplication.
+- [ ] `inspect.rs`: strengthen tests beyond "no error" smoke coverage. Add output assertions
+  for header/section reporting so formatting/field regressions are caught.
+- [ ] `inspect.rs`: add malformed metadata payload tests (e.g., non-gzip bytes with
+  non-zero metadata length) to lock down graceful error-tolerant inspect behavior.
+- [ ] `inspect.rs`: add payload-contract fallback tests for cases where metadata is absent
+  or unreadable, ensuring header-vs-metadata source reporting stays correct.
 - [x] `sort.rs`: `SortWriter::resume` / `adopt_chunk_files` now directly tested.
   Coverage includes: checkpoint resume success, missing required chunk failure,
   stale leftover deletion on resume, empty checkpoint resume, and adopted chunk merge correctness.
 - [x] Import targeted cases from Mapbox's `mvt_fixtures` corpus for `mvt.rs` conformance testing.
   Added fixture-backed conformance tests for canonical valid geometries:
   point/line/polygon + multipoint/multilinestring/multipolygon (fixture IDs 017-022).
+- [ ] `mvt.rs` fixture conformance currently covers canonical valid geometries only.
+  Add targeted invalid/malformed fixture cases to lock down error handling behavior.
+- [ ] `mvt.rs` fixture parser helper assumes single-layer/single-feature fixtures.
+  Generalize helper/assertions for future multi-layer and multi-feature fixture imports.
+- [ ] Add parity tests for shared tile-model preparation used by MLT scaffolding to ensure
+  layer/feature assembly stays consistent with MVT path as code evolves.
+- [ ] `mlt.rs`: clarify `observed_type_count` semantics (currently saturates effectively at 2
+  for mixed columns). Either track true distinct type cardinality or rename/reshape field
+  to a boolean mixed-flag model with explicit tests/docs.
+- [ ] Add MLT semantic roundtrip tests that compare decoded geometry/properties against
+  source features, not only parse/decode success.
+- [ ] MLT fixture roundtrip currently asserts geometry type only; add coordinate/ring-content
+  equality checks to catch subtle geometry corruption that preserves type.
+- [ ] Add explicit MLT size/perf guard checks (or benchmarks) for no-compression tile payloads
+  to catch unintended regressions versus equivalent MVT tiles.
 - [x] PMTiles metadata JSON validation: `elivagar verify` now validates metadata JSON
   structure and `vector_layers` schema. Added regression tests for malformed metadata payloads:
   invalid JSON, missing `vector_layers`, and invalid `vector_layers` entry schema.
   Remaining gap: fuzz testing for attribute/value edge cases that could produce malformed JSON
   (tippecanoe #181).
+- [ ] `verify.rs` geometry-anomaly hardening needs broader rule coverage tests:
+  unknown command IDs, zero repeat counts, polygon MoveTo/ClosePath invariants, and
+  absolute-coordinate limit checks.
+- [ ] `verify.rs` geometry anomaly checks: add seam-tile vs non-seam threshold tests
+  to lock `MVT_DELTA_LIMIT_SEAM` and `MVT_DELTA_LIMIT` behavior.
+- [ ] `tests/pmtiles_roundtrip.rs` metadata corruption helper only supports in-place
+  replacements that fit the existing metadata section. Add explicit oversize-replacement
+  negative-path coverage for future corruption test scenarios.
+- [ ] `pmtiles_reader.rs`: add decode-directory malformed `tile_id` delta overflow test.
+  Current hardening covers truncated columns and offset sentinel/overflow, but not cumulative
+  tile-id delta overflow behavior.
 - [x] Per-attribute minzoom filtering: `encode_attrs_bytes()` in wire_format.rs filters
   attributes by zoom. Verify with tests that per-attribute zoom gates actually take effect
   and don't leak attributes to wrong zoom levels (tilemaker #671).
+- [ ] `wire_format.rs` attr-count cap test checks `tags.len()==255` but not full stream
+  consistency under >255 attrs. Add decode-boundary assertions for capped payload parsing.
+- [ ] `wire_format.rs`: add combined cap+minzoom interaction test (large attr list with
+  mixed gated/ungated attrs) to lock down filtering behavior under truncation.
+- [ ] `wire_format.rs` minzoom tests currently assert some attributes by positional tag index.
+  Make these assertions order-insensitive (key/value membership) so benign tag-order changes
+  don't cause false regressions in filtering tests.
+- [ ] `sort.rs`: add resume coverage for `start_chunk=0` with pre-existing stale chunks
+  present on disk. Current empty-checkpoint test uses an empty directory only.
+- [ ] `sort.rs`: add adopt-chunk negative-path tests (missing/corrupt adopted chunk files)
+  to lock down merge-phase error surfacing behavior.
 
 ## Refactoring opportunities
 
@@ -53,6 +142,10 @@
   re-runs MVT encoding with different profile settings to speed up Shortbread tuning on
   large extracts. Planetiler #1497/#1468 adds exactly this (reuse feature DB for post-
   processing iteration).
+- [ ] Add explicit `--skip-to assemble` control-flow coverage (CLI parse + pipeline behavior),
+  including expected metric emission differences when phase3 is skipped.
+- [ ] Add `--skip-to assemble` negative-path tests for missing/stale chunk state to pin
+  mode-specific failure/reporting behavior.
 - [ ] Early simplification as memory pressure valve: simplify geometry during PBF processing
   when batch memory exceeds budget, rather than deferring all simplification to the assemble
   phase. Reduces peak RSS and sort chunk size. Different from feature dropping — this preserves
@@ -104,6 +197,11 @@
 - [x] Tile size diagnostics: report per-tile size stats, flag oversized tiles, expose
   layer-level breakdowns. Needed for feature dropping tuning and profile regression triage
   (Planetiler #391).
+- [ ] Tile size diagnostics currently have helper-level ordering tests only.
+  Add end-to-end metric emission assertions for `tile_bytes_*`, `tile_max_*`, and
+  `oversize_top_*` summary lines on a controlled pipeline run.
+- [ ] Tile size diagnostics: add boundary-value tests at exact warn/severe thresholds
+  (500KB and 1MB) to lock down classification semantics.
 - [ ] Compressed sort chunks: gzip-compress temp sort files to reduce I/O during sort phase.
   Tippecanoe (#56) saw wins from this. Low priority since sort is already fast.
 - [ ] Building merge at z13: Planetiler optionally unions adjacent buildings to reduce tile
@@ -122,17 +220,30 @@
   invalidate multipolygon topology specifically (Planetiler #496). Tilemaker #828 confirmed
   that DP-simplified polygons break MapLibre's earcut triangulation — concrete downstream
   failure mode for elivagar's current simplifier.
+- [ ] Add explicit multipolygon-path tests for post-simplification invalid ring rejection
+  (current regression coverage is stronger for single polygon emission than multipolygon).
+- [ ] Add boundary-policy tests for invalid ring guard at `z=14` cutoff
+  (`z<14` reject behavior vs `z=14` behavior) to lock intended semantics.
 - [x] Deterministic multipolygon assembly: `join_ways()` in multipolygon.rs uses
   `std::collections::HashMap` which has random iteration order. For well-formed multipolygons
   the two-pass algorithm converges, but broken/ambiguous ones can produce different ring
   assignments between runs. Replace with `FxHashMap` (already used in mvt.rs) or sort chains
   before joining (Planetiler #788).
+- [ ] `multipolygon.rs` determinism hardening follow-up: current `ring_sort_key`
+  (bbox + ring length) is not unique, so tied rings can still preserve input-order
+  differences. Use a canonical full-ring comparator/fingerprint for stable ordering.
+- [ ] Strengthen multipolygon determinism tests: compare full assembled ring coordinate
+  sequences (or canonical fingerprints), not only coarse `ring_sort_key` equality.
 - [x] Pre-quantization polygon validity: validate/repair polygon rings before snapping to tile
   grid coordinates. Invalid polygons that survive clipping+simplification can cascade into
   tile artifacts after integer quantization (Planetiler #566). Tilemaker #602 hit this as
   spikes/self-intersections introduced during coordinate scaling. The interplay between
   simplification and rounding specifically produces visible artifacts (Planetiler #324).
   Planetiler #1493 is actively exploring optimistic naive polygon snapping approaches.
+- [ ] Pre-quantization ring-validity checks are O(n^2) intersection scans.
+  Add perf/scale coverage for large rings to confirm acceptable overhead in worst-case geometry.
+- [ ] Add borderline-valid ring coverage for pre-quantization validity checks
+  (collinear segments, repeated vertices, near-touching edges) to avoid false positives.
 - [x] Label points in polygon holes: `point_on_surface()` scans outer ring only and does not
   avoid placing points inside inner rings. Multipolygons with large holes could get label
   points in the wrong place (tippecanoe #62). Tilemaker #461 hit centroid exceptions on
@@ -141,10 +252,18 @@
   (Planetiler #237). Current algorithm is a simple 5-scan horizontal sweep; Planetiler #723
   implements pole of inaccessibility (max inscribed circle) which gives better results for
   irregular polygons but is more expensive.
+- [ ] Add `point_on_surface_with_holes` coverage for multiple-hole and adjacent-hole layouts
+  to validate interval-subtraction behavior in more complex multipolygons.
+- [ ] Add explicit fallback-path tests for `point_on_surface_with_holes` when scan candidates
+  fail and outer-only fallback lands inside a hole (current behavior returns `None`).
 - [x] Shared-node simplification (line features): preserve block-local shared interior way
   nodes during DP simplification so common road/boundary junction vertices survive
   generalization. Implemented via block-local shared-node detection + required-vertex DP.
   Tippecanoe (#99) had bugs in shared-node preservation mode; this adds explicit coverage.
+- [ ] Add end-to-end line-emission tests that assert pinned shared nodes survive
+  zoom-level simplification in emitted geometry.
+- [ ] Shared-node detection is block-local by design; add explicit coverage/docs for
+  cross-block junction behavior limits so regression expectations are clear.
 - [ ] Shared-edge simplification (adjacent polygons): independent simplification of polygons
   that share an edge can still produce slivers/gaps along shared boundaries
   (tippecanoe #105).
@@ -157,6 +276,14 @@
   simplification for (1) line features, (2) closed-way polygons, and
   (3) relation-derived multipolygons. This reduces catastrophic drift but does
   not guarantee edge-identical output between neighboring polygons.
+- [ ] Add explicit relation-derived multipolygon shared-vertex preservation tests
+  (closed-way polygon coverage exists; relation path needs direct regression checks).
+- [ ] Strengthen shared-vertex simplification assertions to validate specific pinned
+  vertex identity retention, not only increased encoded command counts.
+- [ ] Relation multipolygon shared-vertex preservation tests still infer success mostly via
+  command-count deltas; add direct emitted-geometry vertex identity assertions.
+- [ ] Add precision-boundary tests for `relation_shared_vertex_keys` quantization to verify
+  near-equal coordinate handling and avoid accidental shared-key collisions.
   Remaining work: topology-aware lockstep simplification across polygon groups:
   detect shared edge chains, simplify each shared chain once, and reuse that
   exact chain in all incident polygons before rebuilding rings.
@@ -171,6 +298,13 @@
   Implemented wrapped-copy emission on seam-crossing bboxes and wrapped land-mask marking.
   Also hardened data-bounds checkpoint handling for antimeridian-spanning extracts to avoid
   invalid narrow/wide bbox metadata behavior.
+- [ ] Antimeridian crossing detection currently uses a wide-span heuristic (`lon_span > 180°`)
+  that can misclassify wide but non-crossing extracts as crossing. Refine detection to avoid
+  forced world-wide x-bounds on non-crossing bboxes.
+- [ ] Add end-to-end antimeridian emission tests verifying wrapped-copy behavior does not
+  introduce duplicate or missing features on seam-crossing geometries.
+- [ ] Add explicit tests for wide-but-non-crossing longitude spans to lock expected
+  antimeridian detection behavior.
 
 ## Schema extensions (beyond Shortbread 1.0)
 
@@ -180,11 +314,19 @@
   urban areas. MLT's 2.5D basemap support makes this more relevant if we adopt that format.
   Also consider `building:part=yes` sub-components (tilemaker #692) — needed for proper 3D
   rendering of complex buildings with towers, wings, etc.
+- [ ] Add building measurement parser coverage for more real-world formats
+  (`24m`, `24 meters`, locale comma decimals, semicolon variants) to pin normalization behavior.
+- [ ] Add explicit `building:levels` policy tests (zero, negative, fractional edge cases)
+  to lock intended acceptance/rejection semantics.
 - [x] Elevation attribute on peaks/passes: elivagar's POI layer does not match `natural=peak`
   or `natural=volcano`, and does not emit the `ele` (elevation) tag. Investigate whether
   Shortbread 1.0 specifies these, and add with proper unit conversion — OSM `ele` is
   nominally meters but sometimes tagged in feet (Planetiler #224 had a unit-conversion bug
   here). Useful for topographic labeling in nidhogg.
+- [ ] `pois.rs` elevation parser needs broader format coverage tests
+  (`1000m`, `1,234 m`, `1000;1200`, negatives, malformed strings) to pin normalization behavior.
+- [ ] Add explicit POI tests for `natural=volcano` and `mountain_pass=yes` branches
+  in peak/pass matching logic.
 - [ ] Lake/river centerlines: generate centerline geometries for elongated water features to
   improve label placement. Current `point_on_surface()` works for compact polygons but
   produces poor label positions for long/thin features like fjords or narrow lakes. Planetiler
@@ -211,11 +353,19 @@
   are well-tagged in mountainous areas and useful for topographic rendering. Would need a new
   landform line layer or extension to an existing layer. Tilemaker #265 hit rendering issues
   with cliff classification.
+- [ ] Add explicit closed-way coverage for `natural=cliff` line matching (current regression
+  test is open-way focused despite both open/closed wiring).
+- [ ] Add tag-conflict/priority tests for `natural=cliff` alongside other matching line tags
+  to lock expected classification behavior.
 - [x] EV charging stations as POIs: `amenity=charging_station` is not in elivagar's POI list
   because Shortbread 1.0 doesn't include it, but EV charging infrastructure is increasingly
   important for map consumers. OSM has good coverage in Europe. Investigate adding as a
   schema extension alongside other beyond-Shortbread POI types (Planetiler #765 hit a bug
   where charging stations were silently dropped).
+- [ ] Add POI coverage for non-node charging stations (way/area geometries) to lock
+  geometry-path behavior for `amenity=charging_station`.
+- [ ] Add richer tag-matrix tests for charging stations (additional tags present) to ensure
+  classification remains stable and address suppression behavior stays correct.
 
 ## Future architecture
 
@@ -249,10 +399,21 @@
   members (`MemberId::Relation`), so relation-members-of-relations are silently dropped
   (tilemaker #638). Correct for multipolygon relations (way-only per OSM spec) but worth
   counting.
+- [ ] Missing-ref diagnostics currently have unit coverage for counter accumulation only.
+  Add end-to-end pipeline-path tests that assert emitted summary metrics from real way/relation
+  processing with missing references.
+- [ ] Missing-ref diagnostics: add explicit skip/resume behavior coverage (e.g. `--skip-to sort`)
+  to document/lock whether metrics are omitted or printed as zero when phase12 is skipped.
 - [x] Source provenance in PMTiles metadata: include OSM replication timestamp and source
   PBF filename in the metadata JSON so consumers can trace data freshness. Currently only
   emits schema info (name, format, layers). Planetiler #120 added this for MBTiles; same
   applies to PMTiles.
+- [ ] `pmtiles_writer.rs`: add metadata JSON escape-path tests for `source_pbf` values with
+  quotes, backslashes, and control characters.
+- [ ] Add end-to-end coverage for provenance propagation through `phase_assemble` (source
+  filename + replication timestamp) rather than only `build_metadata` unit tests.
+- [ ] Add end-to-end pipeline assertions that selected `tile_format` produces consistent
+  PMTiles header + metadata tile contract fields in generated archives.
 
 ## Website
 
