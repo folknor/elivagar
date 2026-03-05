@@ -487,3 +487,135 @@ fn extract_declared_layers(
     }
     Ok(names)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[inline]
+    fn cmd(id: u32, count: u32) -> u32 {
+        id | (count << 3)
+    }
+
+    #[inline]
+    fn zz(v: i64) -> u32 {
+        let n = ((v << 1) ^ (v >> 63)).cast_unsigned();
+        u32::try_from(n).expect("zigzag value should fit in u32 for test cases")
+    }
+
+    #[test]
+    fn geometry_rejects_unknown_command_id() {
+        let err = validate_geometry_commands(&[cmd(4, 1)], 2, 10, 1)
+            .expect_err("unknown command id should fail");
+        assert!(err.contains("unknown geometry command id 4"));
+    }
+
+    #[test]
+    fn geometry_rejects_zero_repeat_count() {
+        let err = validate_geometry_commands(&[cmd(1, 0)], 2, 10, 1)
+            .expect_err("zero repeat count should fail");
+        assert!(err.contains("zero repeat count"));
+    }
+
+    #[test]
+    fn geometry_rejects_polygon_moveto_count_not_one() {
+        let commands = vec![
+            cmd(1, 2),
+            zz(0),
+            zz(0),
+            zz(1),
+            zz(1),
+        ];
+        let err = validate_geometry_commands(&commands, 3, 10, 1)
+            .expect_err("polygon MoveTo count != 1 should fail");
+        assert!(err.contains("MoveTo count must be 1"));
+    }
+
+    #[test]
+    fn geometry_rejects_closepath_in_non_polygon() {
+        let commands = vec![
+            cmd(1, 1),
+            zz(0),
+            zz(0),
+            cmd(7, 1),
+        ];
+        let err = validate_geometry_commands(&commands, 2, 10, 1)
+            .expect_err("ClosePath in non-polygon should fail");
+        assert!(err.contains("ClosePath in non-polygon"));
+    }
+
+    #[test]
+    fn geometry_rejects_polygon_closepath_without_enough_points() {
+        let commands = vec![
+            cmd(1, 1),
+            zz(0),
+            zz(0),
+            cmd(7, 1),
+        ];
+        let err = validate_geometry_commands(&commands, 3, 10, 1)
+            .expect_err("polygon ClosePath without enough points should fail");
+        assert!(err.contains("without enough ring points"));
+    }
+
+    #[test]
+    fn geometry_rejects_polygon_missing_closepath() {
+        let commands = vec![
+            cmd(1, 1),
+            zz(0),
+            zz(0),
+            cmd(2, 2),
+            zz(1),
+            zz(0),
+            zz(0),
+            zz(1),
+        ];
+        let err = validate_geometry_commands(&commands, 3, 10, 1)
+            .expect_err("polygon without ClosePath should fail");
+        assert!(err.contains("missing ClosePath"));
+    }
+
+    #[test]
+    fn geometry_rejects_absolute_coordinate_limit_exceeded() {
+        // Three deltas at +65536 each stay within per-step delta limit but exceed
+        // absolute coordinate guard on the third step.
+        let commands = vec![
+            cmd(1, 1),
+            zz(0),
+            zz(0),
+            cmd(2, 3),
+            zz(65_536),
+            zz(0),
+            zz(65_536),
+            zz(0),
+            zz(65_536),
+            zz(0),
+        ];
+        let err = validate_geometry_commands(&commands, 2, 10, 1)
+            .expect_err("absolute coordinate limit should fail");
+        assert!(err.contains("exceeds absolute limit"));
+    }
+
+    #[test]
+    fn geometry_seam_tile_uses_stricter_delta_limit() {
+        // 20k delta is > seam limit (16384) but < non-seam limit (65536).
+        let commands = vec![
+            cmd(1, 1),
+            zz(0),
+            zz(0),
+            cmd(2, 1),
+            zz(20_000),
+            zz(0),
+        ];
+
+        // Non-seam tile passes.
+        validate_geometry_commands(&commands, 2, 4, 1)
+            .expect("non-seam tile should allow 20k delta");
+
+        // Seam tile fails.
+        let err = validate_geometry_commands(&commands, 2, 4, 0)
+            .expect_err("seam tile should reject 20k delta");
+        assert!(err.contains("suspicious geometry delta"));
+        assert!(err.contains(&MVT_DELTA_LIMIT_SEAM.to_string()));
+    }
+}

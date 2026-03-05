@@ -120,10 +120,10 @@
   invalid JSON, missing `vector_layers`, and invalid `vector_layers` entry schema.
   Remaining gap: fuzz testing for attribute/value edge cases that could produce malformed JSON
   (tippecanoe #181).
-- [ ] `verify.rs` geometry-anomaly hardening needs broader rule coverage tests:
+- [x] `verify.rs` geometry-anomaly hardening needs broader rule coverage tests:
   unknown command IDs, zero repeat counts, polygon MoveTo/ClosePath invariants, and
   absolute-coordinate limit checks.
-- [ ] `verify.rs` geometry anomaly checks: add seam-tile vs non-seam threshold tests
+- [x] `verify.rs` geometry anomaly checks: add seam-tile vs non-seam threshold tests
   to lock `MVT_DELTA_LIMIT_SEAM` and `MVT_DELTA_LIMIT` behavior.
 - [x] `tests/pmtiles_roundtrip.rs` metadata corruption helper only supports in-place
   replacements that fit the existing metadata section. Add explicit oversize-replacement
