@@ -33,8 +33,8 @@
 
 ### Pipeline features (3 commits)
 - [x] `43e614f` Missing-ref diagnostics
-- [ ] `19cd941` PMTiles metadata source provenance
-- [ ] `4a7a92e` Tile size diagnostics
+- [x] `19cd941` PMTiles metadata source provenance
+- [x] `4a7a92e` Tile size diagnostics
 
 ### Infrastructure (3 commits)
 - [ ] `52d51e4` `--skip-to assemble` resume mode
@@ -423,7 +423,7 @@
   quotes, backslashes, and control characters.
 - [x] Add end-to-end coverage for provenance propagation through `phase_assemble` (source
   filename + replication timestamp) rather than only `build_metadata` unit tests.
-- [ ] Add end-to-end pipeline assertions that selected `tile_format` produces consistent
+- [x] Add end-to-end pipeline assertions that selected `tile_format` produces consistent
   PMTiles header + metadata tile contract fields in generated archives.
 
 ## Website

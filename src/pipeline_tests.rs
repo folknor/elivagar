@@ -944,6 +944,85 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
     assert_eq!(parsed["osmosis_replication_timestamp"], 1_700_000_123);
 }
 
+#[test]
+fn phase_assemble_tile_format_sets_consistent_payload_contract() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+
+    // MVT contract: gzip-compressed MVT payload, explicit MVT tile type in header.
+    let mvt_chunks_dir = dir.path().join("chunks_mvt");
+    let mvt_output = dir.path().join("phase_assemble_contract_mvt.pmtiles");
+    let mvt_tmp = dir.path().join("tmp_mvt");
+    std::fs::create_dir_all(&mvt_tmp).expect("create mvt tmp dir");
+    let mut mvt_sort_reader = one_tile_sort_reader(&mvt_chunks_dir);
+    let mvt_config = TilegenConfig {
+        pbf_path: dir.path().join("contract-mvt.osm.pbf"),
+        output_path: mvt_output.clone(),
+        tmp_dir: mvt_tmp,
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean_shapefile: None,
+        ocean_simplified_shapefile: None,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: false,
+        allow_unsafe_flat_index: false,
+        threads: 1,
+        way_inflight_budget: 0,
+        rel_batch_budget: 0,
+        assemble_batch_budget: 0,
+        sort_chunk_size: 0,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mvt,
+    };
+    let _ = phase_assemble(&mut mvt_sort_reader, &mvt_config).expect("mvt assemble should succeed");
+    let mut mvt_reader = crate::pmtiles_reader::PmtilesReader::open(&mvt_output)
+        .expect("open mvt pmtiles");
+    let mvt_metadata = mvt_reader.read_metadata().expect("read mvt metadata");
+    let mvt_json: serde_json::Value = serde_json::from_str(&mvt_metadata).expect("parse mvt metadata");
+    assert_eq!(mvt_reader.tile_type(), 1, "mvt header tile_type must be mvt");
+    assert_eq!(mvt_reader.tile_compression(), 2, "mvt header tile_compression must be gzip");
+    assert_eq!(mvt_json["tile_payload_format"], "mvt");
+    assert_eq!(mvt_json["tile_compression"], "gzip");
+
+    // MLT contract: uncompressed payload, unknown tile type in PMTiles header + explicit metadata.
+    let mlt_chunks_dir = dir.path().join("chunks_mlt");
+    let mlt_output = dir.path().join("phase_assemble_contract_mlt.pmtiles");
+    let mlt_tmp = dir.path().join("tmp_mlt");
+    std::fs::create_dir_all(&mlt_tmp).expect("create mlt tmp dir");
+    let mut mlt_sort_reader = one_tile_sort_reader(&mlt_chunks_dir);
+    let mlt_config = TilegenConfig {
+        pbf_path: dir.path().join("contract-mlt.osm.pbf"),
+        output_path: mlt_output.clone(),
+        tmp_dir: mlt_tmp,
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean_shapefile: None,
+        ocean_simplified_shapefile: None,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: false,
+        allow_unsafe_flat_index: false,
+        threads: 1,
+        way_inflight_budget: 0,
+        rel_batch_budget: 0,
+        assemble_batch_budget: 0,
+        sort_chunk_size: 0,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mlt,
+    };
+    let _ = phase_assemble(&mut mlt_sort_reader, &mlt_config).expect("mlt assemble should succeed");
+    let mut mlt_reader = crate::pmtiles_reader::PmtilesReader::open(&mlt_output)
+        .expect("open mlt pmtiles");
+    let mlt_metadata = mlt_reader.read_metadata().expect("read mlt metadata");
+    let mlt_json: serde_json::Value = serde_json::from_str(&mlt_metadata).expect("parse mlt metadata");
+    assert_eq!(mlt_reader.tile_type(), 0, "mlt header tile_type should remain unknown");
+    assert_eq!(mlt_reader.tile_compression(), 1, "mlt header tile_compression should be none");
+    assert_eq!(mlt_json["tile_payload_format"], "mlt");
+    assert_eq!(mlt_json["tile_compression"], "none");
+}
+
 // -----------------------------------------------------------------------
 // Helpers for emit tests — decode SortRecord payloads
 // -----------------------------------------------------------------------
