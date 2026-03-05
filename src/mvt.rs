@@ -642,7 +642,30 @@ mod tests {
     use protohoggr::{Cursor, WIRE_LEN};
 
     #[derive(Debug, PartialEq, Eq)]
+    struct ParsedFixtureFeature {
+        feature_id: Option<u64>,
+        feature_type: u64,
+        feature_tags: Vec<u32>,
+        feature_geometry: Vec<u32>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ParsedFixtureLayer {
+        layer_name: String,
+        layer_version: u64,
+        layer_extent: Option<u64>,
+        keys: Vec<String>,
+        string_values: Vec<String>,
+        features: Vec<ParsedFixtureFeature>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
     struct ParsedFixtureTile {
+        layers: Vec<ParsedFixtureLayer>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ParsedFixtureSingleFeature {
         layer_name: String,
         layer_version: u64,
         layer_extent: Option<u64>,
@@ -654,97 +677,227 @@ mod tests {
         feature_geometry: Vec<u32>,
     }
 
-    fn parse_single_layer_single_feature(bytes: &[u8]) -> ParsedFixtureTile {
+    fn parse_fixture_tile(bytes: &[u8]) -> Result<ParsedFixtureTile, String> {
         let mut tile_cursor = Cursor::new(bytes);
-        let mut layer_buf: Option<&[u8]> = None;
-        while let Ok(Some((field, wire))) = tile_cursor.read_tag() {
-            if field == 3 && wire == WIRE_LEN {
-                layer_buf = Some(tile_cursor.read_len_delimited().unwrap());
-                break;
+        let mut layers = Vec::new();
+        while let Some((field, wire)) = tile_cursor
+            .read_tag()
+            .map_err(|e| format!("read tile tag: {e}"))?
+        {
+            if field != 3 || wire != WIRE_LEN {
+                tile_cursor
+                    .skip_field(wire)
+                    .map_err(|e| format!("skip tile field {field}: {e}"))?;
+                continue;
             }
-            tile_cursor.skip_field(wire).unwrap();
+            let layer_buf = tile_cursor
+                .read_len_delimited()
+                .map_err(|e| format!("read tile.layers: {e}"))?;
+            layers.push(parse_fixture_layer(layer_buf)?);
         }
-        let layer_buf = layer_buf.expect("tile must contain one layer");
+        Ok(ParsedFixtureTile { layers })
+    }
 
+    fn parse_fixture_layer(layer_buf: &[u8]) -> Result<ParsedFixtureLayer, String> {
         let mut layer_name = String::new();
         let mut layer_version = 0u64;
         let mut layer_extent: Option<u64> = None;
-        let mut key = String::new();
-        let mut string_value = String::new();
+        let mut keys = Vec::new();
+        let mut string_values = Vec::new();
+        let mut features = Vec::new();
+
+        let mut layer_cursor = Cursor::new(layer_buf);
+        while let Some((field, wire)) = layer_cursor
+            .read_tag()
+            .map_err(|e| format!("read layer tag: {e}"))?
+        {
+            match (field, wire) {
+                (15, WIRE_VARINT) => {
+                    layer_version = layer_cursor
+                        .read_varint()
+                        .map_err(|e| format!("read layer.version: {e}"))?;
+                }
+                (1, WIRE_LEN) => {
+                    layer_name = String::from_utf8_lossy(
+                        layer_cursor
+                            .read_len_delimited()
+                            .map_err(|e| format!("read layer.name: {e}"))?,
+                    )
+                    .to_string();
+                }
+                (5, WIRE_VARINT) => {
+                    layer_extent = Some(
+                        layer_cursor
+                            .read_varint()
+                            .map_err(|e| format!("read layer.extent: {e}"))?,
+                    );
+                }
+                (3, WIRE_LEN) => {
+                    let key = String::from_utf8_lossy(
+                        layer_cursor
+                            .read_len_delimited()
+                            .map_err(|e| format!("read layer.keys: {e}"))?,
+                    )
+                    .to_string();
+                    keys.push(key);
+                }
+                (4, WIRE_LEN) => {
+                    let value_msg = layer_cursor
+                        .read_len_delimited()
+                        .map_err(|e| format!("read layer.values: {e}"))?;
+                    string_values.push(parse_fixture_value_string(value_msg)?);
+                }
+                (2, WIRE_LEN) => {
+                    let feature_msg = layer_cursor
+                        .read_len_delimited()
+                        .map_err(|e| format!("read layer.features: {e}"))?;
+                    features.push(parse_fixture_feature(feature_msg)?);
+                }
+                _ => {
+                    layer_cursor
+                        .skip_field(wire)
+                        .map_err(|e| format!("skip layer field {field}: {e}"))?;
+                }
+            }
+        }
+
+        Ok(ParsedFixtureLayer {
+            layer_name,
+            layer_version,
+            layer_extent,
+            keys,
+            string_values,
+            features,
+        })
+    }
+
+    fn parse_fixture_value_string(value_msg: &[u8]) -> Result<String, String> {
+        let mut vcur = Cursor::new(value_msg);
+        while let Some((field, wire)) = vcur
+            .read_tag()
+            .map_err(|e| format!("read value tag: {e}"))?
+        {
+            if field == 1 && wire == WIRE_LEN {
+                return Ok(String::from_utf8_lossy(
+                    vcur.read_len_delimited()
+                        .map_err(|e| format!("read value.string: {e}"))?,
+                )
+                .to_string());
+            }
+            vcur.skip_field(wire)
+                .map_err(|e| format!("skip value field {field}: {e}"))?;
+        }
+        Ok(String::new())
+    }
+
+    fn parse_fixture_feature(feature_msg: &[u8]) -> Result<ParsedFixtureFeature, String> {
         let mut feature_id = None;
         let mut feature_type = 0u64;
         let mut feature_tags = Vec::new();
         let mut feature_geometry = Vec::new();
 
-        let mut layer_cursor = Cursor::new(layer_buf);
-        while let Ok(Some((field, wire))) = layer_cursor.read_tag() {
+        let mut fcur = Cursor::new(feature_msg);
+        while let Some((field, wire)) = fcur
+            .read_tag()
+            .map_err(|e| format!("read feature tag: {e}"))?
+        {
             match (field, wire) {
-                (15, WIRE_VARINT) => layer_version = layer_cursor.read_varint().unwrap(),
-                (1, WIRE_LEN) => {
-                    layer_name = String::from_utf8_lossy(layer_cursor.read_len_delimited().unwrap()).to_string();
-                }
-                (5, WIRE_VARINT) => layer_extent = Some(layer_cursor.read_varint().unwrap()),
-                (3, WIRE_LEN) => {
-                    key = String::from_utf8_lossy(layer_cursor.read_len_delimited().unwrap()).to_string();
-                }
-                (4, WIRE_LEN) => {
-                    let value_msg = layer_cursor.read_len_delimited().unwrap();
-                    let mut vcur = Cursor::new(value_msg);
-                    while let Ok(Some((vf, vw))) = vcur.read_tag() {
-                        if vf == 1 && vw == WIRE_LEN {
-                            string_value =
-                                String::from_utf8_lossy(vcur.read_len_delimited().unwrap()).to_string();
-                            break;
-                        }
-                        vcur.skip_field(vw).unwrap();
-                    }
+                (1, WIRE_VARINT) => {
+                    feature_id = Some(
+                        fcur.read_varint()
+                            .map_err(|e| format!("read feature.id: {e}"))?,
+                    );
                 }
                 (2, WIRE_LEN) => {
-                    let feature_msg = layer_cursor.read_len_delimited().unwrap();
-                    let mut fcur = Cursor::new(feature_msg);
-                    while let Ok(Some((ff, fw))) = fcur.read_tag() {
-                        match (ff, fw) {
-                            (1, WIRE_VARINT) => feature_id = Some(fcur.read_varint().unwrap()),
-                            (2, WIRE_LEN) => {
-                                let packed = fcur.read_len_delimited().unwrap();
-                                let mut p = Cursor::new(packed);
-                                while !p.is_empty() {
-                                    feature_tags.push(
-                                        u32::try_from(p.read_varint().unwrap())
-                                            .expect("fixture tags must fit in u32"),
-                                    );
-                                }
-                            }
-                            (3, WIRE_VARINT) => feature_type = fcur.read_varint().unwrap(),
-                            (4, WIRE_LEN) => {
-                                let packed = fcur.read_len_delimited().unwrap();
-                                let mut p = Cursor::new(packed);
-                                while !p.is_empty() {
-                                    feature_geometry.push(
-                                        u32::try_from(p.read_varint().unwrap())
-                                            .expect("fixture geometry must fit in u32"),
-                                    );
-                                }
-                            }
-                            _ => fcur.skip_field(fw).unwrap(),
-                        }
-                    }
+                    let packed = fcur
+                        .read_len_delimited()
+                        .map_err(|e| format!("read feature.tags: {e}"))?;
+                    feature_tags = parse_packed_u32(packed, "feature.tags")?;
                 }
-                _ => layer_cursor.skip_field(wire).unwrap(),
+                (3, WIRE_VARINT) => {
+                    feature_type = fcur
+                        .read_varint()
+                        .map_err(|e| format!("read feature.type: {e}"))?;
+                }
+                (4, WIRE_LEN) => {
+                    let packed = fcur
+                        .read_len_delimited()
+                        .map_err(|e| format!("read feature.geometry: {e}"))?;
+                    feature_geometry = parse_packed_u32(packed, "feature.geometry")?;
+                }
+                _ => {
+                    fcur.skip_field(wire)
+                        .map_err(|e| format!("skip feature field {field}: {e}"))?;
+                }
             }
         }
 
-        ParsedFixtureTile {
-            layer_name,
-            layer_version,
-            layer_extent,
-            key,
-            string_value,
+        Ok(ParsedFixtureFeature {
             feature_id,
             feature_type,
             feature_tags,
             feature_geometry,
+        })
+    }
+
+    fn parse_packed_u32(buf: &[u8], ctx: &str) -> Result<Vec<u32>, String> {
+        let mut out = Vec::new();
+        let mut cur = Cursor::new(buf);
+        while !cur.is_empty() {
+            let val = cur
+                .read_varint()
+                .map_err(|e| format!("read {ctx} varint: {e}"))?;
+            let n = u32::try_from(val).map_err(|_| format!("{ctx} value out of u32 range: {val}"))?;
+            out.push(n);
         }
+        Ok(out)
+    }
+
+    fn parse_single_layer_single_feature(bytes: &[u8]) -> Result<ParsedFixtureSingleFeature, String> {
+        let parsed = parse_fixture_tile(bytes)?;
+        if parsed.layers.len() != 1 {
+            return Err(format!("expected 1 layer, got {}", parsed.layers.len()));
+        }
+        let layer = &parsed.layers[0];
+        if layer.features.len() != 1 {
+            return Err(format!("expected 1 feature, got {}", layer.features.len()));
+        }
+        let feature = &layer.features[0];
+        if feature.feature_tags.len() % 2 != 0 {
+            return Err("feature tags must be key/value pairs".to_string());
+        }
+
+        let (key, string_value) = if feature.feature_tags.len() >= 2 {
+            let key_idx = usize::try_from(feature.feature_tags[0])
+                .map_err(|_| "key index conversion failed".to_string())?;
+            let val_idx = usize::try_from(feature.feature_tags[1])
+                .map_err(|_| "value index conversion failed".to_string())?;
+            let key = layer
+                .keys
+                .get(key_idx)
+                .ok_or_else(|| format!("key index out of bounds: {key_idx}"))?
+                .clone();
+            let string_value = layer
+                .string_values
+                .get(val_idx)
+                .ok_or_else(|| format!("value index out of bounds: {val_idx}"))?
+                .clone();
+            (key, string_value)
+        } else {
+            (String::new(), String::new())
+        };
+
+        Ok(ParsedFixtureSingleFeature {
+            layer_name: layer.layer_name.clone(),
+            layer_version: layer.layer_version,
+            layer_extent: layer.layer_extent,
+            key,
+            string_value,
+            feature_id: feature.feature_id,
+            feature_type: feature.feature_type,
+            feature_tags: feature.feature_tags.clone(),
+            feature_geometry: feature.feature_geometry.clone(),
+        })
     }
 
     #[test]
@@ -900,8 +1053,10 @@ mod tests {
             _ => panic!("unknown fixture id: {fixture_id}"),
         };
 
-        let expected_parsed = parse_single_layer_single_feature(expected);
-        let actual_parsed = parse_single_layer_single_feature(&encoded);
+        let expected_parsed = parse_single_layer_single_feature(expected)
+            .unwrap_or_else(|e| panic!("fixture {fixture_id} parse failed: {e}"));
+        let actual_parsed = parse_single_layer_single_feature(&encoded)
+            .unwrap_or_else(|e| panic!("fixture {fixture_id} encoded parse failed: {e}"));
 
         // Upstream fixtures sometimes omit default-encoded fields like extent.
         assert_eq!(actual_parsed.layer_name, expected_parsed.layer_name, "fixture {fixture_id} layer_name");
@@ -918,6 +1073,63 @@ mod tests {
 
         // Our encoder always writes extent=4096 for spec compliance.
         assert_eq!(actual_parsed.layer_extent, Some(4096), "fixture {fixture_id} extent");
+    }
+
+    #[test]
+    fn fixture_parser_supports_multi_layer_multi_feature_tiles() {
+        let mut layer_a = LayerBuilder::new("layer_a");
+        let ka = layer_a.intern_key("kind");
+        let va = layer_a.intern_value(Value::String("a".to_string()));
+        let mut ga1 = Vec::new();
+        encode_point(&mut ga1, 1, 2);
+        layer_a.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::Point,
+            geometry: ga1,
+            tags: vec![(ka, va)],
+        });
+        let mut ga2 = Vec::new();
+        encode_point(&mut ga2, 3, 4);
+        layer_a.add_feature(Feature {
+            id: Some(2),
+            geom_type: GeomType::Point,
+            geometry: ga2,
+            tags: vec![(ka, va)],
+        });
+
+        let mut layer_b = LayerBuilder::new("layer_b");
+        let kb = layer_b.intern_key("kind");
+        let vb = layer_b.intern_value(Value::String("b".to_string()));
+        let mut gb = Vec::new();
+        encode_linestring(&mut gb, &[(0, 0), (8, 8)]);
+        layer_b.add_feature(Feature {
+            id: Some(3),
+            geom_type: GeomType::LineString,
+            geometry: gb,
+            tags: vec![(kb, vb)],
+        });
+
+        let encoded = encode_tile(&[&layer_a, &layer_b]);
+        let parsed = parse_fixture_tile(&encoded).expect("multi-layer tile parse should succeed");
+        assert_eq!(parsed.layers.len(), 2);
+        assert_eq!(parsed.layers[0].layer_name, "layer_a");
+        assert_eq!(parsed.layers[0].features.len(), 2);
+        assert_eq!(parsed.layers[1].layer_name, "layer_b");
+        assert_eq!(parsed.layers[1].features.len(), 1);
+    }
+
+    #[test]
+    fn conformance_fixture_malformed_truncated_tile_rejected() {
+        let fixture = include_bytes!("../tests/fixtures/mvt_fixtures/017/tile.mvt");
+        let truncated = &fixture[..fixture.len() - 1];
+        assert!(parse_fixture_tile(truncated).is_err());
+    }
+
+    #[test]
+    fn conformance_fixture_malformed_invalid_wire_type_rejected() {
+        // field=3, wire=7 (invalid protobuf wire type)
+        let malformed = [0x1F];
+        assert!(parse_fixture_tile(&malformed).is_err());
     }
 
     #[test]

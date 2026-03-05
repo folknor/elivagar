@@ -100,9 +100,9 @@
 - [x] Import targeted cases from Mapbox's `mvt_fixtures` corpus for `mvt.rs` conformance testing.
   Added fixture-backed conformance tests for canonical valid geometries:
   point/line/polygon + multipoint/multilinestring/multipolygon (fixture IDs 017-022).
-- [ ] `mvt.rs` fixture conformance currently covers canonical valid geometries only.
+- [x] `mvt.rs` fixture conformance currently covers canonical valid geometries only.
   Add targeted invalid/malformed fixture cases to lock down error handling behavior.
-- [ ] `mvt.rs` fixture parser helper assumes single-layer/single-feature fixtures.
+- [x] `mvt.rs` fixture parser helper assumes single-layer/single-feature fixtures.
   Generalize helper/assertions for future multi-layer and multi-feature fixture imports.
 - [ ] Add parity tests for shared tile-model preparation used by MLT scaffolding to ensure
   layer/feature assembly stays consistent with MVT path as code evolves.
