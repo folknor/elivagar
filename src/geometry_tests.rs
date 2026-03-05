@@ -499,6 +499,78 @@ fn test_point_on_surface_with_holes_avoids_hole() {
     assert!(!point_in_polygon(&p, &hole));
 }
 
+#[test]
+fn test_point_on_surface_with_holes_multiple_holes() {
+    let outer = vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ];
+    let hole_a = vec![
+        Point::new(1.0, 1.0),
+        Point::new(4.5, 1.0),
+        Point::new(4.5, 6.0),
+        Point::new(1.0, 6.0),
+    ];
+    let hole_b = vec![
+        Point::new(5.5, 4.0),
+        Point::new(9.0, 4.0),
+        Point::new(9.0, 9.0),
+        Point::new(5.5, 9.0),
+    ];
+    let inners = vec![hole_a.clone(), hole_b.clone()];
+
+    let p = point_on_surface_with_holes(&outer, &inners).expect("should find a point");
+    assert!(point_in_polygon(&p, &outer));
+    assert!(!point_in_polygon(&p, &hole_a));
+    assert!(!point_in_polygon(&p, &hole_b));
+}
+
+#[test]
+fn test_point_on_surface_with_holes_adjacent_holes() {
+    let outer = vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ];
+    // Two holes sharing an edge at x=5.0 (adjacent, no gap).
+    let left_hole = vec![
+        Point::new(2.0, 2.0),
+        Point::new(5.0, 2.0),
+        Point::new(5.0, 8.0),
+        Point::new(2.0, 8.0),
+    ];
+    let right_hole = vec![
+        Point::new(5.0, 2.0),
+        Point::new(8.0, 2.0),
+        Point::new(8.0, 8.0),
+        Point::new(5.0, 8.0),
+    ];
+    let inners = vec![left_hole.clone(), right_hole.clone()];
+
+    let p = point_on_surface_with_holes(&outer, &inners).expect("should find a point");
+    assert!(point_in_polygon(&p, &outer));
+    assert!(!point_in_polygon(&p, &left_hole));
+    assert!(!point_in_polygon(&p, &right_hole));
+}
+
+#[test]
+fn test_point_on_surface_with_holes_fallback_inside_hole_returns_none() {
+    let outer = vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ];
+    // Deliberately degenerate for robustness testing: hole equals outer ring.
+    // All scan candidates are removed and fallback center lies inside the hole.
+    let hole = outer.clone();
+    let inners = vec![hole];
+    assert!(point_on_surface_with_holes(&outer, &inners).is_none());
+}
+
 // --- ClipRect for tile ---
 
 #[test]

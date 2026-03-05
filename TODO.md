@@ -263,9 +263,9 @@
   (Planetiler #237). Current algorithm is a simple 5-scan horizontal sweep; Planetiler #723
   implements pole of inaccessibility (max inscribed circle) which gives better results for
   irregular polygons but is more expensive.
-- [ ] Add `point_on_surface_with_holes` coverage for multiple-hole and adjacent-hole layouts
+- [x] Add `point_on_surface_with_holes` coverage for multiple-hole and adjacent-hole layouts
   to validate interval-subtraction behavior in more complex multipolygons.
-- [ ] Add explicit fallback-path tests for `point_on_surface_with_holes` when scan candidates
+- [x] Add explicit fallback-path tests for `point_on_surface_with_holes` when scan candidates
   fail and outer-only fallback lands inside a hole (current behavior returns `None`).
 - [x] Shared-node simplification (line features): preserve block-local shared interior way
   nodes during DP simplification so common road/boundary junction vertices survive
