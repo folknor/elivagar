@@ -1,42 +1,53 @@
 # elivagar TODO
 
-## Commit review backlog (after `f39344892fb9c5e94596fa4412d24901e1605853`, 35 commits)
+## Commit review backlog (after `f393448`, 35 commits)
 
-- [ ] `3972789` Add MLT property fixtures and refresh TODO status
-- [ ] `a1ff829` Add committed MLT geometry fixtures and roundtrip test
-- [ ] `1d3fd6d` Integrate upstream mlt-core encoder into MLT tile path
-- [ ] `0550018` Harden MLT tile model validation and test coverage
-- [ ] `cea838d` Improve inspect payload contract reporting with legacy fallback
-- [ ] `d848c71` Make PMTiles tile contract format-aware for MLT path
-- [ ] `312d3b8` Add MLT encoder scaffold and tile-model extraction
-- [ ] `3ed8a65` Refactor assembly encoding behind tile-format dispatch
-- [ ] `f9269e1` Add tile-format selection plumbing for MLT
-- [ ] `1691056` Harden verifier with MVT geometry anomaly checks
-- [ ] `244f4a9` Add antimeridian-aware geometry wrapping
-- [ ] `52d51e4` Add --skip-to assemble resume mode
-- [ ] `031151b` Preserve shared vertices in relation multipolygons
-- [ ] `0de6fb1` Preserve shared vertices in polygon simplification
-- [ ] `b08c360` Harden shared-node line simplification
-- [ ] `8653f93` Emit building height and levels attributes
-- [ ] `9de9bf0` Add peak/pass POIs with ele normalization
-- [ ] `a8d8f6b` Add natural=cliff line support in land layer
-- [ ] `eab1cb4` Add EV charging stations to POI matching
-- [ ] `3aca1d6` Make point-on-surface hole-aware for multipolygons
-- [ ] `9c56786` Validate polygon rings before tile quantization
-- [ ] `74b74d8` Guard against invalid simplified polygon rings
-- [ ] `639def2` Make multipolygon assembly deterministic
-- [ ] `4a7a92e` Add tile size diagnostics to pipeline summary
-- [ ] `19cd941` Add PMTiles metadata source provenance
-- [ ] `43e614f` Add missing-ref diagnostics to pipeline summary
-- [ ] `5400bcc` Harden minzoom attribute filtering tests
-- [ ] `0d9366e` Add multipolygon emission coverage tests
-- [ ] `5f65fd1` Add ocean shapefile integration tests
-- [ ] `143d583` Add metadata verification edge-case tests and docs
-- [ ] `b237a3c` Add Mapbox MVT fixture conformance tests
+### Tests only (12 commits) — reviewed
+- [x] `3e99f9b` PMTiles layout and decode regression tests
+- [x] `6a56464` Minzoom attribute filtering tests
+- [x] `6063edd` Sort chunk resume/adopt regression tests
+- [x] `b237a3c` Mapbox MVT fixture conformance tests (6 fixtures)
+- [x] `143d583` Metadata verification edge-case tests
+- [x] `5f65fd1` Ocean shapefile integration tests
+- [x] `0d9366e` Multipolygon emission coverage tests
+- [x] `5400bcc` Harden minzoom attribute filtering tests
+- [x] `0550018` MLT tile model validation tests
+- [x] `a1ff829` MLT geometry fixtures + roundtrip test
+- [x] `3972789` MLT property fixtures + tests
+- [x] `1691056` Verifier MVT geometry anomaly checks + tests
+
+### Schema extensions (4 commits) — reviewed
+- [x] `eab1cb4` EV charging station POIs
+- [x] `a8d8f6b` `natural=cliff` line support
+- [x] `9de9bf0` Peak/pass POIs with elevation normalization
+- [x] `8653f93` Building height/levels attributes
+
+### Geometry correctness (7 commits)
+- [ ] `3aca1d6` Point-on-surface hole-aware for multipolygons
+- [ ] `9c56786` Pre-quantization polygon ring validation
+- [ ] `74b74d8` Post-simplification invalid ring guard
+- [ ] `639def2` Deterministic multipolygon assembly
+- [ ] `b08c360` Shared-node line simplification hardening
+- [ ] `0de6fb1` Shared vertices in polygon simplification
+- [ ] `031151b` Shared vertices in relation multipolygons
+
+### Pipeline features (3 commits)
+- [ ] `43e614f` Missing-ref diagnostics
+- [ ] `19cd941` PMTiles metadata source provenance
+- [ ] `4a7a92e` Tile size diagnostics
+
+### Infrastructure (3 commits)
+- [ ] `52d51e4` `--skip-to assemble` resume mode
+- [ ] `244f4a9` Antimeridian-aware geometry wrapping
 - [ ] `9831ca0` Refactor inspect to use shared PMTiles reader helpers
-- [ ] `6063edd` Add direct resume/adopt sort chunk regression tests
-- [ ] `6a56464` Add targeted minzoom attribute filtering tests
-- [ ] `3e99f9b` Add PMTiles layout and decode regression hardening tests
+
+### MLT integration (6 commits)
+- [ ] `f9269e1` Tile-format CLI plumbing
+- [ ] `3ed8a65` Assembly encoding tile-format dispatch
+- [ ] `312d3b8` MLT encoder scaffold + tile-model extraction
+- [ ] `d848c71` PMTiles tile contract format-aware
+- [ ] `cea838d` Inspect payload contract reporting + legacy fallback
+- [ ] `1d3fd6d` Upstream mlt-core encoder integration
 
 ## Active priorities
 
