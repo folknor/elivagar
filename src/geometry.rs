@@ -1964,7 +1964,7 @@ pub fn canonicalize_shared_chains(
         let target = &chain.incidents[1];
         let ring = &mut rings[target.ring_idx];
         let n = ring.len().saturating_sub(1); // exclude closing vertex
-        if n == 0 || target.len > canonical.len() {
+        if n == 0 || target.len != canonical.len() {
             continue;
         }
 
@@ -2097,6 +2097,12 @@ pub fn simplify_ring_tile_coords(ring: &[(i32, i32)], pinned: &[bool], tolerance
     // Close the ring.
     if let Some(&first) = out.first() {
         out.push(first);
+    }
+    // Postcondition: a valid closed polygon ring needs at least 4 vertices
+    // (3 distinct + closing). If simplification collapsed the ring, fall back
+    // to the original.
+    if out.len() < 4 {
+        return ring.to_vec();
     }
     out
 }
