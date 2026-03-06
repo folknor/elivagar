@@ -3073,6 +3073,7 @@ fn phase_assemble(
 struct AssemblyScratch {
     encode_scratch: mvt::EncodeScratch,
     merge_scratch: mvt::MergeScratch,
+    line_merge_scratch: mvt::LineMergeScratch,
     geom_pool: Vec<Vec<u32>>,
     tags_pool: Vec<Vec<(u16, u16)>>,
     compression_levels: [Option<flate2::Compression>; 11],
@@ -3086,6 +3087,7 @@ thread_local! {
         AssemblyScratch {
             encode_scratch: mvt::EncodeScratch::new(),
             merge_scratch: mvt::MergeScratch::new(),
+            line_merge_scratch: mvt::LineMergeScratch::new(),
             geom_pool: Vec::new(),
             tags_pool: Vec::new(),
             compression_levels: [const { None }; 11],
@@ -3147,6 +3149,18 @@ fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32) -> Vec<E
                 }
             }
 
+            // Merge connected line segments through degree-2 nodes.
+            // Skip at z14 where lines are full resolution and merging adds
+            // overhead without meaningful compression benefit.
+            let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+            if z < 14 {
+                for layer in &mut s.layers {
+                    if let Some(lb) = layer.as_mut() {
+                        lb.merge_connected_lines(&mut s.line_merge_scratch);
+                    }
+                }
+            }
+
             // Max 26 elements (one per Shortbread layer) — with_capacity not needed.
             let non_empty: Vec<&LayerBuilder> = s.layers.iter()
                 .filter_map(|l| l.as_ref())
@@ -3163,7 +3177,6 @@ fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32) -> Vec<E
             }
 
             // Per-zoom compression: boost low zooms, speed up high zooms.
-            let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
             #[allow(clippy::cast_possible_truncation)]
             let level = match z {
                 0..=8 => compression_level.clamp(9, 10),

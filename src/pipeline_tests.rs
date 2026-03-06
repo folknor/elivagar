@@ -836,6 +836,7 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     let mut scratch = AssemblyScratch {
         encode_scratch: mvt::EncodeScratch::new(),
         merge_scratch: mvt::MergeScratch::new(),
+        line_merge_scratch: mvt::LineMergeScratch::new(),
         geom_pool: Vec::new(),
         tags_pool: Vec::new(),
         compression_levels: [const { None }; 11],
