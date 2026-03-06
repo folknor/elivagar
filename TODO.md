@@ -48,11 +48,35 @@ Germany: 146M features, 228K tiles (226K unique), 558 sort chunks, no oversize w
 
 ## Refactoring opportunities
 
-- [ ] Early simplification as memory pressure valve: simplify geometry during PBF processing
-  when batch memory exceeds budget, rather than deferring all simplification to the assemble
-  phase. Reduces peak RSS and sort chunk size. Different from feature dropping — this preserves
-  all features but at lower fidelity. Tippecanoe (#38) moved simplification earlier for this
-  reason. Would need per-zoom simplification tolerance available during PBF phase.
+- [ ] Sort fanout and record weight reduction for planet scale.
+  **Problem**: sort record volume grows superlinearly with input size. NA (19 GB PBF)
+  produces 51.2 GB of sort data (2.68x amplification) vs Germany's 2.07x. The
+  superlinear growth comes from polygon-heavy layers (water_polygons, land) that
+  fan out across many tiles at low zoom with heavy per-record geometry.
+  **Baseline** (commit `f92c435`, plantasjen):
+  | Metric | Germany 5.5 GB | NA 19 GB |
+  |--------|---------------|----------|
+  | sort_bytes/input_MB | 2.07x | 2.68x |
+  | records_per_way | 2.1 | 2.3 |
+  | chunks_per_input_GB | 99 | 284 |
+  Top layers by sort bytes (NA): streets 12.1 GB, water_polygons 10.9 GB,
+  land 9.3 GB, buildings 7.3 GB, water_lines 4.4 GB.
+  Per-record weight: land 209 B, water_polygons 156 B, streets 76 B, buildings 82 B.
+  **Phase 1 — diagnostics** (prerequisite, no behavior changes):
+  - [ ] Per-layer zoom-span distribution: how many zoom levels does each feature span?
+  - [ ] Per-layer tile-touch distribution: how many tiles does each feature touch per zoom?
+  - [ ] Identify which layers × zoom ranges drive the superlinear growth.
+  **Phase 2 — layer/zoom fanout controls** (first behavioral change):
+  - Target low-zoom polygon-heavy layers (water_polygons, land).
+  - Options: tighter min_zoom per layer, zoom-dependent tile-touch caps,
+    subpixel thresholds tuned per geometry type.
+  **Phase 3 — polygon record weight reduction** (second):
+  - Representation compaction (smaller wire format for polygon geometry).
+  - Deferred geometry materialization for heavy polygon paths (compact refs in
+    phase12, late geometry decode in assemble).
+  **Operational controls** (orthogonal, implement when needed):
+  - Dynamic sort chunk flush threshold tied to RSS.
+  - Back-pressure rayon via sort-buffer occupancy.
 - [ ] Relation-geometry scratch-based decode/project (if profiling warrants).
   - `way_index.get()` allocates fresh `Vec<(i32, i32)>` per call; caller allocates
     another `Vec<Point>` for projection. A decode-into-scratch API could cut alloc pressure.
@@ -218,19 +242,20 @@ This is a design problem, not a tuning problem. Before touching pipeline code:
   are well-tagged in mountainous areas and useful for topographic rendering. Would need a new
   landform line layer or extension to an existing layer. Tilemaker #265 hit rendering issues
   with cliff classification.
-- [ ] Add explicit closed-way coverage for `natural=cliff` line matching (current regression
-  test is open-way focused despite both open/closed wiring).
-- [ ] Add tag-conflict/priority tests for `natural=cliff` alongside other matching line tags
-  to lock expected classification behavior.
+- [x] Add explicit closed-way coverage for `natural=cliff` line matching.
+  Done: `test_land_line_cliff_matches_closed_way` in shortbread_tests.rs.
+- [x] Add tag-conflict/priority tests for `natural=cliff` alongside other matching line tags.
+  Done: `test_land_line_cliff_conflict_with_highway_keeps_both_matches` and
+  `test_land_line_cliff_conflict_with_waterway_keeps_both_matches` in shortbread_tests.rs.
 - [x] EV charging stations as POIs: `amenity=charging_station` is not in elivagar's POI list
   because Shortbread 1.0 doesn't include it, but EV charging infrastructure is increasingly
   important for map consumers. OSM has good coverage in Europe. Investigate adding as a
   schema extension alongside other beyond-Shortbread POI types (Planetiler #765 hit a bug
   where charging stations were silently dropped).
-- [ ] Add POI coverage for non-node charging stations (way/area geometries) to lock
-  geometry-path behavior for `amenity=charging_station`.
-- [ ] Add richer tag-matrix tests for charging stations (additional tags present) to ensure
-  classification remains stable and address suppression behavior stays correct.
+- [x] Add POI coverage for non-node charging stations (way/area geometries).
+  Done: `test_pois_ev_charging_station_closed_way_and_multipolygon` in shortbread_tests.rs.
+- [x] Add richer tag-matrix tests for charging stations (additional tags present).
+  Done: `test_pois_ev_charging_station_rich_tag_matrix_is_stable` in shortbread_tests.rs.
 
 ## Future architecture
 

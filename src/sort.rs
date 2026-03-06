@@ -77,6 +77,28 @@ pub fn layer_from_key(key: SortKey) -> u8 {
     ((key >> 8) & 0xFF) as u8
 }
 
+/// Extract zoom level from a tile_id. Uses the PMTiles base offset formula:
+/// `base(z) = (4^z - 1) / 3`. Zoom is the largest z where `base(z) <= tile_id`.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+pub fn zoom_from_tile_id(tile_id: u64) -> u8 {
+    // Precomputed base offsets for z0..=14.
+    const BASES: [u64; 16] = {
+        let mut b = [0u64; 16];
+        let mut z = 0u32;
+        while z < 16 {
+            b[z as usize] = (4u64.pow(z) - 1) / 3;
+            z += 1;
+        }
+        b
+    };
+    let mut z: u8 = 0;
+    while (z as usize) < 15 && BASES[z as usize + 1] <= tile_id {
+        z += 1;
+    }
+    z
+}
+
 // ---------------------------------------------------------------------------
 // SortRecord
 // ---------------------------------------------------------------------------
@@ -115,6 +137,8 @@ pub struct SortWriter {
     /// Per-layer record counts and bytes (indexed by layer_from_key).
     layer_records: [u64; 32],
     layer_bytes: [u64; 32],
+    /// Per-layer-per-zoom record counts. Index: layer * 15 + zoom.
+    layer_zoom_records: Box<[u64; 32 * 15]>,
 }
 
 impl SortWriter {
@@ -134,6 +158,7 @@ impl SortWriter {
             total_record_bytes: 0,
             layer_records: [0; 32],
             layer_bytes: [0; 32],
+            layer_zoom_records: Box::new([0; 32 * 15]),
         })
     }
 
@@ -182,6 +207,7 @@ impl SortWriter {
             total_record_bytes: 0,
             layer_records: [0; 32],
             layer_bytes: [0; 32],
+            layer_zoom_records: Box::new([0; 32 * 15]),
         })
     }
 
@@ -210,6 +236,11 @@ impl SortWriter {
         &self.layer_bytes
     }
 
+    /// Per-layer-per-zoom record counts. Index: `layer * 15 + zoom`.
+    pub fn layer_zoom_records(&self) -> &[u64; 32 * 15] {
+        &self.layer_zoom_records
+    }
+
     /// Add a record to the buffer. If the buffer exceeds `chunk_size_bytes`,
     /// the current buffer is sorted and flushed to a chunk file on disk.
     pub fn push(&mut self, record: SortRecord) -> io::Result<()> {
@@ -221,6 +252,11 @@ impl SortWriter {
         if layer < 32 {
             self.layer_records[layer] += 1;
             self.layer_bytes[layer] += data_len as u64;
+            let tile_id = tile_id_from_key(record.key);
+            let zoom = zoom_from_tile_id(tile_id) as usize;
+            if zoom < 15 {
+                self.layer_zoom_records[layer * 15 + zoom] += 1;
+            }
         }
         self.buffer.push(record);
         if self.buffer_bytes >= self.chunk_size_bytes {

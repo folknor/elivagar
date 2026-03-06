@@ -323,6 +323,7 @@ struct Phase12Stats {
     sort_record_bytes: u64,
     layer_records: [u64; 32],
     layer_bytes: [u64; 32],
+    layer_zoom_records: Box<[u64; 32 * 15]>,
 }
 
 /// Tracks deferred (unsimplified) vertex counts per layer during PBF processing.
@@ -690,6 +691,17 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 let name = shortbread::Layer::ALL[i].name();
                 eprintln!("sort_layer_{name}_records={recs}");
                 eprintln!("sort_layer_{name}_bytes={bytes}");
+                // Per-zoom breakdown for this layer.
+                let mut zoom_parts = Vec::new();
+                for z in 0..15u8 {
+                    let zr = s.layer_zoom_records[i * 15 + z as usize];
+                    if zr > 0 {
+                        zoom_parts.push(format!("z{z}:{zr}"));
+                    }
+                }
+                if !zoom_parts.is_empty() {
+                    eprintln!("sort_layer_{name}_zoom={}", zoom_parts.join(","));
+                }
             }
         }
         // Deferral stats: report per-layer deferred vertex counts.
@@ -1307,6 +1319,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         sort_record_bytes: sw.total_record_bytes(),
         layer_records: *sw.layer_records(),
         layer_bytes: *sw.layer_bytes(),
+        layer_zoom_records: Box::new(*sw.layer_zoom_records()),
     };
     Ok((sw, data_bounds, land_mask, stats))
 }
