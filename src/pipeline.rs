@@ -3334,8 +3334,7 @@ fn reconcile_boundary_seams(
         seam_provenance.push((fi, ring_count));
     }
 
-    if seam_rings.len() < 2 {
-        // Need at least 2 rings to have shared edges.
+    if seam_rings.is_empty() {
         let elapsed_us = start.elapsed().as_micros() as u64;
         metrics.reconcile_us.fetch_add(elapsed_us, Ordering::Relaxed);
         return;
@@ -3344,22 +3343,24 @@ fn reconcile_boundary_seams(
     metrics.tiles_touched.fetch_add(1, Ordering::Relaxed);
     metrics.rings_decoded.fetch_add(seam_rings.len() as u64, Ordering::Relaxed);
 
-    // Detect shared chains.
-    let chains = geometry::detect_shared_chains(seam_rings);
+    // Detect shared chains (needs >= 2 rings to find any).
+    let chains = if seam_rings.len() >= 2 {
+        geometry::detect_shared_chains(seam_rings)
+    } else {
+        Vec::new()
+    };
     metrics.chains_detected.fetch_add(chains.len() as u64, Ordering::Relaxed);
 
-    if chains.is_empty() {
-        let elapsed_us = start.elapsed().as_micros() as u64;
-        metrics.reconcile_us.fetch_add(elapsed_us, Ordering::Relaxed);
-        return;
+    // Canonicalize: copy first incident's vertices to second incident's ring.
+    if !chains.is_empty() {
+        let canon_result = geometry::canonicalize_shared_chains(seam_rings, &chains);
+        metrics.chains_reconciled.fetch_add(canon_result.reconciled as u64, Ordering::Relaxed);
+        metrics.chains_skipped.fetch_add(canon_result.skipped as u64, Ordering::Relaxed);
     }
 
-    // Canonicalize: copy first incident's vertices to second incident's ring.
-    let canon_result = geometry::canonicalize_shared_chains(seam_rings, &chains);
-    metrics.chains_reconciled.fetch_add(canon_result.reconciled as u64, Ordering::Relaxed);
-    metrics.chains_skipped.fetch_add(canon_result.skipped as u64, Ordering::Relaxed);
-
-    // Simplify non-shared segments with tile-coordinate DP, pinning shared vertices.
+    // Tile-coordinate DP on all rings, pinning shared-chain vertices.
+    // Runs even when no chains were found — these rings skipped PBF-phase DP
+    // and need tile-coord simplification regardless.
     for (ring_idx, ring) in seam_rings.iter_mut().enumerate() {
         let pinned = geometry::build_pinned_mask(ring.len(), ring_idx, &chains);
         let simplified = geometry::simplify_ring_tile_coords(ring, &pinned, geometry::TILE_SIMPLIFY_TOLERANCE);
