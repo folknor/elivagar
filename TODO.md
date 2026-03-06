@@ -42,23 +42,8 @@
 
 ## Tile output optimizations
 
-- [ ] Line merging: merge connected LineStrings within same tile/layer into fewer features.
-  Reduces tile size and renderer work. Biggest win for street-heavy urban tiles at planet
-  scale. Planetiler's impl had bugs from merge → min-length filter interaction (#1330, #1174).
-  Cap merged line vertex count to prevent pathological cases — tilemaker #248 uses 6000.
-- [ ] Min polygon area filtering: drop sub-pixel polygons at low zoom levels.
-  Planetiler applies min-pixel-size filtering to polygons and derived point features (#720).
-  Tippecanoe (#160) buffers polygons outward before simplification to prevent small polygons
-  from collapsing to zero area — an alternative to dropping them. Tippecanoe (#4) uses
-  density instead of pure area for tiny features to avoid dropping visually important narrow
-  segments (e.g. rivers, paths). Planetiler #1078 adds feature-size-in-meters utilities for
-  scale-aware filtering. Also applies to inner rings: tilemaker #416 filters tiny inner rings
-  by area threshold to reduce complexity without visual impact.
 - [ ] Sort keys within layers: emit feature order hints (e.g. road importance) so renderers
   stack correctly without client-side sorting. Audit whether MapLibre depends on this (#323).
-- [ ] Sort MVT attribute keys/values for better gzip compression. Reordering string/value
-  tables so similar values are adjacent gives gzip better runs. Cheap optimization,
-  potentially a few % output size reduction (tippecanoe #1).
 - [ ] Feature dropping: iteratively drop least-important features from oversized tiles until
   they fit a size budget. Needed for dense urban areas at planet scale. Tippecanoe (#378)
   hit an infinite loop bug here — need a guaranteed convergence invariant (also #340, #45).
