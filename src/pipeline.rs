@@ -12,10 +12,10 @@ use crate::geometry::{
 };
 use crate::mlt;
 
-/// Full-tile rectangle in tile coordinates (CW, closed). Buffer = 8px.
+/// Full-tile rectangle in tile coordinates (CW, closed). Buffer = 8 rendered pixels = 128 extent units.
 /// Used for interior tiles where the polygon fully covers the tile.
 const INTERIOR_TILE_RING: [(i32, i32); 5] =
-    [(-8, -8), (4104, -8), (4104, 4104), (-8, 4104), (-8, -8)];
+    [(-128, -128), (4224, -128), (4224, 4224), (-128, 4224), (-128, -128)];
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::mvt::{self, GeomType, LayerBuilder};
 use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};

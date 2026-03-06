@@ -24,8 +24,9 @@ pub const EXTENT: f64 = 4096.0;
 /// Industry standard is 1.0; Tilemaker uses ~0.58 for comparison.
 const SIMPLIFY_PIXELS: f64 = 1.0;
 
-/// Buffer fraction of tile size for clipping (8 pixels / 4096 extent).
-pub(crate) const BUFFER_FRACTION: f64 = 8.0 / EXTENT;
+/// Buffer fraction of tile size for clipping (8 rendered pixels).
+/// One tile = 256×256 rendered pixels; 8/256 of the tile width.
+pub(crate) const BUFFER_FRACTION: f64 = 8.0 / 256.0;
 
 /// One tile pixel in extent units: 4096 / 256 = 16.
 #[allow(clippy::cast_possible_truncation)]
