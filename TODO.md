@@ -5,15 +5,6 @@
 1. [ ] Scale validation: run Europe full pipeline (locations-on-ways path).
 2. [ ] Scale validation: run planet full pipeline when hardware is available.
 
-## Test coverage gaps
-
-- [ ] Add parity tests for shared tile-model preparation used by MLT scaffolding to ensure
-  layer/feature assembly stays consistent with MVT path as code evolves.
-- [ ] Add MLT semantic roundtrip tests that compare decoded geometry/properties against
-  source features, not only parse/decode success.
-- [ ] MLT fixture roundtrip currently asserts geometry type only; add coordinate/ring-content
-  equality checks to catch subtle geometry corruption that preserves type.
-
 ## Refactoring opportunities
 
 - [ ] Early simplification as memory pressure valve: simplify geometry during PBF processing

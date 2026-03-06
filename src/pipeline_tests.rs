@@ -239,6 +239,7 @@ fn interior_tile_ring_buffer_matches_buffer_fraction() {
     let expected_buf = (crate::geometry::BUFFER_FRACTION * crate::geometry::EXTENT) as i32;
     assert_eq!(expected_buf, 128);
 
+    #[allow(clippy::cast_possible_truncation)]
     let extent = crate::geometry::EXTENT as i32;
     let expected: [(i32, i32); 5] = [
         (-expected_buf, -expected_buf),
@@ -846,13 +847,6 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     };
     let non_empty = prepare_non_empty_layers(&mut scratch, &tile);
     let model = mlt::build_tile_model(&non_empty);
-    let mut expected: Vec<(String, usize)> = model
-        .layers
-        .iter()
-        .map(|l| (l.name.clone(), l.feature_count))
-        .collect();
-    expected.sort_by(|a, b| a.0.cmp(&b.0));
-
     let mvt_encoded = encode_tile_batch(&[parity_pending_tile(tile_id)], 6, TilePayloadFormat::Mvt)
         .expect("mvt batch encode should succeed");
     assert_eq!(mvt_encoded.len(), 1, "expected one encoded mvt tile");
@@ -860,14 +854,41 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     let mut decoder = GzDecoder::new(mvt_encoded[0].compressed.as_slice());
     let mut raw = Vec::new();
     decoder.read_to_end(&mut raw).expect("gunzip mvt tile");
-    let mut actual: Vec<(String, usize)> = crate::pmtiles_reader::decode_mvt_layers(&raw)
-        .expect("decode mvt layers")
-        .into_iter()
-        .map(|l| (l.name, l.feature_count))
-        .collect();
-    actual.sort_by(|a, b| a.0.cmp(&b.0));
+    let mvt_layers = crate::pmtiles_reader::decode_mvt_layers(&raw)
+        .expect("decode mvt layers");
 
-    assert_eq!(actual, expected, "shared prep model should match mvt layer assembly");
+    assert_eq!(
+        model.layers.len(),
+        mvt_layers.len(),
+        "layer count mismatch between prep model and MVT"
+    );
+
+    let mut model_sorted: Vec<_> = model.layers.iter().collect();
+    model_sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut mvt_sorted: Vec<_> = mvt_layers.iter().collect();
+    mvt_sorted.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for (ml, mvt) in model_sorted.iter().zip(mvt_sorted.iter()) {
+        assert_eq!(ml.name, mvt.name, "layer name mismatch");
+        assert_eq!(ml.feature_count, mvt.feature_count, "feature count mismatch in {}", ml.name);
+        assert_eq!(
+            ml.geometry_mix.points, mvt.points,
+            "point count mismatch in {}", ml.name
+        );
+        assert_eq!(
+            ml.geometry_mix.lines, mvt.lines,
+            "line count mismatch in {}", ml.name
+        );
+        assert_eq!(
+            ml.geometry_mix.polygons, mvt.polygons,
+            "polygon count mismatch in {}", ml.name
+        );
+        let mut model_keys: Vec<&str> = ml.columns.iter().map(|c| c.key.as_str()).collect();
+        model_keys.sort();
+        let mut mvt_keys: Vec<&str> = mvt.keys.iter().map(String::as_str).collect();
+        mvt_keys.sort();
+        assert_eq!(model_keys, mvt_keys, "property key mismatch in {}", ml.name);
+    }
 }
 
 #[test]

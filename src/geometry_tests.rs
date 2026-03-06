@@ -905,8 +905,8 @@ fn buffer_fraction_is_8_rendered_pixels() {
     // BUFFER_FRACTION must be 8 rendered pixels / 256 pixels per tile = 0.03125.
     // A previous bug had 8.0 / 4096.0 (= 0.001953125), which is 8 *extent units*
     // — only 0.5 rendered pixels — causing visible tile seams everywhere.
-    assert_eq!(BUFFER_FRACTION, 8.0 / 256.0);
-    assert_eq!(BUFFER_FRACTION, 0.03125);
+    assert!((BUFFER_FRACTION - 8.0 / 256.0).abs() < f64::EPSILON);
+    assert!((BUFFER_FRACTION - 0.03125).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -914,7 +914,7 @@ fn buffer_fraction_produces_128_extent_unit_buffer() {
     // 8 rendered pixels × 16 extent units per pixel = 128 extent units of buffer.
     // This is the standard MVT buffer size used by Planetiler, Tippecanoe, etc.
     let buffer_extent_units = BUFFER_FRACTION * EXTENT;
-    assert_eq!(buffer_extent_units, 128.0);
+    assert!((buffer_extent_units - 128.0).abs() < f64::EPSILON);
 }
 
 #[test]

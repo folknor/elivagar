@@ -83,8 +83,10 @@ fn value_sort_key(v: &Value) -> (u8, u64, &str) {
         Value::String(s) => (0, 0, s.as_str()),
         Value::Float(f) => (1, f.to_bits() as u64, ""),
         Value::Double(d) => (2, d.to_bits(), ""),
+        #[allow(clippy::cast_sign_loss)]
         Value::Int(i) => (3, *i as u64, ""),
         Value::UInt(u) => (4, *u, ""),
+        #[allow(clippy::cast_sign_loss)]
         Value::SInt(i) => (5, *i as u64, ""),
         Value::Bool(b) => (6, u64::from(*b), ""),
     }
@@ -956,6 +958,7 @@ fn build_chain(
     }
 }
 
+#[allow(clippy::cast_possible_wrap)]
 fn unzigzag(n: u32) -> i32 {
     ((n >> 1) as i32) ^ (-((n & 1) as i32))
 }
