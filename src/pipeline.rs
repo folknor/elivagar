@@ -307,6 +307,22 @@ fn missing_ref_summary_lines(summary: MissingRefStats) -> [String; 6] {
     ]
 }
 
+/// Phase12 statistics returned alongside the sort writer.
+struct Phase12Stats {
+    node_count: u64,
+    way_count: u64,
+    rel_count: u64,
+    node_store_stats: Option<(u64, usize)>,
+    max_way_inflight_bytes: usize,
+    max_rel_batch_bytes: usize,
+    relation_blocks_buffered: usize,
+    relation_blocks_drop_rss_kb: Option<u64>,
+    missing_refs: MissingRefStats,
+    deferral_stats: std::sync::Arc<DeferralStats>,
+    sort_records: u64,
+    sort_record_bytes: u64,
+}
+
 /// Tracks deferred (unsimplified) vertex counts per layer during PBF processing.
 /// When a layer exceeds the vertex budget, deferral is auto-disabled for that layer.
 struct DeferralStats {
@@ -491,14 +507,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let ocean_elapsed;
     let mut phase12_rss: Option<u64> = None;
     let mut ocean_rss: Option<u64> = None;
-    let mut max_way_inflight_bytes: Option<usize> = None;
-    let mut max_rel_batch_bytes: Option<usize> = None;
-    let mut relation_blocks_buffered: Option<usize> = None;
-    let mut relation_blocks_drop_rss_kb: Option<u64> = None;
-
-    let mut node_store_stats: Option<(u64, usize)> = None;
-    let mut missing_ref_summary: Option<MissingRefStats> = None;
-    let mut deferral_stats_out: Option<std::sync::Arc<DeferralStats>> = None;
+    let mut phase12_stats: Option<Phase12Stats> = None;
 
     let mut sort_writer = if matches!(skip, Some(SkipTo::Sort | SkipTo::Assemble)) {
         // Skip straight to later phases — reuse existing chunks on disk.
@@ -517,14 +526,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
-            let (mut sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks, rel_drop_rss, missing_refs, deferral_stats) = phase_read_and_process(config)?;
-            node_store_stats = ns_stats;
-            max_way_inflight_bytes = Some(way_hwm);
-            max_rel_batch_bytes = Some(rel_hwm);
-            relation_blocks_buffered = Some(rel_blocks);
-            relation_blocks_drop_rss_kb = rel_drop_rss;
-            missing_ref_summary = Some(missing_refs);
-            deferral_stats_out = Some(deferral_stats);
+            let (mut sw, bounds_out, mask, p12_stats) = phase_read_and_process(config)?;
+            phase12_stats = Some(p12_stats);
             phase12_elapsed = Some(phase12_start.elapsed());
             phase12_rss = peak_rss_kb();
             sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
@@ -662,22 +665,31 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if let Ok(meta) = std::fs::metadata(&config.output_path) {
         eprintln!("output_bytes={}", meta.len());
     }
-    if let Some((nodes, groups)) = node_store_stats {
-        eprintln!("node_store_nodes={nodes}");
-        eprintln!("node_store_groups={groups}");
-    }
+    if let Some(ref s) = phase12_stats
+        && let Some((nodes, groups)) = s.node_store_stats {
+            eprintln!("node_store_nodes={nodes}");
+            eprintln!("node_store_groups={groups}");
+        }
     if let Some(n) = sort_chunks {
         eprintln!("sort_chunks={n}");
     }
-    // Deferral stats: report per-layer deferred vertex counts.
-    if let Some(ref ds) = deferral_stats_out {
+    if let Some(ref s) = phase12_stats {
+        eprintln!("sort_records={}", s.sort_records);
+        eprintln!("sort_record_bytes={}", s.sort_record_bytes);
+        eprintln!("phase12_nodes={}", s.node_count);
+        eprintln!("phase12_ways={}", s.way_count);
+        eprintln!("phase12_relations={}", s.rel_count);
+        if s.way_count > 0 {
+            eprintln!("records_per_way={:.1}", s.sort_records as f64 / s.way_count as f64);
+        }
+        // Deferral stats: report per-layer deferred vertex counts.
         for (i, max_z) in config.seam_reconcile_layers.iter().enumerate() {
             if *max_z > 0 {
-                let verts = ds.vertices[i].load(Ordering::Relaxed);
+                let verts = s.deferral_stats.vertices[i].load(Ordering::Relaxed);
                 if verts > 0 {
                     let name = shortbread::Layer::ALL[i].name();
                     eprintln!("seam_deferred_vertices_{name}={verts}");
-                    if ds.disabled[i].load(Ordering::Relaxed) {
+                    if s.deferral_stats.disabled[i].load(Ordering::Relaxed) {
                         eprintln!("seam_deferral_disabled_{name}=1");
                     }
                 }
@@ -703,17 +715,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if let Some(kb) = peak_rss {
         eprintln!("peak_rss_kb={kb}");
     }
-    if let Some(bytes) = max_way_inflight_bytes {
-        eprintln!("max_way_inflight_bytes={bytes}");
-    }
-    if let Some(bytes) = max_rel_batch_bytes {
-        eprintln!("max_rel_batch_bytes={bytes}");
-    }
-    if let Some(n) = relation_blocks_buffered {
-        eprintln!("relation_blocks_buffered={n}");
-    }
-    if let Some(kb) = relation_blocks_drop_rss_kb {
-        eprintln!("relation_blocks_drop_rss_kb={kb}");
+    if let Some(ref s) = phase12_stats {
+        eprintln!("max_way_inflight_bytes={}", s.max_way_inflight_bytes);
+        eprintln!("max_rel_batch_bytes={}", s.max_rel_batch_bytes);
+        eprintln!("relation_blocks_buffered={}", s.relation_blocks_buffered);
+        if let Some(kb) = s.relation_blocks_drop_rss_kb {
+            eprintln!("relation_blocks_drop_rss_kb={kb}");
+        }
     }
     eprintln!("max_assemble_batch_bytes={max_assemble_batch_bytes}");
     eprintln!("dedup_candidates={}", dedup_stats.candidates);
@@ -745,8 +753,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         let (z, x, y) = pmtiles_writer::tile_id_to_zxy(t.tile_id);
         eprintln!("oversize_top_{}={z}/{x}/{y}:{}", i + 1, t.bytes);
     }
-    if let Some(m) = missing_ref_summary {
-        for line in missing_ref_summary_lines(m) {
+    if let Some(ref s) = phase12_stats {
+        for line in missing_ref_summary_lines(s.missing_refs) {
             eprintln!("{line}");
         }
     }
@@ -819,7 +827,7 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::unwrap_in_result, clippy::type_complexity)]
 #[hotpath::measure]
-fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize, usize, Option<u64>, MissingRefStats, std::sync::Arc<DeferralStats>), PipelineError> {
+fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Phase12Stats), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let sort_chunk_budget = if config.sort_chunk_size > 0 {
@@ -1273,18 +1281,22 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     let max_way_inflight_bytes = way_hwm.load(Ordering::Relaxed);
     let missing_ref_snapshot = missing_ref_stats.snapshot();
-    Ok((
-        sort_writer.expect("sort_writer not returned from drain"),
-        data_bounds,
-        land_mask,
+    let sw = sort_writer.expect("sort_writer not returned from drain");
+    let stats = Phase12Stats {
+        node_count,
+        way_count,
+        rel_count,
         node_store_stats,
         max_way_inflight_bytes,
         max_rel_batch_bytes,
         relation_blocks_buffered,
         relation_blocks_drop_rss_kb,
-        missing_ref_snapshot,
+        missing_refs: missing_ref_snapshot,
         deferral_stats,
-    ))
+        sort_records: sw.total_records(),
+        sort_record_bytes: sw.total_record_bytes(),
+    };
+    Ok((sw, data_bounds, land_mask, stats))
 }
 
 // ---------------------------------------------------------------------------

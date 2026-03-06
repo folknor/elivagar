@@ -110,6 +110,8 @@ pub struct SortWriter {
     chunk_paths: Vec<PathBuf>,
     chunk_count: usize,
     compression: ChunkCompression,
+    total_records: u64,
+    total_record_bytes: u64,
 }
 
 impl SortWriter {
@@ -125,6 +127,8 @@ impl SortWriter {
             chunk_paths: Vec::new(),
             chunk_count: 0,
             compression,
+            total_records: 0,
+            total_record_bytes: 0,
         })
     }
 
@@ -169,6 +173,8 @@ impl SortWriter {
             chunk_paths,
             chunk_count: start_chunk,
             compression,
+            total_records: 0,
+            total_record_bytes: 0,
         })
     }
 
@@ -177,10 +183,23 @@ impl SortWriter {
         self.chunk_count
     }
 
+    /// Total sort records pushed (across all chunks + current buffer).
+    pub fn total_records(&self) -> u64 {
+        self.total_records
+    }
+
+    /// Total payload bytes pushed (sum of record.data.len()).
+    pub fn total_record_bytes(&self) -> u64 {
+        self.total_record_bytes
+    }
+
     /// Add a record to the buffer. If the buffer exceeds `chunk_size_bytes`,
     /// the current buffer is sorted and flushed to a chunk file on disk.
     pub fn push(&mut self, record: SortRecord) -> io::Result<()> {
-        self.buffer_bytes += record.data.len() + std::mem::size_of::<SortRecord>();
+        let data_len = record.data.len();
+        self.buffer_bytes += data_len + std::mem::size_of::<SortRecord>();
+        self.total_records += 1;
+        self.total_record_bytes += data_len as u64;
         self.buffer.push(record);
         if self.buffer_bytes >= self.chunk_size_bytes {
             self.flush_chunk()?;
