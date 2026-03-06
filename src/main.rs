@@ -106,10 +106,10 @@ struct RunArgs {
     #[arg(long, value_enum, default_value_t = TileCompressionArg::Gzip)]
     tile_compression: TileCompressionArg,
 
-    /// Lz4-compress sort chunk files (reduces disk I/O, costs CPU).
+    /// Compress sort chunk files (reduces disk I/O, costs CPU).
     /// Useful at planet scale where sort data exceeds available RAM.
-    #[arg(long)]
-    compress_sort_chunks: bool,
+    #[arg(long, value_enum)]
+    compress_sort_chunks: Option<SortChunkCompressionArg>,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -143,6 +143,12 @@ enum TileFormatArg {
 enum TileCompressionArg {
     Gzip,
     Brotli,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SortChunkCompressionArg {
+    Lz4,
+    Snappy,
 }
 
 /// Parse a byte size string like "256M", "1G", or raw bytes.
@@ -282,7 +288,11 @@ fn run(args: RunArgs) {
             TileCompressionArg::Gzip => elivagar::TileCompression::Gzip,
             TileCompressionArg::Brotli => elivagar::TileCompression::Brotli,
         },
-        compress_sort_chunks: args.compress_sort_chunks,
+        compress_sort_chunks: match args.compress_sort_chunks {
+            None => elivagar::sort::ChunkCompression::None,
+            Some(SortChunkCompressionArg::Lz4) => elivagar::sort::ChunkCompression::Lz4,
+            Some(SortChunkCompressionArg::Snappy) => elivagar::sort::ChunkCompression::Snappy,
+        },
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")

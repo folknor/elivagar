@@ -31,7 +31,7 @@
 //!     locations_on_ways: false,
 //!     tile_format: elivagar::TilePayloadFormat::Mvt,
 //!     tile_compression: elivagar::TileCompression::Gzip,
-//!     compress_sort_chunks: false,
+//!     compress_sort_chunks: elivagar::sort::ChunkCompression::None,
 //! };
 //! elivagar::run(&config).expect("pipeline failed");
 //! ```
@@ -66,7 +66,7 @@ mod pipeline;
 pub mod pmtiles_writer;
 pub(crate) mod pois;
 pub(crate) mod shortbread;
-pub(crate) mod sort;
+pub mod sort;
 pub mod verify;
 pub(crate) mod way_index;
 pub(crate) mod wire_format;

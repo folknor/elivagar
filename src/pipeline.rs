@@ -166,9 +166,9 @@ pub struct TilegenConfig {
     pub tile_format: TilePayloadFormat,
     /// Tile compression algorithm for MVT payloads (`gzip` default, `brotli` optional).
     pub tile_compression: TileCompression,
-    /// Lz4-compress sort chunk files. Reduces disk I/O at the cost of CPU.
-    /// Useful at planet scale where sort data exceeds available RAM.
-    pub compress_sort_chunks: bool,
+    /// Compression algorithm for sort chunk files. Reduces disk I/O at the
+    /// cost of CPU. Useful at planet scale where sort data exceeds available RAM.
+    pub compress_sort_chunks: sort::ChunkCompression,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -1913,7 +1913,7 @@ struct RelAcc {
     line_emit: LineEmitScratch,
     multipolygon_emit: MultipolygonEmitScratch,
     simp_scratch: geometry::SimplifyMultiScratch,
-    compress_chunks: bool,
+    compression: sort::ChunkCompression,
 }
 
 impl RelAcc {
@@ -1923,7 +1923,7 @@ impl RelAcc {
         }
         let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
-        sort::write_sorted_chunk(&mut self.records, &path, self.compress_chunks)
+        sort::write_sorted_chunk(&mut self.records, &path, self.compression)
             .expect("relation chunk write failed");
         self.chunk_paths.push(path);
         self.count += self.records.len() as u64;
@@ -1946,7 +1946,7 @@ fn flush_rel_batch(
     let chunk_id = std::sync::atomic::AtomicUsize::new(sort_writer.chunk_count());
     let chunk_dir = sort_writer.tmp_dir().to_path_buf();
     let chunk_size = sort_writer.chunk_size_bytes();
-    let chunk_compress = sort_writer.compress();
+    let chunk_compression = sort_writer.compression();
 
     let result = batch
         .into_par_iter()
@@ -1957,7 +1957,7 @@ fn flush_rel_batch(
                 line_emit: LineEmitScratch::new(),
                 multipolygon_emit: MultipolygonEmitScratch::new(),
                 simp_scratch: geometry::SimplifyMultiScratch::new(),
-                compress_chunks: chunk_compress,
+                compression: chunk_compression,
             },
             |mut acc, rel| {
                 let before = acc.records.len();
@@ -1987,7 +1987,7 @@ fn flush_rel_batch(
                 line_emit: LineEmitScratch::new(),
                 multipolygon_emit: MultipolygonEmitScratch::new(),
                 simp_scratch: geometry::SimplifyMultiScratch::new(),
-                compress_chunks: chunk_compress,
+                compression: chunk_compression,
             },
             |mut a, mut b| {
                 a.chunk_paths.extend(b.chunk_paths);

@@ -276,7 +276,7 @@ pub(crate) fn process_ocean_shapefile(
     let chunk_id = AtomicUsize::new(sort_writer.chunk_count());
     let chunk_dir = sort_writer.tmp_dir().to_path_buf();
     let chunk_size = sort_writer.chunk_size_bytes();
-    let chunk_compress = sort_writer.compress();
+    let chunk_compression = sort_writer.compression();
 
     struct OceanAcc {
         records: Vec<SortRecord>,
@@ -284,7 +284,7 @@ pub(crate) fn process_ocean_shapefile(
         chunk_paths: Vec<std::path::PathBuf>,
         count: u64,
         simp_scratch: geometry::SimplifyMultiScratch,
-        compress: bool,
+        compression: sort::ChunkCompression,
     }
 
     impl OceanAcc {
@@ -295,7 +295,7 @@ pub(crate) fn process_ocean_shapefile(
             let id = chunk_id.fetch_add(1, Ordering::Relaxed);
             let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
             // Panic: inside rayon fold — can't propagate Result. Disk I/O failure is unrecoverable.
-            sort::write_sorted_chunk(&mut self.records, &path, self.compress)
+            sort::write_sorted_chunk(&mut self.records, &path, self.compression)
                 .expect("ocean chunk write failed");
             self.chunk_paths.push(path);
             self.count += self.records.len() as u64;
@@ -308,7 +308,7 @@ pub(crate) fn process_ocean_shapefile(
         .par_iter()
         .enumerate()
         .fold(
-            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, simp_scratch: geometry::SimplifyMultiScratch::new(), compress: chunk_compress },
+            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, simp_scratch: geometry::SimplifyMultiScratch::new(), compression: chunk_compression },
             |mut acc, (idx, poly)| {
                 let before = acc.records.len();
                 emit_ocean_polygon(
@@ -330,7 +330,7 @@ pub(crate) fn process_ocean_shapefile(
             acc
         })
         .reduce(
-            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, simp_scratch: geometry::SimplifyMultiScratch::new(), compress: chunk_compress },
+            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, simp_scratch: geometry::SimplifyMultiScratch::new(), compression: chunk_compression },
             |mut a, b| {
                 a.chunk_paths.extend(b.chunk_paths);
                 a.count += b.count;
@@ -1013,7 +1013,7 @@ mod tests {
         let shp_path = dir.path().join("ocean_test.shp");
         write_test_polygon_shapefile(&shp_path);
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, false).unwrap();
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
@@ -1047,7 +1047,7 @@ mod tests {
         let shp_path = dir.path().join("ocean_test_disjoint.shp");
         write_test_polygon_shapefile(&shp_path);
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, false).unwrap();
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         // Mercator data bounds outside [0,1] should not intersect any valid projected shape.
         let disjoint_bounds = MercBbox {
             min_x: 2.0,
@@ -1075,7 +1075,7 @@ mod tests {
         let shp_path = dir.path().join("ocean_test_hole.shp");
         write_test_polygon_with_hole_shapefile(&shp_path);
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, false).unwrap();
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
@@ -1110,7 +1110,7 @@ mod tests {
         write_test_polygon_shapefile(&shp_path);
         fs::write(shp_path.with_extension("shx"), [0u8; 64]).unwrap();
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, false).unwrap();
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
@@ -1137,7 +1137,7 @@ mod tests {
         write_test_polygon_shapefile(&shp_path);
         fs::remove_file(shp_path.with_extension("shx")).unwrap();
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, false).unwrap();
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
@@ -1166,7 +1166,7 @@ mod tests {
         shp_data.truncate(120);
         fs::write(&shp_path, shp_data).unwrap();
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, false).unwrap();
+        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
