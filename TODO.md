@@ -5,6 +5,34 @@
 1. [ ] Scale validation: run Europe full pipeline (locations-on-ways path).
 2. [ ] Scale validation: run planet full pipeline when hardware is available.
 
+## Sort chunk compression investigation
+
+- [ ] Investigate why lz4 compression adds ~25s to phase12 on Germany (4.7 GB PBF).
+  Commit `bd3d45d` introduced gzip-1 sort chunk compression, causing a 3.2x regression
+  on Denmark (14.6s → 46.8s). Switched to lz4 in `4550551` (14.6s → 18.1s Denmark),
+  then made opt-in via `--compress-sort-chunks` in `b07d945` (default off = baseline).
+  **The mystery:** Germany with lz4 (`4550551`): phase12 = 121s vs uncompressed (`5b0fcd1`):
+  phase12 = 95.8s. That's +25s for ~619 chunks. lz4 frame compress runs at 2-4 GB/s, so
+  compressing ~10 GB of sort records should cost ~3-5s, not 25s. Possible causes:
+  - lz4_flex `FrameEncoder` overhead per `write_all` call (many small writes: 8-byte key,
+    4-byte len, variable data per record). Frame encoder may not buffer efficiently.
+  - `BufWriter` sits underneath `FrameEncoder` but lz4 frame may flush per block internally,
+    defeating the BufWriter. Check if writing to a `Vec<u8>` first then compressing in bulk
+    would be faster (one lz4 call per chunk instead of streaming).
+  - Rayon contention: `write_sorted_chunk` is called from rayon workers (ocean, relations)
+    and the serial PBF path. lz4 compression holds the thread longer, potentially starving
+    the rayon pool.
+  - Assemble phase was only +1.2s with lz4 (29.5s vs 28.3s), suggesting decompression is
+    fine — the problem is compression-side only.
+  Not blocking: compression is off by default. Worth investigating before planet runs where
+  it might actually help (sort data >> RAM, disk I/O is the bottleneck).
+
+- [ ] Benchmark results database should differentiate compression modes.
+  Currently `brokkr bench self` doesn't record whether `--compress-sort-chunks` was used.
+  The results DB should capture this flag so that compressed vs uncompressed runs are not
+  conflated when comparing. Affects `brokkr results --compare-last` and any future
+  regression detection.
+
 ## Refactoring opportunities
 
 - [ ] Early simplification as memory pressure valve: simplify geometry during PBF processing
@@ -61,7 +89,7 @@
   simplification for (1) line features, (2) closed-way polygons, and
   (3) relation-derived multipolygons. This reduces catastrophic drift but does
   not guarantee edge-identical output between neighboring polygons.
-  - [ ] Phase 1 — shared chain detection: given a set of polygon rings in a tile,
+  - [x] Phase 1 — shared chain detection: given a set of polygon rings in a tile,
     find contiguous shared vertex sequences (not just shared points). Output:
     `SharedChain { vertices, incidents: Vec<ChainRef> }` where each `ChainRef`
     identifies (ring_index, start, end, reversed). Uses `Vec<ChainRef>` instead
@@ -76,7 +104,7 @@
     Edge cases: ring wrap-around (chain crossing start/end), self-touching rings,
     multiple disconnected chains per ring pair, three-way junctions (vertex where
     3+ polygons meet — each adjacent pair gets its own chain terminating there).
-  - [ ] Phase 2 — boundary/admin polygons: wire chain detection into simplification
+  - [x] Phase 2 — boundary/admin polygons: wire chain detection into simplification
     for `boundaries` and `boundary_labels` layers only. Only act on chains with
     exactly 2 incidents (clean adjacency); skip >2 with a counter/metric.
     Simplify each shared chain once, stitch canonical chains back into rings,
