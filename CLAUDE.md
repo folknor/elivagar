@@ -15,7 +15,7 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 
 Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install --path ~/Programs/brokkr`. Invoked as `brokkr` from the project root (reads `./brokkr.toml` for project detection).
 
-- `brokkr check [-- args]` — run clippy + tests
+- `brokkr check [-- args]` — run clippy + tests. Supports `--features` and `--no-default-features`
 - `brokkr env` — show environment info
 - `brokkr run [--time] [--json] [--runs N] [--no-build] [-- args]` — build release (or skip with `--no-build`) and run with passthrough args. `--time` prints stable `key=value` timing, `--json` prints structured timing, and `--runs N` reports min/median/p95 across repeated runs (single build). Elivagar handles its own defaults (`--tmp-dir`, `--ocean`/`--ocean-simplified` auto-detection, `HOTPATH_METRICS_SERVER_OFF`). Example: `brokkr run -- run input.pbf -o output.pmtiles`.
 - `brokkr bench self [--dataset name] [--variant V] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark. Default variant: raw.

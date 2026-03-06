@@ -443,6 +443,7 @@ fn test_full_pipeline() {
             m[elivagar::shortbread::Layer::Boundaries as usize] = 8;
             m
         },
+        tile_touch_cap: None,
     };
 
     elivagar::run(&config).expect("pipeline should succeed");

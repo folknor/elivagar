@@ -169,6 +169,10 @@ pub struct TilegenConfig {
     /// 0 = disabled, 1-14 = max zoom at which to defer simplification.
     /// Indexed by Layer enum discriminant. Default: Boundaries=8, rest=0.
     pub seam_reconcile_layers: [u8; shortbread::Layer::count()],
+    /// Maximum tiles a single polygon feature may touch at any zoom level.
+    /// When exceeded, the feature is skipped at that zoom. `None` = no cap (default).
+    /// Only applies to polygon-geometry layers. Behind `--tile-touch-cap N` flag.
+    pub tile_touch_cap: Option<u32>,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -475,6 +479,30 @@ impl FanoutStats {
             }
         }
         max
+    }
+
+    /// Count features with tiles_touched >= threshold for a given (layer, zoom).
+    fn features_above(&self, layer: usize, zoom: usize, threshold: u32) -> u64 {
+        let idx = layer * 15 + zoom;
+        if self.feature_count[idx] == 0 {
+            return 0;
+        }
+        // Find the first bucket that contains values >= threshold.
+        let start_bucket = if threshold <= 1 {
+            0
+        } else if threshold <= 2 {
+            1
+        } else {
+            // Bucket b covers [2^(b-1)+1, 2^b] for b>=2. We want the bucket
+            // where the lower bound >= threshold.
+            (u32::BITS - (threshold - 1).leading_zeros()) as usize
+        };
+        let base = idx * FANOUT_HIST_BUCKETS;
+        let mut count: u64 = 0;
+        for b in start_bucket.min(FANOUT_HIST_BUCKETS)..FANOUT_HIST_BUCKETS {
+            count += u64::from(self.hist[base + b]);
+        }
+        count
     }
 }
 
@@ -858,6 +886,19 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 if !fanout_parts.is_empty() {
                     eprintln!("sort_layer_{name}_fanout={}", fanout_parts.join(","));
                 }
+                // Threshold counts: features hitting candidate cap values.
+                for &thresh in &[128u32, 512, 2048] {
+                    let mut thresh_parts = Vec::new();
+                    for z in 0..15u8 {
+                        let n = s.fanout_stats.features_above(i, z as usize, thresh);
+                        if n > 0 {
+                            thresh_parts.push(format!("z{z}:{n}"));
+                        }
+                    }
+                    if !thresh_parts.is_empty() {
+                        eprintln!("sort_layer_{name}_above_{thresh}={}", thresh_parts.join(","));
+                    }
+                }
             }
         }
         // Deferral stats: report per-layer deferred vertex counts.
@@ -1215,6 +1256,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let mz = min_z;
                     let xz = max_z;
                     let srl = config.seam_reconcile_layers;
+                    let ttc = config.tile_touch_cap;
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
@@ -1308,7 +1350,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                     let results: Vec<ProcessedWay> = raw_ways
                                         .into_par_iter()
                                         .map(|raw| process_raw_way(
-                                            &raw, nr_ref, lm_ref, mz, xz, &srl, ds_ref, mr_ref,
+                                            &raw, nr_ref, lm_ref, mz, xz, &srl, ds_ref, mr_ref, ttc,
                                         ))
                                         .collect();
                                     let _ = tx.send(results);
@@ -1402,7 +1444,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         features_emitted += flush_rel_batch(
                             batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
                             sort_writer.as_mut().expect("sort_writer not returned from drain"),
-                            &mut fanout_stats,
+                            &mut fanout_stats, config.tile_touch_cap,
                         );
                         deferral_stats.check_budgets(&config.seam_reconcile_layers);
                     }
@@ -1420,7 +1462,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         features_emitted += flush_rel_batch(
             rel_batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
             sort_writer.as_mut().expect("sort_writer not returned from drain"),
-            &mut fanout_stats,
+            &mut fanout_stats, config.tile_touch_cap,
         );
         deferral_stats.check_budgets(&config.seam_reconcile_layers);
     }
@@ -1923,6 +1965,7 @@ fn process_raw_way(
     seam_reconcile_layers: &[u8],
     deferral_stats: &DeferralStats,
     missing_ref_stats: &MissingRefStatsAtomic,
+    tile_touch_cap: Option<u32>,
 ) -> ProcessedWay {
     // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
     // or looked up via node store (the expensive mmap reads — now parallel).
@@ -2055,6 +2098,7 @@ fn process_raw_way(
                                 &mut scratch.polygon_emit,
                                 sr,
                                 Some(deferral_stats),
+                                tile_touch_cap,
                             );
                         } else {
                             let shifted: Vec<Point> = merc
@@ -2072,6 +2116,7 @@ fn process_raw_way(
                                 &mut scratch.polygon_emit,
                                 sr,
                                 Some(deferral_stats),
+                                tile_touch_cap,
                             );
                         }
                     }
@@ -2232,6 +2277,7 @@ fn flush_rel_batch(
     land_mask: &geometry::LandMask,
     sort_writer: &mut SortWriter,
     fanout_stats: &mut FanoutStats,
+    tile_touch_cap: Option<u32>,
 ) -> u64 {
     use rayon::prelude::*;
 
@@ -2261,6 +2307,7 @@ fn flush_rel_batch(
                     &mut acc.line_emit,
                     &mut acc.multipolygon_emit,
                     &mut acc.simp_scratch,
+                    tile_touch_cap,
                 );
                 // Track fanout for this relation's records.
                 record_fanout_from_records(&acc.records[before..], &mut acc.fanout);
@@ -2329,6 +2376,7 @@ fn process_prepared_relation_into(
     line_emit: &mut LineEmitScratch,
     multipolygon_emit: &mut MultipolygonEmitScratch,
     simp_scratch: &mut geometry::SimplifyMultiScratch,
+    tile_touch_cap: Option<u32>,
 ) {
     let multi = multipolygon::assemble(&rel.member_ways);
     let shared_vertex_keys = relation_shared_vertex_keys(&rel.member_ways);
@@ -2375,7 +2423,7 @@ fn process_prepared_relation_into(
                                 Some(&shared_vertex_keys),
                                 m,
                                 z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr, Some(deferral_stats),
+                                sr, Some(deferral_stats), tile_touch_cap,
                             );
                         } else {
                             let outer_shifted: Vec<Point> = outer_unwrapped
@@ -2397,7 +2445,7 @@ fn process_prepared_relation_into(
                                 Some(&shared_vertex_keys),
                                 m,
                                 z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr, Some(deferral_stats),
+                                sr, Some(deferral_stats), tile_touch_cap,
                             );
                         }
                     }
@@ -2797,6 +2845,7 @@ fn emit_polygon_feature(
     scratch: &mut PolygonEmitScratch,
     seam_max_zoom: u8,
     deferral_stats: Option<&DeferralStats>,
+    tile_touch_cap: Option<u32>,
 ) -> u64 {
     // Auto-disable check: if deferral was killed for this layer, skip it.
     let seam_max_zoom = if seam_max_zoom > 0
@@ -2825,6 +2874,15 @@ fn emit_polygon_feature(
         let single_tile = geometry::is_single_tile(&simp_bbox, z);
         let skip_size_filter = z >= 14;
         let (tx_min, tx_max, ty_min, ty_max) = geometry::tile_range_in_bbox(&simp_bbox, z);
+
+        // Tile-touch cap: skip this zoom if the bbox tile count exceeds the cap.
+        if let Some(cap) = tile_touch_cap {
+            let nx = (tx_max - tx_min + 1) as u64;
+            let ny = (ty_max - ty_min + 1) as u64;
+            if nx * ny > u64::from(cap) {
+                return;
+            }
+        }
 
         if single_tile {
             // Fast path: bbox fits in one tile — clipping is a no-op.
@@ -2997,6 +3055,7 @@ fn emit_multipolygon_feature(
     simp_scratch: &mut geometry::SimplifyMultiScratch,
     seam_max_zoom: u8,
     deferral_stats: Option<&DeferralStats>,
+    tile_touch_cap: Option<u32>,
 ) -> u64 {
     let mut count: u64 = 0;
     let mut emit_for_zoom = |z: u8, simp_outer: &[Point], simp_inners: &[Vec<Point>]| {
@@ -3012,6 +3071,15 @@ fn emit_multipolygon_feature(
         let single_tile = geometry::is_single_tile(&simp_bbox, z);
         let skip_size_filter = z >= 14;
         let (tx_min, tx_max, ty_min, ty_max) = geometry::tile_range_in_bbox(&simp_bbox, z);
+
+        // Tile-touch cap: skip this zoom if the bbox tile count exceeds the cap.
+        if let Some(cap) = tile_touch_cap {
+            let nx = (tx_max - tx_min + 1) as u64;
+            let ny = (ty_max - ty_min + 1) as u64;
+            if nx * ny > u64::from(cap) {
+                return;
+            }
+        }
 
         if single_tile {
             // Fast path: bbox fits in one tile — clipping is a no-op.

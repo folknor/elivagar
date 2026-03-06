@@ -116,6 +116,11 @@ struct RunArgs {
     /// Example: boundaries,water_polygons:5
     #[arg(long, value_delimiter = ',', default_value = "boundaries")]
     seam_reconcile_layers: Vec<String>,
+
+    /// Maximum tiles a single polygon feature may touch at any zoom level.
+    /// Features exceeding the cap are skipped at that zoom. Off by default.
+    #[arg(long)]
+    tile_touch_cap: Option<u32>,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -327,6 +332,7 @@ fn run(args: RunArgs) {
             }
             mask
         },
+        tile_touch_cap: args.tile_touch_cap,
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")
