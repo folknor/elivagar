@@ -169,10 +169,11 @@ pub struct TilegenConfig {
     /// 0 = disabled, 1-14 = max zoom at which to defer simplification.
     /// Indexed by Layer enum discriminant. Default: Boundaries=8, rest=0.
     pub seam_reconcile_layers: [u8; shortbread::Layer::count()],
-    /// Maximum tiles a single polygon feature may touch at any zoom level.
-    /// When exceeded, the feature is skipped at that zoom. `None` = no cap (default).
-    /// Only applies to polygon-geometry layers. Behind `--tile-touch-cap N` flag.
-    pub tile_touch_cap: Option<u32>,
+    /// Per-layer fanout caps: maximum bbox tiles a polygon feature may touch
+    /// at any zoom. When exceeded, the feature is skipped at that zoom.
+    /// 0 = uncapped (default). Only applies to polygon-geometry emit functions.
+    /// Indexed by `Layer` enum discriminant.
+    pub fanout_caps: [u32; shortbread::Layer::count()],
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -403,6 +404,10 @@ struct FanoutStats {
     sum_tiles: Box<[u64; 32 * 15]>,
     /// Log2 histogram. Index: (layer * 15 + zoom) * FANOUT_HIST_BUCKETS + bucket.
     hist: Box<[u32; 32 * 15 * FANOUT_HIST_BUCKETS]>,
+    /// Features capped (skipped at this zoom due to fanout cap). Index: layer * 15 + zoom.
+    capped_features: Box<[u64; 32 * 15]>,
+    /// Estimated tiles saved by capping (sum of bbox tile counts). Index: layer * 15 + zoom.
+    capped_tiles: Box<[u64; 32 * 15]>,
 }
 
 impl FanoutStats {
@@ -412,6 +417,8 @@ impl FanoutStats {
             feature_count: Box::new([0; 32 * 15]),
             sum_tiles: Box::new([0; 32 * 15]),
             hist: Box::new([0; 32 * 15 * FANOUT_HIST_BUCKETS]),
+            capped_features: Box::new([0; 32 * 15]),
+            capped_tiles: Box::new([0; 32 * 15]),
         }
     }
 
@@ -438,6 +445,16 @@ impl FanoutStats {
         self.hist[idx * FANOUT_HIST_BUCKETS + bucket] += 1;
     }
 
+    /// Record that a feature was capped (skipped) at (layer, zoom) with bbox tile count.
+    fn record_cap(&mut self, layer: usize, zoom: usize, bbox_tiles: u64) {
+        if layer >= 32 || zoom >= 15 {
+            return;
+        }
+        let idx = layer * 15 + zoom;
+        self.capped_features[idx] += 1;
+        self.capped_tiles[idx] += bbox_tiles;
+    }
+
     /// Merge another FanoutStats into self.
     fn merge(&mut self, other: &Self) {
         for i in 0..(32 * 15) {
@@ -446,6 +463,8 @@ impl FanoutStats {
             }
             self.feature_count[i] += other.feature_count[i];
             self.sum_tiles[i] += other.sum_tiles[i];
+            self.capped_features[i] += other.capped_features[i];
+            self.capped_tiles[i] += other.capped_tiles[i];
         }
         for i in 0..(32 * 15 * FANOUT_HIST_BUCKETS) {
             self.hist[i] += other.hist[i];
@@ -899,6 +918,30 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                         eprintln!("sort_layer_{name}_above_{thresh}={}", thresh_parts.join(","));
                     }
                 }
+                // Cap impact metrics: features capped, tiles saved, estimated bytes saved.
+                let mut cap_feat_parts = Vec::new();
+                let mut cap_tiles_parts = Vec::new();
+                let mut cap_bytes_parts = Vec::new();
+                for z in 0..15u8 {
+                    let idx = i * 15 + z as usize;
+                    let cf = s.fanout_stats.capped_features[idx];
+                    let ct = s.fanout_stats.capped_tiles[idx];
+                    if cf > 0 {
+                        cap_feat_parts.push(format!("z{z}:{cf}"));
+                        cap_tiles_parts.push(format!("z{z}:{ct}"));
+                        // Estimate bytes saved: capped tiles × avg bytes/record for this layer+zoom.
+                        let zr = s.layer_zoom_records[idx];
+                        let zb = s.layer_zoom_bytes[idx];
+                        let avg_bytes = zb.checked_div(zr).unwrap_or(0);
+                        let estimated_bytes = ct * avg_bytes;
+                        cap_bytes_parts.push(format!("z{z}:{estimated_bytes}"));
+                    }
+                }
+                if !cap_feat_parts.is_empty() {
+                    eprintln!("fanout_capped_features_{name}={}", cap_feat_parts.join(","));
+                    eprintln!("fanout_capped_tiles_{name}={}", cap_tiles_parts.join(","));
+                    eprintln!("fanout_capped_bytes_estimated_{name}={}", cap_bytes_parts.join(","));
+                }
             }
         }
         // Deferral stats: report per-layer deferred vertex counts.
@@ -1256,7 +1299,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let mz = min_z;
                     let xz = max_z;
                     let srl = config.seam_reconcile_layers;
-                    let ttc = config.tile_touch_cap;
+                    let fcs = config.fanout_caps;
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
@@ -1350,7 +1393,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                     let results: Vec<ProcessedWay> = raw_ways
                                         .into_par_iter()
                                         .map(|raw| process_raw_way(
-                                            &raw, nr_ref, lm_ref, mz, xz, &srl, ds_ref, mr_ref, ttc,
+                                            &raw, nr_ref, lm_ref, mz, xz, &srl, ds_ref, mr_ref, &fcs,
                                         ))
                                         .collect();
                                     let _ = tx.send(results);
@@ -1444,7 +1487,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         features_emitted += flush_rel_batch(
                             batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
                             sort_writer.as_mut().expect("sort_writer not returned from drain"),
-                            &mut fanout_stats, config.tile_touch_cap,
+                            &mut fanout_stats, &config.fanout_caps,
                         );
                         deferral_stats.check_budgets(&config.seam_reconcile_layers);
                     }
@@ -1462,7 +1505,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         features_emitted += flush_rel_batch(
             rel_batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
             sort_writer.as_mut().expect("sort_writer not returned from drain"),
-            &mut fanout_stats, config.tile_touch_cap,
+            &mut fanout_stats, &config.fanout_caps,
         );
         deferral_stats.check_budgets(&config.seam_reconcile_layers);
     }
@@ -1803,6 +1846,8 @@ struct ProcessedWay {
     way_id: i64,
     coords_e7: Vec<(i32, i32)>,
     records: Vec<SortRecord>,
+    /// Cap events from polygon emit: (layer_zoom_idx, bbox_tiles).
+    cap_events: Vec<(u16, u64)>,
 }
 
 struct PointEmitScratch {
@@ -1852,6 +1897,8 @@ struct PolygonEmitScratch {
     clip_b: Vec<Point>,
     row_clip_a: Vec<Point>,
     row_clip_b: Vec<Point>,
+    /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64).
+    cap_events: Vec<(u16, u64)>,
 }
 
 impl PolygonEmitScratch {
@@ -1867,6 +1914,7 @@ impl PolygonEmitScratch {
             clip_b: Vec::new(),
             row_clip_a: Vec::new(),
             row_clip_b: Vec::new(),
+            cap_events: Vec::new(),
         }
     }
 }
@@ -1884,6 +1932,8 @@ struct MultipolygonEmitScratch {
     row_outer: Vec<Point>,
     row_inners: Vec<Vec<Point>>,
     row_inner_bboxes: Vec<geometry::MercBbox>,
+    /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64).
+    cap_events: Vec<(u16, u64)>,
 }
 
 impl MultipolygonEmitScratch {
@@ -1901,6 +1951,7 @@ impl MultipolygonEmitScratch {
             row_outer: Vec::new(),
             row_inners: Vec::new(),
             row_inner_bboxes: Vec::new(),
+            cap_events: Vec::new(),
         }
     }
 }
@@ -1942,6 +1993,12 @@ fn drain_processed_ways(
             way_index.put(pw.way_id, &pw.coords_e7);
         }
         record_fanout_from_records(&pw.records, fanout);
+        // Harvest cap events from polygon emit.
+        for &(idx, tiles) in &pw.cap_events {
+            let layer = idx as usize / 15;
+            let zoom = idx as usize % 15;
+            fanout.record_cap(layer, zoom, tiles);
+        }
         count += pw.records.len() as u64;
         // Panic: disk I/O failure is unrecoverable mid-pipeline.
         for record in pw.records {
@@ -1965,7 +2022,7 @@ fn process_raw_way(
     seam_reconcile_layers: &[u8],
     deferral_stats: &DeferralStats,
     missing_ref_stats: &MissingRefStatsAtomic,
-    tile_touch_cap: Option<u32>,
+    fanout_caps: &[u32],
 ) -> ProcessedWay {
     // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
     // or looked up via node store (the expensive mmap reads — now parallel).
@@ -1992,7 +2049,7 @@ fn process_raw_way(
     };
 
     if coords_e7.is_empty() || raw.tags.is_empty() {
-        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new() };
+        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new(), cap_events: Vec::new() };
     }
 
     // Tag matching — convert owned tags to borrowed refs (same pattern as
@@ -2006,12 +2063,13 @@ fn process_raw_way(
     let mut matches = shortbread::match_element(&tag_helper, geom_type);
 
     if matches.is_empty() {
-        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new() };
+        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new(), cap_events: Vec::new() };
     }
 
     #[allow(clippy::cast_sign_loss)]
     let osm_id = raw.way_id as u64;
     let mut records = Vec::new();
+    let mut cap_events: Vec<(u16, u64)> = Vec::new();
     let mut bbox: Option<MercBbox> = None;
     let mut preserve_vertex_mask: Vec<bool> = vec![false; coords_e7.len()];
     if !raw.preserve_node_refs.is_empty() {
@@ -2085,6 +2143,7 @@ fn process_raw_way(
                 }
                 GeomExpect::Polygon => {
                     let sr = seam_reconcile_layers[m.layer as usize];
+                    let fc = fanout_caps.get(m.layer as usize).copied().unwrap_or(0);
                     for shift in antimeridian_shifts_for_bbox(&merc_bbox_val) {
                         if shift == 0.0 {
                             emit_polygon_feature(
@@ -2098,7 +2157,7 @@ fn process_raw_way(
                                 &mut scratch.polygon_emit,
                                 sr,
                                 Some(deferral_stats),
-                                tile_touch_cap,
+                                fc,
                             );
                         } else {
                             let shifted: Vec<Point> = merc
@@ -2116,18 +2175,20 @@ fn process_raw_way(
                                 &mut scratch.polygon_emit,
                                 sr,
                                 Some(deferral_stats),
-                                tile_touch_cap,
+                                fc,
                             );
                         }
                     }
                 }
             }
         }
+        // Collect cap events from polygon scratch before leaving the borrow.
+        cap_events = std::mem::take(&mut scratch.polygon_emit.cap_events);
     });
 
     mark_bbox_wrapped(land_mask, &bbox.expect("bbox set from merc coords"));
 
-    ProcessedWay { way_id: raw.way_id, coords_e7, records }
+    ProcessedWay { way_id: raw.way_id, coords_e7, records, cap_events }
 }
 
 // ---------------------------------------------------------------------------
@@ -2277,7 +2338,7 @@ fn flush_rel_batch(
     land_mask: &geometry::LandMask,
     sort_writer: &mut SortWriter,
     fanout_stats: &mut FanoutStats,
-    tile_touch_cap: Option<u32>,
+    fanout_caps: &[u32],
 ) -> u64 {
     use rayon::prelude::*;
 
@@ -2307,10 +2368,16 @@ fn flush_rel_batch(
                     &mut acc.line_emit,
                     &mut acc.multipolygon_emit,
                     &mut acc.simp_scratch,
-                    tile_touch_cap,
+                    fanout_caps,
                 );
                 // Track fanout for this relation's records.
                 record_fanout_from_records(&acc.records[before..], &mut acc.fanout);
+                // Harvest cap events from multipolygon emit scratch.
+                for &(idx, tiles) in &acc.multipolygon_emit.cap_events {
+                    let layer = idx as usize / 15;
+                    let zoom = idx as usize % 15;
+                    acc.fanout.record_cap(layer, zoom, tiles);
+                }
                 for r in &acc.records[before..] {
                     acc.bytes += r.data.len() + std::mem::size_of::<SortRecord>();
                 }
@@ -2376,7 +2443,7 @@ fn process_prepared_relation_into(
     line_emit: &mut LineEmitScratch,
     multipolygon_emit: &mut MultipolygonEmitScratch,
     simp_scratch: &mut geometry::SimplifyMultiScratch,
-    tile_touch_cap: Option<u32>,
+    fanout_caps: &[u32],
 ) {
     let multi = multipolygon::assemble(&rel.member_ways);
     let shared_vertex_keys = relation_shared_vertex_keys(&rel.member_ways);
@@ -2414,6 +2481,7 @@ fn process_prepared_relation_into(
                     let bbox = merc_bbox(&outer_unwrapped);
                     mark_bbox_wrapped(land_mask, &bbox);
                     let sr = seam_reconcile_layers[m.layer as usize];
+                    let fc = fanout_caps.get(m.layer as usize).copied().unwrap_or(0);
                     for shift in antimeridian_shifts_for_bbox(&bbox) {
                         if shift == 0.0 {
                             emit_multipolygon_feature(
@@ -2423,7 +2491,7 @@ fn process_prepared_relation_into(
                                 Some(&shared_vertex_keys),
                                 m,
                                 z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr, Some(deferral_stats), tile_touch_cap,
+                                sr, Some(deferral_stats), fc,
                             );
                         } else {
                             let outer_shifted: Vec<Point> = outer_unwrapped
@@ -2445,7 +2513,7 @@ fn process_prepared_relation_into(
                                 Some(&shared_vertex_keys),
                                 m,
                                 z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr, Some(deferral_stats), tile_touch_cap,
+                                sr, Some(deferral_stats), fc,
                             );
                         }
                     }
@@ -2845,7 +2913,7 @@ fn emit_polygon_feature(
     scratch: &mut PolygonEmitScratch,
     seam_max_zoom: u8,
     deferral_stats: Option<&DeferralStats>,
-    tile_touch_cap: Option<u32>,
+    fanout_cap: u32,
 ) -> u64 {
     // Auto-disable check: if deferral was killed for this layer, skip it.
     let seam_max_zoom = if seam_max_zoom > 0
@@ -2865,6 +2933,7 @@ fn emit_polygon_feature(
             .filter_map(|(i, &keep)| keep.then_some(i)),
     );
     let has_pins = !scratch.pinned_idxs.is_empty();
+    scratch.cap_events.clear();
     let mut run_for_zoom = |z: u8, simplified: &[Point]| {
         encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
 
@@ -2875,11 +2944,14 @@ fn emit_polygon_feature(
         let skip_size_filter = z >= 14;
         let (tx_min, tx_max, ty_min, ty_max) = geometry::tile_range_in_bbox(&simp_bbox, z);
 
-        // Tile-touch cap: skip this zoom if the bbox tile count exceeds the cap.
-        if let Some(cap) = tile_touch_cap {
+        // Fanout cap: skip this zoom if the bbox tile count exceeds the layer cap.
+        if fanout_cap > 0 {
             let nx = (tx_max - tx_min + 1) as u64;
             let ny = (ty_max - ty_min + 1) as u64;
-            if nx * ny > u64::from(cap) {
+            let bbox_tiles = nx * ny;
+            if bbox_tiles > u64::from(fanout_cap) {
+                #[allow(clippy::cast_possible_truncation)]
+                scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles));
                 return;
             }
         }
@@ -3055,9 +3127,10 @@ fn emit_multipolygon_feature(
     simp_scratch: &mut geometry::SimplifyMultiScratch,
     seam_max_zoom: u8,
     deferral_stats: Option<&DeferralStats>,
-    tile_touch_cap: Option<u32>,
+    fanout_cap: u32,
 ) -> u64 {
     let mut count: u64 = 0;
+    emit_scratch.cap_events.clear();
     let mut emit_for_zoom = |z: u8, simp_outer: &[Point], simp_inners: &[Vec<Point>]| {
         encode_attrs_bytes(&mut emit_scratch.attrs_buf, &m.attrs, z);
 
@@ -3072,11 +3145,14 @@ fn emit_multipolygon_feature(
         let skip_size_filter = z >= 14;
         let (tx_min, tx_max, ty_min, ty_max) = geometry::tile_range_in_bbox(&simp_bbox, z);
 
-        // Tile-touch cap: skip this zoom if the bbox tile count exceeds the cap.
-        if let Some(cap) = tile_touch_cap {
+        // Fanout cap: skip this zoom if the bbox tile count exceeds the layer cap.
+        if fanout_cap > 0 {
             let nx = (tx_max - tx_min + 1) as u64;
             let ny = (ty_max - ty_min + 1) as u64;
-            if nx * ny > u64::from(cap) {
+            let bbox_tiles = nx * ny;
+            if bbox_tiles > u64::from(fanout_cap) {
+                #[allow(clippy::cast_possible_truncation)]
+                emit_scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles));
                 return;
             }
         }

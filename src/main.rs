@@ -117,10 +117,16 @@ struct RunArgs {
     #[arg(long, value_delimiter = ',', default_value = "boundaries")]
     seam_reconcile_layers: Vec<String>,
 
-    /// Maximum tiles a single polygon feature may touch at any zoom level.
-    /// Features exceeding the cap are skipped at that zoom. Off by default.
+    /// Default fanout cap for all polygon layers. 0 or omitted = uncapped.
+    /// Per-layer overrides via --fanout-cap take precedence.
     #[arg(long)]
-    tile_touch_cap: Option<u32>,
+    fanout_cap_default: Option<u32>,
+
+    /// Per-layer fanout caps: max bbox tiles a polygon feature may touch.
+    /// Comma-separated, format: layer=N. Features exceeding the cap are skipped
+    /// at that zoom. Example: water_polygons=2048,boundaries=4096
+    #[arg(long, value_delimiter = ',')]
+    fanout_cap: Vec<String>,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -242,6 +248,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(args: RunArgs) {
     let threads = args.threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -332,7 +339,33 @@ fn run(args: RunArgs) {
             }
             mask
         },
-        tile_touch_cap: args.tile_touch_cap,
+        fanout_caps: {
+            let default_cap = args.fanout_cap_default.unwrap_or(0);
+            let mut caps = [default_cap; elivagar::shortbread::Layer::count()];
+            for spec in &args.fanout_cap {
+                let trimmed = spec.trim();
+                let (name, cap_str) = match trimmed.split_once('=') {
+                    Some(pair) => pair,
+                    None => {
+                        eprintln!("Error: invalid --fanout-cap format, expected layer=N: '{trimmed}'");
+                        std::process::exit(1);
+                    }
+                };
+                let name = name.trim();
+                let cap_val: u32 = cap_str.trim().parse().unwrap_or_else(|_| {
+                    eprintln!("Error: invalid cap value in --fanout-cap: '{trimmed}'");
+                    std::process::exit(1);
+                });
+                match elivagar::shortbread::Layer::from_name(name) {
+                    Some(layer) => caps[layer as usize] = cap_val,
+                    None => {
+                        eprintln!("Error: unknown layer name for --fanout-cap: '{name}'");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            caps
+        },
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")
