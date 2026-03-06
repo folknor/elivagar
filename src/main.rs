@@ -105,6 +105,11 @@ struct RunArgs {
     /// Tile compression algorithm (MVT only).
     #[arg(long, value_enum, default_value_t = TileCompressionArg::Gzip)]
     tile_compression: TileCompressionArg,
+
+    /// Lz4-compress sort chunk files (reduces disk I/O, costs CPU).
+    /// Useful at planet scale where sort data exceeds available RAM.
+    #[arg(long)]
+    compress_sort_chunks: bool,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -277,6 +282,7 @@ fn run(args: RunArgs) {
             TileCompressionArg::Gzip => elivagar::TileCompression::Gzip,
             TileCompressionArg::Brotli => elivagar::TileCompression::Brotli,
         },
+        compress_sort_chunks: args.compress_sort_chunks,
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")

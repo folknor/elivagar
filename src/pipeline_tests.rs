@@ -10,7 +10,7 @@ use std::io::Read;
 use std::time::{Duration, Instant};
 
 fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
-    let mut writer = sort::SortWriter::new(chunks_dir, 1024).expect("create sort writer");
+    let mut writer = sort::SortWriter::new(chunks_dir, 1024, false).expect("create sort writer");
     let attrs: Vec<crate::shortbread::Attr> = vec![
         ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
     ];
@@ -924,6 +924,7 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: false,
     };
 
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
@@ -977,6 +978,7 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: false,
     };
 
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
@@ -1021,6 +1023,7 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: false,
     };
     let _ = phase_assemble(&mut mvt_sort_reader, &mvt_config).expect("mvt assemble should succeed");
     let mut mvt_reader = crate::pmtiles_reader::PmtilesReader::open(&mvt_output)
@@ -1059,6 +1062,7 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mlt,
         tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: false,
     };
     let _ = phase_assemble(&mut mlt_sort_reader, &mlt_config).expect("mlt assemble should succeed");
     let mut mlt_reader = crate::pmtiles_reader::PmtilesReader::open(&mlt_output)

@@ -437,6 +437,7 @@ fn test_full_pipeline() {
         locations_on_ways: false,
         tile_format: elivagar::TilePayloadFormat::Mvt,
         tile_compression: elivagar::TileCompression::Gzip,
+        compress_sort_chunks: false,
     };
 
     elivagar::run(&config).expect("pipeline should succeed");

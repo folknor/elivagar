@@ -166,6 +166,9 @@ pub struct TilegenConfig {
     pub tile_format: TilePayloadFormat,
     /// Tile compression algorithm for MVT payloads (`gzip` default, `brotli` optional).
     pub tile_compression: TileCompression,
+    /// Lz4-compress sort chunk files. Reduces disk I/O at the cost of CPU.
+    /// Useful at planet scale where sort data exceeds available RAM.
+    pub compress_sort_chunks: bool,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -480,7 +483,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir)?;
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
             phase12_elapsed = None;
-            let sw = sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_size, pbf_chunks)?;
+            let sw = sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_size, pbf_chunks, config.compress_sort_chunks)?;
             let mask = load_land_mask(&config.tmp_dir);
             if mask.is_none() {
                 eprintln!("  No land mask found — ocean filtering disabled");
@@ -544,6 +547,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         let sr = sort::SortReader::from_dir(
             &config.tmp_dir.join(SORT_CHUNKS_DIR),
             load_sort_chunk_count(&config.tmp_dir),
+            config.compress_sort_chunks,
         )?;
         (sr, None, peak_rss_kb())
     } else {
@@ -555,6 +559,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             sort::SortReader::from_dir(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
                 load_sort_chunk_count(&config.tmp_dir),
+                config.compress_sort_chunks,
             )?
         };
         (sr, Some(phase3_start.elapsed()), peak_rss_kb())
@@ -757,7 +762,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     // Option so we can move to drain thread during way phase and get back after.
     let mut sort_writer: Option<SortWriter> = Some(
-        SortWriter::new(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_budget)?
+        SortWriter::new(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_budget, config.compress_sort_chunks)?
     );
 
     // Decode threads: give 1/3 of budget to pbfhogg decode, rest to rayon processing.
@@ -1908,6 +1913,7 @@ struct RelAcc {
     line_emit: LineEmitScratch,
     multipolygon_emit: MultipolygonEmitScratch,
     simp_scratch: geometry::SimplifyMultiScratch,
+    compress_chunks: bool,
 }
 
 impl RelAcc {
@@ -1917,7 +1923,7 @@ impl RelAcc {
         }
         let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
-        sort::write_sorted_chunk(&mut self.records, &path)
+        sort::write_sorted_chunk(&mut self.records, &path, self.compress_chunks)
             .expect("relation chunk write failed");
         self.chunk_paths.push(path);
         self.count += self.records.len() as u64;
@@ -1940,6 +1946,7 @@ fn flush_rel_batch(
     let chunk_id = std::sync::atomic::AtomicUsize::new(sort_writer.chunk_count());
     let chunk_dir = sort_writer.tmp_dir().to_path_buf();
     let chunk_size = sort_writer.chunk_size_bytes();
+    let chunk_compress = sort_writer.compress();
 
     let result = batch
         .into_par_iter()
@@ -1950,6 +1957,7 @@ fn flush_rel_batch(
                 line_emit: LineEmitScratch::new(),
                 multipolygon_emit: MultipolygonEmitScratch::new(),
                 simp_scratch: geometry::SimplifyMultiScratch::new(),
+                compress_chunks: chunk_compress,
             },
             |mut acc, rel| {
                 let before = acc.records.len();
@@ -1979,6 +1987,7 @@ fn flush_rel_batch(
                 line_emit: LineEmitScratch::new(),
                 multipolygon_emit: MultipolygonEmitScratch::new(),
                 simp_scratch: geometry::SimplifyMultiScratch::new(),
+                compress_chunks: chunk_compress,
             },
             |mut a, mut b| {
                 a.chunk_paths.extend(b.chunk_paths);
