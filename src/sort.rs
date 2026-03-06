@@ -13,40 +13,8 @@ use std::path::{Path, PathBuf};
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
 
 // ---------------------------------------------------------------------------
-// Chunk I/O abstraction — plain or lz4-compressed
+// Chunk I/O abstraction — lz4-compressed reads
 // ---------------------------------------------------------------------------
-
-enum ChunkWrite {
-    Plain(BufWriter<File>),
-    Lz4(FrameEncoder<BufWriter<File>>),
-}
-
-impl Write for ChunkWrite {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Plain(w) => w.write(buf),
-            Self::Lz4(w) => w.write(buf),
-        }
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Plain(w) => w.flush(),
-            Self::Lz4(w) => w.flush(),
-        }
-    }
-}
-
-impl ChunkWrite {
-    fn finish(self) -> io::Result<()> {
-        match self {
-            Self::Plain(mut w) => w.flush(),
-            Self::Lz4(w) => {
-                w.finish().map_err(io::Error::other)?;
-                Ok(())
-            }
-        }
-    }
-}
 
 enum ChunkRead {
     Plain(BufReader<File>),
@@ -274,27 +242,44 @@ impl SortWriter {
 pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path, compress: bool) -> io::Result<()> {
     records.sort_unstable_by_key(|r| r.key);
 
-    let file = File::create(path)?;
-    let buf = BufWriter::with_capacity(1 << 20, file);
-    let mut writer = if compress {
-        ChunkWrite::Lz4(FrameEncoder::new(buf))
-    } else {
-        ChunkWrite::Plain(buf)
-    };
-
     // Record count as u32. Safe: 1 GB chunk budget yields max ~48.8M records
     // (minimum 22 bytes each), 88x below u32::MAX.
     let count = records.len() as u32;
-    writer.write_all(&count.to_le_bytes())?;
 
-    for record in records.iter() {
-        writer.write_all(&record.key.to_le_bytes())?;
-        let data_len = record.data.len() as u32;
-        writer.write_all(&data_len.to_le_bytes())?;
-        writer.write_all(&record.data)?;
+    if compress {
+        // Pre-serialize all records into a contiguous buffer, then compress
+        // in bulk. This avoids millions of small write_all calls through the
+        // lz4 FrameEncoder (8-byte key, 4-byte len, variable data per record),
+        // which caused a ~25s regression on Germany despite lz4's raw throughput
+        // being 2-4 GB/s.
+        let serialized_size = 4 + records.len() * 12
+            + records.iter().map(|r| r.data.len()).sum::<usize>();
+        let mut serialized = Vec::with_capacity(serialized_size);
+        serialized.extend_from_slice(&count.to_le_bytes());
+        for record in records.iter() {
+            serialized.extend_from_slice(&record.key.to_le_bytes());
+            let data_len = record.data.len() as u32;
+            serialized.extend_from_slice(&data_len.to_le_bytes());
+            serialized.extend_from_slice(&record.data);
+        }
+
+        let file = File::create(path)?;
+        let buf = BufWriter::with_capacity(1 << 20, file);
+        let mut encoder = FrameEncoder::new(buf);
+        encoder.write_all(&serialized)?;
+        encoder.finish().map_err(io::Error::other)?;
+    } else {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::with_capacity(1 << 20, file);
+        writer.write_all(&count.to_le_bytes())?;
+        for record in records.iter() {
+            writer.write_all(&record.key.to_le_bytes())?;
+            let data_len = record.data.len() as u32;
+            writer.write_all(&data_len.to_le_bytes())?;
+            writer.write_all(&record.data)?;
+        }
+        writer.flush()?;
     }
-
-    writer.finish()?;
 
     Ok(())
 }
