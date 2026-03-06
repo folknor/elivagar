@@ -12,10 +12,15 @@ use crate::geometry::{
 };
 use crate::mlt;
 
-/// Full-tile rectangle in tile coordinates (CW, closed). Buffer = 8px.
+/// Full-tile rectangle in tile coordinates (CW, closed). Buffer = 8 rendered pixels = 128 extent units.
 /// Used for interior tiles where the polygon fully covers the tile.
 const INTERIOR_TILE_RING: [(i32, i32); 5] =
-    [(-8, -8), (4104, -8), (4104, 4104), (-8, 4104), (-8, -8)];
+    [(-128, -128), (4224, -128), (4224, 4224), (-128, 4224), (-128, -128)];
+
+/// Maximum zoom at which boundary polygons skip PBF-phase DP simplification.
+/// These zooms defer simplification to the assemble phase where cross-feature
+/// shared-edge reconciliation is possible.
+const BOUNDARY_NO_SIMP_MAX: u8 = 8;
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::mvt::{self, GeomType, LayerBuilder};
 use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
@@ -82,6 +87,13 @@ pub enum SkipTo {
 pub enum TilePayloadFormat {
     Mvt,
     Mlt,
+}
+
+/// Tile compression algorithm for MVT payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileCompression {
+    Gzip,
+    Brotli,
 }
 
 /// Configuration for the tile generation pipeline.
@@ -152,12 +164,15 @@ pub struct TilegenConfig {
     pub locations_on_ways: bool,
     /// Tile payload format (`mvt` default, `mlt` planned).
     pub tile_format: TilePayloadFormat,
+    /// Tile compression algorithm for MVT payloads (`gzip` default, `brotli` optional).
+    pub tile_compression: TileCompression,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const LAND_MASK_FILE: &str = "land_mask.bin";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
+const LON_E7_FULL_CIRCLE: i64 = 3_600_000_000;
 /// Default memory budget per sort chunk (1 GB).
 const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 /// Default way in-flight budget for the standard node-store path.
@@ -267,6 +282,26 @@ impl MissingRefStatsAtomic {
             relation_nested_members: self.relation_nested_members.load(Ordering::Relaxed),
         }
     }
+}
+
+fn missing_ref_summary_lines(summary: MissingRefStats) -> [String; 6] {
+    [
+        format!("missing_way_node_refs={}", summary.missing_way_node_refs),
+        format!(
+            "ways_with_missing_node_refs={}",
+            summary.ways_with_missing_node_refs
+        ),
+        format!(
+            "missing_relation_way_refs={}",
+            summary.missing_relation_way_refs
+        ),
+        format!(
+            "relations_with_missing_way_refs={}",
+            summary.relations_with_missing_way_refs
+        ),
+        format!("relation_non_way_members={}", summary.relation_non_way_members),
+        format!("relation_nested_members={}", summary.relation_nested_members),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -392,7 +427,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("=== Tilegen: {} → {}", config.pbf_path.display(), config.output_path.display());
     eprintln!("    Zoom range: z{}–z{}", config.min_zoom, config.max_zoom);
     eprintln!("    Tmp dir:    {}", config.tmp_dir.display());
-    eprintln!("    Tile format:{:?}", config.tile_format);
+    eprintln!("    Tile format:{:?}, compression:{:?}", config.tile_format, config.tile_compression);
     if let Some(s) = skip {
         eprintln!("    Skip to:    {s:?}");
     }
@@ -559,6 +594,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             TilePayloadFormat::Mlt => "mlt",
         }
     );
+    eprintln!(
+        "tile_compression={}",
+        match config.tile_compression {
+            TileCompression::Gzip => "gzip",
+            TileCompression::Brotli => "brotli",
+        }
+    );
     if let Ok(meta) = std::fs::metadata(&config.output_path) {
         eprintln!("output_bytes={}", meta.len());
     }
@@ -631,12 +673,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("oversize_top_{}={z}/{x}/{y}:{}", i + 1, t.bytes);
     }
     if let Some(m) = missing_ref_summary {
-        eprintln!("missing_way_node_refs={}", m.missing_way_node_refs);
-        eprintln!("ways_with_missing_node_refs={}", m.ways_with_missing_node_refs);
-        eprintln!("missing_relation_way_refs={}", m.missing_relation_way_refs);
-        eprintln!("relations_with_missing_way_refs={}", m.relations_with_missing_way_refs);
-        eprintln!("relation_non_way_members={}", m.relation_non_way_members);
-        eprintln!("relation_nested_members={}", m.relation_nested_members);
+        for line in missing_ref_summary_lines(m) {
+            eprintln!("{line}");
+        }
     }
     Ok(())
 }
@@ -786,6 +825,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut max_lat_e7: i32 = i32::MIN;
     let mut min_lon_e7: i32 = i32::MAX;
     let mut max_lon_e7: i32 = i32::MIN;
+    let mut min_lon_shifted_e7: i64 = i64::MAX;
+    let mut max_lon_shifted_e7: i64 = i64::MIN;
 
     let min_z = config.min_zoom;
     let max_z = config.max_zoom;
@@ -836,6 +877,9 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             max_lat_e7 = max_lat_e7.max(lat_e7);
             min_lon_e7 = min_lon_e7.min(lon_e7);
             max_lon_e7 = max_lon_e7.max(lon_e7);
+            let shifted_lon_e7 = lon_e7_shifted_360(lon_e7);
+            min_lon_shifted_e7 = min_lon_shifted_e7.min(shifted_lon_e7);
+            max_lon_shifted_e7 = max_lon_shifted_e7.max(shifted_lon_e7);
 
             if $node.tags().next().is_some() {
                 let tags_vec: Vec<(&str, &str)> = $node.tags().collect();
@@ -1117,18 +1161,22 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     // Compute data extent in Mercator [0,1] with generous buffer for ocean overlap
     let data_bounds = if min_lat_e7 < max_lat_e7 {
-        let lon_span_e7 = i64::from(max_lon_e7) - i64::from(min_lon_e7);
-        let crosses_antimeridian = lon_span_e7 > 1_800_000_000;
-        let west_lon_e7 = if crosses_antimeridian { -1_800_000_000 } else { min_lon_e7 };
-        let east_lon_e7 = if crosses_antimeridian { 1_800_000_000 } else { max_lon_e7 };
+        let crosses_dateline = crosses_antimeridian(
+            min_lon_e7,
+            max_lon_e7,
+            min_lon_shifted_e7,
+            max_lon_shifted_e7,
+        );
+        let west_lon_e7 = if crosses_dateline { -1_800_000_000 } else { min_lon_e7 };
+        let east_lon_e7 = if crosses_dateline { 1_800_000_000 } else { max_lon_e7 };
         let sw = geometry::project_e7(min_lat_e7, west_lon_e7);
         let ne = geometry::project_e7(max_lat_e7, east_lon_e7);
         // Add ~1 degree buffer (in Mercator space, roughly 1/360 ≈ 0.003)
         let buf = 0.01;
         MercBbox {
-            min_x: if crosses_antimeridian { 0.0 } else { (sw.x - buf).max(0.0) },
+            min_x: if crosses_dateline { 0.0 } else { (sw.x - buf).max(0.0) },
             min_y: (ne.y - buf).max(0.0),  // ne.y < sw.y in Mercator [0,1]
-            max_x: if crosses_antimeridian { 1.0 } else { (ne.x + buf).min(1.0) },
+            max_x: if crosses_dateline { 1.0 } else { (ne.x + buf).min(1.0) },
             max_y: (sw.y + buf).min(1.0),
         }
     } else {
@@ -1262,6 +1310,7 @@ fn estimate_raw_ways_bytes(ways: &[RawWay]) -> usize {
 /// This preserves common junction vertices during DP simplification without global
 /// topology indexing. Block-local detection catches most local road intersections
 /// because OSM PBF primitive blocks are spatially clustered.
+/// Limitation: cross-block shared nodes are intentionally not detected here.
 fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
     let mut counts: FxHashMap<i64, u8> = FxHashMap::default();
     for w in raw_ways.iter() {
@@ -1353,6 +1402,24 @@ fn relation_shared_vertex_keys(member_ways: &[MemberWay]) -> FxHashSet<(i64, i64
 #[inline]
 fn wrap_unit_x(x: f64) -> f64 {
     x.rem_euclid(1.0)
+}
+
+#[inline]
+fn lon_e7_shifted_360(lon_e7: i32) -> i64 {
+    let lon = i64::from(lon_e7);
+    if lon < 0 { lon + LON_E7_FULL_CIRCLE } else { lon }
+}
+
+#[inline]
+fn crosses_antimeridian(
+    min_lon_e7: i32,
+    max_lon_e7: i32,
+    min_lon_shifted_e7: i64,
+    max_lon_shifted_e7: i64,
+) -> bool {
+    let raw_span_e7 = i64::from(max_lon_e7) - i64::from(min_lon_e7);
+    let shifted_span_e7 = max_lon_shifted_e7 - min_lon_shifted_e7;
+    shifted_span_e7 < raw_span_e7
 }
 
 fn unwrap_antimeridian_path(points: &mut [Point], closed: bool) -> bool {
@@ -2524,7 +2591,42 @@ fn emit_polygon_feature(
             }
         }
     };
-    if has_pins {
+    if m.layer == Layer::Boundaries {
+        // Boundary mode: single zoom loop.
+        // z <= 8: emit full-res geometry (assemble-phase reconciliation + tile-coord DP).
+        // z 9..13: normal DP simplification.
+        // z >= 14: full-res (existing behavior, no simplification).
+        for z in (z_lo..=z_hi).rev() {
+            if z < 14 && geometry::merc_bbox_is_subpixel(merc, z) {
+                break;
+            }
+            if z <= BOUNDARY_NO_SIMP_MAX || z >= 14 {
+                run_for_zoom(z, merc);
+            } else {
+                let tol = geometry::simplify_tolerance(z);
+                if has_pins {
+                    let _ = geometry::simplify_into_with_required(
+                        merc,
+                        tol,
+                        &scratch.pinned_idxs,
+                        &mut scratch.simplify_keep,
+                        &mut scratch.simplify_buf,
+                    );
+                } else {
+                    let _ = geometry::simplify_into(
+                        merc,
+                        tol,
+                        &mut scratch.simplify_keep,
+                        &mut scratch.simplify_buf,
+                    );
+                }
+                if scratch.simplify_buf.len() < 4 {
+                    break;
+                }
+                run_for_zoom(z, &scratch.simplify_buf);
+            }
+        }
+    } else if has_pins {
         for z in (z_lo..=z_hi).rev() {
             if z < 14 && geometry::merc_bbox_is_subpixel(merc, z) {
                 break;
@@ -2763,9 +2865,94 @@ fn emit_multipolygon_feature(
             }
         }
     };
-    if let Some(keys) = preserve_vertex_keys
-        && !keys.is_empty()
-    {
+    let has_keys = preserve_vertex_keys.is_some_and(|k| !k.is_empty());
+    if m.layer == Layer::Boundaries {
+        // Boundary mode: single zoom loop.
+        // z <= 8: emit full-res geometry (assemble-phase reconciliation + tile-coord DP).
+        // z 9..13: normal DP simplification (with or without preserve_vertex_keys).
+        // z >= 14: full-res (existing behavior, no simplification).
+        simp_scratch.cascade_outer.clear();
+        simp_scratch.cascade_outer.extend_from_slice(outer);
+        simp_scratch.cascade_inners.clear();
+        simp_scratch.cascade_inners.extend(inners.iter().cloned());
+
+        for z in (z_lo..=z_hi).rev() {
+            if z < 14 && geometry::merc_bbox_is_subpixel(&simp_scratch.cascade_outer, z) {
+                break;
+            }
+            if z <= BOUNDARY_NO_SIMP_MAX || z >= 14 {
+                emit_for_zoom(z, outer, inners);
+            } else {
+                // z 9..13: DP simplification.
+                let tol = geometry::simplify_tolerance(z);
+                if simp_scratch.cascade_outer.len() > 4 {
+                    if has_keys {
+                        let keys = preserve_vertex_keys.expect("checked above");
+                        emit_scratch.required_idxs.clear();
+                        let outer_end = simp_scratch.cascade_outer.len().saturating_sub(1);
+                        for (i, p) in simp_scratch.cascade_outer.iter().take(outer_end).enumerate() {
+                            if keys.contains(&merc_point_key(p)) {
+                                emit_scratch.required_idxs.push(i);
+                            }
+                        }
+                        let _ = geometry::simplify_into_with_required(
+                            &simp_scratch.cascade_outer,
+                            tol,
+                            &emit_scratch.required_idxs,
+                            &mut simp_scratch.keep_buf,
+                            &mut simp_scratch.simp_buf,
+                        );
+                    } else {
+                        let _ = geometry::simplify_into(
+                            &simp_scratch.cascade_outer,
+                            tol,
+                            &mut simp_scratch.keep_buf,
+                            &mut simp_scratch.simp_buf,
+                        );
+                    }
+                    std::mem::swap(&mut simp_scratch.cascade_outer, &mut simp_scratch.simp_buf);
+                }
+
+                for inner in &mut simp_scratch.cascade_inners {
+                    if inner.len() <= 4 {
+                        continue;
+                    }
+                    if has_keys {
+                        let keys = preserve_vertex_keys.expect("checked above");
+                        emit_scratch.required_idxs.clear();
+                        let inner_end = inner.len().saturating_sub(1);
+                        for (i, p) in inner.iter().take(inner_end).enumerate() {
+                            if keys.contains(&merc_point_key(p)) {
+                                emit_scratch.required_idxs.push(i);
+                            }
+                        }
+                        let _ = geometry::simplify_into_with_required(
+                            inner,
+                            tol,
+                            &emit_scratch.required_idxs,
+                            &mut simp_scratch.keep_buf,
+                            &mut simp_scratch.simp_buf,
+                        );
+                    } else {
+                        let _ = geometry::simplify_into(
+                            inner,
+                            tol,
+                            &mut simp_scratch.keep_buf,
+                            &mut simp_scratch.simp_buf,
+                        );
+                    }
+                    std::mem::swap(inner, &mut simp_scratch.simp_buf);
+                }
+                simp_scratch.cascade_inners.retain(|r| r.len() >= 4);
+
+                if simp_scratch.cascade_outer.len() < 4 {
+                    break;
+                }
+                emit_for_zoom(z, &simp_scratch.cascade_outer, &simp_scratch.cascade_inners);
+            }
+        }
+    } else if has_keys {
+        let keys = preserve_vertex_keys.expect("checked above");
         simp_scratch.cascade_outer.clear();
         simp_scratch.cascade_outer.extend_from_slice(outer);
         simp_scratch.cascade_inners.clear();
@@ -2868,7 +3055,13 @@ fn phase_assemble(
         PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir)?
     };
     match config.tile_format {
-        TilePayloadFormat::Mvt => pmtiles.set_tile_contract(TileDataFormat::Mvt, TileDataCompression::Gzip),
+        TilePayloadFormat::Mvt => {
+            let compression = match config.tile_compression {
+                TileCompression::Gzip => TileDataCompression::Gzip,
+                TileCompression::Brotli => TileDataCompression::Brotli,
+            };
+            pmtiles.set_tile_contract(TileDataFormat::Mvt, compression);
+        }
         TilePayloadFormat::Mlt => pmtiles.set_tile_contract(TileDataFormat::Mlt, TileDataCompression::None),
     }
 
@@ -2887,6 +3080,7 @@ fn phase_assemble(
     let (read_tx, read_rx) = sync_channel::<Vec<PendingTile>>(1);
     let (encode_tx, encode_rx) = sync_channel::<Vec<EncodedTile>>(1);
 
+    let seam_metrics = SeamMetrics::new();
     let scope_result: Result<_, PipelineError> = std::thread::scope(|s| {
         // --- Reader thread: k-way merge → PendingTile batches ---
         let reader = s.spawn(move || -> Result<(u64, usize), PipelineError> {
@@ -2981,8 +3175,9 @@ fn phase_assemble(
         // --- Main thread: receive batches, encode with rayon, forward to writer ---
         let compression_level = config.compression_level;
         let tile_format = config.tile_format;
+        let tile_compression = config.tile_compression;
         for batch in read_rx {
-            let encoded = encode_tile_batch(&batch, compression_level, tile_format)?;
+            let encoded = encode_tile_batch(&batch, compression_level, tile_format, tile_compression, &seam_metrics)?;
             if encode_tx.send(encoded).is_err() { break; }
         }
         drop(encode_tx);
@@ -3018,6 +3213,20 @@ fn phase_assemble(
         }
     }
 
+    // Shared-edge reconciliation metrics.
+    let seam_touched = seam_metrics.tiles_touched.load(Ordering::Relaxed);
+    if seam_touched > 0 {
+        eprintln!("  Seam reconciliation (boundaries, z<={}): {} tiles, {} rings, {} chains ({} reconciled, {} skipped), {:.1} ms",
+            BOUNDARY_NO_SIMP_MAX,
+            seam_touched,
+            seam_metrics.rings_decoded.load(Ordering::Relaxed),
+            seam_metrics.chains_detected.load(Ordering::Relaxed),
+            seam_metrics.chains_reconciled.load(Ordering::Relaxed),
+            seam_metrics.chains_skipped.load(Ordering::Relaxed),
+            seam_metrics.reconcile_us.load(Ordering::Relaxed) as f64 / 1000.0,
+        );
+    }
+
     Ok((features_read, tiles_written, unique_tiles, max_batch_bytes, dedup_stats, size_diag))
 }
 
@@ -3027,12 +3236,41 @@ fn phase_assemble(
 struct AssemblyScratch {
     encode_scratch: mvt::EncodeScratch,
     merge_scratch: mvt::MergeScratch,
+    line_merge_scratch: mvt::LineMergeScratch,
     geom_pool: Vec<Vec<u32>>,
     tags_pool: Vec<Vec<(u16, u16)>>,
     compression_levels: [Option<flate2::Compression>; 11],
     gz_buf: Vec<u8>,
     mvt_buf: Vec<u8>,
     layers: [Option<LayerBuilder>; LAYER_COUNT],
+    // Shared-edge reconciliation scratch (boundary polygons at z <= BOUNDARY_NO_SIMP_MAX).
+    seam_rings: Vec<Vec<(i32, i32)>>,
+    /// (feature_index_in_layer, ring_count) — maps decoded rings back to features.
+    seam_provenance: Vec<(usize, usize)>,
+    seam_encode_buf: Vec<u32>,
+}
+
+/// Metrics for shared-edge reconciliation in the assemble phase.
+struct SeamMetrics {
+    tiles_touched: AtomicU64,
+    rings_decoded: AtomicU64,
+    chains_detected: AtomicU64,
+    chains_reconciled: AtomicU64,
+    chains_skipped: AtomicU64,
+    reconcile_us: AtomicU64,
+}
+
+impl SeamMetrics {
+    fn new() -> Self {
+        Self {
+            tiles_touched: AtomicU64::new(0),
+            rings_decoded: AtomicU64::new(0),
+            chains_detected: AtomicU64::new(0),
+            chains_reconciled: AtomicU64::new(0),
+            chains_skipped: AtomicU64::new(0),
+            reconcile_us: AtomicU64::new(0),
+        }
+    }
 }
 
 thread_local! {
@@ -3040,34 +3278,130 @@ thread_local! {
         AssemblyScratch {
             encode_scratch: mvt::EncodeScratch::new(),
             merge_scratch: mvt::MergeScratch::new(),
+            line_merge_scratch: mvt::LineMergeScratch::new(),
             geom_pool: Vec::new(),
             tags_pool: Vec::new(),
             compression_levels: [const { None }; 11],
             gz_buf: Vec::new(),
             mvt_buf: Vec::new(),
             layers: [const { None }; LAYER_COUNT],
+            seam_rings: Vec::new(),
+            seam_provenance: Vec::new(),
+            seam_encode_buf: Vec::new(),
         }
     );
 }
 
-/// Encode + gzip a batch of tiles in parallel using rayon.
+/// Shared-edge reconciliation for boundary polygon features in a single tile.
+///
+/// Decodes polygon MVT commands → tile-coord rings, detects shared chains,
+/// copies canonical vertex sequences to matching rings, simplifies non-shared
+/// segments with tile-coordinate DP, and re-encodes back to MVT commands.
+#[allow(clippy::cast_possible_truncation)]
+fn reconcile_boundary_seams(
+    lb: &mut LayerBuilder,
+    seam_rings: &mut Vec<Vec<(i32, i32)>>,
+    seam_provenance: &mut Vec<(usize, usize)>,
+    encode_buf: &mut Vec<u32>,
+    metrics: &SeamMetrics,
+) {
+    let start = std::time::Instant::now();
+
+    // Collect all polygon rings from features in this layer.
+    seam_rings.clear();
+    seam_provenance.clear();
+
+    let features = lb.features_mut();
+    let mut polygon_feature_indices: Vec<usize> = Vec::new();
+
+    for (fi, feat) in features.iter().enumerate() {
+        if feat.geom_type != GeomType::Polygon {
+            continue;
+        }
+        let decoded = geometry::decode_mvt_polygon(&feat.geometry);
+        let valid_count = decoded.iter().filter(|r| r.len() >= 4 && r.first() == r.last()).count();
+        if valid_count == 0 {
+            continue;
+        }
+        let ring_start = seam_rings.len();
+        for ring in decoded {
+            if ring.len() >= 4 && ring.first() == ring.last() {
+                seam_rings.push(ring);
+            }
+        }
+        let ring_count = seam_rings.len() - ring_start;
+        polygon_feature_indices.push(fi);
+        seam_provenance.push((fi, ring_count));
+    }
+
+    if seam_rings.is_empty() {
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        metrics.reconcile_us.fetch_add(elapsed_us, Ordering::Relaxed);
+        return;
+    }
+
+    metrics.tiles_touched.fetch_add(1, Ordering::Relaxed);
+    metrics.rings_decoded.fetch_add(seam_rings.len() as u64, Ordering::Relaxed);
+
+    // Detect shared chains (needs >= 2 rings to find any).
+    let chains = if seam_rings.len() >= 2 {
+        geometry::detect_shared_chains(seam_rings)
+    } else {
+        Vec::new()
+    };
+    metrics.chains_detected.fetch_add(chains.len() as u64, Ordering::Relaxed);
+
+    // Canonicalize: copy first incident's vertices to second incident's ring.
+    if !chains.is_empty() {
+        let canon_result = geometry::canonicalize_shared_chains(seam_rings, &chains);
+        metrics.chains_reconciled.fetch_add(canon_result.reconciled as u64, Ordering::Relaxed);
+        metrics.chains_skipped.fetch_add(canon_result.skipped as u64, Ordering::Relaxed);
+    }
+
+    // Tile-coordinate DP on all rings, pinning shared-chain vertices.
+    // Runs even when no chains were found — these rings skipped PBF-phase DP
+    // and need tile-coord simplification regardless.
+    for (ring_idx, ring) in seam_rings.iter_mut().enumerate() {
+        let pinned = geometry::build_pinned_mask(ring.len(), ring_idx, &chains);
+        let simplified = geometry::simplify_ring_tile_coords(ring, &pinned, geometry::TILE_SIMPLIFY_TOLERANCE);
+        *ring = simplified;
+    }
+
+    // Re-encode each feature's rings back to MVT commands.
+    let mut ring_cursor: usize = 0;
+    for &(fi, ring_count) in seam_provenance.iter() {
+        let feature_rings = &seam_rings[ring_cursor..ring_cursor + ring_count];
+        ring_cursor += ring_count;
+        let ring_refs: Vec<&[(i32, i32)]> = feature_rings.iter().map(Vec::as_slice).collect();
+        mvt::encode_polygon(encode_buf, &ring_refs);
+        features[fi].geometry.clear();
+        features[fi].geometry.extend_from_slice(encode_buf);
+    }
+
+    let elapsed_us = start.elapsed().as_micros() as u64;
+    metrics.reconcile_us.fetch_add(elapsed_us, Ordering::Relaxed);
+}
+
+/// Encode + compress a batch of tiles in parallel using rayon.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_wrap)]
 fn encode_tile_batch(
     batch: &[PendingTile],
     compression_level: u32,
     tile_format: TilePayloadFormat,
+    tile_compression: TileCompression,
+    seam_metrics: &SeamMetrics,
 ) -> Result<Vec<EncodedTile>, PipelineError> {
     match tile_format {
-        TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(batch, compression_level)),
+        TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(batch, compression_level, tile_compression, seam_metrics)),
         TilePayloadFormat::Mlt => encode_tile_batch_mlt(batch),
     }
 }
 
-/// Encode + gzip a batch of MVT tiles in parallel using rayon.
+/// Encode + compress a batch of MVT tiles in parallel using rayon.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_wrap)]
-fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32) -> Vec<EncodedTile> {
+fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32, tile_compression: TileCompression, seam_metrics: &SeamMetrics) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 
     batch
@@ -3094,10 +3428,32 @@ fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32) -> Vec<E
                 }
             }
 
+            let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+
+            // Shared-edge reconciliation for boundary polygons at low zoom.
+            // Must run BEFORE merge_same_attr_geometries (which destroys per-ring identity).
+            let boundary_layer_idx = Layer::Boundaries as usize;
+            if z <= BOUNDARY_NO_SIMP_MAX
+                && let Some(lb) = s.layers[boundary_layer_idx].as_mut()
+            {
+                reconcile_boundary_seams(lb, &mut s.seam_rings, &mut s.seam_provenance, &mut s.seam_encode_buf, seam_metrics);
+            }
+
             // Merge same-attribute geometries to reduce feature count
             for layer in &mut s.layers {
                 if let Some(lb) = layer.as_mut() {
                     lb.merge_same_attr_geometries(&mut s.merge_scratch, &mut s.geom_pool, &mut s.tags_pool);
+                }
+            }
+
+            // Merge connected line segments through degree-2 nodes.
+            // Skip at z14 where lines are full resolution and merging adds
+            // overhead without meaningful compression benefit.
+            if z < 14 {
+                for layer in &mut s.layers {
+                    if let Some(lb) = layer.as_mut() {
+                        lb.merge_connected_lines(&mut s.line_merge_scratch);
+                    }
                 }
             }
 
@@ -3117,23 +3473,39 @@ fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32) -> Vec<E
             }
 
             // Per-zoom compression: boost low zooms, speed up high zooms.
-            let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
             #[allow(clippy::cast_possible_truncation)]
             let level = match z {
                 0..=8 => compression_level.clamp(9, 10),
                 13..=14 => compression_level.min(3),
                 _ => compression_level,
             } as usize;
-            #[allow(clippy::cast_possible_truncation)]
-            let lvl = *s.compression_levels[level].get_or_insert_with(|| {
-                flate2::Compression::new(level as u32)
-            });
-            let mut gz_buf = std::mem::take(&mut s.gz_buf);
-            gz_buf.clear();
-            let mut encoder = flate2::write::GzEncoder::new(gz_buf, lvl);
-            std::io::Write::write_all(&mut encoder, &s.mvt_buf)
-                .expect("gzip compress failed");
-            let compressed = encoder.finish().expect("gzip finish failed");
+
+            let mut compress_buf = std::mem::take(&mut s.gz_buf);
+            compress_buf.clear();
+
+            let compressed = match tile_compression {
+                TileCompression::Gzip => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let lvl = *s.compression_levels[level].get_or_insert_with(|| {
+                        flate2::Compression::new(level as u32)
+                    });
+                    let mut encoder = flate2::write::GzEncoder::new(compress_buf, lvl);
+                    std::io::Write::write_all(&mut encoder, &s.mvt_buf)
+                        .expect("gzip compress failed");
+                    encoder.finish().expect("gzip finish failed")
+                }
+                TileCompression::Brotli => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let quality = level as u32;
+                    let mut encoder = brotli::CompressorWriter::new(
+                        &mut compress_buf, 4096, quality, 22,
+                    );
+                    std::io::Write::write_all(&mut encoder, &s.mvt_buf)
+                        .expect("brotli compress failed");
+                    drop(encoder);
+                    compress_buf
+                }
+            };
             s.gz_buf = Vec::with_capacity(compressed.len());
 
             Some(EncodedTile { tile_id: tile.tile_id, compressed })

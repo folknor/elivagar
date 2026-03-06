@@ -499,6 +499,78 @@ fn test_point_on_surface_with_holes_avoids_hole() {
     assert!(!point_in_polygon(&p, &hole));
 }
 
+#[test]
+fn test_point_on_surface_with_holes_multiple_holes() {
+    let outer = vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ];
+    let hole_a = vec![
+        Point::new(1.0, 1.0),
+        Point::new(4.5, 1.0),
+        Point::new(4.5, 6.0),
+        Point::new(1.0, 6.0),
+    ];
+    let hole_b = vec![
+        Point::new(5.5, 4.0),
+        Point::new(9.0, 4.0),
+        Point::new(9.0, 9.0),
+        Point::new(5.5, 9.0),
+    ];
+    let inners = vec![hole_a.clone(), hole_b.clone()];
+
+    let p = point_on_surface_with_holes(&outer, &inners).expect("should find a point");
+    assert!(point_in_polygon(&p, &outer));
+    assert!(!point_in_polygon(&p, &hole_a));
+    assert!(!point_in_polygon(&p, &hole_b));
+}
+
+#[test]
+fn test_point_on_surface_with_holes_adjacent_holes() {
+    let outer = vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ];
+    // Two holes sharing an edge at x=5.0 (adjacent, no gap).
+    let left_hole = vec![
+        Point::new(2.0, 2.0),
+        Point::new(5.0, 2.0),
+        Point::new(5.0, 8.0),
+        Point::new(2.0, 8.0),
+    ];
+    let right_hole = vec![
+        Point::new(5.0, 2.0),
+        Point::new(8.0, 2.0),
+        Point::new(8.0, 8.0),
+        Point::new(5.0, 8.0),
+    ];
+    let inners = vec![left_hole.clone(), right_hole.clone()];
+
+    let p = point_on_surface_with_holes(&outer, &inners).expect("should find a point");
+    assert!(point_in_polygon(&p, &outer));
+    assert!(!point_in_polygon(&p, &left_hole));
+    assert!(!point_in_polygon(&p, &right_hole));
+}
+
+#[test]
+fn test_point_on_surface_with_holes_fallback_inside_hole_returns_none() {
+    let outer = vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ];
+    // Deliberately degenerate for robustness testing: hole equals outer ring.
+    // All scan candidates are removed and fallback center lies inside the hole.
+    let hole = outer.clone();
+    let inners = vec![hole];
+    assert!(point_on_surface_with_holes(&outer, &inners).is_none());
+}
+
 // --- ClipRect for tile ---
 
 #[test]
@@ -822,4 +894,374 @@ fn multi_simplify_outer_vertex_count_non_increasing() {
     }
     // At z14, should have original 5 vertices (no simplification at z14)
     assert_eq!(vertex_counts[0], (14, 5));
+}
+
+// ---------------------------------------------------------------------------
+// Buffer constant regression tests (tile seam fix 2026-03-06)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn buffer_fraction_is_8_rendered_pixels() {
+    // BUFFER_FRACTION must be 8 rendered pixels / 256 pixels per tile = 0.03125.
+    // A previous bug had 8.0 / 4096.0 (= 0.001953125), which is 8 *extent units*
+    // — only 0.5 rendered pixels — causing visible tile seams everywhere.
+    assert!((BUFFER_FRACTION - 8.0 / 256.0).abs() < f64::EPSILON);
+    assert!((BUFFER_FRACTION - 0.03125).abs() < f64::EPSILON);
+}
+
+#[test]
+fn buffer_fraction_produces_128_extent_unit_buffer() {
+    // 8 rendered pixels × 16 extent units per pixel = 128 extent units of buffer.
+    // This is the standard MVT buffer size used by Planetiler, Tippecanoe, etc.
+    let buffer_extent_units = BUFFER_FRACTION * EXTENT;
+    assert!((buffer_extent_units - 128.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn clip_rect_for_tile_extends_by_buffer() {
+    // At z=1, each tile spans 0.5 in Mercator space.
+    // Buffer = BUFFER_FRACTION / 2^1 = 0.03125 / 2 = 0.015625.
+    let clip = ClipRect::for_tile(0, 0, 1, BUFFER_FRACTION);
+    let buf = BUFFER_FRACTION / 2.0;
+    let eps = 1e-12;
+    assert!((clip.min_x - (-buf)).abs() < eps);
+    assert!((clip.min_y - (-buf)).abs() < eps);
+    assert!((clip.max_x - (0.5 + buf)).abs() < eps);
+    assert!((clip.max_y - (0.5 + buf)).abs() < eps);
+}
+
+// ---------------------------------------------------------------------------
+// Shared chain detection tests
+// ---------------------------------------------------------------------------
+
+/// Two squares sharing one edge: A=[0,0]-[10,0]-[10,10]-[0,10]-[0,0] and
+/// B=[10,0]-[20,0]-[20,10]-[10,10]-[10,0]. Shared edge: (10,0)→(10,10) in A,
+/// (10,10)→(10,0) in B (opposite winding).
+#[test]
+fn shared_chain_two_adjacent_squares() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert_eq!(chains.len(), 1, "expected one shared chain");
+    let chain = &chains[0];
+    assert_eq!(chain.vertices.len(), 2, "single shared edge = 2 vertices");
+    assert_eq!(chain.incidents.len(), 2);
+    // One incident is ring 0, the other ring 1.
+    let ring_idxs: Vec<usize> = chain.incidents.iter().map(|c| c.ring_idx).collect();
+    assert!(ring_idxs.contains(&0));
+    assert!(ring_idxs.contains(&1));
+}
+
+/// Two squares sharing two consecutive edges (L-shape contact).
+/// A=[0,0]-[10,0]-[10,5]-[10,10]-[0,10]-[0,0]
+/// B=[10,0]-[20,0]-[20,10]-[10,10]-[10,5]-[10,0]
+/// Shared edges: (10,0)→(10,5) and (10,5)→(10,10) → one chain of 3 vertices.
+#[test]
+fn shared_chain_two_edges_form_one_chain() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 5), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 5), (10, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert_eq!(chains.len(), 1, "two consecutive shared edges = one chain");
+    assert_eq!(chains[0].vertices.len(), 3, "chain should have 3 vertices");
+}
+
+/// No shared edges between non-touching polygons.
+#[test]
+fn shared_chain_no_shared_edges() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(20, 0), (30, 0), (30, 10), (20, 10), (20, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert!(chains.is_empty());
+}
+
+/// Shared vertex but no shared edge — should return empty.
+#[test]
+fn shared_chain_shared_vertex_no_shared_edge() {
+    // Two triangles touching at a single point (10,10).
+    let ring_a = vec![(0, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 10), (20, 0), (20, 10), (10, 10)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert!(chains.is_empty(), "shared vertex alone should not produce a chain");
+}
+
+/// Three polygons meeting at a triple point. Each adjacent pair shares one edge.
+#[test]
+fn shared_chain_triple_junction() {
+    // Three triangles meeting at (5, 5):
+    // A: (0,0)-(10,0)-(5,5)-(0,0)
+    // B: (10,0)-(10,10)-(5,5)-(10,0)
+    // C: (0,0)-(5,5)-(0,10)-(0,0)  -- note: shares (0,0)-(5,5) with A, shares (5,5) with B
+    // But only A-B share the edge (10,0)-(5,5) and A-C share the edge (0,0)-(5,5).
+    let ring_a = vec![(0, 0), (10, 0), (5, 5), (0, 0)];
+    let ring_b = vec![(10, 0), (10, 10), (5, 5), (10, 0)];
+    let ring_c = vec![(0, 0), (5, 5), (0, 10), (0, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b, ring_c]);
+    // A-B share edge (10,0)-(5,5), A-C share edge (0,0)-(5,5)
+    assert_eq!(chains.len(), 2, "two pairs sharing one edge each");
+    for chain in &chains {
+        assert_eq!(chain.vertices.len(), 2);
+        assert_eq!(chain.incidents.len(), 2);
+    }
+}
+
+/// Single ring — no shared edges possible.
+#[test]
+fn shared_chain_single_ring() {
+    let ring = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let chains = detect_shared_chains(&[ring]);
+    assert!(chains.is_empty());
+}
+
+/// Empty input.
+#[test]
+fn shared_chain_empty_input() {
+    let chains = detect_shared_chains(&[]);
+    assert!(chains.is_empty());
+}
+
+/// Degenerate ring with < 2 points.
+#[test]
+fn shared_chain_degenerate_ring() {
+    let ring_a = vec![(0, 0)];
+    let ring_b = vec![(0, 0), (10, 0), (10, 10), (0, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert!(chains.is_empty());
+}
+
+/// Opposite winding: the chain should mark one incident as reversed.
+#[test]
+fn shared_chain_marks_reversed_incident() {
+    // A walks edge (10,0)→(10,10), B walks (10,10)→(10,0).
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert_eq!(chains.len(), 1);
+    let chain = &chains[0];
+    // One incident should be reversed, the other not.
+    let reversed_count = chain.incidents.iter().filter(|c| c.reversed).count();
+    assert_eq!(reversed_count, 1, "one of two incidents should be reversed");
+}
+
+/// Three or more rings sharing the same edge (coincident geometry).
+/// Should produce incidents with >2 entries or multiple chains.
+#[test]
+fn shared_chain_three_rings_same_edge() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    // Ring C is a duplicate of ring B (coincident geometry).
+    let ring_c = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b, ring_c]);
+    // Should detect shared edges between A-B and A-C (and possibly B-C).
+    assert!(!chains.is_empty(), "coincident geometry should produce chains");
+}
+
+/// Chain that wraps around the ring start/end point.
+/// Ring A: shared edges are the last edge (D→A) and the first edge (A→B),
+/// which are consecutive in the ring but cross the start/end seam.
+#[test]
+fn shared_chain_wrap_around_ring_seam() {
+    // Ring A: [A, B, C, D, A] where A=(0,0), B=(10,0), C=(10,10), D=(0,10)
+    // Ring B: [A, D, E, F, B, A] where E=(-10,10), F=(-10,0)
+    // Shared edges: D→A (edge 3 in ring A, edge 0 in B) and A→B (edge 0 in ring A, edge 4 in B).
+    // These are consecutive in ring A (wrapping from edge 3 to edge 0).
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(0, 0), (0, 10), (-10, 10), (-10, 0), (10, 0), (0, 0)];
+    // Ring B edges: 0:(0,0)→(0,10), 1:(0,10)→(-10,10), 2:(-10,10)→(-10,0), 3:(-10,0)→(10,0), 4:(10,0)→(0,0)
+    // B edge 0 matches A edge 3 reversed, B edge 4 matches A edge 0 reversed.
+    // In A: edges 3,0 are consecutive (wrapping). In B walking backward: 0→4, also consecutive.
+    // Ring B edges: 0:(0,0)→(0,10), 1:(0,10)→(-10,10), 2:(-10,10)→(-10,0), 3:(-10,0)→(10,0), 4:(10,0)→(0,0)
+    // B edge 0 matches A edge 3 reversed, B edge 4 matches A edge 0 reversed.
+    // Chain growth from seed (A edge 0) wraps forward: edge 0 → edge 1 (not shared, stops).
+    // But the chain also grows because seed ordering is deterministic: edge 0 of ring A
+    // is seeded first and grows. In ring A forward from edge 0: edge 1 is NOT shared,
+    // so chain is just edge 0. Then edge 3 of ring A seeds separately.
+    // Result: two single-edge chains covering the full shared boundary.
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    // Chain growth initially produces two fragments (edges 0 and 3 of ring A),
+    // but merge_seam_chains stitches them into one chain since one's tail
+    // connects to the other's head.
+    assert_eq!(chains.len(), 1, "seam fragments should be merged into one chain");
+    assert_eq!(chains[0].vertices.len(), 3, "two edges = three vertices");
+    assert_eq!(chains[0].incidents.len(), 2);
+}
+
+/// Chain that IS consecutive in both rings across the seam.
+#[test]
+fn shared_chain_consecutive_wrap_around() {
+    // Ring A: [P0, P1, P2, P3, P0] — a square
+    // Ring B shares the last two edges of A: P2→P3 and P3→P0.
+    // In ring B these are consecutive (but in reverse direction).
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    // Ring B: [P0, P3, P4, P5, P0] where P4=(-10,10), P5=(-10,0)
+    // Wait — that doesn't share P2→P3. Let me construct it properly.
+    // Ring A edges: 0:(0,0)→(10,0), 1:(10,0)→(10,10), 2:(10,10)→(0,10), 3:(0,10)→(0,0)
+    // Ring B should share edges 2 and 3 of ring A.
+    // Edge 2: (10,10)→(0,10) — B needs (0,10)→(10,10)
+    // Edge 3: (0,10)→(0,0) — B needs (0,0)→(0,10)
+    // Ring B: [(0,0), (0,10), (10,10), (20,10), (20,0), (0,0)]
+    // B edges: 0:(0,0)→(0,10), 1:(0,10)→(10,10), 2:(10,10)→(20,10), 3:(20,10)→(20,0), 4:(20,0)→(0,0)
+    // B edge 0 matches A edge 3 reversed, B edge 1 matches A edge 2 reversed.
+    // In A: edges 2,3 are consecutive. In B: edges 0,1 are consecutive. Should form one chain.
+    let ring_b = vec![(0, 0), (0, 10), (10, 10), (20, 10), (20, 0), (0, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert_eq!(chains.len(), 1, "consecutive shared edges in both rings should form one chain");
+    assert_eq!(chains[0].vertices.len(), 3, "two edges = three vertices");
+}
+
+// ---------------------------------------------------------------------------
+// MVT polygon decoder tests
+// ---------------------------------------------------------------------------
+
+/// Round-trip: encode a single ring polygon and decode it back.
+#[test]
+fn decode_mvt_polygon_single_ring_round_trip() {
+    let ring = vec![(100, 200), (300, 200), (300, 400), (100, 400), (100, 200)];
+    let mut buf = Vec::new();
+    crate::mvt::encode_polygon(&mut buf, &[&ring]);
+    let decoded = super::decode_mvt_polygon(&buf);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0], ring);
+}
+
+/// Round-trip: multi-ring polygon (outer + inner hole).
+#[test]
+fn decode_mvt_polygon_multi_ring_round_trip() {
+    let outer = vec![(0, 0), (4096, 0), (4096, 4096), (0, 4096), (0, 0)];
+    let inner = vec![(1000, 1000), (1000, 3000), (3000, 3000), (3000, 1000), (1000, 1000)];
+    let mut buf = Vec::new();
+    crate::mvt::encode_polygon(&mut buf, &[&outer, &inner]);
+    let decoded = super::decode_mvt_polygon(&buf);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0], outer);
+    assert_eq!(decoded[1], inner);
+}
+
+/// Empty command buffer produces no rings.
+#[test]
+fn decode_mvt_polygon_empty() {
+    let decoded = super::decode_mvt_polygon(&[]);
+    assert!(decoded.is_empty());
+}
+
+/// Round-trip with negative coordinates (buffer region outside tile).
+#[test]
+fn decode_mvt_polygon_negative_coords() {
+    let ring = vec![(-128, -128), (4224, -128), (4224, 4224), (-128, 4224), (-128, -128)];
+    let mut buf = Vec::new();
+    crate::mvt::encode_polygon(&mut buf, &[&ring]);
+    let decoded = super::decode_mvt_polygon(&buf);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0], ring);
+}
+
+/// Round-trip: two separate polygons encoded sequentially (as multipolygon).
+#[test]
+fn decode_mvt_polygon_two_outer_rings() {
+    let ring_a = vec![(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)];
+    let ring_b = vec![(200, 200), (300, 200), (300, 300), (200, 300), (200, 200)];
+    let mut buf = Vec::new();
+    crate::mvt::encode_polygon(&mut buf, &[&ring_a, &ring_b]);
+    let decoded = super::decode_mvt_polygon(&buf);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0], ring_a);
+    assert_eq!(decoded[1], ring_b);
+}
+
+// ---------------------------------------------------------------------------
+// Chain canonicalization tests
+// ---------------------------------------------------------------------------
+
+/// Two adjacent squares sharing edge (10,0)→(10,10). After canonicalization,
+/// both rings have identical vertices along the shared edge.
+#[test]
+fn canonicalize_two_adjacent_squares() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    let chains = super::detect_shared_chains(&[ring_a.clone(), ring_b.clone()]);
+    assert_eq!(chains.len(), 1);
+    let result = super::canonicalize_shared_chains(&mut [ring_a.clone(), ring_b.clone()], &chains);
+    assert_eq!(result.reconciled, 1);
+    assert_eq!(result.skipped, 0);
+
+    // Modify ring_b's shared edge to simulate divergence, then canonicalize.
+    let mut ring_b = ring_b;
+    ring_b[3] = (10, 11); // perturb (10,10) in ring B
+    let mut rings = [ring_a, ring_b];
+    let result = super::canonicalize_shared_chains(&mut rings, &chains);
+    assert_eq!(result.reconciled, 1);
+    // After canonicalization, ring B's shared segment should match ring A's.
+    // The shared chain vertices are [(10,0), (10,10)] from ring A.
+    // Ring B incident is reversed, so (10,10) maps to ring_b[3] and (10,0) maps to ring_b[0].
+    assert_eq!(rings[1][3], (10, 10), "shared vertex should be restored");
+}
+
+/// Chains with >2 incidents are skipped.
+#[test]
+fn canonicalize_skips_gt2_incidents() {
+    // Three rings sharing the same edge — detect_shared_chains produces
+    // chains with 2 incidents each (one per ring pair), but let's test
+    // that if we manually construct a 3-incident chain, it gets skipped.
+    let chain = super::SharedChain {
+        vertices: vec![(0, 0), (10, 0)],
+        incidents: vec![
+            super::ChainRef { ring_idx: 0, start: 0, len: 2, reversed: false },
+            super::ChainRef { ring_idx: 1, start: 3, len: 2, reversed: true },
+            super::ChainRef { ring_idx: 2, start: 1, len: 2, reversed: false },
+        ],
+    };
+    let mut rings = vec![
+        vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)],
+        vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)],
+        vec![(0, 0), (10, 0), (10, -10), (0, -10), (0, 0)],
+    ];
+    let result = super::canonicalize_shared_chains(&mut rings, &[chain]);
+    assert_eq!(result.reconciled, 0);
+    assert_eq!(result.skipped, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Tile-coordinate simplification tests
+// ---------------------------------------------------------------------------
+
+/// Simplify a ring with no pinned vertices — standard DP behavior.
+#[test]
+fn simplify_ring_tile_coords_no_pins() {
+    // A square with a collinear midpoint on one edge.
+    let ring = vec![(0, 0), (500, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
+    let pinned = vec![false; ring.len()];
+    let simplified = super::simplify_ring_tile_coords(&ring, &pinned, 16.0);
+    // (500, 0) is collinear with (0,0)→(1000,0), should be removed.
+    assert_eq!(simplified.len(), 5, "collinear point should be removed");
+    assert!(!simplified.contains(&(500, 0)));
+}
+
+/// Simplify a ring where shared-chain vertices are pinned — they survive.
+#[test]
+fn simplify_ring_tile_coords_with_pins() {
+    // Same ring but (500, 0) is pinned (part of a shared chain).
+    let ring = vec![(0, 0), (500, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
+    let pinned = vec![true, true, true, false, false, true]; // first 3 are shared chain
+    let simplified = super::simplify_ring_tile_coords(&ring, &pinned, 16.0);
+    // (500, 0) must survive because it's pinned.
+    assert!(simplified.contains(&(500, 0)), "pinned vertex must survive");
+}
+
+/// Build pinned mask marks correct vertices.
+#[test]
+fn build_pinned_mask_basic() {
+    let chain = super::SharedChain {
+        vertices: vec![(10, 0), (10, 10)],
+        incidents: vec![
+            super::ChainRef { ring_idx: 0, start: 1, len: 2, reversed: false },
+            super::ChainRef { ring_idx: 1, start: 3, len: 2, reversed: true },
+        ],
+    };
+    // Ring 0 has 5 vertices (4 + close).
+    let mask = super::build_pinned_mask(5, 0, std::slice::from_ref(&chain));
+    assert_eq!(mask, vec![false, true, true, false, false]);
+
+    // Ring 1: start=3, len=2 → positions 3, 0.
+    let mask = super::build_pinned_mask(5, 1, std::slice::from_ref(&chain));
+    // Position 3 and position 0 are pinned. Position 0 pinned → closing vertex (4) also pinned.
+    assert_eq!(mask, vec![true, false, false, true, true]);
 }

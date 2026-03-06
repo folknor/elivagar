@@ -10,6 +10,10 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+
 // ---------------------------------------------------------------------------
 // Sort key helpers
 // ---------------------------------------------------------------------------
@@ -214,7 +218,8 @@ pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path) -> io::Result
     records.sort_unstable_by_key(|r| r.key);
 
     let file = File::create(path)?;
-    let mut writer = BufWriter::with_capacity(1 << 20, file);
+    let buf = BufWriter::with_capacity(1 << 20, file);
+    let mut writer = GzEncoder::new(buf, Compression::new(1));
 
     // Record count as u32. Safe: 1 GB chunk budget yields max ~48.8M records
     // (minimum 22 bytes each), 88x below u32::MAX.
@@ -228,7 +233,7 @@ pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path) -> io::Result
         writer.write_all(&record.data)?;
     }
 
-    writer.flush()?;
+    writer.finish()?;
 
     Ok(())
 }
@@ -238,14 +243,15 @@ pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path) -> io::Result
 // ---------------------------------------------------------------------------
 
 struct ChunkReader {
-    reader: BufReader<File>,
+    reader: GzDecoder<BufReader<File>>,
     remaining: u32,
 }
 
 impl ChunkReader {
     fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
-        let mut reader = BufReader::with_capacity(256 * 1024, file);
+        let buf = BufReader::with_capacity(256 * 1024, file);
+        let mut reader = GzDecoder::new(buf);
 
         let mut buf4 = [0u8; 4];
         reader.read_exact(&mut buf4)?;

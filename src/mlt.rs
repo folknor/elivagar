@@ -3,9 +3,9 @@ use crate::mvt::{Feature, GeomType, LayerBuilder, Value};
 use geo_types::{Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon};
 use mlt_core::Encodable;
 use mlt_core::v01::{
-    DecodedGeometry, DecodedId, DecodedProperty, Encoder, GeometryEncoder, IdEncoder, IdWidth,
-    LogicalEncoder, OwnedGeometry, OwnedId, OwnedLayer01, OwnedProperty, PhysicalEncoder,
-    PresenceStream, PropValue, PropertyEncoder,
+    DecodedGeometry, DecodedId, DecodedProperty, GeometryEncoder, IdEncoder, IdWidth, IntEncoder,
+    LogicalEncoder, OwnedGeometry, OwnedId, OwnedLayer01, OwnedProperty, PresenceStream,
+    PropValue, ScalarEncoder,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +25,7 @@ pub(crate) struct MltColumnModel {
     pub key: String,
     pub column_type: MltColumnType,
     pub value_count: usize,
+    /// Number of distinct value types observed for this key across layer features.
     pub observed_type_count: u8,
 }
 
@@ -132,7 +133,7 @@ fn encode_layer_geometry(layer_name: &str, features: &[Feature]) -> Result<Owned
 
     let mut geometry = OwnedGeometry::Decoded(decoded);
     geometry
-        .encode_with(GeometryEncoder::all(Encoder::varint()))
+        .encode_with(GeometryEncoder::all(IntEncoder::varint()))
         .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
     Ok(geometry)
 }
@@ -160,33 +161,20 @@ fn encode_layer_properties(
     Ok(properties)
 }
 
-fn property_encoder_for(prop: &OwnedProperty) -> PropertyEncoder {
+fn property_encoder_for(prop: &OwnedProperty) -> ScalarEncoder {
     let values = match prop {
         OwnedProperty::Decoded(decoded) => &decoded.values,
-        OwnedProperty::Encoded(_) => {
-            return PropertyEncoder::new(
-                PresenceStream::Present,
-                LogicalEncoder::None,
-                PhysicalEncoder::VarInt,
-            );
-        }
+        OwnedProperty::Encoded(_) => return ScalarEncoder::int(PresenceStream::Present, IntEncoder::varint()),
     };
     match values {
-        PropValue::Str(_) => PropertyEncoder::with_fsst(
+        PropValue::Str(_) => ScalarEncoder::str_fsst(
             PresenceStream::Present,
-            LogicalEncoder::None,
-            PhysicalEncoder::VarInt,
+            IntEncoder::varint(),
+            IntEncoder::varint(),
         ),
-        PropValue::F32(_) | PropValue::F64(_) => PropertyEncoder::new(
-            PresenceStream::Present,
-            LogicalEncoder::None,
-            PhysicalEncoder::None,
-        ),
-        _ => PropertyEncoder::new(
-            PresenceStream::Present,
-            LogicalEncoder::None,
-            PhysicalEncoder::VarInt,
-        ),
+        PropValue::F32(_) | PropValue::F64(_) => ScalarEncoder::float(PresenceStream::Present),
+        PropValue::Bool(_) => ScalarEncoder::bool(PresenceStream::Present),
+        _ => ScalarEncoder::int(PresenceStream::Present, IntEncoder::varint()),
     }
 }
 
@@ -529,6 +517,7 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
         total_features += feature_count;
 
         let mut columns: Vec<MltColumnModel> = Vec::new();
+        let mut type_masks: Vec<u8> = Vec::new();
         let mut geometry_mix = MltGeometryMix::default();
         for feature in layer.features() {
             match feature.geom_type {
@@ -542,11 +531,15 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
                     continue;
                 };
                 let value_ty = value_type(value);
-                if let Some(existing) = columns.iter_mut().find(|c| c.key == key) {
+                let value_ty_bit = value_type_bit(value_ty);
+                if let Some(idx) = columns.iter().position(|c| c.key == key) {
+                    let existing = &mut columns[idx];
                     existing.value_count += 1;
-                    if existing.column_type != value_ty {
+                    type_masks[idx] |= value_ty_bit;
+                    existing.observed_type_count = u8::try_from(type_masks[idx].count_ones())
+                        .expect("type cardinality should fit in u8");
+                    if existing.observed_type_count > 1 {
                         existing.column_type = MltColumnType::Mixed;
-                        existing.observed_type_count = 2;
                     }
                 } else {
                     columns.push(MltColumnModel {
@@ -555,6 +548,7 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
                         value_count: 1,
                         observed_type_count: 1,
                     });
+                    type_masks.push(value_ty_bit);
                 }
             }
         }
@@ -587,6 +581,19 @@ fn value_type(value: &Value) -> MltColumnType {
     }
 }
 
+fn value_type_bit(value_type: MltColumnType) -> u8 {
+    match value_type {
+        MltColumnType::String => 1 << 0,
+        MltColumnType::Float => 1 << 1,
+        MltColumnType::Double => 1 << 2,
+        MltColumnType::Int => 1 << 3,
+        MltColumnType::UInt => 1 << 4,
+        MltColumnType::SInt => 1 << 5,
+        MltColumnType::Bool => 1 << 6,
+        MltColumnType::Mixed => 0,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -594,6 +601,8 @@ mod tests {
     use crate::mvt::{Feature, GeomType, LayerBuilder};
     use geo_types::Geometry;
     use serde::Deserialize;
+    use serde_json::{Number, Value as JsonValue};
+    use std::collections::BTreeMap;
     use std::collections::HashMap;
 
     fn point_geom() -> Vec<u32> {
@@ -769,6 +778,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_tile_model_tracks_true_mixed_type_cardinality() {
+        let mut layer = LayerBuilder::new("cardinality");
+        let key = layer.intern_key("mixed_key");
+        let v_str = layer.intern_value(Value::String("a".to_string()));
+        let v_float = layer.intern_value(Value::Float(1.5));
+        let v_bool = layer.intern_value(Value::Bool(true));
+        let v_int = layer.intern_value(Value::Int(7));
+
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::Point,
+            geometry: point_geom(),
+            tags: vec![(key, v_str)],
+        });
+        layer.add_feature(Feature {
+            id: Some(2),
+            geom_type: GeomType::Point,
+            geometry: point_geom(),
+            tags: vec![(key, v_float)],
+        });
+        layer.add_feature(Feature {
+            id: Some(3),
+            geom_type: GeomType::Point,
+            geometry: point_geom(),
+            tags: vec![(key, v_bool)],
+        });
+        layer.add_feature(Feature {
+            id: Some(4),
+            geom_type: GeomType::Point,
+            geometry: point_geom(),
+            tags: vec![(key, v_int)],
+        });
+
+        let model = build_tile_model(&[&layer]);
+        let col = model
+            .layers[0]
+            .columns
+            .iter()
+            .find(|c| c.key == "mixed_key")
+            .expect("mixed_key column should exist");
+        assert_eq!(col.column_type, MltColumnType::Mixed);
+        assert_eq!(col.observed_type_count, 4);
+    }
+
     #[derive(Debug, Deserialize)]
     struct GeometryFixture {
         id: String,
@@ -832,6 +886,97 @@ mod tests {
         }
     }
 
+    fn mvt_value_to_json(value: &Value) -> JsonValue {
+        match value {
+            Value::String(v) => JsonValue::String(v.clone()),
+            Value::Float(v) => Number::from_f64(f64::from(*v))
+                .map_or(JsonValue::Null, JsonValue::Number),
+            Value::Double(v) => Number::from_f64(*v).map_or(JsonValue::Null, JsonValue::Number),
+            Value::Int(v) => JsonValue::Number((*v).into()),
+            Value::UInt(v) => JsonValue::Number((*v).into()),
+            Value::SInt(v) => JsonValue::Number((*v).into()),
+            Value::Bool(v) => JsonValue::Bool(*v),
+        }
+    }
+
+    fn expected_feature_properties(layer: &LayerBuilder, feature: &Feature) -> BTreeMap<String, JsonValue> {
+        let mut props = BTreeMap::new();
+        for &(k_idx, v_idx) in &feature.tags {
+            let key = layer.key(k_idx).expect("key index should resolve");
+            let value = layer.value(v_idx).expect("value index should resolve");
+            props.insert(key.to_string(), mvt_value_to_json(value));
+        }
+        props.insert("_layer".to_string(), JsonValue::String(layer.name().to_string()));
+        props.insert("_extent".to_string(), JsonValue::Number(4096.into()));
+        props
+    }
+
+    #[test]
+    fn mlt_semantic_roundtrip_preserves_geometry_and_properties() {
+        let mut layer = LayerBuilder::new("semantic");
+        let k_kind = layer.intern_key("kind");
+        let k_name = layer.intern_key("name");
+        let k_pop = layer.intern_key("population");
+        let k_ratio = layer.intern_key("ratio");
+        let k_rank = layer.intern_key("rank");
+        let k_visible = layer.intern_key("visible");
+
+        let v_kind_city = layer.intern_value(Value::String("city".to_string()));
+        let v_kind_road = layer.intern_value(Value::String("road".to_string()));
+        let v_kind_land = layer.intern_value(Value::String("landuse".to_string()));
+        let v_name_oslo = layer.intern_value(Value::String("Oslo".to_string()));
+        let v_pop = layer.intern_value(Value::UInt(700_000));
+        let v_ratio = layer.intern_value(Value::Double(1.25));
+        let v_rank = layer.intern_value(Value::SInt(-2));
+        let v_visible = layer.intern_value(Value::Bool(true));
+
+        layer.add_feature(Feature {
+            id: Some(101),
+            geom_type: GeomType::Point,
+            geometry: vec![9, 50, 34],
+            tags: vec![(k_kind, v_kind_city), (k_name, v_name_oslo), (k_pop, v_pop)],
+        });
+        layer.add_feature(Feature {
+            id: Some(102),
+            geom_type: GeomType::LineString,
+            geometry: vec![9, 4, 4, 18, 0, 16, 16, 0],
+            tags: vec![(k_kind, v_kind_road), (k_ratio, v_ratio), (k_rank, v_rank)],
+        });
+        layer.add_feature(Feature {
+            id: Some(103),
+            geom_type: GeomType::Polygon,
+            geometry: vec![9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15],
+            tags: vec![(k_kind, v_kind_land), (k_visible, v_visible)],
+        });
+
+        let expected_by_id: HashMap<u64, (Geometry<i32>, BTreeMap<String, JsonValue>)> = layer
+            .features()
+            .iter()
+            .map(|feature| {
+                let id = feature.id.expect("semantic fixture features must have ids");
+                let geom = decode_feature_geometry(feature).expect("source geometry should decode");
+                let props = expected_feature_properties(&layer, feature);
+                (id, (geom, props))
+            })
+            .collect();
+
+        let encoded = encode_tile(&[&layer]).expect("mlt encode should succeed");
+        let mut parsed = mlt_core::parse_layers(&encoded).expect("mlt parse should succeed");
+        assert_eq!(parsed.len(), 1);
+        parsed[0].decode_all().expect("decode_all should succeed");
+        let fc = mlt_core::geojson::FeatureCollection::from_layers(&parsed).expect("feature collection conversion");
+        assert_eq!(fc.features.len(), expected_by_id.len());
+
+        for got in &fc.features {
+            let id = got.id.expect("decoded feature should have id");
+            let (want_geom, want_props) = expected_by_id
+                .get(&id)
+                .expect("decoded feature id should exist in source");
+            assert_eq!(&got.geometry, want_geom, "geometry mismatch for id {id}");
+            assert_eq!(&got.properties, want_props, "properties mismatch for id {id}");
+        }
+    }
+
     #[test]
     fn mlt_geometry_fixtures_roundtrip() {
         let fixtures_json = include_str!("../tests/fixtures/mlt_fixtures/geometry_fixtures.json");
@@ -844,7 +989,7 @@ mod tests {
             layer.add_feature(Feature {
                 id: Some(1),
                 geom_type: fixture_geom_type(&fixture.geom_type),
-                geometry: fixture.geometry,
+                geometry: fixture.geometry.clone(),
                 tags: vec![(key, val)],
             });
 
@@ -855,9 +1000,21 @@ mod tests {
             let fc = mlt_core::geojson::FeatureCollection::from_layers(&parsed).unwrap();
             assert_eq!(fc.features.len(), 1, "fixture {}", fixture.id);
             let got = geometry_name(&fc.features[0].geometry);
+            let source_geom = decode_feature_geometry(&Feature {
+                id: Some(1),
+                geom_type: fixture_geom_type(&fixture.geom_type),
+                geometry: fixture.geometry.clone(),
+                tags: Vec::new(),
+            })
+            .expect("fixture source geometry should decode");
             assert_eq!(
                 got, fixture.expected_geojson_type,
                 "fixture {} ({})",
+                fixture.id, fixture.description
+            );
+            assert_eq!(
+                fc.features[0].geometry, source_geom,
+                "fixture {} ({}) geometry coordinates/rings mismatch",
                 fixture.id, fixture.description
             );
         }
@@ -914,7 +1071,7 @@ mod tests {
             mlt_core::v01::PropValue::F32(v) => ("f32", v.iter().filter(|x| x.is_some()).count()),
             mlt_core::v01::PropValue::F64(v) => ("f64", v.iter().filter(|x| x.is_some()).count()),
             mlt_core::v01::PropValue::Str(v) => ("str", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::Struct => ("struct", 0),
+            mlt_core::v01::PropValue::SharedDict => ("shared_dict", 0),
         }
     }
 
@@ -981,5 +1138,37 @@ mod tests {
                 case.id
             );
         }
+    }
+
+    #[test]
+    fn mlt_no_compression_size_guard_vs_mvt() {
+        let mut layer = LayerBuilder::new("size_guard");
+        let k_kind = layer.intern_key("kind");
+        let k_name = layer.intern_key("name");
+        let k_rank = layer.intern_key("rank");
+
+        for i in 0..64u32 {
+            let v_kind = layer.intern_value(Value::String("poi".to_string()));
+            let v_name = layer.intern_value(Value::String(format!("name_{i}")));
+            let v_rank = layer.intern_value(Value::UInt(u64::from(i % 10)));
+            layer.add_feature(Feature {
+                id: Some(u64::from(i) + 1),
+                geom_type: GeomType::Point,
+                geometry: vec![9, (i + 1) * 2, (i + 1) * 2],
+                tags: vec![(k_kind, v_kind), (k_name, v_name), (k_rank, v_rank)],
+            });
+        }
+
+        let mlt_bytes = encode_tile(&[&layer]).expect("mlt encode should succeed");
+        let mvt_bytes = crate::mvt::encode_tile(&[&layer]);
+
+        assert!(!mlt_bytes.is_empty());
+        assert!(!mvt_bytes.is_empty());
+        assert!(
+            mlt_bytes.len() <= mvt_bytes.len() * 4,
+            "mlt payload unexpectedly large: mlt={} mvt={}",
+            mlt_bytes.len(),
+            mvt_bytes.len()
+        );
     }
 }

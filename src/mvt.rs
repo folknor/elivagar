@@ -75,6 +75,23 @@ impl Hash for Value {
     }
 }
 
+/// Sort key for Value: groups by type discriminant, then by canonical value.
+/// Clusters same-type values together in the protobuf value table so gzip
+/// sees longer runs of similar byte patterns.
+fn value_sort_key(v: &Value) -> (u8, u64, &str) {
+    match v {
+        Value::String(s) => (0, 0, s.as_str()),
+        Value::Float(f) => (1, f.to_bits() as u64, ""),
+        Value::Double(d) => (2, d.to_bits(), ""),
+        #[allow(clippy::cast_sign_loss)]
+        Value::Int(i) => (3, *i as u64, ""),
+        Value::UInt(u) => (4, *u, ""),
+        #[allow(clippy::cast_sign_loss)]
+        Value::SInt(i) => (5, *i as u64, ""),
+        Value::Bool(b) => (6, u64::from(*b), ""),
+    }
+}
+
 pub struct Feature {
     pub id: Option<u64>,
     pub geom_type: GeomType,
@@ -90,6 +107,14 @@ pub struct EncodeScratch {
     val_buf: Vec<u8>,
     packed: Vec<u8>,
     tag_vals: Vec<u32>,
+    /// Sorted key permutation: sorted_keys[new_idx] = old_idx.
+    sorted_keys: Vec<u16>,
+    /// Inverse key map: key_remap[old_idx] = new_idx.
+    key_remap: Vec<u16>,
+    /// Sorted value permutation: sorted_vals[new_idx] = old_idx.
+    sorted_vals: Vec<u16>,
+    /// Inverse value map: val_remap[old_idx] = new_idx.
+    val_remap: Vec<u16>,
 }
 
 impl EncodeScratch {
@@ -100,6 +125,10 @@ impl EncodeScratch {
             val_buf: Vec::new(),
             packed: Vec::new(),
             tag_vals: Vec::new(),
+            sorted_keys: Vec::new(),
+            key_remap: Vec::new(),
+            sorted_vals: Vec::new(),
+            val_remap: Vec::new(),
         }
     }
 }
@@ -116,6 +145,29 @@ impl MergeScratch {
         Self {
             indices: Vec::new(),
             geom: Vec::new(),
+        }
+    }
+}
+
+/// Reusable scratch buffers for line merging.
+pub struct LineMergeScratch {
+    segments: Vec<Vec<(i32, i32)>>,
+    merged: Vec<Vec<(i32, i32)>>,
+    visited: Vec<bool>,
+    starts: Vec<(i32, i32, usize, bool)>,
+    chain: Vec<(i32, i32)>,
+    encode_buf: Vec<u32>,
+}
+
+impl LineMergeScratch {
+    pub fn new() -> Self {
+        Self {
+            segments: Vec::new(),
+            merged: Vec::new(),
+            visited: Vec::new(),
+            starts: Vec::new(),
+            chain: Vec::new(),
+            encode_buf: Vec::new(),
         }
     }
 }
@@ -157,6 +209,10 @@ impl LayerBuilder {
 
     pub(crate) fn features(&self) -> &[Feature] {
         &self.features
+    }
+
+    pub(crate) fn features_mut(&mut self) -> &mut [Feature] {
+        &mut self.features
     }
 
     pub(crate) fn key(&self, idx: u16) -> Option<&str> {
@@ -235,8 +291,31 @@ impl LayerBuilder {
         self.string_value_map.clear();
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn encode(&self, buf: &mut Vec<u8>, s: &mut EncodeScratch) {
         s.layer_buf.clear();
+
+        // Build sorted key permutation (alphabetical) and inverse remap.
+        s.sorted_keys.clear();
+        s.sorted_keys.extend(0..self.keys.len() as u16);
+        s.sorted_keys.sort_by(|&a, &b| self.keys[a as usize].cmp(&self.keys[b as usize]));
+        s.key_remap.clear();
+        s.key_remap.resize(self.keys.len(), 0);
+        for (new_idx, &old_idx) in s.sorted_keys.iter().enumerate() {
+            s.key_remap[old_idx as usize] = new_idx as u16;
+        }
+
+        // Build sorted value permutation (by type then canonical value) and inverse remap.
+        s.sorted_vals.clear();
+        s.sorted_vals.extend(0..self.values.len() as u16);
+        s.sorted_vals.sort_by(|&a, &b| {
+            value_sort_key(&self.values[a as usize]).cmp(&value_sort_key(&self.values[b as usize]))
+        });
+        s.val_remap.clear();
+        s.val_remap.resize(self.values.len(), 0);
+        for (new_idx, &old_idx) in s.sorted_vals.iter().enumerate() {
+            s.val_remap[old_idx as usize] = new_idx as u16;
+        }
 
         // field 15: version = 2
         encode_varint_field_always(&mut s.layer_buf, 15, 2);
@@ -245,7 +324,7 @@ impl LayerBuilder {
         // field 5: extent = 4096
         encode_varint_field_always(&mut s.layer_buf, 5, 4096);
 
-        // field 2: features
+        // field 2: features (tag indices remapped to sorted positions)
         for f in &self.features {
             s.feat_buf.clear();
             if let Some(id) = f.id {
@@ -253,11 +332,9 @@ impl LayerBuilder {
             }
             if !f.tags.is_empty() {
                 s.tag_vals.clear();
-                s.tag_vals.extend(
-                    f.tags
-                        .iter()
-                        .flat_map(|&(k, v)| [u32::from(k), u32::from(v)]),
-                );
+                s.tag_vals.extend(f.tags.iter().flat_map(|&(k, v)| {
+                    [u32::from(s.key_remap[k as usize]), u32::from(s.val_remap[v as usize])]
+                }));
                 encode_packed_uint32(&mut s.feat_buf, &mut s.packed, 2, &s.tag_vals);
             }
             encode_varint_field_always(&mut s.feat_buf, 3, f.geom_type as u64);
@@ -267,15 +344,15 @@ impl LayerBuilder {
             encode_bytes_field_always(&mut s.layer_buf, 2, &s.feat_buf);
         }
 
-        // field 3: keys
-        for k in &self.keys {
-            encode_bytes_field_always(&mut s.layer_buf, 3, k.as_bytes());
+        // field 3: keys (sorted alphabetically)
+        for &old_idx in &s.sorted_keys {
+            encode_bytes_field_always(&mut s.layer_buf, 3, self.keys[old_idx as usize].as_bytes());
         }
 
-        // field 4: values
-        for v in &self.values {
+        // field 4: values (sorted by type then value)
+        for &old_idx in &s.sorted_vals {
             s.val_buf.clear();
-            encode_value(&mut s.val_buf, v);
+            encode_value(&mut s.val_buf, &self.values[old_idx as usize]);
             encode_bytes_field_always(&mut s.layer_buf, 4, &s.val_buf);
         }
 
@@ -602,6 +679,292 @@ impl LayerBuilder {
             self.features.retain(|f| !f.geometry.is_empty());
         }
     }
+
+    /// Merge connected LineString segments within each line feature.
+    ///
+    /// After `merge_same_attr_geometries`, each line feature may contain multiple
+    /// sub-linestrings (MoveTo/LineTo sequences). This pass joins segments that
+    /// share endpoints through degree-2 nodes (not junctions), reducing feature
+    /// complexity and improving gzip compression.
+    pub fn merge_connected_lines(&mut self, scratch: &mut LineMergeScratch) {
+        for feature in &mut self.features {
+            if feature.geom_type != GeomType::LineString {
+                continue;
+            }
+            decode_line_segments(&feature.geometry, &mut scratch.segments);
+            if scratch.segments.len() < 2 {
+                continue;
+            }
+            merge_line_segments(
+                &mut scratch.segments,
+                &mut scratch.merged,
+                &mut scratch.visited,
+                &mut scratch.starts,
+                &mut scratch.chain,
+            );
+            encode_line_segments(&scratch.merged, &mut scratch.encode_buf);
+            std::mem::swap(&mut feature.geometry, &mut scratch.encode_buf);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Line segment merging
+// ---------------------------------------------------------------------------
+
+/// Maximum vertex count for a merged linestring. Prevents pathological cases
+/// from blowing up tile size. When exceeded, the current segment is finished
+/// (no mid-segment truncation) and a new chain starts.
+const MAX_LINE_VERTICES: usize = 6000;
+
+/// Decode MVT line geometry commands into absolute-coordinate segments.
+fn decode_line_segments(commands: &[u32], segments: &mut Vec<Vec<(i32, i32)>>) {
+    segments.clear();
+    let mut i = 0;
+    let mut cx: i32 = 0;
+    let mut cy: i32 = 0;
+    while i < commands.len() {
+        let cmd = commands[i];
+        let cmd_id = cmd & 0x7;
+        let count = (cmd >> 3) as usize;
+        i += 1;
+        match cmd_id {
+            1 => {
+                // MoveTo: start a new segment
+                if i + count * 2 > commands.len() {
+                    break;
+                }
+                for _ in 0..count {
+                    cx = cx.wrapping_add(unzigzag(commands[i]));
+                    cy = cy.wrapping_add(unzigzag(commands[i + 1]));
+                    i += 2;
+                }
+                segments.push(vec![(cx, cy)]);
+            }
+            2 => {
+                // LineTo: extend current segment
+                if i + count * 2 > commands.len() {
+                    break;
+                }
+                if let Some(seg) = segments.last_mut() {
+                    for _ in 0..count {
+                        cx = cx.wrapping_add(unzigzag(commands[i]));
+                        cy = cy.wrapping_add(unzigzag(commands[i + 1]));
+                        i += 2;
+                        seg.push((cx, cy));
+                    }
+                } else {
+                    i += count * 2;
+                }
+            }
+            _ => {
+                // Unknown command — skip
+                i += count * 2;
+            }
+        }
+    }
+    // Drop degenerate segments (< 2 points)
+    segments.retain(|s| s.len() >= 2);
+}
+
+/// Re-encode absolute-coordinate segments as MVT line geometry commands.
+fn encode_line_segments(segments: &[Vec<(i32, i32)>], buf: &mut Vec<u32>) {
+    buf.clear();
+    let mut cx: i32 = 0;
+    let mut cy: i32 = 0;
+    for seg in segments {
+        if seg.len() < 2 {
+            continue;
+        }
+        // MoveTo first point
+        buf.push(command(1, 1));
+        buf.push(zigzag(seg[0].0 - cx));
+        buf.push(zigzag(seg[0].1 - cy));
+        cx = seg[0].0;
+        cy = seg[0].1;
+        // LineTo remaining, skipping consecutive duplicates
+        let lineto_pos = buf.len();
+        buf.push(0); // placeholder
+        let mut count = 0u32;
+        for &(x, y) in &seg[1..] {
+            if x == cx && y == cy {
+                continue;
+            }
+            buf.push(zigzag(x - cx));
+            buf.push(zigzag(y - cy));
+            cx = x;
+            cy = y;
+            count += 1;
+        }
+        if count < 1 {
+            // Degenerate after dedup
+            buf.truncate(lineto_pos - 3);
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            buf[lineto_pos] = command(2, count);
+        }
+    }
+}
+
+/// Which end of a segment participates at an endpoint.
+#[derive(Clone, Copy)]
+struct SegEnd {
+    seg_idx: usize,
+    is_back: bool,
+}
+
+/// Merge connected line segments through degree-2 nodes.
+///
+/// Pass 1: build chains starting from degree != 2 endpoints (dead ends, junctions).
+/// Pass 2: collect remaining unvisited segments as pure cycles.
+/// Traversal order is deterministic (sorted start points and candidate indices).
+fn merge_line_segments(
+    segments: &mut Vec<Vec<(i32, i32)>>,
+    merged: &mut Vec<Vec<(i32, i32)>>,
+    visited: &mut Vec<bool>,
+    starts: &mut Vec<(i32, i32, usize, bool)>,
+    chain: &mut Vec<(i32, i32)>,
+) {
+    merged.clear();
+    if segments.len() < 2 {
+        std::mem::swap(segments, merged);
+        return;
+    }
+
+    // Build endpoint graph
+    let mut endpoints: FxHashMap<(i32, i32), Vec<SegEnd>> = FxHashMap::default();
+    for (i, seg) in segments.iter().enumerate() {
+        let front = seg[0];
+        let back = seg[seg.len() - 1];
+        endpoints
+            .entry(front)
+            .or_default()
+            .push(SegEnd { seg_idx: i, is_back: false });
+        endpoints
+            .entry(back)
+            .or_default()
+            .push(SegEnd { seg_idx: i, is_back: true });
+    }
+
+    visited.clear();
+    visited.resize(segments.len(), false);
+
+    // Pass 1: chains starting from degree != 2 endpoints.
+    // Sort starts for deterministic output.
+    starts.clear();
+    for (&point, ends) in &endpoints {
+        if ends.len() != 2 {
+            for &se in ends {
+                starts.push((point.0, point.1, se.seg_idx, se.is_back));
+            }
+        }
+    }
+    starts.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)));
+
+    for &(_, _, seg_idx, is_back) in starts.iter() {
+        if visited[seg_idx] {
+            continue;
+        }
+        build_chain(segments, &endpoints, visited, chain, seg_idx, is_back, merged);
+    }
+
+    // Pass 2: pure cycles (all unvisited segments).
+    // Process in segment-index order for determinism.
+    for i in 0..segments.len() {
+        if visited[i] {
+            continue;
+        }
+        build_chain(segments, &endpoints, visited, chain, i, false, merged);
+    }
+}
+
+/// Build one chain starting from `seg_idx` entered at `entering_back`.
+/// Walks through degree-2 nodes, respecting the vertex cap.
+/// Emits one or more chains into `out`.
+fn build_chain(
+    segments: &[Vec<(i32, i32)>],
+    endpoints: &FxHashMap<(i32, i32), Vec<SegEnd>>,
+    visited: &mut [bool],
+    chain: &mut Vec<(i32, i32)>,
+    start_seg: usize,
+    entering_back: bool,
+    out: &mut Vec<Vec<(i32, i32)>>,
+) {
+    chain.clear();
+    let mut current_seg = start_seg;
+    let mut entering_back = entering_back;
+
+    loop {
+        if visited[current_seg] {
+            break;
+        }
+
+        let seg = &segments[current_seg];
+
+        // Vertex cap: finish current segment then stop.
+        if !chain.is_empty() && chain.len() + seg.len() > MAX_LINE_VERTICES {
+            // Don't mark as visited — will be picked up as a new chain start.
+            break;
+        }
+
+        visited[current_seg] = true;
+
+        // Append segment points (possibly reversed).
+        if entering_back {
+            if chain.is_empty() {
+                chain.extend(seg.iter().rev());
+            } else {
+                chain.extend(seg.iter().rev().skip(1));
+            }
+        } else if chain.is_empty() {
+            chain.extend_from_slice(seg);
+        } else {
+            chain.extend_from_slice(&seg[1..]);
+        }
+
+        // Find exit point.
+        let exit_point = if entering_back { seg[0] } else { seg[seg.len() - 1] };
+
+        // Look for next segment at exit point.
+        let Some(ends) = endpoints.get(&exit_point) else {
+            break;
+        };
+        if ends.len() != 2 {
+            // Junction or dead end — stop chaining.
+            break;
+        }
+
+        // Find the other SegEnd (not the one we arrived through).
+        // Our exit SegEnd: (current_seg, is_back = !entering_back).
+        let our_exit_is_back = !entering_back;
+        let other = ends.iter().find(|e| {
+            !(e.seg_idx == current_seg && e.is_back == our_exit_is_back)
+        });
+        let Some(&next) = other else {
+            // Self-loop: both ends of same segment at same point.
+            break;
+        };
+
+        // If the "other" is still the same segment (both ends at same point,
+        // but different is_back), it's a closed self-loop — stop.
+        if next.seg_idx == current_seg {
+            break;
+        }
+
+        current_seg = next.seg_idx;
+        entering_back = next.is_back;
+    }
+
+    if chain.len() >= 2 {
+        out.push(std::mem::take(chain));
+    }
+}
+
+#[allow(clippy::cast_possible_wrap)]
+fn unzigzag(n: u32) -> i32 {
+    ((n >> 1) as i32) ^ (-((n & 1) as i32))
 }
 
 // ---------------------------------------------------------------------------
@@ -1547,5 +1910,306 @@ mod tests {
         // Secondary features' vecs should be reclaimed into pools
         assert_eq!(gp.len(), 2); // 2 secondaries reclaimed
         assert_eq!(tp.len(), 2);
+    }
+
+    #[test]
+    fn encode_sorts_keys_alphabetically() {
+        let mut layer = LayerBuilder::new("test");
+        // Insert keys in reverse alphabetical order.
+        let k_z = layer.intern_key("zoo");
+        let k_a = layer.intern_key("alpha");
+        let k_m = layer.intern_key("mid");
+        let v = layer.intern_value(Value::String("x".to_string()));
+        layer.add_feature(Feature {
+            id: None,
+            geom_type: GeomType::Point,
+            geometry: vec![command(1, 1), zigzag(10), zigzag(20)],
+            tags: vec![(k_z, v), (k_a, v), (k_m, v)],
+        });
+        let tile = encode_tile(&[&layer]);
+        let parsed = parse_fixture_tile(&tile).unwrap();
+        assert_eq!(parsed.layers[0].keys, vec!["alpha", "mid", "zoo"]);
+    }
+
+    #[test]
+    fn encode_sorts_values_by_type_then_content() {
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        // Insert values in mixed order: int, string, string, int.
+        let v_i42 = layer.intern_value(Value::Int(42));
+        let v_sb = layer.intern_value(Value::String("banana".to_string()));
+        let v_sa = layer.intern_value(Value::String("apple".to_string()));
+        let v_i1 = layer.intern_value(Value::Int(1));
+
+        for v in [v_i42, v_sb, v_sa, v_i1] {
+            layer.add_feature(Feature {
+                id: None,
+                geom_type: GeomType::Point,
+                geometry: vec![command(1, 1), zigzag(10), zigzag(20)],
+                tags: vec![(k, v)],
+            });
+        }
+        let tile = encode_tile(&[&layer]);
+        let parsed = parse_fixture_tile(&tile).unwrap();
+        // Strings should come first (type 0), sorted alphabetically.
+        // The parser puts all values into string_values (non-strings as "").
+        assert_eq!(parsed.layers[0].string_values[0], "apple");
+        assert_eq!(parsed.layers[0].string_values[1], "banana");
+    }
+
+    #[test]
+    fn encode_remaps_tag_indices_after_sort() {
+        let mut layer = LayerBuilder::new("test");
+        // Keys inserted as "z", "a". After sort: "a"=0, "z"=1.
+        let k_z = layer.intern_key("z");
+        let k_a = layer.intern_key("a");
+        let v_x = layer.intern_value(Value::String("x".to_string()));
+        let v_y = layer.intern_value(Value::String("y".to_string()));
+        // Feature tags: z=y, a=x (using original indices).
+        layer.add_feature(Feature {
+            id: None,
+            geom_type: GeomType::Point,
+            geometry: vec![command(1, 1), zigzag(10), zigzag(20)],
+            tags: vec![(k_z, v_y), (k_a, v_x)],
+        });
+        let tile = encode_tile(&[&layer]);
+        let parsed = parse_fixture_tile(&tile).unwrap();
+        assert_eq!(parsed.layers[0].keys, vec!["a", "z"]);
+        assert_eq!(parsed.layers[0].string_values, vec!["x", "y"]);
+        // Tags should be remapped: a(0)=x(0), z(1)=y(1).
+        assert_eq!(parsed.layers[0].features[0].feature_tags, vec![1, 1, 0, 0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Line merging tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: decode a merged feature's geometry back to segments.
+    fn decode_segments(geom: &[u32]) -> Vec<Vec<(i32, i32)>> {
+        let mut segs = Vec::new();
+        decode_line_segments(geom, &mut segs);
+        segs
+    }
+
+    /// Helper: build a multi-linestring geometry from segments.
+    fn build_multi_line(segments: &[&[(i32, i32)]]) -> Vec<u32> {
+        let mut buf = Vec::new();
+        let mut cx: i32 = 0;
+        let mut cy: i32 = 0;
+        for seg in segments {
+            if seg.len() < 2 { continue; }
+            buf.push(command(1, 1));
+            buf.push(zigzag(seg[0].0 - cx));
+            buf.push(zigzag(seg[0].1 - cy));
+            cx = seg[0].0;
+            cy = seg[0].1;
+            let lineto_pos = buf.len();
+            buf.push(0);
+            let mut count = 0u32;
+            for &(x, y) in &seg[1..] {
+                buf.push(zigzag(x - cx));
+                buf.push(zigzag(y - cy));
+                cx = x;
+                cy = y;
+                count += 1;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            { buf[lineto_pos] = command(2, count); }
+        }
+        buf
+    }
+
+    #[test]
+    fn line_merge_two_segments_degree2() {
+        // A(0,0)→B(10,10) + B(10,10)→C(20,0): B is degree-2, should merge.
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        let v = layer.intern_value(Value::String("v".into()));
+        let geom = build_multi_line(&[
+            &[(0, 0), (10, 10)],
+            &[(10, 10), (20, 0)],
+        ]);
+        layer.add_feature(Feature {
+            id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        });
+        let mut scratch = LineMergeScratch::new();
+        layer.merge_connected_lines(&mut scratch);
+        let segs = decode_segments(&layer.features[0].geometry);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0], vec![(0, 0), (10, 10), (20, 0)]);
+    }
+
+    #[test]
+    fn line_merge_reverse_direction() {
+        // A→B + C→B: second segment needs reversal to connect.
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        let v = layer.intern_value(Value::String("v".into()));
+        let geom = build_multi_line(&[
+            &[(0, 0), (10, 10)],
+            &[(20, 0), (10, 10)],
+        ]);
+        layer.add_feature(Feature {
+            id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        });
+        let mut scratch = LineMergeScratch::new();
+        layer.merge_connected_lines(&mut scratch);
+        let segs = decode_segments(&layer.features[0].geometry);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0], vec![(0, 0), (10, 10), (20, 0)]);
+    }
+
+    #[test]
+    fn line_merge_junction_blocks() {
+        // A→B, B→C, B→D: B is degree-3 (junction), should NOT merge through B.
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        let v = layer.intern_value(Value::String("v".into()));
+        let geom = build_multi_line(&[
+            &[(0, 0), (10, 10)],
+            &[(10, 10), (20, 0)],
+            &[(10, 10), (20, 20)],
+        ]);
+        layer.add_feature(Feature {
+            id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        });
+        let mut scratch = LineMergeScratch::new();
+        layer.merge_connected_lines(&mut scratch);
+        let segs = decode_segments(&layer.features[0].geometry);
+        assert_eq!(segs.len(), 3, "junction should prevent any merging");
+    }
+
+    #[test]
+    fn line_merge_single_segment_noop() {
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        let v = layer.intern_value(Value::String("v".into()));
+        let mut geom = Vec::new();
+        encode_linestring(&mut geom, &[(0, 0), (10, 10), (20, 0)]);
+        let original = geom.clone();
+        layer.add_feature(Feature {
+            id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        });
+        let mut scratch = LineMergeScratch::new();
+        layer.merge_connected_lines(&mut scratch);
+        assert_eq!(layer.features[0].geometry, original);
+    }
+
+    #[test]
+    fn line_merge_closed_ring() {
+        // A→B→C→A forms a closed loop (pure cycle).
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        let v = layer.intern_value(Value::String("v".into()));
+        let geom = build_multi_line(&[
+            &[(0, 0), (10, 0)],
+            &[(10, 0), (10, 10)],
+            &[(10, 10), (0, 0)],
+        ]);
+        layer.add_feature(Feature {
+            id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        });
+        let mut scratch = LineMergeScratch::new();
+        layer.merge_connected_lines(&mut scratch);
+        let segs = decode_segments(&layer.features[0].geometry);
+        assert_eq!(segs.len(), 1, "cycle should merge into one linestring");
+        // Closed: first == last
+        assert_eq!(segs[0].first(), segs[0].last());
+        assert_eq!(segs[0].len(), 4);
+    }
+
+    #[test]
+    fn line_merge_skips_polygon_features() {
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        let v = layer.intern_value(Value::String("v".into()));
+        let mut geom = Vec::new();
+        encode_polygon(&mut geom, &[&[(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]]);
+        let original = geom.clone();
+        layer.add_feature(Feature {
+            id: None, geom_type: GeomType::Polygon, geometry: geom, tags: vec![(k, v)],
+        });
+        let mut scratch = LineMergeScratch::new();
+        layer.merge_connected_lines(&mut scratch);
+        assert_eq!(layer.features[0].geometry, original, "polygon should be untouched");
+    }
+
+    #[test]
+    fn line_merge_chain_of_three() {
+        // A→B→C→D: all interior nodes degree-2, should merge into one.
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        let v = layer.intern_value(Value::String("v".into()));
+        let geom = build_multi_line(&[
+            &[(0, 0), (10, 0)],
+            &[(10, 0), (20, 10)],
+            &[(20, 10), (30, 0)],
+        ]);
+        layer.add_feature(Feature {
+            id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        });
+        let mut scratch = LineMergeScratch::new();
+        layer.merge_connected_lines(&mut scratch);
+        let segs = decode_segments(&layer.features[0].geometry);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0], vec![(0, 0), (10, 0), (20, 10), (30, 0)]);
+    }
+
+    #[test]
+    fn line_merge_deterministic_output() {
+        // Same logical segments in different input orders should produce
+        // identical encoded geometry.
+        let order_a = build_multi_line(&[
+            &[(0, 0), (10, 0)],
+            &[(10, 0), (20, 0)],
+            &[(20, 0), (30, 0)],
+        ]);
+        let order_b = build_multi_line(&[
+            &[(20, 0), (30, 0)],
+            &[(0, 0), (10, 0)],
+            &[(10, 0), (20, 0)],
+        ]);
+        let order_c = build_multi_line(&[
+            &[(10, 0), (20, 0)],
+            &[(20, 0), (30, 0)],
+            &[(0, 0), (10, 0)],
+        ]);
+
+        let mut results = Vec::new();
+        for geom in [order_a, order_b, order_c] {
+            let mut layer = LayerBuilder::new("test");
+            let k = layer.intern_key("k");
+            let v = layer.intern_value(Value::String("v".into()));
+            layer.add_feature(Feature {
+                id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+            });
+            let mut scratch = LineMergeScratch::new();
+            layer.merge_connected_lines(&mut scratch);
+            results.push(layer.features[0].geometry.clone());
+        }
+        assert_eq!(results[0], results[1], "order A vs B should match");
+        assert_eq!(results[1], results[2], "order B vs C should match");
+    }
+
+    #[test]
+    fn line_merge_self_loop_not_merged_through() {
+        // Segment A→A (self-loop) at point (10,10), plus B→(10,10):
+        // The self-loop contributes degree 2 at (10,10) but both ends are
+        // the same segment — should not merge B through it.
+        let geom = build_multi_line(&[
+            &[(10, 10), (20, 20), (10, 10)], // self-loop
+            &[(0, 0), (10, 10)],
+        ]);
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        let v = layer.intern_value(Value::String("v".into()));
+        layer.add_feature(Feature {
+            id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        });
+        let mut scratch = LineMergeScratch::new();
+        layer.merge_connected_lines(&mut scratch);
+        let segs = decode_segments(&layer.features[0].geometry);
+        // Self-loop and the other segment should remain separate.
+        assert_eq!(segs.len(), 2, "self-loop should prevent merging");
     }
 }

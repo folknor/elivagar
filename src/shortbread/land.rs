@@ -222,7 +222,7 @@ fn parse_building_measurement_meters(raw: &str) -> Option<f64> {
         s.truncate(s.len().saturating_sub(1));
     }
 
-    let num = s.split_whitespace().next()?.replace(',', "");
+    let num = normalize_numeric_token(s.split_whitespace().next()?);
     let value = num.parse::<f64>().ok()?;
     if !value.is_finite() {
         return None;
@@ -236,12 +236,36 @@ fn parse_building_levels(raw: &str) -> Option<f64> {
     if s.is_empty() {
         return None;
     }
-    let token = s.split(';').next()?.trim().replace(',', "");
+    let token = normalize_numeric_token(s.split(';').next()?.trim());
     if token.is_empty() {
         return None;
     }
     let levels = token.parse::<f64>().ok()?;
     (levels.is_finite() && levels >= 0.0).then_some(levels)
+}
+
+fn normalize_numeric_token(token: &str) -> String {
+    let t = token.trim();
+    if !t.contains(',') {
+        return t.to_string();
+    }
+    if t.contains('.') {
+        // Assume commas are thousands separators when a dot-decimal exists.
+        return t.replace(',', "");
+    }
+    let comma_count = t.bytes().filter(|&b| b == b',').count();
+    if comma_count == 1
+        && let Some((left, right)) = t.split_once(',')
+    {
+        if right.len() == 3 && !left.is_empty() {
+            // Likely thousands separator, e.g. 1,234
+            return [left, right].concat();
+        }
+        // Likely locale decimal comma, e.g. 24,5
+        return [left, ".", right].concat();
+    }
+    // Multiple commas: assume thousands grouping.
+    t.replace(',', "")
 }
 
 // ---------------------------------------------------------------------------

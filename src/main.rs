@@ -101,6 +101,10 @@ struct RunArgs {
     /// Tile payload format.
     #[arg(long, value_enum, default_value_t = TileFormatArg::Mvt)]
     tile_format: TileFormatArg,
+
+    /// Tile compression algorithm (MVT only).
+    #[arg(long, value_enum, default_value_t = TileCompressionArg::Gzip)]
+    tile_compression: TileCompressionArg,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -128,6 +132,12 @@ enum SkipToArg {
 enum TileFormatArg {
     Mvt,
     Mlt,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TileCompressionArg {
+    Gzip,
+    Brotli,
 }
 
 /// Parse a byte size string like "256M", "1G", or raw bytes.
@@ -262,6 +272,10 @@ fn run(args: RunArgs) {
         tile_format: match args.tile_format {
             TileFormatArg::Mvt => elivagar::TilePayloadFormat::Mvt,
             TileFormatArg::Mlt => elivagar::TilePayloadFormat::Mlt,
+        },
+        tile_compression: match args.tile_compression {
+            TileCompressionArg::Gzip => elivagar::TileCompression::Gzip,
+            TileCompressionArg::Brotli => elivagar::TileCompression::Brotli,
         },
     };
 

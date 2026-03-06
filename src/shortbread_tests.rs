@@ -98,6 +98,85 @@ fn test_building_ignores_unparseable_height_level_attrs() {
 }
 
 #[test]
+fn test_building_parses_real_world_measurement_variants() {
+    let tags = Tags(&[
+        ("building", "yes"),
+        ("height", "24,5 m"),
+        ("min_height", "24 meters"),
+        ("building:levels", "3,5"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::ClosedWay);
+    let bldg = matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+
+    let height = bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "height")
+        .expect("should have height");
+    assert_eq!(height.1, AttrValue::Float(24.5));
+
+    let min_height = bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "min_height")
+        .expect("should have min_height");
+    assert_eq!(min_height.1, AttrValue::Float(24.0));
+
+    let levels = bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "building:levels")
+        .expect("should have building:levels");
+    assert_eq!(levels.1, AttrValue::Float(3.5));
+}
+
+#[test]
+fn test_building_levels_policy_edges() {
+    let zero = Tags(&[("building", "yes"), ("building:levels", "0")]);
+    let zero_matches = match_element(&zero, OsmGeomType::ClosedWay);
+    let zero_bldg = zero_matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+    let levels = zero_bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "building:levels")
+        .expect("zero levels should be retained");
+    assert_eq!(levels.1, AttrValue::Float(0.0));
+
+    let negative = Tags(&[("building", "yes"), ("building:levels", "-1")]);
+    let negative_matches = match_element(&negative, OsmGeomType::ClosedWay);
+    let negative_bldg = negative_matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+    assert!(
+        negative_bldg
+            .attrs
+            .iter()
+            .all(|(k, _, _)| *k != "building:levels"),
+        "negative levels should be rejected",
+    );
+
+    let fractional = Tags(&[("building", "yes"), ("building:levels", "7.5")]);
+    let fractional_matches = match_element(&fractional, OsmGeomType::ClosedWay);
+    let fractional_bldg = fractional_matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("should match Buildings");
+    let levels = fractional_bldg
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "building:levels")
+        .expect("fractional levels should be retained");
+    assert_eq!(levels.1, AttrValue::Float(7.5));
+}
+
+#[test]
 fn test_place_city_capital() {
     let tags = Tags(&[
         ("place", "city"),
@@ -318,6 +397,85 @@ fn test_pois_ev_charging_station() {
 }
 
 #[test]
+fn test_pois_ev_charging_station_closed_way_and_multipolygon() {
+    let tags = Tags(&[
+        ("amenity", "charging_station"),
+        ("name", "Area Charger"),
+        ("addr:housenumber", "7"),
+    ]);
+
+    let closed_way_matches = match_element(&tags, OsmGeomType::ClosedWay);
+    let closed_poi = closed_way_matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("closed-way charging station should match POI centroid");
+    assert_eq!(closed_poi.geom_expect, GeomExpect::PolygonPointOnSurface);
+    assert!(
+        closed_way_matches.iter().all(|m| m.layer != Layer::Addresses),
+        "closed-way charging station should suppress address output",
+    );
+
+    let mp_matches = match_element(&tags, OsmGeomType::MultiPolygon);
+    let mp_poi = mp_matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("multipolygon charging station should match POI centroid");
+    assert_eq!(mp_poi.geom_expect, GeomExpect::PolygonPointOnSurface);
+    assert!(
+        mp_matches.iter().all(|m| m.layer != Layer::Addresses),
+        "multipolygon charging station should suppress address output",
+    );
+}
+
+#[test]
+fn test_pois_ev_charging_station_rich_tag_matrix_is_stable() {
+    let tags = Tags(&[
+        ("amenity", "charging_station"),
+        ("name", "FastCharge Downtown"),
+        ("name:en", "FastCharge Downtown"),
+        ("name:de", "SchnellLaden Zentrum"),
+        ("addr:housenumber", "12B"),
+        ("operator", "ChargeCo"),
+        ("capacity", "8"),
+        ("socket:type2", "yes"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::Node);
+    let poi = matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("charging station should match Pois");
+    let amenity = poi
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "amenity")
+        .expect("should have amenity");
+    assert_eq!(
+        amenity.1,
+        AttrValue::Str(Cow::Borrowed("charging_station"))
+    );
+    assert!(
+        poi.attrs.iter().any(|(k, _, _)| *k == "name"),
+        "name should be preserved on POI output"
+    );
+    assert!(
+        poi.attrs.iter().any(|(k, _, _)| *k == "name_en"),
+        "name:en should be preserved on POI output"
+    );
+    assert!(
+        poi.attrs.iter().any(|(k, _, _)| *k == "name_de"),
+        "name:de should be preserved on POI output"
+    );
+    assert!(
+        poi.attrs.iter().any(|(k, _, _)| *k == "housenumber"),
+        "housenumber should be preserved on POI output"
+    );
+    assert!(
+        matches.iter().all(|m| m.layer != Layer::Addresses),
+        "recognized charging station POI should continue suppressing address output",
+    );
+}
+
+#[test]
 fn test_pois_peak_with_ele_meters() {
     let tags = Tags(&[
         ("natural", "peak"),
@@ -360,6 +518,82 @@ fn test_pois_peak_with_ele_feet_conversion() {
         .find(|(k, _, _)| *k == "ele")
         .expect("should have ele");
     assert_eq!(ele.1, AttrValue::Int(1000));
+}
+
+#[test]
+fn test_pois_elevation_parser_format_coverage() {
+    let cases = [
+        ("1000m", Some(1000)),
+        ("1,234 m", Some(1234)),
+        ("1000;1200", Some(1000)),
+        ("-50", Some(-50)),
+        ("bad-value", None),
+    ];
+    for (raw, expected_ele) in cases {
+        let tags = Tags(&[("natural", "peak"), ("ele", raw)]);
+        let matches = match_element(&tags, OsmGeomType::Node);
+        let poi = matches
+            .iter()
+            .find(|m| m.layer == Layer::Pois)
+            .expect("peak should match Pois");
+        let got = poi
+            .attrs
+            .iter()
+            .find(|(k, _, _)| *k == "ele")
+            .map(|(_, v, _)| v.clone());
+        match (expected_ele, got) {
+            (Some(exp), Some(AttrValue::Int(actual))) => assert_eq!(actual, exp, "ele='{raw}'"),
+            (None, None) => {}
+            _ => panic!("unexpected ele parse outcome for '{raw}'"),
+        }
+    }
+}
+
+#[test]
+fn test_pois_volcano_and_mountain_pass_branches() {
+    let volcano_tags = Tags(&[
+        ("natural", "volcano"),
+        ("ele", "2,500"),
+    ]);
+    let volcano_matches = match_element(&volcano_tags, OsmGeomType::Node);
+    let volcano = volcano_matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("volcano should match Pois");
+    let natural = volcano
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "natural")
+        .expect("volcano should have natural attr");
+    assert_eq!(natural.1, AttrValue::Str(Cow::Borrowed("volcano")));
+    let ele = volcano
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "ele")
+        .expect("volcano should have ele attr");
+    assert_eq!(ele.1, AttrValue::Int(2500));
+
+    let pass_tags = Tags(&[
+        ("mountain_pass", "yes"),
+        ("ele", "1500"),
+    ]);
+    let pass_matches = match_element(&pass_tags, OsmGeomType::Node);
+    let pass = pass_matches
+        .iter()
+        .find(|m| m.layer == Layer::Pois)
+        .expect("mountain_pass=yes should match Pois");
+    let natural = pass
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "natural")
+        .expect("pass should have natural attr");
+    assert_eq!(natural.1, AttrValue::Str(Cow::Borrowed("pass")));
+    let ele = pass
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "ele")
+        .expect("pass should have ele attr");
+    assert_eq!(ele.1, AttrValue::Int(1500));
 }
 
 #[test]
@@ -1111,4 +1345,83 @@ fn test_land_line_cliff_matches() {
         .find(|(k, _, _)| *k == "kind")
         .expect("should have kind");
     assert_eq!(kind.1, AttrValue::Str(Cow::Borrowed("cliff")));
+}
+
+#[test]
+fn test_land_line_cliff_matches_closed_way() {
+    let tags = Tags(&[("natural", "cliff")]);
+    let matches = match_element(&tags, OsmGeomType::ClosedWay);
+    let cliff = matches
+        .iter()
+        .find(|m| m.layer == Layer::Land && m.geom_expect == GeomExpect::Line)
+        .expect("closed-way natural=cliff should also match land line extension");
+    assert_eq!(cliff.min_zoom, 12);
+    let kind = cliff
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "kind")
+        .expect("should have kind");
+    assert_eq!(kind.1, AttrValue::Str(Cow::Borrowed("cliff")));
+}
+
+#[test]
+fn test_land_line_cliff_conflict_with_highway_keeps_both_matches() {
+    let tags = Tags(&[
+        ("natural", "cliff"),
+        ("highway", "primary"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::OpenWay);
+
+    let cliff = matches
+        .iter()
+        .find(|m| m.layer == Layer::Land && m.geom_expect == GeomExpect::Line)
+        .expect("cliff line should still match alongside highway");
+    let cliff_kind = cliff
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "kind")
+        .expect("cliff should have kind");
+    assert_eq!(cliff_kind.1, AttrValue::Str(Cow::Borrowed("cliff")));
+
+    let street = matches
+        .iter()
+        .find(|m| m.layer == Layer::Streets)
+        .expect("highway should still match Streets");
+    let street_kind = street
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "kind")
+        .expect("street should have kind");
+    assert_eq!(street_kind.1, AttrValue::Str(Cow::Borrowed("primary")));
+}
+
+#[test]
+fn test_land_line_cliff_conflict_with_waterway_keeps_both_matches() {
+    let tags = Tags(&[
+        ("natural", "cliff"),
+        ("waterway", "stream"),
+    ]);
+    let matches = match_element(&tags, OsmGeomType::OpenWay);
+
+    let cliff = matches
+        .iter()
+        .find(|m| m.layer == Layer::Land && m.geom_expect == GeomExpect::Line)
+        .expect("cliff line should still match alongside waterway");
+    let cliff_kind = cliff
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "kind")
+        .expect("cliff should have kind");
+    assert_eq!(cliff_kind.1, AttrValue::Str(Cow::Borrowed("cliff")));
+
+    let water = matches
+        .iter()
+        .find(|m| m.layer == Layer::WaterLines)
+        .expect("waterway should still match WaterLines");
+    let water_kind = water
+        .attrs
+        .iter()
+        .find(|(k, _, _)| *k == "kind")
+        .expect("water line should have kind");
+    assert_eq!(water_kind.1, AttrValue::Str(Cow::Borrowed("stream")));
 }
