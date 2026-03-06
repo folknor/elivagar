@@ -438,6 +438,11 @@ fn test_full_pipeline() {
         tile_format: elivagar::TilePayloadFormat::Mvt,
         tile_compression: elivagar::TileCompression::Gzip,
         compress_sort_chunks: elivagar::sort::ChunkCompression::None,
+        seam_reconcile_layers: {
+            let mut m = [false; elivagar::shortbread::Layer::count()];
+            m[elivagar::shortbread::Layer::Boundaries as usize] = true;
+            m
+        },
     };
 
     elivagar::run(&config).expect("pipeline should succeed");

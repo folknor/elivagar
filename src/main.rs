@@ -19,7 +19,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Generate PMTiles from an OSM PBF file.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Inspect a PMTiles archive.
     Inspect(InspectArgs),
     /// Verify a PMTiles archive.
@@ -110,6 +110,11 @@ struct RunArgs {
     /// Useful at planet scale where sort data exceeds available RAM.
     #[arg(long, value_enum)]
     compress_sort_chunks: Option<SortChunkCompressionArg>,
+
+    /// Polygon layers to apply shared-edge seam reconciliation at low zoom.
+    /// Comma-separated layer names. Default: boundaries.
+    #[arg(long, value_delimiter = ',', default_value = "boundaries")]
+    seam_reconcile_layers: Vec<String>,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -207,7 +212,7 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run(args) => run(args),
+        Command::Run(args) => run(*args),
         Command::Inspect(args) => {
             if let Err(e) = elivagar::inspect::inspect(&args.file) {
                 eprintln!("Error: {e}");
@@ -292,6 +297,18 @@ fn run(args: RunArgs) {
             None => elivagar::sort::ChunkCompression::None,
             Some(SortChunkCompressionArg::Lz4) => elivagar::sort::ChunkCompression::Lz4,
             Some(SortChunkCompressionArg::Snappy) => elivagar::sort::ChunkCompression::Snappy,
+        },
+        seam_reconcile_layers: {
+            let mut mask = [false; elivagar::shortbread::Layer::count()];
+            for name in &args.seam_reconcile_layers {
+                match elivagar::shortbread::Layer::from_name(name) {
+                    Some(layer) => mask[layer as usize] = true,
+                    None => {
+                        eprintln!("Warning: unknown layer name for --seam-reconcile-layers: {name}");
+                    }
+                }
+            }
+            mask
         },
     };
 

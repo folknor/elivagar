@@ -717,13 +717,13 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
     let mut scratch = PolygonEmitScratch::new();
     for shift in antimeridian_shifts_for_bbox(&bbox) {
         if shift == 0.0 {
-            let _ = emit_polygon_feature(7002, &coords, &[], &m, 1, 1, &mut records, &mut scratch);
+            let _ = emit_polygon_feature(7002, &coords, &[], &m, 1, 1, &mut records, &mut scratch, false);
         } else {
             let shifted: Vec<Point> = coords
                 .iter()
                 .map(|p| Point { x: p.x + shift, y: p.y })
                 .collect();
-            let _ = emit_polygon_feature(7002, &shifted, &[], &m, 1, 1, &mut records, &mut scratch);
+            let _ = emit_polygon_feature(7002, &shifted, &[], &m, 1, 1, &mut records, &mut scratch, false);
         }
     }
 
@@ -768,6 +768,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 &mut records,
                 &mut emit_scratch,
                 &mut simp_scratch,
+                false,
             );
         } else {
             let outer_shifted: Vec<Point> = outer
@@ -785,6 +786,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 &mut records,
                 &mut emit_scratch,
                 &mut simp_scratch,
+                false,
             );
         }
     }
@@ -804,7 +806,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
 
 #[test]
 fn encode_tile_batch_mlt_empty_batch_is_empty() {
-    match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt, TileCompression::Gzip, &SeamMetrics::new()) {
+    match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt, TileCompression::Gzip, &[], &SeamMetrics::new()) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty batches should remain empty"),
         Err(err) => panic!("empty mlt batch should not fail: {err}"),
     }
@@ -812,7 +814,7 @@ fn encode_tile_batch_mlt_empty_batch_is_empty() {
 
 #[test]
 fn encode_tile_batch_mvt_empty_batch_is_empty() {
-    let encoded = encode_tile_batch(&[], 6, TilePayloadFormat::Mvt, TileCompression::Gzip, &SeamMetrics::new())
+    let encoded = encode_tile_batch(&[], 6, TilePayloadFormat::Mvt, TileCompression::Gzip, &[], &SeamMetrics::new())
         .expect("mvt format should encode successfully");
     assert!(encoded.is_empty());
 }
@@ -823,7 +825,7 @@ fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
         tile_id: pmtiles_writer::xy_to_tile_id(3, 4, 5),
         features: Vec::new(),
     };
-    match encode_tile_batch(&[tile], 6, TilePayloadFormat::Mlt, TileCompression::Gzip, &SeamMetrics::new()) {
+    match encode_tile_batch(&[tile], 6, TilePayloadFormat::Mlt, TileCompression::Gzip, &[], &SeamMetrics::new()) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty tiles should be skipped"),
         Err(err) => panic!("mlt format should not fail for empty tile: {err}"),
     }
@@ -850,7 +852,7 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     };
     let non_empty = prepare_non_empty_layers(&mut scratch, &tile);
     let model = mlt::build_tile_model(&non_empty);
-    let mvt_encoded = encode_tile_batch(&[parity_pending_tile(tile_id)], 6, TilePayloadFormat::Mvt, TileCompression::Gzip, &SeamMetrics::new())
+    let mvt_encoded = encode_tile_batch(&[parity_pending_tile(tile_id)], 6, TilePayloadFormat::Mvt, TileCompression::Gzip, &[], &SeamMetrics::new())
         .expect("mvt batch encode should succeed");
     assert_eq!(mvt_encoded.len(), 1, "expected one encoded mvt tile");
 
@@ -925,6 +927,11 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
+        seam_reconcile_layers: {
+            let mut m = [false; shortbread::Layer::count()];
+            m[shortbread::Layer::Boundaries as usize] = true;
+            m
+        },
     };
 
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
@@ -979,6 +986,11 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
+        seam_reconcile_layers: {
+            let mut m = [false; shortbread::Layer::count()];
+            m[shortbread::Layer::Boundaries as usize] = true;
+            m
+        },
     };
 
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
@@ -1024,6 +1036,11 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
+        seam_reconcile_layers: {
+            let mut m = [false; shortbread::Layer::count()];
+            m[shortbread::Layer::Boundaries as usize] = true;
+            m
+        },
     };
     let _ = phase_assemble(&mut mvt_sort_reader, &mvt_config).expect("mvt assemble should succeed");
     let mut mvt_reader = crate::pmtiles_reader::PmtilesReader::open(&mvt_output)
@@ -1063,6 +1080,11 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         tile_format: TilePayloadFormat::Mlt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
+        seam_reconcile_layers: {
+            let mut m = [false; shortbread::Layer::count()];
+            m[shortbread::Layer::Boundaries as usize] = true;
+            m
+        },
     };
     let _ = phase_assemble(&mut mlt_sort_reader, &mlt_config).expect("mlt assemble should succeed");
     let mut mlt_reader = crate::pmtiles_reader::PmtilesReader::open(&mlt_output)
@@ -1398,7 +1420,7 @@ fn emit_polygon_too_few_points() {
     ];
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    let count = emit_polygon_feature(201, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
+    let count = emit_polygon_feature(201, &coords, &[], &m, 0, 0, &mut records, &mut scratch, false);
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -1415,7 +1437,7 @@ fn emit_polygon_decodes_correctly() {
     ];
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    emit_polygon_feature(200, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
+    emit_polygon_feature(200, &coords, &[], &m, 0, 0, &mut records, &mut scratch, false);
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -1469,7 +1491,7 @@ fn emit_polygon_zoom_dependent_attrs() {
     // At z=0: only 1 attr ("kind", min_zoom=0)
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    emit_polygon_feature(300, &coords_z0, &[], &m_z0, 0, 0, &mut records, &mut scratch);
+    emit_polygon_feature(300, &coords_z0, &[], &m_z0, 0, 0, &mut records, &mut scratch, false);
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -1494,7 +1516,7 @@ fn emit_polygon_zoom_dependent_attrs() {
         Point { x: 0.500_00, y: 0.500_00 },
     ];
     records.clear();
-    emit_polygon_feature(300, &coords_z14, &[], &m_z14, 14, 14, &mut records, &mut scratch);
+    emit_polygon_feature(300, &coords_z14, &[], &m_z14, 14, 14, &mut records, &mut scratch, false);
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -1518,7 +1540,7 @@ fn emit_polygon_skips_self_intersecting_ring_below_z14() {
 
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    let count = emit_polygon_feature(500, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
+    let count = emit_polygon_feature(500, &coords, &[], &m, 0, 0, &mut records, &mut scratch, false);
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -1550,6 +1572,7 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         0,
         &mut records_plain,
         &mut scratch_plain,
+        false,
     );
     emit_polygon_feature(
         900,
@@ -1560,6 +1583,7 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         0,
         &mut records_pinned,
         &mut scratch_pinned,
+        false,
     );
 
     assert_eq!(records_plain.len(), 1);
@@ -1608,6 +1632,7 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         &mut records_plain,
         &mut emit_plain,
         &mut simp_plain,
+        false,
     );
     emit_multipolygon_feature(
         990,
@@ -1620,6 +1645,7 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         &mut records_pinned,
         &mut emit_pinned,
         &mut simp_pinned,
+        false,
     );
 
     assert_eq!(records_plain.len(), 1);
@@ -1706,6 +1732,7 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         &mut records_plain,
         &mut emit_plain,
         &mut simp_plain,
+        false,
     );
     emit_multipolygon_feature(
         991,
@@ -1718,6 +1745,7 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         &mut records_pinned,
         &mut emit_pinned,
         &mut simp_pinned,
+        false,
     );
 
     assert_eq!(records_plain.len(), 1);
@@ -1767,6 +1795,7 @@ fn emit_multipolygon_empty_outer() {
         &mut records,
         &mut emit_scratch,
         &mut simp_scratch,
+        false,
     );
 
     assert_eq!(count, 0);
@@ -1805,6 +1834,7 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
         &mut records,
         &mut emit_scratch,
         &mut simp_scratch,
+        false,
     );
 
     assert_eq!(count, 1);
@@ -1860,6 +1890,7 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
         &mut records,
         &mut emit_scratch,
         &mut simp_scratch,
+        false,
     );
 
     assert_eq!(usize::try_from(count).unwrap(), records.len());
@@ -1914,6 +1945,7 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         &mut outer_only,
         &mut emit_a,
         &mut simp_a,
+        false,
     );
     emit_multipolygon_feature(
         404,
@@ -1926,6 +1958,7 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         &mut with_bad_holes,
         &mut emit_b,
         &mut simp_b,
+        false,
     );
     assert_eq!(outer_only.len(), 1);
     assert_eq!(with_bad_holes.len(), 1);
@@ -1974,6 +2007,7 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         &mut z13_records,
         &mut emit_13,
         &mut simp_13,
+        false,
     );
     emit_multipolygon_feature(
         405,
@@ -1986,6 +2020,7 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         &mut z14_records,
         &mut emit_14,
         &mut simp_14,
+        false,
     );
     assert_eq!(z13_records.len(), 1);
     assert_eq!(z14_records.len(), 1);
@@ -2026,6 +2061,7 @@ fn emit_multipolygon_invalid_outer_rejected_below_z14_but_allowed_at_z14() {
         &mut z13_records,
         &mut emit_13,
         &mut simp_13,
+        false,
     );
     emit_multipolygon_feature(
         4051,
@@ -2038,6 +2074,7 @@ fn emit_multipolygon_invalid_outer_rejected_below_z14_but_allowed_at_z14() {
         &mut z14_records,
         &mut emit_14,
         &mut simp_14,
+        false,
     );
 
     assert!(
@@ -2075,6 +2112,7 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
         &mut records,
         &mut emit_scratch,
         &mut simp_scratch,
+        false,
     );
     assert_eq!(usize::try_from(count).unwrap(), records.len());
     assert!(!records.is_empty());
@@ -2201,6 +2239,12 @@ fn boundary_polygon_feature(osm_id: u64, ring: &[(i32, i32)]) -> (u8, Box<[u8]>)
     )
 }
 
+fn seam_reconcile_boundaries() -> Vec<bool> {
+    let mut v = vec![false; shortbread::Layer::count()];
+    v[shortbread::Layer::Boundaries as usize] = true;
+    v
+}
+
 /// Two adjacent boundary polygons at z5 (≤ BOUNDARY_NO_SIMP_MAX) sharing an edge.
 /// After reconciliation, shared edge vertices must be identical in both features.
 #[test]
@@ -2222,7 +2266,8 @@ fn seam_reconciliation_two_adjacent_boundaries() {
     };
 
     let metrics = SeamMetrics::new();
-    let encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &metrics);
+    let srl = seam_reconcile_boundaries();
+    let encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &srl, &metrics);
     assert_eq!(encoded.len(), 1);
 
     // Verify metrics fired.
@@ -2261,7 +2306,7 @@ fn seam_reconciliation_skipped_at_high_zoom() {
     };
 
     let metrics = SeamMetrics::new();
-    let _encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &metrics);
+    let _encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &[], &metrics);
     // No reconciliation should have happened.
     assert_eq!(metrics.tiles_touched.load(Ordering::Relaxed), 0);
     assert_eq!(metrics.chains_detected.load(Ordering::Relaxed), 0);
@@ -2288,7 +2333,7 @@ fn seam_reconciliation_cross_tile_continuity() {
     };
 
     let metrics = SeamMetrics::new();
-    let encoded = encode_tile_batch_mvt(&[tile_a, tile_b], 6, TileCompression::Gzip, &metrics);
+    let encoded = encode_tile_batch_mvt(&[tile_a, tile_b], 6, TileCompression::Gzip, &[], &metrics);
     // Both tiles should produce valid output (no panics, no empty results).
     assert_eq!(encoded.len(), 2, "both adjacent tiles should encode successfully");
 }
@@ -2307,7 +2352,8 @@ fn seam_reconciliation_single_ring_still_simplifies() {
     };
 
     let metrics = SeamMetrics::new();
-    let encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &metrics);
+    let srl = seam_reconcile_boundaries();
+    let encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &srl, &metrics);
     assert_eq!(encoded.len(), 1);
 
     // Should still have been touched (decoded + simplified).
@@ -2343,7 +2389,8 @@ fn seam_reconciliation_no_shared_edges_still_simplifies() {
     };
 
     let metrics = SeamMetrics::new();
-    let encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &metrics);
+    let srl = seam_reconcile_boundaries();
+    let encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &srl, &metrics);
     assert_eq!(encoded.len(), 1);
 
     assert_eq!(metrics.tiles_touched.load(Ordering::Relaxed), 1);
@@ -2377,7 +2424,7 @@ fn seam_reconciliation_non_boundary_unaffected() {
     };
 
     let metrics = SeamMetrics::new();
-    let _encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &metrics);
+    let _encoded = encode_tile_batch_mvt(&[tile], 6, TileCompression::Gzip, &[], &metrics);
     // Land layer should not trigger seam reconciliation.
     assert_eq!(metrics.tiles_touched.load(Ordering::Relaxed), 0);
 }

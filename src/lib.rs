@@ -32,6 +32,11 @@
 //!     tile_format: elivagar::TilePayloadFormat::Mvt,
 //!     tile_compression: elivagar::TileCompression::Gzip,
 //!     compress_sort_chunks: elivagar::sort::ChunkCompression::None,
+//!     seam_reconcile_layers: {
+//!         let mut m = [false; elivagar::shortbread::Layer::count()];
+//!         m[elivagar::shortbread::Layer::Boundaries as usize] = true;
+//!         m
+//!     },
 //! };
 //! elivagar::run(&config).expect("pipeline failed");
 //! ```
@@ -65,7 +70,7 @@ pub(crate) mod ocean;
 mod pipeline;
 pub mod pmtiles_writer;
 pub(crate) mod pois;
-pub(crate) mod shortbread;
+pub mod shortbread;
 pub mod sort;
 pub mod verify;
 pub(crate) mod way_index;

@@ -125,6 +125,11 @@ impl Layer {
         }
     }
 
+    /// Parse a layer name string (e.g. "water_polygons") into a Layer variant.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|l| l.name() == name)
+    }
+
     /// Total number of layers.
     pub const fn count() -> usize {
         Self::ALL.len()

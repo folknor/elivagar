@@ -108,10 +108,35 @@
     simplify remaining non-shared segments independently. Narrow scope allows
     visual validation on admin borders (the most visible seam source) without
     risking regressions across all layers.
-  - [ ] Phase 3 — all polygon layers: extend to landuse, land, water, sites, etc.
-    Mostly enabling the same code path for more layers, but adds cross-layer shared
-    edges (e.g. landuse polygon sharing an edge with a water polygon). Phase 2 only
-    handles intra-layer sharing.
+  - [ ] Phase 3A — intra-layer shared-edge for curated polygon layers at z≤8.
+    Expand tile-local chain+canonicalize to: WaterPolygons, Land.
+    Sites excluded (z14-only, no content at z≤8). Ocean excluded (separate
+    shapefile, not OSM topology — data-provenance risk).
+    Intra-layer only (no cross-layer canonicalization).
+    Implementation:
+    1. Add `--seam-reconcile-layers` CLI flag (comma-separated layer names,
+       default `boundaries`). Rollout flag for layer-by-layer benchmarking.
+    2. Rename `BOUNDARY_NO_SIMP_MAX` → `SEAM_RECONCILE_MAX_ZOOM`.
+    3. Generalize `reconcile_boundary_seams` → `reconcile_layer_seams` (takes
+       layer index parameter).
+    4. Extend PBF-phase full-res gate (`m.layer == Layer::Boundaries` at lines
+       2603, 2878) to all configured reconcile layers. **Highest-risk change** for
+       memory/runtime — add debug counter for features deferred from PBF
+       simplification per layer to quantify blast radius.
+    5. Assemble call site (~3444): loop over configured reconcile layers, call
+       `reconcile_layer_seams` per layer. Must run BEFORE merge_same_attr_geometries
+       for each target layer.
+    6. Per-layer metrics via fixed arrays (not map — hot path). Counters:
+       chains_detected, reconciled, skipped_incidence_gt2.
+       Invalid ring accounting split: decode_failed, ring_not_closed, ring_too_short.
+    7. Acceptance: shared-edge divergence rate before/after per layer (sampled tiles),
+       no ring-validity regressions, bounded runtime/RSS impact.
+    8. Keep z≤8 threshold initially, expand only if metrics stay flat.
+    Watch: WaterPolygons incidence>2 and ring-role edge cases (outer/inner touching,
+    enclaves) — skip-on-incidents!=2 may become a large no-op bucket.
+  - [ ] Phase 3B — cross-layer shared-edge canonicalization.
+    Only after Phase 3A metrics prove intra-layer improvement with bounded cost.
+    Requires careful provenance tracking (OSM-sourced vs shapefile-sourced edges).
   - Acceptance checks (all phases): no shared-edge divergence after simplification
     within a tolerance threshold, no ring-validity regressions, and no large
     planet-scale runtime/RSS regression.
