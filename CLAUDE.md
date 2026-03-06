@@ -34,7 +34,7 @@ Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install
 - `brokkr results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [--top N]` — query/compare benchmark results from SQLite. Use `--top 0` to show all hotpath functions. Use `--compare-last --command hotpath` to diff two most recent hotpath runs.
 - `brokkr clean` — remove tilegen_tmp and scratch files
 
-Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access). Bench runs record `meta.*` kv pairs (e.g. `meta.compress_sort_chunks`, `meta.tile_format`, `meta.locations_on_ways`) so runs with different flags are distinguishable.
+Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access). Bench runs record `meta.*` kv pairs (e.g. `meta.compress_sort_chunks`, `meta.tile_format`, `meta.locations_on_ways`) so runs with different flags are distinguishable. Bench and hotpath commands require a clean git tree (ignoring `*.md` and `.brokkr/results.db`); use `--force` to run anyway (results will not be stored).
 
 **NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath uses conflicting cargo feature flags (causes build conflicts). Always run sequentially.
 
