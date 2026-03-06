@@ -34,7 +34,7 @@ use pbfhogg::{BlockType, Element, ElementReader, MemberId, PrimitiveBlock};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// Pipeline error type. Stringly-typed because no caller inspects variants —
@@ -307,6 +307,57 @@ fn missing_ref_summary_lines(summary: MissingRefStats) -> [String; 6] {
     ]
 }
 
+/// Tracks deferred (unsimplified) vertex counts per layer during PBF processing.
+/// When a layer exceeds the vertex budget, deferral is auto-disabled for that layer.
+struct DeferralStats {
+    /// Total deferred vertices per layer (atomically updated from rayon threads).
+    vertices: [AtomicU64; shortbread::Layer::count()],
+    /// Per-layer disable flag — set when vertex budget is exceeded.
+    disabled: [AtomicBool; shortbread::Layer::count()],
+}
+
+/// Max deferred vertices per layer before auto-disabling deferral.
+/// ~50M vertices ≈ 400 MB of sort record data. Prevents catastrophic
+/// phase12 regressions on geometry-heavy layers (e.g. water_polygons on Norway).
+const DEFERRAL_VERTEX_BUDGET: u64 = 50_000_000;
+
+impl DeferralStats {
+    fn new() -> Self {
+        Self {
+            vertices: std::array::from_fn(|_| AtomicU64::new(0)),
+            disabled: std::array::from_fn(|_| AtomicBool::new(false)),
+        }
+    }
+
+    /// Record deferred vertices for a layer. Called from rayon threads.
+    fn record(&self, layer: u8, vertex_count: u64) {
+        self.vertices[layer as usize].fetch_add(vertex_count, Ordering::Relaxed);
+    }
+
+    /// Check all layers against the budget and disable any that exceed it.
+    /// Called periodically from the serial callback thread.
+    fn check_budgets(&self, seam_reconcile_layers: &[u8]) {
+        for (i, max_z) in seam_reconcile_layers.iter().enumerate() {
+            if *max_z > 0
+                && !self.disabled[i].load(Ordering::Relaxed)
+                && self.vertices[i].load(Ordering::Relaxed) > DEFERRAL_VERTEX_BUDGET
+            {
+                self.disabled[i].store(true, Ordering::Relaxed);
+                eprintln!(
+                    "  WARNING: seam deferral auto-disabled for layer {} (>{} deferred vertices)",
+                    shortbread::Layer::ALL[i].name(),
+                    DEFERRAL_VERTEX_BUDGET,
+                );
+            }
+        }
+    }
+
+    /// Check if deferral is disabled for a layer.
+    fn is_disabled(&self, layer: u8) -> bool {
+        self.disabled[layer as usize].load(Ordering::Relaxed)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct OversizeTile {
     tile_id: u64,
@@ -447,6 +498,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     let mut node_store_stats: Option<(u64, usize)> = None;
     let mut missing_ref_summary: Option<MissingRefStats> = None;
+    let mut deferral_stats_out: Option<std::sync::Arc<DeferralStats>> = None;
 
     let mut sort_writer = if matches!(skip, Some(SkipTo::Sort | SkipTo::Assemble)) {
         // Skip straight to later phases — reuse existing chunks on disk.
@@ -465,13 +517,14 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
-            let (mut sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks, rel_drop_rss, missing_refs) = phase_read_and_process(config)?;
+            let (mut sw, bounds_out, mask, ns_stats, way_hwm, rel_hwm, rel_blocks, rel_drop_rss, missing_refs, deferral_stats) = phase_read_and_process(config)?;
             node_store_stats = ns_stats;
             max_way_inflight_bytes = Some(way_hwm);
             max_rel_batch_bytes = Some(rel_hwm);
             relation_blocks_buffered = Some(rel_blocks);
             relation_blocks_drop_rss_kb = rel_drop_rss;
             missing_ref_summary = Some(missing_refs);
+            deferral_stats_out = Some(deferral_stats);
             phase12_elapsed = Some(phase12_start.elapsed());
             phase12_rss = peak_rss_kb();
             sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
@@ -616,6 +669,22 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if let Some(n) = sort_chunks {
         eprintln!("sort_chunks={n}");
     }
+    // Deferral stats: report per-layer deferred vertex counts.
+    if let Some(ref ds) = deferral_stats_out {
+        for (i, max_z) in config.seam_reconcile_layers.iter().enumerate() {
+            if *max_z > 0 {
+                let verts = ds.vertices[i].load(Ordering::Relaxed);
+                if verts > 0 {
+                    let disabled = ds.disabled[i].load(Ordering::Relaxed);
+                    eprintln!(
+                        "seam_deferred_vertices_{}={verts}{}",
+                        shortbread::Layer::ALL[i].name(),
+                        if disabled { " (auto-disabled)" } else { "" },
+                    );
+                }
+            }
+        }
+    }
     if let Some(kb) = phase12_rss {
         eprintln!("phase12_rss_kb={kb}");
     }
@@ -751,7 +820,7 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::unwrap_in_result, clippy::type_complexity)]
 #[hotpath::measure]
-fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize, usize, Option<u64>, MissingRefStats), PipelineError> {
+fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Option<(u64, usize)>, usize, usize, usize, Option<u64>, MissingRefStats, std::sync::Arc<DeferralStats>), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let sort_chunk_budget = if config.sort_chunk_size > 0 {
@@ -823,6 +892,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut features_emitted: u64 = 0;
     let mut node_store_stats: Option<(u64, usize)> = None;
     let missing_ref_stats = std::sync::Arc::new(MissingRefStatsAtomic::default());
+    let deferral_stats = std::sync::Arc::new(DeferralStats::new());
     let land_mask = std::sync::Arc::new(geometry::LandMask::new());
 
     // Track data extent for ocean shapefile filtering
@@ -955,6 +1025,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let lm_clone = std::sync::Arc::clone(&land_mask);
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
                     let missing_ref_stats_clone = std::sync::Arc::clone(&missing_ref_stats);
+                    let deferral_stats_clone = std::sync::Arc::clone(&deferral_stats);
                     let mz = min_z;
                     let xz = max_z;
                     let srl = config.seam_reconcile_layers;
@@ -977,6 +1048,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         let nr_ref: Option<&NodeStoreReader> = nr_clone.as_deref();
                         let lm_ref = &*lm_clone;
                         let mr_ref = &*missing_ref_stats_clone;
+                        let ds_ref = &*deferral_stats_clone;
                         // Byte-budgeted throttle: (count, estimated_bytes).
                         // Condvar wakes dispatcher when a task completes.
                         let inflight = std::sync::Mutex::new((0usize, 0usize));
@@ -1050,7 +1122,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                     let results: Vec<ProcessedWay> = raw_ways
                                         .into_par_iter()
                                         .map(|raw| process_raw_way(
-                                            &raw, nr_ref, lm_ref, mz, xz, &srl, mr_ref,
+                                            &raw, nr_ref, lm_ref, mz, xz, &srl, ds_ref, mr_ref,
                                         ))
                                         .collect();
                                     let _ = tx.send(results);
@@ -1070,10 +1142,13 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     // Runs concurrently with worker — main thread is free to forward blocks.
                     let mut wi = way_index.take().expect("way_index already taken");
                     let mut sw = sort_writer.take().expect("sort_writer already taken");
+                    let ds_drain = std::sync::Arc::clone(&deferral_stats);
+                    let srl_drain = config.seam_reconcile_layers;
                     drain_handle = Some(std::thread::spawn(move || {
                         let mut count: u64 = 0;
                         while let Ok(results) = rrx.recv() {
                             count += drain_processed_ways(results, &mut wi, &mut sw);
+                            ds_drain.check_budgets(&srl_drain);
                         }
                         (wi, sw, count)
                     }));
@@ -1137,7 +1212,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
                         rel_batch_bytes = 0;
                         features_emitted += flush_rel_batch(
-                            batch, min_z, max_z, &config.seam_reconcile_layers, &land_mask,
+                            batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
                             sort_writer.as_mut().expect("sort_writer not returned from drain"),
                         );
                     }
@@ -1153,7 +1228,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
 
     if !rel_batch.is_empty() {
         features_emitted += flush_rel_batch(
-            rel_batch, min_z, max_z, &config.seam_reconcile_layers, &land_mask,
+            rel_batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
             sort_writer.as_mut().expect("sort_writer not returned from drain"),
         );
     }
@@ -1207,6 +1282,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         relation_blocks_buffered,
         relation_blocks_drop_rss_kb,
         missing_ref_snapshot,
+        deferral_stats,
     ))
 }
 
@@ -1634,7 +1710,7 @@ fn drain_processed_ways(
 /// match tags, and run geometry processing (projection, simplification,
 /// clipping, MVT encoding).
 #[hotpath::measure]
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn process_raw_way(
     raw: &RawWay,
     node_reader: Option<&NodeStoreReader>,
@@ -1642,6 +1718,7 @@ fn process_raw_way(
     min_zoom: u8,
     max_zoom: u8,
     seam_reconcile_layers: &[u8],
+    deferral_stats: &DeferralStats,
     missing_ref_stats: &MissingRefStatsAtomic,
 ) -> ProcessedWay {
     // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
@@ -1774,6 +1851,7 @@ fn process_raw_way(
                                 &mut records,
                                 &mut scratch.polygon_emit,
                                 sr,
+                                Some(deferral_stats),
                             );
                         } else {
                             let shifted: Vec<Point> = merc
@@ -1790,6 +1868,7 @@ fn process_raw_way(
                                 &mut records,
                                 &mut scratch.polygon_emit,
                                 sr,
+                                Some(deferral_stats),
                             );
                         }
                     }
@@ -1944,6 +2023,7 @@ fn flush_rel_batch(
     min_zoom: u8,
     max_zoom: u8,
     seam_reconcile_layers: &[u8],
+    deferral_stats: &DeferralStats,
     land_mask: &geometry::LandMask,
     sort_writer: &mut SortWriter,
 ) -> u64 {
@@ -1968,7 +2048,7 @@ fn flush_rel_batch(
             |mut acc, rel| {
                 let before = acc.records.len();
                 process_prepared_relation_into(
-                    rel, min_zoom, max_zoom, seam_reconcile_layers, land_mask,
+                    rel, min_zoom, max_zoom, seam_reconcile_layers, deferral_stats, land_mask,
                     &mut acc.records,
                     &mut acc.point_emit,
                     &mut acc.line_emit,
@@ -2030,6 +2110,7 @@ fn process_prepared_relation_into(
     min_zoom: u8,
     max_zoom: u8,
     seam_reconcile_layers: &[u8],
+    deferral_stats: &DeferralStats,
     land_mask: &geometry::LandMask,
     records: &mut Vec<SortRecord>,
     point_emit: &mut PointEmitScratch,
@@ -2082,7 +2163,7 @@ fn process_prepared_relation_into(
                                 Some(&shared_vertex_keys),
                                 m,
                                 z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr,
+                                sr, Some(deferral_stats),
                             );
                         } else {
                             let outer_shifted: Vec<Point> = outer_unwrapped
@@ -2104,7 +2185,7 @@ fn process_prepared_relation_into(
                                 Some(&shared_vertex_keys),
                                 m,
                                 z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr,
+                                sr, Some(deferral_stats),
                             );
                         }
                     }
@@ -2503,7 +2584,16 @@ fn emit_polygon_feature(
     records: &mut Vec<SortRecord>,
     scratch: &mut PolygonEmitScratch,
     seam_max_zoom: u8,
+    deferral_stats: Option<&DeferralStats>,
 ) -> u64 {
+    // Auto-disable check: if deferral was killed for this layer, skip it.
+    let seam_max_zoom = if seam_max_zoom > 0
+        && deferral_stats.is_some_and(|d| d.is_disabled(m.layer as u8))
+    {
+        0
+    } else {
+        seam_max_zoom
+    };
     // Single-ring polygon (no holes)
     let mut count: u64 = 0;
     scratch.pinned_idxs.clear();
@@ -2621,6 +2711,10 @@ fn emit_polygon_feature(
                 break;
             }
             if z <= seam_max_zoom || z >= 14 {
+                if z <= seam_max_zoom
+                    && let Some(ds) = deferral_stats {
+                        ds.record(m.layer as u8, merc.len() as u64);
+                    }
                 run_for_zoom(z, merc);
             } else {
                 let tol = geometry::simplify_tolerance(z);
@@ -2690,6 +2784,7 @@ fn emit_multipolygon_feature(
     emit_scratch: &mut MultipolygonEmitScratch,
     simp_scratch: &mut geometry::SimplifyMultiScratch,
     seam_max_zoom: u8,
+    deferral_stats: Option<&DeferralStats>,
 ) -> u64 {
     let mut count: u64 = 0;
     let mut emit_for_zoom = |z: u8, simp_outer: &[Point], simp_inners: &[Vec<Point>]| {
@@ -2887,6 +2982,14 @@ fn emit_multipolygon_feature(
         }
     };
     let has_keys = preserve_vertex_keys.is_some_and(|k| !k.is_empty());
+    // Auto-disable check.
+    let seam_max_zoom = if seam_max_zoom > 0
+        && deferral_stats.is_some_and(|d| d.is_disabled(m.layer as u8))
+    {
+        0
+    } else {
+        seam_max_zoom
+    };
     if seam_max_zoom > 0 {
         // Seam-reconcile mode: single zoom loop.
         // z <= seam_max_zoom: emit full-res geometry (assemble-phase reconciliation + tile-coord DP).
@@ -2902,6 +3005,11 @@ fn emit_multipolygon_feature(
                 break;
             }
             if z <= seam_max_zoom || z >= 14 {
+                if z <= seam_max_zoom
+                    && let Some(ds) = deferral_stats {
+                        let verts = outer.len() as u64 + inners.iter().map(|r| r.len() as u64).sum::<u64>();
+                        ds.record(m.layer as u8, verts);
+                    }
                 emit_for_zoom(z, outer, inners);
             } else {
                 // z 9..13: DP simplification.

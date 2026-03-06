@@ -717,13 +717,13 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
     let mut scratch = PolygonEmitScratch::new();
     for shift in antimeridian_shifts_for_bbox(&bbox) {
         if shift == 0.0 {
-            let _ = emit_polygon_feature(7002, &coords, &[], &m, 1, 1, &mut records, &mut scratch, 0);
+            let _ = emit_polygon_feature(7002, &coords, &[], &m, 1, 1, &mut records, &mut scratch, 0, None);
         } else {
             let shifted: Vec<Point> = coords
                 .iter()
                 .map(|p| Point { x: p.x + shift, y: p.y })
                 .collect();
-            let _ = emit_polygon_feature(7002, &shifted, &[], &m, 1, 1, &mut records, &mut scratch, 0);
+            let _ = emit_polygon_feature(7002, &shifted, &[], &m, 1, 1, &mut records, &mut scratch, 0, None);
         }
     }
 
@@ -769,6 +769,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 &mut emit_scratch,
                 &mut simp_scratch,
                 0,
+                None,
             );
         } else {
             let outer_shifted: Vec<Point> = outer
@@ -787,6 +788,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 &mut emit_scratch,
                 &mut simp_scratch,
                 0,
+                None,
             );
         }
     }
@@ -1420,7 +1422,7 @@ fn emit_polygon_too_few_points() {
     ];
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    let count = emit_polygon_feature(201, &coords, &[], &m, 0, 0, &mut records, &mut scratch, 0);
+    let count = emit_polygon_feature(201, &coords, &[], &m, 0, 0, &mut records, &mut scratch, 0, None);
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -1437,7 +1439,7 @@ fn emit_polygon_decodes_correctly() {
     ];
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    emit_polygon_feature(200, &coords, &[], &m, 0, 0, &mut records, &mut scratch, 0);
+    emit_polygon_feature(200, &coords, &[], &m, 0, 0, &mut records, &mut scratch, 0, None);
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -1491,7 +1493,7 @@ fn emit_polygon_zoom_dependent_attrs() {
     // At z=0: only 1 attr ("kind", min_zoom=0)
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    emit_polygon_feature(300, &coords_z0, &[], &m_z0, 0, 0, &mut records, &mut scratch, 0);
+    emit_polygon_feature(300, &coords_z0, &[], &m_z0, 0, 0, &mut records, &mut scratch, 0, None);
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -1516,7 +1518,7 @@ fn emit_polygon_zoom_dependent_attrs() {
         Point { x: 0.500_00, y: 0.500_00 },
     ];
     records.clear();
-    emit_polygon_feature(300, &coords_z14, &[], &m_z14, 14, 14, &mut records, &mut scratch, 0);
+    emit_polygon_feature(300, &coords_z14, &[], &m_z14, 14, 14, &mut records, &mut scratch, 0, None);
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -1540,7 +1542,7 @@ fn emit_polygon_skips_self_intersecting_ring_below_z14() {
 
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    let count = emit_polygon_feature(500, &coords, &[], &m, 0, 0, &mut records, &mut scratch, 0);
+    let count = emit_polygon_feature(500, &coords, &[], &m, 0, 0, &mut records, &mut scratch, 0, None);
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -1573,6 +1575,7 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         &mut records_plain,
         &mut scratch_plain,
         0,
+        None,
     );
     emit_polygon_feature(
         900,
@@ -1584,6 +1587,7 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         &mut records_pinned,
         &mut scratch_pinned,
         0,
+        None,
     );
 
     assert_eq!(records_plain.len(), 1);
@@ -1633,6 +1637,7 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         &mut emit_plain,
         &mut simp_plain,
         0,
+        None,
     );
     emit_multipolygon_feature(
         990,
@@ -1646,6 +1651,7 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         &mut emit_pinned,
         &mut simp_pinned,
         0,
+        None,
     );
 
     assert_eq!(records_plain.len(), 1);
@@ -1733,6 +1739,7 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         &mut emit_plain,
         &mut simp_plain,
         0,
+        None,
     );
     emit_multipolygon_feature(
         991,
@@ -1746,6 +1753,7 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         &mut emit_pinned,
         &mut simp_pinned,
         0,
+        None,
     );
 
     assert_eq!(records_plain.len(), 1);
@@ -1796,6 +1804,7 @@ fn emit_multipolygon_empty_outer() {
         &mut emit_scratch,
         &mut simp_scratch,
         0,
+        None,
     );
 
     assert_eq!(count, 0);
@@ -1835,6 +1844,7 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
         &mut emit_scratch,
         &mut simp_scratch,
         0,
+        None,
     );
 
     assert_eq!(count, 1);
@@ -1891,6 +1901,7 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
         &mut emit_scratch,
         &mut simp_scratch,
         0,
+        None,
     );
 
     assert_eq!(usize::try_from(count).unwrap(), records.len());
@@ -1946,6 +1957,7 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         &mut emit_a,
         &mut simp_a,
         0,
+        None,
     );
     emit_multipolygon_feature(
         404,
@@ -1959,6 +1971,7 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         &mut emit_b,
         &mut simp_b,
         0,
+        None,
     );
     assert_eq!(outer_only.len(), 1);
     assert_eq!(with_bad_holes.len(), 1);
@@ -2008,6 +2021,7 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         &mut emit_13,
         &mut simp_13,
         0,
+        None,
     );
     emit_multipolygon_feature(
         405,
@@ -2021,6 +2035,7 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         &mut emit_14,
         &mut simp_14,
         0,
+        None,
     );
     assert_eq!(z13_records.len(), 1);
     assert_eq!(z14_records.len(), 1);
@@ -2062,6 +2077,7 @@ fn emit_multipolygon_invalid_outer_rejected_below_z14_but_allowed_at_z14() {
         &mut emit_13,
         &mut simp_13,
         0,
+        None,
     );
     emit_multipolygon_feature(
         4051,
@@ -2075,6 +2091,7 @@ fn emit_multipolygon_invalid_outer_rejected_below_z14_but_allowed_at_z14() {
         &mut emit_14,
         &mut simp_14,
         0,
+        None,
     );
 
     assert!(
@@ -2113,6 +2130,7 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
         &mut emit_scratch,
         &mut simp_scratch,
         0,
+        None,
     );
     assert_eq!(usize::try_from(count).unwrap(), records.len());
     assert!(!records.is_empty());
