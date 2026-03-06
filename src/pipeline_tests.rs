@@ -232,6 +232,25 @@ fn invalid_merc_ring_detected_pre_quantization() {
 }
 
 #[test]
+fn interior_tile_ring_buffer_matches_buffer_fraction() {
+    // INTERIOR_TILE_RING must use the same buffer as BUFFER_FRACTION expressed
+    // in extent units: 8 rendered pixels × 16 extent units/pixel = 128.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let expected_buf = (crate::geometry::BUFFER_FRACTION * crate::geometry::EXTENT) as i32;
+    assert_eq!(expected_buf, 128);
+
+    let extent = crate::geometry::EXTENT as i32;
+    let expected: [(i32, i32); 5] = [
+        (-expected_buf, -expected_buf),
+        (extent + expected_buf, -expected_buf),
+        (extent + expected_buf, extent + expected_buf),
+        (-expected_buf, extent + expected_buf),
+        (-expected_buf, -expected_buf),
+    ];
+    assert_eq!(INTERIOR_TILE_RING, expected);
+}
+
+#[test]
 fn pre_quantization_ring_accepts_collinear_segments() {
     let ring = vec![
         Point { x: 0.1, y: 0.1 },

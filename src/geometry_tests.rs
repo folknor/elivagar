@@ -895,3 +895,37 @@ fn multi_simplify_outer_vertex_count_non_increasing() {
     // At z14, should have original 5 vertices (no simplification at z14)
     assert_eq!(vertex_counts[0], (14, 5));
 }
+
+// ---------------------------------------------------------------------------
+// Buffer constant regression tests (tile seam fix 2026-03-06)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn buffer_fraction_is_8_rendered_pixels() {
+    // BUFFER_FRACTION must be 8 rendered pixels / 256 pixels per tile = 0.03125.
+    // A previous bug had 8.0 / 4096.0 (= 0.001953125), which is 8 *extent units*
+    // — only 0.5 rendered pixels — causing visible tile seams everywhere.
+    assert_eq!(BUFFER_FRACTION, 8.0 / 256.0);
+    assert_eq!(BUFFER_FRACTION, 0.03125);
+}
+
+#[test]
+fn buffer_fraction_produces_128_extent_unit_buffer() {
+    // 8 rendered pixels × 16 extent units per pixel = 128 extent units of buffer.
+    // This is the standard MVT buffer size used by Planetiler, Tippecanoe, etc.
+    let buffer_extent_units = BUFFER_FRACTION * EXTENT;
+    assert_eq!(buffer_extent_units, 128.0);
+}
+
+#[test]
+fn clip_rect_for_tile_extends_by_buffer() {
+    // At z=1, each tile spans 0.5 in Mercator space.
+    // Buffer = BUFFER_FRACTION / 2^1 = 0.03125 / 2 = 0.015625.
+    let clip = ClipRect::for_tile(0, 0, 1, BUFFER_FRACTION);
+    let buf = BUFFER_FRACTION / 2.0;
+    let eps = 1e-12;
+    assert!((clip.min_x - (-buf)).abs() < eps);
+    assert!((clip.min_y - (-buf)).abs() < eps);
+    assert!((clip.max_x - (0.5 + buf)).abs() < eps);
+    assert!((clip.max_y - (0.5 + buf)).abs() < eps);
+}
