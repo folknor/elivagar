@@ -108,32 +108,30 @@
     simplify remaining non-shared segments independently. Narrow scope allows
     visual validation on admin borders (the most visible seam source) without
     risking regressions across all layers.
-  - [ ] Phase 3A — intra-layer shared-edge for curated polygon layers at z≤8.
-    Expand tile-local chain+canonicalize to: WaterPolygons, Land.
-    Sites excluded (z14-only, no content at z≤8). Ocean excluded (separate
-    shapefile, not OSM topology — data-provenance risk).
-    Intra-layer only (no cross-layer canonicalization).
-    Implementation:
-    1. Add `--seam-reconcile-layers` CLI flag (comma-separated layer names,
-       default `boundaries`). Rollout flag for layer-by-layer benchmarking.
-    2. Rename `BOUNDARY_NO_SIMP_MAX` → `SEAM_RECONCILE_MAX_ZOOM`.
-    3. Generalize `reconcile_boundary_seams` → `reconcile_layer_seams` (takes
-       layer index parameter).
-    4. Extend PBF-phase full-res gate (`m.layer == Layer::Boundaries` at lines
-       2603, 2878) to all configured reconcile layers. **Highest-risk change** for
-       memory/runtime — add debug counter for features deferred from PBF
-       simplification per layer to quantify blast radius.
-    5. Assemble call site (~3444): loop over configured reconcile layers, call
-       `reconcile_layer_seams` per layer. Must run BEFORE merge_same_attr_geometries
-       for each target layer.
-    6. Per-layer metrics via fixed arrays (not map — hot path). Counters:
-       chains_detected, reconciled, skipped_incidence_gt2.
-       Invalid ring accounting split: decode_failed, ring_not_closed, ring_too_short.
-    7. Acceptance: shared-edge divergence rate before/after per layer (sampled tiles),
-       no ring-validity regressions, bounded runtime/RSS impact.
-    8. Keep z≤8 threshold initially, expand only if metrics stay flat.
-    Watch: WaterPolygons incidence>2 and ring-role edge cases (outer/inner touching,
-    enclaves) — skip-on-incidents!=2 may become a large no-op bucket.
+  - [x] Phase 3A — intra-layer shared-edge for curated polygon layers at z≤8.
+    Implementation complete (commits `3e0194d`–`eff9fb2`):
+    1. [x] `--seam-reconcile-layers` CLI flag with per-layer zoom caps (`layer:maxzoom`).
+       Default: `boundaries` (maxzoom 8). Example: `--seam-reconcile-layers boundaries,water_polygons:5`.
+    2. [x] Per-layer zoom caps replace global `SEAM_RECONCILE_MAX_ZOOM` constant.
+       Config type: `[u8; 26]` where 0=disabled, N=max zoom for full-res deferral.
+    3. [x] Generalized PBF-phase full-res gate and assemble reconciliation to all
+       configured layers.
+    4. [x] DeferralStats guardrail: AtomicU64 per-layer vertex counters with
+       auto-disable at 50M vertices (DEFERRAL_VERTEX_BUDGET). Prevents catastrophic
+       regressions on geometry-heavy layers.
+    **Benchmark findings** (Norway 1.3 GB PBF, plantasjen):
+    - `water_polygons:8` causes 3.3x phase12 regression (28s → 120s). Root cause:
+      full-res deferral of complex coastline geometry (ways with thousands of vertices).
+      The reconciliation itself is cheap (~18ms for 455 chains); all cost is in
+      serializing uncompressed geometry into sort records during PBF phase.
+    - `water_polygons:5` still causes 2x regression. Even conservative zoom caps
+      are insufficient for geometry-heavy layers.
+    - `boundaries:8` (default) has negligible impact — boundary polygons are
+      vertex-light compared to coastline geometry.
+    **Conclusion**: water_polygons full-res deferral is not viable with the current
+    architecture. The DeferralStats guardrail provides safety, but the real fix
+    requires an algorithmic change (e.g. simplify-then-reconcile instead of
+    defer-full-res-then-reconcile). Keeping `boundaries:8` as default.
   - [ ] Phase 3B — cross-layer shared-edge canonicalization.
     Only after Phase 3A metrics prove intra-layer improvement with bounded cost.
     Requires careful provenance tracking (OSM-sourced vs shapefile-sourced edges).
