@@ -3,6 +3,7 @@
 // All operations work in Mercator [0,1] coordinate space unless stated otherwise.
 // Pure Rust aside from smallvec for inline small-vec returns.
 
+use rustc_hash::FxHashMap;
 #[cfg(test)]
 use smallvec::SmallVec;
 use std::f64::consts::PI;
@@ -1594,6 +1595,335 @@ impl LandMask {
             .iter()
             .map(|b| b.load(Ordering::Relaxed).count_ones())
             .sum()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared edge chain detection
+// ---------------------------------------------------------------------------
+
+/// A reference to where a shared chain appears within a specific ring.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainRef {
+    /// Index into the input `rings` slice.
+    pub ring_idx: usize,
+    /// Start vertex index within the ring (inclusive).
+    pub start: usize,
+    /// Number of vertices in this chain segment within the ring.
+    pub len: usize,
+    /// True if this ring traverses the chain in the reverse direction
+    /// relative to the canonical vertex order.
+    pub reversed: bool,
+}
+
+/// A contiguous sequence of edges shared between two or more polygon rings.
+#[derive(Clone, Debug)]
+pub struct SharedChain {
+    /// The canonical vertex sequence (in the direction of the first incident ring).
+    pub vertices: Vec<(i32, i32)>,
+    /// Which rings contain this chain and where.
+    pub incidents: Vec<ChainRef>,
+}
+
+/// An undirected edge key: `(min_point, max_point)` for hashing.
+type EdgeKey = ((i32, i32), (i32, i32));
+
+fn edge_key(a: (i32, i32), b: (i32, i32)) -> EdgeKey {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// Per-edge record: which ring and which edge index within that ring.
+#[derive(Clone, Copy)]
+struct EdgeHit {
+    ring_idx: usize,
+    edge_idx: usize,
+}
+
+/// Build edge map and shared-edge lookup from polygon rings.
+///
+/// Returns `shared_edges`: maps `(ring_idx, edge_idx)` to the list of
+/// `EdgeHit`s from *other* rings that share the same undirected edge.
+fn build_shared_edge_map(
+    rings: &[Vec<(i32, i32)>],
+) -> FxHashMap<(usize, usize), Vec<EdgeHit>> {
+    let mut edge_map: FxHashMap<EdgeKey, Vec<EdgeHit>> = FxHashMap::default();
+
+    for (ring_idx, ring) in rings.iter().enumerate() {
+        if ring.len() < 2 {
+            continue;
+        }
+        for i in 0..(ring.len() - 1) {
+            let (a, b) = (ring[i], ring[i + 1]);
+            if a == b {
+                continue;
+            }
+            edge_map
+                .entry(edge_key(a, b))
+                .or_default()
+                .push(EdgeHit { ring_idx, edge_idx: i });
+        }
+    }
+
+    let mut shared: FxHashMap<(usize, usize), Vec<EdgeHit>> = FxHashMap::default();
+    for hits in edge_map.values() {
+        if hits.len() < 2 {
+            continue;
+        }
+        let first = hits[0].ring_idx;
+        if !hits.iter().any(|h| h.ring_idx != first) {
+            continue;
+        }
+        for hit in hits {
+            shared
+                .entry((hit.ring_idx, hit.edge_idx))
+                .or_default()
+                .extend(hits.iter().filter(|h| h.ring_idx != hit.ring_idx).copied());
+        }
+    }
+    shared
+}
+
+/// Grow a chain from a seed edge in `ring_a` paired with `partner_edge` in `ring_b`.
+///
+/// Walks forward in ring A and correspondingly in ring B (forward or backward
+/// depending on relative winding), extending as long as consecutive edges
+/// in both rings match the same undirected edge.
+#[allow(clippy::too_many_arguments)]
+fn grow_chain(
+    rings: &[Vec<(i32, i32)>],
+    shared_edges: &FxHashMap<(usize, usize), Vec<EdgeHit>>,
+    visited: &mut FxHashMap<(usize, usize), bool>,
+    ring_a_idx: usize,
+    seed_edge: usize,
+    ring_b_idx: usize,
+    partner_edge: usize,
+) -> SharedChain {
+    let ring_a = &rings[ring_a_idx];
+    let ring_b = &rings[ring_b_idx];
+    let n_a = ring_a.len() - 1;
+    let n_b = ring_b.len() - 1;
+
+    // Determine relative direction: opposite winding means A→B matches B←A.
+    let opposite_dir = ring_a[seed_edge] == ring_b[partner_edge + 1]
+        && ring_a[seed_edge + 1] == ring_b[partner_edge];
+
+    let mut edges_a: Vec<usize> = vec![seed_edge];
+    let mut edges_b: Vec<usize> = vec![partner_edge];
+
+    // Extend forward.
+    loop {
+        let last_a = *edges_a.last().expect("non-empty");
+        let last_b = *edges_b.last().expect("non-empty");
+        let next_a = (last_a + 1) % n_a;
+        let next_b = if opposite_dir {
+            (last_b + n_b - 1) % n_b
+        } else {
+            (last_b + 1) % n_b
+        };
+        if next_a == seed_edge {
+            break; // full loop
+        }
+        // Stop if either next edge was already consumed by a prior chain
+        // (happens when a shared boundary wraps around a ring's start/end seam
+        // and both fragments are grown from separate seeds).
+        if visited.contains_key(&(ring_a_idx, next_a))
+            || visited.contains_key(&(ring_b_idx, next_b))
+        {
+            break;
+        }
+        if !shared_edges.contains_key(&(ring_a_idx, next_a))
+            || !shared_edges.contains_key(&(ring_b_idx, next_b))
+        {
+            break;
+        }
+        let ea = edge_key(ring_a[next_a], ring_a[next_a + 1]);
+        let eb = edge_key(ring_b[next_b], ring_b[(next_b + 1) % ring_b.len()]);
+        if ea != eb {
+            break;
+        }
+        edges_a.push(next_a);
+        edges_b.push(next_b);
+    }
+
+    // Mark visited.
+    for &ei in &edges_a {
+        visited.insert((ring_a_idx, ei), true);
+    }
+    for &ei in &edges_b {
+        visited.insert((ring_b_idx, ei), true);
+    }
+
+    // Build canonical vertex sequence from ring A.
+    let first = edges_a[0];
+    let mut vertices: Vec<(i32, i32)> = Vec::with_capacity(edges_a.len() + 1);
+    vertices.push(ring_a[first]);
+    for &ei in &edges_a {
+        vertices.push(ring_a[(ei + 1) % ring_a.len()]);
+    }
+
+    // Debug: verify vertices match ring A.
+    debug_assert!(
+        vertices.iter().enumerate().all(|(i, &v)| v == ring_a[(first + i) % ring_a.len()]),
+        "chain vertices do not match ring A"
+    );
+
+    let b_start = if opposite_dir {
+        *edges_b.last().expect("non-empty")
+    } else {
+        edges_b[0]
+    };
+
+    SharedChain {
+        vertices,
+        incidents: vec![
+            ChainRef { ring_idx: ring_a_idx, start: first, len: edges_a.len() + 1, reversed: false },
+            ChainRef { ring_idx: ring_b_idx, start: b_start, len: edges_a.len() + 1, reversed: opposite_dir },
+        ],
+    }
+}
+
+/// Detect contiguous shared edge chains across polygon rings.
+///
+/// Takes decoded polygon rings in tile extent coordinates `(i32, i32)`.
+/// Rings are expected to be closed (first == last vertex), but the function
+/// tolerates unclosed rings by treating them as open polylines.
+///
+/// Returns shared chains sorted by (first incident ring_idx, start index)
+/// for deterministic output.
+pub fn detect_shared_chains(rings: &[Vec<(i32, i32)>]) -> Vec<SharedChain> {
+    let shared_edges = build_shared_edge_map(rings);
+    if shared_edges.is_empty() {
+        return Vec::new();
+    }
+
+    let mut visited: FxHashMap<(usize, usize), bool> = FxHashMap::default();
+    let mut chains: Vec<SharedChain> = Vec::new();
+
+    // Sorted seeds for determinism.
+    let mut seeds: Vec<(usize, usize)> = shared_edges.keys().copied().collect();
+    seeds.sort();
+
+    for &(ring_idx, edge_idx) in &seeds {
+        if visited.contains_key(&(ring_idx, edge_idx)) {
+            continue;
+        }
+        let Some(partners) = shared_edges.get(&(ring_idx, edge_idx)) else {
+            continue;
+        };
+        if rings[ring_idx].len() < 2 {
+            continue;
+        }
+
+        let mut partner_rings: Vec<usize> = partners.iter().map(|h| h.ring_idx).collect();
+        partner_rings.sort();
+        partner_rings.dedup();
+
+        for &partner_ring_idx in &partner_rings {
+            let Some(hit) = partners.iter().find(|h| h.ring_idx == partner_ring_idx) else {
+                continue;
+            };
+            if visited.contains_key(&(ring_idx, edge_idx))
+                && visited.contains_key(&(partner_ring_idx, hit.edge_idx))
+            {
+                continue;
+            }
+            if rings[partner_ring_idx].len() < 2 {
+                continue;
+            }
+
+            chains.push(grow_chain(
+                rings,
+                &shared_edges,
+                &mut visited,
+                ring_idx,
+                edge_idx,
+                partner_ring_idx,
+                hit.edge_idx,
+            ));
+        }
+    }
+
+    merge_seam_chains(&mut chains);
+
+    chains.sort_by(|a, b| {
+        let (a0, b0) = (&a.incidents[0], &b.incidents[0]);
+        a0.ring_idx.cmp(&b0.ring_idx).then(a0.start.cmp(&b0.start))
+    });
+    chains
+}
+
+/// Merge chain fragments that were split at a ring's start/end seam.
+///
+/// Two chains can be merged when they share the same ring pair (same two
+/// ring indices in their incidents) and one chain's last vertex equals the
+/// other chain's first vertex. This happens when a shared boundary crosses
+/// the arbitrary start/end point of a closed ring.
+fn merge_seam_chains(chains: &mut Vec<SharedChain>) {
+    // Build index: (ring_a_idx, ring_b_idx) → list of chain indices.
+    // Normalize the pair so ring_a < ring_b for consistent lookup.
+    let mut pair_map: FxHashMap<(usize, usize), Vec<usize>> = FxHashMap::default();
+    for (ci, chain) in chains.iter().enumerate() {
+        if chain.incidents.len() != 2 {
+            continue;
+        }
+        let (a, b) = (chain.incidents[0].ring_idx, chain.incidents[1].ring_idx);
+        let key = if a <= b { (a, b) } else { (b, a) };
+        pair_map.entry(key).or_default().push(ci);
+    }
+
+    let mut merged_into: Vec<Option<usize>> = vec![None; chains.len()];
+
+    for group in pair_map.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        // Try to merge pairs within this group.
+        // A chain's last vertex == another chain's first vertex means they connect.
+        for &ci in group {
+            if merged_into[ci].is_some() {
+                continue;
+            }
+            loop {
+                let tail = chains[ci].vertices.last().copied();
+                let Some(tail_v) = tail else { break };
+
+                // Find another chain in the group whose first vertex matches our tail.
+                let mut found = None;
+                for &cj in group {
+                    if cj == ci || merged_into[cj].is_some() {
+                        continue;
+                    }
+                    if chains[cj].vertices.first().copied() == Some(tail_v) {
+                        found = Some(cj);
+                        break;
+                    }
+                }
+                let Some(cj) = found else { break };
+
+                // Merge cj into ci: append cj's vertices (skip first, it's the shared point).
+                let suffix: Vec<(i32, i32)> = chains[cj].vertices[1..].to_vec();
+                chains[ci].vertices.extend(suffix);
+
+                // Update chain refs: total len grows.
+                let new_len = chains[ci].vertices.len();
+                for inc in &mut chains[ci].incidents {
+                    inc.len = new_len;
+                }
+
+                merged_into[cj] = Some(ci);
+            }
+        }
+    }
+
+    // Remove merged chains (iterate in reverse to preserve indices).
+    let mut to_remove: Vec<usize> = merged_into
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.map(|_| i))
+        .collect();
+    to_remove.sort_unstable_by(|a, b| b.cmp(a));
+    for idx in to_remove {
+        chains.swap_remove(idx);
     }
 }
 

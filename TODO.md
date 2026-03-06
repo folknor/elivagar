@@ -49,7 +49,7 @@
 
 ## Geometry correctness
 
-- [ ] Shared-edge simplification (adjacent polygons): independent simplification of polygons
+- Shared-edge simplification (adjacent polygons): independent simplification of polygons
   that share an edge can still produce slivers/gaps along shared boundaries
   (tippecanoe #105).
   Context: this is still a geometry-correctness issue (not just visual polish).
@@ -61,15 +61,35 @@
   simplification for (1) line features, (2) closed-way polygons, and
   (3) relation-derived multipolygons. This reduces catastrophic drift but does
   not guarantee edge-identical output between neighboring polygons.
-  Remaining work: topology-aware lockstep simplification across polygon groups:
-  detect shared edge chains, simplify each shared chain once, and reuse that
-  exact chain in all incident polygons before rebuilding rings.
-  Suggested scope split:
-  Phase A: boundary/admin polygons only (highest visibility, narrower schema).
-  Phase B: land/water polygons and general multipolygons.
-  Acceptance checks: no shared-edge divergence after simplification within a
-  tolerance threshold, no ring-validity regressions, and no large planet-scale
-  runtime/RSS regression.
+  - [ ] Phase 1 — shared chain detection: given a set of polygon rings in a tile,
+    find contiguous shared vertex sequences (not just shared points). Output:
+    `SharedChain { vertices, incidents: Vec<ChainRef> }` where each `ChainRef`
+    identifies (ring_index, start, end, reversed). Uses `Vec<ChainRef>` instead
+    of a fixed pair to handle >2 coincident rings (rare but possible with
+    duplicate/overlapping geometry). Testable in isolation with synthetic geometry,
+    no simplification changes yet.
+    Ordering constraint: must run BEFORE `merge_same_attr_geometries` in the
+    assemble phase, because that merge concatenates unrelated rings into one
+    `Vec<u32>`, destroying per-ring identity needed for chain provenance.
+    Function signature: `detect_shared_chains(rings: &[Vec<(i32, i32)>]) -> Vec<SharedChain>`
+    in geometry.rs. Pure function, no side effects.
+    Edge cases: ring wrap-around (chain crossing start/end), self-touching rings,
+    multiple disconnected chains per ring pair, three-way junctions (vertex where
+    3+ polygons meet — each adjacent pair gets its own chain terminating there).
+  - [ ] Phase 2 — boundary/admin polygons: wire chain detection into simplification
+    for `boundaries` and `boundary_labels` layers only. Only act on chains with
+    exactly 2 incidents (clean adjacency); skip >2 with a counter/metric.
+    Simplify each shared chain once, stitch canonical chains back into rings,
+    simplify remaining non-shared segments independently. Narrow scope allows
+    visual validation on admin borders (the most visible seam source) without
+    risking regressions across all layers.
+  - [ ] Phase 3 — all polygon layers: extend to landuse, land, water, sites, etc.
+    Mostly enabling the same code path for more layers, but adds cross-layer shared
+    edges (e.g. landuse polygon sharing an edge with a water polygon). Phase 2 only
+    handles intra-layer sharing.
+  - Acceptance checks (all phases): no shared-edge divergence after simplification
+    within a tolerance threshold, no ring-validity regressions, and no large
+    planet-scale runtime/RSS regression.
 
 ## Schema extensions (beyond Shortbread 1.0)
 

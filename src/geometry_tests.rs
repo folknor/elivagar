@@ -929,3 +929,181 @@ fn clip_rect_for_tile_extends_by_buffer() {
     assert!((clip.max_x - (0.5 + buf)).abs() < eps);
     assert!((clip.max_y - (0.5 + buf)).abs() < eps);
 }
+
+// ---------------------------------------------------------------------------
+// Shared chain detection tests
+// ---------------------------------------------------------------------------
+
+/// Two squares sharing one edge: A=[0,0]-[10,0]-[10,10]-[0,10]-[0,0] and
+/// B=[10,0]-[20,0]-[20,10]-[10,10]-[10,0]. Shared edge: (10,0)→(10,10) in A,
+/// (10,10)→(10,0) in B (opposite winding).
+#[test]
+fn shared_chain_two_adjacent_squares() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert_eq!(chains.len(), 1, "expected one shared chain");
+    let chain = &chains[0];
+    assert_eq!(chain.vertices.len(), 2, "single shared edge = 2 vertices");
+    assert_eq!(chain.incidents.len(), 2);
+    // One incident is ring 0, the other ring 1.
+    let ring_idxs: Vec<usize> = chain.incidents.iter().map(|c| c.ring_idx).collect();
+    assert!(ring_idxs.contains(&0));
+    assert!(ring_idxs.contains(&1));
+}
+
+/// Two squares sharing two consecutive edges (L-shape contact).
+/// A=[0,0]-[10,0]-[10,5]-[10,10]-[0,10]-[0,0]
+/// B=[10,0]-[20,0]-[20,10]-[10,10]-[10,5]-[10,0]
+/// Shared edges: (10,0)→(10,5) and (10,5)→(10,10) → one chain of 3 vertices.
+#[test]
+fn shared_chain_two_edges_form_one_chain() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 5), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 5), (10, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert_eq!(chains.len(), 1, "two consecutive shared edges = one chain");
+    assert_eq!(chains[0].vertices.len(), 3, "chain should have 3 vertices");
+}
+
+/// No shared edges between non-touching polygons.
+#[test]
+fn shared_chain_no_shared_edges() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(20, 0), (30, 0), (30, 10), (20, 10), (20, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert!(chains.is_empty());
+}
+
+/// Shared vertex but no shared edge — should return empty.
+#[test]
+fn shared_chain_shared_vertex_no_shared_edge() {
+    // Two triangles touching at a single point (10,10).
+    let ring_a = vec![(0, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 10), (20, 0), (20, 10), (10, 10)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert!(chains.is_empty(), "shared vertex alone should not produce a chain");
+}
+
+/// Three polygons meeting at a triple point. Each adjacent pair shares one edge.
+#[test]
+fn shared_chain_triple_junction() {
+    // Three triangles meeting at (5, 5):
+    // A: (0,0)-(10,0)-(5,5)-(0,0)
+    // B: (10,0)-(10,10)-(5,5)-(10,0)
+    // C: (0,0)-(5,5)-(0,10)-(0,0)  -- note: shares (0,0)-(5,5) with A, shares (5,5) with B
+    // But only A-B share the edge (10,0)-(5,5) and A-C share the edge (0,0)-(5,5).
+    let ring_a = vec![(0, 0), (10, 0), (5, 5), (0, 0)];
+    let ring_b = vec![(10, 0), (10, 10), (5, 5), (10, 0)];
+    let ring_c = vec![(0, 0), (5, 5), (0, 10), (0, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b, ring_c]);
+    // A-B share edge (10,0)-(5,5), A-C share edge (0,0)-(5,5)
+    assert_eq!(chains.len(), 2, "two pairs sharing one edge each");
+    for chain in &chains {
+        assert_eq!(chain.vertices.len(), 2);
+        assert_eq!(chain.incidents.len(), 2);
+    }
+}
+
+/// Single ring — no shared edges possible.
+#[test]
+fn shared_chain_single_ring() {
+    let ring = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let chains = detect_shared_chains(&[ring]);
+    assert!(chains.is_empty());
+}
+
+/// Empty input.
+#[test]
+fn shared_chain_empty_input() {
+    let chains = detect_shared_chains(&[]);
+    assert!(chains.is_empty());
+}
+
+/// Degenerate ring with < 2 points.
+#[test]
+fn shared_chain_degenerate_ring() {
+    let ring_a = vec![(0, 0)];
+    let ring_b = vec![(0, 0), (10, 0), (10, 10), (0, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert!(chains.is_empty());
+}
+
+/// Opposite winding: the chain should mark one incident as reversed.
+#[test]
+fn shared_chain_marks_reversed_incident() {
+    // A walks edge (10,0)→(10,10), B walks (10,10)→(10,0).
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert_eq!(chains.len(), 1);
+    let chain = &chains[0];
+    // One incident should be reversed, the other not.
+    let reversed_count = chain.incidents.iter().filter(|c| c.reversed).count();
+    assert_eq!(reversed_count, 1, "one of two incidents should be reversed");
+}
+
+/// Three or more rings sharing the same edge (coincident geometry).
+/// Should produce incidents with >2 entries or multiple chains.
+#[test]
+fn shared_chain_three_rings_same_edge() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    // Ring C is a duplicate of ring B (coincident geometry).
+    let ring_c = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b, ring_c]);
+    // Should detect shared edges between A-B and A-C (and possibly B-C).
+    assert!(!chains.is_empty(), "coincident geometry should produce chains");
+}
+
+/// Chain that wraps around the ring start/end point.
+/// Ring A: shared edges are the last edge (D→A) and the first edge (A→B),
+/// which are consecutive in the ring but cross the start/end seam.
+#[test]
+fn shared_chain_wrap_around_ring_seam() {
+    // Ring A: [A, B, C, D, A] where A=(0,0), B=(10,0), C=(10,10), D=(0,10)
+    // Ring B: [A, D, E, F, B, A] where E=(-10,10), F=(-10,0)
+    // Shared edges: D→A (edge 3 in ring A, edge 0 in B) and A→B (edge 0 in ring A, edge 4 in B).
+    // These are consecutive in ring A (wrapping from edge 3 to edge 0).
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(0, 0), (0, 10), (-10, 10), (-10, 0), (10, 0), (0, 0)];
+    // Ring B edges: 0:(0,0)→(0,10), 1:(0,10)→(-10,10), 2:(-10,10)→(-10,0), 3:(-10,0)→(10,0), 4:(10,0)→(0,0)
+    // B edge 0 matches A edge 3 reversed, B edge 4 matches A edge 0 reversed.
+    // In A: edges 3,0 are consecutive (wrapping). In B walking backward: 0→4, also consecutive.
+    // Ring B edges: 0:(0,0)→(0,10), 1:(0,10)→(-10,10), 2:(-10,10)→(-10,0), 3:(-10,0)→(10,0), 4:(10,0)→(0,0)
+    // B edge 0 matches A edge 3 reversed, B edge 4 matches A edge 0 reversed.
+    // Chain growth from seed (A edge 0) wraps forward: edge 0 → edge 1 (not shared, stops).
+    // But the chain also grows because seed ordering is deterministic: edge 0 of ring A
+    // is seeded first and grows. In ring A forward from edge 0: edge 1 is NOT shared,
+    // so chain is just edge 0. Then edge 3 of ring A seeds separately.
+    // Result: two single-edge chains covering the full shared boundary.
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    // Chain growth initially produces two fragments (edges 0 and 3 of ring A),
+    // but merge_seam_chains stitches them into one chain since one's tail
+    // connects to the other's head.
+    assert_eq!(chains.len(), 1, "seam fragments should be merged into one chain");
+    assert_eq!(chains[0].vertices.len(), 3, "two edges = three vertices");
+    assert_eq!(chains[0].incidents.len(), 2);
+}
+
+/// Chain that IS consecutive in both rings across the seam.
+#[test]
+fn shared_chain_consecutive_wrap_around() {
+    // Ring A: [P0, P1, P2, P3, P0] — a square
+    // Ring B shares the last two edges of A: P2→P3 and P3→P0.
+    // In ring B these are consecutive (but in reverse direction).
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    // Ring B: [P0, P3, P4, P5, P0] where P4=(-10,10), P5=(-10,0)
+    // Wait — that doesn't share P2→P3. Let me construct it properly.
+    // Ring A edges: 0:(0,0)→(10,0), 1:(10,0)→(10,10), 2:(10,10)→(0,10), 3:(0,10)→(0,0)
+    // Ring B should share edges 2 and 3 of ring A.
+    // Edge 2: (10,10)→(0,10) — B needs (0,10)→(10,10)
+    // Edge 3: (0,10)→(0,0) — B needs (0,0)→(0,10)
+    // Ring B: [(0,0), (0,10), (10,10), (20,10), (20,0), (0,0)]
+    // B edges: 0:(0,0)→(0,10), 1:(0,10)→(10,10), 2:(10,10)→(20,10), 3:(20,10)→(20,0), 4:(20,0)→(0,0)
+    // B edge 0 matches A edge 3 reversed, B edge 1 matches A edge 2 reversed.
+    // In A: edges 2,3 are consecutive. In B: edges 0,1 are consecutive. Should form one chain.
+    let ring_b = vec![(0, 0), (0, 10), (10, 10), (20, 10), (20, 0), (0, 0)];
+    let chains = detect_shared_chains(&[ring_a, ring_b]);
+    assert_eq!(chains.len(), 1, "consecutive shared edges in both rings should form one chain");
+    assert_eq!(chains[0].vertices.len(), 3, "two edges = three vertices");
+}
