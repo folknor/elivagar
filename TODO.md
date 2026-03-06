@@ -2,8 +2,24 @@
 
 ## Active priorities
 
-1. [ ] Scale validation: run Europe full pipeline (locations-on-ways path).
+1. [ ] Scale validation: run Europe full pipeline (locations-on-ways, defaults including boundaries:8).
+   Capture phase splits + seam metrics + deferred-vertex counts.
 2. [ ] Scale validation: run planet full pipeline when hardware is available.
+
+## Baselines (plantasjen, all locations-on-ways)
+
+| Dataset | Commit | Total | PBF | Ocean | Sort | Assemble | RSS | Output |
+|---------|--------|-------|-----|-------|------|----------|-----|--------|
+| Dataset | Commit | Total | PBF | Ocean | Sort | Assemble | RSS | Output |
+| Denmark 483 MB | `f52429b` | ~12.4s | 8s | 1.5s | 0.5s | 2.3s | 1.8 GB | 286 MB |
+| Germany 5.3 GB | `f52429b` | 114.7s | 83.8s | 1.5s | 0.08s | 28.6s | 7.7 GB | 2.7 GB |
+| Norway 1.3 GB | `8034c16` | ~28s | — | — | — | — | — | — |
+| North America 18.7 GB | `90ad2ef` | 462.6s | 283s | 15s | 0.5s | 164s | 19.4 GB | 12.4 GB |
+
+Norway detailed phase splits not captured (benchmarks were comparative, not absolute).
+Denmark numbers are approximate (multiple commits in range, no regression between them).
+North America is the `--locations-on-ways` baseline from the locations-on-ways work.
+Germany: 146M features, 228K tiles (226K unique), 558 sort chunks, no oversize warnings.
 
 ## Sort chunk compression investigation
 
@@ -133,11 +149,29 @@
     requires an algorithmic change (e.g. simplify-then-reconcile instead of
     defer-full-res-then-reconcile). Keeping `boundaries:8` as default.
   - [ ] Phase 3B — cross-layer shared-edge canonicalization.
-    Only after Phase 3A metrics prove intra-layer improvement with bounded cost.
+    **Deferred** until a clear win signal exists. Gate: visible seam incidence in
+    curated QA tiles that boundaries-only reconciliation cannot address.
+    Given water_polygons Phase 3A results, cross-layer canonicalization is not
+    justified without evidence of a concrete rendering defect.
     Requires careful provenance tracking (OSM-sourced vs shapefile-sourced edges).
   - Acceptance checks (all phases): no shared-edge divergence after simplification
     within a tolerance threshold, no ring-validity regressions, and no large
     planet-scale runtime/RSS regression.
+
+## Architecture research: simplify-first seam reconciliation
+
+Water_polygons full-res deferral is not viable (Phase 3A findings). The alternative
+architecture is simplify-then-reconcile: simplify independently during PBF phase
+(current behavior), then detect and fix divergent shared edges during assemble.
+
+This is a design problem, not a tuning problem. Before touching pipeline code:
+1. [ ] Write a design doc covering the reconciliation algorithm (edge snapping?
+   re-simplification of shared chains? vertex insertion?), data flow changes,
+   and expected cost model.
+2. [ ] Build a synthetic benchmark: generate N polygon pairs with known shared
+   edges, simplify independently, measure divergence, apply candidate fix,
+   measure cost. Validates the algorithm without running the full pipeline.
+3. [ ] Only then prototype in pipeline code.
 
 ## Schema extensions (beyond Shortbread 1.0)
 
