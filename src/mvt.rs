@@ -75,6 +75,21 @@ impl Hash for Value {
     }
 }
 
+/// Sort key for Value: groups by type discriminant, then by canonical value.
+/// Clusters same-type values together in the protobuf value table so gzip
+/// sees longer runs of similar byte patterns.
+fn value_sort_key(v: &Value) -> (u8, u64, &str) {
+    match v {
+        Value::String(s) => (0, 0, s.as_str()),
+        Value::Float(f) => (1, f.to_bits() as u64, ""),
+        Value::Double(d) => (2, d.to_bits(), ""),
+        Value::Int(i) => (3, *i as u64, ""),
+        Value::UInt(u) => (4, *u, ""),
+        Value::SInt(i) => (5, *i as u64, ""),
+        Value::Bool(b) => (6, u64::from(*b), ""),
+    }
+}
+
 pub struct Feature {
     pub id: Option<u64>,
     pub geom_type: GeomType,
@@ -90,6 +105,14 @@ pub struct EncodeScratch {
     val_buf: Vec<u8>,
     packed: Vec<u8>,
     tag_vals: Vec<u32>,
+    /// Sorted key permutation: sorted_keys[new_idx] = old_idx.
+    sorted_keys: Vec<u16>,
+    /// Inverse key map: key_remap[old_idx] = new_idx.
+    key_remap: Vec<u16>,
+    /// Sorted value permutation: sorted_vals[new_idx] = old_idx.
+    sorted_vals: Vec<u16>,
+    /// Inverse value map: val_remap[old_idx] = new_idx.
+    val_remap: Vec<u16>,
 }
 
 impl EncodeScratch {
@@ -100,6 +123,10 @@ impl EncodeScratch {
             val_buf: Vec::new(),
             packed: Vec::new(),
             tag_vals: Vec::new(),
+            sorted_keys: Vec::new(),
+            key_remap: Vec::new(),
+            sorted_vals: Vec::new(),
+            val_remap: Vec::new(),
         }
     }
 }
@@ -235,8 +262,31 @@ impl LayerBuilder {
         self.string_value_map.clear();
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn encode(&self, buf: &mut Vec<u8>, s: &mut EncodeScratch) {
         s.layer_buf.clear();
+
+        // Build sorted key permutation (alphabetical) and inverse remap.
+        s.sorted_keys.clear();
+        s.sorted_keys.extend(0..self.keys.len() as u16);
+        s.sorted_keys.sort_by(|&a, &b| self.keys[a as usize].cmp(&self.keys[b as usize]));
+        s.key_remap.clear();
+        s.key_remap.resize(self.keys.len(), 0);
+        for (new_idx, &old_idx) in s.sorted_keys.iter().enumerate() {
+            s.key_remap[old_idx as usize] = new_idx as u16;
+        }
+
+        // Build sorted value permutation (by type then canonical value) and inverse remap.
+        s.sorted_vals.clear();
+        s.sorted_vals.extend(0..self.values.len() as u16);
+        s.sorted_vals.sort_by(|&a, &b| {
+            value_sort_key(&self.values[a as usize]).cmp(&value_sort_key(&self.values[b as usize]))
+        });
+        s.val_remap.clear();
+        s.val_remap.resize(self.values.len(), 0);
+        for (new_idx, &old_idx) in s.sorted_vals.iter().enumerate() {
+            s.val_remap[old_idx as usize] = new_idx as u16;
+        }
 
         // field 15: version = 2
         encode_varint_field_always(&mut s.layer_buf, 15, 2);
@@ -245,7 +295,7 @@ impl LayerBuilder {
         // field 5: extent = 4096
         encode_varint_field_always(&mut s.layer_buf, 5, 4096);
 
-        // field 2: features
+        // field 2: features (tag indices remapped to sorted positions)
         for f in &self.features {
             s.feat_buf.clear();
             if let Some(id) = f.id {
@@ -253,11 +303,9 @@ impl LayerBuilder {
             }
             if !f.tags.is_empty() {
                 s.tag_vals.clear();
-                s.tag_vals.extend(
-                    f.tags
-                        .iter()
-                        .flat_map(|&(k, v)| [u32::from(k), u32::from(v)]),
-                );
+                s.tag_vals.extend(f.tags.iter().flat_map(|&(k, v)| {
+                    [u32::from(s.key_remap[k as usize]), u32::from(s.val_remap[v as usize])]
+                }));
                 encode_packed_uint32(&mut s.feat_buf, &mut s.packed, 2, &s.tag_vals);
             }
             encode_varint_field_always(&mut s.feat_buf, 3, f.geom_type as u64);
@@ -267,15 +315,15 @@ impl LayerBuilder {
             encode_bytes_field_always(&mut s.layer_buf, 2, &s.feat_buf);
         }
 
-        // field 3: keys
-        for k in &self.keys {
-            encode_bytes_field_always(&mut s.layer_buf, 3, k.as_bytes());
+        // field 3: keys (sorted alphabetically)
+        for &old_idx in &s.sorted_keys {
+            encode_bytes_field_always(&mut s.layer_buf, 3, self.keys[old_idx as usize].as_bytes());
         }
 
-        // field 4: values
-        for v in &self.values {
+        // field 4: values (sorted by type then value)
+        for &old_idx in &s.sorted_vals {
             s.val_buf.clear();
-            encode_value(&mut s.val_buf, v);
+            encode_value(&mut s.val_buf, &self.values[old_idx as usize]);
             encode_bytes_field_always(&mut s.layer_buf, 4, &s.val_buf);
         }
 
@@ -1547,5 +1595,73 @@ mod tests {
         // Secondary features' vecs should be reclaimed into pools
         assert_eq!(gp.len(), 2); // 2 secondaries reclaimed
         assert_eq!(tp.len(), 2);
+    }
+
+    #[test]
+    fn encode_sorts_keys_alphabetically() {
+        let mut layer = LayerBuilder::new("test");
+        // Insert keys in reverse alphabetical order.
+        let k_z = layer.intern_key("zoo");
+        let k_a = layer.intern_key("alpha");
+        let k_m = layer.intern_key("mid");
+        let v = layer.intern_value(Value::String("x".to_string()));
+        layer.add_feature(Feature {
+            id: None,
+            geom_type: GeomType::Point,
+            geometry: vec![command(1, 1), zigzag(10), zigzag(20)],
+            tags: vec![(k_z, v), (k_a, v), (k_m, v)],
+        });
+        let tile = encode_tile(&[&layer]);
+        let parsed = parse_fixture_tile(&tile).unwrap();
+        assert_eq!(parsed.layers[0].keys, vec!["alpha", "mid", "zoo"]);
+    }
+
+    #[test]
+    fn encode_sorts_values_by_type_then_content() {
+        let mut layer = LayerBuilder::new("test");
+        let k = layer.intern_key("k");
+        // Insert values in mixed order: int, string, string, int.
+        let v_i42 = layer.intern_value(Value::Int(42));
+        let v_sb = layer.intern_value(Value::String("banana".to_string()));
+        let v_sa = layer.intern_value(Value::String("apple".to_string()));
+        let v_i1 = layer.intern_value(Value::Int(1));
+
+        for v in [v_i42, v_sb, v_sa, v_i1] {
+            layer.add_feature(Feature {
+                id: None,
+                geom_type: GeomType::Point,
+                geometry: vec![command(1, 1), zigzag(10), zigzag(20)],
+                tags: vec![(k, v)],
+            });
+        }
+        let tile = encode_tile(&[&layer]);
+        let parsed = parse_fixture_tile(&tile).unwrap();
+        // Strings should come first (type 0), sorted alphabetically.
+        // The parser puts all values into string_values (non-strings as "").
+        assert_eq!(parsed.layers[0].string_values[0], "apple");
+        assert_eq!(parsed.layers[0].string_values[1], "banana");
+    }
+
+    #[test]
+    fn encode_remaps_tag_indices_after_sort() {
+        let mut layer = LayerBuilder::new("test");
+        // Keys inserted as "z", "a". After sort: "a"=0, "z"=1.
+        let k_z = layer.intern_key("z");
+        let k_a = layer.intern_key("a");
+        let v_x = layer.intern_value(Value::String("x".to_string()));
+        let v_y = layer.intern_value(Value::String("y".to_string()));
+        // Feature tags: z=y, a=x (using original indices).
+        layer.add_feature(Feature {
+            id: None,
+            geom_type: GeomType::Point,
+            geometry: vec![command(1, 1), zigzag(10), zigzag(20)],
+            tags: vec![(k_z, v_y), (k_a, v_x)],
+        });
+        let tile = encode_tile(&[&layer]);
+        let parsed = parse_fixture_tile(&tile).unwrap();
+        assert_eq!(parsed.layers[0].keys, vec!["a", "z"]);
+        assert_eq!(parsed.layers[0].string_values, vec!["x", "y"]);
+        // Tags should be remapped: a(0)=x(0), z(1)=y(1).
+        assert_eq!(parsed.layers[0].features[0].feature_tags, vec![1, 1, 0, 0]);
     }
 }
