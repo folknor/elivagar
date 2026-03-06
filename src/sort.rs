@@ -139,6 +139,8 @@ pub struct SortWriter {
     layer_bytes: [u64; 32],
     /// Per-layer-per-zoom record counts. Index: layer * 15 + zoom.
     layer_zoom_records: Box<[u64; 32 * 15]>,
+    /// Per-layer-per-zoom payload bytes. Index: layer * 15 + zoom.
+    layer_zoom_bytes: Box<[u64; 32 * 15]>,
 }
 
 impl SortWriter {
@@ -159,6 +161,7 @@ impl SortWriter {
             layer_records: [0; 32],
             layer_bytes: [0; 32],
             layer_zoom_records: Box::new([0; 32 * 15]),
+            layer_zoom_bytes: Box::new([0; 32 * 15]),
         })
     }
 
@@ -208,6 +211,7 @@ impl SortWriter {
             layer_records: [0; 32],
             layer_bytes: [0; 32],
             layer_zoom_records: Box::new([0; 32 * 15]),
+            layer_zoom_bytes: Box::new([0; 32 * 15]),
         })
     }
 
@@ -241,6 +245,11 @@ impl SortWriter {
         &self.layer_zoom_records
     }
 
+    /// Per-layer-per-zoom payload bytes. Index: `layer * 15 + zoom`.
+    pub fn layer_zoom_bytes(&self) -> &[u64; 32 * 15] {
+        &self.layer_zoom_bytes
+    }
+
     /// Add a record to the buffer. If the buffer exceeds `chunk_size_bytes`,
     /// the current buffer is sorted and flushed to a chunk file on disk.
     pub fn push(&mut self, record: SortRecord) -> io::Result<()> {
@@ -255,7 +264,9 @@ impl SortWriter {
             let tile_id = tile_id_from_key(record.key);
             let zoom = zoom_from_tile_id(tile_id) as usize;
             if zoom < 15 {
-                self.layer_zoom_records[layer * 15 + zoom] += 1;
+                let idx = layer * 15 + zoom;
+                self.layer_zoom_records[idx] += 1;
+                self.layer_zoom_bytes[idx] += data_len as u64;
             }
         }
         self.buffer.push(record);

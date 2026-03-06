@@ -324,6 +324,8 @@ struct Phase12Stats {
     layer_records: [u64; 32],
     layer_bytes: [u64; 32],
     layer_zoom_records: Box<[u64; 32 * 15]>,
+    layer_zoom_bytes: Box<[u64; 32 * 15]>,
+    fanout_stats: FanoutStats,
 }
 
 /// Tracks deferred (unsimplified) vertex counts per layer during PBF processing.
@@ -374,6 +376,137 @@ impl DeferralStats {
     /// Check if deferral is disabled for a layer.
     fn is_disabled(&self, layer: u8) -> bool {
         self.disabled[layer as usize].load(Ordering::Relaxed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fanout distribution stats — tiles touched per feature per (layer, zoom)
+// ---------------------------------------------------------------------------
+
+/// Number of log2 histogram buckets for tiles-touched distribution.
+/// Bucket 0: 1 tile, 1: 2, 2: 3-4, 3: 5-8, ..., 11: 1025+.
+const FANOUT_HIST_BUCKETS: usize = 12;
+
+/// Per-(layer, zoom) tiles-touched distribution. Accumulated sequentially
+/// (drain thread for ways, reduce for relations). Fully heap-allocated to
+/// avoid stack overflow on rayon threads (~2 MB default stack).
+struct FanoutStats {
+    /// Max tiles touched by any single feature. Index: layer * 15 + zoom.
+    max_tiles: Box<[u32; 32 * 15]>,
+    /// Total features that emitted at least one record. Index: layer * 15 + zoom.
+    feature_count: Box<[u64; 32 * 15]>,
+    /// Sum of tiles touched (for mean). Index: layer * 15 + zoom.
+    sum_tiles: Box<[u64; 32 * 15]>,
+    /// Log2 histogram. Index: (layer * 15 + zoom) * FANOUT_HIST_BUCKETS + bucket.
+    hist: Box<[u32; 32 * 15 * FANOUT_HIST_BUCKETS]>,
+}
+
+impl FanoutStats {
+    fn new() -> Self {
+        Self {
+            max_tiles: Box::new([0; 32 * 15]),
+            feature_count: Box::new([0; 32 * 15]),
+            sum_tiles: Box::new([0; 32 * 15]),
+            hist: Box::new([0; 32 * 15 * FANOUT_HIST_BUCKETS]),
+        }
+    }
+
+    /// Record that a single feature touched `tiles` tiles at (layer, zoom).
+    #[allow(clippy::cast_possible_truncation)]
+    fn record(&mut self, layer: usize, zoom: usize, tiles: u32) {
+        if layer >= 32 || zoom >= 15 || tiles == 0 {
+            return;
+        }
+        let idx = layer * 15 + zoom;
+        if tiles > self.max_tiles[idx] {
+            self.max_tiles[idx] = tiles;
+        }
+        self.feature_count[idx] += 1;
+        self.sum_tiles[idx] += u64::from(tiles);
+        // Log2 bucket: 0→0, 1→1, 2..3→2, 4..7→3, ...
+        let bucket = if tiles <= 2 {
+            (tiles - 1) as usize
+        } else {
+            // floor(log2(tiles)) + 1, capped at FANOUT_HIST_BUCKETS - 1
+            let b = (u32::BITS - (tiles - 1).leading_zeros()) as usize;
+            b.min(FANOUT_HIST_BUCKETS - 1)
+        };
+        self.hist[idx * FANOUT_HIST_BUCKETS + bucket] += 1;
+    }
+
+    /// Merge another FanoutStats into self.
+    fn merge(&mut self, other: &Self) {
+        for i in 0..(32 * 15) {
+            if other.max_tiles[i] > self.max_tiles[i] {
+                self.max_tiles[i] = other.max_tiles[i];
+            }
+            self.feature_count[i] += other.feature_count[i];
+            self.sum_tiles[i] += other.sum_tiles[i];
+        }
+        for i in 0..(32 * 15 * FANOUT_HIST_BUCKETS) {
+            self.hist[i] += other.hist[i];
+        }
+    }
+
+    /// Compute a percentile (0.0-1.0) from the histogram for a given (layer, zoom).
+    /// Returns the upper bound of the bucket containing the percentile,
+    /// capped at max_tiles to avoid reporting a percentile above the actual max.
+    fn percentile(&self, layer: usize, zoom: usize, p: f64) -> u32 {
+        let idx = layer * 15 + zoom;
+        let total = self.feature_count[idx];
+        if total == 0 {
+            return 0;
+        }
+        let max = self.max_tiles[idx];
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let target = (total as f64 * p).ceil() as u64;
+        let base = idx * FANOUT_HIST_BUCKETS;
+        let mut cumulative: u64 = 0;
+        for b in 0..FANOUT_HIST_BUCKETS {
+            cumulative += u64::from(self.hist[base + b]);
+            if cumulative >= target {
+                let upper = match b {
+                    0 => 1,
+                    1 => 2,
+                    _ if b >= FANOUT_HIST_BUCKETS - 1 => max,
+                    _ => 1u32 << b,
+                };
+                return upper.min(max);
+            }
+        }
+        max
+    }
+}
+
+/// Extract tiles-touched per (layer, zoom) from a set of sort records
+/// belonging to a single feature and record into FanoutStats.
+fn record_fanout_from_records(records: &[SortRecord], stats: &mut FanoutStats) {
+    if records.is_empty() {
+        return;
+    }
+    // Count records per (layer, zoom). Use a small inline array for the
+    // common case (few distinct layer×zoom pairs per feature).
+    // Format: (layer_zoom_idx, count).
+    let mut counts: SmallVec<[(u16, u32); 8]> = SmallVec::new();
+    for r in records {
+        let layer = sort::layer_from_key(r.key) as usize;
+        let tile_id = sort::tile_id_from_key(r.key);
+        let zoom = sort::zoom_from_tile_id(tile_id) as usize;
+        if layer >= 32 || zoom >= 15 {
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let key = (layer * 15 + zoom) as u16;
+        if let Some(entry) = counts.iter_mut().find(|e| e.0 == key) {
+            entry.1 += 1;
+        } else {
+            counts.push((key, 1));
+        }
+    }
+    for &(key, tiles) in &counts {
+        let layer = key as usize / 15;
+        let zoom = key as usize % 15;
+        stats.record(layer, zoom, tiles);
     }
 }
 
@@ -691,16 +824,39 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 let name = shortbread::Layer::ALL[i].name();
                 eprintln!("sort_layer_{name}_records={recs}");
                 eprintln!("sort_layer_{name}_bytes={bytes}");
-                // Per-zoom breakdown for this layer.
+                // Per-zoom breakdown for this layer (records and bytes).
                 let mut zoom_parts = Vec::new();
+                let mut zoom_byte_parts = Vec::new();
                 for z in 0..15u8 {
-                    let zr = s.layer_zoom_records[i * 15 + z as usize];
+                    let idx = i * 15 + z as usize;
+                    let zr = s.layer_zoom_records[idx];
+                    let zb = s.layer_zoom_bytes[idx];
                     if zr > 0 {
                         zoom_parts.push(format!("z{z}:{zr}"));
+                    }
+                    if zb > 0 {
+                        zoom_byte_parts.push(format!("z{z}:{zb}"));
                     }
                 }
                 if !zoom_parts.is_empty() {
                     eprintln!("sort_layer_{name}_zoom={}", zoom_parts.join(","));
+                }
+                if !zoom_byte_parts.is_empty() {
+                    eprintln!("sort_layer_{name}_zoom_bytes={}", zoom_byte_parts.join(","));
+                }
+                // Fanout tail stats: p50/p95/p99/max tiles_touched per feature.
+                let mut fanout_parts = Vec::new();
+                for z in 0..15u8 {
+                    let max = s.fanout_stats.max_tiles[i * 15 + z as usize];
+                    if max > 0 {
+                        let p50 = s.fanout_stats.percentile(i, z as usize, 0.50);
+                        let p95 = s.fanout_stats.percentile(i, z as usize, 0.95);
+                        let p99 = s.fanout_stats.percentile(i, z as usize, 0.99);
+                        fanout_parts.push(format!("z{z}:p50={p50}/p95={p95}/p99={p99}/max={max}"));
+                    }
+                }
+                if !fanout_parts.is_empty() {
+                    eprintln!("sort_layer_{name}_fanout={}", fanout_parts.join(","));
                 }
             }
         }
@@ -920,6 +1076,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut rel_count: u64 = 0;
     let mut features_emitted: u64 = 0;
     let mut node_store_stats: Option<(u64, usize)> = None;
+    let mut fanout_stats = FanoutStats::new();
     let missing_ref_stats = std::sync::Arc::new(MissingRefStatsAtomic::default());
     let deferral_stats = std::sync::Arc::new(DeferralStats::new());
     let land_mask = std::sync::Arc::new(geometry::LandMask::new());
@@ -948,7 +1105,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
     let mut block_tx: Option<std::sync::mpsc::SyncSender<PrimitiveBlock>> = None;
     let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
-    let mut drain_handle: Option<std::thread::JoinHandle<(WayIndex, SortWriter, u64)>> = None;
+    let mut drain_handle: Option<std::thread::JoinHandle<(WayIndex, SortWriter, u64, FanoutStats)>> = None;
 
     // Buffer relation blocks — processed after all PBF blocks are consumed so that
     // late way blocks (common in locations-on-ways PBFs) don't hit a finalized way_index.
@@ -1175,11 +1332,12 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let srl_drain = config.seam_reconcile_layers;
                     drain_handle = Some(std::thread::spawn(move || {
                         let mut count: u64 = 0;
+                        let mut fanout = FanoutStats::new();
                         while let Ok(results) = rrx.recv() {
-                            count += drain_processed_ways(results, &mut wi, &mut sw);
+                            count += drain_processed_ways(results, &mut wi, &mut sw, &mut fanout);
                             ds_drain.check_budgets(&srl_drain);
                         }
-                        (wi, sw, count)
+                        (wi, sw, count, fanout)
                     }));
 
                     block_tx = Some(btx);
@@ -1207,10 +1365,11 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             h.join().expect("worker thread panicked");
         }
         if let Some(h) = drain_handle.take() {
-            let (wi, sw, count) = h.join().expect("drain thread panicked");
+            let (wi, sw, count, way_fanout) = h.join().expect("drain thread panicked");
             way_index = Some(wi);
             sort_writer = Some(sw);
             features_emitted += count;
+            fanout_stats.merge(&way_fanout);
         }
     }
 
@@ -1243,6 +1402,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         features_emitted += flush_rel_batch(
                             batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
                             sort_writer.as_mut().expect("sort_writer not returned from drain"),
+                            &mut fanout_stats,
                         );
                         deferral_stats.check_budgets(&config.seam_reconcile_layers);
                     }
@@ -1260,6 +1420,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         features_emitted += flush_rel_batch(
             rel_batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
             sort_writer.as_mut().expect("sort_writer not returned from drain"),
+            &mut fanout_stats,
         );
         deferral_stats.check_budgets(&config.seam_reconcile_layers);
     }
@@ -1320,6 +1481,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         layer_records: *sw.layer_records(),
         layer_bytes: *sw.layer_bytes(),
         layer_zoom_records: Box::new(*sw.layer_zoom_records()),
+        layer_zoom_bytes: Box::new(*sw.layer_zoom_bytes()),
+        fanout_stats,
     };
     Ok((sw, data_bounds, land_mask, stats))
 }
@@ -1729,12 +1892,14 @@ fn drain_processed_ways(
     results: Vec<ProcessedWay>,
     way_index: &mut WayIndex,
     sort_writer: &mut SortWriter,
+    fanout: &mut FanoutStats,
 ) -> u64 {
     let mut count: u64 = 0;
     for pw in results {
         if !pw.coords_e7.is_empty() {
             way_index.put(pw.way_id, &pw.coords_e7);
         }
+        record_fanout_from_records(&pw.records, fanout);
         count += pw.records.len() as u64;
         // Panic: disk I/O failure is unrecoverable mid-pipeline.
         for record in pw.records {
@@ -2036,6 +2201,7 @@ struct RelAcc {
     multipolygon_emit: MultipolygonEmitScratch,
     simp_scratch: geometry::SimplifyMultiScratch,
     compression: sort::ChunkCompression,
+    fanout: FanoutStats,
 }
 
 impl RelAcc {
@@ -2056,6 +2222,7 @@ impl RelAcc {
 
 /// Process a batch of prepared relations in parallel, streaming outputs to chunk files.
 #[hotpath::measure]
+#[allow(clippy::too_many_arguments)]
 fn flush_rel_batch(
     batch: Vec<PreparedRelation>,
     min_zoom: u8,
@@ -2064,6 +2231,7 @@ fn flush_rel_batch(
     deferral_stats: &DeferralStats,
     land_mask: &geometry::LandMask,
     sort_writer: &mut SortWriter,
+    fanout_stats: &mut FanoutStats,
 ) -> u64 {
     use rayon::prelude::*;
 
@@ -2082,6 +2250,7 @@ fn flush_rel_batch(
                 multipolygon_emit: MultipolygonEmitScratch::new(),
                 simp_scratch: geometry::SimplifyMultiScratch::new(),
                 compression: chunk_compression,
+                fanout: FanoutStats::new(),
             },
             |mut acc, rel| {
                 let before = acc.records.len();
@@ -2093,6 +2262,8 @@ fn flush_rel_batch(
                     &mut acc.multipolygon_emit,
                     &mut acc.simp_scratch,
                 );
+                // Track fanout for this relation's records.
+                record_fanout_from_records(&acc.records[before..], &mut acc.fanout);
                 for r in &acc.records[before..] {
                     acc.bytes += r.data.len() + std::mem::size_of::<SortRecord>();
                 }
@@ -2112,16 +2283,19 @@ fn flush_rel_batch(
                 multipolygon_emit: MultipolygonEmitScratch::new(),
                 simp_scratch: geometry::SimplifyMultiScratch::new(),
                 compression: chunk_compression,
+                fanout: FanoutStats::new(),
             },
             |mut a, mut b| {
                 a.chunk_paths.extend(b.chunk_paths);
                 a.count += b.count;
                 a.records.append(&mut b.records);
                 a.bytes += b.bytes;
+                a.fanout.merge(&b.fanout);
                 a
             },
         );
 
+    fanout_stats.merge(&result.fanout);
     sort_writer.adopt_chunk_files(result.chunk_paths);
     let mut count = result.count;
     // Push remaining records (below chunk_size threshold) through sort_writer's

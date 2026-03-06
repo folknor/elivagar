@@ -12,14 +12,15 @@
 |---------|--------|-------|-----|-------|------|----------|-----|--------|
 | Dataset | Commit | Total | PBF | Ocean | Sort | Assemble | RSS | Output |
 | Denmark 483 MB | `f52429b` | ~12.4s | 8s | 1.5s | 0.5s | 2.3s | 1.8 GB | 286 MB |
-| Germany 5.3 GB | `f52429b` | 114.7s | 83.8s | 1.5s | 0.08s | 28.6s | 7.7 GB | 2.7 GB |
+| Germany 5.5 GB | `f52429b` | 114.7s | 83.8s | 1.5s | 0.08s | 28.6s | 7.7 GB | 2.7 GB |
 | Norway 1.3 GB | `8034c16` | ~28s | — | — | — | — | — | — |
 | North America 18.7 GB | `90ad2ef` | 462.6s | 283s | 15s | 0.5s | 164s | 19.4 GB | 12.4 GB |
 
 Norway detailed phase splits not captured (benchmarks were comparative, not absolute).
 Denmark numbers are approximate (multiple commits in range, no regression between them).
 North America is the `--locations-on-ways` baseline from the locations-on-ways work.
-Germany: 146M features, 228K tiles (226K unique), 558 sort chunks, no oversize warnings.
+Germany: 146M features, 228K tiles (226K unique), 547 sort chunks, no oversize warnings.
+NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2 GB sort bytes.
 
 ## Sort chunk compression investigation
 
@@ -62,18 +63,32 @@ Germany: 146M features, 228K tiles (226K unique), 558 sort chunks, no oversize w
   Top layers by sort bytes (NA): streets 12.1 GB, water_polygons 10.9 GB,
   land 9.3 GB, buildings 7.3 GB, water_lines 4.4 GB.
   Per-record weight: land 209 B, water_polygons 156 B, streets 76 B, buildings 82 B.
-  **Phase 1 — diagnostics** (prerequisite, no behavior changes):
-  - [ ] Per-layer zoom-span distribution: how many zoom levels does each feature span?
-  - [ ] Per-layer tile-touch distribution: how many tiles does each feature touch per zoom?
-  - [ ] Identify which layers × zoom ranges drive the superlinear growth.
-  **Phase 2 — layer/zoom fanout controls** (first behavioral change):
-  - Target low-zoom polygon-heavy layers (water_polygons, land).
-  - Options: tighter min_zoom per layer, zoom-dependent tile-touch caps,
-    subpixel thresholds tuned per geometry type.
-  **Phase 3 — polygon record weight reduction** (second):
-  - Representation compaction (smaller wire format for polygon geometry).
-  - Deferred geometry materialization for heavy polygon paths (compact refs in
-    phase12, late geometry decode in assemble).
+  **Phase 1 — diagnostics** (done, commits `81c4d6b`, `pending`):
+  - [x] Per-layer record count, bytes, and per-record weight.
+  - [x] Per-layer-per-zoom record and byte distribution.
+  - [x] Aggregate sort_records, sort_record_bytes, records_per_way.
+  - [x] Per-feature tiles_touched tail stats (p50/p95/p99/max per layer per zoom).
+  Full analysis in `notes/sort-fanout-analysis-2026-03-06.md`.
+  Key finding: superlinear growth concentrated in polygon layers (water_polygons,
+  land) due to geometric tile subdivision — one polygon × O(4^z) tiles × heavy
+  per-record geometry (156-209 B/rec). Streets/buildings scale linearly.
+  Tail stats (Denmark): p95 tiles_touched is low (1-4 for polygon layers),
+  amplification comes from the tail (max 205-2864). Cap would primarily affect
+  tail features, not median behavior.
+  **Phase 2 — layer/zoom fanout controls** (next):
+  - [ ] Tile-touch cap per feature per zoom, behind `--tile-touch-cap N` flag
+    (default off). If a feature would touch >N tiles at zoom z, skip it. Note:
+    dropping at zoom z can cause visible pop/flicker — overzoom continuity is not
+    guaranteed. Must validate with visual/parity samples on NA before any default.
+  - [ ] Zoom-dependent subpixel area threshold for polygon layers (flag-gated).
+    Quality tradeoff: eliminates small-but-visible features at mid-zoom.
+  **Phase 3 — polygon record weight reduction** (second, but soon):
+  - [ ] More aggressive DP tolerance policy for polygon layers at z8-z12.
+    Not a new simplification path — tighter tolerance tuning for existing
+    `for_each_zoom_simplified`. Expected 30-50% B/rec reduction at z8-z12.
+  - [ ] Compact polygon wire format (delta-encoded coords, smaller varint overhead).
+  - [ ] Deferred geometry materialization (compact refs in phase12, late clip in
+    assemble). Highest savings, largest effort, risk of assemble bottleneck.
   **Operational controls** (orthogonal, implement when needed):
   - Dynamic sort chunk flush threshold tied to RSS.
   - Back-pressure rayon via sort-buffer occupancy.
@@ -302,3 +317,4 @@ This is a design problem, not a tuning problem. Before touching pipeline code:
 - `notes/non-mercator-tiling.md`
 - `notes/wikidata-name-enrichment.md`
 - `notes/natural-earth-low-zoom.md`
+- `notes/sort-fanout-analysis-2026-03-06.md`
