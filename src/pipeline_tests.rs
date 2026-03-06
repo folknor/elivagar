@@ -2446,3 +2446,136 @@ fn seam_reconciliation_non_boundary_unaffected() {
     // Land layer should not trigger seam reconciliation.
     assert_eq!(metrics.tiles_touched.load(Ordering::Relaxed), 0);
 }
+
+// ---------------------------------------------------------------------------
+// DeferralStats guardrail tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deferral_stats_record_and_check_budgets() {
+    let ds = DeferralStats::new();
+    let layer = Layer::Boundaries as u8;
+    let mut srl = [0u8; shortbread::Layer::count()];
+    srl[layer as usize] = 8;
+
+    // Record below budget — should not disable.
+    ds.record(layer, 1000);
+    ds.check_budgets(&srl);
+    assert!(!ds.is_disabled(layer));
+    assert_eq!(ds.vertices[layer as usize].load(Ordering::Relaxed), 1000);
+
+    // Record to exceed budget — should disable.
+    ds.record(layer, DEFERRAL_VERTEX_BUDGET);
+    ds.check_budgets(&srl);
+    assert!(ds.is_disabled(layer));
+    assert_eq!(
+        ds.vertices[layer as usize].load(Ordering::Relaxed),
+        DEFERRAL_VERTEX_BUDGET + 1000,
+    );
+}
+
+#[test]
+fn deferral_stats_only_checks_enabled_layers() {
+    let ds = DeferralStats::new();
+    let layer = Layer::WaterPolygons as u8;
+    // Layer not in seam_reconcile_layers (max_zoom = 0).
+    let srl = [0u8; shortbread::Layer::count()];
+
+    ds.record(layer, DEFERRAL_VERTEX_BUDGET + 1);
+    ds.check_budgets(&srl);
+    // Should NOT disable — layer has max_zoom=0 in config.
+    assert!(!ds.is_disabled(layer));
+}
+
+#[test]
+fn disabled_layer_falls_back_to_simplified_path() {
+    // Build a polygon large enough to not be subpixel at z=0, with enough
+    // vertices that DP simplification reduces command count.
+    // Zigzag rectangle with small perturbations on top/bottom edges.
+    let mut coords = vec![
+        Point { x: 0.1, y: 0.2 },
+    ];
+    // Top edge with zigzag
+    for i in 1..15 {
+        let t = i as f64 / 15.0;
+        coords.push(Point {
+            x: 0.1 + t * 0.6,
+            y: 0.2 + 0.001 * if i % 2 == 0 { 1.0 } else { -1.0 },
+        });
+    }
+    coords.push(Point { x: 0.7, y: 0.2 });
+    coords.push(Point { x: 0.7, y: 0.8 });
+    coords.push(Point { x: 0.1, y: 0.8 });
+    coords.push(Point { x: 0.1, y: 0.2 }); // close
+
+    let m = test_layer_match(Layer::Boundaries, GeomExpect::Polygon);
+
+    // Emit at z=0 with seam_max_zoom=8 and deferral ACTIVE → full-res path.
+    let mut records_fullres = Vec::new();
+    let mut scratch_fullres = PolygonEmitScratch::new();
+    emit_polygon_feature(
+        100, &coords, &[], &m, 0, 0,
+        &mut records_fullres, &mut scratch_fullres, 8, None,
+    );
+
+    // Emit at z=0 with seam_max_zoom=8 but deferral DISABLED → simplified path.
+    let ds = DeferralStats::new();
+    ds.disabled[Layer::Boundaries as usize].store(true, Ordering::Relaxed);
+    let mut records_disabled = Vec::new();
+    let mut scratch_disabled = PolygonEmitScratch::new();
+    emit_polygon_feature(
+        100, &coords, &[], &m, 0, 0,
+        &mut records_disabled, &mut scratch_disabled, 8, Some(&ds),
+    );
+
+    // Emit at z=0 with seam_max_zoom=0 (no deferral at all) → simplified path.
+    let mut records_nodeferral = Vec::new();
+    let mut scratch_nodeferral = PolygonEmitScratch::new();
+    emit_polygon_feature(
+        100, &coords, &[], &m, 0, 0,
+        &mut records_nodeferral, &mut scratch_nodeferral, 0, None,
+    );
+
+    assert_eq!(records_fullres.len(), 1, "full-res should emit");
+    assert_eq!(records_disabled.len(), 1, "disabled should emit");
+    assert_eq!(records_nodeferral.len(), 1, "no-deferral should emit");
+
+    let (_, _, cmds_fullres) = decode_data_header(&records_fullres[0].data);
+    let (_, _, cmds_disabled) = decode_data_header(&records_disabled[0].data);
+    let (_, _, cmds_nodeferral) = decode_data_header(&records_nodeferral[0].data);
+
+    // Full-res should have more commands than simplified.
+    assert!(
+        cmds_fullres > cmds_disabled,
+        "full-res ({cmds_fullres}) should have more commands than disabled ({cmds_disabled})",
+    );
+    // Disabled and no-deferral should produce identical simplified output.
+    assert_eq!(
+        cmds_disabled, cmds_nodeferral,
+        "disabled ({cmds_disabled}) should match no-deferral ({cmds_nodeferral})",
+    );
+}
+
+#[test]
+fn deferral_records_vertex_count() {
+    let ds = DeferralStats::new();
+    let m = test_layer_match(Layer::Boundaries, GeomExpect::Polygon);
+    let coords = [
+        Point { x: 0.3, y: 0.3 },
+        Point { x: 0.7, y: 0.3 },
+        Point { x: 0.7, y: 0.7 },
+        Point { x: 0.3, y: 0.7 },
+        Point { x: 0.3, y: 0.3 },
+    ];
+
+    let mut records = Vec::new();
+    let mut scratch = PolygonEmitScratch::new();
+    // Emit at z=0 with seam_max_zoom=8 → deferred, should record vertices.
+    emit_polygon_feature(
+        200, &coords, &[], &m, 0, 0,
+        &mut records, &mut scratch, 8, Some(&ds),
+    );
+
+    let recorded = ds.vertices[Layer::Boundaries as usize].load(Ordering::Relaxed);
+    assert_eq!(recorded, coords.len() as u64, "should record {n} vertices", n = coords.len());
+}

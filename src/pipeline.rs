@@ -675,12 +675,11 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             if *max_z > 0 {
                 let verts = ds.vertices[i].load(Ordering::Relaxed);
                 if verts > 0 {
-                    let disabled = ds.disabled[i].load(Ordering::Relaxed);
-                    eprintln!(
-                        "seam_deferred_vertices_{}={verts}{}",
-                        shortbread::Layer::ALL[i].name(),
-                        if disabled { " (auto-disabled)" } else { "" },
-                    );
+                    let name = shortbread::Layer::ALL[i].name();
+                    eprintln!("seam_deferred_vertices_{name}={verts}");
+                    if ds.disabled[i].load(Ordering::Relaxed) {
+                        eprintln!("seam_deferral_disabled_{name}=1");
+                    }
                 }
             }
         }
@@ -1215,6 +1214,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                             batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
                             sort_writer.as_mut().expect("sort_writer not returned from drain"),
                         );
+                        deferral_stats.check_budgets(&config.seam_reconcile_layers);
                     }
                 }
             }
@@ -1231,6 +1231,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
             rel_batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
             sort_writer.as_mut().expect("sort_writer not returned from drain"),
         );
+        deferral_stats.check_budgets(&config.seam_reconcile_layers);
     }
 
     // Drop way_index to release compressed data + index memory before
