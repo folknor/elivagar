@@ -26,11 +26,9 @@
   Reference: tippecanoe and tilemaker do not compress sort data. Planetiler supports
   Snappy (opt-in, off by default).
 
-- [ ] Benchmark results database should differentiate compression modes.
-  Currently `brokkr bench self` doesn't record whether `--compress-sort-chunks` was used.
-  The results DB should capture this flag so that compressed vs uncompressed runs are not
-  conflated when comparing. Affects `brokkr results --compare-last` and any future
-  regression detection.
+- [x] Benchmark results database should differentiate compression modes.
+  Resolved: brokkr now records `meta.compress_sort_chunks` (lz4/snappy/none) in the
+  results DB (commit `27f9371` in brokkr).
 
 ## Refactoring opportunities
 
