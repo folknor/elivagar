@@ -30,6 +30,8 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--rel-budget size` | Relation batch accumulation budget (default: 64M, min: 1M) |
 | `--assemble-budget size` | Tile assembly batch budget (default: 32M, min: 1M) |
 | `--tile-format mvt\|mlt` | Tile payload format (default: `mvt`). `mlt` is wired but not yet implemented |
+| `--tile-compression gzip\|brotli` | Tile compression algorithm (default: `gzip`, MVT only) |
+| `--compress-sort-chunks lz4\|snappy` | Compress sort chunk files (off by default). Reduces disk I/O at the cost of CPU |
 | `-j N` / `--threads N` | Thread count (default: logical CPUs) |
 
 ### Inspect a PMTiles archive
@@ -124,6 +126,23 @@ Denmark extract (483 MB PBF) → Shortbread PMTiles, best of 3 runs:
 System: plantasjen (Ryzen 9 5900X, Linux 6.18). Commit: `cb2cd29`.
 
 Measured with `brokkr bench self`. Results stored in `.brokkr/results.db`.
+
+### Sort chunk compression
+
+Optional `--compress-sort-chunks` reduces disk I/O for sort data at the cost
+of CPU. Intended for planet-scale runs where sort data exceeds available RAM.
+
+Germany extract (5.3 GB PBF, `--locations-on-ways`), plantasjen, commit `30a023c`:
+
+| Compression | Total | Peak RSS |
+|-------------|-------|----------|
+| None (default) | **114s** | **8.2 GB** |
+| lz4 | 134s | 9.2 GB |
+| snappy | 143s | 8.6 GB |
+
+On regional extracts where sort data fits in page cache, compression adds
+overhead without benefit. At planet scale (~100+ GB sort data, disk-bound
+merge), compressed chunks may break even or win on total wall time.
 
 ### O_DIRECT-friendly layout
 

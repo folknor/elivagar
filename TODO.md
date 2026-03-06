@@ -7,25 +7,24 @@
 
 ## Sort chunk compression investigation
 
-- [ ] Investigate why lz4 compression adds ~25s to phase12 on Germany (4.7 GB PBF).
-  Commit `bd3d45d` introduced gzip-1 sort chunk compression, causing a 3.2x regression
-  on Denmark (14.6s → 46.8s). Switched to lz4 in `4550551` (14.6s → 18.1s Denmark),
-  then made opt-in via `--compress-sort-chunks` in `b07d945` (default off = baseline).
-  **The mystery:** Germany with lz4 (`4550551`): phase12 = 121s vs uncompressed (`5b0fcd1`):
-  phase12 = 95.8s. That's +25s for ~619 chunks. lz4 frame compress runs at 2-4 GB/s, so
-  compressing ~10 GB of sort records should cost ~3-5s, not 25s. Possible causes:
-  - lz4_flex `FrameEncoder` overhead per `write_all` call (many small writes: 8-byte key,
-    4-byte len, variable data per record). Frame encoder may not buffer efficiently.
-  - `BufWriter` sits underneath `FrameEncoder` but lz4 frame may flush per block internally,
-    defeating the BufWriter. Check if writing to a `Vec<u8>` first then compressing in bulk
-    would be faster (one lz4 call per chunk instead of streaming).
-  - Rayon contention: `write_sorted_chunk` is called from rayon workers (ocean, relations)
-    and the serial PBF path. lz4 compression holds the thread longer, potentially starving
-    the rayon pool.
-  - Assemble phase was only +1.2s with lz4 (29.5s vs 28.3s), suggesting decompression is
-    fine — the problem is compression-side only.
-  Not blocking: compression is off by default. Worth investigating before planet runs where
-  it might actually help (sort data >> RAM, disk I/O is the bottleneck).
+- [x] Investigate why lz4 compression adds ~25s to phase12 on Germany (4.7 GB PBF).
+  **Resolved** (commits `274e21b`, `30a023c`). Two causes found:
+  1. **~16s from millions of small writes** through lz4 `FrameEncoder` (3 write_all calls
+     per record × millions of records). Fixed by pre-serializing all records into a
+     contiguous `Vec<u8>` before compressing in bulk.
+  2. **~10s from real compression throughput** — `lz4_flex` (pure Rust) runs at ~450-500 MB/s,
+     not the 2-4 GB/s of C lz4. 10 GB / 500 MB/s ≈ 20s. This is inherent.
+  Also tested Snappy (`snap` crate, pure Rust) as an alternative — Planetiler uses Snappy
+  for the same use case. Result: Snappy phase12 is identical to lz4, but assemble is worse
+  (Snappy decompression slower than lz4 during merge). lz4 remains the better option.
+  Germany results (commit `30a023c`, plantasjen, locations-on-ways):
+  - None: 114s total, 8.2 GB RSS
+  - lz4: 134s total, 9.2 GB RSS
+  - snappy: 143s total, 8.6 GB RSS
+  Compression remains opt-in (`--compress-sort-chunks lz4|snappy`), off by default.
+  Worth revisiting at planet scale where disk I/O may dominate.
+  Reference: tippecanoe and tilemaker do not compress sort data. Planetiler supports
+  Snappy (opt-in, off by default).
 
 - [ ] Benchmark results database should differentiate compression modes.
   Currently `brokkr bench self` doesn't record whether `--compress-sort-chunks` was used.
