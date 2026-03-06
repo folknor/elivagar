@@ -1166,3 +1166,102 @@ fn decode_mvt_polygon_two_outer_rings() {
     assert_eq!(decoded[0], ring_a);
     assert_eq!(decoded[1], ring_b);
 }
+
+// ---------------------------------------------------------------------------
+// Chain canonicalization tests
+// ---------------------------------------------------------------------------
+
+/// Two adjacent squares sharing edge (10,0)→(10,10). After canonicalization,
+/// both rings have identical vertices along the shared edge.
+#[test]
+fn canonicalize_two_adjacent_squares() {
+    let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    let ring_b = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
+    let chains = super::detect_shared_chains(&[ring_a.clone(), ring_b.clone()]);
+    assert_eq!(chains.len(), 1);
+    let result = super::canonicalize_shared_chains(&mut [ring_a.clone(), ring_b.clone()], &chains);
+    assert_eq!(result.reconciled, 1);
+    assert_eq!(result.skipped, 0);
+
+    // Modify ring_b's shared edge to simulate divergence, then canonicalize.
+    let mut ring_b = ring_b;
+    ring_b[3] = (10, 11); // perturb (10,10) in ring B
+    let mut rings = [ring_a, ring_b];
+    let result = super::canonicalize_shared_chains(&mut rings, &chains);
+    assert_eq!(result.reconciled, 1);
+    // After canonicalization, ring B's shared segment should match ring A's.
+    // The shared chain vertices are [(10,0), (10,10)] from ring A.
+    // Ring B incident is reversed, so (10,10) maps to ring_b[3] and (10,0) maps to ring_b[0].
+    assert_eq!(rings[1][3], (10, 10), "shared vertex should be restored");
+}
+
+/// Chains with >2 incidents are skipped.
+#[test]
+fn canonicalize_skips_gt2_incidents() {
+    // Three rings sharing the same edge — detect_shared_chains produces
+    // chains with 2 incidents each (one per ring pair), but let's test
+    // that if we manually construct a 3-incident chain, it gets skipped.
+    let chain = super::SharedChain {
+        vertices: vec![(0, 0), (10, 0)],
+        incidents: vec![
+            super::ChainRef { ring_idx: 0, start: 0, len: 2, reversed: false },
+            super::ChainRef { ring_idx: 1, start: 3, len: 2, reversed: true },
+            super::ChainRef { ring_idx: 2, start: 1, len: 2, reversed: false },
+        ],
+    };
+    let mut rings = vec![
+        vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)],
+        vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)],
+        vec![(0, 0), (10, 0), (10, -10), (0, -10), (0, 0)],
+    ];
+    let result = super::canonicalize_shared_chains(&mut rings, &[chain]);
+    assert_eq!(result.reconciled, 0);
+    assert_eq!(result.skipped, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Tile-coordinate simplification tests
+// ---------------------------------------------------------------------------
+
+/// Simplify a ring with no pinned vertices — standard DP behavior.
+#[test]
+fn simplify_ring_tile_coords_no_pins() {
+    // A square with a collinear midpoint on one edge.
+    let ring = vec![(0, 0), (500, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
+    let pinned = vec![false; ring.len()];
+    let simplified = super::simplify_ring_tile_coords(&ring, &pinned, 16.0);
+    // (500, 0) is collinear with (0,0)→(1000,0), should be removed.
+    assert_eq!(simplified.len(), 5, "collinear point should be removed");
+    assert!(!simplified.contains(&(500, 0)));
+}
+
+/// Simplify a ring where shared-chain vertices are pinned — they survive.
+#[test]
+fn simplify_ring_tile_coords_with_pins() {
+    // Same ring but (500, 0) is pinned (part of a shared chain).
+    let ring = vec![(0, 0), (500, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
+    let pinned = vec![true, true, true, false, false, true]; // first 3 are shared chain
+    let simplified = super::simplify_ring_tile_coords(&ring, &pinned, 16.0);
+    // (500, 0) must survive because it's pinned.
+    assert!(simplified.contains(&(500, 0)), "pinned vertex must survive");
+}
+
+/// Build pinned mask marks correct vertices.
+#[test]
+fn build_pinned_mask_basic() {
+    let chain = super::SharedChain {
+        vertices: vec![(10, 0), (10, 10)],
+        incidents: vec![
+            super::ChainRef { ring_idx: 0, start: 1, len: 2, reversed: false },
+            super::ChainRef { ring_idx: 1, start: 3, len: 2, reversed: true },
+        ],
+    };
+    // Ring 0 has 5 vertices (4 + close).
+    let mask = super::build_pinned_mask(5, 0, std::slice::from_ref(&chain));
+    assert_eq!(mask, vec![false, true, true, false, false]);
+
+    // Ring 1: start=3, len=2 → positions 3, 0.
+    let mask = super::build_pinned_mask(5, 1, std::slice::from_ref(&chain));
+    // Position 3 and position 0 are pinned. Position 0 pinned → closing vertex (4) also pinned.
+    assert_eq!(mask, vec![true, false, false, true, true]);
+}

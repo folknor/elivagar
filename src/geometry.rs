@@ -1928,6 +1928,226 @@ fn merge_seam_chains(chains: &mut Vec<SharedChain>) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared chain canonicalization
+// ---------------------------------------------------------------------------
+
+/// Result of canonicalizing shared chains across polygon rings.
+pub struct CanonicalizationResult {
+    /// Number of 2-incident chains that were canonicalized.
+    pub reconciled: usize,
+    /// Number of chains with >2 incidents that were skipped.
+    pub skipped: usize,
+}
+
+/// For each shared chain with exactly 2 incidents, copy the first incident's
+/// vertex sequence to the second incident's ring segment (overwriting it).
+///
+/// This ensures both rings have identical vertices along the shared boundary.
+/// Chains with >2 incidents are skipped (counted in result).
+///
+/// The `rings` slice must be the same one passed to `detect_shared_chains`.
+/// Rings are modified in place.
+pub fn canonicalize_shared_chains(
+    rings: &mut [Vec<(i32, i32)>],
+    chains: &[SharedChain],
+) -> CanonicalizationResult {
+    let mut reconciled: usize = 0;
+    let mut skipped: usize = 0;
+
+    for chain in chains {
+        if chain.incidents.len() != 2 {
+            skipped += 1;
+            continue;
+        }
+
+        let canonical = &chain.vertices;
+        let target = &chain.incidents[1];
+        let ring = &mut rings[target.ring_idx];
+        let n = ring.len().saturating_sub(1); // exclude closing vertex
+        if n == 0 || target.len > canonical.len() {
+            continue;
+        }
+
+        // Write canonical vertices into the target ring's segment.
+        // If the target traverses the chain in reverse, reverse the canonical order.
+        for (i, &v) in canonical.iter().enumerate() {
+            let ring_pos = if target.reversed {
+                // Reversed: canonical[0] maps to target.start, walking backward.
+                (target.start + target.len - 1 - i) % n
+            } else {
+                (target.start + i) % n
+            };
+            ring[ring_pos] = v;
+        }
+
+        // Fix closing vertex if modified.
+        let first = ring[0];
+        let last_idx = ring.len() - 1;
+        ring[last_idx] = first;
+
+        reconciled += 1;
+    }
+
+    CanonicalizationResult { reconciled, skipped }
+}
+
+/// Build a pinned-vertex mask for a ring based on shared chain membership.
+///
+/// Returns a `Vec<bool>` where `pinned[i] = true` means vertex `i` is part of
+/// a shared chain and must not be removed by simplification.
+pub fn build_pinned_mask(ring_len: usize, ring_idx: usize, chains: &[SharedChain]) -> Vec<bool> {
+    let mut pinned = vec![false; ring_len];
+    let n = ring_len.saturating_sub(1); // exclude closing vertex
+    if n == 0 {
+        return pinned;
+    }
+    for chain in chains {
+        for inc in &chain.incidents {
+            if inc.ring_idx != ring_idx {
+                continue;
+            }
+            for j in 0..inc.len {
+                let pos = (inc.start + j) % n;
+                pinned[pos] = true;
+            }
+            // Also pin the closing vertex if vertex 0 is pinned.
+            if pinned[0] {
+                pinned[ring_len - 1] = true;
+            }
+        }
+    }
+    pinned
+}
+
+/// Simplify a ring in tile coordinates, preserving pinned vertices.
+///
+/// Runs Douglas-Peucker on non-pinned segments. Pinned vertices (from shared
+/// chains) survive unconditionally. Tolerance is in tile extent units
+/// (16.0 = 1 pixel at extent 4096 / 256 px tiles).
+///
+/// The ring is modified in place. Returns the new ring.
+pub fn simplify_ring_tile_coords(ring: &[(i32, i32)], pinned: &[bool], tolerance: f64) -> Vec<(i32, i32)> {
+    if ring.len() < 4 {
+        return ring.to_vec();
+    }
+
+    // Convert to f64 points for DP.
+    let tol_sq = tolerance * tolerance;
+    let n = ring.len() - 1; // exclude closing vertex
+
+    // Mark vertices to keep.
+    let mut keep = vec![false; n];
+    keep[0] = true; // always keep first
+
+    // For each non-pinned segment between pinned boundaries, run DP.
+    // First, find segment boundaries (indices where pinned[i] is true).
+    let mut boundaries: Vec<usize> = Vec::new();
+    for i in 0..n {
+        if pinned[i] {
+            keep[i] = true;
+            boundaries.push(i);
+        }
+    }
+
+    if boundaries.is_empty() {
+        // No pinned vertices — simplify the whole ring.
+        dp_tile_coords(ring, 0, n - 1, tol_sq, &mut keep);
+    } else {
+        // Simplify segments between consecutive pinned boundaries.
+        for w in boundaries.windows(2) {
+            let (start, end) = (w[0], w[1]);
+            if end - start > 1 {
+                dp_tile_coords(ring, start, end, tol_sq, &mut keep);
+            }
+        }
+        // Wrap-around: segment from last boundary to first boundary (through ring end).
+        let last = *boundaries.last().expect("non-empty");
+        let first = boundaries[0];
+        if last != first {
+            // Segment goes last → n-1 → 0 → first. Only simplify if there
+            // are intermediate vertices.
+            let gap = (first + n - last) % n;
+            if gap > 1 {
+                // Linearize the wrap-around segment for DP.
+                let mut seg: Vec<(i32, i32)> = Vec::with_capacity(gap + 1);
+                for j in 0..=gap {
+                    seg.push(ring[(last + j) % n]);
+                }
+                let mut seg_keep = vec![false; seg.len()];
+                seg_keep[0] = true;
+                seg_keep[seg.len() - 1] = true;
+                dp_tile_coords(&seg, 0, seg.len() - 1, tol_sq, &mut seg_keep);
+                // Map back to ring indices.
+                for (j, &k) in seg_keep.iter().enumerate() {
+                    if k {
+                        keep[(last + j) % n] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Build output.
+    let mut out: Vec<(i32, i32)> = Vec::new();
+    for i in 0..n {
+        if keep[i] {
+            out.push(ring[i]);
+        }
+    }
+    // Close the ring.
+    if let Some(&first) = out.first() {
+        out.push(first);
+    }
+    out
+}
+
+/// Douglas-Peucker on tile coordinate points (i32, i32).
+/// Marks vertices to keep between `start` and `end` (inclusive, both kept).
+fn dp_tile_coords(ring: &[(i32, i32)], start: usize, end: usize, tol_sq: f64, keep: &mut [bool]) {
+    keep[start] = true;
+    keep[end] = true;
+    if end <= start + 1 {
+        return;
+    }
+
+    let (ax, ay) = (f64::from(ring[start].0), f64::from(ring[start].1));
+    let (bx, by) = (f64::from(ring[end].0), f64::from(ring[end].1));
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len_sq = dx * dx + dy * dy;
+
+    let mut max_dist_sq: f64 = 0.0;
+    let mut max_idx = start;
+
+    for (i, &(ix, iy)) in ring.iter().enumerate().take(end).skip(start + 1) {
+        let (px, py) = (f64::from(ix), f64::from(iy));
+        let dist_sq = if len_sq < f64::EPSILON {
+            (px - ax) * (px - ax) + (py - ay) * (py - ay)
+        } else {
+            let t = ((px - ax) * dx + (py - ay) * dy) / len_sq;
+            let t = t.clamp(0.0, 1.0);
+            let proj_x = ax + t * dx;
+            let proj_y = ay + t * dy;
+            (px - proj_x) * (px - proj_x) + (py - proj_y) * (py - proj_y)
+        };
+
+        if dist_sq > max_dist_sq {
+            max_dist_sq = dist_sq;
+            max_idx = i;
+        }
+    }
+
+    if max_dist_sq > tol_sq {
+        keep[max_idx] = true;
+        dp_tile_coords(ring, start, max_idx, tol_sq, keep);
+        dp_tile_coords(ring, max_idx, end, tol_sq, keep);
+    }
+}
+
+/// Tile-coordinate DP tolerance: 1 pixel = EXTENT / 256 = 16 extent units.
+pub const TILE_SIMPLIFY_TOLERANCE: f64 = SIMPLIFY_PIXELS * (EXTENT / 256.0);
+
+// ---------------------------------------------------------------------------
 // MVT polygon command decoder
 // ---------------------------------------------------------------------------
 
@@ -1937,7 +2157,10 @@ fn merge_seam_chains(chains: &mut Vec<SharedChain>) {
 /// undoes delta encoding, and returns one `Vec<(i32, i32)>` per ring (closed:
 /// first == last vertex).
 ///
-/// Returns an empty vec if `commands` is empty or contains no valid rings.
+/// Designed for trusted in-pipeline data (output of our own `encode_polygon`).
+/// On truncated input, may return partially decoded rings. Unknown command IDs
+/// are silently skipped without consuming parameters (safe for well-formed
+/// streams; may desync on malformed data).
 pub fn decode_mvt_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
     let mut rings: Vec<Vec<(i32, i32)>> = Vec::new();
     let mut cx: i32 = 0;
