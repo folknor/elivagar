@@ -3240,7 +3240,12 @@ fn phase_assemble(
     // Shared-edge reconciliation metrics.
     let seam_touched = seam_metrics.tiles_touched.load(Ordering::Relaxed);
     if seam_touched > 0 {
-        eprintln!("  Seam reconciliation (boundaries, z<={}): {} tiles, {} rings, {} chains ({} reconciled, {} skipped), {:.1} ms",
+        let seam_layer_names: Vec<&str> = config.seam_reconcile_layers.iter().enumerate()
+            .filter(|(_, enabled)| **enabled)
+            .map(|(i, _)| shortbread::Layer::ALL[i].name())
+            .collect();
+        eprintln!("  Seam reconciliation ({}, z<={}): {} tiles, {} rings, {} chains ({} reconciled, {} skipped), {:.1} ms",
+            seam_layer_names.join("+"),
             SEAM_RECONCILE_MAX_ZOOM,
             seam_touched,
             seam_metrics.rings_decoded.load(Ordering::Relaxed),

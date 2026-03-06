@@ -301,10 +301,12 @@ fn run(args: RunArgs) {
         seam_reconcile_layers: {
             let mut mask = [false; elivagar::shortbread::Layer::count()];
             for name in &args.seam_reconcile_layers {
-                match elivagar::shortbread::Layer::from_name(name) {
+                let trimmed = name.trim();
+                match elivagar::shortbread::Layer::from_name(trimmed) {
                     Some(layer) => mask[layer as usize] = true,
                     None => {
-                        eprintln!("Warning: unknown layer name for --seam-reconcile-layers: {name}");
+                        eprintln!("Error: unknown layer name for --seam-reconcile-layers: '{trimmed}'");
+                        std::process::exit(1);
                     }
                 }
             }
