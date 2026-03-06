@@ -211,6 +211,10 @@ impl LayerBuilder {
         &self.features
     }
 
+    pub(crate) fn features_mut(&mut self) -> &mut [Feature] {
+        &mut self.features
+    }
+
     pub(crate) fn key(&self, idx: u16) -> Option<&str> {
         self.keys.get(idx as usize).map(String::as_str)
     }
