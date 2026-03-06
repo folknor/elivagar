@@ -1107,3 +1107,62 @@ fn shared_chain_consecutive_wrap_around() {
     assert_eq!(chains.len(), 1, "consecutive shared edges in both rings should form one chain");
     assert_eq!(chains[0].vertices.len(), 3, "two edges = three vertices");
 }
+
+// ---------------------------------------------------------------------------
+// MVT polygon decoder tests
+// ---------------------------------------------------------------------------
+
+/// Round-trip: encode a single ring polygon and decode it back.
+#[test]
+fn decode_mvt_polygon_single_ring_round_trip() {
+    let ring = vec![(100, 200), (300, 200), (300, 400), (100, 400), (100, 200)];
+    let mut buf = Vec::new();
+    crate::mvt::encode_polygon(&mut buf, &[&ring]);
+    let decoded = super::decode_mvt_polygon(&buf);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0], ring);
+}
+
+/// Round-trip: multi-ring polygon (outer + inner hole).
+#[test]
+fn decode_mvt_polygon_multi_ring_round_trip() {
+    let outer = vec![(0, 0), (4096, 0), (4096, 4096), (0, 4096), (0, 0)];
+    let inner = vec![(1000, 1000), (1000, 3000), (3000, 3000), (3000, 1000), (1000, 1000)];
+    let mut buf = Vec::new();
+    crate::mvt::encode_polygon(&mut buf, &[&outer, &inner]);
+    let decoded = super::decode_mvt_polygon(&buf);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0], outer);
+    assert_eq!(decoded[1], inner);
+}
+
+/// Empty command buffer produces no rings.
+#[test]
+fn decode_mvt_polygon_empty() {
+    let decoded = super::decode_mvt_polygon(&[]);
+    assert!(decoded.is_empty());
+}
+
+/// Round-trip with negative coordinates (buffer region outside tile).
+#[test]
+fn decode_mvt_polygon_negative_coords() {
+    let ring = vec![(-128, -128), (4224, -128), (4224, 4224), (-128, 4224), (-128, -128)];
+    let mut buf = Vec::new();
+    crate::mvt::encode_polygon(&mut buf, &[&ring]);
+    let decoded = super::decode_mvt_polygon(&buf);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0], ring);
+}
+
+/// Round-trip: two separate polygons encoded sequentially (as multipolygon).
+#[test]
+fn decode_mvt_polygon_two_outer_rings() {
+    let ring_a = vec![(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)];
+    let ring_b = vec![(200, 200), (300, 200), (300, 300), (200, 300), (200, 200)];
+    let mut buf = Vec::new();
+    crate::mvt::encode_polygon(&mut buf, &[&ring_a, &ring_b]);
+    let decoded = super::decode_mvt_polygon(&buf);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0], ring_a);
+    assert_eq!(decoded[1], ring_b);
+}
