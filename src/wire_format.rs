@@ -76,6 +76,7 @@ const KEY_NAMES: &[&str] = &[
     "ele",                     // 48 (POI elevation in meters)
     "min_height",              // 49
     "building:levels",         // 50
+    "natural",                 // 51 (POI peak/pass natural tag)
 ];
 
 #[allow(clippy::cast_possible_truncation)]
