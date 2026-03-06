@@ -64,7 +64,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `ocean.rs` — ocean shapefile processing (mmap reader + scanline fill)
 
 **Infrastructure:**
-- `sort.rs` — external merge sort (chunk files, k-way merge via binary heap)
+- `sort.rs` — external merge sort (gzip-compressed chunk files, k-way merge via binary heap)
 - `pmtiles_writer.rs` — PMTiles v3 writer with Hilbert tile IDs
 - `inspect.rs` — PMTiles v3 archive inspector (header + metadata reader)
 - `node_index.rs` — node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
@@ -86,7 +86,8 @@ Sequential, same PBF input:
 - `pbfhogg` — PBF reader, sibling dir `../pbfhogg`
 - `rayon` — parallel processing
 - `memmap2` — memory-mapped I/O for way index (and flat node index fallback)
-- `flate2` (zlib-rs backend) — gzip compression for MVT tiles. Same zlib backend as pbfhogg.
+- `flate2` (zlib-rs backend) — gzip compression for MVT tiles and sort chunks. Same zlib backend as pbfhogg.
+- `brotli` — brotli compression for MVT tiles (optional via `--tile-compression brotli`)
 - `mimalloc` — global allocator (critical for rayon performance)
 - `clap` (derive) — CLI argument parsing with subcommands
 - `hotpath` — function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
@@ -104,7 +105,8 @@ Uses clap derive with two subcommands:
 - `--no-ocean` — disable ocean shapefile processing (skip auto-detection)
 - `--skip-to ocean|sort` — resume from checkpoint
 - `--in-memory` — keep tile blob in RAM (faster for small extracts)
-- `--compression-level 0-10` — gzip level (default 6)
+- `--compression-level 0-10` — compression level (default 6)
+- `--tile-compression gzip|brotli` — tile compression algorithm (default gzip)
 - `--force-sorted` — force compact node store even without PBF header flag
 - `--locations-on-ways` — PBF has node coordinates embedded in ways
 - `-j N` / `--threads N` — thread count (default: logical CPUs)

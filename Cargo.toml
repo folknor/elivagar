@@ -19,6 +19,7 @@ protohoggr = { path = "../protohoggr" }
 rayon = "1.5"
 memmap2 = "0.9"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
+brotli = "8"
 smallvec = "1"
 mimalloc = { version = "0.1", default-features = false }
 hotpath = "0.13"

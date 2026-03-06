@@ -804,7 +804,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
 
 #[test]
 fn encode_tile_batch_mlt_empty_batch_is_empty() {
-    match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt) {
+    match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt, TileCompression::Gzip) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty batches should remain empty"),
         Err(err) => panic!("empty mlt batch should not fail: {err}"),
     }
@@ -812,7 +812,7 @@ fn encode_tile_batch_mlt_empty_batch_is_empty() {
 
 #[test]
 fn encode_tile_batch_mvt_empty_batch_is_empty() {
-    let encoded = encode_tile_batch(&[], 6, TilePayloadFormat::Mvt)
+    let encoded = encode_tile_batch(&[], 6, TilePayloadFormat::Mvt, TileCompression::Gzip)
         .expect("mvt format should encode successfully");
     assert!(encoded.is_empty());
 }
@@ -823,7 +823,7 @@ fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
         tile_id: pmtiles_writer::xy_to_tile_id(3, 4, 5),
         features: Vec::new(),
     };
-    match encode_tile_batch(&[tile], 6, TilePayloadFormat::Mlt) {
+    match encode_tile_batch(&[tile], 6, TilePayloadFormat::Mlt, TileCompression::Gzip) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty tiles should be skipped"),
         Err(err) => panic!("mlt format should not fail for empty tile: {err}"),
     }
@@ -847,7 +847,7 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     };
     let non_empty = prepare_non_empty_layers(&mut scratch, &tile);
     let model = mlt::build_tile_model(&non_empty);
-    let mvt_encoded = encode_tile_batch(&[parity_pending_tile(tile_id)], 6, TilePayloadFormat::Mvt)
+    let mvt_encoded = encode_tile_batch(&[parity_pending_tile(tile_id)], 6, TilePayloadFormat::Mvt, TileCompression::Gzip)
         .expect("mvt batch encode should succeed");
     assert_eq!(mvt_encoded.len(), 1, "expected one encoded mvt tile");
 
@@ -920,6 +920,7 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         sort_chunk_size: 0,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
     };
 
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
@@ -972,6 +973,7 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         sort_chunk_size: 0,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
     };
 
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
@@ -1015,6 +1017,7 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         sort_chunk_size: 0,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
     };
     let _ = phase_assemble(&mut mvt_sort_reader, &mvt_config).expect("mvt assemble should succeed");
     let mut mvt_reader = crate::pmtiles_reader::PmtilesReader::open(&mvt_output)
@@ -1052,6 +1055,7 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         sort_chunk_size: 0,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mlt,
+        tile_compression: TileCompression::Gzip,
     };
     let _ = phase_assemble(&mut mlt_sort_reader, &mlt_config).expect("mlt assemble should succeed");
     let mut mlt_reader = crate::pmtiles_reader::PmtilesReader::open(&mlt_output)

@@ -84,6 +84,13 @@ pub enum TilePayloadFormat {
     Mlt,
 }
 
+/// Tile compression algorithm for MVT payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileCompression {
+    Gzip,
+    Brotli,
+}
+
 /// Configuration for the tile generation pipeline.
 ///
 /// All paths are resolved relative to the current working directory.
@@ -152,6 +159,8 @@ pub struct TilegenConfig {
     pub locations_on_ways: bool,
     /// Tile payload format (`mvt` default, `mlt` planned).
     pub tile_format: TilePayloadFormat,
+    /// Tile compression algorithm for MVT payloads (`gzip` default, `brotli` optional).
+    pub tile_compression: TileCompression,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -413,7 +422,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("=== Tilegen: {} → {}", config.pbf_path.display(), config.output_path.display());
     eprintln!("    Zoom range: z{}–z{}", config.min_zoom, config.max_zoom);
     eprintln!("    Tmp dir:    {}", config.tmp_dir.display());
-    eprintln!("    Tile format:{:?}", config.tile_format);
+    eprintln!("    Tile format:{:?}, compression:{:?}", config.tile_format, config.tile_compression);
     if let Some(s) = skip {
         eprintln!("    Skip to:    {s:?}");
     }
@@ -578,6 +587,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         match config.tile_format {
             TilePayloadFormat::Mvt => "mvt",
             TilePayloadFormat::Mlt => "mlt",
+        }
+    );
+    eprintln!(
+        "tile_compression={}",
+        match config.tile_compression {
+            TileCompression::Gzip => "gzip",
+            TileCompression::Brotli => "brotli",
         }
     );
     if let Ok(meta) = std::fs::metadata(&config.output_path) {
@@ -2914,7 +2930,13 @@ fn phase_assemble(
         PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir)?
     };
     match config.tile_format {
-        TilePayloadFormat::Mvt => pmtiles.set_tile_contract(TileDataFormat::Mvt, TileDataCompression::Gzip),
+        TilePayloadFormat::Mvt => {
+            let compression = match config.tile_compression {
+                TileCompression::Gzip => TileDataCompression::Gzip,
+                TileCompression::Brotli => TileDataCompression::Brotli,
+            };
+            pmtiles.set_tile_contract(TileDataFormat::Mvt, compression);
+        }
         TilePayloadFormat::Mlt => pmtiles.set_tile_contract(TileDataFormat::Mlt, TileDataCompression::None),
     }
 
@@ -3027,8 +3049,9 @@ fn phase_assemble(
         // --- Main thread: receive batches, encode with rayon, forward to writer ---
         let compression_level = config.compression_level;
         let tile_format = config.tile_format;
+        let tile_compression = config.tile_compression;
         for batch in read_rx {
-            let encoded = encode_tile_batch(&batch, compression_level, tile_format)?;
+            let encoded = encode_tile_batch(&batch, compression_level, tile_format, tile_compression)?;
             if encode_tx.send(encoded).is_err() { break; }
         }
         drop(encode_tx);
@@ -3098,24 +3121,25 @@ thread_local! {
     );
 }
 
-/// Encode + gzip a batch of tiles in parallel using rayon.
+/// Encode + compress a batch of tiles in parallel using rayon.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_wrap)]
 fn encode_tile_batch(
     batch: &[PendingTile],
     compression_level: u32,
     tile_format: TilePayloadFormat,
+    tile_compression: TileCompression,
 ) -> Result<Vec<EncodedTile>, PipelineError> {
     match tile_format {
-        TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(batch, compression_level)),
+        TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(batch, compression_level, tile_compression)),
         TilePayloadFormat::Mlt => encode_tile_batch_mlt(batch),
     }
 }
 
-/// Encode + gzip a batch of MVT tiles in parallel using rayon.
+/// Encode + compress a batch of MVT tiles in parallel using rayon.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_wrap)]
-fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32) -> Vec<EncodedTile> {
+fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32, tile_compression: TileCompression) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 
     batch
@@ -3183,16 +3207,33 @@ fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32) -> Vec<E
                 13..=14 => compression_level.min(3),
                 _ => compression_level,
             } as usize;
-            #[allow(clippy::cast_possible_truncation)]
-            let lvl = *s.compression_levels[level].get_or_insert_with(|| {
-                flate2::Compression::new(level as u32)
-            });
-            let mut gz_buf = std::mem::take(&mut s.gz_buf);
-            gz_buf.clear();
-            let mut encoder = flate2::write::GzEncoder::new(gz_buf, lvl);
-            std::io::Write::write_all(&mut encoder, &s.mvt_buf)
-                .expect("gzip compress failed");
-            let compressed = encoder.finish().expect("gzip finish failed");
+
+            let mut compress_buf = std::mem::take(&mut s.gz_buf);
+            compress_buf.clear();
+
+            let compressed = match tile_compression {
+                TileCompression::Gzip => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let lvl = *s.compression_levels[level].get_or_insert_with(|| {
+                        flate2::Compression::new(level as u32)
+                    });
+                    let mut encoder = flate2::write::GzEncoder::new(compress_buf, lvl);
+                    std::io::Write::write_all(&mut encoder, &s.mvt_buf)
+                        .expect("gzip compress failed");
+                    encoder.finish().expect("gzip finish failed")
+                }
+                TileCompression::Brotli => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let quality = level as u32;
+                    let mut encoder = brotli::CompressorWriter::new(
+                        &mut compress_buf, 4096, quality, 22,
+                    );
+                    std::io::Write::write_all(&mut encoder, &s.mvt_buf)
+                        .expect("brotli compress failed");
+                    drop(encoder);
+                    compress_buf
+                }
+            };
             s.gz_buf = Vec::with_capacity(compressed.len());
 
             Some(EncodedTile { tile_id: tile.tile_id, compressed })

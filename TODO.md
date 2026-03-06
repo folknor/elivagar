@@ -40,8 +40,6 @@
   hit an infinite loop bug here — need a guaranteed convergence invariant (also #340, #45).
   Low-zoom dropping must be profile-aware to avoid overaggressive removal (tippecanoe #201).
   Prerequisite: tile size diagnostics (see below) to identify which tiles need dropping.
-- [ ] Compressed sort chunks: gzip-compress temp sort files to reduce I/O during sort phase.
-  Tippecanoe (#56) saw wins from this. Low priority since sort is already fast.
 - [ ] Building merge at z13: Planetiler optionally unions adjacent buildings to reduce tile
   size in dense urban areas. Their benchmarks show ~37% planet runtime increase (expensive).
   JTS polygon union also hits robustness bugs on real data (Planetiler #700). Cheaper
