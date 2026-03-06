@@ -17,10 +17,6 @@ use crate::mlt;
 const INTERIOR_TILE_RING: [(i32, i32); 5] =
     [(-128, -128), (4224, -128), (4224, 4224), (-128, 4224), (-128, -128)];
 
-/// Maximum zoom at which boundary polygons skip PBF-phase DP simplification.
-/// These zooms defer simplification to the assemble phase where cross-feature
-/// shared-edge reconciliation is possible.
-const SEAM_RECONCILE_MAX_ZOOM: u8 = 8;
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::mvt::{self, GeomType, LayerBuilder};
 use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
@@ -169,9 +165,10 @@ pub struct TilegenConfig {
     /// Compression algorithm for sort chunk files. Reduces disk I/O at the
     /// cost of CPU. Useful at planet scale where sort data exceeds available RAM.
     pub compress_sort_chunks: sort::ChunkCompression,
-    /// Polygon layers to apply shared-edge seam reconciliation at low zoom.
-    /// Bitmask indexed by Layer enum discriminant. Default: Boundaries only.
-    pub seam_reconcile_layers: [bool; shortbread::Layer::count()],
+    /// Per-layer max zoom for shared-edge seam reconciliation.
+    /// 0 = disabled, 1-14 = max zoom at which to defer simplification.
+    /// Indexed by Layer enum discriminant. Default: Boundaries=8, rest=0.
+    pub seam_reconcile_layers: [u8; shortbread::Layer::count()],
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -1644,7 +1641,7 @@ fn process_raw_way(
     land_mask: &geometry::LandMask,
     min_zoom: u8,
     max_zoom: u8,
-    seam_reconcile_layers: &[bool],
+    seam_reconcile_layers: &[u8],
     missing_ref_stats: &MissingRefStatsAtomic,
 ) -> ProcessedWay {
     // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
@@ -1946,7 +1943,7 @@ fn flush_rel_batch(
     batch: Vec<PreparedRelation>,
     min_zoom: u8,
     max_zoom: u8,
-    seam_reconcile_layers: &[bool],
+    seam_reconcile_layers: &[u8],
     land_mask: &geometry::LandMask,
     sort_writer: &mut SortWriter,
 ) -> u64 {
@@ -2032,7 +2029,7 @@ fn process_prepared_relation_into(
     rel: PreparedRelation,
     min_zoom: u8,
     max_zoom: u8,
-    seam_reconcile_layers: &[bool],
+    seam_reconcile_layers: &[u8],
     land_mask: &geometry::LandMask,
     records: &mut Vec<SortRecord>,
     point_emit: &mut PointEmitScratch,
@@ -2505,7 +2502,7 @@ fn emit_polygon_feature(
     z_hi: u8,
     records: &mut Vec<SortRecord>,
     scratch: &mut PolygonEmitScratch,
-    seam_reconcile: bool,
+    seam_max_zoom: u8,
 ) -> u64 {
     // Single-ring polygon (no holes)
     let mut count: u64 = 0;
@@ -2614,16 +2611,16 @@ fn emit_polygon_feature(
             }
         }
     };
-    if seam_reconcile {
+    if seam_max_zoom > 0 {
         // Seam-reconcile mode: single zoom loop.
-        // z <= 8: emit full-res geometry (assemble-phase reconciliation + tile-coord DP).
-        // z 9..13: normal DP simplification.
+        // z <= seam_max_zoom: emit full-res geometry (assemble-phase reconciliation + tile-coord DP).
+        // z (seam_max_zoom+1)..13: normal DP simplification.
         // z >= 14: full-res (existing behavior, no simplification).
         for z in (z_lo..=z_hi).rev() {
             if z < 14 && geometry::merc_bbox_is_subpixel(merc, z) {
                 break;
             }
-            if z <= SEAM_RECONCILE_MAX_ZOOM || z >= 14 {
+            if z <= seam_max_zoom || z >= 14 {
                 run_for_zoom(z, merc);
             } else {
                 let tol = geometry::simplify_tolerance(z);
@@ -2692,7 +2689,7 @@ fn emit_multipolygon_feature(
     records: &mut Vec<SortRecord>,
     emit_scratch: &mut MultipolygonEmitScratch,
     simp_scratch: &mut geometry::SimplifyMultiScratch,
-    seam_reconcile: bool,
+    seam_max_zoom: u8,
 ) -> u64 {
     let mut count: u64 = 0;
     let mut emit_for_zoom = |z: u8, simp_outer: &[Point], simp_inners: &[Vec<Point>]| {
@@ -2890,10 +2887,10 @@ fn emit_multipolygon_feature(
         }
     };
     let has_keys = preserve_vertex_keys.is_some_and(|k| !k.is_empty());
-    if seam_reconcile {
+    if seam_max_zoom > 0 {
         // Seam-reconcile mode: single zoom loop.
-        // z <= 8: emit full-res geometry (assemble-phase reconciliation + tile-coord DP).
-        // z 9..13: normal DP simplification (with or without preserve_vertex_keys).
+        // z <= seam_max_zoom: emit full-res geometry (assemble-phase reconciliation + tile-coord DP).
+        // z (seam_max_zoom+1)..13: normal DP simplification (with or without preserve_vertex_keys).
         // z >= 14: full-res (existing behavior, no simplification).
         simp_scratch.cascade_outer.clear();
         simp_scratch.cascade_outer.extend_from_slice(outer);
@@ -2904,7 +2901,7 @@ fn emit_multipolygon_feature(
             if z < 14 && geometry::merc_bbox_is_subpixel(&simp_scratch.cascade_outer, z) {
                 break;
             }
-            if z <= SEAM_RECONCILE_MAX_ZOOM || z >= 14 {
+            if z <= seam_max_zoom || z >= 14 {
                 emit_for_zoom(z, outer, inners);
             } else {
                 // z 9..13: DP simplification.
@@ -3240,13 +3237,12 @@ fn phase_assemble(
     // Shared-edge reconciliation metrics.
     let seam_touched = seam_metrics.tiles_touched.load(Ordering::Relaxed);
     if seam_touched > 0 {
-        let seam_layer_names: Vec<&str> = config.seam_reconcile_layers.iter().enumerate()
-            .filter(|(_, enabled)| **enabled)
-            .map(|(i, _)| shortbread::Layer::ALL[i].name())
+        let seam_layer_descs: Vec<String> = config.seam_reconcile_layers.iter().enumerate()
+            .filter(|(_, max_z)| **max_z > 0)
+            .map(|(i, max_z)| format!("{}:z{}", shortbread::Layer::ALL[i].name(), max_z))
             .collect();
-        eprintln!("  Seam reconciliation ({}, z<={}): {} tiles, {} rings, {} chains ({} reconciled, {} skipped), {:.1} ms",
-            seam_layer_names.join("+"),
-            SEAM_RECONCILE_MAX_ZOOM,
+        eprintln!("  Seam reconciliation ({}): {} tiles, {} rings, {} chains ({} reconciled, {} skipped), {:.1} ms",
+            seam_layer_descs.join("+"),
             seam_touched,
             seam_metrics.rings_decoded.load(Ordering::Relaxed),
             seam_metrics.chains_detected.load(Ordering::Relaxed),
@@ -3272,7 +3268,7 @@ struct AssemblyScratch {
     gz_buf: Vec<u8>,
     mvt_buf: Vec<u8>,
     layers: [Option<LayerBuilder>; LAYER_COUNT],
-    // Shared-edge reconciliation scratch (boundary polygons at z <= SEAM_RECONCILE_MAX_ZOOM).
+    // Shared-edge reconciliation scratch (polygon layers at configured per-layer max zoom).
     seam_rings: Vec<Vec<(i32, i32)>>,
     /// (feature_index_in_layer, ring_count) — maps decoded rings back to features.
     seam_provenance: Vec<(usize, usize)>,
@@ -3419,7 +3415,7 @@ fn encode_tile_batch(
     compression_level: u32,
     tile_format: TilePayloadFormat,
     tile_compression: TileCompression,
-    seam_reconcile_layers: &[bool],
+    seam_reconcile_layers: &[u8],
     seam_metrics: &SeamMetrics,
 ) -> Result<Vec<EncodedTile>, PipelineError> {
     match tile_format {
@@ -3431,7 +3427,7 @@ fn encode_tile_batch(
 /// Encode + compress a batch of MVT tiles in parallel using rayon.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_wrap)]
-fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32, tile_compression: TileCompression, seam_reconcile_layers: &[bool], seam_metrics: &SeamMetrics) -> Vec<EncodedTile> {
+fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32, tile_compression: TileCompression, seam_reconcile_layers: &[u8], seam_metrics: &SeamMetrics) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 
     batch
@@ -3462,9 +3458,9 @@ fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32, tile_com
 
             // Shared-edge reconciliation for polygon layers at low zoom.
             // Must run BEFORE merge_same_attr_geometries (which destroys per-ring identity).
-            if z <= SEAM_RECONCILE_MAX_ZOOM {
-                for (li, &enabled) in seam_reconcile_layers.iter().enumerate() {
-                    if enabled
+            {
+                for (li, &max_z) in seam_reconcile_layers.iter().enumerate() {
+                    if max_z > 0 && z <= max_z
                         && let Some(lb) = s.layers[li].as_mut()
                     {
                         reconcile_boundary_seams(lb, &mut s.seam_rings, &mut s.seam_provenance, &mut s.seam_encode_buf, seam_metrics);

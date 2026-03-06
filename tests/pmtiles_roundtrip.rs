@@ -439,8 +439,8 @@ fn test_full_pipeline() {
         tile_compression: elivagar::TileCompression::Gzip,
         compress_sort_chunks: elivagar::sort::ChunkCompression::None,
         seam_reconcile_layers: {
-            let mut m = [false; elivagar::shortbread::Layer::count()];
-            m[elivagar::shortbread::Layer::Boundaries as usize] = true;
+            let mut m = [0u8; elivagar::shortbread::Layer::count()];
+            m[elivagar::shortbread::Layer::Boundaries as usize] = 8;
             m
         },
     };

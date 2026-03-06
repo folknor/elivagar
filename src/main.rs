@@ -112,7 +112,8 @@ struct RunArgs {
     compress_sort_chunks: Option<SortChunkCompressionArg>,
 
     /// Polygon layers to apply shared-edge seam reconciliation at low zoom.
-    /// Comma-separated layer names. Default: boundaries.
+    /// Comma-separated, format: layer or layer:maxzoom (default maxzoom: 8).
+    /// Example: boundaries,water_polygons:5
     #[arg(long, value_delimiter = ',', default_value = "boundaries")]
     seam_reconcile_layers: Vec<String>,
 }
@@ -299,13 +300,27 @@ fn run(args: RunArgs) {
             Some(SortChunkCompressionArg::Snappy) => elivagar::sort::ChunkCompression::Snappy,
         },
         seam_reconcile_layers: {
-            let mut mask = [false; elivagar::shortbread::Layer::count()];
-            for name in &args.seam_reconcile_layers {
-                let trimmed = name.trim();
-                match elivagar::shortbread::Layer::from_name(trimmed) {
-                    Some(layer) => mask[layer as usize] = true,
+            const DEFAULT_MAX_ZOOM: u8 = 8;
+            let mut mask = [0u8; elivagar::shortbread::Layer::count()];
+            for spec in &args.seam_reconcile_layers {
+                let trimmed = spec.trim();
+                let (name, max_zoom) = if let Some((n, z)) = trimmed.split_once(':') {
+                    let z_val: u8 = z.trim().parse().unwrap_or_else(|_| {
+                        eprintln!("Error: invalid zoom in --seam-reconcile-layers: '{trimmed}'");
+                        std::process::exit(1);
+                    });
+                    if z_val > 14 {
+                        eprintln!("Error: zoom must be 0-14 in --seam-reconcile-layers: '{trimmed}'");
+                        std::process::exit(1);
+                    }
+                    (n.trim(), z_val)
+                } else {
+                    (trimmed, DEFAULT_MAX_ZOOM)
+                };
+                match elivagar::shortbread::Layer::from_name(name) {
+                    Some(layer) => mask[layer as usize] = max_zoom,
                     None => {
-                        eprintln!("Error: unknown layer name for --seam-reconcile-layers: '{trimmed}'");
+                        eprintln!("Error: unknown layer name for --seam-reconcile-layers: '{name}'");
                         std::process::exit(1);
                     }
                 }
