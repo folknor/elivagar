@@ -321,6 +321,8 @@ struct Phase12Stats {
     deferral_stats: std::sync::Arc<DeferralStats>,
     sort_records: u64,
     sort_record_bytes: u64,
+    layer_records: [u64; 32],
+    layer_bytes: [u64; 32],
 }
 
 /// Tracks deferred (unsimplified) vertex counts per layer during PBF processing.
@@ -681,6 +683,14 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("phase12_relations={}", s.rel_count);
         if s.way_count > 0 {
             eprintln!("records_per_way={:.1}", s.sort_records as f64 / s.way_count as f64);
+        }
+        // Per-layer sort stats: emit all layers with nonzero records.
+        for (i, (&recs, &bytes)) in s.layer_records.iter().zip(s.layer_bytes.iter()).enumerate() {
+            if recs > 0 && i < shortbread::Layer::ALL.len() {
+                let name = shortbread::Layer::ALL[i].name();
+                eprintln!("sort_layer_{name}_records={recs}");
+                eprintln!("sort_layer_{name}_bytes={bytes}");
+            }
         }
         // Deferral stats: report per-layer deferred vertex counts.
         for (i, max_z) in config.seam_reconcile_layers.iter().enumerate() {
@@ -1295,6 +1305,8 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         deferral_stats,
         sort_records: sw.total_records(),
         sort_record_bytes: sw.total_record_bytes(),
+        layer_records: *sw.layer_records(),
+        layer_bytes: *sw.layer_bytes(),
     };
     Ok((sw, data_bounds, land_mask, stats))
 }

@@ -112,6 +112,9 @@ pub struct SortWriter {
     compression: ChunkCompression,
     total_records: u64,
     total_record_bytes: u64,
+    /// Per-layer record counts and bytes (indexed by layer_from_key).
+    layer_records: [u64; 32],
+    layer_bytes: [u64; 32],
 }
 
 impl SortWriter {
@@ -129,6 +132,8 @@ impl SortWriter {
             compression,
             total_records: 0,
             total_record_bytes: 0,
+            layer_records: [0; 32],
+            layer_bytes: [0; 32],
         })
     }
 
@@ -175,6 +180,8 @@ impl SortWriter {
             compression,
             total_records: 0,
             total_record_bytes: 0,
+            layer_records: [0; 32],
+            layer_bytes: [0; 32],
         })
     }
 
@@ -193,13 +200,28 @@ impl SortWriter {
         self.total_record_bytes
     }
 
+    /// Per-layer record counts (indexed by layer id, 0..26).
+    pub fn layer_records(&self) -> &[u64; 32] {
+        &self.layer_records
+    }
+
+    /// Per-layer payload bytes (indexed by layer id, 0..26).
+    pub fn layer_bytes(&self) -> &[u64; 32] {
+        &self.layer_bytes
+    }
+
     /// Add a record to the buffer. If the buffer exceeds `chunk_size_bytes`,
     /// the current buffer is sorted and flushed to a chunk file on disk.
     pub fn push(&mut self, record: SortRecord) -> io::Result<()> {
         let data_len = record.data.len();
+        let layer = layer_from_key(record.key) as usize;
         self.buffer_bytes += data_len + std::mem::size_of::<SortRecord>();
         self.total_records += 1;
         self.total_record_bytes += data_len as u64;
+        if layer < 32 {
+            self.layer_records[layer] += 1;
+            self.layer_bytes[layer] += data_len as u64;
+        }
         self.buffer.push(record);
         if self.buffer_bytes >= self.chunk_size_bytes {
             self.flush_chunk()?;
