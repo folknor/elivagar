@@ -115,6 +115,8 @@ Uses clap derive with two subcommands:
 - `--way-budget <size>` — in-flight way processing budget (default 128M standard, 256M in `--locations-on-ways` mode). Minimum 1M.
 - `--rel-budget <size>` — relation batch accumulation budget (default 64M). Minimum 1M.
 - `--assemble-budget <size>` — tile assembly batch budget (default 32M). Minimum 1M.
+- `--fanout-cap-default N` — default fanout cap for all polygon layers (0 = uncapped). Per-layer overrides take precedence.
+- `--fanout-cap layer=N,...` — per-layer fanout caps (e.g. `water_polygons=2048,boundaries=4096`). Features whose bbox tile count exceeds the cap are skipped at that zoom. Comma-separated, strict layer name validation.
 
 ### `elivagar inspect <FILE>`
 

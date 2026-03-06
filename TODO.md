@@ -75,11 +75,19 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
   Tail stats (Denmark): p95 tiles_touched is low (1-4 for polygon layers),
   amplification comes from the tail (max 205-2864). Cap would primarily affect
   tail features, not median behavior.
-  **Phase 2 — layer/zoom fanout controls** (next):
-  - [ ] Tile-touch cap per feature per zoom, behind `--tile-touch-cap N` flag
-    (default off). If a feature would touch >N tiles at zoom z, skip it. Note:
-    dropping at zoom z can cause visible pop/flicker — overzoom continuity is not
-    guaranteed. Must validate with visual/parity samples on NA before any default.
+  **Phase 2 — per-layer fanout caps** (done, commit `710e356`):
+  - [x] Per-layer fanout caps via `--fanout-cap-default N` (global fallback) and
+    `--fanout-cap layer=N,layer=N` (per-layer overrides). Effective cap: override
+    if nonzero, else default, else uncapped. Applied to polygon-geometry emit only.
+  - [x] Cap impact metrics: `fanout_capped_features_{layer}`, `capped_tiles`,
+    `capped_bytes_estimated` (avg record size × capped bbox tiles). Strict layer
+    name validation (fail on unknown, not warn).
+  NA baseline (commit `bed3629`, plantasjen): 699s, 22.7 GB RSS. Tail findings:
+  water_polygons max 4.2M tiles at z14 (164 features ≥2048), boundaries max 35K
+  (92 ≥2048). A cap of 2048 would affect ~272 features total; 512 hits ~1,264.
+  - [ ] Validate cap impact: run with `--fanout-cap water_polygons=2048` on NA,
+    compare sort bytes delta, dropped-feature counts, and visual spot checks on
+    coastlines (Great Lakes), boundaries (US-Canada), and one dense urban tile.
   - [ ] Zoom-dependent subpixel area threshold for polygon layers (flag-gated).
     Quality tradeoff: eliminates small-but-visible features at mid-zoom.
   **Phase 3 — polygon record weight reduction** (second, but soon):
