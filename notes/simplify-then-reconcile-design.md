@@ -15,12 +15,21 @@ for configured layers at z <= max_zoom, emitting full-resolution geometry into
 sort records. During assemble, shared chains are detected, canonicalized, and
 then simplified with pinned shared vertices.
 
-**Why it doesn't scale:** Full-res deferral multiplies sort record size
-dramatically for geometry-heavy layers. Norway benchmarks showed 3.3x phase12
-regression for `water_polygons:8` and 2x for `water_polygons:5`. The cost is
-in serializing thousands-of-vertex coastline ways into sort records at every
-zoom level without simplification. The reconciliation itself is cheap (~18ms
-for 455 chains); all cost is upstream.
+**Critical finding:** The default config `--seam-reconcile-layers boundaries`
+is a no-op. Boundaries is a line layer (`GeomExpect::Line` in boundaries.rs),
+but assemble reconciliation only processes polygon features
+(`GeomType::Polygon` check in pipeline.rs). The algorithm was validated with
+synthetic polygon test fixtures using `Layer::Boundaries`, but never activates
+on real pipeline data with the default config. Meaningful reconciliation
+requires targeting polygon layers (e.g. `water_polygons`, `land`) or
+implementing a separate line-reconcile path.
+
+**Why it doesn't scale (for polygon layers):** Full-res deferral multiplies
+sort record size dramatically for geometry-heavy layers. Norway benchmarks
+showed 3.3x phase12 regression for `water_polygons:8` and 2x for
+`water_polygons:5`. The cost is in serializing thousands-of-vertex coastline
+ways into sort records at every zoom level without simplification. The
+reconciliation itself is cheap (~18ms for 455 chains); all cost is upstream.
 
 ## Goal
 
@@ -283,19 +292,28 @@ validated during benchmarking.
   and sort byte delta before/after on Denmark + Norway.
 
 **Coverage metric (required before Phase 2 decision):**
-Run both D1 pinning and current assemble-phase reconciliation on
-Norway + Denmark. Measure:
-1. Total seam chains detected by assemble reconcile (baseline).
+Note: the current assemble-phase reconciliation has no real baseline —
+the default `boundaries` config is inert (line layer, polygon-only code
+path). Any coverage metric must be constructed from scratch.
+
+Approach: run with a polygon layer configured for assemble reconciliation
+(e.g. `--seam-reconcile-layers land:8`) to establish a baseline chain count,
+then compare against D1 pinning on the same data.
+1. Total seam chains detected by assemble reconcile on `land:8` (baseline).
 2. Of those, how many have zero divergence after D1 pinning (D1 hits).
 3. Remaining seam chains that D1 doesn't cover (D1 misses).
 4. D1 coverage = hits / baseline. Gate Phase 2 on coverage >= 90%.
+
+Caveat: `land:8` will regress phase12 (full-res deferral cost), so baseline
+runs are diagnostic only — not a production config.
 
 ### Phase 2: Evaluate defer-then-reconcile removal (candidate cleanup)
 
 **Gated on Phase 1 coverage metric and visual QA across multiple datasets.**
 Do not remove until:
 1. D1 coverage metric >= 90% on NA + Norway + Denmark (all three).
-2. Visual diffs show no new seam regressions vs current assemble reconcile.
+2. Visual diffs show no seam regressions (no existing reconcile baseline
+   to compare against — the default config was inert).
 3. `--polygon-simplify-factor` interaction validated at factor 2.0.
 
 Candidate cleanup items (proceed only if all gates pass):

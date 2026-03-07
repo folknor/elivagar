@@ -209,12 +209,18 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
       serializing uncompressed geometry into sort records during PBF phase.
     - `water_polygons:5` still causes 2x regression. Even conservative zoom caps
       are insufficient for geometry-heavy layers.
-    - `boundaries:8` (default) has negligible impact — boundary polygons are
-      vertex-light compared to coastline geometry.
+    - `boundaries:8` (default) is a **no-op**: boundaries is a line layer
+      (`GeomExpect::Line`), but assemble reconciliation only processes polygon
+      features (`GeomType::Polygon`). The "negligible impact" was because the
+      code path never activates, not because boundary data is vertex-light.
+      Tests used synthetic `Layer::Boundaries` polygons, validating the
+      algorithm but not real pipeline wiring.
     **Conclusion**: water_polygons full-res deferral is not viable with the current
     architecture. The DeferralStats guardrail provides safety, but the real fix
     requires an algorithmic change (e.g. simplify-then-reconcile instead of
-    defer-full-res-then-reconcile). Keeping `boundaries:8` as default.
+    defer-full-res-then-reconcile). The default `boundaries:8` config is inert —
+    meaningful seam reconciliation requires polygon layers (e.g. `water_polygons`,
+    `land`) or a separate line-reconcile path for boundary lines.
   - [ ] Phase 3B — cross-layer shared-edge canonicalization.
     **Deferred** until a clear win signal exists. Gate: visible seam incidence in
     curated QA tiles that boundaries-only reconciliation cannot address.

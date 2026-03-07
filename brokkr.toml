@@ -21,17 +21,17 @@ download_date = "2026-02-20"
 
 [plantasjen.datasets.denmark.pbf.raw]
 file = "denmark-20260220-seq4704.osm.pbf"
-sha256 = "aa5bb8658c9526f2d904c8131b519d02d8c1099e2cf0ed60f4a6067a50048c6b"
+xxhash = "b16340741bcdf2d5ec94ddc5b2ab8d04"
 seq = 4704
 
 [plantasjen.datasets.denmark.pbf.indexed]
 file = "denmark-20260220-seq4704-with-indexdata.osm.pbf"
-sha256 = "3f1977fd7825812ed0f2602c01d3b8cf0bfded36cda7d2287e91ac2e160540b8"
+xxhash = "55760485369644887ae34df411b8034e"
 seq = 4704
 
 [plantasjen.datasets.denmark.pbf.locations]
 file = "denmark-20260220-seq4704-locations.osm.pbf"
-sha256 = "5c73392c27905d64ffb30b912a29790af8769a5d4a15a4a16f33abf1622f88f2"
+xxhash = "c1b990d199a9053b9026ea98ead61b5f"
 seq = 4704
 
 [plantasjen.datasets.norway]
@@ -40,17 +40,17 @@ download_date = "2026-02-25"
 
 [plantasjen.datasets.norway.pbf.raw]
 file = "norway-20260225-seq4709.osm.pbf"
-sha256 = "b11ee1afb8e5c5b2c9a621045ef8b12e91088c271a0f45c6ef795f9d891fd3cb"
+xxhash = "8f1e29b1f89fc0d323afeac0da1e7794"
 seq = 4709
 
 [plantasjen.datasets.norway.pbf.indexed]
 file = "norway-20260225-seq4709-with-indexdata.osm.pbf"
-sha256 = "c501937a0318b82872db9c3be1f967647a05cc59e68cf682f8ee9b7341d75031"
+xxhash = "114169ea198b41c9249b6b54ee1ec4e9"
 seq = 4709
 
 [plantasjen.datasets.norway.pbf.locations]
 file = "norway-20260225-seq4709-locations.osm.pbf"
-sha256 = "9efb74909532e768f6a61e9d5905a5c268240d21aa5308586f85bae232b968d6"
+xxhash = "872f97cde6a59c6584ed55c3f1cabaab"
 seq = 4709
 
 [plantasjen.datasets.germany]
@@ -59,17 +59,17 @@ download_date = "2026-02-24"
 
 [plantasjen.datasets.germany.pbf.raw]
 file = "germany-20260224-seq4704.osm.pbf"
-sha256 = "ef27075bd400a499bcb3f39ea872ef133c9cbae1bf0d1e472fcda72363b4e642"
+xxhash = "9e63140da7898b66bd0ee19a48d5a86f"
 seq = 4704
 
 [plantasjen.datasets.germany.pbf.indexed]
 file = "germany-20260224-seq4704-with-indexdata.osm.pbf"
-sha256 = "6cc377ee78b8d7ba8dedd072defd870b5ec0b3b1104fd73212fbf4cc24977916"
+xxhash = "a5499f39be2fb1ceebef35dd0e3627fb"
 seq = 4704
 
 [plantasjen.datasets.germany.pbf.locations]
 file = "germany-20260224-seq4704-locations.osm.pbf"
-sha256 = "17ccf15b24d8d5bd2b4a0223642b3cabf2ffe4a435c9f3b2906e5359c74c0dd2"
+xxhash = "798b2d971057897ff0e86934c7d5f66a"
 seq = 4704
 
 [plantasjen.datasets.north-america]
@@ -78,17 +78,17 @@ download_date = "2026-02-20"
 
 [plantasjen.datasets.north-america.pbf.raw]
 file = "north-america-latest.osm.pbf"
-sha256 = "25838ac9cbe62752879b739c1d48aa471fbe6de949ba2f0b6d64665428b5e294"
+xxhash = "6b10f3052e8926a11802b1d2c2e58c64"
 seq = 4710
 
 [plantasjen.datasets.north-america.pbf.indexed]
 file = "north-america-seq4710-with-indexdata.osm.pbf"
-sha256 = "09ad61d6bd537a1b2b6e2dd3380eb1b9778b5bb28bd3300dc695ec2bbe6dd904"
+xxhash = "851e6804bcdd713df0bec7510396bf7a"
 seq = 4710
 
 [plantasjen.datasets.north-america.pbf.locations]
 file = "north-america-seq4710-locations.osm.pbf"
-sha256 = "fc8606ebfa16e4bf6560c2452e630ae21b86af6f778142c74cf6d3de0cabcc64"
+xxhash = "8122bcc83873ef95349e6a3522827fd9"
 seq = 4710
 
 [dm6]
@@ -108,7 +108,7 @@ download_date = "2026-02-20"
 
 [dm6.datasets.denmark.pbf.raw]
 file = "denmark-20260220-seq4704.osm.pbf"
-sha256 = "aa5bb8658c9526f2d904c8131b519d02d8c1099e2cf0ed60f4a6067a50048c6b"
+xxhash = "b16340741bcdf2d5ec94ddc5b2ab8d04"
 seq = 4704
 
 [dm6.datasets.norway]
@@ -117,7 +117,7 @@ download_date = "2026-02-25"
 
 [dm6.datasets.norway.pbf.raw]
 file = "norway-20260225-seq4709.osm.pbf"
-sha256 = "b11ee1afb8e5c5b2c9a621045ef8b12e91088c271a0f45c6ef795f9d891fd3cb"
+xxhash = "8f1e29b1f89fc0d323afeac0da1e7794"
 seq = 4709
 
 [dm6.datasets.japan]
@@ -126,7 +126,7 @@ download_date = "2026-02-25"
 
 [dm6.datasets.japan.pbf.raw]
 file = "japan-20260225-seq4706.osm.pbf"
-sha256 = "25cfd4bad5345964580b0741d1926fa55ece83dede24b8d5e148fa4ae24ad0cf"
+xxhash = "TODO"
 seq = 4706
 
 [dm6.datasets.germany]
@@ -135,7 +135,7 @@ download_date = "2026-02-25"
 
 [dm6.datasets.germany.pbf.raw]
 file = "germany-20260225-seq4705.osm.pbf"
-sha256 = "e92e67cc3548f187db50fab53bcd79e9ac42620851afe28dc801ca5c4723b5de"
+xxhash = "TODO"
 seq = 4705
 
 [dm6.datasets.north-america]
@@ -144,5 +144,5 @@ download_date = "2026-02-20"
 
 [dm6.datasets.north-america.pbf.raw]
 file = "north-america-20260220-seq4705.osm.pbf"
-sha256 = "04013cdd97473c463c880388ad3b20124f85a937626f061e361f84b7e818a024"
+xxhash = "TODO"
 seq = 4705
