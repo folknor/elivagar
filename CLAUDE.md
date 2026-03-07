@@ -16,7 +16,7 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install --path ~/Programs/brokkr`. Invoked as `brokkr` from the project root (reads `./brokkr.toml` for project detection).
 
 - `brokkr check [-- args]` — run clippy + tests. Supports `--features` and `--no-default-features`
-- `brokkr env` — show environment info
+- `brokkr env` — show environment info and dataset status with computed XXH128 hashes (copy into the `xxhash` field in `brokkr.toml`)
 - `brokkr run [--time] [--json] [--runs N] [--no-build] [-- args]` — build release (or skip with `--no-build`) and run with passthrough args. `--time` prints stable `key=value` timing, `--json` prints structured timing, and `--runs N` reports min/median/p95 across repeated runs (single build). Elivagar handles its own defaults (`--tmp-dir`, `--ocean`/`--ocean-simplified` auto-detection, `HOTPATH_METRICS_SERVER_OFF`). Example: `brokkr run -- run input.pbf -o output.pmtiles`.
 - `brokkr bench self [--dataset name] [--variant V] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark. Default variant: raw.
 - `brokkr bench planetiler [--dataset name] [--variant V] [--runs N]` — Planetiler comparison benchmark. Default variant: raw.
@@ -33,7 +33,31 @@ Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install
 - `brokkr results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)
 - `brokkr results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [--top N]` — query/compare benchmark results from SQLite. Use `--top 0` to show all hotpath functions. Use `--compare-last --command hotpath` to diff two most recent hotpath runs.
 - `brokkr clean` — remove tilegen_tmp and scratch files
+- `brokkr history [--command CMD] [--project P] [--failed] [--since DATE] [--slow MS] [-n N] [--all]` — query global command history (stored in `$XDG_DATA_HOME/brokkr/history.db`). Every brokkr invocation is recorded with timing, exit status, project, and git context. Works from any directory.
 - `brokkr preview [--from step] [--dataset name] [--variant V] [--no-open]` — end-to-end visual pipeline inspection. Builds pbfhogg (enrich), elivagar (tilegen), nidhogg (ingest/serve), and opens a map viewer. Use `--from tilegen` to skip enrich and iterate on elivagar changes directly.
+
+### brokkr.toml
+
+```toml
+project = "elivagar"
+
+[plantasjen]
+data = "data"
+scratch = "data/scratch"
+
+[plantasjen.datasets.denmark]
+origin = "Geofabrik"
+download_date = "2026-02-20"
+bbox = "8.0,54.5,13.0,58.0"
+
+[plantasjen.datasets.denmark.pbf.raw]
+file = "denmark-raw.osm.pbf"
+xxhash = "aa5bb865..."
+seq = 4704
+```
+
+- `pbf.<variant>` — PBF files keyed by variant name. `--variant` selects (default: `raw`).
+- `xxhash` — XXH128 file hash. Run `brokkr env` to see computed values.
 
 Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access). Bench runs record `meta.*` kv pairs (e.g. `meta.compress_sort_chunks`, `meta.tile_format`, `meta.locations_on_ways`) so runs with different flags are distinguishable. Bench and hotpath commands require a clean git tree (ignoring `*.md` and `.brokkr/results.db`); use `--force` before the subcommand to run anyway (results will not be stored). Example: `brokkr bench --force self --dataset denmark`.
 

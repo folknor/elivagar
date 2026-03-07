@@ -3749,15 +3749,27 @@ fn phase_assemble(
             .filter(|(_, max_z)| **max_z > 0)
             .map(|(i, max_z)| format!("{}:z{}", shortbread::Layer::ALL[i].name(), max_z))
             .collect();
+        let seam_rings = seam_metrics.rings_decoded.load(Ordering::Relaxed);
+        let seam_chains = seam_metrics.chains_detected.load(Ordering::Relaxed);
+        let seam_reconciled = seam_metrics.chains_reconciled.load(Ordering::Relaxed);
+        let seam_skipped = seam_metrics.chains_skipped.load(Ordering::Relaxed);
+        let seam_us = seam_metrics.reconcile_us.load(Ordering::Relaxed);
         eprintln!("  Seam reconciliation ({}): {} tiles, {} rings, {} chains ({} reconciled, {} skipped), {:.1} ms",
             seam_layer_descs.join("+"),
             seam_touched,
-            seam_metrics.rings_decoded.load(Ordering::Relaxed),
-            seam_metrics.chains_detected.load(Ordering::Relaxed),
-            seam_metrics.chains_reconciled.load(Ordering::Relaxed),
-            seam_metrics.chains_skipped.load(Ordering::Relaxed),
-            seam_metrics.reconcile_us.load(Ordering::Relaxed) as f64 / 1000.0,
+            seam_rings,
+            seam_chains,
+            seam_reconciled,
+            seam_skipped,
+            seam_us as f64 / 1000.0,
         );
+        eprintln!("seam_tiles_touched={seam_touched}");
+        eprintln!("seam_rings_decoded={seam_rings}");
+        eprintln!("seam_chains_detected={seam_chains}");
+        eprintln!("seam_chains_reconciled={seam_reconciled}");
+        eprintln!("seam_chains_skipped={seam_skipped}");
+        eprintln!("seam_reconcile_us={seam_us}");
+        eprintln!("seam_layers={}", seam_layer_descs.join("+"));
     }
 
     Ok((features_read, tiles_written, unique_tiles, max_batch_bytes, dedup_stats, size_diag))

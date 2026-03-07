@@ -114,27 +114,11 @@ invisible to this approach. This is essentially what we already have.
 reconciliation already does this for boundaries (where it works because
 boundary geometry is vertex-light and DP rarely diverges).
 
-### Option D: Coordinated simplification via edge hashing (recommended)
+### Option D: Coordinated simplification via vertex pinning (recommended)
 
-Use a deterministic edge-identity scheme so that shared edges are simplified
-identically by both polygons during PBF phase, without either polygon
-needing to know the other exists.
-
-**Algorithm:**
-1. Define a canonical edge identity: for any edge between two OSM nodes,
-   the identity is `(min(node_id_a, node_id_b), max(node_id_a, node_id_b))`.
-   This is the same regardless of which polygon references the edge and in
-   which direction.
-2. During PBF phase, when simplifying a polygon ring at zoom z:
-   a. Run DP as normal to get the kept-vertex set.
-   b. For each *original* edge in the ring that was removed by DP, compute
-      its canonical edge identity. Check: is this edge part of a shared
-      boundary? (See below for how to know this.)
-   c. If shared, the simplification decision must be deterministic based
-      solely on the edge's geometry and the zoom tolerance — not on the
-      polygon context. This means: for a sequence of vertices along a shared
-      boundary, the DP result must be the same regardless of which polygon
-      is being simplified.
+Use OSM relation topology to identify shared edges, then pin shared-segment
+boundaries during DP so that both polygons produce identical simplified
+edges for the shared portion.
 
 **The key insight:** Two polygons sharing an edge have *the same vertex
 sequence* along that edge (by definition — they reference the same OSM
@@ -143,7 +127,7 @@ the results are identical. DP is already deterministic given the same input
 and tolerance. The problem is that each polygon has *additional* vertices
 (the non-shared parts of its ring) that affect the DP recursion.
 
-**Refined algorithm — segment isolation:**
+**Solution — segment-isolated DP:**
 1. During PBF phase, for each polygon ring, identify which sub-sequences
    are shared with other polygons. (This requires knowing shared edges —
    see "Shared edge identification" below.)
@@ -155,12 +139,19 @@ and tolerance. The problem is that each polygon has *additional* vertices
    pinned at the junction with shared segments).
 5. Concatenate simplified segments back into the ring.
 
-This is equivalent to `simplify_into_with_required` where the required
-indices are the shared-segment endpoints. We already have this function.
+**Critical implementation detail:** This requires true segment-isolated DP,
+not merely marking shared-segment endpoints as required indices in a
+full-ring DP pass. Full-ring DP with required indices prevents deletion of
+pinned vertices but does NOT isolate the recursion context — the DP
+recursion partitions are determined by the full ring's vertex positions, so
+interior vertices of the shared segment can still be kept/removed differently
+by each polygon. `simplify_into_with_required` achieves segment isolation
+only if it splits the ring at required indices first and runs DP on each
+sub-segment independently. This must be verified or enforced.
 
 **Shared edge identification — two approaches:**
 
-*Approach D1: OSM topology (PBF phase, zero extra data)*
+*Approach D1: OSM relation topology (PBF phase, zero extra data)*
 
 OSM relations and ways carry explicit topology. A boundary relation
 references ways; adjacent boundary relations share way references. During
@@ -168,17 +159,12 @@ PBF phase, when processing a way that belongs to multiple relations (or to
 a relation and also appears as a standalone polygon), we know it's shared.
 
 Implementation:
-- In the relation accumulation pass, build a `way_id -> Vec<relation_id>`
-  index (already partially done for multipolygon assembly).
+- In the relation accumulation pass, build a `way_id -> count` index
+  tracking how many polygon relations reference each way.
 - A way appearing in 2+ polygon relations (or in 1 relation + as a
   standalone polygon way) has shared edges.
-- Mark the way's vertex indices as "shared segment endpoints" (the first
-  and last vertex of each shared way reference).
-- Pass these as `required_indices` to `simplify_into_with_required`.
-
-This is cheap: one HashMap lookup per way during relation processing,
-plus the existing `simplify_into_with_required` machinery. No sort record
-changes, no assemble-phase changes.
+- At shared/non-shared way boundaries, pin the junction vertices and
+  run segment-isolated DP on the shared sub-sequence.
 
 **Limitation:** Only works for shared edges that come from explicit OSM
 topology (relations referencing the same ways). Two independent closed-way
@@ -204,25 +190,75 @@ edges with count >= 2 need to be retained.
   edge by coincidence.
 - D2 (node-pair hashing) is complete but requires significant memory and
   either two passes or deferred emission.
-- **Recommend D1 first**, with D2 as a follow-up if D1 leaves visible seams
-  from non-relation shared edges.
+- **Recommend D1 first**, with D2 as a follow-up if D1 coverage metric
+  (see below) shows significant uncovered seam chains.
 
 ## Recommended plan
 
-### Phase 1: Relation-aware vertex pinning (D1)
+### Phase 1: Relation-aware segment-isolated DP (D1)
 
-**Goal:** Pin shared-edge endpoints during PBF-phase DP simplification so
-that adjacent relation-derived polygons produce identical simplified edges.
+**Scope:** Partial mitigation for relation-derived shared edges. Not a
+complete replacement for assemble-phase reconciliation — treat as an
+additive improvement that reduces the number of seams reaching assemble.
 
-**Data flow changes:**
-1. During relation batch processing (`flush_rel_batch`), when resolving a
-   multipolygon relation's member ways, note which ways appear in multiple
-   relations. Build a per-batch `FxHashSet<i64>` of shared way IDs.
-2. When emitting polygon sort records, for ways marked as shared, pass
-   their vertex indices as `required_indices` to
-   `simplify_into_with_required`. This is already done for seam-detected
-   vertices via `preserve_vertex_mask` — extend the same mechanism.
-3. No sort record format changes. No assemble-phase changes.
+**Goal:** Pin shared-segment boundaries during PBF-phase DP simplification
+so that adjacent relation-derived polygons produce identical simplified
+edges for the shared portion.
+
+**Mechanism — segment-isolated DP (not merely endpoint pinning):**
+1. Identify shared ways via relation topology (see below).
+2. For each polygon ring containing shared ways, split the ring into
+   shared and non-shared sub-sequences at way junction vertices.
+3. Run DP independently on each sub-sequence (endpoints pinned). This
+   guarantees identical output for both polygons on the shared segment.
+4. Concatenate simplified sub-sequences back into the ring.
+
+This is stronger than marking endpoints as required indices in full-ring
+DP. Full-ring DP with required indices prevents endpoint deletion but
+allows interior-vertex divergence because the recursion context differs
+between polygons. Segment isolation eliminates the context dependency.
+
+**Shared-way detection — cross-batch challenge:**
+
+The naive approach (per-batch `FxHashSet<i64>` of shared way IDs) has a
+significant gap: adjacent admin boundary relations (e.g. France and Germany)
+often have very different relation IDs and will land in different batches
+under `--rel-budget 64M`. This means the primary visual seam case — country
+and state borders — is the one most likely to be missed by batch-local
+detection.
+
+Two mitigation strategies:
+
+*Strategy 1: Global way-reference counting.*
+Maintain a global `FxHashMap<i64, u8>` across all batches, counting how
+many polygon relations reference each way ID. Build incrementally during
+relation accumulation. Problem: the first relation to use a shared way
+doesn't know it's shared yet. Requires either a two-pass approach over the
+relation section or deferred emission, both of which break the streaming
+architecture.
+
+*Strategy 2: Boundary relation heuristic.*
+Treat ALL ways in `type=boundary` relations as shared unconditionally. Pin
+their junction vertices without requiring cross-relation detection. This
+is conservative (pins some non-shared vertices, producing slightly larger
+sort records) but catches the dominant case without any cross-batch
+coordination. Admin boundary ways are shared by definition — they are the
+line between two territories.
+
+**Recommend Strategy 2** for Phase 1: simple, no architectural changes,
+catches the most visible seam source. Strategy 1 can be added later for
+non-boundary relation types if needed. Track `extra_pinned_vertices_boundary`
+metric to bound blast radius — measures how many additional vertices survive
+DP due to boundary-heuristic pinning vs unpinned baseline.
+
+**Interaction with `--polygon-simplify-factor`:**
+More aggressive polygon simplification (factor > 1.0) amplifies divergence
+on shared edges — more vertices removed, bigger gaps between independently
+simplified polygons. D1's segment-isolated DP becomes more important with
+aggressive factors. Note that the pinned junction vertices may be far apart
+after aggressive simplification, leaving long straight segments that could
+still produce visible seams between junctions. This interaction should be
+validated during benchmarking.
 
 **What this fixes:**
 - Admin boundary seams (boundaries layer) — the primary visual issue.
@@ -230,24 +266,39 @@ that adjacent relation-derived polygons produce identical simplified edges.
   from relations).
 
 **What this doesn't fix:**
-- Shared edges between independent closed-way polygons (rare for the
-  affected layers).
+- Shared edges between independent closed-way polygons.
 - Shared edges between a relation polygon and an overlapping standalone
   polygon.
+- Cross-layer shared edges (e.g. land meeting water_polygons).
 
 **Cost model:**
-- PBF phase: one `FxHashSet<i64>` per relation batch (way IDs only, not
-  vertices). Lookup per way during emission — negligible.
-- The `simplify_into_with_required` path is already benchmarked and has
-  no measurable overhead vs regular DP.
+- PBF phase: one `FxHashSet<i64>` of boundary-relation way IDs (built
+  during relation accumulation). Lookup per way during emission — negligible.
+- Segment-isolated DP is equivalent cost to current DP (same total vertex
+  count, just partitioned differently).
 - Sort record sizes: slightly larger at low zoom (pinned vertices survive
-  that would otherwise be removed), but this is bounded — only shared-edge
-  endpoints are pinned, not entire vertex sequences. Expected impact: <1%
-  sort byte increase.
+  that would otherwise be removed), but this is bounded — only way-junction
+  vertices are pinned. **Hypothesis:** <1% sort byte increase — must be
+  validated by benchmarking with `extra_pinned_vertices_boundary` metric
+  and sort byte delta before/after on Denmark + Norway.
 
-### Phase 2: Remove defer-then-reconcile (cleanup)
+**Coverage metric (required before Phase 2 decision):**
+Run both D1 pinning and current assemble-phase reconciliation on
+Norway + Denmark. Measure:
+1. Total seam chains detected by assemble reconcile (baseline).
+2. Of those, how many have zero divergence after D1 pinning (D1 hits).
+3. Remaining seam chains that D1 doesn't cover (D1 misses).
+4. D1 coverage = hits / baseline. Gate Phase 2 on coverage >= 90%.
 
-Once Phase 1 is validated:
+### Phase 2: Evaluate defer-then-reconcile removal (candidate cleanup)
+
+**Gated on Phase 1 coverage metric and visual QA across multiple datasets.**
+Do not remove until:
+1. D1 coverage metric >= 90% on NA + Norway + Denmark (all three).
+2. Visual diffs show no new seam regressions vs current assemble reconcile.
+3. `--polygon-simplify-factor` interaction validated at factor 2.0.
+
+Candidate cleanup items (proceed only if all gates pass):
 1. Remove `seam_reconcile_layers` config, CLI flag, and `DeferralStats`.
 2. Remove `reconcile_boundary_seams` in assemble phase.
 3. Remove `detect_shared_chains`, `canonicalize_shared_chains`,
@@ -256,10 +307,15 @@ Once Phase 1 is validated:
 4. The `--seam-reconcile-layers` flag becomes a no-op (warn and ignore)
    for one release, then remove.
 
+If gating criteria NOT met, keep both paths (D1 pinning + assemble
+reconciliation) as complementary — D1 reduces the seam count that reaches
+assemble, and assemble reconcile handles the remainder.
+
 ### Phase 3: Node-pair hashing for completeness (D2, if needed)
 
-Only if Phase 1 leaves visible seams from non-relation shared edges.
-Not designed in detail here — gate on evidence.
+Only if Phase 1 coverage metric shows significant uncovered seam chains
+from non-relation shared edges. Not designed in detail here — gate on
+evidence from the coverage metric.
 
 ## Synthetic benchmark plan
 
@@ -269,8 +325,15 @@ Before touching pipeline code, validate the core hypothesis:
    10, 100, 1000 vertices per shared segment).
 2. Simplify each polygon independently with standard DP at z8 tolerance.
 3. Measure: how many shared-edge vertices diverge? What's the gap size?
-4. Simplify again with shared-segment endpoints pinned as required indices.
+4. Simplify again with segment-isolated DP (shared segment simplified
+   independently with pinned endpoints).
 5. Measure: do shared edges now agree? What's the vertex count difference?
+
+**Critical test:** Verify that `simplify_into_with_required` actually
+performs segment-isolated DP (splits at required indices, runs DP on each
+sub-segment independently) rather than full-ring DP with unkillable
+vertices. If the current implementation does not isolate segments, it must
+be modified or a separate `simplify_segments` function added.
 
 This can be a `#[test]` in `geometry_tests.rs` — no pipeline or data files
 needed. The test validates that segment-isolated DP with pinned endpoints
@@ -279,19 +342,18 @@ produces identical output for both sides of a shared edge.
 ## Risk assessment
 
 **Low risk:**
-- Phase 1 uses existing `simplify_into_with_required` (well-tested).
+- Segment-isolated DP is a well-understood algorithm variant.
 - No sort record format changes.
-- No assemble-phase algorithm changes.
-- Boundary layer already uses required-vertex pinning for detected shared
-  vertices — this extends the same mechanism to relation-level topology.
+- Boundary relation heuristic (Strategy 2) requires no architectural changes.
 
 **Medium risk:**
-- Relation batch processing currently doesn't track cross-relation way
-  sharing. Need to verify that way IDs are available at the right point
-  in the pipeline. The `flush_rel_batch` function processes batches of
-  relations — ways shared across batches won't be detected within a single
-  batch. This is acceptable: cross-batch sharing is rare for adjacent
-  polygons (they tend to be in the same or nearby PBF blocks).
+- Must verify or enforce that DP implementation actually isolates segments
+  at required indices. If `simplify_into_with_required` runs DP on the full
+  ring with required vertices merely marked as unkillable, interior vertices
+  of the shared segment can still diverge. This is the difference between
+  "works in theory" and "works in practice."
+- Coverage gap for non-relation shared edges is real and may require keeping
+  assemble reconciliation as a complementary path indefinitely.
 
 **Not a risk:**
 - Performance regression. The only new work is a HashSet lookup per way
@@ -302,10 +364,16 @@ produces identical output for both sides of a shared edge.
 - **Planetiler:** Does not reconcile shared edges. Relies on buffer overlap
   to hide seams. Documented as a known issue.
 - **Tilemaker:** No shared-edge handling. Same buffer-overlap strategy.
-- **Tippecanoe:** Issue #105 documents the problem. No fix implemented.
-  Recommends pre-processing (e.g. Mapshaper's `-snap` or `-clean`).
+- **Tippecanoe:** Implements shared-border detection via `--detect-shared-borders`
+  (canonical Tippecanoe issues #301/#302). The felt/tippecanoe fork extends
+  this with `--no-simplification-of-shared-nodes`, which pins shared vertices
+  during simplification — similar in spirit to D1. Tippecanoe's approach
+  operates on pre-processed GeoJSON features, not OSM topology directly.
 
-Elivagar's approach (relation-topology-aware vertex pinning) would be
-unique among open-source tile generators. The key enabler is that we
-process OSM PBF directly and have access to relation topology, unlike
-tools that consume pre-processed GeoJSON/shapefiles.
+Elivagar's D1 approach (relation-topology-aware segment-isolated DP) has
+the advantage of leveraging OSM relation structure to identify shared edges
+without needing a separate shared-edge detection pass. The tradeoff is that
+it only covers relation-derived shared edges, not arbitrary feature
+adjacency. Tippecanoe's `--detect-shared-borders` finds shared edges by
+geometric comparison across all input features, which is more complete but
+requires an explicit detection pass.
