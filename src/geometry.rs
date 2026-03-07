@@ -440,12 +440,18 @@ thread_local! {
 /// using the previous zoom's result. Calls `callback(z, &simplified)` at each
 /// zoom level. Stops early if the simplified geometry drops below `min_points`.
 /// Uses thread-local scratch buffers to avoid per-call allocation.
+///
+/// `tol_scale` multiplies the base simplification tolerance. Use 1.0 for
+/// standard behavior (lines). Values > 1.0 simplify more aggressively (fewer
+/// vertices), useful for polygon fill layers where sub-pixel precision is less
+/// important than for stroked lines.
 #[hotpath::measure]
 pub fn for_each_zoom_simplified<F>(
     merc: &[Point],
     z_lo: u8,
     z_hi: u8,
     min_points: usize,
+    tol_scale: f64,
     mut callback: F,
 ) where
     F: FnMut(u8, &[Point]),
@@ -468,7 +474,7 @@ pub fn for_each_zoom_simplified<F>(
             // Option E: if cascade already has ≤ min_points vertices, DP can't
             // reduce further — skip the call entirely.
             if cascade.len() > min_points {
-                let tol = simplify_tolerance(z);
+                let tol = simplify_tolerance(z) * tol_scale;
                 // Option D: if last DP's max deviation is already below this
                 // zoom's tolerance, the cascade is optimal — skip DP.
                 if last_max_dev_sq >= tol * tol {
@@ -513,6 +519,9 @@ impl SimplifyMultiScratch {
 /// Same zoom-descending approach as [`for_each_zoom_simplified`], but also
 /// simplifies inner rings and drops any that fall below 4 points.
 /// Pass a [`SimplifyMultiScratch`] to reuse buffers across calls.
+///
+/// `tol_scale` multiplies the base simplification tolerance (see
+/// [`for_each_zoom_simplified`] for rationale).
 #[hotpath::measure]
 pub fn for_each_zoom_simplified_multi<F>(
     outer: &[Point],
@@ -520,6 +529,7 @@ pub fn for_each_zoom_simplified_multi<F>(
     z_lo: u8,
     z_hi: u8,
     scratch: &mut SimplifyMultiScratch,
+    tol_scale: f64,
     mut callback: F,
 ) where
     F: FnMut(u8, &[Point], &[Vec<Point>]),
@@ -556,7 +566,7 @@ pub fn for_each_zoom_simplified_multi<F>(
 
     let mut last_max_dev_sq: f64 = f64::MAX;
     for z in (z_lo..=z_hi).rev() {
-        let tol = if z < 14 { simplify_tolerance(z) } else { 0.0 };
+        let tol = if z < 14 { simplify_tolerance(z) * tol_scale } else { 0.0 };
         if tol > 0.0 {
             if merc_bbox_is_subpixel(cascade_outer, z) {
                 break;

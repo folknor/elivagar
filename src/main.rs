@@ -127,6 +127,13 @@ struct RunArgs {
     /// at that zoom. Example: water_polygons=2048,boundaries=4096
     #[arg(long, value_delimiter = ',')]
     fanout_cap: Vec<String>,
+
+    /// Simplification tolerance multiplier for polygon layers.
+    /// 1.0 = same as lines (default). Values > 1.0 simplify polygons more
+    /// aggressively, reducing sort record volume. Polygon fills are less
+    /// sensitive to vertex precision than stroked lines.
+    #[arg(long, default_value_t = 1.0)]
+    polygon_simplify_factor: f64,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -365,6 +372,14 @@ fn run(args: RunArgs) {
                 }
             }
             caps
+        },
+        polygon_simplify_factor: {
+            let f = args.polygon_simplify_factor;
+            if f < 0.1 || f > 10.0 {
+                eprintln!("Error: --polygon-simplify-factor must be between 0.1 and 10.0, got {f}");
+                std::process::exit(1);
+            }
+            f
         },
     };
 

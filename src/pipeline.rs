@@ -174,6 +174,12 @@ pub struct TilegenConfig {
     /// 0 = uncapped (default). Only applies to polygon-geometry emit functions.
     /// Indexed by `Layer` enum discriminant.
     pub fanout_caps: [u32; shortbread::Layer::count()],
+    /// Simplification tolerance multiplier for polygon layers. 1.0 = standard
+    /// (same tolerance as lines). Values > 1.0 simplify more aggressively,
+    /// reducing sort record volume. Polygon fill rendering is less sensitive
+    /// to vertex precision than stroked lines, so higher tolerances are safe.
+    /// Expected sweet spot: 1.0-2.0. Default: 1.0 (no change).
+    pub polygon_simplify_factor: f64,
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
@@ -696,6 +702,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("    Zoom range: z{}–z{}", config.min_zoom, config.max_zoom);
     eprintln!("    Tmp dir:    {}", config.tmp_dir.display());
     eprintln!("    Tile format:{:?}, compression:{:?}", config.tile_format, config.tile_compression);
+    if (config.polygon_simplify_factor - 1.0).abs() > f64::EPSILON {
+        eprintln!("    Polygon simplify factor: {:.2}", config.polygon_simplify_factor);
+    }
     if let Some(s) = skip {
         eprintln!("    Skip to:    {s:?}");
     }
@@ -1326,6 +1335,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                     let xz = max_z;
                     let srl = config.seam_reconcile_layers;
                     let fcs = config.fanout_caps;
+                    let psf = config.polygon_simplify_factor;
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
@@ -1419,7 +1429,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                                     let results: Vec<ProcessedWay> = raw_ways
                                         .into_par_iter()
                                         .map(|raw| process_raw_way(
-                                            &raw, nr_ref, lm_ref, mz, xz, &srl, ds_ref, mr_ref, &fcs,
+                                            &raw, nr_ref, lm_ref, mz, xz, &srl, ds_ref, mr_ref, &fcs, psf,
                                         ))
                                         .collect();
                                     let _ = tx.send(results);
@@ -1513,7 +1523,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
                         features_emitted += flush_rel_batch(
                             batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
                             sort_writer.as_mut().expect("sort_writer not returned from drain"),
-                            &mut fanout_stats, &config.fanout_caps,
+                            &mut fanout_stats, &config.fanout_caps, config.polygon_simplify_factor,
                         );
                         deferral_stats.check_budgets(&config.seam_reconcile_layers);
                     }
@@ -1531,7 +1541,7 @@ fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbo
         features_emitted += flush_rel_batch(
             rel_batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
             sort_writer.as_mut().expect("sort_writer not returned from drain"),
-            &mut fanout_stats, &config.fanout_caps,
+            &mut fanout_stats, &config.fanout_caps, config.polygon_simplify_factor,
         );
         deferral_stats.check_budgets(&config.seam_reconcile_layers);
     }
@@ -2049,6 +2059,7 @@ fn process_raw_way(
     deferral_stats: &DeferralStats,
     missing_ref_stats: &MissingRefStatsAtomic,
     fanout_caps: &[u32],
+    polygon_simplify_factor: f64,
 ) -> ProcessedWay {
     // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
     // or looked up via node store (the expensive mmap reads — now parallel).
@@ -2184,6 +2195,7 @@ fn process_raw_way(
                                 sr,
                                 Some(deferral_stats),
                                 fc,
+                                polygon_simplify_factor,
                             );
                         } else {
                             let shifted: Vec<Point> = merc
@@ -2202,6 +2214,7 @@ fn process_raw_way(
                                 sr,
                                 Some(deferral_stats),
                                 fc,
+                                polygon_simplify_factor,
                             );
                         }
                     }
@@ -2365,6 +2378,7 @@ fn flush_rel_batch(
     sort_writer: &mut SortWriter,
     fanout_stats: &mut FanoutStats,
     fanout_caps: &[u32],
+    polygon_simplify_factor: f64,
 ) -> u64 {
     use rayon::prelude::*;
 
@@ -2395,6 +2409,7 @@ fn flush_rel_batch(
                     &mut acc.multipolygon_emit,
                     &mut acc.simp_scratch,
                     fanout_caps,
+                    polygon_simplify_factor,
                 );
                 // Track fanout for this relation's records.
                 record_fanout_from_records(&acc.records[before..], &mut acc.fanout);
@@ -2470,6 +2485,7 @@ fn process_prepared_relation_into(
     multipolygon_emit: &mut MultipolygonEmitScratch,
     simp_scratch: &mut geometry::SimplifyMultiScratch,
     fanout_caps: &[u32],
+    polygon_simplify_factor: f64,
 ) {
     let multi = multipolygon::assemble(&rel.member_ways);
     let shared_vertex_keys = relation_shared_vertex_keys(&rel.member_ways);
@@ -2517,7 +2533,7 @@ fn process_prepared_relation_into(
                                 Some(&shared_vertex_keys),
                                 m,
                                 z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr, Some(deferral_stats), fc,
+                                sr, Some(deferral_stats), fc, polygon_simplify_factor,
                             );
                         } else {
                             let outer_shifted: Vec<Point> = outer_unwrapped
@@ -2539,7 +2555,7 @@ fn process_prepared_relation_into(
                                 Some(&shared_vertex_keys),
                                 m,
                                 z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr, Some(deferral_stats), fc,
+                                sr, Some(deferral_stats), fc, polygon_simplify_factor,
                             );
                         }
                     }
@@ -2918,7 +2934,7 @@ fn emit_line_feature(
             }
         }
     } else {
-        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, |z, simplified| {
+        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, 1.0, |z, simplified| {
             run_for_zoom(z, simplified);
         });
     }
@@ -2940,6 +2956,7 @@ fn emit_polygon_feature(
     seam_max_zoom: u8,
     deferral_stats: Option<&DeferralStats>,
     fanout_cap: u32,
+    tol_scale: f64,
 ) -> u64 {
     // Auto-disable check: if deferral was killed for this layer, skip it.
     let seam_max_zoom = if seam_max_zoom > 0
@@ -3085,7 +3102,7 @@ fn emit_polygon_feature(
                     }
                 run_for_zoom(z, merc);
             } else {
-                let tol = geometry::simplify_tolerance(z);
+                let tol = geometry::simplify_tolerance(z) * tol_scale;
                 if has_pins {
                     let _ = geometry::simplify_into_with_required(
                         merc,
@@ -3114,7 +3131,7 @@ fn emit_polygon_feature(
                 break;
             }
             if z < 14 {
-                let tol = geometry::simplify_tolerance(z);
+                let tol = geometry::simplify_tolerance(z) * tol_scale;
                 let _ = geometry::simplify_into_with_required(
                     merc,
                     tol,
@@ -3131,7 +3148,7 @@ fn emit_polygon_feature(
             }
         }
     } else {
-        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |z, simplified| {
+        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, tol_scale, |z, simplified| {
             run_for_zoom(z, simplified);
         });
     }
@@ -3154,6 +3171,7 @@ fn emit_multipolygon_feature(
     seam_max_zoom: u8,
     deferral_stats: Option<&DeferralStats>,
     fanout_cap: u32,
+    tol_scale: f64,
 ) -> u64 {
     let mut count: u64 = 0;
     emit_scratch.cap_events.clear();
@@ -3395,7 +3413,7 @@ fn emit_multipolygon_feature(
                 emit_for_zoom(z, outer, inners);
             } else {
                 // z 9..13: DP simplification.
-                let tol = geometry::simplify_tolerance(z);
+                let tol = geometry::simplify_tolerance(z) * tol_scale;
                 if simp_scratch.cascade_outer.len() > 4 {
                     if has_keys {
                         let keys = preserve_vertex_keys.expect("checked above");
@@ -3474,7 +3492,7 @@ fn emit_multipolygon_feature(
                 if geometry::merc_bbox_is_subpixel(&simp_scratch.cascade_outer, z) {
                     break;
                 }
-                let tol = geometry::simplify_tolerance(z);
+                let tol = geometry::simplify_tolerance(z) * tol_scale;
                 if simp_scratch.cascade_outer.len() > 4 {
                     emit_scratch.required_idxs.clear();
                     let outer_end = simp_scratch.cascade_outer.len().saturating_sub(1);
@@ -3521,7 +3539,7 @@ fn emit_multipolygon_feature(
             emit_for_zoom(z, &simp_scratch.cascade_outer, &simp_scratch.cascade_inners);
         }
     } else {
-        geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, |z, simp_outer, simp_inners| {
+        geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, tol_scale, |z, simp_outer, simp_inners| {
             emit_for_zoom(z, simp_outer, simp_inners);
         });
     }

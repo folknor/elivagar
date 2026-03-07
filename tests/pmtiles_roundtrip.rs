@@ -444,6 +444,7 @@ fn test_full_pipeline() {
             m
         },
         fanout_caps: [0; elivagar::shortbread::Layer::count()],
+        polygon_simplify_factor: 1.0,
     };
 
     elivagar::run(&config).expect("pipeline should succeed");

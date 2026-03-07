@@ -406,7 +406,7 @@ fn emit_ocean_polygon(
     let mut row_outer: Vec<Point> = Vec::new();
     let mut row_inners: Vec<Vec<Point>> = Vec::new();
 
-    geometry::for_each_zoom_simplified_multi(outer, inners, min_zoom, max_zoom, simp_scratch, |z, simp_outer, simp_inners| {
+    geometry::for_each_zoom_simplified_multi(outer, inners, min_zoom, max_zoom, simp_scratch, 1.0, |z, simp_outer, simp_inners| {
         let scale = f64::from(1u32 << z);
         let inv_scale = 1.0 / scale;
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
