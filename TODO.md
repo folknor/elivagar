@@ -82,12 +82,32 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
   - [x] Cap impact metrics: `fanout_capped_features_{layer}`, `capped_tiles`,
     `capped_bytes_estimated` (avg record size × capped bbox tiles). Strict layer
     name validation (fail on unknown, not warn).
-  NA baseline (commit `bed3629`, plantasjen): 699s, 22.7 GB RSS. Tail findings:
-  water_polygons max 4.2M tiles at z14 (164 features ≥2048), boundaries max 35K
-  (92 ≥2048). A cap of 2048 would affect ~272 features total; 512 hits ~1,264.
-  - [ ] Validate cap impact: run with `--fanout-cap water_polygons=2048` on NA,
-    compare sort bytes delta, dropped-feature counts, and visual spot checks on
-    coastlines (Great Lakes), boundaries (US-Canada), and one dense urban tile.
+  - [x] Top-10 capped feature ID reporting for visual QA targeting (commit `2cd1907`).
+  NA cap benchmarks (plantasjen, commit `c8392e1`):
+  | Config | Wall | phase12 | sort_bytes | features capped | output |
+  |--------|------|---------|------------|-----------------|--------|
+  | Uncapped (`bed3629`) | 699s | 507s | 51.32 GB | 0 | 13.44 GB |
+  | water_polygons=4096 | 678s (-21s) | 492s | 50.81 GB | 197 | 13.36 GB |
+  | water_polygons=2048 | 670s (-29s) | 485s | 50.77 GB | 425 | 13.34 GB |
+  Diminishing returns from 4096→2048: +8s savings but 2.2x more capped features.
+  **Policy**: water_polygons=4096 is default candidate (most benefit, smallest blast
+  radius). water_polygons=2048 for aggressive profiles. Other layers uncapped.
+  Gate default flip on targeted visual QA of top capped IDs (Great Lakes/coasts).
+  **Instrumentation note**: FanoutStats collection (histograms, per-layer-per-zoom
+  stats) has negligible overhead (array writes, no hot-path allocations). Not worth
+  stripping. The per-layer-per-zoom fanout table output is noisy for production runs;
+  consider making it opt-in via a `--fanout-stats` flag when not debugging sort behavior.
+  - [ ] Visual QA: inspect top capped feature IDs on coastline/lake tiles.
+    Gate for enabling water_polygons=4096 as default.
+    Workflow: run Norway + Japan PBFs with `--fanout-cap water_polygons=4096`,
+    use nidhogg `/map` viewer with OSM ID lookup (nidhogg `GET /api/element/{type}/{id}`
+    + viewer highlight) to inspect each top-10 capped ID.
+    Acceptance: no visible missing water features at z6-z12.
+    Top-10 capped IDs were not captured because the NA runs (`c8392e1`) predated the
+    top-10 reporting commit (`2cd1907`). The KV format is already brokkr-compatible
+    (`fanout_capped_top_N=layer/zZ/osm_id=ID/bbox_tiles=N`). Re-run to capture.
+    NA re-run command:
+    `brokkr bench self --dataset north-america-latest --fanout-cap water_polygons=4096`
   - [ ] Zoom-dependent subpixel area threshold for polygon layers (flag-gated).
     Quality tradeoff: eliminates small-but-visible features at mid-zoom.
   **Phase 3 — polygon record weight reduction** (second, but soon):

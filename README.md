@@ -32,6 +32,9 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--tile-format mvt\|mlt` | Tile payload format (default: `mvt`). `mlt` is wired but not yet implemented |
 | `--tile-compression gzip\|brotli` | Tile compression algorithm (default: `gzip`, MVT only) |
 | `--compress-sort-chunks lz4\|snappy` | Compress sort chunk files (off by default). Reduces disk I/O at the cost of CPU |
+| `--fanout-cap-default N` | Default fanout cap for all polygon layers (0 = uncapped) |
+| `--fanout-cap layer=N,...` | Per-layer fanout caps (e.g. `water_polygons=4096`). Features whose bbox tile count exceeds the cap are skipped at that zoom. Comma-separated |
+| `--seam-reconcile-layers layer:maxzoom,...` | Layers for shared-edge seam reconciliation (default: `boundaries:8`). Format: `layer` or `layer:maxzoom` |
 | `-j N` / `--threads N` | Thread count (default: logical CPUs) |
 
 ### Inspect a PMTiles archive
