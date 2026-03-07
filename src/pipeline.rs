@@ -408,6 +408,8 @@ struct FanoutStats {
     capped_features: Box<[u64; 32 * 15]>,
     /// Estimated tiles saved by capping (sum of bbox tile counts). Index: layer * 15 + zoom.
     capped_tiles: Box<[u64; 32 * 15]>,
+    /// Top capped features by bbox tile count: (osm_id, layer, zoom, bbox_tiles).
+    top_capped: Vec<(u64, u8, u8, u64)>,
 }
 
 impl FanoutStats {
@@ -419,6 +421,7 @@ impl FanoutStats {
             hist: Box::new([0; 32 * 15 * FANOUT_HIST_BUCKETS]),
             capped_features: Box::new([0; 32 * 15]),
             capped_tiles: Box::new([0; 32 * 15]),
+            top_capped: Vec::new(),
         }
     }
 
@@ -446,13 +449,21 @@ impl FanoutStats {
     }
 
     /// Record that a feature was capped (skipped) at (layer, zoom) with bbox tile count.
-    fn record_cap(&mut self, layer: usize, zoom: usize, bbox_tiles: u64) {
+    #[allow(clippy::cast_possible_truncation)]
+    fn record_cap(&mut self, layer: usize, zoom: usize, bbox_tiles: u64, osm_id: u64) {
         if layer >= 32 || zoom >= 15 {
             return;
         }
         let idx = layer * 15 + zoom;
         self.capped_features[idx] += 1;
         self.capped_tiles[idx] += bbox_tiles;
+        // Track top 10 capped features by bbox tile count.
+        const TOP_N: usize = 10;
+        if self.top_capped.len() < TOP_N || bbox_tiles > self.top_capped.last().map_or(0, |e| e.3) {
+            self.top_capped.push((osm_id, layer as u8, zoom as u8, bbox_tiles));
+            self.top_capped.sort_unstable_by_key(|e| std::cmp::Reverse(e.3));
+            self.top_capped.truncate(TOP_N);
+        }
     }
 
     /// Merge another FanoutStats into self.
@@ -469,6 +480,10 @@ impl FanoutStats {
         for i in 0..(32 * 15 * FANOUT_HIST_BUCKETS) {
             self.hist[i] += other.hist[i];
         }
+        // Merge top capped: combine, sort, truncate.
+        self.top_capped.extend_from_slice(&other.top_capped);
+        self.top_capped.sort_unstable_by_key(|e| std::cmp::Reverse(e.3));
+        self.top_capped.truncate(10);
     }
 
     /// Compute a percentile (0.0-1.0) from the histogram for a given (layer, zoom).
@@ -942,6 +957,17 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     eprintln!("fanout_capped_tiles_{name}={}", cap_tiles_parts.join(","));
                     eprintln!("fanout_capped_bytes_estimated_{name}={}", cap_bytes_parts.join(","));
                 }
+            }
+        }
+        // Top capped features for visual QA targeting.
+        if !s.fanout_stats.top_capped.is_empty() {
+            for (rank, &(osm_id, layer, zoom, bbox_tiles)) in s.fanout_stats.top_capped.iter().enumerate() {
+                let name = if (layer as usize) < shortbread::Layer::ALL.len() {
+                    shortbread::Layer::ALL[layer as usize].name()
+                } else {
+                    "unknown"
+                };
+                eprintln!("fanout_capped_top_{}={name}/z{zoom}/osm_id={osm_id}/bbox_tiles={bbox_tiles}", rank + 1);
             }
         }
         // Deferral stats: report per-layer deferred vertex counts.
@@ -1847,7 +1873,7 @@ struct ProcessedWay {
     coords_e7: Vec<(i32, i32)>,
     records: Vec<SortRecord>,
     /// Cap events from polygon emit: (layer_zoom_idx, bbox_tiles).
-    cap_events: Vec<(u16, u64)>,
+    cap_events: Vec<(u16, u64, u64)>,
 }
 
 struct PointEmitScratch {
@@ -1898,7 +1924,7 @@ struct PolygonEmitScratch {
     row_clip_a: Vec<Point>,
     row_clip_b: Vec<Point>,
     /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64).
-    cap_events: Vec<(u16, u64)>,
+    cap_events: Vec<(u16, u64, u64)>,
 }
 
 impl PolygonEmitScratch {
@@ -1933,7 +1959,7 @@ struct MultipolygonEmitScratch {
     row_inners: Vec<Vec<Point>>,
     row_inner_bboxes: Vec<geometry::MercBbox>,
     /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64).
-    cap_events: Vec<(u16, u64)>,
+    cap_events: Vec<(u16, u64, u64)>,
 }
 
 impl MultipolygonEmitScratch {
@@ -1994,10 +2020,10 @@ fn drain_processed_ways(
         }
         record_fanout_from_records(&pw.records, fanout);
         // Harvest cap events from polygon emit.
-        for &(idx, tiles) in &pw.cap_events {
+        for &(idx, tiles, oid) in &pw.cap_events {
             let layer = idx as usize / 15;
             let zoom = idx as usize % 15;
-            fanout.record_cap(layer, zoom, tiles);
+            fanout.record_cap(layer, zoom, tiles, oid);
         }
         count += pw.records.len() as u64;
         // Panic: disk I/O failure is unrecoverable mid-pipeline.
@@ -2069,7 +2095,7 @@ fn process_raw_way(
     #[allow(clippy::cast_sign_loss)]
     let osm_id = raw.way_id as u64;
     let mut records = Vec::new();
-    let mut cap_events: Vec<(u16, u64)> = Vec::new();
+    let mut cap_events: Vec<(u16, u64, u64)> = Vec::new();
     let mut bbox: Option<MercBbox> = None;
     let mut preserve_vertex_mask: Vec<bool> = vec![false; coords_e7.len()];
     if !raw.preserve_node_refs.is_empty() {
@@ -2373,10 +2399,10 @@ fn flush_rel_batch(
                 // Track fanout for this relation's records.
                 record_fanout_from_records(&acc.records[before..], &mut acc.fanout);
                 // Harvest cap events from multipolygon emit scratch.
-                for &(idx, tiles) in &acc.multipolygon_emit.cap_events {
+                for &(idx, tiles, oid) in &acc.multipolygon_emit.cap_events {
                     let layer = idx as usize / 15;
                     let zoom = idx as usize % 15;
-                    acc.fanout.record_cap(layer, zoom, tiles);
+                    acc.fanout.record_cap(layer, zoom, tiles, oid);
                 }
                 for r in &acc.records[before..] {
                     acc.bytes += r.data.len() + std::mem::size_of::<SortRecord>();
@@ -2951,7 +2977,7 @@ fn emit_polygon_feature(
             let bbox_tiles = nx * ny;
             if bbox_tiles > u64::from(fanout_cap) {
                 #[allow(clippy::cast_possible_truncation)]
-                scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles));
+                scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles, osm_id));
                 return;
             }
         }
@@ -3152,7 +3178,7 @@ fn emit_multipolygon_feature(
             let bbox_tiles = nx * ny;
             if bbox_tiles > u64::from(fanout_cap) {
                 #[allow(clippy::cast_possible_truncation)]
-                emit_scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles));
+                emit_scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles, osm_id));
                 return;
             }
         }
