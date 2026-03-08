@@ -34,7 +34,6 @@ Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install
 - `brokkr results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [--top N]` — query/compare benchmark results from SQLite. Use `--top 0` to show all hotpath functions. Use `--compare-last --command hotpath` to diff two most recent hotpath runs.
 - `brokkr clean` — remove tilegen_tmp and scratch files
 - `brokkr history [--command CMD] [--project P] [--failed] [--since DATE] [--slow MS] [-n N] [--all]` — query global command history (stored in `$XDG_DATA_HOME/brokkr/history.db`). Every brokkr invocation is recorded with timing, exit status, project, and git context. Works from any directory.
-- `brokkr preview [--from step] [--dataset name] [--variant V] [--no-open]` — end-to-end visual pipeline inspection. Builds pbfhogg (enrich), elivagar (tilegen), nidhogg (ingest/serve), and opens a map viewer. Use `--from tilegen` to skip enrich and iterate on elivagar changes directly.
 
 ### brokkr.toml
 
