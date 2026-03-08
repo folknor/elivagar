@@ -45,6 +45,16 @@ elivagar inspect <file.pmtiles>
 
 Prints header info, tile statistics, section layout, and metadata (layer list with zoom ranges).
 
+### Render a tile as SVG
+
+```
+elivagar svg <file.pmtiles> -z <zoom> -x <x> -y <y> [-o output.svg]
+```
+
+Renders a single tile as SVG for visual inspection. Each MVT layer gets a distinct
+color. Points render as circles, lines as stroked paths, polygons as filled paths.
+Output goes to stdout by default.
+
 ### Environment variables
 
 | Variable | Description |

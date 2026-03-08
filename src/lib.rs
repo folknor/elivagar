@@ -74,6 +74,7 @@ pub mod pmtiles_writer;
 pub(crate) mod pois;
 pub mod shortbread;
 pub mod sort;
+pub mod svg;
 pub mod verify;
 pub(crate) mod way_index;
 pub(crate) mod wire_format;

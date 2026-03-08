@@ -69,7 +69,7 @@ No shell scripts remain. All development tooling is in `brokkr`.
 
 ## Architecture
 
-Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`).
+Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`, `verify`, `svg`).
 
 ### Modules
 
@@ -92,6 +92,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `sort.rs` — external merge sort (gzip-compressed chunk files, k-way merge via binary heap)
 - `pmtiles_writer.rs` — PMTiles v3 writer with Hilbert tile IDs
 - `inspect.rs` — PMTiles v3 archive inspector (header + metadata reader)
+- `svg.rs` — single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG)
 - `node_index.rs` — node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
 - `way_index.rs` — flat mmap'd way geometry index
 
@@ -119,7 +120,7 @@ Sequential, same PBF input:
 
 ## CLI
 
-Uses clap derive with two subcommands:
+Uses clap derive with subcommands:
 
 ### `elivagar run <INPUT> -o <OUTPUT> [flags]`
 
@@ -145,6 +146,10 @@ Uses clap derive with two subcommands:
 ### `elivagar inspect <FILE>`
 
 Reads a PMTiles archive and prints header info, tile statistics, section layout, and metadata (layer list with zoom ranges).
+
+### `elivagar svg <FILE> -z <Z> -x <X> -y <Y> [-o output.svg]`
+
+Renders a single tile from a PMTiles archive as SVG. Decodes MVT geometry and draws each layer with a distinct color. Points render as circles, lines as stroked paths, polygons as filled paths with `evenodd` fill-rule. Background is land-colored (`#f2efe9`). Output goes to stdout by default, or to a file with `-o`.
 
 ## Key conventions
 

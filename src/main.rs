@@ -24,6 +24,8 @@ enum Command {
     Inspect(InspectArgs),
     /// Verify a PMTiles archive.
     Verify(VerifyArgs),
+    /// Render a single tile as SVG.
+    Svg(SvgArgs),
 }
 
 /// Arguments for the `run` subcommand.
@@ -150,6 +152,29 @@ struct VerifyArgs {
     file: PathBuf,
 }
 
+/// Arguments for the `svg` subcommand.
+#[derive(Parser)]
+struct SvgArgs {
+    /// PMTiles file to read.
+    file: PathBuf,
+
+    /// Zoom level.
+    #[arg(short, long)]
+    z: u8,
+
+    /// Tile X coordinate.
+    #[arg(short, long)]
+    x: u32,
+
+    /// Tile Y coordinate.
+    #[arg(short, long)]
+    y: u32,
+
+    /// Output SVG path (default: stdout).
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+}
+
 #[derive(Clone, ValueEnum)]
 enum SkipToArg {
     Ocean,
@@ -250,6 +275,23 @@ fn main() {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
+            }
+        }
+        Command::Svg(args) => {
+            let result = if let Some(ref path) = args.output {
+                let mut file = std::fs::File::create(path).unwrap_or_else(|e| {
+                    eprintln!("Error creating {}: {e}", path.display());
+                    std::process::exit(1);
+                });
+                elivagar::svg::render_tile_svg(&args.file, args.z, args.x, args.y, &mut file)
+            } else {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                elivagar::svg::render_tile_svg(&args.file, args.z, args.x, args.y, &mut out)
+            };
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
             }
         }
     }
