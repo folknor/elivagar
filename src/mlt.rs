@@ -1071,7 +1071,7 @@ mod tests {
             mlt_core::v01::PropValue::F32(v) => ("f32", v.iter().filter(|x| x.is_some()).count()),
             mlt_core::v01::PropValue::F64(v) => ("f64", v.iter().filter(|x| x.is_some()).count()),
             mlt_core::v01::PropValue::Str(v) => ("str", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::SharedDict => ("shared_dict", 0),
+            mlt_core::v01::PropValue::SharedDict(_) => ("shared_dict", 0),
         }
     }
 
