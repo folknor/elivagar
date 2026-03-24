@@ -319,12 +319,8 @@ impl LayerBuilder {
             s.val_remap[old_idx as usize] = new_idx as u16;
         }
 
-        // field 15: version = 2
-        encode_varint_field_always(&mut s.layer_buf, 15, 2);
         // field 1: name
         encode_bytes_field_always(&mut s.layer_buf, 1, self.name.as_bytes());
-        // field 5: extent = 4096
-        encode_varint_field_always(&mut s.layer_buf, 5, 4096);
 
         // field 2: features (tag indices remapped to sorted positions)
         for f in &self.features {
@@ -357,6 +353,11 @@ impl LayerBuilder {
             encode_value(&mut s.val_buf, &self.values[old_idx as usize]);
             encode_bytes_field_always(&mut s.layer_buf, 4, &s.val_buf);
         }
+
+        // field 5: extent = 4096
+        encode_varint_field_always(&mut s.layer_buf, 5, 4096);
+        // field 15: version = 2
+        encode_varint_field_always(&mut s.layer_buf, 15, 2);
 
         // Write as field 3 (Tile.layers) length-delimited
         encode_bytes_field_always(buf, 3, &s.layer_buf);

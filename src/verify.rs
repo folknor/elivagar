@@ -397,10 +397,15 @@ fn validate_geometry_commands(
         MVT_DELTA_LIMIT
     };
 
+    // Maximum valid count: each MoveTo/LineTo consumes 2 params per repeat,
+    // so count can't exceed remaining_params / 2. vtzero uses geometry length.
+    let max_count = commands.len() as u32 / 2;
+
     let mut i = 0usize;
     let mut cx: i64 = 0;
     let mut cy: i64 = 0;
     let mut ring_points = 0usize;
+    let mut expect_moveto = true; // first command must be MoveTo
     while i < commands.len() {
         let op = commands[i];
         i += 1;
@@ -410,13 +415,22 @@ fn validate_geometry_commands(
             return Err("geometry command with zero repeat count".to_string());
         }
         match id {
-            1 | 2 => {
-                if geom_type == 3 && id == 1 && count != 1 {
-                    return Err("polygon ring MoveTo count must be 1".to_string());
+            1 => {
+                // MoveTo
+                if count > max_count {
+                    return Err(format!("MoveTo count too large ({count} > {max_count})"));
                 }
-                for n in 0..count {
+                if geom_type == 3 && count != 1 {
+                    return Err("polygon ring MoveTo count must be 1 (spec 4.3.4.4)".to_string());
+                }
+                if geom_type == 2 && count != 1 && !expect_moveto {
+                    // Multi-linestring: subsequent MoveTo must also be 1
+                    return Err("linestring MoveTo count must be 1 (spec 4.3.4.3)".to_string());
+                }
+                expect_moveto = false;
+                for _ in 0..count {
                     if i + 1 >= commands.len() {
-                        return Err("geometry command missing parameters".to_string());
+                        return Err("too few points in geometry".to_string());
                     }
                     let dx = zigzag_decode_u32(commands[i]);
                     let dy = zigzag_decode_u32(commands[i + 1]);
@@ -434,24 +448,51 @@ fn validate_geometry_commands(
                         ));
                     }
                     if geom_type == 3 {
-                        if id == 1 && n == 0 {
-                            ring_points = 1;
-                        } else if id == 2 {
-                            ring_points += 1;
-                        }
+                        ring_points = 1;
+                    }
+                }
+            }
+            2 => {
+                // LineTo
+                if count > max_count {
+                    return Err(format!("LineTo count too large ({count} > {max_count})"));
+                }
+                for _ in 0..count {
+                    if i + 1 >= commands.len() {
+                        return Err("too few points in geometry".to_string());
+                    }
+                    let dx = zigzag_decode_u32(commands[i]);
+                    let dy = zigzag_decode_u32(commands[i + 1]);
+                    i += 2;
+                    if dx.abs() > delta_limit || dy.abs() > delta_limit {
+                        return Err(format!(
+                            "suspicious geometry delta ({dx},{dy}) exceeds limit {delta_limit}"
+                        ));
+                    }
+                    cx += dx;
+                    cy += dy;
+                    if cx.abs() > MVT_COORD_ABS_LIMIT || cy.abs() > MVT_COORD_ABS_LIMIT {
+                        return Err(format!(
+                            "geometry coordinate ({cx},{cy}) exceeds absolute limit {MVT_COORD_ABS_LIMIT}"
+                        ));
+                    }
+                    if geom_type == 3 {
+                        ring_points += 1;
                     }
                 }
             }
             7 => {
+                // ClosePath
                 if geom_type != 3 {
                     return Err("ClosePath in non-polygon geometry".to_string());
                 }
-                for _ in 0..count {
-                    if ring_points < 3 {
-                        return Err("polygon ClosePath without enough ring points".to_string());
-                    }
-                    ring_points = 0;
+                if count != 1 {
+                    return Err("ClosePath command count is not 1 (spec 4.3.3.3)".to_string());
                 }
+                if ring_points < 3 {
+                    return Err(format!("polygon ring has too few points ({ring_points}, need ≥3)"));
+                }
+                ring_points = 0;
             }
             _ => return Err(format!("unknown geometry command id {id}")),
         }
@@ -643,7 +684,7 @@ mod tests {
         ];
         let err = validate_geometry_commands(&commands, 3, 10, 1)
             .expect_err("polygon ClosePath without enough points should fail");
-        assert!(err.contains("without enough ring points"));
+        assert!(err.contains("too few points"));
     }
 
     #[test]
