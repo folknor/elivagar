@@ -790,7 +790,7 @@ fn multi_simplify_no_inners_all_zooms() {
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
     let mut results: Vec<(u8, usize, usize)> = Vec::new();
-    for_each_zoom_simplified_multi(&outer, &inners, 14, 14, &mut scratch, 1.0, |z, o, i| {
+    for_each_zoom_simplified_multi(&outer, &inners, 14, 14, &mut scratch, |_| 1.0, |z, o, i| {
         results.push((z, o.len(), i.len()));
     });
     assert_eq!(results.len(), 1);
@@ -804,7 +804,7 @@ fn multi_simplify_callback_per_zoom() {
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
     let mut zooms: Vec<u8> = Vec::new();
-    for_each_zoom_simplified_multi(&outer, &inners, 10, 14, &mut scratch, 1.0, |z, _o, _i| {
+    for_each_zoom_simplified_multi(&outer, &inners, 10, 14, &mut scratch, |_| 1.0, |z, _o, _i| {
         zooms.push(z);
     });
     // Should iterate z14, z13, z12, z11, z10 (high to low)
@@ -832,7 +832,7 @@ fn multi_simplify_inner_count_non_increasing() {
     let inners = vec![inner];
     let mut scratch = SimplifyMultiScratch::new();
     let mut inner_counts: Vec<(u8, usize)> = Vec::new();
-    for_each_zoom_simplified_multi(&outer, &inners, 4, 14, &mut scratch, 1.0, |z, _o, i| {
+    for_each_zoom_simplified_multi(&outer, &inners, 4, 14, &mut scratch, |_| 1.0, |z, _o, i| {
         inner_counts.push((z, i.len()));
     });
     // At z14, inner should be present
@@ -851,7 +851,7 @@ fn multi_simplify_subpixel_outer_stops_early() {
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
     let mut zoom_count = 0;
-    for_each_zoom_simplified_multi(&outer, &inners, 0, 14, &mut scratch, 1.0, |_z, _o, _i| {
+    for_each_zoom_simplified_multi(&outer, &inners, 0, 14, &mut scratch, |_| 1.0, |_z, _o, _i| {
         zoom_count += 1;
     });
     // Should NOT reach all 15 zooms — subpixel check should bail out early
@@ -867,7 +867,7 @@ fn multi_simplify_z14_preserves_all_inners() {
     let inners = vec![inner1.clone(), inner2.clone()];
     let mut scratch = SimplifyMultiScratch::new();
     let mut z14_data: Option<(Vec<Point>, Vec<Vec<Point>>)> = None;
-    for_each_zoom_simplified_multi(&outer, &inners, 14, 14, &mut scratch, 1.0, |_z, o, i| {
+    for_each_zoom_simplified_multi(&outer, &inners, 14, 14, &mut scratch, |_| 1.0, |_z, o, i| {
         z14_data = Some((o.to_vec(), i.to_vec()));
     });
     let (out_outer, out_inners) = z14_data.expect("should have z14 callback");
@@ -884,7 +884,7 @@ fn multi_simplify_outer_vertex_count_non_increasing() {
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
     let mut vertex_counts: Vec<(u8, usize)> = Vec::new();
-    for_each_zoom_simplified_multi(&outer, &inners, 4, 14, &mut scratch, 1.0, |z, o, _i| {
+    for_each_zoom_simplified_multi(&outer, &inners, 4, 14, &mut scratch, |_| 1.0, |z, o, _i| {
         vertex_counts.push((z, o.len()));
     });
     // Vertex count should be monotonically non-increasing

@@ -54,10 +54,13 @@ fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32)
                 }
             }
             7 => {
-                // ClosePath
+                // ClosePath — cursor implicitly returns to last MoveTo.
+                // Must reset both dest AND source cursors.
                 dest.push(cmd);
                 *cx = last_move_x;
                 *cy = last_move_y;
+                src_cx = last_move_x;
+                src_cy = last_move_y;
             }
             _ => {
                 // Unknown command, copy as-is

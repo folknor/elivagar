@@ -264,6 +264,241 @@ pub fn tile_is_interior(ring: &[Point], clip: &ClipRect) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Debug ring validation (ocean geometry diagnostics)
+// ---------------------------------------------------------------------------
+
+/// Check a set of tile-coordinate rings for geometry defects.
+/// Returns a list of human-readable problem descriptions.
+/// Used to isolate where ocean polygon corruption originates.
+pub fn debug_check_rings(rings: &[Vec<(i32, i32)>]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (ri, ring) in rings.iter().enumerate() {
+        if ring.len() < 4 {
+            problems.push(format!("ring {ri}: degenerate ({} verts)", ring.len()));
+            continue;
+        }
+
+        // Consecutive duplicate vertices
+        for i in 0..ring.len() - 1 {
+            if ring[i] == ring[i + 1] {
+                problems.push(format!(
+                    "ring {ri}: consecutive dup at {i}: ({}, {})",
+                    ring[i].0, ring[i].1
+                ));
+            }
+        }
+
+        // Immediate A→B→A backtracks
+        if ring.len() >= 3 {
+            for i in 0..ring.len() - 2 {
+                if ring[i] == ring[i + 2] && ring[i] != ring[i + 1] {
+                    problems.push(format!(
+                        "ring {ri}: backtrack at {i}: ({},{})→({},{})→({},{})",
+                        ring[i].0, ring[i].1,
+                        ring[i + 1].0, ring[i + 1].1,
+                        ring[i + 2].0, ring[i + 2].1,
+                    ));
+                }
+            }
+        }
+
+        // Simple self-intersection: check if any non-adjacent edges cross.
+        // Only test a sample to avoid O(n²) on large rings.
+        let n = ring.len() - 1; // exclude closing vertex
+        if n >= 4 {
+            let step = if n > 200 { n / 100 } else { 1 };
+            for i in (0..n).step_by(step) {
+                let a1 = ring[i];
+                let a2 = ring[(i + 1) % n];
+                // Check against non-adjacent edges
+                let j_start = (i + 2) % n;
+                for jj in 0..n.min(20) {
+                    let j = (j_start + jj) % n;
+                    if j == i || (j + 1) % n == i {
+                        continue;
+                    }
+                    let b1 = ring[j];
+                    let b2 = ring[(j + 1) % n];
+                    if segments_cross(a1, a2, b1, b2) {
+                        problems.push(format!(
+                            "ring {ri}: self-intersection edges {i}-{} and {j}-{}",
+                            (i + 1) % n, (j + 1) % n
+                        ));
+                        break; // one per ring is enough
+                    }
+                }
+                if problems.iter().any(|p| p.contains(&format!("ring {ri}: self"))) {
+                    break;
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// Check if a closed ring (first == last) has any self-intersections.
+/// Returns true if the ring is simple (no crossings). O(n²) but rings are
+/// typically small after DP simplification.
+pub fn ring_is_simple(ring: &[(i32, i32)]) -> bool {
+    if ring.len() < 4 {
+        return true;
+    }
+    let n = ring.len() - 1; // exclude closing vertex
+    for i in 0..n {
+        let a1 = ring[i];
+        let a2 = ring[i + 1];
+        // Check against non-adjacent edges
+        for j in (i + 2)..n {
+            if j + 1 == ring.len() && i == 0 {
+                continue; // last edge wraps to first — they share a vertex
+            }
+            let b1 = ring[j];
+            let b2 = ring[(j + 1) % ring.len()];
+            if segments_cross(a1, a2, b1, b2) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Test if two line segments (a1-a2) and (b1-b2) properly cross (not just touch).
+fn segments_cross(a1: (i32, i32), a2: (i32, i32), b1: (i32, i32), b2: (i32, i32)) -> bool {
+    let d1 = cross_sign(a1, a2, b1);
+    let d2 = cross_sign(a1, a2, b2);
+    let d3 = cross_sign(b1, b2, a1);
+    let d4 = cross_sign(b1, b2, a2);
+    // Proper crossing: endpoints of each segment on opposite sides of the other
+    d1 != d2 && d3 != d4 && d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0
+}
+
+/// Sign of the cross product (p2-p1) × (p3-p1).
+fn cross_sign(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32)) -> i8 {
+    let cross = i64::from(p2.0 - p1.0) * i64::from(p3.1 - p1.1)
+              - i64::from(p2.1 - p1.1) * i64::from(p3.0 - p1.0);
+    if cross > 0 { 1 } else if cross < 0 { -1 } else { 0 }
+}
+
+/// Compute the intersection point of two properly-crossing line segments.
+/// Uses parametric form with f64 for precision, rounds to integer coords.
+#[allow(clippy::cast_possible_truncation)]
+fn segment_intersection(a1: (i32, i32), a2: (i32, i32), b1: (i32, i32), b2: (i32, i32)) -> (i32, i32) {
+    let d1x = f64::from(a2.0 - a1.0);
+    let d1y = f64::from(a2.1 - a1.1);
+    let d2x = f64::from(b2.0 - b1.0);
+    let d2y = f64::from(b2.1 - b1.1);
+    let denom = d1x * d2y - d1y * d2x;
+    if denom.abs() < 1e-12 {
+        return a1; // parallel — shouldn't happen for properly-crossing segments
+    }
+    let dx = f64::from(b1.0 - a1.0);
+    let dy = f64::from(b1.1 - a1.1);
+    let t = (dx * d2y - dy * d2x) / denom;
+    let x = f64::from(a1.0) + t * d1x;
+    let y = f64::from(a1.1) + t * d1y;
+    (x.round() as i32, y.round() as i32)
+}
+
+/// Split a self-intersecting (figure-8) closed ring at crossing points.
+/// Returns None if the ring is already simple.
+/// Returns Some(vec) of simple sub-rings (each closed, first == last, ≥4 verts).
+/// Recurses to handle rings with multiple crossings.
+pub(crate) fn split_figure8_ring(ring: &[(i32, i32)]) -> Option<Vec<Vec<(i32, i32)>>> {
+    if ring.len() < 5 { return None; } // need ≥4 unique + closing
+    let n = ring.len() - 1; // number of unique vertices (ring[n] == ring[0])
+
+    for i in 0..n {
+        let a1 = ring[i];
+        let a2 = ring[i + 1];
+        for j in (i + 2)..n {
+            // Skip adjacent edges (last edge wraps to first — they share a vertex)
+            if j + 1 == ring.len() && i == 0 { continue; }
+            let b1 = ring[j];
+            let b2 = ring[(j + 1) % ring.len()];
+            if !segments_cross(a1, a2, b1, b2) { continue; }
+
+            let p = segment_intersection(a1, a2, b1, b2);
+
+            // Sub-ring A: p → ring[i+1..=j] → p
+            let mut ra = Vec::with_capacity(j - i + 2);
+            ra.push(p);
+            for k in (i + 1)..=j { ra.push(ring[k]); }
+            ra.push(p);
+
+            // Sub-ring B: p → ring[j+1..n-1] → ring[0..=i] → p
+            let mut rb = Vec::with_capacity(n - (j - i) + 2);
+            rb.push(p);
+            for k in (j + 1)..n { rb.push(ring[k]); }
+            for k in 0..=i { rb.push(ring[k]); }
+            rb.push(p);
+
+            // Recursively split sub-rings if they still self-intersect
+            let mut result = Vec::new();
+            for sub in [ra, rb] {
+                if sub.len() < 4 { continue; }
+                if let Some(splits) = split_figure8_ring(&sub) {
+                    result.extend(splits);
+                } else {
+                    result.push(sub);
+                }
+            }
+            return if result.is_empty() { None } else { Some(result) };
+        }
+    }
+    None
+}
+
+/// Nudge hole vertices that share exact coordinates with any outer ring vertex.
+/// Displaces by 1 extent unit toward hole centroid. Prevents earcut bridge
+/// degeneration when hole and outer ring vertices coincide at tile boundaries.
+pub(crate) fn nudge_coincident_hole_vertices(hole: &mut [(i32, i32)], outer: &[(i32, i32)]) {
+    if hole.len() < 4 { return; }
+    let n = hole.len() - 1; // exclude closing vertex
+    // Compute hole centroid
+    let (mut cx, mut cy) = (0i64, 0i64);
+    for &(x, y) in &hole[..n] {
+        cx += i64::from(x);
+        cy += i64::from(y);
+    }
+    cx /= n as i64;
+    cy /= n as i64;
+    // Nudge matching vertices 1 unit toward centroid
+    let outer_unique = &outer[..outer.len().saturating_sub(1)];
+    for i in 0..n {
+        if outer_unique.iter().any(|o| *o == hole[i]) {
+            let dx = if cx > i64::from(hole[i].0) { 1 } else { -1 };
+            let dy = if cy > i64::from(hole[i].1) { 1 } else { -1 };
+            hole[i].0 += dx;
+            hole[i].1 += dy;
+        }
+    }
+    // Fix closing vertex
+    hole[n] = hole[0];
+}
+
+/// Nudge hole vertices that sit exactly on the clip rect boundary.
+/// After S-H clipping, both outer and inner rings produce vertices at the
+/// clip rect corners/edges. Earcut's bridge algorithm fails when hole and
+/// outer vertices are coincident. Nudging by 1 extent unit inward (1/16 pixel)
+/// breaks the coincidence without visible effect.
+pub(crate) fn nudge_hole_off_boundary(ring: &mut [(i32, i32)]) {
+    if ring.len() < 4 { return; }
+    #[allow(clippy::cast_possible_truncation)]
+    let buf: i32 = (BUFFER_FRACTION * EXTENT) as i32; // 128
+    #[allow(clippy::cast_possible_truncation)]
+    let ext: i32 = EXTENT as i32; // 4096
+    let (min, max) = (-buf, ext + buf);
+    let n = ring.len() - 1;
+    for v in ring[..n].iter_mut() {
+        if v.0 == min { v.0 += 1; }
+        else if v.0 == max { v.0 -= 1; }
+        if v.1 == min { v.1 += 1; }
+        else if v.1 == max { v.1 -= 1; }
+    }
+    ring[n] = ring[0];
+}
+
+// ---------------------------------------------------------------------------
 // Tests (see geometry_tests.rs)
 // ---------------------------------------------------------------------------
 

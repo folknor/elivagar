@@ -12,6 +12,22 @@ use rustc_hash::FxHashMap;
 
 use super::stats::DeferralStats;
 
+/// Zoom-dependent tile-space simplification tolerance (squared).
+/// At z14: 1px (16² = 256). Lower zooms get progressively more aggressive:
+/// each zoom level down doubles the tolerance (4× in squared terms).
+/// z10: 16px², z5: 512px², z0: ~16384px².
+/// This matches Tilemaker's approach of exponentially increasing tolerance at low zoom.
+#[inline]
+fn tile_simplify_tol_sq(z: u8) -> i64 {
+    // Tile-space DP only at z6-10 (post-quantization staircase artifacts).
+    // Below z6: features are too simplified already, DP would destroy geometry.
+    // Above z10: enough resolution that staircase isn't visible.
+    if z < 6 || z > 10 { return 0; }
+    let base: i64 = 16 * 16; // 1 rendered pixel squared (256 extent² units)
+    let shift = 10u8.saturating_sub(z);
+    base << (shift as u32)
+}
+
 /// Full-tile rectangle in tile coordinates (CW, closed). Buffer = 8 rendered pixels = 128 extent units.
 /// Used for interior tiles where the polygon fully covers the tile.
 pub(super) const INTERIOR_TILE_RING: [(i32, i32); 5] =
@@ -550,9 +566,12 @@ pub(super) fn emit_line_feature(
         });
     };
 
+    // Short connecting ways (e.g. motorway junction links) are physically subpixel
+    // at low zoom but must survive to maintain road network connectivity.
+    let skip_bbox_check = m.layer == Layer::Boundaries || m.layer == Layer::Streets;
     if has_pins {
         for z in (z_lo..=z_hi).rev() {
-            if z < 14 && geometry::merc_bbox_is_subpixel(merc, z) {
+            if z < 14 && !skip_bbox_check && geometry::merc_bbox_is_subpixel(merc, z) {
                 break;
             }
             if z < 14 {
@@ -573,7 +592,7 @@ pub(super) fn emit_line_feature(
             }
         }
     } else {
-        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, 1.0, |z, simplified| {
+        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 2, |_| 1.0, skip_bbox_check, |z, simplified| {
             run_for_zoom(z, simplified);
         });
     }
@@ -644,17 +663,17 @@ pub(super) fn emit_polygon_feature(
             if simplified.len() < 3 {
                 return;
             }
-            if z < 14 && !is_valid_simple_ring_points(simplified) {
-                return;
-            }
+            // TEMPORARILY DISABLED — validity gates drop valid polygons at low zoom,
+            // causing massive feature loss (water_polygons 5x fewer than Tilemaker).
+            // if z < 14 && !is_valid_simple_ring_points(simplified) {
+            //     return;
+            // }
             geometry::to_tile_coords_into(&mut scratch.tc_buf, simplified, tx, ty, z);
             if !skip_size_filter && geometry::ring_is_subpixel(&scratch.tc_buf) {
                 return;
             }
             close_and_orient_cw(&mut scratch.tc_buf);
-            if z < 14 && !is_valid_simple_tile_ring(&scratch.tc_buf) {
-                return;
-            }
+            geometry::simplify_tile_ring(&mut scratch.tc_buf, tile_simplify_tol_sq(z), 4);
 
             mvt::encode_polygon(&mut scratch.geom_buf, &[&scratch.tc_buf]);
             if scratch.geom_buf.is_empty() {
@@ -701,17 +720,16 @@ pub(super) fn emit_polygon_feature(
                         if scratch.clip_a.len() < 3 {
                             continue;
                         }
-                        if z < 14 && !is_valid_simple_ring_points(&scratch.clip_a) {
-                            continue;
-                        }
+                        // TEMPORARILY DISABLED — validity gates drop valid polygons.
+                        // if z < 14 && !is_valid_simple_ring_points(&scratch.clip_a) {
+                        //     continue;
+                        // }
                         geometry::to_tile_coords_into(&mut scratch.tc_buf, &scratch.clip_a, tx, ty, z);
                         if !skip_size_filter && geometry::ring_is_subpixel(&scratch.tc_buf) {
                             continue;
                         }
                         close_and_orient_cw(&mut scratch.tc_buf);
-                        if z < 14 && !is_valid_simple_tile_ring(&scratch.tc_buf) {
-                            continue;
-                        }
+                        geometry::simplify_tile_ring(&mut scratch.tc_buf, tile_simplify_tol_sq(z), 4);
                     }
 
                     mvt::encode_polygon(&mut scratch.geom_buf, &[&scratch.tc_buf]);
@@ -787,7 +805,7 @@ pub(super) fn emit_polygon_feature(
             }
         }
     } else {
-        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, tol_scale, |z, simplified| {
+        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |_| tol_scale, false, |z, simplified| {
             run_for_zoom(z, simplified);
         });
     }
@@ -847,24 +865,20 @@ pub(super) fn emit_multipolygon_feature(
             if simp_outer.len() < 3 {
                 return;
             }
-            if z < 14 && !is_valid_simple_ring_points(simp_outer) {
-                return;
-            }
+            // TEMPORARILY DISABLED — validity gates drop valid polygons.
+            // if z < 14 && !is_valid_simple_ring_points(simp_outer) {
+            //     return;
+            // }
             if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
             geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], simp_outer, tx, ty, z);
             if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                 return;
             }
             close_and_orient_cw(&mut emit_scratch.all_rings[ring_count]);
-            if z < 14 && !is_valid_simple_tile_ring(&emit_scratch.all_rings[ring_count]) {
-                return;
-            }
+            geometry::simplify_tile_ring(&mut emit_scratch.all_rings[ring_count], tile_simplify_tol_sq(z), 4);
             ring_count += 1;
             for inner in simp_inners {
                 if inner.len() < 3 {
-                    continue;
-                }
-                if z < 14 && !is_valid_simple_ring_points(inner) {
                     continue;
                 }
                 if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
@@ -873,12 +887,19 @@ pub(super) fn emit_multipolygon_feature(
                     continue;
                 }
                 close_and_orient_ccw(&mut emit_scratch.all_rings[ring_count]);
-                if z < 14 && !is_valid_simple_tile_ring(&emit_scratch.all_rings[ring_count]) {
-                    continue;
-                }
+                geometry::simplify_tile_ring(&mut emit_scratch.all_rings[ring_count], tile_simplify_tol_sq(z), 4);
                 ring_count += 1;
             }
 
+            if ring_count > 1 {
+                ring_count = geometry::filter_holes_for_outer(&mut emit_scratch.all_rings, ring_count);
+            }
+            if ring_count > 1 {
+                let (outer_ref, holes) = emit_scratch.all_rings[..ring_count].split_first_mut().expect("nonempty");
+                for hole in holes {
+                    geometry::nudge_coincident_hole_vertices(hole, outer_ref);
+                }
+            }
             let ring_refs: SmallVec<[&[(i32, i32)]; 4]> = emit_scratch.all_rings[..ring_count].iter().map(Vec::as_slice).collect();
             mvt::encode_polygon(&mut emit_scratch.geom_buf, &ring_refs);
             if emit_scratch.geom_buf.is_empty() {
@@ -969,18 +990,17 @@ pub(super) fn emit_multipolygon_feature(
                         if emit_scratch.clip_a.len() < 3 {
                             continue;
                         }
-                        if z < 14 && !is_valid_simple_ring_points(&emit_scratch.clip_a) {
-                            continue;
-                        }
+                        // TEMPORARILY DISABLED — validity gates drop valid polygons.
+                        // if z < 14 && !is_valid_simple_ring_points(&emit_scratch.clip_a) {
+                        //     continue;
+                        // }
                         if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
                         geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], &emit_scratch.clip_a, tx, ty, z);
                         if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                             continue;
                         }
                         close_and_orient_cw(&mut emit_scratch.all_rings[ring_count]);
-                        if z < 14 && !is_valid_simple_tile_ring(&emit_scratch.all_rings[ring_count]) {
-                            continue;
-                        }
+                        geometry::simplify_tile_ring(&mut emit_scratch.all_rings[ring_count], tile_simplify_tol_sq(z), 4);
                         ring_count += 1;
                     }
                     // Inner rings: still need per-tile clipping (holes may be visible).
@@ -992,21 +1012,26 @@ pub(super) fn emit_multipolygon_feature(
                         if emit_scratch.clip_a.len() < 3 {
                             continue;
                         }
-                        if z < 14 && !is_valid_simple_ring_points(&emit_scratch.clip_a) {
-                            continue;
-                        }
                         if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
                         geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], &emit_scratch.clip_a, tx, ty, z);
                         if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                             continue;
                         }
                         close_and_orient_ccw(&mut emit_scratch.all_rings[ring_count]);
-                        if z < 14 && !is_valid_simple_tile_ring(&emit_scratch.all_rings[ring_count]) {
-                            continue;
-                        }
+                        geometry::simplify_tile_ring(&mut emit_scratch.all_rings[ring_count], tile_simplify_tol_sq(z), 4);
+                        geometry::nudge_hole_off_boundary(&mut emit_scratch.all_rings[ring_count]);
                         ring_count += 1;
                     }
 
+                    if ring_count > 1 {
+                        ring_count = geometry::filter_holes_for_outer(&mut emit_scratch.all_rings, ring_count);
+                    }
+                    if ring_count > 1 {
+                        let (outer_ref, holes) = emit_scratch.all_rings[..ring_count].split_first_mut().expect("nonempty");
+                        for hole in holes {
+                            geometry::nudge_coincident_hole_vertices(hole, outer_ref);
+                        }
+                    }
                     let ring_refs: SmallVec<[&[(i32, i32)]; 4]> =
                         emit_scratch.all_rings[..ring_count].iter().map(Vec::as_slice).collect();
                     mvt::encode_polygon(&mut emit_scratch.geom_buf, &ring_refs);
@@ -1178,7 +1203,7 @@ pub(super) fn emit_multipolygon_feature(
             emit_for_zoom(z, &simp_scratch.cascade_outer, &simp_scratch.cascade_inners);
         }
     } else {
-        geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, tol_scale, |z, simp_outer, simp_inners| {
+        geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, |_| tol_scale, |z, simp_outer, simp_inners| {
             emit_for_zoom(z, simp_outer, simp_inners);
         });
     }

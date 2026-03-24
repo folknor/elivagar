@@ -1613,7 +1613,7 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
     let (_, _, pinned_cmd_count) = decode_data_header(&records_pinned[0].data);
     assert!(
         pinned_cmd_count > plain_cmd_count,
-        "pinned polygon vertex should increase retained geometry detail"
+        "pinned polygon vertex should increase retained geometry detail (plain={plain_cmd_count}, pinned={pinned_cmd_count})"
     );
 }
 
@@ -2079,9 +2079,12 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
     assert_eq!(z14_records.len(), 1);
     let (_, _, z13_cmd_count) = decode_data_header(&z13_records[0].data);
     let (_, _, z14_cmd_count) = decode_data_header(&z14_records[0].data);
-    assert!(
-        z14_cmd_count > z13_cmd_count,
-        "z<14 should reject invalid inner rings while z=14 keeps them"
+    // After removing the is_valid_simple_tile_ring gate (which caused Nissum Bredning
+    // feature loss), self-intersecting inners are no longer rejected at z<14.
+    // Both zooms should now produce the same geometry.
+    assert_eq!(
+        z14_cmd_count, z13_cmd_count,
+        "both zooms should produce same geometry (self-intersecting inner not rejected)"
     );
 }
 

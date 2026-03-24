@@ -1,6 +1,5 @@
 //! Render a single MVT tile from a PMTiles archive as SVG.
 
-use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -27,82 +26,146 @@ pub fn render_tile_svg(
     y: u32,
     out: &mut dyn Write,
 ) -> io::Result<()> {
+    render_tile_grid_svg(pmtiles_path, z, x, y, 1, 1, None, out)
+}
+
+/// Render a grid of tiles as a single SVG. Each tile is offset by its position
+/// in the grid. Width=1, height=1 produces the same output as `render_tile_svg`.
+/// If `layer_filter` is Some, only render layers whose names are in the list.
+#[allow(clippy::too_many_arguments)]
+pub fn render_tile_grid_svg(
+    pmtiles_path: &Path,
+    z: u8,
+    x0: u32,
+    y0: u32,
+    width: u32,
+    height: u32,
+    layer_filter: Option<&[&str]>,
+    out: &mut dyn Write,
+) -> io::Result<()> {
     let mut reader = PmtilesReader::open(pmtiles_path)?;
-    let target_id = xy_to_tile_id(z, x, y);
-
     let entries = reader.read_all_entries()?;
-    let entry = entries
-        .iter()
-        .find(|e| e.tile_id == target_id)
-        .ok_or_else(|| io::Error::other(format!("tile z{z}/{x}/{y} not found in archive")))?;
 
-    let decompressed = reader.read_tile(entry)?;
-    let layers = decode_mvt_geometry(&decompressed)?;
-    let svg = build_svg(&layers);
+    // Collect decoded layers per tile position
+    let mut tile_layers: Vec<(u32, u32, Vec<SvgLayer>)> = Vec::new();
+    for dy in 0..height {
+        for dx in 0..width {
+            let tx = x0 + dx;
+            let ty = y0 + dy;
+            let target_id = xy_to_tile_id(z, tx, ty);
+            if let Some(entry) = entries.iter().find(|e| e.tile_id == target_id) {
+                let decompressed = reader.read_tile(entry)?;
+                let layers = decode_mvt_geometry(&decompressed)?;
+                tile_layers.push((dx, dy, layers));
+            }
+        }
+    }
+
+    let svg = build_grid_svg(&tile_layers, width, height, layer_filter);
     out.write_all(svg.as_bytes())
 }
 
-/// Build the SVG string from decoded layers.
+/// Build SVG for a grid of tiles. Each tile's geometry is offset by its grid position.
 #[allow(clippy::let_underscore_must_use)]
-fn build_svg(layers: &[SvgLayer]) -> String {
+fn build_grid_svg(tile_layers: &[(u32, u32, Vec<SvgLayer>)], width: u32, height: u32, layer_filter: Option<&[&str]>) -> String {
+    let total_w = f64::from(width) * EXTENT;
+    let total_h = f64::from(height) * EXTENT;
+    let px_w = 512 * width;
+    let px_h = 512 * height;
+
     let mut s = String::new();
     s.push_str(&format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {EXTENT} {EXTENT}\" width=\"512\" height=\"512\">\n"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {total_w} {total_h}\" width=\"{px_w}\" height=\"{px_h}\">\n"
     ));
     s.push_str(&format!(
-        "  <rect width=\"{EXTENT}\" height=\"{EXTENT}\" fill=\"#f2efe9\"/>\n"
+        "  <rect width=\"{total_w}\" height=\"{total_h}\" fill=\"#f2efe9\"/>\n"
     ));
 
-    for (i, layer) in layers.iter().enumerate() {
-        let color = LAYER_COLORS[i % LAYER_COLORS.len()];
-        s.push_str(&format!(
-            "  <g id=\"{}\" opacity=\"0.8\">\n",
-            layer.name
-        ));
+    // Draw tile grid lines
+    if width > 1 || height > 1 {
+        s.push_str("  <g id=\"grid\" opacity=\"0.15\">\n");
+        for dx in 1..width {
+            let gx = f64::from(dx) * EXTENT;
+            s.push_str(&format!(
+                "    <line x1=\"{gx}\" y1=\"0\" x2=\"{gx}\" y2=\"{total_h}\" stroke=\"#000\" stroke-width=\"1\"/>\n"
+            ));
+        }
+        for dy in 1..height {
+            let gy = f64::from(dy) * EXTENT;
+            s.push_str(&format!(
+                "    <line x1=\"0\" y1=\"{gy}\" x2=\"{total_w}\" y2=\"{gy}\" stroke=\"#000\" stroke-width=\"1\"/>\n"
+            ));
+        }
+        s.push_str("  </g>\n");
+    }
 
-        for feature in &layer.features {
-            match feature.geom_type {
-                1 => {
-                    for path in &feature.paths {
-                        for &(px, py) in path {
-                            s.push_str(&format!(
-                                "    <circle cx=\"{px}\" cy=\"{py}\" r=\"4\" fill=\"{color}\"/>\n"
-                            ));
+    // Collect all unique layer names in order of first appearance
+    let mut layer_names: Vec<String> = Vec::new();
+    for (_, _, layers) in tile_layers {
+        for layer in layers {
+            if !layer_names.contains(&layer.name) {
+                if let Some(filter) = layer_filter
+                    && !filter.contains(&layer.name.as_str())
+                {
+                    continue;
+                }
+                layer_names.push(layer.name.clone());
+            }
+        }
+    }
+
+    // Render by layer (so all ocean across tiles shares the same group)
+    let mut path_id: u32 = 0;
+    for (li, layer_name) in layer_names.iter().enumerate() {
+        let color = LAYER_COLORS[li % LAYER_COLORS.len()];
+        s.push_str(&format!("  <g id=\"{layer_name}\" opacity=\"0.8\">\n"));
+
+        for &(dx, dy, ref layers) in tile_layers {
+            let ox = f64::from(dx) * EXTENT;
+            let oy = f64::from(dy) * EXTENT;
+
+            if let Some(layer) = layers.iter().find(|l| l.name == *layer_name) {
+                for feature in &layer.features {
+                    match feature.geom_type {
+                        1 => {
+                            for path in &feature.paths {
+                                for &(px, py) in path {
+                                    path_id += 1;
+                                    s.push_str(&format!(
+                                        "    <circle id=\"p{path_id}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"{color}\"/>\n",
+                                        px + ox, py + oy
+                                    ));
+                                }
+                            }
                         }
+                        2 => {
+                            for path in &feature.paths {
+                                if path.is_empty() { continue; }
+                                path_id += 1;
+                                let d = build_path_d_offset(path, false, ox, oy);
+                                s.push_str(&format!(
+                                    "    <path id=\"p{path_id}\" d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"1\"/>\n"
+                                ));
+                            }
+                        }
+                        3 => {
+                            if feature.paths.is_empty() { continue; }
+                            path_id += 1;
+                            let mut d = String::new();
+                            for path in &feature.paths {
+                                if path.is_empty() { continue; }
+                                if !d.is_empty() { d.push(' '); }
+                                d.push_str(&build_path_d_offset(path, true, ox, oy));
+                            }
+                            if !d.is_empty() {
+                                s.push_str(&format!(
+                                    "    <path id=\"p{path_id}\" d=\"{d}\" fill=\"{color}\" fill-rule=\"evenodd\" stroke=\"{color}\" stroke-width=\"0.5\"/>\n"
+                                ));
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                2 => {
-                    for path in &feature.paths {
-                        if path.is_empty() {
-                            continue;
-                        }
-                        let d = build_path_d(path, false);
-                        s.push_str(&format!(
-                            "    <path d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"1\"/>\n"
-                        ));
-                    }
-                }
-                3 => {
-                    if feature.paths.is_empty() {
-                        continue;
-                    }
-                    let mut d = String::new();
-                    for path in &feature.paths {
-                        if path.is_empty() {
-                            continue;
-                        }
-                        if !d.is_empty() {
-                            d.push(' ');
-                        }
-                        d.push_str(&build_path_d(path, true));
-                    }
-                    if !d.is_empty() {
-                        s.push_str(&format!(
-                            "    <path d=\"{d}\" fill=\"{color}\" fill-rule=\"evenodd\" stroke=\"{color}\" stroke-width=\"0.5\"/>\n"
-                        ));
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -113,13 +176,13 @@ fn build_svg(layers: &[SvgLayer]) -> String {
     s
 }
 
-fn build_path_d(coords: &[(f64, f64)], close: bool) -> String {
+fn build_path_d_offset(coords: &[(f64, f64)], close: bool, ox: f64, oy: f64) -> String {
     let mut d = String::new();
     for (i, &(px, py)) in coords.iter().enumerate() {
         if i == 0 {
-            d.push_str(&format!("M{px:.1} {py:.1}"));
+            d.push_str(&format!("M{:.1} {:.1}", px + ox, py + oy));
         } else {
-            d.push_str(&format!(" L{px:.1} {py:.1}"));
+            d.push_str(&format!(" L{:.1} {:.1}", px + ox, py + oy));
         }
     }
     if close {
@@ -226,6 +289,8 @@ fn decode_geometry_commands(data: &[u8], geom_type: u64) -> io::Result<Vec<Vec<(
     let mut current: Vec<(f64, f64)> = Vec::new();
     let mut cx: i64 = 0;
     let mut cy: i64 = 0;
+    let mut last_move_x: i64 = 0;
+    let mut last_move_y: i64 = 0;
     let mut i = 0;
 
     while i < commands.len() {
@@ -249,6 +314,8 @@ fn decode_geometry_commands(data: &[u8], geom_type: u64) -> io::Result<Vec<Vec<(
                     cy += zigzag_decode(commands[i + 1]);
                     i += 2;
                     current.push((cx as f64, cy as f64));
+                    last_move_x = cx;
+                    last_move_y = cy;
                 }
             }
             2 => {
@@ -266,6 +333,10 @@ fn decode_geometry_commands(data: &[u8], geom_type: u64) -> io::Result<Vec<Vec<(
             7 if geom_type == 3 && !current.is_empty() => {
                 if let Some(&first) = current.first() {
                     current.push(first);
+                    // MVT ClosePath implicitly returns cursor to the last MoveTo point.
+                    // Without this reset, subsequent rings drift by the last segment delta.
+                    cx = last_move_x;
+                    cy = last_move_y;
                 }
                 paths.push(std::mem::take(&mut current));
             }
@@ -309,4 +380,44 @@ fn decode_packed_varints(data: &[u8]) -> io::Result<Vec<u32>> {
 
 fn zigzag_decode(v: u32) -> i64 {
     i64::from(v >> 1) ^ -i64::from(v & 1)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::decode_geometry_commands;
+
+    fn zz(n: i32) -> u32 {
+        ((n << 1) ^ (n >> 31)).cast_unsigned()
+    }
+
+    #[test]
+    fn polygon_closepath_resets_cursor_between_rings() {
+        // Ring 1: (10,10) -> (20,10) -> (20,20) -> close
+        // Ring 2: (30,30) -> (40,30) -> (40,40) -> close
+        // Ring 2 MoveTo delta is encoded from ring 1 start (10,10): +20,+20.
+        let cmds = vec![
+            (1 | (1 << 3)) as u32, zz(10), zz(10),
+            (2 | (2 << 3)) as u32, zz(10), zz(0), zz(0), zz(10),
+            (7 | (1 << 3)) as u32,
+            (1 | (1 << 3)) as u32, zz(20), zz(20),
+            (2 | (2 << 3)) as u32, zz(10), zz(0), zz(0), zz(10),
+            (7 | (1 << 3)) as u32,
+        ];
+
+        let mut bytes = Vec::new();
+        for v in cmds {
+            let mut x = v;
+            while x >= 0x80 {
+                bytes.push(u8::try_from(x & 0x7f).expect("7-bit varint chunk fits in u8") | 0x80);
+                x >>= 7;
+            }
+            bytes.push(u8::try_from(x).expect("final varint byte should fit in u8"));
+        }
+
+        let paths = decode_geometry_commands(&bytes, 3).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0][0], (10.0, 10.0));
+        assert_eq!(paths[1][0], (30.0, 30.0));
+    }
 }

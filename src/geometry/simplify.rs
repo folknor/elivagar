@@ -223,15 +223,17 @@ thread_local! {
 /// vertices), useful for polygon fill layers where sub-pixel precision is less
 /// important than for stroked lines.
 #[hotpath::measure]
-pub fn for_each_zoom_simplified<F>(
+pub fn for_each_zoom_simplified<F, S>(
     merc: &[Point],
     z_lo: u8,
     z_hi: u8,
     min_points: usize,
-    tol_scale: f64,
+    tol_scale: S,
+    skip_bbox_check: bool,
     mut callback: F,
 ) where
     F: FnMut(u8, &[Point]),
+    S: Fn(u8) -> f64,
 {
     SIMPLIFY_SINGLE_SCRATCH.with(|cell| {
     let scratch = &mut *cell.borrow_mut();
@@ -245,13 +247,15 @@ pub fn for_each_zoom_simplified<F>(
             // Pre-DP subpixel check: if the cascade's bbox diagonal is < 1 pixel
             // at this zoom, the feature is invisible here and at all coarser zooms.
             // Skips DP entirely — O(1) vs O(n²).
-            if super::merc_bbox_is_subpixel(cascade, z) {
+            // Skipped for connectivity-critical layers (streets, boundaries) where
+            // short connecting ways must survive to maintain road network topology.
+            if !skip_bbox_check && super::merc_bbox_is_subpixel(cascade, z) {
                 break;
             }
             // Option E: if cascade already has ≤ min_points vertices, DP can't
             // reduce further — skip the call entirely.
             if cascade.len() > min_points {
-                let tol = simplify_tolerance(z) * tol_scale;
+                let tol = simplify_tolerance(z) * tol_scale(z);
                 // Option D: if last DP's max deviation is already below this
                 // zoom's tolerance, the cascade is optimal — skip DP.
                 if last_max_dev_sq >= tol * tol {
@@ -300,16 +304,17 @@ impl SimplifyMultiScratch {
 /// `tol_scale` multiplies the base simplification tolerance (see
 /// [`for_each_zoom_simplified`] for rationale).
 #[hotpath::measure]
-pub fn for_each_zoom_simplified_multi<F>(
+pub fn for_each_zoom_simplified_multi<F, S>(
     outer: &[Point],
     inners: &[Vec<Point>],
     z_lo: u8,
     z_hi: u8,
     scratch: &mut SimplifyMultiScratch,
-    tol_scale: f64,
+    tol_scale: S,
     mut callback: F,
 ) where
     F: FnMut(u8, &[Point], &[Vec<Point>]),
+    S: Fn(u8) -> f64,
 {
     // Destructure so the borrow checker sees independent fields
     // (needed for retain_mut closure to borrow keep_buf/simp_buf
@@ -343,7 +348,7 @@ pub fn for_each_zoom_simplified_multi<F>(
 
     let mut last_max_dev_sq: f64 = f64::MAX;
     for z in (z_lo..=z_hi).rev() {
-        let tol = if z < 14 { simplify_tolerance(z) * tol_scale } else { 0.0 };
+        let tol = if z < 14 { simplify_tolerance(z) * tol_scale(z) } else { 0.0 };
         if tol > 0.0 {
             if super::merc_bbox_is_subpixel(cascade_outer, z) {
                 break;

@@ -82,24 +82,15 @@ pub(super) fn phase_assemble(
             let mut features_read: u64 = 0;
             let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
             let mut current = PendingTile { tile_id: u64::MAX, features: Vec::new() };
-            let ocean_idx = Layer::Ocean as u8;
-
             // Incremental byte tracking for assemble batch HWM.
             let mut current_tile_bytes: usize = 0;
             let mut batch_bytes: usize = 0;
             let mut max_batch_bytes: usize = 0;
 
-            // Skip tiles that contain ONLY ocean features (no PBF data).
-            // Tilemaker doesn't emit ocean-only tiles; map clients render
-            // absent tiles as background. Skipping these cuts tile count by ~5x.
-            // Tracked incrementally via has_non_ocean flag instead of scanning
-            // all features at tile boundary.
-            let mut has_non_ocean = false;
-
             loop {
                 let record = sort_reader.next()?;
                 let Some(r) = record else {
-                    if current.tile_id != u64::MAX && has_non_ocean {
+                    if current.tile_id != u64::MAX {
                         batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
                     }
@@ -115,7 +106,7 @@ pub(super) fn phase_assemble(
                 let layer_idx = sort::layer_from_key(r.key);
 
                 if tile_id != current.tile_id {
-                    if current.tile_id != u64::MAX && has_non_ocean {
+                    if current.tile_id != u64::MAX {
                         batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
                         if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
@@ -127,9 +118,7 @@ pub(super) fn phase_assemble(
                     }
                     current = PendingTile { tile_id, features: Vec::new() };
                     current_tile_bytes = 0;
-                    has_non_ocean = false;
                 }
-                if layer_idx != ocean_idx { has_non_ocean = true; }
                 let data_len = r.data.len();
                 current.features.push((layer_idx, r.data));
                 current_tile_bytes += 32 + data_len;
@@ -452,16 +441,13 @@ pub(super) fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u3
                 }
             }
 
-            // Merge same-attribute geometries to reduce feature count
-            for layer in &mut s.layers {
+            for (li, layer) in s.layers.iter_mut().enumerate() {
+                if li == shortbread::Layer::Ocean as usize { continue; }
                 if let Some(lb) = layer.as_mut() {
                     lb.merge_same_attr_geometries(&mut s.merge_scratch, &mut s.geom_pool, &mut s.tags_pool);
                 }
             }
 
-            // Merge connected line segments through degree-2 nodes.
-            // Skip at z14 where lines are full resolution and merging adds
-            // overhead without meaningful compression benefit.
             if z < 14 {
                 for layer in &mut s.layers {
                     if let Some(lb) = layer.as_mut() {
@@ -551,7 +537,6 @@ pub(super) fn prepare_non_empty_layers<'a>(
         }
     }
 
-    // Merge same-attribute geometries to reduce feature count.
     for layer in &mut s.layers {
         if let Some(lb) = layer.as_mut() {
             lb.merge_same_attr_geometries(&mut s.merge_scratch, &mut s.geom_pool, &mut s.tags_pool);

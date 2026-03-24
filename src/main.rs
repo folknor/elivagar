@@ -26,6 +26,24 @@ enum Command {
     Verify(VerifyArgs),
     /// Render a single tile as SVG.
     Svg(SvgArgs),
+    /// Diagnose ocean ring winding for a specific tile.
+    Diag(DiagArgs),
+}
+
+/// Arguments for the `diag` subcommand.
+#[derive(Parser)]
+struct DiagArgs {
+    /// PMTiles file to read.
+    file: PathBuf,
+    /// Zoom level.
+    #[arg(short, long)]
+    z: u8,
+    /// Tile X coordinate.
+    #[arg(short, long)]
+    x: u32,
+    /// Tile Y coordinate.
+    #[arg(short, long)]
+    y: u32,
 }
 
 /// Arguments for the `run` subcommand.
@@ -162,13 +180,25 @@ struct SvgArgs {
     #[arg(short, long)]
     z: u8,
 
-    /// Tile X coordinate.
+    /// Tile X coordinate (top-left).
     #[arg(short, long)]
     x: u32,
 
-    /// Tile Y coordinate.
+    /// Tile Y coordinate (top-left).
     #[arg(short, long)]
     y: u32,
+
+    /// Grid width in tiles (default: 1).
+    #[arg(short = 'W', long, default_value = "1")]
+    width: u32,
+
+    /// Grid height in tiles (default: 1).
+    #[arg(short = 'H', long, default_value = "1")]
+    height: u32,
+
+    /// Only render these layers (comma-separated, e.g. "ocean,boundaries").
+    #[arg(short, long)]
+    layers: Option<String>,
 
     /// Output SVG path (default: stdout).
     #[arg(short, long)]
@@ -283,18 +313,251 @@ fn main() {
                     eprintln!("Error creating {}: {e}", path.display());
                     std::process::exit(1);
                 });
-                elivagar::svg::render_tile_svg(&args.file, args.z, args.x, args.y, &mut file)
+                let layer_filter: Option<Vec<&str>> = args.layers.as_deref().map(|s| s.split(',').collect());
+                elivagar::svg::render_tile_grid_svg(
+                    &args.file, args.z, args.x, args.y,
+                    args.width, args.height, layer_filter.as_deref(), &mut file,
+                )
             } else {
                 let stdout = std::io::stdout();
                 let mut out = stdout.lock();
-                elivagar::svg::render_tile_svg(&args.file, args.z, args.x, args.y, &mut out)
+                let layer_filter: Option<Vec<&str>> = args.layers.as_deref().map(|s| s.split(',').collect());
+                elivagar::svg::render_tile_grid_svg(
+                    &args.file, args.z, args.x, args.y,
+                    args.width, args.height, layer_filter.as_deref(), &mut out,
+                )
             };
             if let Err(e) = result {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
+        Command::Diag(args) => {
+            if let Err(e) = diag_ocean_rings(&args.file, args.z, args.x, args.y) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
     }
+}
+
+fn diag_ocean_rings(path: &Path, z: u8, x: u32, y: u32) -> std::io::Result<()> {
+    use elivagar::pmtiles_reader::PmtilesReader;
+    use elivagar::pmtiles_writer::xy_to_tile_id;
+    use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let mut reader = PmtilesReader::open(path)?;
+    let entries = reader.read_all_entries()?;
+    let tile_id = xy_to_tile_id(z, x, y);
+    let entry = entries.iter().find(|e| e.tile_id == tile_id)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "tile not found"))?;
+    let raw = reader.read_tile(entry)?;
+
+    println!("Tile z{z}/{x}/{y} — {raw_len} bytes decompressed", raw_len = raw.len());
+
+    // Parse MVT tile — find all layers
+    let mut tc = Cursor::new(&raw);
+    while let Ok(Some((field, wire_type))) = tc.read_tag() {
+        if field == 3 && wire_type == WIRE_LEN {
+            if let Ok(layer_data) = tc.read_len_delimited() {
+                diag_layer(layer_data);
+            }
+        } else {
+            drop(tc.skip_field(wire_type));
+        }
+    }
+    Ok(())
+}
+
+fn diag_layer(data: &[u8]) {
+    use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
+
+    let mut name = "";
+
+    // First pass: get name and feature byte ranges
+    let mut feature_ranges: Vec<&[u8]> = Vec::new();
+    let mut lc = Cursor::new(data);
+    while let Ok(Some((field, wire_type))) = lc.read_tag() {
+        match (field, wire_type) {
+            (1, WIRE_LEN) => {
+                if let Ok(bytes) = lc.read_len_delimited() {
+                    name = std::str::from_utf8(bytes).unwrap_or("<invalid>");
+                }
+            }
+            (2, WIRE_LEN) => {
+                if let Ok(bytes) = lc.read_len_delimited() {
+                    feature_ranges.push(bytes);
+                }
+            }
+            _ => { drop(lc.skip_field(wire_type)); }
+        }
+    }
+
+    // Count polygon features
+    let mut poly_count = 0;
+    for fdata in &feature_ranges {
+        let mut fc = Cursor::new(fdata);
+        let mut gt: u64 = 0;
+        while let Ok(Some((ff, fw))) = fc.read_tag() {
+            if ff == 3 && fw == WIRE_VARINT {
+                gt = fc.read_varint().unwrap_or(0);
+            } else {
+                drop(fc.skip_field(fw));
+            }
+        }
+        if gt == 3 { poly_count += 1; }
+    }
+
+    println!("  Layer '{name}': {n} features ({poly_count} polygons)", n = feature_ranges.len());
+
+    // Parse each feature — only print polygon detail
+    for (fi, fdata) in feature_ranges.iter().enumerate() {
+        let mut geom_type: u64 = 0;
+        let mut fid: u64 = 0;
+        let mut geometry: Vec<u32> = Vec::new();
+
+        let mut fc = Cursor::new(fdata);
+        while let Ok(Some((ff, fw))) = fc.read_tag() {
+            match (ff, fw) {
+                (1, WIRE_VARINT) => { fid = fc.read_varint().unwrap_or(0); }
+                (3, WIRE_VARINT) => { geom_type = fc.read_varint().unwrap_or(0); }
+                (4, WIRE_LEN) => {
+                    if let Ok(bytes) = fc.read_len_delimited() {
+                        let mut pc = Cursor::new(bytes);
+                        while let Ok(v) = pc.read_varint() {
+                            #[allow(clippy::cast_possible_truncation)]
+                            geometry.push(v as u32);
+                        }
+                    }
+                }
+                _ => { drop(fc.skip_field(fw)); }
+            }
+        }
+
+        if geom_type == 3 && !geometry.is_empty() {
+            let rings = diag_decode_polygon(&geometry);
+            println!("    Feature {fi}: id={fid} geom_type={geom_type} rings={nr}", nr = rings.len());
+            for (ri, ring) in rings.iter().enumerate() {
+                let area = signed_area_ring(ring);
+                let winding = if area > 0 { "CW (outer)" } else if area < 0 { "CCW (hole)" } else { "ZERO" };
+                let simple = diag_ring_is_simple(ring);
+                let simple_str = if simple { "" } else { " *** SELF-INTERSECTING ***" };
+                println!("      ring {ri}: {nv} verts, area={area}, {winding}{simple_str}",
+                    nv = ring.len());
+                if ring.len() <= 6 {
+                    for &(x, y) in ring {
+                        println!("        ({x}, {y})");
+                    }
+                } else {
+                    for &(x, y) in &ring[..3] {
+                        println!("        ({x}, {y})");
+                    }
+                    println!("        ...");
+                    for &(x, y) in &ring[ring.len()-3..] {
+                        println!("        ({x}, {y})");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Inline MVT polygon decoder (avoids needing pub access to geometry module).
+fn diag_decode_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
+    let mut rings: Vec<Vec<(i32, i32)>> = Vec::new();
+    let mut cx: i32 = 0;
+    let mut cy: i32 = 0;
+    let mut i = 0;
+    while i < commands.len() {
+        let cmd = commands[i];
+        let cmd_id = cmd & 0x7;
+        let cmd_count = cmd >> 3;
+        i += 1;
+        match cmd_id {
+            1 => {
+                for _ in 0..cmd_count {
+                    if i + 1 >= commands.len() { return rings; }
+                    let dx = unzigzag_diag(commands[i]);
+                    let dy = unzigzag_diag(commands[i + 1]);
+                    i += 2;
+                    cx += dx;
+                    cy += dy;
+                    rings.push(vec![(cx, cy)]);
+                }
+            }
+            2 => {
+                let Some(ring) = rings.last_mut() else { i += (cmd_count as usize) * 2; continue; };
+                for _ in 0..cmd_count {
+                    if i + 1 >= commands.len() { return rings; }
+                    let dx = unzigzag_diag(commands[i]);
+                    let dy = unzigzag_diag(commands[i + 1]);
+                    i += 2;
+                    cx += dx;
+                    cy += dy;
+                    ring.push((cx, cy));
+                }
+            }
+            7 => {
+                if let Some(ring) = rings.last_mut()
+                    && let Some(&first) = ring.first()
+                {
+                    ring.push(first);
+                    cx = first.0;
+                    cy = first.1;
+                }
+            }
+            _ => {}
+        }
+    }
+    rings
+}
+
+#[inline]
+fn unzigzag_diag(n: u32) -> i32 {
+    #[allow(clippy::cast_possible_wrap)]
+    { ((n >> 1) as i32) ^ (-((n & 1) as i32)) }
+}
+
+fn diag_ring_is_simple(ring: &[(i32, i32)]) -> bool {
+    if ring.len() < 4 { return true; }
+    let n = ring.len() - 1; // exclude closing vertex
+    for i in 0..n {
+        let a1 = ring[i];
+        let a2 = ring[i + 1];
+        for j in (i + 2)..n {
+            if j + 1 == ring.len() && i == 0 { continue; }
+            let b1 = ring[j];
+            let b2 = ring[(j + 1) % ring.len()];
+            // segments_cross: proper crossing only
+            let d1 = diag_cross_sign(a1, a2, b1);
+            let d2 = diag_cross_sign(a1, a2, b2);
+            let d3 = diag_cross_sign(b1, b2, a1);
+            let d4 = diag_cross_sign(b1, b2, a2);
+            if d1 != d2 && d3 != d4 && d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn diag_cross_sign(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32)) -> i8 {
+    let cross = i64::from(p2.0 - p1.0) * i64::from(p3.1 - p1.1)
+              - i64::from(p2.1 - p1.1) * i64::from(p3.0 - p1.0);
+    if cross > 0 { 1 } else if cross < 0 { -1 } else { 0 }
+}
+
+fn signed_area_ring(ring: &[(i32, i32)]) -> i64 {
+    if ring.len() < 3 { return 0; }
+    let mut sum: i64 = 0;
+    for i in 0..ring.len() {
+        let j = (i + 1) % ring.len();
+        sum += i64::from(ring[i].0) * i64::from(ring[j].1);
+        sum -= i64::from(ring[j].0) * i64::from(ring[i].1);
+    }
+    sum / 2
 }
 
 #[allow(clippy::too_many_lines)]
@@ -325,6 +588,8 @@ fn run(args: RunArgs) {
         let auto = detect_ocean(Path::new("data"));
         (args.ocean.or(auto.0), args.ocean_simplified.or(auto.1))
     };
+
+
 
     let allow_unsafe_flat_index = args.allow_unsafe_flat_index || env_var_true("ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX");
 

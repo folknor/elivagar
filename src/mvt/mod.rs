@@ -512,13 +512,13 @@ fn encode_value(buf: &mut Vec<u8>, val: &Value) {
 // ---------------------------------------------------------------------------
 
 #[inline]
-pub(super) fn zigzag(v: i32) -> u32 {
+pub(crate) fn zigzag(v: i32) -> u32 {
     #[allow(clippy::cast_sign_loss)]
     { ((v << 1) ^ (v >> 31)) as u32 }
 }
 
 #[inline]
-pub(super) fn command(id: u32, count: u32) -> u32 {
+pub(crate) fn command(id: u32, count: u32) -> u32 {
     id | (count << 3)
 }
 

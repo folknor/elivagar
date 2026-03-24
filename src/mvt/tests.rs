@@ -677,6 +677,102 @@ fn decode_commands_to_abs(cmds: &[u32]) -> Vec<(i32, i32)> {
     result
 }
 
+/// Regression test: appending a multi-ring polygon (exterior + hole) as a
+/// single source geometry. The ClosePath between rings must reset src_cx/src_cy
+/// so the second ring's MoveTo delta is decoded from the correct origin.
+/// Before the fix, src_cx/src_cy stayed at the last LineTo position, causing
+/// the second ring's coordinates to drift by (last_lineto - last_moveto).
+#[test]
+fn test_append_geometry_multi_ring_polygon_closepath_resets_source_cursor() {
+    // Exterior ring: (100,100) → (200,100) → (200,200) → (100,200) → close
+    // Hole ring:     (120,120) → (180,120) → (180,180) → (120,180) → close
+    let ext = [(100, 100), (200, 100), (200, 200), (100, 200), (100, 100)];
+    let hole = [(120, 120), (180, 120), (180, 180), (120, 180), (120, 120)];
+    let mut src = Vec::new();
+    encode_polygon(&mut src, &[&ext, &hole]);
+
+    let mut dest = Vec::new();
+    let mut cx: i32 = 0;
+    let mut cy: i32 = 0;
+    test_append_geometry(&mut dest, &src, &mut cx, &mut cy);
+
+    // Decode and verify all absolute coords
+    let coords = decode_commands_to_abs(&dest);
+    // Exterior: (100,100), (200,100), (200,200), (100,200)
+    assert_eq!(coords[0], (100, 100), "ext vertex 0");
+    assert_eq!(coords[1], (200, 100), "ext vertex 1");
+    assert_eq!(coords[2], (200, 200), "ext vertex 2");
+    assert_eq!(coords[3], (100, 200), "ext vertex 3");
+    // Hole: (120,120), (180,120), (180,180), (120,180)
+    assert_eq!(coords[4], (120, 120), "hole vertex 0");
+    assert_eq!(coords[5], (180, 120), "hole vertex 1");
+    assert_eq!(coords[6], (180, 180), "hole vertex 2");
+    assert_eq!(coords[7], (120, 180), "hole vertex 3");
+}
+
+/// Regression test: merge two polygon features that each have multi-ring
+/// geometry. Verifies the full merge pipeline produces correct coordinates.
+#[test]
+fn test_merge_two_multi_ring_polygons_coords_in_bounds() {
+    let mut layer = LayerBuilder::new("test");
+    let ki = layer.intern_key("kind");
+    let vi = layer.intern_value(Value::String("ocean".into()));
+
+    // Feature 1: exterior + hole
+    let ext1 = [(0, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
+    let hole1 = [(100, 100), (900, 100), (900, 900), (100, 900), (100, 100)];
+    let mut geom1 = Vec::new();
+    encode_polygon(&mut geom1, &[&ext1, &hole1]);
+    layer.add_feature(Feature {
+        id: Some(1),
+        geom_type: GeomType::Polygon,
+        geometry: geom1,
+        tags: vec![(ki, vi)],
+    });
+
+    // Feature 2: exterior + hole at different location
+    let ext2 = [(2000, 2000), (3000, 2000), (3000, 3000), (2000, 3000), (2000, 2000)];
+    let hole2 = [(2100, 2100), (2900, 2100), (2900, 2900), (2100, 2900), (2100, 2100)];
+    let mut geom2 = Vec::new();
+    encode_polygon(&mut geom2, &[&ext2, &hole2]);
+    layer.add_feature(Feature {
+        id: Some(2),
+        geom_type: GeomType::Polygon,
+        geometry: geom2,
+        tags: vec![(ki, vi)],
+    });
+
+    let mut scratch = MergeScratch::new();
+    let mut gp = Vec::new();
+    let mut tp = Vec::new();
+    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+
+    assert_eq!(layer.test_feature_count(), 1, "should merge into 1 feature");
+    let coords = decode_commands_to_abs(&layer.test_feature(0).geometry);
+
+    // All coordinates must be within the expected range [0, 3000]
+    for (i, &(x, y)) in coords.iter().enumerate() {
+        assert!(x >= 0 && x <= 3000, "coord {i}: x={x} out of range");
+        assert!(y >= 0 && y <= 3000, "coord {i}: y={y} out of range");
+    }
+
+    // Verify specific coordinates from both features
+    // Feature 1 exterior
+    assert_eq!(coords[0], (0, 0));
+    assert_eq!(coords[1], (1000, 0));
+    assert_eq!(coords[2], (1000, 1000));
+    assert_eq!(coords[3], (0, 1000));
+    // Feature 1 hole
+    assert_eq!(coords[4], (100, 100));
+    assert_eq!(coords[5], (900, 100));
+    // Feature 2 exterior
+    assert_eq!(coords[8], (2000, 2000));
+    assert_eq!(coords[9], (3000, 2000));
+    // Feature 2 hole
+    assert_eq!(coords[12], (2100, 2100));
+    assert_eq!(coords[13], (2900, 2100));
+}
+
 // -----------------------------------------------------------------------
 // merge_same_attr_geometries tests
 // -----------------------------------------------------------------------

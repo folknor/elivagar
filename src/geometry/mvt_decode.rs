@@ -72,6 +72,46 @@ pub fn decode_mvt_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
     rings
 }
 
+/// Encode closed rings back to MVT polygon geometry commands.
+///
+/// Inverse of `decode_mvt_polygon`. Each ring must be closed (first == last).
+/// Uses `mvt::command()` and `mvt::zigzag()` for encoding.
+#[allow(dead_code)]
+pub fn encode_mvt_polygon(rings: &[Vec<(i32, i32)>], buf: &mut Vec<u32>) {
+    buf.clear();
+    let mut cx: i32 = 0;
+    let mut cy: i32 = 0;
+    for ring in rings {
+        if ring.len() < 4 {
+            // Degenerate ring (< 3 unique vertices + closing vertex)
+            continue;
+        }
+        // MoveTo first point
+        buf.push(crate::mvt::command(1, 1));
+        buf.push(crate::mvt::zigzag(ring[0].0 - cx));
+        buf.push(crate::mvt::zigzag(ring[0].1 - cy));
+        cx = ring[0].0;
+        cy = ring[0].1;
+        // LineTo remaining points (skip last which is closing duplicate)
+        #[allow(clippy::cast_possible_truncation)]
+        let line_count = (ring.len() - 2) as u32;
+        if line_count > 0 {
+            buf.push(crate::mvt::command(2, line_count));
+            for &(x, y) in &ring[1..ring.len() - 1] {
+                buf.push(crate::mvt::zigzag(x - cx));
+                buf.push(crate::mvt::zigzag(y - cy));
+                cx = x;
+                cy = y;
+            }
+        }
+        // ClosePath
+        buf.push(crate::mvt::command(7, 1));
+        // Cursor resets to MoveTo position after ClosePath
+        cx = ring[0].0;
+        cy = ring[0].1;
+    }
+}
+
 /// Zigzag-decode a u32 back to i32.
 #[inline]
 fn unzigzag(n: u32) -> i32 {

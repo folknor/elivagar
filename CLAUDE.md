@@ -68,7 +68,7 @@ No shell scripts remain. All development tooling is in `brokkr`.
 
 ## Architecture
 
-Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`, `verify`, `svg`).
+Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`, `verify`, `svg`, `diag`).
 
 ### Modules
 
@@ -146,9 +146,17 @@ Uses clap derive with subcommands:
 
 Reads a PMTiles archive and prints header info, tile statistics, section layout, and metadata (layer list with zoom ranges).
 
-### `elivagar svg <FILE> -z <Z> -x <X> -y <Y> [-o output.svg]`
+### `elivagar verify <FILE>`
 
-Renders a single tile from a PMTiles archive as SVG. Decodes MVT geometry and draws each layer with a distinct color. Points render as circles, lines as stroked paths, polygons as filled paths with `evenodd` fill-rule. Background is land-colored (`#f2efe9`). Output goes to stdout by default, or to a file with `-o`.
+Validates a PMTiles archive end-to-end: container integrity, metadata schema, tile decompression, MVT payload structure, geometry command validation, and layer coverage. Also checks ocean polygon rings for self-intersections. Exits 0 on pass, 1 on failure. Stops after 100 tile-level errors.
+
+### `elivagar svg <FILE> -z <Z> -x <X> -y <Y> [-W width] [-H height] [-l layers] [-o output.svg]`
+
+Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids (`-W`/`-H`, default 1x1). `--layers` filters to specific layers (comma-separated, e.g. `ocean,boundaries`). Decodes MVT geometry and draws each layer with a distinct color. Points render as circles, lines as stroked paths, polygons as filled paths with `evenodd` fill-rule. Background is land-colored (`#f2efe9`). Grid lines drawn between tiles when width or height > 1. Output goes to stdout by default, or to a file with `-o`.
+
+### `elivagar diag <FILE> -z <Z> -x <X> -y <Y>`
+
+Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, finds polygon features across all layers, and prints per-ring vertex count, signed area, and winding direction (CW = outer, CCW = hole). Prints first/last 3 vertices for large rings, full vertices for small ones (≤6).
 
 ## Key conventions
 
@@ -156,6 +164,7 @@ Renders a single tile from a PMTiles archive as SVG. Decodes MVT geometry and dr
 - `.unwrap()` forbidden by clippy — use `expect()` or propagate errors
 - Cast lints are strict — annotate with `#[allow(clippy::cast_*)]` where needed
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)
+- **Test geometry must fit in one tile at the test zoom level.** World-spanning polygons (e.g. [0.1–0.9] Mercator) at z14 iterate 268M tiles and OOM the machine. If a test needs high zoom, use geometry confined to a single tile at that zoom.
 - `ELIVAGAR_NODE_STATS=1` — enables detailed SortedNodeStore diagnostic scan (chunk counts, compression ratio, blob bytes). Runs during PBF phase so it adds to `phase12_ms` — safe for hotpath runs but not for bench timing. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after all timing kv pairs and never affect benchmarks.
 - Memory instrumentation (`3a729ab`) — always-on, not feature-gated. Emits per-phase peak RSS (`phase12_rss_kb`, `ocean_rss_kb`, `sort_rss_kb`, `assemble_rss_kb`), `sort_chunks`, and in-flight HWM counters (`max_way_inflight_bytes`, `max_rel_batch_bytes`, `max_assemble_batch_bytes`). Overhead is negligible: 4 `/proc` reads total, per-block byte estimation, per-feature counter increment. Nothing in hot inner loops.
 

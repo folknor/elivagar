@@ -9,7 +9,7 @@ use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use crate::wire_format::encode_attrs_bytes;
-use pbfhogg::{BlockType, Element, ElementReader, PrimitiveBlock};
+use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, PrimitiveBlock};
 
 use super::stats::{
     DeferralStats, FanoutStats, MissingRefStatsAtomic, Phase12Stats,
@@ -199,6 +199,11 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
     // allocation (~200M allocs at planet scale). Cleared each iteration.
     // tags_vec cannot be hoisted: it holds &str references into PBF elements
     // that don't outlive the closure body (mutable reference invariance).
+    // Global shared-node prepass: detect junction nodes across PBF blocks.
+    let global_shared_nodes: std::sync::Arc<FxHashSet<i64>> = std::sync::Arc::new(
+        prepass_shared_nodes(&config.pbf_path, decode_threads)?
+    );
+
     let mut node_records: Vec<SortRecord> = Vec::new();
 
     // Macro to handle Node and DenseNode identically — both types expose the
@@ -296,6 +301,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     let srl = config.seam_reconcile_layers;
                     let fcs = config.fanout_caps;
                     let psf = config.polygon_simplify_factor;
+                    let gsn = std::sync::Arc::clone(&global_shared_nodes);
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
@@ -363,6 +369,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                                     .collect();
                                 let mut raw_ways = raw_ways;
                                 annotate_block_shared_node_refs(&mut raw_ways);
+                                annotate_global_shared_node_refs(&mut raw_ways, &gsn);
                                 let block_bytes = estimate_raw_ways_bytes(&raw_ways);
                                 let block_cost = block_bytes * WAY_OUTPUT_MULTIPLIER;
                                 // Wait for capacity: count limit and byte budget.
@@ -675,8 +682,11 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
                     .or_insert(1);
             }
         } else {
-            // Open line: preserve interior junctions, but not endpoints.
-            for &node_id in &w.node_refs[1..w.node_refs.len() - 1] {
+            // Open line: count ALL nodes including endpoints.
+            // Endpoints are where ways connect — if two ways share an endpoint,
+            // it must be pinned so DP simplification doesn't move it to different
+            // positions in each way (which creates visible gaps at junctions).
+            for &node_id in &w.node_refs {
                 counts
                     .entry(node_id)
                     .and_modify(|c| *c = c.saturating_add(1))
@@ -694,10 +704,83 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
         let scan_slice = if is_closed {
             &w.node_refs[..w.node_refs.len() - 1]
         } else {
-            &w.node_refs[1..w.node_refs.len() - 1]
+            // Scan all nodes including endpoints — shared endpoints must be
+            // pinned to prevent DP from creating gaps at way junctions.
+            &w.node_refs[..]
         };
         for &node_id in scan_slice {
             if counts.get(&node_id).is_some_and(|&c| c >= 2)
+                && !w.preserve_node_refs.contains(&node_id)
+            {
+                w.preserve_node_refs.push(node_id);
+            }
+        }
+    }
+}
+
+/// First pass over the PBF: count node ref occurrences across all ways.
+/// Returns the set of node IDs that appear in 2+ ways (junction nodes).
+///
+/// Uses `BlobFilter::only_ways()` to skip node/relation blobs entirely
+/// (indexed PBFs skip decompression; non-indexed still parse cheaply).
+/// No tag matching or coordinate resolution — just node ref counting.
+fn prepass_shared_nodes(
+    pbf_path: &std::path::Path,
+    decode_threads: usize,
+) -> Result<FxHashSet<i64>, PipelineError> {
+    let start = std::time::Instant::now();
+    let reader = ElementReader::from_path(pbf_path)
+        .map_err(|e| PipelineError(format!("prepass: failed to open PBF: {e}")))?
+        .with_blob_filter(BlobFilter::only_ways())
+        .decode_threads(decode_threads);
+
+    let mut seen: FxHashSet<i64> = FxHashSet::default();
+    let mut shared: FxHashSet<i64> = FxHashSet::default();
+
+    for block_result in reader.into_blocks_pipelined() {
+        let block = block_result
+            .map_err(|e| PipelineError(format!("prepass: PBF read failed: {e}")))?;
+        block.for_each_element(|element| {
+            if let Element::Way(way) = element {
+                for node_id in way.refs() {
+                    if !seen.insert(node_id) {
+                        shared.insert(node_id);
+                    }
+                }
+            }
+        });
+    }
+
+    let elapsed = start.elapsed();
+    let seen_count = seen.len();
+    drop(seen);
+    eprintln!(
+        "  Shared-node prepass: {:.1}s ({} unique nodes, {} shared)",
+        elapsed.as_secs_f64(),
+        seen_count,
+        shared.len(),
+    );
+    Ok(shared)
+}
+
+/// Annotate ways with globally-shared node refs (cross-block junctions).
+///
+/// Supplements `annotate_block_shared_node_refs` which only detects junctions
+/// within a single PBF block. Nodes in `global_shared` that appear in a way's
+/// node refs are added to `preserve_node_refs` so DP simplification pins them.
+fn annotate_global_shared_node_refs(raw_ways: &mut [RawWay], global_shared: &FxHashSet<i64>) {
+    for w in raw_ways.iter_mut() {
+        if w.node_refs.len() <= 2 {
+            continue;
+        }
+        let is_closed = w.node_refs.len() >= 4 && w.node_refs.first() == w.node_refs.last();
+        let scan_slice = if is_closed {
+            &w.node_refs[..w.node_refs.len() - 1]
+        } else {
+            &w.node_refs[..]
+        };
+        for &node_id in scan_slice {
+            if global_shared.contains(&node_id)
                 && !w.preserve_node_refs.contains(&node_id)
             {
                 w.preserve_node_refs.push(node_id);

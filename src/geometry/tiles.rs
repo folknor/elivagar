@@ -200,6 +200,223 @@ fn signed_area_tile(ring: &[(i32, i32)]) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// Tile-space polygon ring simplification (post-quantization cleanup)
+// ---------------------------------------------------------------------------
+// After Mercator→tile coordinate projection, integer quantization creates
+// 1–2 pixel staircase artifacts that Mercator-space DP can't see. This pass
+// removes those zigzags using DP directly on tile coordinates.
+
+/// Simplify a closed tile-coordinate polygon ring in-place using Douglas-Peucker.
+///
+/// `tol_sq` is the squared tolerance in extent units (e.g. 16²=256 for 1 rendered pixel).
+/// Preserves first/last point (ring closure) and ensures the ring retains at least
+/// `min_points` vertices (4 for a valid polygon ring). Winding order is preserved.
+///
+/// If simplification creates a self-intersecting ring (DP can collapse narrow
+/// channels), falls back to the unsimplified ring. This prevents earcut
+/// tessellation artifacts in MapLibre/WebGL renderers.
+pub(crate) fn simplify_tile_ring(ring: &mut Vec<(i32, i32)>, tol_sq: i64, min_points: usize) {
+    if tol_sq <= 0 { return; }
+    // Need at least a triangle + closing point to simplify
+    if ring.len() <= min_points {
+        return;
+    }
+    let closed = ring.first() == ring.last();
+    let n = if closed { ring.len() - 1 } else { ring.len() };
+    if n <= min_points {
+        return;
+    }
+
+    // Build keep-flags array
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[n - 1] = true;
+    tile_dp_recurse(ring, 0, n - 1, tol_sq, &mut keep);
+
+    let kept: usize = keep.iter().filter(|&&k| k).count();
+    if kept < min_points || kept == n {
+        // Can't simplify enough, or nothing was removed — leave ring unchanged
+        return;
+    }
+
+    // Save original in case simplification creates self-intersections
+    let original = ring.clone();
+
+    // Compact in-place
+    let mut write = 0;
+    for read in 0..n {
+        if keep[read] {
+            ring[write] = ring[read];
+            write += 1;
+        }
+    }
+    // Re-close if it was closed
+    if closed {
+        ring[write] = ring[0];
+        write += 1;
+    }
+    ring.truncate(write);
+
+    // Revert if simplification created self-intersections
+    if !super::ring_is_simple(ring) {
+        ring.clear();
+        ring.extend_from_slice(&original);
+    }
+}
+
+fn tile_dp_recurse(ring: &[(i32, i32)], start: usize, end: usize, tol_sq: i64, keep: &mut [bool]) {
+    if end <= start + 1 {
+        return;
+    }
+    let (max_idx, max_dist_sq) = tile_find_farthest(ring, start, end);
+    if max_dist_sq > tol_sq {
+        keep[max_idx] = true;
+        tile_dp_recurse(ring, start, max_idx, tol_sq, keep);
+        tile_dp_recurse(ring, max_idx, end, tol_sq, keep);
+    }
+}
+
+/// Find the point farthest from the segment `ring[start]..ring[end]`, in integer tile coords.
+/// Returns (index, squared_distance).
+#[allow(clippy::needless_range_loop)]
+fn tile_find_farthest(ring: &[(i32, i32)], start: usize, end: usize) -> (usize, i64) {
+    let (ax, ay) = (i64::from(ring[start].0), i64::from(ring[start].1));
+    let (bx, by) = (i64::from(ring[end].0), i64::from(ring[end].1));
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len_sq = dx * dx + dy * dy;
+
+    let mut max_dist_sq: i64 = 0;
+    let mut max_idx = start;
+
+    for i in (start + 1)..end {
+        let (px, py) = (i64::from(ring[i].0), i64::from(ring[i].1));
+        let dist_sq = if len_sq == 0 {
+            let ex = px - ax;
+            let ey = py - ay;
+            ex * ex + ey * ey
+        } else {
+            // Cross product squared / len_sq = perpendicular distance squared
+            let cross = (px - ax) * dy - (py - ay) * dx;
+            // Use full precision: cross² can be up to ~(4096*4096)² ≈ 2^48,
+            // well within i64 range. Divide by len_sq for perp dist².
+            cross * cross / len_sq
+        };
+        if dist_sq > max_dist_sq {
+            max_dist_sq = dist_sq;
+            max_idx = i;
+        }
+    }
+    (max_idx, max_dist_sq)
+}
+
+// ---------------------------------------------------------------------------
+// Earcut-safety ring cleanup (post-quantization quality pass)
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Hole containment validation (earcut-safety for multipolygons)
+// ---------------------------------------------------------------------------
+// After DP simplification + clipping + quantization, holes may no longer sit
+// cleanly inside their outer ring. Earcut produces garbage triangles when a
+// hole extends outside the outer. We validate each hole and drop invalid ones.
+
+/// Minimum hole area in tile extent² units at low zoom.
+/// Holes smaller than this are sub-pixel and invisible — dropping them avoids
+/// earcut-hostile geometry for zero visual cost.
+/// 4 pixels² = 4 × 16² = 1024 extent² units (using 2× signed area = 2048).
+const MIN_HOLE_AREA_2X: i64 = 2048;
+
+/// Check if a point is inside a closed polygon ring using ray casting.
+/// The ring must be closed (first == last). Returns true if the point is
+/// strictly inside (not on the boundary).
+fn point_in_ring(px: i32, py: i32, ring: &[(i32, i32)]) -> bool {
+    if ring.len() < 4 {
+        return false;
+    }
+    let mut inside = false;
+    let n = ring.len() - 1; // exclude closing vertex
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (ring[i].0, ring[i].1);
+        let (xj, yj) = (ring[j].0, ring[j].1);
+        // Ray cast: horizontal ray from (px, py) to +infinity
+        if ((yi > py) != (yj > py))
+            && (i64::from(px) < i64::from(xj - xi) * i64::from(py - yi) / i64::from(yj - yi) + i64::from(xi))
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Validate and filter hole rings for a multipolygon feature in tile coordinates.
+///
+/// Drops holes that:
+/// - Have a representative vertex outside the outer ring
+/// - Have area below the minimum threshold (sub-pixel at low zoom)
+///
+/// `all_rings[0..ring_count]` contains outer (index 0) + holes (indices 1..ring_count).
+/// Returns the new ring_count after filtering.
+#[allow(clippy::needless_range_loop)]
+pub(crate) fn filter_holes_for_outer(
+    all_rings: &mut [Vec<(i32, i32)>],
+    ring_count: usize,
+) -> usize {
+    if ring_count <= 1 {
+        return ring_count;
+    }
+    // Phase 1: decide which holes to keep (immutable borrow of outer)
+    // Use a small inline bitset — ring_count is always small (< 64 in practice).
+    let mut keep_mask: u64 = 1; // bit 0 = outer, always kept
+    {
+        let outer = &all_rings[0];
+        for read in 1..ring_count.min(64) {
+            let hole = &all_rings[read];
+            if hole.len() < 4 {
+                continue;
+            }
+            // Area check: drop sub-pixel holes
+            if signed_area_2x(hole).abs() < MIN_HOLE_AREA_2X {
+                continue;
+            }
+            // Containment check: representative point must be inside outer.
+            let (px, py) = hole[0];
+            if point_in_ring(px, py, outer) {
+                keep_mask |= 1 << read;
+            } else if hole.len() >= 2 {
+                // First vertex on boundary — try midpoint of first edge
+                let (qx, qy) = hole[1];
+                if point_in_ring((px + qx) / 2, (py + qy) / 2, outer) {
+                    keep_mask |= 1 << read;
+                }
+            }
+        }
+    }
+    // Phase 2: compact kept rings (mutable, no outer borrow)
+    let mut write = 1;
+    for read in 1..ring_count.min(64) {
+        if keep_mask & (1 << read) != 0 {
+            if write != read {
+                all_rings.swap(write, read);
+            }
+            write += 1;
+        }
+    }
+    write
+}
+
+/// Signed area × 2 of a closed ring (shoelace, no division).
+fn signed_area_2x(ring: &[(i32, i32)]) -> i64 {
+    let mut area: i64 = 0;
+    for i in 0..ring.len().saturating_sub(1) {
+        area += i64::from(ring[i].0) * i64::from(ring[i + 1].1)
+              - i64::from(ring[i + 1].0) * i64::from(ring[i].1);
+    }
+    area
+}
+
+// ---------------------------------------------------------------------------
 // Land tile mask (z14 resolution bitset for ocean filtering)
 // ---------------------------------------------------------------------------
 

@@ -241,6 +241,15 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
             tile_errors.push(format!("z{z}/{x}/{y}: {msg}"));
         }
 
+        // Ocean polygon ring validity: check for self-intersections.
+        if tile_errors.len() < MAX_TILE_ERRORS {
+            let ocean_problems = validate_ocean_rings(&decompressed);
+            for problem in ocean_problems {
+                tile_errors.push(format!("z{z}/{x}/{y}: {problem}"));
+                if tile_errors.len() >= MAX_TILE_ERRORS { break; }
+            }
+        }
+
         tiles_checked += 1;
     }
 
@@ -262,7 +271,18 @@ fn validate_mvt_geometry(data: &[u8], z: u8, x: u32) -> Result<(), String> {
             let layer = tile_cursor
                 .read_len_delimited()
                 .map_err(|e| format!("layer decode failed: {e}"))?;
-            validate_mvt_layer_geometry(layer, z, x)?;
+            // Extract layer name for error context
+            let mut name_cursor = Cursor::new(layer);
+            let mut layer_name = String::new();
+            while let Ok(Some((lf, lw))) = name_cursor.read_tag() {
+                if lf == 1 && lw == WIRE_LEN {
+                    if let Ok(sub) = name_cursor.read_len_delimited() {
+                        layer_name = String::from_utf8_lossy(sub).to_string();
+                    }
+                } else { drop(name_cursor.skip_field(lw)); }
+            }
+            validate_mvt_layer_geometry(layer, z, x)
+                .map_err(|e| format!("[{layer_name}] {e}"))?;
         } else {
             tile_cursor
                 .skip_field(wire_type)
@@ -316,7 +336,12 @@ fn validate_mvt_feature_geometry(feature: &[u8], z: u8, x: u32) -> Result<(), St
     }
 
     let Some(geom_bytes) = geom_bytes else {
-        return Err("feature missing geometry".to_string());
+        // Features without geometry are valid in MVT (e.g. metadata features).
+        // Only flag polygon features that claim a type but lack geometry data.
+        if geom_type != 0 {
+            return Err(format!("feature has geom_type={geom_type} but missing geometry data"));
+        }
+        return Ok(());
     };
     let commands = decode_packed_varints(geom_bytes)?;
     validate_geometry_commands(&commands, geom_type, z, x)
@@ -441,6 +466,69 @@ fn validate_geometry_commands(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Validate ocean polygon rings for self-intersections.
+/// Decodes MVT protobuf → finds ocean layer → decodes polygon geometry → checks each ring.
+fn validate_ocean_rings(data: &[u8]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut tile_cursor = Cursor::new(data);
+    while let Ok(Some((field, wire_type))) = tile_cursor.read_tag() {
+        if field == 3 && wire_type == WIRE_LEN {
+            if let Ok(layer_data) = tile_cursor.read_len_delimited() {
+                validate_ocean_layer_rings(layer_data, &mut problems);
+            }
+        } else if tile_cursor.skip_field(wire_type).is_err() {
+            break;
+        }
+    }
+    problems
+}
+
+fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
+    let mut name = String::new();
+    let mut feature_blobs: Vec<&[u8]> = Vec::new();
+    let mut cursor = Cursor::new(layer_data);
+    while let Ok(Some((field, wire_type))) = cursor.read_tag() {
+        if wire_type == WIRE_LEN {
+            if let Ok(sub) = cursor.read_len_delimited() {
+                match field {
+                    1 => name = String::from_utf8_lossy(sub).to_string(),
+                    2 => feature_blobs.push(sub),
+                    _ => {}
+                }
+            }
+        } else if cursor.skip_field(wire_type).is_err() {
+            break;
+        }
+    }
+    if name != "ocean" { return; }
+
+    for (fi, feat_data) in feature_blobs.iter().enumerate() {
+        let mut geom_type: u64 = 0;
+        let mut geom_bytes: Option<&[u8]> = None;
+        let mut fc = Cursor::new(feat_data);
+        while let Ok(Some((ff, fw))) = fc.read_tag() {
+            match (ff, fw) {
+                (3, WIRE_VARINT) => { if let Ok(gt) = fc.read_varint() { geom_type = gt; } }
+                (4, WIRE_LEN) => { geom_bytes = fc.read_len_delimited().ok(); }
+                _ => { drop(fc.skip_field(fw)); }
+            }
+        }
+        if geom_type != 3 { continue; } // polygon only
+        let Some(gb) = geom_bytes else { continue; };
+
+        // Decode packed varints to u32 commands
+        let Ok(commands) = decode_packed_varints(gb) else { continue; };
+        let rings = crate::geometry::decode_mvt_polygon(&commands);
+        for (ri, ring) in rings.iter().enumerate() {
+            if ring.len() >= 4 && !crate::geometry::ring_is_simple(ring) {
+                problems.push(format!(
+                    "ocean feat {fi} ring {ri} is self-intersecting ({} verts)", ring.len()
+                ));
+            }
+        }
+    }
+}
 
 fn check_section_bounds(
     name: &str,
