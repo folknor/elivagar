@@ -142,7 +142,7 @@ impl VerifyReport {
 
 /// Verify a PMTiles archive. Returns a report on success, or a fatal error
 /// if the container or metadata is unreadable.
-pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
+pub fn verify(path: &Path, zoom_filter: Option<u8>) -> Result<VerifyReport, VerifyError> {
     // -- Open and validate header --
     let mut reader = PmtilesReader::open(path)?;
     let file_size = reader.file_size()?;
@@ -207,6 +207,10 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
         }
 
         let (z, x, y) = tile_id_to_zxy(entry.tile_id);
+
+        if let Some(zf) = zoom_filter {
+            if z != zf { continue; }
+        }
 
         // Read and decompress.
         let decompressed = match reader.read_tile(entry) {

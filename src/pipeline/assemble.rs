@@ -465,6 +465,9 @@ pub(super) fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u3
                 return None;
             }
 
+            #[cfg(feature = "mvt-swap")]
+            mvt::encode_tile_into_mvt_swap(&mut s.mvt_buf, &non_empty);
+            #[cfg(not(feature = "mvt-swap"))]
             mvt::encode_tile_into(&mut s.mvt_buf, &non_empty, &mut s.encode_scratch);
 
             if s.mvt_buf.is_empty() {

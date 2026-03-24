@@ -168,6 +168,10 @@ struct InspectArgs {
 struct VerifyArgs {
     /// PMTiles file to verify.
     file: PathBuf,
+
+    /// Only check tiles at this zoom level.
+    #[arg(short = 'z', long)]
+    zoom: Option<u8>,
 }
 
 /// Arguments for the `svg` subcommand.
@@ -294,7 +298,7 @@ fn main() {
             }
         }
         Command::Verify(args) => {
-            match elivagar::verify::verify(&args.file) {
+            match elivagar::verify::verify(&args.file, args.zoom) {
                 Ok(report) => {
                     report.print_summary();
                     if !report.passed {
