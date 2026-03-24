@@ -1140,14 +1140,14 @@ fn decode_key(rec: &SortRecord) -> (u64, u8) {
 fn decode_data_header(data: &[u8]) -> (u64, u8, u32) {
     let osm_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
     let gt = data[8];
-    let cmd_count = u16::from_le_bytes(data[9..11].try_into().unwrap());
-    (osm_id, gt, u32::from(cmd_count))
+    let cmd_count = u32::from_le_bytes(data[9..13].try_into().unwrap());
+    (osm_id, gt, cmd_count)
 }
 
 /// Decode the attribute count from a SortRecord's data payload.
 fn decode_attr_count(data: &[u8]) -> u8 {
-    let cmd_count = u16::from_le_bytes(data[9..11].try_into().unwrap()) as usize;
-    let attr_start = 11 + cmd_count * 4;
+    let cmd_count = u32::from_le_bytes(data[9..13].try_into().unwrap()) as usize;
+    let attr_start = 13 + cmd_count * 4;
     data[attr_start]
 }
 
