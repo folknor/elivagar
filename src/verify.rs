@@ -294,12 +294,15 @@ fn validate_mvt_geometry(data: &[u8], z: u8, x: u32) -> Result<(), String> {
 
 fn validate_mvt_layer_geometry(layer: &[u8], z: u8, x: u32) -> Result<(), String> {
     let mut layer_cursor = Cursor::new(layer);
+    let mut feat_idx = 0u32;
     while let Ok(Some((field, wire_type))) = layer_cursor.read_tag() {
         if field == 2 && wire_type == WIRE_LEN {
             let feature = layer_cursor
                 .read_len_delimited()
                 .map_err(|e| format!("feature decode failed: {e}"))?;
-            validate_mvt_feature_geometry(feature, z, x)?;
+            validate_mvt_feature_geometry(feature, z, x)
+                .map_err(|e| format!("feat {feat_idx}: {e}"))?;
+            feat_idx += 1;
         } else {
             layer_cursor
                 .skip_field(wire_type)
@@ -343,8 +346,9 @@ fn validate_mvt_feature_geometry(feature: &[u8], z: u8, x: u32) -> Result<(), St
         }
         return Ok(());
     };
+    let raw_byte_len = geom_bytes.len();
     let commands = decode_packed_varints(geom_bytes)?;
-    validate_geometry_commands(&commands, geom_type, z, x)
+    validate_geometry_commands(&commands, geom_type, z, x, raw_byte_len)
 }
 
 fn decode_packed_varints(data: &[u8]) -> Result<Vec<u32>, String> {
@@ -383,6 +387,7 @@ fn validate_geometry_commands(
     geom_type: u64,
     z: u8,
     x: u32,
+    raw_byte_len: usize,
 ) -> Result<(), String> {
     if commands.is_empty() {
         return Err("feature has empty geometry command stream".to_string());
@@ -397,9 +402,10 @@ fn validate_geometry_commands(
         MVT_DELTA_LIMIT
     };
 
-    // Maximum valid count: each MoveTo/LineTo consumes 2 params per repeat,
-    // so count can't exceed remaining_params / 2. vtzero uses geometry length.
-    let max_count = commands.len() as u32 / 2;
+    // Maximum valid count: vtzero uses raw_byte_len / 2 (each varint is ≥1 byte,
+    // each point needs 2 varints). This is a generous upper bound that avoids
+    // false positives on large but valid geometries.
+    let max_count = (raw_byte_len / 2) as u32;
 
     let mut i = 0usize;
     let mut cx: i64 = 0;
@@ -635,14 +641,14 @@ mod tests {
 
     #[test]
     fn geometry_rejects_unknown_command_id() {
-        let err = validate_geometry_commands(&[cmd(4, 1)], 2, 10, 1)
+        let err = validate_geometry_commands(&[cmd(4, 1)], 2, 10, 1, 1000)
             .expect_err("unknown command id should fail");
         assert!(err.contains("unknown geometry command id 4"));
     }
 
     #[test]
     fn geometry_rejects_zero_repeat_count() {
-        let err = validate_geometry_commands(&[cmd(1, 0)], 2, 10, 1)
+        let err = validate_geometry_commands(&[cmd(1, 0)], 2, 10, 1, 1000)
             .expect_err("zero repeat count should fail");
         assert!(err.contains("zero repeat count"));
     }
@@ -656,7 +662,7 @@ mod tests {
             zz(1),
             zz(1),
         ];
-        let err = validate_geometry_commands(&commands, 3, 10, 1)
+        let err = validate_geometry_commands(&commands, 3, 10, 1, 1000)
             .expect_err("polygon MoveTo count != 1 should fail");
         assert!(err.contains("MoveTo count must be 1"));
     }
@@ -669,7 +675,7 @@ mod tests {
             zz(0),
             cmd(7, 1),
         ];
-        let err = validate_geometry_commands(&commands, 2, 10, 1)
+        let err = validate_geometry_commands(&commands, 2, 10, 1, 1000)
             .expect_err("ClosePath in non-polygon should fail");
         assert!(err.contains("ClosePath in non-polygon"));
     }
@@ -682,7 +688,7 @@ mod tests {
             zz(0),
             cmd(7, 1),
         ];
-        let err = validate_geometry_commands(&commands, 3, 10, 1)
+        let err = validate_geometry_commands(&commands, 3, 10, 1, 1000)
             .expect_err("polygon ClosePath without enough points should fail");
         assert!(err.contains("too few points"));
     }
@@ -699,7 +705,7 @@ mod tests {
             zz(0),
             zz(1),
         ];
-        let err = validate_geometry_commands(&commands, 3, 10, 1)
+        let err = validate_geometry_commands(&commands, 3, 10, 1, 1000)
             .expect_err("polygon without ClosePath should fail");
         assert!(err.contains("missing ClosePath"));
     }
@@ -720,7 +726,7 @@ mod tests {
             zz(65_536),
             zz(0),
         ];
-        let err = validate_geometry_commands(&commands, 2, 10, 1)
+        let err = validate_geometry_commands(&commands, 2, 10, 1, 1000)
             .expect_err("absolute coordinate limit should fail");
         assert!(err.contains("exceeds absolute limit"));
     }
@@ -738,11 +744,11 @@ mod tests {
         ];
 
         // Non-seam tile passes.
-        validate_geometry_commands(&commands, 2, 4, 1)
+        validate_geometry_commands(&commands, 2, 4, 1, 1000)
             .expect("non-seam tile should allow 20k delta");
 
         // Seam tile fails.
-        let err = validate_geometry_commands(&commands, 2, 4, 0)
+        let err = validate_geometry_commands(&commands, 2, 4, 0, 1000)
             .expect_err("seam tile should reject 20k delta");
         assert!(err.contains("suspicious geometry delta"));
         assert!(err.contains(&MVT_DELTA_LIMIT_SEAM.to_string()));

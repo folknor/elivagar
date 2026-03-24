@@ -12,6 +12,35 @@ This strongly suggests the problem is in the MVT byte encoding — not the
 geometry pipeline itself — since MapLibre's built-in protobuf decoder interprets
 something differently than SVG/JSTS decoders.
 
+## Results (2026-03-24)
+
+**The encoder is innocent. The geometry data is the problem.**
+
+All encoder-focused approaches have been executed. None changed the artifacts:
+
+| Approach | Result | Commit |
+|---|---|---|
+| 0: Protobuf field reordering (15,1,5,2,3,4 → 1,2,3,4,5,15) | No visual change | `e1f0862` |
+| 0b: Winding order | Already correct (close_and_orient_cw/ccw at all emit sites) | — |
+| 1: Encoder swap (mvt crate, Option B — geometry-level) | Much worse (third-party encoder produces worse output from same data) | — |
+| 3: Round-trip re-encode (@mapbox/vector-tile decode → vt-pbf re-encode) | Identical artifacts (32,667 tiles, 0 decode errors) | — |
+| 5: MVT compliance validation (Rust verify + vtvalidate) | Found 3 malformed tiles from u16 wire format bug (fixed in `197f6b3`), 15 self-intersecting ocean rings. No other spec violations. | `197f6b3` |
+
+**Conclusion**: The problem is upstream of the encoder — in the polygon
+coordinates produced by Sutherland-Hodgman clipping. S-H produces
+self-intersecting (figure-8) rings when clipping concave coastline polygons.
+SVG handles these correctly via `fill-rule="evenodd"` (winding-agnostic).
+MapLibre's earcut tessellation cannot handle self-intersecting input and
+produces garbage triangles.
+
+**The fix must be in the geometry pipeline**, not the encoder. Options:
+1. Replace S-H with a concave-polygon-safe clipper (Clipper2, Weiler-Atherton)
+2. Post-clip repair (split_figure8_ring gave partial success at z4-7)
+3. Hybrid: keep S-H for speed, add post-clip boolean repair for polygons
+
+Approaches 2 (binary diff) and 4 (visual regression) are no longer needed
+for diagnosis but may be useful for validating the geometry fix.
+
 ---
 
 ## Approach 0: Protobuf Field Ordering (check first — 10 minutes)
