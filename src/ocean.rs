@@ -577,6 +577,7 @@ fn emit_boundary_tile(
         return;
     }
     let mut outer_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
+    geometry::dedup_quantized_ring(&mut outer_tc);
     close_and_orient_cw(&mut outer_tc);
     outer_tc = simplify_ring_safe(&outer_tc);
     if ring_area_abs(&outer_tc) < MIN_RING_AREA {
@@ -591,6 +592,7 @@ fn emit_boundary_tile(
             continue;
         }
         let mut inner_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
+        geometry::dedup_quantized_ring(&mut inner_tc);
         close_and_orient_ccw(&mut inner_tc);
         inner_tc = simplify_ring_safe(&inner_tc);
         if ring_area_abs(&inner_tc) < MIN_RING_AREA {

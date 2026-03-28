@@ -134,6 +134,57 @@ pub fn to_tile_coords(
         .collect()
 }
 
+/// Remove quantization-induced backtrack spikes from a closed ring.
+///
+/// When dense f64 vertices are rounded to i32 tile coordinates, distinct points
+/// can snap to the same integer, creating A→B→A sequences (spikes) and short
+/// loops. These pass `ring_is_simple()` (which only detects proper crossings)
+/// but break MapLibre's earcut tessellation.
+///
+/// Ported from tilemaker's `scaleRing()` (`coordinates_geom.cpp:36-52`):
+/// each new point is checked against the previous `LOOKBACK` points. If a
+/// match is found, the ring is truncated back to that point (killing the spike).
+///
+/// Must be called immediately after `to_tile_coords` / `to_tile_coords_into`,
+/// before `close_and_orient` or any other processing.
+pub(crate) fn dedup_quantized_ring(ring: &mut Vec<(i32, i32)>) {
+    const LOOKBACK: usize = 5;
+    if ring.len() < 4 {
+        return;
+    }
+    // If the ring is closed (first == last), process only the interior vertices.
+    // The closing vertex will be re-added by close_and_orient_cw/ccw.
+    let closed = ring.first() == ring.last();
+    let end = if closed { ring.len() - 1 } else { ring.len() };
+    let mut write = 1usize; // always keep first point
+    for read in 1..end {
+        let p = ring[read];
+        // Check against the last LOOKBACK written points (but never before index 1 —
+        // never truncate back to remove the first vertex).
+        let start = write.saturating_sub(LOOKBACK).max(1);
+        let mut found = None;
+        for j in (start..write).rev() {
+            if ring[j] == p {
+                found = Some(j);
+                break;
+            }
+        }
+        if let Some(j) = found {
+            // Backtrack: truncate to the match point (kill the spike)
+            write = j + 1;
+        } else {
+            ring[write] = p;
+            write += 1;
+        }
+    }
+    if closed && write > 0 {
+        // Re-close the ring
+        ring[write] = ring[0];
+        write += 1;
+    }
+    ring.truncate(write);
+}
+
 /// Compute a `MercBbox` bounding box from a slice of Mercator points.
 pub(crate) fn merc_bbox(points: &[Point]) -> MercBbox {
     let mut min_x = f64::INFINITY;

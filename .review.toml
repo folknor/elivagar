@@ -1,0 +1,14 @@
+[planetiler.plantasjen]
+claude = "94313589-48f1-4c82-a925-6f7d1f0527c6"
+codex = "019d2642-e6f9-7492-a39e-df54aafe064c"
+
+[tilemaker.plantasjen]
+claude = "e97b4d2b-99cf-41e8-b56a-8e54f2ff69e6"
+codex = "019d264d-7219-7751-82ce-21faafda7ee1"
+
+[tippecanoe.plantasjen]
+claude = "0d1b2492-7415-4f95-a72a-062bb5d5bb3c"
+codex = "019d264c-376f-7372-9450-8d7153b802a3"
+
+[_groups]
+competitors = ["planetiler", "tilemaker", "tippecanoe"]

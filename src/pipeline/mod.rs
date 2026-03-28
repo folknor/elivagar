@@ -18,6 +18,35 @@ use crate::shortbread;
 use crate::sort;
 
 use std::path::PathBuf;
+
+/// Emit a named phase marker to the sidecar profiler (if active).
+///
+/// Writes a timestamped line to the FIFO at `BROKKR_MARKER_FIFO`. No-op if
+/// the env var is absent (brokkr not running). O_NONBLOCK prevents blocking
+/// if the FIFO buffer is full.
+fn emit_marker(name: &str) {
+    use std::io::Write;
+    use std::sync::OnceLock;
+
+    static STATE: OnceLock<Option<(std::fs::File, std::time::Instant)>> = OnceLock::new();
+
+    let state = STATE.get_or_init(|| {
+        let path = std::env::var("BROKKR_MARKER_FIFO").ok()?;
+        use std::os::unix::fs::OpenOptionsExt;
+        const O_NONBLOCK: i32 = 0x800; // Linux
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(O_NONBLOCK)
+            .open(&path)
+            .ok()?;
+        Some((f, std::time::Instant::now()))
+    });
+
+    if let Some((f, start)) = state.as_ref() {
+        let us = start.elapsed().as_micros();
+        drop((&*f).write_all(format!("{us} {name}\n").as_bytes()));
+    }
+}
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -317,6 +346,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     }
 
     // --- Phase 1+2: PBF read + feature processing ---
+    emit_marker("PHASE12_START");
     let phase12_elapsed;
     let ocean_elapsed;
     let mut phase12_rss: Option<u64> = None;
@@ -343,6 +373,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             let (mut sw, bounds_out, mask, p12_stats) = phase12::phase_read_and_process(config)?;
             phase12_stats = Some(p12_stats);
             phase12_elapsed = Some(phase12_start.elapsed());
+            emit_marker("PHASE12_END");
             phase12_rss = peak_rss_kb();
             sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
@@ -368,6 +399,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         // --- Ocean shapefile processing ---
         // When a simplified shapefile is provided, use it for z0-7 and the
         // full-resolution shapefile for z8+. Otherwise use the full-res for all zooms.
+        emit_marker("OCEAN_START");
         ocean_elapsed = if let Some(ref ocean_path) = config.ocean_shapefile {
             let ocean_start = Instant::now();
             eprintln!("--- Ocean shapefile ---");
@@ -405,7 +437,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         Some(sort_writer)
     };
 
+    emit_marker("OCEAN_END");
+
     // --- Phase 3: Sort ---
+    emit_marker("SORT_START");
     // Flush any trailing buffer so chunk_count() reflects all chunks on disk,
     // then save the count for --skip-to sort validation.
     if let Some(ref mut sw) = sort_writer {
@@ -435,12 +470,16 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         (sr, Some(phase3_start.elapsed()), peak_rss_kb())
     };
 
+    emit_marker("SORT_END");
+
     // --- Phase 4: Tile assembly + PMTiles write ---
+    emit_marker("ASSEMBLE_START");
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
     let (features_read, tiles_written, unique_tiles, max_assemble_batch_bytes, dedup_stats, tile_size_diag) =
         assemble::phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
+    emit_marker("ASSEMBLE_END");
     let assemble_rss = peak_rss_kb();
 
     let total = total_start.elapsed();

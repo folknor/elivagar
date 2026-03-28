@@ -669,6 +669,7 @@ pub(super) fn emit_polygon_feature(
             //     return;
             // }
             geometry::to_tile_coords_into(&mut scratch.tc_buf, simplified, tx, ty, z);
+            geometry::dedup_quantized_ring(&mut scratch.tc_buf);
             if !skip_size_filter && geometry::ring_is_subpixel(&scratch.tc_buf) {
                 return;
             }
@@ -725,6 +726,7 @@ pub(super) fn emit_polygon_feature(
                         //     continue;
                         // }
                         geometry::to_tile_coords_into(&mut scratch.tc_buf, &scratch.clip_a, tx, ty, z);
+                        geometry::dedup_quantized_ring(&mut scratch.tc_buf);
                         if !skip_size_filter && geometry::ring_is_subpixel(&scratch.tc_buf) {
                             continue;
                         }
@@ -871,6 +873,7 @@ pub(super) fn emit_multipolygon_feature(
             // }
             if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
             geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], simp_outer, tx, ty, z);
+            geometry::dedup_quantized_ring(&mut emit_scratch.all_rings[ring_count]);
             if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                 return;
             }
@@ -883,6 +886,7 @@ pub(super) fn emit_multipolygon_feature(
                 }
                 if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
                 geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], inner, tx, ty, z);
+                geometry::dedup_quantized_ring(&mut emit_scratch.all_rings[ring_count]);
                 if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                     continue;
                 }
@@ -996,6 +1000,7 @@ pub(super) fn emit_multipolygon_feature(
                         // }
                         if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
                         geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], &emit_scratch.clip_a, tx, ty, z);
+                        geometry::dedup_quantized_ring(&mut emit_scratch.all_rings[ring_count]);
                         if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                             continue;
                         }
@@ -1014,6 +1019,7 @@ pub(super) fn emit_multipolygon_feature(
                         }
                         if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
                         geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], &emit_scratch.clip_a, tx, ty, z);
+                        geometry::dedup_quantized_ring(&mut emit_scratch.all_rings[ring_count]);
                         if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
                             continue;
                         }

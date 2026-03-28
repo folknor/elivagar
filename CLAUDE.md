@@ -9,7 +9,7 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 - Never pipe commands with |
 - Never read or write from /tmp. All data lives in the project.
 - Never run raw cargo, curl, pkill. Use `brokkr`.
-- **Never run the full pipeline on real PBF data (brokkr bench self, brokkr run) unless the user explicitly asks.** Use synthetic benchmarks (brokkr bench node-store, brokkr bench pmtiles) for iteration. Full pipeline runs are expensive and should only happen when the user decides it's time.
+- **Never run the full pipeline on real PBF data (brokkr tilegen, brokkr tilegen --bench) unless the user explicitly asks.** Use synthetic benchmarks (brokkr node-store, brokkr pmtiles-writer) for iteration. Full pipeline runs are expensive and should only happen when the user decides it's time.
 
 ## Brokkr tool
 
@@ -17,23 +17,57 @@ Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install
 
 - `brokkr check [-- args]` — run clippy + tests. Supports `--features` and `--no-default-features`
 - `brokkr env` — show environment info and dataset status with computed XXH128 hashes (copy into the `xxhash` field in `brokkr.toml`)
-- `brokkr run [--time] [--json] [--runs N] [--no-build] [-- args]` — build release (or skip with `--no-build`) and run with passthrough args. `--time` prints stable `key=value` timing, `--json` prints structured timing, and `--runs N` reports min/median/p95 across repeated runs (single build). Elivagar handles its own defaults (`--tmp-dir`, `--ocean`/`--ocean-simplified` auto-detection, `HOTPATH_METRICS_SERVER_OFF`). Example: `brokkr run -- run input.pbf -o output.pmtiles`.
-- `brokkr bench self [--dataset name] [--variant V] [--runs N] [--skip-to ocean|sort] [--no-ocean] [--compression-level N]` — full pipeline benchmark. Default variant: raw.
-- `brokkr bench planetiler [--dataset name] [--variant V] [--runs N]` — Planetiler comparison benchmark. Default variant: raw.
-- `brokkr bench tilemaker [--dataset name] [--variant V] [--runs N]` — Tilemaker comparison benchmark (stub). Default variant: raw.
-- `brokkr bench node-store [--nodes N] [--runs N]` — SortedNodeStore benchmark (default: 50M nodes, 5 runs)
-- `brokkr bench pmtiles [--tiles N] [--runs N]` — PMTiles writer benchmark (default: 500K tiles, 5 runs)
-- `brokkr bench eliv-all [--dataset name] [--variant V] [--runs N]` — full benchmark suite. Default variant: raw.
-- `brokkr hotpath [--dataset name] [--variant V] [--alloc] [--verbose]` — hotpath profiling of main tilegen pipeline (timing or allocation). Returns a UUID; use `brokkr results <UUID> [--top 0]` to view the full report. Default variant: raw.
-- `brokkr hotpath pmtiles [--tiles N] [--alloc]` — hotpath profiling of PMTiles micro-benchmark
-- `brokkr hotpath node-store [--nodes N] [--alloc]` — hotpath profiling of node store micro-benchmark
-- `brokkr profile [--dataset name] [--variant V] [--tool perf|samply]` — sampling profiler (perf or samply). Default variant: raw.
-- `brokkr compare-tiles <a> <b> [--sample N]` — compare feature counts between PMTiles archives
-- `brokkr download ocean` — download ocean shapefiles
 - `brokkr results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)
 - `brokkr results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [--top N]` — query/compare benchmark results from SQLite. Use `--top 0` to show all hotpath functions. Use `--compare-last --command hotpath` to diff two most recent hotpath runs.
+- `brokkr results <UUID> --timeline [--stat FIELD] [--fields F1,F2] [--every N] [--phase P] [--where EXPR]` — query sidecar /proc samples (JSONL, stats, downsampled, per-phase, filtered)
+- `brokkr results <UUID> --markers --durations` — phase duration table from markers
+- `brokkr results --compare-timeline <A> <B>` — phase-aligned sidecar comparison
+- `brokkr results dirty --timeline --stat anon` — inspect last failed/dirty run
 - `brokkr clean` — remove tilegen_tmp and scratch files
 - `brokkr history [--command CMD] [--project P] [--failed] [--since DATE] [--slow MS] [-n N] [--all]` — query global command history (stored in `$XDG_DATA_HOME/brokkr/history.db`). Every brokkr invocation is recorded with timing, exit status, project, and git context. Works from any directory.
+
+### Elivagar commands
+
+Commands are top-level (no `bench`/`hotpath` namespace). Measurement modes are flags: `--bench [N]` (full benchmark, N runs), `--hotpath [N]` (function-level timing), `--alloc [N]` (allocation tracking). Without a measurement flag, the command does a plain build+run.
+
+```
+# Measured commands
+brokkr tilegen [--bench [N] | --hotpath [N] | --alloc [N]] [pipeline flags...]
+brokkr pmtiles-writer [--bench [N] | --hotpath [N] | --alloc [N]] [--tiles N]
+brokkr node-store [--bench [N] | --hotpath [N] | --alloc [N]] [--nodes N]
+brokkr planetiler [--bench [N]] [--dataset D] [--variant V]
+brokkr tilemaker [--bench [N]] [--dataset D] [--variant V]
+
+# Verification
+brokkr verify pmtiles [--dataset D] [--tiles VARIANT]
+
+# Utilities
+brokkr compare-tiles <file_a> <file_b> [--sample N]
+brokkr download-ocean
+brokkr download-natural-earth
+
+# Suite
+brokkr suite elivagar [--bench [N]] [--dataset D] [--variant V]
+```
+
+Pipeline flags on `tilegen` (`--tile-format`, `--tile-compression`, `--compress-sort-chunks`, `--in-memory`, `--locations-on-ways`, etc.) are passed through to the elivagar binary and stored as `meta.*` kv pairs in the results DB.
+
+### Sidecar profiler
+
+Every `--bench`, `--hotpath`, and `--alloc` run automatically samples `/proc/{pid}/status` and `/proc/{pid}/io` at 100ms intervals. Data stored in `.brokkr/sidecar.db` (gitignored, local-only). Preserved even if the child is OOM-killed.
+
+Phase markers via FIFO: brokkr creates a FIFO, sets `BROKKR_MARKER_FIFO` in the child's environment, spawns a sidecar thread for `/proc` sampling, reads markers from the FIFO, and bulk-inserts everything into results.db after exit. The child writes `"{timestamp_us} {PHASE_NAME}\n"` (CLOCK_MONOTONIC) via `pbfhogg::debug::emit_marker("PHASE_NAME")` — OnceLock fd caching, O_NONBLOCK, no-op if env var is absent.
+
+To add markers in elivagar, use pbfhogg's `emit_marker` (available if pbfhogg is a dependency with default features):
+```rust
+pbfhogg::debug::emit_marker("PHASE12_START");
+// ... do work ...
+pbfhogg::debug::emit_marker("PHASE12_END");
+```
+
+### Common flags
+
+All measurement commands share: `--force` (run with dirty git tree, results not stored), `--verbose` (full output), `--commit <hash>` (build and benchmark an old commit), `--features <F>` (cargo features), `--wait` (queue behind lock instead of failing).
 
 ### brokkr.toml
 
@@ -58,7 +92,7 @@ seq = 4704
 - `pbf.<variant>` — PBF files keyed by variant name. `--variant` selects (default: `raw`).
 - `xxhash` — XXH128 file hash. Run `brokkr env` to see computed values.
 
-Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access). Bench runs record `meta.*` kv pairs (e.g. `meta.compress_sort_chunks`, `meta.tile_format`, `meta.locations_on_ways`) so runs with different flags are distinguishable. Bench and hotpath commands require a clean git tree (ignoring `*.md` and `.brokkr/results.db`); use `--force` before the subcommand to run anyway (results will not be stored). Example: `brokkr bench --force self --dataset denmark`.
+Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access). Bench runs record `meta.*` kv pairs (e.g. `meta.compress_sort_chunks`, `meta.tile_format`, `meta.locations_on_ways`) so runs with different flags are distinguishable. Bench and hotpath commands require a clean git tree (ignoring `*.md` and `.brokkr/results.db`); use `--force` to run anyway (results will not be stored). Example: `brokkr tilegen --bench --force --dataset denmark`.
 
 **NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath uses conflicting cargo feature flags (causes build conflicts). Always run sequentially.
 
@@ -218,35 +252,74 @@ without benchmarking on a sparse-file workload first.
 
 ## Data preparation (pbfhogg commands)
 
-Elivagar reads PBF files produced by pbfhogg. The production pipeline has three stages, each run from the **pbfhogg** project root via `brokkr run`:
+Elivagar reads PBF files produced by pbfhogg. The production pipeline has three stages, each run from the **pbfhogg** project root via `brokkr`:
 
 ### 1. Generate indexed PBF (cat)
 
-`cat` embeds blob-level indexdata automatically when writing. Steps 2 and 3 are much faster with indexed PBFs.
+`cat` embeds blob-level indexdata automatically when writing. Steps 2 and 3 are much faster with indexed PBFs. The passthrough path (no `--type`) adds indexdata without re-compressing blobs — use this for planet-scale files.
 
 ```
-brokkr run cat raw.osm.pbf --type node,way,relation -o indexed.osm.pbf
+brokkr cat raw.osm.pbf -o indexed.osm.pbf
 ```
 
-### 2. Apply OSC diffs (merge)
-
-Merge an OSC changeset into the indexed PBF. Uses indexdata for fast blob-level passthrough.
+With `--type` for filtered output (full decode + re-encode, higher memory):
 
 ```
-brokkr run merge indexed.osm.pbf changes.osc.gz -o merged.osm.pbf
+brokkr cat raw.osm.pbf --type node,way,relation -o indexed.osm.pbf
+```
+
+### 2. Apply OSC diffs (apply-changes)
+
+Merge an OSC changeset into the indexed PBF. Uses indexdata for fast blob-level passthrough (~92% of blobs pass through as raw bytes at Denmark scale).
+
+```
+brokkr apply-changes indexed.osm.pbf changes.osc.gz -o merged.osm.pbf
+```
+
+With `--locations-on-ways`, apply-changes preserves and updates inline way-node coordinates through diffs. This eliminates the need to re-run step 3 after each merge — only needed once for bootstrapping.
+
+```
+brokkr apply-changes indexed.osm.pbf changes.osc.gz -o merged.osm.pbf --locations-on-ways
 ```
 
 ### 3. Generate locations PBF (add-locations-to-ways)
 
-Embed resolved node coordinates into ways. This is the PBF variant elivagar's tile pipeline reads — ways arrive with geometry already resolved, avoiding a separate node lookup pass.
+Embed resolved node coordinates into ways. This is the PBF variant elivagar's tile pipeline reads — ways arrive with geometry already resolved via `Way::node_locations()`, avoiding a separate node lookup pass.
 
 ```
-brokkr run add-locations-to-ways merged.osm.pbf -o locations.osm.pbf
+brokkr add-locations-to-ways merged.osm.pbf -o locations.osm.pbf
 ```
 
-Options: `--keep-untagged-nodes` (retain untagged nodes in output). Node index is always file-backed mmap (scales to planet).
+Options:
+- `--keep-untagged-nodes` — retain untagged nodes in output
+- `--index-type dense` (default) — file-backed mmap, fastest when working set fits in RAM
+- `--index-type external` — bounded-memory double radix join, all sequential I/O. Best for memory-constrained hosts. Planet (87 GB): 24 min, 17 GB peak RAM on a 30 GB host. Requires sorted PBF input and ~300 GB temp disk at planet scale.
+
+### Notes
 
 Steps 2 and 3 (and `sort`) expect indexed PBFs by default and will error if indexdata is missing. Use `--force` to override the check and run with raw PBFs (slower).
+
+For steady-state operation, use `apply-changes --locations-on-ways` (step 2) instead of running steps 2 and 3 separately. Step 3 is only needed once to bootstrap the initial enriched PBF.
+
+## Review tool
+
+`review` fans out code review queries to persistent AI sessions (Claude Code + Codex), each primed as a competitor project developer. Configured in `.review.toml`.
+
+Three competitor archetypes, grouped as `competitors`:
+- `planetiler` — Java reference implementation. Source at `research/planetiler/`.
+- `tilemaker` — C++ Shortbread generator. Source at `research/tilemaker/`.
+- `tippecanoe` — Felt's tile tool. Source at `research/tippecanoe/`.
+
+Each archetype has a Claude session and a Codex session (6 total). The sessions are primed with the role "you are a [project] developer we've hired to help" and have access to both the competitor source and elivagar source.
+
+Usage:
+- `echo "question" | review competitors` — ask all 6 sessions
+- `echo "question" | review planetiler` — ask planetiler sessions about staged changes
+- `echo "question" | review competitors --dry-run` — preview prompts without sending
+
+When using `--anchor`, the global prefix does not reinforce each session's identity. Include a short reminder in the question text itself, e.g. "As a Planetiler/Tilemaker/Tippecanoe developer, how would you..." — or skip `--anchor` and rely on the sessions' initial priming.
+
+**Use this tool before implementing geometry/rendering changes.** Write up the problem, send to competitors, wait for answers. The write-up + review cycle is faster than implement + build + discover it's wrong.
 
 ## Subagents
 Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.
