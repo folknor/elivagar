@@ -498,6 +498,44 @@ pub(crate) fn nudge_hole_off_boundary(ring: &mut [(i32, i32)]) {
     ring[n] = ring[0];
 }
 
+/// Check if a closed ring of Mercator Points has any self-intersections.
+/// f64 version of `ring_is_simple` — used to detect S-H figure-8s BEFORE
+/// quantization, where proper crossings are still detectable.
+pub(crate) fn ring_is_simple_merc(ring: &[Point]) -> bool {
+    if ring.len() < 4 {
+        return true;
+    }
+    let n = ring.len() - 1;
+    for i in 0..n {
+        let a1 = ring[i];
+        let a2 = ring[i + 1];
+        for j in (i + 2)..n {
+            if j + 1 == ring.len() && i == 0 {
+                continue;
+            }
+            let b1 = ring[j];
+            let b2 = ring[(j + 1) % ring.len()];
+            if segments_cross_f64(a1, a2, b1, b2) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn segments_cross_f64(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
+    let d1 = cross_sign_f64(a1, a2, b1);
+    let d2 = cross_sign_f64(a1, a2, b2);
+    let d3 = cross_sign_f64(b1, b2, a1);
+    let d4 = cross_sign_f64(b1, b2, a2);
+    d1 != d2 && d3 != d4 && d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0
+}
+
+fn cross_sign_f64(p1: Point, p2: Point, p3: Point) -> i8 {
+    let cross = (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
+    if cross > 1e-15 { 1 } else if cross < -1e-15 { -1 } else { 0 }
+}
+
 // ---------------------------------------------------------------------------
 // Tests (see geometry_tests.rs)
 // ---------------------------------------------------------------------------

@@ -502,6 +502,7 @@ fn emit_ocean_polygon(
                     }
                     emit_boundary_tile(
                         feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
+                        simp_outer, simp_inners,
                         layer_idx, attrs, records,
                         &mut bt_all_rings, &mut bt_geom_buf,
                         &mut clip_a, &mut clip_b,
@@ -534,6 +535,7 @@ fn emit_ocean_polygon(
                             }
                             emit_boundary_tile(
                                 feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
+                                simp_outer, simp_inners,
                                 layer_idx, attrs, records,
                                 &mut bt_all_rings, &mut bt_geom_buf,
                                 &mut clip_a, &mut clip_b,
@@ -554,6 +556,7 @@ fn emit_ocean_polygon(
                         }
                         emit_boundary_tile(
                             feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
+                            simp_outer, simp_inners,
                             layer_idx, attrs, records,
                             &mut bt_all_rings, &mut bt_geom_buf,
                             &mut clip_a, &mut clip_b,
@@ -574,6 +577,8 @@ fn emit_boundary_tile(
     tx: u32, ty: u32, z: u8,
     outer: &[Point],
     inners: &[Vec<Point>],
+    orig_outer: &[Point],       // un-preclipped polygon (for i_overlay fallback)
+    orig_inners: &[Vec<Point>], // un-preclipped holes
     layer_idx: u8,
     attrs: &[shortbread::Attr],
     records: &mut Vec<SortRecord>,
@@ -584,26 +589,51 @@ fn emit_boundary_tile(
 ) {
     let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
 
+    // S-H clip, then check for bridge edges (concavity fill artifacts).
+    // S-H connects exit/re-entry points on the same clip edge with a bridge,
+    // covering area that should be separate polygons (e.g. filling in islands).
+    // The bridge ring is simple (no crossings) but topologically wrong.
     geometry::clip_polygon_into(outer, &clip, clip_a, clip_b);
     if clip_a.len() < 3 {
         return;
     }
-    // Quantize outer + holes to tile coordinates
-    let outer_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
-    let mut hole_tcs: Vec<Vec<(i32, i32)>> = Vec::new();
-    for inner in inners {
-        geometry::clip_polygon_into(inner, &clip, clip_a, clip_b);
-        if clip_a.len() < 3 { continue; }
-        let inner_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
-        if inner_tc.len() >= 4 {
-            hole_tcs.push(inner_tc);
-        }
-    }
+    let has_bridge = has_boundary_bridge(clip_a, &clip);
 
-    // Unconditional post-quantization repair via i_overlay integer simplify.
-    // Resolves T-junctions, collinear overlaps, and self-intersections
-    // introduced by f64→i32 rounding. All three competitors do this.
-    let repaired = geometry::repair_quantized_polygon(&outer_tc, &hole_tcs);
+    let outer_tc;
+    let mut hole_tcs: Vec<Vec<(i32, i32)>> = Vec::new();
+    if !has_bridge {
+        // S-H output has no bridge edges — quantize and clip holes
+        outer_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
+        for inner in inners {
+            geometry::clip_polygon_into(inner, &clip, clip_a, clip_b);
+            if clip_a.len() < 3 { continue; }
+            let inner_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
+            if inner_tc.len() >= 4 {
+                hole_tcs.push(inner_tc);
+            }
+        }
+    } else {
+        outer_tc = Vec::new(); // dummy — overwritten by fallback
+    };
+
+    let repaired = if !has_bridge {
+        // S-H produced correct topology — repair quantization artifacts only
+        geometry::repair_quantized_polygon(&outer_tc, &hole_tcs)
+    } else {
+        // S-H produced bridge (concave coastline) — re-clip from original
+        // Mercator geometry using i_overlay boolean intersection, then quantize + repair
+        let robust_polys = geometry::clip_polygon_robust(orig_outer, orig_inners, &clip);
+        let mut all_repaired = Vec::new();
+        for poly in robust_polys {
+            let otc = geometry::to_tile_coords(&poly.outer, tx, ty, z);
+            let htcs: Vec<Vec<(i32, i32)>> = poly.holes.iter()
+                .filter(|h| h.len() >= 3)
+                .map(|h| geometry::to_tile_coords(h, tx, ty, z))
+                .collect();
+            all_repaired.extend(geometry::repair_quantized_polygon(&otc, &htcs));
+        }
+        all_repaired
+    };
     if repaired.is_empty() { return; }
 
     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
@@ -646,6 +676,31 @@ fn emit_boundary_tile(
 /// DP-simplify a closed ring, but fall back to the original if simplification
 /// creates a self-intersecting result. Ocean coastlines can form narrow channels
 /// where DP collapses vertices across the gap, creating crossings.
+/// Detect S-H bridge edges: segments where both endpoints lie on the same clip
+/// boundary. S-H creates these when a concave polygon exits and re-enters through
+/// the same edge, connecting disjoint regions with a zero-width bridge. The bridge
+/// ring is simple (no crossings) but covers area it shouldn't (e.g. islands).
+/// Detect S-H bridge edges by counting boundary-running segments per clip edge.
+/// A single segment on a clip edge is normal (polygon enters/exits at that edge).
+/// TWO or more segments on the SAME edge means S-H connected disjoint regions
+/// with a bridge — the concavity-fill artifact.
+fn has_boundary_bridge(ring: &[Point], clip: &ClipRect) -> bool {
+    let eps = 1e-10;
+    let mut left = 0u32;
+    let mut right = 0u32;
+    let mut bottom = 0u32;
+    let mut top = 0u32;
+    for i in 0..ring.len().saturating_sub(1) {
+        let a = ring[i];
+        let b = ring[i + 1];
+        if (a.x - clip.min_x).abs() < eps && (b.x - clip.min_x).abs() < eps { left += 1; }
+        if (a.x - clip.max_x).abs() < eps && (b.x - clip.max_x).abs() < eps { right += 1; }
+        if (a.y - clip.min_y).abs() < eps && (b.y - clip.min_y).abs() < eps { bottom += 1; }
+        if (a.y - clip.max_y).abs() < eps && (b.y - clip.max_y).abs() < eps { top += 1; }
+    }
+    left > 1 || right > 1 || bottom > 1 || top > 1
+}
+
 /// Emit a full-tile ocean rectangle for pure-ocean tiles (no coastline).
 #[allow(clippy::too_many_arguments)]
 fn emit_full_tile(

@@ -94,6 +94,7 @@ seq = 4704
 ```
 
 - `pbf.<variant>` — PBF files keyed by variant name. `--variant` selects (default: `raw`).
+- `brokkr tilegen --dataset denmark --variant locations` — elivagar auto-detects `LocationsOnWays` from the PBF header. The `--locations-on-ways` flag is only needed to force it when the PBF doesn't have the header flag.
 - `xxhash` — XXH128 file hash. Run `brokkr env` to see computed values.
 
 Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access). Bench runs record `meta.*` kv pairs (e.g. `meta.compress_sort_chunks`, `meta.tile_format`, `meta.locations_on_ways`) so runs with different flags are distinguishable. Bench and hotpath commands require a clean git tree (ignoring `*.md` and `.brokkr/results.db`); use `--force` to run anyway (results will not be stored). Example: `brokkr tilegen --bench --force --dataset denmark`.
