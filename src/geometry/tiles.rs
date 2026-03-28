@@ -185,6 +185,67 @@ pub(crate) fn dedup_quantized_ring(ring: &mut Vec<(i32, i32)>) {
     ring.truncate(write);
 }
 
+/// Repair post-quantization polygon topology using i_overlay's integer simplify.
+///
+/// After quantization to i32 tile coordinates, rounding can introduce T-junctions
+/// (vertex landing exactly on a non-adjacent edge) and collinear overlaps that
+/// pass `ring_is_simple()` but break earcut tessellation. This function resolves
+/// all self-intersections by running i_overlay's sweep-line noder on the quantized
+/// integer coordinates.
+///
+/// Returns a vec of simple polygons (each: outer + holes). Returns empty vec if
+/// the input is degenerate. Applied unconditionally after quantization — all three
+/// competitors (Planetiler, Tilemaker, Tippecanoe) repair every polygon, not just
+/// detected failures.
+pub(crate) fn repair_quantized_polygon(
+    outer: &[(i32, i32)],
+    holes: &[Vec<(i32, i32)>],
+) -> Vec<Vec<Vec<(i32, i32)>>> {
+    use i_overlay::core::fill_rule::FillRule;
+    use i_overlay::core::simplify::Simplify;
+    use i_overlay::core::overlay::IntOverlayOptions;
+
+    if outer.len() < 4 {
+        return Vec::new();
+    }
+
+    // Build i_overlay shape: outer + holes as Vec<Vec<IntPoint>>
+    let to_ip = |ring: &[(i32, i32)]| -> Vec<i_overlay::i_float::int::point::IntPoint> {
+        // Strip closing vertex if present (i_overlay auto-closes)
+        let n = if ring.len() >= 2 && ring.first() == ring.last() {
+            ring.len() - 1
+        } else {
+            ring.len()
+        };
+        ring[..n].iter().map(|&(x, y)| i_overlay::i_float::int::point::IntPoint::new(x, y)).collect()
+    };
+
+    let mut shape: Vec<Vec<i_overlay::i_float::int::point::IntPoint>> = Vec::with_capacity(1 + holes.len());
+    shape.push(to_ip(outer));
+    for hole in holes {
+        if hole.len() >= 4 {
+            shape.push(to_ip(hole));
+        }
+    }
+
+    // Simplify resolves self-intersections, T-junctions, and collinear overlaps.
+    // Uses NonZero fill rule to match MapLibre's earcut winding semantics.
+    let result = shape.simplify(FillRule::NonZero, IntOverlayOptions::default());
+
+    // Convert back: Vec<IntShape> = Vec<Vec<Vec<IntPoint>>> → Vec<Vec<Vec<(i32,i32)>>>
+    result.into_iter().map(|poly| {
+        poly.into_iter().map(|ring| {
+            let mut r: Vec<(i32, i32)> = ring.into_iter().map(|p| (p.x, p.y)).collect();
+            // Re-close the ring
+            if r.len() >= 3 {
+                let first = r[0];
+                r.push(first);
+            }
+            r
+        }).collect()
+    }).collect()
+}
+
 /// Compute a `MercBbox` bounding box from a slice of Mercator points.
 pub(crate) fn merc_bbox(points: &[Point]) -> MercBbox {
     let mut min_x = f64::INFINITY;

@@ -494,8 +494,12 @@ fn emit_ocean_polygon(
                     let tile_x_min = f64::from(tx) * inv_scale - tile_buf;
                     let tile_x_max = f64::from(tx + 1) * inv_scale + tile_buf;
                     if row_x_max < tile_x_min || row_x_min > tile_x_max { continue; }
-                    if let Some(mask) = land_mask
-                        && !mask.has_land(z, tx, ty) { continue; }
+                    if let Some(mask) = land_mask {
+                        if !mask.has_land(z, tx, ty) {
+                            emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
+                            continue;
+                        }
+                    }
                     emit_boundary_tile(
                         feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
                         layer_idx, attrs, records,
@@ -522,8 +526,12 @@ fn emit_ocean_polygon(
                     let test_cx = (f64::from(*gx_min) + 0.5) * inv_scale;
                     if pip(test_cx, cy) {
                         for tx in *gx_min..=*gx_max {
-                            if let Some(mask) = land_mask
-                                && !mask.has_land(z, tx, ty) { continue; }
+                            if let Some(mask) = land_mask {
+                                if !mask.has_land(z, tx, ty) {
+                                    emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
+                                    continue;
+                                }
+                            }
                             emit_boundary_tile(
                                 feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
                                 layer_idx, attrs, records,
@@ -538,8 +546,12 @@ fn emit_ocean_polygon(
                 let test_cx = (f64::from(tx_min) + 0.5) * inv_scale;
                 if pip(test_cx, cy) {
                     for tx in tx_min..=tx_max {
-                        if let Some(mask) = land_mask
-                            && !mask.has_land(z, tx, ty) { continue; }
+                        if let Some(mask) = land_mask {
+                            if !mask.has_land(z, tx, ty) {
+                                emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
+                                continue;
+                            }
+                        }
                         emit_boundary_tile(
                             feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
                             layer_idx, attrs, records,
@@ -576,97 +588,56 @@ fn emit_boundary_tile(
     if clip_a.len() < 3 {
         return;
     }
-    let mut outer_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
-    geometry::dedup_quantized_ring(&mut outer_tc);
-    close_and_orient_cw(&mut outer_tc);
-    outer_tc = simplify_ring_safe(&outer_tc);
-    if ring_area_abs(&outer_tc) < MIN_RING_AREA {
-        return;
-    }
-
-    // Collect hole rings
-    let mut hole_rings: Vec<Vec<(i32, i32)>> = Vec::new();
+    // Quantize outer + holes to tile coordinates
+    let outer_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
+    let mut hole_tcs: Vec<Vec<(i32, i32)>> = Vec::new();
     for inner in inners {
         geometry::clip_polygon_into(inner, &clip, clip_a, clip_b);
-        if clip_a.len() < 3 {
-            continue;
-        }
-        let mut inner_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
-        geometry::dedup_quantized_ring(&mut inner_tc);
-        close_and_orient_ccw(&mut inner_tc);
-        inner_tc = simplify_ring_safe(&inner_tc);
-        if ring_area_abs(&inner_tc) < MIN_RING_AREA {
-            continue;
-        }
-        // Nudge hole vertices off clip rect boundary to prevent earcut bridge degeneration
-        geometry::nudge_hole_off_boundary(&mut inner_tc);
-        hole_rings.push(inner_tc);
-    }
-
-    // Post-clip repair: split self-intersecting rings (S-H figure-8 artifacts).
-    // A self-intersecting outer produces multiple outer sub-rings, each emitted
-    // as a separate feature. Self-intersecting holes split into sub-holes.
-    let outer_parts = if geometry::ring_is_simple(&outer_tc) {
-        vec![outer_tc]
-    } else if let Some(splits) = geometry::split_figure8_ring(&outer_tc) {
-        splits
-    } else {
-        vec![outer_tc] // can't split — emit as-is
-    };
-
-    // Split self-intersecting holes — keep only the largest sub-ring.
-    // split_figure8_ring produces sub-rings sharing the intersection point;
-    // keeping multiple sub-holes with coincident vertices breaks earcut's bridge.
-    let mut repaired_holes: Vec<Vec<(i32, i32)>> = Vec::new();
-    for hole in hole_rings {
-        if geometry::ring_is_simple(&hole) {
-            repaired_holes.push(hole);
-        } else if let Some(splits) = geometry::split_figure8_ring(&hole) {
-            if let Some(mut largest) = splits.into_iter()
-                .max_by_key(|sh| ring_area_abs(sh))
-            {
-                close_and_orient_ccw(&mut largest);
-                if ring_area_abs(&largest) >= MIN_RING_AREA {
-                    repaired_holes.push(largest);
-                }
-            }
-        } else {
-            repaired_holes.push(hole); // can't split — keep as-is
+        if clip_a.len() < 3 { continue; }
+        let inner_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
+        if inner_tc.len() >= 4 {
+            hole_tcs.push(inner_tc);
         }
     }
+
+    // Unconditional post-quantization repair via i_overlay integer simplify.
+    // Resolves T-junctions, collinear overlaps, and self-intersections
+    // introduced by f64→i32 rounding. All three competitors do this.
+    let repaired = geometry::repair_quantized_polygon(&outer_tc, &hole_tcs);
+    if repaired.is_empty() { return; }
 
     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
     let key_base = sort::make_sort_key(tile_id, layer_idx, 0);
 
-    // Emit each outer sub-ring as a separate feature with its contained holes.
-    for mut outer_part in outer_parts {
-        close_and_orient_cw(&mut outer_part);
-        if ring_area_abs(&outer_part) < MIN_RING_AREA {
-            continue;
-        }
-
+    // Emit each repaired polygon as a separate feature
+    for poly in repaired {
+        if poly.is_empty() { continue; }
         all_rings.clear();
-        all_rings.push(outer_part);
-        for hole in &repaired_holes {
-            all_rings.push(hole.clone());
+        for (i, mut ring) in poly.into_iter().enumerate() {
+            if ring.len() < 4 { continue; }
+            if ring_area_abs(&ring) < MIN_RING_AREA { continue; }
+            if i == 0 {
+                close_and_orient_cw(&mut ring);
+            } else {
+                close_and_orient_ccw(&mut ring);
+                geometry::nudge_hole_off_boundary(&mut ring);
+            }
+            all_rings.push(ring);
         }
+        if all_rings.is_empty() { continue; }
 
-        // Filter holes outside this outer + nudge coincident vertices + boundary nudge
         let n_rings = all_rings.len();
         let ring_count = geometry::filter_holes_for_outer(all_rings, n_rings);
         if ring_count > 1 {
             let (outer_ref, holes) = all_rings[..ring_count].split_first_mut().expect("nonempty");
             for hole in holes {
-                geometry::nudge_hole_off_boundary(hole);
                 geometry::nudge_coincident_hole_vertices(hole, outer_ref);
             }
         }
 
         let ring_refs: Vec<&[(i32, i32)]> = all_rings[..ring_count].iter().map(Vec::as_slice).collect();
         mvt::encode_polygon(geom_buf, &ring_refs);
-        if geom_buf.is_empty() {
-            continue;
-        }
+        if geom_buf.is_empty() { continue; }
         let data = encode_feature_data(feature_id, GeomType::Polygon, geom_buf, attrs, z);
         records.push(SortRecord { key: key_base, data });
     }
@@ -675,6 +646,34 @@ fn emit_boundary_tile(
 /// DP-simplify a closed ring, but fall back to the original if simplification
 /// creates a self-intersecting result. Ocean coastlines can form narrow channels
 /// where DP collapses vertices across the gap, creating crossings.
+/// Emit a full-tile ocean rectangle for pure-ocean tiles (no coastline).
+#[allow(clippy::too_many_arguments)]
+fn emit_full_tile(
+    feature_id: u64,
+    tx: u32, ty: u32, z: u8,
+    layer_idx: u8,
+    attrs: &[shortbread::Attr],
+    records: &mut Vec<SortRecord>,
+    all_rings: &mut Vec<Vec<(i32, i32)>>,
+    geom_buf: &mut Vec<u32>,
+) {
+    #[allow(clippy::cast_possible_truncation)]
+    let buf = (BUFFER_FRACTION * geometry::EXTENT) as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let ext = geometry::EXTENT as i32;
+    let ring = vec![
+        (-buf, -buf), (ext + buf, -buf), (ext + buf, ext + buf), (-buf, ext + buf), (-buf, -buf),
+    ];
+    all_rings.clear();
+    all_rings.push(ring);
+    mvt::encode_polygon(geom_buf, &[all_rings[0].as_slice()]);
+    if geom_buf.is_empty() { return; }
+    let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+    let key_base = sort::make_sort_key(tile_id, layer_idx, 0);
+    let data = encode_feature_data(feature_id, GeomType::Polygon, geom_buf, attrs, z);
+    records.push(SortRecord { key: key_base, data });
+}
+
 fn simplify_ring_safe(ring: &[(i32, i32)]) -> Vec<(i32, i32)> {
     let simplified = geometry::simplify_ring_dp(ring, geometry::TILE_SIMPLIFY_TOLERANCE);
     if geometry::ring_is_simple(&simplified) {

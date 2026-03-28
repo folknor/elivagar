@@ -306,3 +306,64 @@ fn clip_polygon_edge_into(polygon: &[Point], edge: Edge, output: &mut Vec<Point>
         s = e;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Robust polygon clipping fallback (i_overlay boolean intersection)
+// ---------------------------------------------------------------------------
+
+/// Clip a polygon (outer + holes) against a rectangle using boolean intersection.
+///
+/// Unlike Sutherland-Hodgman, this handles concave polygons correctly —
+/// no self-intersecting output. Returns zero or more simple polygons,
+/// each with properly assigned holes. Used as a fallback when S-H produces
+/// non-simple (figure-8) results from concave coastlines.
+pub fn clip_polygon_robust(
+    outer: &[Point],
+    holes: &[Vec<Point>],
+    rect: &ClipRect,
+) -> Vec<ClippedPoly> {
+    use i_overlay::core::fill_rule::FillRule;
+    use i_overlay::core::overlay_rule::OverlayRule;
+    use i_overlay::float::single::SingleFloatOverlay;
+
+    if outer.len() < 3 {
+        return Vec::new();
+    }
+
+    let mut subj: Vec<Vec<[f64; 2]>> = Vec::with_capacity(1 + holes.len());
+    subj.push(outer.iter().map(|p| [p.x, p.y]).collect());
+    for hole in holes {
+        if hole.len() >= 3 {
+            subj.push(hole.iter().map(|p| [p.x, p.y]).collect());
+        }
+    }
+
+    let clip_rect: Vec<[f64; 2]> = vec![
+        [rect.min_x, rect.min_y],
+        [rect.max_x, rect.min_y],
+        [rect.max_x, rect.max_y],
+        [rect.min_x, rect.max_y],
+    ];
+
+    let result = subj.overlay(&clip_rect, OverlayRule::Intersect, FillRule::EvenOdd);
+
+    let mut out = Vec::with_capacity(result.len());
+    for shape in result {
+        if shape.is_empty() { continue; }
+        let poly_outer: Vec<Point> = shape[0].iter().map(|p| Point::new(p[0], p[1])).collect();
+        if poly_outer.len() < 3 { continue; }
+        let poly_holes: Vec<Vec<Point>> = shape[1..]
+            .iter()
+            .filter(|h| h.len() >= 3)
+            .map(|h| h.iter().map(|p| Point::new(p[0], p[1])).collect())
+            .collect();
+        out.push(ClippedPoly { outer: poly_outer, holes: poly_holes });
+    }
+    out
+}
+
+/// Result of robust polygon clipping: one simple polygon with holes.
+pub struct ClippedPoly {
+    pub outer: Vec<Point>,
+    pub holes: Vec<Vec<Point>>,
+}
