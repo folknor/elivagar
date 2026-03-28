@@ -4,6 +4,9 @@ Shortbread vector tile generator. Reads OSM PBF files and produces
 [PMTiles v3](https://github.com/protomaps/PMTiles) archives with the
 [Shortbread](https://shortbread-tiles.org/) schema (26 layers).
 
+Built with LLMs. See [LLM.md](LLM.md).
+
+
 ## Usage
 
 ### Generate tiles
