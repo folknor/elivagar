@@ -19,18 +19,16 @@ use crate::sort;
 
 use std::path::PathBuf;
 
-/// Emit a named phase marker to the sidecar profiler (if active).
-///
-/// Writes a timestamped line to the FIFO at `BROKKR_MARKER_FIFO`. No-op if
-/// the env var is absent (brokkr not running). O_NONBLOCK prevents blocking
-/// if the FIFO buffer is full.
-fn emit_marker(name: &str) {
-    use std::io::Write;
+// ---------------------------------------------------------------------------
+// Sidecar FIFO: phase markers + counters
+// ---------------------------------------------------------------------------
+
+/// Shared FIFO state for sidecar markers and counters. Cached via OnceLock —
+/// zero overhead when brokkr isn't running (env var absent → None).
+fn fifo_state() -> Option<&'static (std::fs::File, std::time::Instant)> {
     use std::sync::OnceLock;
-
     static STATE: OnceLock<Option<(std::fs::File, std::time::Instant)>> = OnceLock::new();
-
-    let state = STATE.get_or_init(|| {
+    STATE.get_or_init(|| {
         let path = std::env::var("BROKKR_MARKER_FIFO").ok()?;
         use std::os::unix::fs::OpenOptionsExt;
         const O_NONBLOCK: i32 = 0x800; // Linux
@@ -40,11 +38,25 @@ fn emit_marker(name: &str) {
             .open(&path)
             .ok()?;
         Some((f, std::time::Instant::now()))
-    });
+    }).as_ref()
+}
 
-    if let Some((f, start)) = state.as_ref() {
+/// Emit a named phase marker: `<timestamp_us> <name>\n`
+fn emit_marker(name: &str) {
+    use std::io::Write;
+    if let Some((f, start)) = fifo_state() {
         let us = start.elapsed().as_micros();
         drop((&*f).write_all(format!("{us} {name}\n").as_bytes()));
+    }
+}
+
+/// Emit a counter: `<timestamp_us> @<name>=<value>\n`
+#[allow(dead_code)]
+fn emit_counter(name: &str, value: i64) {
+    use std::io::Write;
+    if let Some((f, start)) = fifo_state() {
+        let us = start.elapsed().as_micros();
+        drop((&*f).write_all(format!("{us} @{name}={value}\n").as_bytes()));
     }
 }
 use std::sync::atomic::Ordering;
@@ -374,6 +386,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             phase12_stats = Some(p12_stats);
             phase12_elapsed = Some(phase12_start.elapsed());
             emit_marker("PHASE12_END");
+            if let Some(ms) = phase12_elapsed.as_ref().map(|d| d.as_millis() as i64) {
+                emit_counter("phase12_ms", ms);
+            }
             phase12_rss = peak_rss_kb();
             sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
@@ -438,6 +453,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     };
 
     emit_marker("OCEAN_END");
+    if let Some((elapsed, features)) = ocean_elapsed {
+        emit_counter("ocean_ms", elapsed.as_millis() as i64);
+        emit_counter("ocean_features", features as i64);
+    }
 
     // --- Phase 3: Sort ---
     emit_marker("SORT_START");
@@ -480,6 +499,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         assemble::phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
     emit_marker("ASSEMBLE_END");
+    emit_counter("assemble_ms", phase4_elapsed.as_millis() as i64);
+    emit_counter("tiles", tiles_written as i64);
+    emit_counter("unique_tiles", unique_tiles as i64);
+    emit_counter("features", features_read as i64);
     let assemble_rss = peak_rss_kb();
 
     let total = total_start.elapsed();

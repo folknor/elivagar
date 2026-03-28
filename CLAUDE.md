@@ -56,14 +56,18 @@ Pipeline flags on `tilegen` (`--tile-format`, `--tile-compression`, `--compress-
 
 Every `--bench`, `--hotpath`, and `--alloc` run automatically samples `/proc/{pid}/status` and `/proc/{pid}/io` at 100ms intervals. Data stored in `.brokkr/sidecar.db` (gitignored, local-only). Preserved even if the child is OOM-killed.
 
-Phase markers via FIFO: brokkr creates a FIFO, sets `BROKKR_MARKER_FIFO` in the child's environment, spawns a sidecar thread for `/proc` sampling, reads markers from the FIFO, and bulk-inserts everything into results.db after exit. The child writes `"{timestamp_us} {PHASE_NAME}\n"` (CLOCK_MONOTONIC) via `pbfhogg::debug::emit_marker("PHASE_NAME")` — OnceLock fd caching, O_NONBLOCK, no-op if env var is absent.
+Phase markers and counters via FIFO: brokkr creates a FIFO, sets `BROKKR_MARKER_FIFO` in the child's environment, spawns a sidecar thread for `/proc` sampling, reads markers/counters from the FIFO, and bulk-inserts everything into results.db after exit.
 
-To add markers in elivagar, use pbfhogg's `emit_marker` (available if pbfhogg is a dependency with default features):
-```rust
-pbfhogg::debug::emit_marker("PHASE12_START");
-// ... do work ...
-pbfhogg::debug::emit_marker("PHASE12_END");
-```
+Protocol (two line formats, same FIFO):
+- Markers: `{timestamp_us} {PHASE_NAME}\n`
+- Counters: `{timestamp_us} @{name}={value}\n` (i64 value)
+
+Elivagar emits markers at phase boundaries (`PHASE12_START/END`, `OCEAN_START/END`, `SORT_START/END`, `ASSEMBLE_START/END`) and counters for key metrics (`phase12_ms`, `ocean_ms`, `ocean_features`, `assemble_ms`, `tiles`, `unique_tiles`, `features`). Implementation is in `pipeline/mod.rs` via `emit_marker()`/`emit_counter()` — OnceLock fd caching, O_NONBLOCK, no-op when brokkr isn't running.
+
+Query with:
+- `brokkr results <uuid> --markers --durations` — phase timing table
+- `brokkr results <uuid> --markers --counters` — counter values
+- `brokkr results <uuid> --markers --phases` — phases with peak RSS + counters inline
 
 ### Common flags
 
