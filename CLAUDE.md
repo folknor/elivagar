@@ -135,8 +135,8 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 
 **Geometry + encoding:**
 - `geometry.rs` - Mercator projection, clipping (Sutherland-Hodgman for OSM layers), Douglas-Peucker simplification
-- `geometry/int_ocean.rs` - integer ocean geometry: early quantization to max_zoom pixel space, exact shift-round per-zoom rescale, rotation-invariant integer DP, i_overlay Simplify/Intersect (NonZero) topology ops
-- `mvt.rs` - MVT protobuf encoder
+- `geometry/int_ocean.rs` - integer polygon geometry engine (ocean AND OSM layers): early quantization to max_zoom pixel space (unclamped, antimeridian-safe), exact shift-round per-zoom rescale, rotation-invariant pin-aware integer DP, i_overlay Simplify/Intersect (NonZero) topology ops, recursive row-band bisection, shared per-zoom emission engine (emit_shape_for_zoom). ALL polygon emission goes through this - see specs/. The earcut oracle (scripts/validate/) is the standing gate: 0 deviant polygons, 0 misattached holes, every polygon layer, every build that touches geometry or MVT encoding.
+- `mvt.rs` - MVT protobuf encoder. CRITICAL: ClosePath does NOT move the delta cursor (MVT spec 4.3.3.3) - a symmetric encoder/decoder violation of this was invisible to all internal round-trips for three months (ledger R23)
 - `multipolygon.rs` - relation ring assembly
 - `ocean.rs` - ocean shapefile processing (mmap reader + scanline fill + quantize-early integer boolean clipping; no S-H, no LandMask - see specs/ocean-integer-clipping.md)
 

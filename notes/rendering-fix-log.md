@@ -346,9 +346,16 @@ total 81502 ms, ocean_ms 58611, peak RSS 1876.8 MB.
   exactly 1 deviant polygon, i.e. the drop is the degenerate itself.
   Deleted: emit.rs S-H polygon clipping, INTERIOR_TILE_RING,
   dedup_quantized_ring's old home, simplify_tile_ring, tile_is_interior,
-  both nudges, filter_holes_for_outer (net -419 lines).
+  both nudges, filter_holes_for_outer (net -419 lines). Bench (ca904211,
+  commit 6830301): total 73854 ms (+0.7% vs Landing A - bound was +20%),
+  ocean_ms 50249, RSS 1867 MB. PERFORMANCE GATE PASSED.
 
-**R24 status: every polygon layer in the archive is now machine-proven
+**R24 status: CLOSED - human gate PASSED (2026-07-06, user visual QA on
+denmark-6830301.pmtiles: "holy shit, this actually looks good" / "I
+believe you've done it"). Every polygon layer machine-proven
 MapLibre-tessellation-clean (earcut deviation 0.000, zero misattached
-holes, 5.9M+ polygons checked across 9 layers). Remaining before close:
-human visual gate + deferred ocean perf spec.**
+holes, 5.9M+ polygons across 9 layers) AND visually confirmed. The
+2026-03-08 problem statement is resolved. Still open, tracked separately:
+deferred ocean perf (ocean_ms ~50s, suspects listed under Landing A);
+water_polygons z5 single degenerate-drop worth one spot-check; hotpath
+0.20 / mlt-core 0.12 dep bumps; planet-scale validation.**
