@@ -202,8 +202,17 @@ pub(super) fn phase_read_and_process(
     // tags_vec cannot be hoisted: it holds &str references into PBF elements
     // that don't outlive the closure body (mutable reference invariance).
     // Global shared-node prepass: detect junction nodes across PBF blocks.
-    let global_shared_nodes: std::sync::Arc<FxHashSet<i64>> =
-        std::sync::Arc::new(prepass_shared_nodes(&config.pbf_path, decode_threads)?);
+    // Runs on its own thread, overlapping the node phase: the prepass reads
+    // only way blobs (BlobFilter::only_ways) while the main read below is
+    // still consuming node blobs, so the two scan disjoint file sections.
+    // The result is not needed until the first way block arrives - joined
+    // there. If the prepass outlives the node phase, the join blocks and the
+    // overlap is partial; the produced set is identical either way.
+    let prepass_pbf_path = config.pbf_path.clone();
+    let mut prepass_handle: Option<std::thread::JoinHandle<Result<FxHashSet<i64>, PipelineError>>> =
+        Some(std::thread::spawn(move || {
+            prepass_shared_nodes(&prepass_pbf_path, decode_threads)
+        }));
 
     let mut node_records: Vec<SortRecord> = Vec::new();
 
@@ -304,7 +313,17 @@ pub(super) fn phase_read_and_process(
                     let srl = config.seam_reconcile_layers;
                     let fcs = config.fanout_caps;
                     let psf = config.polygon_simplify_factor;
-                    let gsn = std::sync::Arc::clone(&global_shared_nodes);
+                    // First point where the shared-node set is needed: join
+                    // the prepass thread spawned before the node phase.
+                    let gsn: std::sync::Arc<FxHashSet<i64>> = std::sync::Arc::new(
+                        prepass_handle
+                            .take()
+                            .expect("prepass joined twice")
+                            .join()
+                            .map_err(|_| {
+                                PipelineError("shared-node prepass thread panicked".to_string())
+                            })??,
+                    );
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
@@ -461,6 +480,16 @@ pub(super) fn phase_read_and_process(
             }
             BlockType::Empty | BlockType::Mixed => {}
         }
+    }
+
+    // No way blocks arrived (prepass result unused): join so a prepass error
+    // still surfaces and the thread does not outlive the phase.
+    if let Some(handle) = prepass_handle.take() {
+        drop(
+            handle
+                .join()
+                .map_err(|_| PipelineError("shared-node prepass thread panicked".to_string()))??,
+        );
     }
 
     // Shut down worker + drain after all PBF blocks consumed.

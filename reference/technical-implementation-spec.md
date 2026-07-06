@@ -79,12 +79,16 @@ Specifications are saved to the ./notes folder.
     written against, AND the document the spec was spawned from (the item's
     source naming the problem - e.g. the owning `notes/*.md` writeup such
     as `notes/rendering-postmortem.md`), if it exists.
-    The measurement record is AGENTS.md's benchmark sections plus
+    The measurement record is `reference/performance.md` plus
     `.brokkr/results.db`: a spec that claims a performance effect, or whose
     changes touch a measured path, states the pre-change baseline (host +
     commit hash) the keep/revert verdict will be read against, and after
     landing records the post-change numbers the same way (commit, then
-    benchmark, then write the hash-anchored numbers). A spec off every
+    benchmark, then write the hash-anchored numbers into
+    `reference/performance.md`). Gate dataset choice, bench invocations, and
+    noise bounds follow that document's reading rules - a verdict read off a
+    single run, an instrumented-mode RSS figure, or a mismatched gate dataset
+    is not a verdict. A spec off every
     measured path owes no benchmark update; it states that, and names the
     gate whose unchanged result confirms neutrality.
 

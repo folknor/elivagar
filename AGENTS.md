@@ -64,7 +64,13 @@ brokkr planetiler [--bench [N]] [--dataset D] [--variant V]
 brokkr tilemaker [--bench [N]] [--dataset D] [--variant V]
 
 # Verification
-brokkr verify pmtiles [--dataset D] [--tiles VARIANT]
+brokkr verify pmtiles [--dataset D] [--tiles VARIANT] [--geometry-stats]
+
+# Archive inspection (wrap the elivagar subcommands; named pmtiles-inspect
+# because brokkr inspect is pbfhogg's PBF inspector)
+brokkr pmtiles-inspect [--dataset D] [--commit H | --file P]
+brokkr diag [--dataset D] [--commit H | --file P] -z Z -x X -y Y
+brokkr svg [--dataset D] [--commit H | --file P] -z Z -x X -y Y [-W] [-H] [-l] [-o]
 
 # Utilities
 brokkr compare-tiles <file_a> <file_b> [--sample N]
@@ -227,31 +233,11 @@ Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, 
 - `ELIVAGAR_NODE_STATS=1` - enables detailed SortedNodeStore diagnostic scan (chunk counts, compression ratio, blob bytes). Runs during PBF phase so it adds to `phase12_ms` - safe for hotpath runs but not for bench timing. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after all timing kv pairs and never affect benchmarks.
 - Memory instrumentation (`3a729ab`) - always-on, not feature-gated. Emits per-phase peak RSS (`phase12_rss_kb`, `ocean_rss_kb`, `sort_rss_kb`, `assemble_rss_kb`), `sort_chunks`, and in-flight HWM counters (`max_way_inflight_bytes`, `max_rel_batch_bytes`, `max_assemble_batch_bytes`). Overhead is negligible: 4 `/proc` reads total, per-block byte estimation, per-feature counter increment. Nothing in hot inner loops.
 
-## Benchmark discipline
+## Benchmarks
 
-All performance numbers (wall time, phase splits, allocation profiles) MUST include:
-1. **Host name** (plantasjen, dm6, etc.)
-2. **Git commit hash** of the code that was measured
-
-Workflow: commit code first, THEN benchmark, THEN update docs with the commit hash.
-Never write benchmark numbers for uncommitted code - the hash is the anchor.
-
-## Benchmark machines
-
-### plantasjen (current)
-- CPU: AMD Ryzen 9 5900X (12 cores / 24 threads, 4.95 GHz boost)
-- RAM: 30 GB DDR4
-- Denmark PBF baseline (commit `60fd209`, post spec-3 ocean-perf): ~35s total (18s pbf, 12s ocean, 0.6s sort, 4.2s assemble), 2.8 GB RSS, 1323406 tiles, 351 MB output. The integer-clipping rewrite (ledger R21-R24) and the ocean-perf restructure (R25 / spec 3) reshaped this wholesale: ocean fell from 48.8s to 11.9s via parallel prologue + piece-by-zoom fan-out, at the cost of RSS rising to 2.8 GB from 24-way parallelism under mimalloc's non-purging arenas. Pre-rewrite Denmark was ~12.4s but with the earcut-broken geometry the rewrite fixed.
-- North America baseline (commit `8704b11`, PRE-rewrite - stale, re-measure at scale): 605s total (413s pbf, 37s ocean, 0.7s sort, 155s assemble), 22.8 GB RSS, 12.5 GB output
-- Node store baseline (50M nodes, commit `cb2cd29`): build 1.7s, way-like 77 ns/lookup, random 394 ns/lookup
-- PMTiles writer baseline (500K tiles, commit `cb2cd29`): 164 ms
-
-### dm6
-- CPU: AMD Ryzen 5 5600G (6 cores / 12 threads, 4.46 GHz boost)
-- RAM: 32 GB DDR4
-- Denmark PBF baseline: ~45s total (26s pbf, 8s ocean, 0.7s sort, 5s assemble)
-
-README.md performance numbers should always come from plantasjen (the reference host).
+Baselines, benchmark machines, gate commands, discipline, and the rules for
+reading hotpath/alloc/bench numbers live in `reference/performance.md`. That
+document plus `.brokkr/results.db` is the measurement record specs cite.
 
 ## Data
 
