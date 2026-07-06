@@ -386,18 +386,182 @@ fn children(cell: PyramidCell) -> [PyramidCell; 4] {
     ]
 }
 
+/// Cut a fragment set against an axis-aligned rect (Spec 4 Landing 3,
+/// pulled forward after profiling showed the general boolean dominating the
+/// descent). Three tiers per shape:
+/// - bbox strictly outside the rect: skip (a boundary touch yields only
+///   zero-area geometry, which every downstream consumer drops);
+/// - bbox inside the rect: clone, the cut is an identity;
+/// - otherwise an exact integer Sutherland-Hodgman half-plane chain with
+///   snap-rounded crossings, guarded per pass: a ring crossing the cut
+///   line more than twice (would bridge into multiple components) or
+///   carrying a vertex exactly on the line (in/out ambiguity) falls back
+///   to the full i_overlay boolean - the R23-class safety net.
 fn intersect_shapes_with_rect(
     scratch: &mut IntEmitScratch,
     shapes: &Shapes,
     rect: IntRect,
-    min_area: u64,
+    _min_area: u64,
     out: &mut Shapes,
 ) {
     out.clear();
     let mut clipped = Vec::new();
     for shape in shapes {
-        intersect_rect_into(scratch, shape, rect, min_area, &mut clipped);
+        let Some(bb) = shape_bbox(shape) else {
+            continue;
+        };
+        if bb.min_x > rect.max_x
+            || bb.max_x < rect.min_x
+            || bb.min_y > rect.max_y
+            || bb.max_y < rect.min_y
+        {
+            continue;
+        }
+        if bb.min_x >= rect.min_x
+            && bb.max_x <= rect.max_x
+            && bb.min_y >= rect.min_y
+            && bb.max_y <= rect.max_y
+        {
+            out.push(shape.clone());
+            continue;
+        }
+        if clip_shape_rect_fast(shape, rect, out) {
+            continue;
+        }
+        intersect_rect_into(scratch, shape, rect, 0, &mut clipped);
         out.append(&mut clipped);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Axis {
+    X,
+    Y,
+}
+
+/// Fast rect clip of one shape. Returns true when handled (result rings,
+/// possibly none, appended to `out`); false means the caller must run the
+/// exact boolean instead. Ring traversal order (and thus winding) is
+/// preserved; a clipped hole stays inside its clipped outer because
+/// clipping is monotone under set intersection. Hole runs coincident with
+/// the outer along a cut line are legal here - emission-time
+/// normalization resolves tangencies, exactly as it does for the
+/// boolean's output.
+fn clip_shape_rect_fast(shape: &Shape, rect: IntRect, out: &mut Shapes) -> bool {
+    let mut result: Shape = Vec::with_capacity(shape.len());
+    let mut buf_a: Contour = Vec::new();
+    let mut buf_b: Contour = Vec::new();
+    for (ring_idx, ring) in shape.iter().enumerate() {
+        buf_a.clear();
+        buf_a.extend_from_slice(ring);
+        for pass in 0..4_u8 {
+            let ok = match pass {
+                0 => clip_ring_half_plane(&buf_a, Axis::X, rect.min_x, false, &mut buf_b),
+                1 => clip_ring_half_plane(&buf_a, Axis::X, rect.max_x, true, &mut buf_b),
+                2 => clip_ring_half_plane(&buf_a, Axis::Y, rect.min_y, false, &mut buf_b),
+                _ => clip_ring_half_plane(&buf_a, Axis::Y, rect.max_y, true, &mut buf_b),
+            };
+            if !ok {
+                return false;
+            }
+            std::mem::swap(&mut buf_a, &mut buf_b);
+            if buf_a.len() < 3 {
+                break;
+            }
+        }
+        if ring_idx == 0 {
+            if buf_a.len() < 3 || contour_area_is_below(&buf_a, 1) {
+                // Outer vanished: holes are subsets of it, the whole
+                // shape's intersection is empty. Handled.
+                return true;
+            }
+            result.push(buf_a.clone());
+        } else if buf_a.len() >= 3 && !contour_area_is_below(&buf_a, 1) {
+            result.push(buf_a.clone());
+        }
+    }
+    if !result.is_empty() {
+        out.push(result);
+    }
+    true
+}
+
+/// One Sutherland-Hodgman pass against an axis line. Returns false when
+/// the fast path cannot guarantee a bridge-free simple result: more than
+/// two crossings, or any vertex exactly on the line.
+fn clip_ring_half_plane(
+    ring: &Contour,
+    axis: Axis,
+    bound: i32,
+    keep_le: bool,
+    out: &mut Contour,
+) -> bool {
+    out.clear();
+    let n = ring.len();
+    if n < 3 {
+        return true;
+    }
+    let coord = |p: IntPoint| match axis {
+        Axis::X => p.x,
+        Axis::Y => p.y,
+    };
+    let mut crossings = 0_u8;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[if i + 1 < n { i + 1 } else { 0 }];
+        let ca = coord(a);
+        let cb = coord(b);
+        if ca == bound || cb == bound {
+            return false;
+        }
+        let a_in = if keep_le { ca < bound } else { ca > bound };
+        let b_in = if keep_le { cb < bound } else { cb > bound };
+        if a_in && out.last().copied() != Some(a) {
+            out.push(a);
+        }
+        if a_in != b_in {
+            crossings += 1;
+            if crossings > 2 {
+                return false;
+            }
+            let p = crossing_point(a, b, axis, bound);
+            if out.last().copied() != Some(p) {
+                out.push(p);
+            }
+        }
+    }
+    if out.len() >= 2 && out.first() == out.last() {
+        out.pop();
+    }
+    true
+}
+
+/// Exact rational crossing of segment (a, b) with an axis line, rounded to
+/// nearest (ties away from zero). The cut line is a grid coordinate, so
+/// the un-rounded crossing is exact.
+fn crossing_point(a: IntPoint, b: IntPoint, axis: Axis, bound: i32) -> IntPoint {
+    match axis {
+        Axis::X => {
+            let num = i64::from(b.y - a.y) * i64::from(bound - a.x);
+            let den = i64::from(b.x - a.x);
+            let y = i64::from(a.y) + round_div(num, den);
+            IntPoint::new(bound, i32::try_from(y).expect("clip crossing fits i32"))
+        }
+        Axis::Y => {
+            let num = i64::from(b.x - a.x) * i64::from(bound - a.y);
+            let den = i64::from(b.y - a.y);
+            let x = i64::from(a.x) + round_div(num, den);
+            IntPoint::new(i32::try_from(x).expect("clip crossing fits i32"), bound)
+        }
+    }
+}
+
+fn round_div(num: i64, den: i64) -> i64 {
+    let (n, d) = if den < 0 { (-num, -den) } else { (num, den) };
+    if n >= 0 {
+        (n + d / 2) / d
+    } else {
+        -((-n + d / 2) / d)
     }
 }
 
@@ -677,15 +841,43 @@ mod tests {
     }
 
     #[test]
-    fn cut_identity_dp_tol_0_byte_identity_reference() {
+    fn cut_identity_dp_tol_0_geometry_equivalence_reference() {
+        // Landing 1 asserted byte identity against the boolean reference;
+        // the Landing 3 splitter keeps the same geometry but not the same
+        // bytes (snap-rounded crossings, retained collinear cut-line
+        // vertices, verbatim identity-tier clones). The cut identity is
+        // therefore pinned as per-tile geometric equivalence: same tile
+        // set, XOR-empty decoded geometry per tile.
         let outer = [(900, 900), (13500, 900), (13500, 13200), (900, 13200)];
         let inner = [(5200, 5200), (5200, 7200), (7200, 7200), (7200, 5200)];
         let shape = shape(&outer, &[&inner]);
         let params = params(2, 0, 2, 0);
+        let got = collect_pyramid(&shape, &params);
+        let expected = collect_direct(&shape, &params);
         assert_eq!(
-            collect_pyramid(&shape, &params),
-            collect_direct(&shape, &params)
+            got.keys().collect::<Vec<_>>(),
+            expected.keys().collect::<Vec<_>>(),
+            "tile sets differ"
         );
+        let mut scratch = IntEmitScratch::new();
+        for (key, got_geom) in &got {
+            let window = IntRect {
+                min_x: i32::MIN / 4,
+                min_y: i32::MIN / 4,
+                max_x: i32::MAX / 4,
+                max_y: i32::MAX / 4,
+            };
+            let one_got: BTreeMap<(u8, u32, u32), Vec<u32>> =
+                BTreeMap::from([(*key, got_geom.clone())]);
+            let one_exp: BTreeMap<(u8, u32, u32), Vec<u32>> =
+                BTreeMap::from([(*key, expected[key].clone())]);
+            let got_shapes = commands_to_window_shapes(&one_got, window, &mut scratch);
+            let exp_shapes = commands_to_window_shapes(&one_exp, window, &mut scratch);
+            assert!(
+                xor_shapes_empty(&got_shapes, &exp_shapes),
+                "geometry diverges at {key:?}"
+            );
+        }
     }
 
     #[test]
@@ -773,6 +965,77 @@ mod tests {
         let left_shapes = commands_to_window_shapes(&left, window, &mut int);
         let right_shapes = commands_to_window_shapes(&right, window, &mut int);
         assert!(xor_shapes_empty(&left_shapes, &right_shapes));
+    }
+
+    #[test]
+    fn fast_rect_clip_equivalent_to_boolean() {
+        // Jagged outer with a hole, clipped against a grid of rects that
+        // exercise identity, disjoint, simple-crossing, multi-crossing
+        // (fallback), and on-line-vertex (fallback) tiers. The fast path
+        // plus fallback must be set-equivalent to the boolean (XOR empty).
+        let subject = shape(
+            &[
+                (100, 100),
+                (2100, 140),
+                (2500, 900),
+                (1900, 1300),
+                (2600, 1700),
+                (2000, 2500),
+                (900, 2100),
+                (300, 2600),
+                (150, 1500),
+                (700, 800),
+            ],
+            &[&[(1000, 1000), (1000, 1600), (1600, 1600), (1600, 1000)]],
+        );
+        let mut scratch = IntEmitScratch::new();
+        let rects = [
+            IntRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: 3000,
+                max_y: 3000,
+            }, // identity
+            IntRect {
+                min_x: 5000,
+                min_y: 5000,
+                max_x: 6000,
+                max_y: 6000,
+            }, // disjoint
+            IntRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: 1200,
+                max_y: 3000,
+            }, // simple crossing
+            IntRect {
+                min_x: 800,
+                min_y: 700,
+                max_x: 2200,
+                max_y: 1900,
+            }, // cuts hole too
+            IntRect {
+                min_x: 0,
+                min_y: 1400,
+                max_x: 3000,
+                max_y: 1500,
+            }, // thin band, multi-crossing
+            IntRect {
+                min_x: 100,
+                min_y: 0,
+                max_x: 2500,
+                max_y: 2600,
+            }, // on-line vertices
+        ];
+        for rect in rects {
+            let mut fast = Vec::new();
+            intersect_shapes_with_rect(&mut scratch, &vec![subject.clone()], rect, 0, &mut fast);
+            let exact = intersect_rect(&subject, rect, 0);
+            assert!(
+                xor_shapes_empty(&fast, &exact),
+                "fast clip diverges from boolean for {rect:?}"
+            );
+        }
     }
 
     #[test]
