@@ -1,10 +1,10 @@
 // MVT (Mapbox Vector Tile) protobuf encoder.
 //
-// Hand-rolled protobuf encoding — the MVT schema is simple enough that codegen
+// Hand-rolled protobuf encoding - the MVT schema is simple enough that codegen
 // is unnecessary. Produces spec-compliant tiles with extent=4096.
 
 // FxHashMap (rustc-hash): non-cryptographic hash ~3× faster than std SipHash for
-// small keys. Safe here because keys are short strings and interned integers — no
+// small keys. Safe here because keys are short strings and interned integers - no
 // adversarial input. Tradeoff: weaker collision resistance (irrelevant for tile
 // encoding). Already a transitive dependency via roaring. To revert, swap back to
 // std::collections::HashMap and remove the rustc-hash direct dependency.
@@ -275,7 +275,7 @@ impl LayerBuilder {
     }
 
     /// Reclaim feature buffers and clear interning state, keeping allocated capacity.
-    /// Used by assembly `thread_local!` to reuse `LayerBuilder` across tiles — the
+    /// Used by assembly `thread_local!` to reuse `LayerBuilder` across tiles - the
     /// HashMap bucket arrays survive, avoiding re-allocation on the next tile.
     pub fn prepare_for_reuse(
         &mut self,
@@ -468,7 +468,7 @@ pub fn encode_polygon(buf: &mut Vec<u32>, rings: &[&[(i32, i32)]]) {
             count += 1;
         }
         if count < 2 {
-            // Degenerate ring after dedup (< 3 unique points) — discard
+            // Degenerate ring after dedup (< 3 unique points) - discard
             buf.truncate(save_len);
             cx = save_cx;
             cy = save_cy;

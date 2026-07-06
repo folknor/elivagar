@@ -62,7 +62,7 @@ Output goes to stdout by default.
 
 | Variable | Description |
 |----------|-------------|
-| `ELIVAGAR_NODE_STATS=1` | Print detailed SortedNodeStore diagnostics (chunk count, compression ratio, blob bytes). Requires a full scan of the node store during the PBF phase — fast on regional extracts, slow at planet scale. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after timing, without this variable. |
+| `ELIVAGAR_NODE_STATS=1` | Print detailed SortedNodeStore diagnostics (chunk count, compression ratio, blob bytes). Requires a full scan of the node store during the PBF phase - fast on regional extracts, slow at planet scale. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after timing, without this variable. |
 | `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1` | Same as `--allow-unsafe-flat-index`. Bypasses unsorted-size and flat-index-size guardrails. |
 
 ### Example
@@ -135,8 +135,8 @@ Denmark extract (483 MB PBF) → Shortbread PMTiles, best of 3 runs:
 | Tool | Total | PBF+Features | Ocean | Sort | Assembly |
 |------|-------|-------------|-------|------|----------|
 | **elivagar** | **12s** | 8s | 1.5s | 0.6s | 2s |
-| Tilemaker | 30s | — | — | — | — |
-| Planetiler 0.10 | 41s | — | — | — | — |
+| Tilemaker | 30s | - | - | - | - |
+| Planetiler 0.10 | 41s | - | - | - | - |
 <!-- BENCH:END -->
 
 System: plantasjen (Ryzen 9 5900X, Linux 6.18). Commit: `cb2cd29`.
@@ -164,7 +164,7 @@ merge), compressed chunks may break even or win on total wall time.
 
 The data section of the output PMTiles archive is 4K-aligned, allowing tile
 serving via `O_DIRECT` / `io_uring` without page cache pollution. This is
-fully backwards-compatible with all PMTiles readers — the spec does not
+fully backwards-compatible with all PMTiles readers - the spec does not
 constrain the data section offset.
 
 ### PMTiles writer

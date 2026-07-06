@@ -22,7 +22,7 @@ use flate2::write::GzEncoder;
 use protohoggr::{encode_bytes_field_always, encode_varint, encode_varint_field_always};
 
 // ---------------------------------------------------------------------------
-// MVT protobuf encoder (minimal — builds tiles with named layers)
+// MVT protobuf encoder (minimal - builds tiles with named layers)
 // ---------------------------------------------------------------------------
 
 /// Encode a minimal valid MVT tile with the given layers.
@@ -78,7 +78,7 @@ fn encode_mvt_point_feature() -> Vec<u8> {
     // field 3: type = POINT (1)
     encode_varint_field_always(&mut feature, 3, 1);
 
-    // field 4: geometry (packed uint32) — MoveTo(1, dx=0, dy=0)
+    // field 4: geometry (packed uint32) - MoveTo(1, dx=0, dy=0)
     // MoveTo command: (1 << 3) | 1 = 9
     // param 0 (zigzag): 0
     // param 1 (zigzag): 0
@@ -394,7 +394,7 @@ fn test_deduplication() {
     assert_eq!(layers[1].name, "buildings");
 }
 
-/// Full pipeline integration test — requires a PBF file.
+/// Full pipeline integration test - requires a PBF file.
 ///
 /// Set `ELIVAGAR_TEST_PBF` to override the default path.
 /// Run with: cargo test --test pmtiles_roundtrip -- --ignored
@@ -582,7 +582,7 @@ fn test_verify_fail_truncated_tile() {
 
     let mut writer = PmtilesWriter::new(config);
 
-    // Write a valid gzip header but truncated content — will fail decompression.
+    // Write a valid gzip header but truncated content - will fail decompression.
     let broken_gzip = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff];
     writer.add_tile(0, 0, 0, &broken_gzip).unwrap();
 

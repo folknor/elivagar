@@ -23,16 +23,16 @@ A full-day debug session on 2026-03-05 produced:
 
 Code changes attempted in that session (all later reverted):
 
-1. **Closed-ring normalization** in `clip_polygon_into` — strip duplicate
+1. **Closed-ring normalization** in `clip_polygon_into` - strip duplicate
    closing vertex before Sutherland-Hodgman (SH expects open rings)
-2. **`snap_points_to_clip_rect`** — snap points within epsilon of clip edges
+2. **`snap_points_to_clip_rect`** - snap points within epsilon of clip edges
    to exact edge values to prevent floating-point boundary cracks
-3. **Disabled row pre-clipping** (`multi_row = false`) — hypothesis that
+3. **Disabled row pre-clipping** (`multi_row = false`) - hypothesis that
    two-stage clipping (row then tile) produced asymmetric boundary fragments
 4. **Removed `INTERIOR_TILE_RING`** fast path and `tile_is_interior` calls
 5. **Removed `is_valid_simple_ring_points` / `is_valid_simple_tile_ring`**
-   filters at z<14 — hypothesis that these dropped geometry that should emit
-6. **Ocean bounds guards** — filter out-of-range tile IDs from DDA edge
+   filters at z<14 - hypothesis that these dropped geometry that should emit
+6. **Ocean bounds guards** - filter out-of-range tile IDs from DDA edge
    rasterization and scanline fill
 
 None of these produced any visible improvement toward fixing the seam problem.
@@ -52,7 +52,7 @@ the working tree.
 
 ### 1. Assemble phase review
 
-Read the full assemble phase in `pipeline.rs` — the reader thread that groups
+Read the full assemble phase in `pipeline.rs` - the reader thread that groups
 `SortRecord`s by `tile_id`, the encoder thread that builds MVT tiles via
 `LayerBuilder`, and the writer thread that feeds compressed tiles to
 `PmtilesWriter`. No bugs found: tile grouping correctly transitions on
@@ -61,7 +61,7 @@ ocean-only tile skipping is properly gated by `has_non_ocean`.
 
 ### 2. Sort and merge review
 
-Read `sort.rs` end to end — `SortWriter` (chunk accumulation + flush),
+Read `sort.rs` end to end - `SortWriter` (chunk accumulation + flush),
 `SortReader` (k-way merge via binary heap), sort key packing/unpacking. The
 merge logic is correct: heap ordering is sound, each chunk is read
 sequentially, and the minimum-key record is always popped. A theoretical
@@ -96,7 +96,7 @@ Verified `project()` and `project_e7()` use y=0 at north, y=1 at south
 produces ~140x fewer features per tile but nearly identical geometry command
 counts. This is because `merge_same_attr_geometries` combines all features
 with identical (geom_type, tags) within a tile. Investigated whether this
-could cause even-odd fill rule artifacts in MapLibre — concluded it cannot,
+could cause even-odd fill rule artifacts in MapLibre - concluded it cannot,
 because merged rings are non-overlapping (each source polygon is clipped to
 the same tile rect, and buffer-zone overlap between different source polygons
 would be at most 0.5 pixels with the old buffer).
@@ -105,7 +105,7 @@ would be at most 0.5 pixels with the old buffer).
 
 `brokkr compare-tiles` between `denmark-latest.pmtiles` and
 `denmark-parity-standard.pmtiles` showed the two files are virtually
-identical — same feature counts, same command counts across all layers and
+identical - same feature counts, same command counts across all layers and
 zoom levels. The only difference is that `latest` includes the ocean layer
 and `parity` was generated with `--no-ocean`. This confirmed the bug was
 systemic (present in all outputs) rather than a regression between versions.
@@ -142,7 +142,7 @@ seamless image. With only 0.5 pixels of overlap, any sub-pixel rendering,
 anti-aliasing, or floating-point rounding makes the tile boundary visible as
 a hard edge where geometry abruptly stops.
 
-This affected all zoom levels, all layers, and all geometry types — polygons,
+This affected all zoom levels, all layers, and all geometry types - polygons,
 lines, and points near tile edges were all clipped too tightly.
 
 ## Why Previous Fixes Had No Effect
@@ -150,7 +150,7 @@ lines, and points near tile edges were all clipped too tightly.
 The 2026-03-05 debug session investigated clipping correctness (closed-ring
 normalization, snap-to-edge, row pre-clipping asymmetry), ocean bounds, ring
 validity filters, and interior-tile fast paths. None of these made a visible
-difference because the clipping logic itself was correct — it was just
+difference because the clipping logic itself was correct - it was just
 operating on a clip rectangle that barely extended past the tile edge. Making
 the clipping more precise doesn't help when the rectangle is wrong.
 
@@ -180,7 +180,7 @@ const INTERIOR_TILE_RING: [(i32, i32); 5] =
 ## How It Was Found
 
 Comparing elivagar's output against itself (parity vs latest) showed
-identical tile content — confirming the bug was systemic, not a regression.
+identical tile content - confirming the bug was systemic, not a regression.
 Comparing against Planetiler showed similar geometry (command counts within a
 few percent) but vastly different feature counts due to elivagar's
 `merge_same_attr_geometries`. The merge was a red herring; both tools produce

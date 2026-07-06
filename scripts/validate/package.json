@@ -1,0 +1,13 @@
+{
+  "name": "validate",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mapbox/vector-tile": "^2.0.4",
+    "@mapbox/vtvalidate": "^0.3.1",
+    "pbf": "^4.0.1",
+    "pmtiles": "^4.4.0",
+    "vt-pbf": "^3.1.3"
+  }
+}

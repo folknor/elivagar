@@ -1,15 +1,15 @@
-// Shortbread vector tile schema — hardcoded Rust implementation.
+// Shortbread vector tile schema - hardcoded Rust implementation.
 //
 // Reference: <https://shortbread.geofabrik.de/>
-// No YAML parsing — every layer, filter, and attribute mapping is compiled code.
+// No YAML parsing - every layer, filter, and attribute mapping is compiled code.
 //
 // Layer matching is split by domain:
-//   water.rs      — water polygons/lines/labels, dam, pier
-//   boundaries.rs — boundaries, boundary_labels, place_labels
-//   land.rs       — land, sites, buildings, addresses
-//   streets.rs    — streets, street_polygons, street_labels, bridges
-//   transport.rs  — aerialways, ferries, public_transport
-//   (pois.rs lives at crate root — see src/pois.rs)
+//   water.rs      - water polygons/lines/labels, dam, pier
+//   boundaries.rs - boundaries, boundary_labels, place_labels
+//   land.rs       - land, sites, buildings, addresses
+//   streets.rs    - streets, street_polygons, street_labels, bridges
+//   transport.rs  - aerialways, ferries, public_transport
+//   (pois.rs lives at crate root - see src/pois.rs)
 
 use std::borrow::Cow;
 use smallvec::SmallVec;
@@ -26,7 +26,7 @@ mod water;
 
 /// MVT layer in the Shortbread schema.
 /// `#[repr(u8)]` so `layer as u8` is a zero-cost index into layer arrays.
-/// No `from_index()` needed — layer indices are only used as array offsets.
+/// No `from_index()` needed - layer indices are only used as array offsets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Layer {
@@ -155,7 +155,7 @@ pub enum OsmGeomType {
     MultiPolygon,
 }
 
-/// Tag lookup helper. Uses linear scan — with 3-15 tags per OSM element,
+/// Tag lookup helper. Uses linear scan - with 3-15 tags per OSM element,
 /// this is faster than sorting + binary search. Binary search was tried
 /// (ca6f17e) and reverted: sort_unstable_by_key on every element plus
 /// binary_search_by_key on every lookup added +55% to the PBF phase on

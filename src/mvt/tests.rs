@@ -752,8 +752,8 @@ fn test_merge_two_multi_ring_polygons_coords_in_bounds() {
 
     // All coordinates must be within the expected range [0, 3000]
     for (i, &(x, y)) in coords.iter().enumerate() {
-        assert!(x >= 0 && x <= 3000, "coord {i}: x={x} out of range");
-        assert!(y >= 0 && y <= 3000, "coord {i}: y={y} out of range");
+        assert!((0..=3000).contains(&x), "coord {i}: x={x} out of range");
+        assert!((0..=3000).contains(&y), "coord {i}: y={y} out of range");
     }
 
     // Verify specific coordinates from both features
@@ -1293,7 +1293,7 @@ fn line_merge_deterministic_output() {
 fn line_merge_self_loop_not_merged_through() {
     // Segment A→A (self-loop) at point (10,10), plus B→(10,10):
     // The self-loop contributes degree 2 at (10,10) but both ends are
-    // the same segment — should not merge B through it.
+    // the same segment - should not merge B through it.
     let geom = build_multi_line(&[
         &[(10, 10), (20, 20), (10, 10)], // self-loop
         &[(0, 0), (10, 10)],

@@ -164,7 +164,7 @@ fn pair_rings(
         // Tests only inner[0] for containment. Correct for valid OSM geometry
         // (all inner ring vertices are inside the correct outer). For malformed
         // data where the inner isn't inside any outer, promote it to an outer
-        // ring (shell) — matches Planetiler's behavior.
+        // ring (shell) - matches Planetiler's behavior.
         let test_pt = &inner[0];
         let mut target_idx: Option<usize> = None;
         for (i, poly) in polygons.iter().enumerate() {
@@ -792,7 +792,7 @@ mod tests {
         // A square ring split into 4 ways, given in an order that defeats
         // single-pass greedy joining:
         //   way1: P1->P2  (creates chain 0)
-        //   way2: P3->P4  (creates chain 1 — no shared endpoints with chain 0)
+        //   way2: P3->P4  (creates chain 1 - no shared endpoints with chain 0)
         //   way3: P2->P3  (joins chain 0, extending to P1->P2->P3;
         //                   endpoint_map now maps P3->chain0, overwriting chain1's P3)
         //   way4: P4->P1  (joins chain 1, extending to P3->P4->P1;

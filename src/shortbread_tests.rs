@@ -865,7 +865,7 @@ fn test_motorway_junction() {
 }
 
 // -----------------------------------------------------------------------
-// YAML spec test — validates against Planetiler's shortbread.spec.yml
+// YAML spec test - validates against Planetiler's shortbread.spec.yml
 // -----------------------------------------------------------------------
 
 fn input_geom_type(geom_str: &str) -> OsmGeomType {
@@ -1035,7 +1035,7 @@ fn shortbread_spec_yaml() {
                 continue;
             };
 
-            // Check min_zoom (skip for boundary_labels — area-dependent,
+            // Check min_zoom (skip for boundary_labels - area-dependent,
             // requires geometry we don't have in match_element)
             if exp_layer != "boundary_labels"
                 && let Some(expected_zoom) = exp["min_zoom"].as_u64()
@@ -1068,7 +1068,7 @@ fn shortbread_spec_yaml() {
                 for (k, v) in exp_tags {
                     let key = k.as_str().unwrap_or_default();
 
-                    // Skip way_area — requires geometry area calculation
+                    // Skip way_area - requires geometry area calculation
                     if key == "way_area" {
                         continue;
                     }
@@ -1089,7 +1089,7 @@ fn shortbread_spec_yaml() {
                             }
                         }
                         None => {
-                            // Absent Bool(false) is OK — we omit false booleans
+                            // Absent Bool(false) is OK - we omit false booleans
                             // to save space (absent = default = false).
                             if expected_val != AttrValue::Bool(false) {
                                 failures.push(format!(
@@ -1102,7 +1102,7 @@ fn shortbread_spec_yaml() {
                 }
 
                 // If allow_extra_tags is false, check no unexpected attrs.
-                // Skip this check when at_zoom is set — we don't implement
+                // Skip this check when at_zoom is set - we don't implement
                 // zoom-dependent attribute filtering yet.
                 let has_at_zoom = exp.get("at_zoom").is_some();
                 if !has_at_zoom
@@ -1250,7 +1250,7 @@ fn test_b5_multipolygon_address() {
 
 #[test]
 fn test_b6_unrecognized_amenity_gets_address() {
-    // B6: amenity=parking_entrance is not a POI — address should not be suppressed.
+    // B6: amenity=parking_entrance is not a POI - address should not be suppressed.
     let tags = Tags(&[
         ("amenity", "parking_entrance"),
         ("addr:housenumber", "5"),
@@ -1267,7 +1267,7 @@ fn test_b6_unrecognized_amenity_gets_address() {
 
 #[test]
 fn test_b6_office_company_gets_address() {
-    // B6: office=company is not a POI — address should not be suppressed.
+    // B6: office=company is not a POI - address should not be suppressed.
     let tags = Tags(&[
         ("office", "company"),
         ("addr:housenumber", "10"),

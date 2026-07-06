@@ -127,7 +127,7 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
 /// parsing: extract vector_layers names + zoom ranges.
 fn print_metadata_json(out: &mut dyn Write, json: &str) -> io::Result<()> {
     // Print top-level key=value pairs (simple string/number values).
-    // This is a minimal approach — we look for "key":"value" or "key":number patterns.
+    // This is a minimal approach - we look for "key":"value" or "key":number patterns.
 
     // Print the raw JSON indented if it's short, otherwise summarize.
     if json.len() < 500 {
@@ -180,7 +180,7 @@ fn print_metadata_json(out: &mut dyn Write, json: &str) -> io::Result<()> {
             }
         }
     } else {
-        // No vector_layers — just print raw.
+        // No vector_layers - just print raw.
         for line in json.lines() {
             writeln!(out, "    {line}")?;
         }

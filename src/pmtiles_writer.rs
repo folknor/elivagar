@@ -195,9 +195,9 @@ enum TileBlob {
 /// fingerprints plus compressed length matching.
 ///
 /// Two storage modes are available:
-/// - [`new()`](Self::new) — in-memory (tile data in a `Vec`). Best for small
+/// - [`new()`](Self::new) - in-memory (tile data in a `Vec`). Best for small
 ///   extracts and tests.
-/// - [`new_streaming()`](Self::new_streaming) — file-backed (tile data and
+/// - [`new_streaming()`](Self::new_streaming) - file-backed (tile data and
 ///   directory entries streamed to disk). Required for planet-scale runs to
 ///   avoid multi-GB RAM usage.
 pub struct PmtilesWriter {
@@ -400,7 +400,7 @@ impl PmtilesWriter {
     /// Returns `io::Error` if file creation, directory encoding, or data copy fails.
     #[hotpath::measure]
     pub fn write_to(&mut self, path: &Path) -> io::Result<()> {
-        // Free dedup map — no longer needed after all tiles are added.
+        // Free dedup map - no longer needed after all tiles are added.
         drop(std::mem::take(&mut self.dedup));
 
         // Build directories: streaming mode reads entries from temp file in
@@ -416,7 +416,7 @@ impl PmtilesWriter {
         let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
 
         // Clean up streaming dir_entries temp file if it exists.
-        // Best-effort cleanup of streaming temp file — failure is harmless.
+        // Best-effort cleanup of streaming temp file - failure is harmless.
         if let DirStore::Streaming { path: dir_path, .. } = &self.dir_store {
             drop(std::fs::remove_file(dir_path));
         }
@@ -510,7 +510,7 @@ impl PmtilesWriter {
         if let Some(ref run) = self.current_run {
             // debug_assert only: ordering is guaranteed by the external merge sort
             // (sort key starts with tile_id). Out-of-order tiles would degrade run-length
-            // compression but not produce an invalid archive — PMTiles readers binary-search
+            // compression but not produce an invalid archive - PMTiles readers binary-search
             // the directory regardless.
             debug_assert!(
                 tile_id >= run.tile_id,
@@ -861,7 +861,7 @@ fn build_metadata(
         let name = layer.name();
         let min_z = layer.min_zoom();
         let max_z = config.max_zoom;
-        // format! is fine here — 26-iteration loop, called once per run. Cold path.
+        // format! is fine here - 26-iteration loop, called once per run. Cold path.
         layer_arr.push_str(&format!(
             r#"{{"id":"{name}","minzoom":{min_z},"maxzoom":{max_z}}}"#,
         ));
@@ -996,7 +996,9 @@ fn hilbert_xy2d(n: u32, x: u32, y: u32) -> u64 {
         let rx: u32 = u32::from((x & s) > 0);
         let ry: u32 = u32::from((y & s) > 0);
         d += (s as u64 * s as u64) * u64::from((3 * rx) ^ ry);
-        hilbert_rot(s, &mut x, &mut y, rx, ry);
+        // xy2d reflects within the full n x n grid (coords hold full values here),
+        // unlike d2xy which reflects within the current sub-square size `s`.
+        hilbert_rot(n, &mut x, &mut y, rx, ry);
         s /= 2;
     }
     d

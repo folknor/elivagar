@@ -29,7 +29,7 @@ pub fn tiles_for_bbox(bbox: &MercBbox, zoom: u8) -> Vec<(u32, u32)> {
 
 /// Check whether a bbox falls entirely within a single tile at the given zoom.
 ///
-/// When true, clipping is unnecessary — all geometry coordinates are within
+/// When true, clipping is unnecessary - all geometry coordinates are within
 /// the tile's non-buffered bounds (a subset of the buffered clip rect).
 #[inline]
 pub fn is_single_tile(bbox: &MercBbox, zoom: u8) -> bool {
@@ -159,7 +159,7 @@ pub(crate) fn dedup_quantized_ring(ring: &mut Vec<(i32, i32)>) {
     let mut write = 1usize; // always keep first point
     for read in 1..end {
         let p = ring[read];
-        // Check against the last LOOKBACK written points (but never before index 1 —
+        // Check against the last LOOKBACK written points (but never before index 1 -
         // never truncate back to remove the first vertex).
         let start = write.saturating_sub(LOOKBACK).max(1);
         let mut found = None;
@@ -194,7 +194,7 @@ pub(crate) fn dedup_quantized_ring(ring: &mut Vec<(i32, i32)>) {
 /// integer coordinates.
 ///
 /// Returns a vec of simple polygons (each: outer + holes). Returns empty vec if
-/// the input is degenerate. Applied unconditionally after quantization — all three
+/// the input is degenerate. Applied unconditionally after quantization - all three
 /// competitors (Planetiler, Tilemaker, Tippecanoe) repair every polygon, not just
 /// detected failures.
 pub(crate) fn repair_quantized_polygon(
@@ -315,7 +315,7 @@ fn signed_area_tile(ring: &[(i32, i32)]) -> f64 {
 // Tile-space polygon ring simplification (post-quantization cleanup)
 // ---------------------------------------------------------------------------
 // After Mercator→tile coordinate projection, integer quantization creates
-// 1–2 pixel staircase artifacts that Mercator-space DP can't see. This pass
+// 1-2 pixel staircase artifacts that Mercator-space DP can't see. This pass
 // removes those zigzags using DP directly on tile coordinates.
 
 /// Simplify a closed tile-coordinate polygon ring in-place using Douglas-Peucker.
@@ -347,7 +347,7 @@ pub(crate) fn simplify_tile_ring(ring: &mut Vec<(i32, i32)>, tol_sq: i64, min_po
 
     let kept: usize = keep.iter().filter(|&&k| k).count();
     if kept < min_points || kept == n {
-        // Can't simplify enough, or nothing was removed — leave ring unchanged
+        // Can't simplify enough, or nothing was removed - leave ring unchanged
         return;
     }
 
@@ -433,7 +433,7 @@ fn tile_find_farthest(ring: &[(i32, i32)], start: usize, end: usize) -> (usize, 
 // hole extends outside the outer. We validate each hole and drop invalid ones.
 
 /// Minimum hole area in tile extent² units at low zoom.
-/// Holes smaller than this are sub-pixel and invisible — dropping them avoids
+/// Holes smaller than this are sub-pixel and invisible - dropping them avoids
 /// earcut-hostile geometry for zero visual cost.
 /// 4 pixels² = 4 × 16² = 1024 extent² units (using 2× signed area = 2048).
 const MIN_HOLE_AREA_2X: i64 = 2048;
@@ -479,7 +479,7 @@ pub(crate) fn filter_holes_for_outer(
         return ring_count;
     }
     // Phase 1: decide which holes to keep (immutable borrow of outer)
-    // Use a small inline bitset — ring_count is always small (< 64 in practice).
+    // Use a small inline bitset - ring_count is always small (< 64 in practice).
     let mut keep_mask: u64 = 1; // bit 0 = outer, always kept
     {
         let outer = &all_rings[0];
@@ -497,7 +497,7 @@ pub(crate) fn filter_holes_for_outer(
             if point_in_ring(px, py, outer) {
                 keep_mask |= 1 << read;
             } else if hole.len() >= 2 {
-                // First vertex on boundary — try midpoint of first edge
+                // First vertex on boundary - try midpoint of first edge
                 let (qx, qy) = hole[1];
                 if point_in_ring((px + qx) / 2, (py + qy) / 2, outer) {
                     keep_mask |= 1 << read;

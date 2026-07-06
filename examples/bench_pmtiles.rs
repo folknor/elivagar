@@ -2,7 +2,7 @@
 
 //! Benchmark: elivagar PmtilesWriter vs pmtiles-rs PmTilesStreamWriter
 //!
-//! Generates synthetic gzipped tiles across zoom levels 0–14, feeds identical
+//! Generates synthetic gzipped tiles across zoom levels 0-14, feeds identical
 //! data to both writers, and compares wall-clock throughput.
 //!
 //! Run:  cargo run --release --example bench_pmtiles -- [--tiles N] [--runs R]
@@ -119,7 +119,7 @@ fn parse_args() -> (usize, usize) {
 // Tile generation
 // ---------------------------------------------------------------------------
 
-/// Generate `target` tiles across zoom levels 0–14, sorted by Hilbert tile ID.
+/// Generate `target` tiles across zoom levels 0-14, sorted by Hilbert tile ID.
 fn generate_tiles(target: usize) -> Vec<TestTile> {
     let mut coords: Vec<(u8, u32, u32)> = Vec::with_capacity(target);
 
@@ -157,7 +157,7 @@ fn make_tile_data(z: u8, x: u32, y: u32) -> Vec<u8> {
     (z, x, y).hash(&mut hasher);
     let seed = hasher.finish();
 
-    // Higher zoom = larger tiles (more detail), 200–3000 bytes uncompressed
+    // Higher zoom = larger tiles (more detail), 200-3000 bytes uncompressed
     let size = 200 + (z as usize) * 150 + ((seed as usize) % 500);
 
     let mut raw = Vec::with_capacity(size);

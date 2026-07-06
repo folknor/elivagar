@@ -13,7 +13,7 @@
 | Dataset | Commit | Total | PBF | Ocean | Sort | Assemble | RSS | Output |
 | Denmark 483 MB | `f52429b` | ~12.4s | 8s | 1.5s | 0.5s | 2.3s | 1.8 GB | 286 MB |
 | Germany 5.5 GB | `f52429b` | 114.7s | 83.8s | 1.5s | 0.08s | 28.6s | 7.7 GB | 2.7 GB |
-| Norway 1.3 GB | `8034c16` | ~28s | — | — | — | — | — | — |
+| Norway 1.3 GB | `8034c16` | ~28s | - | - | - | - | - | - |
 | North America 18.7 GB | `90ad2ef` | 462.6s | 283s | 15s | 0.5s | 164s | 19.4 GB | 12.4 GB |
 
 Norway detailed phase splits not captured (benchmarks were comparative, not absolute).
@@ -29,9 +29,9 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
   1. **~16s from millions of small writes** through lz4 `FrameEncoder` (3 write_all calls
      per record × millions of records). Fixed by pre-serializing all records into a
      contiguous `Vec<u8>` before compressing in bulk.
-  2. **~10s from real compression throughput** — `lz4_flex` (pure Rust) runs at ~450-500 MB/s,
+  2. **~10s from real compression throughput** - `lz4_flex` (pure Rust) runs at ~450-500 MB/s,
      not the 2-4 GB/s of C lz4. 10 GB / 500 MB/s ≈ 20s. This is inherent.
-  Also tested Snappy (`snap` crate, pure Rust) as an alternative — Planetiler uses Snappy
+  Also tested Snappy (`snap` crate, pure Rust) as an alternative - Planetiler uses Snappy
   for the same use case. Result: Snappy phase12 is identical to lz4, but assemble is worse
   (Snappy decompression slower than lz4 during merge). lz4 remains the better option.
   Germany results (commit `30a023c`, plantasjen, locations-on-ways):
@@ -63,19 +63,19 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
   Top layers by sort bytes (NA): streets 12.1 GB, water_polygons 10.9 GB,
   land 9.3 GB, buildings 7.3 GB, water_lines 4.4 GB.
   Per-record weight: land 209 B, water_polygons 156 B, streets 76 B, buildings 82 B.
-  **Phase 1 — diagnostics** (done, commits `81c4d6b`, `pending`):
+  **Phase 1 - diagnostics** (done, commits `81c4d6b`, `pending`):
   - [x] Per-layer record count, bytes, and per-record weight.
   - [x] Per-layer-per-zoom record and byte distribution.
   - [x] Aggregate sort_records, sort_record_bytes, records_per_way.
   - [x] Per-feature tiles_touched tail stats (p50/p95/p99/max per layer per zoom).
   Full analysis in `notes/sort-fanout-analysis-2026-03-06.md`.
   Key finding: superlinear growth concentrated in polygon layers (water_polygons,
-  land) due to geometric tile subdivision — one polygon × O(4^z) tiles × heavy
+  land) due to geometric tile subdivision - one polygon × O(4^z) tiles × heavy
   per-record geometry (156-209 B/rec). Streets/buildings scale linearly.
   Tail stats (Denmark): p95 tiles_touched is low (1-4 for polygon layers),
   amplification comes from the tail (max 205-2864). Cap would primarily affect
   tail features, not median behavior.
-  **Phase 2 — per-layer fanout caps** (done, commit `710e356`):
+  **Phase 2 - per-layer fanout caps** (done, commit `710e356`):
   - [x] Per-layer fanout caps via `--fanout-cap-default N` (global fallback) and
     `--fanout-cap layer=N,layer=N` (per-layer overrides). Effective cap: override
     if nonzero, else default, else uncapped. Applied to polygon-geometry emit only.
@@ -110,9 +110,9 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
     `brokkr bench self --dataset north-america-latest --fanout-cap water_polygons=4096`
   - [ ] Zoom-dependent subpixel area threshold for polygon layers (flag-gated).
     Quality tradeoff: eliminates small-but-visible features at mid-zoom.
-  **Phase 3 — polygon record weight reduction** (second, but soon):
+  **Phase 3 - polygon record weight reduction** (second, but soon):
   - [ ] More aggressive DP tolerance policy for polygon layers at z8-z12.
-    Not a new simplification path — tighter tolerance tuning for existing
+    Not a new simplification path - tighter tolerance tuning for existing
     `for_each_zoom_simplified`. Expected 30-50% B/rec reduction at z8-z12.
   - [ ] Compact polygon wire format (delta-encoded coords, smaller varint overhead).
   - [ ] Deferred geometry materialization (compact refs in phase12, late clip in
@@ -145,7 +145,7 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
   stack correctly without client-side sorting. Audit whether MapLibre depends on this (#323).
 - [ ] Feature dropping: iteratively drop least-important features from oversized tiles until
   they fit a size budget. Needed for dense urban areas at planet scale. Tippecanoe (#378)
-  hit an infinite loop bug here — need a guaranteed convergence invariant (also #340, #45).
+  hit an infinite loop bug here - need a guaranteed convergence invariant (also #340, #45).
   Low-zoom dropping must be profile-aware to avoid overaggressive removal (tippecanoe #201).
   Prerequisite: tile size diagnostics (see below) to identify which tiles need dropping.
 - [ ] Building merge at z13: Planetiler optionally unions adjacent buildings to reduce tile
@@ -169,7 +169,7 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
   simplification for (1) line features, (2) closed-way polygons, and
   (3) relation-derived multipolygons. This reduces catastrophic drift but does
   not guarantee edge-identical output between neighboring polygons.
-  - [x] Phase 1 — shared chain detection: given a set of polygon rings in a tile,
+  - [x] Phase 1 - shared chain detection: given a set of polygon rings in a tile,
     find contiguous shared vertex sequences (not just shared points). Output:
     `SharedChain { vertices, incidents: Vec<ChainRef> }` where each `ChainRef`
     identifies (ring_index, start, end, reversed). Uses `Vec<ChainRef>` instead
@@ -183,16 +183,16 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
     in geometry.rs. Pure function, no side effects.
     Edge cases: ring wrap-around (chain crossing start/end), self-touching rings,
     multiple disconnected chains per ring pair, three-way junctions (vertex where
-    3+ polygons meet — each adjacent pair gets its own chain terminating there).
-  - [x] Phase 2 — boundary/admin polygons: wire chain detection into simplification
+    3+ polygons meet - each adjacent pair gets its own chain terminating there).
+  - [x] Phase 2 - boundary/admin polygons: wire chain detection into simplification
     for `boundaries` and `boundary_labels` layers only. Only act on chains with
     exactly 2 incidents (clean adjacency); skip >2 with a counter/metric.
     Simplify each shared chain once, stitch canonical chains back into rings,
     simplify remaining non-shared segments independently. Narrow scope allows
     visual validation on admin borders (the most visible seam source) without
     risking regressions across all layers.
-  - [x] Phase 3A — intra-layer shared-edge for curated polygon layers at z≤8.
-    Implementation complete (commits `3e0194d`–`eff9fb2`):
+  - [x] Phase 3A - intra-layer shared-edge for curated polygon layers at z≤8.
+    Implementation complete (commits `3e0194d`-`eff9fb2`):
     1. [x] `--seam-reconcile-layers` CLI flag with per-layer zoom caps (`layer:maxzoom`).
        Default: `boundaries` (maxzoom 8). Example: `--seam-reconcile-layers boundaries,water_polygons:5`.
     2. [x] Per-layer zoom caps replace global `SEAM_RECONCILE_MAX_ZOOM` constant.
@@ -218,10 +218,10 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
     **Conclusion**: water_polygons full-res deferral is not viable with the current
     architecture. The DeferralStats guardrail provides safety, but the real fix
     requires an algorithmic change (e.g. simplify-then-reconcile instead of
-    defer-full-res-then-reconcile). The default `boundaries:8` config is inert —
+    defer-full-res-then-reconcile). The default `boundaries:8` config is inert -
     meaningful seam reconciliation requires polygon layers (e.g. `water_polygons`,
     `land`) or a separate line-reconcile path for boundary lines.
-  - [ ] Phase 3B — cross-layer shared-edge canonicalization.
+  - [ ] Phase 3B - cross-layer shared-edge canonicalization.
     **Deferred** until a clear win signal exists. Gate: visible seam incidence in
     curated QA tiles that boundaries-only reconciliation cannot address.
     Given water_polygons Phase 3A results, cross-layer canonicalization is not
@@ -256,7 +256,7 @@ This is a design problem, not a tuning problem. Before touching pipeline code:
   into the assemble phase.
 - [ ] Wikidata multilingual name enrichment: OSM features often carry `wikidata=Q*` tags
   linking to Wikidata entities with names in dozens of languages. Currently elivagar only
-  emits `name:*` tags present directly in the PBF, which limits language coverage — many
+  emits `name:*` tags present directly in the PBF, which limits language coverage - many
   features only have the local-language name tagged. Planetiler does this via a background
   worker that pre-fetches `wikidata_names.json` (#1290 hit reliability issues).
   **Investigated 2026-03-06** (see `notes/wikidata-name-enrichment.md`):
@@ -268,7 +268,7 @@ This is a design problem, not a tuning problem. Before touching pipeline code:
   - Tilemaker and Tippecanoe have no Wikidata integration.
   - Requires wire format changes: extend beyond current 3 name keys (`name`, `name_en`,
     `name_de`) to support configurable language set.
-  - Not a current priority — worth doing before planet-scale release for label coverage.
+  - Not a current priority - worth doing before planet-scale release for label coverage.
 - [ ] Natural Earth low-zoom layers: use Natural Earth vector data (1:10m/1:50m/1:110m) for
   z0-5 features like country boundaries, lakes, and land polygons instead of simplifying
   full-resolution OSM geometry. Currently elivagar uses the water-polygons-split-3857
@@ -284,7 +284,7 @@ This is a design problem, not a tuning problem. Before touching pipeline code:
     `SortRecord`s to sort stream. Negligible performance cost.
   - Scale transition: NE features `max_zoom=5`, OSM features `min_zoom=6`. Split
     Shortbread profile zoom ranges by source.
-  - Neither Planetiler's nor Tilemaker's Shortbread profiles use NE — differentiation.
+  - Neither Planetiler's nor Tilemaker's Shortbread profiles use NE - differentiation.
   - CLI: `--natural-earth dir/` with auto-detection, `--no-natural-earth` to disable.
 - [x] Cliff/landform line features: `natural=cliff` is a linear feature not in Shortbread 1.0.
   Elivagar's land layer only matches polygon natural features (bare_rock, beach, etc.). Cliffs

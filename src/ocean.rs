@@ -23,7 +23,7 @@ const MIN_RING_AREA: i64 = 512;
 // ---------------------------------------------------------------------------
 
 /// Parsed ocean polygon ready for parallel processing.
-// Vecs are ephemeral — consumed once during ocean tile emission, boxed_slice not worth it.
+// Vecs are ephemeral - consumed once during ocean tile emission, boxed_slice not worth it.
 struct OceanPolygon {
     outer: Vec<Point>,
     inners: Vec<Vec<Point>>,
@@ -256,13 +256,13 @@ pub(crate) fn process_ocean_shapefile(
     }
 
     let poly_count = polygons.len();
-    eprintln!("  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons — processing in parallel");
+    eprintln!("  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons - processing in parallel");
 
     // --- Process phase: parallel with rayon, direct chunk flushing ---
     //
     // Each rayon worker accumulates records in a thread-local buffer and flushes
     // directly to a chunk file when the buffer exceeds chunk_size_bytes. This
-    // avoids holding all ocean sort records in memory simultaneously — at planet
+    // avoids holding all ocean sort records in memory simultaneously - at planet
     // scale that could be 10-30 GB. The previous approach (par_iter().collect()
     // into Vec<Vec<SortRecord>> + serial push) was fine for regional extracts but
     // would blow memory and serialize sort+flush at planet scale.
@@ -299,7 +299,7 @@ pub(crate) fn process_ocean_shapefile(
             }
             let id = chunk_id.fetch_add(1, Ordering::Relaxed);
             let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
-            // Panic: inside rayon fold — can't propagate Result. Disk I/O failure is unrecoverable.
+            // Panic: inside rayon fold - can't propagate Result. Disk I/O failure is unrecoverable.
             sort::write_sorted_chunk(&mut self.records, &path, self.compression)
                 .expect("ocean chunk write failed");
             self.chunk_paths.push(path);
@@ -405,7 +405,7 @@ fn emit_ocean_polygon(
     // collapse), which then produce garbage after S-H clipping. Instead we iterate
     // zooms with the original geometry and simplify in tile coords after clipping
     // (simplify_ring_safe in emit_boundary_tile).
-    let _ = simp_scratch; // unused — ocean skips pre-clip simplification
+    let _ = simp_scratch; // unused - ocean skips pre-clip simplification
     for z in (min_zoom..=max_zoom).rev() {
         let (simp_outer, simp_inners): (&[Point], &[Vec<Point>]) = (outer, inners);
         let scale = f64::from(1u32 << z);
@@ -486,23 +486,22 @@ fn emit_ocean_polygon(
             }
 
             if let Some(bx_list) = boundary_rows.get(&ty) {
-                // X-extent of row-clipped polygon — skip boundary tiles outside this range
+                // X-extent of row-clipped polygon - skip boundary tiles outside this range
                 let (row_x_min, row_x_max) = row_outer.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
 
-                // Row has boundary tiles — clip+emit them, then clip+emit gaps
+                // Row has boundary tiles - clip+emit them, then clip+emit gaps
                 for &tx in bx_list {
                     let tile_x_min = f64::from(tx) * inv_scale - tile_buf;
                     let tile_x_max = f64::from(tx + 1) * inv_scale + tile_buf;
                     if row_x_max < tile_x_min || row_x_min > tile_x_max { continue; }
-                    if let Some(mask) = land_mask {
-                        if !mask.has_land(z, tx, ty) {
-                            emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
-                            continue;
-                        }
+                    if let Some(mask) = land_mask
+                        && !mask.has_land(z, tx, ty)
+                    {
+                        emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
+                        continue;
                     }
                     emit_boundary_tile(
                         feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
-                        simp_outer, simp_inners,
                         layer_idx, attrs, records,
                         &mut bt_all_rings, &mut bt_geom_buf,
                         &mut clip_a, &mut clip_b,
@@ -527,15 +526,14 @@ fn emit_ocean_polygon(
                     let test_cx = (f64::from(*gx_min) + 0.5) * inv_scale;
                     if pip(test_cx, cy) {
                         for tx in *gx_min..=*gx_max {
-                            if let Some(mask) = land_mask {
-                                if !mask.has_land(z, tx, ty) {
-                                    emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
-                                    continue;
-                                }
+                            if let Some(mask) = land_mask
+                                && !mask.has_land(z, tx, ty)
+                            {
+                                emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
+                                continue;
                             }
                             emit_boundary_tile(
                                 feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
-                                simp_outer, simp_inners,
                                 layer_idx, attrs, records,
                                 &mut bt_all_rings, &mut bt_geom_buf,
                                 &mut clip_a, &mut clip_b,
@@ -544,19 +542,18 @@ fn emit_ocean_polygon(
                     }
                 }
             } else {
-                // No boundary tiles in this row — single PIP test, then clip each tile
+                // No boundary tiles in this row - single PIP test, then clip each tile
                 let test_cx = (f64::from(tx_min) + 0.5) * inv_scale;
                 if pip(test_cx, cy) {
                     for tx in tx_min..=tx_max {
-                        if let Some(mask) = land_mask {
-                            if !mask.has_land(z, tx, ty) {
-                                emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
-                                continue;
-                            }
+                        if let Some(mask) = land_mask
+                            && !mask.has_land(z, tx, ty)
+                        {
+                            emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
+                            continue;
                         }
                         emit_boundary_tile(
                             feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
-                            simp_outer, simp_inners,
                             layer_idx, attrs, records,
                             &mut bt_all_rings, &mut bt_geom_buf,
                             &mut clip_a, &mut clip_b,
@@ -570,15 +567,13 @@ fn emit_ocean_polygon(
 
 /// Clip and encode a single boundary tile (polygon edge crosses this tile).
 /// Reusable buffers (`all_rings`, `geom_buf`, `clip_a`, `clip_b`) are passed in
-/// to avoid per-call allocation — this function is called per boundary tile per zoom.
+/// to avoid per-call allocation - this function is called per boundary tile per zoom.
 #[allow(clippy::too_many_arguments)]
 fn emit_boundary_tile(
     feature_id: u64,
     tx: u32, ty: u32, z: u8,
     outer: &[Point],
     inners: &[Vec<Point>],
-    orig_outer: &[Point],       // un-preclipped polygon (for i_overlay fallback)
-    orig_inners: &[Vec<Point>], // un-preclipped holes
     layer_idx: u8,
     attrs: &[shortbread::Attr],
     records: &mut Vec<SortRecord>,
@@ -589,51 +584,26 @@ fn emit_boundary_tile(
 ) {
     let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
 
-    // S-H clip, then check for bridge edges (concavity fill artifacts).
-    // S-H connects exit/re-entry points on the same clip edge with a bridge,
-    // covering area that should be separate polygons (e.g. filling in islands).
-    // The bridge ring is simple (no crossings) but topologically wrong.
     geometry::clip_polygon_into(outer, &clip, clip_a, clip_b);
     if clip_a.len() < 3 {
         return;
     }
-    let has_bridge = has_boundary_bridge(clip_a, &clip);
-
-    let outer_tc;
+    // Quantize outer + holes to tile coordinates
+    let outer_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
     let mut hole_tcs: Vec<Vec<(i32, i32)>> = Vec::new();
-    if !has_bridge {
-        // S-H output has no bridge edges — quantize and clip holes
-        outer_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
-        for inner in inners {
-            geometry::clip_polygon_into(inner, &clip, clip_a, clip_b);
-            if clip_a.len() < 3 { continue; }
-            let inner_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
-            if inner_tc.len() >= 4 {
-                hole_tcs.push(inner_tc);
-            }
+    for inner in inners {
+        geometry::clip_polygon_into(inner, &clip, clip_a, clip_b);
+        if clip_a.len() < 3 { continue; }
+        let inner_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
+        if inner_tc.len() >= 4 {
+            hole_tcs.push(inner_tc);
         }
-    } else {
-        outer_tc = Vec::new(); // dummy — overwritten by fallback
-    };
+    }
 
-    let repaired = if !has_bridge {
-        // S-H produced correct topology — repair quantization artifacts only
-        geometry::repair_quantized_polygon(&outer_tc, &hole_tcs)
-    } else {
-        // S-H produced bridge (concave coastline) — re-clip from original
-        // Mercator geometry using i_overlay boolean intersection, then quantize + repair
-        let robust_polys = geometry::clip_polygon_robust(orig_outer, orig_inners, &clip);
-        let mut all_repaired = Vec::new();
-        for poly in robust_polys {
-            let otc = geometry::to_tile_coords(&poly.outer, tx, ty, z);
-            let htcs: Vec<Vec<(i32, i32)>> = poly.holes.iter()
-                .filter(|h| h.len() >= 3)
-                .map(|h| geometry::to_tile_coords(h, tx, ty, z))
-                .collect();
-            all_repaired.extend(geometry::repair_quantized_polygon(&otc, &htcs));
-        }
-        all_repaired
-    };
+    // Unconditional post-quantization repair via i_overlay integer simplify.
+    // Resolves T-junctions, collinear overlaps, and self-intersections
+    // introduced by f64→i32 rounding. All three competitors do this.
+    let repaired = geometry::repair_quantized_polygon(&outer_tc, &hole_tcs);
     if repaired.is_empty() { return; }
 
     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
@@ -673,34 +643,6 @@ fn emit_boundary_tile(
     }
 }
 
-/// DP-simplify a closed ring, but fall back to the original if simplification
-/// creates a self-intersecting result. Ocean coastlines can form narrow channels
-/// where DP collapses vertices across the gap, creating crossings.
-/// Detect S-H bridge edges: segments where both endpoints lie on the same clip
-/// boundary. S-H creates these when a concave polygon exits and re-enters through
-/// the same edge, connecting disjoint regions with a zero-width bridge. The bridge
-/// ring is simple (no crossings) but covers area it shouldn't (e.g. islands).
-/// Detect S-H bridge edges by counting boundary-running segments per clip edge.
-/// A single segment on a clip edge is normal (polygon enters/exits at that edge).
-/// TWO or more segments on the SAME edge means S-H connected disjoint regions
-/// with a bridge — the concavity-fill artifact.
-fn has_boundary_bridge(ring: &[Point], clip: &ClipRect) -> bool {
-    let eps = 1e-10;
-    let mut left = 0u32;
-    let mut right = 0u32;
-    let mut bottom = 0u32;
-    let mut top = 0u32;
-    for i in 0..ring.len().saturating_sub(1) {
-        let a = ring[i];
-        let b = ring[i + 1];
-        if (a.x - clip.min_x).abs() < eps && (b.x - clip.min_x).abs() < eps { left += 1; }
-        if (a.x - clip.max_x).abs() < eps && (b.x - clip.max_x).abs() < eps { right += 1; }
-        if (a.y - clip.min_y).abs() < eps && (b.y - clip.min_y).abs() < eps { bottom += 1; }
-        if (a.y - clip.max_y).abs() < eps && (b.y - clip.max_y).abs() < eps { top += 1; }
-    }
-    left > 1 || right > 1 || bottom > 1 || top > 1
-}
-
 /// Emit a full-tile ocean rectangle for pure-ocean tiles (no coastline).
 #[allow(clippy::too_many_arguments)]
 fn emit_full_tile(
@@ -727,15 +669,6 @@ fn emit_full_tile(
     let key_base = sort::make_sort_key(tile_id, layer_idx, 0);
     let data = encode_feature_data(feature_id, GeomType::Polygon, geom_buf, attrs, z);
     records.push(SortRecord { key: key_base, data });
-}
-
-fn simplify_ring_safe(ring: &[(i32, i32)]) -> Vec<(i32, i32)> {
-    let simplified = geometry::simplify_ring_dp(ring, geometry::TILE_SIMPLIFY_TOLERANCE);
-    if geometry::ring_is_simple(&simplified) {
-        simplified
-    } else {
-        ring.to_vec()
-    }
 }
 
 /// Absolute 2x signed area of a closed ring (shoelace formula, no /2).
@@ -1035,7 +968,7 @@ mod tests {
         assert!(tiles.contains(&pack_tile(0, 0)));
         assert!(tiles.contains(&pack_tile(1, 1)));
         assert!(tiles.contains(&pack_tile(2, 2)));
-        // DDA may also step through (0,1) or (1,0) at grid crossings —
+        // DDA may also step through (0,1) or (1,0) at grid crossings -
         // just verify the result is a subset of the plausible set.
         let plausible: HashSet<u64> = [
             pack_tile(0, 0),
@@ -1160,7 +1093,7 @@ mod tests {
         assert!(geometry::point_in_polygon(&Point::new(0.5, 0.5), &l_shape));
         assert!(geometry::point_in_polygon(&Point::new(0.5, 2.0), &l_shape));
 
-        // Inside the concavity (the cut-out region) — should be false
+        // Inside the concavity (the cut-out region) - should be false
         assert!(!geometry::point_in_polygon(&Point::new(1.5, 2.0), &l_shape));
     }
 

@@ -427,7 +427,7 @@ fn test_area_sq_meters_high_latitude() {
 #[test]
 fn test_area_sq_meters_wide_latitude_span() {
     // A 10° longitude × 25° latitude box from 55°N to 80°N with vertices
-    // at every degree of latitude — simulating a real OSM polygon boundary.
+    // at every degree of latitude - simulating a real OSM polygon boundary.
     //
     // Reference area via spherical integration:
     //   A = R² × Δλ × ∫cos(φ)dφ = (C/2π)² × (10°×π/180) × [sin(80°)-sin(55°)]
@@ -713,7 +713,7 @@ fn test_land_mask_from_bytes_wrong_length() {
 #[test]
 fn tile_is_interior_inside_large_square() {
     // Large square [0.1, 0.1] to [0.9, 0.9]. Tile (1, 1) at z=2 spans
-    // [0.25, 0.25] to [0.5, 0.5] — clearly inside the square.
+    // [0.25, 0.25] to [0.5, 0.5] - clearly inside the square.
     let ring = vec![
         Point::new(0.1, 0.1),
         Point::new(0.9, 0.1),
@@ -741,7 +741,7 @@ fn tile_is_interior_boundary_tile() {
 #[test]
 fn tile_is_interior_outside_tile() {
     // Small square [0.1, 0.1] to [0.3, 0.3]. Tile (3, 3) at z=2 spans
-    // [0.75, 0.75] to [1.0, 1.0] — completely outside.
+    // [0.75, 0.75] to [1.0, 1.0] - completely outside.
     let ring = vec![
         Point::new(0.1, 0.1),
         Point::new(0.3, 0.1),
@@ -763,7 +763,7 @@ fn tile_is_interior_concave_polygon() {
         Point::new(0.5, 0.9),
         Point::new(0.1, 0.9),
     ];
-    // Tile (3, 3) at z=2: [0.75, 0.75] to [1.0, 1.0] — inside the cutout.
+    // Tile (3, 3) at z=2: [0.75, 0.75] to [1.0, 1.0] - inside the cutout.
     let clip = ClipRect::for_tile(3, 3, 2, BUFFER_FRACTION);
     assert!(!tile_is_interior(&ring, &clip));
 }
@@ -785,7 +785,7 @@ fn square_ring(cx: f64, cy: f64, hw: f64) -> Vec<Point> {
 
 #[test]
 fn multi_simplify_no_inners_all_zooms() {
-    // Large outer ring at z14 only — no simplification needed.
+    // Large outer ring at z14 only - no simplification needed.
     let outer = square_ring(0.5, 0.5, 0.1);
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
@@ -846,7 +846,7 @@ fn multi_simplify_inner_count_non_increasing() {
 
 #[test]
 fn multi_simplify_subpixel_outer_stops_early() {
-    // Outer is tiny — should become subpixel and stop iterating before z0.
+    // Outer is tiny - should become subpixel and stop iterating before z0.
     let outer = square_ring(0.5, 0.5, 0.00001); // ~1 meter
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
@@ -854,7 +854,7 @@ fn multi_simplify_subpixel_outer_stops_early() {
     for_each_zoom_simplified_multi(&outer, &inners, 0, 14, &mut scratch, |_| 1.0, |_z, _o, _i| {
         zoom_count += 1;
     });
-    // Should NOT reach all 15 zooms — subpixel check should bail out early
+    // Should NOT reach all 15 zooms - subpixel check should bail out early
     assert!(zoom_count < 15, "subpixel outer should stop early, got {zoom_count} zooms");
 }
 
@@ -904,7 +904,7 @@ fn multi_simplify_outer_vertex_count_non_increasing() {
 fn buffer_fraction_is_8_rendered_pixels() {
     // BUFFER_FRACTION must be 8 rendered pixels / 256 pixels per tile = 0.03125.
     // A previous bug had 8.0 / 4096.0 (= 0.001953125), which is 8 *extent units*
-    // — only 0.5 rendered pixels — causing visible tile seams everywhere.
+    // - only 0.5 rendered pixels - causing visible tile seams everywhere.
     assert!((BUFFER_FRACTION - 8.0 / 256.0).abs() < f64::EPSILON);
     assert!((BUFFER_FRACTION - 0.03125).abs() < f64::EPSILON);
 }
@@ -974,7 +974,7 @@ fn shared_chain_no_shared_edges() {
     assert!(chains.is_empty());
 }
 
-/// Shared vertex but no shared edge — should return empty.
+/// Shared vertex but no shared edge - should return empty.
 #[test]
 fn shared_chain_shared_vertex_no_shared_edge() {
     // Two triangles touching at a single point (10,10).
@@ -1004,7 +1004,7 @@ fn shared_chain_triple_junction() {
     }
 }
 
-/// Single ring — no shared edges possible.
+/// Single ring - no shared edges possible.
 #[test]
 fn shared_chain_single_ring() {
     let ring = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
@@ -1088,16 +1088,16 @@ fn shared_chain_wrap_around_ring_seam() {
 /// Chain that IS consecutive in both rings across the seam.
 #[test]
 fn shared_chain_consecutive_wrap_around() {
-    // Ring A: [P0, P1, P2, P3, P0] — a square
+    // Ring A: [P0, P1, P2, P3, P0] - a square
     // Ring B shares the last two edges of A: P2→P3 and P3→P0.
     // In ring B these are consecutive (but in reverse direction).
     let ring_a = vec![(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
     // Ring B: [P0, P3, P4, P5, P0] where P4=(-10,10), P5=(-10,0)
-    // Wait — that doesn't share P2→P3. Let me construct it properly.
+    // Wait - that doesn't share P2→P3. Let me construct it properly.
     // Ring A edges: 0:(0,0)→(10,0), 1:(10,0)→(10,10), 2:(10,10)→(0,10), 3:(0,10)→(0,0)
     // Ring B should share edges 2 and 3 of ring A.
-    // Edge 2: (10,10)→(0,10) — B needs (0,10)→(10,10)
-    // Edge 3: (0,10)→(0,0) — B needs (0,0)→(0,10)
+    // Edge 2: (10,10)→(0,10) - B needs (0,10)→(10,10)
+    // Edge 3: (0,10)→(0,0) - B needs (0,0)→(0,10)
     // Ring B: [(0,0), (0,10), (10,10), (20,10), (20,0), (0,0)]
     // B edges: 0:(0,0)→(0,10), 1:(0,10)→(10,10), 2:(10,10)→(20,10), 3:(20,10)→(20,0), 4:(20,0)→(0,0)
     // B edge 0 matches A edge 3 reversed, B edge 1 matches A edge 2 reversed.
@@ -1198,7 +1198,7 @@ fn canonicalize_two_adjacent_squares() {
 /// Chains with >2 incidents are skipped.
 #[test]
 fn canonicalize_skips_gt2_incidents() {
-    // Three rings sharing the same edge — detect_shared_chains produces
+    // Three rings sharing the same edge - detect_shared_chains produces
     // chains with 2 incidents each (one per ring pair), but let's test
     // that if we manually construct a 3-incident chain, it gets skipped.
     let chain = super::SharedChain {
@@ -1223,7 +1223,7 @@ fn canonicalize_skips_gt2_incidents() {
 // Tile-coordinate simplification tests
 // ---------------------------------------------------------------------------
 
-/// Simplify a ring with no pinned vertices — standard DP behavior.
+/// Simplify a ring with no pinned vertices - standard DP behavior.
 #[test]
 fn simplify_ring_tile_coords_no_pins() {
     // A square with a collinear midpoint on one edge.
@@ -1235,7 +1235,7 @@ fn simplify_ring_tile_coords_no_pins() {
     assert!(!simplified.contains(&(500, 0)));
 }
 
-/// Simplify a ring where shared-chain vertices are pinned — they survive.
+/// Simplify a ring where shared-chain vertices are pinned - they survive.
 #[test]
 fn simplify_ring_tile_coords_with_pins() {
     // Same ring but (500, 0) is pinned (part of a shared chain).
@@ -1357,7 +1357,7 @@ fn shared_edge_pinning_produces_identical_simplification() {
 
     // With endpoints pinned, DP still processes shared vertices in different
     // sub-problem contexts (the non-shared parts of each ring affect recursion).
-    // Endpoint pinning alone is necessary but not sufficient — see below.
+    // Endpoint pinning alone is necessary but not sufficient - see below.
     // The full fix (design doc Option D) requires isolating the shared segment
     // and simplifying it independently from both rings.
 
@@ -1398,7 +1398,7 @@ fn isolated_shared_segment_simplification_is_identical() {
     let mut out_fwd = Vec::new();
     let mut out_rev = Vec::new();
 
-    // Simplify forward and reversed — same segment, same tolerance.
+    // Simplify forward and reversed - same segment, same tolerance.
     simplify_into(&shared, tol, &mut keep, &mut out_fwd);
     simplify_into(&shared_rev, tol, &mut keep, &mut out_rev);
 

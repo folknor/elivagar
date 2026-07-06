@@ -62,7 +62,7 @@ pub(super) fn prepare_relation(
     let tags: SmallVec<[(&str, &str); 16]> = rel.tags().collect();
     let tag_helper = Tags(&tags);
 
-    // Match while PBF borrows are alive — attrs copy only the relevant tag values
+    // Match while PBF borrows are alive - attrs copy only the relevant tag values
     // into Cow::Owned, avoiding cloning ALL tags to String.
     let matches = shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon);
     if matches.is_empty() {
@@ -119,7 +119,7 @@ pub(super) fn prepare_relation(
 }
 
 /// Per-worker accumulator for streaming relation outputs to chunk files.
-/// Modeled on `OceanAcc` in ocean.rs — each rayon worker flushes directly
+/// Modeled on `OceanAcc` in ocean.rs - each rayon worker flushes directly
 /// to disk, eliminating the `Vec<Vec<SortRecord>>` double-materialization.
 pub(super) struct RelAcc {
     pub(super) records: Vec<SortRecord>,
@@ -213,7 +213,7 @@ pub(super) fn flush_rel_batch(
                 acc
             },
         )
-        // Don't flush in .map() — collect remaining records back for sort_writer
+        // Don't flush in .map() - collect remaining records back for sort_writer
         // to avoid creating many tiny chunk files (one per rayon accumulator).
         .reduce(
             || RelAcc {

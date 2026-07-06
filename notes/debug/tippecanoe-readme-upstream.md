@@ -22,7 +22,7 @@ MTS creates and updates data using distributed and parallelized processing, mean
 Customers like AllTrails, Plume Labs, and Ookla have noted that MTS helps them:
 - build applications faster by focusing more on app development, not infrastructure
 - build more compelling user experiences that drive better user engagement
-- get updated data to their users faster—in some cases up to 90% faster than previous tools
+- get updated data to their users faster-in some cases up to 90% faster than previous tools
 
 Learn more about [MTS](https://blog.mapbox.com/introducing-mapbox-tiling-service-df1df636c7cf).
 
@@ -504,7 +504,7 @@ the same layer, enclose them in an `all` expression so they will all be evaluate
 
 ### Controlling clipping to tile boundaries
 
- * `-b` _pixels_ or `--buffer=`_pixels_: Buffer size where features are duplicated from adjacent tiles. Units are "screen pixels"—1/256th of the tile width or height. (default 5)
+ * `-b` _pixels_ or `--buffer=`_pixels_: Buffer size where features are duplicated from adjacent tiles. Units are "screen pixels"-1/256th of the tile width or height. (default 5)
  * `-pc` or `--no-clipping`: Don't clip features to the size of the tile. If a feature overlaps the tile's bounds or buffer at all, it is included completely. Be careful: this can produce very large tilesets, especially with large polygons.
  * `-pD` or `--no-duplication`: As with `--no-clipping`, each feature is included intact instead of cut to tile boundaries. In addition, it is included only in a single tile per zoom level rather than potentially in multiple copies. Clients of the tileset must check adjacent tiles (possibly some distance away) to ensure they have all features.
 

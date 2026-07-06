@@ -1,7 +1,7 @@
 // POI (Point of Interest) matching for the Shortbread schema.
 //
 // Value arrays (AMENITY_VALUES, etc.) are searched via linear `.contains()`.
-// Investigated binary_search and phf — not worth it. These arrays are only
+// Investigated binary_search and phf - not worth it. These arrays are only
 // reached when the element has the relevant key (amenity, shop, etc.), which
 // is a tiny fraction of all elements. Hotpath profiling confirms tag matching
 // is NOT a bottleneck. The largest array (AMENITY_VALUES, 51 entries, ~400 B)
@@ -25,7 +25,7 @@ pub(crate) fn match_pois_centroid(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatc
 }
 
 /// Returns true if the tags would match a POI (used by address layer to exclude POI elements).
-/// Uses the same matching logic as `pois_match` — only specific values are considered POIs,
+/// Uses the same matching logic as `pois_match` - only specific values are considered POIs,
 /// not bare key presence.
 pub(crate) fn would_match_poi(tags: &Tags<'_>) -> bool {
     pois_match(tags).is_some()

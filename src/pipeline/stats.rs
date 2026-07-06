@@ -113,7 +113,7 @@ pub(super) struct Phase12Stats {
 pub(super) struct DeferralStats {
     /// Total deferred vertices per layer (atomically updated from rayon threads).
     pub(super) vertices: [AtomicU64; shortbread::Layer::count()],
-    /// Per-layer disable flag — set when vertex budget is exceeded.
+    /// Per-layer disable flag - set when vertex budget is exceeded.
     pub(super) disabled: [AtomicBool; shortbread::Layer::count()],
 }
 
@@ -160,7 +160,7 @@ impl DeferralStats {
 }
 
 // ---------------------------------------------------------------------------
-// Fanout distribution stats — tiles touched per feature per (layer, zoom)
+// Fanout distribution stats - tiles touched per feature per (layer, zoom)
 // ---------------------------------------------------------------------------
 
 /// Number of log2 histogram buckets for tiles-touched distribution.

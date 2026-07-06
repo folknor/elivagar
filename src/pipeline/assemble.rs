@@ -357,7 +357,7 @@ pub(super) fn reconcile_boundary_seams(
     }
 
     // Tile-coordinate DP on all rings, pinning shared-chain vertices.
-    // Runs even when no chains were found — these rings skipped PBF-phase DP
+    // Runs even when no chains were found - these rings skipped PBF-phase DP
     // and need tile-coord simplification regardless.
     for (ring_idx, ring) in seam_rings.iter_mut().enumerate() {
         let pinned = geometry::build_pinned_mask(ring.len(), ring_idx, &chains);
@@ -456,7 +456,7 @@ pub(super) fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u3
                 }
             }
 
-            // Max 26 elements (one per Shortbread layer) — with_capacity not needed.
+            // Max 26 elements (one per Shortbread layer) - with_capacity not needed.
             let non_empty: Vec<&LayerBuilder> = s.layers.iter()
                 .filter_map(|l| l.as_ref())
                 .filter(|l| !l.is_empty())
@@ -543,7 +543,7 @@ pub(super) fn prepare_non_empty_layers<'a>(
         }
     }
 
-    // Max 26 elements (one per Shortbread layer) — with_capacity not needed.
+    // Max 26 elements (one per Shortbread layer) - with_capacity not needed.
     s.layers
         .iter()
         .filter_map(|l| l.as_ref())

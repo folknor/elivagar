@@ -54,7 +54,7 @@ fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32)
                 }
             }
             7 => {
-                // ClosePath — cursor implicitly returns to last MoveTo.
+                // ClosePath - cursor implicitly returns to last MoveTo.
                 // Must reset both dest AND source cursors.
                 dest.push(cmd);
                 *cx = last_move_x;
@@ -103,7 +103,7 @@ impl LayerBuilder {
         }
 
         // Sort by (geom_type, tags). Tags are deterministic from shortbread
-        // matching — no normalization needed. Rust's sort is stable (Timsort).
+        // matching - no normalization needed. Rust's sort is stable (Timsort).
         scratch.indices.sort_by(|&a, &b| {
             let fa = &self.features[a];
             let fb = &self.features[b];
@@ -153,7 +153,7 @@ impl LayerBuilder {
 
         if any_merged {
             // Remove dead features (zero-capacity Vecs from mem::take).
-            // Uses is_empty() as tombstone proxy — safe because all pipeline-emitted
+            // Uses is_empty() as tombstone proxy - safe because all pipeline-emitted
             // features have non-empty geometry (enforced at all emit call sites).
             self.features.retain(|f| !f.geometry.is_empty());
         }
@@ -237,7 +237,7 @@ fn decode_line_segments(commands: &[u32], segments: &mut Vec<Vec<(i32, i32)>>) {
                 }
             }
             _ => {
-                // Unknown command — skip
+                // Unknown command - skip
                 i += count * 2;
             }
         }
@@ -384,7 +384,7 @@ fn build_chain(
 
         // Vertex cap: finish current segment then stop.
         if !chain.is_empty() && chain.len() + seg.len() > MAX_LINE_VERTICES {
-            // Don't mark as visited — will be picked up as a new chain start.
+            // Don't mark as visited - will be picked up as a new chain start.
             break;
         }
 
@@ -411,7 +411,7 @@ fn build_chain(
             break;
         };
         if ends.len() != 2 {
-            // Junction or dead end — stop chaining.
+            // Junction or dead end - stop chaining.
             break;
         }
 
@@ -427,7 +427,7 @@ fn build_chain(
         };
 
         // If the "other" is still the same segment (both ends at same point,
-        // but different is_back), it's a closed self-loop — stop.
+        // but different is_back), it's a closed self-loop - stop.
         if next.seg_idx == current_seg {
             break;
         }

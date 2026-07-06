@@ -57,7 +57,7 @@ fn init_lat_lut() -> Box<[f64]> {
 }
 
 /// Project a single WGS84 coordinate (lat_deg, lon_deg) to Mercator [0,1].
-/// Uses exact transcendentals — for tests and one-off calls. Hot path uses
+/// Uses exact transcendentals - for tests and one-off calls. Hot path uses
 /// `project_e7` which goes through the LUT.
 #[cfg(test)]
 #[inline]

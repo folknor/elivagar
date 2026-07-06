@@ -22,7 +22,7 @@ fn tile_simplify_tol_sq(z: u8) -> i64 {
     // Tile-space DP only at z6-10 (post-quantization staircase artifacts).
     // Below z6: features are too simplified already, DP would destroy geometry.
     // Above z10: enough resolution that staircase isn't visible.
-    if z < 6 || z > 10 { return 0; }
+    if !(6..=10).contains(&z) { return 0; }
     let base: i64 = 16 * 16; // 1 rendered pixel squared (256 extent² units)
     let shift = 10u8.saturating_sub(z);
     base << (shift as u32)
@@ -166,135 +166,6 @@ pub(super) fn enrich_polygon_matches(matches: &mut [LayerMatch], area_m2: f64) {
             // else stays at 5 (default from match_boundary_labels)
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Geometry validation helpers
-// ---------------------------------------------------------------------------
-
-pub(super) fn orient2d(a: (i32, i32), b: (i32, i32), c: (i32, i32)) -> i64 {
-    let abx = i64::from(b.0) - i64::from(a.0);
-    let aby = i64::from(b.1) - i64::from(a.1);
-    let acx = i64::from(c.0) - i64::from(a.0);
-    let acy = i64::from(c.1) - i64::from(a.1);
-    abx * acy - aby * acx
-}
-
-fn on_segment(a: (i32, i32), b: (i32, i32), p: (i32, i32)) -> bool {
-    let (min_x, max_x) = if a.0 <= b.0 { (a.0, b.0) } else { (b.0, a.0) };
-    let (min_y, max_y) = if a.1 <= b.1 { (a.1, b.1) } else { (b.1, a.1) };
-    p.0 >= min_x && p.0 <= max_x && p.1 >= min_y && p.1 <= max_y
-}
-
-pub(super) fn segments_intersect(a1: (i32, i32), a2: (i32, i32), b1: (i32, i32), b2: (i32, i32)) -> bool {
-    let o1 = orient2d(a1, a2, b1);
-    let o2 = orient2d(a1, a2, b2);
-    let o3 = orient2d(b1, b2, a1);
-    let o4 = orient2d(b1, b2, a2);
-
-    if o1 == 0 && on_segment(a1, a2, b1) {
-        return true;
-    }
-    if o2 == 0 && on_segment(a1, a2, b2) {
-        return true;
-    }
-    if o3 == 0 && on_segment(b1, b2, a1) {
-        return true;
-    }
-    if o4 == 0 && on_segment(b1, b2, a2) {
-        return true;
-    }
-    (o1 > 0) != (o2 > 0) && (o3 > 0) != (o4 > 0)
-}
-
-pub(super) fn is_valid_simple_tile_ring(ring: &[(i32, i32)]) -> bool {
-    if ring.len() < 4 || ring.first() != ring.last() {
-        return false;
-    }
-    let edge_count = ring.len() - 1;
-    for i in 0..edge_count {
-        let a1 = ring[i];
-        let a2 = ring[i + 1];
-        for j in (i + 1)..edge_count {
-            if j == i || j == i + 1 || (i == 0 && j == edge_count - 1) {
-                continue;
-            }
-            let b1 = ring[j];
-            let b2 = ring[j + 1];
-            if segments_intersect(a1, a2, b1, b2) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-fn orient2d_f64(a: &Point, b: &Point, c: &Point) -> f64 {
-    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-}
-
-fn on_segment_f64(a: &Point, b: &Point, p: &Point) -> bool {
-    let min_x = a.x.min(b.x);
-    let max_x = a.x.max(b.x);
-    let min_y = a.y.min(b.y);
-    let max_y = a.y.max(b.y);
-    p.x >= min_x && p.x <= max_x && p.y >= min_y && p.y <= max_y
-}
-
-fn segments_intersect_f64(a1: &Point, a2: &Point, b1: &Point, b2: &Point) -> bool {
-    let o1 = orient2d_f64(a1, a2, b1);
-    let o2 = orient2d_f64(a1, a2, b2);
-    let o3 = orient2d_f64(b1, b2, a1);
-    let o4 = orient2d_f64(b1, b2, a2);
-    let eps = 1e-15;
-
-    if o1.abs() <= eps && on_segment_f64(a1, a2, b1) {
-        return true;
-    }
-    if o2.abs() <= eps && on_segment_f64(a1, a2, b2) {
-        return true;
-    }
-    if o3.abs() <= eps && on_segment_f64(b1, b2, a1) {
-        return true;
-    }
-    if o4.abs() <= eps && on_segment_f64(b1, b2, a2) {
-        return true;
-    }
-    (o1 > eps) != (o2 > eps) && (o3 > eps) != (o4 > eps)
-}
-
-pub(super) fn is_valid_simple_ring_points(ring: &[Point]) -> bool {
-    if ring.len() < 3 {
-        return false;
-    }
-    // Accept both open rings [A,B,C] and closed rings [A,B,C,A].
-    let is_closed = if ring.len() >= 4 {
-        let first = &ring[0];
-        let last = &ring[ring.len() - 1];
-        (first.x - last.x).abs() < 1e-15 && (first.y - last.y).abs() < 1e-15
-    } else {
-        false
-    };
-    let n = if is_closed { ring.len() - 1 } else { ring.len() };
-    if n < 3 {
-        return false;
-    }
-
-    for i in 0..n {
-        let a1 = &ring[i];
-        let a2 = &ring[(i + 1) % n];
-        for j in (i + 1)..n {
-            if j == i || j == (i + 1) % n || (i == 0 && j == n - 1) {
-                continue;
-            }
-            let b1 = &ring[j];
-            let b2 = &ring[(j + 1) % n];
-            if segments_intersect_f64(a1, a2, b1, b2) {
-                return false;
-            }
-        }
-    }
-    true
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +389,7 @@ pub(super) fn emit_line_feature(
     let mut run_for_zoom = |z: u8, simplified: &[Point]| {
         encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
 
-        // Recompute bbox from simplified coords — at low zooms DP may reduce the
+        // Recompute bbox from simplified coords - at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simplified);
         let single_tile = geometry::is_single_tile(&simp_bbox, z);
@@ -529,7 +400,7 @@ pub(super) fn emit_line_feature(
             || m.layer == Layer::Streets;
         geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
             if single_tile {
-                // Fast path: bbox fits in one tile — clipping is a no-op.
+                // Fast path: bbox fits in one tile - clipping is a no-op.
                 if simplified.len() < 2 {
                     return;
                 }
@@ -638,7 +509,7 @@ pub(super) fn emit_polygon_feature(
     let mut run_for_zoom = |z: u8, simplified: &[Point]| {
         encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
 
-        // Recompute bbox from simplified coords — at low zooms DP may reduce the
+        // Recompute bbox from simplified coords - at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simplified);
         let single_tile = geometry::is_single_tile(&simp_bbox, z);
@@ -658,12 +529,12 @@ pub(super) fn emit_polygon_feature(
         }
 
         if single_tile {
-            // Fast path: bbox fits in one tile — clipping is a no-op.
+            // Fast path: bbox fits in one tile - clipping is a no-op.
             let (tx, ty) = (tx_min, ty_min);
             if simplified.len() < 3 {
                 return;
             }
-            // TEMPORARILY DISABLED — validity gates drop valid polygons at low zoom,
+            // TEMPORARILY DISABLED - validity gates drop valid polygons at low zoom,
             // causing massive feature loss (water_polygons 5x fewer than Tilemaker).
             // if z < 14 && !is_valid_simple_ring_points(simplified) {
             //     return;
@@ -689,7 +560,7 @@ pub(super) fn emit_polygon_feature(
             let multi_row = ty_max > ty_min;
 
             for ty in ty_min..=ty_max {
-                // F14: row pre-clip — restrict polygon to this row's Y-band.
+                // F14: row pre-clip - restrict polygon to this row's Y-band.
                 // Per-tile clips then process far fewer vertices.
                 let row_source: &[Point] = if multi_row {
                     let row_rect = ClipRect::new(
@@ -721,7 +592,7 @@ pub(super) fn emit_polygon_feature(
                         if scratch.clip_a.len() < 3 {
                             continue;
                         }
-                        // TEMPORARILY DISABLED — validity gates drop valid polygons.
+                        // TEMPORARILY DISABLED - validity gates drop valid polygons.
                         // if z < 14 && !is_valid_simple_ring_points(&scratch.clip_a) {
                         //     continue;
                         // }
@@ -837,7 +708,7 @@ pub(super) fn emit_multipolygon_feature(
     let mut emit_for_zoom = |z: u8, simp_outer: &[Point], simp_inners: &[Vec<Point>]| {
         encode_attrs_bytes(&mut emit_scratch.attrs_buf, &m.attrs, z);
 
-        // Recompute bbox from simplified coords — at low zooms DP may reduce the
+        // Recompute bbox from simplified coords - at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simp_outer);
 
@@ -861,13 +732,13 @@ pub(super) fn emit_multipolygon_feature(
         }
 
         if single_tile {
-            // Fast path: bbox fits in one tile — clipping is a no-op.
+            // Fast path: bbox fits in one tile - clipping is a no-op.
             let (tx, ty) = (tx_min, ty_min);
             let mut ring_count: usize = 0;
             if simp_outer.len() < 3 {
                 return;
             }
-            // TEMPORARILY DISABLED — validity gates drop valid polygons.
+            // TEMPORARILY DISABLED - validity gates drop valid polygons.
             // if z < 14 && !is_valid_simple_ring_points(simp_outer) {
             //     return;
             // }
@@ -918,7 +789,7 @@ pub(super) fn emit_multipolygon_feature(
             let multi_row = ty_max > ty_min;
 
             for ty in ty_min..=ty_max {
-                // F14: row pre-clip — restrict polygon to this row's Y-band.
+                // F14: row pre-clip - restrict polygon to this row's Y-band.
                 let (outer_src, inners_src, inners_bbox_src): (&[Point], &[Vec<Point>], &[geometry::MercBbox]) =
                     if multi_row {
                         let row_rect = ClipRect::new(
@@ -994,7 +865,7 @@ pub(super) fn emit_multipolygon_feature(
                         if emit_scratch.clip_a.len() < 3 {
                             continue;
                         }
-                        // TEMPORARILY DISABLED — validity gates drop valid polygons.
+                        // TEMPORARILY DISABLED - validity gates drop valid polygons.
                         // if z < 14 && !is_valid_simple_ring_points(&emit_scratch.clip_a) {
                         //     continue;
                         // }

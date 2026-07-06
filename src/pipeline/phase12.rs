@@ -122,14 +122,14 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
     )?;
     let mut node_store_opt: Option<NodeStore> = match node_store_mode {
         NodeStoreMode::None => {
-            eprintln!("  LocationsOnWays — skipping node store");
+            eprintln!("  LocationsOnWays - skipping node store");
             None
         }
         NodeStoreMode::Sorted => {
             if config.force_sorted && !reader.header().is_sorted() {
                 eprintln!("  --force-sorted: assuming sorted PBF (will abort if not)");
             } else {
-                eprintln!("  PBF declares Sort.Type_then_ID — using compact node store");
+                eprintln!("  PBF declares Sort.Type_then_ID - using compact node store");
             }
             Some(NodeStore::Sorted(SortedNodeStore::new()))
         }
@@ -139,7 +139,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     "  WARNING: unsafe flat index override enabled; bypassing unsorted-size and flat-index-size safety guardrails"
                 );
             }
-            eprintln!("  PBF not sorted — using flat mmap node index");
+            eprintln!("  PBF not sorted - using flat mmap node index");
             Some(NodeStore::Flat(if unsafe_override {
                 NodeIndex::create_unbounded(&idx_dir.join("nodes.idx"))?
             } else {
@@ -180,13 +180,13 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
 
     // Block-level dispatch: worker thread receives entire PrimitiveBlocks containing
     // ways, extracts RawWay data and processes via rayon. Main thread sends blocks
-    // and drains results — no per-way work on the main thread during the way phase.
+    // and drains results - no per-way work on the main thread during the way phase.
     let mut block_tx: Option<std::sync::mpsc::SyncSender<PrimitiveBlock>> = None;
     let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
     let mut drain_handle: Option<std::thread::JoinHandle<(WayIndex, SortWriter, u64, FanoutStats)>> = None;
 
-    // Buffer relation blocks — processed after all PBF blocks are consumed so that
+    // Buffer relation blocks - processed after all PBF blocks are consumed so that
     // late way blocks (common in locations-on-ways PBFs) don't hit a finalized way_index.
     let mut relation_blocks: Vec<PrimitiveBlock> = Vec::new();
 
@@ -206,7 +206,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
 
     let mut node_records: Vec<SortRecord> = Vec::new();
 
-    // Macro to handle Node and DenseNode identically — both types expose the
+    // Macro to handle Node and DenseNode identically - both types expose the
     // same API (.id(), .decimicro_lat(), .decimicro_lon(), .tags()) but are
     // distinct types, so a generic function would not work without a trait.
     macro_rules! handle_node {
@@ -234,7 +234,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     $node.id() as u64, lat_e7, lon_e7,
                     &tags_vec, min_z, max_z, &land_mask, &mut node_records,
                 );
-                // Panic: inside PBF callback — can't propagate Result. Disk I/O failure is unrecoverable.
+                // Panic: inside PBF callback - can't propagate Result. Disk I/O failure is unrecoverable.
                 for r in node_records.drain(..) {
                     sort_writer.as_mut().expect("sort_writer taken by drain thread")
                         .push(r).expect("sort push failed");
@@ -248,11 +248,11 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
         let block = block_result
             .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
 
-        // Classify block by reading first wire tag byte per group —
+        // Classify block by reading first wire tag byte per group -
         // no element decoding. Sorted PBFs have single-type blocks.
         match block.block_type() {
             BlockType::DenseNodes | BlockType::Nodes => {
-                // Node block — process inline
+                // Node block - process inline
                 block.for_each_element(|element| match element {
                     Element::DenseNode(node) => handle_node!(node),
                     Element::Node(node) => handle_node!(node),
@@ -260,7 +260,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                 });
             }
             BlockType::Ways => {
-                // Way block — send entire block to worker thread.
+                // Way block - send entire block to worker thread.
                 // Count ways from block (elements() re-parses from bytes, cheap).
                 way_count += block.elements()
                     .filter(|e| matches!(e, Element::Way(_)))
@@ -280,7 +280,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                         Some(r)
                     };
                     if locations_on_ways {
-                        eprintln!("  LocationsOnWays mode — processing ways (no node store)...");
+                        eprintln!("  LocationsOnWays mode - processing ways (no node store)...");
                     } else {
                         eprintln!("  Node store finalized ({node_count} nodes), processing ways...");
                     }
@@ -316,7 +316,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     };
                     worker_handle = Some(std::thread::spawn(move || {
                         use rayon::prelude::*;
-                        // Take refs outside loop — Copy into each move closure,
+                        // Take refs outside loop - Copy into each move closure,
                         // avoids Arc::clone per spawn.
                         let nr_ref: Option<&NodeStoreReader> = nr_clone.as_deref();
                         let lm_ref = &*lm_clone;
@@ -373,7 +373,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                                 let block_bytes = estimate_raw_ways_bytes(&raw_ways);
                                 let block_cost = block_bytes * WAY_OUTPUT_MULTIPLIER;
                                 // Wait for capacity: count limit and byte budget.
-                                // Always allow at least one task — a single block that
+                                // Always allow at least one task - a single block that
                                 // exceeds the byte budget must not deadlock the condvar
                                 // (no in-flight tasks → no notify_one → permanent sleep).
                                 {
@@ -413,7 +413,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     }));
 
                     // Drain thread: owns way_index + sort_writer, writes results as they arrive.
-                    // Runs concurrently with worker — main thread is free to forward blocks.
+                    // Runs concurrently with worker - main thread is free to forward blocks.
                     let mut wi = way_index.take().expect("way_index already taken");
                     let mut sw = sort_writer.take().expect("sort_writer already taken");
                     let ds_drain = std::sync::Arc::clone(&deferral_stats);
@@ -436,7 +436,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     .send(block).expect("worker thread panicked");
             }
             BlockType::Relations => {
-                // Buffer relation blocks — defer processing until all PBF blocks
+                // Buffer relation blocks - defer processing until all PBF blocks
                 // are consumed. Locations-on-ways PBFs can have way blocks after
                 // relation blocks; processing relations inline would finalize the
                 // way_index too early.
@@ -541,10 +541,10 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
             max_y: (sw.y + buf).min(1.0),
         }
     } else {
-        // No nodes — full world
+        // No nodes - full world
         MercBbox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 }
     };
-    eprintln!("  Data bounds (merc): x[{:.4}–{:.4}] y[{:.4}–{:.4}]",
+    eprintln!("  Data bounds (merc): x[{:.4}-{:.4}] y[{:.4}-{:.4}]",
         data_bounds.min_x, data_bounds.max_x, data_bounds.min_y, data_bounds.max_y);
     let land_mask = std::sync::Arc::try_unwrap(land_mask)
         .unwrap_or_else(|_| panic!("land_mask Arc should have single owner after worker join"));
@@ -626,11 +626,11 @@ pub(super) fn process_node(
 }
 
 // ---------------------------------------------------------------------------
-// Way processing (line + polygon layers) — parallel batch processing
+// Way processing (line + polygon layers) - parallel batch processing
 //
 // Raw way data (node ref IDs + owned tags) is collected on the main thread,
 // then dispatched to rayon where workers do the expensive work in parallel:
-// node coord resolution (mmap reads — page faults spread across threads),
+// node coord resolution (mmap reads - page faults spread across threads),
 // tag matching, projection, simplification, clipping, MVT encoding.
 // The serial post-rayon phase does only fast sequential I/O:
 // way_index.put() + sort_writer.push().
@@ -683,7 +683,7 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
             }
         } else {
             // Open line: count ALL nodes including endpoints.
-            // Endpoints are where ways connect — if two ways share an endpoint,
+            // Endpoints are where ways connect - if two ways share an endpoint,
             // it must be pinned so DP simplification doesn't move it to different
             // positions in each way (which creates visible gaps at junctions).
             for &node_id in &w.node_refs {
@@ -704,7 +704,7 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
         let scan_slice = if is_closed {
             &w.node_refs[..w.node_refs.len() - 1]
         } else {
-            // Scan all nodes including endpoints — shared endpoints must be
+            // Scan all nodes including endpoints - shared endpoints must be
             // pinned to prevent DP from creating gaps at way junctions.
             &w.node_refs[..]
         };
@@ -723,7 +723,7 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
 ///
 /// Uses `BlobFilter::only_ways()` to skip node/relation blobs entirely
 /// (indexed PBFs skip decompression; non-indexed still parse cheaply).
-/// No tag matching or coordinate resolution — just node ref counting.
+/// No tag matching or coordinate resolution - just node ref counting.
 fn prepass_shared_nodes(
     pbf_path: &std::path::Path,
     decode_threads: usize,
@@ -887,7 +887,7 @@ pub(super) fn process_raw_way(
     polygon_simplify_factor: f64,
 ) -> ProcessedWay {
     // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
-    // or looked up via node store (the expensive mmap reads — now parallel).
+    // or looked up via node store (the expensive mmap reads - now parallel).
     let (coords_e7, resolved_node_refs): (Vec<(i32, i32)>, Vec<i64>) = if !raw.coords_e7.is_empty() {
         (raw.coords_e7.clone(), raw.node_refs.clone())
     } else if let Some(nr) = node_reader {
@@ -914,7 +914,7 @@ pub(super) fn process_raw_way(
         return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new(), cap_events: Vec::new() };
     }
 
-    // Tag matching — convert owned tags to borrowed refs (same pattern as
+    // Tag matching - convert owned tags to borrowed refs (same pattern as
     // process_prepared_relation, pipeline.rs PreparedRelation handling)
     let is_closed = coords_e7.len() >= 4 && coords_e7.first() == coords_e7.last();
     let geom_type = if is_closed { OsmGeomType::ClosedWay } else { OsmGeomType::OpenWay };

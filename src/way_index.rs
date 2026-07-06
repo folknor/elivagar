@@ -207,7 +207,7 @@ impl OffsetChunkReader {
     }
 }
 
-/// Merge heap entry — smallest way_id wins (reverse Ord for max-heap).
+/// Merge heap entry - smallest way_id wins (reverse Ord for max-heap).
 struct OffsetHeapEntry {
     way_id: i64,
     data_offset: u64,
@@ -291,7 +291,7 @@ fn sort_offsets_file(unsorted_path: &Path, sorted_path: &Path) -> io::Result<usi
     let mut reader = BufReader::with_capacity(1 << 20, file);
 
     if entry_count <= ENTRIES_PER_CHUNK {
-        // Fast path: everything fits in one chunk — sort in memory, write directly
+        // Fast path: everything fits in one chunk - sort in memory, write directly
         let mut entries = read_entries(&mut reader, entry_count)?;
         entries.sort_unstable_by_key(|e| e.way_id);
         let out_file = File::options()
@@ -359,8 +359,8 @@ pub struct WayIndex {
 
 impl WayIndex {
     /// Create a new writable way index. Creates two sequential temp files in `dir`:
-    /// - `way_offsets.bin` — (way_id, data_offset) entries, 16 bytes each
-    /// - `way_data.bin` — delta-varint compressed coordinates
+    /// - `way_offsets.bin` - (way_id, data_offset) entries, 16 bytes each
+    /// - `way_data.bin` - delta-varint compressed coordinates
     pub fn create(dir: &Path) -> io::Result<Self> {
         let offsets_path = dir.join("way_offsets.bin");
         let data_path = dir.join("way_data.bin");
@@ -408,7 +408,7 @@ impl WayIndex {
 
         // Write compressed data
         let writer = self.data_writer.as_mut().expect("put called after finish_writing");
-        // Panic: unrecoverable I/O — disk full means the run is dead.
+        // Panic: unrecoverable I/O - disk full means the run is dead.
         writer
             .write_all(&self.encode_buf)
             .expect("failed to write way data");
@@ -450,7 +450,7 @@ impl WayIndex {
         // External sort offsets by way_id → sorted file
         self.entry_count = sort_offsets_file(&self.offsets_path, &self.sorted_offsets_path)?;
 
-        // Remove unsorted offsets — no longer needed
+        // Remove unsorted offsets - no longer needed
         drop(std::fs::remove_file(&self.offsets_path));
 
         // Mmap sorted offsets (read-only) for binary search
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn empty_way() {
-        // put() with empty coords is a no-op — no entry written.
+        // put() with empty coords is a no-op - no entry written.
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndex::create(dir.path()).unwrap();
         idx.put(50, &[]);

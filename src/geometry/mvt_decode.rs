@@ -22,7 +22,7 @@ pub fn decode_mvt_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
 
         match cmd_id {
             1 => {
-                // MoveTo — start a new ring. Only 1 MoveTo per ring in polygons.
+                // MoveTo - start a new ring. Only 1 MoveTo per ring in polygons.
                 for _ in 0..cmd_count {
                     if i + 1 >= commands.len() {
                         return rings;
@@ -36,9 +36,9 @@ pub fn decode_mvt_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
                 }
             }
             2 => {
-                // LineTo — append vertices to the current ring.
+                // LineTo - append vertices to the current ring.
                 let Some(ring) = rings.last_mut() else {
-                    // LineTo without a preceding MoveTo — skip.
+                    // LineTo without a preceding MoveTo - skip.
                     i += (cmd_count as usize) * 2;
                     continue;
                 };
@@ -55,7 +55,7 @@ pub fn decode_mvt_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
                 }
             }
             7 => {
-                // ClosePath — close the current ring and reset cursor to ring start.
+                // ClosePath - close the current ring and reset cursor to ring start.
                 if let Some(ring) = rings.last_mut()
                     && let Some(&first) = ring.first()
                 {
@@ -65,7 +65,7 @@ pub fn decode_mvt_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
                 }
             }
             _ => {
-                // Unknown command — skip.
+                // Unknown command - skip.
             }
         }
     }

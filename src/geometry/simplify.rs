@@ -106,7 +106,7 @@ fn dp_recurse(points: &[Point], start: usize, end: usize, tol_sq: f64, keep: &mu
         let right = dp_recurse(points, max_idx, end, tol_sq, keep);
         left.max(right)
     } else {
-        // All points in this segment are within tolerance — max_dist_sq is
+        // All points in this segment are within tolerance - max_dist_sq is
         // the largest deviation among them.
         max_dist_sq
     }
@@ -142,7 +142,7 @@ fn dp_recurse_with_required(
 
 /// Find the point farthest from the line segment `points[start]..points[end]`.
 ///
-/// Must scan all intermediate points — DP correctness requires splitting at the
+/// Must scan all intermediate points - DP correctness requires splitting at the
 /// true maximum, not just any above-tolerance point. Early termination was
 /// investigated and rejected: there's no usable upper bound to prune against,
 /// and the loop body (one `perp_dist_sq` + compare per point) is already minimal.
@@ -246,18 +246,18 @@ pub fn for_each_zoom_simplified<F, S>(
         if z < 14 {
             // Pre-DP subpixel check: if the cascade's bbox diagonal is < 1 pixel
             // at this zoom, the feature is invisible here and at all coarser zooms.
-            // Skips DP entirely — O(1) vs O(n²).
+            // Skips DP entirely - O(1) vs O(n²).
             // Skipped for connectivity-critical layers (streets, boundaries) where
             // short connecting ways must survive to maintain road network topology.
             if !skip_bbox_check && super::merc_bbox_is_subpixel(cascade, z) {
                 break;
             }
             // Option E: if cascade already has ≤ min_points vertices, DP can't
-            // reduce further — skip the call entirely.
+            // reduce further - skip the call entirely.
             if cascade.len() > min_points {
                 let tol = simplify_tolerance(z) * tol_scale(z);
                 // Option D: if last DP's max deviation is already below this
-                // zoom's tolerance, the cascade is optimal — skip DP.
+                // zoom's tolerance, the cascade is optimal - skip DP.
                 if last_max_dev_sq >= tol * tol {
                     last_max_dev_sq = simplify_into(cascade, tol, keep_buf, simp_buf);
                     std::mem::swap(cascade, simp_buf);

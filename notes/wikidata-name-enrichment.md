@@ -166,5 +166,5 @@ The Shortbread spec doesn't mandate specific languages.
 
 ## Status
 
-Research complete. Not a current priority — requires wire format changes and a new
+Research complete. Not a current priority - requires wire format changes and a new
 external data dependency. Worth doing before planet-scale release for label coverage.

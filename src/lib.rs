@@ -45,12 +45,12 @@
 //!
 //! # Pipeline phases
 //!
-//! 1. **PBF read** — single-pass read building node/way indices and emitting
+//! 1. **PBF read** - single-pass read building node/way indices and emitting
 //!    sort records for matched features.
-//! 2. **Ocean** — ocean shapefile processing (optional). Generates water polygon
+//! 2. **Ocean** - ocean shapefile processing (optional). Generates water polygon
 //!    tiles from an ESRI shapefile.
-//! 3. **Sort** — external merge sort of all records by Hilbert tile ID.
-//! 4. **Assembly** — MVT protobuf encode, gzip compress, and write PMTiles archive.
+//! 3. **Sort** - external merge sort of all records by Hilbert tile ID.
+//! 4. **Assembly** - MVT protobuf encode, gzip compress, and write PMTiles archive.
 //!
 //! The [`SkipTo`] enum allows resuming from a checkpoint, reusing sort chunks
 //! from a previous run.

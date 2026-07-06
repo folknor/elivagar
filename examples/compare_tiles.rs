@@ -213,7 +213,7 @@ fn read_u64_le(buf: &[u8], off: usize) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// MVT protobuf decoder (minimal — just counts features per layer)
+// MVT protobuf decoder (minimal - just counts features per layer)
 // ---------------------------------------------------------------------------
 
 struct LayerStats {
@@ -344,7 +344,7 @@ fn decode_mvt_feature(data: &[u8]) -> (u8, usize) {
                 break;
             }
             if field == 4 {
-                // geometry — count varint entries
+                // geometry - count varint entries
                 let mut gpos = pos;
                 while gpos < end {
                     let (_, new_gpos) = decode_proto_varint_raw(data, gpos);
@@ -476,7 +476,7 @@ fn main() {
 
         let sample_count = common.len().min(sample_per_zoom);
         if sample_count == 0 {
-            eprintln!("z{z:2}: A={} tiles, B={} tiles, 0 common — skipping", za.len(), zb.len());
+            eprintln!("z{z:2}: A={} tiles, B={} tiles, 0 common - skipping", za.len(), zb.len());
             continue;
         }
 
@@ -538,7 +538,7 @@ fn main() {
         // Print zoom summary
         let decoded = sampled.len() - read_errors;
         if decoded == 0 {
-            eprintln!("z{z:2}: {read_errors} read errors, 0 decoded — skipping");
+            eprintln!("z{z:2}: {read_errors} read errors, 0 decoded - skipping");
             continue;
         }
         let avg_bytes_a = total_bytes_a / decoded;
@@ -601,7 +601,7 @@ fn main() {
     all_layers.sort();
     all_layers.dedup();
 
-    eprintln!("{:24} {:>10} {:>10} {:>8} {:>10} {:>10}", "layer", &name_a, &name_b, "diff", "cmds_A", "cmds_B");
+    eprintln!("{:24} {:>10} {:>10} {:>8} {:>10} {:>10}", "layer", name_a, name_b, "diff", "cmds_A", "cmds_B");
     eprintln!("{}", "-".repeat(78));
 
     let mut total_a = 0usize;

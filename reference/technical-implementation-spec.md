@@ -1,0 +1,100 @@
+# Technical implementation specification
+
+The single document from which an open TODO item is built to completion without
+re-deriving its design. Two implementers working from it independently produce
+the same artifact.
+
+## What it is
+
+1. **Every brick.** It lays each step on the road from the current code to the
+   finished item. No step is left to discover during implementation.
+2. **Obstacles resolved inline.** Anything blocking the road is solved in the
+   document, as part of it. An unresolved obstacle is a missing brick.
+3. **No deferral.** Nothing in the originating TODO is pushed to "later" -
+   deferred work is a hole in the road. (Work that belongs to a genuinely
+   separate TODO is named and excluded; that is not deferral.)
+4. **No shoehorning.** We do not fit the work into existing abstractions,
+   structures, or conventions because they already exist. The structure that
+   best serves the end goal is the one we build; whatever stands in its way is
+   ripped out and rebuilt. Pre-1.0, breaking any internal API is legal.
+
+## What it must also pin (or it is aspiration, not a spec)
+
+5. **Verification per brick.** Every change names its gate, matched to what
+   the change can break: `brokkr check` (clippy + full test suite, including
+   the Shortbread spec cases) for anything touching tag matching or
+   encoding semantics; `elivagar verify <output>.pmtiles` on a fresh
+   `brokkr tilegen --dataset denmark` build for anything touching geometry,
+   clipping, or the MVT/PMTiles container (zero errors is the bar);
+   targeted tile inspection (`elivagar svg` / `elivagar diag` /
+   `brokkr compare-tiles`) for named regression tiles when the change aims
+   at a specific visual defect; the `brokkr tilegen --bench` invocation for
+   anything claiming or risking a performance effect (the win, its
+   neutrality, or - when a feature knowingly pays for capability with
+   throughput - the accepted cost, stated as an explicit bound the
+   keep/revert verdict is read against); named unit tests for behavior no
+   oracle reaches. Rendering correctness in MapLibre is the one gate that
+   needs a human: the spec names the exact tiles/zooms to eyeball and what
+   correct looks like. A brick whose load is unproven is not laid. Per
+   gate, the spec contains the EXACT command to run - copy-pasteable,
+   flags and all, not "run the relevant tests" or "check some tiles". If
+   no command exists that can verify a gate (no test pins the behavior, no
+   tool decodes the artifact), building that instrument is itself a brick
+   of the spec - specified to the same standard and laid before the brick
+   it gates. A spec justified by an estimated volume leads with the
+   instrument that prices it: the counter (or equivalent) is the first
+   landing, and the spec states an explicit proceed/close threshold the
+   reading is judged against - below it, the item closes as mispriced and
+   the rewrite is never laid. The estimate motivates the spec; only the
+   measurement justifies the landing.
+6. **A keep/revert path.** The implementation unit is one coherent, fully
+   intrusive change that lands and is then kept or reverted on its gate
+   results - never a tiny gated probe or an env-var experiment switch. The
+   sequence of such landings is ordered so `brokkr check` and
+   `elivagar verify` stay green at every boundary between them.
+   Complete-but-unorderable is a failed spec. Benchmark discipline holds
+   at every landing: commit first, then measure, then record numbers
+   against the commit hash (never benchmark uncommitted code).
+7. **The target as concrete artifacts.** "The ideal structure" is pinned to
+   exact types, signatures, ownership, and data flow - buildable, not merely
+   directional.
+8. **A survey of the ground.** The current structure and everything depending on
+   it is inventoried before the teardown, so the rip is precise and drops no
+   load-bearing work. A survey that prices a hot path traces the premise
+   through the actual caller ordering at the priced call site - what the
+   structure admits is not what the callers do. For geometry work the
+   survey includes the failure history: `notes/rendering-fix-log.md` is
+   the ledger of every tried and rejected approach (R01-R20, S01-S09); a
+   spec that re-proposes a logged failure without addressing why it failed
+   is refuted by its own survey. Specs authored as a batch reconcile their
+   surveys against siblings covering the same ground before any is
+   implemented; a sibling's survey may already state the fact that refutes
+   this spec's premise.
+9. **A stopping rule.** The rebuild has a bounded blast radius. Where the
+   teardown stops, and what is out of scope, is stated explicitly.
+10. **The standing references.** Every spec MUST cite, by path: this document
+    (`reference/technical-implementation-spec.md`) as the contract it is
+    written against, AND the document the spec was spawned from (the item's
+    source naming the problem - e.g. the owning `notes/*.md` writeup such
+    as `notes/rendering-fix-log.md`), if it exists.
+    The measurement record is CLAUDE.md's benchmark sections plus
+    `.brokkr/results.db`: a spec that claims a performance effect, or whose
+    changes touch a measured path, states the pre-change baseline (host +
+    commit hash) the keep/revert verdict will be read against, and after
+    landing records the post-change numbers the same way (commit, then
+    benchmark, then write the hash-anchored numbers). A spec off every
+    measured path owes no benchmark update; it states that, and names the
+    gate whose unchanged result confirms neutrality.
+
+## Stance
+
+- **Structural over micro.** The spec pursues the structural change that
+  materially moves the goal - real throughput for performance work, real
+  capability for feature work - not local tweaks. Full rewrites are labeled
+  as such, distinct from local changes.
+- **Cleanliness is a deliverable.** No env-var scaffolding, benchmark knobs, or
+  temporary routing switches left as the way forward.
+- **Unlimited resources, aggressive internal rewrites assumed.** Old
+  abstractions earn no protection from age; shared writer abstractions and
+  generic reuse are not goals. Correctness and maintainability of the *result*
+  still hold.

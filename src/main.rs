@@ -275,7 +275,7 @@ fn detect_ocean(data_dir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
 }
 
 fn main() {
-    // Disable hotpath metrics server by default — elivagar is a sync binary
+    // Disable hotpath metrics server by default - elivagar is a sync binary
     // with no async runtime, so the metrics server is never useful.
     // Override with HOTPATH_METRICS_SERVER_OFF=false if needed.
     if std::env::var_os("HOTPATH_METRICS_SERVER_OFF").is_none() {
@@ -344,9 +344,7 @@ fn main() {
 fn diag_ocean_rings(path: &Path, z: u8, x: u32, y: u32) -> std::io::Result<()> {
     use elivagar::pmtiles_reader::PmtilesReader;
     use elivagar::pmtiles_writer::xy_to_tile_id;
-    use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
-    use flate2::read::GzDecoder;
-    use std::io::Read;
+    use protohoggr::{Cursor, WIRE_LEN};
 
     let mut reader = PmtilesReader::open(path)?;
     let entries = reader.read_all_entries()?;
@@ -355,9 +353,9 @@ fn diag_ocean_rings(path: &Path, z: u8, x: u32, y: u32) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "tile not found"))?;
     let raw = reader.read_tile(entry)?;
 
-    println!("Tile z{z}/{x}/{y} — {raw_len} bytes decompressed", raw_len = raw.len());
+    println!("Tile z{z}/{x}/{y} - {raw_len} bytes decompressed", raw_len = raw.len());
 
-    // Parse MVT tile — find all layers
+    // Parse MVT tile - find all layers
     let mut tc = Cursor::new(&raw);
     while let Ok(Some((field, wire_type))) = tc.read_tag() {
         if field == 3 && wire_type == WIRE_LEN {
@@ -412,7 +410,7 @@ fn diag_layer(data: &[u8]) {
 
     println!("  Layer '{name}': {n} features ({poly_count} polygons)", n = feature_ranges.len());
 
-    // Parse each feature — only print polygon detail
+    // Parse each feature - only print polygon detail
     for (fi, fdata) in feature_ranges.iter().enumerate() {
         let mut geom_type: u64 = 0;
         let mut fid: u64 = 0;

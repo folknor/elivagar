@@ -385,7 +385,7 @@ fn test_no_run_for_different_data() {
     };
 
     let mut writer = PmtilesWriter::new(config);
-    // Add 4 tiles with distinct data — each gets a different offset, no runs possible
+    // Add 4 tiles with distinct data - each gets a different offset, no runs possible
     let data_a = gzip_compress(b"data-a").unwrap();
     let data_b = gzip_compress(b"data-b").unwrap();
     let data_c = gzip_compress(b"data-c").unwrap();
@@ -629,12 +629,12 @@ fn test_dedup_fingerprint_rejection() {
     let (hash1, _real_fp2) = PmtilesWriter::compute_dedup_hashes(&data);
 
     // Inject a fake entry under the same hash1 but with a wrong fingerprint
-    // and matching length — simulates a primary hash collision.
+    // and matching length - simulates a primary hash collision.
     let fake_fp2 = 0xDEAD_BEEF_CAFE_BABE;
     #[allow(clippy::cast_possible_truncation)]
     writer.inject_dedup_entry(hash1, 0, data.len() as u32, fake_fp2);
 
-    // Now add the real tile — hash1 matches, length matches, but fp2 differs.
+    // Now add the real tile - hash1 matches, length matches, but fp2 differs.
     let is_unique = writer.add_tile(0, 0, 0, &data).unwrap();
     assert!(is_unique, "should NOT dedup when fingerprint differs");
     assert_eq!(writer.dedup_stats.candidates, 1);
@@ -662,10 +662,10 @@ fn test_dedup_bucket_collision() {
 
     // Inject a second entry under the same hash1 (different tile).
     writer.inject_dedup_entry(hash1_a, 999, 42, 0x1234);
-    // The inject itself won't increment the collision counter — that only
+    // The inject itself won't increment the collision counter - that only
     // happens during add_tile insertion. But we can verify the bucket has 2 entries.
 
-    // Add tile A again — should find the correct match (first entry in bucket).
+    // Add tile A again - should find the correct match (first entry in bucket).
     let dup = writer.add_tile(1, 0, 0, &data_a).unwrap();
     assert!(!dup, "should dedup with correct bucket entry");
     assert_eq!(writer.dedup_stats.tiles_reused, 1);
@@ -682,7 +682,7 @@ fn test_dedup_bucket_collision() {
     assert!(total_rejects <= 1);
 
     // Now verify a tile that hits the bucket but matches only the injected entry's
-    // hash1 (not fp2) — should be unique.
+    // hash1 (not fp2) - should be unique.
     // We can't easily manufacture this, so just verify the counters are sane.
     assert_eq!(writer.dedup_stats.bytes_saved, data_a.len() as u64);
 }

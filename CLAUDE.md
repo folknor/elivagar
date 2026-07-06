@@ -15,16 +15,16 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 
 Standalone development tool at `~/Programs/brokkr`. Installed via `cargo install --path ~/Programs/brokkr`. Invoked as `brokkr` from the project root (reads `./brokkr.toml` for project detection).
 
-- `brokkr check [-- args]` — run clippy + tests. Supports `--features` and `--no-default-features`
-- `brokkr env` — show environment info and dataset status with computed XXH128 hashes (copy into the `xxhash` field in `brokkr.toml`)
-- `brokkr results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)
-- `brokkr results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [--top N]` — query/compare benchmark results from SQLite. Use `--top 0` to show all hotpath functions. Use `--compare-last --command hotpath` to diff two most recent hotpath runs.
-- `brokkr results <UUID> --timeline [--stat FIELD] [--fields F1,F2] [--every N] [--phase P] [--where EXPR]` — query sidecar /proc samples (JSONL, stats, downsampled, per-phase, filtered)
-- `brokkr results <UUID> --markers --durations` — phase duration table from markers
-- `brokkr results --compare-timeline <A> <B>` — phase-aligned sidecar comparison
-- `brokkr results dirty --timeline --stat anon` — inspect last failed/dirty run
-- `brokkr clean` — remove tilegen_tmp and scratch files
-- `brokkr history [--command CMD] [--project P] [--failed] [--since DATE] [--slow MS] [-n N] [--all]` — query global command history (stored in `$XDG_DATA_HOME/brokkr/history.db`). Every brokkr invocation is recorded with timing, exit status, project, and git context. Works from any directory.
+- `brokkr check [-- args]` - run clippy + tests. Supports `--features` and `--no-default-features`
+- `brokkr env` - show environment info and dataset status with computed XXH128 hashes (copy into the `xxhash` field in `brokkr.toml`)
+- `brokkr results [UUID]` - look up specific result by UUID prefix (shows full detail + hotpath report)
+- `brokkr results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--mode M] [--grep STR] [--top N]` - query/compare benchmark results from SQLite. `--mode` filters by measurement mode (`bench`/`hotpath`/`alloc`); `--grep` substring-matches against both the subprocess `cli_args` and the recorded `brokkr_args` (use it to find runs by flag/axis). Use `--top 0` to show all hotpath functions. Use `--compare-last --mode hotpath` to diff two most recent hotpath runs.
+- `brokkr results <UUID> --timeline [--stat FIELD] [--fields F1,F2] [--every N] [--phase P] [--where EXPR]` - query sidecar /proc samples (JSONL, stats, downsampled, per-phase, filtered)
+- `brokkr results <UUID> --markers --durations` - phase duration table from markers
+- `brokkr results --compare-timeline <A> <B>` - phase-aligned sidecar comparison
+- `brokkr results dirty --timeline --stat anon` - inspect last failed/dirty run
+- `brokkr clean` - remove tilegen_tmp and scratch files
+- `brokkr history [--command CMD] [--project P] [--failed] [--since DATE] [--slow MS] [-n N] [--all]` - query global command history (stored in `$XDG_DATA_HOME/brokkr/history.db`). Every brokkr invocation is recorded with timing, exit status, project, and git context. Works from any directory.
 
 ### Elivagar commands
 
@@ -45,12 +45,13 @@ brokkr verify pmtiles [--dataset D] [--tiles VARIANT]
 brokkr compare-tiles <file_a> <file_b> [--sample N]
 brokkr download-ocean
 brokkr download-natural-earth
+brokkr download <region> [--osc-seq N]  # PBF + indexed + OSC diffs, auto-registers in brokkr.toml
 
 # Suite
 brokkr suite elivagar [--bench [N]] [--dataset D] [--variant V]
 ```
 
-Pipeline flags on `tilegen` (`--tile-format`, `--tile-compression`, `--compress-sort-chunks`, `--in-memory`, `--locations-on-ways`, etc.) are passed through to the elivagar binary and stored as `meta.*` kv pairs in the results DB.
+Pipeline flags on `tilegen` (`--tile-format`, `--tile-compression`, `--compress-sort-chunks`, `--in-memory`, `--locations-on-ways`, etc.) are passed through to the elivagar binary. They land in the results DB as the literal subprocess invocation in `cli_args` - query by flag with `brokkr results --grep tile-compression=brotli`. `meta.*` kv pairs are reserved for runtime observations only (detected locations-on-ways mode, resolved paths); anything derivable from the invocation is not duplicated there.
 
 ### Sidecar profiler
 
@@ -62,12 +63,12 @@ Protocol (two line formats, same FIFO):
 - Markers: `{timestamp_us} {PHASE_NAME}\n`
 - Counters: `{timestamp_us} @{name}={value}\n` (i64 value)
 
-Elivagar emits markers at phase boundaries (`PHASE12_START/END`, `OCEAN_START/END`, `SORT_START/END`, `ASSEMBLE_START/END`) and counters for key metrics (`phase12_ms`, `ocean_ms`, `ocean_features`, `assemble_ms`, `tiles`, `unique_tiles`, `features`). Implementation is in `pipeline/mod.rs` via `emit_marker()`/`emit_counter()` — OnceLock fd caching, O_NONBLOCK, no-op when brokkr isn't running.
+Elivagar emits markers at phase boundaries (`PHASE12_START/END`, `OCEAN_START/END`, `SORT_START/END`, `ASSEMBLE_START/END`) and counters for key metrics (`phase12_ms`, `ocean_ms`, `ocean_features`, `assemble_ms`, `tiles`, `unique_tiles`, `features`). Implementation is in `pipeline/mod.rs` via `emit_marker()`/`emit_counter()` - OnceLock fd caching, O_NONBLOCK, no-op when brokkr isn't running.
 
 Query with:
-- `brokkr results <uuid> --markers --durations` — phase timing table
-- `brokkr results <uuid> --markers --counters` — counter values
-- `brokkr results <uuid> --markers --phases` — phases with peak RSS + counters inline
+- `brokkr results <uuid> --markers --durations` - phase timing table
+- `brokkr results <uuid> --markers --counters` - counter values
+- `brokkr results <uuid> --markers --phases` - phases with peak RSS + counters inline
 
 ### Common flags
 
@@ -93,17 +94,17 @@ xxhash = "aa5bb865..."
 seq = 4704
 ```
 
-- `pbf.<variant>` — PBF files keyed by variant name. `--variant` selects (default: `raw`).
-- `brokkr tilegen --dataset denmark --variant locations` — elivagar auto-detects `LocationsOnWays` from the PBF header. The `--locations-on-ways` flag is only needed to force it when the PBF doesn't have the header flag.
-- `xxhash` — XXH128 file hash. Run `brokkr env` to see computed values.
+- `pbf.<variant>` - PBF files keyed by variant name. `--variant` selects (default: `raw`).
+- `brokkr tilegen --dataset denmark --variant locations` - elivagar auto-detects `LocationsOnWays` from the PBF header. The `--locations-on-ways` flag is only needed to force it when the PBF doesn't have the header flag.
+- `xxhash` - XXH128 file hash. Run `brokkr env` to see computed values.
 
-Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access). Bench runs record `meta.*` kv pairs (e.g. `meta.compress_sort_chunks`, `meta.tile_format`, `meta.locations_on_ways`) so runs with different flags are distinguishable. Bench and hotpath commands require a clean git tree (ignoring `*.md` and `.brokkr/results.db`); use `--force` to run anyway (results will not be stored). Example: `brokkr tilegen --bench --force --dataset denmark`.
+Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access). Runs with different flags are distinguishable via the `cli_args` and `brokkr_args` columns - the literal subprocess and brokkr invocations are stored verbatim, so `brokkr results --grep ...` finds any flag combination. Bench and hotpath commands require a clean git tree (ignoring `*.md` and `.brokkr/results.db`); use `--force` to run anyway (results will not be stored). Example: `brokkr tilegen --bench --force --dataset denmark`.
 
 **NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath uses conflicting cargo feature flags (causes build conflicts). Always run sequentially.
 
 ## Scripts
 
-No shell scripts remain. All development tooling is in `brokkr`.
+No shell scripts. Build/bench/verify tooling is in `brokkr`. `scripts/` holds Python tooling for the spec loop (`codex-review.py`, `codex-implement.py`, `codex_common.py` - see "Spec loop" below) plus `scripts/validate/` (Node round-trip tile validation) and `scripts/session_digest.py` (Claude session transcript digester).
 
 ## Architecture
 
@@ -112,27 +113,27 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 ### Modules
 
 **Pipeline orchestrator:**
-- `pipeline.rs` — PBF → ocean → sort → assemble → PMTiles
+- `pipeline.rs` - PBF → ocean → sort → assemble → PMTiles
 
 **Shortbread profile:**
-- `shortbread/` — tag matching, layer definitions, 26 layers (mod.rs, boundaries.rs, land.rs, streets.rs, transport.rs, water.rs)
-- `shortbread_tests.rs` — spec test cases (65+), loaded via `#[path]` from shortbread/mod.rs
-- `pois.rs` — POI tag matching
-- `wire_format.rs` — sort record binary serialization
+- `shortbread/` - tag matching, layer definitions, 26 layers (mod.rs, boundaries.rs, land.rs, streets.rs, transport.rs, water.rs)
+- `shortbread_tests.rs` - spec test cases (65+), loaded via `#[path]` from shortbread/mod.rs
+- `pois.rs` - POI tag matching
+- `wire_format.rs` - sort record binary serialization
 
 **Geometry + encoding:**
-- `geometry.rs` — Mercator projection, clipping (Sutherland-Hodgman), Douglas-Peucker simplification
-- `mvt.rs` — MVT protobuf encoder
-- `multipolygon.rs` — relation ring assembly
-- `ocean.rs` — ocean shapefile processing (mmap reader + scanline fill)
+- `geometry.rs` - Mercator projection, clipping (Sutherland-Hodgman), Douglas-Peucker simplification
+- `mvt.rs` - MVT protobuf encoder
+- `multipolygon.rs` - relation ring assembly
+- `ocean.rs` - ocean shapefile processing (mmap reader + scanline fill)
 
 **Infrastructure:**
-- `sort.rs` — external merge sort (gzip-compressed chunk files, k-way merge via binary heap)
-- `pmtiles_writer.rs` — PMTiles v3 writer with Hilbert tile IDs
-- `inspect.rs` — PMTiles v3 archive inspector (header + metadata reader)
-- `svg.rs` — single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG)
-- `node_index.rs` — node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
-- `way_index.rs` — flat mmap'd way geometry index
+- `sort.rs` - external merge sort (gzip-compressed chunk files, k-way merge via binary heap)
+- `pmtiles_writer.rs` - PMTiles v3 writer with Hilbert tile IDs
+- `inspect.rs` - PMTiles v3 archive inspector (header + metadata reader)
+- `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG)
+- `node_index.rs` - node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
+- `way_index.rs` - flat mmap'd way geometry index
 
 ### Pipeline phases
 
@@ -147,14 +148,14 @@ Sequential, same PBF input:
 
 ## Dependencies
 
-- `pbfhogg` — PBF reader, sibling dir `../pbfhogg`
-- `rayon` — parallel processing
-- `memmap2` — memory-mapped I/O for way index (and flat node index fallback)
-- `flate2` (zlib-rs backend) — gzip compression for MVT tiles and sort chunks. Same zlib backend as pbfhogg.
-- `brotli` — brotli compression for MVT tiles (optional via `--tile-compression brotli`)
-- `mimalloc` — global allocator (critical for rayon performance)
-- `clap` (derive) — CLI argument parsing with subcommands
-- `hotpath` — function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
+- `pbfhogg` - PBF reader, sibling dir `../pbfhogg`
+- `rayon` - parallel processing
+- `memmap2` - memory-mapped I/O for way index (and flat node index fallback)
+- `flate2` (zlib-rs backend) - gzip compression for MVT tiles and sort chunks. Same zlib backend as pbfhogg.
+- `brotli` - brotli compression for MVT tiles (optional via `--tile-compression brotli`)
+- `mimalloc` - global allocator (critical for rayon performance)
+- `clap` (derive) - CLI argument parsing with subcommands
+- `hotpath` - function profiling, feature-gated (`--features hotpath`), zero-cost when disabled
 
 ## CLI
 
@@ -162,24 +163,24 @@ Uses clap derive with subcommands:
 
 ### `elivagar run <INPUT> -o <OUTPUT> [flags]`
 
-- `-o` / `--output` — output PMTiles path (required)
-- `--tmp-dir path` — temporary directory for sort chunks (default: `data/tilegen_tmp`)
-- `--ocean path.shp` — ocean polygon shapefile (water-polygons-split-3857). Auto-detected from `data/` when omitted.
-- `--ocean-simplified path.shp` — simplified ocean shapefile for z0-7. Auto-detected from `data/` when omitted.
-- `--no-ocean` — disable ocean shapefile processing (skip auto-detection)
-- `--skip-to ocean|sort` — resume from checkpoint
-- `--in-memory` — keep tile blob in RAM (faster for small extracts)
-- `--compression-level 0-10` — compression level (default 6)
-- `--tile-compression gzip|brotli` — tile compression algorithm (default gzip)
-- `--force-sorted` — force compact node store even without PBF header flag
-- `--locations-on-ways` — PBF has node coordinates embedded in ways
-- `-j N` / `--threads N` — thread count (default: logical CPUs)
-- `--sort-budget <size>` — sort chunk memory budget (default 1G). Accepts `256M`, `512M`, `1G`, or raw bytes. Minimum 64M. Lower values reduce peak RSS during PBF processing at the cost of more merge chunks.
-- `--way-budget <size>` — in-flight way processing budget (default 128M standard, 256M in `--locations-on-ways` mode). Minimum 1M.
-- `--rel-budget <size>` — relation batch accumulation budget (default 64M). Minimum 1M.
-- `--assemble-budget <size>` — tile assembly batch budget (default 32M). Minimum 1M.
-- `--fanout-cap-default N` — default fanout cap for all polygon layers (0 = uncapped). Per-layer overrides take precedence.
-- `--fanout-cap layer=N,...` — per-layer fanout caps (e.g. `water_polygons=2048,boundaries=4096`). Features whose bbox tile count exceeds the cap are skipped at that zoom. Comma-separated, strict layer name validation.
+- `-o` / `--output` - output PMTiles path (required)
+- `--tmp-dir path` - temporary directory for sort chunks (default: `data/tilegen_tmp`)
+- `--ocean path.shp` - ocean polygon shapefile (water-polygons-split-3857). Auto-detected from `data/` when omitted.
+- `--ocean-simplified path.shp` - simplified ocean shapefile for z0-7. Auto-detected from `data/` when omitted.
+- `--no-ocean` - disable ocean shapefile processing (skip auto-detection)
+- `--skip-to ocean|sort` - resume from checkpoint
+- `--in-memory` - keep tile blob in RAM (faster for small extracts)
+- `--compression-level 0-10` - compression level (default 6)
+- `--tile-compression gzip|brotli` - tile compression algorithm (default gzip)
+- `--force-sorted` - force compact node store even without PBF header flag
+- `--locations-on-ways` - PBF has node coordinates embedded in ways
+- `-j N` / `--threads N` - thread count (default: logical CPUs)
+- `--sort-budget <size>` - sort chunk memory budget (default 1G). Accepts `256M`, `512M`, `1G`, or raw bytes. Minimum 64M. Lower values reduce peak RSS during PBF processing at the cost of more merge chunks.
+- `--way-budget <size>` - in-flight way processing budget (default 128M standard, 256M in `--locations-on-ways` mode). Minimum 1M.
+- `--rel-budget <size>` - relation batch accumulation budget (default 64M). Minimum 1M.
+- `--assemble-budget <size>` - tile assembly batch budget (default 32M). Minimum 1M.
+- `--fanout-cap-default N` - default fanout cap for all polygon layers (0 = uncapped). Per-layer overrides take precedence.
+- `--fanout-cap layer=N,...` - per-layer fanout caps (e.g. `water_polygons=2048,boundaries=4096`). Features whose bbox tile count exceeds the cap are skipped at that zoom. Comma-separated, strict layer name validation.
 
 ### `elivagar inspect <FILE>`
 
@@ -199,13 +200,13 @@ Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, 
 
 ## Key conventions
 
-- `#[global_allocator]` mimalloc in main.rs — do not remove
-- `.unwrap()` forbidden by clippy — use `expect()` or propagate errors
-- Cast lints are strict — annotate with `#[allow(clippy::cast_*)]` where needed
+- `#[global_allocator]` mimalloc in main.rs - do not remove
+- `.unwrap()` forbidden by clippy - use `expect()` or propagate errors
+- Cast lints are strict - annotate with `#[allow(clippy::cast_*)]` where needed
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)
-- **Test geometry must fit in one tile at the test zoom level.** World-spanning polygons (e.g. [0.1–0.9] Mercator) at z14 iterate 268M tiles and OOM the machine. If a test needs high zoom, use geometry confined to a single tile at that zoom.
-- `ELIVAGAR_NODE_STATS=1` — enables detailed SortedNodeStore diagnostic scan (chunk counts, compression ratio, blob bytes). Runs during PBF phase so it adds to `phase12_ms` — safe for hotpath runs but not for bench timing. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after all timing kv pairs and never affect benchmarks.
-- Memory instrumentation (`3a729ab`) — always-on, not feature-gated. Emits per-phase peak RSS (`phase12_rss_kb`, `ocean_rss_kb`, `sort_rss_kb`, `assemble_rss_kb`), `sort_chunks`, and in-flight HWM counters (`max_way_inflight_bytes`, `max_rel_batch_bytes`, `max_assemble_batch_bytes`). Overhead is negligible: 4 `/proc` reads total, per-block byte estimation, per-feature counter increment. Nothing in hot inner loops.
+- **Test geometry must fit in one tile at the test zoom level.** World-spanning polygons (e.g. [0.1-0.9] Mercator) at z14 iterate 268M tiles and OOM the machine. If a test needs high zoom, use geometry confined to a single tile at that zoom.
+- `ELIVAGAR_NODE_STATS=1` - enables detailed SortedNodeStore diagnostic scan (chunk counts, compression ratio, blob bytes). Runs during PBF phase so it adds to `phase12_ms` - safe for hotpath runs but not for bench timing. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after all timing kv pairs and never affect benchmarks.
+- Memory instrumentation (`3a729ab`) - always-on, not feature-gated. Emits per-phase peak RSS (`phase12_rss_kb`, `ocean_rss_kb`, `sort_rss_kb`, `assemble_rss_kb`), `sort_chunks`, and in-flight HWM counters (`max_way_inflight_bytes`, `max_rel_batch_bytes`, `max_assemble_batch_bytes`). Overhead is negligible: 4 `/proc` reads total, per-block byte estimation, per-feature counter increment. Nothing in hot inner loops.
 
 ## Benchmark discipline
 
@@ -214,7 +215,7 @@ All performance numbers (wall time, phase splits, allocation profiles) MUST incl
 2. **Git commit hash** of the code that was measured
 
 Workflow: commit code first, THEN benchmark, THEN update docs with the commit hash.
-Never write benchmark numbers for uncommitted code — the hash is the anchor.
+Never write benchmark numbers for uncommitted code - the hash is the anchor.
 
 ## Benchmark machines
 
@@ -233,15 +234,15 @@ Never write benchmark numbers for uncommitted code — the hash is the anchor.
 
 README.md performance numbers should always come from plantasjen (the reference host).
 
-## madvise / fadvise — do not add
+## madvise / fadvise - do not add
 
 All madvise hints (MADV_SEQUENTIAL, MADV_RANDOM, MADV_HUGEPAGE, MADV_POPULATE_READ) and
 posix_fadvise hints (FADV_SEQUENTIAL, FADV_DONTNEED) were tried and removed. Every hint
-caused regressions because the node index file is sparse — node IDs go up to ~12B regardless
+caused regressions because the node index file is sparse - node IDs go up to ~12B regardless
 of dataset size, so a Denmark extract produces a ~96 GB file with only ~400 MB populated.
 
 The regression was severe: 45s → 160s on dm6, a 3.5x slowdown. It was bisected to commit
-cdc382a ("Implement Tier 1 Linux I/O hints"). The MADV_HUGEPAGE hint was the primary culprit —
+cdc382a ("Implement Tier 1 Linux I/O hints"). The MADV_HUGEPAGE hint was the primary culprit -
 the kernel tries to assemble 2 MB huge pages from a file that is 99%+ holes, causing massive
 page fault overhead. A "50% of RAM" threshold guard was in place but used file_len (~96 GB)
 instead of the actual working set (~400 MB), so the guard never triggered correctly.
@@ -252,8 +253,8 @@ without benchmarking on a sparse-file workload first.
 
 ## Data
 
-- `data/tilegen_tmp/` — temporary sort chunks (inside gitignored `data/`)
-- Ocean shapefile not included — pass via `--ocean` flag
+- `data/tilegen_tmp/` - temporary sort chunks (inside gitignored `data/`)
+- Ocean shapefile not included - pass via `--ocean` flag
 
 ## Data preparation (pbfhogg commands)
 
@@ -261,7 +262,7 @@ Elivagar reads PBF files produced by pbfhogg. The production pipeline has three 
 
 ### 1. Generate indexed PBF (cat)
 
-`cat` embeds blob-level indexdata automatically when writing. Steps 2 and 3 are much faster with indexed PBFs. The passthrough path (no `--type`) adds indexdata without re-compressing blobs — use this for planet-scale files.
+`cat` embeds blob-level indexdata automatically when writing. Steps 2 and 3 are much faster with indexed PBFs. The passthrough path (no `--type`) adds indexdata without re-compressing blobs - use this for planet-scale files.
 
 ```
 brokkr cat raw.osm.pbf -o indexed.osm.pbf
@@ -281,7 +282,7 @@ Merge an OSC changeset into the indexed PBF. Uses indexdata for fast blob-level 
 brokkr apply-changes indexed.osm.pbf changes.osc.gz -o merged.osm.pbf
 ```
 
-With `--locations-on-ways`, apply-changes preserves and updates inline way-node coordinates through diffs. This eliminates the need to re-run step 3 after each merge — only needed once for bootstrapping.
+With `--locations-on-ways`, apply-changes preserves and updates inline way-node coordinates through diffs. This eliminates the need to re-run step 3 after each merge - only needed once for bootstrapping.
 
 ```
 brokkr apply-changes indexed.osm.pbf changes.osc.gz -o merged.osm.pbf --locations-on-ways
@@ -289,16 +290,16 @@ brokkr apply-changes indexed.osm.pbf changes.osc.gz -o merged.osm.pbf --location
 
 ### 3. Generate locations PBF (add-locations-to-ways)
 
-Embed resolved node coordinates into ways. This is the PBF variant elivagar's tile pipeline reads — ways arrive with geometry already resolved via `Way::node_locations()`, avoiding a separate node lookup pass.
+Embed resolved node coordinates into ways. This is the PBF variant elivagar's tile pipeline reads - ways arrive with geometry already resolved via `Way::node_locations()`, avoiding a separate node lookup pass.
 
 ```
 brokkr add-locations-to-ways merged.osm.pbf -o locations.osm.pbf
 ```
 
 Options:
-- `--keep-untagged-nodes` — retain untagged nodes in output
-- `--index-type dense` (default) — file-backed mmap, fastest when working set fits in RAM
-- `--index-type external` — bounded-memory double radix join, all sequential I/O. Best for memory-constrained hosts. Planet (87 GB): 24 min, 17 GB peak RAM on a 30 GB host. Requires sorted PBF input and ~300 GB temp disk at planet scale.
+- `--keep-untagged-nodes` - retain untagged nodes in output
+- `--index-type dense` (default) - file-backed mmap, fastest when working set fits in RAM
+- `--index-type external` - bounded-memory double radix join, all sequential I/O. Best for memory-constrained hosts. Planet (87 GB): 24 min, 17 GB peak RAM on a 30 GB host. Requires sorted PBF input and ~300 GB temp disk at planet scale.
 
 ### Notes
 
@@ -306,25 +307,20 @@ Steps 2 and 3 (and `sort`) expect indexed PBFs by default and will error if inde
 
 For steady-state operation, use `apply-changes --locations-on-ways` (step 2) instead of running steps 2 and 3 separately. Step 3 is only needed once to bootstrap the initial enriched PBF.
 
-## Review tool
+## Spec loop (codex review + implement)
 
-`review` fans out code review queries to persistent AI sessions (Claude Code + Codex), each primed as a competitor project developer. Configured in `.review.toml`.
+The old `review` fan-out tool is gone. Substantive changes - geometry/rendering work especially - go through the spec loop instead:
 
-Three competitor archetypes, grouped as `competitors`:
-- `planetiler` — Java reference implementation. Source at `research/planetiler/`.
-- `tilemaker` — C++ Shortbread generator. Source at `research/tilemaker/`.
-- `tippecanoe` — Felt's tile tool. Source at `research/tippecanoe/`.
+1. **Author a technical implementation spec** to the standard in `reference/technical-implementation-spec.md` (every brick, exact copy-pasteable verification commands, keep/revert landings ordered so `brokkr check` + `elivagar verify` stay green at each boundary). Specs live in `specs/`.
+2. **Review before code exists**: `python3 scripts/codex-review.py '<one-line prompt>'` - codex gpt-5.5 at xhigh reasoning, no goal. Point it at the spec file and ask it to refute the design: wrong premises, missing bricks, unverifiable gates. Revise the spec until review finds no structural holes.
+3. **Implement from the spec**: `python3 scripts/codex-implement.py [--effort xhigh] '<one-line prompt>'` - codex gpt-5.5, /goal-driven, medium effort default. The implementer works from the spec alone; if it needs information the spec doesn't have, that's a spec defect - fix the spec, not the run.
+4. **Never resume a codex run.** A run that ends with its goal unmet is replaced by a fresh run.
 
-Each archetype has a Claude session and a Codex session (6 total). The sessions are primed with the role "you are a [project] developer we've hired to help" and have access to both the competitor source and elivagar source.
+Both scripts take exactly one argument: the prompt, one line, single-quoted. They print a clean digest (final message, token usage, transcript path); raw NDJSON never reaches the caller. Scratch output goes to `.brokkr/codex/`.
 
-Usage:
-- `echo "question" | review competitors` — ask all 6 sessions
-- `echo "question" | review planetiler` — ask planetiler sessions about staged changes
-- `echo "question" | review competitors --dry-run` — preview prompts without sending
+Competitor reference sources remain available for research: `research/planetiler/` (Java), `research/tilemaker/` (C++), `research/tippecanoe/` (C++), `research/stedsplakat/` (TypeScript/JSTS Overpass→SVG poster renderer).
 
-When using `--anchor`, the global prefix does not reinforce each session's identity. Include a short reminder in the question text itself, e.g. "As a Planetiler/Tilemaker/Tippecanoe developer, how would you..." — or skip `--anchor` and rely on the sessions' initial priming.
-
-**Use this tool before implementing geometry/rendering changes.** Write up the problem, send to competitors, wait for answers. The write-up + review cycle is faster than implement + build + discover it's wrong.
+**Write the spec and get it reviewed before implementing geometry/rendering changes.** The write-up + review cycle is faster than implement + build + discover it's wrong. The failure ledger in `notes/rendering-fix-log.md` is part of any geometry spec's survey - a spec that re-proposes a logged failure without addressing why it failed is refuted by its own survey.
 
 ## Subagents
 Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.

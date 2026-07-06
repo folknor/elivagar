@@ -9,3 +9,5 @@ data
 .bench_pzoom.log
 tile_weights.tsv.gz
 research
+scripts/validate/node_modules
+__pycache__/

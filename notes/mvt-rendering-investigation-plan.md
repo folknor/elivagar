@@ -8,8 +8,8 @@ implemented without improvement.
 
 **Key diagnostic fact**: SVG and JSTS consume the same underlying geometry data
 and produce correct results. Only the MapLibre GL JS consumer shows artifacts.
-This strongly suggests the problem is in the MVT byte encoding — not the
-geometry pipeline itself — since MapLibre's built-in protobuf decoder interprets
+This strongly suggests the problem is in the MVT byte encoding - not the
+geometry pipeline itself - since MapLibre's built-in protobuf decoder interprets
 something differently than SVG/JSTS decoders.
 
 ## Results (2026-03-24)
@@ -21,12 +21,12 @@ All encoder-focused approaches have been executed. None changed the artifacts:
 | Approach | Result | Commit |
 |---|---|---|
 | 0: Protobuf field reordering (15,1,5,2,3,4 → 1,2,3,4,5,15) | No visual change | `e1f0862` |
-| 0b: Winding order | Already correct (close_and_orient_cw/ccw at all emit sites) | — |
-| 1: Encoder swap (mvt crate, Option B — geometry-level) | Much worse (third-party encoder produces worse output from same data) | — |
-| 3: Round-trip re-encode (@mapbox/vector-tile decode → vt-pbf re-encode) | Identical artifacts (32,667 tiles, 0 decode errors) | — |
+| 0b: Winding order | Already correct (close_and_orient_cw/ccw at all emit sites) | - |
+| 1: Encoder swap (mvt crate, Option B - geometry-level) | Much worse (third-party encoder produces worse output from same data) | - |
+| 3: Round-trip re-encode (@mapbox/vector-tile decode → vt-pbf re-encode) | Identical artifacts (32,667 tiles, 0 decode errors) | - |
 | 5: MVT compliance validation (Rust verify + vtvalidate) | Found 3 malformed tiles from u16 wire format bug (fixed in `197f6b3`), 15 self-intersecting ocean rings. No other spec violations. | `197f6b3` |
 
-**Conclusion**: The problem is upstream of the encoder — in the polygon
+**Conclusion**: The problem is upstream of the encoder - in the polygon
 coordinates produced by Sutherland-Hodgman clipping. S-H produces
 self-intersecting (figure-8) rings when clipping concave coastline polygons.
 SVG handles these correctly via `fill-rule="evenodd"` (winding-agnostic).
@@ -43,7 +43,7 @@ for diagnosis but may be useful for validating the geometry fix.
 
 ---
 
-## Approach 0: Protobuf Field Ordering (check first — 10 minutes)
+## Approach 0: Protobuf Field Ordering (check first - 10 minutes)
 
 **Status**: Not yet checked.
 
@@ -55,7 +55,7 @@ field 15 (version)  →  field 1 (name)  →  field 5 (extent)  →
 field 2 (features)  →  field 3 (keys)  →  field 4 (values)
 ```
 
-That's **15, 1, 5, 2, 3, 4** — not monotonically increasing.
+That's **15, 1, 5, 2, 3, 4** - not monotonically increasing.
 
 The protobuf wire format spec technically allows fields in any order. However:
 
@@ -64,7 +64,7 @@ The protobuf wire format spec technically allows fields in any order. However:
    MapLibre Native, or fast-path JS parsers) may assume monotonic field order
    and behave incorrectly when encountering field 15 before field 1.
 3. `@mapbox/vector-tile` (the JS decoder MapLibre GL JS uses) is built on `pbf`
-   (npm), which does handle out-of-order fields — but there may be edge cases
+   (npm), which does handle out-of-order fields - but there may be edge cases
    around repeated fields (features are repeated field 2, interleaved between
    keys/values which are fields 3/4).
 4. The MVT spec itself lists fields as: name=1, features=2, keys=3, values=4,
@@ -79,14 +79,14 @@ field 4 (values)  →  field 5 (extent)  →  field 15 (version)
 ```
 
 This is trivial (move 3 lines), zero-risk, and eliminates a variable. Do this
-first regardless of whether it's the root cause — there's no reason to deviate
+first regardless of whether it's the root cause - there's no reason to deviate
 from what every other tile generator does.
 
 ---
 
 ## Approach 0b: Winding Order Enforcement (likely already tried)
 
-**Status**: Probably attempted in the 160-hour branch — verify before
+**Status**: Probably attempted in the 160-hour branch - verify before
 re-implementing.
 
 Elivagar's `encode_polygon` (`src/mvt/mod.rs:436`) faithfully encodes whatever
@@ -105,13 +105,13 @@ because MVT uses screen coordinates with a flipped Y axis.
 ### Why SVG works but MapLibre doesn't
 
 Elivagar's SVG renderer (`src/svg.rs`) uses `fill-rule="evenodd"`. The evenodd
-rule determines inside/outside by counting ray crossings — it is completely
+rule determines inside/outside by counting ray crossings - it is completely
 **winding-agnostic**. A polygon with backwards winding looks identical.
 
 MapLibre GL JS's polygon fill shader uses the **nonzero** winding rule (the GPU
 default via stencil buffer operations). With nonzero, winding order determines
 which side of a ring is "inside." If an exterior ring is wound CCW instead of
-CW, the fill appears inverted — or if interior rings match the exterior winding,
+CW, the fill appears inverted - or if interior rings match the exterior winding,
 holes disappear and overlap regions create artifacts.
 
 JSTS is also typically winding-agnostic for display (it normalizes internally).
@@ -130,12 +130,12 @@ This is the single most common cause of "looks fine everywhere except MapLibre."
 4. **`geometry.rs` simplification (Douglas-Peucker)**: Simplification preserves
    winding but can create self-intersections that confuse the nonzero fill rule.
 5. **Ocean shapefile processing**: The ocean shapefiles have their own winding
-   convention — if not normalized to MVT convention, ocean polygons would be
+   convention - if not normalized to MVT convention, ocean polygons would be
    affected.
 
 ### Fix
 
-Add a winding-order enforcement step just before `encode_polygon` — compute the
+Add a winding-order enforcement step just before `encode_polygon` - compute the
 signed area of each ring and reverse if needed:
 
 ```rust
@@ -152,7 +152,7 @@ fn signed_area_2x(ring: &[(i32, i32)]) -> i64 {
 ```
 
 If this has already been tried in the other branch and didn't help, that's a
-valuable data point — it means the winding order is already correct (or the
+valuable data point - it means the winding order is already correct (or the
 problem is elsewhere). Worth confirming by running Approach 5 (vtvalidate) which
 reports winding violations.
 
@@ -171,11 +171,11 @@ clipping, simplification, sort records, etc.).
 
 - **crates.io**: `mvt` (v0.10.3, Rust 2024 edition, actively maintained)
 - **Spec**: MVT v2.1
-- **API**: Builder pattern — create `Tile`, add `Layer`s, build `Feature`s via
+- **API**: Builder pattern - create `Tile`, add `Layer`s, build `Feature`s via
   `GeomEncoder` (takes `GeomType` + `.point(x, y)` calls), then
   `tile.to_bytes()` to produce protobuf.
 - **Assessment**: Best drop-in candidate. Focused encoding library (not a tile
-  server). Operates at a higher abstraction level than our raw command encoder —
+  server). Operates at a higher abstraction level than our raw command encoder -
   it takes float tile coordinates and produces valid protobuf. Adds some
   overhead vs our encoder, but this is a diagnostic tool, not a production
   replacement.
@@ -196,13 +196,13 @@ The swap point is `encode_tile_into()` in `src/mvt/mod.rs`. This function takes
 has features with pre-encoded `geometry: Vec<u32>` (MVT command sequences) and
 interned `tags: Vec<(u16, u16)>`.
 
-**Option A — Replace at the protobuf level**: Keep our `LayerBuilder` pipeline
+**Option A - Replace at the protobuf level**: Keep our `LayerBuilder` pipeline
 intact. Write a new `encode_tile_into` that reads the same `LayerBuilder` data
 but feeds it through the `mvt` crate's encoder instead of our hand-rolled
 protobuf writer. This tests whether our protobuf byte generation is wrong.
 
-**Option B — Replace at the geometry level**: Feed raw (x, y) coordinates (pre
-MVT-command-encoding) into the `mvt` crate's `GeomEncoder`. This is deeper —
+**Option B - Replace at the geometry level**: Feed raw (x, y) coordinates (pre
+MVT-command-encoding) into the `mvt` crate's `GeomEncoder`. This is deeper -
 it also tests whether our MVT command encoding (`encode_polygon`,
 `encode_linestring`, etc.) is wrong. More work to wire up, but more thorough.
 
@@ -216,7 +216,7 @@ Option B to test command encoding. If neither fixes it, the encoder is innocent.
 |---|---|
 | Option A fixes it | Bug in protobuf field encoding (tag ordering, length-delimited framing, value encoding) |
 | Option B fixes it but A doesn't | Bug in MVT command sequences (MoveTo/LineTo/ClosePath encoding, zigzag, cursor state) |
-| Neither fixes it | Encoder is innocent — problem is in geometry data upstream |
+| Neither fixes it | Encoder is innocent - problem is in geometry data upstream |
 
 ---
 
@@ -227,7 +227,7 @@ tileset, tile by tile, field by field.
 
 **Concept**: Generate tiles for the same region (Denmark) with both elivagar and
 Planetiler. Decode both with a reference MVT decoder. Structurally diff every
-field. This produces concrete, specific differences — not "something looks
+field. This produces concrete, specific differences - not "something looks
 wrong" but "tile z5/16/10: elivagar water_polygons ring 0 has CCW winding,
 Planetiler has CW."
 
@@ -266,7 +266,7 @@ Planetiler has CW."
        ring counts, tag keys/values
    - Produces a summary report categorizing discrepancies
 
-3. **Sampling strategy**: Don't compare every tile — start with a stratified
+3. **Sampling strategy**: Don't compare every tile - start with a stratified
    sample:
    - All tiles at z0-z4 (small count, high impact)
    - Random sample of ~100 tiles at z5-z10
@@ -315,9 +315,9 @@ re-encoded tiles to MapLibre.
 
 ### Tools
 
-- **Decode**: `@mapbox/vector-tile` (Node.js) — this is what MapLibre uses
+- **Decode**: `@mapbox/vector-tile` (Node.js) - this is what MapLibre uses
   internally, so it reads our bytes the same way MapLibre would.
-- **Re-encode**: `vt-pbf` (npm package) — takes decoded VectorTile objects and
+- **Re-encode**: `vt-pbf` (npm package) - takes decoded VectorTile objects and
   re-serializes to protobuf. Or `geojson-vt` + `vt-pbf` for a GeoJSON
   intermediate.
 
@@ -336,7 +336,7 @@ re-encoded tiles to MapLibre.
      This would point to an obscure encoding edge case.
    - **Re-encoded tiles still render incorrectly**: The reference decoder itself
      reads garbage from our tiles. This means the protobuf structure is more
-     fundamentally wrong — field numbers, wire types, length prefixes, etc.
+     fundamentally wrong - field numbers, wire types, length prefixes, etc.
 
 ### Note on MapLibre's decoder
 
@@ -344,11 +344,11 @@ MapLibre GL JS uses `@mapbox/vector-tile` as its MVT decoder (it's a direct
 dependency). So if `@mapbox/vector-tile` can decode our tiles correctly and
 `vt-pbf` re-encodes them correctly, the re-encoded tiles *should* render
 identically. If they do render correctly, the difference must be in the raw
-protobuf byte patterns — perhaps field ordering, varint encoding quirks, or
+protobuf byte patterns - perhaps field ordering, varint encoding quirks, or
 length-delimited framing that confuses a fast-path parser but not the standard
 decoder.
 
-Actually — wait. If MapLibre uses `@mapbox/vector-tile` as its decoder, then
+Actually - wait. If MapLibre uses `@mapbox/vector-tile` as its decoder, then
 this round-trip test may produce identical results by definition. The real value
 of this approach is if we use a *different* decoder (e.g., the Python
 `mapbox-vector-tile`) to ensure that the decoded geometry is correct independent
@@ -360,7 +360,7 @@ Two variants:
 
 **Variant A**: Decode with `@mapbox/vector-tile`, inspect the decoded geometry
 programmatically (check feature counts, coordinate ranges, winding orders).
-Don't re-encode — just verify the decode output is sane.
+Don't re-encode - just verify the decode output is sane.
 
 **Variant B**: Decode with Python `mapbox-vector-tile` (completely independent
 decoder), re-encode with `mapbox-vector-tile`'s encoder, write to new archive,
@@ -380,7 +380,7 @@ commit, testing hundreds of tiles in seconds.
 - Official Node.js bindings for MapLibre Native
 - `map.render()` → raw RGBA buffer → convert to PNG with `sharp`
 - Requires OpenGL on Linux (Mesa/llvmpipe for headless)
-- Most direct approach — no browser overhead
+- Most direct approach - no browser overhead
 
 **Option B: Puppeteer + MapLibre GL JS**
 - Run MapLibre GL JS in headless Chromium
@@ -423,7 +423,7 @@ commit, testing hundreds of tiles in seconds.
 
 ### Style
 
-Use a minimal MapLibre style that exercises all 26 Shortbread layers — you want
+Use a minimal MapLibre style that exercises all 26 Shortbread layers - you want
 to test all layers, not just water. The existing Shortbread reference style
 works. Alternatively, render each layer group separately (water, land, streets,
 etc.) so you can attribute artifacts to specific layers.
@@ -432,7 +432,7 @@ etc.) so you can attribute artifacts to specific layers.
 
 This approach is most valuable *after* you've fixed the artifacts (to prevent
 regressions), or when combined with a reference tileset (Planetiler) to detect
-differences. It doesn't tell you *what* is wrong — only *where* and *whether*
+differences. It doesn't tell you *what* is wrong - only *where* and *whether*
 something is wrong.
 
 ---
@@ -457,7 +457,7 @@ decoders are lenient about.
 **`vtzero` (Mapbox, C++)**
 - Header-only C++ library
 - Most thorough low-level validator available
-- `decode_polygon_geometry()` with handler callback — `ring_end()` tells you
+- `decode_polygon_geometry()` with handler callback - `ring_end()` tells you
   if ring is outer, inner, or invalid (wrong winding)
 - Throws `geometry_exception` for invalid command sequences,
   `format_exception` for invalid protobuf
@@ -515,21 +515,21 @@ Common MVT spec violations that SVG/JSTS tolerate but MapLibre does not:
 
 ## Recommended Execution Order
 
-1. **Approach 5 (Compliance validation)** — Fastest to set up. Write a 50-line
+1. **Approach 5 (Compliance validation)** - Fastest to set up. Write a 50-line
    Node.js script, run over all tiles, see if any fail. If they do, you have
    concrete spec violations to fix. Can be done in an afternoon.
 
-2. **Approach 1 (Encoder swap)** — Clean bisection of the problem. 1-2 days.
+2. **Approach 1 (Encoder swap)** - Clean bisection of the problem. 1-2 days.
    Start with Option A (protobuf-level swap).
 
-3. **Approach 2 (Binary diff)** — If approach 1 clears the encoder, this tells
+3. **Approach 2 (Binary diff)** - If approach 1 clears the encoder, this tells
    you what's different in the data. Pairs well with approach 5 findings.
 
-4. **Approach 4 (Visual regression)** — Set up in parallel with the above.
+4. **Approach 4 (Visual regression)** - Set up in parallel with the above.
    Even before you fix the bug, this gives you automated detection of which
    tiles are affected, and later prevents regressions.
 
-5. **Approach 3 (Round-trip re-encode)** — Only needed if approaches 1-2 don't
+5. **Approach 3 (Round-trip re-encode)** - Only needed if approaches 1-2 don't
    isolate the problem. The decode→re-encode cycle helps if the issue is in
    subtle protobuf byte-level encoding that validators don't catch.
 
@@ -539,16 +539,16 @@ Common MVT spec violations that SVG/JSTS tolerate but MapLibre does not:
 
 Before doing any of the above, verify these in 30 minutes:
 
-- [ ] Run `tippecanoe-decode` on a few tiles from the elivagar output — does it
+- [ ] Run `tippecanoe-decode` on a few tiles from the elivagar output - does it
   warn about anything?
 - [ ] Check if elivagar's `encode_polygon` respects MVT winding order (CW
   exterior, CCW interior in screen coordinates). The SVG renderer uses
-  `evenodd` fill-rule which is winding-agnostic — if the polygon encoder
+  `evenodd` fill-rule which is winding-agnostic - if the polygon encoder
   doesn't enforce winding, SVG would look fine but MapLibre would not.
 - [ ] Compare the protobuf field order in elivagar's encoder vs the MVT spec.
-  Some decoders assume fields appear in field-number order (1, 2, 3, 4, 5…).
+  Some decoders assume fields appear in field-number order (1, 2, 3, 4, 5...).
   Elivagar writes: version (15), name (1), extent (5), features (2), keys (3),
-  values (4). That's 15, 1, 5, 2, 3, 4 — not monotonically increasing. A
+  values (4). That's 15, 1, 5, 2, 3, 4 - not monotonically increasing. A
   strict decoder could choke on this.
 - [ ] Verify that the `extent` field value (4096) in the protobuf matches the
   coordinate space used by `encode_polygon`/`encode_linestring`. If geometry

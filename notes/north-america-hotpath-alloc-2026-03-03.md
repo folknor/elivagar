@@ -24,14 +24,14 @@ Dataset:
 
 Top allocators (cumulative):
 
-1. `elivagar::pipeline::process_raw_way` — `224.9 GB`
-2. `elivagar::geometry::for_each_zoom_simplified` — `148.4 GB`
-3. `elivagar::pipeline::emit_polygon_feature` — `85.2 GB`
-4. `elivagar::pipeline::process_prepared_relation_into` — `69.9 GB`
-5. `elivagar::pipeline::emit_line_feature` — `63.2 GB`
-6. `elivagar::geometry::for_each_zoom_simplified_multi` — `60.4 GB`
-7. `elivagar::pipeline::emit_multipolygon_feature` — `48.9 GB`
-8. `elivagar::geometry::clip_polygon_into` — `44.8 GB`
+1. `elivagar::pipeline::process_raw_way` - `224.9 GB`
+2. `elivagar::geometry::for_each_zoom_simplified` - `148.4 GB`
+3. `elivagar::pipeline::emit_polygon_feature` - `85.2 GB`
+4. `elivagar::pipeline::process_prepared_relation_into` - `69.9 GB`
+5. `elivagar::pipeline::emit_line_feature` - `63.2 GB`
+6. `elivagar::geometry::for_each_zoom_simplified_multi` - `60.4 GB`
+7. `elivagar::pipeline::emit_multipolygon_feature` - `48.9 GB`
+8. `elivagar::geometry::clip_polygon_into` - `44.8 GB`
 
 Interpretation from baseline:
 
@@ -62,7 +62,7 @@ Interpretation from baseline:
   - `phase12_ms -1.4%`
 - Decision: keep (small but positive throughput improvement).
 
-### Relation-path pass 3 (`9b7b046`) — rejected
+### Relation-path pass 3 (`9b7b046`) - rejected
 
 - Single-outer `pair_rings` fast path regressed Germany wall by `+3.9%` with no RSS benefit.
 - Reverted in `4382006`.

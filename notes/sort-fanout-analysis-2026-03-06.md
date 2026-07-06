@@ -1,4 +1,4 @@
-# Sort Fanout Analysis — North America vs Germany
+# Sort Fanout Analysis - North America vs Germany
 
 Commit `81c4d6b` (plantasjen), locations-on-ways, defaults.
 
@@ -14,7 +14,7 @@ Commit `81c4d6b` (plantasjen), locations-on-ways, defaults.
 | features | 146M | 511M | 3.5x |
 | ways | 69.6M | 208.9M | 3.0x |
 
-Input grows 3.4x but sort bytes grow 4.5x — 30% superlinear amplification.
+Input grows 3.4x but sort bytes grow 4.5x - 30% superlinear amplification.
 
 ## NA per-layer breakdown (top 8 by sort bytes)
 
@@ -31,13 +31,13 @@ Input grows 3.4x but sort bytes grow 4.5x — 30% superlinear amplification.
 
 Top 3 layers = 32.3 GB = 63% of all sort data.
 
-## Zoom distribution — polygon layers vs non-polygon
+## Zoom distribution - polygon layers vs non-polygon
 
 ### water_polygons (10.9 GB, 70M records, 11 zoom levels)
 
 | Zoom | Records | Cumul % | Growth from prev |
 |------|--------:|--------:|-----------------:|
-| z4 | 1,681 | 0.0% | — |
+| z4 | 1,681 | 0.0% | - |
 | z5 | 4,765 | 0.0% | 2.8x |
 | z6 | 12,310 | 0.0% | 2.6x |
 | z7 | 83,909 | 0.1% | 6.8x |
@@ -56,7 +56,7 @@ tapering z11+ (subpixel rejection kicking in for small features).
 
 | Zoom | Records | Cumul % | Growth from prev |
 |------|--------:|--------:|-----------------:|
-| z7 | 42,297 | 0.1% | — |
+| z7 | 42,297 | 0.1% | - |
 | z8 | 202,184 | 0.5% | 4.8x |
 | z9 | 646,054 | 2.0% | 3.2x |
 | z10 | 3,101,322 | 9.0% | 4.8x |
@@ -65,9 +65,9 @@ tapering z11+ (subpixel rejection kicking in for small features).
 | z13 | 10,219,620 | 63.7% | 1.3x |
 | z14 | 16,141,210 | 100% | 1.6x |
 
-Same pattern. z9→z10 is 4.8x — large land polygons exploding across tiles.
+Same pattern. z9→z10 is 4.8x - large land polygons exploding across tiles.
 
-### streets (12.1 GB, 158.8M records) — for contrast
+### streets (12.1 GB, 158.8M records) - for contrast
 
 | Zoom | Records | % |
 |------|--------:|--:|
@@ -79,7 +79,7 @@ Same pattern. z9→z10 is 4.8x — large land polygons exploding across tiles.
 
 Streets are z13+z14 dominated (82%). Linear growth, not the superlinear driver.
 
-### buildings (7.3 GB) — 100% z14. Pure linear scaling.
+### buildings (7.3 GB) - 100% z14. Pure linear scaling.
 
 ## Root cause
 
@@ -99,13 +99,13 @@ Pacific islands will push this further.
 **Target**: Reduce the number of sort records generated, especially for polygon layers
 at mid-zoom (z8-z12) where geometric growth is steepest.
 
-**Concrete options** (quality/coverage tradeoffs — not free wins, need visual validation):
+**Concrete options** (quality/coverage tradeoffs - not free wins, need visual validation):
 
 1. **Zoom-dependent subpixel area threshold for polygons**
    - Current: uniform 1px threshold across all zooms
    - Proposed: 4px² at z<=10, 2px² at z11-z12, 1px at z13+ for polygon layers
    - Impact: eliminates small-but-technically-visible features at mid-zoom
-   - Estimated savings: 2-4 GB (conservative — depends on feature size distribution)
+   - Estimated savings: 2-4 GB (conservative - depends on feature size distribution)
 
 2. **Tile-touch cap per feature per zoom**
    - If a single feature would touch >N tiles at zoom z, skip it at that zoom
@@ -119,11 +119,11 @@ at mid-zoom (z8-z12) where geometric growth is steepest.
    - water_polygons currently starts at z4. Few users zoom to z4-z6 with water detail.
    - Raising water_polygons min_zoom to z7 eliminates 103K records (trivial savings)
    - More impactful: raise land min_zoom from z7 to z8 (saves 42K records, also trivial)
-   - Verdict: not the lever — the volume is at z10+
+   - Verdict: not the lever - the volume is at z10+
 
 **Best first target**: Option 2 (tile-touch cap) as a guardrail behind a flag
 (default off). Dropping a feature at zoom z can create visible pop/flicker if
-style differs by zoom — overzoom continuity is not guaranteed. Must validate
+style differs by zoom - overzoom continuity is not guaranteed. Must validate
 with visual/parity samples before any default change.
 
 ### Priority 2: Polygon record weight reduction
@@ -170,16 +170,16 @@ polygon layers at mid-zoom, tuned to reduce B/rec for the heaviest geometry.
 
 Key findings from Denmark p50/p95/p99/max tiles_touched:
 
-- **boundaries z14**: p50=16, p95=2864, max=2864 — extreme tail from coastline
-- **ferries z14**: p50=8, p95=512, max=1258 — long ferry routes
-- **water_polygons z14**: p50=1, p95=2, max=205 — most small, tail moderate
-- **land z14**: p50=1, p95=4, max=207 — similar to water_polygons
-- **streets z14**: p50=1, p95=2, max=32 — well-behaved
-- **buildings z14**: p50=1, p95=1, max=14 — tight distribution
+- **boundaries z14**: p50=16, p95=2864, max=2864 - extreme tail from coastline
+- **ferries z14**: p50=8, p95=512, max=1258 - long ferry routes
+- **water_polygons z14**: p50=1, p95=2, max=205 - most small, tail moderate
+- **land z14**: p50=1, p95=4, max=207 - similar to water_polygons
+- **streets z14**: p50=1, p95=2, max=32 - well-behaved
+- **buildings z14**: p50=1, p95=1, max=14 - tight distribution
 
 The tail is concentrated in a few layers (boundaries, ferries) and in polygon
 layers (water_polygons, land) at the max. The p95 for polygon layers is very
-low (1-4) — the amplification comes from the tail, not the median feature.
+low (1-4) - the amplification comes from the tail, not the median feature.
 
 This means tile-touch cap would primarily affect the tail features. For NA,
 the tail will be much larger (Great Lakes, coastlines, major boundaries).

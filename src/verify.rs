@@ -382,6 +382,36 @@ fn zigzag_decode_u32(v: u32) -> i64 {
     i64::from(v >> 1) ^ -i64::from(v & 1)
 }
 
+/// Decode and validate a single point (dx,dy pair) from the command stream,
+/// advancing the cursor and accumulating absolute coordinates.
+fn consume_geometry_point(
+    commands: &[u32],
+    i: &mut usize,
+    cx: &mut i64,
+    cy: &mut i64,
+    delta_limit: i64,
+) -> Result<(), String> {
+    if *i + 1 >= commands.len() {
+        return Err("too few points in geometry".to_string());
+    }
+    let dx = zigzag_decode_u32(commands[*i]);
+    let dy = zigzag_decode_u32(commands[*i + 1]);
+    *i += 2;
+    if dx.abs() > delta_limit || dy.abs() > delta_limit {
+        return Err(format!(
+            "suspicious geometry delta ({dx},{dy}) exceeds limit {delta_limit}"
+        ));
+    }
+    *cx += dx;
+    *cy += dy;
+    if cx.abs() > MVT_COORD_ABS_LIMIT || cy.abs() > MVT_COORD_ABS_LIMIT {
+        return Err(format!(
+            "geometry coordinate ({cx},{cy}) exceeds absolute limit {MVT_COORD_ABS_LIMIT}"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_geometry_commands(
     commands: &[u32],
     geom_type: u64,
@@ -405,7 +435,7 @@ fn validate_geometry_commands(
     // Maximum valid count: vtzero uses raw_byte_len / 2 (each varint is ≥1 byte,
     // each point needs 2 varints). This is a generous upper bound that avoids
     // false positives on large but valid geometries.
-    let max_count = (raw_byte_len / 2) as u32;
+    let max_count = u32::try_from(raw_byte_len / 2).unwrap_or(u32::MAX);
 
     let mut i = 0usize;
     let mut cx: i64 = 0;
@@ -435,24 +465,7 @@ fn validate_geometry_commands(
                 }
                 expect_moveto = false;
                 for _ in 0..count {
-                    if i + 1 >= commands.len() {
-                        return Err("too few points in geometry".to_string());
-                    }
-                    let dx = zigzag_decode_u32(commands[i]);
-                    let dy = zigzag_decode_u32(commands[i + 1]);
-                    i += 2;
-                    if dx.abs() > delta_limit || dy.abs() > delta_limit {
-                        return Err(format!(
-                            "suspicious geometry delta ({dx},{dy}) exceeds limit {delta_limit}"
-                        ));
-                    }
-                    cx += dx;
-                    cy += dy;
-                    if cx.abs() > MVT_COORD_ABS_LIMIT || cy.abs() > MVT_COORD_ABS_LIMIT {
-                        return Err(format!(
-                            "geometry coordinate ({cx},{cy}) exceeds absolute limit {MVT_COORD_ABS_LIMIT}"
-                        ));
-                    }
+                    consume_geometry_point(commands, &mut i, &mut cx, &mut cy, delta_limit)?;
                     if geom_type == 3 {
                         ring_points = 1;
                     }
@@ -464,24 +477,7 @@ fn validate_geometry_commands(
                     return Err(format!("LineTo count too large ({count} > {max_count})"));
                 }
                 for _ in 0..count {
-                    if i + 1 >= commands.len() {
-                        return Err("too few points in geometry".to_string());
-                    }
-                    let dx = zigzag_decode_u32(commands[i]);
-                    let dy = zigzag_decode_u32(commands[i + 1]);
-                    i += 2;
-                    if dx.abs() > delta_limit || dy.abs() > delta_limit {
-                        return Err(format!(
-                            "suspicious geometry delta ({dx},{dy}) exceeds limit {delta_limit}"
-                        ));
-                    }
-                    cx += dx;
-                    cy += dy;
-                    if cx.abs() > MVT_COORD_ABS_LIMIT || cy.abs() > MVT_COORD_ABS_LIMIT {
-                        return Err(format!(
-                            "geometry coordinate ({cx},{cy}) exceeds absolute limit {MVT_COORD_ABS_LIMIT}"
-                        ));
-                    }
+                    consume_geometry_point(commands, &mut i, &mut cx, &mut cy, delta_limit)?;
                     if geom_type == 3 {
                         ring_points += 1;
                     }

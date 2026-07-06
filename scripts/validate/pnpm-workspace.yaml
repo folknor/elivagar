@@ -1,0 +1,3 @@
+allowBuilds:
+  '@mapbox/vtvalidate': true
+  aws-sdk: true

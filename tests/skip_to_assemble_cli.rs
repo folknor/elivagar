@@ -30,7 +30,7 @@ fn write_tiny_pbf(path: &Path) {
         1,
         590_500_000,
         100_500_000,
-        &[("amenity", "cafe"), ("name", "Test Cafe")],
+        [("amenity", "cafe"), ("name", "Test Cafe")],
         Some(&meta),
     );
     if let Some(bytes) = bb.take().expect("take block") {
@@ -63,7 +63,7 @@ fn write_missing_ref_pbf(path: &Path) {
         1,
         590_500_000,
         100_500_000,
-        &[("amenity", "cafe"), ("name", "Test Cafe")],
+        [("amenity", "cafe"), ("name", "Test Cafe")],
         Some(&meta),
     );
     if let Some(bytes) = bb.take().expect("take node block") {
@@ -73,7 +73,7 @@ fn write_missing_ref_pbf(path: &Path) {
     // Block 2: way with one missing node reference.
     bb.add_way(
         10,
-        &[("highway", "residential"), ("name", "Broken Way")],
+        [("highway", "residential"), ("name", "Broken Way")],
         &[1, 999],
         Some(&meta),
     );
@@ -89,7 +89,7 @@ fn write_missing_ref_pbf(path: &Path) {
     ];
     bb.add_relation(
         20,
-        &[("type", "multipolygon"), ("building", "yes"), ("name", "Broken Relation")],
+        [("type", "multipolygon"), ("building", "yes"), ("name", "Broken Relation")],
         &members,
         Some(&meta),
     );

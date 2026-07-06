@@ -7,7 +7,6 @@ use smallvec::smallvec;
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
-use std::time::{Duration, Instant};
 
 fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
     let mut writer = sort::SortWriter::new(chunks_dir, 1024, sort::ChunkCompression::None).expect("create sort writer");
@@ -215,23 +214,6 @@ fn tile_size_diag_thresholds_are_strictly_greater_than_boundaries() {
 }
 
 #[test]
-fn invalid_tile_ring_detected() {
-    let bowtie = vec![(0, 0), (10, 10), (0, 10), (10, 0), (0, 0)];
-    assert!(!is_valid_simple_tile_ring(&bowtie));
-}
-
-#[test]
-fn invalid_merc_ring_detected_pre_quantization() {
-    let bowtie = vec![
-        Point { x: 0.3, y: 0.3 },
-        Point { x: 0.7, y: 0.7 },
-        Point { x: 0.3, y: 0.7 },
-        Point { x: 0.7, y: 0.3 },
-    ];
-    assert!(!is_valid_simple_ring_points(&bowtie));
-}
-
-#[test]
 fn interior_tile_ring_buffer_matches_buffer_fraction() {
     // INTERIOR_TILE_RING must use the same buffer as BUFFER_FRACTION expressed
     // in extent units: 8 rendered pixels × 16 extent units/pixel = 128.
@@ -249,68 +231,6 @@ fn interior_tile_ring_buffer_matches_buffer_fraction() {
         (-expected_buf, -expected_buf),
     ];
     assert_eq!(INTERIOR_TILE_RING, expected);
-}
-
-#[test]
-fn pre_quantization_ring_accepts_collinear_segments() {
-    let ring = vec![
-        Point { x: 0.1, y: 0.1 },
-        Point { x: 0.5, y: 0.1 }, // collinear
-        Point { x: 0.9, y: 0.1 }, // collinear
-        Point { x: 0.9, y: 0.9 },
-        Point { x: 0.1, y: 0.9 },
-        Point { x: 0.1, y: 0.1 },
-    ];
-    assert!(is_valid_simple_ring_points(&ring));
-}
-
-#[test]
-fn pre_quantization_ring_rejects_repeated_non_adjacent_vertex() {
-    let ring = vec![
-        Point { x: 0.1, y: 0.1 },
-        Point { x: 0.9, y: 0.1 },
-        Point { x: 0.9, y: 0.9 },
-        Point { x: 0.5, y: 0.5 },
-        Point { x: 0.9, y: 0.9 }, // repeated non-adjacent vertex
-        Point { x: 0.1, y: 0.9 },
-        Point { x: 0.1, y: 0.1 },
-    ];
-    assert!(!is_valid_simple_ring_points(&ring));
-}
-
-#[test]
-fn pre_quantization_ring_near_touching_gap_is_valid_but_touching_is_not() {
-    let near_touching = vec![
-        Point { x: 0.0, y: 0.0 },
-        Point { x: 1.0, y: 0.0 },
-        Point { x: 1.0, y: 1.0 },
-        Point { x: 0.51, y: 1.0 },
-        Point { x: 0.51, y: 0.000_000_002 },
-        Point { x: 0.49, y: 0.000_000_002 },
-        Point { x: 0.49, y: 1.0 },
-        Point { x: 0.0, y: 1.0 },
-        Point { x: 0.0, y: 0.0 },
-    ];
-    assert!(
-        is_valid_simple_ring_points(&near_touching),
-        "tiny non-zero gaps should remain valid"
-    );
-
-    let touching = vec![
-        Point { x: 0.0, y: 0.0 },
-        Point { x: 1.0, y: 0.0 },
-        Point { x: 1.0, y: 1.0 },
-        Point { x: 0.51, y: 1.0 },
-        Point { x: 0.51, y: 0.0 }, // exact touch with bottom edge
-        Point { x: 0.49, y: 0.0 }, // exact touch with bottom edge
-        Point { x: 0.49, y: 1.0 },
-        Point { x: 0.0, y: 1.0 },
-        Point { x: 0.0, y: 0.0 },
-    ];
-    assert!(
-        !is_valid_simple_ring_points(&touching),
-        "edge-touching rings should be rejected"
-    );
 }
 
 /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
@@ -370,7 +290,7 @@ fn boundary_label_admin4_100k_km2() {
 /// admin_level=4 with area < 100,000 km^2 -> min_zoom stays at default (5)
 #[test]
 fn boundary_label_admin4_small_area() {
-    let area_m2 = 50_000.0 * 1e6; // 50k km^2 — below 100k threshold
+    let area_m2 = 50_000.0 * 1e6; // 50k km^2 - below 100k threshold
     let mut matches = vec![boundary_labels_match(4)];
     enrich_polygon_matches(&mut matches, area_m2);
 
@@ -1112,7 +1032,7 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
 }
 
 // -----------------------------------------------------------------------
-// Helpers for emit tests — decode SortRecord payloads
+// Helpers for emit tests - decode SortRecord payloads
 // -----------------------------------------------------------------------
 
 use crate::sort;
@@ -2193,30 +2113,6 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
     assert!(zooms.contains(&2));
 }
 
-#[test]
-fn pre_quantization_ring_validity_large_ring_scale() {
-    const N: u32 = 1200;
-    let mut ring = Vec::with_capacity((N as usize) + 1);
-    for i in 0..N {
-        let theta = f64::from(i) * std::f64::consts::TAU / f64::from(N);
-        ring.push(Point {
-            x: 0.5 + 0.4 * theta.cos(),
-            y: 0.5 + 0.4 * theta.sin(),
-        });
-    }
-    ring.push(ring[0]);
-
-    let start = Instant::now();
-    let valid = is_valid_simple_ring_points(&ring);
-    let elapsed = start.elapsed();
-
-    assert!(valid, "large simple ring should validate as simple");
-    assert!(
-        elapsed < Duration::from_secs(3),
-        "large-ring validity check took too long: {elapsed:?}",
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Checkpoint roundtrip tests
 // ---------------------------------------------------------------------------
@@ -2350,7 +2246,7 @@ fn seam_reconciliation_two_adjacent_boundaries() {
     let boundary_layer = layers.iter().find(|l| l.name == "boundaries")
         .expect("should have boundaries layer");
     // After merge_same_attr_geometries, features with identical attributes may be merged
-    // into a single multipolygon — so we check polygons >= 1 (not >= 2).
+    // into a single multipolygon - so we check polygons >= 1 (not >= 2).
     assert!(boundary_layer.polygons >= 1, "should have at least 1 polygon feature");
 }
 
@@ -2406,7 +2302,7 @@ fn seam_reconciliation_cross_tile_continuity() {
 /// Single boundary polygon (no shared edges) still gets tile-coord DP at z<=8.
 #[test]
 fn seam_reconciliation_single_ring_still_simplifies() {
-    // A ring with a collinear midpoint — should be simplified even without shared chains.
+    // A ring with a collinear midpoint - should be simplified even without shared chains.
     let ring = vec![(0, 0), (2000, 0), (4000, 0), (4000, 4000), (0, 4000), (0, 0)];
     // (2000, 0) is collinear between (0,0) and (4000,0), should be removed by DP.
 
@@ -2467,7 +2363,7 @@ fn seam_reconciliation_no_shared_edges_still_simplifies() {
 /// Non-boundary layers are unaffected by reconciliation.
 #[test]
 fn seam_reconciliation_non_boundary_unaffected() {
-    // Two land polygons with shared edge at z5 — should NOT trigger reconciliation.
+    // Two land polygons with shared edge at z5 - should NOT trigger reconciliation.
     let ring_a = vec![(0, 0), (2000, 0), (2000, 2000), (0, 2000), (0, 0)];
     let ring_b = vec![(2000, 0), (4000, 0), (4000, 2000), (2000, 2000), (2000, 0)];
 
@@ -2505,13 +2401,13 @@ fn deferral_stats_record_and_check_budgets() {
     let mut srl = [0u8; shortbread::Layer::count()];
     srl[layer as usize] = 8;
 
-    // Record below budget — should not disable.
+    // Record below budget - should not disable.
     ds.record(layer, 1000);
     ds.check_budgets(&srl);
     assert!(!ds.is_disabled(layer));
     assert_eq!(ds.vertices[layer as usize].load(Ordering::Relaxed), 1000);
 
-    // Record to exceed budget — should disable.
+    // Record to exceed budget - should disable.
     ds.record(layer, DEFERRAL_VERTEX_BUDGET);
     ds.check_budgets(&srl);
     assert!(ds.is_disabled(layer));
@@ -2530,7 +2426,7 @@ fn deferral_stats_only_checks_enabled_layers() {
 
     ds.record(layer, DEFERRAL_VERTEX_BUDGET + 1);
     ds.check_budgets(&srl);
-    // Should NOT disable — layer has max_zoom=0 in config.
+    // Should NOT disable - layer has max_zoom=0 in config.
     assert!(!ds.is_disabled(layer));
 }
 

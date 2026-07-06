@@ -451,7 +451,7 @@ pub fn simplify_ring_tile_coords(ring: &[(i32, i32)], pinned: &[bool], tolerance
     }
 
     if boundaries.is_empty() {
-        // No pinned vertices — simplify the whole ring.
+        // No pinned vertices - simplify the whole ring.
         dp_tile_coords(ring, 0, n - 1, tol_sq, &mut keep);
     } else {
         // Simplify segments between consecutive pinned boundaries.
@@ -554,30 +554,3 @@ fn dp_tile_coords(ring: &[(i32, i32)], start: usize, end: usize, tol_sq: f64, ke
 /// Tile-coordinate DP tolerance: 1 pixel = EXTENT / 256 = 16 extent units.
 pub const TILE_SIMPLIFY_TOLERANCE: f64 = SIMPLIFY_PIXELS * (EXTENT / 256.0);
 
-/// Simplify a closed ring in tile coordinates using Douglas-Peucker.
-/// Returns the simplified ring (closed, with first == last).
-/// Falls back to the original ring if simplification collapses it below 4 vertices.
-pub fn simplify_ring_dp(ring: &[(i32, i32)], tolerance: f64) -> Vec<(i32, i32)> {
-    if ring.len() < 4 {
-        return ring.to_vec();
-    }
-    let tol_sq = tolerance * tolerance;
-    let n = ring.len() - 1; // exclude closing vertex
-    let mut keep = vec![false; n];
-    keep[0] = true;
-    dp_tile_coords(ring, 0, n - 1, tol_sq, &mut keep);
-
-    let mut out: Vec<(i32, i32)> = Vec::new();
-    for i in 0..n {
-        if keep[i] {
-            out.push(ring[i]);
-        }
-    }
-    if let Some(&first) = out.first() {
-        out.push(first);
-    }
-    if out.len() < 4 {
-        return ring.to_vec();
-    }
-    out
-}

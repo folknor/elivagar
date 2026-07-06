@@ -29,7 +29,7 @@ pub enum ChunkCompression {
 }
 
 // ---------------------------------------------------------------------------
-// Chunk I/O abstraction — compressed reads
+// Chunk I/O abstraction - compressed reads
 // ---------------------------------------------------------------------------
 
 enum ChunkRead {
@@ -106,7 +106,7 @@ pub fn zoom_from_tile_id(tile_id: u64) -> u8 {
 /// A record in the sort buffer: a sort key plus opaque payload bytes.
 ///
 /// `data` must be an owned Vec because records are serialized to chunk files on
-/// disk and deserialized during k-way merge — there is no lifetime to reference
+/// disk and deserialized during k-way merge - there is no lifetime to reference
 /// into. Arena allocation was considered and rejected: it would require
 /// redesigning the chunk file format (currently per-record `key|len|data`), the
 /// ChunkReader, and the HeapEntry ownership model, for minimal runtime benefit
@@ -398,7 +398,7 @@ pub fn write_sorted_chunk(records: &mut [SortRecord], path: &Path, compression: 
 }
 
 // ---------------------------------------------------------------------------
-// ChunkReader — reads records sequentially from a single chunk file
+// ChunkReader - reads records sequentially from a single chunk file
 // ---------------------------------------------------------------------------
 
 struct ChunkReader {
@@ -449,7 +449,7 @@ impl ChunkReader {
 }
 
 // ---------------------------------------------------------------------------
-// HeapEntry — element in the merge heap
+// HeapEntry - element in the merge heap
 // ---------------------------------------------------------------------------
 
 struct HeapEntry {
@@ -485,7 +485,7 @@ impl PartialOrd for HeapEntry {
 }
 
 // ---------------------------------------------------------------------------
-// SortReader — k-way merge of sorted chunk files
+// SortReader - k-way merge of sorted chunk files
 // ---------------------------------------------------------------------------
 
 /// Reads sorted records from multiple chunk files using a k-way merge.
@@ -519,7 +519,7 @@ impl SortReader {
                 io::ErrorKind::InvalidData,
                 format!(
                     "chunk count mismatch: found {} but checkpoint expects {}. \
-                     Stale chunks from a previous run may be present — \
+                     Stale chunks from a previous run may be present - \
                      run a full pipeline (without --skip-to) to regenerate.",
                     chunk_paths.len(),
                     expected,
@@ -573,7 +573,7 @@ impl SortReader {
 
         // Read the next record from the same chunk and push it onto the heap.
         // When a chunk is fully consumed, advise the kernel to evict its pages
-        // from the page cache — at planet scale this frees 100+ GB for the
+        // from the page cache - at planet scale this frees 100+ GB for the
         // assemble phase's PMTiles read-back.
         if let Some((key, data)) = self.chunk_readers[idx].read_record()? {
             self.heap.push(HeapEntry {
@@ -839,7 +839,7 @@ mod tests {
         }
         let _ = writer.finish().unwrap();
 
-        // None skips validation — always succeeds
+        // None skips validation - always succeeds
         let reader = SortReader::from_dir(dir.path(), None, ChunkCompression::None);
         assert!(reader.is_ok());
     }

@@ -31,7 +31,7 @@ rustc --version
 ### pbfhogg (PBF reader)
 
 Elivagar depends on [pbfhogg](https://github.com/folknor/pbfhogg), a fast OSM
-PBF reader. It must be cloned as a **sibling directory** — that is, next to the
+PBF reader. It must be cloned as a **sibling directory** - that is, next to the
 elivagar directory, not inside it:
 
 ```
