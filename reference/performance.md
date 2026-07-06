@@ -34,9 +34,23 @@ landing the post-change numbers are recorded here the same way.
 
 | dataset | commit | run | wall | phase12 | ocean | sort | assemble | reader | peak RSS | output |
 |---|---|---|---|---|---|---|---|---|---|---|
-| denmark | `60fd209` | `1a6ca281` | 35.0s | 18s | 12s | 0.6s | 4.2s | ~4.1s | 2.8 GB | 351 MB, 1.32M tiles / 175K unique |
+| denmark | `9b51e46` | `e18231c5` | 31.8s | 15.2s | 11.8s | 0.002s | 4.2s | 4.1s | 2.6 GB | 351 MB, 1.32M tiles / 175K unique |
 | norway | `95d6d52` | `38dcd3e8` | 171.1s | 131.1s | 16.0s | 0.03s | 23.7s | 23.2s | 4.1 GB | 1.28 GB, 16.3M tiles / 820K unique |
-| germany | `95d6d52` | `6fc97675` | 255.9s | 213.1s | 10.9s | 0.02s | 30.9s | 30.1s | 10.3 GB | 2.97 GB, 2.68M tiles / 352K unique |
+| germany | `9b51e46` | `15add85d` | 231.5s | 187.6s | 10.8s | 0.02s | 32.2s | 30.6s | 15.0 GB | 2.97 GB, 2.68M tiles / 352K unique |
+
+Superseded rows (kept for delta reading):
+
+| dataset | commit | run | wall | phase12 | peak RSS | note |
+|---|---|---|---|---|---|---|
+| denmark | `60fd209` | `1a6ca281` | 35.0s | 18s | 2.8 GB | pre prepass-overlap |
+| germany | `95d6d52` | `6fc97675` | 255.9s | 213.1s | 10.3 GB | pre prepass-overlap |
+
+The prepass-overlap landing (`9b51e46`, P0 of the perf backlog) cut wall ~9%
+on both gates with byte-identical output, at the cost of germany peak RSS
+rising 10.3 to 15.0 GB: the prepass hash sets now coexist with node-store
+construction instead of preceding it. The norway row predates the overlap
+(expect ~10-20s less wall and somewhat higher RSS when re-measured). The
+compact-counter work (backlog item 15 half 2, P2) removes the RSS cost.
 
 "reader" is the `assemble_reader_ns` counter: serial k-way merge reader time
 inside the assemble phase. The Denmark reader value is from the instrumented
