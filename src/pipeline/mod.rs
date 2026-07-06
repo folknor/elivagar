@@ -12,7 +12,9 @@ mod phase12;
 mod relations;
 mod assemble;
 
-use crate::geometry::{self, MercBbox};
+#[cfg(test)]
+use crate::geometry;
+use crate::geometry::MercBbox;
 use crate::pmtiles_writer;
 use crate::shortbread;
 use crate::sort;
@@ -211,7 +213,6 @@ pub struct TilegenConfig {
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
-const LAND_MASK_FILE: &str = "land_mask.bin";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
 const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
@@ -246,16 +247,6 @@ fn load_sort_chunk_count(tmp_dir: &std::path::Path) -> Option<usize> {
             None
         }
     }
-}
-
-fn save_land_mask(tmp_dir: &std::path::Path, mask: &geometry::LandMask) -> Result<(), PipelineError> {
-    std::fs::write(tmp_dir.join(LAND_MASK_FILE), mask.to_bytes())?;
-    Ok(())
-}
-
-fn load_land_mask(tmp_dir: &std::path::Path) -> Option<geometry::LandMask> {
-    let data = std::fs::read(tmp_dir.join(LAND_MASK_FILE)).ok()?;
-    geometry::LandMask::from_bytes(&data)
 }
 
 fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), PipelineError> {
@@ -376,13 +367,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         }
         None
     } else {
-        let (mut sort_writer, land_mask) = if skip.is_none() {
+        let mut sort_writer = if skip.is_none() {
             // Full run: clean tmp dir and run PBF phase
             drop(std::fs::remove_dir_all(&config.tmp_dir)); // Best-effort: may not exist yet.
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let phase12_start = Instant::now();
-            let (mut sw, bounds_out, mask, p12_stats) = phase12::phase_read_and_process(config)?;
+            let (mut sw, bounds_out, p12_stats) = phase12::phase_read_and_process(config)?;
             phase12_stats = Some(p12_stats);
             phase12_elapsed = Some(phase12_start.elapsed());
             emit_marker("PHASE12_END");
@@ -395,24 +386,17 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             phase12_rss = peak_rss_kb();
             sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
-            save_land_mask(&config.tmp_dir, &mask)?;
-            (sw, Some(mask))
+            sw
         } else {
             // --skip-to ocean: load checkpoint, resume from PBF chunks
             let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir)?;
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
             phase12_elapsed = None;
-            let sw = sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_size, pbf_chunks, config.compress_sort_chunks)?;
-            let mask = load_land_mask(&config.tmp_dir);
-            if mask.is_none() {
-                eprintln!("  No land mask found - ocean filtering disabled");
-            }
-            (sw, mask)
+            sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_size, pbf_chunks, config.compress_sort_chunks)?
         };
 
         // Load data_bounds (needed for ocean, always available from checkpoint or just computed)
         let (data_bounds, _) = load_checkpoint(&config.tmp_dir)?;
-        let mask_ref = land_mask.as_ref();
 
         // --- Ocean shapefile processing ---
         // When a simplified shapefile is provided, use it for z0-7 and the
@@ -428,19 +412,19 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 if config.min_zoom <= simplified_max {
                     eprintln!("  Simplified (z{}-z{}):", config.min_zoom, simplified_max);
                     ocean_features += crate::ocean::process_ocean_shapefile(
-                        simplified_path, &data_bounds, config.min_zoom, simplified_max, mask_ref, &mut sort_writer,
+                        simplified_path, &data_bounds, config.min_zoom, simplified_max, &mut sort_writer,
                     )?;
                 }
                 if config.max_zoom >= 8 {
                     let full_min = config.min_zoom.max(8);
                     eprintln!("  Full-resolution (z{full_min}-z{}):", config.max_zoom);
                     ocean_features += crate::ocean::process_ocean_shapefile(
-                        ocean_path, &data_bounds, full_min, config.max_zoom, mask_ref, &mut sort_writer,
+                        ocean_path, &data_bounds, full_min, config.max_zoom, &mut sort_writer,
                     )?;
                 }
             } else {
                 ocean_features = crate::ocean::process_ocean_shapefile(
-                    ocean_path, &data_bounds, config.min_zoom, config.max_zoom, mask_ref, &mut sort_writer,
+                    ocean_path, &data_bounds, config.min_zoom, config.max_zoom, &mut sort_writer,
                 )?;
             }
 

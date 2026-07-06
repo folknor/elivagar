@@ -122,10 +122,11 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `wire_format.rs` - sort record binary serialization
 
 **Geometry + encoding:**
-- `geometry.rs` - Mercator projection, clipping (Sutherland-Hodgman), Douglas-Peucker simplification
+- `geometry.rs` - Mercator projection, clipping (Sutherland-Hodgman for OSM layers), Douglas-Peucker simplification
+- `geometry/int_ocean.rs` - integer ocean geometry: early quantization to max_zoom pixel space, exact shift-round per-zoom rescale, rotation-invariant integer DP, i_overlay Simplify/Intersect (NonZero) topology ops
 - `mvt.rs` - MVT protobuf encoder
 - `multipolygon.rs` - relation ring assembly
-- `ocean.rs` - ocean shapefile processing (mmap reader + scanline fill)
+- `ocean.rs` - ocean shapefile processing (mmap reader + scanline fill + quantize-early integer boolean clipping; no S-H, no LandMask - see specs/ocean-integer-clipping.md)
 
 **Infrastructure:**
 - `sort.rs` - external merge sort (gzip-compressed chunk files, k-way merge via binary heap)
@@ -188,7 +189,7 @@ Reads a PMTiles archive and prints header info, tile statistics, section layout,
 
 ### `elivagar verify <FILE>`
 
-Validates a PMTiles archive end-to-end: container integrity, metadata schema, tile decompression, MVT payload structure, geometry command validation, and layer coverage. Also checks ocean polygon rings for self-intersections. Exits 0 on pass, 1 on failure. Stops after 100 tile-level errors.
+Validates a PMTiles archive end-to-end: container integrity, metadata schema, tile decompression, MVT payload structure, geometry command validation, and layer coverage. Also checks ocean polygon rings for self-intersections. `--geometry-stats` prints per-zoom ocean-layer statistics (ring counts, max/p99 ring vertices, consecutive duplicates, full-tile fills). Exits 0 on pass, 1 on failure. Stops after 100 tile-level errors.
 
 ### `elivagar svg <FILE> -z <Z> -x <X> -y <Y> [-W width] [-H height] [-l layers] [-o output.svg]`
 

@@ -16,7 +16,7 @@ use super::emit::{
     PointEmitScratch, LineEmitScratch, MultipolygonEmitScratch,
     emit_point_or_centroid, emit_line_feature, emit_multipolygon_feature,
     enrich_polygon_matches, unwrap_antimeridian_path, antimeridian_shifts_for_bbox,
-    mark_bbox_wrapped, relation_shared_vertex_keys,
+    relation_shared_vertex_keys,
 };
 
 /// A relation with geometry resolved from way_index, ready for parallel processing.
@@ -159,7 +159,6 @@ pub(super) fn flush_rel_batch(
     max_zoom: u8,
     seam_reconcile_layers: &[u8],
     deferral_stats: &DeferralStats,
-    land_mask: &geometry::LandMask,
     sort_writer: &mut SortWriter,
     fanout_stats: &mut FanoutStats,
     fanout_caps: &[u32],
@@ -187,7 +186,7 @@ pub(super) fn flush_rel_batch(
             |mut acc, rel| {
                 let before = acc.records.len();
                 process_prepared_relation_into(
-                    rel, min_zoom, max_zoom, seam_reconcile_layers, deferral_stats, land_mask,
+                    rel, min_zoom, max_zoom, seam_reconcile_layers, deferral_stats,
                     &mut acc.records,
                     &mut acc.point_emit,
                     &mut acc.line_emit,
@@ -263,7 +262,6 @@ pub(super) fn process_prepared_relation_into(
     max_zoom: u8,
     seam_reconcile_layers: &[u8],
     deferral_stats: &DeferralStats,
-    land_mask: &geometry::LandMask,
     records: &mut Vec<SortRecord>,
     point_emit: &mut PointEmitScratch,
     line_emit: &mut LineEmitScratch,
@@ -306,7 +304,6 @@ pub(super) fn process_prepared_relation_into(
                         let _ = unwrap_antimeridian_path(inner, true);
                     }
                     let bbox = merc_bbox(&outer_unwrapped);
-                    mark_bbox_wrapped(land_mask, &bbox);
                     let sr = seam_reconcile_layers[m.layer as usize];
                     let fc = fanout_caps.get(m.layer as usize).copied().unwrap_or(0);
                     for shift in antimeridian_shifts_for_bbox(&bbox) {
@@ -358,7 +355,6 @@ pub(super) fn process_prepared_relation_into(
                         let _ = unwrap_antimeridian_path(inner, true);
                     }
                     let bbox = merc_bbox(&outer_unwrapped);
-                    mark_bbox_wrapped(land_mask, &bbox);
                     emit_point_or_centroid(
                         rel.osm_id,
                         &outer_unwrapped,
@@ -383,7 +379,6 @@ pub(super) fn process_prepared_relation_into(
                     let mut coords = mw.coords.clone();
                     let _ = unwrap_antimeridian_path(&mut coords, false);
                     let bbox = merc_bbox(&coords);
-                    mark_bbox_wrapped(land_mask, &bbox);
                     for shift in antimeridian_shifts_for_bbox(&bbox) {
                         if shift == 0.0 {
                             emit_line_feature(

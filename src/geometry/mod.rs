@@ -10,6 +10,7 @@ mod surface;
 pub mod tiles;
 pub mod seams;
 pub mod mvt_decode;
+pub(crate) mod int_ocean;
 
 // Re-export everything at the geometry:: level so callers don't change.
 pub use projection::*;

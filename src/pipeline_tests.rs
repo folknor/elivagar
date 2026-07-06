@@ -2152,35 +2152,10 @@ fn sort_chunk_count_none_no_file() {
 }
 
 #[test]
-fn land_mask_checkpoint_roundtrip() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    let mask = geometry::LandMask::new();
-    // Mark a small bbox that covers a known z14 tile.
-    let bbox = geometry::MercBbox {
-        min_x: 0.5,
-        max_x: 0.500_1,
-        min_y: 0.5,
-        max_y: 0.500_1,
-    };
-    mask.mark_bbox(&bbox);
-    assert!(mask.has_land(14, 8192, 8192));
-    save_land_mask(dir.path(), &mask).unwrap();
-    let loaded = load_land_mask(dir.path()).expect("should load");
-    assert!(loaded.has_land(14, 8192, 8192));
-    assert!(!loaded.has_land(14, 0, 0));
-}
-
-#[test]
 fn load_checkpoint_missing_file() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let result = load_checkpoint(dir.path());
     assert!(result.is_err());
-}
-
-#[test]
-fn load_land_mask_missing_returns_none() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    assert!(load_land_mask(dir.path()).is_none());
 }
 
 // ---------------------------------------------------------------------------

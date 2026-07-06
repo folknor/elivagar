@@ -126,7 +126,7 @@ download_date = "2026-02-25"
 
 [dm6.datasets.japan.pbf.raw]
 file = "japan-20260225-seq4706.osm.pbf"
-xxhash = "TODO"
+xxhash = "f80ccecbe3e1a4fbc468cbf3a12494d0"
 seq = 4706
 
 [dm6.datasets.germany]
@@ -135,7 +135,7 @@ download_date = "2026-02-25"
 
 [dm6.datasets.germany.pbf.raw]
 file = "germany-20260225-seq4705.osm.pbf"
-xxhash = "TODO"
+xxhash = "da380af1a45575ad80b1b9dad48d7893"
 seq = 4705
 
 [dm6.datasets.north-america]

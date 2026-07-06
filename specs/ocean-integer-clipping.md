@@ -187,7 +187,7 @@ emit_boundary_tile
 |---|---|
 | Fyn missing | z7 ~(67,40); z8 ~(135,80) |
 | Mors stability (R17 fixed - must not regress) | z7-z9, z8 ~(134,78) |
-| Inland full-tile ocean (Tissø) | z10/544/316 - NO full-tile ocean ring |
+| Inland ocean flooding (Tissø) | z10/544/321 - NO ocean layer at all (z10/544/316 in the March notes is mislabeled: that tile is open Kattegat where full-tile ocean is correct) |
 | Pure-ocean tiles present (R18 - must not regress) | open-water z12 west of Jutland |
 | Coastline artifacts | z10-z11 Limfjorden / west-coast fjords |
 
@@ -474,7 +474,7 @@ brokkr check
 brokkr tilegen --dataset denmark
 elivagar verify data/tilegen_tmp/denmark-$(git rev-parse --short HEAD).pmtiles
 elivagar verify data/tilegen_tmp/denmark-$(git rev-parse --short HEAD).pmtiles --geometry-stats
-elivagar diag data/tilegen_tmp/denmark-$(git rev-parse --short HEAD).pmtiles -z 10 -x 544 -y 316
+elivagar diag data/tilegen_tmp/denmark-$(git rev-parse --short HEAD).pmtiles -z 10 -x 544 -y 321
 mkdir -p notes/qa
 elivagar svg data/tilegen_tmp/denmark-$(git rev-parse --short HEAD).pmtiles -z 7 -x 66 -y 39 -W 3 -H 3 -l ocean -o notes/qa/z7-fyn-mors.svg
 elivagar svg data/tilegen_tmp/denmark-$(git rev-parse --short HEAD).pmtiles -z 8 -x 133 -y 77 -W 4 -H 4 -l ocean -o notes/qa/z8-fyn-mors.svg
@@ -482,7 +482,7 @@ elivagar svg data/tilegen_tmp/denmark-$(git rev-parse --short HEAD).pmtiles -z 1
 ```
 Pass criteria: verify exits 0 with zero errors; geometry-stats shows ocean
 consecutive-duplicate count 0 and z10-14 max ring vertices ≤ 4096 (sanity
-bound; record actuals); diag shows no full-tile ocean ring at Tissø; SVGs
+bound; record actuals); diag shows no ocean layer at the true Tissø tile (z10/544/321); SVGs
 show Fyn/Mors as land with continuous coastline.
 
 Human gate (the one non-command gate): MapLibre pass over §2.3 - Fyn z6-z8,

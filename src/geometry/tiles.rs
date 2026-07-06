@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU8, Ordering};
-
 use super::EXTENT;
 use super::projection::{MercBbox, Point};
 
@@ -113,27 +111,6 @@ pub fn to_tile_coords_into(
     }));
 }
 
-/// Convert a slice of Mercator points to tile pixel coordinates for MVT encoding.
-#[allow(clippy::cast_possible_truncation)]
-pub fn to_tile_coords(
-    points: &[Point],
-    tile_x: u32,
-    tile_y: u32,
-    zoom: u8,
-) -> Vec<(i32, i32)> {
-    let z_scale = f64::from(1u32 << zoom);
-    let tx = f64::from(tile_x);
-    let ty = f64::from(tile_y);
-    points
-        .iter()
-        .map(|p| {
-            let px_x = (p.x * z_scale - tx) * EXTENT;
-            let px_y = (p.y * z_scale - ty) * EXTENT;
-            (px_x.round() as i32, px_y.round() as i32)
-        })
-        .collect()
-}
-
 /// Remove quantization-induced backtrack spikes from a closed ring.
 ///
 /// When dense f64 vertices are rounded to i32 tile coordinates, distinct points
@@ -183,67 +160,6 @@ pub(crate) fn dedup_quantized_ring(ring: &mut Vec<(i32, i32)>) {
         write += 1;
     }
     ring.truncate(write);
-}
-
-/// Repair post-quantization polygon topology using i_overlay's integer simplify.
-///
-/// After quantization to i32 tile coordinates, rounding can introduce T-junctions
-/// (vertex landing exactly on a non-adjacent edge) and collinear overlaps that
-/// pass `ring_is_simple()` but break earcut tessellation. This function resolves
-/// all self-intersections by running i_overlay's sweep-line noder on the quantized
-/// integer coordinates.
-///
-/// Returns a vec of simple polygons (each: outer + holes). Returns empty vec if
-/// the input is degenerate. Applied unconditionally after quantization - all three
-/// competitors (Planetiler, Tilemaker, Tippecanoe) repair every polygon, not just
-/// detected failures.
-pub(crate) fn repair_quantized_polygon(
-    outer: &[(i32, i32)],
-    holes: &[Vec<(i32, i32)>],
-) -> Vec<Vec<Vec<(i32, i32)>>> {
-    use i_overlay::core::fill_rule::FillRule;
-    use i_overlay::core::simplify::Simplify;
-    use i_overlay::core::overlay::IntOverlayOptions;
-
-    if outer.len() < 4 {
-        return Vec::new();
-    }
-
-    // Build i_overlay shape: outer + holes as Vec<Vec<IntPoint>>
-    let to_ip = |ring: &[(i32, i32)]| -> Vec<i_overlay::i_float::int::point::IntPoint> {
-        // Strip closing vertex if present (i_overlay auto-closes)
-        let n = if ring.len() >= 2 && ring.first() == ring.last() {
-            ring.len() - 1
-        } else {
-            ring.len()
-        };
-        ring[..n].iter().map(|&(x, y)| i_overlay::i_float::int::point::IntPoint::new(x, y)).collect()
-    };
-
-    let mut shape: Vec<Vec<i_overlay::i_float::int::point::IntPoint>> = Vec::with_capacity(1 + holes.len());
-    shape.push(to_ip(outer));
-    for hole in holes {
-        if hole.len() >= 4 {
-            shape.push(to_ip(hole));
-        }
-    }
-
-    // Simplify resolves self-intersections, T-junctions, and collinear overlaps.
-    // Uses NonZero fill rule to match MapLibre's earcut winding semantics.
-    let result = shape.simplify(FillRule::NonZero, IntOverlayOptions::default());
-
-    // Convert back: Vec<IntShape> = Vec<Vec<Vec<IntPoint>>> → Vec<Vec<Vec<(i32,i32)>>>
-    result.into_iter().map(|poly| {
-        poly.into_iter().map(|ring| {
-            let mut r: Vec<(i32, i32)> = ring.into_iter().map(|p| (p.x, p.y)).collect();
-            // Re-close the ring
-            if r.len() >= 3 {
-                let first = r[0];
-                r.push(first);
-            }
-            r
-        }).collect()
-    }).collect()
 }
 
 /// Compute a `MercBbox` bounding box from a slice of Mercator points.
@@ -526,113 +442,4 @@ fn signed_area_2x(ring: &[(i32, i32)]) -> i64 {
               - i64::from(ring[i + 1].0) * i64::from(ring[i].1);
     }
     area
-}
-
-// ---------------------------------------------------------------------------
-// Land tile mask (z14 resolution bitset for ocean filtering)
-// ---------------------------------------------------------------------------
-
-/// Z14-resolution bitset recording which grid cells contain land features.
-/// Thread-safe: uses atomic byte operations for concurrent writes from rayon.
-/// 16384×16384 = 268M cells stored in 32 MB.
-///
-/// Ocean fill tiles are only generated for cells where the mask is set,
-/// so higher resolution → fewer spurious ocean-only tiles.
-pub(crate) struct LandMask {
-    bits: Box<[AtomicU8]>,
-}
-
-impl LandMask {
-    /// Zoom level of the mask grid.
-    const ZOOM: u8 = 14;
-    /// Grid dimension: 2^14 = 16384 tiles per axis.
-    const DIM: usize = 1 << Self::ZOOM;
-    /// Total bytes: 16384*16384/8 = 33,554,432 (32 MB).
-    pub(super) const BYTES: usize = Self::DIM * Self::DIM / 8;
-
-    /// Create an empty mask (no land anywhere). Heap-allocated (32 MB).
-    pub fn new() -> Self {
-        let mut bits = Vec::with_capacity(Self::BYTES);
-        bits.resize_with(Self::BYTES, || AtomicU8::new(0));
-        Self { bits: bits.into_boxed_slice() }
-    }
-
-    /// Mark all z14 cells covered by a Mercator bounding box.
-    /// Hot path: called per-feature during PBF processing from rayon threads.
-    pub fn mark_bbox(&self, bbox: &MercBbox) {
-        #[allow(clippy::cast_possible_truncation)]
-        let dim = Self::DIM as u32;
-        let scale = dim as f64;
-        let max_tile = dim - 1;
-        let tx_min = clamp_tile(bbox.min_x * scale, max_tile);
-        let tx_max = clamp_tile(bbox.max_x * scale, max_tile);
-        let ty_min = clamp_tile(bbox.min_y * scale, max_tile);
-        let ty_max = clamp_tile(bbox.max_y * scale, max_tile);
-        for ty in ty_min..=ty_max {
-            for tx in tx_min..=tx_max {
-                self.set_bit(tx, ty);
-            }
-        }
-    }
-
-    /// Check whether a tile at any zoom level overlaps a z14 cell with land.
-    /// For z ≥ 14: checks the single z14 cell (ancestor lookup).
-    /// For z < 14: checks if ANY z14 descendant is set (early-exit scan).
-    pub fn has_land(&self, z: u8, tx: u32, ty: u32) -> bool {
-        if z >= Self::ZOOM {
-            let shift = z - Self::ZOOM;
-            self.get_bit(tx >> shift, ty >> shift)
-        } else {
-            let shift = Self::ZOOM - z;
-            let x0 = tx << shift;
-            let y0 = ty << shift;
-            let count = 1u32 << shift;
-            for dy in 0..count {
-                for dx in 0..count {
-                    if self.get_bit(x0 + dx, y0 + dy) {
-                        return true;
-                    }
-                }
-            }
-            false
-        }
-    }
-
-    #[inline]
-    pub(super) fn set_bit(&self, tx: u32, ty: u32) {
-        let idx = ty as usize * Self::DIM + tx as usize;
-        let byte_idx = idx / 8;
-        let bit_idx = idx % 8;
-        self.bits[byte_idx].fetch_or(1 << bit_idx, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(super) fn get_bit(&self, tx: u32, ty: u32) -> bool {
-        let idx = ty as usize * Self::DIM + tx as usize;
-        let byte_idx = idx / 8;
-        let bit_idx = idx % 8;
-        (self.bits[byte_idx].load(Ordering::Relaxed) >> bit_idx) & 1 != 0
-    }
-
-    /// Serialize to 32 MB for checkpoint persistence.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.bits.iter().map(|b| b.load(Ordering::Relaxed)).collect()
-    }
-
-    /// Deserialize from bytes. Returns `None` if wrong length.
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() != Self::BYTES {
-            return None;
-        }
-        let bits: Vec<AtomicU8> = data.iter().map(|&b| AtomicU8::new(b)).collect();
-        Some(Self { bits: bits.into_boxed_slice() })
-    }
-
-    /// Count how many z14 cells have land features.
-    pub fn count_set(&self) -> u32 {
-        self.bits
-            .iter()
-            .map(|b| b.load(Ordering::Relaxed).count_ones())
-            .sum()
-    }
 }

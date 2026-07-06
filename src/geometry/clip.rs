@@ -238,6 +238,7 @@ pub fn clip_polygon_into(
 }
 
 /// Convenience wrapper that allocates its own buffers. Use [`clip_polygon_into`] in hot paths.
+#[allow(dead_code)]
 pub fn clip_polygon(ring: &[Point], rect: &ClipRect) -> Vec<Point> {
     let mut buf_a = Vec::new();
     let mut buf_b = Vec::new();
@@ -306,4 +307,3 @@ fn clip_polygon_edge_into(polygon: &[Point], edge: Edge, output: &mut Vec<Point>
         s = e;
     }
 }
-

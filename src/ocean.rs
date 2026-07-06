@@ -4,7 +4,11 @@
 // data bounds, parses polygons, and processes them in parallel with rayon.
 // Uses scanline fill to minimize point-in-polygon tests.
 
-use crate::geometry::{self, ClipRect, MercBbox, Point, BUFFER_FRACTION, close_and_orient_cw, close_and_orient_ccw, merc_bbox};
+use crate::geometry::{self, MercBbox, Point, BUFFER_FRACTION, close_and_orient_cw, close_and_orient_ccw};
+use crate::geometry::int_ocean::{
+    IntRect, Shape, Shapes, OCEAN_DP_TOL_PX,
+    intersect_rect, normalize, point_in_shape, quantize_polygon, rescale_shape, simplify_shape_dp,
+};
 use crate::mvt::{self, GeomType};
 use crate::pmtiles_writer;
 use crate::shortbread::{self, Layer};
@@ -13,22 +17,12 @@ use crate::wire_format::encode_feature_data;
 
 use std::collections::{HashMap, HashSet};
 
-/// Minimum ring area in extent² units (2x signed area threshold).
-/// 1 pixel² = 16² = 256 extent² units (EXTENT=4096, 256 pixels per tile).
-/// We compare against 2x area (shoelace without /2), so threshold is 512.
-const MIN_RING_AREA: i64 = 512;
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/// Parsed ocean polygon ready for parallel processing.
-// Vecs are ephemeral - consumed once during ocean tile emission, boxed_slice not worth it.
-struct OceanPolygon {
-    outer: Vec<Point>,
-    inners: Vec<Vec<Point>>,
-}
-const _: () = assert!(std::mem::size_of::<OceanPolygon>() == 48);
+const TILE_EXTENT_I32: i32 = 4096;
+const TILE_BUFFER_I32: i32 = 128;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -47,7 +41,6 @@ pub(crate) fn process_ocean_shapefile(
     data_bounds: &MercBbox,
     min_zoom: u8,
     max_zoom: u8,
-    land_mask: Option<&geometry::LandMask>,
     sort_writer: &mut SortWriter,
 ) -> Result<u64, std::io::Error> {
     eprintln!("  Opening {}", path.display());
@@ -85,13 +78,10 @@ pub(crate) fn process_ocean_shapefile(
     let shp = &shp_mmap[..];
     eprintln!("  Mmapped {:.1} MB", shp.len() as f64 / (1024.0 * 1024.0));
 
-    let bounds_clip = ClipRect::new(
-        data_bounds.min_x, data_bounds.min_y,
-        data_bounds.max_x, data_bounds.max_y,
-    );
+    let data_rect = data_bounds_rect(data_bounds, max_zoom);
 
     // --- Parse phase: extract all polygons (single-threaded, sequential I/O) ---
-    let mut polygons: Vec<OceanPolygon> = Vec::new();
+    let mut pieces: Vec<Shape> = Vec::new();
     let mut shapes_hit: u64 = 0;
 
     for &offset in &offsets {
@@ -169,31 +159,32 @@ pub(crate) fn process_ocean_shapefile(
         for (w, window) in ring_starts.windows(2).enumerate() {
             let ring = &all_points[window[0]..window[1]];
 
-            let clipped = geometry::clip_polygon(ring, &bounds_clip);
-            if clipped.len() < 3 {
-                if w == 0 || geometry::signed_area(ring) >= 0.0 {
-                    if let Some(outer) = current_outer.take() {
-                        polygons.push(OceanPolygon { outer, inners: std::mem::take(&mut current_inners) });
-                    }
-                    current_outer = None;
-                }
-                continue;
-            }
-
             let is_outer = w == 0 || geometry::signed_area(ring) >= 0.0;
 
             if is_outer {
                 if let Some(outer) = current_outer.take() {
-                    polygons.push(OceanPolygon { outer, inners: std::mem::take(&mut current_inners) });
+                    push_quantized_pieces(
+                        &mut pieces,
+                        &outer,
+                        &std::mem::take(&mut current_inners),
+                        max_zoom,
+                        data_rect,
+                    );
                 }
-                current_outer = Some(clipped);
-            } else {
-                current_inners.push(clipped);
+                current_outer = Some(ring.to_vec());
+            } else if current_outer.is_some() {
+                current_inners.push(ring.to_vec());
             }
         }
 
         if let Some(outer) = current_outer {
-            polygons.push(OceanPolygon { outer, inners: current_inners });
+            push_quantized_pieces(
+                &mut pieces,
+                &outer,
+                &current_inners,
+                max_zoom,
+                data_rect,
+            );
         }
     }
 
@@ -205,57 +196,45 @@ pub(crate) fn process_ocean_shapefile(
     const SPLIT_Z: u8 = 8;
     const SPLIT_MIN_VERTICES: usize = 500;
     if max_zoom >= SPLIT_Z {
-        let orig_count = polygons.len();
-        let mut split_out: Vec<OceanPolygon> = Vec::with_capacity(polygons.len());
-        let mut clip_a: Vec<Point> = Vec::new();
-        let mut clip_b: Vec<Point> = Vec::new();
-        let split_scale = f64::from(1u32 << SPLIT_Z);
-        let split_inv = 1.0 / split_scale;
-        for poly in polygons.drain(..) {
-            if poly.outer.len() < SPLIT_MIN_VERTICES {
-                split_out.push(poly);
+        let orig_count = pieces.len();
+        let mut split_out: Vec<Shape> = Vec::with_capacity(pieces.len());
+        let split_tile_size = 1_i32 << (u32::from(max_zoom - SPLIT_Z) + 12);
+        let max_split_tile = i32::from((1_u16 << SPLIT_Z) - 1);
+        for piece in pieces.drain(..) {
+            if piece.first().map_or(0, Vec::len) < SPLIT_MIN_VERTICES {
+                split_out.push(piece);
                 continue;
             }
-            let bb = merc_bbox(&poly.outer);
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            let stx_min = (bb.min_x * split_scale).floor().max(0.0) as u32;
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            let sty_min = (bb.min_y * split_scale).floor().max(0.0) as u32;
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            let stx_max = ((bb.max_x * split_scale).floor().max(0.0) as u32).min((1u32 << SPLIT_Z) - 1);
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            let sty_max = ((bb.max_y * split_scale).floor().max(0.0) as u32).min((1u32 << SPLIT_Z) - 1);
+            let Some(bb) = shape_bbox(&piece) else {
+                continue;
+            };
+            let stx_min = (bb.min_x.div_euclid(split_tile_size)).clamp(0, max_split_tile);
+            let sty_min = (bb.min_y.div_euclid(split_tile_size)).clamp(0, max_split_tile);
+            let stx_max = (bb.max_x.div_euclid(split_tile_size)).clamp(0, max_split_tile);
+            let sty_max = (bb.max_y.div_euclid(split_tile_size)).clamp(0, max_split_tile);
             if stx_min == stx_max && sty_min == sty_max {
-                // Already fits in one tile at SPLIT_Z
-                split_out.push(poly);
+                split_out.push(piece);
                 continue;
             }
             for sty in sty_min..=sty_max {
                 for stx in stx_min..=stx_max {
-                    let tile_rect = ClipRect::new(
-                        f64::from(stx) * split_inv,
-                        f64::from(sty) * split_inv,
-                        f64::from(stx + 1) * split_inv,
-                        f64::from(sty + 1) * split_inv,
-                    );
-                    geometry::clip_polygon_into(&poly.outer, &tile_rect, &mut clip_a, &mut clip_b);
-                    if clip_a.len() < 4 { continue; }
-                    let sub_outer = clip_a.clone();
-                    let sub_inners: Vec<Vec<Point>> = poly.inners.iter().filter_map(|inner| {
-                        geometry::clip_polygon_into(inner, &tile_rect, &mut clip_a, &mut clip_b);
-                        if clip_a.len() >= 4 { Some(clip_a.clone()) } else { None }
-                    }).collect();
-                    split_out.push(OceanPolygon { outer: sub_outer, inners: sub_inners });
+                    let tile_rect = IntRect {
+                        min_x: stx * split_tile_size,
+                        min_y: sty * split_tile_size,
+                        max_x: (stx + 1) * split_tile_size,
+                        max_y: (sty + 1) * split_tile_size,
+                    };
+                    split_out.extend(intersect_rect(&piece, tile_rect, 0));
                 }
             }
         }
-        polygons = split_out;
-        if polygons.len() != orig_count {
-            eprintln!("  Pre-split at z{SPLIT_Z}: {orig_count} → {} polygons", polygons.len());
+        pieces = split_out;
+        if pieces.len() != orig_count {
+            eprintln!("  Pre-split at z{SPLIT_Z}: {orig_count} -> {} polygons", pieces.len());
         }
     }
 
-    let poly_count = polygons.len();
+    let poly_count = pieces.len();
     eprintln!("  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons - processing in parallel");
 
     // --- Process phase: parallel with rayon, direct chunk flushing ---
@@ -272,10 +251,6 @@ pub(crate) fn process_ocean_shapefile(
     let ocean_layer = Layer::Ocean as u8;
     let empty_attrs: Vec<shortbread::Attr> = Vec::new();
 
-    if let Some(mask) = land_mask {
-        eprintln!("  Land mask: {} z14 cells, filtering enabled", mask.count_set());
-    }
-
     // Ocean chunks use the same chunk_NNNN.bin naming (starting after PBF chunks)
     // so that --skip-to sort (SortReader::from_dir sequential scan) finds them.
     let chunk_id = AtomicUsize::new(sort_writer.chunk_count());
@@ -288,7 +263,6 @@ pub(crate) fn process_ocean_shapefile(
         bytes: usize,
         chunk_paths: Vec<std::path::PathBuf>,
         count: u64,
-        simp_scratch: geometry::SimplifyMultiScratch,
         compression: sort::ChunkCompression,
     }
 
@@ -309,17 +283,17 @@ pub(crate) fn process_ocean_shapefile(
         }
     }
 
-    let result = polygons
+    let result = pieces
         .par_iter()
         .enumerate()
         .fold(
-            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, simp_scratch: geometry::SimplifyMultiScratch::new(), compression: chunk_compression },
-            |mut acc, (idx, poly)| {
+            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, compression: chunk_compression },
+            |mut acc, (idx, piece)| {
                 let before = acc.records.len();
                 emit_ocean_polygon(
-                    idx as u64, &poly.outer, &poly.inners,
+                    idx as u64, piece,
                     min_zoom, max_zoom, ocean_layer, &empty_attrs,
-                    land_mask, &mut acc.records, &mut acc.simp_scratch,
+                    &mut acc.records,
                 );
                 for r in &acc.records[before..] {
                     acc.bytes += r.data.len() + std::mem::size_of::<sort::SortRecord>();
@@ -335,7 +309,7 @@ pub(crate) fn process_ocean_shapefile(
             acc
         })
         .reduce(
-            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, simp_scratch: geometry::SimplifyMultiScratch::new(), compression: chunk_compression },
+            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, compression: chunk_compression },
             |mut a, b| {
                 a.chunk_paths.extend(b.chunk_paths);
                 a.count += b.count;
@@ -348,6 +322,155 @@ pub(crate) fn process_ocean_shapefile(
 
     eprintln!("  {poly_count} polygons, {count} features");
     Ok(count)
+}
+
+fn push_quantized_pieces(
+    pieces: &mut Vec<Shape>,
+    outer: &[Point],
+    inners: &[Vec<Point>],
+    max_zoom: u8,
+    data_rect: IntRect,
+) {
+    let shape = quantize_polygon(outer, inners, max_zoom);
+    if shape.is_empty() {
+        return;
+    }
+    pieces.extend(intersect_rect(&shape, data_rect, 0));
+}
+
+fn data_bounds_rect(data_bounds: &MercBbox, max_zoom: u8) -> IntRect {
+    let scale = 1_i64 << (u32::from(max_zoom) + 12);
+    IntRect {
+        min_x: merc_floor(data_bounds.min_x, scale),
+        min_y: merc_floor(data_bounds.min_y, scale),
+        max_x: merc_ceil(data_bounds.max_x, scale),
+        max_y: merc_ceil(data_bounds.max_y, scale),
+    }
+}
+
+fn merc_floor(v: f64, scale: i64) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let q = (v * scale as f64).floor() as i64;
+    i32::try_from(q.clamp(0, scale)).expect("base ocean coordinate fits i32")
+}
+
+fn merc_ceil(v: f64, scale: i64) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let q = (v * scale as f64).ceil() as i64;
+    i32::try_from(q.clamp(0, scale)).expect("base ocean coordinate fits i32")
+}
+
+fn shape_bbox(shape: &Shape) -> Option<IntRect> {
+    let mut points = shape.iter().flatten();
+    let first = points.next()?;
+    let (mut min_x, mut max_x) = (first.x, first.x);
+    let (mut min_y, mut max_y) = (first.y, first.y);
+    for p in points {
+        min_x = min_x.min(p.x);
+        max_x = max_x.max(p.x);
+        min_y = min_y.min(p.y);
+        max_y = max_y.max(p.y);
+    }
+    Some(IntRect { min_x, min_y, max_x, max_y })
+}
+
+fn tile_range_for_rect(rect: IntRect, max_tile: u32) -> (u32, u32, u32, u32) {
+    (
+        tile_index(rect.min_x, max_tile),
+        tile_index(rect.max_x, max_tile),
+        tile_index(rect.min_y, max_tile),
+        tile_index(rect.max_y, max_tile),
+    )
+}
+
+fn tile_index(q: i32, max_tile: u32) -> u32 {
+    if q <= 0 {
+        0
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        let idx = (q / TILE_EXTENT_I32) as u32;
+        idx.min(max_tile)
+    }
+}
+
+fn row_band_rect(ty: u32, world_max: i32) -> IntRect {
+    IntRect {
+        min_x: 0,
+        min_y: tile_origin(ty) - TILE_BUFFER_I32,
+        max_x: world_max,
+        max_y: tile_origin(ty + 1) + TILE_BUFFER_I32,
+    }
+}
+
+fn tile_origin(t: u32) -> i32 {
+    i32::try_from(t).expect("tile coordinate fits i32") * TILE_EXTENT_I32
+}
+
+fn tile_center_coord(t: u32) -> i32 {
+    tile_origin(t) + TILE_EXTENT_I32 / 2
+}
+
+fn buffered_tile_rect(tx: u32, ty: u32) -> IntRect {
+    IntRect {
+        min_x: tile_origin(tx) - TILE_BUFFER_I32,
+        min_y: tile_origin(ty) - TILE_BUFFER_I32,
+        max_x: tile_origin(tx + 1) + TILE_BUFFER_I32,
+        max_y: tile_origin(ty + 1) + TILE_BUFFER_I32,
+    }
+}
+
+fn buffered_tile_rect_contained(tx: u32, ty: u32, rect: IntRect) -> bool {
+    let tile = buffered_tile_rect(tx, ty);
+    tile.min_x >= rect.min_x
+        && tile.max_x <= rect.max_x
+        && tile.min_y >= rect.min_y
+        && tile.max_y <= rect.max_y
+}
+
+fn fast_path_rect(row_shapes: &Shapes, shape_bbox: IntRect, band: IntRect) -> Option<IntRect> {
+    if row_shapes.len() != 1 || row_shapes[0].len() != 1 || row_shapes[0][0].len() != 4 {
+        return None;
+    }
+
+    let rect = rect_intersection(shape_bbox, band)?;
+    let mut actual = row_shapes[0][0]
+        .iter()
+        .map(|p| (p.x, p.y))
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    let mut expected = vec![
+        (rect.min_x, rect.min_y),
+        (rect.max_x, rect.min_y),
+        (rect.max_x, rect.max_y),
+        (rect.min_x, rect.max_y),
+    ];
+    expected.sort_unstable();
+    (actual == expected).then_some(rect)
+}
+
+fn rect_intersection(a: IntRect, b: IntRect) -> Option<IntRect> {
+    let rect = IntRect {
+        min_x: a.min_x.max(b.min_x),
+        min_y: a.min_y.max(b.min_y),
+        max_x: a.max_x.min(b.max_x),
+        max_y: a.max_y.min(b.max_y),
+    };
+    (rect.min_x < rect.max_x && rect.min_y < rect.max_y).then_some(rect)
+}
+
+fn debug_assert_no_boundary_in_fast_tiles(
+    boundary_tiles: &HashSet<u64>,
+    ty: u32,
+    tx_min: u32,
+    tx_max: u32,
+    rect: IntRect,
+) {
+    #[cfg(debug_assertions)]
+    for tx in tx_min..=tx_max {
+        if buffered_tile_rect_contained(tx, ty, rect) {
+            debug_assert!(!boundary_tiles.contains(&pack_tile(tx, ty)));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,276 +491,274 @@ pub(crate) fn process_ocean_shapefile(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
 fn emit_ocean_polygon(
     feature_id: u64,
-    outer: &[Point],
-    inners: &[Vec<Point>],
+    piece: &Shape,
     min_zoom: u8,
     max_zoom: u8,
     layer_idx: u8,
     attrs: &[shortbread::Attr],
-    land_mask: Option<&geometry::LandMask>,
     records: &mut Vec<SortRecord>,
-    simp_scratch: &mut geometry::SimplifyMultiScratch,
 ) {
-    if outer.len() < 4 {
+    if piece.is_empty() {
         return;
     }
 
-    let bbox = merc_bbox(outer);
-
-    // Reuse collections across zoom iterations (O4: avoid re-alloc per zoom)
     let mut boundary_tiles: HashSet<u64> = HashSet::new();
     let mut boundary_rows: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut gaps: Vec<(u32, u32)> = Vec::new();
     let mut bt_all_rings: Vec<Vec<(i32, i32)>> = Vec::new();
     let mut bt_geom_buf: Vec<u32> = Vec::new();
-    let mut clip_a: Vec<Point> = Vec::new();
-    let mut clip_b: Vec<Point> = Vec::new();
-    // Row pre-clip buffers: clip polygon to each tile row's Y-band before
-    // per-tile clipping. Reduces input vertex count for individual tile clips
-    // dramatically for large ocean polygons spanning many rows.
-    let mut row_clip_a: Vec<Point> = Vec::new();
-    let mut row_clip_b: Vec<Point> = Vec::new();
-    let mut row_outer: Vec<Point> = Vec::new();
-    let mut row_inners: Vec<Vec<Point>> = Vec::new();
 
-    // No pre-clip Mercator simplification for ocean.
-    // Pre-clip DP on coastlines creates self-intersecting rings (narrow channels
-    // collapse), which then produce garbage after S-H clipping. Instead we iterate
-    // zooms with the original geometry and simplify in tile coords after clipping
-    // (simplify_ring_safe in emit_boundary_tile).
-    let _ = simp_scratch; // unused - ocean skips pre-clip simplification
     for z in (min_zoom..=max_zoom).rev() {
-        let (simp_outer, simp_inners): (&[Point], &[Vec<Point>]) = (outer, inners);
-        let scale = f64::from(1u32 << z);
-        let inv_scale = 1.0 / scale;
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let max_tile = (1u32 << z) - 1;
+        let world_max = i32::try_from((u64::from(max_tile) + 1) * u64::from(TILE_EXTENT_I32 as u32))
+            .expect("z14 world extent fits i32");
 
-        // Rasterize polygon edges → boundary tiles
-        boundary_tiles.clear();
-        rasterize_ring_edges(simp_outer, scale, &mut boundary_tiles);
-        for inner in simp_inners {
-            rasterize_ring_edges(inner, scale, &mut boundary_tiles);
-        }
+        let mut shape_z = rescale_shape(piece, max_zoom - z);
+        simplify_shape_dp(&mut shape_z, OCEAN_DP_TOL_PX);
+        for shape in normalize(shape_z, 256) {
+            let Some(bbox) = shape_bbox(&shape) else {
+                continue;
+            };
+            let (tx_min, tx_max, ty_min, ty_max) = tile_range_for_rect(bbox, max_tile);
 
-        // Group boundary tiles by row (ty → sorted tx list)
-        boundary_rows.clear();
-        for &packed in &boundary_tiles {
-            #[allow(clippy::cast_possible_truncation)]
-            let tx = (packed >> 32) as u32;
-            #[allow(clippy::cast_possible_truncation)]
-            let ty = packed as u32;
-            boundary_rows.entry(ty).or_default().push(tx);
-        }
-        for txs in boundary_rows.values_mut() {
-            txs.sort_unstable();
-            txs.dedup();
-        }
-
-        // Tile range from bbox
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let tx_min = (bbox.min_x * scale).floor().max(0.0) as u32;
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let ty_min = (bbox.min_y * scale).floor().max(0.0) as u32;
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let tx_max = ((bbox.max_x * scale).floor().max(0.0) as u32).min(max_tile);
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let ty_max = ((bbox.max_y * scale).floor().max(0.0) as u32).min(max_tile);
-
-        // PIP helper: inside outer and not in any hole
-        let pip = |px: f64, py: f64| -> bool {
-            let test_pt = Point::new(px, py);
-            geometry::point_in_polygon(&test_pt, simp_outer)
-                && !simp_inners.iter().any(|inner| geometry::point_in_polygon(&test_pt, inner))
-        };
-
-        // Scanline: process row by row
-        let tile_buf = BUFFER_FRACTION * inv_scale;
-        for ty in ty_min..=ty_max {
-            let cy = (f64::from(ty) + 0.5) * inv_scale;
-
-            // Row pre-clip: restrict polygon to this row's Y-band.
-            // Per-tile clips then process a much smaller polygon
-            // (e.g. ~50 vertices instead of ~1000 for large fjord polygons).
-            let row_rect = ClipRect::new(
-                0.0,
-                f64::from(ty) * inv_scale - tile_buf,
-                1.0,
-                f64::from(ty + 1) * inv_scale + tile_buf,
-            );
-            geometry::clip_polygon_into(simp_outer, &row_rect, &mut row_clip_a, &mut row_clip_b);
-            if row_clip_a.is_empty() { continue; }
-            row_outer.clear();
-            row_outer.extend_from_slice(&row_clip_a);
-
-            // Pre-clip inners to row band (rare for ocean, usually empty)
-            let mut row_inner_count = 0;
-            for inner in simp_inners {
-                geometry::clip_polygon_into(inner, &row_rect, &mut row_clip_a, &mut row_clip_b);
-                if row_clip_a.len() >= 3 {
-                    if row_inner_count < row_inners.len() {
-                        row_inners[row_inner_count].clear();
-                        row_inners[row_inner_count].extend_from_slice(&row_clip_a);
-                    } else {
-                        row_inners.push(row_clip_a.clone());
-                    }
-                    row_inner_count += 1;
-                }
+            boundary_tiles.clear();
+            rasterize_shape_edges(&shape, max_tile, &mut boundary_tiles);
+            boundary_rows.clear();
+            for &packed in &boundary_tiles {
+                #[allow(clippy::cast_possible_truncation)]
+                let tx = (packed >> 32) as u32;
+                #[allow(clippy::cast_possible_truncation)]
+                let ty = packed as u32;
+                boundary_rows.entry(ty).or_default().push(tx);
+            }
+            for txs in boundary_rows.values_mut() {
+                txs.sort_unstable();
+                txs.dedup();
             }
 
-            if let Some(bx_list) = boundary_rows.get(&ty) {
-                // X-extent of row-clipped polygon - skip boundary tiles outside this range
-                let (row_x_min, row_x_max) = row_outer.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
-
-                // Row has boundary tiles - clip+emit them, then clip+emit gaps
-                for &tx in bx_list {
-                    let tile_x_min = f64::from(tx) * inv_scale - tile_buf;
-                    let tile_x_max = f64::from(tx + 1) * inv_scale + tile_buf;
-                    if row_x_max < tile_x_min || row_x_min > tile_x_max { continue; }
-                    if let Some(mask) = land_mask
-                        && !mask.has_land(z, tx, ty)
-                    {
-                        emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
-                        continue;
-                    }
-                    emit_boundary_tile(
-                        feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
-                        layer_idx, attrs, records,
-                        &mut bt_all_rings, &mut bt_geom_buf,
-                        &mut clip_a, &mut clip_b,
-                    );
+            for ty in ty_min..=ty_max {
+                let band = row_band_rect(ty, world_max);
+                let row_shapes = intersect_rect(&shape, band, 256);
+                if row_shapes.is_empty() {
+                    continue;
                 }
 
-                // Gap tiles: use PIP to decide if inside, then clip actual polygon
-                gaps.clear();
-                if bx_list[0] > tx_min {
-                    gaps.push((tx_min, bx_list[0] - 1));
-                }
-                for pair in bx_list.windows(2) {
-                    if pair[1] > pair[0] + 1 {
-                        gaps.push((pair[0] + 1, pair[1] - 1));
-                    }
-                }
-                if *bx_list.last().expect("nonempty") < tx_max {
-                    gaps.push((bx_list.last().expect("nonempty") + 1, tx_max));
-                }
-
-                for (gx_min, gx_max) in &gaps {
-                    let test_cx = (f64::from(*gx_min) + 0.5) * inv_scale;
-                    if pip(test_cx, cy) {
-                        for tx in *gx_min..=*gx_max {
-                            if let Some(mask) = land_mask
-                                && !mask.has_land(z, tx, ty)
-                            {
-                                emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
-                                continue;
-                            }
-                            emit_boundary_tile(
-                                feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
-                                layer_idx, attrs, records,
-                                &mut bt_all_rings, &mut bt_geom_buf,
-                                &mut clip_a, &mut clip_b,
+                if let Some(r) = fast_path_rect(&row_shapes, bbox, band) {
+                    debug_assert_no_boundary_in_fast_tiles(&boundary_tiles, ty, tx_min, tx_max, r);
+                    for tx in tx_min..=tx_max {
+                        if buffered_tile_rect_contained(tx, ty, r) {
+                            emit_full_tile(
+                                feature_id,
+                                tx,
+                                ty,
+                                z,
+                                layer_idx,
+                                attrs,
+                                records,
+                                &mut bt_all_rings,
+                                &mut bt_geom_buf,
+                            );
+                        } else {
+                            emit_tile_for_row_shapes(
+                                feature_id,
+                                tx,
+                                ty,
+                                z,
+                                &row_shapes,
+                                layer_idx,
+                                attrs,
+                                records,
+                                &mut bt_all_rings,
+                                &mut bt_geom_buf,
                             );
                         }
                     }
+                    continue;
                 }
-            } else {
-                // No boundary tiles in this row - single PIP test, then clip each tile
-                let test_cx = (f64::from(tx_min) + 0.5) * inv_scale;
-                if pip(test_cx, cy) {
-                    for tx in tx_min..=tx_max {
-                        if let Some(mask) = land_mask
-                            && !mask.has_land(z, tx, ty)
-                        {
-                            emit_full_tile(feature_id, tx, ty, z, layer_idx, attrs, records, &mut bt_all_rings, &mut bt_geom_buf);
-                            continue;
-                        }
-                        emit_boundary_tile(
-                            feature_id, tx, ty, z, &row_outer, &row_inners[..row_inner_count],
-                            layer_idx, attrs, records,
-                            &mut bt_all_rings, &mut bt_geom_buf,
-                            &mut clip_a, &mut clip_b,
-                        );
-                    }
+
+                let boundary_txs = boundary_rows.get(&ty).map_or(&[][..], Vec::as_slice);
+                for row_shape in &row_shapes {
+                    let Some(row_bbox) = shape_bbox(row_shape) else {
+                        continue;
+                    };
+                    let (row_tx_min, row_tx_max, _, _) = tile_range_for_rect(row_bbox, max_tile);
+                    emit_boundary_and_gap_tiles(
+                        feature_id,
+                        ty,
+                        z,
+                        row_tx_min,
+                        row_tx_max,
+                        boundary_txs,
+                        row_shape,
+                        layer_idx,
+                        attrs,
+                        records,
+                        &mut bt_all_rings,
+                        &mut bt_geom_buf,
+                    );
                 }
             }
         }
     }
 }
 
-/// Clip and encode a single boundary tile (polygon edge crosses this tile).
-/// Reusable buffers (`all_rings`, `geom_buf`, `clip_a`, `clip_b`) are passed in
-/// to avoid per-call allocation - this function is called per boundary tile per zoom.
 #[allow(clippy::too_many_arguments)]
-fn emit_boundary_tile(
+fn emit_boundary_and_gap_tiles(
     feature_id: u64,
-    tx: u32, ty: u32, z: u8,
-    outer: &[Point],
-    inners: &[Vec<Point>],
+    ty: u32,
+    z: u8,
+    tx_min: u32,
+    tx_max: u32,
+    boundary_txs: &[u32],
+    row_shape: &Shape,
     layer_idx: u8,
     attrs: &[shortbread::Attr],
     records: &mut Vec<SortRecord>,
     all_rings: &mut Vec<Vec<(i32, i32)>>,
     geom_buf: &mut Vec<u32>,
-    clip_a: &mut Vec<Point>,
-    clip_b: &mut Vec<Point>,
 ) {
-    let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-
-    geometry::clip_polygon_into(outer, &clip, clip_a, clip_b);
-    if clip_a.len() < 3 {
+    if tx_min > tx_max {
         return;
     }
-    // Quantize outer + holes to tile coordinates
-    let outer_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
-    let mut hole_tcs: Vec<Vec<(i32, i32)>> = Vec::new();
-    for inner in inners {
-        geometry::clip_polygon_into(inner, &clip, clip_a, clip_b);
-        if clip_a.len() < 3 { continue; }
-        let inner_tc = geometry::to_tile_coords(clip_a, tx, ty, z);
-        if inner_tc.len() >= 4 {
-            hole_tcs.push(inner_tc);
+
+    let mut cursor = tx_min;
+    for &boundary_tx in boundary_txs {
+        if boundary_tx < tx_min || boundary_tx > tx_max {
+            continue;
         }
+        if cursor < boundary_tx {
+            emit_gap_run(
+                feature_id,
+                cursor,
+                boundary_tx - 1,
+                ty,
+                z,
+                row_shape,
+                layer_idx,
+                attrs,
+                records,
+                all_rings,
+                geom_buf,
+            );
+        }
+        emit_clipped_tile_shape(
+            feature_id, boundary_tx, ty, z, row_shape, layer_idx, attrs, records, all_rings, geom_buf,
+        );
+        cursor = boundary_tx.saturating_add(1);
     }
 
-    // Unconditional post-quantization repair via i_overlay integer simplify.
-    // Resolves T-junctions, collinear overlaps, and self-intersections
-    // introduced by f64→i32 rounding. All three competitors do this.
-    let repaired = geometry::repair_quantized_polygon(&outer_tc, &hole_tcs);
-    if repaired.is_empty() { return; }
+    if cursor <= tx_max {
+        emit_gap_run(
+            feature_id,
+            cursor,
+            tx_max,
+            ty,
+            z,
+            row_shape,
+            layer_idx,
+            attrs,
+            records,
+            all_rings,
+            geom_buf,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_gap_run(
+    feature_id: u64,
+    tx_min: u32,
+    tx_max: u32,
+    ty: u32,
+    z: u8,
+    row_shape: &Shape,
+    layer_idx: u8,
+    attrs: &[shortbread::Attr],
+    records: &mut Vec<SortRecord>,
+    all_rings: &mut Vec<Vec<(i32, i32)>>,
+    geom_buf: &mut Vec<u32>,
+) {
+    if tx_min > tx_max {
+        return;
+    }
+    let cy = tile_center_coord(ty);
+    let test_x = tile_center_coord(tx_min);
+    if !point_in_shape(test_x, cy, row_shape) {
+        return;
+    }
+    for tx in tx_min..=tx_max {
+        emit_clipped_tile_shape(
+            feature_id, tx, ty, z, row_shape, layer_idx, attrs, records, all_rings, geom_buf,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_tile_for_row_shapes(
+    feature_id: u64,
+    tx: u32,
+    ty: u32,
+    z: u8,
+    row_shapes: &Shapes,
+    layer_idx: u8,
+    attrs: &[shortbread::Attr],
+    records: &mut Vec<SortRecord>,
+    all_rings: &mut Vec<Vec<(i32, i32)>>,
+    geom_buf: &mut Vec<u32>,
+) {
+    for row_shape in row_shapes {
+        emit_clipped_tile_shape(
+            feature_id, tx, ty, z, row_shape, layer_idx, attrs, records, all_rings, geom_buf,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_clipped_tile_shape(
+    feature_id: u64,
+    tx: u32,
+    ty: u32,
+    z: u8,
+    shape: &Shape,
+    layer_idx: u8,
+    attrs: &[shortbread::Attr],
+    records: &mut Vec<SortRecord>,
+    all_rings: &mut Vec<Vec<(i32, i32)>>,
+    geom_buf: &mut Vec<u32>,
+) {
+    let tile_shapes = intersect_rect(shape, buffered_tile_rect(tx, ty), 256);
+    if tile_shapes.is_empty() {
+        return;
+    }
 
     let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
     let key_base = sort::make_sort_key(tile_id, layer_idx, 0);
+    let ox = tile_origin(tx);
+    let oy = tile_origin(ty);
 
-    // Emit each repaired polygon as a separate feature
-    for poly in repaired {
-        if poly.is_empty() { continue; }
+    for tile_shape in tile_shapes {
         all_rings.clear();
-        for (i, mut ring) in poly.into_iter().enumerate() {
-            if ring.len() < 4 { continue; }
-            if ring_area_abs(&ring) < MIN_RING_AREA { continue; }
+        for (i, contour) in tile_shape.into_iter().enumerate() {
+            if contour.len() < 3 {
+                continue;
+            }
+            let mut ring: Vec<(i32, i32)> =
+                contour.into_iter().map(|p| (p.x - ox, p.y - oy)).collect();
             if i == 0 {
                 close_and_orient_cw(&mut ring);
             } else {
                 close_and_orient_ccw(&mut ring);
-                geometry::nudge_hole_off_boundary(&mut ring);
             }
             all_rings.push(ring);
         }
-        if all_rings.is_empty() { continue; }
-
-        let n_rings = all_rings.len();
-        let ring_count = geometry::filter_holes_for_outer(all_rings, n_rings);
-        if ring_count > 1 {
-            let (outer_ref, holes) = all_rings[..ring_count].split_first_mut().expect("nonempty");
-            for hole in holes {
-                geometry::nudge_coincident_hole_vertices(hole, outer_ref);
-            }
+        if all_rings.is_empty() {
+            continue;
         }
 
-        let ring_refs: Vec<&[(i32, i32)]> = all_rings[..ring_count].iter().map(Vec::as_slice).collect();
+        let ring_refs: Vec<&[(i32, i32)]> = all_rings.iter().map(Vec::as_slice).collect();
         mvt::encode_polygon(geom_buf, &ring_refs);
-        if geom_buf.is_empty() { continue; }
+        if geom_buf.is_empty() {
+            continue;
+        }
         let data = encode_feature_data(feature_id, GeomType::Polygon, geom_buf, attrs, z);
         records.push(SortRecord { key: key_base, data });
     }
@@ -671,44 +792,42 @@ fn emit_full_tile(
     records.push(SortRecord { key: key_base, data });
 }
 
-/// Absolute 2x signed area of a closed ring (shoelace formula, no /2).
-fn ring_area_abs(ring: &[(i32, i32)]) -> i64 {
-    let mut area: i64 = 0;
-    let n = ring.len();
-    if n < 3 {
-        return 0;
-    }
-    for i in 0..n - 1 {
-        area += (ring[i].0 as i64) * (ring[i + 1].1 as i64)
-            - (ring[i + 1].0 as i64) * (ring[i].1 as i64);
-    }
-    area.abs()
-}
-
 // ---------------------------------------------------------------------------
 // Rasterization helpers
 // ---------------------------------------------------------------------------
 
 /// Rasterize polygon ring edges into tile grid cells using DDA grid traversal.
 /// Marks all tiles that a ring's edges cross through.
-fn rasterize_ring_edges(ring: &[Point], scale: f64, tiles: &mut HashSet<u64>) {
-    if ring.len() < 2 {
-        return;
-    }
-    for i in 0..ring.len() {
-        let j = if i + 1 < ring.len() { i + 1 } else { 0 };
-        let x0 = ring[i].x * scale;
-        let y0 = ring[i].y * scale;
-        let x1 = ring[j].x * scale;
-        let y1 = ring[j].y * scale;
-        rasterize_segment(x0, y0, x1, y1, tiles);
+fn rasterize_shape_edges(shape: &Shape, max_tile: u32, tiles: &mut HashSet<u64>) {
+    for ring in shape {
+        if ring.len() < 2 {
+            continue;
+        }
+        for i in 0..ring.len() {
+            let j = if i + 1 < ring.len() { i + 1 } else { 0 };
+            let x0 = f64::from(ring[i].x) / f64::from(TILE_EXTENT_I32);
+            let y0 = f64::from(ring[i].y) / f64::from(TILE_EXTENT_I32);
+            let x1 = f64::from(ring[j].x) / f64::from(TILE_EXTENT_I32);
+            let y1 = f64::from(ring[j].y) / f64::from(TILE_EXTENT_I32);
+            rasterize_segment_clamped(x0, y0, x1, y1, max_tile, tiles);
+        }
     }
 }
 
 /// DDA grid traversal: enumerate all grid cells a line segment crosses.
+#[cfg(test)]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn rasterize_segment(
     x0: f64, y0: f64, x1: f64, y1: f64,
+    tiles: &mut HashSet<u64>,
+) {
+    rasterize_segment_clamped(x0, y0, x1, y1, u32::MAX, tiles);
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn rasterize_segment_clamped(
+    x0: f64, y0: f64, x1: f64, y1: f64,
+    max_tile: u32,
     tiles: &mut HashSet<u64>,
 ) {
     let mut cx = x0.floor() as i32;
@@ -716,7 +835,7 @@ fn rasterize_segment(
     let ex = x1.floor() as i32;
     let ey = y1.floor() as i32;
 
-    insert_rasterized_tile(cx, cy, tiles);
+    insert_rasterized_tile(cx, cy, max_tile, tiles);
 
     let dx = x1 - x0;
     let dy = y1 - y0;
@@ -727,13 +846,13 @@ fn rasterize_segment(
 
     if dy == 0.0 && is_grid_line_coord(y0) {
         let step_x = if dx > 0.0 { 1 } else { -1 };
-        rasterize_horizontal_grid_line(cx, cy, ex, step_x, tiles);
+        rasterize_horizontal_grid_line(cx, cy, ex, step_x, max_tile, tiles);
         return;
     }
 
     if dx == 0.0 && is_grid_line_coord(x0) {
         let step_y = if dy > 0.0 { 1 } else { -1 };
-        rasterize_vertical_grid_line(cx, cy, ey, step_y, tiles);
+        rasterize_vertical_grid_line(cx, cy, ey, step_y, max_tile, tiles);
         return;
     }
 
@@ -766,8 +885,8 @@ fn rasterize_segment(
         // before entering the diagonal cell. Over-marking boundary tiles is
         // safe; under-marking can misclassify a boundary row as an interior gap.
         if t_max_x.total_cmp(&t_max_y).is_eq() {
-            insert_rasterized_tile(cx + step_x, cy, tiles);
-            insert_rasterized_tile(cx, cy + step_y, tiles);
+            insert_rasterized_tile(cx + step_x, cy, max_tile, tiles);
+            insert_rasterized_tile(cx, cy + step_y, max_tile, tiles);
             cx += step_x;
             cy += step_y;
             t_max_x += t_delta_x;
@@ -779,7 +898,7 @@ fn rasterize_segment(
             cy += step_y;
             t_max_y += t_delta_y;
         }
-        insert_rasterized_tile(cx, cy, tiles);
+        insert_rasterized_tile(cx, cy, max_tile, tiles);
     }
 }
 
@@ -793,12 +912,13 @@ fn rasterize_horizontal_grid_line(
     cy: i32,
     ex: i32,
     step_x: i32,
+    max_tile: u32,
     tiles: &mut HashSet<u64>,
 ) {
     let max_steps = (cx - ex).unsigned_abs() + 2;
     for _ in 0..max_steps {
-        insert_rasterized_tile(cx, cy, tiles);
-        insert_rasterized_tile(cx, cy - 1, tiles);
+        insert_rasterized_tile(cx, cy, max_tile, tiles);
+        insert_rasterized_tile(cx, cy - 1, max_tile, tiles);
         if cx == ex {
             break;
         }
@@ -811,12 +931,13 @@ fn rasterize_vertical_grid_line(
     mut cy: i32,
     ey: i32,
     step_y: i32,
+    max_tile: u32,
     tiles: &mut HashSet<u64>,
 ) {
     let max_steps = (cy - ey).unsigned_abs() + 2;
     for _ in 0..max_steps {
-        insert_rasterized_tile(cx, cy, tiles);
-        insert_rasterized_tile(cx - 1, cy, tiles);
+        insert_rasterized_tile(cx, cy, max_tile, tiles);
+        insert_rasterized_tile(cx - 1, cy, max_tile, tiles);
         if cy == ey {
             break;
         }
@@ -825,9 +946,9 @@ fn rasterize_vertical_grid_line(
 }
 
 #[inline]
-fn insert_rasterized_tile(tx: i32, ty: i32, tiles: &mut HashSet<u64>) {
+fn insert_rasterized_tile(tx: i32, ty: i32, max_tile: u32, tiles: &mut HashSet<u64>) {
     if let (Ok(tx), Ok(ty)) = (u32::try_from(tx), u32::try_from(ty)) {
-        tiles.insert(pack_tile(tx, ty));
+        tiles.insert(pack_tile(tx.min(max_tile), ty.min(max_tile)));
     }
 }
 
@@ -997,6 +1118,73 @@ mod tests {
             .into_iter()
             .map(|(tx, ty)| pack_tile(tx, ty))
             .collect()
+    }
+
+    fn ip(x: i32, y: i32) -> i_overlay::i_float::int::point::IntPoint {
+        i_overlay::i_float::int::point::IntPoint::new(x, y)
+    }
+
+    fn rect_row_shape(rect: IntRect) -> Shapes {
+        vec![vec![vec![
+            ip(rect.min_x, rect.min_y),
+            ip(rect.max_x, rect.min_y),
+            ip(rect.max_x, rect.max_y),
+            ip(rect.min_x, rect.max_y),
+        ]]]
+    }
+
+    #[test]
+    fn fast_path_fires_for_single_4_corner_rect() {
+        let bbox = IntRect { min_x: 0, min_y: 0, max_x: 12_288, max_y: 12_288 };
+        let band = IntRect { min_x: 0, min_y: 3_968, max_x: 12_288, max_y: 8_320 };
+        let row_shapes = rect_row_shape(rect_intersection(bbox, band).unwrap());
+        assert_eq!(fast_path_rect(&row_shapes, bbox, band), rect_intersection(bbox, band));
+    }
+
+    #[test]
+    fn fast_path_rejects_one_vertex_displaced_by_1_unit() {
+        let bbox = IntRect { min_x: 0, min_y: 0, max_x: 12_288, max_y: 12_288 };
+        let band = IntRect { min_x: 0, min_y: 3_968, max_x: 12_288, max_y: 8_320 };
+        let rect = rect_intersection(bbox, band).unwrap();
+        let row_shapes = vec![vec![vec![
+            ip(rect.min_x, rect.min_y),
+            ip(rect.max_x + 1, rect.min_y),
+            ip(rect.max_x, rect.max_y),
+            ip(rect.min_x, rect.max_y),
+        ]]];
+        assert!(fast_path_rect(&row_shapes, bbox, band).is_none());
+    }
+
+    #[test]
+    fn fast_path_rejects_extra_contour_hole() {
+        let bbox = IntRect { min_x: 0, min_y: 0, max_x: 12_288, max_y: 12_288 };
+        let band = IntRect { min_x: 0, min_y: 3_968, max_x: 12_288, max_y: 8_320 };
+        let rect = rect_intersection(bbox, band).unwrap();
+        let mut row_shapes = rect_row_shape(rect);
+        row_shapes[0].push(vec![ip(100, 4_100), ip(200, 4_100), ip(200, 4_200), ip(100, 4_200)]);
+        assert!(fast_path_rect(&row_shapes, bbox, band).is_none());
+    }
+
+    #[test]
+    fn fast_path_edge_tiles_whose_buffered_rect_exceeds_r_take_boolean_path() {
+        let rect = IntRect { min_x: 0, min_y: -128, max_x: 12_288, max_y: 4_224 };
+        assert!(!buffered_tile_rect_contained(0, 0, rect));
+        assert!(buffered_tile_rect_contained(1, 0, rect));
+        assert!(!buffered_tile_rect_contained(2, 0, rect));
+    }
+
+    #[test]
+    fn fast_path_rotated_reversed_corner_order_still_fires() {
+        let bbox = IntRect { min_x: 0, min_y: 0, max_x: 12_288, max_y: 12_288 };
+        let band = IntRect { min_x: 0, min_y: 3_968, max_x: 12_288, max_y: 8_320 };
+        let rect = rect_intersection(bbox, band).unwrap();
+        let row_shapes = vec![vec![vec![
+            ip(rect.max_x, rect.max_y),
+            ip(rect.max_x, rect.min_y),
+            ip(rect.min_x, rect.min_y),
+            ip(rect.min_x, rect.max_y),
+        ]]];
+        assert_eq!(fast_path_rect(&row_shapes, bbox, band), Some(rect));
     }
 
     #[test]
@@ -1218,7 +1406,6 @@ mod tests {
             &bounds,
             0,
             0,
-            None,
             &mut sort_writer,
         )
         .unwrap();
@@ -1253,7 +1440,6 @@ mod tests {
             &disjoint_bounds,
             0,
             0,
-            None,
             &mut sort_writer,
         )
         .unwrap();
@@ -1280,7 +1466,6 @@ mod tests {
             &bounds,
             0,
             0,
-            None,
             &mut sort_writer,
         )
         .unwrap();
@@ -1314,7 +1499,6 @@ mod tests {
             &bounds,
             0,
             0,
-            None,
             &mut sort_writer,
         )
         .expect_err("short .shx header should fail");
@@ -1341,7 +1525,6 @@ mod tests {
             &bounds,
             0,
             0,
-            None,
             &mut sort_writer,
         )
         .expect_err("missing .shx should fail");
@@ -1370,7 +1553,6 @@ mod tests {
             &bounds,
             0,
             0,
-            None,
             &mut sort_writer,
         )
         .unwrap();

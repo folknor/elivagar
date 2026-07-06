@@ -18,7 +18,7 @@ use super::stats::{
 use super::emit::{
     PointEmitScratch, LineEmitScratch, PolygonEmitScratch,
     push_sort_record, emit_point_or_centroid, emit_line_feature, emit_polygon_feature,
-    antimeridian_shifts_for_bbox, mark_bbox_wrapped, enrich_polygon_matches,
+    antimeridian_shifts_for_bbox, enrich_polygon_matches,
     unwrap_antimeridian_path,
 };
 use super::relations::{
@@ -84,7 +84,7 @@ pub(super) fn select_node_store_mode(
 #[hotpath::measure]
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::unwrap_in_result)]
-pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, geometry::LandMask, Phase12Stats), PipelineError> {
+pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, Phase12Stats), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let sort_chunk_budget = if config.sort_chunk_size > 0 {
@@ -158,8 +158,6 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
     let mut fanout_stats = FanoutStats::new();
     let missing_ref_stats = std::sync::Arc::new(MissingRefStatsAtomic::default());
     let deferral_stats = std::sync::Arc::new(DeferralStats::new());
-    let land_mask = std::sync::Arc::new(geometry::LandMask::new());
-
     // Track data extent for ocean shapefile filtering
     let mut min_lat_e7: i32 = i32::MAX;
     let mut max_lat_e7: i32 = i32::MIN;
@@ -232,7 +230,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                 #[allow(clippy::cast_sign_loss)]
                 let n = process_node(
                     $node.id() as u64, lat_e7, lon_e7,
-                    &tags_vec, min_z, max_z, &land_mask, &mut node_records,
+                    &tags_vec, min_z, max_z, &mut node_records,
                 );
                 // Panic: inside PBF callback - can't propagate Result. Disk I/O failure is unrecoverable.
                 for r in node_records.drain(..) {
@@ -292,7 +290,6 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     // inside rayon::in_place_scope) can't make progress → deadlock.
                     let (rtx, rrx) = std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(MAX_INFLIGHT);
                     let nr_clone = nr.clone();
-                    let lm_clone = std::sync::Arc::clone(&land_mask);
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
                     let missing_ref_stats_clone = std::sync::Arc::clone(&missing_ref_stats);
                     let deferral_stats_clone = std::sync::Arc::clone(&deferral_stats);
@@ -319,7 +316,6 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                         // Take refs outside loop - Copy into each move closure,
                         // avoids Arc::clone per spawn.
                         let nr_ref: Option<&NodeStoreReader> = nr_clone.as_deref();
-                        let lm_ref = &*lm_clone;
                         let mr_ref = &*missing_ref_stats_clone;
                         let ds_ref = &*deferral_stats_clone;
                         // Byte-budgeted throttle: (count, estimated_bytes).
@@ -396,7 +392,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                                     let results: Vec<ProcessedWay> = raw_ways
                                         .into_par_iter()
                                         .map(|raw| process_raw_way(
-                                            &raw, nr_ref, lm_ref, mz, xz, &srl, ds_ref, mr_ref, &fcs, psf,
+                                            &raw, nr_ref, mz, xz, &srl, ds_ref, mr_ref, &fcs, psf,
                                         ))
                                         .collect();
                                     let _ = tx.send(results);
@@ -488,7 +484,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                         let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
                         rel_batch_bytes = 0;
                         features_emitted += flush_rel_batch(
-                            batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
+                            batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats,
                             sort_writer.as_mut().expect("sort_writer not returned from drain"),
                             &mut fanout_stats, &config.fanout_caps, config.polygon_simplify_factor,
                         );
@@ -506,7 +502,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
 
     if !rel_batch.is_empty() {
         features_emitted += flush_rel_batch(
-            rel_batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats, &land_mask,
+            rel_batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats,
             sort_writer.as_mut().expect("sort_writer not returned from drain"),
             &mut fanout_stats, &config.fanout_caps, config.polygon_simplify_factor,
         );
@@ -546,10 +542,6 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
     };
     eprintln!("  Data bounds (merc): x[{:.4}-{:.4}] y[{:.4}-{:.4}]",
         data_bounds.min_x, data_bounds.max_x, data_bounds.min_y, data_bounds.max_y);
-    let land_mask = std::sync::Arc::try_unwrap(land_mask)
-        .unwrap_or_else(|_| panic!("land_mask Arc should have single owner after worker join"));
-    eprintln!("  Land mask: {} z14 cells populated", land_mask.count_set());
-
     let max_way_inflight_bytes = way_hwm.load(Ordering::Relaxed);
     let missing_ref_snapshot = missing_ref_stats.snapshot();
     let sw = sort_writer.expect("sort_writer not returned from drain");
@@ -572,7 +564,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
         layer_zoom_bytes: Box::new(*sw.layer_zoom_bytes()),
         fanout_stats,
     };
-    Ok((sw, data_bounds, land_mask, stats))
+    Ok((sw, data_bounds, stats))
 }
 
 // ---------------------------------------------------------------------------
@@ -588,7 +580,6 @@ pub(super) fn process_node(
     tags: &[(&str, &str)],
     min_zoom: u8,
     max_zoom: u8,
-    land_mask: &geometry::LandMask,
     records: &mut Vec<SortRecord>,
 ) -> u64 {
     let tag_helper = Tags(tags);
@@ -599,7 +590,6 @@ pub(super) fn process_node(
 
     let p = geometry::project_e7(lat_e7, lon_e7);
     let pbbox = MercBbox { min_x: p.x, min_y: p.y, max_x: p.x, max_y: p.y };
-    land_mask.mark_bbox(&pbbox);
     let mut count: u64 = 0;
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
@@ -840,7 +830,7 @@ thread_local! {
 }
 
 /// Drain a single batch of processed way results: write way_index entries,
-/// push sort records. Returns feature count. Land mask marking moved to rayon threads.
+/// push sort records. Returns feature count.
 #[hotpath::measure]
 pub(super) fn drain_processed_ways(
     results: Vec<ProcessedWay>,
@@ -877,7 +867,6 @@ pub(super) fn drain_processed_ways(
 pub(super) fn process_raw_way(
     raw: &RawWay,
     node_reader: Option<&NodeStoreReader>,
-    land_mask: &geometry::LandMask,
     min_zoom: u8,
     max_zoom: u8,
     seam_reconcile_layers: &[u8],
@@ -932,7 +921,6 @@ pub(super) fn process_raw_way(
     let osm_id = raw.way_id as u64;
     let mut records = Vec::new();
     let mut cap_events: Vec<(u16, u64, u64)> = Vec::new();
-    let mut bbox: Option<MercBbox> = None;
     let mut preserve_vertex_mask: Vec<bool> = vec![false; coords_e7.len()];
     if !raw.preserve_node_refs.is_empty() {
         let preserve_nodes: FxHashSet<i64> = raw.preserve_node_refs.iter().copied().collect();
@@ -951,7 +939,6 @@ pub(super) fn process_raw_way(
 
         let merc = scratch.merc.as_slice();
         let merc_bbox_val = merc_bbox(merc);
-        bbox = Some(merc_bbox_val);
 
         // Enrich polygon matches with area-dependent data (way_area, min_zoom overrides)
         if is_closed {
@@ -1049,8 +1036,6 @@ pub(super) fn process_raw_way(
         // Collect cap events from polygon scratch before leaving the borrow.
         cap_events = std::mem::take(&mut scratch.polygon_emit.cap_events);
     });
-
-    mark_bbox_wrapped(land_mask, &bbox.expect("bbox set from merc coords"));
 
     ProcessedWay { way_id: raw.way_id, coords_e7, records, cap_events }
 }

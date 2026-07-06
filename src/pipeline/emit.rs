@@ -80,18 +80,6 @@ pub(super) fn antimeridian_shifts_for_bbox(bbox: &MercBbox) -> SmallVec<[f64; 3]
     shifts
 }
 
-pub(super) fn mark_bbox_wrapped(mask: &geometry::LandMask, bbox: &MercBbox) {
-    for shift in antimeridian_shifts_for_bbox(bbox) {
-        let shifted = MercBbox {
-            min_x: bbox.min_x + shift,
-            max_x: bbox.max_x + shift,
-            min_y: bbox.min_y,
-            max_y: bbox.max_y,
-        };
-        mask.mark_bbox(&shifted);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Shared vertex helpers (used by both phase12 and relations)
 // ---------------------------------------------------------------------------
