@@ -57,6 +57,52 @@ pub struct VerifyReport {
     pub layers_observed: HashSet<String>,
     pub layers_declared: Vec<String>,
     pub passed: bool,
+    pub geometry_stats: Option<GeometryStats>,
+}
+
+/// Per-zoom ocean-layer geometry statistics (--geometry-stats).
+#[derive(Default)]
+pub struct ZoomGeomStats {
+    pub features: u64,
+    pub rings: u64,
+    /// One entry per ring: vertex count (closed ring, incl. closing vertex).
+    pub ring_vertex_counts: Vec<u32>,
+    /// Adjacent equal vertex pairs within rings (excludes ring closure).
+    pub consecutive_dups: u64,
+    /// Single-ring features whose ring is a 4-corner rectangle covering the
+    /// full [0, 4096] extent (buffered full-tile ocean fills).
+    pub full_tile_features: u64,
+}
+
+#[derive(Default)]
+pub struct GeometryStats {
+    pub per_zoom: std::collections::BTreeMap<u8, ZoomGeomStats>,
+}
+
+impl GeometryStats {
+    /// Print a per-zoom table to stdout.
+    pub fn print_summary(&self) {
+        println!();
+        println!("Ocean geometry stats:");
+        println!(
+            "{:>4}  {:>9}  {:>9}  {:>9}  {:>9}  {:>11}  {:>9}",
+            "zoom", "features", "rings", "max_verts", "p99_verts", "consec_dups", "full_tile"
+        );
+        for (z, s) in &self.per_zoom {
+            let mut counts = s.ring_vertex_counts.clone();
+            counts.sort_unstable();
+            let max = counts.last().copied().unwrap_or(0);
+            let p99 = if counts.is_empty() {
+                0
+            } else {
+                counts[(counts.len() - 1).min(counts.len() * 99 / 100)]
+            };
+            println!(
+                "{:>4}  {:>9}  {:>9}  {:>9}  {:>9}  {:>11}  {:>9}",
+                z, s.features, s.rings, max, p99, s.consecutive_dups, s.full_tile_features
+            );
+        }
+    }
 }
 
 impl VerifyReport {
@@ -143,6 +189,12 @@ impl VerifyReport {
 /// Verify a PMTiles archive. Returns a report on success, or a fatal error
 /// if the container or metadata is unreadable.
 pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
+    verify_opts(path, false)
+}
+
+/// Verify with options: `geometry_stats` additionally collects per-zoom
+/// ocean-layer geometry statistics into the report.
+pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, VerifyError> {
     // -- Open and validate header --
     let mut reader = PmtilesReader::open(path)?;
     let file_size = reader.file_size()?;
@@ -200,6 +252,7 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
     let mut tiles_checked: u64 = 0;
     let mut tile_errors: Vec<String> = Vec::new();
     let mut layers_observed: HashSet<String> = HashSet::new();
+    let mut stats: Option<GeometryStats> = geometry_stats.then(GeometryStats::default);
 
     for entry in &entries {
         if tile_errors.len() >= MAX_TILE_ERRORS {
@@ -250,6 +303,10 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
             }
         }
 
+        if let Some(stats) = stats.as_mut() {
+            collect_ocean_geometry_stats(&decompressed, z, stats);
+        }
+
         tiles_checked += 1;
     }
 
@@ -261,7 +318,105 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
         layers_observed,
         layers_declared,
         passed,
+        geometry_stats: stats,
     })
+}
+
+/// Decode the ocean layer of one tile and accumulate geometry statistics.
+fn collect_ocean_geometry_stats(data: &[u8], z: u8, stats: &mut GeometryStats) {
+    let mut tile_cursor = Cursor::new(data);
+    while let Ok(Some((field, wire_type))) = tile_cursor.read_tag() {
+        if field == 3 && wire_type == WIRE_LEN {
+            if let Ok(layer_data) = tile_cursor.read_len_delimited() {
+                collect_ocean_layer_stats(layer_data, z, stats);
+            }
+        } else if tile_cursor.skip_field(wire_type).is_err() {
+            break;
+        }
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats) {
+    let mut name = String::new();
+    let mut feature_blobs: Vec<&[u8]> = Vec::new();
+    let mut cursor = Cursor::new(layer_data);
+    while let Ok(Some((field, wire_type))) = cursor.read_tag() {
+        if wire_type == WIRE_LEN {
+            if let Ok(sub) = cursor.read_len_delimited() {
+                match field {
+                    1 => name = String::from_utf8_lossy(sub).to_string(),
+                    2 => feature_blobs.push(sub),
+                    _ => {}
+                }
+            }
+        } else if cursor.skip_field(wire_type).is_err() {
+            break;
+        }
+    }
+    if name != "ocean" { return; }
+
+    let zs = stats.per_zoom.entry(z).or_default();
+    for feat_data in &feature_blobs {
+        let mut geom_type: u64 = 0;
+        let mut geom_bytes: Option<&[u8]> = None;
+        let mut fc = Cursor::new(feat_data);
+        while let Ok(Some((ff, fw))) = fc.read_tag() {
+            match (ff, fw) {
+                (3, WIRE_VARINT) => { if let Ok(gt) = fc.read_varint() { geom_type = gt; } }
+                (4, WIRE_LEN) => { geom_bytes = fc.read_len_delimited().ok(); }
+                _ => { drop(fc.skip_field(fw)); }
+            }
+        }
+        if geom_type != 3 { continue; }
+        let Some(gb) = geom_bytes else { continue; };
+        let Ok(commands) = decode_packed_varints(gb) else { continue; };
+        let rings = crate::geometry::decode_mvt_polygon(&commands);
+        if rings.is_empty() { continue; }
+
+        zs.features += 1;
+        zs.rings += rings.len() as u64;
+        for ring in &rings {
+            zs.ring_vertex_counts.push(ring.len() as u32);
+            // Adjacent equal pairs; the closing vertex duplicates the FIRST
+            // vertex (not its predecessor), so closure never counts.
+            for pair in ring.windows(2) {
+                if pair[0] == pair[1] {
+                    zs.consecutive_dups += 1;
+                }
+            }
+        }
+        if rings.len() == 1 && is_full_tile_rect(&rings[0]) {
+            zs.full_tile_features += 1;
+        }
+    }
+}
+
+/// A closed 4-corner rectangle ring covering the full [0, 4096] extent
+/// (i.e. a buffered full-tile ocean fill).
+fn is_full_tile_rect(ring: &[(i32, i32)]) -> bool {
+    let n = if ring.first() == ring.last() && ring.len() > 1 {
+        ring.len() - 1
+    } else {
+        ring.len()
+    };
+    if n != 4 {
+        return false;
+    }
+    let (mut min_x, mut min_y) = (i32::MAX, i32::MAX);
+    let (mut max_x, mut max_y) = (i32::MIN, i32::MIN);
+    for &(x, y) in &ring[..n] {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+        // Every vertex must be a corner of the bbox - checked below.
+    }
+    let corners = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)];
+    let all_corners = ring[..n].iter().all(|v| corners.contains(v));
+    #[allow(clippy::cast_possible_truncation)]
+    let ext = crate::geometry::EXTENT as i32;
+    all_corners && min_x <= 0 && min_y <= 0 && max_x >= ext && max_y >= ext
 }
 
 fn validate_mvt_geometry(data: &[u8], z: u8, x: u32) -> Result<(), String> {
@@ -623,6 +778,22 @@ fn extract_declared_layers(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_tile_rect_detects_buffered_fill() {
+        let ring = vec![(-128, -128), (4224, -128), (4224, 4224), (-128, 4224), (-128, -128)];
+        assert!(is_full_tile_rect(&ring));
+    }
+
+    #[test]
+    fn full_tile_rect_rejects_partial_and_non_rect() {
+        // Covers extent but 5 distinct vertices (not a pure rectangle).
+        let ring = vec![(-128, -128), (4224, -128), (4224, 4224), (2000, 4224), (-128, 4000), (-128, -128)];
+        assert!(!is_full_tile_rect(&ring));
+        // Rectangle but does not cover the full extent.
+        let ring = vec![(0, 0), (2048, 0), (2048, 2048), (0, 2048), (0, 0)];
+        assert!(!is_full_tile_rect(&ring));
+    }
 
     #[inline]
     fn cmd(id: u32, count: u32) -> u32 {

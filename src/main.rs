@@ -168,6 +168,11 @@ struct InspectArgs {
 struct VerifyArgs {
     /// PMTiles file to verify.
     file: PathBuf,
+
+    /// Collect and print per-zoom ocean geometry statistics (ring vertex
+    /// counts, consecutive duplicates, full-tile rectangle features).
+    #[arg(long)]
+    geometry_stats: bool,
 }
 
 /// Arguments for the `svg` subcommand.
@@ -294,9 +299,12 @@ fn main() {
             }
         }
         Command::Verify(args) => {
-            match elivagar::verify::verify(&args.file) {
+            match elivagar::verify::verify_opts(&args.file, args.geometry_stats) {
                 Ok(report) => {
                     report.print_summary();
+                    if let Some(stats) = &report.geometry_stats {
+                        stats.print_summary();
+                    }
                     if !report.passed {
                         std::process::exit(1);
                     }
