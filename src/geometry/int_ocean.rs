@@ -876,6 +876,7 @@ fn signed_area_tile_2x(ring: &[(i32, i32)]) -> i128 {
     area
 }
 
+#[hotpath::measure]
 fn emit_normalized_shape_for_zoom(
     shape: &Shape,
     z: u8,
@@ -950,6 +951,7 @@ fn emit_normalized_shape_for_zoom(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn emit_boundary_and_gap_tiles(
     ty: u32,
     tx_min: u32,
@@ -1014,6 +1016,7 @@ fn emit_gap_run(
     }
 }
 
+#[hotpath::measure]
 fn emit_clipped_tile_shape(
     tx: u32,
     ty: u32,
@@ -1036,6 +1039,7 @@ fn emit_clipped_tile_shape(
     scratch.clipped_shapes = clipped;
 }
 
+#[hotpath::measure]
 fn emit_full_tile(
     tx: u32,
     ty: u32,
@@ -1074,6 +1078,7 @@ fn emit_full_tile(
 /// occur at its entry/exit points, so proximity marking at DDA crossings
 /// and segment endpoints is exact for dilation < 1 tile. Over-marking is
 /// safe (costs one redundant clip); under-marking is the bug.
+#[hotpath::measure]
 fn rasterize_shape_edges(shape: &Shape, max_tile: u32, tiles: &mut FxHashSet<u64>) {
     for ring in shape {
         if ring.len() < 2 {
@@ -1386,6 +1391,7 @@ pub(crate) fn lookback_dedup_contour_pinned(ring: &mut Contour, mut flags: Optio
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn ring_is_simple_complete(ring: &Contour) -> bool {
     if ring.len() < 3 {
         return false;

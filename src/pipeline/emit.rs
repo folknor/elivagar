@@ -415,6 +415,7 @@ fn emit_tier1_single_ring(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn emit_normalized_per_tile(
     osm_id: u64,
     layer: Layer,

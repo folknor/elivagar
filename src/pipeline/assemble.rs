@@ -92,7 +92,17 @@ pub(super) fn phase_assemble(
     let seam_metrics = SeamMetrics::new();
     let scope_result: Result<_, PipelineError> = std::thread::scope(|s| {
         // --- Reader thread: k-way merge → PendingTile batches ---
-        let reader = s.spawn(move || -> Result<(u64, usize), PipelineError> {
+        let reader = s.spawn(move || -> Result<(u64, usize, u64), PipelineError> {
+            // Single wall-clock span for the whole thread, not per-record: this
+            // loop calls sort_reader.next() up to ~512M times at NA scale, and
+            // the k-way merge's read_record() is exactly this thread's serial
+            // bottleneck (perf-hunt item 14) - per-call #[hotpath::measure]
+            // would add two clock reads per call, the same overhead problem
+            // node_index.rs's get_from_group_cached explicitly avoids at a
+            // similar call count. One Instant::now() pair gives this thread's
+            // total wall time, comparable against phase_assemble's total to
+            // see how much of assemble is this serial reader.
+            let reader_started = std::time::Instant::now();
             let mut features_read: u64 = 0;
             let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
             let mut current = PendingTile {
@@ -149,7 +159,9 @@ pub(super) fn phase_assemble(
                 current.features.push((layer_idx, r.data));
                 current_tile_bytes += 32 + data_len;
             }
-            Ok((features_read, max_batch_bytes))
+            #[allow(clippy::cast_possible_truncation)]
+            let reader_ns = reader_started.elapsed().as_nanos() as u64;
+            Ok((features_read, max_batch_bytes, reader_ns))
         });
 
         // --- Writer thread: encoded tiles → PMTiles ---
@@ -201,7 +213,8 @@ pub(super) fn phase_assemble(
         }
         drop(encode_tx);
 
-        let (features_read, max_batch_bytes) = reader.join().expect("reader panicked")?;
+        let (features_read, max_batch_bytes, reader_ns) =
+            reader.join().expect("reader panicked")?;
         let (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, size_diag) =
             writer.join().expect("writer panicked");
         Ok((
@@ -213,6 +226,7 @@ pub(super) fn phase_assemble(
             bytes_per_zoom,
             max_batch_bytes,
             size_diag,
+            reader_ns,
         ))
     });
 
@@ -225,7 +239,13 @@ pub(super) fn phase_assemble(
         bytes_per_zoom,
         max_batch_bytes,
         size_diag,
+        reader_ns,
     ) = scope_result?;
+    eprintln!(
+        "  Assemble reader thread (k-way merge): {:.1}s",
+        reader_ns as f64 / 1_000_000_000.0
+    );
+    eprintln!("assemble_reader_ns={reader_ns}");
     if let Some(filename) = config.pbf_path.file_name().and_then(|s| s.to_str()) {
         pmtiles.set_source_pbf_filename(filename.to_string());
     } else {

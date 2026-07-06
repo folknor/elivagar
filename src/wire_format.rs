@@ -239,6 +239,7 @@ fn kind_value_to_id(s: &str) -> Option<u8> {
 /// The buffer is cleared and filled with bytes that can be appended to
 /// the geometry portion via `encode_feature_data_with_attrs`.
 #[allow(clippy::cast_possible_truncation)]
+#[hotpath::measure]
 pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], zoom: u8) {
     buf.clear();
     let filtered_count = attrs

@@ -794,6 +794,7 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
 /// Uses `BlobFilter::only_ways()` to skip node/relation blobs entirely
 /// (indexed PBFs skip decompression; non-indexed still parse cheaply).
 /// No tag matching or coordinate resolution - just node ref counting.
+#[hotpath::measure]
 fn prepass_shared_nodes(
     pbf_path: &std::path::Path,
     decode_threads: usize,
