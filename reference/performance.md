@@ -35,7 +35,7 @@ landing the post-change numbers are recorded here the same way.
 | dataset | commit | run | wall | phase12 | ocean | sort | assemble | reader | peak RSS | output |
 |---|---|---|---|---|---|---|---|---|---|---|
 | denmark | `9b51e46` | `e18231c5` | 31.8s | 15.2s | 11.8s | 0.002s | 4.2s | 4.1s | 2.6 GB | 351 MB, 1.32M tiles / 175K unique |
-| norway | `95d6d52` | `38dcd3e8` | 171.1s | 131.1s | 16.0s | 0.03s | 23.7s | 23.2s | 4.1 GB | 1.28 GB, 16.3M tiles / 820K unique |
+| norway | `661cd1c` | `8d1d19ca` | 160.1s | 121.3s | 14.9s | 0.03s | 23.4s | 23.0s | 5.9 GB | 1.28 GB, 16.3M tiles / 820K unique |
 | germany | `9b51e46` | `15add85d` | 231.5s | 187.6s | 10.8s | 0.02s | 32.2s | 30.6s | 15.0 GB | 2.97 GB, 2.68M tiles / 352K unique |
 
 Superseded rows (kept for delta reading):
@@ -43,6 +43,7 @@ Superseded rows (kept for delta reading):
 | dataset | commit | run | wall | phase12 | peak RSS | note |
 |---|---|---|---|---|---|---|
 | denmark | `60fd209` | `1a6ca281` | 35.0s | 18s | 2.8 GB | pre prepass-overlap |
+| norway | `95d6d52` | `38dcd3e8` | 171.1s | 131.1s | 4.1 GB | pre prepass-overlap |
 | germany | `95d6d52` | `6fc97675` | 255.9s | 213.1s | 10.3 GB | pre prepass-overlap |
 
 The prepass-overlap landing (`9b51e46`, P0 of the perf backlog) cut wall ~9%

@@ -37,6 +37,8 @@ enum Command {
     Svg(SvgArgs),
     /// Diagnose ocean ring winding for a specific tile.
     Diag(DiagArgs),
+    /// Compare two PMTiles archives semantically.
+    Regress(RegressArgs),
 }
 
 /// Arguments for the `diag` subcommand.
@@ -219,6 +221,37 @@ struct SvgArgs {
     output: Option<PathBuf>,
 }
 
+/// Arguments for the `regress` subcommand.
+#[derive(Parser)]
+struct RegressArgs {
+    /// Current PMTiles archive to compare.
+    current: PathBuf,
+
+    /// Blessed PMTiles archive to compare against.
+    #[arg(long)]
+    against: PathBuf,
+
+    /// Geometry tolerance in layer extent units.
+    #[arg(long, default_value_t = 0)]
+    tol: i32,
+
+    /// Number of tolerance-moved features allowed before failure.
+    #[arg(long, default_value_t = 0)]
+    max_moved: u64,
+
+    /// Per-class example cap.
+    #[arg(long, default_value_t = 20)]
+    max_examples: usize,
+
+    /// Directory for side-by-side SVG dumps of structural examples.
+    #[arg(long)]
+    svg_dump: Option<PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Clone, ValueEnum)]
 enum SkipToArg {
     Ocean,
@@ -371,6 +404,47 @@ fn main() {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
+        }
+        Command::Regress(args) => {
+            run_regress(&args);
+        }
+    }
+}
+
+fn run_regress(args: &RegressArgs) {
+    let cfg = elivagar::regress::RegressConfig {
+        tol: args.tol,
+        max_moved: args.max_moved,
+        max_examples: args.max_examples,
+    };
+    match elivagar::regress::regress(&args.current, &args.against, &cfg) {
+        Ok(report) => {
+            let passed = report.passed(&cfg);
+            if let Some(dir) = &args.svg_dump
+                && let Err(e) =
+                    report.dump_svg_examples(&args.current, &args.against, dir, args.max_examples)
+            {
+                eprintln!("Error writing SVG dump: {e}");
+                std::process::exit(1);
+            }
+            if args.json {
+                match serde_json::to_string_pretty(&report.to_json(passed)) {
+                    Ok(text) => println!("{text}"),
+                    Err(e) => {
+                        eprintln!("Error encoding JSON report: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                report.print_text();
+            }
+            if !passed {
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
         }
     }
 }

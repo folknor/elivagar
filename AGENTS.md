@@ -219,6 +219,21 @@ Validates a PMTiles archive end-to-end: container integrity, metadata schema, ti
 
 Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids (`-W`/`-H`, default 1x1). `--layers` filters to specific layers (comma-separated, e.g. `ocean,boundaries`). Decodes MVT geometry and draws each layer with a distinct color. Points render as circles, lines as stroked paths, polygons as filled paths with `evenodd` fill-rule. Background is land-colored (`#f2efe9`). Grid lines drawn between tiles when width or height > 1. Output goes to stdout by default, or to a file with `-o`.
 
+### `elivagar regress <CURRENT> --against <BLESSED> [--tol N] [--max-moved N] [--max-examples N] [--svg-dump DIR] [--json]`
+
+Semantic diff of two PMTiles archives against a blessed known-good one
+(MVT + gzip only). Decodes every tile into a canonical form (layers sorted,
+features sorted, merged-feature components sorted - erasing the pipeline's
+intra-layer order nondeterminism and nothing else), then classifies:
+tiles/layers added or removed, extent mismatches, missing/added features,
+attr changes (bit-exact values), and matched-feature geometry moves split
+into tolerance (within `--tol`, in the layer's extent units) vs structural
+(beyond it, or any component-count / ring-role / hole-containment change).
+Ocean features match geometrically (their ids are synthetic). Exit 0 only
+if nothing structural and `tolerance_moved <= --max-moved`; the report
+prints per-zoom/layer counters and displacement percentiles. Design and
+gates: notes/spec-5-output-regression.md.
+
 ### `elivagar diag <FILE> -z <Z> -x <X> -y <Y>`
 
 Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, finds polygon features across all layers, and prints per-ring vertex count, signed area, and winding direction (CW = outer, CCW = hole). Prints first/last 3 vertices for large rings, full vertices for small ones (≤6).
