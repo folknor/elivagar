@@ -5,8 +5,12 @@
 // Uses scanline fill to minimize point-in-polygon tests.
 
 use crate::geometry::int_ocean::{
-    IntEmitScratch, IntRect, OCEAN_DP_TOL_PX, Shape, ZoomEmitParams, emit_shape_for_zoom,
-    intersect_rect_into, quantize_polygon, shape_bbox,
+    IntEmitScratch, IntRect, OCEAN_DP_TOL_PX, Shape, Shapes, intersect_rect_into, quantize_polygon,
+    shape_bbox,
+};
+use crate::geometry::pyramid::{
+    PyramidCell, PyramidParams, PyramidScratch, emit_shape_pyramid, emit_shape_pyramid_cell,
+    split_for_parallel,
 };
 use crate::geometry::{self, MercBbox, Point};
 use crate::mvt::GeomType;
@@ -21,8 +25,7 @@ use std::os::unix::fs::FileExt;
 // Types
 // ---------------------------------------------------------------------------
 
-const SPLIT_Z: u8 = 8;
-const SPLIT_MIN_VERTICES: usize = 500;
+const LARGE_PIECE_VERTICES: usize = 4096;
 // Cap each parallel fold accumulator's in-flight payload well below the
 // global sort_budget: with (piece x zoom) fan-out across many rayon workers,
 // letting each balloon to the full budget before flushing would multiply peak
@@ -44,8 +47,18 @@ struct ShxRecord {
 }
 
 thread_local! {
-    static OCEAN_EMIT_SCRATCH: std::cell::RefCell<IntEmitScratch> =
-        std::cell::RefCell::new(IntEmitScratch::new());
+    static OCEAN_EMIT_SCRATCH: std::cell::RefCell<PyramidScratch> =
+        std::cell::RefCell::new(PyramidScratch::new());
+}
+
+enum OceanWorkKind {
+    Whole(usize),
+    Cell(PyramidCell, Shapes),
+}
+
+struct OceanWorkItem {
+    feature_id: u64,
+    kind: OceanWorkKind,
 }
 
 struct OceanAcc {
@@ -179,7 +192,7 @@ pub(crate) fn process_ocean_shapefile(
 
     let data_rect = data_bounds_rect(data_bounds, max_zoom);
 
-    // --- Parse phase: extract, clip, and pre-split polygons in parallel ---
+    // --- Parse phase: extract and clip polygons in parallel ---
     use rayon::prelude::*;
 
     let parsed_records: Vec<ParsedOceanRecord> = records
@@ -201,22 +214,14 @@ pub(crate) fn process_ocean_shapefile(
     }
     drop(shp_mmap);
     let shapes_hit: u64 = parsed_records.iter().map(|record| record.shapes_hit).sum();
-    let source_pieces: usize = parsed_records
-        .iter()
-        .map(|record| record.source_pieces)
-        .sum();
-    let split_pieces: usize = parsed_records
+    let parsed_pieces: usize = parsed_records
         .iter()
         .map(|record| record.pieces.len())
         .sum();
 
-    let mut pieces: Vec<Shape> = Vec::with_capacity(split_pieces);
+    let mut pieces: Vec<Shape> = Vec::with_capacity(parsed_pieces);
     for record in parsed_records {
         pieces.extend(record.pieces);
-    }
-
-    if max_zoom >= SPLIT_Z && split_pieces != source_pieces {
-        eprintln!("  Pre-split at z{SPLIT_Z}: {source_pieces} -> {split_pieces} polygons");
     }
 
     let poly_count = pieces.len();
@@ -245,25 +250,44 @@ pub(crate) fn process_ocean_shapefile(
     let chunk_size = sort_writer.chunk_size_bytes().min(OCEAN_CHUNK_SIZE_LIMIT);
     let chunk_compression = sort_writer.compression();
 
-    let zoom_count = usize::from(max_zoom.saturating_sub(min_zoom)) + 1;
-    let piece_count = pieces.len();
-    let work_items = piece_count
-        .checked_mul(zoom_count)
-        .expect("ocean piece and zoom work item count fits usize");
+    let params = ocean_params(min_zoom, max_zoom);
+    let split_target = 4 * rayon::current_num_threads().max(1);
+    let mut work_items = Vec::with_capacity(pieces.len());
+    let mut pre_emit = OceanAcc::new(chunk_compression);
+    let mut split_scratch = PyramidScratch::new();
+    for (piece_idx, piece) in pieces.iter().enumerate() {
+        let feature_id = piece_idx as u64;
+        if total_vertices(piece) < LARGE_PIECE_VERTICES {
+            work_items.push(OceanWorkItem {
+                feature_id,
+                kind: OceanWorkKind::Whole(piece_idx),
+            });
+            continue;
+        }
 
-    let mut result = (0..work_items)
+        let mut sink = ocean_sink(feature_id, ocean_layer, &empty_attrs_bytes, &mut pre_emit);
+        let cells = split_for_parallel(piece, &params, split_target, &mut split_scratch, &mut sink);
+        drop(sink);
+        if pre_emit.bytes >= chunk_size {
+            pre_emit.flush(&chunk_dir, &chunk_id);
+        }
+        for (cell, frag) in cells {
+            work_items.push(OceanWorkItem {
+                feature_id,
+                kind: OceanWorkKind::Cell(cell, frag),
+            });
+        }
+    }
+
+    let mut result = work_items
         .into_par_iter()
         .fold(
             || OceanAcc::new(chunk_compression),
-            |mut acc, work_idx| {
-                let piece_idx = work_idx % piece_count;
-                let zoom_offset = work_idx / piece_count;
-                let z = max_zoom - u8::try_from(zoom_offset).expect("zoom offset fits u8");
-                emit_ocean_polygon_zoom(
-                    piece_idx as u64,
-                    &pieces[piece_idx],
-                    z,
-                    max_zoom,
+            |mut acc, item| {
+                emit_ocean_piece(
+                    item,
+                    &pieces,
+                    &params,
                     ocean_layer,
                     &empty_attrs_bytes,
                     &mut acc,
@@ -285,6 +309,7 @@ pub(crate) fn process_ocean_shapefile(
             },
         );
 
+    result.merge_from(pre_emit);
     result.flush(&chunk_dir, &chunk_id);
     sort_writer.adopt_chunk_files(result.chunk_paths);
     let count = result.count;
@@ -533,7 +558,7 @@ fn push_quantized_pieces(
     // The common case for an in-bounds extract: the shape lies entirely
     // inside the data bounds - the boolean is an expensive identity.
     if shape_bbox(&shape).is_some_and(|bb| rect_contains(data_rect, bb)) {
-        split_piece(scratch, pieces, shape, max_zoom);
+        pieces.push(shape);
         return 1;
     }
 
@@ -541,57 +566,9 @@ fn push_quantized_pieces(
     intersect_rect_into(scratch, &shape, data_rect, 0, &mut clipped);
     let source_pieces = clipped.len();
     for piece in clipped {
-        split_piece(scratch, pieces, piece, max_zoom);
+        pieces.push(piece);
     }
     source_pieces
-}
-
-fn split_piece(scratch: &mut IntEmitScratch, pieces: &mut Vec<Shape>, piece: Shape, max_zoom: u8) {
-    if max_zoom < SPLIT_Z {
-        pieces.push(piece);
-        return;
-    }
-
-    // Count all rings: hole-heavy pieces must not dodge the split.
-    let total_vertices: usize = piece.iter().map(Vec::len).sum();
-    if total_vertices < SPLIT_MIN_VERTICES {
-        pieces.push(piece);
-        return;
-    }
-
-    let Some(bb) = shape_bbox(&piece) else {
-        return;
-    };
-    let split_tile_size = 1_i32 << (u32::from(max_zoom - SPLIT_Z) + 12);
-    let max_split_tile = i32::from((1_u16 << SPLIT_Z) - 1);
-    let stx_min = (bb.min_x.div_euclid(split_tile_size)).clamp(0, max_split_tile);
-    let sty_min = (bb.min_y.div_euclid(split_tile_size)).clamp(0, max_split_tile);
-    let stx_max = (bb.max_x.div_euclid(split_tile_size)).clamp(0, max_split_tile);
-    let sty_max = (bb.max_y.div_euclid(split_tile_size)).clamp(0, max_split_tile);
-
-    if stx_min == stx_max && sty_min == sty_max {
-        pieces.push(piece);
-        return;
-    }
-
-    let mut clipped: Vec<Shape> = Vec::new();
-    for sty in sty_min..=sty_max {
-        for stx in stx_min..=stx_max {
-            let tile_rect = IntRect {
-                min_x: stx * split_tile_size,
-                min_y: sty * split_tile_size,
-                max_x: (stx + 1) * split_tile_size,
-                max_y: (sty + 1) * split_tile_size,
-            };
-            // Split tile fully containing the piece: no cut needed.
-            if rect_contains(tile_rect, bb) {
-                pieces.push(piece.clone());
-                continue;
-            }
-            intersect_rect_into(scratch, &piece, tile_rect, 0, &mut clipped);
-            pieces.append(&mut clipped);
-        }
-    }
 }
 
 /// True if `outer` contains `inner` (closed containment).
@@ -624,52 +601,70 @@ fn merc_ceil(v: f64, scale: i64) -> i32 {
     i32::try_from(q.clamp(0, scale)).expect("base ocean coordinate fits i32")
 }
 
-#[hotpath::measure]
-#[allow(clippy::too_many_arguments)]
-fn emit_ocean_polygon_zoom(
+fn total_vertices(piece: &Shape) -> usize {
+    piece.iter().map(Vec::len).sum()
+}
+
+fn ocean_params(min_zoom: u8, max_zoom: u8) -> PyramidParams<'static> {
+    PyramidParams {
+        maxz: max_zoom,
+        z_top: min_zoom,
+        z_bottom: max_zoom,
+        dp_tol: &ocean_dp_tol,
+        min_area: &ocean_min_area,
+        pins: None,
+    }
+}
+
+fn ocean_dp_tol(_z: u8) -> i64 {
+    OCEAN_DP_TOL_PX
+}
+
+fn ocean_min_area(_z: u8) -> u64 {
+    256
+}
+
+fn ocean_sink<'a>(
     feature_id: u64,
-    piece: &Shape,
-    z: u8,
-    max_zoom: u8,
+    layer_idx: u8,
+    attrs_bytes: &'a [u8],
+    acc: &'a mut OceanAcc,
+) -> impl FnMut(u8, u32, u32, &[u32]) + 'a {
+    move |z: u8, tx: u32, ty: u32, geom: &[u32]| {
+        let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+        let key = sort::make_sort_key(tile_id, layer_idx, 0);
+        let range = append_feature_data_with_attrs(
+            &mut acc.payload,
+            feature_id,
+            GeomType::Polygon,
+            geom,
+            attrs_bytes,
+        );
+        acc.bytes += range.len() + std::mem::size_of::<sort::PayloadRecord>();
+        acc.records.push((key, range.start, range.len()));
+    }
+}
+
+#[hotpath::measure]
+fn emit_ocean_piece(
+    item: OceanWorkItem,
+    pieces: &[Shape],
+    params: &PyramidParams<'_>,
     layer_idx: u8,
     attrs_bytes: &[u8],
     acc: &mut OceanAcc,
 ) {
-    if piece.is_empty() {
-        return;
-    }
-
-    let records = &mut acc.records;
-    let payload = &mut acc.payload;
-    let bytes = &mut acc.bytes;
-
     OCEAN_EMIT_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
-        let mut sink = |tx: u32, ty: u32, geom: &[u32]| {
-            let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            let key = sort::make_sort_key(tile_id, layer_idx, 0);
-            let range = append_feature_data_with_attrs(
-                payload,
-                feature_id,
-                GeomType::Polygon,
-                geom,
-                attrs_bytes,
-            );
-            *bytes += range.len() + std::mem::size_of::<sort::PayloadRecord>();
-            records.push((key, range.start, range.len()));
-        };
-        emit_shape_for_zoom(
-            piece,
-            ZoomEmitParams {
-                z,
-                maxz: max_zoom,
-                dp_tol: OCEAN_DP_TOL_PX,
-                min_area: 256,
-                pins: None,
-            },
-            &mut scratch,
-            &mut sink,
-        );
+        let mut sink = ocean_sink(item.feature_id, layer_idx, attrs_bytes, acc);
+        match item.kind {
+            OceanWorkKind::Whole(piece_idx) => {
+                emit_shape_pyramid(&pieces[piece_idx], params, &mut scratch, &mut sink);
+            }
+            OceanWorkKind::Cell(cell, frag) => {
+                emit_shape_pyramid_cell(cell, frag, params, &mut scratch, &mut sink);
+            }
+        }
     });
 }
 

@@ -65,6 +65,8 @@ pub struct VerifyReport {
 pub struct ZoomGeomStats {
     pub features: u64,
     pub rings: u64,
+    /// Sum of encoded ocean layer protobuf bytes for tiles at this zoom.
+    pub encoded_bytes: u64,
     /// One entry per ring: vertex count (closed ring, incl. closing vertex).
     pub ring_vertex_counts: Vec<u32>,
     /// Adjacent equal vertex pairs within rings (excludes ring closure).
@@ -85,8 +87,15 @@ impl GeometryStats {
         println!();
         println!("Ocean geometry stats:");
         println!(
-            "{:>4}  {:>9}  {:>9}  {:>9}  {:>9}  {:>11}  {:>9}",
-            "zoom", "features", "rings", "max_verts", "p99_verts", "consec_dups", "full_tile"
+            "{:>4}  {:>9}  {:>9}  {:>13}  {:>9}  {:>9}  {:>11}  {:>9}",
+            "zoom",
+            "features",
+            "rings",
+            "encoded_bytes",
+            "max_verts",
+            "p99_verts",
+            "consec_dups",
+            "full_tile"
         );
         for (z, s) in &self.per_zoom {
             let mut counts = s.ring_vertex_counts.clone();
@@ -98,8 +107,15 @@ impl GeometryStats {
                 counts[(counts.len() - 1).min(counts.len() * 99 / 100)]
             };
             println!(
-                "{:>4}  {:>9}  {:>9}  {:>9}  {:>9}  {:>11}  {:>9}",
-                z, s.features, s.rings, max, p99, s.consecutive_dups, s.full_tile_features
+                "{:>4}  {:>9}  {:>9}  {:>13}  {:>9}  {:>9}  {:>11}  {:>9}",
+                z,
+                s.features,
+                s.rings,
+                s.encoded_bytes,
+                max,
+                p99,
+                s.consecutive_dups,
+                s.full_tile_features
             );
         }
     }
@@ -378,6 +394,7 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
     }
 
     let zs = stats.per_zoom.entry(z).or_default();
+    zs.encoded_bytes += layer_data.len() as u64;
     for feat_data in &feature_blobs {
         let mut geom_type: u64 = 0;
         let mut geom_bytes: Option<&[u8]> = None;

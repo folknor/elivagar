@@ -7,6 +7,7 @@ pub mod clip;
 pub(crate) mod int_ocean;
 pub mod mvt_decode;
 pub mod projection;
+pub(crate) mod pyramid;
 pub mod seams;
 pub mod simplify;
 mod surface;

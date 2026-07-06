@@ -1040,7 +1040,7 @@ fn emit_clipped_tile_shape(
 }
 
 #[hotpath::measure]
-fn emit_full_tile(
+pub(crate) fn emit_full_tile(
     tx: u32,
     ty: u32,
     scratch: &mut IntEmitScratch,
