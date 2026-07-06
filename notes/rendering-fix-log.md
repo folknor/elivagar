@@ -271,3 +271,24 @@ Priority order based on reviewer consensus:
 2. **S03** - Feed row-preclipped geometry to fallback. Fixes the 150s→11s performance gap.
 3. **S04** - Per-tile ocean feature union. Fixes inter-feature overlap class.
 4. **S05** - Stronger integer repair. Fixes remaining self-touch/pinch cases.
+
+### R22 - Earcut oracle: the problem was never the ocean layer
+**Date:** 2026-07-06
+**Instrument:** `scripts/validate/earcut-oracle.mjs` - runs MapLibre's actual
+tessellator (earcut) with MapLibre's winding-based classifyRings over every
+polygon in a PMTiles archive, measuring earcut.deviation per polygon.
+**Findings on denmark-5403f33 (post-R21):**
+- ocean (rewritten path): 1.95M polygons, deviation 0.000 at every zoom,
+  100% ring classification. The R21 architecture is PROVEN earcut-clean.
+- water_polygons (old emit.rs path): 2366 polygons over 1% deviation,
+  worst 4.87e2; winding misclassification discards most rings
+  (z14: 23130 features -> 7897 renderable polygons).
+- land (old emit.rs path): 25309 polygons over 1% deviation, worst 1.50e3;
+  z7: 8 features -> 0 renderable (entire layer invisible).
+**Conclusion:** the three-month "ocean rendering" saga was two defects in
+EVERY OSM polygon layer via emit.rs (earcut-hostile geometry + wrong ring
+winding), visually indistinguishable from ocean breakage because inland
+water (Limfjorden, Ringkobing Fjord, Nissum Bredning) is water_polygons,
+not ocean. Next: port emit.rs polygons to int_ocean machinery + fix
+winding; oracle (deviation 0, 100% classification, all layers) becomes the
+primary gate.
