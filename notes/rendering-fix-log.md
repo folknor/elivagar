@@ -421,8 +421,53 @@ ocean_ms 50249, RSS 1867 MB.
   strict revert triggers, and if Landing 4 close-out shows total above
   the Landing-1 71493 anchor without the ocean win, that is a real
   regression, not noise. Spec STATUS and Landing 2 bound annotated.
-- Landing 3 (parallel prologue + piece x zoom fan-out): PENDING - see spec.
-- Landing 4 (close-out profile + this ledger + CLAUDE.md baselines): PENDING.
-**Pickup:** everything needed is in the spec (standard gate block,
-per-landing bounds), this ledger, and the leftovers doc. Parity baselines
-regenerate via scripts/oracle_sweep.py <pmtiles> <suffix> [baseline].
+- Landing 3 (parallel prologue + piece x zoom fan-out): LANDED at
+  `60fd209`, KEPT (user-ratified 2026-07-06). Parallel parse+clip+z8
+  pre-split over the .shx offsets against a shared mmap; (piece x zoom)
+  emission fan-out with thread-local scratch; bounded per-fold chunk
+  arenas; SPLIT_MIN_VERTICES counts all rings. Correctness: verify
+  1323406 tiles (exact parity with Landings 1/2), nine earcut oracles 0
+  over-threshold / 0 misattached. Bench (1a6ca281 at `60fd209`): total
+  34961 ms (was 72681 at Landing 2 - a 2.08x win, bound <= 72681 MET),
+  ocean_ms 11912 (was 48773 - a 4.09x win), peak RSS 2774.5 MB.
+  **Bounds:** total MET; ocean_ms <= 10000 MISSED by +19.1%; RSS <= 2062
+  MISSED (+38%). VERDICT: KEPT by explicit user ratification. The ocean
+  miss went to the human per Landing 2's no-compounding guardrail (no
+  noise reading for Landing 3); the user ruled the bundled 2.08x total /
+  4.09x ocean win with airtight correctness outweighs a +19.1% overshoot
+  of the 10000 target. RSS was explicitly WAIVED by the user given the
+  win; the step-5 review diagnosed the overage as structurally inherent
+  to the spec-mandated 24-way parallelism under mimalloc's non-purging
+  per-thread arenas (NOT per-work-item scratch duplication, which the
+  thread-local scratch avoids). The residual ocean_ms gap to 10000 has a
+  named lever: perf-hunt-reports leftovers item 8 (read_ring_points
+  per-ring 64 KB buffer reuse). Review cleanups folded in: merged two
+  redundant per-record emit scratches, folded a mut rebind, documented
+  the chunk-size cap.
+- Landing 4 (close-out): DONE at `60fd209` (2026-07-06). Hotpath profile
+  (results.db 4fc80395, denmark, `60fd209`, instrumented so wall/RSS are
+  meaningless; CPU totals are summed across the now-parallel 24 threads):
+  `intersect_rect_into` STILL dominant at 159.2 s CPU / 1.76M calls (P50
+  3.82 us, P99 581 us); `emit_shape_for_zoom` 89.0 s; `cut_row_bands_-
+  with_scratch` 53.8 s; `process_raw_way` 67.0 s; `simplify_shape_dp`
+  11.1 s; `normalize_into` 7.6 s. READING (per the spec stopping rule):
+  intersect_rect remaining dominant means the deferred follow-ups are the
+  NEXT spec's premise, with this profile as their ready-made survey -
+  leftovers item 1 (dedicated O(n) integer rect clipper), item 2
+  (coverage-span emitter), item 8 (read_ring_points buffer reuse, the
+  concrete ocean_ms lever). Spec 3's scope ENDS here regardless: the R24
+  deferred-perf item is discharged (ocean 50.2s -> 11.9s, total 73.9s ->
+  35.0s across Landings 1-3). CLAUDE.md/AGENTS.md Denmark baseline updated
+  to `60fd209`. Spec document git-rm'd in the Landing 4 commit.
+
+**R25 status: CLOSED (2026-07-06). Spec 3 (ocean-perf-structural)
+complete across four landings. Denmark on plantasjen: total 73854 ms ->
+34961 ms (2.11x), ocean 50249 ms -> 11912 ms (4.22x), all nine polygon
+layers earcut-clean (0 over-threshold / 0 misattached, verify 1323406
+tiles exact parity) at every landing. RSS rose 1867 -> 2774 MB (24-way
+parallelism under mimalloc, user-accepted). Two bounds missed and
+user-ratified as kept: Landing 1 ocean_ms (bound mis-calibrated - the
+gap lived in later landings) and Landing 3 ocean_ms 11912 vs 10000
+(+19.1%, outweighed by the bundled win). Remaining ocean headroom to
+sub-10s and the RSS reduction are named, OUT-OF-SCOPE follow-ups owned by
+notes/perf-hunt-reports-2026-07-06.md leftovers (items 1, 2, 8).**
