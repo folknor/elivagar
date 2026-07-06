@@ -4,6 +4,15 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// hotpath 0.14 installed CountingAllocator internally under hotpath-alloc; as
+// of 0.20 it is a plain generic type the consumer must declare - the crate no
+// longer wires it up on its own. Without this, hotpath-alloc builds fall back
+// to the system allocator and track_alloc/track_dealloc never fire, so every
+// function silently reports 0 bytes.
+#[cfg(feature = "hotpath-alloc")]
+#[global_allocator]
+static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
+
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
