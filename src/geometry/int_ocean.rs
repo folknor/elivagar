@@ -95,6 +95,7 @@ where
     (shape, flags)
 }
 
+#[hotpath::measure]
 pub(crate) fn rescale_shape(shape: &Shape, s: u8) -> Shape {
     if s == 0 {
         return shape.clone();
@@ -159,6 +160,7 @@ pub(crate) fn rescale_shape_pinned(
     }
 }
 
+#[hotpath::measure]
 pub(crate) fn simplify_shape_dp(shape: &mut Shape, tol: i64, pins: Option<&[Vec<bool>]>) {
     if tol <= 0 {
         return;
@@ -180,6 +182,7 @@ pub(crate) fn simplify_shape_dp(shape: &mut Shape, tol: i64, pins: Option<&[Vec<
 }
 
 #[allow(clippy::needless_pass_by_value)]
+#[hotpath::measure]
 pub(crate) fn normalize(shape: Shape, min_area: u64) -> Shapes {
     if shape.is_empty() {
         return Vec::new();
@@ -188,6 +191,7 @@ pub(crate) fn normalize(shape: Shape, min_area: u64) -> Shapes {
     clean_shapes(shape.as_slice().simplify(FillRule::NonZero, options), min_area)
 }
 
+#[hotpath::measure]
 pub(crate) fn intersect_rect(shape: &Shape, rect: IntRect, min_area: u64) -> Shapes {
     if shape.is_empty() || rect.min_x >= rect.max_x || rect.min_y >= rect.max_y {
         return Vec::new();
@@ -720,6 +724,7 @@ fn debug_assert_no_boundary_in_fast_tiles(
 }
 
 #[allow(clippy::needless_pass_by_value)]
+#[hotpath::measure]
 pub(crate) fn emit_shape_for_zoom(
     shape_base: &Shape,
     params: ZoomEmitParams<'_>,
@@ -1262,6 +1267,7 @@ fn orient(a: IntPoint, b: IntPoint, c: IntPoint) -> i8 {
 /// INTERSECT leaf`.
 ///
 /// Returns one `Shapes` per row, indexed `ty - ty0` (empty for empty rows).
+#[hotpath::measure]
 pub(crate) fn cut_row_bands(
     shape: &Shape,
     ty0: u32,
