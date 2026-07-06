@@ -34,6 +34,11 @@ file = "denmark-20260220-seq4704-locations.osm.pbf"
 xxhash = "c1b990d199a9053b9026ea98ead61b5f"
 seq = 4704
 
+[plantasjen.datasets.denmark.blessed]
+file = "blessed/denmark-9ee474a.pmtiles"
+commit = "9ee474a"
+xxhash = "4f798e253c20775eab451514bb1e33af"
+
 [plantasjen.datasets.norway]
 origin = "Geofabrik"
 download_date = "2026-02-25"

@@ -385,9 +385,15 @@ cross-build check (dirty-HEAD-with-regress-code archive vs runB) is also
 zero-diff. Runtime 49s user / 99% single CPU on denmark: codex did NOT
 implement the rayon parallelization named in 3.2 - within the accepted
 single-threaded budget, so the landing proceeds; parallelize only if the
-per-landing battery cost starts to chafe. Step 3 (noop-commit probe via
---commit 9b51e46) requires a clean tree and runs right after the landing
-commit.
+per-landing battery cost starts to chafe. Step 3 PASSED post-landing on
+the committed build (`9ee474a`): `brokkr tilegen --commit 9b51e46
+--dataset denmark` (note: brokkr builds the old commit in a worktree but
+names the output after the main repo HEAD - rename accordingly), archive
+at `data/probes/denmark-9b51e46.pmtiles`, regressed against the
+committed-build archive `data/probes/denmark-9ee474a.pmtiles`: zero diffs
+of every class, 1323406 tiles identical. One operational note for the
+battery: a `--commit` build OVERWRITES the shared release binary - rebuild
+HEAD before invoking regress afterwards.
 
 **Brick 5 - landing.** One commit: decoder, engine, CLI, tests, plus:
 AGENTS.md CLI section gains `elivagar regress` and the Verification list
