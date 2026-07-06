@@ -1,7 +1,7 @@
 use crate::geometry::int_ocean::{
     Contour, IntEmitScratch, IntRect, Shape, Shapes, TILE_BUFFER_I32, TILE_EXTENT_I32,
     contour_area_is_below, emit_full_tile, encode_tile_shape, intersect_rect_into, normalize_into,
-    rescale_shape_pinned, shape_bbox, simplify_shape_dp,
+    point_in_contour, rescale_shape_pinned, shape_bbox, signed_area_2x, simplify_shape_dp,
 };
 use i_overlay::i_float::int::point::IntPoint;
 use rustc_hash::FxHashSet;
@@ -439,101 +439,258 @@ enum Axis {
     Y,
 }
 
-/// Fast rect clip of one shape. Returns true when handled (result rings,
-/// possibly none, appended to `out`); false means the caller must run the
-/// exact boolean instead. Ring traversal order (and thus winding) is
-/// preserved; a clipped hole stays inside its clipped outer because
-/// clipping is monotone under set intersection. Hole runs coincident with
-/// the outer along a cut line are legal here - emission-time
-/// normalization resolves tangencies, exactly as it does for the
-/// boolean's output.
+/// Fast rect clip of one shape via four half-plane passes with full
+/// multi-crossing reconnection. Returns true when handled (result
+/// components, possibly none, appended to `out`); false means the caller
+/// must run the exact boolean instead. Holes are clipped independently
+/// and re-nested by point-in-contour when the outer splits into multiple
+/// components. Hole runs coincident with the outer along a cut line are
+/// legal here - emission-time normalization resolves tangencies, exactly
+/// as it does for the boolean's output.
 fn clip_shape_rect_fast(shape: &Shape, rect: IntRect, out: &mut Shapes) -> bool {
-    let mut result: Shape = Vec::with_capacity(shape.len());
-    let mut buf_a: Contour = Vec::new();
-    let mut buf_b: Contour = Vec::new();
-    for (ring_idx, ring) in shape.iter().enumerate() {
-        buf_a.clear();
-        buf_a.extend_from_slice(ring);
-        for pass in 0..4_u8 {
-            let ok = match pass {
-                0 => clip_ring_half_plane(&buf_a, Axis::X, rect.min_x, false, &mut buf_b),
-                1 => clip_ring_half_plane(&buf_a, Axis::X, rect.max_x, true, &mut buf_b),
-                2 => clip_ring_half_plane(&buf_a, Axis::Y, rect.min_y, false, &mut buf_b),
-                _ => clip_ring_half_plane(&buf_a, Axis::Y, rect.max_y, true, &mut buf_b),
-            };
-            if !ok {
+    let passes: [(Axis, i32, bool); 4] = [
+        (Axis::X, rect.min_x, false),
+        (Axis::X, rect.max_x, true),
+        (Axis::Y, rect.min_y, false),
+        (Axis::Y, rect.max_y, true),
+    ];
+
+    let mut outers: Vec<Contour> = vec![shape[0].clone()];
+    for &(axis, bound, keep_le) in &passes {
+        let mut next = Vec::with_capacity(outers.len());
+        for ring in &outers {
+            let Some(parts) = clip_ring_half_plane_multi(ring, axis, bound, keep_le) else {
                 return false;
+            };
+            next.extend(parts);
+        }
+        outers = next;
+        if outers.is_empty() {
+            // Outer vanished: holes are subsets of it, the whole shape's
+            // intersection is empty. Handled.
+            return true;
+        }
+    }
+    outers.retain(|r| r.len() >= 3 && !contour_area_is_below(r, 1));
+    if outers.is_empty() {
+        return true;
+    }
+
+    let mut holes: Vec<Contour> = Vec::new();
+    for hole in &shape[1..] {
+        let mut parts = vec![hole.clone()];
+        for &(axis, bound, keep_le) in &passes {
+            let mut next = Vec::with_capacity(parts.len());
+            for ring in &parts {
+                let Some(sub) = clip_ring_half_plane_multi(ring, axis, bound, keep_le) else {
+                    return false;
+                };
+                next.extend(sub);
             }
-            std::mem::swap(&mut buf_a, &mut buf_b);
-            if buf_a.len() < 3 {
+            parts = next;
+            if parts.is_empty() {
                 break;
             }
         }
-        if ring_idx == 0 {
-            if buf_a.len() < 3 || contour_area_is_below(&buf_a, 1) {
-                // Outer vanished: holes are subsets of it, the whole
-                // shape's intersection is empty. Handled.
-                return true;
-            }
-            result.push(buf_a.clone());
-        } else if buf_a.len() >= 3 && !contour_area_is_below(&buf_a, 1) {
-            result.push(buf_a.clone());
+        holes.extend(
+            parts
+                .into_iter()
+                .filter(|r| r.len() >= 3 && !contour_area_is_below(r, 1)),
+        );
+    }
+
+    // Enforce role winding (reconnection preserves geometry, not
+    // necessarily traversal direction).
+    for o in &mut outers {
+        if signed_area_2x(o) < 0 {
+            o.reverse();
         }
     }
-    if !result.is_empty() {
-        out.push(result);
+    for h in &mut holes {
+        if signed_area_2x(h) > 0 {
+            h.reverse();
+        }
     }
+
+    if outers.len() == 1 {
+        let mut component = Vec::with_capacity(1 + holes.len());
+        component.extend(outers);
+        component.extend(holes);
+        out.push(component);
+        return true;
+    }
+
+    let mut components: Vec<Shape> = outers.into_iter().map(|o| vec![o]).collect();
+    'holes: for hole in holes {
+        let probe = hole[0];
+        for component in &mut components {
+            if point_in_contour(probe.x, probe.y, &component[0]) {
+                component.push(hole);
+                continue 'holes;
+            }
+        }
+        // A hole not inside any outer: rounding put its probe vertex on
+        // or outside every boundary - ambiguous, let the boolean decide.
+        return false;
+    }
+    out.extend(components);
     true
 }
 
-/// One Sutherland-Hodgman pass against an axis line. Returns false when
-/// the fast path cannot guarantee a bridge-free simple result: more than
-/// two crossings, or any vertex exactly on the line.
-fn clip_ring_half_plane(
+/// Half-plane clip of one simple ring with multi-crossing reconnection:
+/// kept chains reconnect along the cut line by pairing SORTED crossings -
+/// for a simple ring, polygon-interior intervals along the line lie
+/// exactly between alternating sorted crossings (Jordan), so adjacent
+/// pairs are the bridge segments. Returns None when the fast path cannot
+/// proceed safely: a vertex exactly on the line (in/out ambiguity), an
+/// odd crossing count, two crossings whose snap-rounded line positions
+/// collide (pairing ambiguity), or a bridge that fails to join an exit to
+/// an entry (non-simple input).
+#[allow(clippy::too_many_lines)]
+fn clip_ring_half_plane_multi(
     ring: &Contour,
     axis: Axis,
     bound: i32,
     keep_le: bool,
-    out: &mut Contour,
-) -> bool {
-    out.clear();
+) -> Option<Vec<Contour>> {
     let n = ring.len();
     if n < 3 {
-        return true;
+        return Some(Vec::new());
     }
     let coord = |p: IntPoint| match axis {
         Axis::X => p.x,
         Axis::Y => p.y,
     };
-    let mut crossings = 0_u8;
-    for i in 0..n {
-        let a = ring[i];
-        let b = ring[if i + 1 < n { i + 1 } else { 0 }];
-        let ca = coord(a);
-        let cb = coord(b);
-        if ca == bound || cb == bound {
-            return false;
+    let along = |p: IntPoint| match axis {
+        Axis::X => p.y,
+        Axis::Y => p.x,
+    };
+    let inside = |c: i32| if keep_le { c < bound } else { c > bound };
+
+    let mut any_in = false;
+    let mut any_out = false;
+    let mut first_out = None;
+    for (i, &p) in ring.iter().enumerate() {
+        let c = coord(p);
+        if c == bound {
+            return None;
         }
-        let a_in = if keep_le { ca < bound } else { ca > bound };
-        let b_in = if keep_le { cb < bound } else { cb > bound };
-        if a_in && out.last().copied() != Some(a) {
-            out.push(a);
+        if inside(c) {
+            any_in = true;
+        } else {
+            any_out = true;
+            if first_out.is_none() {
+                first_out = Some(i);
+            }
+        }
+    }
+    if !any_out {
+        return Some(vec![ring.clone()]);
+    }
+    if !any_in {
+        return Some(Vec::new());
+    }
+    let start = first_out?;
+
+    // Walk edges from an OUTSIDE vertex so every kept chain is contiguous:
+    // entry crossing, kept vertices, exit crossing.
+    let mut chains: Vec<Contour> = Vec::new();
+    let mut current: Option<Contour> = None;
+    for k in 0..n {
+        let a = ring[(start + k) % n];
+        let b = ring[(start + k + 1) % n];
+        let a_in = inside(coord(a));
+        let b_in = inside(coord(b));
+        if a_in
+            && let Some(chain) = current.as_mut()
+            && chain.last().copied() != Some(a)
+        {
+            chain.push(a);
         }
         if a_in != b_in {
-            crossings += 1;
-            if crossings > 2 {
-                return false;
-            }
-            let p = crossing_point(a, b, axis, bound);
-            if out.last().copied() != Some(p) {
-                out.push(p);
+            let c = crossing_point(a, b, axis, bound);
+            if a_in {
+                let mut chain = current.take()?;
+                if chain.last().copied() != Some(c) {
+                    chain.push(c);
+                }
+                chains.push(chain);
+            } else {
+                current = Some(vec![c]);
             }
         }
     }
-    if out.len() >= 2 && out.first() == out.last() {
-        out.pop();
+    if current.is_some() {
+        return None;
     }
-    true
+    if chains.is_empty() {
+        return Some(Vec::new());
+    }
+    // Degenerate chains (entry == exit after rounding) poison pairing.
+    if chains.iter().any(|ch| ch.len() < 2) {
+        return None;
+    }
+
+    // Endpoint list: (position along line, chain index, is_entry).
+    let mut endpoints: Vec<(i32, usize, bool)> = Vec::with_capacity(chains.len() * 2);
+    for (idx, chain) in chains.iter().enumerate() {
+        endpoints.push((along(chain[0]), idx, true));
+        endpoints.push((along(chain[chain.len() - 1]), idx, false));
+    }
+    endpoints.sort_unstable_by_key(|&(pos, _, _)| pos);
+    if endpoints.windows(2).any(|w| w[0].0 == w[1].0) {
+        return None;
+    }
+
+    // Adjacent sorted pairs are bridges; each must join an exit to an
+    // entry. entry_partner[chain] = chain whose entry the bridge from
+    // this chain's exit reaches.
+    let mut exit_to_entry = vec![usize::MAX; chains.len()];
+    let (pairs, _) = endpoints.as_chunks::<2>();
+    for pair in pairs {
+        let (_, i0, entry0) = pair[0];
+        let (_, i1, entry1) = pair[1];
+        match (entry0, entry1) {
+            (true, false) => exit_to_entry[i1] = i0,
+            (false, true) => exit_to_entry[i0] = i1,
+            _ => return None,
+        }
+    }
+    if exit_to_entry.contains(&usize::MAX) {
+        return None;
+    }
+
+    let mut visited = vec![false; chains.len()];
+    let mut rings_out = Vec::new();
+    for start_chain in 0..chains.len() {
+        if visited[start_chain] {
+            continue;
+        }
+        let mut ring_out: Contour = Vec::new();
+        let mut c = start_chain;
+        loop {
+            visited[c] = true;
+            for &p in &chains[c] {
+                if ring_out.last().copied() != Some(p) {
+                    ring_out.push(p);
+                }
+            }
+            c = exit_to_entry[c];
+            if c == start_chain {
+                break;
+            }
+            if visited[c] {
+                return None;
+            }
+        }
+        if ring_out.len() >= 2 && ring_out.first() == ring_out.last() {
+            ring_out.pop();
+        }
+        if ring_out.len() >= 3 {
+            rings_out.push(ring_out);
+        }
+    }
+    Some(rings_out)
 }
 
 /// Exact rational crossing of segment (a, b) with an axis line, rounded to
@@ -1027,14 +1184,45 @@ mod tests {
                 max_y: 2600,
             }, // on-line vertices
         ];
-        for rect in rects {
-            let mut fast = Vec::new();
-            intersect_shapes_with_rect(&mut scratch, &vec![subject.clone()], rect, 0, &mut fast);
-            let exact = intersect_rect(&subject, rect, 0);
-            assert!(
-                xor_shapes_empty(&fast, &exact),
-                "fast clip diverges from boolean for {rect:?}"
-            );
+        // Comb polygon: crosses a horizontal cut line many times, forcing
+        // the multi-crossing reconnection to produce multiple components.
+        let comb = shape(
+            &[
+                (101, 101),
+                (2901, 101),
+                (2901, 2201),
+                (2501, 2201),
+                (2501, 601),
+                (2101, 601),
+                (2101, 2201),
+                (1701, 2201),
+                (1701, 601),
+                (1301, 601),
+                (1301, 2201),
+                (901, 2201),
+                (901, 601),
+                (501, 601),
+                (501, 2201),
+                (101, 2201),
+            ],
+            &[],
+        );
+        for subject in [&subject, &comb] {
+            for rect in rects {
+                let mut fast = Vec::new();
+                intersect_shapes_with_rect(
+                    &mut scratch,
+                    &vec![subject.clone()],
+                    rect,
+                    0,
+                    &mut fast,
+                );
+                let exact = intersect_rect(subject, rect, 0);
+                assert!(
+                    xor_shapes_empty(&fast, &exact),
+                    "fast clip diverges from boolean for {rect:?}"
+                );
+            }
         }
     }
 

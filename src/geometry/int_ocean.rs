@@ -427,7 +427,7 @@ fn orient_ring_pinned(ring: &mut Contour, flags: &mut [bool], outer: bool) {
     }
 }
 
-fn signed_area_2x(ring: &Contour) -> i128 {
+pub(crate) fn signed_area_2x(ring: &Contour) -> i128 {
     let mut area = 0_i128;
     for i in 0..ring.len() {
         let j = (i + 1) % ring.len();
@@ -649,7 +649,7 @@ fn true_area(ring: &Contour) -> u128 {
     signed_area_2x(ring).unsigned_abs() / 2
 }
 
-fn point_in_contour(x: i32, y: i32, ring: &Contour) -> bool {
+pub(crate) fn point_in_contour(x: i32, y: i32, ring: &Contour) -> bool {
     if ring.len() < 3 {
         return false;
     }
