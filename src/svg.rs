@@ -11,11 +11,9 @@ use crate::pmtiles_writer::xy_to_tile_id;
 const EXTENT: f64 = 4096.0;
 
 const LAYER_COLORS: &[&str] = &[
-    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
-    "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac",
-    "#af7aa1", "#86bcb6", "#d37295", "#8cd17d", "#b6992d",
-    "#499894", "#f1ce63", "#d4a6c8", "#9d7660", "#a0cbe8",
-    "#ffbe7d", "#d7b5a6",
+    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7",
+    "#9c755f", "#bab0ac", "#af7aa1", "#86bcb6", "#d37295", "#8cd17d", "#b6992d", "#499894",
+    "#f1ce63", "#d4a6c8", "#9d7660", "#a0cbe8", "#ffbe7d", "#d7b5a6",
 ];
 
 /// Render a single tile as SVG and write to `out`.
@@ -66,8 +64,13 @@ pub fn render_tile_grid_svg(
 }
 
 /// Build SVG for a grid of tiles. Each tile's geometry is offset by its grid position.
-#[allow(clippy::let_underscore_must_use)]
-fn build_grid_svg(tile_layers: &[(u32, u32, Vec<SvgLayer>)], width: u32, height: u32, layer_filter: Option<&[&str]>) -> String {
+#[allow(clippy::let_underscore_must_use, clippy::too_many_lines)]
+fn build_grid_svg(
+    tile_layers: &[(u32, u32, Vec<SvgLayer>)],
+    width: u32,
+    height: u32,
+    layer_filter: Option<&[&str]>,
+) -> String {
     let total_w = f64::from(width) * EXTENT;
     let total_h = f64::from(height) * EXTENT;
     let px_w = 512 * width;
@@ -140,7 +143,9 @@ fn build_grid_svg(tile_layers: &[(u32, u32, Vec<SvgLayer>)], width: u32, height:
                         }
                         2 => {
                             for path in &feature.paths {
-                                if path.is_empty() { continue; }
+                                if path.is_empty() {
+                                    continue;
+                                }
                                 path_id += 1;
                                 let d = build_path_d_offset(path, false, ox, oy);
                                 s.push_str(&format!(
@@ -149,12 +154,18 @@ fn build_grid_svg(tile_layers: &[(u32, u32, Vec<SvgLayer>)], width: u32, height:
                             }
                         }
                         3 => {
-                            if feature.paths.is_empty() { continue; }
+                            if feature.paths.is_empty() {
+                                continue;
+                            }
                             path_id += 1;
                             let mut d = String::new();
                             for path in &feature.paths {
-                                if path.is_empty() { continue; }
-                                if !d.is_empty() { d.push(' '); }
+                                if path.is_empty() {
+                                    continue;
+                                }
+                                if !d.is_empty() {
+                                    d.push(' ');
+                                }
                                 d.push_str(&build_path_d_offset(path, true, ox, oy));
                             }
                             if !d.is_empty() {
@@ -392,11 +403,23 @@ mod tests {
         // Ring 2: (30,30) -> (40,30) -> (40,40) -> close.
         // Ring 2 MoveTo delta is encoded from ring 1's LAST vertex (20,20): +10,+10.
         let cmds = vec![
-            (1 | (1 << 3)) as u32, zz(10), zz(10),
-            (2 | (2 << 3)) as u32, zz(10), zz(0), zz(0), zz(10),
+            (1 | (1 << 3)) as u32,
+            zz(10),
+            zz(10),
+            (2 | (2 << 3)) as u32,
+            zz(10),
+            zz(0),
+            zz(0),
+            zz(10),
             (7 | (1 << 3)) as u32,
-            (1 | (1 << 3)) as u32, zz(10), zz(10),
-            (2 | (2 << 3)) as u32, zz(10), zz(0), zz(0), zz(10),
+            (1 | (1 << 3)) as u32,
+            zz(10),
+            zz(10),
+            (2 | (2 << 3)) as u32,
+            zz(10),
+            zz(0),
+            zz(0),
+            zz(10),
             (7 | (1 << 3)) as u32,
         ];
 

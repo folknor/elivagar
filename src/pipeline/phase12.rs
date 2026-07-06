@@ -11,24 +11,19 @@ use crate::way_index::WayIndex;
 use crate::wire_format::encode_attrs_bytes;
 use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, PrimitiveBlock};
 
-use super::stats::{
-    DeferralStats, FanoutStats, MissingRefStatsAtomic, Phase12Stats,
-    record_fanout_from_records,
-};
 use super::emit::{
-    PointEmitScratch, LineEmitScratch, PolygonEmitScratch,
-    push_sort_record, emit_point_or_centroid, emit_line_feature, emit_polygon_feature,
-    antimeridian_shifts_for_bbox, enrich_polygon_matches,
-    unwrap_antimeridian_path,
+    LineEmitScratch, PointEmitScratch, PolygonEmitScratch, antimeridian_shifts_for_bbox,
+    emit_line_feature, emit_point_or_centroid, emit_polygon_feature, enrich_polygon_matches,
+    push_sort_record, unwrap_antimeridian_path,
 };
 use super::relations::{
-    PreparedRelation, REL_BATCH_SIZE, REL_BATCH_BUDGET_DEFAULT,
-    estimate_prepared_rel_bytes, prepare_relation, flush_rel_batch,
+    PreparedRelation, REL_BATCH_BUDGET_DEFAULT, REL_BATCH_SIZE, estimate_prepared_rel_bytes,
+    flush_rel_batch, prepare_relation,
 };
-use super::{
-    PipelineError, TilegenConfig, current_rss_kb,
-    SORT_CHUNKS_DIR,
+use super::stats::{
+    DeferralStats, FanoutStats, MissingRefStatsAtomic, Phase12Stats, record_fanout_from_records,
 };
+use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb};
 
 pub(super) const LON_E7_FULL_CIRCLE: i64 = 3_600_000_000;
 /// Default memory budget per sort chunk (1 GB).
@@ -84,7 +79,9 @@ pub(super) fn select_node_store_mode(
 #[hotpath::measure]
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::unwrap_in_result)]
-pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWriter, MercBbox, Phase12Stats), PipelineError> {
+pub(super) fn phase_read_and_process(
+    config: &TilegenConfig,
+) -> Result<(SortWriter, MercBbox, Phase12Stats), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let sort_chunk_budget = if config.sort_chunk_size > 0 {
@@ -94,21 +91,26 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
     };
 
     // Option so we can move to drain thread during way phase and get back after.
-    let mut sort_writer: Option<SortWriter> = Some(
-        SortWriter::new(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_budget, config.compress_sort_chunks)?
-    );
+    let mut sort_writer: Option<SortWriter> = Some(SortWriter::new(
+        &config.tmp_dir.join(SORT_CHUNKS_DIR),
+        sort_chunk_budget,
+        config.compress_sort_chunks,
+    )?);
 
     // Decode threads: give 1/3 of budget to pbfhogg decode, rest to rayon processing.
     let decode_threads = (config.threads / 3).max(1);
-    let reader =
-        ElementReader::from_path(&config.pbf_path)
-            .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?
-            .decode_threads(decode_threads);
+    let reader = ElementReader::from_path(&config.pbf_path)
+        .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?
+        .decode_threads(decode_threads);
 
     let idx_dir = &config.tmp_dir;
     // Option so we can consume it via .take() on first Way element.
     let locations_on_ways = config.locations_on_ways
-        || reader.header().optional_features().iter().any(|f| f == "LocationsOnWays");
+        || reader
+            .header()
+            .optional_features()
+            .iter()
+            .any(|f| f == "LocationsOnWays");
 
     let pbf_size = std::fs::metadata(&config.pbf_path)
         .map(|m| m.len())
@@ -182,7 +184,9 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
     let mut block_tx: Option<std::sync::mpsc::SyncSender<PrimitiveBlock>> = None;
     let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
-    let mut drain_handle: Option<std::thread::JoinHandle<(WayIndex, SortWriter, u64, FanoutStats)>> = None;
+    let mut drain_handle: Option<
+        std::thread::JoinHandle<(WayIndex, SortWriter, u64, FanoutStats)>,
+    > = None;
 
     // Buffer relation blocks - processed after all PBF blocks are consumed so that
     // late way blocks (common in locations-on-ways PBFs) don't hit a finalized way_index.
@@ -198,9 +202,8 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
     // tags_vec cannot be hoisted: it holds &str references into PBF elements
     // that don't outlive the closure body (mutable reference invariance).
     // Global shared-node prepass: detect junction nodes across PBF blocks.
-    let global_shared_nodes: std::sync::Arc<FxHashSet<i64>> = std::sync::Arc::new(
-        prepass_shared_nodes(&config.pbf_path, decode_threads)?
-    );
+    let global_shared_nodes: std::sync::Arc<FxHashSet<i64>> =
+        std::sync::Arc::new(prepass_shared_nodes(&config.pbf_path, decode_threads)?);
 
     let mut node_records: Vec<SortRecord> = Vec::new();
 
@@ -243,8 +246,7 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
     }
 
     for block_result in reader.into_blocks_pipelined() {
-        let block = block_result
-            .map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
+        let block = block_result.map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
 
         // Classify block by reading first wire tag byte per group -
         // no element decoding. Sorted PBFs have single-type blocks.
@@ -260,7 +262,8 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
             BlockType::Ways => {
                 // Way block - send entire block to worker thread.
                 // Count ways from block (elements() re-parses from bytes, cheap).
-                way_count += block.elements()
+                way_count += block
+                    .elements()
                     .filter(|e| matches!(e, Element::Way(_)))
                     .count() as u64;
 
@@ -269,10 +272,10 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     let nr: Option<std::sync::Arc<NodeStoreReader>> = if locations_on_ways {
                         None
                     } else {
-                        let ns = node_store_opt.take()
-                            .expect("node store already consumed");
+                        let ns = node_store_opt.take().expect("node store already consumed");
                         let r = std::sync::Arc::new(
-                            ns.into_reader().expect("failed to convert node store to reader")
+                            ns.into_reader()
+                                .expect("failed to convert node store to reader"),
                         );
                         node_store_stats = r.sorted_stats();
                         Some(r)
@@ -280,7 +283,9 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     if locations_on_ways {
                         eprintln!("  LocationsOnWays mode - processing ways (no node store)...");
                     } else {
-                        eprintln!("  Node store finalized ({node_count} nodes), processing ways...");
+                        eprintln!(
+                            "  Node store finalized ({node_count} nodes), processing ways..."
+                        );
                     }
 
                     let (btx, brx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(1);
@@ -288,7 +293,8 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                     // while holding a rayon thread. If capacity < inflight tasks,
                     // blocked senders tie up all rayon threads → worker (which runs
                     // inside rayon::in_place_scope) can't make progress → deadlock.
-                    let (rtx, rrx) = std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(MAX_INFLIGHT);
+                    let (rtx, rrx) =
+                        std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(MAX_INFLIGHT);
                     let nr_clone = nr.clone();
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
                     let missing_ref_stats_clone = std::sync::Arc::clone(&missing_ref_stats);
@@ -326,16 +332,20 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                         let cvar_ref = &inflight_cvar;
                         rayon::in_place_scope(|s| {
                             while let Ok(block) = brx.recv() {
-                                let raw_ways: Vec<RawWay> = block.elements()
+                                let raw_ways: Vec<RawWay> = block
+                                    .elements()
                                     .filter_map(|e| match e {
                                         Element::Way(way) => {
-                                            let tags: Vec<(String, String)> = way.tags()
+                                            let tags: Vec<(String, String)> = way
+                                                .tags()
                                                 .map(|(k, v)| (k.to_string(), v.to_string()))
                                                 .collect();
                                             if nr_ref.is_some() {
                                                 // Standard PBF: collect node refs
                                                 let node_refs: Vec<i64> = way.refs().collect();
-                                                if node_refs.is_empty() { return None; }
+                                                if node_refs.is_empty() {
+                                                    return None;
+                                                }
                                                 Some(RawWay {
                                                     way_id: way.id(),
                                                     node_refs,
@@ -348,9 +358,13 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                                                 let node_refs: Vec<i64> = way.refs().collect();
                                                 let coords_e7: Vec<(i32, i32)> = way
                                                     .node_locations()
-                                                    .map(|loc| (loc.decimicro_lat(), loc.decimicro_lon()))
+                                                    .map(|loc| {
+                                                        (loc.decimicro_lat(), loc.decimicro_lon())
+                                                    })
                                                     .collect();
-                                                if coords_e7.is_empty() { return None; }
+                                                if coords_e7.is_empty() {
+                                                    return None;
+                                                }
                                                 Some(RawWay {
                                                     way_id: way.id(),
                                                     node_refs,
@@ -373,17 +387,19 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                                 // exceeds the byte budget must not deadlock the condvar
                                 // (no in-flight tasks → no notify_one → permanent sleep).
                                 {
-                                    let mut guard = inflight_ref.lock()
-                                        .expect("inflight lock");
-                                    guard = inflight_cvar.wait_while(guard, |&mut (count, bytes)| {
-                                        count >= MAX_INFLIGHT
-                                            || (count > 0 && bytes + block_cost > way_budget)
-                                    }).expect("condvar wait");
+                                    let mut guard = inflight_ref.lock().expect("inflight lock");
+                                    guard = inflight_cvar
+                                        .wait_while(guard, |&mut (count, bytes)| {
+                                            count >= MAX_INFLIGHT
+                                                || (count > 0 && bytes + block_cost > way_budget)
+                                        })
+                                        .expect("condvar wait");
                                     guard.0 += 1;
                                     guard.1 += block_cost;
                                     // Update HWM with current in-flight bytes (raw, not multiplied).
                                     way_hwm_clone.fetch_max(
-                                        guard.1 / WAY_OUTPUT_MULTIPLIER, Ordering::Relaxed,
+                                        guard.1 / WAY_OUTPUT_MULTIPLIER,
+                                        Ordering::Relaxed,
                                     );
                                 }
                                 let tx = rtx.clone();
@@ -391,13 +407,15 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                                 s.spawn(move |_| {
                                     let results: Vec<ProcessedWay> = raw_ways
                                         .into_par_iter()
-                                        .map(|raw| process_raw_way(
-                                            &raw, nr_ref, mz, xz, &srl, ds_ref, mr_ref, &fcs, psf,
-                                        ))
+                                        .map(|raw| {
+                                            process_raw_way(
+                                                &raw, nr_ref, mz, xz, &srl, ds_ref, mr_ref, &fcs,
+                                                psf,
+                                            )
+                                        })
                                         .collect();
                                     let _ = tx.send(results);
-                                    let mut guard = inflight_ref.lock()
-                                        .expect("inflight lock");
+                                    let mut guard = inflight_ref.lock().expect("inflight lock");
                                     guard.0 -= 1;
                                     guard.1 -= block_cost;
                                     cvar_ref.notify_one();
@@ -428,8 +446,11 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                 }
 
                 // send() blocks if worker is still processing previous block (backpressure)
-                block_tx.as_ref().expect("worker not initialized")
-                    .send(block).expect("worker thread panicked");
+                block_tx
+                    .as_ref()
+                    .expect("worker not initialized")
+                    .send(block)
+                    .expect("worker thread panicked");
             }
             BlockType::Relations => {
                 // Buffer relation blocks - defer processing until all PBF blocks
@@ -472,7 +493,9 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                 rel_count += 1;
                 if let Some(prepared) = prepare_relation(
                     &rel,
-                    way_index.as_ref().expect("way_index not returned from drain"),
+                    way_index
+                        .as_ref()
+                        .expect("way_index not returned from drain"),
                     &missing_ref_stats,
                 ) {
                     rel_batch_bytes += estimate_prepared_rel_bytes(&prepared);
@@ -481,12 +504,21 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
                         max_rel_batch_bytes = rel_batch_bytes;
                     }
                     if rel_batch.len() >= REL_BATCH_SIZE || rel_batch_bytes >= rel_budget {
-                        let batch = std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
+                        let batch =
+                            std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
                         rel_batch_bytes = 0;
                         features_emitted += flush_rel_batch(
-                            batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats,
-                            sort_writer.as_mut().expect("sort_writer not returned from drain"),
-                            &mut fanout_stats, &config.fanout_caps, config.polygon_simplify_factor,
+                            batch,
+                            min_z,
+                            max_z,
+                            &config.seam_reconcile_layers,
+                            &deferral_stats,
+                            sort_writer
+                                .as_mut()
+                                .expect("sort_writer not returned from drain"),
+                            &mut fanout_stats,
+                            &config.fanout_caps,
+                            config.polygon_simplify_factor,
                         );
                         deferral_stats.check_budgets(&config.seam_reconcile_layers);
                     }
@@ -497,14 +529,23 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
     let rss_before_relation_drop = current_rss_kb();
     drop(relation_blocks);
     let rss_after_relation_drop = current_rss_kb();
-    let relation_blocks_drop_rss_kb = rss_before_relation_drop.zip(rss_after_relation_drop)
+    let relation_blocks_drop_rss_kb = rss_before_relation_drop
+        .zip(rss_after_relation_drop)
         .map(|(before, after)| before.saturating_sub(after));
 
     if !rel_batch.is_empty() {
         features_emitted += flush_rel_batch(
-            rel_batch, min_z, max_z, &config.seam_reconcile_layers, &deferral_stats,
-            sort_writer.as_mut().expect("sort_writer not returned from drain"),
-            &mut fanout_stats, &config.fanout_caps, config.polygon_simplify_factor,
+            rel_batch,
+            min_z,
+            max_z,
+            &config.seam_reconcile_layers,
+            &deferral_stats,
+            sort_writer
+                .as_mut()
+                .expect("sort_writer not returned from drain"),
+            &mut fanout_stats,
+            &config.fanout_caps,
+            config.polygon_simplify_factor,
         );
         deferral_stats.check_budgets(&config.seam_reconcile_layers);
     }
@@ -524,24 +565,47 @@ pub(super) fn phase_read_and_process(config: &TilegenConfig) -> Result<(SortWrit
             min_lon_shifted_e7,
             max_lon_shifted_e7,
         );
-        let west_lon_e7 = if crosses_dateline { -1_800_000_000 } else { min_lon_e7 };
-        let east_lon_e7 = if crosses_dateline { 1_800_000_000 } else { max_lon_e7 };
+        let west_lon_e7 = if crosses_dateline {
+            -1_800_000_000
+        } else {
+            min_lon_e7
+        };
+        let east_lon_e7 = if crosses_dateline {
+            1_800_000_000
+        } else {
+            max_lon_e7
+        };
         let sw = geometry::project_e7(min_lat_e7, west_lon_e7);
         let ne = geometry::project_e7(max_lat_e7, east_lon_e7);
         // Add ~1 degree buffer (in Mercator space, roughly 1/360 ≈ 0.003)
         let buf = 0.01;
         MercBbox {
-            min_x: if crosses_dateline { 0.0 } else { (sw.x - buf).max(0.0) },
-            min_y: (ne.y - buf).max(0.0),  // ne.y < sw.y in Mercator [0,1]
-            max_x: if crosses_dateline { 1.0 } else { (ne.x + buf).min(1.0) },
+            min_x: if crosses_dateline {
+                0.0
+            } else {
+                (sw.x - buf).max(0.0)
+            },
+            min_y: (ne.y - buf).max(0.0), // ne.y < sw.y in Mercator [0,1]
+            max_x: if crosses_dateline {
+                1.0
+            } else {
+                (ne.x + buf).min(1.0)
+            },
             max_y: (sw.y + buf).min(1.0),
         }
     } else {
         // No nodes - full world
-        MercBbox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 }
+        MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        }
     };
-    eprintln!("  Data bounds (merc): x[{:.4}-{:.4}] y[{:.4}-{:.4}]",
-        data_bounds.min_x, data_bounds.max_x, data_bounds.min_y, data_bounds.max_y);
+    eprintln!(
+        "  Data bounds (merc): x[{:.4}-{:.4}] y[{:.4}-{:.4}]",
+        data_bounds.min_x, data_bounds.max_x, data_bounds.min_y, data_bounds.max_y
+    );
     let max_way_inflight_bytes = way_hwm.load(Ordering::Relaxed);
     let missing_ref_snapshot = missing_ref_stats.snapshot();
     let sw = sort_writer.expect("sort_writer not returned from drain");
@@ -589,7 +653,12 @@ pub(super) fn process_node(
     }
 
     let p = geometry::project_e7(lat_e7, lon_e7);
-    let pbbox = MercBbox { min_x: p.x, min_y: p.y, max_x: p.x, max_y: p.y };
+    let pbbox = MercBbox {
+        min_x: p.x,
+        min_y: p.y,
+        max_x: p.x,
+        max_y: p.y,
+    };
     let mut count: u64 = 0;
     let mut geom_buf: Vec<u32> = Vec::new();
     let mut attrs_buf: Vec<u8> = Vec::new();
@@ -607,7 +676,15 @@ pub(super) fn process_node(
                 let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
                 let (px, py) = geometry::merc_to_tile_px(&p, tx, ty, z);
                 mvt::encode_point(&mut geom_buf, px, py);
-                push_sort_record(tile_id, osm_id, m.layer, GeomType::Point, &geom_buf, &attrs_buf, records);
+                push_sort_record(
+                    tile_id,
+                    osm_id,
+                    m.layer,
+                    GeomType::Point,
+                    &geom_buf,
+                    &attrs_buf,
+                    records,
+                );
                 count += 1;
             });
         }
@@ -640,13 +717,16 @@ const _: () = assert!(std::mem::size_of::<RawWay>() == 104);
 
 /// Estimate heap bytes for a block of raw ways (struct + node_refs + tag strings).
 pub(super) fn estimate_raw_ways_bytes(ways: &[RawWay]) -> usize {
-    ways.iter().map(|w| {
-        std::mem::size_of::<RawWay>() + w.node_refs.len() * 8
-            + w.preserve_node_refs.len() * 8
-            + w.coords_e7.len() * 8
-            + w.tags.len() * 48
-            + w.tags.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
-    }).sum()
+    ways.iter()
+        .map(|w| {
+            std::mem::size_of::<RawWay>()
+                + w.node_refs.len() * 8
+                + w.preserve_node_refs.len() * 8
+                + w.coords_e7.len() * 8
+                + w.tags.len() * 48
+                + w.tags.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
+        })
+        .sum()
 }
 
 /// Mark interior node refs that are shared by at least 2 ways in the same block.
@@ -728,8 +808,8 @@ fn prepass_shared_nodes(
     let mut shared: FxHashSet<i64> = FxHashSet::default();
 
     for block_result in reader.into_blocks_pipelined() {
-        let block = block_result
-            .map_err(|e| PipelineError(format!("prepass: PBF read failed: {e}")))?;
+        let block =
+            block_result.map_err(|e| PipelineError(format!("prepass: PBF read failed: {e}")))?;
         block.for_each_element(|element| {
             if let Element::Way(way) = element {
                 for node_id in way.refs() {
@@ -770,9 +850,7 @@ fn annotate_global_shared_node_refs(raw_ways: &mut [RawWay], global_shared: &FxH
             &w.node_refs[..]
         };
         for &node_id in scan_slice {
-            if global_shared.contains(&node_id)
-                && !w.preserve_node_refs.contains(&node_id)
-            {
+            if global_shared.contains(&node_id) && !w.preserve_node_refs.contains(&node_id) {
                 w.preserve_node_refs.push(node_id);
             }
         }
@@ -782,7 +860,11 @@ fn annotate_global_shared_node_refs(raw_ways: &mut [RawWay], global_shared: &FxH
 #[inline]
 pub(super) fn lon_e7_shifted_360(lon_e7: i32) -> i64 {
     let lon = i64::from(lon_e7);
-    if lon < 0 { lon + LON_E7_FULL_CIRCLE } else { lon }
+    if lon < 0 {
+        lon + LON_E7_FULL_CIRCLE
+    } else {
+        lon
+    }
 }
 
 #[inline]
@@ -877,7 +959,8 @@ pub(super) fn process_raw_way(
 ) -> ProcessedWay {
     // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
     // or looked up via node store (the expensive mmap reads - now parallel).
-    let (coords_e7, resolved_node_refs): (Vec<(i32, i32)>, Vec<i64>) = if !raw.coords_e7.is_empty() {
+    let (coords_e7, resolved_node_refs): (Vec<(i32, i32)>, Vec<i64>) = if !raw.coords_e7.is_empty()
+    {
         (raw.coords_e7.clone(), raw.node_refs.clone())
     } else if let Some(nr) = node_reader {
         let mut missing_refs: usize = 0;
@@ -900,21 +983,37 @@ pub(super) fn process_raw_way(
     };
 
     if coords_e7.is_empty() || raw.tags.is_empty() {
-        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new(), cap_events: Vec::new() };
+        return ProcessedWay {
+            way_id: raw.way_id,
+            coords_e7,
+            records: Vec::new(),
+            cap_events: Vec::new(),
+        };
     }
 
     // Tag matching - convert owned tags to borrowed refs (same pattern as
     // process_prepared_relation, pipeline.rs PreparedRelation handling)
     let is_closed = coords_e7.len() >= 4 && coords_e7.first() == coords_e7.last();
-    let geom_type = if is_closed { OsmGeomType::ClosedWay } else { OsmGeomType::OpenWay };
-    let tags_ref: Vec<(&str, &str)> = raw.tags.iter()
+    let geom_type = if is_closed {
+        OsmGeomType::ClosedWay
+    } else {
+        OsmGeomType::OpenWay
+    };
+    let tags_ref: Vec<(&str, &str)> = raw
+        .tags
+        .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let tag_helper = Tags(&tags_ref);
     let mut matches = shortbread::match_element(&tag_helper, geom_type);
 
     if matches.is_empty() {
-        return ProcessedWay { way_id: raw.way_id, coords_e7, records: Vec::new(), cap_events: Vec::new() };
+        return ProcessedWay {
+            way_id: raw.way_id,
+            coords_e7,
+            records: Vec::new(),
+            cap_events: Vec::new(),
+        };
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -934,7 +1033,11 @@ pub(super) fn process_raw_way(
     WAY_WORKER_SCRATCH.with(|cell| {
         let scratch = &mut *cell.borrow_mut();
         scratch.merc.clear();
-        scratch.merc.extend(coords_e7.iter().map(|&(lat, lon)| geometry::project_e7(lat, lon)));
+        scratch.merc.extend(
+            coords_e7
+                .iter()
+                .map(|&(lat, lon)| geometry::project_e7(lat, lon)),
+        );
         let _ = unwrap_antimeridian_path(&mut scratch.merc, is_closed);
 
         let merc = scratch.merc.as_slice();
@@ -954,9 +1057,19 @@ pub(super) fn process_raw_way(
             }
 
             match m.geom_expect {
-                GeomExpect::Point | GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
+                GeomExpect::Point
+                | GeomExpect::PolygonCentroid
+                | GeomExpect::PolygonPointOnSurface => {
                     emit_point_or_centroid(
-                        osm_id, merc, None, &merc_bbox_val, m, z_lo, z_hi, &mut records, &mut scratch.point_emit,
+                        osm_id,
+                        merc,
+                        None,
+                        &merc_bbox_val,
+                        m,
+                        z_lo,
+                        z_hi,
+                        &mut records,
+                        &mut scratch.point_emit,
                     );
                 }
                 GeomExpect::Line => {
@@ -975,7 +1088,10 @@ pub(super) fn process_raw_way(
                         } else {
                             let shifted: Vec<Point> = merc
                                 .iter()
-                                .map(|p| Point { x: p.x + shift, y: p.y })
+                                .map(|p| Point {
+                                    x: p.x + shift,
+                                    y: p.y,
+                                })
                                 .collect();
                             emit_line_feature(
                                 osm_id,
@@ -1012,7 +1128,10 @@ pub(super) fn process_raw_way(
                         } else {
                             let shifted: Vec<Point> = merc
                                 .iter()
-                                .map(|p| Point { x: p.x + shift, y: p.y })
+                                .map(|p| Point {
+                                    x: p.x + shift,
+                                    y: p.y,
+                                })
                                 .collect();
                             emit_polygon_feature(
                                 osm_id,
@@ -1037,5 +1156,10 @@ pub(super) fn process_raw_way(
         cap_events = std::mem::take(&mut scratch.polygon_emit.cap_events);
     });
 
-    ProcessedWay { way_id: raw.way_id, coords_e7, records, cap_events }
+    ProcessedWay {
+        way_id: raw.way_id,
+        coords_e7,
+        records,
+        cap_events,
+    }
 }

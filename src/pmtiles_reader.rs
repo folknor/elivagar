@@ -207,11 +207,7 @@ impl PmtilesReader {
     }
 
     /// Read and decode a single directory section.
-    pub fn read_directory(
-        &mut self,
-        offset: u64,
-        length: u64,
-    ) -> io::Result<Vec<RawDirEntry>> {
+    pub fn read_directory(&mut self, offset: u64, length: u64) -> io::Result<Vec<RawDirEntry>> {
         self.file.seek(SeekFrom::Start(offset))?;
         #[allow(clippy::cast_possible_truncation)]
         let mut compressed = vec![0u8; length as usize];
@@ -277,8 +273,7 @@ pub fn decode_directory(data: &[u8]) -> io::Result<Vec<RawDirEntry>> {
     #[allow(clippy::cast_possible_truncation)]
     let count = c
         .read_varint()
-        .map_err(|e| io::Error::other(format!("directory count: {e}")))?
-        as usize;
+        .map_err(|e| io::Error::other(format!("directory count: {e}")))? as usize;
 
     let mut tile_ids = Vec::with_capacity(count);
     let mut prev: u64 = 0;

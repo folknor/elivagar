@@ -81,7 +81,9 @@ impl NodeIndex {
     /// Negative node IDs are silently ignored (invalid in OSM data).
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
-        if node_id < 0 { return; }
+        if node_id < 0 {
+            return;
+        }
         let offset = node_id as u64 * ENTRY_SIZE;
         let needed = offset + ENTRY_SIZE;
 
@@ -105,8 +107,11 @@ impl NodeIndex {
                 new_len += GROW_INCREMENT;
             }
             // Panic: unrecoverable I/O - disk full or mmap failure means the run is dead.
-            self.file.set_len(new_len).expect("failed to grow node index file");
-            self.mmap = unsafe { MmapMut::map_mut(&self.file).expect("failed to remap node index") };
+            self.file
+                .set_len(new_len)
+                .expect("failed to grow node index file");
+            self.mmap =
+                unsafe { MmapMut::map_mut(&self.file).expect("failed to remap node index") };
 
             self.file_len = new_len;
         }
@@ -117,7 +122,11 @@ impl NodeIndex {
     }
 
     /// Read coordinates for a node. Returns None if entry is unset (all zeros).
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::unwrap_used)]
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        clippy::unwrap_used
+    )]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
         get_from_mmap(&self.mmap, self.file_len, node_id)
     }
@@ -135,9 +144,15 @@ impl NodeIndex {
 }
 
 /// Shared get logic for both NodeIndex and NodeIndexReader.
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::unwrap_used)]
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::unwrap_used
+)]
 fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: i64) -> Option<(i32, i32)> {
-    if node_id < 0 { return None; }
+    if node_id < 0 {
+        return None;
+    }
     let offset = node_id as u64 * ENTRY_SIZE;
     let needed = offset + ENTRY_SIZE;
 
@@ -202,7 +217,10 @@ fn test_bit(mask: &[u8; BITMASK_BYTES], pos: u8) -> bool {
 fn count_bits_before(mask: &[u8; BITMASK_BYTES], pos: u8) -> usize {
     let byte_idx = pos as usize / 8;
     let bit_idx = pos % 8;
-    let full: usize = mask[..byte_idx].iter().map(|b| b.count_ones() as usize).sum();
+    let full: usize = mask[..byte_idx]
+        .iter()
+        .map(|b| b.count_ones() as usize)
+        .sum();
     let partial = (mask[byte_idx] & ((1u8 << bit_idx) - 1)).count_ones() as usize;
     full + partial
 }
@@ -252,7 +270,11 @@ fn bitpack_values_into(values: &[u32], bit_width: u8, dest: &mut Vec<u8>) {
 /// regressed synthetic by ~10% due to branch misprediction on the refill loop.
 /// Doesn't matter anyway - decompress_chunk is DRAM-latency-bound on real data
 /// (820ns avg on 270 MB blob vs 25ns synthetic with L1-hot data).
-#[allow(clippy::cast_possible_truncation, clippy::unwrap_used, clippy::needless_range_loop)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::unwrap_used,
+    clippy::needless_range_loop
+)]
 fn bitunpack_values(packed: &[u8], n: usize, bit_width: u8, out: &mut [u32]) {
     if bit_width == 0 {
         for o in &mut out[..n] {
@@ -288,7 +310,9 @@ fn required_bits(max_val: u32) -> u8 {
         return 0;
     }
     #[allow(clippy::cast_possible_truncation)]
-    { (32 - max_val.leading_zeros()) as u8 }
+    {
+        (32 - max_val.leading_zeros()) as u8
+    }
 }
 
 /// Per-group flat blob layout. Each chunk is stored inline as:
@@ -301,7 +325,10 @@ const CHUNK_HEADER_SIZE: usize = BITMASK_BYTES + 2; // 34 bytes
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
 fn encode_flags_and_len(compressed: bool, packed_len: usize) -> u16 {
-    debug_assert!(packed_len <= 0x7FFF, "packed_len {packed_len} exceeds 15-bit limit");
+    debug_assert!(
+        packed_len <= 0x7FFF,
+        "packed_len {packed_len} exceeds 15-bit limit"
+    );
     let flags = if compressed { 0x8000u16 } else { 0u16 };
     flags | packed_len as u16
 }
@@ -330,9 +357,17 @@ fn compress_coords_into(
     let lon_min = lons.iter().copied().min().unwrap_or(0);
 
     #[allow(clippy::cast_sign_loss)]
-    let lat_max_offset = lats.iter().map(|&v| (v - lat_min) as u32).max().unwrap_or(0);
+    let lat_max_offset = lats
+        .iter()
+        .map(|&v| (v - lat_min) as u32)
+        .max()
+        .unwrap_or(0);
     #[allow(clippy::cast_sign_loss)]
-    let lon_max_offset = lons.iter().map(|&v| (v - lon_min) as u32).max().unwrap_or(0);
+    let lon_max_offset = lons
+        .iter()
+        .map(|&v| (v - lon_min) as u32)
+        .max()
+        .unwrap_or(0);
 
     let lat_bits = required_bits(lat_max_offset);
     let lon_bits = required_bits(lon_max_offset);
@@ -409,10 +444,7 @@ fn decompress_chunk(
     for i in 0..n {
         #[allow(clippy::cast_possible_wrap)]
         {
-            out[i] = (
-                lat_min + lat_buf[i] as i32,
-                lon_min + lon_buf[i] as i32,
-            );
+            out[i] = (lat_min + lat_buf[i] as i32, lon_min + lon_buf[i] as i32);
         }
     }
 }
@@ -441,14 +473,18 @@ fn find_chunk_in_blob(data: &[u8], chunk_idx: usize) -> ChunkRef<'_> {
     let mut offset = 0;
     for _ in 0..chunk_idx {
         // Skip: node_mask (32) + flags_and_len (2) + packed data
-        let fl = u16::from_le_bytes([data[offset + BITMASK_BYTES], data[offset + BITMASK_BYTES + 1]]);
+        let fl = u16::from_le_bytes([
+            data[offset + BITMASK_BYTES],
+            data[offset + BITMASK_BYTES + 1],
+        ]);
         let packed_len = (fl & 0x7FFF) as usize;
         offset += CHUNK_HEADER_SIZE + packed_len;
     }
-    let node_mask: &[u8; BITMASK_BYTES] = data[offset..offset + BITMASK_BYTES]
-        .try_into()
-        .unwrap();
-    let fl = u16::from_le_bytes([data[offset + BITMASK_BYTES], data[offset + BITMASK_BYTES + 1]]);
+    let node_mask: &[u8; BITMASK_BYTES] = data[offset..offset + BITMASK_BYTES].try_into().unwrap();
+    let fl = u16::from_le_bytes([
+        data[offset + BITMASK_BYTES],
+        data[offset + BITMASK_BYTES + 1],
+    ]);
     let compressed = fl & 0x8000 != 0;
     let packed_len = (fl & 0x7FFF) as usize;
     let packed_start = offset + CHUNK_HEADER_SIZE;
@@ -574,7 +610,12 @@ fn get_from_group_cached(
         // Evict last entry: swap it to front, then overwrite
         cache.entries.swap(0, CACHE_ENTRIES - 1);
         let entry = &mut cache.entries[0];
-        decompress_chunk(chunk.node_mask, chunk.compressed, chunk.packed, &mut entry.coords);
+        decompress_chunk(
+            chunk.node_mask,
+            chunk.compressed,
+            chunk.packed,
+            &mut entry.coords,
+        );
         entry.node_mask = *chunk.node_mask;
         entry.group_id = group_id;
         entry.chunk_idx = chunk_idx;
@@ -623,10 +664,10 @@ pub struct SortedNodeStore {
     // Builder state for the group being accumulated.
     current_group_id: u64,
     current_chunk_mask: [u8; BITMASK_BYTES],
-    current_group_data: Vec<u8>,  // flat blob being built for current group
-    compress_buf: Vec<u8>,        // scratch buffer for compression, reused
-    scratch_lats: Vec<i32>,       // scratch buffer for flush_chunk, reused
-    scratch_lons: Vec<i32>,       // scratch buffer for flush_chunk, reused
+    current_group_data: Vec<u8>, // flat blob being built for current group
+    compress_buf: Vec<u8>,       // scratch buffer for compression, reused
+    scratch_lats: Vec<i32>,      // scratch buffer for flush_chunk, reused
+    scratch_lons: Vec<i32>,      // scratch buffer for flush_chunk, reused
     scratch_lat_offsets: Vec<u32>, // scratch buffer for compress_coords_into, reused
     scratch_lon_offsets: Vec<u32>, // scratch buffer for compress_coords_into, reused
 
@@ -746,17 +787,21 @@ impl SortedNodeStore {
         let compressed = self.compress_buf.len() < raw_size;
 
         // Write chunk into flat blob: [node_mask:32][flags_and_len:2][packed_data]
-        self.current_group_data.extend_from_slice(&self.current_node_mask);
+        self.current_group_data
+            .extend_from_slice(&self.current_node_mask);
         if compressed {
             let fl = encode_flags_and_len(true, self.compress_buf.len());
             self.current_group_data.extend_from_slice(&fl.to_le_bytes());
-            self.current_group_data.extend_from_slice(&self.compress_buf);
+            self.current_group_data
+                .extend_from_slice(&self.compress_buf);
         } else {
             let fl = encode_flags_and_len(false, raw_size);
             self.current_group_data.extend_from_slice(&fl.to_le_bytes());
             for &(lat, lon) in &self.current_coords {
-                self.current_group_data.extend_from_slice(&lat.to_le_bytes());
-                self.current_group_data.extend_from_slice(&lon.to_le_bytes());
+                self.current_group_data
+                    .extend_from_slice(&lat.to_le_bytes());
+                self.current_group_data
+                    .extend_from_slice(&lon.to_le_bytes());
             }
         }
 
@@ -885,8 +930,12 @@ pub struct SortedNodeStoreReader {
 }
 
 impl SortedNodeStoreReader {
-    pub fn node_count(&self) -> u64 { self.node_count }
-    pub fn group_count(&self) -> usize { self.group_count }
+    pub fn node_count(&self) -> u64 {
+        self.node_count
+    }
+    pub fn group_count(&self) -> usize {
+        self.group_count
+    }
 
     /// Look up coordinates for a node. O(1) via bitmask popcount.
     /// Uses a thread-local decompression cache for amortized lookups.

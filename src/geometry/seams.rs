@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 
-use super::SIMPLIFY_PIXELS;
 use super::EXTENT;
+use super::SIMPLIFY_PIXELS;
 
 /// A reference to where a shared chain appears within a specific ring.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,9 +44,7 @@ struct EdgeHit {
 ///
 /// Returns `shared_edges`: maps `(ring_idx, edge_idx)` to the list of
 /// `EdgeHit`s from *other* rings that share the same undirected edge.
-fn build_shared_edge_map(
-    rings: &[Vec<(i32, i32)>],
-) -> FxHashMap<(usize, usize), Vec<EdgeHit>> {
+fn build_shared_edge_map(rings: &[Vec<(i32, i32)>]) -> FxHashMap<(usize, usize), Vec<EdgeHit>> {
     let mut edge_map: FxHashMap<EdgeKey, Vec<EdgeHit>> = FxHashMap::default();
 
     for (ring_idx, ring) in rings.iter().enumerate() {
@@ -58,10 +56,10 @@ fn build_shared_edge_map(
             if a == b {
                 continue;
             }
-            edge_map
-                .entry(edge_key(a, b))
-                .or_default()
-                .push(EdgeHit { ring_idx, edge_idx: i });
+            edge_map.entry(edge_key(a, b)).or_default().push(EdgeHit {
+                ring_idx,
+                edge_idx: i,
+            });
         }
     }
 
@@ -164,7 +162,10 @@ fn grow_chain(
 
     // Debug: verify vertices match ring A.
     debug_assert!(
-        vertices.iter().enumerate().all(|(i, &v)| v == ring_a[(first + i) % ring_a.len()]),
+        vertices
+            .iter()
+            .enumerate()
+            .all(|(i, &v)| v == ring_a[(first + i) % ring_a.len()]),
         "chain vertices do not match ring A"
     );
 
@@ -177,8 +178,18 @@ fn grow_chain(
     SharedChain {
         vertices,
         incidents: vec![
-            ChainRef { ring_idx: ring_a_idx, start: first, len: edges_a.len() + 1, reversed: false },
-            ChainRef { ring_idx: ring_b_idx, start: b_start, len: edges_a.len() + 1, reversed: opposite_dir },
+            ChainRef {
+                ring_idx: ring_a_idx,
+                start: first,
+                len: edges_a.len() + 1,
+                reversed: false,
+            },
+            ChainRef {
+                ring_idx: ring_b_idx,
+                start: b_start,
+                len: edges_a.len() + 1,
+                reversed: opposite_dir,
+            },
         ],
     }
 }
@@ -389,7 +400,10 @@ pub fn canonicalize_shared_chains(
         reconciled += 1;
     }
 
-    CanonicalizationResult { reconciled, skipped }
+    CanonicalizationResult {
+        reconciled,
+        skipped,
+    }
 }
 
 /// Build a pinned-vertex mask for a ring based on shared chain membership.
@@ -427,7 +441,11 @@ pub fn build_pinned_mask(ring_len: usize, ring_idx: usize, chains: &[SharedChain
 /// (16.0 = 1 pixel at extent 4096 / 256 px tiles).
 ///
 /// The ring is modified in place. Returns the new ring.
-pub fn simplify_ring_tile_coords(ring: &[(i32, i32)], pinned: &[bool], tolerance: f64) -> Vec<(i32, i32)> {
+pub fn simplify_ring_tile_coords(
+    ring: &[(i32, i32)],
+    pinned: &[bool],
+    tolerance: f64,
+) -> Vec<(i32, i32)> {
     if ring.len() < 4 {
         return ring.to_vec();
     }
@@ -553,4 +571,3 @@ fn dp_tile_coords(ring: &[(i32, i32)], start: usize, end: usize, tol_sq: f64, ke
 
 /// Tile-coordinate DP tolerance: 1 pixel = EXTENT / 256 = 16 extent units.
 pub const TILE_SIMPLIFY_TOLERANCE: f64 = SIMPLIFY_PIXELS * (EXTENT / 256.0);
-

@@ -20,7 +20,10 @@
 use crate::mvt::{self, GeomType, LayerBuilder, Value};
 use crate::shortbread::{self, AttrValue};
 
-const _: () = assert!(cfg!(target_endian = "little"), "wire format assumes little-endian");
+const _: () = assert!(
+    cfg!(target_endian = "little"),
+    "wire format assumes little-endian"
+);
 
 /// Static key ID table. All attribute key strings used in the Shortbread schema.
 /// Index = key_id (u8), used in wire format. New keys MUST be appended (never reorder).
@@ -81,7 +84,9 @@ const KEY_NAMES: &[&str] = &[
 
 #[allow(clippy::cast_possible_truncation)]
 fn key_to_id(key: &str) -> u8 {
-    KEY_NAMES.iter().position(|&k| k == key)
+    KEY_NAMES
+        .iter()
+        .position(|&k| k == key)
         .unwrap_or_else(|| panic!("unknown wire format key: {key:?}")) as u8
 }
 
@@ -90,72 +95,72 @@ fn key_to_id(key: &str) -> u8 {
 /// New values MUST be appended (never reorder).
 const KIND_VALUES: &[&str] = &[
     // Water (14)
-    "water",             // 0
-    "glacier",           // 1
-    "riverbank",         // 2
-    "dock",              // 3
-    "canal",             // 4
-    "reservoir",         // 5
-    "basin",             // 6
-    "river",             // 7
-    "stream",            // 8
-    "ditch",             // 9
-    "dam",               // 10
-    "pier",              // 11
-    "breakwater",        // 12
-    "groyne",            // 13
+    "water",      // 0
+    "glacier",    // 1
+    "riverbank",  // 2
+    "dock",       // 3
+    "canal",      // 4
+    "reservoir",  // 5
+    "basin",      // 6
+    "river",      // 7
+    "stream",     // 8
+    "ditch",      // 9
+    "dam",        // 10
+    "pier",       // 11
+    "breakwater", // 12
+    "groyne",     // 13
     // Land (45)
-    "forest",            // 14
-    "farmland",          // 15
-    "farmyard",          // 16
-    "meadow",            // 17
-    "orchard",           // 18
-    "vineyard",          // 19
-    "allotments",        // 20
-    "brownfield",        // 21
-    "cemetery",          // 22
-    "commercial",        // 23
-    "garages",           // 24
-    "grass",             // 25
-    "greenfield",        // 26
+    "forest",                  // 14
+    "farmland",                // 15
+    "farmyard",                // 16
+    "meadow",                  // 17
+    "orchard",                 // 18
+    "vineyard",                // 19
+    "allotments",              // 20
+    "brownfield",              // 21
+    "cemetery",                // 22
+    "commercial",              // 23
+    "garages",                 // 24
+    "grass",                   // 25
+    "greenfield",              // 26
     "greenhouse_horticulture", // 27
-    "industrial",        // 28
-    "landfill",          // 29
-    "plant_nursery",     // 30
-    "quarry",            // 31
-    "railway",           // 32
-    "recreation_ground", // 33
-    "residential",       // 34
-    "retail",            // 35
-    "village_green",     // 36
-    "garden",            // 37
-    "golf_course",       // 38
-    "miniature_golf",    // 39
-    "park",              // 40
-    "playground",        // 41
-    "bare_rock",         // 42
-    "beach",             // 43
-    "grassland",         // 44
-    "heath",             // 45
-    "sand",              // 46
-    "scree",             // 47
-    "scrub",             // 48
-    "shingle",           // 49
-    "bog",               // 50
-    "marsh",             // 51
-    "string_bog",        // 52
-    "swamp",             // 53
-    "wet_meadow",        // 54
-    "grave_yard",        // 55
-    "danger_area",       // 56
-    "sports_centre",     // 57
-    "construction",      // 58
-    "bicycle_parking",   // 59
-    "college",           // 60
-    "hospital",          // 61
-    "parking",           // 62
-    "prison",            // 63
-    "university",        // 64
+    "industrial",              // 28
+    "landfill",                // 29
+    "plant_nursery",           // 30
+    "quarry",                  // 31
+    "railway",                 // 32
+    "recreation_ground",       // 33
+    "residential",             // 34
+    "retail",                  // 35
+    "village_green",           // 36
+    "garden",                  // 37
+    "golf_course",             // 38
+    "miniature_golf",          // 39
+    "park",                    // 40
+    "playground",              // 41
+    "bare_rock",               // 42
+    "beach",                   // 43
+    "grassland",               // 44
+    "heath",                   // 45
+    "sand",                    // 46
+    "scree",                   // 47
+    "scrub",                   // 48
+    "shingle",                 // 49
+    "bog",                     // 50
+    "marsh",                   // 51
+    "string_bog",              // 52
+    "swamp",                   // 53
+    "wet_meadow",              // 54
+    "grave_yard",              // 55
+    "danger_area",             // 56
+    "sports_centre",           // 57
+    "construction",            // 58
+    "bicycle_parking",         // 59
+    "college",                 // 60
+    "hospital",                // 61
+    "parking",                 // 62
+    "prison",                  // 63
+    "university",              // 64
     // Streets (28 + 5 _link)
     "motorway",          // 65
     "trunk",             // 66
@@ -236,7 +241,11 @@ fn kind_value_to_id(s: &str) -> Option<u8> {
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], zoom: u8) {
     buf.clear();
-    let filtered_count = attrs.iter().filter(|(_, _, az)| zoom >= *az).count().min(u8::MAX as usize);
+    let filtered_count = attrs
+        .iter()
+        .filter(|(_, _, az)| zoom >= *az)
+        .count()
+        .min(u8::MAX as usize);
     buf.push(filtered_count as u8);
     for (key, val, attr_zoom) in attrs {
         if zoom < *attr_zoom {
@@ -403,41 +412,56 @@ pub(crate) fn add_feature_to_layer(
         let vi = match val_type {
             0 => {
                 // string
-                if pos + 2 > data.len() { break; }
-                let slen = u16::from_le_bytes(data[pos..pos + 2].try_into().expect("slen")) as usize;
+                if pos + 2 > data.len() {
+                    break;
+                }
+                let slen =
+                    u16::from_le_bytes(data[pos..pos + 2].try_into().expect("slen")) as usize;
                 pos += 2;
-                if pos + slen > data.len() { break; }
+                if pos + slen > data.len() {
+                    break;
+                }
                 let s = std::str::from_utf8(&data[pos..pos + slen]).unwrap_or("");
                 pos += slen;
                 layer.intern_string_value(s)
             }
             1 => {
                 // int
-                if pos + 8 > data.len() { break; }
+                if pos + 8 > data.len() {
+                    break;
+                }
                 let i = i64::from_le_bytes(data[pos..pos + 8].try_into().expect("int"));
                 pos += 8;
                 layer.intern_value(Value::Int(i))
             }
             2 => {
                 // bool
-                if pos >= data.len() { break; }
+                if pos >= data.len() {
+                    break;
+                }
                 let b = data[pos] != 0;
                 pos += 1;
                 layer.intern_value(Value::Bool(b))
             }
             3 => {
                 // float
-                if pos + 8 > data.len() { break; }
+                if pos + 8 > data.len() {
+                    break;
+                }
                 let f = f64::from_le_bytes(data[pos..pos + 8].try_into().expect("float"));
                 pos += 8;
                 layer.intern_value(Value::Double(f))
             }
             4 => {
                 // interned string (kind value)
-                if pos >= data.len() { break; }
+                if pos >= data.len() {
+                    break;
+                }
                 let vid = data[pos] as usize;
                 pos += 1;
-                if vid >= KIND_VALUES.len() { break; }
+                if vid >= KIND_VALUES.len() {
+                    break;
+                }
                 layer.intern_string_value(KIND_VALUES[vid])
             }
             _ => break,
@@ -518,7 +542,10 @@ mod tests {
         // Check each key-value pair
         let (k0, v0) = f.tags[0];
         assert_eq!(layer.test_key(k0), "name");
-        assert_eq!(*layer.test_value(v0), Value::String("Main Street".to_string()));
+        assert_eq!(
+            *layer.test_value(v0),
+            Value::String("Main Street".to_string())
+        );
 
         let (k1, v1) = f.tags[1];
         assert_eq!(layer.test_key(k1), "admin_level");
@@ -604,9 +631,8 @@ mod tests {
         let geom_cmds: Vec<u32> = vec![9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15];
 
         // Use a known interned kind value
-        let attrs: Vec<shortbread::Attr> = vec![
-            ("kind", AttrValue::Str(Cow::Borrowed("residential")), 0),
-        ];
+        let attrs: Vec<shortbread::Attr> =
+            vec![("kind", AttrValue::Str(Cow::Borrowed("residential")), 0)];
 
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 14);
 
@@ -621,7 +647,10 @@ mod tests {
 
         let (k0, v0) = f.tags[0];
         assert_eq!(layer.test_key(k0), "kind");
-        assert_eq!(*layer.test_value(v0), Value::String("residential".to_string()));
+        assert_eq!(
+            *layer.test_value(v0),
+            Value::String("residential".to_string())
+        );
     }
 
     /// Test 4: Multiple interned kind values from different categories roundtrip.
@@ -633,9 +662,8 @@ mod tests {
         let test_kinds = ["water", "forest", "motorway", "park", "river"];
 
         for kind in test_kinds {
-            let attrs: Vec<shortbread::Attr> = vec![
-                ("kind", AttrValue::Str(Cow::Borrowed(kind)), 0),
-            ];
+            let attrs: Vec<shortbread::Attr> =
+                vec![("kind", AttrValue::Str(Cow::Borrowed(kind)), 0)];
 
             let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
 
@@ -660,9 +688,8 @@ mod tests {
         let geom_cmds: Vec<u32> = vec![9, 10, 20];
 
         // "custom_kind" is not in KIND_VALUES
-        let attrs: Vec<shortbread::Attr> = vec![
-            ("kind", AttrValue::Str(Cow::Borrowed("custom_kind")), 0),
-        ];
+        let attrs: Vec<shortbread::Attr> =
+            vec![("kind", AttrValue::Str(Cow::Borrowed("custom_kind")), 0)];
 
         let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
 
@@ -674,7 +701,10 @@ mod tests {
         let f = layer.test_feature(0);
         let (k0, v0) = f.tags[0];
         assert_eq!(layer.test_key(k0), "kind");
-        assert_eq!(*layer.test_value(v0), Value::String("custom_kind".to_string()));
+        assert_eq!(
+            *layer.test_value(v0),
+            Value::String("custom_kind".to_string())
+        );
     }
 
     /// Test 6: Attributes appear exactly at their minzoom boundary (no early leak).
@@ -699,7 +729,10 @@ mod tests {
         add_feature_to_layer(&mut layer_z9, &encoded_z9, &mut gp, &mut tp);
         let z9_tags = feature_tag_map(&layer_z9, 0);
         assert_eq!(z9_tags.len(), 2, "z9 must not include min_zoom=10 attrs");
-        assert_eq!(z9_tags.get("kind"), Some(&Value::String("city".to_string())));
+        assert_eq!(
+            z9_tags.get("kind"),
+            Some(&Value::String("city".to_string()))
+        );
         assert_eq!(z9_tags.get("bridge"), Some(&Value::Bool(true)));
         assert!(!z9_tags.contains_key("admin_level"));
         assert!(!z9_tags.contains_key("height"));
@@ -712,7 +745,10 @@ mod tests {
         add_feature_to_layer(&mut layer_z10, &encoded_z10, &mut gp2, &mut tp2);
         let z10_tags = feature_tag_map(&layer_z10, 0);
         assert_eq!(z10_tags.len(), 4, "z10 should include all attrs");
-        assert_eq!(z10_tags.get("kind"), Some(&Value::String("city".to_string())));
+        assert_eq!(
+            z10_tags.get("kind"),
+            Some(&Value::String("city".to_string()))
+        );
         assert_eq!(z10_tags.get("bridge"), Some(&Value::Bool(true)));
         assert_eq!(z10_tags.get("admin_level"), Some(&Value::Int(6)));
         assert_eq!(z10_tags.get("height"), Some(&Value::Double(42.0)));
@@ -779,7 +815,11 @@ mod tests {
         add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
 
         let f = layer.test_feature(0);
-        assert_eq!(f.tags.len(), 0, "z4 should include no attrs when all min_zoom=5");
+        assert_eq!(
+            f.tags.len(),
+            0,
+            "z4 should include no attrs when all min_zoom=5"
+        );
     }
 
     /// Test 10: Attr count byte is capped at u8::MAX for very large attr lists.
@@ -873,5 +913,4 @@ mod tests {
         assert_eq!(kind_count, 220);
         assert_eq!(name_count, 35);
     }
-
 }

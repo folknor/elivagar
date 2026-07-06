@@ -22,7 +22,11 @@ fn test_project_copenhagen() {
     // x = (12.57 + 180) / 360 ≈ 0.53492
     assert!(approx_eq(p.x, 0.534_917), "x={}", p.x);
     // y should be < 0.5 (northern hemisphere)
-    assert!(p.y < 0.5, "y={} should be < 0.5 for northern hemisphere", p.y);
+    assert!(
+        p.y < 0.5,
+        "y={} should be < 0.5 for northern hemisphere",
+        p.y
+    );
     assert!(p.y > 0.0, "y={} should be > 0.0", p.y);
     // y = 0.5 - ln(tan(lat) + sec(lat)) / (2π) ≈ 0.3130
     assert!(approx_eq(p.y, 0.312_976), "y={}", p.y);
@@ -48,7 +52,9 @@ fn test_project_e7_lut_accuracy() {
         assert!(
             (lut_p.y - exact_p.y).abs() < EPSILON,
             "LUT mismatch at lat={lat_deg}°: lut={}, exact={}, diff={}",
-            lut_p.y, exact_p.y, (lut_p.y - exact_p.y).abs(),
+            lut_p.y,
+            exact_p.y,
+            (lut_p.y - exact_p.y).abs(),
         );
     }
 }
@@ -106,7 +112,11 @@ fn test_simplify_triangle_preserved() {
         Point::new(1.0, 0.0),
     ];
     let simplified = simplify(&points, 0.01);
-    assert_eq!(simplified.len(), 3, "triangle should be preserved with small tolerance");
+    assert_eq!(
+        simplified.len(),
+        3,
+        "triangle should be preserved with small tolerance"
+    );
 }
 
 #[test]
@@ -117,7 +127,11 @@ fn test_simplify_triangle_collapsed() {
         Point::new(1.0, 0.0),
     ];
     let simplified = simplify(&points, 0.01);
-    assert_eq!(simplified.len(), 2, "near-collinear point should be removed");
+    assert_eq!(
+        simplified.len(),
+        2,
+        "near-collinear point should be removed"
+    );
 }
 
 #[test]
@@ -157,7 +171,8 @@ fn test_simplify_with_required_preserves_pinned_vertex() {
     let mut out = Vec::new();
     let _ = simplify_into_with_required(&points, 0.01, &[2], &mut keep, &mut out);
     assert!(
-        out.iter().any(|p| approx_eq(p.x, 0.5) && approx_eq(p.y, 0.0001)),
+        out.iter()
+            .any(|p| approx_eq(p.x, 0.5) && approx_eq(p.y, 0.0001)),
         "required interior point should survive DP",
     );
 }
@@ -180,25 +195,27 @@ fn test_simplify_with_required_ignores_out_of_range_indices() {
 #[test]
 fn test_clip_line_crossing() {
     let rect = ClipRect::new(0.0, 0.0, 1.0, 1.0);
-    let line = vec![
-        Point::new(-0.5, 0.5),
-        Point::new(1.5, 0.5),
-    ];
+    let line = vec![Point::new(-0.5, 0.5), Point::new(1.5, 0.5)];
     let clipped = clip_linestring(&line, &rect);
     assert_eq!(clipped.len(), 1, "should produce one sub-line");
     let seg = &clipped[0];
     assert_eq!(seg.len(), 2);
-    assert!(approx_eq(seg[0].x, 0.0), "entry at left edge: x={}", seg[0].x);
-    assert!(approx_eq(seg[1].x, 1.0), "exit at right edge: x={}", seg[1].x);
+    assert!(
+        approx_eq(seg[0].x, 0.0),
+        "entry at left edge: x={}",
+        seg[0].x
+    );
+    assert!(
+        approx_eq(seg[1].x, 1.0),
+        "exit at right edge: x={}",
+        seg[1].x
+    );
 }
 
 #[test]
 fn test_clip_line_fully_inside() {
     let rect = ClipRect::new(0.0, 0.0, 1.0, 1.0);
-    let line = vec![
-        Point::new(0.2, 0.2),
-        Point::new(0.8, 0.8),
-    ];
+    let line = vec![Point::new(0.2, 0.2), Point::new(0.8, 0.8)];
     let clipped = clip_linestring(&line, &rect);
     assert_eq!(clipped.len(), 1);
     assert_eq!(clipped[0].len(), 2);
@@ -207,12 +224,12 @@ fn test_clip_line_fully_inside() {
 #[test]
 fn test_clip_line_fully_outside() {
     let rect = ClipRect::new(0.0, 0.0, 1.0, 1.0);
-    let line = vec![
-        Point::new(2.0, 2.0),
-        Point::new(3.0, 3.0),
-    ];
+    let line = vec![Point::new(2.0, 2.0), Point::new(3.0, 3.0)];
     let clipped = clip_linestring(&line, &rect);
-    assert!(clipped.is_empty(), "line fully outside should produce no output");
+    assert!(
+        clipped.is_empty(),
+        "line fully outside should produce no output"
+    );
 }
 
 #[test]
@@ -258,7 +275,10 @@ fn test_clip_polygon_partially_outside() {
     ];
     let clipped = clip_polygon(&ring, &rect);
     // Should be clipped to right edge at x=1.0
-    assert!(!clipped.is_empty(), "partially overlapping polygon should produce output");
+    assert!(
+        !clipped.is_empty(),
+        "partially overlapping polygon should produce output"
+    );
     for p in &clipped {
         assert!(p.x >= -EPSILON, "x={} should be >= 0", p.x);
         assert!(p.x <= 1.0 + EPSILON, "x={} should be <= 1", p.x);
@@ -318,7 +338,10 @@ fn test_signed_area_unit_square() {
         Point::new(0.0, 1.0),
     ];
     let area = signed_area(&ring);
-    assert!(approx_eq(area, 1.0), "unit square area: {area}, expected 1.0");
+    assert!(
+        approx_eq(area, 1.0),
+        "unit square area: {area}, expected 1.0"
+    );
 }
 
 #[test]
@@ -384,9 +407,16 @@ fn test_tiles_for_bbox_copenhagen() {
     // Copenhagen at zoom 10
     let bbox = project_bbox(55.6, 12.5, 55.7, 12.6);
     let tiles = tiles_for_bbox(&bbox, 10);
-    assert!(!tiles.is_empty(), "Copenhagen should intersect at least one tile");
+    assert!(
+        !tiles.is_empty(),
+        "Copenhagen should intersect at least one tile"
+    );
     // At zoom 10 it should be a small number of tiles
-    assert!(tiles.len() <= 4, "should be a small number of tiles: {}", tiles.len());
+    assert!(
+        tiles.len() <= 4,
+        "should be a small number of tiles: {}",
+        tiles.len()
+    );
 }
 
 // --- Area tests ---
@@ -494,7 +524,8 @@ fn test_point_on_surface_with_holes_avoids_hole() {
         Point::new(8.0, 8.0),
         Point::new(2.0, 8.0),
     ];
-    let p = point_on_surface_with_holes(&outer, std::slice::from_ref(&hole)).expect("should find a point");
+    let p = point_on_surface_with_holes(&outer, std::slice::from_ref(&hole))
+        .expect("should find a point");
     assert!(point_in_polygon(&p, &outer));
     assert!(!point_in_polygon(&p, &hole));
 }
@@ -586,8 +617,16 @@ fn test_clip_rect_for_tile() {
 fn test_clip_rect_for_tile_with_buffer() {
     let rect = ClipRect::for_tile(0, 0, 1, 0.1);
     // Buffer extends by 0.1 * 0.5 = 0.05 on each side
-    assert!(rect.min_x < 0.0, "buffered min_x={} should be < 0", rect.min_x);
-    assert!(rect.max_x > 0.5, "buffered max_x={} should be > 0.5", rect.max_x);
+    assert!(
+        rect.min_x < 0.0,
+        "buffered min_x={} should be < 0",
+        rect.min_x
+    );
+    assert!(
+        rect.max_x > 0.5,
+        "buffered max_x={} should be > 0.5",
+        rect.max_x
+    );
 }
 
 // --- Simplification tolerance ---
@@ -621,10 +660,7 @@ fn test_merc_bbox_subpixel_tiny_feature() {
 #[test]
 fn test_merc_bbox_subpixel_large_feature() {
     // A feature spanning 0.01 Mercator units is visible at all zooms.
-    let large = vec![
-        Point::new(0.5, 0.5),
-        Point::new(0.51, 0.51),
-    ];
+    let large = vec![Point::new(0.5, 0.5), Point::new(0.51, 0.51)];
     for z in 0..=14 {
         assert!(!merc_bbox_is_subpixel(&large, z));
     }
@@ -652,9 +688,17 @@ fn multi_simplify_no_inners_all_zooms() {
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
     let mut results: Vec<(u8, usize, usize)> = Vec::new();
-    for_each_zoom_simplified_multi(&outer, &inners, 14, 14, &mut scratch, |_| 1.0, |z, o, i| {
-        results.push((z, o.len(), i.len()));
-    });
+    for_each_zoom_simplified_multi(
+        &outer,
+        &inners,
+        14,
+        14,
+        &mut scratch,
+        |_| 1.0,
+        |z, o, i| {
+            results.push((z, o.len(), i.len()));
+        },
+    );
     assert_eq!(results.len(), 1);
     assert_eq!(results[0], (14, 5, 0)); // 5-point square, 0 inners
 }
@@ -666,9 +710,17 @@ fn multi_simplify_callback_per_zoom() {
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
     let mut zooms: Vec<u8> = Vec::new();
-    for_each_zoom_simplified_multi(&outer, &inners, 10, 14, &mut scratch, |_| 1.0, |z, _o, _i| {
-        zooms.push(z);
-    });
+    for_each_zoom_simplified_multi(
+        &outer,
+        &inners,
+        10,
+        14,
+        &mut scratch,
+        |_| 1.0,
+        |z, _o, _i| {
+            zooms.push(z);
+        },
+    );
     // Should iterate z14, z13, z12, z11, z10 (high to low)
     assert_eq!(zooms, vec![14, 13, 12, 11, 10]);
 }
@@ -694,15 +746,29 @@ fn multi_simplify_inner_count_non_increasing() {
     let inners = vec![inner];
     let mut scratch = SimplifyMultiScratch::new();
     let mut inner_counts: Vec<(u8, usize)> = Vec::new();
-    for_each_zoom_simplified_multi(&outer, &inners, 4, 14, &mut scratch, |_| 1.0, |z, _o, i| {
-        inner_counts.push((z, i.len()));
-    });
+    for_each_zoom_simplified_multi(
+        &outer,
+        &inners,
+        4,
+        14,
+        &mut scratch,
+        |_| 1.0,
+        |z, _o, i| {
+            inner_counts.push((z, i.len()));
+        },
+    );
     // At z14, inner should be present
     assert_eq!(inner_counts[0], (14, 1));
     // Inner count should be monotonically non-increasing
     for w in inner_counts.windows(2) {
-        assert!(w[0].1 >= w[1].1, "inner count increased from z{} ({}) to z{} ({})",
-            w[0].0, w[0].1, w[1].0, w[1].1);
+        assert!(
+            w[0].1 >= w[1].1,
+            "inner count increased from z{} ({}) to z{} ({})",
+            w[0].0,
+            w[0].1,
+            w[1].0,
+            w[1].1
+        );
     }
 }
 
@@ -713,11 +779,22 @@ fn multi_simplify_subpixel_outer_stops_early() {
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
     let mut zoom_count = 0;
-    for_each_zoom_simplified_multi(&outer, &inners, 0, 14, &mut scratch, |_| 1.0, |_z, _o, _i| {
-        zoom_count += 1;
-    });
+    for_each_zoom_simplified_multi(
+        &outer,
+        &inners,
+        0,
+        14,
+        &mut scratch,
+        |_| 1.0,
+        |_z, _o, _i| {
+            zoom_count += 1;
+        },
+    );
     // Should NOT reach all 15 zooms - subpixel check should bail out early
-    assert!(zoom_count < 15, "subpixel outer should stop early, got {zoom_count} zooms");
+    assert!(
+        zoom_count < 15,
+        "subpixel outer should stop early, got {zoom_count} zooms"
+    );
 }
 
 #[test]
@@ -729,11 +806,23 @@ fn multi_simplify_z14_preserves_all_inners() {
     let inners = vec![inner1.clone(), inner2.clone()];
     let mut scratch = SimplifyMultiScratch::new();
     let mut z14_data: Option<(Vec<Point>, Vec<Vec<Point>>)> = None;
-    for_each_zoom_simplified_multi(&outer, &inners, 14, 14, &mut scratch, |_| 1.0, |_z, o, i| {
-        z14_data = Some((o.to_vec(), i.to_vec()));
-    });
+    for_each_zoom_simplified_multi(
+        &outer,
+        &inners,
+        14,
+        14,
+        &mut scratch,
+        |_| 1.0,
+        |_z, o, i| {
+            z14_data = Some((o.to_vec(), i.to_vec()));
+        },
+    );
     let (out_outer, out_inners) = z14_data.expect("should have z14 callback");
-    assert_eq!(out_outer.len(), outer.len(), "outer should be unchanged at z14");
+    assert_eq!(
+        out_outer.len(),
+        outer.len(),
+        "outer should be unchanged at z14"
+    );
     assert_eq!(out_inners.len(), 2, "both inners should be present at z14");
     assert_eq!(out_inners[0].len(), inner1.len(), "inner1 unchanged at z14");
     assert_eq!(out_inners[1].len(), inner2.len(), "inner2 unchanged at z14");
@@ -746,13 +835,27 @@ fn multi_simplify_outer_vertex_count_non_increasing() {
     let inners: Vec<Vec<Point>> = vec![];
     let mut scratch = SimplifyMultiScratch::new();
     let mut vertex_counts: Vec<(u8, usize)> = Vec::new();
-    for_each_zoom_simplified_multi(&outer, &inners, 4, 14, &mut scratch, |_| 1.0, |z, o, _i| {
-        vertex_counts.push((z, o.len()));
-    });
+    for_each_zoom_simplified_multi(
+        &outer,
+        &inners,
+        4,
+        14,
+        &mut scratch,
+        |_| 1.0,
+        |z, o, _i| {
+            vertex_counts.push((z, o.len()));
+        },
+    );
     // Vertex count should be monotonically non-increasing
     for w in vertex_counts.windows(2) {
-        assert!(w[0].1 >= w[1].1, "vertex count increased from z{} ({}) to z{} ({})",
-            w[0].0, w[0].1, w[1].0, w[1].1);
+        assert!(
+            w[0].1 >= w[1].1,
+            "vertex count increased from z{} ({}) to z{} ({})",
+            w[0].0,
+            w[0].1,
+            w[1].0,
+            w[1].1
+        );
     }
     // At z14, should have original 5 vertices (no simplification at z14)
     assert_eq!(vertex_counts[0], (14, 5));
@@ -843,7 +946,10 @@ fn shared_chain_shared_vertex_no_shared_edge() {
     let ring_a = vec![(0, 0), (10, 10), (0, 10), (0, 0)];
     let ring_b = vec![(10, 10), (20, 0), (20, 10), (10, 10)];
     let chains = detect_shared_chains(&[ring_a, ring_b]);
-    assert!(chains.is_empty(), "shared vertex alone should not produce a chain");
+    assert!(
+        chains.is_empty(),
+        "shared vertex alone should not produce a chain"
+    );
 }
 
 /// Three polygons meeting at a triple point. Each adjacent pair shares one edge.
@@ -914,7 +1020,10 @@ fn shared_chain_three_rings_same_edge() {
     let ring_c = vec![(10, 0), (20, 0), (20, 10), (10, 10), (10, 0)];
     let chains = detect_shared_chains(&[ring_a, ring_b, ring_c]);
     // Should detect shared edges between A-B and A-C (and possibly B-C).
-    assert!(!chains.is_empty(), "coincident geometry should produce chains");
+    assert!(
+        !chains.is_empty(),
+        "coincident geometry should produce chains"
+    );
 }
 
 /// Chain that wraps around the ring start/end point.
@@ -942,7 +1051,11 @@ fn shared_chain_wrap_around_ring_seam() {
     // Chain growth initially produces two fragments (edges 0 and 3 of ring A),
     // but merge_seam_chains stitches them into one chain since one's tail
     // connects to the other's head.
-    assert_eq!(chains.len(), 1, "seam fragments should be merged into one chain");
+    assert_eq!(
+        chains.len(),
+        1,
+        "seam fragments should be merged into one chain"
+    );
     assert_eq!(chains[0].vertices.len(), 3, "two edges = three vertices");
     assert_eq!(chains[0].incidents.len(), 2);
 }
@@ -966,7 +1079,11 @@ fn shared_chain_consecutive_wrap_around() {
     // In A: edges 2,3 are consecutive. In B: edges 0,1 are consecutive. Should form one chain.
     let ring_b = vec![(0, 0), (0, 10), (10, 10), (20, 10), (20, 0), (0, 0)];
     let chains = detect_shared_chains(&[ring_a, ring_b]);
-    assert_eq!(chains.len(), 1, "consecutive shared edges in both rings should form one chain");
+    assert_eq!(
+        chains.len(),
+        1,
+        "consecutive shared edges in both rings should form one chain"
+    );
     assert_eq!(chains[0].vertices.len(), 3, "two edges = three vertices");
 }
 
@@ -989,7 +1106,13 @@ fn decode_mvt_polygon_single_ring_round_trip() {
 #[test]
 fn decode_mvt_polygon_multi_ring_round_trip() {
     let outer = vec![(0, 0), (4096, 0), (4096, 4096), (0, 4096), (0, 0)];
-    let inner = vec![(1000, 1000), (1000, 3000), (3000, 3000), (3000, 1000), (1000, 1000)];
+    let inner = vec![
+        (1000, 1000),
+        (1000, 3000),
+        (3000, 3000),
+        (3000, 1000),
+        (1000, 1000),
+    ];
     let mut buf = Vec::new();
     crate::mvt::encode_polygon(&mut buf, &[&outer, &inner]);
     let decoded = super::decode_mvt_polygon(&buf);
@@ -1008,7 +1131,13 @@ fn decode_mvt_polygon_empty() {
 /// Round-trip with negative coordinates (buffer region outside tile).
 #[test]
 fn decode_mvt_polygon_negative_coords() {
-    let ring = vec![(-128, -128), (4224, -128), (4224, 4224), (-128, 4224), (-128, -128)];
+    let ring = vec![
+        (-128, -128),
+        (4224, -128),
+        (4224, 4224),
+        (-128, 4224),
+        (-128, -128),
+    ];
     let mut buf = Vec::new();
     crate::mvt::encode_polygon(&mut buf, &[&ring]);
     let decoded = super::decode_mvt_polygon(&buf);
@@ -1066,9 +1195,24 @@ fn canonicalize_skips_gt2_incidents() {
     let chain = super::SharedChain {
         vertices: vec![(0, 0), (10, 0)],
         incidents: vec![
-            super::ChainRef { ring_idx: 0, start: 0, len: 2, reversed: false },
-            super::ChainRef { ring_idx: 1, start: 3, len: 2, reversed: true },
-            super::ChainRef { ring_idx: 2, start: 1, len: 2, reversed: false },
+            super::ChainRef {
+                ring_idx: 0,
+                start: 0,
+                len: 2,
+                reversed: false,
+            },
+            super::ChainRef {
+                ring_idx: 1,
+                start: 3,
+                len: 2,
+                reversed: true,
+            },
+            super::ChainRef {
+                ring_idx: 2,
+                start: 1,
+                len: 2,
+                reversed: false,
+            },
         ],
     };
     let mut rings = vec![
@@ -1114,8 +1258,18 @@ fn build_pinned_mask_basic() {
     let chain = super::SharedChain {
         vertices: vec![(10, 0), (10, 10)],
         incidents: vec![
-            super::ChainRef { ring_idx: 0, start: 1, len: 2, reversed: false },
-            super::ChainRef { ring_idx: 1, start: 3, len: 2, reversed: true },
+            super::ChainRef {
+                ring_idx: 0,
+                start: 1,
+                len: 2,
+                reversed: false,
+            },
+            super::ChainRef {
+                ring_idx: 1,
+                start: 3,
+                len: 2,
+                reversed: true,
+            },
         ],
     };
     // Ring 0 has 5 vertices (4 + close).
@@ -1207,11 +1361,13 @@ fn shared_edge_pinning_produces_identical_simplification() {
     simplify_into_with_required(&ring_a, tol, &required_a, &mut keep_a, &mut out_a);
     simplify_into_with_required(&ring_b, tol, &required_b, &mut keep_b, &mut out_b);
 
-    let pinned_shared_a: Vec<Point> = out_a.iter()
+    let pinned_shared_a: Vec<Point> = out_a
+        .iter()
         .filter(|p| p.x > 0.49 && p.x < 0.51 && p.y >= 0.29 && p.y <= 0.71)
         .copied()
         .collect();
-    let pinned_shared_b: Vec<Point> = out_b.iter()
+    let pinned_shared_b: Vec<Point> = out_b
+        .iter()
         .filter(|p| p.x > 0.49 && p.x < 0.51 && p.y >= 0.29 && p.y <= 0.71)
         .rev()
         .copied()
@@ -1224,13 +1380,31 @@ fn shared_edge_pinning_produces_identical_simplification() {
     // and simplifying it independently from both rings.
 
     // Verify endpoints are preserved (pinning works).
-    assert!(pinned_shared_a.len() >= 2, "pinned shared A must have at least endpoints");
-    assert!(pinned_shared_b.len() >= 2, "pinned shared B must have at least endpoints");
+    assert!(
+        pinned_shared_a.len() >= 2,
+        "pinned shared A must have at least endpoints"
+    );
+    assert!(
+        pinned_shared_b.len() >= 2,
+        "pinned shared B must have at least endpoints"
+    );
     let eps = 1e-10;
-    assert!((pinned_shared_a[0].y - 0.3).abs() < eps, "A start endpoint preserved");
-    assert!((pinned_shared_a.last().unwrap().y - 0.7).abs() < eps, "A end endpoint preserved");
-    assert!((pinned_shared_b[0].y - 0.3).abs() < eps, "B start endpoint preserved (reversed)");
-    assert!((pinned_shared_b.last().unwrap().y - 0.7).abs() < eps, "B end endpoint preserved (reversed)");
+    assert!(
+        (pinned_shared_a[0].y - 0.3).abs() < eps,
+        "A start endpoint preserved"
+    );
+    assert!(
+        (pinned_shared_a.last().unwrap().y - 0.7).abs() < eps,
+        "A end endpoint preserved"
+    );
+    assert!(
+        (pinned_shared_b[0].y - 0.3).abs() < eps,
+        "B start endpoint preserved (reversed)"
+    );
+    assert!(
+        (pinned_shared_b.last().unwrap().y - 0.7).abs() < eps,
+        "B end endpoint preserved (reversed)"
+    );
 }
 
 /// When the shared segment is extracted and simplified in isolation (same
@@ -1268,15 +1442,29 @@ fn isolated_shared_segment_simplification_is_identical() {
     out_rev.reverse();
 
     // Must be identical: same points, same tolerance, DP is deterministic.
-    assert_eq!(out_fwd.len(), out_rev.len(),
+    assert_eq!(
+        out_fwd.len(),
+        out_rev.len(),
         "isolated shared segment simplified forward ({}) vs reversed ({}) must have same vertex count",
-        out_fwd.len(), out_rev.len());
+        out_fwd.len(),
+        out_rev.len()
+    );
     for (i, (a, b)) in out_fwd.iter().zip(out_rev.iter()).enumerate() {
-        assert!((a.x - b.x).abs() < 1e-15 && (a.y - b.y).abs() < 1e-15,
-            "vertex {i} diverged: fwd=({}, {}) rev=({}, {})", a.x, a.y, b.x, b.y);
+        assert!(
+            (a.x - b.x).abs() < 1e-15 && (a.y - b.y).abs() < 1e-15,
+            "vertex {i} diverged: fwd=({}, {}) rev=({}, {})",
+            a.x,
+            a.y,
+            b.x,
+            b.y
+        );
     }
 
     // Sanity: DP actually removed some vertices.
-    assert!(out_fwd.len() < n,
-        "DP should have simplified: {} vertices in, {} out", n, out_fwd.len());
+    assert!(
+        out_fwd.len() < n,
+        "DP should have simplified: {} vertices in, {} out",
+        n,
+        out_fwd.len()
+    );
 }

@@ -111,7 +111,9 @@ fn decode_way(data: &[u8], offset: usize) -> Vec<(i32, i32)> {
 fn mmap_way_id(mmap: &[u8], idx: usize) -> i64 {
     let off = idx * OFFSET_ENTRY_SIZE;
     i64::from_le_bytes(
-        mmap[off..off + 8].try_into().expect("offset mmap too short"),
+        mmap[off..off + 8]
+            .try_into()
+            .expect("offset mmap too short"),
     )
 }
 
@@ -120,7 +122,9 @@ fn mmap_way_id(mmap: &[u8], idx: usize) -> i64 {
 fn mmap_data_offset(mmap: &[u8], idx: usize) -> usize {
     let off = idx * OFFSET_ENTRY_SIZE + 8;
     u64::from_le_bytes(
-        mmap[off..off + 8].try_into().expect("offset mmap too short"),
+        mmap[off..off + 8]
+            .try_into()
+            .expect("offset mmap too short"),
     ) as usize
 }
 
@@ -146,14 +150,15 @@ fn read_entries(reader: &mut BufReader<File>, count: usize) -> io::Result<Vec<Wa
     for _ in 0..count {
         reader.read_exact(&mut buf)?;
         let way_id = i64::from_le_bytes([
-            buf[0], buf[1], buf[2], buf[3],
-            buf[4], buf[5], buf[6], buf[7],
+            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
         ]);
         let data_offset = u64::from_le_bytes([
-            buf[8], buf[9], buf[10], buf[11],
-            buf[12], buf[13], buf[14], buf[15],
+            buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
         ]);
-        entries.push(WayEntry { way_id, data_offset });
+        entries.push(WayEntry {
+            way_id,
+            data_offset,
+        });
     }
     Ok(entries)
 }
@@ -196,12 +201,10 @@ impl OffsetChunkReader {
         self.reader.read_exact(&mut buf)?;
         self.remaining -= 1;
         let way_id = i64::from_le_bytes([
-            buf[0], buf[1], buf[2], buf[3],
-            buf[4], buf[5], buf[6], buf[7],
+            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
         ]);
         let data_offset = u64::from_le_bytes([
-            buf[8], buf[9], buf[10], buf[11],
-            buf[12], buf[13], buf[14], buf[15],
+            buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
         ]);
         Ok(Some((way_id, data_offset)))
     }
@@ -225,7 +228,9 @@ impl PartialEq for OffsetHeapEntry {
 impl Ord for OffsetHeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse: smallest way_id first from max-heap
-        other.way_id.cmp(&self.way_id)
+        other
+            .way_id
+            .cmp(&self.way_id)
             .then_with(|| other.chunk_idx.cmp(&self.chunk_idx))
     }
 }
@@ -244,7 +249,11 @@ fn merge_offset_chunks(chunk_paths: &[PathBuf], sorted_path: &Path) -> io::Resul
     for (idx, path) in chunk_paths.iter().enumerate() {
         let mut cr = OffsetChunkReader::open(path)?;
         if let Some((way_id, data_offset)) = cr.read_entry()? {
-            heap.push(OffsetHeapEntry { way_id, data_offset, chunk_idx: idx });
+            heap.push(OffsetHeapEntry {
+                way_id,
+                data_offset,
+                chunk_idx: idx,
+            });
         }
         readers.push(cr);
     }
@@ -262,7 +271,11 @@ fn merge_offset_chunks(chunk_paths: &[PathBuf], sorted_path: &Path) -> io::Resul
 
         let idx = entry.chunk_idx;
         if let Some((way_id, data_offset)) = readers[idx].read_entry()? {
-            heap.push(OffsetHeapEntry { way_id, data_offset, chunk_idx: idx });
+            heap.push(OffsetHeapEntry {
+                way_id,
+                data_offset,
+                chunk_idx: idx,
+            });
         }
     }
 
@@ -305,7 +318,9 @@ fn sort_offsets_file(unsorted_path: &Path, sorted_path: &Path) -> io::Result<usi
     }
 
     // Multi-chunk external sort
-    let dir = unsorted_path.parent().expect("offsets file has no parent dir");
+    let dir = unsorted_path
+        .parent()
+        .expect("offsets file has no parent dir");
     let mut chunk_paths: Vec<PathBuf> = Vec::new();
     let mut remaining = entry_count;
 
@@ -407,7 +422,10 @@ impl WayIndex {
         encode_way(&mut self.encode_buf, coords);
 
         // Write compressed data
-        let writer = self.data_writer.as_mut().expect("put called after finish_writing");
+        let writer = self
+            .data_writer
+            .as_mut()
+            .expect("put called after finish_writing");
         // Panic: unrecoverable I/O - disk full means the run is dead.
         writer
             .write_all(&self.encode_buf)

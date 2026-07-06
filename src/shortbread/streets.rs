@@ -34,8 +34,8 @@ fn highway_zoom(v: &str) -> Option<u8> {
         "unclassified" => Some(12),
         "residential" => Some(12),
         "busway" | "bus_guideway" => Some(12),
-        "living_street" | "service" | "pedestrian" | "track" | "footway"
-        | "steps" | "path" | "cycleway" => Some(13),
+        "living_street" | "service" | "pedestrian" | "track" | "footway" | "steps" | "path"
+        | "cycleway" => Some(13),
         _ => None,
     }
 }
@@ -58,9 +58,7 @@ fn railway_zoom(tags: &Tags<'_>, v: &str) -> Option<u8> {
             }
         }
         "narrow_gauge" => Some(10),
-        "light_rail" | "subway" | "tram" | "funicular" | "monorail" => {
-            Some(10)
-        }
+        "light_rail" | "subway" | "tram" | "funicular" | "monorail" => Some(10),
         _ => None,
     }
 }
@@ -245,8 +243,8 @@ fn street_label_zoom(tags: &Tags<'_>) -> Option<u8> {
     }
     if let Some(v) = tags.get("railway") {
         return match v {
-            "rail" | "narrow_gauge" | "light_rail" | "subway" | "tram"
-            | "funicular" | "monorail" => Some(10),
+            "rail" | "narrow_gauge" | "light_rail" | "subway" | "tram" | "funicular"
+            | "monorail" => Some(10),
             _ => None,
         };
     }
@@ -264,11 +262,11 @@ fn street_label_zoom_highway(v: &str) -> Option<u8> {
     match v {
         "motorway" => Some(10),
         "trunk" | "primary" => Some(12),
-        "secondary" | "tertiary" | "motorway_link" | "trunk_link"
-        | "primary_link" | "secondary_link" => Some(13),
-        "tertiary_link" | "unclassified" | "residential" | "busway"
-        | "bus_guideway" | "living_street" | "service" | "pedestrian"
-        | "track" | "footway" | "steps" | "path" | "cycleway" => Some(14),
+        "secondary" | "tertiary" | "motorway_link" | "trunk_link" | "primary_link"
+        | "secondary_link" => Some(13),
+        "tertiary_link" | "unclassified" | "residential" | "busway" | "bus_guideway"
+        | "living_street" | "service" | "pedestrian" | "track" | "footway" | "steps" | "path"
+        | "cycleway" => Some(14),
         _ => None,
     }
 }
@@ -299,10 +297,7 @@ pub(super) fn match_street_labels_points(tags: &Tags<'_>, out: &mut SmallVec<[La
 // Streets polygons labels
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_streets_polygons_labels(
-    tags: &Tags<'_>,
-    out: &mut SmallVec<[LayerMatch; 4]>,
-) {
+pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if !has_name(tags) {
         return;
     }

@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::process::Command;
 
-use pbfhogg::block_builder::{self, BlockBuilder, MemberData, Metadata};
 use pbfhogg::MemberId;
+use pbfhogg::block_builder::{self, BlockBuilder, MemberData, Metadata};
 use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 
 fn write_tiny_pbf(path: &Path) {
@@ -34,7 +34,9 @@ fn write_tiny_pbf(path: &Path) {
         Some(&meta),
     );
     if let Some(bytes) = bb.take().expect("take block") {
-        writer.write_primitive_block(bytes).expect("write data block");
+        writer
+            .write_primitive_block(bytes)
+            .expect("write data block");
     }
     writer.flush().expect("flush pbf");
 }
@@ -67,7 +69,9 @@ fn write_missing_ref_pbf(path: &Path) {
         Some(&meta),
     );
     if let Some(bytes) = bb.take().expect("take node block") {
-        writer.write_primitive_block(bytes).expect("write node block");
+        writer
+            .write_primitive_block(bytes)
+            .expect("write node block");
     }
 
     // Block 2: way with one missing node reference.
@@ -78,23 +82,40 @@ fn write_missing_ref_pbf(path: &Path) {
         Some(&meta),
     );
     if let Some(bytes) = bb.take().expect("take way block") {
-        writer.write_primitive_block(bytes).expect("write way block");
+        writer
+            .write_primitive_block(bytes)
+            .expect("write way block");
     }
 
     // Block 3: multipolygon relation with missing way ref + non-way + nested members.
     let members = [
-        MemberData { id: MemberId::Way(555), role: "outer" },
-        MemberData { id: MemberId::Node(1), role: "label" },
-        MemberData { id: MemberId::Relation(777), role: "sub" },
+        MemberData {
+            id: MemberId::Way(555),
+            role: "outer",
+        },
+        MemberData {
+            id: MemberId::Node(1),
+            role: "label",
+        },
+        MemberData {
+            id: MemberId::Relation(777),
+            role: "sub",
+        },
     ];
     bb.add_relation(
         20,
-        [("type", "multipolygon"), ("building", "yes"), ("name", "Broken Relation")],
+        [
+            ("type", "multipolygon"),
+            ("building", "yes"),
+            ("name", "Broken Relation"),
+        ],
         &members,
         Some(&meta),
     );
     if let Some(bytes) = bb.take().expect("take relation block") {
-        writer.write_primitive_block(bytes).expect("write relation block");
+        writer
+            .write_primitive_block(bytes)
+            .expect("write relation block");
     }
 
     writer.flush().expect("flush pbf");
@@ -139,7 +160,11 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
         "--threads",
         "1",
     ]);
-    assert!(first.status.success(), "first run failed: {}", String::from_utf8_lossy(&first.stderr));
+    assert!(
+        first.status.success(),
+        "first run failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
     let first_err = String::from_utf8_lossy(&first.stderr);
     assert!(first_err.contains("phase3_ms="));
     assert!(first_err.contains("tile_bytes_total="));
@@ -159,7 +184,11 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
         "--skip-to",
         "assemble",
     ]);
-    assert!(second.status.success(), "skip-to assemble failed: {}", String::from_utf8_lossy(&second.stderr));
+    assert!(
+        second.status.success(),
+        "skip-to assemble failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
     let second_err = String::from_utf8_lossy(&second.stderr);
     assert!(second_err.contains("--- Skipping to assemble (using existing chunks) ---"));
     assert!(!second_err.contains("phase3_ms="));
@@ -247,14 +276,36 @@ fn missing_ref_metrics_emitted_in_full_run_and_omitted_on_skip_to_sort() {
         "--threads",
         "1",
     ]);
-    assert!(first.status.success(), "first run failed: {}", String::from_utf8_lossy(&first.stderr));
+    assert!(
+        first.status.success(),
+        "first run failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
     let first_err = String::from_utf8_lossy(&first.stderr);
-    assert_eq!(metric_value(&first_err, "missing_way_node_refs="), Some("1".to_string()));
-    assert_eq!(metric_value(&first_err, "ways_with_missing_node_refs="), Some("1".to_string()));
-    assert_eq!(metric_value(&first_err, "missing_relation_way_refs="), Some("1".to_string()));
-    assert_eq!(metric_value(&first_err, "relations_with_missing_way_refs="), Some("1".to_string()));
-    assert_eq!(metric_value(&first_err, "relation_non_way_members="), Some("2".to_string()));
-    assert_eq!(metric_value(&first_err, "relation_nested_members="), Some("1".to_string()));
+    assert_eq!(
+        metric_value(&first_err, "missing_way_node_refs="),
+        Some("1".to_string())
+    );
+    assert_eq!(
+        metric_value(&first_err, "ways_with_missing_node_refs="),
+        Some("1".to_string())
+    );
+    assert_eq!(
+        metric_value(&first_err, "missing_relation_way_refs="),
+        Some("1".to_string())
+    );
+    assert_eq!(
+        metric_value(&first_err, "relations_with_missing_way_refs="),
+        Some("1".to_string())
+    );
+    assert_eq!(
+        metric_value(&first_err, "relation_non_way_members="),
+        Some("2".to_string())
+    );
+    assert_eq!(
+        metric_value(&first_err, "relation_nested_members="),
+        Some("1".to_string())
+    );
 
     let second = run_elivagar(&[
         "run",
@@ -269,7 +320,11 @@ fn missing_ref_metrics_emitted_in_full_run_and_omitted_on_skip_to_sort() {
         "--skip-to",
         "sort",
     ]);
-    assert!(second.status.success(), "skip-to sort run failed: {}", String::from_utf8_lossy(&second.stderr));
+    assert!(
+        second.status.success(),
+        "skip-to sort run failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
     let second_err = String::from_utf8_lossy(&second.stderr);
     assert!(second_err.contains("--- Skipping to sort (using existing chunks) ---"));
     assert!(metric_value(&second_err, "missing_way_node_refs=").is_none());

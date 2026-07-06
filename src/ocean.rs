@@ -4,11 +4,11 @@
 // data bounds, parses polygons, and processes them in parallel with rayon.
 // Uses scanline fill to minimize point-in-polygon tests.
 
-use crate::geometry::{self, MercBbox, Point};
 use crate::geometry::int_ocean::{
     IntEmitScratch, IntRect, OCEAN_DP_TOL_PX, Shape, ZoomEmitParams, emit_shape_for_zoom,
     intersect_rect, quantize_polygon, shape_bbox,
 };
+use crate::geometry::{self, MercBbox, Point};
 use crate::mvt::GeomType;
 use crate::pmtiles_writer;
 use crate::shortbread::{self, Layer};
@@ -47,8 +47,11 @@ pub(crate) fn process_ocean_shapefile(
     if shx_data.len() < 100 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("invalid .shx file {}: expected at least 100-byte header, got {} bytes",
-                shx_path.display(), shx_data.len()),
+            format!(
+                "invalid .shx file {}: expected at least 100-byte header, got {} bytes",
+                shx_path.display(),
+                shx_data.len()
+            ),
         ));
     }
 
@@ -57,7 +60,10 @@ pub(crate) fn process_ocean_shapefile(
     for i in 0..shape_count {
         let base = 100 + i * 8;
         let offset_words = i32::from_be_bytes([
-            shx_data[base], shx_data[base + 1], shx_data[base + 2], shx_data[base + 3],
+            shx_data[base],
+            shx_data[base + 1],
+            shx_data[base + 2],
+            shx_data[base + 3],
         ]);
         if offset_words < 0 {
             continue;
@@ -87,9 +93,21 @@ pub(crate) fn process_ocean_shapefile(
 
         let bb = rec + 4;
         let xmin = f64::from_le_bytes(shp[bb..bb + 8].try_into().expect("shapefile field read"));
-        let ymin = f64::from_le_bytes(shp[bb + 8..bb + 16].try_into().expect("shapefile field read"));
-        let xmax = f64::from_le_bytes(shp[bb + 16..bb + 24].try_into().expect("shapefile field read"));
-        let ymax = f64::from_le_bytes(shp[bb + 24..bb + 32].try_into().expect("shapefile field read"));
+        let ymin = f64::from_le_bytes(
+            shp[bb + 8..bb + 16]
+                .try_into()
+                .expect("shapefile field read"),
+        );
+        let xmax = f64::from_le_bytes(
+            shp[bb + 16..bb + 24]
+                .try_into()
+                .expect("shapefile field read"),
+        );
+        let ymax = f64::from_le_bytes(
+            shp[bb + 24..bb + 32]
+                .try_into()
+                .expect("shapefile field read"),
+        );
 
         let merc_min = geometry::from_epsg3857(xmin, ymax);
         let merc_max = geometry::from_epsg3857(xmax, ymin);
@@ -104,8 +122,16 @@ pub(crate) fn process_ocean_shapefile(
 
         shapes_hit += 1;
 
-        let num_parts_i32 = i32::from_le_bytes(shp[rec + 36..rec + 40].try_into().expect("shapefile field read"));
-        let num_points_i32 = i32::from_le_bytes(shp[rec + 40..rec + 44].try_into().expect("shapefile field read"));
+        let num_parts_i32 = i32::from_le_bytes(
+            shp[rec + 36..rec + 40]
+                .try_into()
+                .expect("shapefile field read"),
+        );
+        let num_points_i32 = i32::from_le_bytes(
+            shp[rec + 40..rec + 44]
+                .try_into()
+                .expect("shapefile field read"),
+        );
         if num_parts_i32 < 0 || num_points_i32 < 0 {
             eprintln!("  Warning: negative part/point count at offset {offset}, skipping record");
             continue;
@@ -119,7 +145,9 @@ pub(crate) fn process_ocean_shapefile(
         let points_start = parts_start + num_parts * 4;
         let record_end = points_start + num_points * 16;
         if record_end > shp.len() {
-            eprintln!("  Warning: shape record at offset {offset} extends past end of file, skipping");
+            eprintln!(
+                "  Warning: shape record at offset {offset} extends past end of file, skipping"
+            );
             continue;
         }
 
@@ -127,9 +155,13 @@ pub(crate) fn process_ocean_shapefile(
             .map(|j| {
                 let b = parts_start + j * 4;
                 let v = i32::from_le_bytes(shp[b..b + 4].try_into().expect("shapefile field read"));
-                if v < 0 { usize::MAX } else {
+                if v < 0 {
+                    usize::MAX
+                } else {
                     #[allow(clippy::cast_sign_loss)]
-                    { v as usize }
+                    {
+                        v as usize
+                    }
                 }
             })
             .collect();
@@ -143,7 +175,9 @@ pub(crate) fn process_ocean_shapefile(
             .map(|j| {
                 let b = points_start + j * 16;
                 let x = f64::from_le_bytes(shp[b..b + 8].try_into().expect("shapefile field read"));
-                let y = f64::from_le_bytes(shp[b + 8..b + 16].try_into().expect("shapefile field read"));
+                let y = f64::from_le_bytes(
+                    shp[b + 8..b + 16].try_into().expect("shapefile field read"),
+                );
                 geometry::from_epsg3857(x, y)
             })
             .collect();
@@ -173,13 +207,7 @@ pub(crate) fn process_ocean_shapefile(
         }
 
         if let Some(outer) = current_outer {
-            push_quantized_pieces(
-                &mut pieces,
-                &outer,
-                &current_inners,
-                max_zoom,
-                data_rect,
-            );
+            push_quantized_pieces(&mut pieces, &outer, &current_inners, max_zoom, data_rect);
         }
     }
 
@@ -232,12 +260,17 @@ pub(crate) fn process_ocean_shapefile(
         }
         pieces = split_out;
         if pieces.len() != orig_count {
-            eprintln!("  Pre-split at z{SPLIT_Z}: {orig_count} -> {} polygons", pieces.len());
+            eprintln!(
+                "  Pre-split at z{SPLIT_Z}: {orig_count} -> {} polygons",
+                pieces.len()
+            );
         }
     }
 
     let poly_count = pieces.len();
-    eprintln!("  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons - processing in parallel");
+    eprintln!(
+        "  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons - processing in parallel"
+    );
 
     // --- Process phase: parallel with rayon, direct chunk flushing ---
     //
@@ -289,12 +322,22 @@ pub(crate) fn process_ocean_shapefile(
         .par_iter()
         .enumerate()
         .fold(
-            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, compression: chunk_compression },
+            || OceanAcc {
+                records: Vec::new(),
+                bytes: 0,
+                chunk_paths: Vec::new(),
+                count: 0,
+                compression: chunk_compression,
+            },
             |mut acc, (idx, piece)| {
                 let before = acc.records.len();
                 emit_ocean_polygon(
-                    idx as u64, piece,
-                    min_zoom, max_zoom, ocean_layer, &empty_attrs,
+                    idx as u64,
+                    piece,
+                    min_zoom,
+                    max_zoom,
+                    ocean_layer,
+                    &empty_attrs,
                     &mut acc.records,
                 );
                 for r in &acc.records[before..] {
@@ -311,7 +354,13 @@ pub(crate) fn process_ocean_shapefile(
             acc
         })
         .reduce(
-            || OceanAcc { records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0, compression: chunk_compression },
+            || OceanAcc {
+                records: Vec::new(),
+                bytes: 0,
+                chunk_paths: Vec::new(),
+                count: 0,
+                compression: chunk_compression,
+            },
             |mut a, b| {
                 a.chunk_paths.extend(b.chunk_paths);
                 a.count += b.count;
@@ -418,10 +467,10 @@ fn emit_ocean_polygon(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::path::Path;
     use crate::geometry::Point;
     use crate::sort::SortWriter;
+    use std::fs;
+    use std::path::Path;
 
     fn write_u32_be(buf: &mut [u8], off: usize, v: u32) {
         buf[off..off + 4].copy_from_slice(&v.to_be_bytes());
@@ -503,7 +552,11 @@ mod tests {
         write_f64_le(&mut shp, rec + 12, ymin); // ymin
         write_f64_le(&mut shp, rec + 20, xmax); // xmax
         write_f64_le(&mut shp, rec + 28, ymax); // ymax
-        write_u32_le(&mut shp, rec + 36, u32::try_from(num_parts).expect("part count fits u32")); // num_parts
+        write_u32_le(
+            &mut shp,
+            rec + 36,
+            u32::try_from(num_parts).expect("part count fits u32"),
+        ); // num_parts
         write_u32_le(
             &mut shp,
             rec + 40,
@@ -580,12 +633,18 @@ mod tests {
 
     #[test]
     fn pip_inside_square() {
-        assert!(geometry::point_in_polygon(&Point::new(0.5, 0.5), &unit_square()));
+        assert!(geometry::point_in_polygon(
+            &Point::new(0.5, 0.5),
+            &unit_square()
+        ));
     }
 
     #[test]
     fn pip_outside_square() {
-        assert!(!geometry::point_in_polygon(&Point::new(2.0, 0.5), &unit_square()));
+        assert!(!geometry::point_in_polygon(
+            &Point::new(2.0, 0.5),
+            &unit_square()
+        ));
     }
 
     #[test]
@@ -619,7 +678,10 @@ mod tests {
     fn pip_degenerate() {
         // Fewer than 3 points should return false
         assert!(!geometry::point_in_polygon(&Point::new(0.0, 0.0), &[]));
-        assert!(!geometry::point_in_polygon(&Point::new(0.0, 0.0), &[Point { x: 0.0, y: 0.0 }]));
+        assert!(!geometry::point_in_polygon(
+            &Point::new(0.0, 0.0),
+            &[Point { x: 0.0, y: 0.0 }]
+        ));
         assert!(!geometry::point_in_polygon(
             &Point::new(0.0, 0.0),
             &[Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 1.0 }],
@@ -661,7 +723,8 @@ mod tests {
         let shp_path = dir.path().join("ocean_test.shp");
         write_test_polygon_shapefile(&shp_path);
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+        let mut sort_writer =
+            SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
@@ -669,14 +732,7 @@ mod tests {
             max_y: 1.0,
         };
 
-        let emitted = process_ocean_shapefile(
-            &shp_path,
-            &bounds,
-            0,
-            0,
-            &mut sort_writer,
-        )
-        .unwrap();
+        let emitted = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer).unwrap();
 
         assert!(emitted > 0, "expected ocean features to be emitted");
 
@@ -694,7 +750,8 @@ mod tests {
         let shp_path = dir.path().join("ocean_test_disjoint.shp");
         write_test_polygon_shapefile(&shp_path);
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+        let mut sort_writer =
+            SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         // Mercator data bounds outside [0,1] should not intersect any valid projected shape.
         let disjoint_bounds = MercBbox {
             min_x: 2.0,
@@ -703,14 +760,8 @@ mod tests {
             max_y: 3.0,
         };
 
-        let emitted = process_ocean_shapefile(
-            &shp_path,
-            &disjoint_bounds,
-            0,
-            0,
-            &mut sort_writer,
-        )
-        .unwrap();
+        let emitted =
+            process_ocean_shapefile(&shp_path, &disjoint_bounds, 0, 0, &mut sort_writer).unwrap();
 
         assert_eq!(emitted, 0, "expected no ocean features for disjoint bounds");
     }
@@ -721,7 +772,8 @@ mod tests {
         let shp_path = dir.path().join("ocean_test_hole.shp");
         write_test_polygon_with_hole_shapefile(&shp_path);
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+        let mut sort_writer =
+            SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
@@ -729,18 +781,14 @@ mod tests {
             max_y: 1.0,
         };
 
-        let emitted = process_ocean_shapefile(
-            &shp_path,
-            &bounds,
-            0,
-            0,
-            &mut sort_writer,
-        )
-        .unwrap();
+        let emitted = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer).unwrap();
         assert!(emitted > 0, "expected ocean features to be emitted");
 
         let mut reader = sort_writer.finish().unwrap();
-        let rec = reader.next().unwrap().expect("expected at least one record");
+        let rec = reader
+            .next()
+            .unwrap()
+            .expect("expected at least one record");
         let cmd_count = u16::from_le_bytes(rec.data[9..11].try_into().unwrap());
         assert!(
             cmd_count >= 6,
@@ -755,21 +803,16 @@ mod tests {
         write_test_polygon_shapefile(&shp_path);
         fs::write(shp_path.with_extension("shx"), [0u8; 64]).unwrap();
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+        let mut sort_writer =
+            SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
             max_x: 1.0,
             max_y: 1.0,
         };
-        let err = process_ocean_shapefile(
-            &shp_path,
-            &bounds,
-            0,
-            0,
-            &mut sort_writer,
-        )
-        .expect_err("short .shx header should fail");
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer)
+            .expect_err("short .shx header should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("invalid .shx file"));
     }
@@ -781,21 +824,16 @@ mod tests {
         write_test_polygon_shapefile(&shp_path);
         fs::remove_file(shp_path.with_extension("shx")).unwrap();
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+        let mut sort_writer =
+            SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
             max_x: 1.0,
             max_y: 1.0,
         };
-        let err = process_ocean_shapefile(
-            &shp_path,
-            &bounds,
-            0,
-            0,
-            &mut sort_writer,
-        )
-        .expect_err("missing .shx should fail");
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer)
+            .expect_err("missing .shx should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
@@ -809,21 +847,15 @@ mod tests {
         shp_data.truncate(120);
         fs::write(&shp_path, shp_data).unwrap();
 
-        let mut sort_writer = SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+        let mut sort_writer =
+            SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let bounds = MercBbox {
             min_x: 0.0,
             min_y: 0.0,
             max_x: 1.0,
             max_y: 1.0,
         };
-        let emitted = process_ocean_shapefile(
-            &shp_path,
-            &bounds,
-            0,
-            0,
-            &mut sort_writer,
-        )
-        .unwrap();
+        let emitted = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer).unwrap();
         assert_eq!(emitted, 0, "truncated record should be skipped");
     }
 }

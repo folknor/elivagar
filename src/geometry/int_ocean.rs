@@ -7,7 +7,7 @@ use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::core::simplify::Simplify;
 use i_overlay::i_float::int::point::IntPoint;
 use rustc_hash::FxHashSet;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub(crate) type Contour = Vec<IntPoint>;
 pub(crate) type Shape = Vec<Contour>;
@@ -188,7 +188,10 @@ pub(crate) fn normalize(shape: Shape, min_area: u64) -> Shapes {
         return Vec::new();
     }
     let options = overlay_options(min_area);
-    clean_shapes(shape.as_slice().simplify(FillRule::NonZero, options), min_area)
+    clean_shapes(
+        shape.as_slice().simplify(FillRule::NonZero, options),
+        min_area,
+    )
 }
 
 #[hotpath::measure]
@@ -205,15 +208,17 @@ pub(crate) fn intersect_rect(shape: &Shape, rect: IntRect, min_area: u64) -> Sha
         options,
         Default::default(),
     );
-    clean_shapes(overlay.overlay(OverlayRule::Intersect, FillRule::NonZero), min_area)
+    clean_shapes(
+        overlay.overlay(OverlayRule::Intersect, FillRule::NonZero),
+        min_area,
+    )
 }
 
 pub(crate) fn point_in_shape(x: i32, y: i32, shape: &Shape) -> bool {
     if shape.is_empty() {
         return false;
     }
-    point_in_contour(x, y, &shape[0])
-        && !shape[1..].iter().any(|hole| point_in_contour(x, y, hole))
+    point_in_contour(x, y, &shape[0]) && !shape[1..].iter().any(|hole| point_in_contour(x, y, hole))
 }
 
 fn overlay_options(min_area: u64) -> IntOverlayOptions<u64> {
@@ -616,7 +621,12 @@ pub(crate) fn shape_bbox(shape: &Shape) -> Option<IntRect> {
         min_y = min_y.min(p.y);
         max_y = max_y.max(p.y);
     }
-    Some(IntRect { min_x, min_y, max_x, max_y })
+    Some(IntRect {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    })
 }
 
 pub(crate) fn tile_range_for_rect(rect: IntRect, max_tile: u32) -> (u32, u32, u32, u32) {
@@ -660,6 +670,7 @@ pub(crate) fn buffered_tile_rect(tx: u32, ty: u32) -> IntRect {
     }
 }
 
+#[allow(dead_code)]
 fn rect_intersection(a: IntRect, b: IntRect) -> Option<IntRect> {
     let rect = IntRect {
         min_x: a.min_x.max(b.min_x),
@@ -721,8 +732,7 @@ pub(crate) fn encode_tile_shape(
         if contour.len() < 3 {
             continue;
         }
-        let mut ring: Vec<(i32, i32)> =
-            contour.into_iter().map(|p| (p.x - ox, p.y - oy)).collect();
+        let mut ring: Vec<(i32, i32)> = contour.into_iter().map(|p| (p.x - ox, p.y - oy)).collect();
         if i == 0 {
             close_and_orient_cw(&mut ring);
         } else {
@@ -827,7 +837,15 @@ fn emit_boundary_and_gap_tiles(
             continue;
         }
         if cursor < boundary_tx {
-            emit_gap_run(cursor, boundary_tx - 1, ty, row_shape, min_area, scratch, sink);
+            emit_gap_run(
+                cursor,
+                boundary_tx - 1,
+                ty,
+                row_shape,
+                min_area,
+                scratch,
+                sink,
+            );
         }
         emit_clipped_tile_shape(boundary_tx, ty, row_shape, min_area, scratch, sink);
         cursor = boundary_tx.saturating_add(1);
@@ -843,7 +861,7 @@ fn emit_gap_run(
     tx_max: u32,
     ty: u32,
     row_shape: &Shape,
-    min_area: u64,
+    _min_area: u64,
     scratch: &mut IntEmitScratch,
     sink: &mut dyn FnMut(u32, u32, &[u32]),
 ) {
@@ -885,7 +903,10 @@ fn emit_full_tile(
     let ring = vec![
         (-TILE_BUFFER_I32, -TILE_BUFFER_I32),
         (TILE_EXTENT_I32 + TILE_BUFFER_I32, -TILE_BUFFER_I32),
-        (TILE_EXTENT_I32 + TILE_BUFFER_I32, TILE_EXTENT_I32 + TILE_BUFFER_I32),
+        (
+            TILE_EXTENT_I32 + TILE_BUFFER_I32,
+            TILE_EXTENT_I32 + TILE_BUFFER_I32,
+        ),
         (-TILE_BUFFER_I32, TILE_EXTENT_I32 + TILE_BUFFER_I32),
         (-TILE_BUFFER_I32, -TILE_BUFFER_I32),
     ];
@@ -940,14 +961,30 @@ fn mark_endpoint_dilated(x: f64, y: f64, max_tile: u32, tiles: &mut FxHashSet<u6
     let y_lo = fy <= DILATE_TILE_UNITS;
     let y_hi = fy >= 1.0 - DILATE_TILE_UNITS;
     insert_rasterized_tile(cx, cy, max_tile, tiles);
-    if x_lo { insert_rasterized_tile(cx - 1, cy, max_tile, tiles); }
-    if x_hi { insert_rasterized_tile(cx + 1, cy, max_tile, tiles); }
-    if y_lo { insert_rasterized_tile(cx, cy - 1, max_tile, tiles); }
-    if y_hi { insert_rasterized_tile(cx, cy + 1, max_tile, tiles); }
-    if x_lo && y_lo { insert_rasterized_tile(cx - 1, cy - 1, max_tile, tiles); }
-    if x_lo && y_hi { insert_rasterized_tile(cx - 1, cy + 1, max_tile, tiles); }
-    if x_hi && y_lo { insert_rasterized_tile(cx + 1, cy - 1, max_tile, tiles); }
-    if x_hi && y_hi { insert_rasterized_tile(cx + 1, cy + 1, max_tile, tiles); }
+    if x_lo {
+        insert_rasterized_tile(cx - 1, cy, max_tile, tiles);
+    }
+    if x_hi {
+        insert_rasterized_tile(cx + 1, cy, max_tile, tiles);
+    }
+    if y_lo {
+        insert_rasterized_tile(cx, cy - 1, max_tile, tiles);
+    }
+    if y_hi {
+        insert_rasterized_tile(cx, cy + 1, max_tile, tiles);
+    }
+    if x_lo && y_lo {
+        insert_rasterized_tile(cx - 1, cy - 1, max_tile, tiles);
+    }
+    if x_lo && y_hi {
+        insert_rasterized_tile(cx - 1, cy + 1, max_tile, tiles);
+    }
+    if x_hi && y_lo {
+        insert_rasterized_tile(cx + 1, cy - 1, max_tile, tiles);
+    }
+    if x_hi && y_hi {
+        insert_rasterized_tile(cx + 1, cy + 1, max_tile, tiles);
+    }
 }
 
 /// At a vertical grid-line crossing (x = integer, at height y), mark the
@@ -1039,8 +1076,16 @@ fn rasterize_segment_clamped(
         f64::MAX
     };
 
-    let t_delta_x = if dx != 0.0 { f64::from(step_x) / dx } else { f64::MAX };
-    let t_delta_y = if dy != 0.0 { f64::from(step_y) / dy } else { f64::MAX };
+    let t_delta_x = if dx != 0.0 {
+        f64::from(step_x) / dx
+    } else {
+        f64::MAX
+    };
+    let t_delta_y = if dy != 0.0 {
+        f64::from(step_y) / dy
+    } else {
+        f64::MAX
+    };
 
     let max_steps = (cx - ex).unsigned_abs() + (cy - ey).unsigned_abs() + 2;
     for _ in 0..max_steps {
@@ -1134,10 +1179,7 @@ pub(crate) fn pack_tile(tx: u32, ty: u32) -> u64 {
     (u64::from(tx) << 32) | u64::from(ty)
 }
 
-pub(crate) fn lookback_dedup_contour_pinned(
-    ring: &mut Contour,
-    mut flags: Option<&mut Vec<bool>>,
-) {
+pub(crate) fn lookback_dedup_contour_pinned(ring: &mut Contour, mut flags: Option<&mut Vec<bool>>) {
     const LOOKBACK: usize = 5;
     if ring.len() < 4 {
         return;
@@ -1333,13 +1375,17 @@ fn row_range_rect(lo: u32, hi: u32, world_max: i32, buffer: i32) -> IntRect {
     let top = i32::try_from(i64::from(lo) << TILE_SHIFT).expect("row top fits i32") - buffer;
     let bottom =
         i32::try_from((i64::from(hi) + 1) << TILE_SHIFT).expect("row bottom fits i32") + buffer;
-    IntRect { min_x: 0, min_y: top, max_x: world_max, max_y: bottom }
+    IntRect {
+        min_x: 0,
+        min_y: top,
+        max_x: world_max,
+        max_y: bottom,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     fn p(x: i32, y: i32) -> IntPoint {
         IntPoint::new(x, y)
@@ -1493,7 +1539,12 @@ mod tests {
         ]];
         let out = intersect_rect(
             &shape,
-            IntRect { min_x: 5, min_y: 0, max_x: 12, max_y: 10 },
+            IntRect {
+                min_x: 5,
+                min_y: 0,
+                max_x: 12,
+                max_y: 10,
+            },
             0,
         );
         assert_eq!(out.len(), 2);
@@ -1507,7 +1558,12 @@ mod tests {
         ];
         let out = intersect_rect(
             &shape,
-            IntRect { min_x: 0, min_y: 0, max_x: 10, max_y: 10 },
+            IntRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: 10,
+                max_y: 10,
+            },
             0,
         );
         assert_eq!(out.len(), 1);
@@ -1523,7 +1579,12 @@ mod tests {
         ];
         let out = intersect_rect(
             &shape,
-            IntRect { min_x: 0, min_y: 0, max_x: 10, max_y: 10 },
+            IntRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: 10,
+                max_y: 10,
+            },
             0,
         );
         assert!(!out.is_empty());
@@ -1535,7 +1596,12 @@ mod tests {
         let shape = square_shape(0, 10);
         let out = intersect_rect(
             &shape,
-            IntRect { min_x: 2, min_y: 2, max_x: 8, max_y: 8 },
+            IntRect {
+                min_x: 2,
+                min_y: 2,
+                max_x: 8,
+                max_y: 8,
+            },
             0,
         );
         assert_eq!(out.len(), 1);
@@ -1685,9 +1751,13 @@ mod cut_row_bands_tests {
     fn leaf_equality_concave_shape_spanning_8_rows() {
         // Zigzag concave polygon spanning rows 0..=7 (each row 4096 tall).
         let outer = vec![
-            p(1000, 0), p(30000, 0), p(30000, 32000),
-            p(20000, 32000), p(20000, 8000),   // deep concavity
-            p(12000, 8000), p(12000, 32000),
+            p(1000, 0),
+            p(30000, 0),
+            p(30000, 32000),
+            p(20000, 32000),
+            p(20000, 8000), // deep concavity
+            p(12000, 8000),
+            p(12000, 32000),
             p(1000, 32000),
         ];
         assert_rows_equal(&vec![outer], 0, 7);
@@ -1696,7 +1766,12 @@ mod cut_row_bands_tests {
     #[test]
     fn leaf_equality_shape_with_hole() {
         let outer = vec![p(0, 0), p(40000, 0), p(40000, 24000), p(0, 24000)];
-        let hole = vec![p(8000, 4000), p(8000, 20000), p(30000, 20000), p(30000, 4000)];
+        let hole = vec![
+            p(8000, 4000),
+            p(8000, 20000),
+            p(30000, 20000),
+            p(30000, 4000),
+        ];
         assert_rows_equal(&vec![outer, hole], 0, 5);
     }
 
@@ -1738,12 +1813,18 @@ mod landing1_tests {
         let shape: Shape = vec![vec![p(100, 3968), p(8000, 3968), p(8000, 3000)]];
         let mut tiles = FxHashSet::default();
         rasterize_shape_edges(&shape, u32::MAX, &mut tiles);
-        assert!(tiles.contains(&pack_tile(0, 1)), "row-1 tile within 128 must be marked");
+        assert!(
+            tiles.contains(&pack_tile(0, 1)),
+            "row-1 tile within 128 must be marked"
+        );
         // 129 units above row 1 (y = 3967): outside every row-1 buffered rect.
         let shape: Shape = vec![vec![p(100, 3967), p(8000, 3967), p(8000, 3000)]];
         let mut tiles = FxHashSet::default();
         rasterize_shape_edges(&shape, u32::MAX, &mut tiles);
-        assert!(!tiles.contains(&pack_tile(0, 1)), "129 units away must NOT mark row 1");
+        assert!(
+            !tiles.contains(&pack_tile(0, 1)),
+            "129 units away must NOT mark row 1"
+        );
     }
 
     #[test]
@@ -1754,7 +1835,10 @@ mod landing1_tests {
         let mut tiles = FxHashSet::default();
         rasterize_shape_edges(&shape, u32::MAX, &mut tiles);
         for (tx, ty) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)] {
-            assert!(tiles.contains(&pack_tile(tx, ty)), "corner tile ({tx},{ty})");
+            assert!(
+                tiles.contains(&pack_tile(tx, ty)),
+                "corner tile ({tx},{ty})"
+            );
         }
     }
 
@@ -1800,12 +1884,21 @@ mod landing1_tests {
         for tx in 1u32..=3 {
             let mut full: Vec<Vec<u32>> = Vec::new();
             let mut scratch = IntEmitScratch::new();
-            emit_full_tile(tx, 0, &mut scratch, &mut |_, _, g: &[u32]| full.push(g.to_vec()));
+            emit_full_tile(tx, 0, &mut scratch, &mut |_, _, g: &[u32]| {
+                full.push(g.to_vec());
+            });
             let mut clipped: Vec<Vec<u32>> = Vec::new();
             let mut scratch = IntEmitScratch::new();
-            emit_clipped_tile_shape(tx, 0, &row_shape, 256, &mut scratch, &mut |_, _, g: &[u32]| {
-                clipped.push(g.to_vec());
-            });
+            emit_clipped_tile_shape(
+                tx,
+                0,
+                &row_shape,
+                256,
+                &mut scratch,
+                &mut |_, _, g: &[u32]| {
+                    clipped.push(g.to_vec());
+                },
+            );
             assert_eq!(
                 decoded_cycles(&full),
                 decoded_cycles(&clipped),
@@ -1824,8 +1917,14 @@ mod landing1_tests {
             .collect();
         let piece: Shape = vec![outer, hole];
         let total: usize = piece.iter().map(Vec::len).sum();
-        assert!(total >= 500, "hole vertices must count toward the split gate");
-        assert!(piece.first().map_or(0, Vec::len) < 500, "outer alone dodges - the old bug");
+        assert!(
+            total >= 500,
+            "hole vertices must count toward the split gate"
+        );
+        assert!(
+            piece.first().map_or(0, Vec::len) < 500,
+            "outer alone dodges - the old bug"
+        );
     }
 
     #[test]
@@ -1835,7 +1934,12 @@ mod landing1_tests {
         let ring: Contour = vec![p(500, 500), p(900, 500), p(900, 900), p(500, 900)];
         let shape: Shape = vec![ring.clone()];
         let bb = shape_bbox(&shape).expect("bbox");
-        let data = IntRect { min_x: 0, min_y: 0, max_x: 4096, max_y: 4096 };
+        let data = IntRect {
+            min_x: 0,
+            min_y: 0,
+            max_x: 4096,
+            max_y: 4096,
+        };
         assert!(bb.min_x >= data.min_x && bb.max_x <= data.max_x);
         // The skip is in ocean.rs push_quantized_pieces; its observable
         // contract is verbatim passthrough - assert the geometric identity

@@ -230,7 +230,6 @@ fn test_dedup() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
-
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -255,7 +254,6 @@ fn test_metadata_json() {
         max_zoom: 14,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 2),
-
     };
     let json = build_metadata(
         &config,
@@ -354,7 +352,6 @@ fn test_run_length_dedup() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 1),
-
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -381,7 +378,6 @@ fn test_no_run_for_different_data() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 1),
-
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -411,7 +407,6 @@ fn write_to_streaming_produces_valid_header() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
-
     };
 
     let mut writer = PmtilesWriter::new_streaming(config, dir.path()).unwrap();
@@ -445,7 +440,6 @@ fn write_to_streaming_matches_in_memory() {
         max_zoom: 2,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 1),
-
     };
 
     let tile_a = gzip_compress(b"tile-a").unwrap();
@@ -470,7 +464,10 @@ fn write_to_streaming_matches_in_memory() {
 
     let mem_bytes = std::fs::read(&mem_path).unwrap();
     let stream_bytes = std::fs::read(&stream_path).unwrap();
-    assert_eq!(mem_bytes, stream_bytes, "streaming and in-memory archives should be byte-identical");
+    assert_eq!(
+        mem_bytes, stream_bytes,
+        "streaming and in-memory archives should be byte-identical"
+    );
 }
 
 #[test]
@@ -480,7 +477,6 @@ fn write_to_produces_valid_header() {
         max_zoom: 1,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
-
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -676,7 +672,8 @@ fn test_dedup_bucket_collision() {
     // Verify length mismatch was counted for the injected entry (len=42 vs data_a.len()).
     // The scan checks the injected entry first or second depending on order.
     // One entry matches (tile A), the other has len=42 → reject_len_mismatch.
-    let total_rejects = writer.dedup_stats.reject_len_mismatch + writer.dedup_stats.reject_fp_mismatch;
+    let total_rejects =
+        writer.dedup_stats.reject_len_mismatch + writer.dedup_stats.reject_fp_mismatch;
     // We matched on one entry but may have checked the other first.
     // The exact count depends on iteration order, but total_rejects should be 0 or 1.
     assert!(total_rejects <= 1);
@@ -737,7 +734,11 @@ fn data_section_is_4k_aligned() {
 
     let bytes = std::fs::read(&path).unwrap();
     let data_offset = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
-    assert_eq!(data_offset % 4096, 0, "data_offset {data_offset} should be 4K-aligned");
+    assert_eq!(
+        data_offset % 4096,
+        0,
+        "data_offset {data_offset} should be 4K-aligned"
+    );
 }
 
 #[test]
@@ -772,7 +773,10 @@ fn root_only_layout_offsets_are_consistent() {
     assert_eq!(metadata_offset, root_dir_offset + root_dir_length);
     assert!(metadata_length > 0);
     assert_eq!(leaf_dirs_offset, metadata_offset + metadata_length);
-    assert_eq!(leaf_dirs_length, 0, "single-tile archive should be root-only");
+    assert_eq!(
+        leaf_dirs_length, 0,
+        "single-tile archive should be root-only"
+    );
     assert!(data_offset >= leaf_dirs_offset + leaf_dirs_length);
 
     let file_len = bytes.len() as u64;
@@ -809,7 +813,10 @@ fn root_leaf_boundary_switches_at_threshold() {
     let threshold_num_entries = read_u64_le(&at_threshold_bytes, 80);
     let threshold_leaf_dirs_length = read_u64_le(&at_threshold_bytes, 48);
     assert_eq!(threshold_num_entries, ROOT_THRESHOLD as u64);
-    assert_eq!(threshold_leaf_dirs_length, 0, "threshold case should remain root-only");
+    assert_eq!(
+        threshold_leaf_dirs_length, 0,
+        "threshold case should remain root-only"
+    );
 
     let over_num_entries = read_u64_le(&over_threshold_bytes, 80);
     let over_leaf_dirs_length = read_u64_le(&over_threshold_bytes, 48);

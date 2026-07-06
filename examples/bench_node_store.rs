@@ -1,4 +1,8 @@
-#![allow(clippy::unwrap_used, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 
 //! Benchmark: SortedNodeStore write + read performance.
 //!
@@ -21,7 +25,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let _guard = hotpath::HotpathGuardBuilder::new("bench_node_store")
-        .percentiles(&[50, 95, 99])
+        .percentiles(&[50.0, 95.0, 99.0])
         .build();
 
     let config = parse_args();
@@ -45,7 +49,15 @@ fn main() {
     let best_way_ms = bench_way_lookups(&reader, &way_lookups, total_way_lookups, config.runs);
     let best_rand_ms = bench_random_lookups(&reader, &random_lookups, config.runs);
 
-    print_summary(&config, build_ms, node_ids.len(), best_way_ms, total_way_lookups, best_rand_ms, random_lookups.len());
+    print_summary(
+        &config,
+        build_ms,
+        node_ids.len(),
+        best_way_ms,
+        total_way_lookups,
+        best_rand_ms,
+        random_lookups.len(),
+    );
 }
 
 fn generate_and_print_nodes(count: usize) -> (Vec<i64>, Vec<(i32, i32)>) {
@@ -71,7 +83,10 @@ fn build_store(
     let mut best_build_ms = u128::MAX;
     let mut reader = None;
     for run in 0..build_runs {
-        eprint!("  Building SortedNodeStore (run {}/{build_runs})... ", run + 1);
+        eprint!(
+            "  Building SortedNodeStore (run {}/{build_runs})... ",
+            run + 1
+        );
         let build_start = Instant::now();
         let mut store = SortedNodeStore::new();
         for i in 0..node_ids.len() {
@@ -291,7 +306,8 @@ impl Rng {
     }
 
     fn next(&mut self) -> u64 {
-        self.0 = self.0
+        self.0 = self
+            .0
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         self.0

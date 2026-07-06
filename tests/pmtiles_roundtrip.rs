@@ -15,8 +15,8 @@ use std::fs::OpenOptions;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use elivagar::pmtiles_reader::{decode_mvt_layers, PmtilesReader};
-use elivagar::pmtiles_writer::{tile_id_to_zxy, xy_to_tile_id, PmtilesConfig, PmtilesWriter};
+use elivagar::pmtiles_reader::{PmtilesReader, decode_mvt_layers};
+use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use protohoggr::{encode_bytes_field_always, encode_varint, encode_varint_field_always};
@@ -161,7 +161,6 @@ fn test_header_fields() {
         max_zoom: 10,
         bounds: (8.0, 54.5, 15.2, 57.8),
         center: (11.5, 56.0, 7),
-
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -224,7 +223,6 @@ fn test_tile_roundtrip() {
         max_zoom: 2,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
-
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -235,13 +233,7 @@ fn test_tile_roundtrip() {
         .collect();
 
     // Tile coords must be added in Hilbert order.
-    let coords: Vec<(u8, u32, u32)> = vec![
-        (0, 0, 0),
-        (1, 0, 0),
-        (1, 0, 1),
-        (1, 1, 1),
-        (1, 1, 0),
-    ];
+    let coords: Vec<(u8, u32, u32)> = vec![(0, 0, 0), (1, 0, 0), (1, 0, 1), (1, 1, 1), (1, 1, 0)];
 
     let gzipped: Vec<Vec<u8>> = payloads.iter().map(|p| gzip_bytes(p)).collect();
     for (i, &(z, x, y)) in coords.iter().enumerate() {
@@ -262,7 +254,10 @@ fn test_tile_roundtrip() {
         assert_eq!((z, x, y), coords[i], "tile {i} coord mismatch");
 
         let decompressed = reader.read_tile(entry).unwrap();
-        assert_eq!(decompressed, payloads[i], "tile {i} data mismatch at z{z}/{x}/{y}");
+        assert_eq!(
+            decompressed, payloads[i],
+            "tile {i} data mismatch at z{z}/{x}/{y}"
+        );
     }
 }
 
@@ -273,7 +268,6 @@ fn test_mvt_layer_decode() {
         max_zoom: 5,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
-
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -346,7 +340,6 @@ fn test_deduplication() {
         max_zoom: 2,
         bounds: (-180.0, -85.0, 180.0, 85.0),
         center: (0.0, 0.0, 0),
-
     };
 
     let mut writer = PmtilesWriter::new(config);
@@ -429,7 +422,9 @@ fn test_full_pipeline() {
         compression_level: 6,
         force_sorted: false,
         allow_unsafe_flat_index: false,
-        threads: std::thread::available_parallelism().map(std::num::NonZero::get).unwrap_or(4),
+        threads: std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(4),
         way_inflight_budget: 0,
         rel_batch_budget: 0,
         assemble_batch_budget: 0,
@@ -463,7 +458,10 @@ fn test_full_pipeline() {
     );
 
     // Verify tiles exist at multiple zoom levels.
-    let zooms: HashSet<u8> = entries.iter().map(|e| tile_id_to_zxy(e.tile_id).0).collect();
+    let zooms: HashSet<u8> = entries
+        .iter()
+        .map(|e| tile_id_to_zxy(e.tile_id).0)
+        .collect();
     assert!(
         zooms.len() >= 5,
         "expected tiles at 5+ zoom levels, got {}: {:?}",
@@ -473,19 +471,36 @@ fn test_full_pipeline() {
 
     // Valid Shortbread layer names (all 26).
     let shortbread_layers: HashSet<&str> = [
-        "water_polygons", "water_polygons_labels",
-        "water_lines", "water_lines_labels",
-        "dam_lines", "dam_polygons",
-        "pier_lines", "pier_polygons",
-        "boundaries", "boundary_labels",
-        "place_labels", "land", "sites",
-        "buildings", "addresses",
-        "streets", "street_polygons",
-        "street_labels", "street_labels_points",
+        "water_polygons",
+        "water_polygons_labels",
+        "water_lines",
+        "water_lines_labels",
+        "dam_lines",
+        "dam_polygons",
+        "pier_lines",
+        "pier_polygons",
+        "boundaries",
+        "boundary_labels",
+        "place_labels",
+        "land",
+        "sites",
+        "buildings",
+        "addresses",
+        "streets",
+        "street_polygons",
+        "street_labels",
+        "street_labels_points",
         "streets_polygons_labels",
-        "bridges", "aerialways", "ferries",
-        "public_transport", "pois", "ocean",
-    ].iter().copied().collect();
+        "bridges",
+        "aerialways",
+        "ferries",
+        "public_transport",
+        "pois",
+        "ocean",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     // Sample tiles across zoom levels and verify MVT content.
     let sample_count = entries.len().min(200);
@@ -583,7 +598,9 @@ fn test_verify_fail_truncated_tile() {
     let mut writer = PmtilesWriter::new(config);
 
     // Write a valid gzip header but truncated content - will fail decompression.
-    let broken_gzip = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff];
+    let broken_gzip = vec![
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff,
+    ];
     writer.add_tile(0, 0, 0, &broken_gzip).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -614,7 +631,9 @@ fn test_verify_fail_invalid_metadata_json() {
 
     rewrite_metadata_json_in_place(&path, "{");
 
-    let err = elivagar::verify::verify(&path).err().expect("verify should fail");
+    let err = elivagar::verify::verify(&path)
+        .err()
+        .expect("verify should fail");
     let msg = err.to_string();
     assert!(msg.contains("metadata error"), "unexpected error: {msg}");
     assert!(msg.contains("invalid JSON"), "unexpected error: {msg}");
@@ -639,10 +658,15 @@ fn test_verify_fail_metadata_missing_vector_layers() {
 
     rewrite_metadata_json_in_place(&path, "{\"name\":\"Shortbread\",\"format\":\"pbf\"}");
 
-    let err = elivagar::verify::verify(&path).err().expect("verify should fail");
+    let err = elivagar::verify::verify(&path)
+        .err()
+        .expect("verify should fail");
     let msg = err.to_string();
     assert!(msg.contains("metadata error"), "unexpected error: {msg}");
-    assert!(msg.contains("missing 'vector_layers'"), "unexpected error: {msg}");
+    assert!(
+        msg.contains("missing 'vector_layers'"),
+        "unexpected error: {msg}"
+    );
 }
 
 #[test]
@@ -665,7 +689,9 @@ fn test_verify_fail_metadata_vector_layers_schema() {
     // vector_layers exists, but entry is missing string "id".
     rewrite_metadata_json_in_place(&path, "{\"vector_layers\":[{\"id\":1}]}");
 
-    let err = elivagar::verify::verify(&path).err().expect("verify should fail");
+    let err = elivagar::verify::verify(&path)
+        .err()
+        .expect("verify should fail");
     let msg = err.to_string();
     assert!(msg.contains("metadata error"), "unexpected error: {msg}");
     assert!(
@@ -701,7 +727,12 @@ fn test_metadata_rewrite_rejects_oversized_replacement() {
         let mut items = String::new();
         for i in 0..item_count {
             let ch = char::from_u32(33 + ((i % 90) as u32)).unwrap();
-            items.push_str(&format!(r#""{:08x}-{}-{:08x}","#, i, ch, i.wrapping_mul(1_048_583)));
+            items.push_str(&format!(
+                r#""{:08x}-{}-{:08x}","#,
+                i,
+                ch,
+                i.wrapping_mul(1_048_583)
+            ));
         }
         let candidate = format!(r#"{{"vector_layers":[{{"id":"streets"}}],"pad":[{items}]}}"#);
         if gzip_bytes(candidate.as_bytes()).len() > metadata_length {
@@ -714,7 +745,8 @@ fn test_metadata_rewrite_rejects_oversized_replacement() {
         .expect_err("oversize replacement should fail");
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     assert!(
-        err.to_string().contains("replacement metadata must fit existing section"),
+        err.to_string()
+            .contains("replacement metadata must fit existing section"),
         "unexpected error: {err}"
     );
 }

@@ -6,11 +6,11 @@
 //   Phase 3:   External merge sort by Hilbert tile ID
 //   Phase 4:   Tile assembly (MVT encode + gzip) + PMTiles write
 
-mod stats;
+mod assemble;
 mod emit;
 mod phase12;
 mod relations;
-mod assemble;
+mod stats;
 
 #[cfg(test)]
 use crate::geometry;
@@ -30,17 +30,19 @@ use std::path::PathBuf;
 fn fifo_state() -> Option<&'static (std::fs::File, std::time::Instant)> {
     use std::sync::OnceLock;
     static STATE: OnceLock<Option<(std::fs::File, std::time::Instant)>> = OnceLock::new();
-    STATE.get_or_init(|| {
-        let path = std::env::var("BROKKR_MARKER_FIFO").ok()?;
-        use std::os::unix::fs::OpenOptionsExt;
-        const O_NONBLOCK: i32 = 0x800; // Linux
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(O_NONBLOCK)
-            .open(&path)
-            .ok()?;
-        Some((f, std::time::Instant::now()))
-    }).as_ref()
+    STATE
+        .get_or_init(|| {
+            let path = std::env::var("BROKKR_MARKER_FIFO").ok()?;
+            use std::os::unix::fs::OpenOptionsExt;
+            const O_NONBLOCK: i32 = 0x800; // Linux
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(O_NONBLOCK)
+                .open(&path)
+                .ok()?;
+            Some((f, std::time::Instant::now()))
+        })
+        .as_ref()
 }
 
 /// Emit a named phase marker: `<timestamp_us> <name>\n`
@@ -64,7 +66,7 @@ fn emit_counter(name: &str, value: i64) {
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use stats::{missing_ref_summary_lines, Phase12Stats};
+use stats::{Phase12Stats, missing_ref_summary_lines};
 
 /// Pipeline error type. Stringly-typed because no caller inspects variants -
 /// errors are only displayed or propagated. An enum would add boilerplate for no benefit.
@@ -221,7 +223,11 @@ const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 // Checkpoint I/O
 // ---------------------------------------------------------------------------
 
-fn save_checkpoint(tmp_dir: &std::path::Path, bounds: &MercBbox, chunk_count: usize) -> Result<(), PipelineError> {
+fn save_checkpoint(
+    tmp_dir: &std::path::Path,
+    bounds: &MercBbox,
+    chunk_count: usize,
+) -> Result<(), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let content = format!(
         "{} {} {} {} {}",
@@ -232,7 +238,10 @@ fn save_checkpoint(tmp_dir: &std::path::Path, bounds: &MercBbox, chunk_count: us
 }
 
 /// Save total chunk count so --skip-to sort can validate against stale leftovers.
-fn save_sort_chunk_count(tmp_dir: &std::path::Path, count: Option<usize>) -> Result<(), PipelineError> {
+fn save_sort_chunk_count(
+    tmp_dir: &std::path::Path,
+    count: Option<usize>,
+) -> Result<(), PipelineError> {
     if let Some(n) = count {
         std::fs::write(tmp_dir.join(SORT_CHECKPOINT_FILE), n.to_string())?;
     }
@@ -251,14 +260,22 @@ fn load_sort_chunk_count(tmp_dir: &std::path::Path) -> Option<usize> {
 
 fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| PipelineError(format!("no checkpoint in {}: {e} (run a full tilegen first)", tmp_dir.display())))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        PipelineError(format!(
+            "no checkpoint in {}: {e} (run a full tilegen first)",
+            tmp_dir.display()
+        ))
+    })?;
     let parts: Vec<&str> = content.split_whitespace().collect();
     if parts.len() != 5 {
-        return Err(PipelineError(format!("invalid checkpoint format: expected 5 fields, got {}", parts.len())));
+        return Err(PipelineError(format!(
+            "invalid checkpoint format: expected 5 fields, got {}",
+            parts.len()
+        )));
     }
     let parse = |s: &str, name: &str| -> Result<f64, PipelineError> {
-        s.parse().map_err(|e| PipelineError(format!("checkpoint parse {name}: {e}")))
+        s.parse()
+            .map_err(|e| PipelineError(format!("checkpoint parse {name}: {e}")))
     };
     let bounds = MercBbox {
         min_x: parse(parts[0], "min_x")?,
@@ -266,7 +283,8 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
         max_x: parse(parts[2], "max_x")?,
         max_y: parse(parts[3], "max_y")?,
     };
-    let chunks: usize = parts[4].parse()
+    let chunks: usize = parts[4]
+        .parse()
         .map_err(|e| PipelineError(format!("checkpoint parse chunk count: {e}")))?;
     Ok((bounds, chunks))
 }
@@ -337,12 +355,22 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let total_start = Instant::now();
     let skip = config.skip_to;
 
-    eprintln!("=== Tilegen: {} → {}", config.pbf_path.display(), config.output_path.display());
+    eprintln!(
+        "=== Tilegen: {} → {}",
+        config.pbf_path.display(),
+        config.output_path.display()
+    );
     eprintln!("    Zoom range: z{}-z{}", config.min_zoom, config.max_zoom);
     eprintln!("    Tmp dir:    {}", config.tmp_dir.display());
-    eprintln!("    Tile format:{:?}, compression:{:?}", config.tile_format, config.tile_compression);
+    eprintln!(
+        "    Tile format:{:?}, compression:{:?}",
+        config.tile_format, config.tile_compression
+    );
     if (config.polygon_simplify_factor - 1.0).abs() > f64::EPSILON {
-        eprintln!("    Polygon simplify factor: {:.2}", config.polygon_simplify_factor);
+        eprintln!(
+            "    Polygon simplify factor: {:.2}",
+            config.polygon_simplify_factor
+        );
     }
     if let Some(s) = skip {
         eprintln!("    Skip to:    {s:?}");
@@ -392,7 +420,12 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir)?;
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
             phase12_elapsed = None;
-            sort::SortWriter::resume(&config.tmp_dir.join(SORT_CHUNKS_DIR), sort_chunk_size, pbf_chunks, config.compress_sort_chunks)?
+            sort::SortWriter::resume(
+                &config.tmp_dir.join(SORT_CHUNKS_DIR),
+                sort_chunk_size,
+                pbf_chunks,
+                config.compress_sort_chunks,
+            )?
         };
 
         // Load data_bounds (needed for ocean, always available from checkpoint or just computed)
@@ -412,19 +445,31 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 if config.min_zoom <= simplified_max {
                     eprintln!("  Simplified (z{}-z{}):", config.min_zoom, simplified_max);
                     ocean_features += crate::ocean::process_ocean_shapefile(
-                        simplified_path, &data_bounds, config.min_zoom, simplified_max, &mut sort_writer,
+                        simplified_path,
+                        &data_bounds,
+                        config.min_zoom,
+                        simplified_max,
+                        &mut sort_writer,
                     )?;
                 }
                 if config.max_zoom >= 8 {
                     let full_min = config.min_zoom.max(8);
                     eprintln!("  Full-resolution (z{full_min}-z{}):", config.max_zoom);
                     ocean_features += crate::ocean::process_ocean_shapefile(
-                        ocean_path, &data_bounds, full_min, config.max_zoom, &mut sort_writer,
+                        ocean_path,
+                        &data_bounds,
+                        full_min,
+                        config.max_zoom,
+                        &mut sort_writer,
                     )?;
                 }
             } else {
                 ocean_features = crate::ocean::process_ocean_shapefile(
-                    ocean_path, &data_bounds, config.min_zoom, config.max_zoom, &mut sort_writer,
+                    ocean_path,
+                    &data_bounds,
+                    config.min_zoom,
+                    config.max_zoom,
+                    &mut sort_writer,
                 )?;
             }
 
@@ -441,8 +486,14 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     emit_marker("OCEAN_END");
     if let Some((elapsed, features)) = ocean_elapsed {
-        emit_counter("ocean_ms", i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX));
-        emit_counter("ocean_features", i64::try_from(features).unwrap_or(i64::MAX));
+        emit_counter(
+            "ocean_ms",
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX),
+        );
+        emit_counter(
+            "ocean_features",
+            i64::try_from(features).unwrap_or(i64::MAX),
+        );
     }
 
     // --- Phase 3: Sort ---
@@ -482,13 +533,25 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     emit_marker("ASSEMBLE_START");
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
-    let (features_read, tiles_written, unique_tiles, max_assemble_batch_bytes, dedup_stats, tile_size_diag) =
-        assemble::phase_assemble(&mut sort_reader, config)?;
+    let (
+        features_read,
+        tiles_written,
+        unique_tiles,
+        max_assemble_batch_bytes,
+        dedup_stats,
+        tile_size_diag,
+    ) = assemble::phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
     emit_marker("ASSEMBLE_END");
-    emit_counter("assemble_ms", i64::try_from(phase4_elapsed.as_millis()).unwrap_or(i64::MAX));
+    emit_counter(
+        "assemble_ms",
+        i64::try_from(phase4_elapsed.as_millis()).unwrap_or(i64::MAX),
+    );
     emit_counter("tiles", i64::try_from(tiles_written).unwrap_or(i64::MAX));
-    emit_counter("unique_tiles", i64::try_from(unique_tiles).unwrap_or(i64::MAX));
+    emit_counter(
+        "unique_tiles",
+        i64::try_from(unique_tiles).unwrap_or(i64::MAX),
+    );
     emit_counter("features", i64::try_from(features_read).unwrap_or(i64::MAX));
     let assemble_rss = peak_rss_kb();
 
@@ -529,10 +592,11 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("output_bytes={}", meta.len());
     }
     if let Some(ref s) = phase12_stats
-        && let Some((nodes, groups)) = s.node_store_stats {
-            eprintln!("node_store_nodes={nodes}");
-            eprintln!("node_store_groups={groups}");
-        }
+        && let Some((nodes, groups)) = s.node_store_stats
+    {
+        eprintln!("node_store_nodes={nodes}");
+        eprintln!("node_store_groups={groups}");
+    }
     if let Some(n) = sort_chunks {
         eprintln!("sort_chunks={n}");
     }
@@ -543,7 +607,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("phase12_ways={}", s.way_count);
         eprintln!("phase12_relations={}", s.rel_count);
         if s.way_count > 0 {
-            eprintln!("records_per_way={:.1}", s.sort_records as f64 / s.way_count as f64);
+            eprintln!(
+                "records_per_way={:.1}",
+                s.sort_records as f64 / s.way_count as f64
+            );
         }
         // Per-layer sort stats: emit all layers with nonzero records.
         for (i, (&recs, &bytes)) in s.layer_records.iter().zip(s.layer_bytes.iter()).enumerate() {
@@ -595,7 +662,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                         }
                     }
                     if !thresh_parts.is_empty() {
-                        eprintln!("sort_layer_{name}_above_{thresh}={}", thresh_parts.join(","));
+                        eprintln!(
+                            "sort_layer_{name}_above_{thresh}={}",
+                            thresh_parts.join(",")
+                        );
                     }
                 }
                 // Cap impact metrics: features capped, tiles saved, estimated bytes saved.
@@ -620,19 +690,27 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 if !cap_feat_parts.is_empty() {
                     eprintln!("fanout_capped_features_{name}={}", cap_feat_parts.join(","));
                     eprintln!("fanout_capped_tiles_{name}={}", cap_tiles_parts.join(","));
-                    eprintln!("fanout_capped_bytes_estimated_{name}={}", cap_bytes_parts.join(","));
+                    eprintln!(
+                        "fanout_capped_bytes_estimated_{name}={}",
+                        cap_bytes_parts.join(",")
+                    );
                 }
             }
         }
         // Top capped features for visual QA targeting.
         if !s.fanout_stats.top_capped.is_empty() {
-            for (rank, &(osm_id, layer, zoom, bbox_tiles)) in s.fanout_stats.top_capped.iter().enumerate() {
+            for (rank, &(osm_id, layer, zoom, bbox_tiles)) in
+                s.fanout_stats.top_capped.iter().enumerate()
+            {
                 let name = if (layer as usize) < shortbread::Layer::ALL.len() {
                     shortbread::Layer::ALL[layer as usize].name()
                 } else {
                     "unknown"
                 };
-                eprintln!("fanout_capped_top_{}={name}/z{zoom}/osm_id={osm_id}/bbox_tiles={bbox_tiles}", rank + 1);
+                eprintln!(
+                    "fanout_capped_top_{}={name}/z{zoom}/osm_id={osm_id}/bbox_tiles={bbox_tiles}",
+                    rank + 1
+                );
             }
         }
         // Deferral stats: report per-layer deferred vertex counts.
@@ -680,10 +758,22 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     eprintln!("dedup_candidates={}", dedup_stats.candidates);
     eprintln!("dedup_tiles_reused={}", dedup_stats.tiles_reused);
     eprintln!("dedup_bytes_saved={}", dedup_stats.bytes_saved);
-    eprintln!("dedup_reject_len_mismatch={}", dedup_stats.reject_len_mismatch);
-    eprintln!("dedup_reject_fp_mismatch={}", dedup_stats.reject_fp_mismatch);
-    eprintln!("dedup_insert_skipped_cap={}", dedup_stats.insert_skipped_cap);
-    eprintln!("dedup_hash_bucket_collisions={}", dedup_stats.hash_bucket_collisions);
+    eprintln!(
+        "dedup_reject_len_mismatch={}",
+        dedup_stats.reject_len_mismatch
+    );
+    eprintln!(
+        "dedup_reject_fp_mismatch={}",
+        dedup_stats.reject_fp_mismatch
+    );
+    eprintln!(
+        "dedup_insert_skipped_cap={}",
+        dedup_stats.insert_skipped_cap
+    );
+    eprintln!(
+        "dedup_hash_bucket_collisions={}",
+        dedup_stats.hash_bucket_collisions
+    );
     eprintln!("tile_bytes_total={}", tile_size_diag.total_tile_bytes);
     eprintln!(
         "tile_bytes_avg={}",
@@ -698,7 +788,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         eprintln!("tile_max_zxy={z}/{x}/{y}");
     }
     eprintln!("oversize_tiles_warn={}", tile_size_diag.oversize_warn_count);
-    eprintln!("oversize_tiles_severe={}", tile_size_diag.oversize_severe_count);
+    eprintln!(
+        "oversize_tiles_severe={}",
+        tile_size_diag.oversize_severe_count
+    );
     for (i, t) in tile_size_diag.top_oversized.iter().enumerate() {
         if t.bytes == 0 {
             continue;
@@ -720,44 +813,41 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
 // Re-export submodule items so `use super::*` in pipeline_tests.rs works.
 #[cfg(test)]
-use stats::{
-    MissingRefStats, MissingRefStatsAtomic,
-    OversizeTile, insert_top_oversized, TileSizeDiagnostics,
-    DeferralStats, DEFERRAL_VERTEX_BUDGET,
-    TILE_OVERSIZE_TOP_N, TILE_OVERSIZE_WARN_BYTES, TILE_OVERSIZE_SEVERE_BYTES,
-    record_tile_size_diagnostics,
-};
-#[cfg(test)]
-use emit::{
-    PointEmitScratch, LineEmitScratch, PolygonEmitScratch, MultipolygonEmitScratch,
-    emit_point_or_centroid, emit_line_feature, emit_polygon_feature, emit_multipolygon_feature,
-    enrich_polygon_matches, unwrap_antimeridian_path, antimeridian_shifts_for_bbox,
-    merc_point_key, relation_shared_vertex_keys,
-};
-#[cfg(test)]
-use phase12::{
-    select_node_store_mode, NodeStoreMode, crosses_antimeridian,
-    annotate_block_shared_node_refs, RawWay, lon_e7_shifted_360,
-};
-#[cfg(test)]
-use assemble::{
-    PendingTile, encode_tile_batch, encode_tile_batch_mvt,
-    prepare_non_empty_layers, SeamMetrics, phase_assemble,
-    AssemblyScratch, LAYER_COUNT,
-};
-#[cfg(test)]
-use crate::sort::SortRecord;
-#[cfg(test)]
 use crate::geometry::Point;
-#[cfg(test)]
-#[cfg(test)]
-use crate::multipolygon::{MemberWay, WayRole};
 #[cfg(test)]
 use crate::geometry::merc_bbox;
 #[cfg(test)]
 use crate::mlt;
 #[cfg(test)]
+#[cfg(test)]
+use crate::multipolygon::{MemberWay, WayRole};
+#[cfg(test)]
 use crate::mvt::GeomType;
+#[cfg(test)]
+use crate::sort::SortRecord;
+#[cfg(test)]
+use assemble::{
+    AssemblyScratch, LAYER_COUNT, PendingTile, SeamMetrics, encode_tile_batch,
+    encode_tile_batch_mvt, phase_assemble, prepare_non_empty_layers,
+};
+#[cfg(test)]
+use emit::{
+    LineEmitScratch, MultipolygonEmitScratch, PointEmitScratch, PolygonEmitScratch,
+    antimeridian_shifts_for_bbox, emit_line_feature, emit_multipolygon_feature,
+    emit_point_or_centroid, emit_polygon_feature, enrich_polygon_matches, merc_point_key,
+    relation_shared_vertex_keys, unwrap_antimeridian_path,
+};
+#[cfg(test)]
+use phase12::{
+    NodeStoreMode, RawWay, annotate_block_shared_node_refs, crosses_antimeridian,
+    lon_e7_shifted_360, select_node_store_mode,
+};
+#[cfg(test)]
+use stats::{
+    DEFERRAL_VERTEX_BUDGET, DeferralStats, MissingRefStats, MissingRefStatsAtomic, OversizeTile,
+    TILE_OVERSIZE_SEVERE_BYTES, TILE_OVERSIZE_TOP_N, TILE_OVERSIZE_WARN_BYTES, TileSizeDiagnostics,
+    insert_top_oversized, record_tile_size_diagnostics,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

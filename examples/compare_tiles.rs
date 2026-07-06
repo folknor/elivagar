@@ -174,7 +174,11 @@ fn decode_directory(data: &[u8]) -> Vec<RawDirEntry> {
         let v = decode_varint(data, &mut pos);
         let offset = if v == 0 && i > 0 {
             let prev: &RawDirEntry = &entries[i - 1];
-            let prev_run = if prev.run_length > 0 { prev.run_length } else { 1 };
+            let prev_run = if prev.run_length > 0 {
+                prev.run_length
+            } else {
+                1
+            };
             prev.offset + u64::from(prev.length) * u64::from(prev_run)
         } else {
             v - 1
@@ -436,12 +440,22 @@ fn main() {
     eprintln!("Reading {name_a}...");
     let mut reader_a = PmtilesReader::open(Path::new(path_a)).expect("open file A");
     let entries_a = reader_a.read_all_entries().expect("read entries A");
-    eprintln!("  {} tiles, z{}-{}", entries_a.len(), reader_a.min_zoom, reader_a.max_zoom);
+    eprintln!(
+        "  {} tiles, z{}-{}",
+        entries_a.len(),
+        reader_a.min_zoom,
+        reader_a.max_zoom
+    );
 
     eprintln!("Reading {name_b}...");
     let mut reader_b = PmtilesReader::open(Path::new(path_b)).expect("open file B");
     let entries_b = reader_b.read_all_entries().expect("read entries B");
-    eprintln!("  {} tiles, z{}-{}", entries_b.len(), reader_b.min_zoom, reader_b.max_zoom);
+    eprintln!(
+        "  {} tiles, z{}-{}",
+        entries_b.len(),
+        reader_b.min_zoom,
+        reader_b.max_zoom
+    );
 
     // Group entries by zoom
     let min_zoom = reader_a.min_zoom.min(reader_b.min_zoom);
@@ -464,7 +478,8 @@ fn main() {
         let zb = entries_by_zoom_b.get(&z).unwrap_or(&empty);
 
         // Build lookup for file B by tile_id
-        let b_map: HashMap<u64, usize> = zb.iter().enumerate().map(|(i, e)| (e.tile_id, i)).collect();
+        let b_map: HashMap<u64, usize> =
+            zb.iter().enumerate().map(|(i, e)| (e.tile_id, i)).collect();
 
         // Find common tile_ids
         let mut common: Vec<(usize, usize)> = Vec::new();
@@ -476,17 +491,32 @@ fn main() {
 
         let sample_count = common.len().min(sample_per_zoom);
         if sample_count == 0 {
-            eprintln!("z{z:2}: A={} tiles, B={} tiles, 0 common - skipping", za.len(), zb.len());
+            eprintln!(
+                "z{z:2}: A={} tiles, B={} tiles, 0 common - skipping",
+                za.len(),
+                zb.len()
+            );
             continue;
         }
 
         // Evenly sample from common tiles
-        let step = if common.len() <= sample_per_zoom { 1 } else { common.len() / sample_per_zoom };
-        let sampled: Vec<(usize, usize)> = common.iter().step_by(step).take(sample_per_zoom).copied().collect();
+        let step = if common.len() <= sample_per_zoom {
+            1
+        } else {
+            common.len() / sample_per_zoom
+        };
+        let sampled: Vec<(usize, usize)> = common
+            .iter()
+            .step_by(step)
+            .take(sample_per_zoom)
+            .copied()
+            .collect();
 
         // Decode sampled tiles and accumulate per-layer stats
-        let mut layer_stats_a: HashMap<String, (usize, usize, usize, usize, usize)> = HashMap::new(); // (features, points, lines, polys, geom_cmds)
-        let mut layer_stats_b: HashMap<String, (usize, usize, usize, usize, usize)> = HashMap::new();
+        let mut layer_stats_a: HashMap<String, (usize, usize, usize, usize, usize)> =
+            HashMap::new(); // (features, points, lines, polys, geom_cmds)
+        let mut layer_stats_b: HashMap<String, (usize, usize, usize, usize, usize)> =
+            HashMap::new();
         let mut total_bytes_a: usize = 0;
         let mut total_bytes_b: usize = 0;
 
@@ -494,11 +524,17 @@ fn main() {
         for (ai, bi) in &sampled {
             let tile_data_a = match reader_a.read_tile(&za[*ai]) {
                 Ok(d) => d,
-                Err(_) => { read_errors += 1; continue; }
+                Err(_) => {
+                    read_errors += 1;
+                    continue;
+                }
             };
             let tile_data_b = match reader_b.read_tile(&zb[*bi]) {
                 Ok(d) => d,
-                Err(_) => { read_errors += 1; continue; }
+                Err(_) => {
+                    read_errors += 1;
+                    continue;
+                }
             };
             total_bytes_a += tile_data_a.len();
             total_bytes_b += tile_data_b.len();
@@ -543,7 +579,11 @@ fn main() {
         }
         let avg_bytes_a = total_bytes_a / decoded;
         let avg_bytes_b = total_bytes_b / decoded;
-        let err_note = if read_errors > 0 { format!(" ({read_errors} read errors)") } else { String::new() };
+        let err_note = if read_errors > 0 {
+            format!(" ({read_errors} read errors)")
+        } else {
+            String::new()
+        };
         eprintln!(
             "z{z:2}: {sample} tiles sampled (of {common} common, A={ta} B={tb} total)  avg_mvt: A={avg_a} B={avg_b} bytes{err_note}",
             sample = decoded,
@@ -555,7 +595,11 @@ fn main() {
         );
 
         // Collect all layer names seen at this zoom
-        let mut all_layers: Vec<String> = layer_stats_a.keys().chain(layer_stats_b.keys()).cloned().collect();
+        let mut all_layers: Vec<String> = layer_stats_a
+            .keys()
+            .chain(layer_stats_b.keys())
+            .cloned()
+            .collect();
         all_layers.sort();
         all_layers.dedup();
 
@@ -597,11 +641,18 @@ fn main() {
     // Grand totals
     eprintln!("\n=== Grand totals (all sampled tiles) ===\n");
 
-    let mut all_layers: Vec<String> = grand_totals_a.keys().chain(grand_totals_b.keys()).cloned().collect();
+    let mut all_layers: Vec<String> = grand_totals_a
+        .keys()
+        .chain(grand_totals_b.keys())
+        .cloned()
+        .collect();
     all_layers.sort();
     all_layers.dedup();
 
-    eprintln!("{:24} {:>10} {:>10} {:>8} {:>10} {:>10}", "layer", name_a, name_b, "diff", "cmds_A", "cmds_B");
+    eprintln!(
+        "{:24} {:>10} {:>10} {:>8} {:>10} {:>10}",
+        "layer", name_a, name_b, "diff", "cmds_A", "cmds_B"
+    );
     eprintln!("{}", "-".repeat(78));
 
     let mut total_a = 0usize;
@@ -636,7 +687,10 @@ fn main() {
     } else {
         "N/A".to_string()
     };
-    eprintln!("{:24} {total_a:10} {total_b:10} {total_diff:>8} {total_cmds_a:10} {total_cmds_b:10}", "TOTAL");
+    eprintln!(
+        "{:24} {total_a:10} {total_b:10} {total_diff:>8} {total_cmds_a:10} {total_cmds_b:10}",
+        "TOTAL"
+    );
 }
 
 fn group_by_zoom(entries: &[TileEntry]) -> HashMap<u8, Vec<TileEntry>> {

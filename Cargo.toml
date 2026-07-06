@@ -17,18 +17,18 @@ path = "src/main.rs"
 pbfhogg = { path = "../pbfhogg" }
 protohoggr = { path = "../protohoggr" }
 rayon = "1.5"
-memmap2 = "0.9"
+memmap2 = "0.9.11"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 brotli = "8.0.4"
 lz4_flex = "0.13"
 snap = "1"
 smallvec = "1.15.2"
 mimalloc = { version = "0.1.52", default-features = false }
-hotpath = "0.14.1"
+hotpath = "0.20.0"
 rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }
 serde_json = "1"
-mlt-core = { version = "0.3", default-features = false, features = ["fastpfor-rust"] }
+mlt-core = "0.12.3"
 geo-types = "0.7.19"
 i_overlay = "7.0"
 

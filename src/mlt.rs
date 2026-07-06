@@ -1,12 +1,10 @@
 use crate::mvt::{Feature, GeomType, LayerBuilder, Value};
 
-use geo_types::{Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon};
-use mlt_core::Encodable;
-use mlt_core::v01::{
-    DecodedGeometry, DecodedId, DecodedProperty, GeometryEncoder, IdEncoder, IdWidth, IntEncoder,
-    LogicalEncoder, OwnedGeometry, OwnedId, OwnedLayer01, OwnedProperty, PresenceStream,
-    PropValue, ScalarEncoder,
+use geo_types::{
+    Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
 };
+use mlt_core::encoder::EncoderConfig;
+use mlt_core::{PropKind, PropValue as MltPropValue, TileLayer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MltColumnType {
@@ -85,198 +83,111 @@ pub(crate) fn encode_tile(layers: &[&LayerBuilder]) -> Result<Vec<u8>, MltEncode
         if layer.is_empty() {
             continue;
         }
-        let owned_layer = encode_layer(layer)?;
-        mlt_core::OwnedLayer::Tag01(owned_layer)
-            .write_to(&mut out)
-            .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
+        let encoded = encode_layer(layer)?;
+        out.extend_from_slice(&encoded);
     }
     Ok(out)
 }
 
-fn encode_layer(layer: &LayerBuilder) -> Result<OwnedLayer01, MltEncodeError> {
+fn encode_layer(layer: &LayerBuilder) -> Result<Vec<u8>, MltEncodeError> {
+    build_mlt_tile_layer(layer)?
+        .encode(EncoderConfig::default())
+        .map_err(|e| MltEncodeError::Encode(e.to_string()))
+}
+
+fn build_mlt_tile_layer(layer: &LayerBuilder) -> Result<TileLayer, MltEncodeError> {
     let features = layer.features();
-    let id = encode_layer_ids(features)?;
-    let geometry = encode_layer_geometry(layer.name(), features)?;
-    let properties = encode_layer_properties(layer, features)?;
-
-    Ok(OwnedLayer01 {
-        name: layer.name().to_string(),
-        extent: 4096,
-        id,
-        geometry,
-        properties,
-    })
-}
-
-fn encode_layer_ids(features: &[Feature]) -> Result<OwnedId, MltEncodeError> {
-    let ids: Vec<Option<u64>> = features.iter().map(|f| f.id).collect();
-    if ids.iter().all(Option::is_none) {
-        return Ok(OwnedId::None);
-    }
-
-    let mut id = OwnedId::Decoded(DecodedId(Some(ids)));
-    id.encode_with(IdEncoder::new(LogicalEncoder::Delta, IdWidth::OptId64))
-        .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
-    Ok(id)
-}
-
-fn encode_layer_geometry(layer_name: &str, features: &[Feature]) -> Result<OwnedGeometry, MltEncodeError> {
-    let mut decoded = DecodedGeometry::default();
-    for (idx, feature) in features.iter().enumerate() {
-        let geom = decode_feature_geometry(feature).map_err(|msg| MltEncodeError::GeometryDecode {
-            layer: layer_name.to_string(),
-            feature_index: idx,
-            message: msg,
-        })?;
-        decoded.push_geom(&geom);
-    }
-
-    let mut geometry = OwnedGeometry::Decoded(decoded);
-    geometry
-        .encode_with(GeometryEncoder::all(IntEncoder::varint()))
-        .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
-    Ok(geometry)
-}
-
-fn encode_layer_properties(
-    layer: &LayerBuilder,
-    features: &[Feature],
-) -> Result<Vec<OwnedProperty>, MltEncodeError> {
     let tile_model = build_tile_model(&[layer]);
     let columns = tile_model
         .layers
         .first()
         .map(|lm| lm.columns.as_slice())
         .unwrap_or(&[]);
+    let mut builder = mlt_core::TileLayer::builder(layer.name(), 4096)
+        .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
+    let mut property_keys = Vec::with_capacity(columns.len());
 
-    let mut properties = Vec::with_capacity(columns.len());
     for col in columns {
-        let decoded = build_property_column(layer, features, col);
-        let mut prop = OwnedProperty::Decoded(decoded);
-        prop.encode_with(property_encoder_for(&prop))
+        let key = builder
+            .add_property(col.key.clone(), mlt_prop_kind(col.column_type))
             .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
-        properties.push(prop);
+        property_keys.push(key);
     }
 
-    Ok(properties)
-}
-
-fn property_encoder_for(prop: &OwnedProperty) -> ScalarEncoder {
-    let values = match prop {
-        OwnedProperty::Decoded(decoded) => &decoded.values,
-        OwnedProperty::Encoded(_) => return ScalarEncoder::int(PresenceStream::Present, IntEncoder::varint()),
-    };
-    match values {
-        PropValue::Str(_) => ScalarEncoder::str_fsst(
-            PresenceStream::Present,
-            IntEncoder::varint(),
-            IntEncoder::varint(),
-        ),
-        PropValue::F32(_) | PropValue::F64(_) => ScalarEncoder::float(PresenceStream::Present),
-        PropValue::Bool(_) => ScalarEncoder::bool(PresenceStream::Present),
-        _ => ScalarEncoder::int(PresenceStream::Present, IntEncoder::varint()),
+    for (idx, feature) in features.iter().enumerate() {
+        let geom =
+            decode_feature_geometry(feature).map_err(|msg| MltEncodeError::GeometryDecode {
+                layer: layer.name().to_string(),
+                feature_index: idx,
+                message: msg,
+            })?;
+        let mut feature_builder = builder.feature(geom);
+        feature_builder.id(feature.id);
+        for (col, key) in columns.iter().zip(&property_keys) {
+            if let Some(value) = feature_value_for_key(layer, feature, &col.key) {
+                feature_builder
+                    .property(*key, value_to_mlt_prop(value, col.column_type))
+                    .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
+            }
+        }
+        feature_builder
+            .finish()
+            .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
     }
+
+    Ok(builder.finish())
 }
 
-fn build_property_column(
-    layer: &LayerBuilder,
-    features: &[Feature],
-    column: &MltColumnModel,
-) -> DecodedProperty {
-    let values = match column.column_type {
-        MltColumnType::String => {
-            let mut out = Vec::with_capacity(features.len());
-            for feature in features {
-                let mapped = feature_value_for_key(layer, feature, &column.key)
-                    .map(value_to_string);
-                out.push(mapped);
-            }
-            PropValue::Str(out)
-        }
-        MltColumnType::Float => {
-            let mut out = Vec::with_capacity(features.len());
-            for feature in features {
-                let mapped = feature_value_for_key(layer, feature, &column.key).and_then(|v| match v {
-                    Value::Float(x) => Some(*x),
-                    _ => None,
-                });
-                out.push(mapped);
-            }
-            PropValue::F32(out)
-        }
-        MltColumnType::Double => {
-            let mut out = Vec::with_capacity(features.len());
-            for feature in features {
-                let mapped = feature_value_for_key(layer, feature, &column.key).and_then(|v| match v {
-                    Value::Double(x) => Some(*x),
-                    _ => None,
-                });
-                out.push(mapped);
-            }
-            PropValue::F64(out)
-        }
-        MltColumnType::Int => {
-            let mut out = Vec::with_capacity(features.len());
-            for feature in features {
-                let mapped = feature_value_for_key(layer, feature, &column.key).and_then(|v| match v {
-                    Value::Int(x) => Some(*x),
-                    _ => None,
-                });
-                out.push(mapped);
-            }
-            PropValue::I64(out)
-        }
-        MltColumnType::UInt => {
-            let mut out = Vec::with_capacity(features.len());
-            for feature in features {
-                let mapped = feature_value_for_key(layer, feature, &column.key).and_then(|v| match v {
-                    Value::UInt(x) => Some(*x),
-                    _ => None,
-                });
-                out.push(mapped);
-            }
-            PropValue::U64(out)
-        }
-        MltColumnType::SInt => {
-            let mut out = Vec::with_capacity(features.len());
-            for feature in features {
-                let mapped = feature_value_for_key(layer, feature, &column.key).and_then(|v| match v {
-                    Value::SInt(x) => Some(*x),
-                    _ => None,
-                });
-                out.push(mapped);
-            }
-            PropValue::I64(out)
-        }
-        MltColumnType::Bool => {
-            let mut out = Vec::with_capacity(features.len());
-            for feature in features {
-                let mapped = feature_value_for_key(layer, feature, &column.key).and_then(|v| match v {
-                    Value::Bool(x) => Some(*x),
-                    _ => None,
-                });
-                out.push(mapped);
-            }
-            PropValue::Bool(out)
-        }
-        MltColumnType::Mixed => {
-            let mut out = Vec::with_capacity(features.len());
-            for feature in features {
-                let mapped = feature_value_for_key(layer, feature, &column.key)
-                    .map(value_to_string);
-                out.push(mapped);
-            }
-            PropValue::Str(out)
-        }
-    };
-
-    DecodedProperty {
-        name: column.key.clone(),
-        values,
+fn mlt_prop_kind(column_type: MltColumnType) -> PropKind {
+    match column_type {
+        MltColumnType::String | MltColumnType::Mixed => PropKind::Str,
+        MltColumnType::Float => PropKind::F32,
+        MltColumnType::Double => PropKind::F64,
+        MltColumnType::Int | MltColumnType::SInt => PropKind::I64,
+        MltColumnType::UInt => PropKind::U64,
+        MltColumnType::Bool => PropKind::Bool,
     }
 }
 
-fn feature_value_for_key<'a>(layer: &'a LayerBuilder, feature: &Feature, key: &str) -> Option<&'a Value> {
+fn value_to_mlt_prop(value: &Value, column_type: MltColumnType) -> MltPropValue {
+    match column_type {
+        MltColumnType::String => MltPropValue::Str(match value {
+            Value::String(x) => Some(x.clone()),
+            _ => None,
+        }),
+        MltColumnType::Float => MltPropValue::F32(match value {
+            Value::Float(x) => Some(*x),
+            _ => None,
+        }),
+        MltColumnType::Double => MltPropValue::F64(match value {
+            Value::Double(x) => Some(*x),
+            _ => None,
+        }),
+        MltColumnType::Int => MltPropValue::I64(match value {
+            Value::Int(x) => Some(*x),
+            _ => None,
+        }),
+        MltColumnType::UInt => MltPropValue::U64(match value {
+            Value::UInt(x) => Some(*x),
+            _ => None,
+        }),
+        MltColumnType::SInt => MltPropValue::I64(match value {
+            Value::SInt(x) => Some(*x),
+            _ => None,
+        }),
+        MltColumnType::Bool => MltPropValue::Bool(match value {
+            Value::Bool(x) => Some(*x),
+            _ => None,
+        }),
+        MltColumnType::Mixed => MltPropValue::Str(Some(value_to_string(value))),
+    }
+}
+
+fn feature_value_for_key<'a>(
+    layer: &'a LayerBuilder,
+    feature: &Feature,
+    key: &str,
+) -> Option<&'a Value> {
     for &(k_idx, v_idx) in &feature.tags {
         if layer.key(k_idx) == Some(key) {
             return layer.value(v_idx);
@@ -431,7 +342,10 @@ fn parse_points(commands: &[u32]) -> Result<Vec<Coord<i32>>, String> {
                     i = next_i;
                     cursor_x += dx;
                     cursor_y += dy;
-                    out.push(Coord { x: cursor_x, y: cursor_y });
+                    out.push(Coord {
+                        x: cursor_x,
+                        y: cursor_y,
+                    });
                 }
             }
             7 => {}
@@ -466,7 +380,10 @@ fn parse_paths(commands: &[u32]) -> Result<Vec<Vec<Coord<i32>>>, String> {
                     if !current.is_empty() {
                         paths.push(std::mem::take(&mut current));
                     }
-                    current.push(Coord { x: cursor_x, y: cursor_y });
+                    current.push(Coord {
+                        x: cursor_x,
+                        y: cursor_y,
+                    });
                 }
             }
             2 => {
@@ -478,7 +395,10 @@ fn parse_paths(commands: &[u32]) -> Result<Vec<Vec<Coord<i32>>>, String> {
                     i = next_i;
                     cursor_x += dx;
                     cursor_y += dy;
-                    current.push(Coord { x: cursor_x, y: cursor_y });
+                    current.push(Coord {
+                        x: cursor_x,
+                        y: cursor_y,
+                    });
                 }
             }
             7 => {}
@@ -526,7 +446,9 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
                 GeomType::Polygon => geometry_mix.polygons += 1,
             }
             for &(k_idx, v_idx) in &feature.tags {
-                let Some(key) = layer.key(k_idx) else { continue };
+                let Some(key) = layer.key(k_idx) else {
+                    continue;
+                };
                 let Some(value) = layer.value(v_idx) else {
                     continue;
                 };
@@ -600,10 +522,20 @@ mod tests {
     use super::*;
     use crate::mvt::{Feature, GeomType, LayerBuilder};
     use geo_types::Geometry;
+    use mlt_core::LendingIterator as _;
     use serde::Deserialize;
     use serde_json::{Number, Value as JsonValue};
     use std::collections::BTreeMap;
     use std::collections::HashMap;
+
+    fn parse_decoded_layers<'a>(
+        encoded: &'a [u8],
+    ) -> mlt_core::MltResult<Vec<mlt_core::ParsedLayer<'a>>> {
+        let mut parser = mlt_core::Parser::default();
+        let layers = parser.parse_layers(encoded)?;
+        let mut decoder = mlt_core::Decoder::default();
+        decoder.decode_all(layers)
+    }
 
     fn point_geom() -> Vec<u32> {
         vec![9, 50, 50]
@@ -642,7 +574,10 @@ mod tests {
         assert_eq!(model.layers[0].geometry_mix.polygons, 0);
         assert_eq!(model.layers[0].columns.len(), 2);
         assert_eq!(model.layers[0].columns[0].key, "kind");
-        assert_eq!(model.layers[0].columns[0].column_type, MltColumnType::String);
+        assert_eq!(
+            model.layers[0].columns[0].column_type,
+            MltColumnType::String
+        );
         assert_eq!(model.layers[0].columns[0].value_count, 2);
         assert_eq!(model.layers[0].columns[0].observed_type_count, 1);
         assert_eq!(model.layers[0].columns[1].key, "population");
@@ -666,12 +601,11 @@ mod tests {
         let encoded = encode_tile(&[&layer]).expect("mlt encode should succeed");
         assert!(!encoded.is_empty());
 
-        let mut parsed = mlt_core::parse_layers(&encoded).expect("encoded mlt should parse");
+        let parsed = parse_decoded_layers(&encoded).expect("encoded mlt should parse");
         assert_eq!(parsed.len(), 1);
-        parsed[0].decode_all().expect("decode_all should succeed");
         let l01 = parsed[0].as_layer01().expect("expected tag01 layer");
-        assert_eq!(l01.name, "test");
-        assert_eq!(l01.extent, 4096);
+        assert_eq!(l01.name(), "test");
+        assert_eq!(l01.extent().get(), 4096);
     }
 
     #[test]
@@ -813,8 +747,7 @@ mod tests {
         });
 
         let model = build_tile_model(&[&layer]);
-        let col = model
-            .layers[0]
+        let col = model.layers[0]
             .columns
             .iter()
             .find(|c| c.key == "mixed_key")
@@ -889,8 +822,9 @@ mod tests {
     fn mvt_value_to_json(value: &Value) -> JsonValue {
         match value {
             Value::String(v) => JsonValue::String(v.clone()),
-            Value::Float(v) => Number::from_f64(f64::from(*v))
-                .map_or(JsonValue::Null, JsonValue::Number),
+            Value::Float(v) => {
+                Number::from_f64(f64::from(*v)).map_or(JsonValue::Null, JsonValue::Number)
+            }
             Value::Double(v) => Number::from_f64(*v).map_or(JsonValue::Null, JsonValue::Number),
             Value::Int(v) => JsonValue::Number((*v).into()),
             Value::UInt(v) => JsonValue::Number((*v).into()),
@@ -899,14 +833,20 @@ mod tests {
         }
     }
 
-    fn expected_feature_properties(layer: &LayerBuilder, feature: &Feature) -> BTreeMap<String, JsonValue> {
+    fn expected_feature_properties(
+        layer: &LayerBuilder,
+        feature: &Feature,
+    ) -> BTreeMap<String, JsonValue> {
         let mut props = BTreeMap::new();
         for &(k_idx, v_idx) in &feature.tags {
             let key = layer.key(k_idx).expect("key index should resolve");
             let value = layer.value(v_idx).expect("value index should resolve");
             props.insert(key.to_string(), mvt_value_to_json(value));
         }
-        props.insert("_layer".to_string(), JsonValue::String(layer.name().to_string()));
+        props.insert(
+            "_layer".to_string(),
+            JsonValue::String(layer.name().to_string()),
+        );
         props.insert("_extent".to_string(), JsonValue::Number(4096.into()));
         props
     }
@@ -961,10 +901,10 @@ mod tests {
             .collect();
 
         let encoded = encode_tile(&[&layer]).expect("mlt encode should succeed");
-        let mut parsed = mlt_core::parse_layers(&encoded).expect("mlt parse should succeed");
+        let parsed = parse_decoded_layers(&encoded).expect("mlt parse should succeed");
         assert_eq!(parsed.len(), 1);
-        parsed[0].decode_all().expect("decode_all should succeed");
-        let fc = mlt_core::geojson::FeatureCollection::from_layers(&parsed).expect("feature collection conversion");
+        let fc = mlt_core::geojson::FeatureCollection::from_layers(parsed)
+            .expect("feature collection conversion");
         assert_eq!(fc.features.len(), expected_by_id.len());
 
         for got in &fc.features {
@@ -973,7 +913,10 @@ mod tests {
                 .get(&id)
                 .expect("decoded feature id should exist in source");
             assert_eq!(&got.geometry, want_geom, "geometry mismatch for id {id}");
-            assert_eq!(&got.properties, want_props, "properties mismatch for id {id}");
+            assert_eq!(
+                &got.properties, want_props,
+                "properties mismatch for id {id}"
+            );
         }
     }
 
@@ -994,10 +937,9 @@ mod tests {
             });
 
             let encoded = encode_tile(&[&layer]).unwrap();
-            let mut parsed = mlt_core::parse_layers(&encoded).unwrap();
+            let parsed = parse_decoded_layers(&encoded).unwrap();
             assert_eq!(parsed.len(), 1, "fixture {}", fixture.id);
-            parsed[0].decode_all().unwrap();
-            let fc = mlt_core::geojson::FeatureCollection::from_layers(&parsed).unwrap();
+            let fc = mlt_core::geojson::FeatureCollection::from_layers(parsed).unwrap();
             assert_eq!(fc.features.len(), 1, "fixture {}", fixture.id);
             let got = geometry_name(&fc.features[0].geometry);
             let source_geom = decode_feature_geometry(&Feature {
@@ -1057,21 +999,18 @@ mod tests {
         }
     }
 
-    fn decoded_property_kind_and_count(
-        values: &mlt_core::v01::PropValue,
-    ) -> (&'static str, usize) {
-        match values {
-            mlt_core::v01::PropValue::Bool(v) => ("bool", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::I8(v) => ("i8", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::U8(v) => ("u8", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::I32(v) => ("i32", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::U32(v) => ("u32", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::I64(v) => ("i64", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::U64(v) => ("u64", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::F32(v) => ("f32", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::F64(v) => ("f64", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::Str(v) => ("str", v.iter().filter(|x| x.is_some()).count()),
-            mlt_core::v01::PropValue::SharedDict(_) => ("shared_dict", 0),
+    fn decoded_property_kind(value: mlt_core::PropValueRef<'_>) -> &'static str {
+        match value {
+            mlt_core::PropValueRef::Bool(_) => "bool",
+            mlt_core::PropValueRef::I8(_)
+            | mlt_core::PropValueRef::I32(_)
+            | mlt_core::PropValueRef::I64(_) => "i64",
+            mlt_core::PropValueRef::U8(_)
+            | mlt_core::PropValueRef::U32(_)
+            | mlt_core::PropValueRef::U64(_) => "u64",
+            mlt_core::PropValueRef::F32(_) => "f32",
+            mlt_core::PropValueRef::F64(_) => "f64",
+            mlt_core::PropValueRef::Str(_) => "str",
         }
     }
 
@@ -1099,9 +1038,8 @@ mod tests {
             }
 
             let encoded = encode_tile(&[&layer]).expect("mlt encode should succeed");
-            let mut parsed = mlt_core::parse_layers(&encoded).expect("mlt parse should succeed");
+            let parsed = parse_decoded_layers(&encoded).expect("mlt parse should succeed");
             assert_eq!(parsed.len(), 1, "case {}", case.id);
-            parsed[0].decode_all().expect("decode_all should succeed");
             let l01 = parsed[0].as_layer01().expect("expected tag01 layer");
 
             let expected: HashMap<&str, (&str, usize)> = case
@@ -1110,23 +1048,31 @@ mod tests {
                 .map(|e| (e.key.as_str(), (e.kind.as_str(), e.non_null)))
                 .collect();
 
+            let mut decoded: HashMap<String, (&'static str, usize)> = HashMap::new();
+            let mut features = l01.iter_features();
+            while let Some(feature) = features.next() {
+                let feature = feature.expect("feature should decode");
+                for prop in feature.iter_properties() {
+                    let name = prop.name().to_string();
+                    let kind = decoded_property_kind(prop.value());
+                    let entry = decoded.entry(name).or_insert((kind, 0));
+                    assert_eq!(entry.0, kind, "case {} property kind changed", case.id);
+                    entry.1 += 1;
+                }
+            }
+
             let mut seen = 0usize;
-            for prop in &l01.properties {
-                let decoded = match prop {
-                    mlt_core::v01::Property::Decoded(v) => v,
-                    mlt_core::v01::Property::Encoded(_) => panic!("property should be decoded"),
-                };
-                if let Some((want_kind, want_non_null)) = expected.get(decoded.name.as_str()) {
-                    let (got_kind, got_non_null) = decoded_property_kind_and_count(&decoded.values);
+            for (name, (got_kind, got_non_null)) in &decoded {
+                if let Some((want_kind, want_non_null)) = expected.get(name.as_str()) {
                     assert_eq!(
-                        got_kind, *want_kind,
+                        *got_kind, *want_kind,
                         "case {} property '{}' kind mismatch",
-                        case.id, decoded.name
+                        case.id, name
                     );
                     assert_eq!(
-                        got_non_null, *want_non_null,
+                        *got_non_null, *want_non_null,
                         "case {} property '{}' non_null mismatch",
-                        case.id, decoded.name
+                        case.id, name
                     );
                     seen += 1;
                 }

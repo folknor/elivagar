@@ -33,11 +33,13 @@ impl MissingRefStatsAtomic {
     pub(super) fn record_way_missing_nodes(&self, missing_refs: usize) {
         self.missing_way_node_refs
             .fetch_add(missing_refs as u64, Ordering::Relaxed);
-        self.ways_with_missing_node_refs.fetch_add(1, Ordering::Relaxed);
+        self.ways_with_missing_node_refs
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(super) fn record_relation_missing_way_ref(&self) {
-        self.missing_relation_way_refs.fetch_add(1, Ordering::Relaxed);
+        self.missing_relation_way_refs
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(super) fn record_relation_with_missing_way_refs(&self) {
@@ -46,7 +48,8 @@ impl MissingRefStatsAtomic {
     }
 
     pub(super) fn record_relation_non_way_member(&self) {
-        self.relation_non_way_members.fetch_add(1, Ordering::Relaxed);
+        self.relation_non_way_members
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(super) fn record_relation_nested_member(&self) {
@@ -82,8 +85,14 @@ pub(super) fn missing_ref_summary_lines(summary: MissingRefStats) -> [String; 6]
             "relations_with_missing_way_refs={}",
             summary.relations_with_missing_way_refs
         ),
-        format!("relation_non_way_members={}", summary.relation_non_way_members),
-        format!("relation_nested_members={}", summary.relation_nested_members),
+        format!(
+            "relation_non_way_members={}",
+            summary.relation_non_way_members
+        ),
+        format!(
+            "relation_nested_members={}",
+            summary.relation_nested_members
+        ),
     ]
 }
 
@@ -235,8 +244,10 @@ impl FanoutStats {
         // Track top 10 capped features by bbox tile count.
         const TOP_N: usize = 10;
         if self.top_capped.len() < TOP_N || bbox_tiles > self.top_capped.last().map_or(0, |e| e.3) {
-            self.top_capped.push((osm_id, layer as u8, zoom as u8, bbox_tiles));
-            self.top_capped.sort_unstable_by_key(|e| std::cmp::Reverse(e.3));
+            self.top_capped
+                .push((osm_id, layer as u8, zoom as u8, bbox_tiles));
+            self.top_capped
+                .sort_unstable_by_key(|e| std::cmp::Reverse(e.3));
             self.top_capped.truncate(TOP_N);
         }
     }
@@ -257,7 +268,8 @@ impl FanoutStats {
         }
         // Merge top capped: combine, sort, truncate.
         self.top_capped.extend_from_slice(&other.top_capped);
-        self.top_capped.sort_unstable_by_key(|e| std::cmp::Reverse(e.3));
+        self.top_capped
+            .sort_unstable_by_key(|e| std::cmp::Reverse(e.3));
         self.top_capped.truncate(10);
     }
 
@@ -362,7 +374,10 @@ pub(super) struct TileSizeDiagnostics {
     pub(super) top_oversized: [OversizeTile; TILE_OVERSIZE_TOP_N],
 }
 
-pub(super) fn insert_top_oversized(top: &mut [OversizeTile; TILE_OVERSIZE_TOP_N], tile: OversizeTile) {
+pub(super) fn insert_top_oversized(
+    top: &mut [OversizeTile; TILE_OVERSIZE_TOP_N],
+    tile: OversizeTile,
+) {
     let mut pos = None;
     for (i, t) in top.iter().enumerate() {
         if tile.bytes > t.bytes {
@@ -377,7 +392,11 @@ pub(super) fn insert_top_oversized(top: &mut [OversizeTile; TILE_OVERSIZE_TOP_N]
     top[i] = tile;
 }
 
-pub(super) fn record_tile_size_diagnostics(size_diag: &mut TileSizeDiagnostics, tile_id: u64, tile_bytes: u64) {
+pub(super) fn record_tile_size_diagnostics(
+    size_diag: &mut TileSizeDiagnostics,
+    tile_id: u64,
+    tile_bytes: u64,
+) {
     size_diag.total_tile_bytes += tile_bytes;
     if tile_bytes > size_diag.max_tile.bytes {
         size_diag.max_tile = OversizeTile {

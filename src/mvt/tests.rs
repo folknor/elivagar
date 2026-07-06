@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
-use super::*;
 use super::merge::{test_append_geometry, test_decode_line_segments};
+use super::*;
 use protohoggr::{Cursor, WIRE_LEN};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -299,7 +299,7 @@ fn test_varint_encoding() {
 
 #[test]
 fn test_command_encoding() {
-    assert_eq!(command(1, 1), 9);  // MoveTo, count=1
+    assert_eq!(command(1, 1), 9); // MoveTo, count=1
     assert_eq!(command(2, 3), 26); // LineTo, count=3
     assert_eq!(command(7, 1), 15); // ClosePath, count=1
 }
@@ -308,11 +308,14 @@ fn test_command_encoding() {
 fn test_encode_point() {
     let mut cmds = Vec::new();
     encode_point(&mut cmds, 25, 17);
-    assert_eq!(cmds, vec![
-        9,  // MoveTo, count=1
-        50, // zigzag(25) = 50
-        34, // zigzag(17) = 34
-    ]);
+    assert_eq!(
+        cmds,
+        vec![
+            9,  // MoveTo, count=1
+            50, // zigzag(25) = 50
+            34, // zigzag(17) = 34
+        ]
+    );
 }
 
 #[test]
@@ -320,16 +323,19 @@ fn test_encode_linestring() {
     let coords = [(2, 1), (4, 3), (6, 5)];
     let mut cmds = Vec::new();
     encode_linestring(&mut cmds, &coords);
-    assert_eq!(cmds, vec![
-        9,  // MoveTo count=1
-        4,  // zigzag(2)
-        2,  // zigzag(1)
-        18, // LineTo count=2
-        4,  // zigzag(4-2=2)
-        4,  // zigzag(3-1=2)
-        4,  // zigzag(6-4=2)
-        4,  // zigzag(5-3=2)
-    ]);
+    assert_eq!(
+        cmds,
+        vec![
+            9,  // MoveTo count=1
+            4,  // zigzag(2)
+            2,  // zigzag(1)
+            18, // LineTo count=2
+            4,  // zigzag(4-2=2)
+            4,  // zigzag(3-1=2)
+            4,  // zigzag(6-4=2)
+            4,  // zigzag(5-3=2)
+        ]
+    );
 }
 
 #[test]
@@ -424,20 +430,45 @@ fn assert_matches_mvt_fixture(fixture_id: &str, geom_type: GeomType, geometry: &
         .unwrap_or_else(|e| panic!("fixture {fixture_id} encoded parse failed: {e}"));
 
     // Upstream fixtures sometimes omit default-encoded fields like extent.
-    assert_eq!(actual_parsed.layer_name, expected_parsed.layer_name, "fixture {fixture_id} layer_name");
-    assert_eq!(actual_parsed.layer_version, expected_parsed.layer_version, "fixture {fixture_id} version");
-    assert_eq!(actual_parsed.key, expected_parsed.key, "fixture {fixture_id} key");
-    assert_eq!(actual_parsed.string_value, expected_parsed.string_value, "fixture {fixture_id} value");
-    assert_eq!(actual_parsed.feature_id, expected_parsed.feature_id, "fixture {fixture_id} id");
-    assert_eq!(actual_parsed.feature_type, expected_parsed.feature_type, "fixture {fixture_id} type");
-    assert_eq!(actual_parsed.feature_tags, expected_parsed.feature_tags, "fixture {fixture_id} tags");
+    assert_eq!(
+        actual_parsed.layer_name, expected_parsed.layer_name,
+        "fixture {fixture_id} layer_name"
+    );
+    assert_eq!(
+        actual_parsed.layer_version, expected_parsed.layer_version,
+        "fixture {fixture_id} version"
+    );
+    assert_eq!(
+        actual_parsed.key, expected_parsed.key,
+        "fixture {fixture_id} key"
+    );
+    assert_eq!(
+        actual_parsed.string_value, expected_parsed.string_value,
+        "fixture {fixture_id} value"
+    );
+    assert_eq!(
+        actual_parsed.feature_id, expected_parsed.feature_id,
+        "fixture {fixture_id} id"
+    );
+    assert_eq!(
+        actual_parsed.feature_type, expected_parsed.feature_type,
+        "fixture {fixture_id} type"
+    );
+    assert_eq!(
+        actual_parsed.feature_tags, expected_parsed.feature_tags,
+        "fixture {fixture_id} tags"
+    );
     assert_eq!(
         actual_parsed.feature_geometry, expected_parsed.feature_geometry,
         "fixture {fixture_id} geometry"
     );
 
     // Our encoder always writes extent=4096 for spec compliance.
-    assert_eq!(actual_parsed.layer_extent, Some(4096), "fixture {fixture_id} extent");
+    assert_eq!(
+        actual_parsed.layer_extent,
+        Some(4096),
+        "fixture {fixture_id} extent"
+    );
 }
 
 #[test]
@@ -512,7 +543,11 @@ fn conformance_fixture_018_valid_linestring_geometry() {
 #[test]
 fn conformance_fixture_019_valid_polygon_geometry() {
     // mapbox/mvt-fixtures#019
-    assert_matches_mvt_fixture("019", GeomType::Polygon, &[9, 6, 12, 18, 10, 12, 24, 44, 15]);
+    assert_matches_mvt_fixture(
+        "019",
+        GeomType::Polygon,
+        &[9, 6, 12, 18, 10, 12, 24, 44, 15],
+    );
 }
 
 #[test]
@@ -538,8 +573,8 @@ fn conformance_fixture_022_valid_multipolygon_geometry() {
         "022",
         GeomType::Polygon,
         &[
-            9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15, 9, 22, 2, 26, 18, 0, 0, 18, 17, 0, 15,
-            9, 4, 13, 26, 0, 8, 8, 0, 0, 7, 15,
+            9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15, 9, 22, 2, 26, 18, 0, 0, 18, 17, 0, 15, 9, 4, 13,
+            26, 0, 8, 8, 0, 0, 7, 15,
         ],
     );
 }
@@ -726,8 +761,20 @@ fn test_merge_two_multi_ring_polygons_coords_in_bounds() {
     });
 
     // Feature 2: exterior + hole at different location
-    let ext2 = [(2000, 2000), (3000, 2000), (3000, 3000), (2000, 3000), (2000, 2000)];
-    let hole2 = [(2100, 2100), (2900, 2100), (2900, 2900), (2100, 2900), (2100, 2100)];
+    let ext2 = [
+        (2000, 2000),
+        (3000, 2000),
+        (3000, 3000),
+        (2000, 3000),
+        (2000, 2000),
+    ];
+    let hole2 = [
+        (2100, 2100),
+        (2900, 2100),
+        (2900, 2900),
+        (2100, 2900),
+        (2100, 2100),
+    ];
     let mut geom2 = Vec::new();
     encode_polygon(&mut geom2, &[&ext2, &hole2]);
     layer.add_feature(Feature {
@@ -1090,7 +1137,9 @@ fn build_multi_line(segments: &[&[(i32, i32)]]) -> Vec<u32> {
     let mut cx: i32 = 0;
     let mut cy: i32 = 0;
     for seg in segments {
-        if seg.len() < 2 { continue; }
+        if seg.len() < 2 {
+            continue;
+        }
         buf.push(command(1, 1));
         buf.push(zigzag(seg[0].0 - cx));
         buf.push(zigzag(seg[0].1 - cy));
@@ -1107,7 +1156,9 @@ fn build_multi_line(segments: &[&[(i32, i32)]]) -> Vec<u32> {
             count += 1;
         }
         #[allow(clippy::cast_possible_truncation)]
-        { buf[lineto_pos] = command(2, count); }
+        {
+            buf[lineto_pos] = command(2, count);
+        }
     }
     buf
 }
@@ -1118,12 +1169,12 @@ fn line_merge_two_segments_degree2() {
     let mut layer = LayerBuilder::new("test");
     let k = layer.intern_key("k");
     let v = layer.intern_value(Value::String("v".into()));
-    let geom = build_multi_line(&[
-        &[(0, 0), (10, 10)],
-        &[(10, 10), (20, 0)],
-    ]);
+    let geom = build_multi_line(&[&[(0, 0), (10, 10)], &[(10, 10), (20, 0)]]);
     layer.add_feature(Feature {
-        id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        id: None,
+        geom_type: GeomType::LineString,
+        geometry: geom,
+        tags: vec![(k, v)],
     });
     let mut scratch = LineMergeScratch::new();
     layer.merge_connected_lines(&mut scratch);
@@ -1138,12 +1189,12 @@ fn line_merge_reverse_direction() {
     let mut layer = LayerBuilder::new("test");
     let k = layer.intern_key("k");
     let v = layer.intern_value(Value::String("v".into()));
-    let geom = build_multi_line(&[
-        &[(0, 0), (10, 10)],
-        &[(20, 0), (10, 10)],
-    ]);
+    let geom = build_multi_line(&[&[(0, 0), (10, 10)], &[(20, 0), (10, 10)]]);
     layer.add_feature(Feature {
-        id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        id: None,
+        geom_type: GeomType::LineString,
+        geometry: geom,
+        tags: vec![(k, v)],
     });
     let mut scratch = LineMergeScratch::new();
     layer.merge_connected_lines(&mut scratch);
@@ -1164,7 +1215,10 @@ fn line_merge_junction_blocks() {
         &[(10, 10), (20, 20)],
     ]);
     layer.add_feature(Feature {
-        id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        id: None,
+        geom_type: GeomType::LineString,
+        geometry: geom,
+        tags: vec![(k, v)],
     });
     let mut scratch = LineMergeScratch::new();
     layer.merge_connected_lines(&mut scratch);
@@ -1181,7 +1235,10 @@ fn line_merge_single_segment_noop() {
     encode_linestring(&mut geom, &[(0, 0), (10, 10), (20, 0)]);
     let original = geom.clone();
     layer.add_feature(Feature {
-        id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        id: None,
+        geom_type: GeomType::LineString,
+        geometry: geom,
+        tags: vec![(k, v)],
     });
     let mut scratch = LineMergeScratch::new();
     layer.merge_connected_lines(&mut scratch);
@@ -1200,7 +1257,10 @@ fn line_merge_closed_ring() {
         &[(10, 10), (0, 0)],
     ]);
     layer.add_feature(Feature {
-        id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        id: None,
+        geom_type: GeomType::LineString,
+        geometry: geom,
+        tags: vec![(k, v)],
     });
     let mut scratch = LineMergeScratch::new();
     layer.merge_connected_lines(&mut scratch);
@@ -1220,11 +1280,17 @@ fn line_merge_skips_polygon_features() {
     encode_polygon(&mut geom, &[&[(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]]);
     let original = geom.clone();
     layer.add_feature(Feature {
-        id: None, geom_type: GeomType::Polygon, geometry: geom, tags: vec![(k, v)],
+        id: None,
+        geom_type: GeomType::Polygon,
+        geometry: geom,
+        tags: vec![(k, v)],
     });
     let mut scratch = LineMergeScratch::new();
     layer.merge_connected_lines(&mut scratch);
-    assert_eq!(layer.features[0].geometry, original, "polygon should be untouched");
+    assert_eq!(
+        layer.features[0].geometry, original,
+        "polygon should be untouched"
+    );
 }
 
 #[test]
@@ -1239,7 +1305,10 @@ fn line_merge_chain_of_three() {
         &[(20, 10), (30, 0)],
     ]);
     layer.add_feature(Feature {
-        id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        id: None,
+        geom_type: GeomType::LineString,
+        geometry: geom,
+        tags: vec![(k, v)],
     });
     let mut scratch = LineMergeScratch::new();
     layer.merge_connected_lines(&mut scratch);
@@ -1252,21 +1321,9 @@ fn line_merge_chain_of_three() {
 fn line_merge_deterministic_output() {
     // Same logical segments in different input orders should produce
     // identical encoded geometry.
-    let order_a = build_multi_line(&[
-        &[(0, 0), (10, 0)],
-        &[(10, 0), (20, 0)],
-        &[(20, 0), (30, 0)],
-    ]);
-    let order_b = build_multi_line(&[
-        &[(20, 0), (30, 0)],
-        &[(0, 0), (10, 0)],
-        &[(10, 0), (20, 0)],
-    ]);
-    let order_c = build_multi_line(&[
-        &[(10, 0), (20, 0)],
-        &[(20, 0), (30, 0)],
-        &[(0, 0), (10, 0)],
-    ]);
+    let order_a = build_multi_line(&[&[(0, 0), (10, 0)], &[(10, 0), (20, 0)], &[(20, 0), (30, 0)]]);
+    let order_b = build_multi_line(&[&[(20, 0), (30, 0)], &[(0, 0), (10, 0)], &[(10, 0), (20, 0)]]);
+    let order_c = build_multi_line(&[&[(10, 0), (20, 0)], &[(20, 0), (30, 0)], &[(0, 0), (10, 0)]]);
 
     let mut results = Vec::new();
     for geom in [order_a, order_b, order_c] {
@@ -1274,7 +1331,10 @@ fn line_merge_deterministic_output() {
         let k = layer.intern_key("k");
         let v = layer.intern_value(Value::String("v".into()));
         layer.add_feature(Feature {
-            id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+            id: None,
+            geom_type: GeomType::LineString,
+            geometry: geom,
+            tags: vec![(k, v)],
         });
         let mut scratch = LineMergeScratch::new();
         layer.merge_connected_lines(&mut scratch);
@@ -1297,7 +1357,10 @@ fn line_merge_self_loop_not_merged_through() {
     let k = layer.intern_key("k");
     let v = layer.intern_value(Value::String("v".into()));
     layer.add_feature(Feature {
-        id: None, geom_type: GeomType::LineString, geometry: geom, tags: vec![(k, v)],
+        id: None,
+        geom_type: GeomType::LineString,
+        geometry: geom,
+        tags: vec![(k, v)],
     });
     let mut scratch = LineMergeScratch::new();
     layer.merge_connected_lines(&mut scratch);

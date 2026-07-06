@@ -63,13 +63,13 @@
 
 pub(crate) mod geometry;
 pub mod inspect;
-pub(crate) mod multipolygon;
 pub(crate) mod mlt;
-pub mod pmtiles_reader;
+pub(crate) mod multipolygon;
 pub(crate) mod mvt;
 pub mod node_index;
 pub(crate) mod ocean;
 mod pipeline;
+pub mod pmtiles_reader;
 pub mod pmtiles_writer;
 pub(crate) mod pois;
 pub mod shortbread;
@@ -79,6 +79,6 @@ pub mod verify;
 pub(crate) mod way_index;
 pub(crate) mod wire_format;
 
-pub use pipeline::{run, PipelineError, SkipTo, TilegenConfig};
 pub use pipeline::TileCompression;
 pub use pipeline::TilePayloadFormat;
+pub use pipeline::{PipelineError, SkipTo, TilegenConfig, run};

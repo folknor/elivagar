@@ -3,14 +3,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::geometry;
 use crate::mlt;
 use crate::mvt::{self, GeomType, LayerBuilder};
-use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter, TileDataCompression, TileDataFormat};
+use crate::pmtiles_writer::{
+    self, PmtilesConfig, PmtilesWriter, TileDataCompression, TileDataFormat,
+};
 use crate::shortbread::{self, Layer};
 use crate::sort;
 use crate::wire_format::add_feature_to_layer;
 use pbfhogg::ElementReader;
 
-use super::{PipelineError, TilegenConfig, TilePayloadFormat, TileCompression};
 use super::stats::{TileSizeDiagnostics, record_tile_size_diagnostics};
+use super::{PipelineError, TileCompression, TilePayloadFormat, TilegenConfig};
 
 // ---------------------------------------------------------------------------
 // Phase 4: Tile assembly + PMTiles write
@@ -35,7 +37,17 @@ const _: () = assert!(std::mem::size_of::<EncodedTile>() == 32);
 pub(super) fn phase_assemble(
     sort_reader: &mut sort::SortReader,
     config: &TilegenConfig,
-) -> Result<(u64, u64, u64, usize, pmtiles_writer::DedupStats, TileSizeDiagnostics), PipelineError> {
+) -> Result<
+    (
+        u64,
+        u64,
+        u64,
+        usize,
+        pmtiles_writer::DedupStats,
+        TileSizeDiagnostics,
+    ),
+    PipelineError,
+> {
     use std::sync::mpsc::sync_channel;
 
     let pmtiles_config = PmtilesConfig {
@@ -57,7 +69,9 @@ pub(super) fn phase_assemble(
             };
             pmtiles.set_tile_contract(TileDataFormat::Mvt, compression);
         }
-        TilePayloadFormat::Mlt => pmtiles.set_tile_contract(TileDataFormat::Mlt, TileDataCompression::None),
+        TilePayloadFormat::Mlt => {
+            pmtiles.set_tile_contract(TileDataFormat::Mlt, TileDataCompression::None);
+        }
     }
 
     const BATCH_SIZE: usize = 4096;
@@ -81,7 +95,10 @@ pub(super) fn phase_assemble(
         let reader = s.spawn(move || -> Result<(u64, usize), PipelineError> {
             let mut features_read: u64 = 0;
             let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
-            let mut current = PendingTile { tile_id: u64::MAX, features: Vec::new() };
+            let mut current = PendingTile {
+                tile_id: u64::MAX,
+                features: Vec::new(),
+            };
             // Incremental byte tracking for assemble batch HWM.
             let mut current_tile_bytes: usize = 0;
             let mut batch_bytes: usize = 0;
@@ -95,7 +112,9 @@ pub(super) fn phase_assemble(
                         batch.push(current);
                     }
                     if !batch.is_empty() {
-                        if batch_bytes > max_batch_bytes { max_batch_bytes = batch_bytes; }
+                        if batch_bytes > max_batch_bytes {
+                            max_batch_bytes = batch_bytes;
+                        }
                         drop(read_tx.send(batch)); // ignore: encoder may have exited
                     }
                     break;
@@ -110,13 +129,20 @@ pub(super) fn phase_assemble(
                         batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
                         if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
-                            if batch_bytes > max_batch_bytes { max_batch_bytes = batch_bytes; }
-                            if read_tx.send(batch).is_err() { break; }
+                            if batch_bytes > max_batch_bytes {
+                                max_batch_bytes = batch_bytes;
+                            }
+                            if read_tx.send(batch).is_err() {
+                                break;
+                            }
                             batch = Vec::with_capacity(BATCH_SIZE);
                             batch_bytes = 0;
                         }
                     }
-                    current = PendingTile { tile_id, features: Vec::new() };
+                    current = PendingTile {
+                        tile_id,
+                        features: Vec::new(),
+                    };
                     current_tile_bytes = 0;
                 }
                 let data_len = r.data.len();
@@ -161,17 +187,45 @@ pub(super) fn phase_assemble(
         let tile_format = config.tile_format;
         let tile_compression = config.tile_compression;
         for batch in read_rx {
-            let encoded = encode_tile_batch(&batch, compression_level, tile_format, tile_compression, &config.seam_reconcile_layers, &seam_metrics)?;
-            if encode_tx.send(encoded).is_err() { break; }
+            let encoded = encode_tile_batch(
+                &batch,
+                compression_level,
+                tile_format,
+                tile_compression,
+                &config.seam_reconcile_layers,
+                &seam_metrics,
+            )?;
+            if encode_tx.send(encoded).is_err() {
+                break;
+            }
         }
         drop(encode_tx);
 
         let (features_read, max_batch_bytes) = reader.join().expect("reader panicked")?;
-        let (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, size_diag) = writer.join().expect("writer panicked");
-        Ok((features_read, tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes, size_diag))
+        let (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, size_diag) =
+            writer.join().expect("writer panicked");
+        Ok((
+            features_read,
+            tiles_written,
+            pmtiles,
+            tiles_per_zoom,
+            unique_per_zoom,
+            bytes_per_zoom,
+            max_batch_bytes,
+            size_diag,
+        ))
     });
 
-    let (features_read, tiles_written, mut pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, max_batch_bytes, size_diag) = scope_result?;
+    let (
+        features_read,
+        tiles_written,
+        mut pmtiles,
+        tiles_per_zoom,
+        unique_per_zoom,
+        bytes_per_zoom,
+        max_batch_bytes,
+        size_diag,
+    ) = scope_result?;
     if let Some(filename) = config.pbf_path.file_name().and_then(|s| s.to_str()) {
         pmtiles.set_source_pbf_filename(filename.to_string());
     } else {
@@ -200,7 +254,10 @@ pub(super) fn phase_assemble(
     // Shared-edge reconciliation metrics.
     let seam_touched = seam_metrics.tiles_touched.load(Ordering::Relaxed);
     if seam_touched > 0 {
-        let seam_layer_descs: Vec<String> = config.seam_reconcile_layers.iter().enumerate()
+        let seam_layer_descs: Vec<String> = config
+            .seam_reconcile_layers
+            .iter()
+            .enumerate()
             .filter(|(_, max_z)| **max_z > 0)
             .map(|(i, max_z)| format!("{}:z{}", shortbread::Layer::ALL[i].name(), max_z))
             .collect();
@@ -209,7 +266,8 @@ pub(super) fn phase_assemble(
         let seam_reconciled = seam_metrics.chains_reconciled.load(Ordering::Relaxed);
         let seam_skipped = seam_metrics.chains_skipped.load(Ordering::Relaxed);
         let seam_us = seam_metrics.reconcile_us.load(Ordering::Relaxed);
-        eprintln!("  Seam reconciliation ({}): {} tiles, {} rings, {} chains ({} reconciled, {} skipped), {:.1} ms",
+        eprintln!(
+            "  Seam reconciliation ({}): {} tiles, {} rings, {} chains ({} reconciled, {} skipped), {:.1} ms",
             seam_layer_descs.join("+"),
             seam_touched,
             seam_rings,
@@ -227,7 +285,14 @@ pub(super) fn phase_assemble(
         eprintln!("seam_layers={}", seam_layer_descs.join("+"));
     }
 
-    Ok((features_read, tiles_written, unique_tiles, max_batch_bytes, dedup_stats, size_diag))
+    Ok((
+        features_read,
+        tiles_written,
+        unique_tiles,
+        max_batch_bytes,
+        dedup_stats,
+        size_diag,
+    ))
 }
 
 /// Per-worker assembly state, persisted across batches via `thread_local!`.
@@ -317,7 +382,10 @@ pub(super) fn reconcile_boundary_seams(
             continue;
         }
         let decoded = geometry::decode_mvt_polygon(&feat.geometry);
-        let valid_count = decoded.iter().filter(|r| r.len() >= 4 && r.first() == r.last()).count();
+        let valid_count = decoded
+            .iter()
+            .filter(|r| r.len() >= 4 && r.first() == r.last())
+            .count();
         if valid_count == 0 {
             continue;
         }
@@ -334,12 +402,16 @@ pub(super) fn reconcile_boundary_seams(
 
     if seam_rings.is_empty() {
         let elapsed_us = start.elapsed().as_micros() as u64;
-        metrics.reconcile_us.fetch_add(elapsed_us, Ordering::Relaxed);
+        metrics
+            .reconcile_us
+            .fetch_add(elapsed_us, Ordering::Relaxed);
         return;
     }
 
     metrics.tiles_touched.fetch_add(1, Ordering::Relaxed);
-    metrics.rings_decoded.fetch_add(seam_rings.len() as u64, Ordering::Relaxed);
+    metrics
+        .rings_decoded
+        .fetch_add(seam_rings.len() as u64, Ordering::Relaxed);
 
     // Detect shared chains (needs >= 2 rings to find any).
     let chains = if seam_rings.len() >= 2 {
@@ -347,13 +419,19 @@ pub(super) fn reconcile_boundary_seams(
     } else {
         Vec::new()
     };
-    metrics.chains_detected.fetch_add(chains.len() as u64, Ordering::Relaxed);
+    metrics
+        .chains_detected
+        .fetch_add(chains.len() as u64, Ordering::Relaxed);
 
     // Canonicalize: copy first incident's vertices to second incident's ring.
     if !chains.is_empty() {
         let canon_result = geometry::canonicalize_shared_chains(seam_rings, &chains);
-        metrics.chains_reconciled.fetch_add(canon_result.reconciled as u64, Ordering::Relaxed);
-        metrics.chains_skipped.fetch_add(canon_result.skipped as u64, Ordering::Relaxed);
+        metrics
+            .chains_reconciled
+            .fetch_add(canon_result.reconciled as u64, Ordering::Relaxed);
+        metrics
+            .chains_skipped
+            .fetch_add(canon_result.skipped as u64, Ordering::Relaxed);
     }
 
     // Tile-coordinate DP on all rings, pinning shared-chain vertices.
@@ -361,7 +439,8 @@ pub(super) fn reconcile_boundary_seams(
     // and need tile-coord simplification regardless.
     for (ring_idx, ring) in seam_rings.iter_mut().enumerate() {
         let pinned = geometry::build_pinned_mask(ring.len(), ring_idx, &chains);
-        let simplified = geometry::simplify_ring_tile_coords(ring, &pinned, geometry::TILE_SIMPLIFY_TOLERANCE);
+        let simplified =
+            geometry::simplify_ring_tile_coords(ring, &pinned, geometry::TILE_SIMPLIFY_TOLERANCE);
         *ring = simplified;
     }
 
@@ -377,7 +456,9 @@ pub(super) fn reconcile_boundary_seams(
     }
 
     let elapsed_us = start.elapsed().as_micros() as u64;
-    metrics.reconcile_us.fetch_add(elapsed_us, Ordering::Relaxed);
+    metrics
+        .reconcile_us
+        .fetch_add(elapsed_us, Ordering::Relaxed);
 }
 
 /// Encode + compress a batch of tiles in parallel using rayon.
@@ -392,7 +473,13 @@ pub(super) fn encode_tile_batch(
     seam_metrics: &SeamMetrics,
 ) -> Result<Vec<EncodedTile>, PipelineError> {
     match tile_format {
-        TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(batch, compression_level, tile_compression, seam_reconcile_layers, seam_metrics)),
+        TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(
+            batch,
+            compression_level,
+            tile_compression,
+            seam_reconcile_layers,
+            seam_metrics,
+        )),
         TilePayloadFormat::Mlt => encode_tile_batch_mlt(batch),
     }
 }
@@ -400,114 +487,136 @@ pub(super) fn encode_tile_batch(
 /// Encode + compress a batch of MVT tiles in parallel using rayon.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_wrap)]
-pub(super) fn encode_tile_batch_mvt(batch: &[PendingTile], compression_level: u32, tile_compression: TileCompression, seam_reconcile_layers: &[u8], seam_metrics: &SeamMetrics) -> Vec<EncodedTile> {
+pub(super) fn encode_tile_batch_mvt(
+    batch: &[PendingTile],
+    compression_level: u32,
+    tile_compression: TileCompression,
+    seam_reconcile_layers: &[u8],
+    seam_metrics: &SeamMetrics,
+) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 
     batch
         .par_iter()
         .map(|tile| {
             ASSEMBLY_SCRATCH.with(|cell| {
-            let s = &mut *cell.borrow_mut();
+                let s = &mut *cell.borrow_mut();
 
-            // Reset persisted layers from previous tile (reclaim features + clear interning).
-            for slot in &mut s.layers {
-                if let Some(lb) = slot.as_mut() {
-                    lb.prepare_for_reuse(&mut s.geom_pool, &mut s.tags_pool);
-                }
-            }
-
-            for &(layer_idx, ref data) in &tile.features {
-                if (layer_idx as usize) < s.layers.len() {
-                    add_feature_to_layer(
-                        get_or_create_layer(&mut s.layers, layer_idx as usize),
-                        data,
-                        &mut s.geom_pool,
-                        &mut s.tags_pool,
-                    );
-                }
-            }
-
-            let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-
-            // Shared-edge reconciliation for polygon layers at low zoom.
-            // Must run BEFORE merge_same_attr_geometries (which destroys per-ring identity).
-            {
-                for (li, &max_z) in seam_reconcile_layers.iter().enumerate() {
-                    if max_z > 0 && z <= max_z
-                        && let Some(lb) = s.layers[li].as_mut()
-                    {
-                        reconcile_boundary_seams(lb, &mut s.seam_rings, &mut s.seam_provenance, &mut s.seam_encode_buf, seam_metrics);
+                // Reset persisted layers from previous tile (reclaim features + clear interning).
+                for slot in &mut s.layers {
+                    if let Some(lb) = slot.as_mut() {
+                        lb.prepare_for_reuse(&mut s.geom_pool, &mut s.tags_pool);
                     }
                 }
-            }
 
-            for (li, layer) in s.layers.iter_mut().enumerate() {
-                if li == shortbread::Layer::Ocean as usize { continue; }
-                if let Some(lb) = layer.as_mut() {
-                    lb.merge_same_attr_geometries(&mut s.merge_scratch, &mut s.geom_pool, &mut s.tags_pool);
+                for &(layer_idx, ref data) in &tile.features {
+                    if (layer_idx as usize) < s.layers.len() {
+                        add_feature_to_layer(
+                            get_or_create_layer(&mut s.layers, layer_idx as usize),
+                            data,
+                            &mut s.geom_pool,
+                            &mut s.tags_pool,
+                        );
+                    }
                 }
-            }
 
-            if z < 14 {
-                for layer in &mut s.layers {
+                let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+
+                // Shared-edge reconciliation for polygon layers at low zoom.
+                // Must run BEFORE merge_same_attr_geometries (which destroys per-ring identity).
+                {
+                    for (li, &max_z) in seam_reconcile_layers.iter().enumerate() {
+                        if max_z > 0
+                            && z <= max_z
+                            && let Some(lb) = s.layers[li].as_mut()
+                        {
+                            reconcile_boundary_seams(
+                                lb,
+                                &mut s.seam_rings,
+                                &mut s.seam_provenance,
+                                &mut s.seam_encode_buf,
+                                seam_metrics,
+                            );
+                        }
+                    }
+                }
+
+                for (li, layer) in s.layers.iter_mut().enumerate() {
+                    if li == shortbread::Layer::Ocean as usize {
+                        continue;
+                    }
                     if let Some(lb) = layer.as_mut() {
-                        lb.merge_connected_lines(&mut s.line_merge_scratch);
+                        lb.merge_same_attr_geometries(
+                            &mut s.merge_scratch,
+                            &mut s.geom_pool,
+                            &mut s.tags_pool,
+                        );
                     }
                 }
-            }
 
-            // Max 26 elements (one per Shortbread layer) - with_capacity not needed.
-            let non_empty: Vec<&LayerBuilder> = s.layers.iter()
-                .filter_map(|l| l.as_ref())
-                .filter(|l| !l.is_empty())
-                .collect();
-            if non_empty.is_empty() {
-                return None;
-            }
-
-            mvt::encode_tile_into(&mut s.mvt_buf, &non_empty, &mut s.encode_scratch);
-
-            if s.mvt_buf.is_empty() {
-                return None;
-            }
-
-            // Per-zoom compression: boost low zooms, speed up high zooms.
-            #[allow(clippy::cast_possible_truncation)]
-            let level = match z {
-                0..=8 => compression_level.clamp(9, 10),
-                13..=14 => compression_level.min(3),
-                _ => compression_level,
-            } as usize;
-
-            let mut compress_buf = std::mem::take(&mut s.gz_buf);
-            compress_buf.clear();
-
-            let compressed = match tile_compression {
-                TileCompression::Gzip => {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let lvl = *s.compression_levels[level].get_or_insert_with(|| {
-                        flate2::Compression::new(level as u32)
-                    });
-                    let mut encoder = flate2::write::GzEncoder::new(compress_buf, lvl);
-                    std::io::Write::write_all(&mut encoder, &s.mvt_buf)
-                        .expect("gzip compress failed");
-                    encoder.finish().expect("gzip finish failed")
+                if z < 14 {
+                    for layer in &mut s.layers {
+                        if let Some(lb) = layer.as_mut() {
+                            lb.merge_connected_lines(&mut s.line_merge_scratch);
+                        }
+                    }
                 }
-                TileCompression::Brotli => {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let quality = level as u32;
-                    let mut encoder = brotli::CompressorWriter::new(
-                        &mut compress_buf, 4096, quality, 22,
-                    );
-                    std::io::Write::write_all(&mut encoder, &s.mvt_buf)
-                        .expect("brotli compress failed");
-                    drop(encoder);
-                    compress_buf
-                }
-            };
-            s.gz_buf = Vec::with_capacity(compressed.len());
 
-            Some(EncodedTile { tile_id: tile.tile_id, compressed })
+                // Max 26 elements (one per Shortbread layer) - with_capacity not needed.
+                let non_empty: Vec<&LayerBuilder> = s
+                    .layers
+                    .iter()
+                    .filter_map(|l| l.as_ref())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                if non_empty.is_empty() {
+                    return None;
+                }
+
+                mvt::encode_tile_into(&mut s.mvt_buf, &non_empty, &mut s.encode_scratch);
+
+                if s.mvt_buf.is_empty() {
+                    return None;
+                }
+
+                // Per-zoom compression: boost low zooms, speed up high zooms.
+                #[allow(clippy::cast_possible_truncation)]
+                let level = match z {
+                    0..=8 => compression_level.clamp(9, 10),
+                    13..=14 => compression_level.min(3),
+                    _ => compression_level,
+                } as usize;
+
+                let mut compress_buf = std::mem::take(&mut s.gz_buf);
+                compress_buf.clear();
+
+                let compressed = match tile_compression {
+                    TileCompression::Gzip => {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let lvl = *s.compression_levels[level]
+                            .get_or_insert_with(|| flate2::Compression::new(level as u32));
+                        let mut encoder = flate2::write::GzEncoder::new(compress_buf, lvl);
+                        std::io::Write::write_all(&mut encoder, &s.mvt_buf)
+                            .expect("gzip compress failed");
+                        encoder.finish().expect("gzip finish failed")
+                    }
+                    TileCompression::Brotli => {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let quality = level as u32;
+                        let mut encoder =
+                            brotli::CompressorWriter::new(&mut compress_buf, 4096, quality, 22);
+                        std::io::Write::write_all(&mut encoder, &s.mvt_buf)
+                            .expect("brotli compress failed");
+                        drop(encoder);
+                        compress_buf
+                    }
+                };
+                s.gz_buf = Vec::with_capacity(compressed.len());
+
+                Some(EncodedTile {
+                    tile_id: tile.tile_id,
+                    compressed,
+                })
             })
         })
         .flatten()
@@ -553,7 +662,9 @@ pub(super) fn prepare_non_empty_layers<'a>(
 
 /// Encode an MLT batch (currently scaffolded, returns not-implemented error with tile context).
 #[hotpath::measure]
-pub(super) fn encode_tile_batch_mlt(batch: &[PendingTile]) -> Result<Vec<EncodedTile>, PipelineError> {
+pub(super) fn encode_tile_batch_mlt(
+    batch: &[PendingTile],
+) -> Result<Vec<EncodedTile>, PipelineError> {
     use rayon::prelude::*;
 
     let results: Vec<Result<Option<EncodedTile>, PipelineError>> = batch

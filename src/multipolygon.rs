@@ -8,7 +8,7 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::geometry::{self, signed_area, Point};
+use crate::geometry::{self, Point, signed_area};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -152,10 +152,8 @@ fn pair_rings(
         return Vec::new();
     }
 
-    let mut polygons: Vec<(Vec<Point>, Vec<Vec<Point>>)> = outer_rings
-        .into_iter()
-        .map(|r| (r, Vec::new()))
-        .collect();
+    let mut polygons: Vec<(Vec<Point>, Vec<Vec<Point>>)> =
+        outer_rings.into_iter().map(|r| (r, Vec::new())).collect();
 
     for inner in inner_rings {
         if inner.is_empty() {
@@ -207,6 +205,7 @@ fn quantize(p: &Point) -> (i64, i64) {
 /// endpoint map. This can leave orphaned chains when `endpoint_map.insert()`
 /// overwrites entries for other chains. A second pass rebuilds the map from
 /// surviving chains and attempts pairwise joins until no more progress is made.
+#[allow(clippy::too_many_lines)]
 fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
     let mut chains: Vec<Vec<Point>> = Vec::with_capacity(ways.len());
     // Maps an endpoint (quantized) to the index in `chains` that has that endpoint.
@@ -252,9 +251,13 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
 
             // Look for another chain matching our back endpoint.
             if let Some(&j) = endpoint_map.get(&back)
-                && j != i && chains[j].len() >= 2
+                && j != i
+                && chains[j].len() >= 2
             {
-                let (j_front, j_back) = (quantize(&chains[j][0]), quantize(&chains[j][chains[j].len() - 1]));
+                let (j_front, j_back) = (
+                    quantize(&chains[j][0]),
+                    quantize(&chains[j][chains[j].len() - 1]),
+                );
                 let taken_j = std::mem::take(&mut chains[j]);
                 if back == j_front {
                     chains[i].extend_from_slice(&taken_j[1..]);
@@ -279,16 +282,21 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
 
             // Look for another chain matching our front endpoint.
             if let Some(&j) = endpoint_map.get(&front)
-                && j != i && chains[j].len() >= 2
+                && j != i
+                && chains[j].len() >= 2
             {
-                let (j_front, j_back) = (quantize(&chains[j][0]), quantize(&chains[j][chains[j].len() - 1]));
+                let (j_front, j_back) = (
+                    quantize(&chains[j][0]),
+                    quantize(&chains[j][chains[j].len() - 1]),
+                );
                 let taken_j = std::mem::take(&mut chains[j]);
                 if front == j_back {
                     let mut merged = taken_j;
                     merged.extend_from_slice(&chains[i][1..]);
                     chains[i] = merged;
                 } else if front == j_front {
-                    let mut merged = Vec::with_capacity(taken_j.len() + chains[i].len().saturating_sub(1));
+                    let mut merged =
+                        Vec::with_capacity(taken_j.len() + chains[i].len().saturating_sub(1));
                     merged.extend(taken_j.iter().rev().copied());
                     merged.extend_from_slice(&chains[i][1..]);
                     chains[i] = merged;
@@ -316,10 +324,7 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
     }
 
     // Collect remaining unclosed chains (skip degenerate ones).
-    let unclosed: Vec<Vec<Point>> = chains
-        .into_iter()
-        .filter(|c| c.len() >= 2)
-        .collect();
+    let unclosed: Vec<Vec<Point>> = chains.into_iter().filter(|c| c.len() >= 2).collect();
 
     (closed, unclosed)
 }
@@ -338,7 +343,8 @@ fn append_way_to_chains(
 
     // Try to find a chain endpoint matching our front.
     if let Some(&idx) = endpoint_map.get(&way_front)
-        && idx < chains.len() && !chains[idx].is_empty()
+        && idx < chains.len()
+        && !chains[idx].is_empty()
     {
         attach_way(idx, way, chains, endpoint_map, closed);
         return;
@@ -346,7 +352,8 @@ fn append_way_to_chains(
 
     // Try to find a chain endpoint matching our back.
     if let Some(&idx) = endpoint_map.get(&way_back)
-        && idx < chains.len() && !chains[idx].is_empty()
+        && idx < chains.len()
+        && !chains[idx].is_empty()
     {
         let mut reversed: Vec<Point> = way.to_vec();
         reversed.reverse();
@@ -390,7 +397,8 @@ fn attach_way(
     } else if chain_front == way_front {
         // Prepend reversed way to front of chain.
         endpoint_map.remove(&chain_front);
-        let mut new_chain: Vec<Point> = Vec::with_capacity(way.len() + chains[idx].len().saturating_sub(1));
+        let mut new_chain: Vec<Point> =
+            Vec::with_capacity(way.len() + chains[idx].len().saturating_sub(1));
         new_chain.extend(way.iter().rev().copied());
         new_chain.extend_from_slice(&chains[idx][1..]);
         chains[idx] = new_chain;
@@ -594,21 +602,27 @@ mod tests {
     fn test_outer_with_inner_hole() {
         // Outer: large square
         let members = vec![
-            make_member("outer", vec![
-                pt(0.0, 0.0),
-                pt(10.0, 0.0),
-                pt(10.0, 10.0),
-                pt(0.0, 10.0),
-                pt(0.0, 0.0),
-            ]),
+            make_member(
+                "outer",
+                vec![
+                    pt(0.0, 0.0),
+                    pt(10.0, 0.0),
+                    pt(10.0, 10.0),
+                    pt(0.0, 10.0),
+                    pt(0.0, 0.0),
+                ],
+            ),
             // Inner: small square inside the outer
-            make_member("inner", vec![
-                pt(2.0, 2.0),
-                pt(8.0, 2.0),
-                pt(8.0, 8.0),
-                pt(2.0, 8.0),
-                pt(2.0, 2.0),
-            ]),
+            make_member(
+                "inner",
+                vec![
+                    pt(2.0, 2.0),
+                    pt(8.0, 2.0),
+                    pt(8.0, 8.0),
+                    pt(2.0, 8.0),
+                    pt(2.0, 2.0),
+                ],
+            ),
         ];
 
         let mp = assemble(&members);
@@ -630,20 +644,26 @@ mod tests {
     #[test]
     fn test_two_disjoint_outers() {
         let members = vec![
-            make_member("outer", vec![
-                pt(0.0, 0.0),
-                pt(1.0, 0.0),
-                pt(1.0, 1.0),
-                pt(0.0, 1.0),
-                pt(0.0, 0.0),
-            ]),
-            make_member("outer", vec![
-                pt(5.0, 5.0),
-                pt(6.0, 5.0),
-                pt(6.0, 6.0),
-                pt(5.0, 6.0),
-                pt(5.0, 5.0),
-            ]),
+            make_member(
+                "outer",
+                vec![
+                    pt(0.0, 0.0),
+                    pt(1.0, 0.0),
+                    pt(1.0, 1.0),
+                    pt(0.0, 1.0),
+                    pt(0.0, 0.0),
+                ],
+            ),
+            make_member(
+                "outer",
+                vec![
+                    pt(5.0, 5.0),
+                    pt(6.0, 5.0),
+                    pt(6.0, 6.0),
+                    pt(5.0, 6.0),
+                    pt(5.0, 5.0),
+                ],
+            ),
         ];
 
         let mp = assemble(&members);
@@ -664,22 +684,28 @@ mod tests {
         // Large CCW ring (positive signed_area -> outer)
         // In standard math: (0,0)->(10,0)->(10,10)->(0,10) is CCW -> positive area
         let members = vec![
-            make_member("", vec![
-                pt(0.0, 0.0),
-                pt(10.0, 0.0),
-                pt(10.0, 10.0),
-                pt(0.0, 10.0),
-                pt(0.0, 0.0),
-            ]),
+            make_member(
+                "",
+                vec![
+                    pt(0.0, 0.0),
+                    pt(10.0, 0.0),
+                    pt(10.0, 10.0),
+                    pt(0.0, 10.0),
+                    pt(0.0, 0.0),
+                ],
+            ),
             // Small CW ring (negative signed_area -> inner)
             // (3,3)->(3,7)->(7,7)->(7,3) is CW -> negative area
-            make_member("", vec![
-                pt(3.0, 3.0),
-                pt(3.0, 7.0),
-                pt(7.0, 7.0),
-                pt(7.0, 3.0),
-                pt(3.0, 3.0),
-            ]),
+            make_member(
+                "",
+                vec![
+                    pt(3.0, 3.0),
+                    pt(3.0, 7.0),
+                    pt(7.0, 7.0),
+                    pt(7.0, 3.0),
+                    pt(3.0, 3.0),
+                ],
+            ),
         ];
 
         let mp = assemble(&members);
@@ -736,15 +762,16 @@ mod tests {
     #[test]
     fn test_outer_ring_orientation_enforced() {
         // CW ring in math coords (negative signed_area) -- should be flipped.
-        let members = vec![
-            make_member("outer", vec![
+        let members = vec![make_member(
+            "outer",
+            vec![
                 pt(0.0, 1.0),
                 pt(1.0, 1.0),
                 pt(1.0, 0.0),
                 pt(0.0, 0.0),
                 pt(0.0, 1.0),
-            ]),
-        ];
+            ],
+        )];
 
         let mp = assemble(&members);
         assert_eq!(mp.polygons.len(), 1);
@@ -760,20 +787,26 @@ mod tests {
         // Outer: CCW (positive area) -- will stay positive.
         // Inner: also CCW (positive area) -- should be flipped to negative.
         let members = vec![
-            make_member("outer", vec![
-                pt(0.0, 0.0),
-                pt(10.0, 0.0),
-                pt(10.0, 10.0),
-                pt(0.0, 10.0),
-                pt(0.0, 0.0),
-            ]),
-            make_member("inner", vec![
-                pt(2.0, 2.0),
-                pt(8.0, 2.0),
-                pt(8.0, 8.0),
-                pt(2.0, 8.0),
-                pt(2.0, 2.0),
-            ]),
+            make_member(
+                "outer",
+                vec![
+                    pt(0.0, 0.0),
+                    pt(10.0, 0.0),
+                    pt(10.0, 10.0),
+                    pt(0.0, 10.0),
+                    pt(0.0, 0.0),
+                ],
+            ),
+            make_member(
+                "inner",
+                vec![
+                    pt(2.0, 2.0),
+                    pt(8.0, 2.0),
+                    pt(8.0, 8.0),
+                    pt(2.0, 8.0),
+                    pt(2.0, 2.0),
+                ],
+            ),
         ];
 
         let mp = assemble(&members);
@@ -807,7 +840,11 @@ mod tests {
         ];
 
         let mp = assemble(&members);
-        assert_eq!(mp.polygons.len(), 1, "out-of-order ways should form one polygon");
+        assert_eq!(
+            mp.polygons.len(),
+            1,
+            "out-of-order ways should form one polygon"
+        );
         assert_eq!(mp.polygons[0].0.len(), 4, "square should have 4 vertices");
     }
 

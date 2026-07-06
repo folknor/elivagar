@@ -15,6 +15,7 @@ pub fn inspect(path: &Path) -> io::Result<()> {
     inspect_to_writer(path, &mut out)
 }
 
+#[allow(clippy::too_many_lines)]
 fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
     let mut reader = PmtilesReader::open(path)?;
     let file_size = reader.file_size()?;
@@ -71,13 +72,17 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
     let metadata_tile_compression = metadata_json
         .as_deref()
         .and_then(|j| extract_json_string(j, "\"tile_compression\":\""));
-    let (payload_format_display, payload_compression_display, payload_format_src, payload_compress_src) =
-        payload_contract_display(
-            reader.tile_type(),
-            tile_compression,
-            metadata_payload_format.as_deref(),
-            metadata_tile_compression.as_deref(),
-        );
+    let (
+        payload_format_display,
+        payload_compression_display,
+        payload_format_src,
+        payload_compress_src,
+    ) = payload_contract_display(
+        reader.tile_type(),
+        tile_compression,
+        metadata_payload_format.as_deref(),
+        metadata_tile_compression.as_deref(),
+    );
 
     writeln!(out, "PMTiles v{version}  {}", path.display())?;
     writeln!(out, "  File size:  {}", format_bytes(file_size))?;
@@ -85,8 +90,14 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
     writeln!(out, "  Tile type:          {tile_type}")?;
     writeln!(out, "  Tile compression:   {tile_compression}")?;
     writeln!(out, "  Internal compress:  {internal_compression}")?;
-    writeln!(out, "  Payload format:     {payload_format_display} ({payload_format_src})")?;
-    writeln!(out, "  Payload compress:   {payload_compression_display} ({payload_compress_src})")?;
+    writeln!(
+        out,
+        "  Payload format:     {payload_format_display} ({payload_format_src})"
+    )?;
+    writeln!(
+        out,
+        "  Payload compress:   {payload_compression_display} ({payload_compress_src})"
+    )?;
     writeln!(out, "  Clustered:          {clustered}")?;
     writeln!(out)?;
     writeln!(out, "  Zoom:    {min_zoom}..{max_zoom}")?;
@@ -94,11 +105,17 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
         out,
         "  Bounds:  [{min_lon:.7}, {min_lat:.7}] to [{max_lon:.7}, {max_lat:.7}]"
     )?;
-    writeln!(out, "  Center:  [{center_lon:.7}, {center_lat:.7}] z{center_zoom}")?;
+    writeln!(
+        out,
+        "  Center:  [{center_lon:.7}, {center_lat:.7}] z{center_zoom}"
+    )?;
     writeln!(out)?;
     writeln!(out, "  Tiles addressed:  {num_addressed:>14}")?;
     writeln!(out, "  Unique tiles:     {unique_tiles:>14}")?;
-    writeln!(out, "  Deduplicated:     {dedup_count:>14} ({dedup_pct:.1}%)")?;
+    writeln!(
+        out,
+        "  Deduplicated:     {dedup_count:>14} ({dedup_pct:.1}%)"
+    )?;
     writeln!(out, "  Directory entries: {num_entries:>13}")?;
     print_section_layout(
         out,
@@ -339,10 +356,10 @@ fn tile_type_name(val: u8) -> &'static str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{inspect, inspect_to_writer};
     use super::{extract_json_string, infer_payload_format_from_header, payload_contract_display};
+    use super::{inspect, inspect_to_writer};
     use crate::pmtiles_reader::PmtilesReader;
-    use crate::pmtiles_writer::{tile_id_to_zxy, xy_to_tile_id, PmtilesConfig, PmtilesWriter};
+    use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id};
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom, Write};
     use std::path::Path;
@@ -531,10 +548,7 @@ mod tests {
             extract_json_string(json, "\"tile_compression\":\"").as_deref(),
             Some("none")
         );
-        assert_eq!(
-            extract_json_string(json, "\"missing\":\"").as_deref(),
-            None
-        );
+        assert_eq!(extract_json_string(json, "\"missing\":\"").as_deref(), None);
     }
 
     #[test]
@@ -556,8 +570,7 @@ mod tests {
 
     #[test]
     fn payload_contract_display_falls_back_to_header_for_legacy() {
-        let (fmt, comp, fmt_src, comp_src) =
-            payload_contract_display(1, "gzip", None, None);
+        let (fmt, comp, fmt_src, comp_src) = payload_contract_display(1, "gzip", None, None);
         assert_eq!(fmt, "mvt");
         assert_eq!(comp, "gzip");
         assert_eq!(fmt_src, "header");

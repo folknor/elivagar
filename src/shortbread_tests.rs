@@ -68,7 +68,10 @@ fn test_building_emits_height_level_attrs() {
         .find(|(k, _, _)| *k == "min_height")
         .expect("should have min_height");
     if let AttrValue::Float(v) = min_height.1 {
-        assert!((v - 3.048).abs() < 1e-9, "expected 10 ft => 3.048 m, got {v}");
+        assert!(
+            (v - 3.048).abs() < 1e-9,
+            "expected 10 ft => 3.048 m, got {v}"
+        );
     } else {
         panic!("min_height should be float");
     }
@@ -94,7 +97,10 @@ fn test_building_ignores_unparseable_height_level_attrs() {
         .iter()
         .find(|m| m.layer == Layer::Buildings)
         .expect("should match Buildings");
-    assert!(bldg.attrs.is_empty(), "invalid numeric tags should be ignored");
+    assert!(
+        bldg.attrs.is_empty(),
+        "invalid numeric tags should be ignored"
+    );
 }
 
 #[test]
@@ -386,10 +392,7 @@ fn test_pois_ev_charging_station() {
         .iter()
         .find(|(k, _, _)| *k == "amenity")
         .expect("should have amenity");
-    assert_eq!(
-        amenity.1,
-        AttrValue::Str(Cow::Borrowed("charging_station"))
-    );
+    assert_eq!(amenity.1, AttrValue::Str(Cow::Borrowed("charging_station")));
     assert!(
         matches.iter().all(|m| m.layer != Layer::Addresses),
         "recognized POI amenity should suppress address output",
@@ -411,7 +414,9 @@ fn test_pois_ev_charging_station_closed_way_and_multipolygon() {
         .expect("closed-way charging station should match POI centroid");
     assert_eq!(closed_poi.geom_expect, GeomExpect::PolygonPointOnSurface);
     assert!(
-        closed_way_matches.iter().all(|m| m.layer != Layer::Addresses),
+        closed_way_matches
+            .iter()
+            .all(|m| m.layer != Layer::Addresses),
         "closed-way charging station should suppress address output",
     );
 
@@ -449,10 +454,7 @@ fn test_pois_ev_charging_station_rich_tag_matrix_is_stable() {
         .iter()
         .find(|(k, _, _)| *k == "amenity")
         .expect("should have amenity");
-    assert_eq!(
-        amenity.1,
-        AttrValue::Str(Cow::Borrowed("charging_station"))
-    );
+    assert_eq!(amenity.1, AttrValue::Str(Cow::Borrowed("charging_station")));
     assert!(
         poi.attrs.iter().any(|(k, _, _)| *k == "name"),
         "name should be preserved on POI output"
@@ -477,11 +479,7 @@ fn test_pois_ev_charging_station_rich_tag_matrix_is_stable() {
 
 #[test]
 fn test_pois_peak_with_ele_meters() {
-    let tags = Tags(&[
-        ("natural", "peak"),
-        ("name", "Peak One"),
-        ("ele", "2469"),
-    ]);
+    let tags = Tags(&[("natural", "peak"), ("name", "Peak One"), ("ele", "2469")]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let poi = matches
         .iter()
@@ -503,10 +501,7 @@ fn test_pois_peak_with_ele_meters() {
 
 #[test]
 fn test_pois_peak_with_ele_feet_conversion() {
-    let tags = Tags(&[
-        ("natural", "peak"),
-        ("ele", "3281 ft"),
-    ]);
+    let tags = Tags(&[("natural", "peak"), ("ele", "3281 ft")]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let poi = matches
         .iter()
@@ -551,10 +546,7 @@ fn test_pois_elevation_parser_format_coverage() {
 
 #[test]
 fn test_pois_volcano_and_mountain_pass_branches() {
-    let volcano_tags = Tags(&[
-        ("natural", "volcano"),
-        ("ele", "2,500"),
-    ]);
+    let volcano_tags = Tags(&[("natural", "volcano"), ("ele", "2,500")]);
     let volcano_matches = match_element(&volcano_tags, OsmGeomType::Node);
     let volcano = volcano_matches
         .iter()
@@ -573,10 +565,7 @@ fn test_pois_volcano_and_mountain_pass_branches() {
         .expect("volcano should have ele attr");
     assert_eq!(ele.1, AttrValue::Int(2500));
 
-    let pass_tags = Tags(&[
-        ("mountain_pass", "yes"),
-        ("ele", "1500"),
-    ]);
+    let pass_tags = Tags(&[("mountain_pass", "yes"), ("ele", "1500")]);
     let pass_matches = match_element(&pass_tags, OsmGeomType::Node);
     let pass = pass_matches
         .iter()
@@ -684,11 +673,7 @@ fn test_tags_helper() {
 
 #[test]
 fn test_state_capital() {
-    let tags = Tags(&[
-        ("place", "city"),
-        ("name", "Bergen"),
-        ("capital", "4"),
-    ]);
+    let tags = Tags(&[("place", "city"), ("name", "Bergen"), ("capital", "4")]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let place = matches
         .iter()
@@ -928,8 +913,7 @@ fn attr_values_match(key: &str, expected: &AttrValue, actual: &AttrValue) -> boo
 fn shortbread_spec_yaml() {
     let yaml = std::fs::read_to_string("tests/fixtures/shortbread.spec.yml")
         .expect("failed to read shortbread.spec.yml");
-    let doc: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).expect("failed to parse YAML");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("failed to parse YAML");
     let cases = doc["examples"]
         .as_sequence()
         .expect("expected 'examples' array");
@@ -998,8 +982,7 @@ fn shortbread_spec_yaml() {
             if matches.is_empty() {
                 passed += 1;
             } else {
-                let layer_names: Vec<&str> =
-                    matches.iter().map(|m| m.layer.name()).collect();
+                let layer_names: Vec<&str> = matches.iter().map(|m| m.layer.name()).collect();
                 failures.push(format!(
                     "[{name}] expected no matches, got: {layer_names:?}"
                 ));
@@ -1009,9 +992,7 @@ fn shortbread_spec_yaml() {
         }
 
         // Skip tests that only have at_zoom (no layer field)
-        if expected_outputs.len() == 1
-            && expected_outputs[0].get("layer").is_none()
-        {
+        if expected_outputs.len() == 1 && expected_outputs[0].get("layer").is_none() {
             skipped += 1;
             continue;
         }
@@ -1026,8 +1007,7 @@ fn shortbread_spec_yaml() {
             let found = matches.iter().find(|m| m.layer.name() == exp_layer);
 
             let Some(m) = found else {
-                let layer_names: Vec<&str> =
-                    matches.iter().map(|m| m.layer.name()).collect();
+                let layer_names: Vec<&str> = matches.iter().map(|m| m.layer.name()).collect();
                 failures.push(format!(
                     "[{name}] expected layer '{exp_layer}', got: {layer_names:?}"
                 ));
@@ -1106,12 +1086,13 @@ fn shortbread_spec_yaml() {
                 // zoom-dependent attribute filtering yet.
                 let has_at_zoom = exp.get("at_zoom").is_some();
                 if !has_at_zoom
-                    && exp.get("allow_extra_tags").and_then(serde_yaml::Value::as_bool)
+                    && exp
+                        .get("allow_extra_tags")
+                        .and_then(serde_yaml::Value::as_bool)
                         == Some(false)
                 {
                     for (ak, _, _) in &m.attrs {
-                        let in_expected =
-                            exp_tags.keys().any(|k| k.as_str() == Some(*ak));
+                        let in_expected = exp_tags.keys().any(|k| k.as_str() == Some(*ak));
                         if !in_expected {
                             failures.push(format!(
                                 "[{name}] layer '{exp_layer}' unexpected extra attr '{ak}'"
@@ -1173,9 +1154,7 @@ fn test_b1_all_wetland_subtypes() {
     for subtype in &["bog", "marsh", "swamp", "string_bog", "wet_meadow"] {
         let tags = Tags(&[("natural", "wetland"), ("wetland", subtype)]);
         let matches = match_element(&tags, OsmGeomType::ClosedWay);
-        let land = matches
-            .iter()
-            .find(|m| m.layer == Layer::Land);
+        let land = matches.iter().find(|m| m.layer == Layer::Land);
         assert!(
             land.is_some(),
             "natural=wetland + wetland={subtype} should match Land"
@@ -1236,10 +1215,7 @@ fn test_b2_maritime_yes() {
 #[test]
 fn test_b5_multipolygon_address() {
     // B5: multipolygon relations with addr:housenumber should produce address features.
-    let tags = Tags(&[
-        ("building", "yes"),
-        ("addr:housenumber", "7"),
-    ]);
+    let tags = Tags(&[("building", "yes"), ("addr:housenumber", "7")]);
     let matches = match_element(&tags, OsmGeomType::MultiPolygon);
     let addr = matches.iter().find(|m| m.layer == Layer::Addresses);
     assert!(
@@ -1251,10 +1227,7 @@ fn test_b5_multipolygon_address() {
 #[test]
 fn test_b6_unrecognized_amenity_gets_address() {
     // B6: amenity=parking_entrance is not a POI - address should not be suppressed.
-    let tags = Tags(&[
-        ("amenity", "parking_entrance"),
-        ("addr:housenumber", "5"),
-    ]);
+    let tags = Tags(&[("amenity", "parking_entrance"), ("addr:housenumber", "5")]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let addr = matches.iter().find(|m| m.layer == Layer::Addresses);
     assert!(
@@ -1268,25 +1241,16 @@ fn test_b6_unrecognized_amenity_gets_address() {
 #[test]
 fn test_b6_office_company_gets_address() {
     // B6: office=company is not a POI - address should not be suppressed.
-    let tags = Tags(&[
-        ("office", "company"),
-        ("addr:housenumber", "10"),
-    ]);
+    let tags = Tags(&[("office", "company"), ("addr:housenumber", "10")]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let addr = matches.iter().find(|m| m.layer == Layer::Addresses);
-    assert!(
-        addr.is_some(),
-        "office=company should not suppress address"
-    );
+    assert!(addr.is_some(), "office=company should not suppress address");
 }
 
 #[test]
 fn test_b6_recognized_amenity_still_excludes_address() {
     // Ensure recognized POI values still suppress addresses.
-    let tags = Tags(&[
-        ("amenity", "restaurant"),
-        ("addr:housenumber", "42"),
-    ]);
+    let tags = Tags(&[("amenity", "restaurant"), ("addr:housenumber", "42")]);
     let matches = match_element(&tags, OsmGeomType::Node);
     let addr = matches.iter().find(|m| m.layer == Layer::Addresses);
     assert!(addr.is_none(), "restaurant should suppress address");
@@ -1366,10 +1330,7 @@ fn test_land_line_cliff_matches_closed_way() {
 
 #[test]
 fn test_land_line_cliff_conflict_with_highway_keeps_both_matches() {
-    let tags = Tags(&[
-        ("natural", "cliff"),
-        ("highway", "primary"),
-    ]);
+    let tags = Tags(&[("natural", "cliff"), ("highway", "primary")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
 
     let cliff = matches
@@ -1397,10 +1358,7 @@ fn test_land_line_cliff_conflict_with_highway_keeps_both_matches() {
 
 #[test]
 fn test_land_line_cliff_conflict_with_waterway_keeps_both_matches() {
-    let tags = Tags(&[
-        ("natural", "cliff"),
-        ("waterway", "stream"),
-    ]);
+    let tags = Tags(&[("natural", "cliff"), ("waterway", "stream")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);
 
     let cliff = matches

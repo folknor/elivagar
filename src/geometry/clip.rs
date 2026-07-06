@@ -38,7 +38,12 @@ pub struct ClipRect {
 
 impl ClipRect {
     pub fn new(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Self {
-        Self { min_x, min_y, max_x, max_y }
+        Self {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        }
     }
 
     /// Create a clip rect for a tile with optional buffer (in fraction of tile size).
@@ -74,11 +79,8 @@ thread_local! {
 /// Uses a thread-local scratch buffer to avoid per-call allocation. The callback
 /// receives a borrowed slice of the segment points.
 #[hotpath::measure]
-pub fn for_each_clipped_segment<F>(
-    line: &[Point],
-    rect: &ClipRect,
-    mut callback: F,
-) where
+pub fn for_each_clipped_segment<F>(line: &[Point], rect: &ClipRect, mut callback: F)
+where
     F: FnMut(&[Point]),
 {
     if line.len() < 2 {
@@ -96,34 +98,42 @@ pub fn for_each_clipped_segment<F>(
         return;
     }
     CLIP_LINE_SCRATCH.with(|cell| {
-    let current = &mut *cell.borrow_mut();
-    current.clear();
+        let current = &mut *cell.borrow_mut();
+        current.clear();
 
-    for i in 0..(line.len() - 1) {
-        if let Some((a, b)) = clip_segment(line[i], line[i + 1], rect) {
-            let enters_from_outside = !points_near(&a, &line[i]);
-            let exits_to_outside = !points_near(&b, &line[i + 1]);
+        for i in 0..(line.len() - 1) {
+            if let Some((a, b)) = clip_segment(line[i], line[i + 1], rect) {
+                let enters_from_outside = !points_near(&a, &line[i]);
+                let exits_to_outside = !points_near(&b, &line[i + 1]);
 
-            if enters_from_outside {
-                if current.len() >= 2 { callback(current); }
+                if enters_from_outside {
+                    if current.len() >= 2 {
+                        callback(current);
+                    }
+                    current.clear();
+                    current.push(a);
+                } else if current.is_empty() {
+                    current.push(a);
+                }
+                current.push(b);
+
+                if exits_to_outside {
+                    if current.len() >= 2 {
+                        callback(current);
+                    }
+                    current.clear();
+                }
+            } else {
+                if current.len() >= 2 {
+                    callback(current);
+                }
                 current.clear();
-                current.push(a);
-            } else if current.is_empty() {
-                current.push(a);
             }
-            current.push(b);
-
-            if exits_to_outside {
-                if current.len() >= 2 { callback(current); }
-                current.clear();
-            }
-        } else {
-            if current.len() >= 2 { callback(current); }
-            current.clear();
         }
-    }
 
-    if current.len() >= 2 { callback(current); }
+        if current.len() >= 2 {
+            callback(current);
+        }
     }); // CLIP_LINE_SCRATCH.with
 }
 

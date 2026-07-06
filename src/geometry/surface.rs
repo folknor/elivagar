@@ -1,5 +1,5 @@
-use super::projection::Point;
 use super::point_in_polygon;
+use super::projection::Point;
 
 /// Find a point guaranteed to be inside the polygon, suitable for label placement.
 ///
@@ -79,10 +79,18 @@ fn ring_bbox(ring: &[Point]) -> (Point, Point) {
     let mut max_x = f64::NEG_INFINITY;
     let mut max_y = f64::NEG_INFINITY;
     for p in ring {
-        if p.x < min_x { min_x = p.x; }
-        if p.y < min_y { min_y = p.y; }
-        if p.x > max_x { max_x = p.x; }
-        if p.y > max_y { max_y = p.y; }
+        if p.x < min_x {
+            min_x = p.x;
+        }
+        if p.y < min_y {
+            min_y = p.y;
+        }
+        if p.x > max_x {
+            max_x = p.x;
+        }
+        if p.y > max_y {
+            max_y = p.y;
+        }
     }
     (Point::new(min_x, min_y), Point::new(max_x, max_y))
 }

@@ -304,10 +304,18 @@ impl PmtilesWriter {
             tile_data_compression: TileDataCompression::Gzip,
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
-            blob: TileBlob::File { writer, path: blob_path, offset: 0 },
+            blob: TileBlob::File {
+                writer,
+                path: blob_path,
+                offset: 0,
+            },
             num_addressed: 0,
             current_run: None,
-            dir_store: DirStore::Streaming { writer: dir_writer, path: dir_path, count: 0 },
+            dir_store: DirStore::Streaming {
+                writer: dir_writer,
+                path: dir_path,
+                count: 0,
+            },
             dedup: HashMap::new(),
             dedup_count: 0,
             dedup_cap: MAX_DEDUP_ENTRIES,
@@ -326,7 +334,10 @@ impl PmtilesWriter {
     #[hotpath::measure]
     pub fn add_tile(&mut self, z: u8, x: u32, y: u32, data: &[u8]) -> io::Result<bool> {
         if data.len() > u32::MAX as usize {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "tile data exceeds 4 GB"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tile data exceeds 4 GB",
+            ));
         }
         let tile_id = xy_to_tile_id(z, x, y);
 
@@ -372,7 +383,11 @@ impl PmtilesWriter {
                 offset = vec.len() as u64;
                 vec.extend_from_slice(data);
             }
-            TileBlob::File { writer, offset: file_offset, .. } => {
+            TileBlob::File {
+                writer,
+                offset: file_offset,
+                ..
+            } => {
                 offset = *file_offset;
                 writer.write_all(data)?;
                 *file_offset += data.len() as u64;
@@ -468,7 +483,11 @@ impl PmtilesWriter {
             TileBlob::Memory(vec) => {
                 w.write_all(vec)?;
             }
-            TileBlob::File { writer, path: blob_path, .. } => {
+            TileBlob::File {
+                writer,
+                path: blob_path,
+                ..
+            } => {
                 writer.flush()?;
                 let blob_file = File::open(&*blob_path)?;
                 let mut reader = BufReader::with_capacity(1 << 20, blob_file);
@@ -528,7 +547,12 @@ impl PmtilesWriter {
         }
         // Flush old run if any, then start new one
         self.flush_run()?;
-        self.current_run = Some(DirEntry { tile_id, offset, length, run_length: 1 });
+        self.current_run = Some(DirEntry {
+            tile_id,
+            offset,
+            length,
+            run_length: 1,
+        });
         Ok(())
     }
 
@@ -540,7 +564,11 @@ impl PmtilesWriter {
         self.flush_run()?;
         match &mut self.dir_store {
             DirStore::Memory(entries) => Ok(std::mem::take(entries)),
-            DirStore::Streaming { writer, path, count } => {
+            DirStore::Streaming {
+                writer,
+                path,
+                count,
+            } => {
                 writer.flush()?;
                 #[allow(clippy::cast_possible_truncation)]
                 let num = *count as usize;
@@ -561,7 +589,10 @@ impl PmtilesWriter {
     /// Used to test fingerprint rejection without needing real hash collisions.
     #[cfg(test)]
     fn inject_dedup_entry(&mut self, hash1: u64, offset: u64, length: u32, fp2: u64) {
-        self.dedup.entry(hash1).or_default().push((offset, length, fp2));
+        self.dedup
+            .entry(hash1)
+            .or_default()
+            .push((offset, length, fp2));
         self.dedup_count += 1;
     }
 
@@ -609,7 +640,11 @@ impl PmtilesWriter {
                 };
                 Ok((root, leaf, num))
             }
-            DirStore::Streaming { writer, path, count } => {
+            DirStore::Streaming {
+                writer,
+                path,
+                count,
+            } => {
                 writer.flush()?;
                 #[allow(clippy::cast_possible_truncation)]
                 let count = *count as usize;
@@ -826,7 +861,6 @@ fn encode_offset_column(buf: &mut Vec<u8>, entries: &[DirEntry]) {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Gzip compression helper
 // ---------------------------------------------------------------------------
@@ -917,8 +951,12 @@ fn read_dir_entries<R: io::Read>(reader: &mut R, count: usize) -> io::Result<Vec
     for _ in 0..count {
         reader.read_exact(&mut buf)?;
         entries.push(DirEntry {
-            tile_id: u64::from_le_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]),
-            offset: u64::from_le_bytes([buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]]),
+            tile_id: u64::from_le_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ]),
+            offset: u64::from_le_bytes([
+                buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+            ]),
             length: u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]),
             run_length: u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]),
         });

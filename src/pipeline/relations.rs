@@ -2,22 +2,18 @@ use smallvec::SmallVec;
 
 use crate::geometry::{self, Point, merc_bbox};
 use crate::multipolygon::{self, MemberWay, WayRole};
-use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
 use crate::shortbread::LayerMatch;
+use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
 use crate::sort::{self, SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use pbfhogg::MemberId;
 
-use super::stats::{
-    DeferralStats, FanoutStats, MissingRefStatsAtomic,
-    record_fanout_from_records,
-};
 use super::emit::{
-    PointEmitScratch, LineEmitScratch, MultipolygonEmitScratch,
-    emit_point_or_centroid, emit_line_feature, emit_multipolygon_feature,
-    enrich_polygon_matches, unwrap_antimeridian_path, antimeridian_shifts_for_bbox,
-    relation_shared_vertex_keys,
+    LineEmitScratch, MultipolygonEmitScratch, PointEmitScratch, antimeridian_shifts_for_bbox,
+    emit_line_feature, emit_multipolygon_feature, emit_point_or_centroid, enrich_polygon_matches,
+    relation_shared_vertex_keys, unwrap_antimeridian_path,
 };
+use super::stats::{DeferralStats, FanoutStats, MissingRefStatsAtomic, record_fanout_from_records};
 
 /// A relation with geometry resolved from way_index, ready for parallel processing.
 /// Matches are resolved eagerly in `prepare_relation` while PBF borrows are alive,
@@ -35,7 +31,10 @@ pub(super) const REL_BATCH_BUDGET_DEFAULT: usize = 64 * 1024 * 1024; // 64 MB
 /// Estimate heap bytes for a single prepared relation (struct + member way coords).
 pub(super) fn estimate_prepared_rel_bytes(r: &PreparedRelation) -> usize {
     std::mem::size_of::<PreparedRelation>()
-        + r.member_ways.iter().map(|mw| 32 + mw.coords.len() * 16).sum::<usize>()
+        + r.member_ways
+            .iter()
+            .map(|mw| 32 + mw.coords.len() * 16)
+            .sum::<usize>()
 }
 
 /// Resolve relation geometry from way_index (serial I/O). Returns None if
@@ -135,7 +134,11 @@ pub(super) struct RelAcc {
 }
 
 impl RelAcc {
-    pub(super) fn flush(&mut self, chunk_dir: &std::path::Path, chunk_id: &std::sync::atomic::AtomicUsize) {
+    pub(super) fn flush(
+        &mut self,
+        chunk_dir: &std::path::Path,
+        chunk_id: &std::sync::atomic::AtomicUsize,
+    ) {
         if self.records.is_empty() {
             return;
         }
@@ -175,7 +178,10 @@ pub(super) fn flush_rel_batch(
         .into_par_iter()
         .fold(
             || RelAcc {
-                records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0,
+                records: Vec::new(),
+                bytes: 0,
+                chunk_paths: Vec::new(),
+                count: 0,
                 point_emit: PointEmitScratch::new(),
                 line_emit: LineEmitScratch::new(),
                 multipolygon_emit: MultipolygonEmitScratch::new(),
@@ -186,7 +192,11 @@ pub(super) fn flush_rel_batch(
             |mut acc, rel| {
                 let before = acc.records.len();
                 process_prepared_relation_into(
-                    rel, min_zoom, max_zoom, seam_reconcile_layers, deferral_stats,
+                    rel,
+                    min_zoom,
+                    max_zoom,
+                    seam_reconcile_layers,
+                    deferral_stats,
                     &mut acc.records,
                     &mut acc.point_emit,
                     &mut acc.line_emit,
@@ -216,7 +226,10 @@ pub(super) fn flush_rel_batch(
         // to avoid creating many tiny chunk files (one per rayon accumulator).
         .reduce(
             || RelAcc {
-                records: Vec::new(), bytes: 0, chunk_paths: Vec::new(), count: 0,
+                records: Vec::new(),
+                bytes: 0,
+                chunk_paths: Vec::new(),
+                count: 0,
                 point_emit: PointEmitScratch::new(),
                 line_emit: LineEmitScratch::new(),
                 multipolygon_emit: MultipolygonEmitScratch::new(),
@@ -279,7 +292,9 @@ pub(super) fn process_prepared_relation_into(
 
     let mut matches = rel.matches;
 
-    let total_area_m2: f64 = multi.polygons.iter()
+    let total_area_m2: f64 = multi
+        .polygons
+        .iter()
         .map(|(outer, _)| geometry::area_sq_meters(outer))
         .sum();
     enrich_polygon_matches(&mut matches, total_area_m2);
@@ -314,19 +329,32 @@ pub(super) fn process_prepared_relation_into(
                                 &inners_unwrapped,
                                 Some(&shared_vertex_keys),
                                 m,
-                                z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr, Some(deferral_stats), fc, polygon_simplify_factor,
+                                z_lo,
+                                z_hi,
+                                records,
+                                multipolygon_emit,
+                                simp_scratch,
+                                sr,
+                                Some(deferral_stats),
+                                fc,
+                                polygon_simplify_factor,
                             );
                         } else {
                             let outer_shifted: Vec<Point> = outer_unwrapped
                                 .iter()
-                                .map(|p| Point { x: p.x + shift, y: p.y })
+                                .map(|p| Point {
+                                    x: p.x + shift,
+                                    y: p.y,
+                                })
                                 .collect();
                             let inners_shifted: Vec<Vec<Point>> = inners_unwrapped
                                 .iter()
                                 .map(|ring| {
                                     ring.iter()
-                                        .map(|p| Point { x: p.x + shift, y: p.y })
+                                        .map(|p| Point {
+                                            x: p.x + shift,
+                                            y: p.y,
+                                        })
                                         .collect()
                                 })
                                 .collect();
@@ -336,8 +364,15 @@ pub(super) fn process_prepared_relation_into(
                                 &inners_shifted,
                                 Some(&shared_vertex_keys),
                                 m,
-                                z_lo, z_hi, records, multipolygon_emit, simp_scratch,
-                                sr, Some(deferral_stats), fc, polygon_simplify_factor,
+                                z_lo,
+                                z_hi,
+                                records,
+                                multipolygon_emit,
+                                simp_scratch,
+                                sr,
+                                Some(deferral_stats),
+                                fc,
+                                polygon_simplify_factor,
                             );
                         }
                     }
@@ -394,7 +429,10 @@ pub(super) fn process_prepared_relation_into(
                         } else {
                             let shifted: Vec<Point> = coords
                                 .iter()
-                                .map(|p| Point { x: p.x + shift, y: p.y })
+                                .map(|p| Point {
+                                    x: p.x + shift,
+                                    y: p.y,
+                                })
                                 .collect();
                             emit_line_feature(
                                 rel.osm_id,

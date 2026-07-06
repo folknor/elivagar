@@ -3,23 +3,23 @@
 // All operations work in Mercator [0,1] coordinate space unless stated otherwise.
 // Pure Rust aside from smallvec for inline small-vec returns.
 
-pub mod projection;
-pub mod simplify;
 pub mod clip;
+pub(crate) mod int_ocean;
+pub mod mvt_decode;
+pub mod projection;
+pub mod seams;
+pub mod simplify;
 mod surface;
 pub mod tiles;
-pub mod seams;
-pub mod mvt_decode;
-pub(crate) mod int_ocean;
 
 // Re-export everything at the geometry:: level so callers don't change.
-pub use projection::*;
-pub use simplify::*;
 pub use clip::*;
+pub use mvt_decode::*;
+pub use projection::*;
+pub use seams::*;
+pub use simplify::*;
 pub use surface::*;
 pub use tiles::*;
-pub use seams::*;
-pub use mvt_decode::*;
 
 use std::f64::consts::PI;
 
@@ -58,10 +58,18 @@ pub(crate) fn merc_bbox_is_subpixel(points: &[Point], zoom: u8) -> bool {
     let (mut min_x, mut min_y) = (points[0].x, points[0].y);
     let (mut max_x, mut max_y) = (min_x, min_y);
     for p in &points[1..] {
-        if p.x < min_x { min_x = p.x; }
-        if p.x > max_x { max_x = p.x; }
-        if p.y < min_y { min_y = p.y; }
-        if p.y > max_y { max_y = p.y; }
+        if p.x < min_x {
+            min_x = p.x;
+        }
+        if p.x > max_x {
+            max_x = p.x;
+        }
+        if p.y < min_y {
+            min_y = p.y;
+        }
+        if p.y > max_y {
+            max_y = p.y;
+        }
     }
     let pixel = 1.0 / (256.0 * f64::from(1u32 << zoom));
     let dx = max_x - min_x;
@@ -78,10 +86,18 @@ pub fn line_is_subpixel(coords: &[(i32, i32)]) -> bool {
     let (mut min_x, mut min_y) = coords[0];
     let (mut max_x, mut max_y) = (min_x, min_y);
     for &(x, y) in &coords[1..] {
-        if x < min_x { min_x = x; }
-        if x > max_x { max_x = x; }
-        if y < min_y { min_y = y; }
-        if y > max_y { max_y = y; }
+        if x < min_x {
+            min_x = x;
+        }
+        if x > max_x {
+            max_x = x;
+        }
+        if y < min_y {
+            min_y = y;
+        }
+        if y > max_y {
+            max_y = y;
+        }
     }
     let dx = i64::from(max_x - min_x);
     let dy = i64::from(max_y - min_y);
@@ -232,8 +248,14 @@ fn segments_cross(a1: (i32, i32), a2: (i32, i32), b1: (i32, i32), b2: (i32, i32)
 /// Sign of the cross product (p2-p1) × (p3-p1).
 fn cross_sign(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32)) -> i8 {
     let cross = i64::from(p2.0 - p1.0) * i64::from(p3.1 - p1.1)
-              - i64::from(p2.1 - p1.1) * i64::from(p3.0 - p1.0);
-    if cross > 0 { 1 } else if cross < 0 { -1 } else { 0 }
+        - i64::from(p2.1 - p1.1) * i64::from(p3.0 - p1.0);
+    if cross > 0 {
+        1
+    } else if cross < 0 {
+        -1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------

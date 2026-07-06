@@ -9,21 +9,18 @@ use std::fs::File;
 use std::io::Read;
 
 fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
-    let mut writer = sort::SortWriter::new(chunks_dir, 1024, sort::ChunkCompression::None).expect("create sort writer");
-    let attrs: Vec<crate::shortbread::Attr> = vec![
-        ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
-    ];
-    let feature = crate::wire_format::encode_feature_data(
-        1,
-        mvt::GeomType::Point,
-        &[9, 0, 0],
-        &attrs,
-        14,
-    );
-    writer.push(SortRecord {
-        key: sort::make_sort_key(pmtiles_writer::xy_to_tile_id(0, 0, 0), Layer::Pois as u8, 0),
-        data: feature,
-    }).expect("push sort record");
+    let mut writer = sort::SortWriter::new(chunks_dir, 1024, sort::ChunkCompression::None)
+        .expect("create sort writer");
+    let attrs: Vec<crate::shortbread::Attr> =
+        vec![("kind", AttrValue::Str(Cow::Borrowed("city")), 0)];
+    let feature =
+        crate::wire_format::encode_feature_data(1, mvt::GeomType::Point, &[9, 0, 0], &attrs, 14);
+    writer
+        .push(SortRecord {
+            key: sort::make_sort_key(pmtiles_writer::xy_to_tile_id(0, 0, 0), Layer::Pois as u8, 0),
+            data: feature,
+        })
+        .expect("push sort record");
     writer.finish().expect("finish sort writer")
 }
 
@@ -36,7 +33,13 @@ fn parity_pending_tile(tile_id: u64) -> PendingTile {
         features: vec![
             (
                 Layer::Pois as u8,
-                crate::wire_format::encode_feature_data(11, mvt::GeomType::Point, &[9, 0, 0], &point_attrs, 14),
+                crate::wire_format::encode_feature_data(
+                    11,
+                    mvt::GeomType::Point,
+                    &[9, 0, 0],
+                    &point_attrs,
+                    14,
+                ),
             ),
             (
                 Layer::Streets as u8,
@@ -54,37 +57,27 @@ fn parity_pending_tile(tile_id: u64) -> PendingTile {
 
 #[test]
 fn flat_index_guard_sorted_large_allowed() {
-    let mode = select_node_store_mode(
-        false,
-        true,
-        false,
-        50 * 1024 * 1024 * 1024,
-        false,
-    ).expect("sorted input should be allowed");
+    let mode = select_node_store_mode(false, true, false, 50 * 1024 * 1024 * 1024, false)
+        .expect("sorted input should be allowed");
     assert_eq!(mode, NodeStoreMode::Sorted);
 }
 
 #[test]
 fn flat_index_guard_unsorted_small_allowed() {
-    let mode = select_node_store_mode(
-        false,
-        false,
-        false,
-        512 * 1024 * 1024,
-        false,
-    ).expect("small unsorted input should be allowed");
-    assert_eq!(mode, NodeStoreMode::Flat { unsafe_override: false });
+    let mode = select_node_store_mode(false, false, false, 512 * 1024 * 1024, false)
+        .expect("small unsorted input should be allowed");
+    assert_eq!(
+        mode,
+        NodeStoreMode::Flat {
+            unsafe_override: false
+        }
+    );
 }
 
 #[test]
 fn flat_index_guard_unsorted_large_rejected_with_stable_error() {
-    let err = select_node_store_mode(
-        false,
-        false,
-        false,
-        2 * 1024 * 1024 * 1024,
-        false,
-    ).expect_err("large unsorted input should be rejected");
+    let err = select_node_store_mode(false, false, false, 2 * 1024 * 1024 * 1024, false)
+        .expect_err("large unsorted input should be rejected");
     let msg = err.to_string();
     assert!(msg.contains("does not declare Sort.Type_then_ID"));
     assert!(msg.contains("pbfhogg sort input.pbf -o sorted.pbf"));
@@ -93,14 +86,14 @@ fn flat_index_guard_unsorted_large_rejected_with_stable_error() {
 
 #[test]
 fn flat_index_guard_override_path_works() {
-    let mode = select_node_store_mode(
-        false,
-        false,
-        false,
-        2 * 1024 * 1024 * 1024,
-        true,
-    ).expect("override should allow large unsorted input");
-    assert_eq!(mode, NodeStoreMode::Flat { unsafe_override: true });
+    let mode = select_node_store_mode(false, false, false, 2 * 1024 * 1024 * 1024, true)
+        .expect("override should allow large unsorted input");
+    assert_eq!(
+        mode,
+        NodeStoreMode::Flat {
+            unsafe_override: true
+        }
+    );
 }
 
 #[test]
@@ -208,7 +201,11 @@ fn tile_size_diag_thresholds_are_strictly_greater_than_boundaries() {
     assert_eq!(diag.oversize_warn_count, 2);
     assert_eq!(diag.oversize_severe_count, 0);
 
-    record_tile_size_diagnostics(&mut diag, pmtiles_writer::xy_to_tile_id(3, 0, 0), severe + 1);
+    record_tile_size_diagnostics(
+        &mut diag,
+        pmtiles_writer::xy_to_tile_id(3, 0, 0),
+        severe + 1,
+    );
     assert_eq!(diag.oversize_warn_count, 3);
     assert_eq!(diag.oversize_severe_count, 1);
 }
@@ -236,12 +233,17 @@ fn boundary_label_admin2_large_area() {
 
     assert_eq!(matches[0].min_zoom, 2);
     // Also verify way_area was added (in hectares)
-    let way_area_attr = matches[0].attrs.iter()
+    let way_area_attr = matches[0]
+        .attrs
+        .iter()
         .find(|(k, _, _)| *k == "way_area")
         .expect("way_area attr missing");
     if let AttrValue::Float(h) = way_area_attr.1 {
         let expected_hectares = area_m2 / 10_000.0;
-        assert!((h - expected_hectares).abs() < 0.01, "way_area hectares mismatch");
+        assert!(
+            (h - expected_hectares).abs() < 0.01,
+            "way_area hectares mismatch"
+        );
     } else {
         panic!("way_area should be Float");
     }
@@ -274,7 +276,10 @@ fn boundary_label_admin4_small_area() {
     let mut matches = vec![boundary_labels_match(4)];
     enrich_polygon_matches(&mut matches, area_m2);
 
-    assert_eq!(matches[0].min_zoom, 5, "small area should keep default min_zoom=5");
+    assert_eq!(
+        matches[0].min_zoom, 5,
+        "small area should keep default min_zoom=5"
+    );
 }
 
 /// Non-BoundaryLabels layer should be completely unchanged by enrich_polygon_matches.
@@ -293,7 +298,11 @@ fn non_boundary_labels_unchanged() {
     enrich_polygon_matches(&mut matches, 9_999_999_999.0);
 
     assert_eq!(matches[0].min_zoom, original_min_zoom);
-    assert_eq!(matches[0].attrs.len(), original_attr_count, "attrs should not be modified");
+    assert_eq!(
+        matches[0].attrs.len(),
+        original_attr_count,
+        "attrs should not be modified"
+    );
 }
 
 #[test]
@@ -425,8 +434,14 @@ fn relation_shared_vertex_keys_detects_shared_closed_way_vertices() {
 
 #[test]
 fn relation_shared_vertex_keys_quantization_near_equal_points_share_key() {
-    let base = Point { x: 0.500_000_000_000, y: 0.2 };
-    let near = Point { x: 0.500_000_000_000_4, y: 0.2 }; // +0.4e-12
+    let base = Point {
+        x: 0.500_000_000_000,
+        y: 0.2,
+    };
+    let near = Point {
+        x: 0.500_000_000_000_4,
+        y: 0.2,
+    }; // +0.4e-12
     assert_eq!(
         merc_point_key(&base),
         merc_point_key(&near),
@@ -463,8 +478,14 @@ fn relation_shared_vertex_keys_quantization_near_equal_points_share_key() {
 
 #[test]
 fn relation_shared_vertex_keys_quantization_boundary_distinguishes_points() {
-    let base = Point { x: 0.500_000_000_000, y: 0.2 };
-    let far = Point { x: 0.500_000_000_000_6, y: 0.2 }; // +0.6e-12
+    let base = Point {
+        x: 0.500_000_000_000,
+        y: 0.2,
+    };
+    let far = Point {
+        x: 0.500_000_000_000_6,
+        y: 0.2,
+    }; // +0.6e-12
     assert_ne!(
         merc_point_key(&base),
         merc_point_key(&far),
@@ -505,10 +526,7 @@ fn relation_shared_vertex_keys_quantization_boundary_distinguishes_points() {
 
 #[test]
 fn unwrap_antimeridian_path_keeps_crossing_segment_local() {
-    let mut pts = vec![
-        Point { x: 0.995, y: 0.4 },
-        Point { x: 0.005, y: 0.4 },
-    ];
+    let mut pts = vec![Point { x: 0.995, y: 0.4 }, Point { x: 0.005, y: 0.4 }];
     let changed = unwrap_antimeridian_path(&mut pts, false);
     assert!(changed);
     assert!(pts[1].x > 1.0, "second point should unwrap across +1 seam");
@@ -570,10 +588,7 @@ fn crosses_antimeridian_rejects_wide_non_crossing_interval() {
 #[test]
 fn antimeridian_wrapped_line_emits_both_seam_tiles_without_duplicates() {
     let m = test_layer_match(Layer::Streets, GeomExpect::Line);
-    let coords = vec![
-        Point { x: 0.995, y: 0.25 },
-        Point { x: 1.005, y: 0.25 },
-    ];
+    let coords = vec![Point { x: 0.995, y: 0.25 }, Point { x: 1.005, y: 0.25 }];
     let bbox = merc_bbox(&coords);
     let mut records = Vec::new();
     let mut scratch = LineEmitScratch::new();
@@ -583,7 +598,10 @@ fn antimeridian_wrapped_line_emits_both_seam_tiles_without_duplicates() {
         } else {
             let shifted: Vec<Point> = coords
                 .iter()
-                .map(|p| Point { x: p.x + shift, y: p.y })
+                .map(|p| Point {
+                    x: p.x + shift,
+                    y: p.y,
+                })
                 .collect();
             let _ = emit_line_feature(7001, &shifted, &[], &m, 1, 1, &mut records, &mut scratch);
         }
@@ -597,7 +615,11 @@ fn antimeridian_wrapped_line_emits_both_seam_tiles_without_duplicates() {
 
     let left = pmtiles_writer::xy_to_tile_id(1, 0, 0);
     let right = pmtiles_writer::xy_to_tile_id(1, 1, 0);
-    assert_eq!(counts.len(), 2, "seam-crossing line should hit exactly two z1 seam tiles");
+    assert_eq!(
+        counts.len(),
+        2,
+        "seam-crossing line should hit exactly two z1 seam tiles"
+    );
     assert_eq!(counts.get(&left), Some(&1));
     assert_eq!(counts.get(&right), Some(&1));
 }
@@ -617,13 +639,42 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
     let mut scratch = PolygonEmitScratch::new();
     for shift in antimeridian_shifts_for_bbox(&bbox) {
         if shift == 0.0 {
-            let _ = emit_polygon_feature(7002, &coords, &[], &m, 1, 1, &mut records, &mut scratch, 0, None, 0, 1.0);
+            let _ = emit_polygon_feature(
+                7002,
+                &coords,
+                &[],
+                &m,
+                1,
+                1,
+                &mut records,
+                &mut scratch,
+                0,
+                None,
+                0,
+                1.0,
+            );
         } else {
             let shifted: Vec<Point> = coords
                 .iter()
-                .map(|p| Point { x: p.x + shift, y: p.y })
+                .map(|p| Point {
+                    x: p.x + shift,
+                    y: p.y,
+                })
                 .collect();
-            let _ = emit_polygon_feature(7002, &shifted, &[], &m, 1, 1, &mut records, &mut scratch, 0, None, 0, 1.0);
+            let _ = emit_polygon_feature(
+                7002,
+                &shifted,
+                &[],
+                &m,
+                1,
+                1,
+                &mut records,
+                &mut scratch,
+                0,
+                None,
+                0,
+                1.0,
+            );
         }
     }
 
@@ -635,7 +686,11 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
 
     let left = pmtiles_writer::xy_to_tile_id(1, 0, 0);
     let right = pmtiles_writer::xy_to_tile_id(1, 1, 0);
-    assert_eq!(counts.len(), 2, "seam-crossing polygon should hit exactly two z1 seam tiles");
+    assert_eq!(
+        counts.len(),
+        2,
+        "seam-crossing polygon should hit exactly two z1 seam tiles"
+    );
     assert_eq!(counts.get(&left), Some(&1));
     assert_eq!(counts.get(&right), Some(&1));
 }
@@ -676,7 +731,10 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
         } else {
             let outer_shifted: Vec<Point> = outer
                 .iter()
-                .map(|p| Point { x: p.x + shift, y: p.y })
+                .map(|p| Point {
+                    x: p.x + shift,
+                    y: p.y,
+                })
                 .collect();
             let _ = emit_multipolygon_feature(
                 7003,
@@ -705,14 +763,25 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
 
     let left = pmtiles_writer::xy_to_tile_id(1, 0, 0);
     let right = pmtiles_writer::xy_to_tile_id(1, 1, 0);
-    assert_eq!(counts.len(), 2, "seam-crossing multipolygon should hit exactly two z1 seam tiles");
+    assert_eq!(
+        counts.len(),
+        2,
+        "seam-crossing multipolygon should hit exactly two z1 seam tiles"
+    );
     assert_eq!(counts.get(&left), Some(&1));
     assert_eq!(counts.get(&right), Some(&1));
 }
 
 #[test]
 fn encode_tile_batch_mlt_empty_batch_is_empty() {
-    match encode_tile_batch(&[], 6, TilePayloadFormat::Mlt, TileCompression::Gzip, &[], &SeamMetrics::new()) {
+    match encode_tile_batch(
+        &[],
+        6,
+        TilePayloadFormat::Mlt,
+        TileCompression::Gzip,
+        &[],
+        &SeamMetrics::new(),
+    ) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty batches should remain empty"),
         Err(err) => panic!("empty mlt batch should not fail: {err}"),
     }
@@ -720,8 +789,15 @@ fn encode_tile_batch_mlt_empty_batch_is_empty() {
 
 #[test]
 fn encode_tile_batch_mvt_empty_batch_is_empty() {
-    let encoded = encode_tile_batch(&[], 6, TilePayloadFormat::Mvt, TileCompression::Gzip, &[], &SeamMetrics::new())
-        .expect("mvt format should encode successfully");
+    let encoded = encode_tile_batch(
+        &[],
+        6,
+        TilePayloadFormat::Mvt,
+        TileCompression::Gzip,
+        &[],
+        &SeamMetrics::new(),
+    )
+    .expect("mvt format should encode successfully");
     assert!(encoded.is_empty());
 }
 
@@ -731,7 +807,14 @@ fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
         tile_id: pmtiles_writer::xy_to_tile_id(3, 4, 5),
         features: Vec::new(),
     };
-    match encode_tile_batch(&[tile], 6, TilePayloadFormat::Mlt, TileCompression::Gzip, &[], &SeamMetrics::new()) {
+    match encode_tile_batch(
+        &[tile],
+        6,
+        TilePayloadFormat::Mlt,
+        TileCompression::Gzip,
+        &[],
+        &SeamMetrics::new(),
+    ) {
         Ok(encoded) => assert!(encoded.is_empty(), "empty tiles should be skipped"),
         Err(err) => panic!("mlt format should not fail for empty tile: {err}"),
     }
@@ -758,15 +841,21 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     };
     let non_empty = prepare_non_empty_layers(&mut scratch, &tile);
     let model = mlt::build_tile_model(&non_empty);
-    let mvt_encoded = encode_tile_batch(&[parity_pending_tile(tile_id)], 6, TilePayloadFormat::Mvt, TileCompression::Gzip, &[], &SeamMetrics::new())
-        .expect("mvt batch encode should succeed");
+    let mvt_encoded = encode_tile_batch(
+        &[parity_pending_tile(tile_id)],
+        6,
+        TilePayloadFormat::Mvt,
+        TileCompression::Gzip,
+        &[],
+        &SeamMetrics::new(),
+    )
+    .expect("mvt batch encode should succeed");
     assert_eq!(mvt_encoded.len(), 1, "expected one encoded mvt tile");
 
     let mut decoder = GzDecoder::new(mvt_encoded[0].compressed.as_slice());
     let mut raw = Vec::new();
     decoder.read_to_end(&mut raw).expect("gunzip mvt tile");
-    let mvt_layers = crate::pmtiles_reader::decode_mvt_layers(&raw)
-        .expect("decode mvt layers");
+    let mvt_layers = crate::pmtiles_reader::decode_mvt_layers(&raw).expect("decode mvt layers");
 
     assert_eq!(
         model.layers.len(),
@@ -781,18 +870,25 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
 
     for (ml, mvt) in model_sorted.iter().zip(mvt_sorted.iter()) {
         assert_eq!(ml.name, mvt.name, "layer name mismatch");
-        assert_eq!(ml.feature_count, mvt.feature_count, "feature count mismatch in {}", ml.name);
+        assert_eq!(
+            ml.feature_count, mvt.feature_count,
+            "feature count mismatch in {}",
+            ml.name
+        );
         assert_eq!(
             ml.geometry_mix.points, mvt.points,
-            "point count mismatch in {}", ml.name
+            "point count mismatch in {}",
+            ml.name
         );
         assert_eq!(
             ml.geometry_mix.lines, mvt.lines,
-            "line count mismatch in {}", ml.name
+            "line count mismatch in {}",
+            ml.name
         );
         assert_eq!(
             ml.geometry_mix.polygons, mvt.polygons,
-            "polygon count mismatch in {}", ml.name
+            "polygon count mismatch in {}",
+            ml.name
         );
         let mut model_keys: Vec<&str> = ml.columns.iter().map(|c| c.key.as_str()).collect();
         model_keys.sort();
@@ -845,8 +941,8 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
         phase_assemble(&mut sort_reader, &config).expect("assemble should succeed");
 
-    let mut reader = crate::pmtiles_reader::PmtilesReader::open(&output_path)
-        .expect("open generated pmtiles");
+    let mut reader =
+        crate::pmtiles_reader::PmtilesReader::open(&output_path).expect("open generated pmtiles");
     let metadata = reader.read_metadata().expect("read metadata");
     let parsed: serde_json::Value = serde_json::from_str(&metadata).expect("parse metadata json");
     assert_eq!(parsed["source_pbf"], "source-file.osm.pbf");
@@ -906,8 +1002,8 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
         phase_assemble(&mut sort_reader, &config).expect("assemble should succeed");
 
-    let mut reader = crate::pmtiles_reader::PmtilesReader::open(&output_path)
-        .expect("open generated pmtiles");
+    let mut reader =
+        crate::pmtiles_reader::PmtilesReader::open(&output_path).expect("open generated pmtiles");
     let metadata = reader.read_metadata().expect("read metadata");
     let parsed: serde_json::Value = serde_json::from_str(&metadata).expect("parse metadata json");
     assert_eq!(parsed["source_pbf"], "replication-source.osm.pbf");
@@ -915,6 +1011,7 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn phase_assemble_tile_format_sets_consistent_payload_contract() {
     let dir = tempfile::tempdir().expect("create tempdir");
 
@@ -955,12 +1052,21 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         polygon_simplify_factor: 1.0,
     };
     let _ = phase_assemble(&mut mvt_sort_reader, &mvt_config).expect("mvt assemble should succeed");
-    let mut mvt_reader = crate::pmtiles_reader::PmtilesReader::open(&mvt_output)
-        .expect("open mvt pmtiles");
+    let mut mvt_reader =
+        crate::pmtiles_reader::PmtilesReader::open(&mvt_output).expect("open mvt pmtiles");
     let mvt_metadata = mvt_reader.read_metadata().expect("read mvt metadata");
-    let mvt_json: serde_json::Value = serde_json::from_str(&mvt_metadata).expect("parse mvt metadata");
-    assert_eq!(mvt_reader.tile_type(), 1, "mvt header tile_type must be mvt");
-    assert_eq!(mvt_reader.tile_compression(), 2, "mvt header tile_compression must be gzip");
+    let mvt_json: serde_json::Value =
+        serde_json::from_str(&mvt_metadata).expect("parse mvt metadata");
+    assert_eq!(
+        mvt_reader.tile_type(),
+        1,
+        "mvt header tile_type must be mvt"
+    );
+    assert_eq!(
+        mvt_reader.tile_compression(),
+        2,
+        "mvt header tile_compression must be gzip"
+    );
     assert_eq!(mvt_json["tile_payload_format"], "mvt");
     assert_eq!(mvt_json["tile_compression"], "gzip");
 
@@ -1001,12 +1107,21 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         polygon_simplify_factor: 1.0,
     };
     let _ = phase_assemble(&mut mlt_sort_reader, &mlt_config).expect("mlt assemble should succeed");
-    let mut mlt_reader = crate::pmtiles_reader::PmtilesReader::open(&mlt_output)
-        .expect("open mlt pmtiles");
+    let mut mlt_reader =
+        crate::pmtiles_reader::PmtilesReader::open(&mlt_output).expect("open mlt pmtiles");
     let mlt_metadata = mlt_reader.read_metadata().expect("read mlt metadata");
-    let mlt_json: serde_json::Value = serde_json::from_str(&mlt_metadata).expect("parse mlt metadata");
-    assert_eq!(mlt_reader.tile_type(), 0, "mlt header tile_type should remain unknown");
-    assert_eq!(mlt_reader.tile_compression(), 1, "mlt header tile_compression should be none");
+    let mlt_json: serde_json::Value =
+        serde_json::from_str(&mlt_metadata).expect("parse mlt metadata");
+    assert_eq!(
+        mlt_reader.tile_type(),
+        0,
+        "mlt header tile_type should remain unknown"
+    );
+    assert_eq!(
+        mlt_reader.tile_compression(),
+        1,
+        "mlt header tile_compression should be none"
+    );
     assert_eq!(mlt_json["tile_payload_format"], "mlt");
     assert_eq!(mlt_json["tile_compression"], "none");
 }
@@ -1015,8 +1130,8 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
 // Helpers for emit tests - decode SortRecord payloads
 // -----------------------------------------------------------------------
 
-use crate::sort;
 use crate::mvt;
+use crate::sort;
 
 fn test_layer_match(layer: Layer, geom_expect: GeomExpect) -> LayerMatch {
     LayerMatch {
@@ -1115,7 +1230,10 @@ fn record_polygon_rings(rec: &SortRecord) -> Vec<Vec<(i32, i32)>> {
 }
 
 fn assert_no_backtrack_in_records(records: &[SortRecord]) {
-    assert!(!records.is_empty(), "fixture should emit at least one feature");
+    assert!(
+        !records.is_empty(),
+        "fixture should emit at least one feature"
+    );
     for rec in records {
         for ring in record_polygon_rings(rec) {
             for i in 2..ring.len() {
@@ -1126,7 +1244,10 @@ fn assert_no_backtrack_in_records(records: &[SortRecord]) {
 }
 
 fn assert_simple_record_rings(records: &[SortRecord]) {
-    assert!(!records.is_empty(), "fixture should emit at least one feature");
+    assert!(
+        !records.is_empty(),
+        "fixture should emit at least one feature"
+    );
     for rec in records {
         for ring in record_polygon_rings(rec) {
             assert!(geometry::ring_is_simple(&ring), "non-simple ring {ring:?}");
@@ -1141,7 +1262,12 @@ fn assert_simple_record_rings(records: &[SortRecord]) {
 #[test]
 fn emit_point_empty_coords() {
     let m = test_layer_match(Layer::Pois, GeomExpect::Point);
-    let bbox = MercBbox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 };
+    let bbox = MercBbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 1.0,
+        max_y: 1.0,
+    };
     let mut records = Vec::new();
     let mut scratch = PointEmitScratch::new();
     let count = emit_point_or_centroid(1, &[], None, &bbox, &m, 0, 0, &mut records, &mut scratch);
@@ -1153,10 +1279,25 @@ fn emit_point_empty_coords() {
 fn emit_point_decodes_correctly() {
     let m = test_layer_match(Layer::Pois, GeomExpect::Point);
     let coords = [Point { x: 0.5, y: 0.5 }];
-    let bbox = MercBbox { min_x: 0.0, min_y: 0.0, max_x: 1.0, max_y: 1.0 };
+    let bbox = MercBbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 1.0,
+        max_y: 1.0,
+    };
     let mut records = Vec::new();
     let mut scratch = PointEmitScratch::new();
-    emit_point_or_centroid(42, &coords, None, &bbox, &m, 0, 0, &mut records, &mut scratch);
+    emit_point_or_centroid(
+        42,
+        &coords,
+        None,
+        &bbox,
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut scratch,
+    );
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -1191,10 +1332,25 @@ fn emit_point_multi_zoom_tile_ids_differ() {
     let m = test_layer_match(Layer::Pois, GeomExpect::Point);
     // Use a point clearly inside one z1 tile (not on a boundary)
     let coords = [Point { x: 0.25, y: 0.25 }];
-    let bbox = MercBbox { min_x: 0.25, min_y: 0.25, max_x: 0.25, max_y: 0.25 };
+    let bbox = MercBbox {
+        min_x: 0.25,
+        min_y: 0.25,
+        max_x: 0.25,
+        max_y: 0.25,
+    };
     let mut records = Vec::new();
     let mut scratch = PointEmitScratch::new();
-    emit_point_or_centroid(7, &coords, None, &bbox, &m, 0, 1, &mut records, &mut scratch);
+    emit_point_or_centroid(
+        7,
+        &coords,
+        None,
+        &bbox,
+        &m,
+        0,
+        1,
+        &mut records,
+        &mut scratch,
+    );
 
     // Should get 1 record at z=0 and 1 record at z=1 = 2 total
     assert_eq!(records.len(), 2);
@@ -1229,10 +1385,7 @@ fn emit_line_too_few_points() {
 #[test]
 fn emit_line_decodes_correctly() {
     let m = test_layer_match(Layer::Streets, GeomExpect::Line);
-    let coords = [
-        Point { x: 0.3, y: 0.3 },
-        Point { x: 0.7, y: 0.7 },
-    ];
+    let coords = [Point { x: 0.3, y: 0.3 }, Point { x: 0.7, y: 0.7 }];
     let mut records = Vec::new();
     let mut scratch = LineEmitScratch::new();
     emit_line_feature(100, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
@@ -1265,8 +1418,14 @@ fn emit_line_cascading_simplification() {
     // At z=0, simplification tolerance is very large, so a short line may vanish.
     let m = test_layer_match(Layer::Streets, GeomExpect::Line);
     let coords = [
-        Point { x: 0.500_000, y: 0.500_000 },
-        Point { x: 0.500_001, y: 0.500_001 },
+        Point {
+            x: 0.500_000,
+            y: 0.500_000,
+        },
+        Point {
+            x: 0.500_001,
+            y: 0.500_001,
+        },
     ];
     let mut records = Vec::new();
     let mut scratch = LineEmitScratch::new();
@@ -1275,12 +1434,18 @@ fn emit_line_cascading_simplification() {
     // At z=14 this line is ~0.4 pixel which is sub-pixel, but Streets skips
     // the size filter, so it should still produce a record at z=14.
     // At lower zooms, simplification may collapse it.
-    let z14_records: Vec<_> = records.iter().filter(|r| {
-        let tid = sort::tile_id_from_key(r.key);
-        let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tid);
-        z == 14
-    }).collect();
-    assert!(!z14_records.is_empty(), "line should survive at z=14 for Streets layer");
+    let z14_records: Vec<_> = records
+        .iter()
+        .filter(|r| {
+            let tid = sort::tile_id_from_key(r.key);
+            let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tid);
+            z == 14
+        })
+        .collect();
+    assert!(
+        !z14_records.is_empty(),
+        "line should survive at z=14 for Streets layer"
+    );
 }
 
 #[test]
@@ -1333,13 +1498,7 @@ fn emit_line_preserve_mask_keeps_required_vertices() {
     let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
     let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
     let mut target_tc = Vec::new();
-    geometry::to_tile_coords_into(
-        &mut target_tc,
-        &[Point { x: 0.5, y: 0.10002 }],
-        0,
-        0,
-        0,
-    );
+    geometry::to_tile_coords_into(&mut target_tc, &[Point { x: 0.5, y: 0.10002 }], 0, 0, 0);
     let expected = target_tc[0];
     assert!(
         pinned_pts.contains(&expected),
@@ -1365,7 +1524,20 @@ fn emit_polygon_too_few_points() {
     ];
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    let count = emit_polygon_feature(201, &coords, &[], &m, 0, 0, &mut records, &mut scratch, 0, None, 0, 1.0);
+    let count = emit_polygon_feature(
+        201,
+        &coords,
+        &[],
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut scratch,
+        0,
+        None,
+        0,
+        1.0,
+    );
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -1382,7 +1554,20 @@ fn emit_polygon_decodes_correctly() {
     ];
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    emit_polygon_feature(200, &coords, &[], &m, 0, 0, &mut records, &mut scratch, 0, None, 0, 1.0);
+    emit_polygon_feature(
+        200,
+        &coords,
+        &[],
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut scratch,
+        0,
+        None,
+        0,
+        1.0,
+    );
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -1397,7 +1582,10 @@ fn emit_polygon_decodes_correctly() {
     assert_eq!(osm_id, 200);
     assert_eq!(gt, 3); // Polygon
     // A polygon ring needs MoveTo + LineTo(n-1) + ClosePath = at least 3 commands
-    assert!(cmd_count >= 3, "polygon should have MoveTo + LineTo + ClosePath");
+    assert!(
+        cmd_count >= 3,
+        "polygon should have MoveTo + LineTo + ClosePath"
+    );
 
     // Attributes
     assert_eq!(decode_attr_count(&rec.data), 1);
@@ -1436,11 +1624,28 @@ fn emit_polygon_zoom_dependent_attrs() {
     // At z=0: only 1 attr ("kind", min_zoom=0)
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    emit_polygon_feature(300, &coords_z0, &[], &m_z0, 0, 0, &mut records, &mut scratch, 0, None, 0, 1.0);
+    emit_polygon_feature(
+        300,
+        &coords_z0,
+        &[],
+        &m_z0,
+        0,
+        0,
+        &mut records,
+        &mut scratch,
+        0,
+        None,
+        0,
+        1.0,
+    );
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
-    assert_eq!(f.tags.len(), 1, "at z=0 only the always-on attr should be present");
+    assert_eq!(
+        f.tags.len(),
+        1,
+        "at z=0 only the always-on attr should be present"
+    );
 
     // At z=14: both attrs. Use a tiny polygon inside one z=14 tile.
     let m_z14 = LayerMatch {
@@ -1454,14 +1659,42 @@ fn emit_polygon_zoom_dependent_attrs() {
         ],
     };
     let coords_z14 = [
-        Point { x: 0.500_00, y: 0.500_00 },
-        Point { x: 0.500_05, y: 0.500_00 },
-        Point { x: 0.500_05, y: 0.500_05 },
-        Point { x: 0.500_00, y: 0.500_05 },
-        Point { x: 0.500_00, y: 0.500_00 },
+        Point {
+            x: 0.500_00,
+            y: 0.500_00,
+        },
+        Point {
+            x: 0.500_05,
+            y: 0.500_00,
+        },
+        Point {
+            x: 0.500_05,
+            y: 0.500_05,
+        },
+        Point {
+            x: 0.500_00,
+            y: 0.500_05,
+        },
+        Point {
+            x: 0.500_00,
+            y: 0.500_00,
+        },
     ];
     records.clear();
-    emit_polygon_feature(300, &coords_z14, &[], &m_z14, 14, 14, &mut records, &mut scratch, 0, None, 0, 1.0);
+    emit_polygon_feature(
+        300,
+        &coords_z14,
+        &[],
+        &m_z14,
+        14,
+        14,
+        &mut records,
+        &mut scratch,
+        0,
+        None,
+        0,
+        1.0,
+    );
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -1485,7 +1718,20 @@ fn emit_polygon_skips_self_intersecting_ring_below_z14() {
 
     let mut records = Vec::new();
     let mut scratch = PolygonEmitScratch::new();
-    let count = emit_polygon_feature(500, &coords, &[], &m, 0, 0, &mut records, &mut scratch, 0, None, 0, 1.0);
+    let count = emit_polygon_feature(
+        500,
+        &coords,
+        &[],
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut scratch,
+        0,
+        None,
+        0,
+        1.0,
+    );
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -1493,16 +1739,40 @@ fn emit_polygon_skips_self_intersecting_ring_below_z14() {
 #[test]
 fn emit_polygon_preserve_mask_keeps_required_vertices() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
-    let target = Point { x: 0.500_050_0, y: 0.500_010_2 };
+    let target = Point {
+        x: 0.500_050_0,
+        y: 0.500_010_2,
+    };
     let coords = [
-        Point { x: 0.500_010_0, y: 0.500_010_0 },
-        Point { x: 0.500_030_0, y: 0.500_010_1 },
+        Point {
+            x: 0.500_010_0,
+            y: 0.500_010_0,
+        },
+        Point {
+            x: 0.500_030_0,
+            y: 0.500_010_1,
+        },
         target,
-        Point { x: 0.500_070_0, y: 0.500_010_1 },
-        Point { x: 0.500_090_0, y: 0.500_010_0 },
-        Point { x: 0.500_090_0, y: 0.500_090_0 },
-        Point { x: 0.500_010_0, y: 0.500_090_0 },
-        Point { x: 0.500_010_0, y: 0.500_010_0 },
+        Point {
+            x: 0.500_070_0,
+            y: 0.500_010_1,
+        },
+        Point {
+            x: 0.500_090_0,
+            y: 0.500_010_0,
+        },
+        Point {
+            x: 0.500_090_0,
+            y: 0.500_090_0,
+        },
+        Point {
+            x: 0.500_010_0,
+            y: 0.500_090_0,
+        },
+        Point {
+            x: 0.500_010_0,
+            y: 0.500_010_0,
+        },
     ];
 
     let mut records_plain = Vec::new();
@@ -1558,16 +1828,40 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
 #[test]
 fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
-    let target = Point { x: 0.500_050_0, y: 0.500_010_2 };
+    let target = Point {
+        x: 0.500_050_0,
+        y: 0.500_010_2,
+    };
     let outer = vec![
-        Point { x: 0.500_010_0, y: 0.500_010_0 },
-        Point { x: 0.500_030_0, y: 0.500_010_1 },
+        Point {
+            x: 0.500_010_0,
+            y: 0.500_010_0,
+        },
+        Point {
+            x: 0.500_030_0,
+            y: 0.500_010_1,
+        },
         target,
-        Point { x: 0.500_070_0, y: 0.500_010_1 },
-        Point { x: 0.500_090_0, y: 0.500_010_0 },
-        Point { x: 0.500_090_0, y: 0.500_090_0 },
-        Point { x: 0.500_010_0, y: 0.500_090_0 },
-        Point { x: 0.500_010_0, y: 0.500_010_0 },
+        Point {
+            x: 0.500_070_0,
+            y: 0.500_010_1,
+        },
+        Point {
+            x: 0.500_090_0,
+            y: 0.500_010_0,
+        },
+        Point {
+            x: 0.500_090_0,
+            y: 0.500_090_0,
+        },
+        Point {
+            x: 0.500_010_0,
+            y: 0.500_090_0,
+        },
+        Point {
+            x: 0.500_010_0,
+            y: 0.500_010_0,
+        },
     ];
     let inners: Vec<Vec<Point>> = Vec::new();
     let mut keys = rustc_hash::FxHashSet::default();
@@ -1581,12 +1875,36 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     let mut simp_pinned = geometry::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
-        990, &outer, &inners, None, &m, 13, 13, &mut records_plain,
-        &mut emit_plain, &mut simp_plain, 0, None, 0, 1.0,
+        990,
+        &outer,
+        &inners,
+        None,
+        &m,
+        13,
+        13,
+        &mut records_plain,
+        &mut emit_plain,
+        &mut simp_plain,
+        0,
+        None,
+        0,
+        1.0,
     );
     emit_multipolygon_feature(
-        990, &outer, &inners, Some(&keys), &m, 13, 13, &mut records_pinned,
-        &mut emit_pinned, &mut simp_pinned, 0, None, 0, 1.0,
+        990,
+        &outer,
+        &inners,
+        Some(&keys),
+        &m,
+        13,
+        13,
+        &mut records_pinned,
+        &mut emit_pinned,
+        &mut simp_pinned,
+        0,
+        None,
+        0,
+        1.0,
     );
 
     assert_eq!(records_plain.len(), 1);
@@ -1606,20 +1924,50 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
 #[test]
 fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
-    let target = Point { x: 0.500_050_0, y: 0.500_010_2 };
+    let target = Point {
+        x: 0.500_050_0,
+        y: 0.500_010_2,
+    };
     let outer = vec![
-        Point { x: 0.500_010_0, y: 0.500_010_0 },
-        Point { x: 0.500_030_0, y: 0.500_010_1 },
+        Point {
+            x: 0.500_010_0,
+            y: 0.500_010_0,
+        },
+        Point {
+            x: 0.500_030_0,
+            y: 0.500_010_1,
+        },
         target,
-        Point { x: 0.500_070_0, y: 0.500_010_1 },
-        Point { x: 0.500_090_0, y: 0.500_010_0 },
-        Point { x: 0.500_090_0, y: 0.500_090_0 },
-        Point { x: 0.500_010_0, y: 0.500_090_0 },
-        Point { x: 0.500_010_0, y: 0.500_010_0 },
+        Point {
+            x: 0.500_070_0,
+            y: 0.500_010_1,
+        },
+        Point {
+            x: 0.500_090_0,
+            y: 0.500_010_0,
+        },
+        Point {
+            x: 0.500_090_0,
+            y: 0.500_090_0,
+        },
+        Point {
+            x: 0.500_010_0,
+            y: 0.500_090_0,
+        },
+        Point {
+            x: 0.500_010_0,
+            y: 0.500_010_0,
+        },
     ];
     let relation_members = vec![
-        MemberWay { role: WayRole::Outer, coords: vec![Point { x: 0.0, y: 0.0 }, target, Point { x: 0.0, y: 0.2 }] },
-        MemberWay { role: WayRole::Outer, coords: vec![Point { x: 1.0, y: 0.0 }, target, Point { x: 1.0, y: 0.2 }] },
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![Point { x: 0.0, y: 0.0 }, target, Point { x: 0.0, y: 0.2 }],
+        },
+        MemberWay {
+            role: WayRole::Outer,
+            coords: vec![Point { x: 1.0, y: 0.0 }, target, Point { x: 1.0, y: 0.2 }],
+        },
     ];
     let shared_keys = relation_shared_vertex_keys(&relation_members);
     assert!(shared_keys.contains(&merc_point_key(&target)));
@@ -1632,12 +1980,36 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
     let mut simp_pinned = geometry::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
-        991, &outer, &[], None, &m, 13, 13, &mut records_plain,
-        &mut emit_plain, &mut simp_plain, 0, None, 0, 1.0,
+        991,
+        &outer,
+        &[],
+        None,
+        &m,
+        13,
+        13,
+        &mut records_plain,
+        &mut emit_plain,
+        &mut simp_plain,
+        0,
+        None,
+        0,
+        1.0,
     );
     emit_multipolygon_feature(
-        991, &outer, &[], Some(&shared_keys), &m, 13, 13, &mut records_pinned,
-        &mut emit_pinned, &mut simp_pinned, 0, None, 0, 1.0,
+        991,
+        &outer,
+        &[],
+        Some(&shared_keys),
+        &m,
+        13,
+        13,
+        &mut records_pinned,
+        &mut emit_pinned,
+        &mut simp_pinned,
+        0,
+        None,
+        0,
+        1.0,
     );
 
     assert_eq!(records_plain.len(), 1);
@@ -1691,12 +2063,36 @@ fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
     let mut emit_scratch = MultipolygonEmitScratch::new();
     let mut simp_scratch = geometry::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
-        9902, &outer_a, &hole_a, None, &m, 0, 0, &mut records,
-        &mut emit_scratch, &mut simp_scratch, 0, None, 0, 1.0,
+        9902,
+        &outer_a,
+        &hole_a,
+        None,
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut emit_scratch,
+        &mut simp_scratch,
+        0,
+        None,
+        0,
+        1.0,
     );
     emit_multipolygon_feature(
-        9903, &outer_b, &hole_b, None, &m, 0, 0, &mut records,
-        &mut emit_scratch, &mut simp_scratch, 0, None, 0, 1.0,
+        9903,
+        &outer_b,
+        &hole_b,
+        None,
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut emit_scratch,
+        &mut simp_scratch,
+        0,
+        None,
+        0,
+        1.0,
     );
     assert_eq!(records.len(), 2);
     assert_simple_record_rings(&records);
@@ -1719,30 +2115,84 @@ fn landing_b_historical_infinity_classes_emit_nothing() {
         Point { x: 0.10, y: 0.10 },
     ]];
     let tiny_outer = vec![
-        Point { x: 0.500_000, y: 0.500_000 },
-        Point { x: 0.500_001, y: 0.500_000 },
-        Point { x: 0.500_001, y: 0.500_001 },
-        Point { x: 0.500_000, y: 0.500_001 },
-        Point { x: 0.500_000, y: 0.500_000 },
+        Point {
+            x: 0.500_000,
+            y: 0.500_000,
+        },
+        Point {
+            x: 0.500_001,
+            y: 0.500_000,
+        },
+        Point {
+            x: 0.500_001,
+            y: 0.500_001,
+        },
+        Point {
+            x: 0.500_000,
+            y: 0.500_001,
+        },
+        Point {
+            x: 0.500_000,
+            y: 0.500_000,
+        },
     ];
     let bigger_than_outer_hole = vec![vec![
-        Point { x: 0.499_990, y: 0.499_990 },
-        Point { x: 0.500_010, y: 0.499_990 },
-        Point { x: 0.500_010, y: 0.500_010 },
-        Point { x: 0.499_990, y: 0.500_010 },
-        Point { x: 0.499_990, y: 0.499_990 },
+        Point {
+            x: 0.499_990,
+            y: 0.499_990,
+        },
+        Point {
+            x: 0.500_010,
+            y: 0.499_990,
+        },
+        Point {
+            x: 0.500_010,
+            y: 0.500_010,
+        },
+        Point {
+            x: 0.499_990,
+            y: 0.500_010,
+        },
+        Point {
+            x: 0.499_990,
+            y: 0.499_990,
+        },
     ]];
 
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
     let mut simp_scratch = geometry::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
-        9904, &zero_area_outer, &large_hole, None, &m, 0, 0, &mut records,
-        &mut emit_scratch, &mut simp_scratch, 0, None, 0, 1.0,
+        9904,
+        &zero_area_outer,
+        &large_hole,
+        None,
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut emit_scratch,
+        &mut simp_scratch,
+        0,
+        None,
+        0,
+        1.0,
     );
     emit_multipolygon_feature(
-        9905, &tiny_outer, &bigger_than_outer_hole, None, &m, 0, 0, &mut records,
-        &mut emit_scratch, &mut simp_scratch, 0, None, 0, 1.0,
+        9905,
+        &tiny_outer,
+        &bigger_than_outer_hole,
+        None,
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut emit_scratch,
+        &mut simp_scratch,
+        0,
+        None,
+        0,
+        1.0,
     );
     assert!(records.is_empty());
 }
@@ -1753,16 +2203,50 @@ fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
     let mut scratch = PolygonEmitScratch::new();
 
     let tier1 = [
-        Point { x: 0.500_010, y: 0.500_010 },
-        Point { x: 0.500_030, y: 0.500_012 },
-        Point { x: 0.500_010, y: 0.500_010 },
-        Point { x: 0.500_090, y: 0.500_010 },
-        Point { x: 0.500_090, y: 0.500_090 },
-        Point { x: 0.500_010, y: 0.500_090 },
-        Point { x: 0.500_010, y: 0.500_010 },
+        Point {
+            x: 0.500_010,
+            y: 0.500_010,
+        },
+        Point {
+            x: 0.500_030,
+            y: 0.500_012,
+        },
+        Point {
+            x: 0.500_010,
+            y: 0.500_010,
+        },
+        Point {
+            x: 0.500_090,
+            y: 0.500_010,
+        },
+        Point {
+            x: 0.500_090,
+            y: 0.500_090,
+        },
+        Point {
+            x: 0.500_010,
+            y: 0.500_090,
+        },
+        Point {
+            x: 0.500_010,
+            y: 0.500_010,
+        },
     ];
     let mut records = Vec::new();
-    emit_polygon_feature(9910, &tier1, &[], &m, 13, 13, &mut records, &mut scratch, 0, None, 0, 1.0);
+    emit_polygon_feature(
+        9910,
+        &tier1,
+        &[],
+        &m,
+        13,
+        13,
+        &mut records,
+        &mut scratch,
+        0,
+        None,
+        0,
+        1.0,
+    );
     assert_no_backtrack_in_records(&records);
 
     let tier2 = [
@@ -1775,7 +2259,20 @@ fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
         Point { x: 0.10, y: 0.10 },
     ];
     records.clear();
-    emit_polygon_feature(9911, &tier2, &[], &m, 4, 4, &mut records, &mut scratch, 0, None, 0, 1.0);
+    emit_polygon_feature(
+        9911,
+        &tier2,
+        &[],
+        &m,
+        4,
+        4,
+        &mut records,
+        &mut scratch,
+        0,
+        None,
+        0,
+        1.0,
+    );
     assert_no_backtrack_in_records(&records);
 
     let tier3 = [
@@ -1788,7 +2285,20 @@ fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
         Point { x: 0.10, y: 0.10 },
     ];
     records.clear();
-    emit_polygon_feature(9912, &tier3, &[], &m, 4, 4, &mut records, &mut scratch, 0, None, 0, 1.0);
+    emit_polygon_feature(
+        9912,
+        &tier3,
+        &[],
+        &m,
+        4,
+        4,
+        &mut records,
+        &mut scratch,
+        0,
+        None,
+        0,
+        1.0,
+    );
     assert_no_backtrack_in_records(&records);
 }
 
@@ -1869,7 +2379,10 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
     let (osm_id, gt, cmd_count) = decode_data_header(&rec.data);
     assert_eq!(osm_id, 402);
     assert_eq!(gt, 3);
-    assert!(cmd_count >= 6, "multipolygon with hole should encode multiple ring commands");
+    assert!(
+        cmd_count >= 6,
+        "multipolygon with hole should encode multiple ring commands"
+    );
 
     let lb = decode_to_layer(&rec.data);
     assert_eq!(lb.test_feature_count(), 1);
@@ -1918,7 +2431,10 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
     );
 
     assert_eq!(usize::try_from(count).unwrap(), records.len());
-    assert!(records.len() > 1, "large multipolygon should clip into multiple z2 tiles");
+    assert!(
+        records.len() > 1,
+        "large multipolygon should clip into multiple z2 tiles"
+    );
 
     for rec in &records {
         let (osm_id, gt, cmd_count) = decode_data_header(&rec.data);
@@ -1939,10 +2455,7 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         Point { x: 0.20, y: 0.20 },
     ];
     let inners = vec![
-        vec![
-            Point { x: 0.30, y: 0.30 },
-            Point { x: 0.50, y: 0.30 },
-        ], // too short
+        vec![Point { x: 0.30, y: 0.30 }, Point { x: 0.50, y: 0.30 }], // too short
         vec![
             Point { x: 0.35, y: 0.35 },
             Point { x: 0.65, y: 0.65 },
@@ -2006,18 +2519,48 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
     let outer = vec![
         // Keep this polygon within one z14 tile so the test checks
         // invalid-inner handling, not multi-tile fanout.
-        Point { x: 0.500_010, y: 0.500_010 },
-        Point { x: 0.500_040, y: 0.500_010 },
-        Point { x: 0.500_040, y: 0.500_040 },
-        Point { x: 0.500_010, y: 0.500_040 },
-        Point { x: 0.500_010, y: 0.500_010 },
+        Point {
+            x: 0.500_010,
+            y: 0.500_010,
+        },
+        Point {
+            x: 0.500_040,
+            y: 0.500_010,
+        },
+        Point {
+            x: 0.500_040,
+            y: 0.500_040,
+        },
+        Point {
+            x: 0.500_010,
+            y: 0.500_040,
+        },
+        Point {
+            x: 0.500_010,
+            y: 0.500_010,
+        },
     ];
     let bowtie_inner = vec![vec![
-        Point { x: 0.500_018, y: 0.500_018 },
-        Point { x: 0.500_032, y: 0.500_032 },
-        Point { x: 0.500_018, y: 0.500_032 },
-        Point { x: 0.500_032, y: 0.500_018 },
-        Point { x: 0.500_018, y: 0.500_018 },
+        Point {
+            x: 0.500_018,
+            y: 0.500_018,
+        },
+        Point {
+            x: 0.500_032,
+            y: 0.500_032,
+        },
+        Point {
+            x: 0.500_018,
+            y: 0.500_032,
+        },
+        Point {
+            x: 0.500_032,
+            y: 0.500_018,
+        },
+        Point {
+            x: 0.500_018,
+            y: 0.500_018,
+        },
     ]];
 
     let mut z13_records = Vec::new();
@@ -2075,11 +2618,26 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
 fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
     let bowtie_outer = vec![
-        Point { x: 0.500_010, y: 0.500_010 },
-        Point { x: 0.500_040, y: 0.500_040 },
-        Point { x: 0.500_010, y: 0.500_040 },
-        Point { x: 0.500_040, y: 0.500_010 },
-        Point { x: 0.500_010, y: 0.500_010 },
+        Point {
+            x: 0.500_010,
+            y: 0.500_010,
+        },
+        Point {
+            x: 0.500_040,
+            y: 0.500_040,
+        },
+        Point {
+            x: 0.500_010,
+            y: 0.500_040,
+        },
+        Point {
+            x: 0.500_040,
+            y: 0.500_010,
+        },
+        Point {
+            x: 0.500_010,
+            y: 0.500_010,
+        },
     ];
 
     let mut z13_records = Vec::new();
@@ -2090,12 +2648,36 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
     let mut simp_14 = geometry::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
-        4051, &bowtie_outer, &[], None, &m, 13, 13, &mut z13_records,
-        &mut emit_13, &mut simp_13, 0, None, 0, 1.0,
+        4051,
+        &bowtie_outer,
+        &[],
+        None,
+        &m,
+        13,
+        13,
+        &mut z13_records,
+        &mut emit_13,
+        &mut simp_13,
+        0,
+        None,
+        0,
+        1.0,
     );
     emit_multipolygon_feature(
-        4051, &bowtie_outer, &[], None, &m, 14, 14, &mut z14_records,
-        &mut emit_14, &mut simp_14, 0, None, 0, 1.0,
+        4051,
+        &bowtie_outer,
+        &[],
+        None,
+        &m,
+        14,
+        14,
+        &mut z14_records,
+        &mut emit_14,
+        &mut simp_14,
+        0,
+        None,
+        0,
+        1.0,
     );
 
     for rec in z13_records.iter().chain(&z14_records) {
@@ -2202,9 +2784,7 @@ fn load_checkpoint_missing_file() {
 fn boundary_polygon_feature(osm_id: u64, ring: &[(i32, i32)]) -> (u8, Box<[u8]>) {
     let mut geom_buf = Vec::new();
     mvt::encode_polygon(&mut geom_buf, &[ring]);
-    let attrs: Vec<crate::shortbread::Attr> = vec![
-        ("admin_level", AttrValue::Int(4), 0),
-    ];
+    let attrs: Vec<crate::shortbread::Attr> = vec![("admin_level", AttrValue::Int(4), 0)];
     (
         Layer::Boundaries as u8,
         crate::wire_format::encode_feature_data(osm_id, GeomType::Polygon, &geom_buf, &attrs, 5),
@@ -2254,11 +2834,16 @@ fn seam_reconciliation_two_adjacent_boundaries() {
     let mut raw = Vec::new();
     std::io::Read::read_to_end(&mut decoder, &mut raw).expect("gunzip");
     let layers = crate::pmtiles_reader::decode_mvt_layers(&raw).expect("decode mvt");
-    let boundary_layer = layers.iter().find(|l| l.name == "boundaries")
+    let boundary_layer = layers
+        .iter()
+        .find(|l| l.name == "boundaries")
         .expect("should have boundaries layer");
     // After merge_same_attr_geometries, features with identical attributes may be merged
     // into a single multipolygon - so we check polygons >= 1 (not >= 2).
-    assert!(boundary_layer.polygons >= 1, "should have at least 1 polygon feature");
+    assert!(
+        boundary_layer.polygons >= 1,
+        "should have at least 1 polygon feature"
+    );
 }
 
 /// At z > BOUNDARY_NO_SIMP_MAX, reconciliation should NOT fire.
@@ -2307,14 +2892,25 @@ fn seam_reconciliation_cross_tile_continuity() {
     let metrics = SeamMetrics::new();
     let encoded = encode_tile_batch_mvt(&[tile_a, tile_b], 6, TileCompression::Gzip, &[], &metrics);
     // Both tiles should produce valid output (no panics, no empty results).
-    assert_eq!(encoded.len(), 2, "both adjacent tiles should encode successfully");
+    assert_eq!(
+        encoded.len(),
+        2,
+        "both adjacent tiles should encode successfully"
+    );
 }
 
 /// Single boundary polygon (no shared edges) still gets tile-coord DP at z<=8.
 #[test]
 fn seam_reconciliation_single_ring_still_simplifies() {
     // A ring with a collinear midpoint - should be simplified even without shared chains.
-    let ring = vec![(0, 0), (2000, 0), (4000, 0), (4000, 4000), (0, 4000), (0, 0)];
+    let ring = vec![
+        (0, 0),
+        (2000, 0),
+        (4000, 0),
+        (4000, 4000),
+        (0, 4000),
+        (0, 0),
+    ];
     // (2000, 0) is collinear between (0,0) and (4000,0), should be removed by DP.
 
     let tile_id = pmtiles_writer::xy_to_tile_id(5, 10, 10);
@@ -2339,9 +2935,14 @@ fn seam_reconciliation_single_ring_still_simplifies() {
     let mut raw = Vec::new();
     std::io::Read::read_to_end(&mut decoder, &mut raw).expect("gunzip");
     let layers = crate::pmtiles_reader::decode_mvt_layers(&raw).expect("decode mvt");
-    let boundary_layer = layers.iter().find(|l| l.name == "boundaries")
+    let boundary_layer = layers
+        .iter()
+        .find(|l| l.name == "boundaries")
         .expect("should have boundaries layer");
-    assert!(boundary_layer.polygons >= 1, "should have boundary polygon output");
+    assert!(
+        boundary_layer.polygons >= 1,
+        "should have boundary polygon output"
+    );
 }
 
 /// Two boundary polygons with NO shared edge still get simplified at z<=8.
@@ -2349,7 +2950,14 @@ fn seam_reconciliation_single_ring_still_simplifies() {
 fn seam_reconciliation_no_shared_edges_still_simplifies() {
     // Two non-adjacent polygons, each with a collinear midpoint.
     let ring_a = vec![(0, 0), (500, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
-    let ring_b = vec![(2000, 2000), (3000, 2000), (4000, 2000), (4000, 3000), (2000, 3000), (2000, 2000)];
+    let ring_b = vec![
+        (2000, 2000),
+        (3000, 2000),
+        (4000, 2000),
+        (4000, 3000),
+        (2000, 3000),
+        (2000, 2000),
+    ];
 
     let tile_id = pmtiles_writer::xy_to_tile_id(5, 10, 10);
     let tile = PendingTile {
@@ -2382,16 +2990,21 @@ fn seam_reconciliation_non_boundary_unaffected() {
     mvt::encode_polygon(&mut geom_a, &[&ring_a]);
     let mut geom_b = Vec::new();
     mvt::encode_polygon(&mut geom_b, &[&ring_b]);
-    let attrs: Vec<crate::shortbread::Attr> = vec![
-        ("kind", AttrValue::Str(Cow::Borrowed("residential")), 0),
-    ];
+    let attrs: Vec<crate::shortbread::Attr> =
+        vec![("kind", AttrValue::Str(Cow::Borrowed("residential")), 0)];
 
     let tile_id = pmtiles_writer::xy_to_tile_id(5, 10, 10);
     let tile = PendingTile {
         tile_id,
         features: vec![
-            (Layer::Land as u8, crate::wire_format::encode_feature_data(300, GeomType::Polygon, &geom_a, &attrs, 5)),
-            (Layer::Land as u8, crate::wire_format::encode_feature_data(301, GeomType::Polygon, &geom_b, &attrs, 5)),
+            (
+                Layer::Land as u8,
+                crate::wire_format::encode_feature_data(300, GeomType::Polygon, &geom_a, &attrs, 5),
+            ),
+            (
+                Layer::Land as u8,
+                crate::wire_format::encode_feature_data(301, GeomType::Polygon, &geom_b, &attrs, 5),
+            ),
         ],
     };
 
@@ -2461,8 +3074,18 @@ fn disabled_layer_falls_back_to_simplified_path() {
     let mut records_fullres = Vec::new();
     let mut scratch_fullres = PolygonEmitScratch::new();
     emit_polygon_feature(
-        100, &coords, &[], &m, 2, 2,
-        &mut records_fullres, &mut scratch_fullres, 8, None, 0, 1.0,
+        100,
+        &coords,
+        &[],
+        &m,
+        2,
+        2,
+        &mut records_fullres,
+        &mut scratch_fullres,
+        8,
+        None,
+        0,
+        1.0,
     );
 
     let ds = DeferralStats::new();
@@ -2470,15 +3093,35 @@ fn disabled_layer_falls_back_to_simplified_path() {
     let mut records_disabled = Vec::new();
     let mut scratch_disabled = PolygonEmitScratch::new();
     emit_polygon_feature(
-        100, &coords, &[], &m, 2, 2,
-        &mut records_disabled, &mut scratch_disabled, 8, Some(&ds), 0, 1.0,
+        100,
+        &coords,
+        &[],
+        &m,
+        2,
+        2,
+        &mut records_disabled,
+        &mut scratch_disabled,
+        8,
+        Some(&ds),
+        0,
+        1.0,
     );
 
     let mut records_nodeferral = Vec::new();
     let mut scratch_nodeferral = PolygonEmitScratch::new();
     emit_polygon_feature(
-        100, &coords, &[], &m, 2, 2,
-        &mut records_nodeferral, &mut scratch_nodeferral, 0, None, 0, 1.0,
+        100,
+        &coords,
+        &[],
+        &m,
+        2,
+        2,
+        &mut records_nodeferral,
+        &mut scratch_nodeferral,
+        0,
+        None,
+        0,
+        1.0,
     );
 
     assert_eq!(records_fullres.len(), 1, "full-res should emit");
@@ -2515,10 +3158,25 @@ fn deferral_records_vertex_count() {
     let mut scratch = PolygonEmitScratch::new();
     // Emit at z=0 with seam_max_zoom=8 → deferred, should record vertices.
     emit_polygon_feature(
-        200, &coords, &[], &m, 0, 0,
-        &mut records, &mut scratch, 8, Some(&ds), 0, 1.0,
+        200,
+        &coords,
+        &[],
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut scratch,
+        8,
+        Some(&ds),
+        0,
+        1.0,
     );
 
     let recorded = ds.vertices[Layer::Boundaries as usize].load(Ordering::Relaxed);
-    assert_eq!(recorded, coords.len() as u64, "should record {n} vertices", n = coords.len());
+    assert_eq!(
+        recorded,
+        coords.len() as u64,
+        "should record {n} vertices",
+        n = coords.len()
+    );
 }

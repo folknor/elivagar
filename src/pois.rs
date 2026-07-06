@@ -9,7 +9,9 @@
 // binary_search saves ~19 comparisons per hit but hits are rare; phf adds a
 // dependency for zero measurable gain.
 
-use crate::shortbread::{attr_str, attr_dyn, attr_int, attr_bool, name_attrs, Attr, Tags, Layer, LayerMatch, GeomExpect};
+use crate::shortbread::{
+    Attr, GeomExpect, Layer, LayerMatch, Tags, attr_bool, attr_dyn, attr_int, attr_str, name_attrs,
+};
 use smallvec::{SmallVec, smallvec};
 
 // ---------------------------------------------------------------------------
@@ -102,9 +104,7 @@ fn pois_match(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn pois_match_amenity(
-    tags: &Tags<'_>,
-) -> Option<SmallVec<[Attr; 8]>> {
+fn pois_match_amenity(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
     static AMENITY_VALUES: &[&str] = &[
         "arts_centre",
         "atm",
@@ -172,11 +172,7 @@ fn pois_match_amenity(
     Some(attrs)
 }
 
-fn poi_amenity_special_attrs(
-    tags: &Tags<'_>,
-    amenity: &str,
-    attrs: &mut SmallVec<[Attr; 8]>,
-) {
+fn poi_amenity_special_attrs(tags: &Tags<'_>, amenity: &str, attrs: &mut SmallVec<[Attr; 8]>) {
     match amenity {
         "restaurant" | "fast_food" | "pub" | "bar" | "cafe" => {
             if let Some(v) = tags.get("cuisine") {
@@ -207,10 +203,7 @@ fn poi_amenity_special_attrs(
     }
 }
 
-fn poi_recycling_attrs(
-    tags: &Tags<'_>,
-    attrs: &mut SmallVec<[Attr; 8]>,
-) {
+fn poi_recycling_attrs(tags: &Tags<'_>, attrs: &mut SmallVec<[Attr; 8]>) {
     attrs.push(attr_bool(
         "recycling:glass_bottles",
         tags.has_value("recycling:glass_bottles", "yes"),
@@ -270,9 +263,7 @@ fn pois_match_historic(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
     match_tag_in_list(tags, "historic", VALUES)
 }
 
-fn pois_match_leisure(
-    tags: &Tags<'_>,
-) -> Option<SmallVec<[Attr; 8]>> {
+fn pois_match_leisure(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
     static LEISURE_VALUES: &[&str] = &[
         "dog_park",
         "golf_course",
@@ -296,9 +287,7 @@ fn pois_match_leisure(
     Some(attrs)
 }
 
-fn pois_match_man_made(
-    tags: &Tags<'_>,
-) -> Option<SmallVec<[Attr; 8]>> {
+fn pois_match_man_made(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
     static MAN_MADE_VALUES: &[&str] = &[
         "lighthouse",
         "mast",
@@ -452,9 +441,7 @@ fn pois_match_shop(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
     match_tag_in_list(tags, "shop", VALUES)
 }
 
-fn pois_match_tourism(
-    tags: &Tags<'_>,
-) -> Option<SmallVec<[Attr; 8]>> {
+fn pois_match_tourism(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
     static TOURISM_VALUES: &[&str] = &[
         "alpine_hut",
         "artwork",

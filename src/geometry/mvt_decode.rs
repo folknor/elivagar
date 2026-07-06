@@ -113,5 +113,7 @@ pub fn encode_mvt_polygon(rings: &[Vec<(i32, i32)>], buf: &mut Vec<u32>) {
 #[inline]
 fn unzigzag(n: u32) -> i32 {
     #[allow(clippy::cast_possible_wrap)]
-    { ((n >> 1) as i32) ^ (-((n & 1) as i32)) }
+    {
+        ((n >> 1) as i32) ^ (-((n & 1) as i32))
+    }
 }

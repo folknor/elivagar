@@ -9,8 +9,8 @@
 // encoding). Already a transitive dependency via roaring. To revert, swap back to
 // std::collections::HashMap and remove the rustc-hash direct dependency.
 use protohoggr::{
-    encode_bytes_field_always, encode_packed_uint32, encode_tag, encode_varint,
-    encode_varint_field_always, zigzag_encode_64, WIRE_32BIT, WIRE_64BIT, WIRE_VARINT,
+    WIRE_32BIT, WIRE_64BIT, WIRE_VARINT, encode_bytes_field_always, encode_packed_uint32,
+    encode_tag, encode_varint, encode_varint_field_always, zigzag_encode_64,
 };
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
@@ -300,7 +300,8 @@ impl LayerBuilder {
         // Build sorted key permutation (alphabetical) and inverse remap.
         s.sorted_keys.clear();
         s.sorted_keys.extend(0..self.keys.len() as u16);
-        s.sorted_keys.sort_by(|&a, &b| self.keys[a as usize].cmp(&self.keys[b as usize]));
+        s.sorted_keys
+            .sort_by(|&a, &b| self.keys[a as usize].cmp(&self.keys[b as usize]));
         s.key_remap.clear();
         s.key_remap.resize(self.keys.len(), 0);
         for (new_idx, &old_idx) in s.sorted_keys.iter().enumerate() {
@@ -331,7 +332,10 @@ impl LayerBuilder {
             if !f.tags.is_empty() {
                 s.tag_vals.clear();
                 s.tag_vals.extend(f.tags.iter().flat_map(|&(k, v)| {
-                    [u32::from(s.key_remap[k as usize]), u32::from(s.val_remap[v as usize])]
+                    [
+                        u32::from(s.key_remap[k as usize]),
+                        u32::from(s.val_remap[v as usize]),
+                    ]
                 }));
                 encode_packed_uint32(&mut s.feat_buf, &mut s.packed, 2, &s.tag_vals);
             }
@@ -517,7 +521,9 @@ fn encode_value(buf: &mut Vec<u8>, val: &Value) {
 #[inline]
 pub(crate) fn zigzag(v: i32) -> u32 {
     #[allow(clippy::cast_sign_loss)]
-    { ((v << 1) ^ (v >> 31)) as u32 }
+    {
+        ((v << 1) ^ (v >> 31)) as u32
+    }
 }
 
 #[inline]
@@ -528,7 +534,9 @@ pub(crate) fn command(id: u32, count: u32) -> u32 {
 #[inline]
 pub(super) fn decode_zigzag(v: u32) -> i32 {
     #[allow(clippy::cast_possible_wrap)]
-    { ((v >> 1) as i32) ^ (-((v & 1) as i32)) }
+    {
+        ((v >> 1) as i32) ^ (-((v & 1) as i32))
+    }
 }
 
 // ---------------------------------------------------------------------------

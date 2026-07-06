@@ -23,8 +23,7 @@ fn boundary_match(tags: &Tags<'_>) -> Option<(i64, u8)> {
 
 pub(super) fn match_boundaries_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some((admin_level, min_zoom)) = boundary_match(tags) {
-        let maritime =
-            tags.has_value("maritime", "yes") || tags.has_value("natural", "coastline");
+        let maritime = tags.has_value("maritime", "yes") || tags.has_value("natural", "coastline");
         let disputed = tags.has_value("disputed", "yes");
         out.push(LayerMatch {
             layer: Layer::Boundaries,
@@ -87,10 +86,7 @@ pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
 }
 
 /// Returns (kind, min_zoom, population_default) for a place label.
-fn place_label_info(
-    tags: &Tags<'_>,
-    place: &str,
-) -> Option<(&'static str, u8, i64)> {
+fn place_label_info(tags: &Tags<'_>, place: &str) -> Option<(&'static str, u8, i64)> {
     // Capital detection.
     // NOTE: OSM also uses capital=2 for national capitals (admin_level=2),
     // but neither Planetiler nor Tilemaker handle it - consistent gap across

@@ -11,8 +11,8 @@
 //   transport.rs  - aerialways, ferries, public_transport
 //   (pois.rs lives at crate root - see src/pois.rs)
 
-use std::borrow::Cow;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 
 mod boundaries;
 mod land;
@@ -61,17 +61,32 @@ pub enum Layer {
 impl Layer {
     /// All layers in enum order.
     pub const ALL: [Layer; 26] = [
-        Self::WaterPolygons, Self::WaterPolygonsLabels,
-        Self::WaterLines, Self::WaterLinesLabels,
-        Self::DamLines, Self::DamPolygons,
-        Self::PierLines, Self::PierPolygons,
-        Self::Boundaries, Self::BoundaryLabels,
-        Self::PlaceLabels, Self::Land,
-        Self::Sites, Self::Buildings, Self::Addresses,
-        Self::Streets, Self::StreetPolygons,
-        Self::StreetLabels, Self::StreetLabelsPoints, Self::StreetsPolygonsLabels,
-        Self::Bridges, Self::Aerialways, Self::Ferries,
-        Self::PublicTransport, Self::Pois, Self::Ocean,
+        Self::WaterPolygons,
+        Self::WaterPolygonsLabels,
+        Self::WaterLines,
+        Self::WaterLinesLabels,
+        Self::DamLines,
+        Self::DamPolygons,
+        Self::PierLines,
+        Self::PierPolygons,
+        Self::Boundaries,
+        Self::BoundaryLabels,
+        Self::PlaceLabels,
+        Self::Land,
+        Self::Sites,
+        Self::Buildings,
+        Self::Addresses,
+        Self::Streets,
+        Self::StreetPolygons,
+        Self::StreetLabels,
+        Self::StreetLabelsPoints,
+        Self::StreetsPolygonsLabels,
+        Self::Bridges,
+        Self::Aerialways,
+        Self::Ferries,
+        Self::PublicTransport,
+        Self::Pois,
+        Self::Ocean,
     ];
 
     /// MVT layer name string.
@@ -118,10 +133,18 @@ impl Layer {
             Self::WaterLines | Self::WaterLinesLabels => 9,
             Self::StreetLabels | Self::Ferries => 10,
             Self::StreetPolygons | Self::PublicTransport => 11,
-            Self::DamLines | Self::DamPolygons | Self::PierLines | Self::PierPolygons
-            | Self::StreetLabelsPoints | Self::Bridges | Self::Aerialways => 12,
-            Self::Sites | Self::Buildings | Self::Addresses
-            | Self::StreetsPolygonsLabels | Self::Pois => 14,
+            Self::DamLines
+            | Self::DamPolygons
+            | Self::PierLines
+            | Self::PierPolygons
+            | Self::StreetLabelsPoints
+            | Self::Bridges
+            | Self::Aerialways => 12,
+            Self::Sites
+            | Self::Buildings
+            | Self::Addresses
+            | Self::StreetsPolygonsLabels
+            | Self::Pois => 14,
         }
     }
 
@@ -166,10 +189,7 @@ pub struct Tags<'a>(pub &'a [(&'a str, &'a str)]);
 
 impl<'a> Tags<'a> {
     pub fn get(&self, key: &str) -> Option<&'a str> {
-        self.0
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| *v)
+        self.0.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
     }
 
     pub fn has(&self, key: &str) -> bool {
@@ -181,9 +201,7 @@ impl<'a> Tags<'a> {
     }
 
     pub fn has_any(&self, key: &str, vals: &[&str]) -> bool {
-        self.0
-            .iter()
-            .any(|(k, v)| *k == key && vals.contains(v))
+        self.0.iter().any(|(k, v)| *k == key && vals.contains(v))
     }
 }
 

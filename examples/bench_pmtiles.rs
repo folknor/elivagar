@@ -49,8 +49,8 @@ fn main() {
     // Benchmark elivagar writer (hotpath guard prints timing report on drop)
     #[cfg(feature = "hotpath")]
     let _guard = hotpath::HotpathGuardBuilder::new("bench_pmtiles")
-        .percentiles(&[50, 95, 99])
-        .with_functions_limit(0)
+        .percentiles(&[50.0, 95.0, 99.0])
+        .functions_limit(0)
         .build();
 
     eprint!("  elivagar:   ");
@@ -234,9 +234,7 @@ fn bench_pmtiles_rs(tiles: &[TestTile], runs: usize) -> (u128, u64) {
             .expect("create pmtiles-rs writer");
 
         for tile in tiles {
-            let coord =
-                pmtiles::TileCoord::new(tile.z, tile.x, tile.y)
-                    .expect("tile coord");
+            let coord = pmtiles::TileCoord::new(tile.z, tile.x, tile.y).expect("tile coord");
             writer
                 .add_raw_tile(coord, &tile.data)
                 .expect("pmtiles-rs add_raw_tile");

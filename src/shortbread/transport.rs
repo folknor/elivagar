@@ -63,10 +63,7 @@ pub(super) fn match_ferries(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
 // Public transport
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_public_transport_point(
-    tags: &Tags<'_>,
-    out: &mut SmallVec<[LayerMatch; 4]>,
-) {
+pub(super) fn match_public_transport_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     match_public_transport(tags, GeomExpect::Point, out);
 }
 

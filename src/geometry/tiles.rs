@@ -14,9 +14,7 @@ pub fn tiles_for_bbox(bbox: &MercBbox, zoom: u8) -> Vec<(u32, u32)> {
     let ty_min = clamp_tile(bbox.min_y * z_scale, max_tile);
     let ty_max = clamp_tile(bbox.max_y * z_scale, max_tile);
 
-    let mut tiles = Vec::with_capacity(
-        ((tx_max - tx_min + 1) * (ty_max - ty_min + 1)) as usize,
-    );
+    let mut tiles = Vec::with_capacity(((tx_max - tx_min + 1) * (ty_max - ty_min + 1)) as usize);
     for ty in ty_min..=ty_max {
         for tx in tx_min..=tx_max {
             tiles.push((tx, ty));
@@ -109,14 +107,20 @@ pub(crate) fn merc_bbox(points: &[Point]) -> MercBbox {
         max_x = max_x.max(p.x);
         max_y = max_y.max(p.y);
     }
-    MercBbox { min_x, min_y, max_x, max_y }
+    MercBbox {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    }
 }
 
 /// Close a tile-coordinate ring (if not already closed) and enforce clockwise winding (MVT outer).
 pub(crate) fn close_and_orient_cw(ring: &mut Vec<(i32, i32)>) {
     if ring.first() != ring.last()
-        && let Some(&first) = ring.first() {
-            ring.push(first);
+        && let Some(&first) = ring.first()
+    {
+        ring.push(first);
     }
     ensure_cw_tile(ring);
 }
@@ -124,8 +128,9 @@ pub(crate) fn close_and_orient_cw(ring: &mut Vec<(i32, i32)>) {
 /// Close a tile-coordinate ring (if not already closed) and enforce counter-clockwise winding (MVT inner).
 pub(crate) fn close_and_orient_ccw(ring: &mut Vec<(i32, i32)>) {
     if ring.first() != ring.last()
-        && let Some(&first) = ring.first() {
-            ring.push(first);
+        && let Some(&first) = ring.first()
+    {
+        ring.push(first);
     }
     ensure_ccw_tile(ring);
 }

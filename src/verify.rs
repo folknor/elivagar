@@ -126,11 +126,9 @@ impl VerifyReport {
         }
 
         // Layer coverage summary.
-        let shortbread_names: HashSet<&str> =
-            Layer::ALL.iter().map(|l| l.name()).collect();
+        let shortbread_names: HashSet<&str> = Layer::ALL.iter().map(|l| l.name()).collect();
 
-        let declared_set: HashSet<&str> =
-            self.layers_declared.iter().map(String::as_str).collect();
+        let declared_set: HashSet<&str> = self.layers_declared.iter().map(String::as_str).collect();
 
         // Layers observed in tiles but not declared in metadata.
         let undeclared: Vec<&str> = self
@@ -168,9 +166,7 @@ impl VerifyReport {
         }
         if !non_shortbread.is_empty() {
             println!();
-            println!(
-                "Warning: declared layers not in Shortbread schema: {non_shortbread:?}"
-            );
+            println!("Warning: declared layers not in Shortbread schema: {non_shortbread:?}");
         }
 
         println!();
@@ -194,6 +190,7 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
 
 /// Verify with options: `geometry_stats` additionally collects per-zoom
 /// ocean-layer geometry statistics into the report.
+#[allow(clippy::too_many_lines)]
 pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, VerifyError> {
     // -- Open and validate header --
     let mut reader = PmtilesReader::open(path)?;
@@ -225,10 +222,30 @@ pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, Ve
     }
 
     // -- Section bounds --
-    check_section_bounds("root_dir", reader.root_dir_offset(), reader.root_dir_length(), file_size)?;
-    check_section_bounds("metadata", reader.metadata_offset(), reader.metadata_length(), file_size)?;
-    check_section_bounds("leaf_dirs", reader.leaf_dirs_offset(), reader.leaf_dirs_length(), file_size)?;
-    check_section_bounds("tile_data", reader.data_offset(), reader.data_length(), file_size)?;
+    check_section_bounds(
+        "root_dir",
+        reader.root_dir_offset(),
+        reader.root_dir_length(),
+        file_size,
+    )?;
+    check_section_bounds(
+        "metadata",
+        reader.metadata_offset(),
+        reader.metadata_length(),
+        file_size,
+    )?;
+    check_section_bounds(
+        "leaf_dirs",
+        reader.leaf_dirs_offset(),
+        reader.leaf_dirs_length(),
+        file_size,
+    )?;
+    check_section_bounds(
+        "tile_data",
+        reader.data_offset(),
+        reader.data_length(),
+        file_size,
+    )?;
 
     // Dedup invariant: unique <= addressed.
     if reader.num_unique() > reader.num_addressed() {
@@ -299,7 +316,9 @@ pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, Ve
             let ocean_problems = validate_ocean_rings(&decompressed);
             for problem in ocean_problems {
                 tile_errors.push(format!("z{z}/{x}/{y}: {problem}"));
-                if tile_errors.len() >= MAX_TILE_ERRORS { break; }
+                if tile_errors.len() >= MAX_TILE_ERRORS {
+                    break;
+                }
             }
         }
 
@@ -354,7 +373,9 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
             break;
         }
     }
-    if name != "ocean" { return; }
+    if name != "ocean" {
+        return;
+    }
 
     let zs = stats.per_zoom.entry(z).or_default();
     for feat_data in &feature_blobs {
@@ -363,16 +384,32 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
         let mut fc = Cursor::new(feat_data);
         while let Ok(Some((ff, fw))) = fc.read_tag() {
             match (ff, fw) {
-                (3, WIRE_VARINT) => { if let Ok(gt) = fc.read_varint() { geom_type = gt; } }
-                (4, WIRE_LEN) => { geom_bytes = fc.read_len_delimited().ok(); }
-                _ => { drop(fc.skip_field(fw)); }
+                (3, WIRE_VARINT) => {
+                    if let Ok(gt) = fc.read_varint() {
+                        geom_type = gt;
+                    }
+                }
+                (4, WIRE_LEN) => {
+                    geom_bytes = fc.read_len_delimited().ok();
+                }
+                _ => {
+                    drop(fc.skip_field(fw));
+                }
             }
         }
-        if geom_type != 3 { continue; }
-        let Some(gb) = geom_bytes else { continue; };
-        let Ok(commands) = decode_packed_varints(gb) else { continue; };
+        if geom_type != 3 {
+            continue;
+        }
+        let Some(gb) = geom_bytes else {
+            continue;
+        };
+        let Ok(commands) = decode_packed_varints(gb) else {
+            continue;
+        };
         let rings = crate::geometry::decode_mvt_polygon(&commands);
-        if rings.is_empty() { continue; }
+        if rings.is_empty() {
+            continue;
+        }
 
         zs.features += 1;
         zs.rings += rings.len() as u64;
@@ -412,7 +449,12 @@ fn is_full_tile_rect(ring: &[(i32, i32)]) -> bool {
         max_y = max_y.max(y);
         // Every vertex must be a corner of the bbox - checked below.
     }
-    let corners = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)];
+    let corners = [
+        (min_x, min_y),
+        (max_x, min_y),
+        (max_x, max_y),
+        (min_x, max_y),
+    ];
     let all_corners = ring[..n].iter().all(|v| corners.contains(v));
     #[allow(clippy::cast_possible_truncation)]
     let ext = crate::geometry::EXTENT as i32;
@@ -434,10 +476,11 @@ fn validate_mvt_geometry(data: &[u8], z: u8, x: u32) -> Result<(), String> {
                     if let Ok(sub) = name_cursor.read_len_delimited() {
                         layer_name = String::from_utf8_lossy(sub).to_string();
                     }
-                } else { drop(name_cursor.skip_field(lw)); }
+                } else {
+                    drop(name_cursor.skip_field(lw));
+                }
             }
-            validate_mvt_layer_geometry(layer, z, x)
-                .map_err(|e| format!("[{layer_name}] {e}"))?;
+            validate_mvt_layer_geometry(layer, z, x).map_err(|e| format!("[{layer_name}] {e}"))?;
         } else {
             tile_cursor
                 .skip_field(wire_type)
@@ -497,7 +540,9 @@ fn validate_mvt_feature_geometry(feature: &[u8], z: u8, x: u32) -> Result<(), St
         // Features without geometry are valid in MVT (e.g. metadata features).
         // Only flag polygon features that claim a type but lack geometry data.
         if geom_type != 0 {
-            return Err(format!("feature has geom_type={geom_type} but missing geometry data"));
+            return Err(format!(
+                "feature has geom_type={geom_type} but missing geometry data"
+            ));
         }
         return Ok(());
     };
@@ -647,7 +692,9 @@ fn validate_geometry_commands(
                     return Err("ClosePath command count is not 1 (spec 4.3.3.3)".to_string());
                 }
                 if ring_points < 3 {
-                    return Err(format!("polygon ring has too few points ({ring_points}, need ≥3)"));
+                    return Err(format!(
+                        "polygon ring has too few points ({ring_points}, need ≥3)"
+                    ));
                 }
                 ring_points = 0;
             }
@@ -699,7 +746,9 @@ fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
             break;
         }
     }
-    if name != "ocean" { return; }
+    if name != "ocean" {
+        return;
+    }
 
     for (fi, feat_data) in feature_blobs.iter().enumerate() {
         let mut geom_type: u64 = 0;
@@ -707,21 +756,36 @@ fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
         let mut fc = Cursor::new(feat_data);
         while let Ok(Some((ff, fw))) = fc.read_tag() {
             match (ff, fw) {
-                (3, WIRE_VARINT) => { if let Ok(gt) = fc.read_varint() { geom_type = gt; } }
-                (4, WIRE_LEN) => { geom_bytes = fc.read_len_delimited().ok(); }
-                _ => { drop(fc.skip_field(fw)); }
+                (3, WIRE_VARINT) => {
+                    if let Ok(gt) = fc.read_varint() {
+                        geom_type = gt;
+                    }
+                }
+                (4, WIRE_LEN) => {
+                    geom_bytes = fc.read_len_delimited().ok();
+                }
+                _ => {
+                    drop(fc.skip_field(fw));
+                }
             }
         }
-        if geom_type != 3 { continue; } // polygon only
-        let Some(gb) = geom_bytes else { continue; };
+        if geom_type != 3 {
+            continue;
+        } // polygon only
+        let Some(gb) = geom_bytes else {
+            continue;
+        };
 
         // Decode packed varints to u32 commands
-        let Ok(commands) = decode_packed_varints(gb) else { continue; };
+        let Ok(commands) = decode_packed_varints(gb) else {
+            continue;
+        };
         let rings = crate::geometry::decode_mvt_polygon(&commands);
         for (ri, ring) in rings.iter().enumerate() {
             if ring.len() >= 4 && !crate::geometry::ring_is_simple(ring) {
                 problems.push(format!(
-                    "ocean feat {fi} ring {ri} is self-intersecting ({} verts)", ring.len()
+                    "ocean feat {fi} ring {ri} is self-intersecting ({} verts)",
+                    ring.len()
                 ));
             }
         }
@@ -748,27 +812,18 @@ fn check_section_bounds(
     Ok(())
 }
 
-fn extract_declared_layers(
-    parsed: &serde_json::Value,
-) -> Result<Vec<String>, VerifyError> {
+fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, VerifyError> {
     let vector_layers = parsed
         .get("vector_layers")
         .ok_or_else(|| VerifyError::Metadata("missing 'vector_layers' key".to_string()))?
         .as_array()
-        .ok_or_else(|| {
-            VerifyError::Metadata("'vector_layers' is not an array".to_string())
-        })?;
+        .ok_or_else(|| VerifyError::Metadata("'vector_layers' is not an array".to_string()))?;
 
     let mut names = Vec::with_capacity(vector_layers.len());
     for layer in vector_layers {
-        let id = layer
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                VerifyError::Metadata(
-                    "vector_layers entry missing 'id' string".to_string(),
-                )
-            })?;
+        let id = layer.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+            VerifyError::Metadata("vector_layers entry missing 'id' string".to_string())
+        })?;
         names.push(id.to_string());
     }
     Ok(names)
@@ -781,14 +836,27 @@ mod tests {
 
     #[test]
     fn full_tile_rect_detects_buffered_fill() {
-        let ring = vec![(-128, -128), (4224, -128), (4224, 4224), (-128, 4224), (-128, -128)];
+        let ring = vec![
+            (-128, -128),
+            (4224, -128),
+            (4224, 4224),
+            (-128, 4224),
+            (-128, -128),
+        ];
         assert!(is_full_tile_rect(&ring));
     }
 
     #[test]
     fn full_tile_rect_rejects_partial_and_non_rect() {
         // Covers extent but 5 distinct vertices (not a pure rectangle).
-        let ring = vec![(-128, -128), (4224, -128), (4224, 4224), (2000, 4224), (-128, 4000), (-128, -128)];
+        let ring = vec![
+            (-128, -128),
+            (4224, -128),
+            (4224, 4224),
+            (2000, 4224),
+            (-128, 4000),
+            (-128, -128),
+        ];
         assert!(!is_full_tile_rect(&ring));
         // Rectangle but does not cover the full extent.
         let ring = vec![(0, 0), (2048, 0), (2048, 2048), (0, 2048), (0, 0)];
@@ -822,13 +890,7 @@ mod tests {
 
     #[test]
     fn geometry_rejects_polygon_moveto_count_not_one() {
-        let commands = vec![
-            cmd(1, 2),
-            zz(0),
-            zz(0),
-            zz(1),
-            zz(1),
-        ];
+        let commands = vec![cmd(1, 2), zz(0), zz(0), zz(1), zz(1)];
         let err = validate_geometry_commands(&commands, 3, 10, 1, 1000)
             .expect_err("polygon MoveTo count != 1 should fail");
         assert!(err.contains("MoveTo count must be 1"));
@@ -836,12 +898,7 @@ mod tests {
 
     #[test]
     fn geometry_rejects_closepath_in_non_polygon() {
-        let commands = vec![
-            cmd(1, 1),
-            zz(0),
-            zz(0),
-            cmd(7, 1),
-        ];
+        let commands = vec![cmd(1, 1), zz(0), zz(0), cmd(7, 1)];
         let err = validate_geometry_commands(&commands, 2, 10, 1, 1000)
             .expect_err("ClosePath in non-polygon should fail");
         assert!(err.contains("ClosePath in non-polygon"));
@@ -849,12 +906,7 @@ mod tests {
 
     #[test]
     fn geometry_rejects_polygon_closepath_without_enough_points() {
-        let commands = vec![
-            cmd(1, 1),
-            zz(0),
-            zz(0),
-            cmd(7, 1),
-        ];
+        let commands = vec![cmd(1, 1), zz(0), zz(0), cmd(7, 1)];
         let err = validate_geometry_commands(&commands, 3, 10, 1, 1000)
             .expect_err("polygon ClosePath without enough points should fail");
         assert!(err.contains("too few points"));
@@ -901,14 +953,7 @@ mod tests {
     #[test]
     fn geometry_seam_tile_uses_stricter_delta_limit() {
         // 20k delta is > seam limit (16384) but < non-seam limit (65536).
-        let commands = vec![
-            cmd(1, 1),
-            zz(0),
-            zz(0),
-            cmd(2, 1),
-            zz(20_000),
-            zz(0),
-        ];
+        let commands = vec![cmd(1, 1), zz(0), zz(0), cmd(2, 1), zz(20_000), zz(0)];
 
         // Non-seam tile passes.
         validate_geometry_commands(&commands, 2, 4, 1, 1000)

@@ -239,7 +239,10 @@ enum SortChunkCompressionArg {
 fn parse_byte_size(s: &str) -> Option<usize> {
     let s = s.trim();
     if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
-        n.trim().parse::<usize>().ok().map(|v| v * 1024 * 1024 * 1024)
+        n.trim()
+            .parse::<usize>()
+            .ok()
+            .map(|v| v * 1024 * 1024 * 1024)
     } else if let Some(n) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
         n.trim().parse::<usize>().ok().map(|v| v * 1024 * 1024)
     } else {
@@ -321,18 +324,32 @@ fn main() {
                     eprintln!("Error creating {}: {e}", path.display());
                     std::process::exit(1);
                 });
-                let layer_filter: Option<Vec<&str>> = args.layers.as_deref().map(|s| s.split(',').collect());
+                let layer_filter: Option<Vec<&str>> =
+                    args.layers.as_deref().map(|s| s.split(',').collect());
                 elivagar::svg::render_tile_grid_svg(
-                    &args.file, args.z, args.x, args.y,
-                    args.width, args.height, layer_filter.as_deref(), &mut file,
+                    &args.file,
+                    args.z,
+                    args.x,
+                    args.y,
+                    args.width,
+                    args.height,
+                    layer_filter.as_deref(),
+                    &mut file,
                 )
             } else {
                 let stdout = std::io::stdout();
                 let mut out = stdout.lock();
-                let layer_filter: Option<Vec<&str>> = args.layers.as_deref().map(|s| s.split(',').collect());
+                let layer_filter: Option<Vec<&str>> =
+                    args.layers.as_deref().map(|s| s.split(',').collect());
                 elivagar::svg::render_tile_grid_svg(
-                    &args.file, args.z, args.x, args.y,
-                    args.width, args.height, layer_filter.as_deref(), &mut out,
+                    &args.file,
+                    args.z,
+                    args.x,
+                    args.y,
+                    args.width,
+                    args.height,
+                    layer_filter.as_deref(),
+                    &mut out,
                 )
             };
             if let Err(e) = result {
@@ -357,11 +374,16 @@ fn diag_ocean_rings(path: &Path, z: u8, x: u32, y: u32) -> std::io::Result<()> {
     let mut reader = PmtilesReader::open(path)?;
     let entries = reader.read_all_entries()?;
     let tile_id = xy_to_tile_id(z, x, y);
-    let entry = entries.iter().find(|e| e.tile_id == tile_id)
+    let entry = entries
+        .iter()
+        .find(|e| e.tile_id == tile_id)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "tile not found"))?;
     let raw = reader.read_tile(entry)?;
 
-    println!("Tile z{z}/{x}/{y} - {raw_len} bytes decompressed", raw_len = raw.len());
+    println!(
+        "Tile z{z}/{x}/{y} - {raw_len} bytes decompressed",
+        raw_len = raw.len()
+    );
 
     // Parse MVT tile - find all layers
     let mut tc = Cursor::new(&raw);
@@ -377,6 +399,7 @@ fn diag_ocean_rings(path: &Path, z: u8, x: u32, y: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn diag_layer(data: &[u8]) {
     use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
@@ -397,7 +420,9 @@ fn diag_layer(data: &[u8]) {
                     feature_ranges.push(bytes);
                 }
             }
-            _ => { drop(lc.skip_field(wire_type)); }
+            _ => {
+                drop(lc.skip_field(wire_type));
+            }
         }
     }
 
@@ -413,10 +438,15 @@ fn diag_layer(data: &[u8]) {
                 drop(fc.skip_field(fw));
             }
         }
-        if gt == 3 { poly_count += 1; }
+        if gt == 3 {
+            poly_count += 1;
+        }
     }
 
-    println!("  Layer '{name}': {n} features ({poly_count} polygons)", n = feature_ranges.len());
+    println!(
+        "  Layer '{name}': {n} features ({poly_count} polygons)",
+        n = feature_ranges.len()
+    );
 
     // Parse each feature - only print polygon detail
     for (fi, fdata) in feature_ranges.iter().enumerate() {
@@ -427,8 +457,12 @@ fn diag_layer(data: &[u8]) {
         let mut fc = Cursor::new(fdata);
         while let Ok(Some((ff, fw))) = fc.read_tag() {
             match (ff, fw) {
-                (1, WIRE_VARINT) => { fid = fc.read_varint().unwrap_or(0); }
-                (3, WIRE_VARINT) => { geom_type = fc.read_varint().unwrap_or(0); }
+                (1, WIRE_VARINT) => {
+                    fid = fc.read_varint().unwrap_or(0);
+                }
+                (3, WIRE_VARINT) => {
+                    geom_type = fc.read_varint().unwrap_or(0);
+                }
                 (4, WIRE_LEN) => {
                     if let Ok(bytes) = fc.read_len_delimited() {
                         let mut pc = Cursor::new(bytes);
@@ -438,20 +472,37 @@ fn diag_layer(data: &[u8]) {
                         }
                     }
                 }
-                _ => { drop(fc.skip_field(fw)); }
+                _ => {
+                    drop(fc.skip_field(fw));
+                }
             }
         }
 
         if geom_type == 3 && !geometry.is_empty() {
             let rings = diag_decode_polygon(&geometry);
-            println!("    Feature {fi}: id={fid} geom_type={geom_type} rings={nr}", nr = rings.len());
+            println!(
+                "    Feature {fi}: id={fid} geom_type={geom_type} rings={nr}",
+                nr = rings.len()
+            );
             for (ri, ring) in rings.iter().enumerate() {
                 let area = signed_area_ring(ring);
-                let winding = if area > 0 { "CW (outer)" } else if area < 0 { "CCW (hole)" } else { "ZERO" };
+                let winding = if area > 0 {
+                    "CW (outer)"
+                } else if area < 0 {
+                    "CCW (hole)"
+                } else {
+                    "ZERO"
+                };
                 let simple = diag_ring_is_simple(ring);
-                let simple_str = if simple { "" } else { " *** SELF-INTERSECTING ***" };
-                println!("      ring {ri}: {nv} verts, area={area}, {winding}{simple_str}",
-                    nv = ring.len());
+                let simple_str = if simple {
+                    ""
+                } else {
+                    " *** SELF-INTERSECTING ***"
+                };
+                println!(
+                    "      ring {ri}: {nv} verts, area={area}, {winding}{simple_str}",
+                    nv = ring.len()
+                );
                 if ring.len() <= 6 {
                     for &(x, y) in ring {
                         println!("        ({x}, {y})");
@@ -461,7 +512,7 @@ fn diag_layer(data: &[u8]) {
                         println!("        ({x}, {y})");
                     }
                     println!("        ...");
-                    for &(x, y) in &ring[ring.len()-3..] {
+                    for &(x, y) in &ring[ring.len() - 3..] {
                         println!("        ({x}, {y})");
                     }
                 }
@@ -484,7 +535,9 @@ fn diag_decode_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
         match cmd_id {
             1 => {
                 for _ in 0..cmd_count {
-                    if i + 1 >= commands.len() { return rings; }
+                    if i + 1 >= commands.len() {
+                        return rings;
+                    }
                     let dx = unzigzag_diag(commands[i]);
                     let dy = unzigzag_diag(commands[i + 1]);
                     i += 2;
@@ -494,9 +547,14 @@ fn diag_decode_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
                 }
             }
             2 => {
-                let Some(ring) = rings.last_mut() else { i += (cmd_count as usize) * 2; continue; };
+                let Some(ring) = rings.last_mut() else {
+                    i += (cmd_count as usize) * 2;
+                    continue;
+                };
                 for _ in 0..cmd_count {
-                    if i + 1 >= commands.len() { return rings; }
+                    if i + 1 >= commands.len() {
+                        return rings;
+                    }
                     let dx = unzigzag_diag(commands[i]);
                     let dy = unzigzag_diag(commands[i + 1]);
                     i += 2;
@@ -522,17 +580,23 @@ fn diag_decode_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
 #[inline]
 fn unzigzag_diag(n: u32) -> i32 {
     #[allow(clippy::cast_possible_wrap)]
-    { ((n >> 1) as i32) ^ (-((n & 1) as i32)) }
+    {
+        ((n >> 1) as i32) ^ (-((n & 1) as i32))
+    }
 }
 
 fn diag_ring_is_simple(ring: &[(i32, i32)]) -> bool {
-    if ring.len() < 4 { return true; }
+    if ring.len() < 4 {
+        return true;
+    }
     let n = ring.len() - 1; // exclude closing vertex
     for i in 0..n {
         let a1 = ring[i];
         let a2 = ring[i + 1];
         for j in (i + 2)..n {
-            if j + 1 == ring.len() && i == 0 { continue; }
+            if j + 1 == ring.len() && i == 0 {
+                continue;
+            }
             let b1 = ring[j];
             let b2 = ring[(j + 1) % ring.len()];
             // segments_cross: proper crossing only
@@ -550,12 +614,20 @@ fn diag_ring_is_simple(ring: &[(i32, i32)]) -> bool {
 
 fn diag_cross_sign(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32)) -> i8 {
     let cross = i64::from(p2.0 - p1.0) * i64::from(p3.1 - p1.1)
-              - i64::from(p2.1 - p1.1) * i64::from(p3.0 - p1.0);
-    if cross > 0 { 1 } else if cross < 0 { -1 } else { 0 }
+        - i64::from(p2.1 - p1.1) * i64::from(p3.0 - p1.0);
+    if cross > 0 {
+        1
+    } else if cross < 0 {
+        -1
+    } else {
+        0
+    }
 }
 
 fn signed_area_ring(ring: &[(i32, i32)]) -> i64 {
-    if ring.len() < 3 { return 0; }
+    if ring.len() < 3 {
+        return 0;
+    }
     let mut sum: i64 = 0;
     for i in 0..ring.len() {
         let j = (i + 1) % ring.len();
@@ -594,9 +666,8 @@ fn run(args: RunArgs) {
         (args.ocean.or(auto.0), args.ocean_simplified.or(auto.1))
     };
 
-
-
-    let allow_unsafe_flat_index = args.allow_unsafe_flat_index || env_var_true("ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX");
+    let allow_unsafe_flat_index =
+        args.allow_unsafe_flat_index || env_var_true("ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX");
 
     let config = elivagar::TilegenConfig {
         pbf_path: args.input,
@@ -641,7 +712,9 @@ fn run(args: RunArgs) {
                         std::process::exit(1);
                     });
                     if z_val > 14 {
-                        eprintln!("Error: zoom must be 0-14 in --seam-reconcile-layers: '{trimmed}'");
+                        eprintln!(
+                            "Error: zoom must be 0-14 in --seam-reconcile-layers: '{trimmed}'"
+                        );
                         std::process::exit(1);
                     }
                     (n.trim(), z_val)
@@ -651,7 +724,9 @@ fn run(args: RunArgs) {
                 match elivagar::shortbread::Layer::from_name(name) {
                     Some(layer) => mask[layer as usize] = max_zoom,
                     None => {
-                        eprintln!("Error: unknown layer name for --seam-reconcile-layers: '{name}'");
+                        eprintln!(
+                            "Error: unknown layer name for --seam-reconcile-layers: '{name}'"
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -666,7 +741,9 @@ fn run(args: RunArgs) {
                 let (name, cap_str) = match trimmed.split_once('=') {
                     Some(pair) => pair,
                     None => {
-                        eprintln!("Error: invalid --fanout-cap format, expected layer=N: '{trimmed}'");
+                        eprintln!(
+                            "Error: invalid --fanout-cap format, expected layer=N: '{trimmed}'"
+                        );
                         std::process::exit(1);
                     }
                 };
@@ -696,8 +773,8 @@ fn run(args: RunArgs) {
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")
-        .percentiles(&[50, 95, 99])
-        .with_functions_limit(0)
+        .percentiles(&[50.0, 95.0, 99.0])
+        .functions_limit(0)
         .build();
 
     if let Err(e) = elivagar::run(&config) {
@@ -710,7 +787,10 @@ fn env_var_true(name: &str) -> bool {
     std::env::var_os(name)
         .map(|v| {
             let v = v.to_string_lossy();
-            matches!(v.as_ref(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+            matches!(
+                v.as_ref(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
         })
         .unwrap_or(false)
 }

@@ -1,6 +1,8 @@
 use rustc_hash::FxHashMap;
 
-use super::{command, decode_zigzag, zigzag, GeomType, LayerBuilder, LineMergeScratch, MergeScratch};
+use super::{
+    GeomType, LayerBuilder, LineMergeScratch, MergeScratch, command, decode_zigzag, zigzag,
+};
 
 /// Append a source MVT geometry command stream to a destination buffer,
 /// adjusting delta encoding so the commands are relative to the running
@@ -98,7 +100,8 @@ impl LayerBuilder {
         scratch.indices.sort_by(|&a, &b| {
             let fa = &self.features[a];
             let fb = &self.features[b];
-            fa.geom_type.cmp(&fb.geom_type)
+            fa.geom_type
+                .cmp(&fb.geom_type)
                 .then_with(|| fa.tags.cmp(&fb.tags))
         });
 
@@ -125,7 +128,12 @@ impl LayerBuilder {
                 let mut cy: i32 = 0;
                 for k in i..j {
                     let idx = scratch.indices[k];
-                    append_geometry(&mut scratch.geom, &self.features[idx].geometry, &mut cx, &mut cy);
+                    append_geometry(
+                        &mut scratch.geom,
+                        &self.features[idx].geometry,
+                        &mut cx,
+                        &mut cy,
+                    );
                 }
                 // Swap merged geometry into first feature
                 let first = scratch.indices[i];
@@ -308,14 +316,14 @@ fn merge_line_segments(
     for (i, seg) in segments.iter().enumerate() {
         let front = seg[0];
         let back = seg[seg.len() - 1];
-        endpoints
-            .entry(front)
-            .or_default()
-            .push(SegEnd { seg_idx: i, is_back: false });
-        endpoints
-            .entry(back)
-            .or_default()
-            .push(SegEnd { seg_idx: i, is_back: true });
+        endpoints.entry(front).or_default().push(SegEnd {
+            seg_idx: i,
+            is_back: false,
+        });
+        endpoints.entry(back).or_default().push(SegEnd {
+            seg_idx: i,
+            is_back: true,
+        });
     }
 
     visited.clear();
@@ -331,13 +339,20 @@ fn merge_line_segments(
             }
         }
     }
-    starts.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)));
+    starts.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+    });
 
     for &(_, _, seg_idx, is_back) in starts.iter() {
         if visited[seg_idx] {
             continue;
         }
-        build_chain(segments, &endpoints, visited, chain, seg_idx, is_back, merged);
+        build_chain(
+            segments, &endpoints, visited, chain, seg_idx, is_back, merged,
+        );
     }
 
     // Pass 2: pure cycles (all unvisited segments).
@@ -395,7 +410,11 @@ fn build_chain(
         }
 
         // Find exit point.
-        let exit_point = if entering_back { seg[0] } else { seg[seg.len() - 1] };
+        let exit_point = if entering_back {
+            seg[0]
+        } else {
+            seg[seg.len() - 1]
+        };
 
         // Look for next segment at exit point.
         let Some(ends) = endpoints.get(&exit_point) else {
@@ -409,9 +428,9 @@ fn build_chain(
         // Find the other SegEnd (not the one we arrived through).
         // Our exit SegEnd: (current_seg, is_back = !entering_back).
         let our_exit_is_back = !entering_back;
-        let other = ends.iter().find(|e| {
-            !(e.seg_idx == current_seg && e.is_back == our_exit_is_back)
-        });
+        let other = ends
+            .iter()
+            .find(|e| !(e.seg_idx == current_seg && e.is_back == our_exit_is_back));
         let Some(&next) = other else {
             // Self-loop: both ends of same segment at same point.
             break;

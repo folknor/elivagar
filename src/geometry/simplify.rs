@@ -1,5 +1,5 @@
-use super::projection::Point;
 use super::SIMPLIFY_PIXELS;
+use super::projection::Point;
 
 /// Compute the simplification tolerance for a given zoom level.
 /// Returns the tolerance in Mercator [0,1] units corresponding to
@@ -69,13 +69,8 @@ pub fn simplify_into_with_required(
         }
     }
 
-    let max_dev_sq = dp_recurse_with_required(
-        points,
-        0,
-        points.len() - 1,
-        tolerance * tolerance,
-        keep_buf,
-    );
+    let max_dev_sq =
+        dp_recurse_with_required(points, 0, points.len() - 1, tolerance * tolerance, keep_buf);
     for (i, &k) in keep_buf.iter().enumerate() {
         if k {
             output.push(points[i]);
@@ -236,39 +231,43 @@ pub fn for_each_zoom_simplified<F, S>(
     S: Fn(u8) -> f64,
 {
     SIMPLIFY_SINGLE_SCRATCH.with(|cell| {
-    let scratch = &mut *cell.borrow_mut();
-    let SimplifySingleScratch { cascade, keep_buf, simp_buf } = scratch;
-    cascade.clear();
-    cascade.extend_from_slice(merc);
-    // Track max deviation² from last DP run for cascade convergence check.
-    let mut last_max_dev_sq: f64 = f64::MAX;
-    for z in (z_lo..=z_hi).rev() {
-        if z < 14 {
-            // Pre-DP subpixel check: if the cascade's bbox diagonal is < 1 pixel
-            // at this zoom, the feature is invisible here and at all coarser zooms.
-            // Skips DP entirely - O(1) vs O(n²).
-            // Skipped for connectivity-critical layers (streets, boundaries) where
-            // short connecting ways must survive to maintain road network topology.
-            if !skip_bbox_check && super::merc_bbox_is_subpixel(cascade, z) {
-                break;
-            }
-            // Option E: if cascade already has ≤ min_points vertices, DP can't
-            // reduce further - skip the call entirely.
-            if cascade.len() > min_points {
-                let tol = simplify_tolerance(z) * tol_scale(z);
-                // Option D: if last DP's max deviation is already below this
-                // zoom's tolerance, the cascade is optimal - skip DP.
-                if last_max_dev_sq >= tol * tol {
-                    last_max_dev_sq = simplify_into(cascade, tol, keep_buf, simp_buf);
-                    std::mem::swap(cascade, simp_buf);
+        let scratch = &mut *cell.borrow_mut();
+        let SimplifySingleScratch {
+            cascade,
+            keep_buf,
+            simp_buf,
+        } = scratch;
+        cascade.clear();
+        cascade.extend_from_slice(merc);
+        // Track max deviation² from last DP run for cascade convergence check.
+        let mut last_max_dev_sq: f64 = f64::MAX;
+        for z in (z_lo..=z_hi).rev() {
+            if z < 14 {
+                // Pre-DP subpixel check: if the cascade's bbox diagonal is < 1 pixel
+                // at this zoom, the feature is invisible here and at all coarser zooms.
+                // Skips DP entirely - O(1) vs O(n²).
+                // Skipped for connectivity-critical layers (streets, boundaries) where
+                // short connecting ways must survive to maintain road network topology.
+                if !skip_bbox_check && super::merc_bbox_is_subpixel(cascade, z) {
+                    break;
+                }
+                // Option E: if cascade already has ≤ min_points vertices, DP can't
+                // reduce further - skip the call entirely.
+                if cascade.len() > min_points {
+                    let tol = simplify_tolerance(z) * tol_scale(z);
+                    // Option D: if last DP's max deviation is already below this
+                    // zoom's tolerance, the cascade is optimal - skip DP.
+                    if last_max_dev_sq >= tol * tol {
+                        last_max_dev_sq = simplify_into(cascade, tol, keep_buf, simp_buf);
+                        std::mem::swap(cascade, simp_buf);
+                    }
                 }
             }
+            if cascade.len() < min_points {
+                break;
+            }
+            callback(z, cascade);
         }
-        if cascade.len() < min_points {
-            break;
-        }
-        callback(z, cascade);
-    }
     }); // SIMPLIFY_SINGLE_SCRATCH.with
 }
 
@@ -349,7 +348,11 @@ pub fn for_each_zoom_simplified_multi<F, S>(
 
     let mut last_max_dev_sq: f64 = f64::MAX;
     for z in (z_lo..=z_hi).rev() {
-        let tol = if z < 14 { simplify_tolerance(z) * tol_scale(z) } else { 0.0 };
+        let tol = if z < 14 {
+            simplify_tolerance(z) * tol_scale(z)
+        } else {
+            0.0
+        };
         if tol > 0.0 {
             if super::merc_bbox_is_subpixel(cascade_outer, z) {
                 break;
@@ -362,7 +365,8 @@ pub fn for_each_zoom_simplified_multi<F, S>(
                 let mut write = 0;
                 for read in 0..cascade_inners.len() {
                     if inner_max_dev_sq[read] >= tol_sq {
-                        inner_max_dev_sq[read] = simplify_into(&cascade_inners[read], tol, keep_buf, simp_buf);
+                        inner_max_dev_sq[read] =
+                            simplify_into(&cascade_inners[read], tol, keep_buf, simp_buf);
                         std::mem::swap(&mut cascade_inners[read], simp_buf);
                     }
                     if cascade_inners[read].len() >= 4 {

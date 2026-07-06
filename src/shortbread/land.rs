@@ -173,10 +173,16 @@ pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
         && v != "no"
     {
         let mut attrs = SmallVec::new();
-        if let Some(height) = tags.get("height").and_then(parse_building_measurement_meters) {
+        if let Some(height) = tags
+            .get("height")
+            .and_then(parse_building_measurement_meters)
+        {
             attrs.push(("height", AttrValue::Float(height), 0));
         }
-        if let Some(min_height) = tags.get("min_height").and_then(parse_building_measurement_meters) {
+        if let Some(min_height) = tags
+            .get("min_height")
+            .and_then(parse_building_measurement_meters)
+        {
             attrs.push(("min_height", AttrValue::Float(min_height), 0));
         }
         if let Some(levels) = tags.get("building:levels").and_then(parse_building_levels) {
