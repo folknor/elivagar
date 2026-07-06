@@ -7,8 +7,6 @@ use super::{command, decode_zigzag, zigzag, GeomType, LayerBuilder, LineMergeScr
 /// cursor (`cx`, `cy`). This allows multiple independently-encoded
 /// geometries to be concatenated into a valid multi-geometry.
 fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32) {
-    let mut last_move_x: i32 = 0;
-    let mut last_move_y: i32 = 0;
     // The source feature was encoded assuming cursor starts at (0,0).
     // Track the source's absolute cursor so we can re-encode deltas
     // relative to our running destination cursor.
@@ -42,10 +40,6 @@ fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32)
                     dest.push(zigzag(src_cy - *cy));
                     *cx = src_cx;
                     *cy = src_cy;
-                    if cmd_id == 1 {
-                        last_move_x = src_cx;
-                        last_move_y = src_cy;
-                    }
                     i += 2;
                 }
                 // Patch command header with actual count if truncated.
@@ -54,13 +48,10 @@ fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32)
                 }
             }
             7 => {
-                // ClosePath - cursor implicitly returns to last MoveTo.
-                // Must reset both dest AND source cursors.
+                // ClosePath - per MVT spec 4.3.3.3 the cursor does NOT move
+                // (it stays at the last LineTo vertex), in both the source
+                // and destination coordinate spaces.
                 dest.push(cmd);
-                *cx = last_move_x;
-                *cy = last_move_y;
-                src_cx = last_move_x;
-                src_cy = last_move_y;
             }
             _ => {
                 // Unknown command, copy as-is

@@ -478,11 +478,13 @@ pub fn encode_polygon(buf: &mut Vec<u32>, rings: &[&[(i32, i32)]]) {
         {
             buf[lineto_pos] = command(2, count);
         }
-        // ClosePath
+        // ClosePath. Per MVT spec 4.3.3.3 ClosePath does NOT change the
+        // cursor: the next ring's MoveTo is relative to this ring's LAST
+        // LineTo vertex (cx/cy already hold it). For months this encoder
+        // reset the cursor to the ring's MoveTo instead - displacing every
+        // ring after the first in spec-compliant decoders (MapLibre) while
+        // our own symmetric decoders round-tripped it invisibly.
         buf.push(command(7, 1));
-        // After ClosePath, cursor returns to the MoveTo position
-        cx = points[0].0;
-        cy = points[0].1;
     }
 }
 

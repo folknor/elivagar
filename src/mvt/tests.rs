@@ -599,13 +599,14 @@ fn test_append_geometry_polygon_closepath() {
     let mut cx: i32 = 0;
     let mut cy: i32 = 0;
     test_append_geometry(&mut dest, &src, &mut cx, &mut cy);
-    // After ClosePath, cursor resets to the MoveTo position (0,0)
-    assert_eq!(cx, 0);
-    assert_eq!(cy, 0);
+    // ClosePath does not move the cursor (MVT spec 4.3.3.3): it stays at
+    // the last LineTo vertex (50,100).
+    assert_eq!(cx, 50);
+    assert_eq!(cy, 100);
 }
 
 #[test]
-fn test_append_geometry_two_polygons_cursor_reset() {
+fn test_append_geometry_two_polygons_cursor_continuity() {
     // Polygon 1: square at (0,0)
     let ring1 = [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
     let mut src1 = Vec::new();
@@ -620,13 +621,13 @@ fn test_append_geometry_two_polygons_cursor_reset() {
     let mut cx: i32 = 0;
     let mut cy: i32 = 0;
     test_append_geometry(&mut dest, &src1, &mut cx, &mut cy);
-    // After close, cursor is at ring1's MoveTo = (0,0)
+    // Cursor stays at ring1's last LineTo vertex = (0,10)
     assert_eq!(cx, 0);
-    assert_eq!(cy, 0);
+    assert_eq!(cy, 10);
     test_append_geometry(&mut dest, &src2, &mut cx, &mut cy);
-    // After close, cursor is at ring2's MoveTo = (100,100)
+    // Cursor stays at ring2's last LineTo vertex = (100,110)
     assert_eq!(cx, 100);
-    assert_eq!(cy, 100);
+    assert_eq!(cy, 110);
 
     // Decode and verify all absolute positions are correct
     let coords = decode_commands_to_abs(&dest);
@@ -643,8 +644,6 @@ fn decode_commands_to_abs(cmds: &[u32]) -> Vec<(i32, i32)> {
     let mut result = Vec::new();
     let mut cx: i32 = 0;
     let mut cy: i32 = 0;
-    let mut last_move_x: i32 = 0;
-    let mut last_move_y: i32 = 0;
     let mut i = 0;
     while i < cmds.len() {
         let cmd = cmds[i];
@@ -659,17 +658,12 @@ fn decode_commands_to_abs(cmds: &[u32]) -> Vec<(i32, i32)> {
                     cx += dx;
                     cy += dy;
                     result.push((cx, cy));
-                    if cmd_id == 1 {
-                        last_move_x = cx;
-                        last_move_y = cy;
-                    }
                     i += 2;
                 }
             }
             7 => {
-                // ClosePath resets cursor to last MoveTo position
-                cx = last_move_x;
-                cy = last_move_y;
+                // ClosePath: cursor unchanged (MVT spec 4.3.3.3) - it stays
+                // at the last LineTo vertex, matching MapLibre's decoder.
             }
             _ => {}
         }
@@ -678,12 +672,13 @@ fn decode_commands_to_abs(cmds: &[u32]) -> Vec<(i32, i32)> {
 }
 
 /// Regression test: appending a multi-ring polygon (exterior + hole) as a
-/// single source geometry. The ClosePath between rings must reset src_cx/src_cy
-/// so the second ring's MoveTo delta is decoded from the correct origin.
-/// Before the fix, src_cx/src_cy stayed at the last LineTo position, causing
-/// the second ring's coordinates to drift by (last_lineto - last_moveto).
+/// single source geometry. Both encoder and decoder must use MVT-spec cursor
+/// semantics (ClosePath does not move the cursor); the hole's MoveTo delta is
+/// relative to the exterior's LAST LineTo vertex. The historical bug encoded
+/// the delta relative to the exterior's MoveTo, displacing every ring after
+/// the first in spec-compliant decoders (MapLibre).
 #[test]
-fn test_append_geometry_multi_ring_polygon_closepath_resets_source_cursor() {
+fn test_append_geometry_multi_ring_polygon_spec_cursor_semantics() {
     // Exterior ring: (100,100) → (200,100) → (200,200) → (100,200) → close
     // Hole ring:     (120,120) → (180,120) → (180,180) → (120,180) → close
     let ext = [(100, 100), (200, 100), (200, 200), (100, 200), (100, 100)];

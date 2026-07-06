@@ -506,12 +506,11 @@ fn diag_decode_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
                 }
             }
             7 => {
+                // ClosePath: cursor unchanged per MVT spec 4.3.3.3.
                 if let Some(ring) = rings.last_mut()
                     && let Some(&first) = ring.first()
                 {
                     ring.push(first);
-                    cx = first.0;
-                    cy = first.1;
                 }
             }
             _ => {}

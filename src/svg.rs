@@ -289,8 +289,6 @@ fn decode_geometry_commands(data: &[u8], geom_type: u64) -> io::Result<Vec<Vec<(
     let mut current: Vec<(f64, f64)> = Vec::new();
     let mut cx: i64 = 0;
     let mut cy: i64 = 0;
-    let mut last_move_x: i64 = 0;
-    let mut last_move_y: i64 = 0;
     let mut i = 0;
 
     while i < commands.len() {
@@ -314,8 +312,6 @@ fn decode_geometry_commands(data: &[u8], geom_type: u64) -> io::Result<Vec<Vec<(
                     cy += zigzag_decode(commands[i + 1]);
                     i += 2;
                     current.push((cx as f64, cy as f64));
-                    last_move_x = cx;
-                    last_move_y = cy;
                 }
             }
             2 => {
@@ -333,10 +329,8 @@ fn decode_geometry_commands(data: &[u8], geom_type: u64) -> io::Result<Vec<Vec<(
             7 if geom_type == 3 && !current.is_empty() => {
                 if let Some(&first) = current.first() {
                     current.push(first);
-                    // MVT ClosePath implicitly returns cursor to the last MoveTo point.
-                    // Without this reset, subsequent rings drift by the last segment delta.
-                    cx = last_move_x;
-                    cy = last_move_y;
+                    // Per MVT spec 4.3.3.3 ClosePath does NOT move the cursor;
+                    // the next ring's MoveTo is relative to the last LineTo vertex.
                 }
                 paths.push(std::mem::take(&mut current));
             }
@@ -392,15 +386,16 @@ mod tests {
     }
 
     #[test]
-    fn polygon_closepath_resets_cursor_between_rings() {
-        // Ring 1: (10,10) -> (20,10) -> (20,20) -> close
-        // Ring 2: (30,30) -> (40,30) -> (40,40) -> close
-        // Ring 2 MoveTo delta is encoded from ring 1 start (10,10): +20,+20.
+    fn polygon_closepath_leaves_cursor_at_last_lineto() {
+        // MVT spec 4.3.3.3: ClosePath does not move the cursor.
+        // Ring 1: (10,10) -> (20,10) -> (20,20) -> close; cursor stays (20,20).
+        // Ring 2: (30,30) -> (40,30) -> (40,40) -> close.
+        // Ring 2 MoveTo delta is encoded from ring 1's LAST vertex (20,20): +10,+10.
         let cmds = vec![
             (1 | (1 << 3)) as u32, zz(10), zz(10),
             (2 | (2 << 3)) as u32, zz(10), zz(0), zz(0), zz(10),
             (7 | (1 << 3)) as u32,
-            (1 | (1 << 3)) as u32, zz(20), zz(20),
+            (1 | (1 << 3)) as u32, zz(10), zz(10),
             (2 | (2 << 3)) as u32, zz(10), zz(0), zz(0), zz(10),
             (7 | (1 << 3)) as u32,
         ];

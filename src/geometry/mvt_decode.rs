@@ -55,13 +55,12 @@ pub fn decode_mvt_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
                 }
             }
             7 => {
-                // ClosePath - close the current ring and reset cursor to ring start.
+                // ClosePath - close the current ring. Per MVT spec 4.3.3.3
+                // the cursor is NOT changed (stays at the last LineTo vertex).
                 if let Some(ring) = rings.last_mut()
                     && let Some(&first) = ring.first()
                 {
                     ring.push(first);
-                    cx = first.0;
-                    cy = first.1;
                 }
             }
             _ => {
@@ -104,11 +103,9 @@ pub fn encode_mvt_polygon(rings: &[Vec<(i32, i32)>], buf: &mut Vec<u32>) {
                 cy = y;
             }
         }
-        // ClosePath
+        // ClosePath - cursor unchanged per MVT spec 4.3.3.3 (cx/cy keep
+        // the last LineTo vertex).
         buf.push(crate::mvt::command(7, 1));
-        // Cursor resets to MoveTo position after ClosePath
-        cx = ring[0].0;
-        cy = ring[0].1;
     }
 }
 

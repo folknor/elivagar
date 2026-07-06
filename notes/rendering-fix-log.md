@@ -292,3 +292,29 @@ water (Limfjorden, Ringkobing Fjord, Nissum Bredning) is water_polygons,
 not ocean. Next: port emit.rs polygons to int_ocean machinery + fix
 winding; oracle (deviation 0, 100% classification, all layers) becomes the
 primary gate.
+
+### R23 - THE BUG: ClosePath cursor semantics in the MVT encoder
+**Date:** 2026-07-06
+**What:** `encode_polygon` reset the delta cursor to the ring's MoveTo
+position after ClosePath. MVT spec 4.3.3.3: ClosePath does NOT move the
+cursor (it stays at the last LineTo vertex). Every ring after the first in
+every multi-ring polygon feature was therefore DISPLACED by
+(first_vertex - last_vertex) of the preceding ring in every spec-compliant
+decoder - MapLibre, @mapbox/vector-tile, vtzero. Proof: z2/2/1 ocean feat
+id=539 hole decodes at (440,1045) in our decoder but (485,1039) in
+MapLibre; delta arithmetic matches the wrong-reference hypothesis exactly.
+**Why it survived three months:** our decoders (diag, svg, verify,
+mvt_decode) mirrored the SAME wrong convention, so every internal
+round-trip was self-consistent; R12's @mapbox round-trip "proof of
+innocence" re-encoded the already-displaced decode faithfully; the March
+merge.rs "cursor-reset fix" (R-era) codified the bug rather than fixing it;
+vtvalidate checks command validity, not nesting.
+**Fix:** encoder (mvt/mod.rs), decoders (geometry/mvt_decode.rs, svg.rs,
+main.rs diag), merge (mvt/merge.rs), tests updated to spec semantics.
+**Oracle verdict (denmark-a13222e, faithful maplibre classifyRings):**
+ocean 0 over-threshold / 0 misattached across 1.95M polygons (was 37447);
+misattached holes drop water_polygons 2700->9, land 16500->352. Remaining
+over-threshold polygons (water_polygons 1808, land 22824, buildings 552)
+are genuine emit.rs geometry defects - next spec: port emit.rs polygons to
+int_ocean machinery.
+**Supersedes:** the R11/R12 "encoder definitively innocent" conclusion.
