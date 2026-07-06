@@ -105,17 +105,17 @@ pub fn zoom_from_tile_id(tile_id: u64) -> u8 {
 
 /// A record in the sort buffer: a sort key plus opaque payload bytes.
 ///
-/// `data` must be an owned Vec because records are serialized to chunk files on
-/// disk and deserialized during k-way merge - there is no lifetime to reference
-/// into. Arena allocation was considered and rejected: it would require
-/// redesigning the chunk file format (currently per-record `key|len|data`), the
-/// ChunkReader, and the HeapEntry ownership model, for minimal runtime benefit
-/// since mimalloc handles the small allocs efficiently.
+/// `data` must be owned because records are serialized to chunk files on
+/// disk and deserialized during k-way merge. Hot producers that already write
+/// direct chunks can use `write_sorted_payload_chunk` to sort arena indexes
+/// without changing the chunk file format or the merge reader ownership model.
 pub struct SortRecord {
     pub key: SortKey,
     pub data: Box<[u8]>,
 }
 const _: () = assert!(std::mem::size_of::<SortRecord>() == 24);
+
+pub type PayloadRecord = (SortKey, usize, usize);
 
 // ---------------------------------------------------------------------------
 // SortWriter
@@ -405,6 +405,64 @@ pub fn write_sorted_chunk(
             let data_len = record.data.len() as u32;
             writer.write_all(&data_len.to_le_bytes())?;
             writer.write_all(&record.data)?;
+        }
+        writer.flush()?;
+    }
+
+    Ok(())
+}
+
+/// Write arena-backed records as a sorted chunk file in the standard format.
+///
+/// `records` entries are `(key, offset, len)` into `payload`. Only this in-memory
+/// staging differs from `write_sorted_chunk`; the bytes on disk are identical.
+#[hotpath::measure]
+#[allow(clippy::cast_possible_truncation)]
+pub fn write_sorted_payload_chunk(
+    records: &mut [PayloadRecord],
+    payload: &[u8],
+    path: &Path,
+    compression: ChunkCompression,
+) -> io::Result<()> {
+    records.sort_unstable_by_key(|r| r.0);
+
+    let count = records.len() as u32;
+
+    if compression != ChunkCompression::None {
+        let serialized_size = 4 + records.len() * 12 + records.iter().map(|r| r.2).sum::<usize>();
+        let mut serialized = Vec::with_capacity(serialized_size);
+        serialized.extend_from_slice(&count.to_le_bytes());
+        for &(key, offset, len) in records.iter() {
+            serialized.extend_from_slice(&key.to_le_bytes());
+            let data_len = len as u32;
+            serialized.extend_from_slice(&data_len.to_le_bytes());
+            serialized.extend_from_slice(&payload[offset..offset + len]);
+        }
+
+        let file = File::create(path)?;
+        let buf = BufWriter::with_capacity(1 << 20, file);
+        match compression {
+            ChunkCompression::None => unreachable!(),
+            ChunkCompression::Lz4 => {
+                let mut encoder = FrameEncoder::new(buf);
+                encoder.write_all(&serialized)?;
+                encoder.finish().map_err(io::Error::other)?;
+            }
+            ChunkCompression::Snappy => {
+                let mut encoder = snap::write::FrameEncoder::new(buf);
+                encoder.write_all(&serialized)?;
+                encoder.flush()?;
+            }
+        }
+    } else {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::with_capacity(1 << 20, file);
+        writer.write_all(&count.to_le_bytes())?;
+        for &(key, offset, len) in records.iter() {
+            writer.write_all(&key.to_le_bytes())?;
+            let data_len = len as u32;
+            writer.write_all(&data_len.to_le_bytes())?;
+            writer.write_all(&payload[offset..offset + len])?;
         }
         writer.flush()?;
     }

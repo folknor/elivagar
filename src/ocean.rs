@@ -6,18 +6,68 @@
 
 use crate::geometry::int_ocean::{
     IntEmitScratch, IntRect, OCEAN_DP_TOL_PX, Shape, ZoomEmitParams, emit_shape_for_zoom,
-    intersect_rect, quantize_polygon, shape_bbox,
+    intersect_rect_into, quantize_polygon, shape_bbox,
 };
 use crate::geometry::{self, MercBbox, Point};
 use crate::mvt::GeomType;
 use crate::pmtiles_writer;
-use crate::shortbread::{self, Layer};
-use crate::sort::{self, SortRecord, SortWriter};
-use crate::wire_format::encode_feature_data;
+use crate::shortbread::Layer;
+use crate::sort::{self, SortWriter};
+use crate::wire_format::{append_feature_data_with_attrs, encode_attrs_bytes};
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+struct OceanAcc {
+    records: Vec<sort::PayloadRecord>,
+    payload: Vec<u8>,
+    bytes: usize,
+    chunk_paths: Vec<std::path::PathBuf>,
+    count: u64,
+    compression: sort::ChunkCompression,
+}
+
+impl OceanAcc {
+    fn new(compression: sort::ChunkCompression) -> Self {
+        Self {
+            records: Vec::new(),
+            payload: Vec::new(),
+            bytes: 0,
+            chunk_paths: Vec::new(),
+            count: 0,
+            compression,
+        }
+    }
+
+    fn push_polygon(&mut self, key: sort::SortKey, feature_id: u64, geom: &[u32], attrs: &[u8]) {
+        let range = append_feature_data_with_attrs(
+            &mut self.payload,
+            feature_id,
+            GeomType::Polygon,
+            geom,
+            attrs,
+        );
+        self.bytes += range.len() + std::mem::size_of::<sort::PayloadRecord>();
+        self.records.push((key, range.start, range.len()));
+    }
+
+    fn flush(&mut self, chunk_dir: &std::path::Path, chunk_id: &std::sync::atomic::AtomicUsize) {
+        if self.records.is_empty() {
+            return;
+        }
+        let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
+        // Panic: inside rayon fold. Disk I/O failure is unrecoverable here.
+        sort::write_sorted_payload_chunk(&mut self.records, &self.payload, &path, self.compression)
+            .expect("ocean chunk write failed");
+        self.chunk_paths.push(path);
+        self.count += self.records.len() as u64;
+        self.records.clear();
+        self.payload.clear();
+        self.bytes = 0;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -84,6 +134,7 @@ pub(crate) fn process_ocean_shapefile(
     // --- Parse phase: extract all polygons (single-threaded, sequential I/O) ---
     let mut pieces: Vec<Shape> = Vec::new();
     let mut shapes_hit: u64 = 0;
+    let mut parse_scratch = IntEmitScratch::new();
 
     for &offset in &offsets {
         let rec = offset + 8;
@@ -193,6 +244,7 @@ pub(crate) fn process_ocean_shapefile(
             if is_outer {
                 if let Some(outer) = current_outer.take() {
                     push_quantized_pieces(
+                        &mut parse_scratch,
                         &mut pieces,
                         &outer,
                         &std::mem::take(&mut current_inners),
@@ -207,7 +259,14 @@ pub(crate) fn process_ocean_shapefile(
         }
 
         if let Some(outer) = current_outer {
-            push_quantized_pieces(&mut pieces, &outer, &current_inners, max_zoom, data_rect);
+            push_quantized_pieces(
+                &mut parse_scratch,
+                &mut pieces,
+                &outer,
+                &current_inners,
+                max_zoom,
+                data_rect,
+            );
         }
     }
 
@@ -221,6 +280,8 @@ pub(crate) fn process_ocean_shapefile(
     if max_zoom >= SPLIT_Z {
         let orig_count = pieces.len();
         let mut split_out: Vec<Shape> = Vec::with_capacity(pieces.len());
+        let mut split_scratch = IntEmitScratch::new();
+        let mut clipped: Vec<Shape> = Vec::new();
         let split_tile_size = 1_i32 << (u32::from(max_zoom - SPLIT_Z) + 12);
         let max_split_tile = i32::from((1_u16 << SPLIT_Z) - 1);
         for piece in pieces.drain(..) {
@@ -254,7 +315,8 @@ pub(crate) fn process_ocean_shapefile(
                         split_out.push(piece.clone());
                         continue;
                     }
-                    split_out.extend(intersect_rect(&piece, tile_rect, 0));
+                    intersect_rect_into(&mut split_scratch, &piece, tile_rect, 0, &mut clipped);
+                    split_out.append(&mut clipped);
                 }
             }
         }
@@ -281,10 +343,11 @@ pub(crate) fn process_ocean_shapefile(
     // into Vec<Vec<SortRecord>> + serial push) was fine for regional extracts but
     // would blow memory and serialize sort+flush at planet scale.
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
 
     let ocean_layer = Layer::Ocean as u8;
-    let empty_attrs: Vec<shortbread::Attr> = Vec::new();
+    let mut empty_attrs_bytes = Vec::new();
+    encode_attrs_bytes(&mut empty_attrs_bytes, &[], max_zoom);
 
     // Ocean chunks use the same chunk_NNNN.bin naming (starting after PBF chunks)
     // so that --skip-to sort (SortReader::from_dir sequential scan) finds them.
@@ -293,56 +356,21 @@ pub(crate) fn process_ocean_shapefile(
     let chunk_size = sort_writer.chunk_size_bytes();
     let chunk_compression = sort_writer.compression();
 
-    struct OceanAcc {
-        records: Vec<SortRecord>,
-        bytes: usize,
-        chunk_paths: Vec<std::path::PathBuf>,
-        count: u64,
-        compression: sort::ChunkCompression,
-    }
-
-    impl OceanAcc {
-        fn flush(&mut self, chunk_dir: &std::path::Path, chunk_id: &AtomicUsize) {
-            if self.records.is_empty() {
-                return;
-            }
-            let id = chunk_id.fetch_add(1, Ordering::Relaxed);
-            let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
-            // Panic: inside rayon fold - can't propagate Result. Disk I/O failure is unrecoverable.
-            sort::write_sorted_chunk(&mut self.records, &path, self.compression)
-                .expect("ocean chunk write failed");
-            self.chunk_paths.push(path);
-            self.count += self.records.len() as u64;
-            self.records.clear();
-            self.bytes = 0;
-        }
-    }
-
     let result = pieces
         .par_iter()
         .enumerate()
         .fold(
-            || OceanAcc {
-                records: Vec::new(),
-                bytes: 0,
-                chunk_paths: Vec::new(),
-                count: 0,
-                compression: chunk_compression,
-            },
+            || OceanAcc::new(chunk_compression),
             |mut acc, (idx, piece)| {
-                let before = acc.records.len();
                 emit_ocean_polygon(
                     idx as u64,
                     piece,
                     min_zoom,
                     max_zoom,
                     ocean_layer,
-                    &empty_attrs,
-                    &mut acc.records,
+                    &empty_attrs_bytes,
+                    &mut acc,
                 );
-                for r in &acc.records[before..] {
-                    acc.bytes += r.data.len() + std::mem::size_of::<sort::SortRecord>();
-                }
                 if acc.bytes >= chunk_size {
                     acc.flush(&chunk_dir, &chunk_id);
                 }
@@ -354,13 +382,7 @@ pub(crate) fn process_ocean_shapefile(
             acc
         })
         .reduce(
-            || OceanAcc {
-                records: Vec::new(),
-                bytes: 0,
-                chunk_paths: Vec::new(),
-                count: 0,
-                compression: chunk_compression,
-            },
+            || OceanAcc::new(chunk_compression),
             |mut a, b| {
                 a.chunk_paths.extend(b.chunk_paths);
                 a.count += b.count;
@@ -376,6 +398,7 @@ pub(crate) fn process_ocean_shapefile(
 }
 
 fn push_quantized_pieces(
+    scratch: &mut IntEmitScratch,
     pieces: &mut Vec<Shape>,
     outer: &[Point],
     inners: &[Vec<Point>],
@@ -392,7 +415,9 @@ fn push_quantized_pieces(
         pieces.push(shape);
         return;
     }
-    pieces.extend(intersect_rect(&shape, data_rect, 0));
+    let mut clipped = Vec::new();
+    intersect_rect_into(scratch, &shape, data_rect, 0, &mut clipped);
+    pieces.append(&mut clipped);
 }
 
 /// True if `outer` contains `inner` (closed containment).
@@ -433,8 +458,8 @@ fn emit_ocean_polygon(
     min_zoom: u8,
     max_zoom: u8,
     layer_idx: u8,
-    attrs: &[shortbread::Attr],
-    records: &mut Vec<SortRecord>,
+    attrs_bytes: &[u8],
+    acc: &mut OceanAcc,
 ) {
     if piece.is_empty() {
         return;
@@ -445,8 +470,7 @@ fn emit_ocean_polygon(
         let mut sink = |tx: u32, ty: u32, geom: &[u32]| {
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
             let key = sort::make_sort_key(tile_id, layer_idx, 0);
-            let data = encode_feature_data(feature_id, GeomType::Polygon, geom, attrs, z);
-            records.push(SortRecord { key, data });
+            acc.push_polygon(key, feature_id, geom, attrs_bytes);
         };
         emit_shape_for_zoom(
             piece,

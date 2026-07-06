@@ -1,13 +1,13 @@
-use crate::geometry::{Point, close_and_orient_ccw, close_and_orient_cw};
+use crate::geometry::Point;
 use crate::mvt;
 
 use i_overlay::core::fill_rule::FillRule;
-use i_overlay::core::overlay::{ContourDirection, IntOverlayOptions, Overlay};
+use i_overlay::core::overlay::{ContourDirection, IntOverlayOptions, Overlay, ShapeType};
 use i_overlay::core::overlay_rule::OverlayRule;
-use i_overlay::core::simplify::Simplify;
 use i_overlay::i_float::int::point::IntPoint;
 use rustc_hash::FxHashSet;
 use std::collections::HashMap;
+use std::ops::Range;
 
 pub(crate) type Contour = Vec<IntPoint>;
 pub(crate) type Shape = Vec<Contour>;
@@ -29,10 +29,15 @@ pub(crate) const TILE_BUFFER_I32: i32 = 128;
 pub(crate) struct IntEmitScratch {
     pub boundary_tiles: FxHashSet<u64>,
     pub boundary_rows: HashMap<u32, Vec<u32>>,
-    pub all_rings: Vec<Vec<(i32, i32)>>,
+    pub tile_points: Vec<(i32, i32)>,
+    pub tile_ranges: Vec<Range<usize>>,
     pub geom_buf: Vec<u32>,
     pub shape_z: Shape,
     pub flags_z: Vec<Vec<bool>>,
+    overlay: Overlay<i32>,
+    rect_contour: Contour,
+    normalized_shapes: Shapes,
+    clipped_shapes: Shapes,
 }
 
 impl IntEmitScratch {
@@ -40,10 +45,15 @@ impl IntEmitScratch {
         Self {
             boundary_tiles: FxHashSet::default(),
             boundary_rows: HashMap::new(),
-            all_rings: Vec::new(),
+            tile_points: Vec::new(),
+            tile_ranges: Vec::new(),
             geom_buf: Vec::new(),
             shape_z: Vec::new(),
             flags_z: Vec::new(),
+            overlay: Overlay::new_custom(0, overlay_options(0), Default::default()),
+            rect_contour: Vec::with_capacity(4),
+            normalized_shapes: Vec::new(),
+            clipped_shapes: Vec::new(),
         }
     }
 }
@@ -181,37 +191,85 @@ pub(crate) fn simplify_shape_dp(shape: &mut Shape, tol: i64, pins: Option<&[Vec<
     };
 }
 
+#[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
-#[hotpath::measure]
 pub(crate) fn normalize(shape: Shape, min_area: u64) -> Shapes {
-    if shape.is_empty() {
-        return Vec::new();
-    }
-    let options = overlay_options(min_area);
-    clean_shapes(
-        shape.as_slice().simplify(FillRule::NonZero, options),
-        min_area,
-    )
+    let mut scratch = IntEmitScratch::new();
+    let mut out = Vec::new();
+    normalize_into(&mut scratch, shape, min_area, &mut out);
+    out
 }
 
 #[hotpath::measure]
+pub(crate) fn normalize_into(
+    scratch: &mut IntEmitScratch,
+    mut shape: Shape,
+    min_area: u64,
+    out: &mut Shapes,
+) {
+    out.clear();
+    if shape.is_empty() {
+        return;
+    }
+    scratch.overlay.options = overlay_options(min_area);
+    let mut shapes = if shape.len() == 1 {
+        match scratch
+            .overlay
+            .simplify_contour(&shape[0], FillRule::NonZero)
+        {
+            Some(shapes) => shapes,
+            None => {
+                clean_shape_in_place(&mut shape, min_area);
+                if shape.first().is_some_and(|outer| outer.len() >= 3) {
+                    out.push(shape);
+                }
+                return;
+            }
+        }
+    } else {
+        scratch.overlay.clear();
+        scratch.overlay.add_shape(&shape, ShapeType::Subject);
+        scratch
+            .overlay
+            .overlay(OverlayRule::Subject, FillRule::NonZero)
+    };
+    clean_shapes_in_place(&mut shapes, min_area);
+    out.append(&mut shapes);
+}
+
+#[cfg(test)]
 pub(crate) fn intersect_rect(shape: &Shape, rect: IntRect, min_area: u64) -> Shapes {
+    let mut scratch = IntEmitScratch::new();
+    let mut out = Vec::new();
+    intersect_rect_into(&mut scratch, shape, rect, min_area, &mut out);
+    out
+}
+
+#[hotpath::measure]
+pub(crate) fn intersect_rect_into(
+    scratch: &mut IntEmitScratch,
+    shape: &Shape,
+    rect: IntRect,
+    min_area: u64,
+    out: &mut Shapes,
+) {
+    out.clear();
     if shape.is_empty() || rect.min_x >= rect.max_x || rect.min_y >= rect.max_y {
-        return Vec::new();
+        return;
     }
 
-    let rect_shape = rect_shape(rect);
-    let options = overlay_options(min_area);
-    let mut overlay = Overlay::with_shapes_options(
-        std::slice::from_ref(shape),
-        std::slice::from_ref(&rect_shape),
-        options,
-        Default::default(),
-    );
-    clean_shapes(
-        overlay.overlay(OverlayRule::Intersect, FillRule::NonZero),
-        min_area,
-    )
+    fill_rect_contour(&mut scratch.rect_contour, rect);
+    scratch.overlay.options = overlay_options(min_area);
+    scratch.overlay.clear();
+    scratch.overlay.add_shape(shape, ShapeType::Subject);
+    scratch
+        .overlay
+        .add_contour(&scratch.rect_contour, ShapeType::Clip);
+    let mut shapes = scratch
+        .overlay
+        .overlay(OverlayRule::Intersect, FillRule::NonZero);
+    clean_shapes_in_place(&mut shapes, min_area);
+    out.append(&mut shapes);
 }
 
 pub(crate) fn point_in_shape(x: i32, y: i32, shape: &Shape) -> bool {
@@ -229,13 +287,12 @@ fn overlay_options(min_area: u64) -> IntOverlayOptions<u64> {
     }
 }
 
-fn rect_shape(rect: IntRect) -> Shape {
-    vec![vec![
-        IntPoint::new(rect.min_x, rect.min_y),
-        IntPoint::new(rect.max_x, rect.min_y),
-        IntPoint::new(rect.max_x, rect.max_y),
-        IntPoint::new(rect.min_x, rect.max_y),
-    ]]
+fn fill_rect_contour(out: &mut Contour, rect: IntRect) {
+    out.clear();
+    out.push(IntPoint::new(rect.min_x, rect.min_y));
+    out.push(IntPoint::new(rect.max_x, rect.min_y));
+    out.push(IntPoint::new(rect.max_x, rect.max_y));
+    out.push(IntPoint::new(rect.min_x, rect.max_y));
 }
 
 fn quantize_ring(points: &[Point], maxz: u8, outer: bool) -> Option<Contour> {
@@ -544,26 +601,48 @@ fn farthest_from_segment(chain: &Contour, start: usize, end: usize) -> Option<(u
     best.map(|(idx, num, _, _)| (idx, num, den))
 }
 
-fn clean_shapes(shapes: Shapes, min_area: u64) -> Shapes {
-    let mut out = Vec::with_capacity(shapes.len());
-    for shape in shapes {
-        let mut clean = Vec::with_capacity(shape.len());
-        for (i, contour) in shape.into_iter().enumerate() {
-            let mut ring = Vec::with_capacity(contour.len());
-            for p in contour {
-                push_nonduplicate(&mut ring, p);
+fn clean_shapes_in_place(shapes: &mut Shapes, min_area: u64) {
+    let mut write = 0usize;
+    for read in 0..shapes.len() {
+        clean_shape_in_place(&mut shapes[read], min_area);
+        if shapes[read].first().is_some_and(|outer| outer.len() >= 3) {
+            if write != read {
+                shapes.swap(write, read);
             }
-            remove_closing_duplicate(&mut ring);
-            if ring_is_valid(&ring) && true_area(&ring) >= u128::from(min_area) {
-                orient_ring(&mut ring, i == 0);
-                clean.push(ring);
-            }
-        }
-        if clean.first().is_some_and(|outer| outer.len() >= 3) {
-            out.push(clean);
+            write += 1;
         }
     }
-    out
+    shapes.truncate(write);
+}
+
+fn clean_shape_in_place(shape: &mut Shape, min_area: u64) {
+    let mut write = 0usize;
+    for read in 0..shape.len() {
+        clean_contour_in_place(&mut shape[read]);
+        if ring_is_valid(&shape[read]) && true_area(&shape[read]) >= u128::from(min_area) {
+            orient_ring(&mut shape[read], write == 0);
+            if write != read {
+                shape.swap(write, read);
+            }
+            write += 1;
+        }
+    }
+    shape.truncate(write);
+}
+
+fn clean_contour_in_place(ring: &mut Contour) {
+    if ring.is_empty() {
+        return;
+    }
+    let mut write = 1usize;
+    for read in 1..ring.len() {
+        if ring[read] != ring[write - 1] {
+            ring[write] = ring[read];
+            write += 1;
+        }
+    }
+    ring.truncate(write);
+    remove_closing_duplicate(ring);
 }
 
 fn true_area(ring: &Contour) -> u128 {
@@ -706,9 +785,14 @@ pub(crate) fn emit_shape_for_zoom(
         simplify_shape_dp(&mut scratch.shape_z, params.dp_tol, None);
     }
 
-    for shape in normalize(std::mem::take(&mut scratch.shape_z), params.min_area) {
-        emit_normalized_shape_for_zoom(&shape, params.z, params.min_area, scratch, sink);
+    let shape_z = std::mem::take(&mut scratch.shape_z);
+    let mut normalized = std::mem::take(&mut scratch.normalized_shapes);
+    normalize_into(scratch, shape_z, params.min_area, &mut normalized);
+    for shape in &normalized {
+        emit_normalized_shape_for_zoom(shape, params.z, params.min_area, scratch, sink);
     }
+    normalized.clear();
+    scratch.normalized_shapes = normalized;
 }
 
 fn flags_from_pin_set(shape: &Shape, pins: &FxHashSet<(i32, i32)>) -> Vec<Vec<bool>> {
@@ -727,28 +811,69 @@ pub(crate) fn encode_tile_shape(
 ) {
     let ox = tile_origin(tx);
     let oy = tile_origin(ty);
-    scratch.all_rings.clear();
+    scratch.tile_points.clear();
+    scratch.tile_ranges.clear();
     for (i, contour) in tile_shape.into_iter().enumerate() {
         if contour.len() < 3 {
             continue;
         }
-        let mut ring: Vec<(i32, i32)> = contour.into_iter().map(|p| (p.x - ox, p.y - oy)).collect();
-        if i == 0 {
-            close_and_orient_cw(&mut ring);
-        } else {
-            close_and_orient_ccw(&mut ring);
-        }
-        scratch.all_rings.push(ring);
+        append_translated_ring(
+            &contour,
+            ox,
+            oy,
+            i == 0,
+            &mut scratch.tile_points,
+            &mut scratch.tile_ranges,
+        );
     }
-    if scratch.all_rings.is_empty() {
+    if scratch.tile_ranges.is_empty() {
         return;
     }
 
-    let ring_refs: Vec<&[(i32, i32)]> = scratch.all_rings.iter().map(Vec::as_slice).collect();
-    mvt::encode_polygon(&mut scratch.geom_buf, &ring_refs);
+    mvt::encode_polygon_ranges(
+        &mut scratch.geom_buf,
+        &scratch.tile_points,
+        &scratch.tile_ranges,
+    );
     if !scratch.geom_buf.is_empty() {
         sink(tx, ty, &scratch.geom_buf);
     }
+}
+
+fn append_translated_ring(
+    contour: &Contour,
+    ox: i32,
+    oy: i32,
+    clockwise: bool,
+    points: &mut Vec<(i32, i32)>,
+    ranges: &mut Vec<Range<usize>>,
+) {
+    let start = points.len();
+    points.extend(contour.iter().map(|p| (p.x - ox, p.y - oy)));
+    if points[start..].first() != points[start..].last()
+        && let Some(&first) = points.get(start)
+    {
+        points.push(first);
+    }
+    let area = signed_area_tile_2x(&points[start..]);
+    if (clockwise && area < 0) || (!clockwise && area > 0) {
+        points[start..].reverse();
+    }
+    if points.len() >= start + 4 {
+        ranges.push(start..points.len());
+    } else {
+        points.truncate(start);
+    }
+}
+
+fn signed_area_tile_2x(ring: &[(i32, i32)]) -> i128 {
+    let mut area = 0_i128;
+    for i in 0..ring.len() {
+        let j = (i + 1) % ring.len();
+        area += i128::from(ring[i].0) * i128::from(ring[j].1);
+        area -= i128::from(ring[j].0) * i128::from(ring[i].1);
+    }
+    area
 }
 
 fn emit_normalized_shape_for_zoom(
@@ -786,7 +911,15 @@ fn emit_normalized_shape_for_zoom(
         txs.dedup();
     }
 
-    let row_bands = cut_row_bands(shape, ty_min, ty_max, world_max, TILE_BUFFER_I32, min_area);
+    let row_bands = cut_row_bands_with_scratch(
+        scratch,
+        shape,
+        ty_min,
+        ty_max,
+        world_max,
+        TILE_BUFFER_I32,
+        min_area,
+    );
     for ty in ty_min..=ty_max {
         let row_shapes = &row_bands[(ty - ty_min) as usize];
         if row_shapes.is_empty() {
@@ -889,9 +1022,18 @@ fn emit_clipped_tile_shape(
     scratch: &mut IntEmitScratch,
     sink: &mut dyn FnMut(u32, u32, &[u32]),
 ) {
-    for tile_shape in intersect_rect(shape, buffered_tile_rect(tx, ty), min_area) {
+    let mut clipped = std::mem::take(&mut scratch.clipped_shapes);
+    intersect_rect_into(
+        scratch,
+        shape,
+        buffered_tile_rect(tx, ty),
+        min_area,
+        &mut clipped,
+    );
+    for tile_shape in clipped.drain(..) {
         encode_tile_shape(tile_shape, tx, ty, scratch, sink);
     }
+    scratch.clipped_shapes = clipped;
 }
 
 fn emit_full_tile(
@@ -900,7 +1042,9 @@ fn emit_full_tile(
     scratch: &mut IntEmitScratch,
     sink: &mut dyn FnMut(u32, u32, &[u32]),
 ) {
-    let ring = vec![
+    scratch.tile_points.clear();
+    scratch.tile_ranges.clear();
+    scratch.tile_points.extend_from_slice(&[
         (-TILE_BUFFER_I32, -TILE_BUFFER_I32),
         (TILE_EXTENT_I32 + TILE_BUFFER_I32, -TILE_BUFFER_I32),
         (
@@ -909,10 +1053,13 @@ fn emit_full_tile(
         ),
         (-TILE_BUFFER_I32, TILE_EXTENT_I32 + TILE_BUFFER_I32),
         (-TILE_BUFFER_I32, -TILE_BUFFER_I32),
-    ];
-    scratch.all_rings.clear();
-    scratch.all_rings.push(ring);
-    mvt::encode_polygon(&mut scratch.geom_buf, &[scratch.all_rings[0].as_slice()]);
+    ]);
+    scratch.tile_ranges.push(0..scratch.tile_points.len());
+    mvt::encode_polygon_ranges(
+        &mut scratch.geom_buf,
+        &scratch.tile_points,
+        &scratch.tile_ranges,
+    );
     if !scratch.geom_buf.is_empty() {
         sink(tx, ty, &scratch.geom_buf);
     }
@@ -1315,8 +1462,31 @@ fn orient(a: IntPoint, b: IntPoint, c: IntPoint) -> i8 {
 /// INTERSECT leaf`.
 ///
 /// Returns one `Shapes` per row, indexed `ty - ty0` (empty for empty rows).
-#[hotpath::measure]
+#[cfg(test)]
 pub(crate) fn cut_row_bands(
+    shape: &Shape,
+    ty0: u32,
+    ty1: u32,
+    world_max: i32,
+    buffer: i32,
+    leaf_min_area: u64,
+) -> Vec<Shapes> {
+    debug_assert!(ty0 <= ty1);
+    let mut scratch = IntEmitScratch::new();
+    cut_row_bands_with_scratch(
+        &mut scratch,
+        shape,
+        ty0,
+        ty1,
+        world_max,
+        buffer,
+        leaf_min_area,
+    )
+}
+
+#[hotpath::measure]
+fn cut_row_bands_with_scratch(
+    scratch: &mut IntEmitScratch,
     shape: &Shape,
     ty0: u32,
     ty1: u32,
@@ -1327,11 +1497,22 @@ pub(crate) fn cut_row_bands(
     debug_assert!(ty0 <= ty1);
     let mut out: Vec<Shapes> = Vec::with_capacity((ty1 - ty0 + 1) as usize);
     let root: Shapes = vec![shape.clone()];
-    cut_rows_rec(&root, ty0, ty1, world_max, buffer, leaf_min_area, &mut out);
+    cut_rows_rec(
+        scratch,
+        &root,
+        ty0,
+        ty1,
+        world_max,
+        buffer,
+        leaf_min_area,
+        &mut out,
+    );
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cut_rows_rec(
+    scratch: &mut IntEmitScratch,
     shapes: &Shapes,
     lo: u32,
     hi: u32,
@@ -1350,8 +1531,10 @@ fn cut_rows_rec(
     if lo == hi {
         let band = row_range_rect(lo, lo, world_max, buffer);
         let mut row: Shapes = Vec::new();
+        let mut clipped: Shapes = Vec::new();
         for s in shapes {
-            row.extend(intersect_rect(s, band, leaf_min_area));
+            intersect_rect_into(scratch, s, band, leaf_min_area, &mut clipped);
+            row.append(&mut clipped);
         }
         out.push(row);
         return;
@@ -1361,12 +1544,33 @@ fn cut_rows_rec(
     let lower_rect = row_range_rect(mid + 1, hi, world_max, buffer);
     let mut upper: Shapes = Vec::new();
     let mut lower: Shapes = Vec::new();
+    let mut clipped: Shapes = Vec::new();
     for s in shapes {
-        upper.extend(intersect_rect(s, upper_rect, 0));
-        lower.extend(intersect_rect(s, lower_rect, 0));
+        intersect_rect_into(scratch, s, upper_rect, 0, &mut clipped);
+        upper.append(&mut clipped);
+        intersect_rect_into(scratch, s, lower_rect, 0, &mut clipped);
+        lower.append(&mut clipped);
     }
-    cut_rows_rec(&upper, lo, mid, world_max, buffer, leaf_min_area, out);
-    cut_rows_rec(&lower, mid + 1, hi, world_max, buffer, leaf_min_area, out);
+    cut_rows_rec(
+        scratch,
+        &upper,
+        lo,
+        mid,
+        world_max,
+        buffer,
+        leaf_min_area,
+        out,
+    );
+    cut_rows_rec(
+        scratch,
+        &lower,
+        mid + 1,
+        hi,
+        world_max,
+        buffer,
+        leaf_min_area,
+        out,
+    );
 }
 
 /// Buffered rect covering tile rows `lo..=hi` (full x range).

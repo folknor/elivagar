@@ -3,8 +3,8 @@ use smallvec::SmallVec;
 
 use crate::geometry::int_ocean::{
     IntEmitScratch, OSM_DP_TOL_PX, Shape, ZoomEmitParams, buffered_tile_rect,
-    contour_area_is_below, emit_shape_for_zoom, encode_tile_shape, intersect_rect,
-    lookback_dedup_contour_pinned, normalize, quantize_polygon, quantize_polygon_pinned,
+    contour_area_is_below, emit_shape_for_zoom, encode_tile_shape, intersect_rect_into,
+    lookback_dedup_contour_pinned, normalize_into, quantize_polygon, quantize_polygon_pinned,
     rescale_shape, rescale_shape_pinned, ring_is_simple_complete, shape_bbox, simplify_shape_dp,
     tile_count_for_rect, tile_range_for_rect,
 };
@@ -396,7 +396,9 @@ fn emit_tier1_single_ring(
     }
 
     let mut emitted = 0;
-    for fixed in normalize(shape_z, min_area) {
+    let mut fixed_shapes = Vec::new();
+    normalize_into(int_scratch, shape_z, min_area, &mut fixed_shapes);
+    for fixed in fixed_shapes {
         emitted += emit_int_tile_shape(
             osm_id,
             layer,
@@ -425,14 +427,24 @@ fn emit_normalized_per_tile(
 ) -> u64 {
     let max_tile = (1u32 << z) - 1;
     let mut emitted = 0;
-    for shape in normalize(shape_z, min_area) {
+    let mut shapes = Vec::new();
+    normalize_into(int_scratch, shape_z, min_area, &mut shapes);
+    let mut clipped = Vec::new();
+    for shape in shapes {
         let Some(bbox) = shape_bbox(&shape) else {
             continue;
         };
         let (tx_min, tx_max, ty_min, ty_max) = tile_range_for_rect(bbox, max_tile);
         for ty in ty_min..=ty_max {
             for tx in tx_min..=tx_max {
-                for tile_shape in intersect_rect(&shape, buffered_tile_rect(tx, ty), min_area) {
+                intersect_rect_into(
+                    int_scratch,
+                    &shape,
+                    buffered_tile_rect(tx, ty),
+                    min_area,
+                    &mut clipped,
+                );
+                for tile_shape in clipped.drain(..) {
                     emitted += emit_int_tile_shape(
                         osm_id,
                         layer,
@@ -1002,6 +1014,7 @@ pub(super) fn emit_multipolygon_feature(
 #[cfg(test)]
 mod landing_b_tests {
     use super::*;
+    use crate::geometry::int_ocean::{intersect_rect, normalize};
     use i_overlay::i_float::int::point::IntPoint;
 
     fn p(x: i32, y: i32) -> IntPoint {

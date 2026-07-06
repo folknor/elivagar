@@ -443,53 +443,69 @@ pub fn encode_polygon(buf: &mut Vec<u32>, rings: &[&[(i32, i32)]]) {
     let mut cx: i32 = 0;
     let mut cy: i32 = 0;
     for ring in rings {
-        if ring.len() < 4 {
-            continue;
-        }
-        let points = &ring[..ring.len() - 1];
-        // Save state in case we need to discard a degenerate ring
-        let save_len = buf.len();
-        let save_cx = cx;
-        let save_cy = cy;
-        // MoveTo first point
-        buf.push(command(1, 1));
-        buf.push(zigzag(points[0].0 - cx));
-        buf.push(zigzag(points[0].1 - cy));
-        cx = points[0].0;
-        cy = points[0].1;
-        // LineTo remaining, skipping consecutive duplicates
-        let lineto_pos = buf.len();
-        buf.push(0); // placeholder for LineTo command
-        let mut count = 0u32;
-        for &(x, y) in &points[1..] {
-            if x == cx && y == cy {
-                continue;
-            }
-            buf.push(zigzag(x - cx));
-            buf.push(zigzag(y - cy));
-            cx = x;
-            cy = y;
-            count += 1;
-        }
-        if count < 2 {
-            // Degenerate ring after dedup (< 3 unique points) - discard
-            buf.truncate(save_len);
-            cx = save_cx;
-            cy = save_cy;
-            continue;
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            buf[lineto_pos] = command(2, count);
-        }
-        // ClosePath. Per MVT spec 4.3.3.3 ClosePath does NOT change the
-        // cursor: the next ring's MoveTo is relative to this ring's LAST
-        // LineTo vertex (cx/cy already hold it). For months this encoder
-        // reset the cursor to the ring's MoveTo instead - displacing every
-        // ring after the first in spec-compliant decoders (MapLibre) while
-        // our own symmetric decoders round-tripped it invisibly.
-        buf.push(command(7, 1));
+        encode_polygon_ring(buf, ring, &mut cx, &mut cy);
     }
+}
+
+pub fn encode_polygon_ranges(
+    buf: &mut Vec<u32>,
+    points: &[(i32, i32)],
+    ranges: &[std::ops::Range<usize>],
+) {
+    buf.clear();
+    let mut cx: i32 = 0;
+    let mut cy: i32 = 0;
+    for range in ranges {
+        encode_polygon_ring(buf, &points[range.clone()], &mut cx, &mut cy);
+    }
+}
+
+fn encode_polygon_ring(buf: &mut Vec<u32>, ring: &[(i32, i32)], cx: &mut i32, cy: &mut i32) {
+    if ring.len() < 4 {
+        return;
+    }
+    let points = &ring[..ring.len() - 1];
+    // Save state in case we need to discard a degenerate ring.
+    let save_len = buf.len();
+    let save_cx = *cx;
+    let save_cy = *cy;
+    // MoveTo first point.
+    buf.push(command(1, 1));
+    buf.push(zigzag(points[0].0 - *cx));
+    buf.push(zigzag(points[0].1 - *cy));
+    *cx = points[0].0;
+    *cy = points[0].1;
+    // LineTo remaining, skipping consecutive duplicates.
+    let lineto_pos = buf.len();
+    buf.push(0);
+    let mut count = 0u32;
+    for &(x, y) in &points[1..] {
+        if x == *cx && y == *cy {
+            continue;
+        }
+        buf.push(zigzag(x - *cx));
+        buf.push(zigzag(y - *cy));
+        *cx = x;
+        *cy = y;
+        count += 1;
+    }
+    if count < 2 {
+        buf.truncate(save_len);
+        *cx = save_cx;
+        *cy = save_cy;
+        return;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        buf[lineto_pos] = command(2, count);
+    }
+    // ClosePath. Per MVT spec 4.3.3.3 ClosePath does NOT change the
+    // cursor: the next ring's MoveTo is relative to this ring's LAST
+    // LineTo vertex (cx/cy already hold it). For months this encoder
+    // reset the cursor to the ring's MoveTo instead - displacing every
+    // ring after the first in spec-compliant decoders (MapLibre) while
+    // our own symmetric decoders round-tripped it invisibly.
+    buf.push(command(7, 1));
 }
 
 fn encode_value(buf: &mut Vec<u8>, val: &Value) {

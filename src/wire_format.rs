@@ -301,6 +301,19 @@ pub(crate) fn encode_feature_data_with_attrs(
     attrs_bytes: &[u8],
 ) -> Box<[u8]> {
     let mut buf = Vec::with_capacity(13 + geom_cmds.len() * 4 + attrs_bytes.len());
+    append_feature_data_with_attrs(&mut buf, osm_id, geom_type, geom_cmds, attrs_bytes);
+    buf.into_boxed_slice()
+}
+
+pub(crate) fn append_feature_data_with_attrs(
+    buf: &mut Vec<u8>,
+    osm_id: u64,
+    geom_type: GeomType,
+    geom_cmds: &[u32],
+    attrs_bytes: &[u8],
+) -> std::ops::Range<usize> {
+    let start = buf.len();
+    buf.reserve(13 + geom_cmds.len() * 4 + attrs_bytes.len());
     buf.extend_from_slice(&osm_id.to_le_bytes());
     buf.push(geom_type as u8);
     #[allow(clippy::cast_possible_truncation)]
@@ -310,9 +323,10 @@ pub(crate) fn encode_feature_data_with_attrs(
         buf.extend_from_slice(&cmd.to_le_bytes());
     }
     buf.extend_from_slice(attrs_bytes);
-    buf.into_boxed_slice()
+    start..buf.len()
 }
 
+#[allow(dead_code)]
 pub(crate) fn encode_feature_data(
     osm_id: u64,
     geom_type: GeomType,

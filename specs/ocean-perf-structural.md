@@ -1,9 +1,16 @@
 # Ocean/polygon emission perf: remove the rectangle-boolean mismatch
 
-**STATUS (2026-07-06, session end):** Landing 1 LANDED at commit
+**STATUS (2026-07-06, pickup adjudication):** Landing 1 LANDED at commit
 `2fab70a` - all correctness gates green, total 71493 ms (met), RSS met,
-ocean_ms 47324 vs the 30000 bound MISSED; kept with justification (see
-ledger R25) - RATIFY OR REVERT AT PICKUP. Landings 2-4 not started.
+ocean_ms 47324 vs the 30000 bound MISSED. Keep RATIFIED at pickup
+(delegated adjudication, see ledger R25): the ocean_ms bound is ruled
+MIS-CALIBRATED - Landing 1 removed only the gap-run boolean population,
+while the perf-hunt profile puts the dominant ocean cost in row-cutting
+internals (~48s cut_row_bands CPU), boundary clips, and tail-bound
+parallelism, i.e. Landing 2/3 + leftovers item 1 territory. The spec's
+ocean commitment is carried by Landing 3's ocean_ms <= 10000 bound,
+which stands unchanged and is NOT subject to another kept-despite-miss
+reading. Landings 2-4 not started.
 Parity baselines: regenerate with
 `python3 scripts/oracle_sweep.py <pmtiles> <suffix> [baseline-suffix]`
 (the notes/qa tables are not committed). Bench baseline for Landing 2's
@@ -162,6 +169,11 @@ Named unit tests (int_ocean.rs cut/rasterize test modules):
 Accepted-cost bound (keep/revert): total_ms <= 73854 AND
 ocean_ms <= 30000 AND rss_mb <= 1961 (1.05x baseline). Expectation is
 far lower ocean_ms; the bound is the floor of "must clearly move".
+ADJUDICATED 2026-07-06: total and RSS met; ocean_ms 47324 missed. The
+ocean term ruled mis-calibrated (projection error at spec time - the
+gap-run population this landing removes was never the dominant ocean
+cost per the survey's own numbers) and the keep of 2fab70a ratified;
+the ocean target transfers to Landing 3's bound. See STATUS and R25.
 
 ### Landing 2 - allocation-churn removal (i_overlay reuse + sinks)
 
