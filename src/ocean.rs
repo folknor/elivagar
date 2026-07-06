@@ -716,14 +716,24 @@ fn rasterize_segment(
     let ex = x1.floor() as i32;
     let ey = y1.floor() as i32;
 
-    if cx >= 0 && cy >= 0 {
-        tiles.insert(pack_tile(cx as u32, cy as u32));
-    }
+    insert_rasterized_tile(cx, cy, tiles);
 
     let dx = x1 - x0;
     let dy = y1 - y0;
 
     if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+
+    if dy == 0.0 && is_grid_line_coord(y0) {
+        let step_x = if dx > 0.0 { 1 } else { -1 };
+        rasterize_horizontal_grid_line(cx, cy, ex, step_x, tiles);
+        return;
+    }
+
+    if dx == 0.0 && is_grid_line_coord(x0) {
+        let step_y = if dy > 0.0 { 1 } else { -1 };
+        rasterize_vertical_grid_line(cx, cy, ey, step_y, tiles);
         return;
     }
 
@@ -752,20 +762,72 @@ fn rasterize_segment(
         if cx == ex && cy == ey {
             break;
         }
-        // Known: when t_max_x == t_max_y (exact grid corner crossing), only
-        // the Y step is taken, skipping the X-direction tile. Not reachable
-        // with real shapefile coordinates (requires exact float equality).
-        // Even if triggered, the scanline PIP fallback handles the missed tile.
-        if t_max_x < t_max_y {
+        // At exact grid-corner crossings the segment touches both side cells
+        // before entering the diagonal cell. Over-marking boundary tiles is
+        // safe; under-marking can misclassify a boundary row as an interior gap.
+        if t_max_x.total_cmp(&t_max_y).is_eq() {
+            insert_rasterized_tile(cx + step_x, cy, tiles);
+            insert_rasterized_tile(cx, cy + step_y, tiles);
+            cx += step_x;
+            cy += step_y;
+            t_max_x += t_delta_x;
+            t_max_y += t_delta_y;
+        } else if t_max_x < t_max_y {
             cx += step_x;
             t_max_x += t_delta_x;
         } else {
             cy += step_y;
             t_max_y += t_delta_y;
         }
-        if cx >= 0 && cy >= 0 {
-            tiles.insert(pack_tile(cx as u32, cy as u32));
+        insert_rasterized_tile(cx, cy, tiles);
+    }
+}
+
+#[inline]
+fn is_grid_line_coord(coord: f64) -> bool {
+    coord.fract().abs() <= f64::EPSILON
+}
+
+fn rasterize_horizontal_grid_line(
+    mut cx: i32,
+    cy: i32,
+    ex: i32,
+    step_x: i32,
+    tiles: &mut HashSet<u64>,
+) {
+    let max_steps = (cx - ex).unsigned_abs() + 2;
+    for _ in 0..max_steps {
+        insert_rasterized_tile(cx, cy, tiles);
+        insert_rasterized_tile(cx, cy - 1, tiles);
+        if cx == ex {
+            break;
         }
+        cx += step_x;
+    }
+}
+
+fn rasterize_vertical_grid_line(
+    cx: i32,
+    mut cy: i32,
+    ey: i32,
+    step_y: i32,
+    tiles: &mut HashSet<u64>,
+) {
+    let max_steps = (cy - ey).unsigned_abs() + 2;
+    for _ in 0..max_steps {
+        insert_rasterized_tile(cx, cy, tiles);
+        insert_rasterized_tile(cx - 1, cy, tiles);
+        if cy == ey {
+            break;
+        }
+        cy += step_y;
+    }
+}
+
+#[inline]
+fn insert_rasterized_tile(tx: i32, ty: i32, tiles: &mut HashSet<u64>) {
+    if let (Ok(tx), Ok(ty)) = (u32::try_from(tx), u32::try_from(ty)) {
+        tiles.insert(pack_tile(tx, ty));
     }
 }
 
@@ -930,6 +992,13 @@ mod tests {
     // rasterize_segment tests
     // -----------------------------------------------------------------------
 
+    fn packed_tiles<const N: usize>(tiles: [(u32, u32); N]) -> HashSet<u64> {
+        tiles
+            .into_iter()
+            .map(|(tx, ty)| pack_tile(tx, ty))
+            .collect()
+    }
+
     #[test]
     fn rasterize_horizontal() {
         let mut tiles = HashSet::new();
@@ -964,24 +1033,57 @@ mod tests {
     fn rasterize_diagonal() {
         let mut tiles = HashSet::new();
         rasterize_segment(0.5, 0.5, 2.5, 2.5, &mut tiles);
-        // Must hit the three main diagonal tiles
-        assert!(tiles.contains(&pack_tile(0, 0)));
-        assert!(tiles.contains(&pack_tile(1, 1)));
-        assert!(tiles.contains(&pack_tile(2, 2)));
-        // DDA may also step through (0,1) or (1,0) at grid crossings -
-        // just verify the result is a subset of the plausible set.
-        let plausible: HashSet<u64> = [
-            pack_tile(0, 0),
-            pack_tile(0, 1),
-            pack_tile(1, 0),
-            pack_tile(1, 1),
-            pack_tile(1, 2),
-            pack_tile(2, 1),
-            pack_tile(2, 2),
-        ]
-        .into_iter()
-        .collect();
-        assert!(tiles.is_subset(&plausible));
+        let expected = packed_tiles([(0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2), (2, 2)]);
+        assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    fn rasterize_45_degree_segment_through_exact_corners_marks_both_side_cells() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(0.5, 0.5, 2.5, 2.5, &mut tiles);
+        let expected = packed_tiles([(0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2), (2, 2)]);
+        assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    fn rasterize_segment_starting_exactly_on_a_corner() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(1.0, 1.0, 3.0, 3.0, &mut tiles);
+        let expected = packed_tiles([(1, 1), (2, 1), (1, 2), (2, 2), (3, 2), (2, 3), (3, 3)]);
+        assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    fn rasterize_segment_ending_exactly_on_a_corner() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(0.5, 0.5, 2.0, 2.0, &mut tiles);
+        let expected = packed_tiles([(0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (1, 2), (2, 2)]);
+        assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    fn rasterize_axis_aligned_segment_along_a_grid_line() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(0.5, 1.0, 3.5, 1.0, &mut tiles);
+        let expected = packed_tiles([
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+            (2, 0),
+            (2, 1),
+            (3, 0),
+            (3, 1),
+        ]);
+        assert_eq!(tiles, expected);
+    }
+
+    #[test]
+    fn rasterize_tangent_corner_touch() {
+        let mut tiles = HashSet::new();
+        rasterize_segment(0.5, 1.5, 1.5, 0.5, &mut tiles);
+        let expected = packed_tiles([(0, 1), (1, 1), (0, 0), (1, 0)]);
+        assert_eq!(tiles, expected);
     }
 
     #[test]
