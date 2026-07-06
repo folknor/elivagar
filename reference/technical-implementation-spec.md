@@ -4,6 +4,8 @@ The single document from which an open TODO item is built to completion without
 re-deriving its design. Two implementers working from it independently produce
 the same artifact.
 
+Specifications are saved to the ./notes folder.
+
 ## What it is
 
 1. **Every brick.** It lays each step on the road from the current code to the
@@ -76,8 +78,8 @@ the same artifact.
     (`reference/technical-implementation-spec.md`) as the contract it is
     written against, AND the document the spec was spawned from (the item's
     source naming the problem - e.g. the owning `notes/*.md` writeup such
-    as `notes/rendering-fix-log.md`), if it exists.
-    The measurement record is CLAUDE.md's benchmark sections plus
+    as `notes/rendering-postmortem.md`), if it exists.
+    The measurement record is AGENTS.md's benchmark sections plus
     `.brokkr/results.db`: a spec that claims a performance effect, or whose
     changes touch a measured path, states the pre-change baseline (host +
     commit hash) the keep/revert verdict will be read against, and after
