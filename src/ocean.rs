@@ -14,10 +14,39 @@ use crate::pmtiles_writer;
 use crate::shortbread::Layer;
 use crate::sort::{self, SortWriter};
 use crate::wire_format::{append_feature_data_with_attrs, encode_attrs_bytes};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+const SPLIT_Z: u8 = 8;
+const SPLIT_MIN_VERTICES: usize = 500;
+// Cap each parallel fold accumulator's in-flight payload well below the
+// global sort_budget: with (piece x zoom) fan-out across many rayon workers,
+// letting each balloon to the full budget before flushing would multiply peak
+// RSS by the worker count. Smaller, more frequent chunk files cost the sort
+// phase almost nothing (~0.5-0.7s).
+const OCEAN_CHUNK_SIZE_LIMIT: usize = 4 * 1024 * 1024;
+const RING_READ_BUFFER_BYTES: usize = 64 * 1024;
+
+struct ParsedOceanRecord {
+    pieces: Vec<Shape>,
+    source_pieces: usize,
+    shapes_hit: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ShxRecord {
+    offset: usize,
+    content_len: usize,
+}
+
+thread_local! {
+    static OCEAN_EMIT_SCRATCH: std::cell::RefCell<IntEmitScratch> =
+        std::cell::RefCell::new(IntEmitScratch::new());
+}
 
 struct OceanAcc {
     records: Vec<sort::PayloadRecord>,
@@ -40,18 +69,6 @@ impl OceanAcc {
         }
     }
 
-    fn push_polygon(&mut self, key: sort::SortKey, feature_id: u64, geom: &[u32], attrs: &[u8]) {
-        let range = append_feature_data_with_attrs(
-            &mut self.payload,
-            feature_id,
-            GeomType::Polygon,
-            geom,
-            attrs,
-        );
-        self.bytes += range.len() + std::mem::size_of::<sort::PayloadRecord>();
-        self.records.push((key, range.start, range.len()));
-    }
-
     fn flush(&mut self, chunk_dir: &std::path::Path, chunk_id: &std::sync::atomic::AtomicUsize) {
         if self.records.is_empty() {
             return;
@@ -66,6 +83,21 @@ impl OceanAcc {
         self.records.clear();
         self.payload.clear();
         self.bytes = 0;
+    }
+
+    fn merge_from(&mut self, other: Self) {
+        self.chunk_paths.extend(other.chunk_paths);
+        self.count += other.count;
+
+        let payload_base = self.payload.len();
+        self.payload.extend(other.payload);
+        self.records.extend(
+            other
+                .records
+                .into_iter()
+                .map(|(key, offset, len)| (key, payload_base + offset, len)),
+        );
+        self.bytes += other.bytes;
     }
 }
 
@@ -106,7 +138,7 @@ pub(crate) fn process_ocean_shapefile(
     }
 
     let shape_count = (shx_data.len() - 100) / 8;
-    let mut offsets: Vec<usize> = Vec::with_capacity(shape_count);
+    let mut records: Vec<ShxRecord> = Vec::with_capacity(shape_count);
     for i in 0..shape_count {
         let base = 100 + i * 8;
         let offset_words = i32::from_be_bytes([
@@ -115,218 +147,76 @@ pub(crate) fn process_ocean_shapefile(
             shx_data[base + 2],
             shx_data[base + 3],
         ]);
-        if offset_words < 0 {
+        let content_words = i32::from_be_bytes([
+            shx_data[base + 4],
+            shx_data[base + 5],
+            shx_data[base + 6],
+            shx_data[base + 7],
+        ]);
+        if offset_words < 0 || content_words < 0 {
             continue;
         }
         #[allow(clippy::cast_sign_loss)]
-        offsets.push((offset_words as usize) * 2);
+        let offset = (offset_words as usize) * 2;
+        #[allow(clippy::cast_sign_loss)]
+        let content_len = (content_words as usize) * 2;
+        records.push(ShxRecord {
+            offset,
+            content_len,
+        });
     }
     eprintln!("  Index: {shape_count} shapes");
 
     // --- Mmap the .shp file ---
     let shp_file = std::fs::File::open(path)?;
     let shp_mmap = unsafe { memmap2::Mmap::map(&shp_file) }?;
-    let shp = &shp_mmap[..];
-    eprintln!("  Mmapped {:.1} MB", shp.len() as f64 / (1024.0 * 1024.0));
+    #[cfg(unix)]
+    shp_mmap.advise(memmap2::Advice::Random)?;
+    eprintln!(
+        "  Mmapped {:.1} MB",
+        shp_mmap.len() as f64 / (1024.0 * 1024.0)
+    );
 
     let data_rect = data_bounds_rect(data_bounds, max_zoom);
 
-    // --- Parse phase: extract all polygons (single-threaded, sequential I/O) ---
-    let mut pieces: Vec<Shape> = Vec::new();
-    let mut shapes_hit: u64 = 0;
-    let mut parse_scratch = IntEmitScratch::new();
+    // --- Parse phase: extract, clip, and pre-split polygons in parallel ---
+    use rayon::prelude::*;
 
-    for &offset in &offsets {
-        let rec = offset + 8;
-        if rec + 44 > shp.len() {
-            break;
-        }
-
-        let bb = rec + 4;
-        let xmin = f64::from_le_bytes(shp[bb..bb + 8].try_into().expect("shapefile field read"));
-        let ymin = f64::from_le_bytes(
-            shp[bb + 8..bb + 16]
-                .try_into()
-                .expect("shapefile field read"),
-        );
-        let xmax = f64::from_le_bytes(
-            shp[bb + 16..bb + 24]
-                .try_into()
-                .expect("shapefile field read"),
-        );
-        let ymax = f64::from_le_bytes(
-            shp[bb + 24..bb + 32]
-                .try_into()
-                .expect("shapefile field read"),
-        );
-
-        let merc_min = geometry::from_epsg3857(xmin, ymax);
-        let merc_max = geometry::from_epsg3857(xmax, ymin);
-
-        if merc_max.x < data_bounds.min_x
-            || merc_min.x > data_bounds.max_x
-            || merc_max.y < data_bounds.min_y
-            || merc_min.y > data_bounds.max_y
-        {
-            continue;
-        }
-
-        shapes_hit += 1;
-
-        let num_parts_i32 = i32::from_le_bytes(
-            shp[rec + 36..rec + 40]
-                .try_into()
-                .expect("shapefile field read"),
-        );
-        let num_points_i32 = i32::from_le_bytes(
-            shp[rec + 40..rec + 44]
-                .try_into()
-                .expect("shapefile field read"),
-        );
-        if num_parts_i32 < 0 || num_points_i32 < 0 {
-            eprintln!("  Warning: negative part/point count at offset {offset}, skipping record");
-            continue;
-        }
-        #[allow(clippy::cast_sign_loss)]
-        let num_parts = num_parts_i32 as usize;
-        #[allow(clippy::cast_sign_loss)]
-        let num_points = num_points_i32 as usize;
-
-        let parts_start = rec + 44;
-        let points_start = parts_start + num_parts * 4;
-        let record_end = points_start + num_points * 16;
-        if record_end > shp.len() {
-            eprintln!(
-                "  Warning: shape record at offset {offset} extends past end of file, skipping"
-            );
-            continue;
-        }
-
-        let mut ring_starts: Vec<usize> = (0..num_parts)
-            .map(|j| {
-                let b = parts_start + j * 4;
-                let v = i32::from_le_bytes(shp[b..b + 4].try_into().expect("shapefile field read"));
-                if v < 0 {
-                    usize::MAX
-                } else {
-                    #[allow(clippy::cast_sign_loss)]
-                    {
-                        v as usize
-                    }
-                }
-            })
-            .collect();
-        if ring_starts.iter().any(|&v| v > num_points) {
-            eprintln!("  Warning: invalid part index at offset {offset}, skipping record");
-            continue;
-        }
-        ring_starts.push(num_points);
-
-        let all_points: Vec<Point> = (0..num_points)
-            .map(|j| {
-                let b = points_start + j * 16;
-                let x = f64::from_le_bytes(shp[b..b + 8].try_into().expect("shapefile field read"));
-                let y = f64::from_le_bytes(
-                    shp[b + 8..b + 16].try_into().expect("shapefile field read"),
-                );
-                geometry::from_epsg3857(x, y)
-            })
-            .collect();
-
-        let mut current_outer: Option<Vec<Point>> = None;
-        let mut current_inners: Vec<Vec<Point>> = Vec::new();
-
-        for (w, window) in ring_starts.windows(2).enumerate() {
-            let ring = &all_points[window[0]..window[1]];
-
-            let is_outer = w == 0 || geometry::signed_area(ring) >= 0.0;
-
-            if is_outer {
-                if let Some(outer) = current_outer.take() {
-                    push_quantized_pieces(
-                        &mut parse_scratch,
-                        &mut pieces,
-                        &outer,
-                        &std::mem::take(&mut current_inners),
-                        max_zoom,
-                        data_rect,
-                    );
-                }
-                current_outer = Some(ring.to_vec());
-            } else if current_outer.is_some() {
-                current_inners.push(ring.to_vec());
-            }
-        }
-
-        if let Some(outer) = current_outer {
-            push_quantized_pieces(
-                &mut parse_scratch,
-                &mut pieces,
-                &outer,
-                &current_inners,
+    let parsed_records: Vec<ParsedOceanRecord> = records
+        .par_iter()
+        .map(|&record| {
+            parse_ocean_record(
+                record,
+                &shp_mmap,
+                &shp_file,
+                data_bounds,
                 max_zoom,
                 data_rect,
-            );
-        }
+            )
+        })
+        .collect();
+    #[cfg(unix)]
+    unsafe {
+        shp_mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed)?;
+    }
+    drop(shp_mmap);
+    let shapes_hit: u64 = parsed_records.iter().map(|record| record.shapes_hit).sum();
+    let source_pieces: usize = parsed_records
+        .iter()
+        .map(|record| record.source_pieces)
+        .sum();
+    let split_pieces: usize = parsed_records
+        .iter()
+        .map(|record| record.pieces.len())
+        .sum();
+
+    let mut pieces: Vec<Shape> = Vec::with_capacity(split_pieces);
+    for record in parsed_records {
+        pieces.extend(record.pieces);
     }
 
-    // Pre-split large polygons along grid-aligned tile boundaries to reduce
-    // per-polygon vertex count. Splitting at zoom SPLIT_Z means each sub-polygon
-    // fits within one tile at SPLIT_Z, spanning at most 2^(z-SPLIT_Z)² tiles at
-    // finer zooms. This dramatically reduces DP simplification cost (O(n log n))
-    // and per-row clip input size. Only split polygons above a vertex threshold.
-    const SPLIT_Z: u8 = 8;
-    const SPLIT_MIN_VERTICES: usize = 500;
-    if max_zoom >= SPLIT_Z {
-        let orig_count = pieces.len();
-        let mut split_out: Vec<Shape> = Vec::with_capacity(pieces.len());
-        let mut split_scratch = IntEmitScratch::new();
-        let mut clipped: Vec<Shape> = Vec::new();
-        let split_tile_size = 1_i32 << (u32::from(max_zoom - SPLIT_Z) + 12);
-        let max_split_tile = i32::from((1_u16 << SPLIT_Z) - 1);
-        for piece in pieces.drain(..) {
-            // Count ALL rings: hole-heavy pieces must not dodge the split.
-            let total_vertices: usize = piece.iter().map(Vec::len).sum();
-            if total_vertices < SPLIT_MIN_VERTICES {
-                split_out.push(piece);
-                continue;
-            }
-            let Some(bb) = shape_bbox(&piece) else {
-                continue;
-            };
-            let stx_min = (bb.min_x.div_euclid(split_tile_size)).clamp(0, max_split_tile);
-            let sty_min = (bb.min_y.div_euclid(split_tile_size)).clamp(0, max_split_tile);
-            let stx_max = (bb.max_x.div_euclid(split_tile_size)).clamp(0, max_split_tile);
-            let sty_max = (bb.max_y.div_euclid(split_tile_size)).clamp(0, max_split_tile);
-            if stx_min == stx_max && sty_min == sty_max {
-                split_out.push(piece);
-                continue;
-            }
-            for sty in sty_min..=sty_max {
-                for stx in stx_min..=stx_max {
-                    let tile_rect = IntRect {
-                        min_x: stx * split_tile_size,
-                        min_y: sty * split_tile_size,
-                        max_x: (stx + 1) * split_tile_size,
-                        max_y: (sty + 1) * split_tile_size,
-                    };
-                    // Split tile fully containing the piece: no cut needed.
-                    if rect_contains(tile_rect, bb) {
-                        split_out.push(piece.clone());
-                        continue;
-                    }
-                    intersect_rect_into(&mut split_scratch, &piece, tile_rect, 0, &mut clipped);
-                    split_out.append(&mut clipped);
-                }
-            }
-        }
-        pieces = split_out;
-        if pieces.len() != orig_count {
-            eprintln!(
-                "  Pre-split at z{SPLIT_Z}: {orig_count} -> {} polygons",
-                pieces.len()
-            );
-        }
+    if max_zoom >= SPLIT_Z && split_pieces != source_pieces {
+        eprintln!("  Pre-split at z{SPLIT_Z}: {source_pieces} -> {split_pieces} polygons");
     }
 
     let poly_count = pieces.len();
@@ -342,7 +232,6 @@ pub(crate) fn process_ocean_shapefile(
     // scale that could be 10-30 GB. The previous approach (par_iter().collect()
     // into Vec<Vec<SortRecord>> + serial push) was fine for regional extracts but
     // would blow memory and serialize sort+flush at planet scale.
-    use rayon::prelude::*;
     use std::sync::atomic::AtomicUsize;
 
     let ocean_layer = Layer::Ocean as u8;
@@ -353,19 +242,27 @@ pub(crate) fn process_ocean_shapefile(
     // so that --skip-to sort (SortReader::from_dir sequential scan) finds them.
     let chunk_id = AtomicUsize::new(sort_writer.chunk_count());
     let chunk_dir = sort_writer.tmp_dir().to_path_buf();
-    let chunk_size = sort_writer.chunk_size_bytes();
+    let chunk_size = sort_writer.chunk_size_bytes().min(OCEAN_CHUNK_SIZE_LIMIT);
     let chunk_compression = sort_writer.compression();
 
-    let result = pieces
-        .par_iter()
-        .enumerate()
+    let zoom_count = usize::from(max_zoom.saturating_sub(min_zoom)) + 1;
+    let piece_count = pieces.len();
+    let work_items = piece_count
+        .checked_mul(zoom_count)
+        .expect("ocean piece and zoom work item count fits usize");
+
+    let mut result = (0..work_items)
+        .into_par_iter()
         .fold(
             || OceanAcc::new(chunk_compression),
-            |mut acc, (idx, piece)| {
-                emit_ocean_polygon(
-                    idx as u64,
-                    piece,
-                    min_zoom,
+            |mut acc, work_idx| {
+                let piece_idx = work_idx % piece_count;
+                let zoom_offset = work_idx / piece_count;
+                let z = max_zoom - u8::try_from(zoom_offset).expect("zoom offset fits u8");
+                emit_ocean_polygon_zoom(
+                    piece_idx as u64,
+                    &pieces[piece_idx],
+                    z,
                     max_zoom,
                     ocean_layer,
                     &empty_attrs_bytes,
@@ -377,24 +274,247 @@ pub(crate) fn process_ocean_shapefile(
                 acc
             },
         )
-        .map(|mut acc| {
-            acc.flush(&chunk_dir, &chunk_id);
-            acc
-        })
         .reduce(
             || OceanAcc::new(chunk_compression),
             |mut a, b| {
-                a.chunk_paths.extend(b.chunk_paths);
-                a.count += b.count;
+                a.merge_from(b);
+                if a.bytes >= chunk_size {
+                    a.flush(&chunk_dir, &chunk_id);
+                }
                 a
             },
         );
 
+    result.flush(&chunk_dir, &chunk_id);
     sort_writer.adopt_chunk_files(result.chunk_paths);
     let count = result.count;
 
     eprintln!("  {poly_count} polygons, {count} features");
     Ok(count)
+}
+
+fn parse_ocean_record(
+    record: ShxRecord,
+    shp_mmap: &memmap2::Mmap,
+    shp_file: &std::fs::File,
+    data_bounds: &MercBbox,
+    max_zoom: u8,
+    data_rect: IntRect,
+) -> ParsedOceanRecord {
+    let mut out = ParsedOceanRecord {
+        pieces: Vec::new(),
+        source_pieces: 0,
+        shapes_hit: 0,
+    };
+
+    let rec = record.offset + 8;
+    if record.content_len < 44 || rec + 44 > shp_mmap.len() {
+        return out;
+    }
+
+    let header = {
+        let shp = &shp_mmap[..];
+        let mut header = [0_u8; 44];
+        header.copy_from_slice(&shp[rec..rec + 44]);
+        header
+    };
+
+    let xmin = f64::from_le_bytes(header[4..12].try_into().expect("shapefile field read"));
+    let ymin = f64::from_le_bytes(header[12..20].try_into().expect("shapefile field read"));
+    let xmax = f64::from_le_bytes(header[20..28].try_into().expect("shapefile field read"));
+    let ymax = f64::from_le_bytes(header[28..36].try_into().expect("shapefile field read"));
+
+    let merc_min = geometry::from_epsg3857(xmin, ymax);
+    let merc_max = geometry::from_epsg3857(xmax, ymin);
+
+    if merc_max.x < data_bounds.min_x
+        || merc_min.x > data_bounds.max_x
+        || merc_max.y < data_bounds.min_y
+        || merc_min.y > data_bounds.max_y
+    {
+        return out;
+    }
+
+    out.shapes_hit = 1;
+
+    // One scratch suffices: the data-rect clip and the pre-split intersect run
+    // strictly sequentially (never simultaneously), and each i_overlay op clears
+    // the scratch on entry. Two separate scratches doubled the per-record Overlay
+    // allocation for no benefit.
+    let mut scratch = IntEmitScratch::new();
+    let source = ShapeRecordSource {
+        record,
+        rec,
+        shp_len: shp_mmap.len(),
+        shp_file,
+        header: &header,
+    };
+    out.source_pieces +=
+        push_shape_record_pieces(&source, &mut scratch, &mut out.pieces, max_zoom, data_rect);
+
+    out
+}
+
+struct ShapeRecordSource<'a> {
+    record: ShxRecord,
+    rec: usize,
+    shp_len: usize,
+    shp_file: &'a std::fs::File,
+    header: &'a [u8; 44],
+}
+
+fn push_shape_record_pieces(
+    source: &ShapeRecordSource<'_>,
+    scratch: &mut IntEmitScratch,
+    pieces: &mut Vec<Shape>,
+    max_zoom: u8,
+    data_rect: IntRect,
+) -> usize {
+    let offset = source.record.offset;
+    let num_parts_i32 = i32::from_le_bytes(
+        source.header[36..40]
+            .try_into()
+            .expect("shapefile field read"),
+    );
+    let num_points_i32 = i32::from_le_bytes(
+        source.header[40..44]
+            .try_into()
+            .expect("shapefile field read"),
+    );
+    if num_parts_i32 < 0 || num_points_i32 < 0 {
+        eprintln!("  Warning: negative part/point count at offset {offset}, skipping record");
+        return 0;
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let num_parts = num_parts_i32 as usize;
+    #[allow(clippy::cast_sign_loss)]
+    let num_points = num_points_i32 as usize;
+
+    let parts_start = 44;
+    let points_start = parts_start + num_parts * 4;
+    let record_end = points_start + num_points * 16;
+    if record_end > source.record.content_len || source.rec + record_end > source.shp_len {
+        eprintln!("  Warning: shape record at offset {offset} extends past end of file, skipping");
+        return 0;
+    }
+
+    let Some(mut ring_starts) = read_ring_starts(source, num_parts) else {
+        return 0;
+    };
+    if ring_starts.iter().any(|&v| v > num_points) {
+        eprintln!("  Warning: invalid part index at offset {offset}, skipping record");
+        return 0;
+    }
+    ring_starts.push(num_points);
+
+    let mut source_pieces = 0;
+    let mut current_outer: Option<Vec<Point>> = None;
+    let mut current_inners: Vec<Vec<Point>> = Vec::new();
+
+    for (w, window) in ring_starts.windows(2).enumerate() {
+        let Some(ring) = read_ring_points(source, points_start, window[0], window[1]) else {
+            return source_pieces;
+        };
+        let is_outer = w == 0 || geometry::signed_area(&ring) >= 0.0;
+
+        if is_outer {
+            if let Some(outer) = current_outer.take() {
+                source_pieces += push_quantized_pieces(
+                    scratch,
+                    pieces,
+                    &outer,
+                    &std::mem::take(&mut current_inners),
+                    max_zoom,
+                    data_rect,
+                );
+            }
+            current_outer = Some(ring);
+        } else if current_outer.is_some() {
+            current_inners.push(ring);
+        }
+    }
+
+    if let Some(outer) = current_outer {
+        source_pieces += push_quantized_pieces(
+            scratch,
+            pieces,
+            &outer,
+            &current_inners,
+            max_zoom,
+            data_rect,
+        );
+    }
+
+    source_pieces
+}
+
+fn read_ring_starts(source: &ShapeRecordSource<'_>, num_parts: usize) -> Option<Vec<usize>> {
+    let mut parts = vec![0_u8; num_parts * 4];
+    if !parts.is_empty() {
+        let read_offset = u64::try_from(source.rec + 44).expect("shapefile offset fits u64");
+        if let Err(err) = source.shp_file.read_exact_at(&mut parts, read_offset) {
+            eprintln!(
+                "  Warning: failed to read shape parts at offset {}: {err}",
+                source.record.offset
+            );
+            return None;
+        }
+    }
+    Some(
+        (0..num_parts)
+            .map(|j| {
+                let b = j * 4;
+                let v =
+                    i32::from_le_bytes(parts[b..b + 4].try_into().expect("shapefile field read"));
+                if v < 0 {
+                    usize::MAX
+                } else {
+                    #[allow(clippy::cast_sign_loss)]
+                    {
+                        v as usize
+                    }
+                }
+            })
+            .collect(),
+    )
+}
+
+fn read_ring_points(
+    source: &ShapeRecordSource<'_>,
+    points_start: usize,
+    start: usize,
+    end: usize,
+) -> Option<Vec<Point>> {
+    let point_count = end - start;
+    let mut ring = Vec::with_capacity(point_count);
+    let mut buf = vec![0_u8; RING_READ_BUFFER_BYTES];
+    let mut points_read = 0usize;
+
+    while points_read < point_count {
+        let points_this_read = ((point_count - points_read) * 16).min(buf.len()) / 16;
+        let byte_len = points_this_read * 16;
+        let read_offset = u64::try_from(source.rec + points_start + (start + points_read) * 16)
+            .expect("shapefile offset fits u64");
+        if let Err(err) = source
+            .shp_file
+            .read_exact_at(&mut buf[..byte_len], read_offset)
+        {
+            eprintln!(
+                "  Warning: failed to read shape points at offset {}: {err}",
+                source.record.offset
+            );
+            return None;
+        }
+        for idx in 0..points_this_read {
+            let b = idx * 16;
+            let x = f64::from_le_bytes(buf[b..b + 8].try_into().expect("shapefile field read"));
+            let y =
+                f64::from_le_bytes(buf[b + 8..b + 16].try_into().expect("shapefile field read"));
+            ring.push(geometry::from_epsg3857(x, y));
+        }
+        points_read += points_this_read;
+    }
+    Some(ring)
 }
 
 fn push_quantized_pieces(
@@ -404,20 +524,74 @@ fn push_quantized_pieces(
     inners: &[Vec<Point>],
     max_zoom: u8,
     data_rect: IntRect,
-) {
+) -> usize {
     let shape = quantize_polygon(outer, inners, max_zoom);
     if shape.is_empty() {
-        return;
+        return 0;
     }
+
     // The common case for an in-bounds extract: the shape lies entirely
     // inside the data bounds - the boolean is an expensive identity.
     if shape_bbox(&shape).is_some_and(|bb| rect_contains(data_rect, bb)) {
-        pieces.push(shape);
-        return;
+        split_piece(scratch, pieces, shape, max_zoom);
+        return 1;
     }
+
     let mut clipped = Vec::new();
     intersect_rect_into(scratch, &shape, data_rect, 0, &mut clipped);
-    pieces.append(&mut clipped);
+    let source_pieces = clipped.len();
+    for piece in clipped {
+        split_piece(scratch, pieces, piece, max_zoom);
+    }
+    source_pieces
+}
+
+fn split_piece(scratch: &mut IntEmitScratch, pieces: &mut Vec<Shape>, piece: Shape, max_zoom: u8) {
+    if max_zoom < SPLIT_Z {
+        pieces.push(piece);
+        return;
+    }
+
+    // Count all rings: hole-heavy pieces must not dodge the split.
+    let total_vertices: usize = piece.iter().map(Vec::len).sum();
+    if total_vertices < SPLIT_MIN_VERTICES {
+        pieces.push(piece);
+        return;
+    }
+
+    let Some(bb) = shape_bbox(&piece) else {
+        return;
+    };
+    let split_tile_size = 1_i32 << (u32::from(max_zoom - SPLIT_Z) + 12);
+    let max_split_tile = i32::from((1_u16 << SPLIT_Z) - 1);
+    let stx_min = (bb.min_x.div_euclid(split_tile_size)).clamp(0, max_split_tile);
+    let sty_min = (bb.min_y.div_euclid(split_tile_size)).clamp(0, max_split_tile);
+    let stx_max = (bb.max_x.div_euclid(split_tile_size)).clamp(0, max_split_tile);
+    let sty_max = (bb.max_y.div_euclid(split_tile_size)).clamp(0, max_split_tile);
+
+    if stx_min == stx_max && sty_min == sty_max {
+        pieces.push(piece);
+        return;
+    }
+
+    let mut clipped: Vec<Shape> = Vec::new();
+    for sty in sty_min..=sty_max {
+        for stx in stx_min..=stx_max {
+            let tile_rect = IntRect {
+                min_x: stx * split_tile_size,
+                min_y: sty * split_tile_size,
+                max_x: (stx + 1) * split_tile_size,
+                max_y: (sty + 1) * split_tile_size,
+            };
+            // Split tile fully containing the piece: no cut needed.
+            if rect_contains(tile_rect, bb) {
+                pieces.push(piece.clone());
+                continue;
+            }
+            intersect_rect_into(scratch, &piece, tile_rect, 0, &mut clipped);
+            pieces.append(&mut clipped);
+        }
+    }
 }
 
 /// True if `outer` contains `inner` (closed containment).
@@ -452,10 +626,10 @@ fn merc_ceil(v: f64, scale: i64) -> i32 {
 
 #[hotpath::measure]
 #[allow(clippy::too_many_arguments)]
-fn emit_ocean_polygon(
+fn emit_ocean_polygon_zoom(
     feature_id: u64,
     piece: &Shape,
-    min_zoom: u8,
+    z: u8,
     max_zoom: u8,
     layer_idx: u8,
     attrs_bytes: &[u8],
@@ -465,12 +639,24 @@ fn emit_ocean_polygon(
         return;
     }
 
-    let mut scratch = IntEmitScratch::new();
-    for z in (min_zoom..=max_zoom).rev() {
+    let records = &mut acc.records;
+    let payload = &mut acc.payload;
+    let bytes = &mut acc.bytes;
+
+    OCEAN_EMIT_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
         let mut sink = |tx: u32, ty: u32, geom: &[u32]| {
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
             let key = sort::make_sort_key(tile_id, layer_idx, 0);
-            acc.push_polygon(key, feature_id, geom, attrs_bytes);
+            let range = append_feature_data_with_attrs(
+                payload,
+                feature_id,
+                GeomType::Polygon,
+                geom,
+                attrs_bytes,
+            );
+            *bytes += range.len() + std::mem::size_of::<sort::PayloadRecord>();
+            records.push((key, range.start, range.len()));
         };
         emit_shape_for_zoom(
             piece,
@@ -484,7 +670,7 @@ fn emit_ocean_polygon(
             &mut scratch,
             &mut sink,
         );
-    }
+    });
 }
 
 #[cfg(test)]

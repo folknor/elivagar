@@ -406,3 +406,16 @@ profile):
 7. Codex build_graph_view multi-rule extraction: only pays off if some
    future design extracts multiple overlay rules from one graph (e.g.
    Intersect + Difference per tile for land/water complements).
+8. Landing 3 review: `read_ring_points` (src/ocean.rs) allocates a fresh
+   `RING_READ_BUFFER_BYTES` (64 KB) `Vec<u8>` per ring in the hot parse
+   path. Threading a reused per-record (or per-thread) buffer through
+   the parallel parse would cut parse-path allocation - helping both
+   ocean_ms and RSS - but is a real refactor of a working path (buffer
+   lifetime now has to survive across the rayon closure boundary),
+   deliberately deferred as out-of-scope for Landing 3 (surgical, no
+   gold-plating). Also observed: the `read_exact_at` calls in
+   `read_ring_points` and its caller are unconditional, but the trait
+   import that provides them (`std::os::unix::fs::FileExt`, ocean.rs:18)
+   is `#[cfg(unix)]`-gated - a non-unix target would fail to compile.
+   Acceptable for this Linux-only project; a proper fix needs an mmap
+   fallback for non-unix and is out of scope here.

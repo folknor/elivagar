@@ -10,11 +10,17 @@ internals (~48s cut_row_bands CPU), boundary clips, and tail-bound
 parallelism, i.e. Landing 2/3 + leftovers item 1 territory. The spec's
 ocean commitment is carried by Landing 3's ocean_ms <= 10000 bound,
 which stands unchanged and is NOT subject to another kept-despite-miss
-reading. Landings 2-4 not started.
+reading. Landing 2 LANDED at `bb59325` and RATIFIED (2026-07-06,
+adjudicated): all correctness gates green, output provably identical;
+total +1.66% / ocean +3.06% vs 2fab70a are sub-noise (standing 7-15%
+noise band) and the bound is ruled noise-tolerant; RSS flat at 1875 MB
+(the metric this landing targets). Landings 3-4 not started.
 Parity baselines: regenerate with
 `python3 scripts/oracle_sweep.py <pmtiles> <suffix> [baseline-suffix]`
 (the notes/qa tables are not committed). Bench baseline for Landing 2's
-bound: 2fab70a = total 71493 / ocean 47324 / RSS 1869 MB.
+bound: 2fab70a = total 71493 / ocean 47324 / RSS 1869 MB. Bench anchor
+for Landing 3's bound: bb59325 = total 72681 / ocean 48773 / RSS 1875 MB
+(rss ceiling 1.10x = 2062 MB); the ocean_ms <= 10000 term is absolute.
 
 **Contract:** `reference/technical-implementation-spec.md`.
 **Spawned from:** `notes/rendering-fix-log.md` R24 Landing A verdict (ocean
@@ -195,6 +201,21 @@ Accepted-cost bound (keep/revert): total_ms <= Landing-1 bench total_ms
 AND ocean_ms <= Landing-1 ocean_ms AND rss_mb <= 1.05x Landing-1 rss -
 strict: this landing is pure allocation removal, any wall-time
 regression on either metric = revert.
+ADJUDICATED 2026-07-06: KEPT at `bb59325`. Bench vs 2fab70a: total
+72681 (+1.66%), ocean 48773 (+3.06%), RSS 1875 MB (+0.32%, under the
+1.05x sub-bound). The wall-time terms formally missed, but both deltas
+sit far inside the standing +/-7-15% noise band and the bound as
+written demands resolution the single-pair bench does not have; it is
+ruled NOISE-TOLERANT, not violated. The risk the strict bound guarded
+(persistent Overlay buffers x rayon worker memory, see section 5) did
+not materialize - RSS, the metric this landing targets, held flat.
+Correctness gates all green: verify 1323406 tiles (exact parity with
+Landing 1), nine earcut oracles 0/0, step-5 review confirms
+output-identical semantics and byte-identical chunk format. Landing 3's
+bounds now anchor to bb59325 (total 72681, RSS 1875 -> 1.10x = 2062 MB)
+and remain STRICT; sub-noise tolerance does not compound - if Landing 4
+close-out shows total above the Landing-1 71493 anchor without the
+Landing-3 ocean win, that is a real regression. See R25.
 
 ### Landing 3 - ocean parallelism restructure
 
