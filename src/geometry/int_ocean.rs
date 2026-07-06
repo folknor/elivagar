@@ -405,6 +405,82 @@ fn point_on_segment(x: i32, y: i32, a: IntPoint, b: IntPoint) -> bool {
         && py <= ay.max(by)
 }
 
+/// Cut a shape into per-row-band shapes for tile rows `ty0..=ty1`, by
+/// recursive bisection: intersect the shape with the buffered upper/lower
+/// halves of the row range, then recurse into each half with the (much
+/// smaller) result - O(V log R) total noding instead of O(V x R).
+///
+/// Leaf bands are exactly `[0..world_max] x [row_top-buffer, row_bottom+buffer]`
+/// and are cut with `leaf_min_area`; internal bisection cuts use
+/// min_area 0 so structural halving never drops slivers a leaf would keep.
+/// The leaf result equals a direct `intersect_rect(shape, leaf_band,
+/// leaf_min_area)` because every leaf band is contained in all its ancestor
+/// half-rects: `(shape INTERSECT ancestor) INTERSECT leaf == shape
+/// INTERSECT leaf`.
+///
+/// Returns one `Shapes` per row, indexed `ty - ty0` (empty for empty rows).
+pub(crate) fn cut_row_bands(
+    shape: &Shape,
+    ty0: u32,
+    ty1: u32,
+    world_max: i32,
+    buffer: i32,
+    leaf_min_area: u64,
+) -> Vec<Shapes> {
+    debug_assert!(ty0 <= ty1);
+    let mut out: Vec<Shapes> = Vec::with_capacity((ty1 - ty0 + 1) as usize);
+    let root: Shapes = vec![shape.clone()];
+    cut_rows_rec(&root, ty0, ty1, world_max, buffer, leaf_min_area, &mut out);
+    out
+}
+
+fn cut_rows_rec(
+    shapes: &Shapes,
+    lo: u32,
+    hi: u32,
+    world_max: i32,
+    buffer: i32,
+    leaf_min_area: u64,
+    out: &mut Vec<Shapes>,
+) {
+    if shapes.is_empty() {
+        // Nothing survives in this range - emit empty rows.
+        for _ in lo..=hi {
+            out.push(Vec::new());
+        }
+        return;
+    }
+    if lo == hi {
+        let band = row_range_rect(lo, lo, world_max, buffer);
+        let mut row: Shapes = Vec::new();
+        for s in shapes {
+            row.extend(intersect_rect(s, band, leaf_min_area));
+        }
+        out.push(row);
+        return;
+    }
+    let mid = lo + (hi - lo) / 2;
+    let upper_rect = row_range_rect(lo, mid, world_max, buffer);
+    let lower_rect = row_range_rect(mid + 1, hi, world_max, buffer);
+    let mut upper: Shapes = Vec::new();
+    let mut lower: Shapes = Vec::new();
+    for s in shapes {
+        upper.extend(intersect_rect(s, upper_rect, 0));
+        lower.extend(intersect_rect(s, lower_rect, 0));
+    }
+    cut_rows_rec(&upper, lo, mid, world_max, buffer, leaf_min_area, out);
+    cut_rows_rec(&lower, mid + 1, hi, world_max, buffer, leaf_min_area, out);
+}
+
+/// Buffered rect covering tile rows `lo..=hi` (full x range).
+fn row_range_rect(lo: u32, hi: u32, world_max: i32, buffer: i32) -> IntRect {
+    const TILE_SHIFT: u32 = 12; // 4096 pixel units per tile
+    let top = i32::try_from(i64::from(lo) << TILE_SHIFT).expect("row top fits i32") - buffer;
+    let bottom =
+        i32::try_from((i64::from(hi) + 1) << TILE_SHIFT).expect("row bottom fits i32") + buffer;
+    IntRect { min_x: 0, min_y: top, max_x: world_max, max_y: bottom }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,5 +696,115 @@ mod tests {
         assert!(!point_in_shape(5, 5, &shape));
         assert!(point_in_shape(0, 5, &shape));
         assert!(!point_in_shape(3, 5, &shape));
+    }
+}
+
+#[cfg(test)]
+mod cut_row_bands_tests {
+    use super::*;
+
+    fn p(x: i32, y: i32) -> IntPoint {
+        IntPoint::new(x, y)
+    }
+
+    /// Canonicalize Shapes for order/rotation-independent comparison:
+    /// rotate each ring to start at its lexicographic minimum, sort rings
+    /// within shapes, sort shapes.
+    fn canon(shapes: &Shapes) -> Vec<Vec<Vec<(i32, i32)>>> {
+        let mut out: Vec<Vec<Vec<(i32, i32)>>> = shapes
+            .iter()
+            .map(|shape| {
+                let mut rings: Vec<Vec<(i32, i32)>> = shape
+                    .iter()
+                    .map(|ring| {
+                        let pts: Vec<(i32, i32)> = ring.iter().map(|q| (q.x, q.y)).collect();
+                        // Try both directions, pick the lexicographically
+                        // smaller rotation-normalized form (winding is an
+                        // output convention, not part of set equality here).
+                        let a = rotate_min(&pts);
+                        let mut rev = pts.clone();
+                        rev.reverse();
+                        let b = rotate_min(&rev);
+                        if a <= b { a } else { b }
+                    })
+                    .collect();
+                rings.sort();
+                rings
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn rotate_min(pts: &[(i32, i32)]) -> Vec<(i32, i32)> {
+        let n = pts.len();
+        let min_idx = (0..n).min_by_key(|&i| pts[i]).unwrap_or(0);
+        (0..n).map(|i| pts[(min_idx + i) % n]).collect()
+    }
+
+    fn direct_rows(shape: &Shape, ty0: u32, ty1: u32, world_max: i32, buffer: i32) -> Vec<Shapes> {
+        (ty0..=ty1)
+            .map(|ty| {
+                let band = IntRect {
+                    min_x: 0,
+                    min_y: i32::try_from((i64::from(ty)) << 12).expect("fits") - buffer,
+                    max_x: world_max,
+                    max_y: i32::try_from((i64::from(ty) + 1) << 12).expect("fits") + buffer,
+                };
+                intersect_rect(shape, band, 256)
+            })
+            .collect()
+    }
+
+    fn assert_rows_equal(shape: &Shape, ty0: u32, ty1: u32) {
+        let world_max = 1 << 20;
+        let bisected = cut_row_bands(shape, ty0, ty1, world_max, 128, 256);
+        let direct = direct_rows(shape, ty0, ty1, world_max, 128);
+        assert_eq!(bisected.len(), direct.len());
+        for (i, (b, d)) in bisected.iter().zip(&direct).enumerate() {
+            let ty = ty0 + u32::try_from(i).expect("row index fits u32");
+            assert_eq!(canon(b), canon(d), "row {i} (ty={ty})");
+        }
+    }
+
+    #[test]
+    fn leaf_equality_concave_shape_spanning_8_rows() {
+        // Zigzag concave polygon spanning rows 0..=7 (each row 4096 tall).
+        let outer = vec![
+            p(1000, 0), p(30000, 0), p(30000, 32000),
+            p(20000, 32000), p(20000, 8000),   // deep concavity
+            p(12000, 8000), p(12000, 32000),
+            p(1000, 32000),
+        ];
+        assert_rows_equal(&vec![outer], 0, 7);
+    }
+
+    #[test]
+    fn leaf_equality_shape_with_hole() {
+        let outer = vec![p(0, 0), p(40000, 0), p(40000, 24000), p(0, 24000)];
+        let hole = vec![p(8000, 4000), p(8000, 20000), p(30000, 20000), p(30000, 4000)];
+        assert_rows_equal(&vec![outer, hole], 0, 5);
+    }
+
+    #[test]
+    fn leaf_equality_single_row_range() {
+        let outer = vec![p(100, 100), p(5000, 100), p(5000, 3000), p(100, 3000)];
+        assert_rows_equal(&vec![outer], 0, 0);
+    }
+
+    #[test]
+    fn empty_rows_in_range_yield_empty_shapes() {
+        // Shape occupies only rows 0..=1 of a 0..=7 range.
+        let outer = vec![p(100, 100), p(9000, 100), p(9000, 7000), p(100, 7000)];
+        let rows = cut_row_bands(&vec![outer.clone()], 0, 7, 1 << 20, 128, 256);
+        assert_eq!(rows.len(), 8);
+        assert!(!rows[0].is_empty());
+        assert!(!rows[1].is_empty());
+        // Row 2's band starts at 8192-128=8064 > 7000: empty from row 2 on.
+        for (i, r) in rows.iter().enumerate().skip(2) {
+            assert!(r.is_empty(), "row {i} should be empty");
+        }
+        // And equality with direct cutting still holds.
+        assert_rows_equal(&vec![outer], 0, 7);
     }
 }

@@ -318,3 +318,19 @@ over-threshold polygons (water_polygons 1808, land 22824, buildings 552)
 are genuine emit.rs geometry defects - next spec: port emit.rs polygons to
 int_ocean machinery.
 **Supersedes:** the R11/R12 "encoder definitively innocent" conclusion.
+
+### R24 - Spec 2 (emit polygon port + ocean perf): landing log
+**Spec:** `specs/emit-polygon-integer-port.md` (rev 3; contract +
+Planetiler + Tippecanoe codex xhigh reviews).
+**Landing 0 baseline (commit `3ef651b`, plantasjen, bench 9d4752b8):**
+total 81502 ms, ocean_ms 58611, peak RSS 1876.8 MB.
+- Landing A (ocean band bisection): check green; Denmark plain run
+  73579 ms; verify PASS 1322463; ocean oracle 0/0 unchanged. Bench
+  (commit 594b677): total 73364 ms (-10%), ocean_ms 50395 (from 58611).
+  The 15000 ms accepted-cost bound is NOT met - bisection was not the
+  dominant cost. VERDICT (user decision 2026-07-06): keep the landing
+  (strict improvement, all correctness gates green); further ocean perf
+  DEFERRED until the map renders correctly end to end. Remaining suspects
+  for a future perf spec: per-gap-tile boolean clips on coastal rows,
+  per-piece-per-zoom normalize, leaf intersect allocation churn.
+- Landing B (emit.rs three-tier port): PENDING

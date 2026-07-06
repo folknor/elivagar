@@ -104,7 +104,19 @@ Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cro
 
 ## Scripts
 
-No shell scripts. Build/bench/verify tooling is in `brokkr`. `scripts/` holds Python tooling for the spec loop (`codex-review.py`, `codex-implement.py`, `codex_common.py` - see "Spec loop" below) plus `scripts/validate/` (Node round-trip tile validation) and `scripts/session_digest.py` (Claude session transcript digester).
+No shell scripts. Build/bench/verify tooling is in `brokkr`.
+
+**Python (spec loop - see "Spec loop" below):**
+- `scripts/codex-review.py '<prompt>'` - codex gpt-5.5 at xhigh reasoning, no goal. Spec critique before code exists.
+- `scripts/codex-implement.py [--effort LEVEL] '<prompt>'` - codex gpt-5.5, /goal-driven, medium default. Implements from a spec.
+- `scripts/codex_common.py` - shared launcher: runs `codex exec`, captures NDJSON internally, prints a clean digest (final message, usage, transcript path). Never resume a run; relaunch fresh.
+- `scripts/session_digest.py <transcript.jsonl> [max_chars]` - digests a Claude Code session transcript to user messages + truncated assistant text, for catching up on old sessions.
+
+**Node (`scripts/validate/`, pnpm; run from that directory):**
+- `earcut-oracle.mjs <file.pmtiles> [layer] [threshold]` - **the MapLibre tessellation-fidelity gate.** Decodes every tile with @mapbox/vector-tile, groups rings with maplibre-gl's verbatim self-calibrating `classifyRings` (maxRings=500), tessellates each polygon with earcut, and reports per-zoom `earcut.deviation` plus misattached-hole counts (hole bbox outside its assigned outer). Pass = 0 over threshold, 0 misattached, on every polygon layer. This is the oracle that caught the R23 ClosePath cursor bug after every internal validator passed for three months - run it on any change that touches geometry or MVT encoding.
+- `feature-probe.mjs <file.pmtiles> <z> <x> <y> <layer> <featIdx>` - dumps one feature exactly as MapLibre sees it: per-ring vertex count, signed area, bbox, then classifyRings grouping and per-polygon deviation. For drilling into an oracle offender.
+- `winding-probe.mjs <file.pmtiles> <z> <x> <y> [layer]` - per-ring signed-area/winding summary for every polygon feature in one tile.
+- `validate.mjs` / `roundtrip.mjs` - vtvalidate structural checks and decode/re-encode round-trip (NOTE: a round-trip through any single decoder cannot catch symmetric encoder/decoder convention bugs - that is what the earcut oracle is for).
 
 ## Architecture
 

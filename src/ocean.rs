@@ -7,7 +7,8 @@
 use crate::geometry::{self, MercBbox, Point, BUFFER_FRACTION, close_and_orient_cw, close_and_orient_ccw};
 use crate::geometry::int_ocean::{
     IntRect, Shape, Shapes, OCEAN_DP_TOL_PX,
-    intersect_rect, normalize, point_in_shape, quantize_polygon, rescale_shape, simplify_shape_dp,
+    cut_row_bands, intersect_rect, normalize, point_in_shape, quantize_polygon, rescale_shape,
+    simplify_shape_dp,
 };
 use crate::mvt::{self, GeomType};
 use crate::pmtiles_writer;
@@ -535,14 +536,17 @@ fn emit_ocean_polygon(
                 txs.dedup();
             }
 
+            // Cut all row bands at once by recursive bisection: O(V log R)
+            // total noding instead of re-noding the whole shape per row.
+            let row_bands = cut_row_bands(&shape, ty_min, ty_max, world_max, TILE_BUFFER_I32, 256);
             for ty in ty_min..=ty_max {
                 let band = row_band_rect(ty, world_max);
-                let row_shapes = intersect_rect(&shape, band, 256);
+                let row_shapes = &row_bands[(ty - ty_min) as usize];
                 if row_shapes.is_empty() {
                     continue;
                 }
 
-                if let Some(r) = fast_path_rect(&row_shapes, bbox, band) {
+                if let Some(r) = fast_path_rect(row_shapes, bbox, band) {
                     debug_assert_no_boundary_in_fast_tiles(&boundary_tiles, ty, tx_min, tx_max, r);
                     for tx in tx_min..=tx_max {
                         if buffered_tile_rect_contained(tx, ty, r) {
@@ -563,7 +567,7 @@ fn emit_ocean_polygon(
                                 tx,
                                 ty,
                                 z,
-                                &row_shapes,
+                                row_shapes,
                                 layer_idx,
                                 attrs,
                                 records,
@@ -576,7 +580,7 @@ fn emit_ocean_polygon(
                 }
 
                 let boundary_txs = boundary_rows.get(&ty).map_or(&[][..], Vec::as_slice);
-                for row_shape in &row_shapes {
+                for row_shape in row_shapes {
                     let Some(row_bbox) = shape_bbox(row_shape) else {
                         continue;
                     };
