@@ -141,9 +141,12 @@ emit_boundary_tile
   sites are removed. emit.rs semantics out of scope except Landing 4.
 - **Upstream data property (used by the §3.3 fast path):**
   water-polygons-split-3857 records are produced by OSMCoastline with
-  `--bbox-overlap`: adjacent records duplicate the same coastline geometry in
-  their overlap strips (see `notes/ocean-tippecanoe.md` §6 Stage A). Where two
-  records both cover an area, they agree on what is water there.
+  `--bbox-overlap`: OSMCoastline splits water polygons recursively at
+  `--max-points` and duplicates `--bbox-overlap` meters of the same coastline
+  geometry at split boundaries to prevent rendering seams (fact preserved
+  from the March 2026 Tippecanoe competitor analysis; that doc was removed
+  2026-07-06). Where two records both cover an area, they agree on what is
+  water there.
 - **Failure-ledger reconciliation:**
   - R06/S04 (full-tile fills covering another feature's island holes): NOT
     re-proposed. Gap/interior tiles emit boolean-clipped geometry

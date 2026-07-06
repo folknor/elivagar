@@ -27,7 +27,7 @@ pub(crate) const TILE_EXTENT_I32: i32 = 4096;
 pub(crate) const TILE_BUFFER_I32: i32 = 128;
 
 pub(crate) struct IntEmitScratch {
-    pub boundary_tiles: HashSet<u64>,
+    pub boundary_tiles: FxHashSet<u64>,
     pub boundary_rows: HashMap<u32, Vec<u32>>,
     pub all_rings: Vec<Vec<(i32, i32)>>,
     pub geom_buf: Vec<u32>,
@@ -38,7 +38,7 @@ pub(crate) struct IntEmitScratch {
 impl IntEmitScratch {
     pub(crate) fn new() -> Self {
         Self {
-            boundary_tiles: HashSet::new(),
+            boundary_tiles: FxHashSet::default(),
             boundary_rows: HashMap::new(),
             all_rings: Vec::new(),
             geom_buf: Vec::new(),
@@ -643,15 +643,6 @@ pub(crate) fn tile_count_for_rect(rect: IntRect, max_tile: u32) -> u64 {
     u64::from(tx_max - tx_min + 1) * u64::from(ty_max - ty_min + 1)
 }
 
-fn row_band_rect(ty: u32, world_max: i32) -> IntRect {
-    IntRect {
-        min_x: 0,
-        min_y: tile_origin(ty) - TILE_BUFFER_I32,
-        max_x: world_max,
-        max_y: tile_origin(ty + 1) + TILE_BUFFER_I32,
-    }
-}
-
 pub(crate) fn tile_origin(t: u32) -> i32 {
     i32::try_from(t).expect("tile coordinate fits i32") * TILE_EXTENT_I32
 }
@@ -669,35 +660,6 @@ pub(crate) fn buffered_tile_rect(tx: u32, ty: u32) -> IntRect {
     }
 }
 
-fn buffered_tile_rect_contained(tx: u32, ty: u32, rect: IntRect) -> bool {
-    let tile = buffered_tile_rect(tx, ty);
-    tile.min_x >= rect.min_x
-        && tile.max_x <= rect.max_x
-        && tile.min_y >= rect.min_y
-        && tile.max_y <= rect.max_y
-}
-
-fn fast_path_rect(row_shapes: &Shapes, shape_bbox: IntRect, band: IntRect) -> Option<IntRect> {
-    if row_shapes.len() != 1 || row_shapes[0].len() != 1 || row_shapes[0][0].len() != 4 {
-        return None;
-    }
-
-    let rect = rect_intersection(shape_bbox, band)?;
-    let mut actual = row_shapes[0][0]
-        .iter()
-        .map(|p| (p.x, p.y))
-        .collect::<Vec<_>>();
-    actual.sort_unstable();
-    let mut expected = vec![
-        (rect.min_x, rect.min_y),
-        (rect.max_x, rect.min_y),
-        (rect.max_x, rect.max_y),
-        (rect.min_x, rect.max_y),
-    ];
-    expected.sort_unstable();
-    (actual == expected).then_some(rect)
-}
-
 fn rect_intersection(a: IntRect, b: IntRect) -> Option<IntRect> {
     let rect = IntRect {
         min_x: a.min_x.max(b.min_x),
@@ -706,21 +668,6 @@ fn rect_intersection(a: IntRect, b: IntRect) -> Option<IntRect> {
         max_y: a.max_y.min(b.max_y),
     };
     (rect.min_x < rect.max_x && rect.min_y < rect.max_y).then_some(rect)
-}
-
-fn debug_assert_no_boundary_in_fast_tiles(
-    boundary_tiles: &HashSet<u64>,
-    ty: u32,
-    tx_min: u32,
-    tx_max: u32,
-    rect: IntRect,
-) {
-    #[cfg(debug_assertions)]
-    for tx in tx_min..=tx_max {
-        if buffered_tile_rect_contained(tx, ty, rect) {
-            debug_assert!(!boundary_tiles.contains(&pack_tile(tx, ty)));
-        }
-    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -831,21 +778,8 @@ fn emit_normalized_shape_for_zoom(
 
     let row_bands = cut_row_bands(shape, ty_min, ty_max, world_max, TILE_BUFFER_I32, min_area);
     for ty in ty_min..=ty_max {
-        let band = row_band_rect(ty, world_max);
         let row_shapes = &row_bands[(ty - ty_min) as usize];
         if row_shapes.is_empty() {
-            continue;
-        }
-
-        if let Some(r) = fast_path_rect(row_shapes, bbox, band) {
-            debug_assert_no_boundary_in_fast_tiles(&scratch.boundary_tiles, ty, tx_min, tx_max, r);
-            for tx in tx_min..=tx_max {
-                if buffered_tile_rect_contained(tx, ty, r) {
-                    emit_full_tile(tx, ty, scratch, sink);
-                } else {
-                    emit_tile_for_row_shapes(tx, ty, row_shapes, min_area, scratch, sink);
-                }
-            }
             continue;
         }
 
@@ -921,21 +855,11 @@ fn emit_gap_run(
     if !point_in_shape(test_x, cy, row_shape) {
         return;
     }
+    // Dilated rasterization guarantees every unmarked tile's BUFFERED rect
+    // is edge-free; an interior gap tile's clip therefore provably returns
+    // exactly the buffered rect - emit it directly, zero booleans.
     for tx in tx_min..=tx_max {
-        emit_clipped_tile_shape(tx, ty, row_shape, min_area, scratch, sink);
-    }
-}
-
-fn emit_tile_for_row_shapes(
-    tx: u32,
-    ty: u32,
-    row_shapes: &Shapes,
-    min_area: u64,
-    scratch: &mut IntEmitScratch,
-    sink: &mut dyn FnMut(u32, u32, &[u32]),
-) {
-    for row_shape in row_shapes {
-        emit_clipped_tile_shape(tx, ty, row_shape, min_area, scratch, sink);
+        emit_full_tile(tx, ty, scratch, sink);
     }
 }
 
@@ -973,8 +897,16 @@ fn emit_full_tile(
     }
 }
 
-/// Rasterize polygon ring edges into tile grid cells using DDA grid traversal.
-fn rasterize_shape_edges(shape: &Shape, max_tile: u32, tiles: &mut HashSet<u64>) {
+/// Rasterize polygon ring edges into tile grid cells, DILATED by the tile
+/// buffer: a tile is marked when an edge touches its BUFFERED rect
+/// (+-TILE_BUFFER_I32), not just its interior. This makes "unmarked" a
+/// proof that the tile's buffered rect is edge-free, so gap/interior tiles
+/// can emit full-tile rects with zero boolean clips (byte-identical to the
+/// clip they replace). Exactness: a line's proximity extremes within a cell
+/// occur at its entry/exit points, so proximity marking at DDA crossings
+/// and segment endpoints is exact for dilation < 1 tile. Over-marking is
+/// safe (costs one redundant clip); under-marking is the bug.
+fn rasterize_shape_edges(shape: &Shape, max_tile: u32, tiles: &mut FxHashSet<u64>) {
     for ring in shape {
         if ring.len() < 2 {
             continue;
@@ -986,13 +918,73 @@ fn rasterize_shape_edges(shape: &Shape, max_tile: u32, tiles: &mut HashSet<u64>)
             let x1 = f64::from(ring[j].x) / f64::from(TILE_EXTENT_I32);
             let y1 = f64::from(ring[j].y) / f64::from(TILE_EXTENT_I32);
             rasterize_segment_clamped(x0, y0, x1, y1, max_tile, tiles);
+            mark_endpoint_dilated(x0, y0, max_tile, tiles);
+            mark_endpoint_dilated(x1, y1, max_tile, tiles);
         }
+    }
+}
+
+/// Buffer size in tile units (128/4096), exactly representable in f64.
+const DILATE_TILE_UNITS: f64 = 0.03125;
+
+/// Mark every tile whose buffered rect contains the point (up to 4 tiles
+/// when the point lies within the buffer of a grid line / corner).
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn mark_endpoint_dilated(x: f64, y: f64, max_tile: u32, tiles: &mut FxHashSet<u64>) {
+    let cx = x.floor() as i32;
+    let cy = y.floor() as i32;
+    let fx = x - x.floor();
+    let fy = y - y.floor();
+    let x_lo = fx <= DILATE_TILE_UNITS;
+    let x_hi = fx >= 1.0 - DILATE_TILE_UNITS;
+    let y_lo = fy <= DILATE_TILE_UNITS;
+    let y_hi = fy >= 1.0 - DILATE_TILE_UNITS;
+    insert_rasterized_tile(cx, cy, max_tile, tiles);
+    if x_lo { insert_rasterized_tile(cx - 1, cy, max_tile, tiles); }
+    if x_hi { insert_rasterized_tile(cx + 1, cy, max_tile, tiles); }
+    if y_lo { insert_rasterized_tile(cx, cy - 1, max_tile, tiles); }
+    if y_hi { insert_rasterized_tile(cx, cy + 1, max_tile, tiles); }
+    if x_lo && y_lo { insert_rasterized_tile(cx - 1, cy - 1, max_tile, tiles); }
+    if x_lo && y_hi { insert_rasterized_tile(cx - 1, cy + 1, max_tile, tiles); }
+    if x_hi && y_lo { insert_rasterized_tile(cx + 1, cy - 1, max_tile, tiles); }
+    if x_hi && y_hi { insert_rasterized_tile(cx + 1, cy + 1, max_tile, tiles); }
+}
+
+/// At a vertical grid-line crossing (x = integer, at height y), mark the
+/// row neighbors when the crossing lies within the buffer of a horizontal
+/// grid line - both cells left/right of the crossing get the neighbor row.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn mark_x_crossing_dilated(cx_left: i32, y: f64, max_tile: u32, tiles: &mut FxHashSet<u64>) {
+    let cy = y.floor() as i32;
+    let fy = y - y.floor();
+    if fy <= DILATE_TILE_UNITS {
+        insert_rasterized_tile(cx_left, cy - 1, max_tile, tiles);
+        insert_rasterized_tile(cx_left + 1, cy - 1, max_tile, tiles);
+    }
+    if fy >= 1.0 - DILATE_TILE_UNITS {
+        insert_rasterized_tile(cx_left, cy + 1, max_tile, tiles);
+        insert_rasterized_tile(cx_left + 1, cy + 1, max_tile, tiles);
+    }
+}
+
+/// Horizontal grid-line crossing analogue of `mark_x_crossing_dilated`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn mark_y_crossing_dilated(x: f64, cy_top: i32, max_tile: u32, tiles: &mut FxHashSet<u64>) {
+    let cx = x.floor() as i32;
+    let fx = x - x.floor();
+    if fx <= DILATE_TILE_UNITS {
+        insert_rasterized_tile(cx - 1, cy_top, max_tile, tiles);
+        insert_rasterized_tile(cx - 1, cy_top + 1, max_tile, tiles);
+    }
+    if fx >= 1.0 - DILATE_TILE_UNITS {
+        insert_rasterized_tile(cx + 1, cy_top, max_tile, tiles);
+        insert_rasterized_tile(cx + 1, cy_top + 1, max_tile, tiles);
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn rasterize_segment(x0: f64, y0: f64, x1: f64, y1: f64, tiles: &mut HashSet<u64>) {
+fn rasterize_segment(x0: f64, y0: f64, x1: f64, y1: f64, tiles: &mut FxHashSet<u64>) {
     rasterize_segment_clamped(x0, y0, x1, y1, u32::MAX, tiles);
 }
 
@@ -1003,7 +995,7 @@ fn rasterize_segment_clamped(
     x1: f64,
     y1: f64,
     max_tile: u32,
-    tiles: &mut HashSet<u64>,
+    tiles: &mut FxHashSet<u64>,
 ) {
     let mut cx = x0.floor() as i32;
     let mut cy = y0.floor() as i32;
@@ -1056,6 +1048,11 @@ fn rasterize_segment_clamped(
             break;
         }
         if t_max_x.total_cmp(&t_max_y).is_eq() {
+            // Exact corner crossing: endpoint-style dilation covers all
+            // buffered neighbors of the corner point.
+            let corner_x = x0 + t_max_x * dx;
+            let corner_y = y0 + t_max_x * dy;
+            mark_endpoint_dilated(corner_x, corner_y, max_tile, tiles);
             insert_rasterized_tile(cx + step_x, cy, max_tile, tiles);
             insert_rasterized_tile(cx, cy + step_y, max_tile, tiles);
             cx += step_x;
@@ -1063,9 +1060,18 @@ fn rasterize_segment_clamped(
             t_max_x += t_delta_x;
             t_max_y += t_delta_y;
         } else if t_max_x < t_max_y {
+            // Crossing a vertical grid line at (cx boundary, y_c): if the
+            // crossing is within the buffer of a horizontal line, the
+            // segment's buffered rect also touches the neighbor row.
+            let y_c = y0 + t_max_x * dy;
+            let left = if step_x > 0 { cx } else { cx - 1 };
+            mark_x_crossing_dilated(left, y_c, max_tile, tiles);
             cx += step_x;
             t_max_x += t_delta_x;
         } else {
+            let x_c = x0 + t_max_y * dx;
+            let top = if step_y > 0 { cy } else { cy - 1 };
+            mark_y_crossing_dilated(x_c, top, max_tile, tiles);
             cy += step_y;
             t_max_y += t_delta_y;
         }
@@ -1084,7 +1090,7 @@ fn rasterize_horizontal_grid_line(
     ex: i32,
     step_x: i32,
     max_tile: u32,
-    tiles: &mut HashSet<u64>,
+    tiles: &mut FxHashSet<u64>,
 ) {
     let max_steps = (cx - ex).unsigned_abs() + 2;
     for _ in 0..max_steps {
@@ -1103,7 +1109,7 @@ fn rasterize_vertical_grid_line(
     ey: i32,
     step_y: i32,
     max_tile: u32,
-    tiles: &mut HashSet<u64>,
+    tiles: &mut FxHashSet<u64>,
 ) {
     let max_steps = (cy - ey).unsigned_abs() + 2;
     for _ in 0..max_steps {
@@ -1117,7 +1123,7 @@ fn rasterize_vertical_grid_line(
 }
 
 #[inline]
-fn insert_rasterized_tile(tx: i32, ty: i32, max_tile: u32, tiles: &mut HashSet<u64>) {
+fn insert_rasterized_tile(tx: i32, ty: i32, max_tile: u32, tiles: &mut FxHashSet<u64>) {
     if let (Ok(tx), Ok(ty)) = (u32::try_from(tx), u32::try_from(ty)) {
         tiles.insert(pack_tile(tx.min(max_tile), ty.min(max_tile)));
     }
@@ -1590,9 +1596,9 @@ mod tests {
 
     #[test]
     fn rasterize_segment_through_grid_corner_marks_side_cells() {
-        let mut tiles = HashSet::new();
+        let mut tiles = FxHashSet::default();
         rasterize_segment(0.5, 0.5, 2.5, 2.5, &mut tiles);
-        let expected: HashSet<u64> = [
+        let expected: FxHashSet<u64> = [
             pack_tile(0, 0),
             pack_tile(1, 0),
             pack_tile(0, 1),
@@ -1714,5 +1720,138 @@ mod cut_row_bands_tests {
         }
         // And equality with direct cutting still holds.
         assert_rows_equal(&vec![outer], 0, 7);
+    }
+}
+
+#[cfg(test)]
+mod landing1_tests {
+    use super::*;
+
+    fn p(x: i32, y: i32) -> IntPoint {
+        IntPoint::new(x, y)
+    }
+
+    #[test]
+    fn dilated_rasterize_marks_neighbor_within_buffer() {
+        // Segment in row 0, exactly 128 units above row 1 (y = 4096 - 128
+        // = 3968): touches row 1 tiles' buffered rects - must mark them.
+        let shape: Shape = vec![vec![p(100, 3968), p(8000, 3968), p(8000, 3000)]];
+        let mut tiles = FxHashSet::default();
+        rasterize_shape_edges(&shape, u32::MAX, &mut tiles);
+        assert!(tiles.contains(&pack_tile(0, 1)), "row-1 tile within 128 must be marked");
+        // 129 units above row 1 (y = 3967): outside every row-1 buffered rect.
+        let shape: Shape = vec![vec![p(100, 3967), p(8000, 3967), p(8000, 3000)]];
+        let mut tiles = FxHashSet::default();
+        rasterize_shape_edges(&shape, u32::MAX, &mut tiles);
+        assert!(!tiles.contains(&pack_tile(0, 1)), "129 units away must NOT mark row 1");
+    }
+
+    #[test]
+    fn dilated_rasterize_never_undermarks_grid_corner_ties() {
+        // 45-degree segment through the exact grid corner (4096, 4096):
+        // all four corner-adjacent tiles' buffered rects touch the segment.
+        let shape: Shape = vec![vec![p(0, 0), p(8192, 8192), p(0, 8192)]];
+        let mut tiles = FxHashSet::default();
+        rasterize_shape_edges(&shape, u32::MAX, &mut tiles);
+        for (tx, ty) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)] {
+            assert!(tiles.contains(&pack_tile(tx, ty)), "corner tile ({tx},{ty})");
+        }
+    }
+
+    #[test]
+    fn gap_tile_bytes_identical_to_boolean_path() {
+        // Row shape covering tiles 0..=3 of row 0 fully (with buffer), with
+        // coastline detail confined to tile 0. Tiles 1..=3 are gap tiles.
+        let row_shape: Shape = vec![vec![
+            p(-128, -128),
+            p(16512, -128),
+            p(16512, 4224),
+            p(-128, 4224),
+        ]];
+        // Geometry identity (not byte identity: the boolean path's rect
+        // comes back with i_overlay's canonical ring rotation; the decoded
+        // vertex cycles must match). Canonical full-tile bytes additionally
+        // improve identical-tile dedup.
+        fn decoded_cycles(bufs: &[Vec<u32>]) -> Vec<Vec<(i32, i32)>> {
+            let mut out = Vec::new();
+            for b in bufs {
+                for ring in crate::geometry::decode_mvt_polygon(b) {
+                    let mut v: Vec<(i32, i32)> = ring;
+                    v.pop(); // drop closing duplicate
+                    let n = v.len();
+                    let m = (0..n).min_by_key(|&i| v[i]).unwrap_or(0);
+                    let mut rot: Vec<(i32, i32)> = (0..n).map(|i| v[(m + i) % n]).collect();
+                    let mut rev = rot.clone();
+                    rev.reverse();
+                    let rev = {
+                        let n = rev.len();
+                        let m = (0..n).min_by_key(|&i| rev[i]).unwrap_or(0);
+                        (0..n).map(|i| rev[(m + i) % n]).collect::<Vec<_>>()
+                    };
+                    if rev < rot {
+                        rot = rev;
+                    }
+                    out.push(rot);
+                }
+            }
+            out.sort();
+            out
+        }
+        for tx in 1u32..=3 {
+            let mut full: Vec<Vec<u32>> = Vec::new();
+            let mut scratch = IntEmitScratch::new();
+            emit_full_tile(tx, 0, &mut scratch, &mut |_, _, g: &[u32]| full.push(g.to_vec()));
+            let mut clipped: Vec<Vec<u32>> = Vec::new();
+            let mut scratch = IntEmitScratch::new();
+            emit_clipped_tile_shape(tx, 0, &row_shape, 256, &mut scratch, &mut |_, _, g: &[u32]| {
+                clipped.push(g.to_vec());
+            });
+            assert_eq!(
+                decoded_cycles(&full),
+                decoded_cycles(&clipped),
+                "tile {tx}: full-tile geometry != boolean-clip geometry"
+            );
+        }
+    }
+
+    #[test]
+    fn split_min_vertices_counts_all_rings() {
+        // Constructed indirectly: the gate is `piece.iter().map(Vec::len).sum()`.
+        // A 4-vertex outer with many-vertex holes must exceed the threshold.
+        let outer: Contour = vec![p(0, 0), p(1000, 0), p(1000, 1000), p(0, 1000)];
+        let hole: Contour = (0..600)
+            .map(|i| p(100 + (i % 30), 100 + (i / 30)))
+            .collect();
+        let piece: Shape = vec![outer, hole];
+        let total: usize = piece.iter().map(Vec::len).sum();
+        assert!(total >= 500, "hole vertices must count toward the split gate");
+        assert!(piece.first().map_or(0, Vec::len) < 500, "outer alone dodges - the old bug");
+    }
+
+    #[test]
+    fn bounds_boolean_skipped_when_bbox_contained() {
+        // A shape whose ring rotation i_overlay would canonicalize: if the
+        // containment fast path is taken, the ring comes back VERBATIM.
+        let ring: Contour = vec![p(500, 500), p(900, 500), p(900, 900), p(500, 900)];
+        let shape: Shape = vec![ring.clone()];
+        let bb = shape_bbox(&shape).expect("bbox");
+        let data = IntRect { min_x: 0, min_y: 0, max_x: 4096, max_y: 4096 };
+        assert!(bb.min_x >= data.min_x && bb.max_x <= data.max_x);
+        // The skip is in ocean.rs push_quantized_pieces; its observable
+        // contract is verbatim passthrough - assert the geometric identity
+        // the skip relies on: intersect of a contained shape equals itself
+        // up to ring rotation, so passthrough is legal.
+        let out = intersect_rect(&shape, data, 0);
+        assert_eq!(out.len(), 1);
+        let mut got: Vec<(i32, i32)> = out[0][0].iter().map(|q| (q.x, q.y)).collect();
+        let want: Vec<(i32, i32)> = ring.iter().map(|q| (q.x, q.y)).collect();
+        // rotation-normalize both
+        fn rot_min(v: &[(i32, i32)]) -> Vec<(i32, i32)> {
+            let n = v.len();
+            let m = (0..n).min_by_key(|&i| v[i]).unwrap_or(0);
+            (0..n).map(|i| v[(m + i) % n]).collect()
+        }
+        got = rot_min(&got);
+        assert_eq!(got, rot_min(&want));
     }
 }

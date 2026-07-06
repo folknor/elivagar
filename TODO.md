@@ -6,21 +6,14 @@
    Capture phase splits + seam metrics + deferred-vertex counts.
 2. [ ] Scale validation: run planet full pipeline when hardware is available.
 
-## Baselines (plantasjen, all locations-on-ways)
+## Baselines
 
-| Dataset | Commit | Total | PBF | Ocean | Sort | Assemble | RSS | Output |
-|---------|--------|-------|-----|-------|------|----------|-----|--------|
-| Dataset | Commit | Total | PBF | Ocean | Sort | Assemble | RSS | Output |
-| Denmark 483 MB | `f52429b` | ~12.4s | 8s | 1.5s | 0.5s | 2.3s | 1.8 GB | 286 MB |
-| Germany 5.5 GB | `f52429b` | 114.7s | 83.8s | 1.5s | 0.08s | 28.6s | 7.7 GB | 2.7 GB |
-| Norway 1.3 GB | `8034c16` | ~28s | - | - | - | - | - | - |
-| North America 18.7 GB | `90ad2ef` | 462.6s | 283s | 15s | 0.5s | 164s | 19.4 GB | 12.4 GB |
-
-Norway detailed phase splits not captured (benchmarks were comparative, not absolute).
-Denmark numbers are approximate (multiple commits in range, no regression between them).
-North America is the `--locations-on-ways` baseline from the locations-on-ways work.
-Germany: 146M features, 228K tiles (226K unique), 547 sort chunks, no oversize warnings.
-NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2 GB sort bytes.
+Pre-2026-07 baselines removed: the integer-clipping rewrite (ledger
+R21-R24, specs/) changed the perf profile wholesale. Current
+hash-anchored numbers live in CLAUDE.md and .brokkr/results.db; the
+ocean phase is being re-optimized in specs/ocean-perf-structural.md.
+Scale-validation runs (Europe/planet, Active priorities above) must
+re-establish per-dataset baselines when run.
 
 ## Sort chunk compression investigation
 
@@ -111,9 +104,10 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
   - [ ] Zoom-dependent subpixel area threshold for polygon layers (flag-gated).
     Quality tradeoff: eliminates small-but-visible features at mid-zoom.
   **Phase 3 - polygon record weight reduction** (second, but soon):
-  - [ ] More aggressive DP tolerance policy for polygon layers at z8-z12.
-    Not a new simplification path - tighter tolerance tuning for existing
-    `for_each_zoom_simplified`. Expected 30-50% B/rec reduction at z8-z12.
+  - [x] ~~More aggressive DP tolerance policy for polygon layers at z8-z12~~
+    Superseded 2026-07-06: polygon simplification is now per-zoom integer DP
+    from base geometry (OSM_DP_TOL_PX in geometry/int_ocean.rs, no cascade);
+    tolerance tuning happens there if record weight still matters.
   - [ ] Compact polygon wire format (delta-encoded coords, smaller varint overhead).
   - [ ] Deferred geometry materialization (compact refs in phase12, late clip in
     assemble). Highest savings, largest effort, risk of assemble bottleneck.
@@ -157,94 +151,22 @@ NA diagnostic run (commit `81c4d6b`): 570s, 19.3 GB RSS, 486M sort records, 51.2
 
 ## Geometry correctness
 
-- Shared-edge simplification (adjacent polygons): independent simplification of polygons
-  that share an edge can still produce slivers/gaps along shared boundaries
-  (tippecanoe #105).
-  Context: this is still a geometry-correctness issue (not just visual polish).
-  Current behavior simplifies each polygon/ring independently; when neighboring
-  features share an edge, DP can choose different kept vertices on each side.
-  That creates tiny gaps/overlaps ("seams"), especially at low zoom and along
-  long administrative/landuse boundaries.
-  Implemented mitigation so far: preserve detected shared vertices during
-  simplification for (1) line features, (2) closed-way polygons, and
-  (3) relation-derived multipolygons. This reduces catastrophic drift but does
-  not guarantee edge-identical output between neighboring polygons.
-  - [x] Phase 1 - shared chain detection: given a set of polygon rings in a tile,
-    find contiguous shared vertex sequences (not just shared points). Output:
-    `SharedChain { vertices, incidents: Vec<ChainRef> }` where each `ChainRef`
-    identifies (ring_index, start, end, reversed). Uses `Vec<ChainRef>` instead
-    of a fixed pair to handle >2 coincident rings (rare but possible with
-    duplicate/overlapping geometry). Testable in isolation with synthetic geometry,
-    no simplification changes yet.
-    Ordering constraint: must run BEFORE `merge_same_attr_geometries` in the
-    assemble phase, because that merge concatenates unrelated rings into one
-    `Vec<u32>`, destroying per-ring identity needed for chain provenance.
-    Function signature: `detect_shared_chains(rings: &[Vec<(i32, i32)>]) -> Vec<SharedChain>`
-    in geometry.rs. Pure function, no side effects.
-    Edge cases: ring wrap-around (chain crossing start/end), self-touching rings,
-    multiple disconnected chains per ring pair, three-way junctions (vertex where
-    3+ polygons meet - each adjacent pair gets its own chain terminating there).
-  - [x] Phase 2 - boundary/admin polygons: wire chain detection into simplification
-    for `boundaries` and `boundary_labels` layers only. Only act on chains with
-    exactly 2 incidents (clean adjacency); skip >2 with a counter/metric.
-    Simplify each shared chain once, stitch canonical chains back into rings,
-    simplify remaining non-shared segments independently. Narrow scope allows
-    visual validation on admin borders (the most visible seam source) without
-    risking regressions across all layers.
-  - [x] Phase 3A - intra-layer shared-edge for curated polygon layers at z≤8.
-    Implementation complete (commits `3e0194d`-`eff9fb2`):
-    1. [x] `--seam-reconcile-layers` CLI flag with per-layer zoom caps (`layer:maxzoom`).
-       Default: `boundaries` (maxzoom 8). Example: `--seam-reconcile-layers boundaries,water_polygons:5`.
-    2. [x] Per-layer zoom caps replace global `SEAM_RECONCILE_MAX_ZOOM` constant.
-       Config type: `[u8; 26]` where 0=disabled, N=max zoom for full-res deferral.
-    3. [x] Generalized PBF-phase full-res gate and assemble reconciliation to all
-       configured layers.
-    4. [x] DeferralStats guardrail: AtomicU64 per-layer vertex counters with
-       auto-disable at 50M vertices (DEFERRAL_VERTEX_BUDGET). Prevents catastrophic
-       regressions on geometry-heavy layers.
-    **Benchmark findings** (Norway 1.3 GB PBF, plantasjen):
-    - `water_polygons:8` causes 3.3x phase12 regression (28s → 120s). Root cause:
-      full-res deferral of complex coastline geometry (ways with thousands of vertices).
-      The reconciliation itself is cheap (~18ms for 455 chains); all cost is in
-      serializing uncompressed geometry into sort records during PBF phase.
-    - `water_polygons:5` still causes 2x regression. Even conservative zoom caps
-      are insufficient for geometry-heavy layers.
-    - `boundaries:8` (default) is a **no-op**: boundaries is a line layer
-      (`GeomExpect::Line`), but assemble reconciliation only processes polygon
-      features (`GeomType::Polygon`). The "negligible impact" was because the
-      code path never activates, not because boundary data is vertex-light.
-      Tests used synthetic `Layer::Boundaries` polygons, validating the
-      algorithm but not real pipeline wiring.
-    **Conclusion**: water_polygons full-res deferral is not viable with the current
-    architecture. The DeferralStats guardrail provides safety, but the real fix
-    requires an algorithmic change (e.g. simplify-then-reconcile instead of
-    defer-full-res-then-reconcile). The default `boundaries:8` config is inert -
-    meaningful seam reconciliation requires polygon layers (e.g. `water_polygons`,
-    `land`) or a separate line-reconcile path for boundary lines.
-  - [ ] Phase 3B - cross-layer shared-edge canonicalization.
-    **Deferred** until a clear win signal exists. Gate: visible seam incidence in
-    curated QA tiles that boundaries-only reconciliation cannot address.
-    Given water_polygons Phase 3A results, cross-layer canonicalization is not
-    justified without evidence of a concrete rendering defect.
-    Requires careful provenance tracking (OSM-sourced vs shapefile-sourced edges).
-  - Acceptance checks (all phases): no shared-edge divergence after simplification
-    within a tolerance threshold, no ring-validity regressions, and no large
-    planet-scale runtime/RSS regression.
-
-## Architecture research: simplify-first seam reconciliation
-
-Water_polygons full-res deferral is not viable (Phase 3A findings). The alternative
-architecture is simplify-then-reconcile: simplify independently during PBF phase
-(current behavior), then detect and fix divergent shared edges during assemble.
-
-This is a design problem, not a tuning problem. Before touching pipeline code:
-1. [ ] Write a design doc covering the reconciliation algorithm (edge snapping?
-   re-simplification of shared chains? vertex insertion?), data flow changes,
-   and expected cost model.
-2. [ ] Build a synthetic benchmark: generate N polygon pairs with known shared
-   edges, simplify independently, measure divergence, apply candidate fix,
-   measure cost. Validates the algorithm without running the full pipeline.
-3. [ ] Only then prototype in pipeline code.
+- Shared-edge simplification (adjacent polygons, tippecanoe #105):
+  PREMISES SUPERSEDED 2026-07-06. The March analysis (full-res deferral
+  3.3x regression, simplify-then-reconcile design research) targeted the
+  old Mercator-space DP pipeline, which no longer exists. The integer
+  engine simplifies every feature per zoom with rotation-invariant DP
+  from a SHARED base quantization grid with pin-aware shared-vertex
+  preservation (specs/emit-polygon-integer-port.md), which changes seam
+  incidence wholesale. The seam-reconcile machinery
+  (`--seam-reconcile-layers`, assemble reconcile_boundary_seams) is
+  still wired and functional.
+  - [ ] Re-evaluate seam incidence visually on the post-rewrite output
+    (admin borders at z4-z8, landuse boundaries) BEFORE any further
+    reconciliation work. If seams are gone or negligible, delete the
+    deferral machinery; if not, design against the integer engine.
+    (The March design docs and Phase 1-3A findings are in git history
+    and notes/simplify-then-reconcile-design.md if needed.)
 
 ## Schema extensions (beyond Shortbread 1.0)
 
@@ -286,25 +208,6 @@ This is a design problem, not a tuning problem. Before touching pipeline code:
     Shortbread profile zoom ranges by source.
   - Neither Planetiler's nor Tilemaker's Shortbread profiles use NE - differentiation.
   - CLI: `--natural-earth dir/` with auto-detection, `--no-natural-earth` to disable.
-- [x] Cliff/landform line features: `natural=cliff` is a linear feature not in Shortbread 1.0.
-  Elivagar's land layer only matches polygon natural features (bare_rock, beach, etc.). Cliffs
-  are well-tagged in mountainous areas and useful for topographic rendering. Would need a new
-  landform line layer or extension to an existing layer. Tilemaker #265 hit rendering issues
-  with cliff classification.
-- [x] Add explicit closed-way coverage for `natural=cliff` line matching.
-  Done: `test_land_line_cliff_matches_closed_way` in shortbread_tests.rs.
-- [x] Add tag-conflict/priority tests for `natural=cliff` alongside other matching line tags.
-  Done: `test_land_line_cliff_conflict_with_highway_keeps_both_matches` and
-  `test_land_line_cliff_conflict_with_waterway_keeps_both_matches` in shortbread_tests.rs.
-- [x] EV charging stations as POIs: `amenity=charging_station` is not in elivagar's POI list
-  because Shortbread 1.0 doesn't include it, but EV charging infrastructure is increasingly
-  important for map consumers. OSM has good coverage in Europe. Investigate adding as a
-  schema extension alongside other beyond-Shortbread POI types (Planetiler #765 hit a bug
-  where charging stations were silently dropped).
-- [x] Add POI coverage for non-node charging stations (way/area geometries).
-  Done: `test_pois_ev_charging_station_closed_way_and_multipolygon` in shortbread_tests.rs.
-- [x] Add richer tag-matrix tests for charging stations (additional tags present).
-  Done: `test_pois_ev_charging_station_rich_tag_matrix_is_stable` in shortbread_tests.rs.
 
 ## Future architecture
 

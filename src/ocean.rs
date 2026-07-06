@@ -196,7 +196,9 @@ pub(crate) fn process_ocean_shapefile(
         let split_tile_size = 1_i32 << (u32::from(max_zoom - SPLIT_Z) + 12);
         let max_split_tile = i32::from((1_u16 << SPLIT_Z) - 1);
         for piece in pieces.drain(..) {
-            if piece.first().map_or(0, Vec::len) < SPLIT_MIN_VERTICES {
+            // Count ALL rings: hole-heavy pieces must not dodge the split.
+            let total_vertices: usize = piece.iter().map(Vec::len).sum();
+            if total_vertices < SPLIT_MIN_VERTICES {
                 split_out.push(piece);
                 continue;
             }
@@ -219,6 +221,11 @@ pub(crate) fn process_ocean_shapefile(
                         max_x: (stx + 1) * split_tile_size,
                         max_y: (sty + 1) * split_tile_size,
                     };
+                    // Split tile fully containing the piece: no cut needed.
+                    if rect_contains(tile_rect, bb) {
+                        split_out.push(piece.clone());
+                        continue;
+                    }
                     split_out.extend(intersect_rect(&piece, tile_rect, 0));
                 }
             }
@@ -330,7 +337,21 @@ fn push_quantized_pieces(
     if shape.is_empty() {
         return;
     }
+    // The common case for an in-bounds extract: the shape lies entirely
+    // inside the data bounds - the boolean is an expensive identity.
+    if shape_bbox(&shape).is_some_and(|bb| rect_contains(data_rect, bb)) {
+        pieces.push(shape);
+        return;
+    }
     pieces.extend(intersect_rect(&shape, data_rect, 0));
+}
+
+/// True if `outer` contains `inner` (closed containment).
+fn rect_contains(outer: IntRect, inner: IntRect) -> bool {
+    outer.min_x <= inner.min_x
+        && outer.min_y <= inner.min_y
+        && outer.max_x >= inner.max_x
+        && outer.max_y >= inner.max_y
 }
 
 fn data_bounds_rect(data_bounds: &MercBbox, max_zoom: u8) -> IntRect {

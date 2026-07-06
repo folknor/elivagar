@@ -359,3 +359,25 @@ holes, 5.9M+ polygons across 9 layers) AND visually confirmed. The
 deferred ocean perf (ocean_ms ~50s, suspects listed under Landing A);
 water_polygons z5 single degenerate-drop worth one spot-check; hotpath
 0.20 / mlt-core 0.12 dep bumps; planet-scale validation.**
+
+### R25 - Spec 3 (ocean-perf-structural) landing log
+**Spec:** `specs/ocean-perf-structural.md` (rev 2; contract review closed).
+Perf-hunt reports + leftovers: `notes/perf-hunt-reports-2026-07-06.md`.
+**Landing 0 baseline:** bench 9d4752b8 at `3ef651b` obsoleted by instrument
+commit; operative baseline ca904211 at `6830301`: total 73854 ms,
+ocean_ms 50249, RSS 1867 MB.
+- Landing 1 (dilated rasterization + exact fixes): implemented in main
+  session (codex run blocked by its sandbox on the data/ symlink - no
+  code from it). check green; Denmark plain 72760 ms; verify PASS 1323406
+  tiles (+943 vs baseline: previously under-marked gap runs whose head
+  PIP missed coverage now emit - safe direction); nine-layer oracle all
+  clean, parity max-delta ocean 1.10% (the recovered tiles), all other
+  layers <= 0.04%. Gap tiles now emit canonical full-tile rects:
+  GEOMETRY-identical to the boolean clips they replace (bytes differ by
+  ring rotation, improving identical-tile dedup). Bench verdict below.
+- Landing 2 (i_overlay reuse + sink SoA): PENDING - see spec.
+- Landing 3 (parallel prologue + piece x zoom fan-out): PENDING - see spec.
+- Landing 4 (close-out profile + this ledger + CLAUDE.md baselines): PENDING.
+**Pickup:** everything needed is in the spec (standard gate block,
+per-landing bounds), this ledger, and the leftovers doc. Parity baselines
+regenerate via scripts/oracle_sweep.py <pmtiles> <suffix> [baseline].
