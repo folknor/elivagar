@@ -251,31 +251,62 @@ pub(crate) fn process_ocean_shapefile(
     let chunk_compression = sort_writer.compression();
 
     let params = ocean_params(min_zoom, max_zoom);
-    let split_target = 4 * rayon::current_num_threads().max(1);
+    // Per-piece item target for the parallel frontier. Root cells of a
+    // large piece usually exceed this on their own (the frontier loop is
+    // then a no-op); it only forces expansion for single-root ranges.
+    const SPLIT_ITEMS_PER_PIECE: usize = 16;
+    // Split phase runs in parallel across pieces; each large piece emits
+    // its above-frontier tiles into its own accumulator, merged (and
+    // flushed) serially afterwards.
+    let piece_prep: Vec<(Vec<OceanWorkItem>, Option<OceanAcc>)> = pieces
+        .par_iter()
+        .enumerate()
+        .map(|(piece_idx, piece)| {
+            let feature_id = piece_idx as u64;
+            if total_vertices(piece) < LARGE_PIECE_VERTICES {
+                return (
+                    vec![OceanWorkItem {
+                        feature_id,
+                        kind: OceanWorkKind::Whole(piece_idx),
+                    }],
+                    None,
+                );
+            }
+            let mut acc = OceanAcc::new(chunk_compression);
+            let cells = OCEAN_EMIT_SCRATCH.with(|cell| {
+                let mut scratch = cell.borrow_mut();
+                let mut sink = ocean_sink(feature_id, ocean_layer, &empty_attrs_bytes, &mut acc);
+                split_for_parallel(
+                    piece,
+                    &params,
+                    SPLIT_ITEMS_PER_PIECE,
+                    &mut scratch,
+                    &mut sink,
+                )
+            });
+            if acc.bytes >= chunk_size {
+                acc.flush(&chunk_dir, &chunk_id);
+            }
+            let items = cells
+                .into_iter()
+                .map(|(cell, frag)| OceanWorkItem {
+                    feature_id,
+                    kind: OceanWorkKind::Cell(cell, frag),
+                })
+                .collect();
+            (items, Some(acc))
+        })
+        .collect();
+
     let mut work_items = Vec::with_capacity(pieces.len());
     let mut pre_emit = OceanAcc::new(chunk_compression);
-    let mut split_scratch = PyramidScratch::new();
-    for (piece_idx, piece) in pieces.iter().enumerate() {
-        let feature_id = piece_idx as u64;
-        if total_vertices(piece) < LARGE_PIECE_VERTICES {
-            work_items.push(OceanWorkItem {
-                feature_id,
-                kind: OceanWorkKind::Whole(piece_idx),
-            });
-            continue;
-        }
-
-        let mut sink = ocean_sink(feature_id, ocean_layer, &empty_attrs_bytes, &mut pre_emit);
-        let cells = split_for_parallel(piece, &params, split_target, &mut split_scratch, &mut sink);
-        drop(sink);
-        if pre_emit.bytes >= chunk_size {
-            pre_emit.flush(&chunk_dir, &chunk_id);
-        }
-        for (cell, frag) in cells {
-            work_items.push(OceanWorkItem {
-                feature_id,
-                kind: OceanWorkKind::Cell(cell, frag),
-            });
+    for (items, acc) in piece_prep {
+        work_items.extend(items);
+        if let Some(acc) = acc {
+            pre_emit.merge_from(acc);
+            if pre_emit.bytes >= chunk_size {
+                pre_emit.flush(&chunk_dir, &chunk_id);
+            }
         }
     }
 

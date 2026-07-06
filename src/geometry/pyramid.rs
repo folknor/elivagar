@@ -91,20 +91,51 @@ pub(crate) fn split_for_parallel(
     }
 
     let target = target_items.max(1);
-    let mut frontier_depth = 0_u8;
-    let mut capacity = 1_usize;
-    while capacity < target && params.z_top + frontier_depth < params.z_bottom {
-        frontier_depth += 1;
-        capacity = capacity.saturating_mul(4);
+    let mut items = root_fragments(shape_base, params, scratch);
+    // Expand the shallowest item one level at a time until the pool is
+    // large enough for the parallel fan-out. Expansion emits the expanded
+    // cell (and resolves full/empty subtrees inline), so the returned
+    // items' subtrees are disjoint and complete. Root cells of a large
+    // piece usually already exceed the target, making this loop a no-op;
+    // it matters for single-root ranges (z_top 0).
+    loop {
+        if items.len() >= target {
+            break;
+        }
+        let Some(idx) = items
+            .iter()
+            .enumerate()
+            .filter(|(_, (c, _))| c.z < params.z_bottom)
+            .min_by_key(|(_, (c, _))| c.z)
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        let (cell, frag) = items.swap_remove(idx);
+        if is_full_buffered_cell(&frag, params.maxz, cell) {
+            emit_full_subtree(cell, params, scratch, sink);
+            scratch.return_shapes(frag);
+            continue;
+        }
+        emit_cell(cell, &frag, params, scratch, sink);
+        for child in children(cell) {
+            let mut child_frag = scratch.take_shapes();
+            intersect_shapes_with_rect(
+                &mut scratch.int,
+                &frag,
+                buffered_cell_rect_base(params.maxz, child),
+                0,
+                &mut child_frag,
+            );
+            if child_frag.is_empty() {
+                scratch.return_shapes(child_frag);
+            } else {
+                items.push((child, child_frag));
+            }
+        }
+        scratch.return_shapes(frag);
     }
-    let frontier_z = params.z_top + frontier_depth;
-
-    let roots = root_fragments(shape_base, params, scratch);
-    let mut out = Vec::with_capacity(capacity);
-    for (cell, frag) in roots {
-        split_descend(cell, frag, frontier_z, params, scratch, sink, &mut out);
-    }
-    out
+    items
 }
 
 fn valid_params(params: &PyramidParams<'_>) -> bool {
@@ -130,30 +161,101 @@ fn root_fragments(
     let (tx_min, tx_max, ty_min, ty_max) =
         tile_range_for_base_rect(bbox, params.maxz, params.z_top);
     let mut roots = Vec::new();
-    for ty in ty_min..=ty_max {
-        for tx in tx_min..=tx_max {
-            let cell = PyramidCell {
-                z: params.z_top,
-                tx,
-                ty,
-            };
-            let mut frag = scratch.take_shapes();
-            intersect_shapes_with_rect(
-                &mut scratch.int,
-                &normalized,
-                buffered_cell_rect_base(params.maxz, cell),
-                0,
-                &mut frag,
-            );
-            if frag.is_empty() {
-                scratch.return_shapes(frag);
-            } else {
-                roots.push((cell, frag));
-            }
-        }
-    }
-    scratch.return_shapes(normalized);
+    root_bisect(
+        RootRange {
+            tx0: tx_min,
+            tx1: tx_max,
+            ty0: ty_min,
+            ty1: ty_max,
+        },
+        normalized,
+        params,
+        scratch,
+        &mut roots,
+    );
     roots
+}
+
+#[derive(Clone, Copy)]
+struct RootRange {
+    tx0: u32,
+    tx1: u32,
+    ty0: u32,
+    ty1: u32,
+}
+
+/// Recursive quadrant bisection of the z_top cell range: cuts the shape set
+/// with buffered RANGE rects, halving the longer axis each level -
+/// O(V log cells) total noding instead of the O(V x cells) of clipping the
+/// whole shape once per root cell. The cut identity holds because a child
+/// range's buffered rect is a subset of its parent's (same buffer, subset
+/// range), same argument as the per-cell descent.
+fn root_bisect(
+    range: RootRange,
+    frag: Shapes,
+    params: &PyramidParams<'_>,
+    scratch: &mut PyramidScratch,
+    out: &mut Vec<(PyramidCell, Shapes)>,
+) {
+    if frag.is_empty() {
+        scratch.return_shapes(frag);
+        return;
+    }
+    if range.tx0 == range.tx1 && range.ty0 == range.ty1 {
+        out.push((
+            PyramidCell {
+                z: params.z_top,
+                tx: range.tx0,
+                ty: range.ty0,
+            },
+            frag,
+        ));
+        return;
+    }
+    let (a, b) = if range.tx1 - range.tx0 >= range.ty1 - range.ty0 {
+        let mid = range.tx0 + (range.tx1 - range.tx0) / 2;
+        (
+            RootRange { tx1: mid, ..range },
+            RootRange {
+                tx0: mid + 1,
+                ..range
+            },
+        )
+    } else {
+        let mid = range.ty0 + (range.ty1 - range.ty0) / 2;
+        (
+            RootRange { ty1: mid, ..range },
+            RootRange {
+                ty0: mid + 1,
+                ..range
+            },
+        )
+    };
+    for half in [a, b] {
+        let mut half_frag = scratch.take_shapes();
+        intersect_shapes_with_rect(
+            &mut scratch.int,
+            &frag,
+            buffered_range_rect_base(params.maxz, params.z_top, half),
+            0,
+            &mut half_frag,
+        );
+        root_bisect(half, half_frag, params, scratch, out);
+    }
+    scratch.return_shapes(frag);
+}
+
+fn buffered_range_rect_base(maxz: u8, z: u8, r: RootRange) -> IntRect {
+    let tile_size = cell_tile_size_base(maxz, z);
+    let buffer = i64::from(TILE_BUFFER_I32) << u32::from(maxz - z);
+    IntRect {
+        min_x: i32::try_from(i64::from(r.tx0) * tile_size - buffer).expect("range min x fits i32"),
+        min_y: i32::try_from(i64::from(r.ty0) * tile_size - buffer).expect("range min y fits i32"),
+        max_x: i32::try_from((i64::from(r.tx1) + 1) * tile_size + buffer)
+            .expect("range max x fits i32"),
+        max_y: i32::try_from((i64::from(r.ty1) + 1) * tile_size + buffer)
+            .expect("range max y fits i32"),
+    }
 }
 
 fn descend(
@@ -190,46 +292,6 @@ fn descend(
             &mut child_frag,
         );
         descend(child, child_frag, params, scratch, sink);
-    }
-    scratch.return_shapes(frag);
-}
-
-fn split_descend(
-    cell: PyramidCell,
-    frag: Shapes,
-    frontier_z: u8,
-    params: &PyramidParams<'_>,
-    scratch: &mut PyramidScratch,
-    sink: PyramidSink<'_>,
-    out: &mut Vec<(PyramidCell, Shapes)>,
-) {
-    if frag.is_empty() {
-        scratch.return_shapes(frag);
-        return;
-    }
-
-    if is_full_buffered_cell(&frag, params.maxz, cell) {
-        emit_full_subtree(cell, params, scratch, sink);
-        scratch.return_shapes(frag);
-        return;
-    }
-
-    if cell.z >= frontier_z || cell.z == params.z_bottom {
-        out.push((cell, frag));
-        return;
-    }
-
-    emit_cell(cell, &frag, params, scratch, sink);
-    for child in children(cell) {
-        let mut child_frag = scratch.take_shapes();
-        intersect_shapes_with_rect(
-            &mut scratch.int,
-            &frag,
-            buffered_cell_rect_base(params.maxz, child),
-            0,
-            &mut child_frag,
-        );
-        split_descend(child, child_frag, frontier_z, params, scratch, sink, out);
     }
     scratch.return_shapes(frag);
 }
