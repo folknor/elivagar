@@ -1340,3 +1340,26 @@ fn isolated_shared_segment_simplification_is_identical() {
     assert!(out_fwd.len() < n,
         "DP should have simplified: {} vertices in, {} out", n, out_fwd.len());
 }
+
+// ---------------------------------------------------------------------------
+// filter_holes_for_outer: no silent hole cap (Landing 4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn filter_holes_keeps_all_contained_holes_beyond_63() {
+    // Outer: large closed rect. 70 contained holes, each 40x40 (2x area 3200,
+    // above MIN_HOLE_AREA_2X). The old u64 keep-mask silently dropped every
+    // hole past index 63.
+    let outer: Vec<(i32, i32)> = vec![(0, 0), (4096, 0), (4096, 4096), (0, 4096), (0, 0)];
+    let mut rings: Vec<Vec<(i32, i32)>> = vec![outer];
+    for i in 0..70 {
+        let x0 = 50 + (i % 10) * 400;
+        let y0 = 50 + (i / 10) * 400;
+        rings.push(vec![
+            (x0, y0), (x0, y0 + 40), (x0 + 40, y0 + 40), (x0 + 40, y0), (x0, y0),
+        ]);
+    }
+    let count = rings.len();
+    let kept = filter_holes_for_outer(&mut rings, count);
+    assert_eq!(kept, 71, "all 70 contained holes must survive");
+}

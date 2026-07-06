@@ -394,12 +394,14 @@ pub(crate) fn filter_holes_for_outer(
     if ring_count <= 1 {
         return ring_count;
     }
-    // Phase 1: decide which holes to keep (immutable borrow of outer)
-    // Use a small inline bitset - ring_count is always small (< 64 in practice).
-    let mut keep_mask: u64 = 1; // bit 0 = outer, always kept
+    // Phase 1: decide which holes to keep (immutable borrow of outer).
+    // A Vec<bool> sized to ring_count - the previous u64 bitmask silently
+    // DROPPED every hole past index 63 (a deleted island per dropped hole).
+    let mut keep = vec![false; ring_count];
+    keep[0] = true; // outer, always kept
     {
         let outer = &all_rings[0];
-        for read in 1..ring_count.min(64) {
+        for read in 1..ring_count {
             let hole = &all_rings[read];
             if hole.len() < 4 {
                 continue;
@@ -411,20 +413,20 @@ pub(crate) fn filter_holes_for_outer(
             // Containment check: representative point must be inside outer.
             let (px, py) = hole[0];
             if point_in_ring(px, py, outer) {
-                keep_mask |= 1 << read;
+                keep[read] = true;
             } else if hole.len() >= 2 {
                 // First vertex on boundary - try midpoint of first edge
                 let (qx, qy) = hole[1];
                 if point_in_ring((px + qx) / 2, (py + qy) / 2, outer) {
-                    keep_mask |= 1 << read;
+                    keep[read] = true;
                 }
             }
         }
     }
     // Phase 2: compact kept rings (mutable, no outer borrow)
     let mut write = 1;
-    for read in 1..ring_count.min(64) {
-        if keep_mask & (1 << read) != 0 {
+    for read in 1..ring_count {
+        if keep[read] {
             if write != read {
                 all_rings.swap(write, read);
             }
