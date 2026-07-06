@@ -333,4 +333,22 @@ total 81502 ms, ocean_ms 58611, peak RSS 1876.8 MB.
   DEFERRED until the map renders correctly end to end. Remaining suspects
   for a future perf spec: per-gap-tile boolean clips on coastal rows,
   per-piece-per-zoom normalize, leaf intersect allocation churn.
-- Landing B (emit.rs three-tier port): PENDING
+- Landing B (emit.rs three-tier port): implemented by codex xhigh from the
+  spec; audited + all gates independently re-run. check green; Denmark
+  74486 ms plain; verify PASS 1322463 tiles; earcut oracle ALL NINE polygon
+  layers 0 over-threshold / 0 misattached, worst deviation 0.000
+  (water_polygons was 1808 over / worst 147x; land was 22824 over / worst
+  Infinity; buildings 552 over -> all zero). Feature-count parity vs
+  pre-port (a13222e tables; Landing A count-neutral): within +-2% at every
+  layer/zoom, counts slightly UP at mid zooms (normalize splits formerly
+  self-intersecting polygons into multiple simple ones); one documented
+  exception: water_polygons z5 4 -> 3 features - the old z5 table had
+  exactly 1 deviant polygon, i.e. the drop is the degenerate itself.
+  Deleted: emit.rs S-H polygon clipping, INTERIOR_TILE_RING,
+  dedup_quantized_ring's old home, simplify_tile_ring, tile_is_interior,
+  both nudges, filter_holes_for_outer (net -419 lines).
+
+**R24 status: every polygon layer in the archive is now machine-proven
+MapLibre-tessellation-clean (earcut deviation 0.000, zero misattached
+holes, 5.9M+ polygons checked across 9 layers). Remaining before close:
+human visual gate + deferred ocean perf spec.**

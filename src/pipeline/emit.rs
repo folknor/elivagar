@@ -1,7 +1,14 @@
 use smallvec::SmallVec;
 use rustc_hash::FxHashSet;
 
-use crate::geometry::{self, ClipRect, MercBbox, Point, BUFFER_FRACTION, close_and_orient_cw, close_and_orient_ccw, merc_bbox};
+use crate::geometry::{self, ClipRect, MercBbox, Point, BUFFER_FRACTION, merc_bbox};
+use crate::geometry::int_ocean::{
+    IntEmitScratch, OSM_DP_TOL_PX, Shape, ZoomEmitParams,
+    buffered_tile_rect, contour_area_is_below, emit_shape_for_zoom, encode_tile_shape,
+    intersect_rect, lookback_dedup_contour_pinned, normalize, quantize_polygon,
+    quantize_polygon_pinned, rescale_shape, rescale_shape_pinned, ring_is_simple_complete,
+    shape_bbox, simplify_shape_dp, tile_count_for_rect, tile_range_for_rect,
+};
 use crate::multipolygon::MemberWay;
 use crate::mvt::{self, GeomType};
 use crate::pmtiles_writer;
@@ -11,27 +18,6 @@ use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs};
 use rustc_hash::FxHashMap;
 
 use super::stats::DeferralStats;
-
-/// Zoom-dependent tile-space simplification tolerance (squared).
-/// At z14: 1px (16² = 256). Lower zooms get progressively more aggressive:
-/// each zoom level down doubles the tolerance (4× in squared terms).
-/// z10: 16px², z5: 512px², z0: ~16384px².
-/// This matches Tilemaker's approach of exponentially increasing tolerance at low zoom.
-#[inline]
-fn tile_simplify_tol_sq(z: u8) -> i64 {
-    // Tile-space DP only at z6-10 (post-quantization staircase artifacts).
-    // Below z6: features are too simplified already, DP would destroy geometry.
-    // Above z10: enough resolution that staircase isn't visible.
-    if !(6..=10).contains(&z) { return 0; }
-    let base: i64 = 16 * 16; // 1 rendered pixel squared (256 extent² units)
-    let shift = 10u8.saturating_sub(z);
-    base << (shift as u32)
-}
-
-/// Full-tile rectangle in tile coordinates (CW, closed). Buffer = 8 rendered pixels = 128 extent units.
-/// Used for interior tiles where the polygon fully covers the tile.
-pub(super) const INTERIOR_TILE_RING: [(i32, i32); 5] =
-    [(-128, -128), (4224, -128), (4224, 4224), (-128, 4224), (-128, -128)];
 
 // ---------------------------------------------------------------------------
 // Antimeridian helpers (shared by phase12 and relations)
@@ -197,16 +183,10 @@ impl LineEmitScratch {
 }
 
 pub(super) struct PolygonEmitScratch {
-    pub(super) geom_buf: Vec<u32>,
     pub(super) attrs_buf: Vec<u8>,
-    pub(super) tc_buf: Vec<(i32, i32)>,
-    pub(super) simplify_keep: Vec<bool>,
-    pub(super) simplify_buf: Vec<Point>,
-    pub(super) pinned_idxs: Vec<usize>,
-    pub(super) clip_a: Vec<Point>,
-    pub(super) clip_b: Vec<Point>,
-    pub(super) row_clip_a: Vec<Point>,
-    pub(super) row_clip_b: Vec<Point>,
+    pub(super) int_emit: IntEmitScratch,
+    pub(super) pin_keys: FxHashSet<(i64, i64)>,
+    pub(super) base_pins: FxHashSet<(i32, i32)>,
     /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64, osm_id as u64).
     pub(super) cap_events: Vec<(u16, u64, u64)>,
 }
@@ -214,34 +194,19 @@ pub(super) struct PolygonEmitScratch {
 impl PolygonEmitScratch {
     pub(super) fn new() -> Self {
         Self {
-            geom_buf: Vec::new(),
             attrs_buf: Vec::new(),
-            tc_buf: Vec::new(),
-            simplify_keep: Vec::new(),
-            simplify_buf: Vec::new(),
-            pinned_idxs: Vec::new(),
-            clip_a: Vec::new(),
-            clip_b: Vec::new(),
-            row_clip_a: Vec::new(),
-            row_clip_b: Vec::new(),
+            int_emit: IntEmitScratch::new(),
+            pin_keys: FxHashSet::default(),
+            base_pins: FxHashSet::default(),
             cap_events: Vec::new(),
         }
     }
 }
 
 pub(super) struct MultipolygonEmitScratch {
-    pub(super) geom_buf: Vec<u32>,
     pub(super) attrs_buf: Vec<u8>,
-    pub(super) required_idxs: Vec<usize>,
-    pub(super) clip_a: Vec<Point>,
-    pub(super) clip_b: Vec<Point>,
-    pub(super) all_rings: Vec<Vec<(i32, i32)>>,
-    pub(super) inner_bboxes: Vec<geometry::MercBbox>,
-    pub(super) row_clip_a: Vec<Point>,
-    pub(super) row_clip_b: Vec<Point>,
-    pub(super) row_outer: Vec<Point>,
-    pub(super) row_inners: Vec<Vec<Point>>,
-    pub(super) row_inner_bboxes: Vec<geometry::MercBbox>,
+    pub(super) int_emit: IntEmitScratch,
+    pub(super) base_pins: FxHashSet<(i32, i32)>,
     /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64, osm_id as u64).
     pub(super) cap_events: Vec<(u16, u64, u64)>,
 }
@@ -249,18 +214,9 @@ pub(super) struct MultipolygonEmitScratch {
 impl MultipolygonEmitScratch {
     pub(super) fn new() -> Self {
         Self {
-            geom_buf: Vec::new(),
             attrs_buf: Vec::new(),
-            required_idxs: Vec::new(),
-            clip_a: Vec::new(),
-            clip_b: Vec::new(),
-            all_rings: Vec::new(),
-            inner_bboxes: Vec::new(),
-            row_clip_a: Vec::new(),
-            row_clip_b: Vec::new(),
-            row_outer: Vec::new(),
-            row_inners: Vec::new(),
-            row_inner_bboxes: Vec::new(),
+            int_emit: IntEmitScratch::new(),
+            base_pins: FxHashSet::default(),
             cap_events: Vec::new(),
         }
     }
@@ -285,6 +241,174 @@ pub(super) fn push_sort_record(
     let data = encode_feature_data_with_attrs(osm_id, geom_type, geom_buf, attrs_buf);
     let key = sort::make_sort_key(tile_id, layer as u8, 0);
     records.push(SortRecord { key, data });
+}
+
+const OSM_POLYGON_MAX_Z: u8 = 14;
+const OSM_TIER2_MAX_TILES: u64 = 64;
+
+fn polygon_min_area(z: u8, layer: Layer) -> u64 {
+    if z >= OSM_POLYGON_MAX_Z || layer == Layer::StreetPolygons || layer == Layer::Bridges {
+        0
+    } else {
+        geometry::MIN_POLY_AREA as u64
+    }
+}
+
+fn polygon_dp_tol(z: u8, seam_max_zoom: u8, tol_scale: f64) -> i64 {
+    if z <= seam_max_zoom || z >= OSM_POLYGON_MAX_Z {
+        0
+    } else {
+        #[allow(clippy::cast_possible_truncation)]
+        let tol = (OSM_DP_TOL_PX as f64 * tol_scale).round() as i64;
+        tol.max(0)
+    }
+}
+
+fn fill_pin_keys_from_mask(points: &[Point], preserve_vertex_mask: &[bool], out: &mut FxHashSet<(i64, i64)>) {
+    out.clear();
+    for (p, &keep) in points.iter().zip(preserve_vertex_mask) {
+        if keep {
+            out.insert(merc_point_key(p));
+        }
+    }
+}
+
+fn fill_base_pins(shape: &Shape, flags: &[Vec<bool>], out: &mut FxHashSet<(i32, i32)>) {
+    out.clear();
+    for (ring, ring_flags) in shape.iter().zip(flags) {
+        for (p, &pinned) in ring.iter().zip(ring_flags) {
+            if pinned {
+                out.insert((p.x, p.y));
+            }
+        }
+    }
+}
+
+fn prepare_shape_for_zoom(
+    shape_base: &Shape,
+    flags_base: &[Vec<bool>],
+    z: u8,
+    dp_tol: i64,
+    int_scratch: &mut IntEmitScratch,
+) {
+    let shift = OSM_POLYGON_MAX_Z.saturating_sub(z);
+    if flags_base.is_empty() {
+        int_scratch.shape_z = rescale_shape(shape_base, shift);
+        int_scratch.flags_z.clear();
+        simplify_shape_dp(&mut int_scratch.shape_z, dp_tol, None);
+    } else {
+        let (shape_z, flags_z) = rescale_shape_pinned(shape_base, shift, flags_base);
+        int_scratch.shape_z = shape_z;
+        int_scratch.flags_z = flags_z;
+        simplify_shape_dp(&mut int_scratch.shape_z, dp_tol, Some(&int_scratch.flags_z));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_int_tile_shape(
+    osm_id: u64,
+    layer: Layer,
+    attrs_buf: &[u8],
+    z: u8,
+    tx: u32,
+    ty: u32,
+    tile_shape: Shape,
+    int_scratch: &mut IntEmitScratch,
+    records: &mut Vec<SortRecord>,
+) -> u64 {
+    let mut emitted = 0;
+    let mut sink = |out_tx: u32, out_ty: u32, geom: &[u32]| {
+        let tile_id = pmtiles_writer::xy_to_tile_id(z, out_tx, out_ty);
+        push_sort_record(tile_id, osm_id, layer, GeomType::Polygon, geom, attrs_buf, records);
+        emitted += 1;
+    };
+    encode_tile_shape(tile_shape, tx, ty, int_scratch, &mut sink);
+    emitted
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_tier1_single_ring(
+    osm_id: u64,
+    layer: Layer,
+    attrs_buf: &[u8],
+    z: u8,
+    tx: u32,
+    ty: u32,
+    mut shape_z: Shape,
+    mut flags_z: Vec<Vec<bool>>,
+    dp_tol: i64,
+    min_area: u64,
+    int_scratch: &mut IntEmitScratch,
+    records: &mut Vec<SortRecord>,
+) -> u64 {
+    if shape_z.len() != 1 || shape_z[0].len() < 3 {
+        return 0;
+    }
+    let flags = if flags_z.is_empty() {
+        None
+    } else {
+        flags_z.get_mut(0)
+    };
+    lookback_dedup_contour_pinned(&mut shape_z[0], flags);
+    if !flags_z.is_empty() {
+        simplify_shape_dp(&mut shape_z, dp_tol, Some(&flags_z));
+    } else {
+        simplify_shape_dp(&mut shape_z, dp_tol, None);
+    }
+    if shape_z.len() != 1 || shape_z[0].len() < 3 {
+        return 0;
+    }
+    if contour_area_is_below(&shape_z[0], min_area) {
+        return 0;
+    }
+    if ring_is_simple_complete(&shape_z[0]) {
+        return emit_int_tile_shape(osm_id, layer, attrs_buf, z, tx, ty, shape_z, int_scratch, records);
+    }
+
+    let mut emitted = 0;
+    for fixed in normalize(shape_z, min_area) {
+        emitted += emit_int_tile_shape(osm_id, layer, attrs_buf, z, tx, ty, fixed, int_scratch, records);
+    }
+    emitted
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_normalized_per_tile(
+    osm_id: u64,
+    layer: Layer,
+    attrs_buf: &[u8],
+    z: u8,
+    shape_z: Shape,
+    min_area: u64,
+    int_scratch: &mut IntEmitScratch,
+    records: &mut Vec<SortRecord>,
+) -> u64 {
+    let max_tile = (1u32 << z) - 1;
+    let mut emitted = 0;
+    for shape in normalize(shape_z, min_area) {
+        let Some(bbox) = shape_bbox(&shape) else {
+            continue;
+        };
+        let (tx_min, tx_max, ty_min, ty_max) = tile_range_for_rect(bbox, max_tile);
+        for ty in ty_min..=ty_max {
+            for tx in tx_min..=tx_max {
+                for tile_shape in intersect_rect(&shape, buffered_tile_rect(tx, ty), min_area) {
+                    emitted += emit_int_tile_shape(
+                        osm_id,
+                        layer,
+                        attrs_buf,
+                        z,
+                        tx,
+                        ty,
+                        tile_shape,
+                        int_scratch,
+                        records,
+                    );
+                }
+            }
+        }
+    }
+    emitted
 }
 
 // ---------------------------------------------------------------------------
@@ -459,8 +583,7 @@ pub(super) fn emit_line_feature(
 }
 
 #[hotpath::measure]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn emit_polygon_feature(
     osm_id: u64,
     merc: &[Point],
@@ -475,7 +598,6 @@ pub(super) fn emit_polygon_feature(
     fanout_cap: u32,
     tol_scale: f64,
 ) -> u64 {
-    // Auto-disable check: if deferral was killed for this layer, skip it.
     let seam_max_zoom = if seam_max_zoom > 0
         && deferral_stats.is_some_and(|d| d.is_disabled(m.layer as u8))
     {
@@ -483,198 +605,124 @@ pub(super) fn emit_polygon_feature(
     } else {
         seam_max_zoom
     };
-    // Single-ring polygon (no holes)
-    let mut count: u64 = 0;
-    scratch.pinned_idxs.clear();
-    scratch.pinned_idxs.extend(
-        preserve_vertex_mask
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &keep)| keep.then_some(i)),
-    );
-    let has_pins = !scratch.pinned_idxs.is_empty();
+
     scratch.cap_events.clear();
-    let mut run_for_zoom = |z: u8, simplified: &[Point]| {
+    if merc.len() < 4 {
+        return 0;
+    }
+    fill_pin_keys_from_mask(merc, preserve_vertex_mask, &mut scratch.pin_keys);
+    let has_pins = !scratch.pin_keys.is_empty();
+    let (shape_base, flags_base) = if has_pins {
+        quantize_polygon_pinned(merc, &[], OSM_POLYGON_MAX_Z, |p| {
+            scratch.pin_keys.contains(&merc_point_key(p))
+        })
+    } else {
+        (quantize_polygon(merc, &[], OSM_POLYGON_MAX_Z), Vec::new())
+    };
+    if shape_base.is_empty() {
+        return 0;
+    }
+    fill_base_pins(&shape_base, &flags_base, &mut scratch.base_pins);
+
+    let mut count: u64 = 0;
+    let mut run_for_zoom = |z: u8| {
         encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
+        let dp_tol = polygon_dp_tol(z, seam_max_zoom, tol_scale);
+        let min_area = polygon_min_area(z, m.layer);
+        let max_tile = (1u32 << z) - 1;
 
-        // Recompute bbox from simplified coords - at low zooms DP may reduce the
-        // geometry to far fewer tiles than the original bbox suggests.
-        let simp_bbox = merc_bbox(simplified);
-        let single_tile = geometry::is_single_tile(&simp_bbox, z);
-        let skip_size_filter = z >= 14;
-        let (tx_min, tx_max, ty_min, ty_max) = geometry::tile_range_in_bbox(&simp_bbox, z);
-
-        // Fanout cap: skip this zoom if the bbox tile count exceeds the layer cap.
-        if fanout_cap > 0 {
-            let nx = (tx_max - tx_min + 1) as u64;
-            let ny = (ty_max - ty_min + 1) as u64;
-            let bbox_tiles = nx * ny;
-            if bbox_tiles > u64::from(fanout_cap) {
-                #[allow(clippy::cast_possible_truncation)]
-                scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles, osm_id));
-                return;
-            }
+        prepare_shape_for_zoom(&shape_base, &flags_base, z, 0, &mut scratch.int_emit);
+        let Some(pre_bbox) = shape_bbox(&scratch.int_emit.shape_z) else {
+            return;
+        };
+        let (pre_tx_min, pre_tx_max, pre_ty_min, pre_ty_max) = tile_range_for_rect(pre_bbox, max_tile);
+        if pre_tx_min == pre_tx_max && pre_ty_min == pre_ty_max && scratch.int_emit.shape_z.len() == 1 {
+            let shape_z = std::mem::take(&mut scratch.int_emit.shape_z);
+            let flags_z = std::mem::take(&mut scratch.int_emit.flags_z);
+            count += emit_tier1_single_ring(
+                osm_id,
+                m.layer,
+                &scratch.attrs_buf,
+                z,
+                pre_tx_min,
+                pre_ty_min,
+                shape_z,
+                flags_z,
+                dp_tol,
+                min_area,
+                &mut scratch.int_emit,
+                records,
+            );
+            return;
         }
 
-        if single_tile {
-            // Fast path: bbox fits in one tile - clipping is a no-op.
-            let (tx, ty) = (tx_min, ty_min);
-            if simplified.len() < 3 {
-                return;
-            }
-            // TEMPORARILY DISABLED - validity gates drop valid polygons at low zoom,
-            // causing massive feature loss (water_polygons 5x fewer than Tilemaker).
-            // if z < 14 && !is_valid_simple_ring_points(simplified) {
-            //     return;
-            // }
-            geometry::to_tile_coords_into(&mut scratch.tc_buf, simplified, tx, ty, z);
-            geometry::dedup_quantized_ring(&mut scratch.tc_buf);
-            if !skip_size_filter && geometry::ring_is_subpixel(&scratch.tc_buf) {
-                return;
-            }
-            close_and_orient_cw(&mut scratch.tc_buf);
-            geometry::simplify_tile_ring(&mut scratch.tc_buf, tile_simplify_tol_sq(z), 4);
-
-            mvt::encode_polygon(&mut scratch.geom_buf, &[&scratch.tc_buf]);
-            if scratch.geom_buf.is_empty() {
-                return;
-            }
-            let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, &scratch.geom_buf, &scratch.attrs_buf, records);
-            count += 1;
+        if scratch.int_emit.flags_z.is_empty() {
+            simplify_shape_dp(&mut scratch.int_emit.shape_z, dp_tol, None);
         } else {
-            let inv_z = 1.0 / f64::from(1u32 << z);
-            let tile_buf = BUFFER_FRACTION * inv_z;
-            let multi_row = ty_max > ty_min;
+            simplify_shape_dp(&mut scratch.int_emit.shape_z, dp_tol, Some(&scratch.int_emit.flags_z));
+        }
+        let Some(bbox) = shape_bbox(&scratch.int_emit.shape_z) else {
+            return;
+        };
+        let bbox_tiles = tile_count_for_rect(bbox, max_tile);
+        if fanout_cap > 0 && bbox_tiles > u64::from(fanout_cap) {
+            #[allow(clippy::cast_possible_truncation)]
+            scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles, osm_id));
+            return;
+        }
 
-            for ty in ty_min..=ty_max {
-                // F14: row pre-clip - restrict polygon to this row's Y-band.
-                // Per-tile clips then process far fewer vertices.
-                let row_source: &[Point] = if multi_row {
-                    let row_rect = ClipRect::new(
-                        0.0,
-                        f64::from(ty) * inv_z - tile_buf,
-                        1.0,
-                        f64::from(ty + 1) * inv_z + tile_buf,
-                    );
-                    geometry::clip_polygon_into(
-                        simplified, &row_rect, &mut scratch.row_clip_a, &mut scratch.row_clip_b,
-                    );
-                    if scratch.row_clip_a.len() < 3 {
-                        continue;
-                    }
-                    &scratch.row_clip_a
-                } else {
-                    simplified
-                };
-
-                for tx in tx_min..=tx_max {
-                    let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-                    if geometry::tile_is_interior(row_source, &clip) {
-                        scratch.tc_buf.clear();
-                        scratch.tc_buf.extend_from_slice(&INTERIOR_TILE_RING);
-                    } else {
-                        geometry::clip_polygon_into(
-                            row_source, &clip, &mut scratch.clip_a, &mut scratch.clip_b,
-                        );
-                        if scratch.clip_a.len() < 3 {
-                            continue;
-                        }
-                        // TEMPORARILY DISABLED - validity gates drop valid polygons.
-                        // if z < 14 && !is_valid_simple_ring_points(&scratch.clip_a) {
-                        //     continue;
-                        // }
-                        geometry::to_tile_coords_into(&mut scratch.tc_buf, &scratch.clip_a, tx, ty, z);
-                        geometry::dedup_quantized_ring(&mut scratch.tc_buf);
-                        if !skip_size_filter && geometry::ring_is_subpixel(&scratch.tc_buf) {
-                            continue;
-                        }
-                        close_and_orient_cw(&mut scratch.tc_buf);
-                        geometry::simplify_tile_ring(&mut scratch.tc_buf, tile_simplify_tol_sq(z), 4);
-                    }
-
-                    mvt::encode_polygon(&mut scratch.geom_buf, &[&scratch.tc_buf]);
-                    if scratch.geom_buf.is_empty() {
-                        continue;
-                    }
-                    let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                    push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, &scratch.geom_buf, &scratch.attrs_buf, records);
-                    count += 1;
-                }
-            }
+        if bbox_tiles <= OSM_TIER2_MAX_TILES {
+            let shape_z = std::mem::take(&mut scratch.int_emit.shape_z);
+            count += emit_normalized_per_tile(
+                osm_id,
+                m.layer,
+                &scratch.attrs_buf,
+                z,
+                shape_z,
+                min_area,
+                &mut scratch.int_emit,
+                records,
+            );
+        } else {
+            let pins = (!scratch.base_pins.is_empty()).then_some(&scratch.base_pins);
+            let mut emitted = 0;
+            let mut sink = |tx: u32, ty: u32, geom: &[u32]| {
+                let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, geom, &scratch.attrs_buf, records);
+                emitted += 1;
+            };
+            emit_shape_for_zoom(
+                &shape_base,
+                ZoomEmitParams {
+                    z,
+                    maxz: OSM_POLYGON_MAX_Z,
+                    dp_tol,
+                    min_area,
+                    pins,
+                },
+                &mut scratch.int_emit,
+                &mut sink,
+            );
+            count += emitted;
         }
     };
-    if seam_max_zoom > 0 {
-        // Seam-reconcile mode: single zoom loop.
-        // z <= seam_max_zoom: emit full-res geometry (assemble-phase reconciliation + tile-coord DP).
-        // z (seam_max_zoom+1)..13: normal DP simplification.
-        // z >= 14: full-res (existing behavior, no simplification).
-        for z in (z_lo..=z_hi).rev() {
-            if z < 14 && geometry::merc_bbox_is_subpixel(merc, z) {
-                break;
-            }
-            if z <= seam_max_zoom || z >= 14 {
-                if z <= seam_max_zoom
-                    && let Some(ds) = deferral_stats {
-                        ds.record(m.layer as u8, merc.len() as u64);
-                    }
-                run_for_zoom(z, merc);
-            } else {
-                let tol = geometry::simplify_tolerance(z) * tol_scale;
-                if has_pins {
-                    let _ = geometry::simplify_into_with_required(
-                        merc,
-                        tol,
-                        &scratch.pinned_idxs,
-                        &mut scratch.simplify_keep,
-                        &mut scratch.simplify_buf,
-                    );
-                } else {
-                    let _ = geometry::simplify_into(
-                        merc,
-                        tol,
-                        &mut scratch.simplify_keep,
-                        &mut scratch.simplify_buf,
-                    );
-                }
-                if scratch.simplify_buf.len() < 4 {
-                    break;
-                }
-                run_for_zoom(z, &scratch.simplify_buf);
-            }
+
+    for z in (z_lo..=z_hi).rev() {
+        if z < OSM_POLYGON_MAX_Z && geometry::merc_bbox_is_subpixel(merc, z) {
+            break;
         }
-    } else if has_pins {
-        for z in (z_lo..=z_hi).rev() {
-            if z < 14 && geometry::merc_bbox_is_subpixel(merc, z) {
-                break;
-            }
-            if z < 14 {
-                let tol = geometry::simplify_tolerance(z) * tol_scale;
-                let _ = geometry::simplify_into_with_required(
-                    merc,
-                    tol,
-                    &scratch.pinned_idxs,
-                    &mut scratch.simplify_keep,
-                    &mut scratch.simplify_buf,
-                );
-                if scratch.simplify_buf.len() < 4 {
-                    break;
-                }
-                run_for_zoom(z, &scratch.simplify_buf);
-            } else {
-                run_for_zoom(z, merc);
-            }
+        if seam_max_zoom > 0 && z <= seam_max_zoom
+            && let Some(ds) = deferral_stats
+        {
+            ds.record(m.layer as u8, merc.len() as u64);
         }
-    } else {
-        geometry::for_each_zoom_simplified(merc, z_lo, z_hi, 4, |_| tol_scale, false, |z, simplified| {
-            run_for_zoom(z, simplified);
-        });
+        run_for_zoom(z);
     }
     count
 }
 
 #[hotpath::measure]
-#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn emit_multipolygon_feature(
     osm_id: u64,
     outer: &[Point],
@@ -685,233 +733,12 @@ pub(super) fn emit_multipolygon_feature(
     z_hi: u8,
     records: &mut Vec<SortRecord>,
     emit_scratch: &mut MultipolygonEmitScratch,
-    simp_scratch: &mut geometry::SimplifyMultiScratch,
+    _simp_scratch: &mut geometry::SimplifyMultiScratch,
     seam_max_zoom: u8,
     deferral_stats: Option<&DeferralStats>,
     fanout_cap: u32,
     tol_scale: f64,
 ) -> u64 {
-    let mut count: u64 = 0;
-    emit_scratch.cap_events.clear();
-    let mut emit_for_zoom = |z: u8, simp_outer: &[Point], simp_inners: &[Vec<Point>]| {
-        encode_attrs_bytes(&mut emit_scratch.attrs_buf, &m.attrs, z);
-
-        // Recompute bbox from simplified coords - at low zooms DP may reduce the
-        // geometry to far fewer tiles than the original bbox suggests.
-        let simp_bbox = merc_bbox(simp_outer);
-
-        // F11: Precompute inner ring bboxes for O(1) tile rejection.
-        emit_scratch.inner_bboxes.clear();
-        emit_scratch.inner_bboxes.extend(simp_inners.iter().map(|r| merc_bbox(r)));
-        let single_tile = geometry::is_single_tile(&simp_bbox, z);
-        let skip_size_filter = z >= 14;
-        let (tx_min, tx_max, ty_min, ty_max) = geometry::tile_range_in_bbox(&simp_bbox, z);
-
-        // Fanout cap: skip this zoom if the bbox tile count exceeds the layer cap.
-        if fanout_cap > 0 {
-            let nx = (tx_max - tx_min + 1) as u64;
-            let ny = (ty_max - ty_min + 1) as u64;
-            let bbox_tiles = nx * ny;
-            if bbox_tiles > u64::from(fanout_cap) {
-                #[allow(clippy::cast_possible_truncation)]
-                emit_scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles, osm_id));
-                return;
-            }
-        }
-
-        if single_tile {
-            // Fast path: bbox fits in one tile - clipping is a no-op.
-            let (tx, ty) = (tx_min, ty_min);
-            let mut ring_count: usize = 0;
-            if simp_outer.len() < 3 {
-                return;
-            }
-            // TEMPORARILY DISABLED - validity gates drop valid polygons.
-            // if z < 14 && !is_valid_simple_ring_points(simp_outer) {
-            //     return;
-            // }
-            if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
-            geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], simp_outer, tx, ty, z);
-            geometry::dedup_quantized_ring(&mut emit_scratch.all_rings[ring_count]);
-            if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
-                return;
-            }
-            close_and_orient_cw(&mut emit_scratch.all_rings[ring_count]);
-            geometry::simplify_tile_ring(&mut emit_scratch.all_rings[ring_count], tile_simplify_tol_sq(z), 4);
-            ring_count += 1;
-            for inner in simp_inners {
-                if inner.len() < 3 {
-                    continue;
-                }
-                if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
-                geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], inner, tx, ty, z);
-                geometry::dedup_quantized_ring(&mut emit_scratch.all_rings[ring_count]);
-                if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
-                    continue;
-                }
-                close_and_orient_ccw(&mut emit_scratch.all_rings[ring_count]);
-                geometry::simplify_tile_ring(&mut emit_scratch.all_rings[ring_count], tile_simplify_tol_sq(z), 4);
-                ring_count += 1;
-            }
-
-            if ring_count > 1 {
-                ring_count = geometry::filter_holes_for_outer(&mut emit_scratch.all_rings, ring_count);
-            }
-            if ring_count > 1 {
-                let (outer_ref, holes) = emit_scratch.all_rings[..ring_count].split_first_mut().expect("nonempty");
-                for hole in holes {
-                    geometry::nudge_coincident_hole_vertices(hole, outer_ref);
-                }
-            }
-            let ring_refs: SmallVec<[&[(i32, i32)]; 4]> = emit_scratch.all_rings[..ring_count].iter().map(Vec::as_slice).collect();
-            mvt::encode_polygon(&mut emit_scratch.geom_buf, &ring_refs);
-            if emit_scratch.geom_buf.is_empty() {
-                return;
-            }
-            let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, &emit_scratch.geom_buf, &emit_scratch.attrs_buf, records);
-            count += 1;
-        } else {
-            let inv_z = 1.0 / f64::from(1u32 << z);
-            let tile_buf = BUFFER_FRACTION * inv_z;
-            let multi_row = ty_max > ty_min;
-
-            for ty in ty_min..=ty_max {
-                // F14: row pre-clip - restrict polygon to this row's Y-band.
-                let (outer_src, inners_src, inners_bbox_src): (&[Point], &[Vec<Point>], &[geometry::MercBbox]) =
-                    if multi_row {
-                        let row_rect = ClipRect::new(
-                            0.0,
-                            f64::from(ty) * inv_z - tile_buf,
-                            1.0,
-                            f64::from(ty + 1) * inv_z + tile_buf,
-                        );
-                        // Pre-clip outer to row.
-                        geometry::clip_polygon_into(
-                            simp_outer, &row_rect, &mut emit_scratch.row_clip_a, &mut emit_scratch.row_clip_b,
-                        );
-                        if emit_scratch.row_clip_a.len() < 3 {
-                            continue;
-                        }
-                        std::mem::swap(&mut emit_scratch.row_outer, &mut emit_scratch.row_clip_a);
-
-                        // Pre-clip inners to row.
-                        let row_y_min = f64::from(ty) * inv_z - tile_buf;
-                        let row_y_max = f64::from(ty + 1) * inv_z + tile_buf;
-                        let mut row_inner_count = 0;
-                        for (inner, ib) in simp_inners.iter().zip(&emit_scratch.inner_bboxes) {
-                            if ib.max_y < row_y_min || ib.min_y > row_y_max {
-                                continue;
-                            }
-                            geometry::clip_polygon_into(
-                                inner, &row_rect, &mut emit_scratch.row_clip_a, &mut emit_scratch.row_clip_b,
-                            );
-                            if emit_scratch.row_clip_a.len() < 3 {
-                                continue;
-                            }
-                            if row_inner_count < emit_scratch.row_inners.len() {
-                                std::mem::swap(
-                                    &mut emit_scratch.row_inners[row_inner_count],
-                                    &mut emit_scratch.row_clip_a,
-                                );
-                            } else {
-                                emit_scratch.row_inners.push(Vec::new());
-                                std::mem::swap(
-                                    emit_scratch.row_inners.last_mut().expect("just pushed"),
-                                    &mut emit_scratch.row_clip_a,
-                                );
-                            }
-                            row_inner_count += 1;
-                        }
-                        emit_scratch.row_inner_bboxes.clear();
-                        emit_scratch.row_inner_bboxes.extend(
-                            emit_scratch.row_inners[..row_inner_count].iter().map(|r| merc_bbox(r))
-                        );
-                        (
-                            &emit_scratch.row_outer,
-                            &emit_scratch.row_inners[..row_inner_count],
-                            &emit_scratch.row_inner_bboxes,
-                        )
-                    } else {
-                        (simp_outer, simp_inners, emit_scratch.inner_bboxes.as_slice())
-                    };
-
-                for tx in tx_min..=tx_max {
-                    let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-                    let mut ring_count: usize = 0;
-
-                    if geometry::tile_is_interior(outer_src, &clip) {
-                        // Interior tile: outer ring covers entire tile.
-                        if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
-                        emit_scratch.all_rings[ring_count].clear();
-                        emit_scratch.all_rings[ring_count].extend_from_slice(&INTERIOR_TILE_RING);
-                        ring_count += 1;
-                    } else {
-                        geometry::clip_polygon_into(
-                            outer_src, &clip, &mut emit_scratch.clip_a, &mut emit_scratch.clip_b,
-                        );
-                        if emit_scratch.clip_a.len() < 3 {
-                            continue;
-                        }
-                        // TEMPORARILY DISABLED - validity gates drop valid polygons.
-                        // if z < 14 && !is_valid_simple_ring_points(&emit_scratch.clip_a) {
-                        //     continue;
-                        // }
-                        if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
-                        geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], &emit_scratch.clip_a, tx, ty, z);
-                        geometry::dedup_quantized_ring(&mut emit_scratch.all_rings[ring_count]);
-                        if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
-                            continue;
-                        }
-                        close_and_orient_cw(&mut emit_scratch.all_rings[ring_count]);
-                        geometry::simplify_tile_ring(&mut emit_scratch.all_rings[ring_count], tile_simplify_tol_sq(z), 4);
-                        ring_count += 1;
-                    }
-                    // Inner rings: still need per-tile clipping (holes may be visible).
-                    for (inner, ib) in inners_src.iter().zip(inners_bbox_src) {
-                        if !geometry::bbox_intersects_clip(ib, &clip) { continue; }
-                        geometry::clip_polygon_into(
-                            inner, &clip, &mut emit_scratch.clip_a, &mut emit_scratch.clip_b,
-                        );
-                        if emit_scratch.clip_a.len() < 3 {
-                            continue;
-                        }
-                        if ring_count >= emit_scratch.all_rings.len() { emit_scratch.all_rings.push(Vec::new()); }
-                        geometry::to_tile_coords_into(&mut emit_scratch.all_rings[ring_count], &emit_scratch.clip_a, tx, ty, z);
-                        geometry::dedup_quantized_ring(&mut emit_scratch.all_rings[ring_count]);
-                        if !skip_size_filter && geometry::ring_is_subpixel(&emit_scratch.all_rings[ring_count]) {
-                            continue;
-                        }
-                        close_and_orient_ccw(&mut emit_scratch.all_rings[ring_count]);
-                        geometry::simplify_tile_ring(&mut emit_scratch.all_rings[ring_count], tile_simplify_tol_sq(z), 4);
-                        geometry::nudge_hole_off_boundary(&mut emit_scratch.all_rings[ring_count]);
-                        ring_count += 1;
-                    }
-
-                    if ring_count > 1 {
-                        ring_count = geometry::filter_holes_for_outer(&mut emit_scratch.all_rings, ring_count);
-                    }
-                    if ring_count > 1 {
-                        let (outer_ref, holes) = emit_scratch.all_rings[..ring_count].split_first_mut().expect("nonempty");
-                        for hole in holes {
-                            geometry::nudge_coincident_hole_vertices(hole, outer_ref);
-                        }
-                    }
-                    let ring_refs: SmallVec<[&[(i32, i32)]; 4]> =
-                        emit_scratch.all_rings[..ring_count].iter().map(Vec::as_slice).collect();
-                    mvt::encode_polygon(&mut emit_scratch.geom_buf, &ring_refs);
-                    if emit_scratch.geom_buf.is_empty() {
-                        continue;
-                    }
-                    let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                    push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, &emit_scratch.geom_buf, &emit_scratch.attrs_buf, records);
-                    count += 1;
-                }
-            }
-        }
-    };
-    let has_keys = preserve_vertex_keys.is_some_and(|k| !k.is_empty());
-    // Auto-disable check.
     let seam_max_zoom = if seam_max_zoom > 0
         && deferral_stats.is_some_and(|d| d.is_disabled(m.layer as u8))
     {
@@ -919,158 +746,239 @@ pub(super) fn emit_multipolygon_feature(
     } else {
         seam_max_zoom
     };
-    if seam_max_zoom > 0 {
-        // Seam-reconcile mode: single zoom loop.
-        // z <= seam_max_zoom: emit full-res geometry (assemble-phase reconciliation + tile-coord DP).
-        // z (seam_max_zoom+1)..13: normal DP simplification (with or without preserve_vertex_keys).
-        // z >= 14: full-res (existing behavior, no simplification).
-        simp_scratch.cascade_outer.clear();
-        simp_scratch.cascade_outer.extend_from_slice(outer);
-        simp_scratch.cascade_inners.clear();
-        simp_scratch.cascade_inners.extend(inners.iter().cloned());
-
-        for z in (z_lo..=z_hi).rev() {
-            if z < 14 && geometry::merc_bbox_is_subpixel(&simp_scratch.cascade_outer, z) {
-                break;
-            }
-            if z <= seam_max_zoom || z >= 14 {
-                if z <= seam_max_zoom
-                    && let Some(ds) = deferral_stats {
-                        let verts = outer.len() as u64 + inners.iter().map(|r| r.len() as u64).sum::<u64>();
-                        ds.record(m.layer as u8, verts);
-                    }
-                emit_for_zoom(z, outer, inners);
-            } else {
-                // z 9..13: DP simplification.
-                let tol = geometry::simplify_tolerance(z) * tol_scale;
-                if simp_scratch.cascade_outer.len() > 4 {
-                    if has_keys {
-                        let keys = preserve_vertex_keys.expect("checked above");
-                        emit_scratch.required_idxs.clear();
-                        let outer_end = simp_scratch.cascade_outer.len().saturating_sub(1);
-                        for (i, p) in simp_scratch.cascade_outer.iter().take(outer_end).enumerate() {
-                            if keys.contains(&merc_point_key(p)) {
-                                emit_scratch.required_idxs.push(i);
-                            }
-                        }
-                        let _ = geometry::simplify_into_with_required(
-                            &simp_scratch.cascade_outer,
-                            tol,
-                            &emit_scratch.required_idxs,
-                            &mut simp_scratch.keep_buf,
-                            &mut simp_scratch.simp_buf,
-                        );
-                    } else {
-                        let _ = geometry::simplify_into(
-                            &simp_scratch.cascade_outer,
-                            tol,
-                            &mut simp_scratch.keep_buf,
-                            &mut simp_scratch.simp_buf,
-                        );
-                    }
-                    std::mem::swap(&mut simp_scratch.cascade_outer, &mut simp_scratch.simp_buf);
-                }
-
-                for inner in &mut simp_scratch.cascade_inners {
-                    if inner.len() <= 4 {
-                        continue;
-                    }
-                    if has_keys {
-                        let keys = preserve_vertex_keys.expect("checked above");
-                        emit_scratch.required_idxs.clear();
-                        let inner_end = inner.len().saturating_sub(1);
-                        for (i, p) in inner.iter().take(inner_end).enumerate() {
-                            if keys.contains(&merc_point_key(p)) {
-                                emit_scratch.required_idxs.push(i);
-                            }
-                        }
-                        let _ = geometry::simplify_into_with_required(
-                            inner,
-                            tol,
-                            &emit_scratch.required_idxs,
-                            &mut simp_scratch.keep_buf,
-                            &mut simp_scratch.simp_buf,
-                        );
-                    } else {
-                        let _ = geometry::simplify_into(
-                            inner,
-                            tol,
-                            &mut simp_scratch.keep_buf,
-                            &mut simp_scratch.simp_buf,
-                        );
-                    }
-                    std::mem::swap(inner, &mut simp_scratch.simp_buf);
-                }
-                simp_scratch.cascade_inners.retain(|r| r.len() >= 4);
-
-                if simp_scratch.cascade_outer.len() < 4 {
-                    break;
-                }
-                emit_for_zoom(z, &simp_scratch.cascade_outer, &simp_scratch.cascade_inners);
-            }
-        }
-    } else if has_keys {
-        let keys = preserve_vertex_keys.expect("checked above");
-        simp_scratch.cascade_outer.clear();
-        simp_scratch.cascade_outer.extend_from_slice(outer);
-        simp_scratch.cascade_inners.clear();
-        simp_scratch.cascade_inners.extend(inners.iter().cloned());
-
-        for z in (z_lo..=z_hi).rev() {
-            if z < 14 {
-                if geometry::merc_bbox_is_subpixel(&simp_scratch.cascade_outer, z) {
-                    break;
-                }
-                let tol = geometry::simplify_tolerance(z) * tol_scale;
-                if simp_scratch.cascade_outer.len() > 4 {
-                    emit_scratch.required_idxs.clear();
-                    let outer_end = simp_scratch.cascade_outer.len().saturating_sub(1);
-                    for (i, p) in simp_scratch.cascade_outer.iter().take(outer_end).enumerate() {
-                        if keys.contains(&merc_point_key(p)) {
-                            emit_scratch.required_idxs.push(i);
-                        }
-                    }
-                    let _ = geometry::simplify_into_with_required(
-                        &simp_scratch.cascade_outer,
-                        tol,
-                        &emit_scratch.required_idxs,
-                        &mut simp_scratch.keep_buf,
-                        &mut simp_scratch.simp_buf,
-                    );
-                    std::mem::swap(&mut simp_scratch.cascade_outer, &mut simp_scratch.simp_buf);
-                }
-
-                for inner in &mut simp_scratch.cascade_inners {
-                    if inner.len() <= 4 {
-                        continue;
-                    }
-                    emit_scratch.required_idxs.clear();
-                    let inner_end = inner.len().saturating_sub(1);
-                    for (i, p) in inner.iter().take(inner_end).enumerate() {
-                        if keys.contains(&merc_point_key(p)) {
-                            emit_scratch.required_idxs.push(i);
-                        }
-                    }
-                    let _ = geometry::simplify_into_with_required(
-                        inner,
-                        tol,
-                        &emit_scratch.required_idxs,
-                        &mut simp_scratch.keep_buf,
-                        &mut simp_scratch.simp_buf,
-                    );
-                    std::mem::swap(inner, &mut simp_scratch.simp_buf);
-                }
-                simp_scratch.cascade_inners.retain(|r| r.len() >= 4);
-            }
-            if simp_scratch.cascade_outer.len() < 4 {
-                break;
-            }
-            emit_for_zoom(z, &simp_scratch.cascade_outer, &simp_scratch.cascade_inners);
-        }
+    let (shape_base, flags_base) = if let Some(keys) = preserve_vertex_keys.filter(|k| !k.is_empty()) {
+        quantize_polygon_pinned(outer, inners, OSM_POLYGON_MAX_Z, |p| keys.contains(&merc_point_key(p)))
     } else {
-        geometry::for_each_zoom_simplified_multi(outer, inners, z_lo, z_hi, simp_scratch, |_| tol_scale, |z, simp_outer, simp_inners| {
-            emit_for_zoom(z, simp_outer, simp_inners);
-        });
+        (quantize_polygon(outer, inners, OSM_POLYGON_MAX_Z), Vec::new())
+    };
+    if shape_base.is_empty() {
+        return 0;
+    }
+    emit_scratch.cap_events.clear();
+    fill_base_pins(&shape_base, &flags_base, &mut emit_scratch.base_pins);
+
+    let mut count: u64 = 0;
+    let mut run_for_zoom = |z: u8| {
+        encode_attrs_bytes(&mut emit_scratch.attrs_buf, &m.attrs, z);
+        let dp_tol = polygon_dp_tol(z, seam_max_zoom, tol_scale);
+        let min_area = polygon_min_area(z, m.layer);
+        let max_tile = (1u32 << z) - 1;
+
+        prepare_shape_for_zoom(&shape_base, &flags_base, z, 0, &mut emit_scratch.int_emit);
+        let Some(pre_bbox) = shape_bbox(&emit_scratch.int_emit.shape_z) else {
+            return;
+        };
+        let (pre_tx_min, pre_tx_max, pre_ty_min, pre_ty_max) = tile_range_for_rect(pre_bbox, max_tile);
+        if pre_tx_min == pre_tx_max && pre_ty_min == pre_ty_max {
+            if emit_scratch.int_emit.shape_z.len() == 1 {
+                let shape_z = std::mem::take(&mut emit_scratch.int_emit.shape_z);
+                let flags_z = std::mem::take(&mut emit_scratch.int_emit.flags_z);
+                count += emit_tier1_single_ring(
+                    osm_id,
+                    m.layer,
+                    &emit_scratch.attrs_buf,
+                    z,
+                    pre_tx_min,
+                    pre_ty_min,
+                    shape_z,
+                    flags_z,
+                    dp_tol,
+                    min_area,
+                    &mut emit_scratch.int_emit,
+                    records,
+                );
+                return;
+            }
+            if emit_scratch.int_emit.flags_z.is_empty() {
+                simplify_shape_dp(&mut emit_scratch.int_emit.shape_z, dp_tol, None);
+            } else {
+                simplify_shape_dp(
+                    &mut emit_scratch.int_emit.shape_z,
+                    dp_tol,
+                    Some(&emit_scratch.int_emit.flags_z),
+                );
+            }
+            let shape_z = std::mem::take(&mut emit_scratch.int_emit.shape_z);
+            count += emit_normalized_per_tile(
+                osm_id,
+                m.layer,
+                &emit_scratch.attrs_buf,
+                z,
+                shape_z,
+                min_area,
+                &mut emit_scratch.int_emit,
+                records,
+            );
+            return;
+        }
+
+        if emit_scratch.int_emit.flags_z.is_empty() {
+            simplify_shape_dp(&mut emit_scratch.int_emit.shape_z, dp_tol, None);
+        } else {
+            simplify_shape_dp(
+                &mut emit_scratch.int_emit.shape_z,
+                dp_tol,
+                Some(&emit_scratch.int_emit.flags_z),
+            );
+        }
+        let Some(bbox) = shape_bbox(&emit_scratch.int_emit.shape_z) else {
+            return;
+        };
+        let bbox_tiles = tile_count_for_rect(bbox, max_tile);
+        if fanout_cap > 0 && bbox_tiles > u64::from(fanout_cap) {
+            #[allow(clippy::cast_possible_truncation)]
+            emit_scratch.cap_events.push(((m.layer as usize * 15 + z as usize) as u16, bbox_tiles, osm_id));
+            return;
+        }
+
+        if bbox_tiles <= OSM_TIER2_MAX_TILES {
+            let shape_z = std::mem::take(&mut emit_scratch.int_emit.shape_z);
+            count += emit_normalized_per_tile(
+                osm_id,
+                m.layer,
+                &emit_scratch.attrs_buf,
+                z,
+                shape_z,
+                min_area,
+                &mut emit_scratch.int_emit,
+                records,
+            );
+        } else {
+            let pins = (!emit_scratch.base_pins.is_empty()).then_some(&emit_scratch.base_pins);
+            let mut emitted = 0;
+            let mut sink = |tx: u32, ty: u32, geom: &[u32]| {
+                let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                push_sort_record(tile_id, osm_id, m.layer, GeomType::Polygon, geom, &emit_scratch.attrs_buf, records);
+                emitted += 1;
+            };
+            emit_shape_for_zoom(
+                &shape_base,
+                ZoomEmitParams {
+                    z,
+                    maxz: OSM_POLYGON_MAX_Z,
+                    dp_tol,
+                    min_area,
+                    pins,
+                },
+                &mut emit_scratch.int_emit,
+                &mut sink,
+            );
+            count += emitted;
+        }
+    };
+
+    for z in (z_lo..=z_hi).rev() {
+        if z < OSM_POLYGON_MAX_Z && geometry::merc_bbox_is_subpixel(outer, z) {
+            break;
+        }
+        if seam_max_zoom > 0 && z <= seam_max_zoom
+            && let Some(ds) = deferral_stats
+        {
+            let verts = outer.len() as u64 + inners.iter().map(|r| r.len() as u64).sum::<u64>();
+            ds.record(m.layer as u8, verts);
+        }
+        run_for_zoom(z);
     }
     count
+}
+
+#[cfg(test)]
+mod landing_b_tests {
+    use super::*;
+    use i_overlay::i_float::int::point::IntPoint;
+
+    fn p(x: i32, y: i32) -> IntPoint {
+        IntPoint::new(x, y)
+    }
+
+    #[test]
+    fn landing_b_tier1_and_tier2_identical_bytes_for_single_tile_shape() {
+        let shape: Shape = normalize(
+            vec![vec![p(100, 100), p(900, 100), p(900, 900), p(100, 900)]],
+            0,
+        )
+        .pop()
+        .expect("square normalizes");
+        let shape = intersect_rect(&shape, buffered_tile_rect(0, 0), 0)
+            .pop()
+            .expect("square intersects tile");
+        let mut tier1_records = Vec::new();
+        let mut tier2_records = Vec::new();
+        let mut scratch = IntEmitScratch::new();
+        let attrs = Vec::new();
+
+        let emitted_tier1 = emit_tier1_single_ring(
+            777,
+            Layer::Buildings,
+            &attrs,
+            0,
+            0,
+            0,
+            shape.clone(),
+            Vec::new(),
+            0,
+            0,
+            &mut scratch,
+            &mut tier1_records,
+        );
+        let emitted_tier2 = emit_normalized_per_tile(
+            777,
+            Layer::Buildings,
+            &attrs,
+            0,
+            shape,
+            0,
+            &mut scratch,
+            &mut tier2_records,
+        );
+
+        assert_eq!(emitted_tier1, 1);
+        assert_eq!(emitted_tier2, 1);
+        assert_eq!(
+            tier1_records[0].data,
+            tier2_records[0].data,
+            "tier1={:?} tier2={:?}",
+            tier1_records[0].data,
+            tier2_records[0].data,
+        );
+    }
+
+    #[test]
+    fn landing_b_tier1_bowtie_escalates_to_simple_output() {
+        let shape: Shape = vec![vec![p(0, 0), p(20, 20), p(0, 20), p(20, 0)]];
+        let mut records = Vec::new();
+        let mut scratch = IntEmitScratch::new();
+        let attrs = Vec::new();
+
+        let emitted = emit_tier1_single_ring(
+            778,
+            Layer::Buildings,
+            &attrs,
+            0,
+            0,
+            0,
+            shape,
+            Vec::new(),
+            0,
+            0,
+            &mut scratch,
+            &mut records,
+        );
+
+        assert!(emitted > 0);
+        for rec in records {
+            let cmd_count = u32::from_le_bytes(rec.data[9..13].try_into().expect("cmd count")) as usize;
+            let geom_start = 13;
+            let mut cmds = Vec::with_capacity(cmd_count);
+            for idx in 0..cmd_count {
+                let offset = geom_start + idx * 4;
+                cmds.push(u32::from_le_bytes(
+                    rec.data[offset..offset + 4].try_into().expect("u32 command"),
+                ));
+            }
+            for ring in crate::geometry::decode_mvt_polygon(&cmds) {
+                assert!(crate::geometry::ring_is_simple(&ring), "non-simple ring {ring:?}");
+            }
+        }
+    }
 }

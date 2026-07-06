@@ -733,7 +733,6 @@ use emit::{
     emit_point_or_centroid, emit_line_feature, emit_polygon_feature, emit_multipolygon_feature,
     enrich_polygon_matches, unwrap_antimeridian_path, antimeridian_shifts_for_bbox,
     merc_point_key, relation_shared_vertex_keys,
-    INTERIOR_TILE_RING,
 };
 #[cfg(test)]
 use phase12::{

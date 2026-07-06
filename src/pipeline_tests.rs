@@ -213,26 +213,6 @@ fn tile_size_diag_thresholds_are_strictly_greater_than_boundaries() {
     assert_eq!(diag.oversize_severe_count, 1);
 }
 
-#[test]
-fn interior_tile_ring_buffer_matches_buffer_fraction() {
-    // INTERIOR_TILE_RING must use the same buffer as BUFFER_FRACTION expressed
-    // in extent units: 8 rendered pixels × 16 extent units/pixel = 128.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let expected_buf = (crate::geometry::BUFFER_FRACTION * crate::geometry::EXTENT) as i32;
-    assert_eq!(expected_buf, 128);
-
-    #[allow(clippy::cast_possible_truncation)]
-    let extent = crate::geometry::EXTENT as i32;
-    let expected: [(i32, i32); 5] = [
-        (-expected_buf, -expected_buf),
-        (extent + expected_buf, -expected_buf),
-        (extent + expected_buf, extent + expected_buf),
-        (-expected_buf, extent + expected_buf),
-        (-expected_buf, -expected_buf),
-    ];
-    assert_eq!(INTERIOR_TILE_RING, expected);
-}
-
 /// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
 fn boundary_labels_match(admin_level: i64) -> LayerMatch {
     LayerMatch {
@@ -1123,6 +1103,37 @@ fn decode_commands_to_abs_coords(cmds: &[u32]) -> Vec<(i32, i32)> {
     out
 }
 
+fn contains_point_near(points: &[(i32, i32)], expected: (i32, i32)) -> bool {
+    points
+        .iter()
+        .any(|&(x, y)| (x - expected.0).abs() <= 1 && (y - expected.1).abs() <= 1)
+}
+
+fn record_polygon_rings(rec: &SortRecord) -> Vec<Vec<(i32, i32)>> {
+    let lb = decode_to_layer(&rec.data);
+    geometry::decode_mvt_polygon(&lb.test_feature(0).geometry)
+}
+
+fn assert_no_backtrack_in_records(records: &[SortRecord]) {
+    assert!(!records.is_empty(), "fixture should emit at least one feature");
+    for rec in records {
+        for ring in record_polygon_rings(rec) {
+            for i in 2..ring.len() {
+                assert_ne!(ring[i], ring[i - 2], "A-B-A backtrack in {ring:?}");
+            }
+        }
+    }
+}
+
+fn assert_simple_record_rings(records: &[SortRecord]) {
+    assert!(!records.is_empty(), "fixture should emit at least one feature");
+    for rec in records {
+        for ring in record_polygon_rings(rec) {
+            assert!(geometry::ring_is_simple(&ring), "non-simple ring {ring:?}");
+        }
+    }
+}
+
 // -----------------------------------------------------------------------
 // emit_point_or_centroid tests (formerly emit_point_feature)
 // -----------------------------------------------------------------------
@@ -1482,15 +1493,16 @@ fn emit_polygon_skips_self_intersecting_ring_below_z14() {
 #[test]
 fn emit_polygon_preserve_mask_keeps_required_vertices() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let target = Point { x: 0.500_050_0, y: 0.500_010_2 };
     let coords = [
-        Point { x: 0.1, y: 0.1 },
-        Point { x: 0.3, y: 0.10001 },
-        Point { x: 0.5, y: 0.10002 }, // pin this vertex
-        Point { x: 0.7, y: 0.10001 },
-        Point { x: 0.9, y: 0.1 },
-        Point { x: 0.9, y: 0.9 },
-        Point { x: 0.1, y: 0.9 },
-        Point { x: 0.1, y: 0.1 },
+        Point { x: 0.500_010_0, y: 0.500_010_0 },
+        Point { x: 0.500_030_0, y: 0.500_010_1 },
+        target,
+        Point { x: 0.500_070_0, y: 0.500_010_1 },
+        Point { x: 0.500_090_0, y: 0.500_010_0 },
+        Point { x: 0.500_090_0, y: 0.500_090_0 },
+        Point { x: 0.500_010_0, y: 0.500_090_0 },
+        Point { x: 0.500_010_0, y: 0.500_010_0 },
     ];
 
     let mut records_plain = Vec::new();
@@ -1502,8 +1514,8 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         &coords,
         &[false; 8],
         &m,
-        0,
-        0,
+        13,
+        13,
         &mut records_plain,
         &mut scratch_plain,
         0,
@@ -1516,8 +1528,8 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         &coords,
         &[false, false, true, false, false, false, false, false],
         &m,
-        0,
-        0,
+        13,
+        13,
         &mut records_pinned,
         &mut scratch_pinned,
         0,
@@ -1528,31 +1540,38 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
 
     assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
-
-    let (_, _, plain_cmd_count) = decode_data_header(&records_plain[0].data);
-    let (_, _, pinned_cmd_count) = decode_data_header(&records_pinned[0].data);
+    let (tile_id, _) = decode_key(&records_pinned[0]);
+    let (z, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let mut target_tc = Vec::new();
+    geometry::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
+    let expected = target_tc[0];
+    let plain_lb = decode_to_layer(&records_plain[0].data);
+    let pinned_lb = decode_to_layer(&records_pinned[0].data);
+    let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
+    let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
     assert!(
-        pinned_cmd_count > plain_cmd_count,
-        "pinned polygon vertex should increase retained geometry detail (plain={plain_cmd_count}, pinned={pinned_cmd_count})"
+        contains_point_near(&pinned_pts, expected),
+        "expected {expected:?}, pinned={pinned_pts:?}, plain={plain_pts:?}",
     );
+    assert!(!contains_point_near(&plain_pts, expected));
 }
-
 #[test]
 fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let target = Point { x: 0.500_050_0, y: 0.500_010_2 };
     let outer = vec![
-        Point { x: 0.1, y: 0.1 },
-        Point { x: 0.3, y: 0.10001 },
-        Point { x: 0.5, y: 0.10002 }, // keep
-        Point { x: 0.7, y: 0.10001 },
-        Point { x: 0.9, y: 0.1 },
-        Point { x: 0.9, y: 0.9 },
-        Point { x: 0.1, y: 0.9 },
-        Point { x: 0.1, y: 0.1 },
+        Point { x: 0.500_010_0, y: 0.500_010_0 },
+        Point { x: 0.500_030_0, y: 0.500_010_1 },
+        target,
+        Point { x: 0.500_070_0, y: 0.500_010_1 },
+        Point { x: 0.500_090_0, y: 0.500_010_0 },
+        Point { x: 0.500_090_0, y: 0.500_090_0 },
+        Point { x: 0.500_010_0, y: 0.500_090_0 },
+        Point { x: 0.500_010_0, y: 0.500_010_0 },
     ];
     let inners: Vec<Vec<Point>> = Vec::new();
     let mut keys = rustc_hash::FxHashSet::default();
-    keys.insert(merc_point_key(&Point { x: 0.5, y: 0.10002 }));
+    keys.insert(merc_point_key(&target));
 
     let mut records_plain = Vec::new();
     let mut records_pinned = Vec::new();
@@ -1562,103 +1581,48 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     let mut simp_pinned = geometry::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
-        990,
-        &outer,
-        &inners,
-        None,
-        &m,
-        0,
-        0,
-        &mut records_plain,
-        &mut emit_plain,
-        &mut simp_plain,
-        0,
-        None,
-        0,
-        1.0,
+        990, &outer, &inners, None, &m, 13, 13, &mut records_plain,
+        &mut emit_plain, &mut simp_plain, 0, None, 0, 1.0,
     );
     emit_multipolygon_feature(
-        990,
-        &outer,
-        &inners,
-        Some(&keys),
-        &m,
-        0,
-        0,
-        &mut records_pinned,
-        &mut emit_pinned,
-        &mut simp_pinned,
-        0,
-        None,
-        0,
-        1.0,
+        990, &outer, &inners, Some(&keys), &m, 13, 13, &mut records_pinned,
+        &mut emit_pinned, &mut simp_pinned, 0, None, 0, 1.0,
     );
 
     assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
-    let (_, _, plain_cmd_count) = decode_data_header(&records_plain[0].data);
-    let (_, _, pinned_cmd_count) = decode_data_header(&records_pinned[0].data);
-    assert!(pinned_cmd_count > plain_cmd_count);
-
+    let (tile_id, _) = decode_key(&records_pinned[0]);
+    let (z, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let mut target_tc = Vec::new();
+    geometry::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
+    let expected = target_tc[0];
     let plain_lb = decode_to_layer(&records_plain[0].data);
     let pinned_lb = decode_to_layer(&records_pinned[0].data);
     let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
     let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
-    let mut target_tc = Vec::new();
-    geometry::to_tile_coords_into(
-        &mut target_tc,
-        &[Point { x: 0.5, y: 0.10002 }],
-        0,
-        0,
-        0,
-    );
-    let expected = target_tc[0];
-    assert!(
-        pinned_pts.contains(&expected),
-        "pinned geometry should retain required shared vertex {expected:?}"
-    );
-    assert!(
-        !plain_pts.contains(&expected),
-        "un-pinned geometry should be allowed to drop non-required vertex {expected:?}"
-    );
+    assert!(contains_point_near(&pinned_pts, expected));
+    assert!(!contains_point_near(&plain_pts, expected));
 }
-
 #[test]
 fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let target = Point { x: 0.500_050_0, y: 0.500_010_2 };
     let outer = vec![
-        Point { x: 0.1, y: 0.1 },
-        Point { x: 0.3, y: 0.10001 },
-        Point { x: 0.5, y: 0.10002 }, // should be preserved via relation-derived key
-        Point { x: 0.7, y: 0.10001 },
-        Point { x: 0.9, y: 0.1 },
-        Point { x: 0.9, y: 0.9 },
-        Point { x: 0.1, y: 0.9 },
-        Point { x: 0.1, y: 0.1 },
+        Point { x: 0.500_010_0, y: 0.500_010_0 },
+        Point { x: 0.500_030_0, y: 0.500_010_1 },
+        target,
+        Point { x: 0.500_070_0, y: 0.500_010_1 },
+        Point { x: 0.500_090_0, y: 0.500_010_0 },
+        Point { x: 0.500_090_0, y: 0.500_090_0 },
+        Point { x: 0.500_010_0, y: 0.500_090_0 },
+        Point { x: 0.500_010_0, y: 0.500_010_0 },
     ];
     let relation_members = vec![
-        MemberWay {
-            role: WayRole::Outer,
-            coords: vec![
-                Point { x: 0.0, y: 0.0 },
-                Point { x: 0.5, y: 0.10002 },
-                Point { x: 0.0, y: 0.2 },
-            ],
-        },
-        MemberWay {
-            role: WayRole::Outer,
-            coords: vec![
-                Point { x: 1.0, y: 0.0 },
-                Point { x: 0.5, y: 0.10002 },
-                Point { x: 1.0, y: 0.2 },
-            ],
-        },
+        MemberWay { role: WayRole::Outer, coords: vec![Point { x: 0.0, y: 0.0 }, target, Point { x: 0.0, y: 0.2 }] },
+        MemberWay { role: WayRole::Outer, coords: vec![Point { x: 1.0, y: 0.0 }, target, Point { x: 1.0, y: 0.2 }] },
     ];
     let shared_keys = relation_shared_vertex_keys(&relation_members);
-    assert!(
-        shared_keys.contains(&merc_point_key(&Point { x: 0.5, y: 0.10002 })),
-        "relation-derived shared key should include the target outer vertex"
-    );
+    assert!(shared_keys.contains(&merc_point_key(&target)));
 
     let mut records_plain = Vec::new();
     let mut records_pinned = Vec::new();
@@ -1668,66 +1632,165 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
     let mut simp_pinned = geometry::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
-        991,
-        &outer,
-        &[],
-        None,
-        &m,
-        0,
-        0,
-        &mut records_plain,
-        &mut emit_plain,
-        &mut simp_plain,
-        0,
-        None,
-        0,
-        1.0,
+        991, &outer, &[], None, &m, 13, 13, &mut records_plain,
+        &mut emit_plain, &mut simp_plain, 0, None, 0, 1.0,
     );
     emit_multipolygon_feature(
-        991,
-        &outer,
-        &[],
-        Some(&shared_keys),
-        &m,
-        0,
-        0,
-        &mut records_pinned,
-        &mut emit_pinned,
-        &mut simp_pinned,
-        0,
-        None,
-        0,
-        1.0,
+        991, &outer, &[], Some(&shared_keys), &m, 13, 13, &mut records_pinned,
+        &mut emit_pinned, &mut simp_pinned, 0, None, 0, 1.0,
     );
 
     assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
+    let (tile_id, _) = decode_key(&records_pinned[0]);
+    let (z, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let mut target_tc = Vec::new();
+    geometry::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
+    let expected = target_tc[0];
     let plain_lb = decode_to_layer(&records_plain[0].data);
     let pinned_lb = decode_to_layer(&records_pinned[0].data);
     let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
     let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
-    let mut target_tc = Vec::new();
-    geometry::to_tile_coords_into(
-        &mut target_tc,
-        &[Point { x: 0.5, y: 0.10002 }],
-        0,
-        0,
-        0,
-    );
-    let expected = target_tc[0];
-    assert!(
-        pinned_pts.contains(&expected),
-        "relation-derived pinned geometry should retain shared vertex {expected:?}"
-    );
-    assert!(
-        !plain_pts.contains(&expected),
-        "without relation-derived shared keys, vertex may be simplified away"
-    );
+    assert!(contains_point_near(&pinned_pts, expected));
+    assert!(!contains_point_near(&plain_pts, expected));
 }
 
-// -----------------------------------------------------------------------
-// emit_multipolygon_feature tests
-// -----------------------------------------------------------------------
+#[test]
+fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let outer_a = vec![
+        Point { x: 0.10, y: 0.10 },
+        Point { x: 0.30, y: 0.10 },
+        Point { x: 0.30, y: 0.30 },
+        Point { x: 0.10, y: 0.30 },
+        Point { x: 0.10, y: 0.10 },
+    ];
+    let hole_a = vec![vec![
+        Point { x: 0.16, y: 0.16 },
+        Point { x: 0.24, y: 0.16 },
+        Point { x: 0.24, y: 0.24 },
+        Point { x: 0.16, y: 0.24 },
+        Point { x: 0.16, y: 0.16 },
+    ]];
+    let outer_b = vec![
+        Point { x: 0.60, y: 0.60 },
+        Point { x: 0.80, y: 0.60 },
+        Point { x: 0.80, y: 0.80 },
+        Point { x: 0.60, y: 0.80 },
+        Point { x: 0.60, y: 0.60 },
+    ];
+    let hole_b = vec![vec![
+        Point { x: 0.66, y: 0.66 },
+        Point { x: 0.74, y: 0.66 },
+        Point { x: 0.74, y: 0.74 },
+        Point { x: 0.66, y: 0.74 },
+        Point { x: 0.66, y: 0.66 },
+    ]];
+
+    let mut records = Vec::new();
+    let mut emit_scratch = MultipolygonEmitScratch::new();
+    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    emit_multipolygon_feature(
+        9902, &outer_a, &hole_a, None, &m, 0, 0, &mut records,
+        &mut emit_scratch, &mut simp_scratch, 0, None, 0, 1.0,
+    );
+    emit_multipolygon_feature(
+        9903, &outer_b, &hole_b, None, &m, 0, 0, &mut records,
+        &mut emit_scratch, &mut simp_scratch, 0, None, 0, 1.0,
+    );
+    assert_eq!(records.len(), 2);
+    assert_simple_record_rings(&records);
+}
+
+#[test]
+fn landing_b_historical_infinity_classes_emit_nothing() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let zero_area_outer = vec![
+        Point { x: 0.20, y: 0.20 },
+        Point { x: 0.30, y: 0.20 },
+        Point { x: 0.40, y: 0.20 },
+        Point { x: 0.20, y: 0.20 },
+    ];
+    let large_hole = vec![vec![
+        Point { x: 0.10, y: 0.10 },
+        Point { x: 0.50, y: 0.10 },
+        Point { x: 0.50, y: 0.50 },
+        Point { x: 0.10, y: 0.50 },
+        Point { x: 0.10, y: 0.10 },
+    ]];
+    let tiny_outer = vec![
+        Point { x: 0.500_000, y: 0.500_000 },
+        Point { x: 0.500_001, y: 0.500_000 },
+        Point { x: 0.500_001, y: 0.500_001 },
+        Point { x: 0.500_000, y: 0.500_001 },
+        Point { x: 0.500_000, y: 0.500_000 },
+    ];
+    let bigger_than_outer_hole = vec![vec![
+        Point { x: 0.499_990, y: 0.499_990 },
+        Point { x: 0.500_010, y: 0.499_990 },
+        Point { x: 0.500_010, y: 0.500_010 },
+        Point { x: 0.499_990, y: 0.500_010 },
+        Point { x: 0.499_990, y: 0.499_990 },
+    ]];
+
+    let mut records = Vec::new();
+    let mut emit_scratch = MultipolygonEmitScratch::new();
+    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    emit_multipolygon_feature(
+        9904, &zero_area_outer, &large_hole, None, &m, 0, 0, &mut records,
+        &mut emit_scratch, &mut simp_scratch, 0, None, 0, 1.0,
+    );
+    emit_multipolygon_feature(
+        9905, &tiny_outer, &bigger_than_outer_hole, None, &m, 0, 0, &mut records,
+        &mut emit_scratch, &mut simp_scratch, 0, None, 0, 1.0,
+    );
+    assert!(records.is_empty());
+}
+
+#[test]
+fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
+    let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
+    let mut scratch = PolygonEmitScratch::new();
+
+    let tier1 = [
+        Point { x: 0.500_010, y: 0.500_010 },
+        Point { x: 0.500_030, y: 0.500_012 },
+        Point { x: 0.500_010, y: 0.500_010 },
+        Point { x: 0.500_090, y: 0.500_010 },
+        Point { x: 0.500_090, y: 0.500_090 },
+        Point { x: 0.500_010, y: 0.500_090 },
+        Point { x: 0.500_010, y: 0.500_010 },
+    ];
+    let mut records = Vec::new();
+    emit_polygon_feature(9910, &tier1, &[], &m, 13, 13, &mut records, &mut scratch, 0, None, 0, 1.0);
+    assert_no_backtrack_in_records(&records);
+
+    let tier2 = [
+        Point { x: 0.10, y: 0.10 },
+        Point { x: 0.12, y: 0.11 },
+        Point { x: 0.10, y: 0.10 },
+        Point { x: 0.30, y: 0.10 },
+        Point { x: 0.30, y: 0.30 },
+        Point { x: 0.10, y: 0.30 },
+        Point { x: 0.10, y: 0.10 },
+    ];
+    records.clear();
+    emit_polygon_feature(9911, &tier2, &[], &m, 4, 4, &mut records, &mut scratch, 0, None, 0, 1.0);
+    assert_no_backtrack_in_records(&records);
+
+    let tier3 = [
+        Point { x: 0.10, y: 0.10 },
+        Point { x: 0.12, y: 0.11 },
+        Point { x: 0.10, y: 0.10 },
+        Point { x: 0.90, y: 0.10 },
+        Point { x: 0.90, y: 0.90 },
+        Point { x: 0.10, y: 0.90 },
+        Point { x: 0.10, y: 0.10 },
+    ];
+    records.clear();
+    emit_polygon_feature(9912, &tier3, &[], &m, 4, 4, &mut records, &mut scratch, 0, None, 0, 1.0);
+    assert_no_backtrack_in_records(&records);
+}
 
 #[test]
 fn emit_multipolygon_empty_outer() {
@@ -2009,7 +2072,7 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
 }
 
 #[test]
-fn emit_multipolygon_invalid_outer_rejected_below_z14_but_allowed_at_z14() {
+fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
     let bowtie_outer = vec![
         Point { x: 0.500_010, y: 0.500_010 },
@@ -2027,49 +2090,22 @@ fn emit_multipolygon_invalid_outer_rejected_below_z14_but_allowed_at_z14() {
     let mut simp_14 = geometry::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
-        4051,
-        &bowtie_outer,
-        &[],
-        None,
-        &m,
-        13,
-        13,
-        &mut z13_records,
-        &mut emit_13,
-        &mut simp_13,
-        0,
-        None,
-        0,
-        1.0,
+        4051, &bowtie_outer, &[], None, &m, 13, 13, &mut z13_records,
+        &mut emit_13, &mut simp_13, 0, None, 0, 1.0,
     );
     emit_multipolygon_feature(
-        4051,
-        &bowtie_outer,
-        &[],
-        None,
-        &m,
-        14,
-        14,
-        &mut z14_records,
-        &mut emit_14,
-        &mut simp_14,
-        0,
-        None,
-        0,
-        1.0,
+        4051, &bowtie_outer, &[], None, &m, 14, 14, &mut z14_records,
+        &mut emit_14, &mut simp_14, 0, None, 0, 1.0,
     );
 
-    assert!(
-        z13_records.is_empty(),
-        "z<14 should reject invalid outer rings in multipolygon path"
-    );
-    assert_eq!(
-        z14_records.len(),
-        1,
-        "z=14 should keep invalid outer rings per current guard policy"
-    );
+    for rec in z13_records.iter().chain(&z14_records) {
+        let lb = decode_to_layer(&rec.data);
+        let rings = geometry::decode_mvt_polygon(&lb.test_feature(0).geometry);
+        for ring in rings {
+            assert!(geometry::ring_is_simple(&ring));
+        }
+    }
 }
-
 #[test]
 fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
@@ -2407,50 +2443,41 @@ fn deferral_stats_only_checks_enabled_layers() {
 
 #[test]
 fn disabled_layer_falls_back_to_simplified_path() {
-    // Build a polygon large enough to not be subpixel at z=0, with enough
-    // vertices that DP simplification reduces command count.
-    // Zigzag rectangle with small perturbations on top/bottom edges.
-    let mut coords = vec![
-        Point { x: 0.1, y: 0.2 },
-    ];
-    // Top edge with zigzag
+    let mut coords = vec![Point { x: 0.05, y: 0.05 }];
     for i in 1..15 {
         let t = i as f64 / 15.0;
         coords.push(Point {
-            x: 0.1 + t * 0.6,
-            y: 0.2 + 0.001 * if i % 2 == 0 { 1.0 } else { -1.0 },
+            x: 0.05 + t * 0.15,
+            y: 0.05 + 0.0005 * if i % 2 == 0 { 1.0 } else { -1.0 },
         });
     }
-    coords.push(Point { x: 0.7, y: 0.2 });
-    coords.push(Point { x: 0.7, y: 0.8 });
-    coords.push(Point { x: 0.1, y: 0.8 });
-    coords.push(Point { x: 0.1, y: 0.2 }); // close
+    coords.push(Point { x: 0.20, y: 0.05 });
+    coords.push(Point { x: 0.20, y: 0.20 });
+    coords.push(Point { x: 0.05, y: 0.20 });
+    coords.push(Point { x: 0.05, y: 0.05 });
 
     let m = test_layer_match(Layer::Boundaries, GeomExpect::Polygon);
 
-    // Emit at z=0 with seam_max_zoom=8 and deferral ACTIVE → full-res path.
     let mut records_fullres = Vec::new();
     let mut scratch_fullres = PolygonEmitScratch::new();
     emit_polygon_feature(
-        100, &coords, &[], &m, 0, 0,
+        100, &coords, &[], &m, 2, 2,
         &mut records_fullres, &mut scratch_fullres, 8, None, 0, 1.0,
     );
 
-    // Emit at z=0 with seam_max_zoom=8 but deferral DISABLED → simplified path.
     let ds = DeferralStats::new();
     ds.disabled[Layer::Boundaries as usize].store(true, Ordering::Relaxed);
     let mut records_disabled = Vec::new();
     let mut scratch_disabled = PolygonEmitScratch::new();
     emit_polygon_feature(
-        100, &coords, &[], &m, 0, 0,
+        100, &coords, &[], &m, 2, 2,
         &mut records_disabled, &mut scratch_disabled, 8, Some(&ds), 0, 1.0,
     );
 
-    // Emit at z=0 with seam_max_zoom=0 (no deferral at all) → simplified path.
     let mut records_nodeferral = Vec::new();
     let mut scratch_nodeferral = PolygonEmitScratch::new();
     emit_polygon_feature(
-        100, &coords, &[], &m, 0, 0,
+        100, &coords, &[], &m, 2, 2,
         &mut records_nodeferral, &mut scratch_nodeferral, 0, None, 0, 1.0,
     );
 
@@ -2462,12 +2489,10 @@ fn disabled_layer_falls_back_to_simplified_path() {
     let (_, _, cmds_disabled) = decode_data_header(&records_disabled[0].data);
     let (_, _, cmds_nodeferral) = decode_data_header(&records_nodeferral[0].data);
 
-    // Full-res should have more commands than simplified.
     assert!(
         cmds_fullres > cmds_disabled,
         "full-res ({cmds_fullres}) should have more commands than disabled ({cmds_disabled})",
     );
-    // Disabled and no-deferral should produce identical simplified output.
     assert_eq!(
         cmds_disabled, cmds_nodeferral,
         "disabled ({cmds_disabled}) should match no-deferral ({cmds_nodeferral})",

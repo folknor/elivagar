@@ -88,22 +88,6 @@ pub fn line_is_subpixel(coords: &[(i32, i32)]) -> bool {
     dx * dx + dy * dy < MIN_LINE_EXTENT_SQ
 }
 
-/// Check if a polygon ring's area is sub-pixel. Uses the shoelace formula.
-/// Returns true if the feature is too small and should be dropped.
-pub fn ring_is_subpixel(coords: &[(i32, i32)]) -> bool {
-    if coords.len() < 4 {
-        return true;
-    }
-    let mut area: i64 = 0;
-    let n = coords.len();
-    for i in 0..n {
-        let j = (i + 1) % n;
-        area += i64::from(coords[i].0) * i64::from(coords[j].1);
-        area -= i64::from(coords[j].0) * i64::from(coords[i].1);
-    }
-    area.abs() / 2 < MIN_POLY_AREA
-}
-
 // ---------------------------------------------------------------------------
 // Ring orientation (Shoelace formula)
 // ---------------------------------------------------------------------------
@@ -209,61 +193,6 @@ pub fn point_in_polygon(p: &Point, ring: &[Point]) -> bool {
     inside
 }
 
-// ---------------------------------------------------------------------------
-// Interior tile detection
-// ---------------------------------------------------------------------------
-
-/// Check if a tile (given by its buffered `ClipRect`) is entirely interior to a polygon ring.
-///
-/// Single O(n) pass combining 4-corner PIP ray-cast with edge-bbox overlap check.
-/// Returns true when no edge bbox overlaps the clip rect AND all 4 corners of the
-/// clip rect are inside the ring. Conservative: may return false for tiles that are
-/// truly interior but have a nearby edge bbox.
-pub fn tile_is_interior(ring: &[Point], clip: &ClipRect) -> bool {
-    let n = ring.len();
-    if n < 3 {
-        return false;
-    }
-
-    let corners: [(f64, f64); 4] = [
-        (clip.min_x, clip.min_y),
-        (clip.max_x, clip.min_y),
-        (clip.max_x, clip.max_y),
-        (clip.min_x, clip.max_y),
-    ];
-    let mut inside = [false; 4];
-
-    let mut j = n - 1;
-    for i in 0..n {
-        let (xi, yi) = (ring[i].x, ring[i].y);
-        let (xj, yj) = (ring[j].x, ring[j].y);
-
-        // Edge bbox overlap with clip rect - if any edge might cross the tile,
-        // the polygon boundary could intersect it, so bail out conservatively.
-        if xi.min(xj) <= clip.max_x
-            && xi.max(xj) >= clip.min_x
-            && yi.min(yj) <= clip.max_y
-            && yi.max(yj) >= clip.min_y
-        {
-            return false;
-        }
-
-        // PIP ray-casting for all 4 corners simultaneously.
-        for (k, &(cx, cy)) in corners.iter().enumerate() {
-            if (yi > cy) != (yj > cy) {
-                let intersect_x = xi + (cy - yi) / (yj - yi) * (xj - xi);
-                if cx < intersect_x {
-                    inside[k] = !inside[k];
-                }
-            }
-        }
-
-        j = i;
-    }
-
-    inside[0] && inside[1] && inside[2] && inside[3]
-}
-
 /// Check if a closed ring (first == last) has any self-intersections.
 /// Returns true if the ring is simple (no crossings). O(n²) but rings are
 /// typically small after DP simplification.
@@ -305,57 +234,6 @@ fn cross_sign(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32)) -> i8 {
     let cross = i64::from(p2.0 - p1.0) * i64::from(p3.1 - p1.1)
               - i64::from(p2.1 - p1.1) * i64::from(p3.0 - p1.0);
     if cross > 0 { 1 } else if cross < 0 { -1 } else { 0 }
-}
-
-/// Nudge hole vertices that share exact coordinates with any outer ring vertex.
-/// Displaces by 1 extent unit toward hole centroid. Prevents earcut bridge
-/// degeneration when hole and outer ring vertices coincide at tile boundaries.
-pub(crate) fn nudge_coincident_hole_vertices(hole: &mut [(i32, i32)], outer: &[(i32, i32)]) {
-    if hole.len() < 4 { return; }
-    let n = hole.len() - 1; // exclude closing vertex
-    // Compute hole centroid
-    let (mut cx, mut cy) = (0i64, 0i64);
-    for &(x, y) in &hole[..n] {
-        cx += i64::from(x);
-        cy += i64::from(y);
-    }
-    let n_i64 = i64::try_from(n).expect("hole vertex count fits i64");
-    cx /= n_i64;
-    cy /= n_i64;
-    // Nudge matching vertices 1 unit toward centroid
-    let outer_unique = &outer[..outer.len().saturating_sub(1)];
-    for h in &mut hole[..n] {
-        if outer_unique.contains(h) {
-            let dx = if cx > i64::from(h.0) { 1 } else { -1 };
-            let dy = if cy > i64::from(h.1) { 1 } else { -1 };
-            h.0 += dx;
-            h.1 += dy;
-        }
-    }
-    // Fix closing vertex
-    hole[n] = hole[0];
-}
-
-/// Nudge hole vertices that sit exactly on the clip rect boundary.
-/// After S-H clipping, both outer and inner rings produce vertices at the
-/// clip rect corners/edges. Earcut's bridge algorithm fails when hole and
-/// outer vertices are coincident. Nudging by 1 extent unit inward (1/16 pixel)
-/// breaks the coincidence without visible effect.
-pub(crate) fn nudge_hole_off_boundary(ring: &mut [(i32, i32)]) {
-    if ring.len() < 4 { return; }
-    #[allow(clippy::cast_possible_truncation)]
-    let buf: i32 = (BUFFER_FRACTION * EXTENT) as i32; // 128
-    #[allow(clippy::cast_possible_truncation)]
-    let ext: i32 = EXTENT as i32; // 4096
-    let (min, max) = (-buf, ext + buf);
-    let n = ring.len() - 1;
-    for v in &mut ring[..n] {
-        if v.0 == min { v.0 += 1; }
-        else if v.0 == max { v.0 -= 1; }
-        if v.1 == min { v.1 += 1; }
-        else if v.1 == max { v.1 -= 1; }
-    }
-    ring[n] = ring[0];
 }
 
 // ---------------------------------------------------------------------------

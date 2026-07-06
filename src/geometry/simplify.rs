@@ -275,6 +275,7 @@ pub fn for_each_zoom_simplified<F, S>(
 /// Reusable scratch buffers for [`for_each_zoom_simplified_multi`].
 /// Hoist outside tight loops to avoid per-call allocation of cascade/simplification
 /// buffers. Buffers grow to accommodate the largest polygon and stay allocated.
+#[allow(dead_code)]
 pub struct SimplifyMultiScratch {
     pub cascade_outer: Vec<Point>,
     pub cascade_inners: Vec<Vec<Point>>,

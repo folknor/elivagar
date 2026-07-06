@@ -52,14 +52,6 @@ impl ClipRect {
     }
 }
 
-/// O(1) AABB intersection test: does a Mercator bbox overlap a clip rect?
-pub fn bbox_intersects_clip(bbox: &super::projection::MercBbox, clip: &ClipRect) -> bool {
-    bbox.max_x >= clip.min_x
-        && bbox.min_x <= clip.max_x
-        && bbox.max_y >= clip.min_y
-        && bbox.min_y <= clip.max_y
-}
-
 /// Clip a linestring to an axis-aligned rectangle using Cohen-Sutherland.
 ///
 /// Returns zero or more sub-linestrings (the line may enter and exit multiple times).
