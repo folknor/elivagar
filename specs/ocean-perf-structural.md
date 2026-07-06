@@ -1,5 +1,14 @@
 # Ocean/polygon emission perf: remove the rectangle-boolean mismatch
 
+**STATUS (2026-07-06, session end):** Landing 1 LANDED at commit
+`2fab70a` - all correctness gates green, total 71493 ms (met), RSS met,
+ocean_ms 47324 vs the 30000 bound MISSED; kept with justification (see
+ledger R25) - RATIFY OR REVERT AT PICKUP. Landings 2-4 not started.
+Parity baselines: regenerate with
+`python3 scripts/oracle_sweep.py <pmtiles> <suffix> [baseline-suffix]`
+(the notes/qa tables are not committed). Bench baseline for Landing 2's
+bound: 2fab70a = total 71493 / ocean 47324 / RSS 1869 MB.
+
 **Contract:** `reference/technical-implementation-spec.md`.
 **Spawned from:** `notes/rendering-fix-log.md` R24 Landing A verdict (ocean
 perf deferred; ocean_ms 50249 at commit `6830301`) and the two independent

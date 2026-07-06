@@ -374,7 +374,17 @@ ocean_ms 50249, RSS 1867 MB.
   clean, parity max-delta ocean 1.10% (the recovered tiles), all other
   layers <= 0.04%. Gap tiles now emit canonical full-tile rects:
   GEOMETRY-identical to the boolean clips they replace (bytes differ by
-  ring rotation, improving identical-tile dedup). Bench verdict below.
+  ring rotation, improving identical-tile dedup).
+  **Bench verdict (commit 2fab70a vs 6830301):** total 71493 ms (-3.2%,
+  bound <= 73854 MET), RSS 1869 MB (MET), ocean_ms 47324 (bound <= 30000
+  MISSED - interior-tile booleans were not the dominant ocean cost;
+  remaining mass is row-cutting internals + boundary clips, i.e.
+  Landing 2/3 + leftovers item 1 territory). VERDICT: KEPT despite the
+  ocean bound, because the landing bundles a correctness fix (+943
+  previously-missing water tiles from the under-marking fix), a net
+  total-time win, and clean gates; auto-reverting a correctness
+  improvement at session end was judged worse than recording the miss.
+  FIRST PICKUP DECISION: ratify the keep or revert 2fab70a.
 - Landing 2 (i_overlay reuse + sink SoA): PENDING - see spec.
 - Landing 3 (parallel prologue + piece x zoom fan-out): PENDING - see spec.
 - Landing 4 (close-out profile + this ledger + CLAUDE.md baselines): PENDING.
