@@ -319,6 +319,21 @@ fn emit_cell(
         if shape_z.is_empty() {
             continue;
         }
+        // Brick 8 (spec 3.3 contingency, tripped by norway +34-38% coastal
+        // layer bytes): the hard window pins keep full-resolution coastline
+        // in every edge strip. Thin the pinned window runs with a second DP
+        // at tolerance 2 - interior vertices already carry no sub-dp_tol
+        // detail so they are unaffected; window runs drop to 2-unit
+        // fidelity. Cross-side seam drift is now bounded by 2 zoom units
+        // (sub-pixel at render) instead of zero; the seam-window test
+        // budget matches. Skipped when dp_tol <= 2 (seam-deferral layers
+        // stay verbatim).
+        if dp_tol > 2 {
+            thin_window_runs(&mut shape_z, cell, &mut scratch.edge_flags);
+            if shape_z.is_empty() {
+                continue;
+            }
+        }
 
         if dp_tol > 0 && is_convex_single_ring(&shape_z) {
             if !contour_area_is_below(&shape_z[0], min_area) {
@@ -813,6 +828,47 @@ fn is_full_buffered_cell(frag: &Shapes, maxz: u8, cell: PyramidCell) -> bool {
     true
 }
 
+/// Second simplification pass over a zoom-scale shape: tolerance 2, with
+/// only the ENDPOINTS of maximal in-window vertex runs pinned (window =
+/// within the 128-unit buffer of the cell's tile edge lines, in zoom
+/// coordinates). Run endpoints include the cut vertices on clip lines, so
+/// fragment bounds survive; run interiors thin to 2-unit fidelity.
+fn thin_window_runs(shape_z: &mut Shape, cell: PyramidCell, flags_buf: &mut Vec<Vec<bool>>) {
+    let left = i64::from(cell.tx) * i64::from(TILE_EXTENT_I32);
+    let right = (i64::from(cell.tx) + 1) * i64::from(TILE_EXTENT_I32);
+    let top = i64::from(cell.ty) * i64::from(TILE_EXTENT_I32);
+    let bottom = (i64::from(cell.ty) + 1) * i64::from(TILE_EXTENT_I32);
+    let buffer = i64::from(TILE_BUFFER_I32);
+
+    flags_buf.clear();
+    let mut any_window = false;
+    for ring in shape_z.iter() {
+        let n = ring.len();
+        let in_window = |p: IntPoint| {
+            near_line(i64::from(p.x), left, buffer)
+                || near_line(i64::from(p.x), right, buffer)
+                || near_line(i64::from(p.y), top, buffer)
+                || near_line(i64::from(p.y), bottom, buffer)
+        };
+        let mut flags = vec![false; n];
+        for i in 0..n {
+            if !in_window(ring[i]) {
+                continue;
+            }
+            any_window = true;
+            let prev = ring[if i == 0 { n - 1 } else { i - 1 }];
+            let next = ring[if i + 1 < n { i + 1 } else { 0 }];
+            if !in_window(prev) || !in_window(next) {
+                flags[i] = true;
+            }
+        }
+        flags_buf.push(flags);
+    }
+    if any_window {
+        simplify_shape_dp(shape_z, 2, Some(flags_buf));
+    }
+}
+
 fn build_edge_flags(
     shape: &Shape,
     params: &PyramidParams<'_>,
@@ -1183,7 +1239,15 @@ mod tests {
         };
         let left_shapes = commands_to_window_shapes(&left, window, &mut int);
         let right_shapes = commands_to_window_shapes(&right, window, &mut int);
-        assert!(xor_shapes_empty(&left_shapes, &right_shapes));
+        // With Brick 8's window thinning, cross-side seam drift is bounded
+        // by the 2-unit strip tolerance instead of zero: budget the XOR at
+        // 2 units times the window height per side.
+        let budget = 2 * 2 * u128::try_from(window.max_y - window.min_y).expect("window height");
+        let xor_area = xor_shapes_area(&left_shapes, &right_shapes);
+        assert!(
+            xor_area <= budget,
+            "seam window drift {xor_area} exceeds budget {budget}"
+        );
     }
 
     #[test]

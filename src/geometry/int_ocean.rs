@@ -83,7 +83,9 @@ where
     (shape, flags)
 }
 
-#[hotpath::measure]
+/// Test-only reference: production rescaling goes through
+/// `rescale_shape_pinned` (the pyramid always carries pin flags).
+#[cfg(test)]
 pub(crate) fn rescale_shape(shape: &Shape, s: u8) -> Shape {
     if s == 0 {
         return shape.clone();
