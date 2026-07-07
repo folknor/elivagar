@@ -37,7 +37,7 @@ landing the post-change numbers are recorded here the same way.
 | denmark | `a0fca65` | plain | 26.4s | 15.8s | 5.9s | 0.02s | 4.1s | - | 2.9 GB | 365 MB, 1.33M tiles / 170K unique |
 | norway | `b26b335` | plain | 105.0s | 70.5s | 7.8s | - | 26.5s | - | 5.9 GB | 1.38 GB, 16.3M tiles / 804K unique |
 | norway | `661cd1c` | `8d1d19ca` | 160.1s | 121.3s | 14.9s | 0.03s | 23.4s | 23.0s | 5.9 GB | 1.28 GB, 16.3M tiles / 820K unique |
-| germany | `9b51e46` | `15add85d` | 231.5s | 187.6s | 10.8s | 0.02s | 32.2s | 30.6s | 15.0 GB | 2.97 GB, 2.68M tiles / 352K unique |
+| germany | `9994e5f` | `fa3a8236` | 230.7s | 188.3s | 5.2s | 0.01s | 36.2s | 34.4s | 14.8 GB | 3.0 GB, 2.69M tiles / 347K unique |
 
 Superseded rows (kept for delta reading):
 
@@ -47,10 +47,13 @@ Superseded rows (kept for delta reading):
 | denmark | `60fd209` | `1a6ca281` | 35.0s | 18s | 2.8 GB | pre prepass-overlap |
 | norway | `95d6d52` | `38dcd3e8` | 171.1s | 131.1s | 4.1 GB | pre prepass-overlap |
 | germany | `95d6d52` | `6fc97675` | 255.9s | 213.1s | 10.3 GB | pre prepass-overlap |
+| germany | `9b51e46` | `15add85d` | 231.5s | 187.6s | 15.0 GB | pre pyramid-descent (ocean 10.8s) |
 
 Descent-era figures are plain single runs (not bench-3), so treat them
-as indicative to ~10%, not verdict-grade; the germany `9b51e46` row
-predates the descent and awaits re-measure. Spec 4 (Landings 1+2 +
+as indicative to ~10%, not verdict-grade. Germany is now re-measured
+post-descent at `9994e5f` (`fa3a8236`, bench-3, verdict-grade): the
+descent cut ocean 10.8 to 5.2s, but germany is phase12-bound (188s of
+231s wall), so wall held at 230.7s (231.5 pre-descent). Spec 4 (Landings 1+2 +
 convexity fix) took denmark from `9b51e46` 31.8s / ocean 11.8s to
 `a0fca65` 26.4s / ocean 5.9s, and norway from `661cd1c` 160.1s to
 `b26b335` 105.0s (phase12-dominated there; ocean 14.9 to 7.8s). Output
