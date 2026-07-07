@@ -49,15 +49,15 @@ ocean phase is no longer a bottleneck at any measured scale.
 Item 15 half 1 (prepass overlap): landed and kept - denmark 35.0 to 31.8s,
 germany 255.9 to 231.5s, output byte-identical. Cost recorded: germany peak
 RSS 10.3 to 15.0 GB (prepass sets now coexist with node-store build);
-removed by item 15 half 2 (P2). Half 2 - compact counters - lives in P2; it
-is a planet-scale correctness requirement, not a latency fix.
+removed by item 15 half 2, landed as part of the P2 phase12-ownership
+rewrite below.
 
 ---
 
 ## P1 - DONE (spec 4, landed `c8f8184`..`a0fca65`, kept)
 
-Spec: `notes/spec-4-tile-pyramid-descent.md`. All three landings plus
-Landing 3's splitter (pulled forward) shipped as one campaign. Result:
+The spec 4 campaign (see git history) shipped all three landings plus
+Landing 3's splitter (pulled forward) as one campaign. Result:
 denmark ocean 11.8 to 5.9s / wall 31.8 to 26.4s; norway 160.1 to 105.0s.
 Subsumed items 2, 3, 4, 5, 9, 10, 12 and Landing-3's item 1. All polygon
 layers earcut-clean (a late convexity-soundness fix, `a0fca65`, caught 10
@@ -194,69 +194,45 @@ validity check.
 
 ---
 
-## P2 - phase12 ownership rewrite
+## P2 - DONE (phase12 ownership rewrite, kept)
 
 The largest phase at every scale (51% DK, 77% NO, 83% DE of clean wall), and
-the production path (locations-on-ways, planet) lives or dies here.
+the production path (locations-on-ways, planet) lived or died here.
 
-### Item 16: way-phase ownership rewrite (the core)
+Item 16 (way-phase ownership rewrite): landed. The way phase now sends the
+whole `PrimitiveBlock` into the rayon task instead of pre-extracting owned
+`(String, String)` tags and node refs/coords into a `RawWay` on a serial
+dispatch thread first; each task classifies and resolves against borrowed
+`&str` tags directly. Every emitted feature writes into a per-worker
+`RecordSink` (key, offset, len over a payload arena) instead of a per-record
+`Box<[u8]>`, flushed straight to chunk files - the `OceanAcc`/`RelAcc`
+arena-and-flush idiom, with `RelAcc` itself converged onto `RecordSink` as
+part of the same landing. The in-flight concurrency ceiling now scales with
+`config.threads` instead of a fixed 8, closing the parallelism-cap regression
+risk raised in review. `RawWay` survives only as a `#[cfg(test)]` fixture.
 
-The way phase has a serialized ownership chain: (1) a single worker-dispatch
-thread parses every way out of every block and copies all tags to
-`(String, String)` plus collects node_refs/coords into fresh Vecs
-(phase12.rs:335-379) BEFORE rayon starts; (2) `process_raw_way` immediately
-re-borrows those Strings as `&str` and, in locations-on-ways mode, clones
-`coords_e7` again; (3) every emitted feature is a separate `Box<[u8]>`
-funneled through a channel to a drain thread pushing into `SortWriter`, which
-re-serializes into a contiguous buffer anyway. `process_raw_way` is 73/168/754
-thread-s (DK/NO/DE). `RawWay` exists because PBF element borrows do not
-outlive the callback - but the block DOES outlive it; the materialization is
-an artifact of where extraction happens, not a real lifetime constraint.
+Item 22 (selective way resolution + relation planning): landed in reduced
+form. An upfront relation-planning prepass computes the member-way set
+before the way pass runs; the way task now classifies tags under both
+`ClosedWay`/`OpenWay` before resolving coordinates and returns immediately
+for non-member ways that cannot match either geom type, skipping node-store
+lookups entirely for them. Only relation members are written to
+`way_index`. Landed narrower than the original pick: the prepass supplies
+the member-way set only, not full relation skeletons - relation blocks are
+still buffered and matched at end-of-read via `prepare_relation` exactly as
+before, so item 18 (parallelize relation prepare, Parked below) was NOT
+subsumed by this landing and remains open.
 
-Redesign: send the whole `PrimitiveBlock` into the rayon task. Inside: parse
-elements, run the block-local shared-node annotation, process ways with
-borrowed `&str` tags directly (zero tag allocation, extraction parallel
-across blocks). Emit records into a per-worker (key, offset, len) + payload
-arena - the `OceanAcc`/`RelAcc` pattern ocean and relations already use - and
-flush per-worker chunk files directly (or per-partition buffers if item 14
-lands first). The drain thread shrinks to way-index puts only.
-`SortRecord { Box<[u8]> }` stops existing on the hot path. Risks:
-block-held-alive memory (in-flight byte budget must count block bytes);
-way ordering into the way index no longer matters (`WayIndex` external-sorts
-offsets anyway). Full rewrite of the way phase's data flow; intentionally
-converges way/ocean/relation producers on one arena-and-flush idiom.
+Item 15 half 2 (compact shared-node counters): landed. `prepass_shared_nodes`
+replaced its in-memory `seen`/`shared` `FxHashSet<i64>` pair with an exact
+external merge-sort of node refs (chunk files bounded by the sort budget,
+k-way merge on read-back), removing the planet-scale `seen` set (est.
+30-60 GB) by construction on both the node-store and locations-on-ways
+paths. `shared` itself stays exact, so DP-pinning output is unchanged.
 
-### Item 22: selective way resolution + relation planning (spec decision)
-
-The strongest form of this front (relation-aware rewrite report's top pick):
-an upfront relation planning pass storing compact relation skeletons + the
-set of member way IDs actually needed; in the main way pass, classify tags
-while PBF borrows are alive, and only collect node refs / resolve coordinates
-for ways that either match Shortbread directly OR are in the relation-member
-set. Attacks work BEFORE geometry: node-store lookups (`find_chunk_in_blob` +
-`decompress_chunk` are 187 thread-s on germany's standard path), tag cloning,
-way-index writes (today geometry is stored for ALL ways when only the ~5%
-referenced by relations are read back), relation binary searches. Makes
-locations-on-ways much stronger. Explicitly subsumes item 15's counter work
-and the way-index member filtering bonus.
-
-The P2 spec decides between "16 then fold 22 in" and "straight to 22"; they
-rewire the same data flow and must not land as two separate intrusive
-rewrites of the same phase. Risks (22): relation-prepass memory at planet
-scale, exact missing-ref reporting, unusual PBF ordering, topology pinning
-solved as PART of the redesign rather than keeping the all-ways prepass
-sacred.
-
-### Item 15, half 2: compact shared-node counters (planet requirement)
-
-At planet scale `seen` holds ~2B unique node ids: an `FxHashSet<i64>` that
-size is 30-60 GB, which alone breaks the 64 GB box. Replace with rank-indexed
-2-bit saturating counters over the node store's dense rank (~600 MB planet),
-or for locations-on-ways (production - no node store) a sort-based count or
-Bloom-pair (over-pinning is SAFE, it only preserves extra vertices). This is
-a correctness-of-scale REQUIREMENT before any planet attempt, independent of
-whether 16 or 22 wins the spec decision. If item 22 lands, its relation
-planning replaces the prepass wholesale and this dissolves into it.
+Output regress-identical throughout (`--tol 0`). This unblocks item 14 (P3):
+its partitioned-sort producers can now write into the same arena idiom
+directly. See git history for the campaign.
 
 ---
 
@@ -351,8 +327,10 @@ change.
 - **Item 13 (hoist zoom-independent OSM attr encoding)**: measured 1.0-2.1s
   thread-time - noise. Drive-by only.
 - **Item 18 (parallelize relation prepare)**: `prepare_relation` is 0.1/4.0s
-  serial (DK/NO) - real but small; the P2 rewrite (especially the item-22
-  form) restructures relation preparation anyway. Revisit only if NA
+  serial (DK/NO) - real but small. P2 landed WITHOUT restructuring relation
+  preparation - the member-way prepass gates way resolution, not relation
+  parsing, and `prepare_relation` still runs unchanged at end-of-read - so
+  this item was not subsumed and remains open as stated. Revisit only if NA
   re-baseline shows it grown.
 - **Item 20 (tile-owned polygon output)** and **item 21 (OSM polygon feature
   planner)**: the radical siblings of items 14 and 10 respectively. Both
@@ -374,7 +352,8 @@ change.
 ## Non-targets (explicit, per report noted)
 
 - Sort phase itself (0.02-0.6s at every scale measured) - the cost was never
-  the sort, it is the reader (item 14) and the producers (item 16).
+  the sort, it is the reader (item 14, still open) and the producers (item 16,
+  landed in P2).
 - Micro-optimizing `simplify_shape_dp` / `rescale_shape` internals - the win
   is calling them on fragments (P1), not making them faster.
 - Tuning `SPLIT_Z` / `SPLIT_MIN_VERTICES` / chunk sizes - knob-turning on a
@@ -382,8 +361,8 @@ change.
 - `decompress_chunk` / `find_chunk_in_blob` (187 thread-s on germany!) - the
   standard-path node store cost; the production pipeline is locations-on-ways,
   which deletes the node store entirely. Treat the standard path as
-  legacy-adequate. (The item-22 form of P2 shrinks it anyway as a side
-  effect.)
+  legacy-adequate. (P2's selective-resolution landing shrinks it anyway as a
+  side effect.)
 - Do not micro-tune `match_element` (4.3-55 thread-s), `find_chunk_in_blob`,
   bitpacking, or the DP inner loops - prior attempts died on DRAM latency;
   none are structural.

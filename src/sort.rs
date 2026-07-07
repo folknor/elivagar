@@ -9,6 +9,10 @@ use std::collections::BinaryHeap;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+
+use crate::pipeline::emit::RecordTally;
 
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
 
@@ -141,6 +145,12 @@ pub struct SortWriter {
     layer_zoom_records: Box<[u64; 32 * 15]>,
     /// Per-layer-per-zoom payload bytes. Index: layer * 15 + zoom.
     layer_zoom_bytes: Box<[u64; 32 * 15]>,
+    /// Shared chunk-number allocator, active only while a concurrent producer
+    /// (the way-phase drain) writes chunks into the same directory from other
+    /// threads. When set, `flush_chunk` draws chunk numbers from this atomic so
+    /// they never collide with the numbers those producers allocate; `chunk_count`
+    /// is resynced from it on detach. `None` restores the plain self-counted path.
+    chunk_counter: Option<Arc<AtomicUsize>>,
 }
 
 impl SortWriter {
@@ -166,6 +176,7 @@ impl SortWriter {
             layer_bytes: [0; 32],
             layer_zoom_records: Box::new([0; 32 * 15]),
             layer_zoom_bytes: Box::new([0; 32 * 15]),
+            chunk_counter: None,
         })
     }
 
@@ -221,6 +232,7 @@ impl SortWriter {
             layer_bytes: [0; 32],
             layer_zoom_records: Box::new([0; 32 * 15]),
             layer_zoom_bytes: Box::new([0; 32 * 15]),
+            chunk_counter: None,
         })
     }
 
@@ -285,6 +297,50 @@ impl SortWriter {
         Ok(())
     }
 
+    /// Add a record to the buffer without updating statistics.
+    ///
+    /// Arena producers merge their own tally before pushing leftover tail records
+    /// through this path, so using `push` would double-count those tails.
+    pub(crate) fn push_untracked(&mut self, record: SortRecord) -> io::Result<()> {
+        self.buffer_bytes += record.data.len() + std::mem::size_of::<SortRecord>();
+        self.buffer.push(record);
+        if self.buffer_bytes >= self.chunk_size_bytes {
+            self.flush_chunk()?;
+        }
+        Ok(())
+    }
+
+    /// Install a shared chunk-number allocator for the window during which
+    /// other threads write chunk files into this writer's directory concurrently
+    /// (the way-phase tasks). Both this writer's `flush_chunk` and those producers
+    /// must `fetch_add` the same atomic so no two chunks claim the same number.
+    /// The counter MUST be initialized to the current `chunk_count()` by the caller.
+    pub(crate) fn attach_chunk_counter(&mut self, counter: Arc<AtomicUsize>) {
+        self.chunk_counter = Some(counter);
+    }
+
+    /// Remove the shared allocator and resync `chunk_count` from its final value,
+    /// so subsequent phases (ocean, relations) and `from_dir` see the true total.
+    /// Call only once every concurrent producer has stopped allocating.
+    pub(crate) fn detach_chunk_counter(&mut self) {
+        if let Some(counter) = self.chunk_counter.take() {
+            self.chunk_count = counter.load(std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn merge_tally(&mut self, tally: &RecordTally) {
+        self.total_records += tally.total_records;
+        self.total_record_bytes += tally.total_record_bytes;
+        for i in 0..32 {
+            self.layer_records[i] += tally.layer_records[i];
+            self.layer_bytes[i] += tally.layer_bytes[i];
+        }
+        for i in 0..(32 * 15) {
+            self.layer_zoom_records[i] += tally.layer_zoom_records[i];
+            self.layer_zoom_bytes[i] += tally.layer_zoom_bytes[i];
+        }
+    }
+
     /// Flush the in-memory buffer to a chunk file if non-empty.
     /// Call this before saving a checkpoint so `chunk_count()` is accurate.
     pub fn flush(&mut self) -> io::Result<()> {
@@ -327,13 +383,20 @@ impl SortWriter {
     /// Sort the in-memory buffer by key and write a chunk file to disk.
     #[allow(clippy::cast_possible_truncation)]
     fn flush_chunk(&mut self) -> io::Result<()> {
-        let path = self
-            .tmp_dir
-            .join(format!("chunk_{:04}.bin", self.chunk_count));
+        // With a shared allocator active, draw the number from it so this flush
+        // cannot collide with a concurrent producer's chunk; `chunk_count` is
+        // resynced on detach. Otherwise self-count as usual.
+        let chunk_no = match &self.chunk_counter {
+            Some(counter) => counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            None => self.chunk_count,
+        };
+        let path = self.tmp_dir.join(format!("chunk_{chunk_no:04}.bin"));
         write_sorted_chunk(&mut self.buffer, &path, self.compression)?;
 
         self.chunk_paths.push(path);
-        self.chunk_count += 1;
+        if self.chunk_counter.is_none() {
+            self.chunk_count += 1;
+        }
         self.buffer.clear();
         self.buffer_bytes = 0;
         Ok(())
@@ -1170,6 +1233,58 @@ mod tests {
         let reader = writer.finish().unwrap();
         let keys = collect_keys(reader);
         assert_eq!(keys, vec![5, 10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn shared_chunk_counter_avoids_collision() {
+        // Models the way phase: a producer thread allocates chunk numbers from a
+        // shared counter and hands files to the drain writer via adopt, while the
+        // writer's own flushes must draw from the SAME counter so no two chunks
+        // claim the same chunk_NNNN.bin. Regression guard for the drain-vs-task
+        // chunk-id collision.
+        let dir = tempfile::tempdir().expect("create tempdir");
+        // chunk_size 1 forces a flush on every push.
+        let mut writer = SortWriter::new(dir.path(), 1, ChunkCompression::None).unwrap();
+        let counter = Arc::new(AtomicUsize::new(writer.chunk_count()));
+        writer.attach_chunk_counter(Arc::clone(&counter));
+
+        // "Task" allocates chunk 0 and writes it, then hands it over.
+        let task_no = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(task_no, 0);
+        let task_path = dir.path().join(format!("chunk_{task_no:04}.bin"));
+        let mut task_recs = vec![SortRecord {
+            key: 10,
+            data: Box::from(10u64.to_le_bytes().as_slice()),
+        }];
+        write_sorted_chunk(&mut task_recs, &task_path, ChunkCompression::None).unwrap();
+        writer.adopt_chunk_files(vec![task_path]);
+
+        // The writer's own flushes must skip 0 (taken by the task) and use 1, 2.
+        writer
+            .push(SortRecord {
+                key: 20,
+                data: Box::from(20u64.to_le_bytes().as_slice()),
+            })
+            .unwrap();
+        writer
+            .push(SortRecord {
+                key: 30,
+                data: Box::from(30u64.to_le_bytes().as_slice()),
+            })
+            .unwrap();
+
+        writer.detach_chunk_counter();
+        assert_eq!(writer.chunk_count(), 3, "3 distinct chunks allocated");
+        for i in 0..3 {
+            assert!(
+                dir.path().join(format!("chunk_{i:04}.bin")).exists(),
+                "chunk_{i:04}.bin missing - a flush collided and overwrote it"
+            );
+        }
+
+        let reader = writer.finish().unwrap();
+        let keys = collect_keys(reader);
+        assert_eq!(keys, vec![10, 20, 30], "no records lost to a collision");
     }
 
     #[test]

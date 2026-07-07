@@ -4,16 +4,19 @@ use crate::geometry::{self, Point, merc_bbox};
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::shortbread::LayerMatch;
 use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
-use crate::sort::{self, SortRecord, SortWriter};
+use crate::sort::{self, SortWriter};
 use crate::way_index::WayIndex;
 use pbfhogg::MemberId;
 
 use super::emit::{
-    LineEmitScratch, MultipolygonEmitScratch, PointEmitScratch, antimeridian_shifts_for_bbox,
-    emit_line_feature, emit_multipolygon_feature, emit_point_or_centroid, enrich_polygon_matches,
-    relation_shared_vertex_keys, unwrap_antimeridian_path,
+    LineEmitScratch, MultipolygonEmitScratch, PointEmitScratch, RecordSink,
+    antimeridian_shifts_for_bbox, emit_line_feature, emit_multipolygon_feature,
+    emit_point_or_centroid, enrich_polygon_matches, relation_shared_vertex_keys,
+    unwrap_antimeridian_path,
 };
-use super::stats::{DeferralStats, FanoutStats, MissingRefStatsAtomic, record_fanout_from_records};
+use super::stats::{
+    DeferralStats, FanoutStats, MissingRefStatsAtomic, record_fanout_from_payload_records,
+};
 
 /// A relation with geometry resolved from way_index, ready for parallel processing.
 /// Matches are resolved eagerly in `prepare_relation` while PBF borrows are alive,
@@ -121,7 +124,7 @@ pub(super) fn prepare_relation(
 /// Modeled on `OceanAcc` in ocean.rs - each rayon worker flushes directly
 /// to disk, eliminating the `Vec<Vec<SortRecord>>` double-materialization.
 pub(super) struct RelAcc {
-    pub(super) records: Vec<SortRecord>,
+    pub(super) sink: RecordSink,
     pub(super) bytes: usize,
     pub(super) chunk_paths: Vec<std::path::PathBuf>,
     pub(super) count: u64,
@@ -139,16 +142,21 @@ impl RelAcc {
         chunk_dir: &std::path::Path,
         chunk_id: &std::sync::atomic::AtomicUsize,
     ) {
-        if self.records.is_empty() {
+        if self.sink.records.is_empty() {
             return;
         }
         let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
-        sort::write_sorted_chunk(&mut self.records, &path, self.compression)
-            .expect("relation chunk write failed");
+        sort::write_sorted_payload_chunk(
+            &mut self.sink.records,
+            &self.sink.payload,
+            &path,
+            self.compression,
+        )
+        .expect("relation chunk write failed");
         self.chunk_paths.push(path);
-        self.count += self.records.len() as u64;
-        self.records.clear();
+        self.count += self.sink.records.len() as u64;
+        self.sink.clear_payload();
         self.bytes = 0;
     }
 }
@@ -178,7 +186,7 @@ pub(super) fn flush_rel_batch(
         .into_par_iter()
         .fold(
             || RelAcc {
-                records: Vec::new(),
+                sink: RecordSink::new(),
                 bytes: 0,
                 chunk_paths: Vec::new(),
                 count: 0,
@@ -190,14 +198,14 @@ pub(super) fn flush_rel_batch(
                 fanout: FanoutStats::new(),
             },
             |mut acc, rel| {
-                let before = acc.records.len();
+                let before = acc.sink.records.len();
                 process_prepared_relation_into(
                     rel,
                     min_zoom,
                     max_zoom,
                     seam_reconcile_layers,
                     deferral_stats,
-                    &mut acc.records,
+                    &mut acc.sink,
                     &mut acc.point_emit,
                     &mut acc.line_emit,
                     &mut acc.multipolygon_emit,
@@ -206,16 +214,19 @@ pub(super) fn flush_rel_batch(
                     polygon_simplify_factor,
                 );
                 // Track fanout for this relation's records.
-                record_fanout_from_records(&acc.records[before..], &mut acc.fanout);
+                record_fanout_from_payload_records(&acc.sink.records[before..], &mut acc.fanout);
                 // Harvest cap events from multipolygon emit scratch.
+                // `emit_multipolygon_feature` only clears cap_events when it runs,
+                // so a relation that emits only points/lines would re-harvest the
+                // previous relation's events across this fold accumulator. Clear
+                // after harvesting to count each cap event exactly once.
                 for &(idx, tiles, oid) in &acc.multipolygon_emit.cap_events {
                     let layer = idx as usize / 15;
                     let zoom = idx as usize % 15;
                     acc.fanout.record_cap(layer, zoom, tiles, oid);
                 }
-                for r in &acc.records[before..] {
-                    acc.bytes += r.data.len() + std::mem::size_of::<SortRecord>();
-                }
+                acc.multipolygon_emit.cap_events.clear();
+                acc.bytes = acc.sink.bytes();
                 if acc.bytes >= chunk_size {
                     acc.flush(&chunk_dir, &chunk_id);
                 }
@@ -226,7 +237,7 @@ pub(super) fn flush_rel_batch(
         // to avoid creating many tiny chunk files (one per rayon accumulator).
         .reduce(
             || RelAcc {
-                records: Vec::new(),
+                sink: RecordSink::new(),
                 bytes: 0,
                 chunk_paths: Vec::new(),
                 count: 0,
@@ -240,7 +251,15 @@ pub(super) fn flush_rel_batch(
             |mut a, mut b| {
                 a.chunk_paths.extend(b.chunk_paths);
                 a.count += b.count;
-                a.records.append(&mut b.records);
+                let base = a.sink.payload.len();
+                a.sink.payload.append(&mut b.sink.payload);
+                a.sink.records.extend(
+                    b.sink
+                        .records
+                        .drain(..)
+                        .map(|(key, off, len)| (key, off + base, len)),
+                );
+                a.sink.tally.merge(&b.sink.tally);
                 a.bytes += b.bytes;
                 a.fanout.merge(&b.fanout);
                 a
@@ -249,23 +268,29 @@ pub(super) fn flush_rel_batch(
 
     fanout_stats.merge(&result.fanout);
     sort_writer.adopt_chunk_files(result.chunk_paths);
+    sort_writer.merge_tally(&result.sink.tally);
     let mut count = result.count;
     // Push remaining records (below chunk_size threshold) through sort_writer's
     // normal buffering, so they merge with way records instead of creating
     // tiny standalone chunk files.
     #[allow(clippy::cast_possible_truncation)]
     {
-        count += result.records.len() as u64;
+        count += result.sink.records.len() as u64;
     }
-    for record in result.records {
-        sort_writer.push(record).expect("sort push failed");
+    for (key, off, len) in result.sink.records {
+        sort_writer
+            .push_untracked(sort::SortRecord {
+                key,
+                data: result.sink.payload[off..off + len].into(),
+            })
+            .expect("sort push failed");
     }
     count
 }
 
 /// Process a prepared relation's geometry into an external buffer (CPU-bound).
 /// Called from rayon worker threads via `RelAcc` fold. Reuses the caller's
-/// `records` vec and `simp_scratch` to avoid per-relation allocation.
+/// `sink` and `simp_scratch` to avoid per-relation allocation.
 #[hotpath::measure]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
@@ -275,7 +300,7 @@ pub(super) fn process_prepared_relation_into(
     max_zoom: u8,
     seam_reconcile_layers: &[u8],
     deferral_stats: &DeferralStats,
-    records: &mut Vec<SortRecord>,
+    sink: &mut RecordSink,
     point_emit: &mut PointEmitScratch,
     line_emit: &mut LineEmitScratch,
     multipolygon_emit: &mut MultipolygonEmitScratch,
@@ -331,7 +356,7 @@ pub(super) fn process_prepared_relation_into(
                                 m,
                                 z_lo,
                                 z_hi,
-                                records,
+                                sink,
                                 multipolygon_emit,
                                 simp_scratch,
                                 sr,
@@ -366,7 +391,7 @@ pub(super) fn process_prepared_relation_into(
                                 m,
                                 z_lo,
                                 z_hi,
-                                records,
+                                sink,
                                 multipolygon_emit,
                                 simp_scratch,
                                 sr,
@@ -398,7 +423,7 @@ pub(super) fn process_prepared_relation_into(
                         m,
                         z_lo,
                         z_hi,
-                        records,
+                        sink,
                         point_emit,
                     );
                 }
@@ -423,7 +448,7 @@ pub(super) fn process_prepared_relation_into(
                                 m,
                                 z_lo,
                                 z_hi,
-                                records,
+                                sink,
                                 line_emit,
                             );
                         } else {
@@ -441,7 +466,7 @@ pub(super) fn process_prepared_relation_into(
                                 m,
                                 z_lo,
                                 z_hi,
-                                records,
+                                sink,
                                 line_emit,
                             );
                         }

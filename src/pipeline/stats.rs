@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use smallvec::SmallVec;
 
 use crate::shortbread;
-use crate::sort::{self, SortRecord};
+use crate::sort;
 
 pub(super) const TILE_OVERSIZE_WARN_BYTES: u64 = 500 * 1024;
 pub(super) const TILE_OVERSIZE_SEVERE_BYTES: u64 = 1024 * 1024;
@@ -327,29 +327,29 @@ impl FanoutStats {
     }
 }
 
-/// Extract tiles-touched per (layer, zoom) from a set of sort records
+/// Extract tiles-touched per (layer, zoom) from a set of payload sort records
 /// belonging to a single feature and record into FanoutStats.
-pub(super) fn record_fanout_from_records(records: &[SortRecord], stats: &mut FanoutStats) {
+pub(super) fn record_fanout_from_payload_records(
+    records: &[sort::PayloadRecord],
+    stats: &mut FanoutStats,
+) {
     if records.is_empty() {
         return;
     }
-    // Count records per (layer, zoom). Use a small inline array for the
-    // common case (few distinct layer×zoom pairs per feature).
-    // Format: (layer_zoom_idx, count).
     let mut counts: SmallVec<[(u16, u32); 8]> = SmallVec::new();
-    for r in records {
-        let layer = sort::layer_from_key(r.key) as usize;
-        let tile_id = sort::tile_id_from_key(r.key);
+    for &(key, _, _) in records {
+        let layer = sort::layer_from_key(key) as usize;
+        let tile_id = sort::tile_id_from_key(key);
         let zoom = sort::zoom_from_tile_id(tile_id) as usize;
         if layer >= 32 || zoom >= 15 {
             continue;
         }
         #[allow(clippy::cast_possible_truncation)]
-        let key = (layer * 15 + zoom) as u16;
-        if let Some(entry) = counts.iter_mut().find(|e| e.0 == key) {
+        let layer_zoom = (layer * 15 + zoom) as u16;
+        if let Some(entry) = counts.iter_mut().find(|e| e.0 == layer_zoom) {
             entry.1 += 1;
         } else {
-            counts.push((key, 1));
+            counts.push((layer_zoom, 1));
         }
     }
     for &(key, tiles) in &counts {

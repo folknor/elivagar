@@ -9,19 +9,20 @@ use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter};
 use crate::way_index::WayIndex;
 use crate::wire_format::encode_attrs_bytes;
-use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, PrimitiveBlock};
+use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, MemberId, PrimitiveBlock, Way};
 
 use super::emit::{
-    LineEmitScratch, PointEmitScratch, PolygonEmitScratch, antimeridian_shifts_for_bbox,
-    emit_line_feature, emit_point_or_centroid, emit_polygon_feature, enrich_polygon_matches,
-    push_sort_record, unwrap_antimeridian_path,
+    LineEmitScratch, PointEmitScratch, PolygonEmitScratch, RecordSink,
+    antimeridian_shifts_for_bbox, emit_line_feature, emit_point_or_centroid, emit_polygon_feature,
+    enrich_polygon_matches, push_sort_record, unwrap_antimeridian_path,
 };
 use super::relations::{
     PreparedRelation, REL_BATCH_BUDGET_DEFAULT, REL_BATCH_SIZE, estimate_prepared_rel_bytes,
     flush_rel_batch, prepare_relation,
 };
 use super::stats::{
-    DeferralStats, FanoutStats, MissingRefStatsAtomic, Phase12Stats, record_fanout_from_records,
+    DeferralStats, FanoutStats, MissingRefStatsAtomic, Phase12Stats,
+    record_fanout_from_payload_records,
 };
 use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb};
 
@@ -209,10 +210,23 @@ pub(super) fn phase_read_and_process(
     // there. If the prepass outlives the node phase, the join blocks and the
     // overlap is partial; the produced set is identical either way.
     let prepass_pbf_path = config.pbf_path.clone();
+    let prepass_tmp_dir = config.tmp_dir.join("shared_node_prepass");
+    let prepass_sort_budget = sort_chunk_budget;
     let mut prepass_handle: Option<std::thread::JoinHandle<Result<FxHashSet<i64>, PipelineError>>> =
         Some(std::thread::spawn(move || {
-            prepass_shared_nodes(&prepass_pbf_path, decode_threads)
+            prepass_shared_nodes(
+                &prepass_pbf_path,
+                decode_threads,
+                &prepass_tmp_dir,
+                prepass_sort_budget,
+            )
         }));
+    let relation_plan_pbf_path = config.pbf_path.clone();
+    let mut relation_plan_handle: Option<
+        std::thread::JoinHandle<Result<RelationPlan, PipelineError>>,
+    > = Some(std::thread::spawn(move || {
+        prepass_relation_plan(&relation_plan_pbf_path, decode_threads)
+    }));
 
     let mut node_records: Vec<SortRecord> = Vec::new();
 
@@ -298,12 +312,12 @@ pub(super) fn phase_read_and_process(
                     }
 
                     let (btx, brx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(1);
-                    // Capacity must be >= MAX_INFLIGHT: rayon tasks block on send()
+                    // Capacity must be at least the in-flight task ceiling: rayon tasks block on send()
                     // while holding a rayon thread. If capacity < inflight tasks,
                     // blocked senders tie up all rayon threads → worker (which runs
                     // inside rayon::in_place_scope) can't make progress → deadlock.
-                    let (rtx, rrx) =
-                        std::sync::mpsc::sync_channel::<Vec<ProcessedWay>>(MAX_INFLIGHT);
+                    let max_inflight = config.threads.max(8);
+                    let (rtx, rrx) = std::sync::mpsc::sync_channel::<WayTaskResult>(max_inflight);
                     let nr_clone = nr.clone();
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
                     let missing_ref_stats_clone = std::sync::Arc::clone(&missing_ref_stats);
@@ -313,6 +327,20 @@ pub(super) fn phase_read_and_process(
                     let srl = config.seam_reconcile_layers;
                     let fcs = config.fanout_caps;
                     let psf = config.polygon_simplify_factor;
+                    let way_chunk_dir = config.tmp_dir.join(SORT_CHUNKS_DIR);
+                    let way_chunk_size = sort_chunk_budget;
+                    let way_chunk_compression = config.compress_sort_chunks;
+                    let way_chunk_id = std::sync::Arc::new(AtomicUsize::new(
+                        sort_writer
+                            .as_ref()
+                            .expect("sort_writer taken before way worker")
+                            .chunk_count(),
+                    ));
+                    // The drain writer flushes leftover tails into the same chunk
+                    // directory concurrently with the way tasks. Share ONE chunk-number
+                    // allocator between them so a drain flush and a task flush never
+                    // claim the same chunk_NNNN.bin.
+                    let drain_chunk_id = std::sync::Arc::clone(&way_chunk_id);
                     // First point where the shared-node set is needed: join
                     // the prepass thread spawned before the node phase.
                     let gsn: std::sync::Arc<FxHashSet<i64>> = std::sync::Arc::new(
@@ -324,10 +352,19 @@ pub(super) fn phase_read_and_process(
                                 PipelineError("shared-node prepass thread panicked".to_string())
                             })??,
                     );
+                    let relation_plan = std::sync::Arc::new(
+                        relation_plan_handle
+                            .take()
+                            .expect("relation prepass joined twice")
+                            .join()
+                            .map_err(|_| {
+                                PipelineError("relation prepass thread panicked".to_string())
+                            })??,
+                    );
+                    let relation_plan_clone = std::sync::Arc::clone(&relation_plan);
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
-                    const MAX_INFLIGHT: usize = 8;
                     const WAY_OUTPUT_MULTIPLIER: usize = 10;
                     let way_budget = if config.way_inflight_budget > 0 {
                         config.way_inflight_budget
@@ -337,12 +374,16 @@ pub(super) fn phase_read_and_process(
                         DEFAULT_WAY_BUDGET
                     };
                     worker_handle = Some(std::thread::spawn(move || {
-                        use rayon::prelude::*;
                         // Take refs outside loop - Copy into each move closure,
                         // avoids Arc::clone per spawn.
                         let nr_ref: Option<&NodeStoreReader> = nr_clone.as_deref();
                         let mr_ref = &*missing_ref_stats_clone;
                         let ds_ref = &*deferral_stats_clone;
+                        let rp_ref = &*relation_plan_clone;
+                        let chunk_dir_base = way_chunk_dir;
+                        let chunk_size = way_chunk_size;
+                        let chunk_compression = way_chunk_compression;
+                        let chunk_id_base = way_chunk_id;
                         // Byte-budgeted throttle: (count, estimated_bytes).
                         // Condvar wakes dispatcher when a task completes.
                         let inflight = std::sync::Mutex::new((0usize, 0usize));
@@ -351,55 +392,9 @@ pub(super) fn phase_read_and_process(
                         let cvar_ref = &inflight_cvar;
                         rayon::in_place_scope(|s| {
                             while let Ok(block) = brx.recv() {
-                                let raw_ways: Vec<RawWay> = block
-                                    .elements()
-                                    .filter_map(|e| match e {
-                                        Element::Way(way) => {
-                                            let tags: Vec<(String, String)> = way
-                                                .tags()
-                                                .map(|(k, v)| (k.to_string(), v.to_string()))
-                                                .collect();
-                                            if nr_ref.is_some() {
-                                                // Standard PBF: collect node refs
-                                                let node_refs: Vec<i64> = way.refs().collect();
-                                                if node_refs.is_empty() {
-                                                    return None;
-                                                }
-                                                Some(RawWay {
-                                                    way_id: way.id(),
-                                                    node_refs,
-                                                    preserve_node_refs: Vec::new(),
-                                                    coords_e7: Vec::new(),
-                                                    tags,
-                                                })
-                                            } else {
-                                                // Locations-on-ways: collect refs + coords directly
-                                                let node_refs: Vec<i64> = way.refs().collect();
-                                                let coords_e7: Vec<(i32, i32)> = way
-                                                    .node_locations()
-                                                    .map(|loc| {
-                                                        (loc.decimicro_lat(), loc.decimicro_lon())
-                                                    })
-                                                    .collect();
-                                                if coords_e7.is_empty() {
-                                                    return None;
-                                                }
-                                                Some(RawWay {
-                                                    way_id: way.id(),
-                                                    node_refs,
-                                                    preserve_node_refs: Vec::new(),
-                                                    coords_e7,
-                                                    tags,
-                                                })
-                                            }
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect();
-                                let mut raw_ways = raw_ways;
-                                annotate_block_shared_node_refs(&mut raw_ways);
-                                annotate_global_shared_node_refs(&mut raw_ways, &gsn);
-                                let block_bytes = estimate_raw_ways_bytes(&raw_ways);
+                                let plans = build_way_plans(&block, &gsn);
+                                let block_bytes =
+                                    block.decompressed_size() + estimate_way_plans_bytes(&plans);
                                 let block_cost = block_bytes * WAY_OUTPUT_MULTIPLIER;
                                 // Wait for capacity: count limit and byte budget.
                                 // Always allow at least one task - a single block that
@@ -409,7 +404,7 @@ pub(super) fn phase_read_and_process(
                                     let mut guard = inflight_ref.lock().expect("inflight lock");
                                     guard = inflight_cvar
                                         .wait_while(guard, |&mut (count, bytes)| {
-                                            count >= MAX_INFLIGHT
+                                            count >= max_inflight
                                                 || (count > 0 && bytes + block_cost > way_budget)
                                         })
                                         .expect("condvar wait");
@@ -422,18 +417,35 @@ pub(super) fn phase_read_and_process(
                                     );
                                 }
                                 let tx = rtx.clone();
+                                let chunk_dir = chunk_dir_base.clone();
+                                let chunk_id = std::sync::Arc::clone(&chunk_id_base);
                                 #[allow(clippy::let_underscore_must_use)]
                                 s.spawn(move |_| {
-                                    let results: Vec<ProcessedWay> = raw_ways
-                                        .into_par_iter()
-                                        .map(|raw| {
-                                            process_raw_way(
-                                                &raw, nr_ref, mz, xz, &srl, ds_ref, mr_ref, &fcs,
-                                                psf,
-                                            )
-                                        })
-                                        .collect();
-                                    let _ = tx.send(results);
+                                    let mut acc = WayAcc::new(chunk_compression);
+                                    let mut plans = plans.into_iter();
+                                    for element in block.elements() {
+                                        let Element::Way(way) = element else {
+                                            continue;
+                                        };
+                                        let Some(plan) = plans.next() else {
+                                            continue;
+                                        };
+                                        debug_assert_eq!(
+                                            plan.way_id,
+                                            way.id(),
+                                            "way plan misaligned with block ways"
+                                        );
+                                        let is_member = rp_ref.needed_ways.contains(&plan.way_id);
+                                        process_planned_way_into(
+                                            &way, &plan, is_member, nr_ref, mz, xz, &srl, ds_ref,
+                                            mr_ref, &fcs, psf, &mut acc,
+                                        );
+                                        if acc.bytes >= chunk_size {
+                                            acc.flush(&chunk_dir, &chunk_id);
+                                        }
+                                    }
+                                    let result = acc.finish();
+                                    let _ = tx.send(result);
                                     let mut guard = inflight_ref.lock().expect("inflight lock");
                                     guard.0 -= 1;
                                     guard.1 -= block_cost;
@@ -452,12 +464,16 @@ pub(super) fn phase_read_and_process(
                     let ds_drain = std::sync::Arc::clone(&deferral_stats);
                     let srl_drain = config.seam_reconcile_layers;
                     drain_handle = Some(std::thread::spawn(move || {
+                        sw.attach_chunk_counter(drain_chunk_id);
                         let mut count: u64 = 0;
                         let mut fanout = FanoutStats::new();
                         while let Ok(results) = rrx.recv() {
-                            count += drain_processed_ways(results, &mut wi, &mut sw, &mut fanout);
+                            count += drain_way_task_result(results, &mut wi, &mut sw, &mut fanout);
                             ds_drain.check_budgets(&srl_drain);
                         }
+                        // All tasks have finished allocating (rtx dropped closed the
+                        // channel); resync chunk_count so ocean/relations/from_dir agree.
+                        sw.detach_chunk_counter();
                         (wi, sw, count, fanout)
                     }));
 
@@ -489,6 +505,13 @@ pub(super) fn phase_read_and_process(
             handle
                 .join()
                 .map_err(|_| PipelineError("shared-node prepass thread panicked".to_string()))??,
+        );
+    }
+    if let Some(handle) = relation_plan_handle.take() {
+        drop(
+            handle
+                .join()
+                .map_err(|_| PipelineError("relation prepass thread panicked".to_string()))??,
         );
     }
 
@@ -732,9 +755,9 @@ pub(super) fn process_node(
 // way_index.put() + sort_writer.push().
 // ---------------------------------------------------------------------------
 
-/// Raw way data copied from PBF on the main thread. Tags are owned because
-/// PBF element borrows don't survive the callback (same pattern as PreparedRelation).
-// Tags use String not compact-string: short-lived, mimalloc handles small allocs efficiently.
+/// Legacy raw way fixture used by phase12 unit tests.
+#[cfg(test)]
+#[allow(dead_code)]
 pub(super) struct RawWay {
     pub(super) way_id: i64,
     pub(super) node_refs: Vec<i64>,
@@ -742,9 +765,12 @@ pub(super) struct RawWay {
     pub(super) coords_e7: Vec<(i32, i32)>,
     pub(super) tags: Vec<(String, String)>,
 }
+#[cfg(test)]
 const _: () = assert!(std::mem::size_of::<RawWay>() == 104);
 
 /// Estimate heap bytes for a block of raw ways (struct + node_refs + tag strings).
+#[cfg(test)]
+#[allow(dead_code)]
 pub(super) fn estimate_raw_ways_bytes(ways: &[RawWay]) -> usize {
     ways.iter()
         .map(|w| {
@@ -758,63 +784,116 @@ pub(super) fn estimate_raw_ways_bytes(ways: &[RawWay]) -> usize {
         .sum()
 }
 
+/// The node refs of a way that participate in shared-junction detection.
+///
+/// Ways with <= 2 refs never contribute or receive a pin. For a closed ring the
+/// duplicated closing vertex is dropped (it is the same node as the first). For
+/// an open line ALL nodes count, endpoints included - shared endpoints are where
+/// ways connect and must be pinned so DP simplification does not move them to
+/// different positions in each way (which creates visible gaps at junctions).
+fn shared_scan_slice(node_refs: &[i64]) -> &[i64] {
+    if node_refs.len() <= 2 {
+        return &[];
+    }
+    let is_closed = node_refs.len() >= 4 && node_refs.first() == node_refs.last();
+    if is_closed {
+        &node_refs[..node_refs.len() - 1]
+    } else {
+        node_refs
+    }
+}
+
+/// Count block-local node-ref occurrences across every way's scan slice.
+fn shared_node_counts<'a>(ways: impl Iterator<Item = &'a [i64]>) -> FxHashMap<i64, u8> {
+    let mut counts: FxHashMap<i64, u8> = FxHashMap::default();
+    for refs in ways {
+        for &node_id in shared_scan_slice(refs) {
+            counts
+                .entry(node_id)
+                .and_modify(|c| *c = c.saturating_add(1))
+                .or_insert(1);
+        }
+    }
+    counts
+}
+
+/// Compute the preserve set for one way: refs that are shared by 2+ ways in this
+/// block, or (when `global_shared` is supplied) known cross-block junctions.
+fn preserve_refs_for_way(
+    node_refs: &[i64],
+    counts: &FxHashMap<i64, u8>,
+    global_shared: Option<&FxHashSet<i64>>,
+) -> Vec<i64> {
+    let mut preserve: Vec<i64> = Vec::new();
+    for &node_id in shared_scan_slice(node_refs) {
+        let shared = counts.get(&node_id).is_some_and(|&c| c >= 2)
+            || global_shared.is_some_and(|g| g.contains(&node_id));
+        if shared && !preserve.contains(&node_id) {
+            preserve.push(node_id);
+        }
+    }
+    preserve
+}
+
 /// Mark interior node refs that are shared by at least 2 ways in the same block.
 ///
 /// This preserves common junction vertices during DP simplification without global
 /// topology indexing. Block-local detection catches most local road intersections
 /// because OSM PBF primitive blocks are spatially clustered.
 /// Limitation: cross-block shared nodes are intentionally not detected here.
+///
+/// Delegates to the same `shared_node_counts` / `preserve_refs_for_way` helpers
+/// as the production `build_way_plans`, so this test wrapper cannot drift from
+/// the code path the pipeline actually runs.
+#[cfg(test)]
 pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
-    let mut counts: FxHashMap<i64, u8> = FxHashMap::default();
-    for w in raw_ways.iter() {
-        if w.node_refs.len() <= 2 {
-            continue;
-        }
-        let is_closed = w.node_refs.len() >= 4 && w.node_refs.first() == w.node_refs.last();
-        if is_closed {
-            // Closed ring: shared-edge vertices can appear anywhere in the ring
-            // except the duplicated closing vertex.
-            for &node_id in &w.node_refs[..w.node_refs.len() - 1] {
-                counts
-                    .entry(node_id)
-                    .and_modify(|c| *c = c.saturating_add(1))
-                    .or_insert(1);
-            }
-        } else {
-            // Open line: count ALL nodes including endpoints.
-            // Endpoints are where ways connect - if two ways share an endpoint,
-            // it must be pinned so DP simplification doesn't move it to different
-            // positions in each way (which creates visible gaps at junctions).
-            for &node_id in &w.node_refs {
-                counts
-                    .entry(node_id)
-                    .and_modify(|c| *c = c.saturating_add(1))
-                    .or_insert(1);
-            }
-        }
-    }
-
+    let counts = shared_node_counts(raw_ways.iter().map(|w| w.node_refs.as_slice()));
     for w in raw_ways.iter_mut() {
-        w.preserve_node_refs.clear();
-        if w.node_refs.len() <= 2 {
-            continue;
-        }
-        let is_closed = w.node_refs.len() >= 4 && w.node_refs.first() == w.node_refs.last();
-        let scan_slice = if is_closed {
-            &w.node_refs[..w.node_refs.len() - 1]
-        } else {
-            // Scan all nodes including endpoints - shared endpoints must be
-            // pinned to prevent DP from creating gaps at way junctions.
-            &w.node_refs[..]
-        };
-        for &node_id in scan_slice {
-            if counts.get(&node_id).is_some_and(|&c| c >= 2)
-                && !w.preserve_node_refs.contains(&node_id)
-            {
-                w.preserve_node_refs.push(node_id);
-            }
-        }
+        w.preserve_node_refs = preserve_refs_for_way(&w.node_refs, &counts, None);
     }
+}
+
+pub(super) struct WayPlan {
+    pub(super) way_id: i64,
+    pub(super) node_refs: Vec<i64>,
+    pub(super) preserve_node_refs: Vec<i64>,
+}
+
+fn estimate_way_plans_bytes(plans: &[WayPlan]) -> usize {
+    plans
+        .iter()
+        .map(|p| {
+            std::mem::size_of::<WayPlan>() + p.node_refs.len() * 8 + p.preserve_node_refs.len() * 8
+        })
+        .sum()
+}
+
+fn build_way_plans(block: &PrimitiveBlock, global_shared: &FxHashSet<i64>) -> Vec<WayPlan> {
+    let mut plans: Vec<WayPlan> = block
+        .elements()
+        .filter_map(|element| {
+            let Element::Way(way) = element else {
+                return None;
+            };
+            // Emit a plan for EVERY way element (even one with zero node refs).
+            // The task loop below zips this list positionally against
+            // `block.ways()`; dropping any way here would shift every following
+            // plan onto the wrong way. Empty-ref ways resolve to empty coords and
+            // are dropped inside `process_planned_way_into`.
+            Some(WayPlan {
+                way_id: way.id(),
+                node_refs: way.refs().collect(),
+                preserve_node_refs: Vec::new(),
+            })
+        })
+        .collect();
+
+    let counts = shared_node_counts(plans.iter().map(|p| p.node_refs.as_slice()));
+    for plan in &mut plans {
+        plan.preserve_node_refs =
+            preserve_refs_for_way(&plan.node_refs, &counts, Some(global_shared));
+    }
+    plans
 }
 
 /// First pass over the PBF: count node ref occurrences across all ways.
@@ -827,40 +906,244 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
 fn prepass_shared_nodes(
     pbf_path: &std::path::Path,
     decode_threads: usize,
+    tmp_dir: &std::path::Path,
+    chunk_budget: usize,
 ) -> Result<FxHashSet<i64>, PipelineError> {
     let start = std::time::Instant::now();
+    match std::fs::remove_dir_all(tmp_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(PipelineError(format!(
+                "prepass: remove old scratch dir failed: {e}"
+            )));
+        }
+    }
+    std::fs::create_dir_all(tmp_dir)
+        .map_err(|e| PipelineError(format!("prepass: create scratch dir failed: {e}")))?;
     let reader = ElementReader::from_path(pbf_path)
         .map_err(|e| PipelineError(format!("prepass: failed to open PBF: {e}")))?
         .with_blob_filter(BlobFilter::only_ways())
         .decode_threads(decode_threads);
 
-    let mut seen: FxHashSet<i64> = FxHashSet::default();
-    let mut shared: FxHashSet<i64> = FxHashSet::default();
+    let mut refs: Vec<u64> = Vec::with_capacity((chunk_budget / 8).clamp(1024, 8_000_000));
+    let mut chunk_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut total_refs: u64 = 0;
+    let flush_refs = |refs: &mut Vec<u64>,
+                      chunk_paths: &mut Vec<std::path::PathBuf>|
+     -> Result<(), PipelineError> {
+        if refs.is_empty() {
+            return Ok(());
+        }
+        refs.sort_unstable();
+        let path = tmp_dir.join(format!("refs_{:04}.bin", chunk_paths.len()));
+        let file = std::fs::File::create(&path)
+            .map_err(|e| PipelineError(format!("prepass: create ref chunk failed: {e}")))?;
+        let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+        use std::io::Write;
+        for key in refs.iter() {
+            writer
+                .write_all(&key.to_le_bytes())
+                .map_err(|e| PipelineError(format!("prepass: write ref chunk failed: {e}")))?;
+        }
+        writer
+            .flush()
+            .map_err(|e| PipelineError(format!("prepass: flush ref chunk failed: {e}")))?;
+        refs.clear();
+        chunk_paths.push(path);
+        Ok(())
+    };
 
+    let target_refs = (chunk_budget / 8).max(1024);
     for block_result in reader.into_blocks_pipelined() {
         let block =
             block_result.map_err(|e| PipelineError(format!("prepass: PBF read failed: {e}")))?;
-        block.for_each_element(|element| {
+        for element in block.elements() {
             if let Element::Way(way) = element {
                 for node_id in way.refs() {
-                    if !seen.insert(node_id) {
-                        shared.insert(node_id);
+                    refs.push(encode_signed_i64_key(node_id));
+                    total_refs += 1;
+                    if refs.len() >= target_refs {
+                        flush_refs(&mut refs, &mut chunk_paths)?;
                     }
+                }
+            }
+        }
+    }
+    flush_refs(&mut refs, &mut chunk_paths)?;
+
+    let mut shared: FxHashSet<i64> = FxHashSet::default();
+    let mut readers = Vec::with_capacity(chunk_paths.len());
+    let mut heap = std::collections::BinaryHeap::new();
+    for path in &chunk_paths {
+        let mut reader = NodeRefChunkReader::open(path)?;
+        if let Some(key) = reader.next_key()? {
+            heap.push(NodeRefHeapEntry {
+                key,
+                chunk_idx: readers.len(),
+            });
+        }
+        readers.push(reader);
+    }
+
+    let mut unique_count: u64 = 0;
+    let mut prev: Option<u64> = None;
+    let mut prev_count: u8 = 0;
+    while let Some(entry) = heap.pop() {
+        if prev == Some(entry.key) {
+            prev_count = prev_count.saturating_add(1);
+        } else {
+            if let Some(key) = prev {
+                unique_count += 1;
+                if prev_count >= 2 {
+                    shared.insert(decode_signed_i64_key(key));
+                }
+            }
+            prev = Some(entry.key);
+            prev_count = 1;
+        }
+        if let Some(next) = readers[entry.chunk_idx].next_key()? {
+            heap.push(NodeRefHeapEntry {
+                key: next,
+                chunk_idx: entry.chunk_idx,
+            });
+        }
+    }
+    if let Some(key) = prev {
+        unique_count += 1;
+        if prev_count >= 2 {
+            shared.insert(decode_signed_i64_key(key));
+        }
+    }
+    std::fs::remove_dir_all(tmp_dir)
+        .map_err(|e| PipelineError(format!("prepass: remove scratch dir failed: {e}")))?;
+
+    let elapsed = start.elapsed();
+    eprintln!(
+        "  Shared-node prepass: {:.1}s ({} refs, {} unique nodes, {} shared)",
+        elapsed.as_secs_f64(),
+        total_refs,
+        unique_count,
+        shared.len(),
+    );
+    Ok(shared)
+}
+
+#[inline]
+#[allow(clippy::cast_sign_loss)]
+fn encode_signed_i64_key(value: i64) -> u64 {
+    (value as u64) ^ (1_u64 << 63)
+}
+
+#[inline]
+#[allow(clippy::cast_possible_wrap)]
+fn decode_signed_i64_key(key: u64) -> i64 {
+    (key ^ (1_u64 << 63)) as i64
+}
+
+struct NodeRefChunkReader {
+    reader: std::io::BufReader<std::fs::File>,
+    buf: [u8; 8],
+}
+
+impl NodeRefChunkReader {
+    fn open(path: &std::path::Path) -> Result<Self, PipelineError> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| PipelineError(format!("prepass: open ref chunk failed: {e}")))?;
+        Ok(Self {
+            reader: std::io::BufReader::with_capacity(256 * 1024, file),
+            buf: [0; 8],
+        })
+    }
+
+    fn next_key(&mut self) -> Result<Option<u64>, PipelineError> {
+        use std::io::Read;
+        match self.reader.read_exact(&mut self.buf) {
+            Ok(()) => Ok(Some(u64::from_le_bytes(self.buf))),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(e) => Err(PipelineError(format!(
+                "prepass: read ref chunk failed: {e}"
+            ))),
+        }
+    }
+}
+
+#[derive(Eq, PartialEq)]
+struct NodeRefHeapEntry {
+    key: u64,
+    chunk_idx: usize,
+}
+
+impl Ord for NodeRefHeapEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .key
+            .cmp(&self.key)
+            .then_with(|| other.chunk_idx.cmp(&self.chunk_idx))
+    }
+}
+
+impl PartialOrd for NodeRefHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub(super) struct RelationPlan {
+    pub(super) needed_ways: FxHashSet<i64>,
+}
+
+#[hotpath::measure]
+fn prepass_relation_plan(
+    pbf_path: &std::path::Path,
+    decode_threads: usize,
+) -> Result<RelationPlan, PipelineError> {
+    let start = std::time::Instant::now();
+    let reader = ElementReader::from_path(pbf_path)
+        .map_err(|e| PipelineError(format!("relation prepass: failed to open PBF: {e}")))?
+        .with_blob_filter(BlobFilter::only_relations())
+        .decode_threads(decode_threads);
+
+    let mut needed_ways: FxHashSet<i64> = FxHashSet::default();
+    let mut matched_relations: u64 = 0;
+    for block_result in reader.into_blocks_pipelined() {
+        let block = block_result
+            .map_err(|e| PipelineError(format!("relation prepass: PBF read failed: {e}")))?;
+        block.for_each_element(|element| {
+            let Element::Relation(rel) = element else {
+                return;
+            };
+            let mut rel_type = "";
+            for (k, v) in rel.tags() {
+                if k == "type" {
+                    rel_type = v;
+                    break;
+                }
+            }
+            if rel_type != "multipolygon" && rel_type != "boundary" {
+                return;
+            }
+            let tags: smallvec::SmallVec<[(&str, &str); 16]> = rel.tags().collect();
+            let tag_helper = Tags(&tags);
+            if shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon).is_empty() {
+                return;
+            }
+            matched_relations += 1;
+            for member in rel.members() {
+                if let MemberId::Way(way_id) = member.id {
+                    needed_ways.insert(way_id);
                 }
             }
         });
     }
 
-    let elapsed = start.elapsed();
-    let seen_count = seen.len();
-    drop(seen);
     eprintln!(
-        "  Shared-node prepass: {:.1}s ({} unique nodes, {} shared)",
-        elapsed.as_secs_f64(),
-        seen_count,
-        shared.len(),
+        "  Relation prepass: {:.1}s ({} matching relations, {} member ways)",
+        start.elapsed().as_secs_f64(),
+        matched_relations,
+        needed_ways.len(),
     );
-    Ok(shared)
+    Ok(RelationPlan { needed_ways })
 }
 
 /// Annotate ways with globally-shared node refs (cross-block junctions).
@@ -868,6 +1151,8 @@ fn prepass_shared_nodes(
 /// Supplements `annotate_block_shared_node_refs` which only detects junctions
 /// within a single PBF block. Nodes in `global_shared` that appear in a way's
 /// node refs are added to `preserve_node_refs` so DP simplification pins them.
+#[cfg(test)]
+#[allow(dead_code)]
 fn annotate_global_shared_node_refs(raw_ways: &mut [RawWay], global_shared: &FxHashSet<i64>) {
     for w in raw_ways.iter_mut() {
         if w.node_refs.len() <= 2 {
@@ -909,75 +1194,124 @@ pub(super) fn crosses_antimeridian(
     shifted_span_e7 < raw_span_e7
 }
 
-/// Result of parallel way processing: resolved coords (needed for way_index),
-/// sort records (geometry output). Land mask is marked on rayon threads directly.
-pub(super) struct ProcessedWay {
-    pub(super) way_id: i64,
-    pub(super) coords_e7: Vec<(i32, i32)>,
-    pub(super) records: Vec<SortRecord>,
-    /// Cap events from polygon emit: (layer_zoom_idx, bbox_tiles).
-    pub(super) cap_events: Vec<(u16, u64, u64)>,
+pub(super) struct WayTaskResult {
+    pub(super) chunk_paths: Vec<std::path::PathBuf>,
+    pub(super) count: u64,
+    pub(super) sink: RecordSink,
+    pub(super) fanout: FanoutStats,
+    pub(super) way_puts: Vec<(i64, Vec<(i32, i32)>)>,
 }
 
-pub(super) struct WayWorkerScratch {
+pub(super) struct WayAcc {
+    pub(super) sink: RecordSink,
+    pub(super) bytes: usize,
+    pub(super) chunk_paths: Vec<std::path::PathBuf>,
+    pub(super) count: u64,
+    pub(super) fanout: FanoutStats,
+    pub(super) way_puts: Vec<(i64, Vec<(i32, i32)>)>,
     pub(super) merc: Vec<Point>,
     pub(super) point_emit: PointEmitScratch,
     pub(super) line_emit: LineEmitScratch,
     pub(super) polygon_emit: PolygonEmitScratch,
+    pub(super) compression: crate::sort::ChunkCompression,
 }
 
-impl WayWorkerScratch {
-    pub(super) fn new() -> Self {
+impl WayAcc {
+    pub(super) fn new(compression: crate::sort::ChunkCompression) -> Self {
         Self {
+            sink: RecordSink::new(),
+            bytes: 0,
+            chunk_paths: Vec::new(),
+            count: 0,
+            fanout: FanoutStats::new(),
+            way_puts: Vec::new(),
             merc: Vec::new(),
             point_emit: PointEmitScratch::new(),
             line_emit: LineEmitScratch::new(),
             polygon_emit: PolygonEmitScratch::new(),
+            compression,
+        }
+    }
+
+    pub(super) fn flush(
+        &mut self,
+        chunk_dir: &std::path::Path,
+        chunk_id: &std::sync::atomic::AtomicUsize,
+    ) {
+        if self.sink.records.is_empty() {
+            return;
+        }
+        let id = chunk_id.fetch_add(1, Ordering::Relaxed);
+        let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
+        crate::sort::write_sorted_payload_chunk(
+            &mut self.sink.records,
+            &self.sink.payload,
+            &path,
+            self.compression,
+        )
+        .expect("way chunk write failed");
+        self.chunk_paths.push(path);
+        self.count += self.sink.records.len() as u64;
+        self.sink.clear_payload();
+        self.bytes = 0;
+    }
+
+    pub(super) fn finish(self) -> WayTaskResult {
+        WayTaskResult {
+            chunk_paths: self.chunk_paths,
+            count: self.count,
+            sink: self.sink,
+            fanout: self.fanout,
+            way_puts: self.way_puts,
         }
     }
 }
 
-thread_local! {
-    pub(super) static WAY_WORKER_SCRATCH: std::cell::RefCell<WayWorkerScratch> = std::cell::RefCell::new(WayWorkerScratch::new());
-}
-
-/// Drain a single batch of processed way results: write way_index entries,
-/// push sort records. Returns feature count.
 #[hotpath::measure]
-pub(super) fn drain_processed_ways(
-    results: Vec<ProcessedWay>,
+pub(super) fn drain_way_task_result(
+    result: WayTaskResult,
     way_index: &mut WayIndex,
     sort_writer: &mut SortWriter,
     fanout: &mut FanoutStats,
 ) -> u64 {
-    let mut count: u64 = 0;
-    for pw in results {
-        if !pw.coords_e7.is_empty() {
-            way_index.put(pw.way_id, &pw.coords_e7);
-        }
-        record_fanout_from_records(&pw.records, fanout);
-        // Harvest cap events from polygon emit.
-        for &(idx, tiles, oid) in &pw.cap_events {
-            let layer = idx as usize / 15;
-            let zoom = idx as usize % 15;
-            fanout.record_cap(layer, zoom, tiles, oid);
-        }
-        count += pw.records.len() as u64;
-        // Panic: disk I/O failure is unrecoverable mid-pipeline.
-        for record in pw.records {
-            sort_writer.push(record).expect("sort push failed");
-        }
+    for (way_id, coords_e7) in result.way_puts {
+        way_index.put(way_id, &coords_e7);
+    }
+    sort_writer.adopt_chunk_files(result.chunk_paths);
+    sort_writer.merge_tally(&result.sink.tally);
+    fanout.merge(&result.fanout);
+    let count = result.count + result.sink.records.len() as u64;
+    for (key, off, len) in result.sink.records {
+        sort_writer
+            .push_untracked(SortRecord {
+                key,
+                data: result.sink.payload[off..off + len].into(),
+            })
+            .expect("sort push failed");
     }
     count
 }
 
-/// Process a raw way on a rayon worker thread: resolve node coordinates,
-/// match tags, and run geometry processing (projection, simplification,
-/// clipping, MVT encoding).
+fn harvest_way_cap_events(acc: &mut WayAcc) {
+    for &(idx, tiles, oid) in &acc.polygon_emit.cap_events {
+        let layer = idx as usize / 15;
+        let zoom = idx as usize % 15;
+        acc.fanout.record_cap(layer, zoom, tiles, oid);
+    }
+    // `emit_polygon_feature` only clears cap_events when it runs, so a following
+    // non-polygon (or non-matching) way would re-harvest this way's events. The
+    // old thread-local path used `std::mem::take` per way; reproduce that
+    // consume-once semantics by clearing here.
+    acc.polygon_emit.cap_events.clear();
+}
+
+/// Process a raw way into a task-local arena.
 #[hotpath::measure]
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub(super) fn process_raw_way(
-    raw: &RawWay,
+pub(super) fn process_planned_way_into(
+    way: &Way<'_>,
+    plan: &WayPlan,
+    is_member: bool,
     node_reader: Option<&NodeStoreReader>,
     min_zoom: u8,
     max_zoom: u8,
@@ -986,17 +1320,32 @@ pub(super) fn process_raw_way(
     missing_ref_stats: &MissingRefStatsAtomic,
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
-) -> ProcessedWay {
-    // Resolve node coordinates: either pre-resolved from locations-on-ways PBF,
-    // or looked up via node store (the expensive mmap reads - now parallel).
-    let (coords_e7, resolved_node_refs): (Vec<(i32, i32)>, Vec<i64>) = if !raw.coords_e7.is_empty()
+    acc: &mut WayAcc,
+) {
+    let tags_ref: Vec<(&str, &str)> = way.tags().collect();
+    if tags_ref.is_empty() && !is_member {
+        return;
+    }
+    let tag_helper = Tags(&tags_ref);
+    // Members are always resolved (a relation reads their geometry back), so the
+    // both-geom pre-filter is only worth computing for non-members, where it
+    // gates the early return. Computing it for members would run two
+    // `match_element` passes whose result is never inspected.
+    if !is_member {
+        let possible_feature = !shortbread::match_element(&tag_helper, OsmGeomType::ClosedWay)
+            .is_empty()
+            || !shortbread::match_element(&tag_helper, OsmGeomType::OpenWay).is_empty();
+        if !possible_feature {
+            return;
+        }
+    }
+
+    let (coords_e7, resolved_node_refs): (Vec<(i32, i32)>, Vec<i64>) = if let Some(nr) = node_reader
     {
-        (raw.coords_e7.clone(), raw.node_refs.clone())
-    } else if let Some(nr) = node_reader {
         let mut missing_refs: usize = 0;
-        let mut resolved: Vec<(i32, i32)> = Vec::with_capacity(raw.node_refs.len());
-        let mut resolved_refs: Vec<i64> = Vec::with_capacity(raw.node_refs.len());
-        for &id in &raw.node_refs {
+        let mut resolved: Vec<(i32, i32)> = Vec::with_capacity(plan.node_refs.len());
+        let mut resolved_refs: Vec<i64> = Vec::with_capacity(plan.node_refs.len());
+        for &id in &plan.node_refs {
             if let Some(coord) = nr.get(id) {
                 resolved.push(coord);
                 resolved_refs.push(id);
@@ -1009,50 +1358,39 @@ pub(super) fn process_raw_way(
         }
         (resolved, resolved_refs)
     } else {
-        (Vec::new(), Vec::new())
+        (
+            way.node_locations()
+                .map(|loc| (loc.decimicro_lat(), loc.decimicro_lon()))
+                .collect(),
+            plan.node_refs.clone(),
+        )
     };
 
-    if coords_e7.is_empty() || raw.tags.is_empty() {
-        return ProcessedWay {
-            way_id: raw.way_id,
-            coords_e7,
-            records: Vec::new(),
-            cap_events: Vec::new(),
-        };
+    if coords_e7.is_empty() {
+        return;
+    }
+    if is_member {
+        acc.way_puts.push((plan.way_id, coords_e7.clone()));
     }
 
-    // Tag matching - convert owned tags to borrowed refs (same pattern as
-    // process_prepared_relation, pipeline.rs PreparedRelation handling)
     let is_closed = coords_e7.len() >= 4 && coords_e7.first() == coords_e7.last();
     let geom_type = if is_closed {
         OsmGeomType::ClosedWay
     } else {
         OsmGeomType::OpenWay
     };
-    let tags_ref: Vec<(&str, &str)> = raw
-        .tags
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    let tag_helper = Tags(&tags_ref);
     let mut matches = shortbread::match_element(&tag_helper, geom_type);
 
     if matches.is_empty() {
-        return ProcessedWay {
-            way_id: raw.way_id,
-            coords_e7,
-            records: Vec::new(),
-            cap_events: Vec::new(),
-        };
+        return;
     }
 
     #[allow(clippy::cast_sign_loss)]
-    let osm_id = raw.way_id as u64;
-    let mut records = Vec::new();
-    let mut cap_events: Vec<(u16, u64, u64)> = Vec::new();
+    let osm_id = plan.way_id as u64;
+    let before = acc.sink.records.len();
     let mut preserve_vertex_mask: Vec<bool> = vec![false; coords_e7.len()];
-    if !raw.preserve_node_refs.is_empty() {
-        let preserve_nodes: FxHashSet<i64> = raw.preserve_node_refs.iter().copied().collect();
+    if !plan.preserve_node_refs.is_empty() {
+        let preserve_nodes: FxHashSet<i64> = plan.preserve_node_refs.iter().copied().collect();
         for (i, node_id) in resolved_node_refs.iter().enumerate() {
             if preserve_nodes.contains(node_id) {
                 preserve_vertex_mask[i] = true;
@@ -1060,20 +1398,18 @@ pub(super) fn process_raw_way(
         }
     }
 
-    WAY_WORKER_SCRATCH.with(|cell| {
-        let scratch = &mut *cell.borrow_mut();
-        scratch.merc.clear();
-        scratch.merc.extend(
-            coords_e7
-                .iter()
-                .map(|&(lat, lon)| geometry::project_e7(lat, lon)),
-        );
-        let _ = unwrap_antimeridian_path(&mut scratch.merc, is_closed);
+    acc.merc.clear();
+    acc.merc.extend(
+        coords_e7
+            .iter()
+            .map(|&(lat, lon)| geometry::project_e7(lat, lon)),
+    );
+    let _ = unwrap_antimeridian_path(&mut acc.merc, is_closed);
 
-        let merc = scratch.merc.as_slice();
+    {
+        let merc = acc.merc.as_slice();
         let merc_bbox_val = merc_bbox(merc);
 
-        // Enrich polygon matches with area-dependent data (way_area, min_zoom overrides)
         if is_closed {
             let area_m2 = geometry::area_sq_meters(merc);
             enrich_polygon_matches(&mut matches, area_m2);
@@ -1098,8 +1434,8 @@ pub(super) fn process_raw_way(
                         m,
                         z_lo,
                         z_hi,
-                        &mut records,
-                        &mut scratch.point_emit,
+                        &mut acc.sink,
+                        &mut acc.point_emit,
                     );
                 }
                 GeomExpect::Line => {
@@ -1112,8 +1448,8 @@ pub(super) fn process_raw_way(
                                 m,
                                 z_lo,
                                 z_hi,
-                                &mut records,
-                                &mut scratch.line_emit,
+                                &mut acc.sink,
+                                &mut acc.line_emit,
                             );
                         } else {
                             let shifted: Vec<Point> = merc
@@ -1130,8 +1466,8 @@ pub(super) fn process_raw_way(
                                 m,
                                 z_lo,
                                 z_hi,
-                                &mut records,
-                                &mut scratch.line_emit,
+                                &mut acc.sink,
+                                &mut acc.line_emit,
                             );
                         }
                     }
@@ -1148,8 +1484,8 @@ pub(super) fn process_raw_way(
                                 m,
                                 z_lo,
                                 z_hi,
-                                &mut records,
-                                &mut scratch.polygon_emit,
+                                &mut acc.sink,
+                                &mut acc.polygon_emit,
                                 sr,
                                 Some(deferral_stats),
                                 fc,
@@ -1170,8 +1506,8 @@ pub(super) fn process_raw_way(
                                 m,
                                 z_lo,
                                 z_hi,
-                                &mut records,
-                                &mut scratch.polygon_emit,
+                                &mut acc.sink,
+                                &mut acc.polygon_emit,
                                 sr,
                                 Some(deferral_stats),
                                 fc,
@@ -1182,14 +1518,57 @@ pub(super) fn process_raw_way(
                 }
             }
         }
-        // Collect cap events from polygon scratch before leaving the borrow.
-        cap_events = std::mem::take(&mut scratch.polygon_emit.cap_events);
-    });
+    }
+    record_fanout_from_payload_records(&acc.sink.records[before..], &mut acc.fanout);
+    harvest_way_cap_events(acc);
+    acc.bytes = acc.sink.bytes();
+}
 
-    ProcessedWay {
-        way_id: raw.way_id,
-        coords_e7,
-        records,
-        cap_events,
+#[cfg(test)]
+mod shared_node_helper_tests {
+    use super::{FxHashSet, preserve_refs_for_way, shared_node_counts};
+
+    // The block-local counting + scan-slice behaviour is exercised through
+    // `annotate_block_shared_node_refs` in pipeline_tests.rs, which now delegates
+    // to the same helpers as the production `build_way_plans`. These tests cover
+    // the one branch `build_way_plans` adds on top: the `global_shared` union,
+    // which the RawWay wrapper (called with `None`) cannot reach.
+
+    #[test]
+    fn global_shared_pins_a_non_block_local_node() {
+        // node 20 appears in exactly one way here, so block-local counting alone
+        // never pins it; the global cross-block set must force the pin.
+        let refs = [10_i64, 20, 30];
+        let counts = shared_node_counts([refs.as_slice()].into_iter());
+
+        let without_global = preserve_refs_for_way(&refs, &counts, None);
+        assert!(
+            without_global.is_empty(),
+            "block-local alone must not pin a singly-occurring node"
+        );
+
+        let global: FxHashSet<i64> = [20].into_iter().collect();
+        let with_global = preserve_refs_for_way(&refs, &counts, Some(&global));
+        assert_eq!(
+            with_global,
+            vec![20],
+            "a node in the global-shared set must be pinned even if block-local count is 1"
+        );
+    }
+
+    #[test]
+    fn global_shared_never_pins_the_closing_dup_vertex() {
+        // The closing vertex is excluded from the scan slice, so a closed ring's
+        // node is still reachable via its first occurrence but the trailing
+        // duplicate must not produce a second entry.
+        let refs = [1_i64, 2, 3, 4, 1];
+        let counts = shared_node_counts([refs.as_slice()].into_iter());
+        let global: FxHashSet<i64> = [1].into_iter().collect();
+        let preserve = preserve_refs_for_way(&refs, &counts, Some(&global));
+        assert_eq!(
+            preserve,
+            vec![1],
+            "closing node pinned once via its leading occurrence, not duplicated"
+        );
     }
 }

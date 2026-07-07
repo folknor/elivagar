@@ -232,7 +232,7 @@ into tolerance (within `--tol`, in the layer's extent units) vs structural
 Ocean features match geometrically (their ids are synthetic). Exit 0 only
 if nothing structural and `tolerance_moved <= --max-moved`; the report
 prints per-zoom/layer counters and displacement percentiles. Design and
-gates: notes/spec-5-output-regression.md.
+gates settled in the spec-5 output-regression landing (see git history).
 
 ### `elivagar diag <FILE> -z <Z> -x <X> -y <Y>`
 

@@ -12,7 +12,9 @@ use crate::mvt::{self, GeomType};
 use crate::pmtiles_writer;
 use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
 use crate::sort::{self, SortRecord};
-use crate::wire_format::{encode_attrs_bytes, encode_feature_data_with_attrs};
+use crate::wire_format::{
+    append_feature_data_with_attrs, encode_attrs_bytes, encode_feature_data_with_attrs,
+};
 use rustc_hash::FxHashMap;
 
 use super::stats::DeferralStats;
@@ -232,21 +234,156 @@ impl MultipolygonEmitScratch {
 // Sort record push helper
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
+pub(crate) struct RecordTally {
+    pub(crate) layer_records: [u64; 32],
+    pub(crate) layer_bytes: [u64; 32],
+    pub(crate) layer_zoom_records: Box<[u64; 32 * 15]>,
+    pub(crate) layer_zoom_bytes: Box<[u64; 32 * 15]>,
+    pub(crate) total_records: u64,
+    pub(crate) total_record_bytes: u64,
+}
+
+impl RecordTally {
+    pub(super) fn new() -> Self {
+        Self {
+            layer_records: [0; 32],
+            layer_bytes: [0; 32],
+            layer_zoom_records: Box::new([0; 32 * 15]),
+            layer_zoom_bytes: Box::new([0; 32 * 15]),
+            total_records: 0,
+            total_record_bytes: 0,
+        }
+    }
+
+    pub(super) fn record(&mut self, key: sort::SortKey, data_len: usize) {
+        let layer = sort::layer_from_key(key) as usize;
+        self.total_records += 1;
+        self.total_record_bytes += data_len as u64;
+        if layer < 32 {
+            self.layer_records[layer] += 1;
+            self.layer_bytes[layer] += data_len as u64;
+            let zoom = sort::zoom_from_tile_id(sort::tile_id_from_key(key)) as usize;
+            if zoom < 15 {
+                let idx = layer * 15 + zoom;
+                self.layer_zoom_records[idx] += 1;
+                self.layer_zoom_bytes[idx] += data_len as u64;
+            }
+        }
+    }
+
+    pub(super) fn merge(&mut self, other: &Self) {
+        self.total_records += other.total_records;
+        self.total_record_bytes += other.total_record_bytes;
+        for i in 0..32 {
+            self.layer_records[i] += other.layer_records[i];
+            self.layer_bytes[i] += other.layer_bytes[i];
+        }
+        for i in 0..(32 * 15) {
+            self.layer_zoom_records[i] += other.layer_zoom_records[i];
+            self.layer_zoom_bytes[i] += other.layer_zoom_bytes[i];
+        }
+    }
+}
+
+impl Default for RecordTally {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(super) struct RecordSink {
+    pub(super) records: Vec<sort::PayloadRecord>,
+    pub(super) payload: Vec<u8>,
+    pub(super) tally: RecordTally,
+}
+
+impl RecordSink {
+    pub(super) fn new() -> Self {
+        Self {
+            records: Vec::new(),
+            payload: Vec::new(),
+            tally: RecordTally::new(),
+        }
+    }
+
+    pub(super) fn bytes(&self) -> usize {
+        self.payload.len() + self.records.len() * std::mem::size_of::<sort::PayloadRecord>()
+    }
+
+    pub(super) fn clear_payload(&mut self) {
+        self.records.clear();
+        self.payload.clear();
+    }
+}
+
+impl Default for RecordSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(super) trait FeatureRecordSink {
+    fn push_feature(
+        &mut self,
+        key: sort::SortKey,
+        osm_id: u64,
+        geom_type: GeomType,
+        geom_buf: &[u32],
+        attrs_buf: &[u8],
+    );
+}
+
+impl FeatureRecordSink for Vec<SortRecord> {
+    fn push_feature(
+        &mut self,
+        key: sort::SortKey,
+        osm_id: u64,
+        geom_type: GeomType,
+        geom_buf: &[u32],
+        attrs_buf: &[u8],
+    ) {
+        let data = encode_feature_data_with_attrs(osm_id, geom_type, geom_buf, attrs_buf);
+        self.push(SortRecord { key, data });
+    }
+}
+
+impl FeatureRecordSink for RecordSink {
+    fn push_feature(
+        &mut self,
+        key: sort::SortKey,
+        osm_id: u64,
+        geom_type: GeomType,
+        geom_buf: &[u32],
+        attrs_buf: &[u8],
+    ) {
+        let range = append_feature_data_with_attrs(
+            &mut self.payload,
+            osm_id,
+            geom_type,
+            geom_buf,
+            attrs_buf,
+        );
+        let len = range.end - range.start;
+        self.records.push((key, range.start, len));
+        self.tally.record(key, len);
+    }
+}
+
 /// Push a single encoded feature into the sort record buffer.
 /// Shared by all geometry emitters (point, line, polygon, multipolygon).
 #[inline]
-pub(super) fn push_sort_record(
+pub(super) fn push_sort_record<T: FeatureRecordSink + ?Sized>(
     tile_id: u64,
     osm_id: u64,
     layer: Layer,
     geom_type: GeomType,
     geom_buf: &[u32],
     attrs_buf: &[u8],
-    records: &mut Vec<SortRecord>,
+    records: &mut T,
 ) {
-    let data = encode_feature_data_with_attrs(osm_id, geom_type, geom_buf, attrs_buf);
     let key = sort::make_sort_key(tile_id, layer as u8, 0);
-    records.push(SortRecord { key, data });
+    records.push_feature(key, osm_id, geom_type, geom_buf, attrs_buf);
 }
 
 const OSM_POLYGON_MAX_Z: u8 = 14;
@@ -399,7 +536,7 @@ pub(super) fn emit_point_or_centroid(
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
-    records: &mut Vec<SortRecord>,
+    records: &mut impl FeatureRecordSink,
     scratch: &mut PointEmitScratch,
 ) -> u64 {
     if coords.is_empty() {
@@ -454,7 +591,7 @@ pub(super) fn emit_line_feature(
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
-    records: &mut Vec<SortRecord>,
+    records: &mut impl FeatureRecordSink,
     scratch: &mut LineEmitScratch,
 ) -> u64 {
     let mut count: u64 = 0;
@@ -581,7 +718,7 @@ pub(super) fn emit_polygon_feature(
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
-    records: &mut Vec<SortRecord>,
+    records: &mut impl FeatureRecordSink,
     scratch: &mut PolygonEmitScratch,
     seam_max_zoom: u8,
     deferral_stats: Option<&DeferralStats>,
@@ -686,7 +823,7 @@ pub(super) fn emit_multipolygon_feature(
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
-    records: &mut Vec<SortRecord>,
+    records: &mut impl FeatureRecordSink,
     emit_scratch: &mut MultipolygonEmitScratch,
     _simp_scratch: &mut geometry::SimplifyMultiScratch,
     seam_max_zoom: u8,

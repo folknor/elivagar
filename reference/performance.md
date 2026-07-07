@@ -67,7 +67,10 @@ on both gates with byte-identical output, at the cost of germany peak RSS
 rising 10.3 to 15.0 GB: the prepass hash sets now coexist with node-store
 construction instead of preceding it. The norway row predates the overlap
 (expect ~10-20s less wall and somewhat higher RSS when re-measured). The
-compact-counter work (backlog item 15 half 2, P2) removes the RSS cost.
+compact-counter work (item 15 half 2, P2 - phase12 ownership rewrite) has
+since landed: `prepass_shared_nodes` builds `shared` from an exact external
+merge-sort instead of an in-memory `seen` set, so the RSS cost above should
+fall once germany is re-benched and re-baselined here against the new commit.
 
 "reader" is the `assemble_reader_ns` counter: serial k-way merge reader time
 inside the assemble phase. The Denmark reader value is from the instrumented
