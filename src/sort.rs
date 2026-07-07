@@ -16,6 +16,15 @@ use crate::pipeline::emit::RecordTally;
 
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
 
+/// Number of tile-id range partitions used for sort chunk files.
+///
+/// The PMTiles tile id space for z0..z14 has 357,913,941 addressed ids. Splitting
+/// that ordered key space into 256 ranges keeps each partition coarse enough to
+/// avoid tiny files while letting assemble merge one range at a time.
+pub const SORT_PARTITIONS: usize = 256;
+
+const TILE_ID_LIMIT_EXCLUSIVE: u64 = 357_913_941;
+
 // ---------------------------------------------------------------------------
 // Chunk compression selection
 // ---------------------------------------------------------------------------
@@ -101,6 +110,82 @@ pub fn zoom_from_tile_id(tile_id: u64) -> u8 {
         z += 1;
     }
     z
+}
+
+/// Return the tile-id range partition for a sort key.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+pub fn partition_from_key(key: SortKey) -> usize {
+    let tile_id = tile_id_from_key(key).min(TILE_ID_LIMIT_EXCLUSIVE - 1);
+    ((tile_id * SORT_PARTITIONS as u64) / TILE_ID_LIMIT_EXCLUSIVE) as usize
+}
+
+fn chunk_path(tmp_dir: &Path, chunk_no: usize, partition: usize) -> PathBuf {
+    tmp_dir.join(format!("chunk_{chunk_no:04}_p{partition:03}.bin"))
+}
+
+fn legacy_chunk_path(tmp_dir: &Path, chunk_no: usize) -> PathBuf {
+    tmp_dir.join(format!("chunk_{chunk_no:04}.bin"))
+}
+
+fn parse_chunk_filename(path: &Path) -> Option<(usize, Option<usize>)> {
+    let name = path.file_name()?.to_str()?;
+    if !name.starts_with("chunk_") || !name.ends_with(".bin") {
+        return None;
+    }
+    let stem = &name[..name.len() - 4];
+    if let Some((id, partition)) = stem.strip_prefix("chunk_")?.split_once("_p") {
+        let chunk_no = id.parse().ok()?;
+        let part = partition.parse().ok()?;
+        if part < SORT_PARTITIONS {
+            return Some((chunk_no, Some(part)));
+        }
+        return None;
+    }
+    let chunk_no = stem.strip_prefix("chunk_")?.parse().ok()?;
+    Some((chunk_no, None))
+}
+
+type ChunkScanEntry = (usize, Option<usize>, PathBuf);
+type ChunkById = Vec<Option<(Option<usize>, PathBuf)>>;
+
+fn scan_chunk_files(tmp_dir: &Path) -> io::Result<Vec<ChunkScanEntry>> {
+    let mut out = Vec::new();
+    match fs::read_dir(tmp_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if let Some((chunk_no, partition)) = parse_chunk_filename(&path) {
+                    out.push((chunk_no, partition, path));
+                }
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    out.sort_unstable_by_key(|(chunk_no, _, _)| *chunk_no);
+    Ok(out)
+}
+
+fn chunk_files_by_id(tmp_dir: &Path) -> io::Result<ChunkById> {
+    let scanned = scan_chunk_files(tmp_dir)?;
+    let max_id = scanned
+        .iter()
+        .map(|(chunk_no, _, _)| *chunk_no)
+        .max()
+        .map_or(0, |id| id + 1);
+    let mut by_id = vec![None; max_id];
+    for (chunk_no, partition, path) in scanned {
+        if by_id[chunk_no].is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate chunk id {chunk_no} in {}", tmp_dir.display()),
+            ));
+        }
+        by_id[chunk_no] = Some((partition, path));
+    }
+    Ok(by_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -190,31 +275,27 @@ impl SortWriter {
         compression: ChunkCompression,
     ) -> io::Result<Self> {
         let mut chunk_paths: Vec<PathBuf> = Vec::with_capacity(start_chunk);
+        let mut by_id = chunk_files_by_id(tmp_dir)?;
         for i in 0..start_chunk {
-            let path = tmp_dir.join(format!("chunk_{i:04}.bin"));
-            if !path.exists() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("missing chunk file: {}", path.display()),
-                ));
+            match by_id.get_mut(i).and_then(Option::take) {
+                Some((_, path)) => chunk_paths.push(path),
+                None => {
+                    let path = legacy_chunk_path(tmp_dir, i);
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("missing chunk file: {}", path.display()),
+                    ));
+                }
             }
-            chunk_paths.push(path);
         }
 
         // Delete leftover chunks from a previous run. Scan beyond gaps to
         // catch stale chunks that would otherwise contaminate a later sort.
-        {
-            let mut i = start_chunk;
-            let mut gap_count = 0;
-            while gap_count < 10 {
-                let path = tmp_dir.join(format!("chunk_{i:04}.bin"));
-                if path.exists() {
-                    fs::remove_file(&path)?;
-                    gap_count = 0;
-                } else {
-                    gap_count += 1;
-                }
-                i += 1;
+        for (i, entry) in by_id.into_iter().enumerate() {
+            if i >= start_chunk
+                && let Some((_, path)) = entry
+            {
+                fs::remove_file(path)?;
             }
         }
 
@@ -381,22 +462,33 @@ impl SortWriter {
     }
 
     /// Sort the in-memory buffer by key and write a chunk file to disk.
-    #[allow(clippy::cast_possible_truncation)]
     fn flush_chunk(&mut self) -> io::Result<()> {
-        // With a shared allocator active, draw the number from it so this flush
-        // cannot collide with a concurrent producer's chunk; `chunk_count` is
-        // resynced on detach. Otherwise self-count as usual.
-        let chunk_no = match &self.chunk_counter {
-            Some(counter) => counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            None => self.chunk_count,
-        };
-        let path = self.tmp_dir.join(format!("chunk_{chunk_no:04}.bin"));
-        write_sorted_chunk(&mut self.buffer, &path, self.compression)?;
-
-        self.chunk_paths.push(path);
-        if self.chunk_counter.is_none() {
-            self.chunk_count += 1;
+        if self.buffer.is_empty() {
+            return Ok(());
         }
+        self.buffer.sort_unstable_by_key(|r| r.key);
+        let mut paths = Vec::new();
+        let mut start = 0;
+        while start < self.buffer.len() {
+            let partition = partition_from_key(self.buffer[start].key);
+            let mut end = start + 1;
+            while end < self.buffer.len() && partition_from_key(self.buffer[end].key) == partition {
+                end += 1;
+            }
+            let chunk_no = match &self.chunk_counter {
+                Some(counter) => counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                None => self.chunk_count + paths.len(),
+            };
+            let path = chunk_path(&self.tmp_dir, chunk_no, partition);
+            write_chunk_records_presorted(&self.buffer[start..end], &path, self.compression)?;
+            paths.push(path);
+            start = end;
+        }
+
+        if self.chunk_counter.is_none() {
+            self.chunk_count += paths.len();
+        }
+        self.chunk_paths.extend(paths);
         self.buffer.clear();
         self.buffer_bytes = 0;
         Ok(())
@@ -424,7 +516,15 @@ pub fn write_sorted_chunk(
     compression: ChunkCompression,
 ) -> io::Result<()> {
     records.sort_unstable_by_key(|r| r.key);
+    write_chunk_records_presorted(records, path, compression)
+}
 
+#[allow(clippy::cast_possible_truncation)]
+fn write_chunk_records_presorted(
+    records: &[SortRecord],
+    path: &Path,
+    compression: ChunkCompression,
+) -> io::Result<()> {
     // Record count as u32. Safe: 1 GB chunk budget yields max ~48.8M records
     // (minimum 22 bytes each), 88x below u32::MAX.
     let count = records.len() as u32;
@@ -437,7 +537,7 @@ pub fn write_sorted_chunk(
             4 + records.len() * 12 + records.iter().map(|r| r.data.len()).sum::<usize>();
         let mut serialized = Vec::with_capacity(serialized_size);
         serialized.extend_from_slice(&count.to_le_bytes());
-        for record in records.iter() {
+        for record in records {
             serialized.extend_from_slice(&record.key.to_le_bytes());
             let data_len = record.data.len() as u32;
             serialized.extend_from_slice(&data_len.to_le_bytes());
@@ -463,7 +563,7 @@ pub fn write_sorted_chunk(
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(1 << 20, file);
         writer.write_all(&count.to_le_bytes())?;
-        for record in records.iter() {
+        for record in records {
             writer.write_all(&record.key.to_le_bytes())?;
             let data_len = record.data.len() as u32;
             writer.write_all(&data_len.to_le_bytes())?;
@@ -488,14 +588,23 @@ pub fn write_sorted_payload_chunk(
     compression: ChunkCompression,
 ) -> io::Result<()> {
     records.sort_unstable_by_key(|r| r.0);
+    write_payload_chunk_records_presorted(records, payload, path, compression)
+}
 
+#[allow(clippy::cast_possible_truncation)]
+fn write_payload_chunk_records_presorted(
+    records: &[PayloadRecord],
+    payload: &[u8],
+    path: &Path,
+    compression: ChunkCompression,
+) -> io::Result<()> {
     let count = records.len() as u32;
 
     if compression != ChunkCompression::None {
         let serialized_size = 4 + records.len() * 12 + records.iter().map(|r| r.2).sum::<usize>();
         let mut serialized = Vec::with_capacity(serialized_size);
         serialized.extend_from_slice(&count.to_le_bytes());
-        for &(key, offset, len) in records.iter() {
+        for &(key, offset, len) in records {
             serialized.extend_from_slice(&key.to_le_bytes());
             let data_len = len as u32;
             serialized.extend_from_slice(&data_len.to_le_bytes());
@@ -521,7 +630,7 @@ pub fn write_sorted_payload_chunk(
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(1 << 20, file);
         writer.write_all(&count.to_le_bytes())?;
-        for &(key, offset, len) in records.iter() {
+        for &(key, offset, len) in records {
             writer.write_all(&key.to_le_bytes())?;
             let data_len = len as u32;
             writer.write_all(&data_len.to_le_bytes())?;
@@ -531,6 +640,36 @@ pub fn write_sorted_payload_chunk(
     }
 
     Ok(())
+}
+
+/// Write arena-backed records as partition-pure sorted chunk files.
+///
+/// The caller provides the shared chunk id allocator used by direct producers.
+/// Returned paths are suitable for `SortWriter::adopt_chunk_files`.
+#[hotpath::measure]
+pub fn write_partitioned_payload_chunks(
+    records: &mut [PayloadRecord],
+    payload: &[u8],
+    tmp_dir: &Path,
+    chunk_id: &AtomicUsize,
+    compression: ChunkCompression,
+) -> io::Result<Vec<PathBuf>> {
+    records.sort_unstable_by_key(|r| r.0);
+    let mut paths = Vec::new();
+    let mut start = 0;
+    while start < records.len() {
+        let partition = partition_from_key(records[start].0);
+        let mut end = start + 1;
+        while end < records.len() && partition_from_key(records[end].0) == partition {
+            end += 1;
+        }
+        let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = chunk_path(tmp_dir, id, partition);
+        write_payload_chunk_records_presorted(&records[start..end], payload, &path, compression)?;
+        paths.push(path);
+        start = end;
+    }
+    Ok(paths)
 }
 
 // ---------------------------------------------------------------------------
@@ -623,53 +762,12 @@ impl PartialOrd for HeapEntry {
 // SortReader - k-way merge of sorted chunk files
 // ---------------------------------------------------------------------------
 
-/// Reads sorted records from multiple chunk files using a k-way merge.
-pub struct SortReader {
+struct PartitionMergeReader {
     chunk_readers: Vec<ChunkReader>,
     heap: BinaryHeap<HeapEntry>,
 }
 
-impl SortReader {
-    /// Open all chunk files found in a directory and create a merge reader.
-    ///
-    /// `expected_chunks`: if `Some(n)`, verifies exactly `n` contiguous chunk files exist.
-    /// Detects stale leftover chunks from a previous run that could silently contaminate
-    /// the merge. Pass `None` to skip validation (not recommended for `--skip-to sort`).
-    pub fn from_dir(
-        tmp_dir: &Path,
-        expected_chunks: Option<usize>,
-        compression: ChunkCompression,
-    ) -> io::Result<Self> {
-        let mut chunk_paths: Vec<PathBuf> = Vec::new();
-        let mut i = 0;
-        loop {
-            let path = tmp_dir.join(format!("chunk_{i:04}.bin"));
-            if path.exists() {
-                chunk_paths.push(path);
-                i += 1;
-            } else {
-                break;
-            }
-        }
-        if let Some(expected) = expected_chunks
-            && chunk_paths.len() != expected
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "chunk count mismatch: found {} but checkpoint expects {}. \
-                     Stale chunks from a previous run may be present - \
-                     run a full pipeline (without --skip-to) to regenerate.",
-                    chunk_paths.len(),
-                    expected,
-                ),
-            ));
-        }
-        Self::new(&chunk_paths, compression)
-    }
-
-    /// Open all chunk files and prime the merge heap with the first record
-    /// from each chunk.
+impl PartitionMergeReader {
     fn new(chunk_paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
         let mut chunk_readers = Vec::with_capacity(chunk_paths.len());
         let mut heap = BinaryHeap::with_capacity(chunk_paths.len());
@@ -686,19 +784,13 @@ impl SortReader {
             chunk_readers.push(cr);
         }
 
-        Ok(SortReader {
+        Ok(Self {
             chunk_readers,
             heap,
         })
     }
 
-    /// Return the next record in globally sorted order, or `None` when all
-    /// records have been consumed.
-    ///
-    /// Named `next` for clarity, but can't implement `Iterator` because iteration
-    /// is fallible (`io::Result`). The `fallible-iterator` crate isn't worth the dep.
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> io::Result<Option<SortRecord>> {
+    fn next(&mut self) -> io::Result<Option<SortRecord>> {
         let entry = match self.heap.pop() {
             Some(e) => e,
             None => return Ok(None),
@@ -710,10 +802,6 @@ impl SortReader {
             data: entry.data,
         };
 
-        // Read the next record from the same chunk and push it onto the heap.
-        // When a chunk is fully consumed, advise the kernel to evict its pages
-        // from the page cache - at planet scale this frees 100+ GB for the
-        // assemble phase's PMTiles read-back.
         if let Some((key, data)) = self.chunk_readers[idx].read_record()? {
             self.heap.push(HeapEntry {
                 key,
@@ -726,6 +814,174 @@ impl SortReader {
     }
 }
 
+/// One tile-id range partition of sort chunk files.
+pub struct SortPartition {
+    pub index: usize,
+    pub paths: Vec<PathBuf>,
+}
+
+/// A reader for one partition's chunk files.
+pub struct SortPartitionReader {
+    inner: PartitionMergeReader,
+}
+
+impl SortPartitionReader {
+    pub fn open(paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
+        Ok(Self {
+            inner: PartitionMergeReader::new(paths, compression)?,
+        })
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> io::Result<Option<SortRecord>> {
+        self.inner.next()
+    }
+}
+
+enum SortReaderMode {
+    Partitioned {
+        partitions: Vec<Vec<PathBuf>>,
+        next_partition: usize,
+        current: Option<PartitionMergeReader>,
+    },
+    Legacy(PartitionMergeReader),
+}
+
+/// Reads sorted records from multiple chunk files using partition-aware
+/// per-range merges when all files carry partition suffixes.
+pub struct SortReader {
+    mode: SortReaderMode,
+    compression: ChunkCompression,
+}
+
+impl SortReader {
+    /// Open all chunk files found in a directory and create a merge reader.
+    ///
+    /// `expected_chunks`: if `Some(n)`, verifies exactly `n` contiguous chunk files exist.
+    /// Detects stale leftover chunks from a previous run that could silently contaminate
+    /// the merge. Pass `None` to skip validation (not recommended for `--skip-to sort`).
+    pub fn from_dir(
+        tmp_dir: &Path,
+        expected_chunks: Option<usize>,
+        compression: ChunkCompression,
+    ) -> io::Result<Self> {
+        let by_id = chunk_files_by_id(tmp_dir)?;
+        if let Some(expected) = expected_chunks {
+            for i in 0..expected {
+                if by_id.get(i).and_then(Option::as_ref).is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "chunk count mismatch: missing chunk {i} but checkpoint expects {expected}. \
+                             Stale chunks from a previous run may be present - \
+                             run a full pipeline (without --skip-to) to regenerate.",
+                        ),
+                    ));
+                }
+            }
+            if by_id.len() > expected && by_id[expected..].iter().any(Option::is_some) {
+                let found = by_id.iter().filter(|entry| entry.is_some()).count();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "chunk count mismatch: found {found} but checkpoint expects {expected}. \
+                         Stale chunks from a previous run may be present - \
+                         run a full pipeline (without --skip-to) to regenerate.",
+                    ),
+                ));
+            }
+        }
+        let chunk_paths: Vec<PathBuf> = by_id
+            .iter()
+            .filter_map(|entry| entry.as_ref().map(|(_, path)| path.clone()))
+            .collect();
+        Self::new(&chunk_paths, compression)
+    }
+
+    /// Open all chunk files and prime the merge heap with the first record
+    /// from each chunk.
+    fn new(chunk_paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
+        let mut partitions = vec![Vec::new(); SORT_PARTITIONS];
+        let mut all_partitioned = true;
+        for path in chunk_paths {
+            match parse_chunk_filename(path).and_then(|(_, partition)| partition) {
+                Some(partition) => partitions[partition].push(path.clone()),
+                None => {
+                    all_partitioned = false;
+                    break;
+                }
+            }
+        }
+        if all_partitioned {
+            return Ok(Self {
+                mode: SortReaderMode::Partitioned {
+                    partitions,
+                    next_partition: 0,
+                    current: None,
+                },
+                compression,
+            });
+        }
+        Ok(Self {
+            mode: SortReaderMode::Legacy(PartitionMergeReader::new(chunk_paths, compression)?),
+            compression,
+        })
+    }
+
+    /// Take partition groups for partition-level parallel assembly.
+    ///
+    /// Returns `None` when the reader is in legacy mode because at least one
+    /// chunk file did not carry a partition suffix.
+    pub fn take_partitions(&mut self) -> Option<Vec<SortPartition>> {
+        match &mut self.mode {
+            SortReaderMode::Partitioned { partitions, .. } => {
+                let mut taken = Vec::new();
+                for (index, paths) in std::mem::take(partitions).into_iter().enumerate() {
+                    if !paths.is_empty() {
+                        taken.push(SortPartition { index, paths });
+                    }
+                }
+                Some(taken)
+            }
+            SortReaderMode::Legacy(_) => None,
+        }
+    }
+
+    /// Return the next record in globally sorted order, or `None` when all
+    /// records have been consumed.
+    ///
+    /// Named `next` for clarity, but can't implement `Iterator` because iteration
+    /// is fallible (`io::Result`). The `fallible-iterator` crate isn't worth the dep.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> io::Result<Option<SortRecord>> {
+        let compression = self.compression;
+        match &mut self.mode {
+            SortReaderMode::Legacy(reader) => reader.next(),
+            SortReaderMode::Partitioned {
+                partitions,
+                next_partition,
+                current,
+            } => loop {
+                if let Some(reader) = current
+                    && let Some(record) = reader.next()?
+                {
+                    return Ok(Some(record));
+                }
+                *current = None;
+                while *next_partition < partitions.len() && partitions[*next_partition].is_empty() {
+                    *next_partition += 1;
+                }
+                if *next_partition >= partitions.len() {
+                    return Ok(None);
+                }
+                let paths = &partitions[*next_partition];
+                *next_partition += 1;
+                *current = Some(PartitionMergeReader::new(paths, compression)?);
+            },
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -734,6 +990,14 @@ impl SortReader {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn chunk_path_for_id(dir: &Path, id: usize) -> Option<PathBuf> {
+        chunk_files_by_id(dir)
+            .unwrap()
+            .get(id)
+            .and_then(Option::as_ref)
+            .map(|(_, path)| path.clone())
+    }
 
     fn collect_keys(mut reader: SortReader) -> Vec<u64> {
         let mut out = Vec::new();
@@ -1097,11 +1361,11 @@ mod tests {
         let resumed = SortWriter::resume(dir.path(), 120, 2, ChunkCompression::None).unwrap();
         assert_eq!(resumed.chunk_count(), 2);
 
-        // chunk_0002.bin should have been deleted as stale leftover.
-        assert!(!dir.path().join("chunk_0002.bin").exists());
+        // Chunk id 2 should have been deleted as stale leftover.
+        assert!(chunk_path_for_id(dir.path(), 2).is_none());
         // checkpoint chunks must still exist.
-        assert!(dir.path().join("chunk_0000.bin").exists());
-        assert!(dir.path().join("chunk_0001.bin").exists());
+        assert!(chunk_path_for_id(dir.path(), 0).is_some());
+        assert!(chunk_path_for_id(dir.path(), 1).is_some());
     }
 
     #[test]
@@ -1120,7 +1384,8 @@ mod tests {
         }
         assert!(writer.chunk_count() >= 2);
         let _ = writer.finish().unwrap();
-        std::fs::remove_file(dir.path().join("chunk_0001.bin")).unwrap();
+        let missing_path = chunk_path_for_id(dir.path(), 1).expect("chunk 1 exists");
+        std::fs::remove_file(missing_path).unwrap();
 
         let err = SortWriter::resume(dir.path(), 120, 2, ChunkCompression::None)
             .err()
@@ -1155,13 +1420,13 @@ mod tests {
         }
         assert!(seeded.chunk_count() >= 2, "expected stale chunks to exist");
         let _ = seeded.finish().unwrap();
-        assert!(dir.path().join("chunk_0000.bin").exists());
+        assert!(chunk_path_for_id(dir.path(), 0).is_some());
 
         // Empty-checkpoint resume should prune all stale chunks and start clean.
         let resumed = SortWriter::resume(dir.path(), 120, 0, ChunkCompression::None).unwrap();
         assert_eq!(resumed.chunk_count(), 0);
-        assert!(!dir.path().join("chunk_0000.bin").exists());
-        assert!(!dir.path().join("chunk_0001.bin").exists());
+        assert!(chunk_path_for_id(dir.path(), 0).is_none());
+        assert!(chunk_path_for_id(dir.path(), 1).is_none());
 
         // New writes should restart naming from chunk_0000.bin.
         let mut resumed = resumed;
@@ -1172,7 +1437,7 @@ mod tests {
             })
             .unwrap();
         resumed.flush().unwrap();
-        assert!(dir.path().join("chunk_0000.bin").exists());
+        assert!(chunk_path_for_id(dir.path(), 0).is_some());
     }
 
     #[test]
@@ -1277,8 +1542,8 @@ mod tests {
         assert_eq!(writer.chunk_count(), 3, "3 distinct chunks allocated");
         for i in 0..3 {
             assert!(
-                dir.path().join(format!("chunk_{i:04}.bin")).exists(),
-                "chunk_{i:04}.bin missing - a flush collided and overwrote it"
+                chunk_path_for_id(dir.path(), i).is_some(),
+                "chunk id {i} missing - a flush collided and overwrote it"
             );
         }
 

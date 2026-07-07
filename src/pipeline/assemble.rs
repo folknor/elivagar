@@ -32,6 +32,29 @@ pub(super) struct EncodedTile {
 }
 const _: () = assert!(std::mem::size_of::<EncodedTile>() == 32);
 
+struct AssembleCore {
+    features_read: u64,
+    tiles_written: u64,
+    pmtiles: PmtilesWriter,
+    tiles_per_zoom: [u64; 15],
+    unique_per_zoom: [u64; 15],
+    bytes_per_zoom: [u64; 15],
+    max_batch_bytes: usize,
+    size_diag: TileSizeDiagnostics,
+    reader_ns: u64,
+    reader_total_ns: Option<u64>,
+    partition_workers: Option<usize>,
+    partition_count: Option<usize>,
+}
+
+struct PartitionOutput {
+    order: usize,
+    features_read: u64,
+    max_batch_bytes: usize,
+    reader_ns: u64,
+    encoded_tiles: Vec<EncodedTile>,
+}
+
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
 pub(super) fn phase_assemble(
@@ -90,147 +113,178 @@ pub(super) fn phase_assemble(
     let (encode_tx, encode_rx) = sync_channel::<Vec<EncodedTile>>(1);
 
     let seam_metrics = SeamMetrics::new();
-    let scope_result: Result<_, PipelineError> = std::thread::scope(|s| {
-        // --- Reader thread: k-way merge → PendingTile batches ---
-        let reader = s.spawn(move || -> Result<(u64, usize, u64), PipelineError> {
-            // Single wall-clock span for the whole thread, not per-record: this
-            // loop calls sort_reader.next() up to ~512M times at NA scale, and
-            // the k-way merge's read_record() is exactly this thread's serial
-            // bottleneck (perf-hunt item 14) - per-call #[hotpath::measure]
-            // would add two clock reads per call, the same overhead problem
-            // node_index.rs's get_from_group_cached explicitly avoids at a
-            // similar call count. One Instant::now() pair gives this thread's
-            // total wall time, comparable against phase_assemble's total to
-            // see how much of assemble is this serial reader.
-            let reader_started = std::time::Instant::now();
-            let mut features_read: u64 = 0;
-            let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
-            let mut current = PendingTile {
-                tile_id: u64::MAX,
-                features: Vec::new(),
-            };
-            // Incremental byte tracking for assemble batch HWM.
-            let mut current_tile_bytes: usize = 0;
-            let mut batch_bytes: usize = 0;
-            let mut max_batch_bytes: usize = 0;
-
-            loop {
-                let record = sort_reader.next()?;
-                let Some(r) = record else {
-                    if current.tile_id != u64::MAX {
-                        batch_bytes += 32 + current_tile_bytes;
-                        batch.push(current);
-                    }
-                    if !batch.is_empty() {
-                        if batch_bytes > max_batch_bytes {
-                            max_batch_bytes = batch_bytes;
-                        }
-                        drop(read_tx.send(batch)); // ignore: encoder may have exited
-                    }
-                    break;
-                };
-                features_read += 1;
-
-                let tile_id = sort::tile_id_from_key(r.key);
-                let layer_idx = sort::layer_from_key(r.key);
-
-                if tile_id != current.tile_id {
-                    if current.tile_id != u64::MAX {
-                        batch_bytes += 32 + current_tile_bytes;
-                        batch.push(current);
-                        if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
-                            if batch_bytes > max_batch_bytes {
-                                max_batch_bytes = batch_bytes;
-                            }
-                            if read_tx.send(batch).is_err() {
-                                break;
-                            }
-                            batch = Vec::with_capacity(BATCH_SIZE);
-                            batch_bytes = 0;
-                        }
-                    }
-                    current = PendingTile {
-                        tile_id,
+    let scope_result: Result<AssembleCore, PipelineError> =
+        if let Some(partitions) = sort_reader.take_partitions() {
+            phase_assemble_partitions(&partitions, pmtiles, config, &seam_metrics)
+        } else {
+            std::thread::scope(|s| {
+                // --- Reader thread: k-way merge → PendingTile batches ---
+                let reader = s.spawn(move || -> Result<(u64, usize, u64), PipelineError> {
+                    // Single wall-clock span for the whole thread, not per-record: this
+                    // loop calls sort_reader.next() up to ~512M times at NA scale, and
+                    // the k-way merge's read_record() is exactly this thread's serial
+                    // bottleneck (perf-hunt item 14) - per-call #[hotpath::measure]
+                    // would add two clock reads per call, the same overhead problem
+                    // node_index.rs's get_from_group_cached explicitly avoids at a
+                    // similar call count. One Instant::now() pair gives this thread's
+                    // total wall time, comparable against phase_assemble's total to
+                    // see how much of assemble is this serial reader.
+                    let reader_started = std::time::Instant::now();
+                    let mut features_read: u64 = 0;
+                    let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
+                    let mut current = PendingTile {
+                        tile_id: u64::MAX,
                         features: Vec::new(),
                     };
-                    current_tile_bytes = 0;
-                }
-                let data_len = r.data.len();
-                current.features.push((layer_idx, r.data));
-                current_tile_bytes += 32 + data_len;
-            }
-            #[allow(clippy::cast_possible_truncation)]
-            let reader_ns = reader_started.elapsed().as_nanos() as u64;
-            Ok((features_read, max_batch_bytes, reader_ns))
-        });
+                    // Incremental byte tracking for assemble batch HWM.
+                    let mut current_tile_bytes: usize = 0;
+                    let mut batch_bytes: usize = 0;
+                    let mut max_batch_bytes: usize = 0;
 
-        // --- Writer thread: encoded tiles → PMTiles ---
-        // move takes ownership of pmtiles; returned via join handle for write_to().
-        let writer = s.spawn(move || -> (u64, PmtilesWriter, [u64; 15], [u64; 15], [u64; 15], TileSizeDiagnostics) {
-            let mut pmtiles = pmtiles;
-            let mut tiles_written: u64 = 0;
-            let mut tiles_per_zoom = [0u64; 15];
-            let mut unique_per_zoom = [0u64; 15];
-            let mut bytes_per_zoom = [0u64; 15];
-            let mut size_diag = TileSizeDiagnostics::default();
-            while let Ok(batch) = encode_rx.recv() {
-                for tile in batch {
-                    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-                    let tile_bytes = tile.compressed.len() as u64;
-                    record_tile_size_diagnostics(&mut size_diag, tile.tile_id, tile_bytes);
-                    // Panic: disk I/O failure is unrecoverable mid-pipeline.
-                    let is_unique = pmtiles.add_tile(z, x, y, &tile.compressed)
-                        .expect("failed to write tile");
-                    tiles_written += 1;
-                    if (z as usize) < 15 {
-                        tiles_per_zoom[z as usize] += 1;
-                        if is_unique {
-                            unique_per_zoom[z as usize] += 1;
-                            bytes_per_zoom[z as usize] += tile_bytes;
+                    loop {
+                        let record = sort_reader.next()?;
+                        let Some(r) = record else {
+                            if current.tile_id != u64::MAX {
+                                batch_bytes += 32 + current_tile_bytes;
+                                batch.push(current);
+                            }
+                            if !batch.is_empty() {
+                                if batch_bytes > max_batch_bytes {
+                                    max_batch_bytes = batch_bytes;
+                                }
+                                drop(read_tx.send(batch)); // ignore: encoder may have exited
+                            }
+                            break;
+                        };
+                        features_read += 1;
+
+                        let tile_id = sort::tile_id_from_key(r.key);
+                        let layer_idx = sort::layer_from_key(r.key);
+
+                        if tile_id != current.tile_id {
+                            if current.tile_id != u64::MAX {
+                                batch_bytes += 32 + current_tile_bytes;
+                                batch.push(current);
+                                if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
+                                    if batch_bytes > max_batch_bytes {
+                                        max_batch_bytes = batch_bytes;
+                                    }
+                                    if read_tx.send(batch).is_err() {
+                                        break;
+                                    }
+                                    batch = Vec::with_capacity(BATCH_SIZE);
+                                    batch_bytes = 0;
+                                }
+                            }
+                            current = PendingTile {
+                                tile_id,
+                                features: Vec::new(),
+                            };
+                            current_tile_bytes = 0;
+                        }
+                        let data_len = r.data.len();
+                        current.features.push((layer_idx, r.data));
+                        current_tile_bytes += 32 + data_len;
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    let reader_ns = reader_started.elapsed().as_nanos() as u64;
+                    Ok((features_read, max_batch_bytes, reader_ns))
+                });
+
+                // --- Writer thread: encoded tiles → PMTiles ---
+                // move takes ownership of pmtiles; returned via join handle for write_to().
+                let writer = s.spawn(
+                move || -> (
+                    u64,
+                    PmtilesWriter,
+                    [u64; 15],
+                    [u64; 15],
+                    [u64; 15],
+                    TileSizeDiagnostics,
+                ) {
+                    let mut pmtiles = pmtiles;
+                    let mut tiles_written: u64 = 0;
+                    let mut tiles_per_zoom = [0u64; 15];
+                    let mut unique_per_zoom = [0u64; 15];
+                    let mut bytes_per_zoom = [0u64; 15];
+                    let mut size_diag = TileSizeDiagnostics::default();
+                    while let Ok(batch) = encode_rx.recv() {
+                        for tile in batch {
+                            let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+                            let tile_bytes = tile.compressed.len() as u64;
+                            record_tile_size_diagnostics(&mut size_diag, tile.tile_id, tile_bytes);
+                            // Panic: disk I/O failure is unrecoverable mid-pipeline.
+                            let is_unique = pmtiles
+                                .add_tile(z, x, y, &tile.compressed)
+                                .expect("failed to write tile");
+                            tiles_written += 1;
+                            if (z as usize) < 15 {
+                                tiles_per_zoom[z as usize] += 1;
+                                if is_unique {
+                                    unique_per_zoom[z as usize] += 1;
+                                    bytes_per_zoom[z as usize] += tile_bytes;
+                                }
+                            }
                         }
                     }
+                    (
+                        tiles_written,
+                        pmtiles,
+                        tiles_per_zoom,
+                        unique_per_zoom,
+                        bytes_per_zoom,
+                        size_diag,
+                    )
+                },
+            );
+
+                // --- Main thread: receive batches, encode with rayon, forward to writer ---
+                let compression_level = config.compression_level;
+                let tile_format = config.tile_format;
+                let tile_compression = config.tile_compression;
+                for batch in read_rx {
+                    let encoded = encode_tile_batch(
+                        &batch,
+                        compression_level,
+                        tile_format,
+                        tile_compression,
+                        &config.seam_reconcile_layers,
+                        &seam_metrics,
+                    )?;
+                    if encode_tx.send(encoded).is_err() {
+                        break;
+                    }
                 }
-            }
-            (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, size_diag)
-        });
+                drop(encode_tx);
 
-        // --- Main thread: receive batches, encode with rayon, forward to writer ---
-        let compression_level = config.compression_level;
-        let tile_format = config.tile_format;
-        let tile_compression = config.tile_compression;
-        for batch in read_rx {
-            let encoded = encode_tile_batch(
-                &batch,
-                compression_level,
-                tile_format,
-                tile_compression,
-                &config.seam_reconcile_layers,
-                &seam_metrics,
-            )?;
-            if encode_tx.send(encoded).is_err() {
-                break;
-            }
-        }
-        drop(encode_tx);
+                let (features_read, max_batch_bytes, reader_ns) =
+                    reader.join().expect("reader panicked")?;
+                let (
+                    tiles_written,
+                    pmtiles,
+                    tiles_per_zoom,
+                    unique_per_zoom,
+                    bytes_per_zoom,
+                    size_diag,
+                ) = writer.join().expect("writer panicked");
+                Ok(AssembleCore {
+                    features_read,
+                    tiles_written,
+                    pmtiles,
+                    tiles_per_zoom,
+                    unique_per_zoom,
+                    bytes_per_zoom,
+                    max_batch_bytes,
+                    size_diag,
+                    reader_ns,
+                    reader_total_ns: None,
+                    partition_workers: None,
+                    partition_count: None,
+                })
+            })
+        };
 
-        let (features_read, max_batch_bytes, reader_ns) =
-            reader.join().expect("reader panicked")?;
-        let (tiles_written, pmtiles, tiles_per_zoom, unique_per_zoom, bytes_per_zoom, size_diag) =
-            writer.join().expect("writer panicked");
-        Ok((
-            features_read,
-            tiles_written,
-            pmtiles,
-            tiles_per_zoom,
-            unique_per_zoom,
-            bytes_per_zoom,
-            max_batch_bytes,
-            size_diag,
-            reader_ns,
-        ))
-    });
-
-    let (
+    let AssembleCore {
         features_read,
         tiles_written,
         mut pmtiles,
@@ -240,11 +294,29 @@ pub(super) fn phase_assemble(
         max_batch_bytes,
         size_diag,
         reader_ns,
-    ) = scope_result?;
-    eprintln!(
-        "  Assemble reader thread (k-way merge): {:.1}s",
-        reader_ns as f64 / 1_000_000_000.0
-    );
+        reader_total_ns,
+        partition_workers,
+        partition_count,
+    } = scope_result?;
+    if let (Some(total_ns), Some(workers), Some(partitions)) =
+        (reader_total_ns, partition_workers, partition_count)
+    {
+        eprintln!(
+            "  Assemble partition readers: {} partitions, {} workers, max {:.1}s, total {:.1}s",
+            partitions,
+            workers,
+            reader_ns as f64 / 1_000_000_000.0,
+            total_ns as f64 / 1_000_000_000.0
+        );
+        eprintln!("assemble_reader_total_ns={total_ns}");
+        eprintln!("assemble_partition_workers={workers}");
+        eprintln!("assemble_partitions={partitions}");
+    } else {
+        eprintln!(
+            "  Assemble reader thread (k-way merge): {:.1}s",
+            reader_ns as f64 / 1_000_000_000.0
+        );
+    }
     eprintln!("assemble_reader_ns={reader_ns}");
     if let Some(filename) = config.pbf_path.file_name().and_then(|s| s.to_str()) {
         pmtiles.set_source_pbf_filename(filename.to_string());
@@ -313,6 +385,254 @@ pub(super) fn phase_assemble(
         dedup_stats,
         size_diag,
     ))
+}
+
+#[allow(clippy::too_many_lines)]
+fn phase_assemble_partitions(
+    partitions: &[sort::SortPartition],
+    mut pmtiles: PmtilesWriter,
+    config: &TilegenConfig,
+    seam_metrics: &SeamMetrics,
+) -> Result<AssembleCore, PipelineError> {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::mpsc;
+
+    let partition_count = partitions.len();
+    if partition_count == 0 {
+        return Ok(AssembleCore {
+            features_read: 0,
+            tiles_written: 0,
+            pmtiles,
+            tiles_per_zoom: [0; 15],
+            unique_per_zoom: [0; 15],
+            bytes_per_zoom: [0; 15],
+            max_batch_bytes: 0,
+            size_diag: TileSizeDiagnostics::default(),
+            reader_ns: 0,
+            reader_total_ns: Some(0),
+            partition_workers: Some(0),
+            partition_count: Some(0),
+        });
+    }
+
+    let worker_count = config.threads.clamp(1, 4).min(partition_count);
+    let next_job = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel::<Result<PartitionOutput, PipelineError>>();
+
+    let compression = config.compress_sort_chunks;
+    let compression_level = config.compression_level;
+    let tile_format = config.tile_format;
+    let tile_compression = config.tile_compression;
+    let seam_reconcile_layers = config.seam_reconcile_layers;
+    let assemble_budget = if config.assemble_batch_budget > 0 {
+        config.assemble_batch_budget
+    } else {
+        32 * 1024 * 1024
+    };
+
+    let mut features_read: u64 = 0;
+    let mut tiles_written: u64 = 0;
+    let mut tiles_per_zoom = [0u64; 15];
+    let mut unique_per_zoom = [0u64; 15];
+    let mut bytes_per_zoom = [0u64; 15];
+    let mut max_batch_bytes: usize = 0;
+    let mut size_diag = TileSizeDiagnostics::default();
+    let mut reader_max_ns: u64 = 0;
+    let mut reader_total_ns: u64 = 0;
+
+    let scope_result: Result<(), PipelineError> = std::thread::scope(|s| {
+        for _ in 0..worker_count {
+            let tx = tx.clone();
+            let partitions_ref = &partitions;
+            let next_job_ref = &next_job;
+            let stop_ref = &stop;
+            let seam_layers = seam_reconcile_layers;
+            s.spawn(move || {
+                loop {
+                    if stop_ref.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let order = next_job_ref.fetch_add(1, Ordering::Relaxed);
+                    if order >= partitions_ref.len() {
+                        break;
+                    }
+                    let partition = &partitions_ref[order];
+                    let result = read_encode_partition(
+                        order,
+                        partition,
+                        compression,
+                        compression_level,
+                        tile_format,
+                        tile_compression,
+                        &seam_layers,
+                        seam_metrics,
+                        assemble_budget,
+                    );
+                    if result.is_err() {
+                        stop_ref.store(true, Ordering::Relaxed);
+                    }
+                    if tx.send(result).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+
+        let mut pending = BTreeMap::<usize, PartitionOutput>::new();
+        let mut next_write = 0usize;
+        for result in rx {
+            let output = result?;
+            pending.insert(output.order, output);
+            while let Some(output) = pending.remove(&next_write) {
+                features_read += output.features_read;
+                max_batch_bytes = max_batch_bytes.max(output.max_batch_bytes);
+                reader_max_ns = reader_max_ns.max(output.reader_ns);
+                reader_total_ns += output.reader_ns;
+                for tile in output.encoded_tiles {
+                    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+                    let tile_bytes = tile.compressed.len() as u64;
+                    record_tile_size_diagnostics(&mut size_diag, tile.tile_id, tile_bytes);
+                    let is_unique = pmtiles.add_tile(z, x, y, &tile.compressed)?;
+                    tiles_written += 1;
+                    if (z as usize) < 15 {
+                        tiles_per_zoom[z as usize] += 1;
+                        if is_unique {
+                            unique_per_zoom[z as usize] += 1;
+                            bytes_per_zoom[z as usize] += tile_bytes;
+                        }
+                    }
+                }
+                next_write += 1;
+            }
+        }
+
+        if next_write != partition_count {
+            return Err(PipelineError(format!(
+                "assemble partition worker stopped after {next_write} of {partition_count} partitions"
+            )));
+        }
+        Ok(())
+    });
+    scope_result?;
+
+    Ok(AssembleCore {
+        features_read,
+        tiles_written,
+        pmtiles,
+        tiles_per_zoom,
+        unique_per_zoom,
+        bytes_per_zoom,
+        max_batch_bytes,
+        size_diag,
+        reader_ns: reader_max_ns,
+        reader_total_ns: Some(reader_total_ns),
+        partition_workers: Some(worker_count),
+        partition_count: Some(partition_count),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_encode_partition(
+    order: usize,
+    partition: &sort::SortPartition,
+    compression: sort::ChunkCompression,
+    compression_level: u32,
+    tile_format: TilePayloadFormat,
+    tile_compression: TileCompression,
+    seam_reconcile_layers: &[u8],
+    seam_metrics: &SeamMetrics,
+    assemble_budget: usize,
+) -> Result<PartitionOutput, PipelineError> {
+    const BATCH_SIZE: usize = 4096;
+
+    let mut reader = sort::SortPartitionReader::open(&partition.paths, compression)?;
+    let mut features_read: u64 = 0;
+    let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
+    let mut current = PendingTile {
+        tile_id: u64::MAX,
+        features: Vec::new(),
+    };
+    let mut current_tile_bytes: usize = 0;
+    let mut batch_bytes: usize = 0;
+    let mut max_batch_bytes: usize = 0;
+    let mut encoded_tiles = Vec::new();
+    let mut reader_ns: u64 = 0;
+    let mut read_started = std::time::Instant::now();
+
+    loop {
+        let record = reader.next()?;
+        let Some(r) = record else {
+            if current.tile_id != u64::MAX {
+                batch_bytes += 32 + current_tile_bytes;
+                batch.push(current);
+            }
+            if !batch.is_empty() {
+                max_batch_bytes = max_batch_bytes.max(batch_bytes);
+                add_reader_elapsed(&mut reader_ns, read_started);
+                encoded_tiles.extend(encode_tile_batch(
+                    &batch,
+                    compression_level,
+                    tile_format,
+                    tile_compression,
+                    seam_reconcile_layers,
+                    seam_metrics,
+                )?);
+            } else {
+                add_reader_elapsed(&mut reader_ns, read_started);
+            }
+            break;
+        };
+        features_read += 1;
+
+        let tile_id = sort::tile_id_from_key(r.key);
+        let layer_idx = sort::layer_from_key(r.key);
+        if tile_id != current.tile_id {
+            if current.tile_id != u64::MAX {
+                batch_bytes += 32 + current_tile_bytes;
+                batch.push(current);
+                if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
+                    max_batch_bytes = max_batch_bytes.max(batch_bytes);
+                    add_reader_elapsed(&mut reader_ns, read_started);
+                    encoded_tiles.extend(encode_tile_batch(
+                        &batch,
+                        compression_level,
+                        tile_format,
+                        tile_compression,
+                        seam_reconcile_layers,
+                        seam_metrics,
+                    )?);
+                    batch = Vec::with_capacity(BATCH_SIZE);
+                    batch_bytes = 0;
+                    read_started = std::time::Instant::now();
+                }
+            }
+            current = PendingTile {
+                tile_id,
+                features: Vec::new(),
+            };
+            current_tile_bytes = 0;
+        }
+        let data_len = r.data.len();
+        current.features.push((layer_idx, r.data));
+        current_tile_bytes += 32 + data_len;
+    }
+
+    Ok(PartitionOutput {
+        order,
+        features_read,
+        max_batch_bytes,
+        reader_ns,
+        encoded_tiles,
+    })
+}
+
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+fn add_reader_elapsed(reader_ns: &mut u64, started: std::time::Instant) {
+    *reader_ns += started.elapsed().as_nanos() as u64;
 }
 
 /// Per-worker assembly state, persisted across batches via `thread_local!`.

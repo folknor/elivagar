@@ -86,12 +86,16 @@ impl OceanAcc {
         if self.records.is_empty() {
             return;
         }
-        let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
         // Panic: inside rayon fold. Disk I/O failure is unrecoverable here.
-        sort::write_sorted_payload_chunk(&mut self.records, &self.payload, &path, self.compression)
-            .expect("ocean chunk write failed");
-        self.chunk_paths.push(path);
+        let paths = sort::write_partitioned_payload_chunks(
+            &mut self.records,
+            &self.payload,
+            chunk_dir,
+            chunk_id,
+            self.compression,
+        )
+        .expect("ocean chunk write failed");
+        self.chunk_paths.extend(paths);
         self.count += self.records.len() as u64;
         self.records.clear();
         self.payload.clear();

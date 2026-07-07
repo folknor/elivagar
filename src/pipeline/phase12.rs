@@ -1241,16 +1241,15 @@ impl WayAcc {
         if self.sink.records.is_empty() {
             return;
         }
-        let id = chunk_id.fetch_add(1, Ordering::Relaxed);
-        let path = chunk_dir.join(format!("chunk_{id:04}.bin"));
-        crate::sort::write_sorted_payload_chunk(
+        let paths = crate::sort::write_partitioned_payload_chunks(
             &mut self.sink.records,
             &self.sink.payload,
-            &path,
+            chunk_dir,
+            chunk_id,
             self.compression,
         )
         .expect("way chunk write failed");
-        self.chunk_paths.push(path);
+        self.chunk_paths.extend(paths);
         self.count += self.sink.records.len() as u64;
         self.sink.clear_payload();
         self.bytes = 0;
