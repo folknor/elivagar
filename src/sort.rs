@@ -7,7 +7,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -56,6 +56,7 @@ const PARTITION_BASES: [usize; 16] = {
 pub const SORT_PARTITIONS: usize = PARTITION_BASES[15];
 
 const TILE_ID_LIMIT_EXCLUSIVE: u64 = TILE_ID_BASES[15];
+const MULTI_CHUNK_MAGIC: &[u8; 8] = b"ELVGSRT1";
 
 // ---------------------------------------------------------------------------
 // Chunk compression selection
@@ -174,11 +175,22 @@ fn chunk_path(tmp_dir: &Path, chunk_no: usize, partition: usize) -> PathBuf {
     ))
 }
 
+fn multi_chunk_path(tmp_dir: &Path, chunk_no: usize) -> PathBuf {
+    tmp_dir.join(format!("chunk_{chunk_no:04}_z{PARTITION_SPLIT_Z}m.bin"))
+}
+
 fn legacy_chunk_path(tmp_dir: &Path, chunk_no: usize) -> PathBuf {
     tmp_dir.join(format!("chunk_{chunk_no:04}.bin"))
 }
 
-fn parse_chunk_filename(path: &Path) -> Option<(usize, Option<usize>)> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChunkFileKind {
+    Legacy,
+    Partition(usize),
+    Multi,
+}
+
+fn parse_chunk_filename(path: &Path) -> Option<(usize, ChunkFileKind)> {
     let name = path.file_name()?.to_str()?;
     if !name.starts_with("chunk_") || !name.ends_with(".bin") {
         return None;
@@ -187,27 +199,34 @@ fn parse_chunk_filename(path: &Path) -> Option<(usize, Option<usize>)> {
     let body = stem.strip_prefix("chunk_")?;
     if let Some((id, suffix)) = body.split_once("_z") {
         let chunk_no = id.parse().ok()?;
+        if let Some(split_z) = suffix.strip_suffix('m') {
+            let split_z: u8 = split_z.parse().ok()?;
+            if split_z == PARTITION_SPLIT_Z {
+                return Some((chunk_no, ChunkFileKind::Multi));
+            }
+            return Some((chunk_no, ChunkFileKind::Legacy));
+        }
         let (split_z, partition) = suffix.split_once('p')?;
         let split_z: u8 = split_z.parse().ok()?;
         let part: usize = partition.parse().ok()?;
         if split_z == PARTITION_SPLIT_Z && part < SORT_PARTITIONS {
-            return Some((chunk_no, Some(part)));
+            return Some((chunk_no, ChunkFileKind::Partition(part)));
         }
-        return Some((chunk_no, None));
+        return Some((chunk_no, ChunkFileKind::Legacy));
     }
     if let Some((id, _partition)) = body.split_once("_p") {
         // First-cut P3 chunks used a different partition numbering scheme.
         // Keep them visible for checkpoint cleanup and legacy merge fallback,
         // but do not treat the suffix as a current partition id.
         let chunk_no = id.parse().ok()?;
-        return Some((chunk_no, None));
+        return Some((chunk_no, ChunkFileKind::Legacy));
     }
     let chunk_no = body.parse().ok()?;
-    Some((chunk_no, None))
+    Some((chunk_no, ChunkFileKind::Legacy))
 }
 
-type ChunkScanEntry = (usize, Option<usize>, PathBuf);
-type ChunkById = Vec<Option<(Option<usize>, PathBuf)>>;
+type ChunkScanEntry = (usize, ChunkFileKind, PathBuf);
+type ChunkById = Vec<Option<(ChunkFileKind, PathBuf)>>;
 
 fn scan_chunk_files(tmp_dir: &Path) -> io::Result<Vec<ChunkScanEntry>> {
     let mut out = Vec::new();
@@ -216,8 +235,8 @@ fn scan_chunk_files(tmp_dir: &Path) -> io::Result<Vec<ChunkScanEntry>> {
             for entry in entries {
                 let entry = entry?;
                 let path = entry.path();
-                if let Some((chunk_no, partition)) = parse_chunk_filename(&path) {
-                    out.push((chunk_no, partition, path));
+                if let Some((chunk_no, kind)) = parse_chunk_filename(&path) {
+                    out.push((chunk_no, kind, path));
                 }
             }
         }
@@ -236,14 +255,14 @@ fn chunk_files_by_id(tmp_dir: &Path) -> io::Result<ChunkById> {
         .max()
         .map_or(0, |id| id + 1);
     let mut by_id = vec![None; max_id];
-    for (chunk_no, partition, path) in scanned {
+    for (chunk_no, kind, path) in scanned {
         if by_id[chunk_no].is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("duplicate chunk id {chunk_no} in {}", tmp_dir.display()),
             ));
         }
-        by_id[chunk_no] = Some((partition, path));
+        by_id[chunk_no] = Some((kind, path));
     }
     Ok(by_id)
 }
@@ -528,22 +547,29 @@ impl SortWriter {
         }
         self.buffer.sort_unstable_by_key(|r| r.key);
         let mut paths = Vec::new();
-        let mut start = 0;
-        while start < self.buffer.len() {
-            let partition = partition_from_key(self.buffer[start].key);
-            let next_key = partition_next_key(partition);
-            let mut end = start + 1;
-            while end < self.buffer.len() && self.buffer[end].key < next_key {
-                end += 1;
-            }
+        if self.compression == ChunkCompression::None {
             let chunk_no = match &self.chunk_counter {
                 Some(counter) => counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 None => self.chunk_count + paths.len(),
             };
-            let path = chunk_path(&self.tmp_dir, chunk_no, partition);
-            write_chunk_records_presorted(&self.buffer[start..end], &path, self.compression)?;
+            let path =
+                write_uncompressed_partitioned_sort_chunk(&self.buffer, &self.tmp_dir, chunk_no)?;
             paths.push(path);
-            start = end;
+        } else {
+            let ranges = partition_ranges_by_key(self.buffer.len(), |idx| self.buffer[idx].key);
+            for range in ranges {
+                let chunk_no = match &self.chunk_counter {
+                    Some(counter) => counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    None => self.chunk_count + paths.len(),
+                };
+                let path = chunk_path(&self.tmp_dir, chunk_no, range.partition);
+                write_chunk_records_presorted(
+                    &self.buffer[range.start..range.end],
+                    &path,
+                    self.compression,
+                )?;
+                paths.push(path);
+            }
         }
 
         if self.chunk_counter.is_none() {
@@ -636,6 +662,157 @@ fn write_chunk_records_presorted(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct PartitionRange {
+    partition: usize,
+    start: usize,
+    end: usize,
+}
+
+fn partition_ranges_by_key(
+    len: usize,
+    mut key_at: impl FnMut(usize) -> SortKey,
+) -> Vec<PartitionRange> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < len {
+        let partition = partition_from_key(key_at(start));
+        let next_key = partition_next_key(partition);
+        let mut end = start + 1;
+        while end < len && key_at(end) < next_key {
+            end += 1;
+        }
+        ranges.push(PartitionRange {
+            partition,
+            start,
+            end,
+        });
+        start = end;
+    }
+    ranges
+}
+
+#[inline]
+fn sort_record_bytes(record: &SortRecord) -> u64 {
+    12 + record.data.len() as u64
+}
+
+#[inline]
+fn payload_record_bytes(record: PayloadRecord) -> u64 {
+    12 + record.2 as u64
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn write_multi_sort_chunk(
+    records: &[SortRecord],
+    ranges: &[PartitionRange],
+    path: &Path,
+) -> io::Result<()> {
+    let mut sections = Vec::with_capacity(ranges.len());
+    let mut offset = 8 + 4 + (ranges.len() as u64 * 16);
+    for range in ranges {
+        let byte_len = records[range.start..range.end]
+            .iter()
+            .map(sort_record_bytes)
+            .sum::<u64>();
+        sections.push((range.partition, range.end - range.start, offset));
+        offset += byte_len;
+    }
+
+    let file = File::create(path)?;
+    let mut writer = BufWriter::with_capacity(1 << 20, file);
+    writer.write_all(MULTI_CHUNK_MAGIC)?;
+    writer.write_all(&(sections.len() as u32).to_le_bytes())?;
+    for &(partition, count, offset) in &sections {
+        writer.write_all(&(partition as u32).to_le_bytes())?;
+        writer.write_all(&(count as u32).to_le_bytes())?;
+        writer.write_all(&offset.to_le_bytes())?;
+    }
+    for range in ranges {
+        for record in &records[range.start..range.end] {
+            writer.write_all(&record.key.to_le_bytes())?;
+            let data_len = record.data.len() as u32;
+            writer.write_all(&data_len.to_le_bytes())?;
+            writer.write_all(&record.data)?;
+        }
+    }
+    writer.flush()
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn write_multi_payload_chunk(
+    records: &[PayloadRecord],
+    payload: &[u8],
+    ranges: &[PartitionRange],
+    path: &Path,
+) -> io::Result<()> {
+    let mut sections = Vec::with_capacity(ranges.len());
+    let mut offset = 8 + 4 + (ranges.len() as u64 * 16);
+    for range in ranges {
+        let byte_len = records[range.start..range.end]
+            .iter()
+            .copied()
+            .map(payload_record_bytes)
+            .sum::<u64>();
+        sections.push((range.partition, range.end - range.start, offset));
+        offset += byte_len;
+    }
+
+    let file = File::create(path)?;
+    let mut writer = BufWriter::with_capacity(1 << 20, file);
+    writer.write_all(MULTI_CHUNK_MAGIC)?;
+    writer.write_all(&(sections.len() as u32).to_le_bytes())?;
+    for &(partition, count, offset) in &sections {
+        writer.write_all(&(partition as u32).to_le_bytes())?;
+        writer.write_all(&(count as u32).to_le_bytes())?;
+        writer.write_all(&offset.to_le_bytes())?;
+    }
+    for range in ranges {
+        for &(key, offset, len) in &records[range.start..range.end] {
+            writer.write_all(&key.to_le_bytes())?;
+            let data_len = len as u32;
+            writer.write_all(&data_len.to_le_bytes())?;
+            writer.write_all(&payload[offset..offset + len])?;
+        }
+    }
+    writer.flush()
+}
+
+fn write_uncompressed_partitioned_sort_chunk(
+    records: &[SortRecord],
+    tmp_dir: &Path,
+    chunk_no: usize,
+) -> io::Result<PathBuf> {
+    let ranges = partition_ranges_by_key(records.len(), |idx| records[idx].key);
+    if ranges.len() == 1 {
+        let path = chunk_path(tmp_dir, chunk_no, ranges[0].partition);
+        write_chunk_records_presorted(records, &path, ChunkCompression::None)?;
+        Ok(path)
+    } else {
+        let path = multi_chunk_path(tmp_dir, chunk_no);
+        write_multi_sort_chunk(records, &ranges, &path)?;
+        Ok(path)
+    }
+}
+
+fn write_uncompressed_partitioned_payload_chunk(
+    records: &[PayloadRecord],
+    payload: &[u8],
+    tmp_dir: &Path,
+    chunk_no: usize,
+) -> io::Result<PathBuf> {
+    let ranges = partition_ranges_by_key(records.len(), |idx| records[idx].0);
+    if ranges.len() == 1 {
+        let path = chunk_path(tmp_dir, chunk_no, ranges[0].partition);
+        write_payload_chunk_records_presorted(records, payload, &path, ChunkCompression::None)?;
+        Ok(path)
+    } else {
+        let path = multi_chunk_path(tmp_dir, chunk_no);
+        write_multi_payload_chunk(records, payload, &ranges, &path)?;
+        Ok(path)
+    }
+}
+
 /// Write arena-backed records as a sorted chunk file in the standard format.
 ///
 /// `records` entries are `(key, offset, len)` into `payload`. Only this in-memory
@@ -715,21 +892,28 @@ pub fn write_partitioned_payload_chunks(
     chunk_id: &AtomicUsize,
     compression: ChunkCompression,
 ) -> io::Result<Vec<PathBuf>> {
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
     records.sort_unstable_by_key(|r| r.0);
-    let mut paths = Vec::new();
-    let mut start = 0;
-    while start < records.len() {
-        let partition = partition_from_key(records[start].0);
-        let next_key = partition_next_key(partition);
-        let mut end = start + 1;
-        while end < records.len() && records[end].0 < next_key {
-            end += 1;
-        }
+    if compression == ChunkCompression::None {
         let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = chunk_path(tmp_dir, id, partition);
-        write_payload_chunk_records_presorted(&records[start..end], payload, &path, compression)?;
+        let path = write_uncompressed_partitioned_payload_chunk(records, payload, tmp_dir, id)?;
+        return Ok(vec![path]);
+    }
+
+    let ranges = partition_ranges_by_key(records.len(), |idx| records[idx].0);
+    let mut paths = Vec::new();
+    for range in ranges {
+        let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = chunk_path(tmp_dir, id, range.partition);
+        write_payload_chunk_records_presorted(
+            &records[range.start..range.end],
+            payload,
+            &path,
+            compression,
+        )?;
         paths.push(path);
-        start = end;
     }
     Ok(paths)
 }
@@ -737,6 +921,86 @@ pub fn write_partitioned_payload_chunks(
 // ---------------------------------------------------------------------------
 // ChunkReader - reads records sequentially from a single chunk file
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct MultiChunkSection {
+    partition: usize,
+    offset: u64,
+    count: u32,
+}
+
+#[derive(Clone, Debug)]
+struct SortPartitionSource {
+    path: PathBuf,
+    section: Option<MultiChunkSection>,
+}
+
+impl SortPartitionSource {
+    fn whole(path: PathBuf) -> Self {
+        Self {
+            path,
+            section: None,
+        }
+    }
+
+    fn section(path: PathBuf, section: MultiChunkSection) -> Self {
+        Self {
+            path,
+            section: Some(section),
+        }
+    }
+}
+
+fn read_multi_chunk_sections(path: &Path) -> io::Result<Vec<MultiChunkSection>> {
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic)?;
+    if &magic != MULTI_CHUNK_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid multi-partition chunk magic in {}", path.display()),
+        ));
+    }
+
+    let mut buf4 = [0u8; 4];
+    file.read_exact(&mut buf4)?;
+    let section_count = usize::try_from(u32::from_le_bytes(buf4)).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("section count does not fit usize in {}", path.display()),
+        )
+    })?;
+    let mut sections = Vec::with_capacity(section_count);
+    for _ in 0..section_count {
+        file.read_exact(&mut buf4)?;
+        let partition = usize::try_from(u32::from_le_bytes(buf4)).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("partition id does not fit usize in {}", path.display()),
+            )
+        })?;
+        if partition >= SORT_PARTITIONS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid partition {partition} in {}", path.display()),
+            ));
+        }
+
+        file.read_exact(&mut buf4)?;
+        let count = u32::from_le_bytes(buf4);
+
+        let mut buf8 = [0u8; 8];
+        file.read_exact(&mut buf8)?;
+        let offset = u64::from_le_bytes(buf8);
+
+        sections.push(MultiChunkSection {
+            partition,
+            offset,
+            count,
+        });
+    }
+    Ok(sections)
+}
 
 struct ChunkReader {
     reader: ChunkRead,
@@ -758,6 +1022,33 @@ impl ChunkReader {
         let remaining = u32::from_le_bytes(buf4);
 
         Ok(ChunkReader { reader, remaining })
+    }
+
+    fn open_source(
+        source: &SortPartitionSource,
+        compression: ChunkCompression,
+    ) -> io::Result<Self> {
+        match &source.section {
+            None => Self::open(&source.path, compression),
+            Some(section) => {
+                if compression != ChunkCompression::None {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "compressed multi-partition chunk section is not supported: {}",
+                            source.path.display()
+                        ),
+                    ));
+                }
+                let mut file = File::open(&source.path)?;
+                file.seek(SeekFrom::Start(section.offset))?;
+                let buf = BufReader::with_capacity(256 * 1024, file);
+                Ok(ChunkReader {
+                    reader: ChunkRead::Plain(buf),
+                    remaining: section.count,
+                })
+            }
+        }
     }
 
     // Allocates a Vec per record. A reusable buffer was considered but the heap
@@ -830,12 +1121,12 @@ struct PartitionMergeReader {
 }
 
 impl PartitionMergeReader {
-    fn new(chunk_paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
-        let mut chunk_readers = Vec::with_capacity(chunk_paths.len());
-        let mut heap = BinaryHeap::with_capacity(chunk_paths.len());
+    fn new(sources: &[SortPartitionSource], compression: ChunkCompression) -> io::Result<Self> {
+        let mut chunk_readers = Vec::with_capacity(sources.len());
+        let mut heap = BinaryHeap::with_capacity(sources.len());
 
-        for (idx, path) in chunk_paths.iter().enumerate() {
-            let mut cr = ChunkReader::open(path, compression)?;
+        for (idx, source) in sources.iter().enumerate() {
+            let mut cr = ChunkReader::open_source(source, compression)?;
             if let Some((key, data)) = cr.read_record()? {
                 heap.push(HeapEntry {
                     key,
@@ -850,6 +1141,15 @@ impl PartitionMergeReader {
             chunk_readers,
             heap,
         })
+    }
+
+    fn new_whole_paths(chunk_paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
+        let sources: Vec<SortPartitionSource> = chunk_paths
+            .iter()
+            .cloned()
+            .map(SortPartitionSource::whole)
+            .collect();
+        Self::new(&sources, compression)
     }
 
     fn next(&mut self) -> io::Result<Option<SortRecord>> {
@@ -879,7 +1179,7 @@ impl PartitionMergeReader {
 /// One tile-id range partition of sort chunk files.
 pub struct SortPartition {
     pub index: usize,
-    pub paths: Vec<PathBuf>,
+    sources: Vec<SortPartitionSource>,
 }
 
 /// A reader for one partition's chunk files.
@@ -888,9 +1188,9 @@ pub struct SortPartitionReader {
 }
 
 impl SortPartitionReader {
-    pub fn open(paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
+    pub fn open(partition: &SortPartition, compression: ChunkCompression) -> io::Result<Self> {
         Ok(Self {
-            inner: PartitionMergeReader::new(paths, compression)?,
+            inner: PartitionMergeReader::new(&partition.sources, compression)?,
         })
     }
 
@@ -902,7 +1202,7 @@ impl SortPartitionReader {
 
 enum SortReaderMode {
     Partitioned {
-        partitions: Vec<Vec<PathBuf>>,
+        partitions: Vec<Vec<SortPartitionSource>>,
         next_partition: usize,
         current: Option<PartitionMergeReader>,
     },
@@ -964,17 +1264,38 @@ impl SortReader {
     /// from each chunk.
     fn new(chunk_paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
         let mut partitions = vec![Vec::new(); SORT_PARTITIONS];
-        let mut all_partitioned = true;
+        let mut saw_partitioned = false;
+        let mut saw_multi = false;
+        let mut saw_legacy = false;
         for path in chunk_paths {
-            match parse_chunk_filename(path).and_then(|(_, partition)| partition) {
-                Some(partition) => partitions[partition].push(path.clone()),
-                None => {
-                    all_partitioned = false;
-                    break;
+            match parse_chunk_filename(path).map(|(_, kind)| kind) {
+                Some(ChunkFileKind::Partition(partition)) => {
+                    saw_partitioned = true;
+                    partitions[partition].push(SortPartitionSource::whole(path.clone()));
+                }
+                Some(ChunkFileKind::Multi) => {
+                    saw_partitioned = true;
+                    saw_multi = true;
+                    for section in read_multi_chunk_sections(path)? {
+                        if section.count > 0 {
+                            let partition = section.partition;
+                            partitions[partition]
+                                .push(SortPartitionSource::section(path.clone(), section));
+                        }
+                    }
+                }
+                Some(ChunkFileKind::Legacy) | None => {
+                    saw_legacy = true;
                 }
             }
         }
-        if all_partitioned {
+        if saw_legacy && saw_multi {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cannot mix legacy chunks with indexed multi-partition chunks",
+            ));
+        }
+        if saw_partitioned && !saw_legacy {
             return Ok(Self {
                 mode: SortReaderMode::Partitioned {
                     partitions,
@@ -985,7 +1306,10 @@ impl SortReader {
             });
         }
         Ok(Self {
-            mode: SortReaderMode::Legacy(PartitionMergeReader::new(chunk_paths, compression)?),
+            mode: SortReaderMode::Legacy(PartitionMergeReader::new_whole_paths(
+                chunk_paths,
+                compression,
+            )?),
             compression,
         })
     }
@@ -1000,7 +1324,10 @@ impl SortReader {
                 let mut taken = Vec::new();
                 for (index, paths) in std::mem::take(partitions).into_iter().enumerate() {
                     if !paths.is_empty() {
-                        taken.push(SortPartition { index, paths });
+                        taken.push(SortPartition {
+                            index,
+                            sources: paths,
+                        });
                     }
                 }
                 Some(taken)
@@ -1036,9 +1363,9 @@ impl SortReader {
                 if *next_partition >= partitions.len() {
                     return Ok(None);
                 }
-                let paths = &partitions[*next_partition];
+                let sources = &partitions[*next_partition];
                 *next_partition += 1;
-                *current = Some(PartitionMergeReader::new(paths, compression)?);
+                *current = Some(PartitionMergeReader::new(sources, compression)?);
             },
         }
     }
@@ -1059,6 +1386,14 @@ mod tests {
             .get(id)
             .and_then(Option::as_ref)
             .map(|(_, path)| path.clone())
+    }
+
+    fn chunk_kind_for_id(dir: &Path, id: usize) -> Option<ChunkFileKind> {
+        chunk_files_by_id(dir)
+            .unwrap()
+            .get(id)
+            .and_then(Option::as_ref)
+            .map(|(kind, _)| *kind)
     }
 
     fn collect_keys(mut reader: SortReader) -> Vec<u64> {
@@ -1171,6 +1506,83 @@ mod tests {
         assert!(matches!(&reader.mode, SortReaderMode::Legacy(_)));
         let keys = collect_keys(reader);
         assert_eq!(keys, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn uncompressed_writer_coalesces_partition_sections_into_one_file() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None).unwrap();
+
+        let p0 = PARTITION_BASES[14];
+        let p1 = p0 + 1;
+        let k0 = make_sort_key(partition_start_tile_id(p0), 0, 0);
+        let k1 = make_sort_key(partition_start_tile_id(p1), 0, 0);
+        let k1b = make_sort_key(partition_start_tile_id(p1) + 7, 2, 3);
+
+        for key in [k1b, k0, k1] {
+            writer
+                .push(SortRecord {
+                    key,
+                    data: Box::from(key.to_le_bytes().as_slice()),
+                })
+                .unwrap();
+        }
+        writer.flush().unwrap();
+
+        assert_eq!(writer.chunk_count(), 1);
+        assert_eq!(chunk_kind_for_id(dir.path(), 0), Some(ChunkFileKind::Multi));
+
+        let reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None).unwrap();
+        assert_eq!(collect_keys(reader), vec![k0, k1, k1b]);
+
+        let mut reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None).unwrap();
+        let partitions = reader.take_partitions().expect("partitioned reader");
+        assert_eq!(partitions.len(), 2);
+        assert_eq!(partitions[0].index, p0);
+        assert_eq!(partitions[1].index, p1);
+        assert!(partitions[0].sources[0].section.is_some());
+        assert!(partitions[1].sources[0].section.is_some());
+
+        let mut part0 = SortPartitionReader::open(&partitions[0], ChunkCompression::None).unwrap();
+        assert_eq!(part0.next().unwrap().expect("p0 record").key, k0);
+        assert!(part0.next().unwrap().is_none());
+
+        let mut part1 = SortPartitionReader::open(&partitions[1], ChunkCompression::None).unwrap();
+        assert_eq!(part1.next().unwrap().expect("p1 first").key, k1);
+        assert_eq!(part1.next().unwrap().expect("p1 second").key, k1b);
+        assert!(part1.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn payload_partition_writer_coalesces_sections_into_one_file() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let p0 = PARTITION_BASES[14];
+        let p1 = p0 + 1;
+        let k0 = make_sort_key(partition_start_tile_id(p0), 0, 0);
+        let k1 = make_sort_key(partition_start_tile_id(p1), 0, 0);
+        let mut payload = Vec::new();
+        let mut records = Vec::new();
+        for key in [k1, k0] {
+            let off = payload.len();
+            payload.extend_from_slice(&key.to_le_bytes());
+            records.push((key, off, 8));
+        }
+
+        let chunk_id = AtomicUsize::new(0);
+        let paths = write_partitioned_payload_chunks(
+            &mut records,
+            &payload,
+            dir.path(),
+            &chunk_id,
+            ChunkCompression::None,
+        )
+        .unwrap();
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(chunk_id.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(chunk_kind_for_id(dir.path(), 0), Some(ChunkFileKind::Multi));
+        let reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None).unwrap();
+        assert_eq!(collect_keys(reader), vec![k0, k1]);
     }
 
     #[test]

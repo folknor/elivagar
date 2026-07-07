@@ -548,7 +548,7 @@ fn read_encode_partition(
 ) -> Result<PartitionOutput, PipelineError> {
     const BATCH_SIZE: usize = 4096;
 
-    let mut reader = sort::SortPartitionReader::open(&partition.paths, compression)?;
+    let mut reader = sort::SortPartitionReader::open(partition, compression)?;
     let mut features_read: u64 = 0;
     let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
     let mut current = PendingTile {
