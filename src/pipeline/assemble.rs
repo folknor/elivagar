@@ -47,12 +47,36 @@ struct AssembleCore {
     partition_count: Option<usize>,
 }
 
-struct PartitionOutput {
+struct PartitionBatch {
     order: usize,
+    batch_index: usize,
+    is_last: bool,
     features_read: u64,
     max_batch_bytes: usize,
     reader_ns: u64,
     encoded_tiles: Vec<EncodedTile>,
+}
+
+struct PartitionBatchMeta {
+    order: usize,
+    batch_index: usize,
+    is_last: bool,
+    features_read: u64,
+    max_batch_bytes: usize,
+    reader_ns: u64,
+}
+
+struct PartitionEncodeCtx<'a> {
+    compression_level: u32,
+    tile_format: TilePayloadFormat,
+    tile_compression: TileCompression,
+    seam_reconcile_layers: &'a [u8],
+    seam_metrics: &'a SeamMetrics,
+}
+
+#[derive(Default)]
+struct PendingPartitionBatches {
+    batches: std::collections::BTreeMap<usize, PartitionBatch>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -419,7 +443,7 @@ fn phase_assemble_partitions(
     let worker_count = config.threads.clamp(1, 4).min(partition_count);
     let next_job = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
-    let (tx, rx) = mpsc::channel::<Result<PartitionOutput, PipelineError>>();
+    let (tx, rx) = mpsc::channel::<Result<PartitionBatch, PipelineError>>();
 
     let compression = config.compress_sort_chunks;
     let compression_level = config.compression_level;
@@ -469,11 +493,14 @@ fn phase_assemble_partitions(
                         &seam_layers,
                         seam_metrics,
                         assemble_budget,
+                        &tx,
                     );
                     if result.is_err() {
                         stop_ref.store(true, Ordering::Relaxed);
                     }
-                    if tx.send(result).is_err() {
+                    if let Err(err) = result
+                        && tx.send(Err(err)).is_err()
+                    {
                         break;
                     }
                 }
@@ -481,17 +508,44 @@ fn phase_assemble_partitions(
         }
         drop(tx);
 
-        let mut pending = BTreeMap::<usize, PartitionOutput>::new();
+        let mut pending = BTreeMap::<usize, PendingPartitionBatches>::new();
         let mut next_write = 0usize;
+        let mut next_batch = 0usize;
+        let mut current_partition_reader_ns = 0u64;
         for result in rx {
-            let output = result?;
-            pending.insert(output.order, output);
-            while let Some(output) = pending.remove(&next_write) {
-                features_read += output.features_read;
-                max_batch_bytes = max_batch_bytes.max(output.max_batch_bytes);
-                reader_max_ns = reader_max_ns.max(output.reader_ns);
-                reader_total_ns += output.reader_ns;
-                for tile in output.encoded_tiles {
+            let batch = result?;
+            if batch.order >= partition_count {
+                return Err(PipelineError(format!(
+                    "assemble partition batch has invalid order {} of {partition_count}",
+                    batch.order
+                )));
+            }
+            let batch_order = batch.order;
+            let batch_index = batch.batch_index;
+            let state = pending.entry(batch_order).or_default();
+            if state.batches.insert(batch_index, batch).is_some() {
+                return Err(PipelineError(format!(
+                    "duplicate assemble partition batch {batch_index} for partition {batch_order}"
+                )));
+            }
+
+            while pending
+                .get(&next_write)
+                .is_some_and(|state| state.batches.contains_key(&next_batch))
+            {
+                let state = pending
+                    .get_mut(&next_write)
+                    .expect("ready partition exists");
+                let batch = state
+                    .batches
+                    .remove(&next_batch)
+                    .expect("ready batch exists");
+                let batch_is_last = batch.is_last;
+                features_read += batch.features_read;
+                max_batch_bytes = max_batch_bytes.max(batch.max_batch_bytes);
+                reader_total_ns += batch.reader_ns;
+                current_partition_reader_ns += batch.reader_ns;
+                for tile in batch.encoded_tiles {
                     let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
                     let tile_bytes = tile.compressed.len() as u64;
                     record_tile_size_diagnostics(&mut size_diag, tile.tile_id, tile_bytes);
@@ -505,7 +559,20 @@ fn phase_assemble_partitions(
                         }
                     }
                 }
-                next_write += 1;
+                if batch_is_last {
+                    if !state.batches.is_empty() {
+                        return Err(PipelineError(format!(
+                            "assemble partition {next_write} received batches after final marker"
+                        )));
+                    }
+                    reader_max_ns = reader_max_ns.max(current_partition_reader_ns);
+                    current_partition_reader_ns = 0;
+                    pending.remove(&next_write);
+                    next_write += 1;
+                    next_batch = 0;
+                } else {
+                    next_batch += 1;
+                }
             }
         }
 
@@ -545,11 +612,12 @@ fn read_encode_partition(
     seam_reconcile_layers: &[u8],
     seam_metrics: &SeamMetrics,
     assemble_budget: usize,
-) -> Result<PartitionOutput, PipelineError> {
+    tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
+) -> Result<(), PipelineError> {
     const BATCH_SIZE: usize = 4096;
 
     let mut reader = sort::SortPartitionReader::open(partition, compression)?;
-    let mut features_read: u64 = 0;
+    let mut batch_features_read: u64 = 0;
     let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
     let mut current = PendingTile {
         tile_id: u64::MAX,
@@ -557,10 +625,15 @@ fn read_encode_partition(
     };
     let mut current_tile_bytes: usize = 0;
     let mut batch_bytes: usize = 0;
-    let mut max_batch_bytes: usize = 0;
-    let mut encoded_tiles = Vec::new();
-    let mut reader_ns: u64 = 0;
+    let mut batch_index = 0usize;
     let mut read_started = std::time::Instant::now();
+    let encode_ctx = PartitionEncodeCtx {
+        compression_level,
+        tile_format,
+        tile_compression,
+        seam_reconcile_layers,
+        seam_metrics,
+    };
 
     loop {
         let record = reader.next()?;
@@ -569,23 +642,24 @@ fn read_encode_partition(
                 batch_bytes += 32 + current_tile_bytes;
                 batch.push(current);
             }
-            if !batch.is_empty() {
-                max_batch_bytes = max_batch_bytes.max(batch_bytes);
-                add_reader_elapsed(&mut reader_ns, read_started);
-                encoded_tiles.extend(encode_tile_batch(
-                    &batch,
-                    compression_level,
-                    tile_format,
-                    tile_compression,
-                    seam_reconcile_layers,
-                    seam_metrics,
-                )?);
-            } else {
-                add_reader_elapsed(&mut reader_ns, read_started);
-            }
+            let mut reader_ns = 0;
+            add_reader_elapsed(&mut reader_ns, read_started);
+            encode_and_send_partition_batch(
+                tx,
+                &encode_ctx,
+                &PartitionBatchMeta {
+                    order,
+                    batch_index,
+                    is_last: true,
+                    features_read: batch_features_read,
+                    max_batch_bytes: if batch.is_empty() { 0 } else { batch_bytes },
+                    reader_ns,
+                },
+                &batch,
+            )?;
             break;
         };
-        features_read += 1;
+        batch_features_read += 1;
 
         let tile_id = sort::tile_id_from_key(r.key);
         let layer_idx = sort::layer_from_key(r.key);
@@ -594,16 +668,23 @@ fn read_encode_partition(
                 batch_bytes += 32 + current_tile_bytes;
                 batch.push(current);
                 if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
-                    max_batch_bytes = max_batch_bytes.max(batch_bytes);
+                    let mut reader_ns = 0;
                     add_reader_elapsed(&mut reader_ns, read_started);
-                    encoded_tiles.extend(encode_tile_batch(
+                    encode_and_send_partition_batch(
+                        tx,
+                        &encode_ctx,
+                        &PartitionBatchMeta {
+                            order,
+                            batch_index,
+                            is_last: false,
+                            features_read: batch_features_read,
+                            max_batch_bytes: batch_bytes,
+                            reader_ns,
+                        },
                         &batch,
-                        compression_level,
-                        tile_format,
-                        tile_compression,
-                        seam_reconcile_layers,
-                        seam_metrics,
-                    )?);
+                    )?;
+                    batch_index += 1;
+                    batch_features_read = 0;
                     batch = Vec::with_capacity(BATCH_SIZE);
                     batch_bytes = 0;
                     read_started = std::time::Instant::now();
@@ -620,13 +701,47 @@ fn read_encode_partition(
         current_tile_bytes += 32 + data_len;
     }
 
-    Ok(PartitionOutput {
-        order,
-        features_read,
-        max_batch_bytes,
-        reader_ns,
-        encoded_tiles,
-    })
+    Ok(())
+}
+
+fn encode_and_send_partition_batch(
+    tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
+    ctx: &PartitionEncodeCtx<'_>,
+    meta: &PartitionBatchMeta,
+    pending_tiles: &[PendingTile],
+) -> Result<(), PipelineError> {
+    let encoded_tiles = if pending_tiles.is_empty() {
+        Vec::new()
+    } else {
+        encode_tile_batch(
+            pending_tiles,
+            ctx.compression_level,
+            ctx.tile_format,
+            ctx.tile_compression,
+            ctx.seam_reconcile_layers,
+            ctx.seam_metrics,
+        )?
+    };
+    send_partition_batch(
+        tx,
+        PartitionBatch {
+            order: meta.order,
+            batch_index: meta.batch_index,
+            is_last: meta.is_last,
+            features_read: meta.features_read,
+            max_batch_bytes: meta.max_batch_bytes,
+            reader_ns: meta.reader_ns,
+            encoded_tiles,
+        },
+    )
+}
+
+fn send_partition_batch(
+    tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
+    batch: PartitionBatch,
+) -> Result<(), PipelineError> {
+    tx.send(Ok(batch))
+        .map_err(|_| PipelineError("assemble partition receiver stopped".to_string()))
 }
 
 #[inline]
