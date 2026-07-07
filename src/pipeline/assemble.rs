@@ -79,65 +79,6 @@ struct PendingPartitionBatches {
     batches: std::collections::BTreeMap<usize, PartitionBatch>,
 }
 
-struct PartitionScheduler {
-    state: std::sync::Mutex<PartitionSchedulerState>,
-    ready: std::sync::Condvar,
-    window: usize,
-}
-
-struct PartitionSchedulerState {
-    next_job: usize,
-    next_write: usize,
-    stop: bool,
-}
-
-impl PartitionScheduler {
-    fn new(window: usize) -> Self {
-        Self {
-            state: std::sync::Mutex::new(PartitionSchedulerState {
-                next_job: 0,
-                next_write: 0,
-                stop: false,
-            }),
-            ready: std::sync::Condvar::new(),
-            window: window.max(1),
-        }
-    }
-
-    fn next_job(&self, partition_count: usize) -> Option<usize> {
-        let mut state = self.state.lock().expect("partition scheduler lock");
-        loop {
-            if state.stop || state.next_job >= partition_count {
-                return None;
-            }
-            let limit = state
-                .next_write
-                .saturating_add(self.window)
-                .min(partition_count);
-            if state.next_job < limit {
-                let order = state.next_job;
-                state.next_job += 1;
-                return Some(order);
-            }
-            state = self.ready.wait(state).expect("partition scheduler condvar");
-        }
-    }
-
-    fn mark_written(&self, next_write: usize) {
-        let mut state = self.state.lock().expect("partition scheduler lock");
-        if next_write > state.next_write {
-            state.next_write = next_write;
-            self.ready.notify_all();
-        }
-    }
-
-    fn request_stop(&self) {
-        let mut state = self.state.lock().expect("partition scheduler lock");
-        state.stop = true;
-        self.ready.notify_all();
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
 pub(super) fn phase_assemble(
@@ -478,6 +419,7 @@ fn phase_assemble_partitions(
     seam_metrics: &SeamMetrics,
 ) -> Result<AssembleCore, PipelineError> {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::mpsc;
 
     let partition_count = partitions.len();
@@ -499,7 +441,8 @@ fn phase_assemble_partitions(
     }
 
     let worker_count = config.threads.clamp(1, 4).min(partition_count);
-    let scheduler = PartitionScheduler::new(worker_count * 8);
+    let next_job = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
     let (tx, rx) = mpsc::channel::<Result<PartitionBatch, PipelineError>>();
 
     let compression = config.compress_sort_chunks;
@@ -527,10 +470,18 @@ fn phase_assemble_partitions(
         for _ in 0..worker_count {
             let tx = tx.clone();
             let partitions_ref = &partitions;
-            let scheduler_ref = &scheduler;
+            let next_job_ref = &next_job;
+            let stop_ref = &stop;
             let seam_layers = seam_reconcile_layers;
             s.spawn(move || {
-                while let Some(order) = scheduler_ref.next_job(partitions_ref.len()) {
+                loop {
+                    if stop_ref.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let order = next_job_ref.fetch_add(1, Ordering::Relaxed);
+                    if order >= partitions_ref.len() {
+                        break;
+                    }
                     let partition = &partitions_ref[order];
                     let result = read_encode_partition(
                         order,
@@ -545,12 +496,11 @@ fn phase_assemble_partitions(
                         &tx,
                     );
                     if result.is_err() {
-                        scheduler_ref.request_stop();
+                        stop_ref.store(true, Ordering::Relaxed);
                     }
                     if let Err(err) = result
                         && tx.send(Err(err)).is_err()
                     {
-                        scheduler_ref.request_stop();
                         break;
                     }
                 }
@@ -563,15 +513,8 @@ fn phase_assemble_partitions(
         let mut next_batch = 0usize;
         let mut current_partition_reader_ns = 0u64;
         for result in rx {
-            let batch = match result {
-                Ok(batch) => batch,
-                Err(err) => {
-                    scheduler.request_stop();
-                    return Err(err);
-                }
-            };
+            let batch = result?;
             if batch.order >= partition_count {
-                scheduler.request_stop();
                 return Err(PipelineError(format!(
                     "assemble partition batch has invalid order {} of {partition_count}",
                     batch.order
@@ -581,7 +524,6 @@ fn phase_assemble_partitions(
             let batch_index = batch.batch_index;
             let state = pending.entry(batch_order).or_default();
             if state.batches.insert(batch_index, batch).is_some() {
-                scheduler.request_stop();
                 return Err(PipelineError(format!(
                     "duplicate assemble partition batch {batch_index} for partition {batch_order}"
                 )));
@@ -619,7 +561,6 @@ fn phase_assemble_partitions(
                 }
                 if batch_is_last {
                     if !state.batches.is_empty() {
-                        scheduler.request_stop();
                         return Err(PipelineError(format!(
                             "assemble partition {next_write} received batches after final marker"
                         )));
@@ -629,7 +570,6 @@ fn phase_assemble_partitions(
                     pending.remove(&next_write);
                     next_write += 1;
                     next_batch = 0;
-                    scheduler.mark_written(next_write);
                 } else {
                     next_batch += 1;
                 }
@@ -637,7 +577,6 @@ fn phase_assemble_partitions(
         }
 
         if next_write != partition_count {
-            scheduler.request_stop();
             return Err(PipelineError(format!(
                 "assemble partition worker stopped after {next_write} of {partition_count} partitions"
             )));
