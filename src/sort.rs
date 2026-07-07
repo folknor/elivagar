@@ -149,6 +149,25 @@ pub fn partition_from_key(key: SortKey) -> usize {
     partition
 }
 
+fn partition_start_tile_id(partition: usize) -> u64 {
+    debug_assert!(partition < SORT_PARTITIONS);
+    let mut zoom = 14usize;
+    while partition < PARTITION_BASES[zoom] {
+        zoom -= 1;
+    }
+    let split_z = zoom.min(PARTITION_SPLIT_Z as usize);
+    let prefix = partition - PARTITION_BASES[zoom];
+    TILE_ID_BASES[zoom] + ((prefix as u64) << (2 * (zoom - split_z)))
+}
+
+fn partition_next_key(partition: usize) -> SortKey {
+    if partition + 1 >= SORT_PARTITIONS {
+        SortKey::MAX
+    } else {
+        make_sort_key(partition_start_tile_id(partition + 1), 0, 0)
+    }
+}
+
 fn chunk_path(tmp_dir: &Path, chunk_no: usize, partition: usize) -> PathBuf {
     tmp_dir.join(format!(
         "chunk_{chunk_no:04}_z{PARTITION_SPLIT_Z}p{partition:05}.bin"
@@ -512,8 +531,9 @@ impl SortWriter {
         let mut start = 0;
         while start < self.buffer.len() {
             let partition = partition_from_key(self.buffer[start].key);
+            let next_key = partition_next_key(partition);
             let mut end = start + 1;
-            while end < self.buffer.len() && partition_from_key(self.buffer[end].key) == partition {
+            while end < self.buffer.len() && self.buffer[end].key < next_key {
                 end += 1;
             }
             let chunk_no = match &self.chunk_counter {
@@ -700,8 +720,9 @@ pub fn write_partitioned_payload_chunks(
     let mut start = 0;
     while start < records.len() {
         let partition = partition_from_key(records[start].0);
+        let next_key = partition_next_key(partition);
         let mut end = start + 1;
-        while end < records.len() && partition_from_key(records[end].0) == partition {
+        while end < records.len() && records[end].0 < next_key {
             end += 1;
         }
         let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1096,12 +1117,21 @@ mod tests {
         assert_eq!(first, PARTITION_BASES[14]);
         assert_eq!(last_same_prefix, first);
         assert_eq!(next_prefix, first + 1);
+        assert_eq!(
+            partition_next_key(first),
+            make_sort_key(z14_base + 65_536, 0, 0)
+        );
+        assert!(make_sort_key(z14_base + 65_535, u8::MAX, u8::MAX) < partition_next_key(first));
 
         let z13_base = TILE_ID_BASES[13];
         let z13_first = partition_from_key(make_sort_key(z13_base, 0, 0));
         let z13_next = partition_from_key(make_sort_key(z13_base + 16_384, 0, 0));
         assert_eq!(z13_first, PARTITION_BASES[13]);
         assert_eq!(z13_next, z13_first + 1);
+        assert_eq!(
+            partition_next_key(z13_first),
+            make_sort_key(z13_base + 16_384, 0, 0)
+        );
     }
 
     #[test]
