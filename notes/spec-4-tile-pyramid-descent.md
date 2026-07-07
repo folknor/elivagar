@@ -20,6 +20,28 @@ Pre-change baselines (plantasjen) the keep/revert verdicts are read against:
 Brick 0 (norway re-baseline at HEAD) is done: run `8d1d19ca`. The Landing 2
 norway keep bound reads against 160.1s.
 
+LANDING 1 STATUS (2026-07-07): landed and kept on denmark evidence;
+norway verdict pending machine availability. Landed as `c8f8184` plus
+three perf-fix rounds (`aedc9cf` parallel split + root bisection,
+`4cae762` multi-crossing reconnection splitter - Landing 3's Brick 9
+pulled forward after profiling, `7d86aef` on-line-vertex fast path +
+oversize item expansion). Denmark verdict at `7d86aef` (bench run
+`83d03eb4`, binary identity verified by strings): wall 25.9s vs 31.8s
+baseline, ocean_ms 5.6s vs 11.8s baseline against the 9s keep bound;
+tiles +0.23% (documented buffer-coverage gain at old z8 pre-split
+lines - the old unbuffered split DROPPED buffer-strip coverage there),
+output bytes +5.1% (within bound). Correctness: earcut oracle clean on
+the pre-splitter landing archive (1.4M ocean polygons, 0/0), human
+visual QA passed, regress vs blessed shows all diffs ocean-only and
+consistent with pre-split deletion; the splitter rounds cut vertices
+differently (<= 1 unit along cut lines), so oracle + regress rerun on
+a current archive is part of the pending norway batch. Deviations from
+this spec discovered during landing, folded back: root fragments must
+be built by range bisection (not per-cell whole-piece cuts), the split
+frontier must expand by fragment size (not only count), and the
+splitter needs the full crossing-reconnection form immediately - the
+two-crossing S-H subset falls back on exactly the expensive fragments.
+
 Hotpath evidence (2026-07-06 campaign, `95d6d52`): `intersect_rect_into`
 157/721/243 thread-s (DK/NO/DE) and 67% of denmark's tracked allocation;
 `emit_shape_for_zoom` 85/155/81; `cut_row_bands_with_scratch` 51/94/48;

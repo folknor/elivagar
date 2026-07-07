@@ -1007,6 +1007,58 @@ mod tests {
         shape[0].iter().all(|point| corners.contains(point))
     }
 
+    fn decoded_cycles(bufs: &[Vec<u32>]) -> Vec<Vec<(i32, i32)>> {
+        let mut out = Vec::new();
+        for b in bufs {
+            for ring in decode_mvt_polygon(b) {
+                let mut v = ring;
+                v.pop();
+                let n = v.len();
+                let m = (0..n).min_by_key(|&i| v[i]).unwrap_or(0);
+                let mut rot: Vec<(i32, i32)> = (0..n).map(|i| v[(m + i) % n]).collect();
+                let mut rev = rot.clone();
+                rev.reverse();
+                let n = rev.len();
+                let m = (0..n).min_by_key(|&i| rev[i]).unwrap_or(0);
+                let rev: Vec<(i32, i32)> = (0..n).map(|i| rev[(m + i) % n]).collect();
+                if rev < rot {
+                    rot = rev;
+                }
+                out.push(rot);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn convexity_early_out_vs_normalize_equivalence() {
+        let quads = [
+            shape(&[(100, 100), (900, 140), (870, 800), (120, 760)], &[]),
+            shape(&[(40, 300), (500, 60), (980, 360), (680, 900)], &[]),
+            shape(&[(200, 100), (850, 100), (980, 700), (260, 920)], &[]),
+            shape(&[(80, 80), (960, 180), (820, 960), (140, 840)], &[]),
+        ];
+        let mut scratch = IntEmitScratch::new();
+        for quad in quads {
+            assert!(is_convex_single_ring(&quad));
+            let mut fast = Vec::new();
+            encode_tile_shape(quad.clone(), 0, 0, &mut scratch, &mut |_, _, geom| {
+                fast.push(geom.to_vec());
+            });
+
+            let mut normalized = Vec::new();
+            normalize_into(&mut scratch, quad, 0, &mut normalized);
+            let mut normal = Vec::new();
+            for shape in normalized {
+                encode_tile_shape(shape, 0, 0, &mut scratch, &mut |_, _, geom| {
+                    normal.push(geom.to_vec());
+                });
+            }
+            assert_eq!(decoded_cycles(&fast), decoded_cycles(&normal));
+        }
+    }
+
     #[test]
     fn cut_identity_dp_tol_0_geometry_equivalence_reference() {
         // Landing 1 asserted byte identity against the boolean reference;

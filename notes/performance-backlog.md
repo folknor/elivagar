@@ -44,25 +44,24 @@ ocean phase is no longer a bottleneck at any measured scale.
 
 ---
 
-## P0 - land now (small, safe, measured)
+## P0 - DONE (landed `9b51e46`, kept)
 
-### Item 15, half 1: overlap the shared-node prepass
-
-`prepass_shared_nodes` (phase12.rs:797) does a complete SECOND scan of the
-PBF's way blobs before the main read, building two `FxHashSet<i64>` (seen,
-shared). Pure serial latency: 6.8s DK / 24.1s NO / 78.7s DE, scaling with way
-volume, ~16-37% of phase12. Spawn the prepass on its own thread at phase12
-start, join it right before the first way block dispatches. The main read
-spends its opening seconds on node blocks while the prepass reads a different
-file section (`BlobFilter::only_ways`). Hides essentially all of it. Small,
-safe, de-risks nothing else.
-
-(Half 2 - compact counters - moved to P2, where it belongs with the phase12
-rewrite; it is a planet-scale correctness requirement, not a latency fix.)
+Item 15 half 1 (prepass overlap): landed and kept - denmark 35.0 to 31.8s,
+germany 255.9 to 231.5s, output byte-identical. Cost recorded: germany peak
+RSS 10.3 to 15.0 GB (prepass sets now coexist with node-store build);
+removed by item 15 half 2 (P2). Half 2 - compact counters - lives in P2; it
+is a planet-scale correctness requirement, not a latency fix.
 
 ---
 
-## P1 - the emission-engine rewrite
+## P1 - the emission-engine rewrite (IN FLIGHT: spec 4)
+
+Spec: `notes/spec-4-tile-pyramid-descent.md`. Landing 1 (engine + ocean)
+landed and kept at `7d86aef`: denmark ocean_ms 11.8 to 5.6s, wall 31.8 to
+25.9s; Landing 3's splitter was pulled forward into it (profiling demanded
+it). Landing 2 (OSM emitters + teardown, subsumes item 9 and deletes item
+12) is in implementation. The spec's LANDING 1 STATUS block records the
+design deviations discovered while landing.
 
 One coherent spec. Attacks the top of every profile simultaneously:
 `intersect_rect_into` (157/721/243 thread-s + 67% of allocation), the
