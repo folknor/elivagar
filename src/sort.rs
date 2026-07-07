@@ -16,14 +16,46 @@ use crate::pipeline::emit::RecordTally;
 
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
 
-/// Number of tile-id range partitions used for sort chunk files.
+/// Zoom level used to split each zoom block into ordered Hilbert ranges.
 ///
-/// The PMTiles tile id space for z0..z14 has 357,913,941 addressed ids. Splitting
-/// that ordered key space into 256 ranges keeps each partition coarse enough to
-/// avoid tiny files while letting assemble merge one range at a time.
-pub const SORT_PARTITIONS: usize = 256;
+/// For z14 this makes each partition exactly one z6 Hilbert prefix, or 65,536
+/// child tile ids. The previous equal-width split over the whole PMTiles id
+/// space left Germany with one 8 GB hot partition, which erased the assemble
+/// parallelism the partitioned path was meant to expose.
+const PARTITION_SPLIT_Z: u8 = 6;
 
-const TILE_ID_LIMIT_EXCLUSIVE: u64 = 357_913_941;
+const TILE_ID_BASES: [u64; 16] = {
+    let mut bases = [0u64; 16];
+    let mut z = 0usize;
+    while z < 16 {
+        bases[z] = ((1u64 << (2 * z)) - 1) / 3;
+        z += 1;
+    }
+    bases
+};
+
+const PARTITION_BASES: [usize; 16] = {
+    let mut bases = [0usize; 16];
+    let mut z = 0usize;
+    let mut acc = 0usize;
+    while z < 15 {
+        bases[z] = acc;
+        let split_z = if z < PARTITION_SPLIT_Z as usize {
+            z
+        } else {
+            PARTITION_SPLIT_Z as usize
+        };
+        acc += 1usize << (2 * split_z);
+        z += 1;
+    }
+    bases[15] = acc;
+    bases
+};
+
+/// Number of ordered partition ids produced by the z6-calibrated scheme.
+pub const SORT_PARTITIONS: usize = PARTITION_BASES[15];
+
+const TILE_ID_LIMIT_EXCLUSIVE: u64 = TILE_ID_BASES[15];
 
 // ---------------------------------------------------------------------------
 // Chunk compression selection
@@ -95,18 +127,8 @@ pub fn layer_from_key(key: SortKey) -> u8 {
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
 pub fn zoom_from_tile_id(tile_id: u64) -> u8 {
-    // Precomputed base offsets for z0..=14.
-    const BASES: [u64; 16] = {
-        let mut b = [0u64; 16];
-        let mut z = 0u32;
-        while z < 16 {
-            b[z as usize] = (4u64.pow(z) - 1) / 3;
-            z += 1;
-        }
-        b
-    };
     let mut z: u8 = 0;
-    while (z as usize) < 15 && BASES[z as usize + 1] <= tile_id {
+    while (z as usize) < 15 && TILE_ID_BASES[z as usize + 1] <= tile_id {
         z += 1;
     }
     z
@@ -117,11 +139,20 @@ pub fn zoom_from_tile_id(tile_id: u64) -> u8 {
 #[allow(clippy::cast_possible_truncation)]
 pub fn partition_from_key(key: SortKey) -> usize {
     let tile_id = tile_id_from_key(key).min(TILE_ID_LIMIT_EXCLUSIVE - 1);
-    ((tile_id * SORT_PARTITIONS as u64) / TILE_ID_LIMIT_EXCLUSIVE) as usize
+    let zoom = zoom_from_tile_id(tile_id);
+    let local_id = tile_id - TILE_ID_BASES[zoom as usize];
+    let split_z = zoom.min(PARTITION_SPLIT_Z);
+    let shift = 2 * u32::from(zoom - split_z);
+    let prefix = (local_id >> shift) as usize;
+    let partition = PARTITION_BASES[zoom as usize] + prefix;
+    debug_assert!(partition < SORT_PARTITIONS);
+    partition
 }
 
 fn chunk_path(tmp_dir: &Path, chunk_no: usize, partition: usize) -> PathBuf {
-    tmp_dir.join(format!("chunk_{chunk_no:04}_p{partition:03}.bin"))
+    tmp_dir.join(format!(
+        "chunk_{chunk_no:04}_z{PARTITION_SPLIT_Z}p{partition:05}.bin"
+    ))
 }
 
 fn legacy_chunk_path(tmp_dir: &Path, chunk_no: usize) -> PathBuf {
@@ -134,15 +165,25 @@ fn parse_chunk_filename(path: &Path) -> Option<(usize, Option<usize>)> {
         return None;
     }
     let stem = &name[..name.len() - 4];
-    if let Some((id, partition)) = stem.strip_prefix("chunk_")?.split_once("_p") {
+    let body = stem.strip_prefix("chunk_")?;
+    if let Some((id, suffix)) = body.split_once("_z") {
         let chunk_no = id.parse().ok()?;
-        let part = partition.parse().ok()?;
-        if part < SORT_PARTITIONS {
+        let (split_z, partition) = suffix.split_once('p')?;
+        let split_z: u8 = split_z.parse().ok()?;
+        let part: usize = partition.parse().ok()?;
+        if split_z == PARTITION_SPLIT_Z && part < SORT_PARTITIONS {
             return Some((chunk_no, Some(part)));
         }
-        return None;
+        return Some((chunk_no, None));
     }
-    let chunk_no = stem.strip_prefix("chunk_")?.parse().ok()?;
+    if let Some((id, _partition)) = body.split_once("_p") {
+        // First-cut P3 chunks used a different partition numbering scheme.
+        // Keep them visible for checkpoint cleanup and legacy merge fallback,
+        // but do not treat the suffix as a current partition id.
+        let chunk_no = id.parse().ok()?;
+        return Some((chunk_no, None));
+    }
+    let chunk_no = body.parse().ok()?;
     Some((chunk_no, None))
 }
 
@@ -1007,6 +1048,17 @@ mod tests {
         out
     }
 
+    fn write_presorted_test_chunk(path: &Path, keys: &[u64]) {
+        let mut records: Vec<SortRecord> = keys
+            .iter()
+            .map(|&key| SortRecord {
+                key,
+                data: Box::from(key.to_le_bytes().as_slice()),
+            })
+            .collect();
+        write_sorted_chunk(&mut records, path, ChunkCompression::None).unwrap();
+    }
+
     #[test]
     fn sort_key_round_trip() {
         let cases: Vec<(u64, u8, u8)> = vec![
@@ -1031,6 +1083,64 @@ mod tests {
                 "layer mismatch for ({tile_id}, {layer}, {priority})"
             );
         }
+    }
+
+    #[test]
+    fn partition_from_key_uses_z6_hilbert_prefixes() {
+        assert_eq!(SORT_PARTITIONS, 38_229);
+
+        let z14_base = TILE_ID_BASES[14];
+        let first = partition_from_key(make_sort_key(z14_base, 0, 0));
+        let last_same_prefix = partition_from_key(make_sort_key(z14_base + 65_535, 0, 0));
+        let next_prefix = partition_from_key(make_sort_key(z14_base + 65_536, 0, 0));
+        assert_eq!(first, PARTITION_BASES[14]);
+        assert_eq!(last_same_prefix, first);
+        assert_eq!(next_prefix, first + 1);
+
+        let z13_base = TILE_ID_BASES[13];
+        let z13_first = partition_from_key(make_sort_key(z13_base, 0, 0));
+        let z13_next = partition_from_key(make_sort_key(z13_base + 16_384, 0, 0));
+        assert_eq!(z13_first, PARTITION_BASES[13]);
+        assert_eq!(z13_next, z13_first + 1);
+    }
+
+    #[test]
+    fn partition_ids_are_monotonic_across_zoom_boundaries() {
+        let mut previous = 0usize;
+        let mut first = true;
+        for zoom in 0usize..15 {
+            let start = TILE_ID_BASES[zoom];
+            let end = TILE_ID_BASES[zoom + 1] - 1;
+            let step = ((end - start) / 17).max(1);
+            let mut tile_id = start;
+            loop {
+                let partition = partition_from_key(make_sort_key(tile_id, 0, 0));
+                if !first {
+                    assert!(
+                        partition >= previous,
+                        "partition order moved backward at tile_id {tile_id}: {partition} < {previous}",
+                    );
+                }
+                first = false;
+                previous = partition;
+                if tile_id == end {
+                    break;
+                }
+                tile_id = (tile_id + step).min(end);
+            }
+        }
+    }
+
+    #[test]
+    fn first_cut_partition_suffix_falls_back_to_legacy_merge() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        write_presorted_test_chunk(&dir.path().join("chunk_0000_p227.bin"), &[10, 30]);
+        write_presorted_test_chunk(&dir.path().join("chunk_0001_p000.bin"), &[20, 40]);
+
+        let reader = SortReader::from_dir(dir.path(), Some(2), ChunkCompression::None).unwrap();
+        assert!(matches!(&reader.mode, SortReaderMode::Legacy(_)));
+        let keys = collect_keys(reader);
+        assert_eq!(keys, vec![10, 20, 30, 40]);
     }
 
     #[test]
