@@ -127,9 +127,9 @@ pub fn layer_from_key(key: SortKey) -> u8 {
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
 pub fn zoom_from_tile_id(tile_id: u64) -> u8 {
-    let mut z: u8 = 0;
-    while (z as usize) < 15 && TILE_ID_BASES[z as usize + 1] <= tile_id {
-        z += 1;
+    let mut z: u8 = 14;
+    while z > 0 && tile_id < TILE_ID_BASES[z as usize] {
+        z -= 1;
     }
     z
 }
