@@ -37,7 +37,7 @@ landing the post-change numbers are recorded here the same way.
 | denmark | `a0fca65` | plain | 26.4s | 15.8s | 5.9s | 0.02s | 4.1s | - | 2.9 GB | 365 MB, 1.33M tiles / 170K unique |
 | norway | `b26b335` | plain | 105.0s | 70.5s | 7.8s | - | 26.5s | - | 5.9 GB | 1.38 GB, 16.3M tiles / 804K unique |
 | norway | `661cd1c` | `8d1d19ca` | 160.1s | 121.3s | 14.9s | 0.03s | 23.4s | 23.0s | 5.9 GB | 1.28 GB, 16.3M tiles / 820K unique |
-| germany | `9994e5f` | `fa3a8236` | 230.7s | 188.3s | 5.2s | 0.01s | 36.2s | 34.4s | 14.8 GB | 3.0 GB, 2.69M tiles / 347K unique |
+| germany | `c3c1520` | `28e2b5b4` | 180.6s | 142.8s | 5.1s | 0.01s | 31.9s | 30.5s | 11.1 GB | 3.0 GB, 2.69M tiles / 347K unique |
 
 Superseded rows (kept for delta reading):
 
@@ -48,6 +48,7 @@ Superseded rows (kept for delta reading):
 | norway | `95d6d52` | `38dcd3e8` | 171.1s | 131.1s | 4.1 GB | pre prepass-overlap |
 | germany | `95d6d52` | `6fc97675` | 255.9s | 213.1s | 10.3 GB | pre prepass-overlap |
 | germany | `9b51e46` | `15add85d` | 231.5s | 187.6s | 15.0 GB | pre pyramid-descent (ocean 10.8s) |
+| germany | `9994e5f` | `fa3a8236` | 230.7s | 188.3s | 14.8 GB | pre P2 phase12 ownership rewrite |
 
 Descent-era figures are plain single runs (not bench-3), so treat them
 as indicative to ~10%, not verdict-grade. Germany is now re-measured
@@ -67,10 +68,15 @@ on both gates with byte-identical output, at the cost of germany peak RSS
 rising 10.3 to 15.0 GB: the prepass hash sets now coexist with node-store
 construction instead of preceding it. The norway row predates the overlap
 (expect ~10-20s less wall and somewhat higher RSS when re-measured). The
-compact-counter work (item 15 half 2, P2 - phase12 ownership rewrite) has
-since landed: `prepass_shared_nodes` builds `shared` from an exact external
-merge-sort instead of an in-memory `seen` set, so the RSS cost above should
-fall once germany is re-benched and re-baselined here against the new commit.
+P2 phase12 ownership rewrite (`c3c1520`, items 16, 22 reduced, 15 half 2)
+then landed and is kept: rayon tasks own their PBF block and borrow tags,
+emission goes through a per-worker arena, way resolution is gated to relation
+members and matches, and `prepass_shared_nodes` builds `shared` from an exact
+external merge-sort instead of an in-memory `seen` set. Germany bench-3
+(`28e2b5b4`) fell to 180.6s wall / 142.8s phase12 / 11.1 GB peak RSS from the
+`9994e5f` baseline - phase12 down 24 percent, wall down 22 percent, RSS down
+25 percent, output regress-identical (denmark tol 0, germany counts
+bit-identical).
 
 "reader" is the `assemble_reader_ns` counter: serial k-way merge reader time
 inside the assemble phase. The Denmark reader value is from the instrumented
