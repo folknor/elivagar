@@ -924,12 +924,33 @@ fn is_convex_single_ring(shape: &Shape) -> bool {
     is_convex_ring(&shape[0])
 }
 
+/// True only for a genuinely convex, simple ring - a sound gate for
+/// skipping normalization at emission.
+///
+/// Two conditions, both necessary, together sufficient:
+/// 1. No reflex vertex: every consecutive-triple cross product shares one
+///    nonzero sign (collinear triples skipped).
+/// 2. Exactly one revolution: the edge-direction vector's x-component
+///    changes sign exactly twice around the ring, and its y-component
+///    exactly twice.
+///
+/// Condition 1 ALONE is unsound - a self-intersecting spiral that laps
+/// more than once turns the same way at every vertex yet is non-simple,
+/// and earcut mis-tessellates it (the land-layer defect this replaces).
+/// Condition 2 is the discrete "winds exactly once": a convex polygon
+/// splits into two x-monotone chains at its leftmost/rightmost vertices
+/// (two x-flips) and two y-monotone chains (two y-flips); a lapping ring
+/// flips four or more times.
 fn is_convex_ring(ring: &Contour) -> bool {
+    let n = ring.len();
+    if n < 3 {
+        return false;
+    }
     let mut sign = 0_i8;
-    for i in 0..ring.len() {
+    for i in 0..n {
         let a = ring[i];
-        let b = ring[(i + 1) % ring.len()];
-        let c = ring[(i + 2) % ring.len()];
+        let b = ring[(i + 1) % n];
+        let c = ring[(i + 2) % n];
         let cross = (i128::from(b.x) - i128::from(a.x)) * (i128::from(c.y) - i128::from(a.y))
             - (i128::from(b.y) - i128::from(a.y)) * (i128::from(c.x) - i128::from(a.x));
         if cross == 0 {
@@ -942,7 +963,41 @@ fn is_convex_ring(ring: &Contour) -> bool {
             return false;
         }
     }
-    sign != 0
+    if sign == 0 {
+        return false;
+    }
+    direction_flips(ring, Axis::X) == 2 && direction_flips(ring, Axis::Y) == 2
+}
+
+/// Count sign changes of one edge-vector component around the cyclic ring,
+/// skipping zero components (vertical edges for X, horizontal for Y).
+fn direction_flips(ring: &Contour, axis: Axis) -> u32 {
+    let comp = |a: IntPoint, b: IntPoint| -> i32 {
+        let d = match axis {
+            Axis::X => i64::from(b.x) - i64::from(a.x),
+            Axis::Y => i64::from(b.y) - i64::from(a.y),
+        };
+        d.signum() as i32
+    };
+    let n = ring.len();
+    let mut signs: Vec<i32> = Vec::with_capacity(n);
+    for i in 0..n {
+        let s = comp(ring[i], ring[(i + 1) % n]);
+        if s != 0 {
+            signs.push(s);
+        }
+    }
+    let m = signs.len();
+    if m < 2 {
+        return 0;
+    }
+    let mut flips = 0;
+    for i in 0..m {
+        if signs[i] != signs[(i + 1) % m] {
+            flips += 1;
+        }
+    }
+    flips
 }
 
 #[cfg(test)]
@@ -1247,6 +1302,59 @@ mod tests {
         assert!(
             xor_area <= budget,
             "seam window drift {xor_area} exceeds budget {budget}"
+        );
+    }
+
+    #[test]
+    fn is_convex_ring_rejects_all_same_turn_spiral() {
+        // A self-intersecting ring that turns left at every vertex yet
+        // laps more than once - the class that slipped through the old
+        // cross-product-only test and shipped non-simple land polygons
+        // past normalization. All consecutive turns are left (positive
+        // cross), so the reflex check alone accepts it; the revolution
+        // check must reject it.
+        let spiral: Contour = vec![
+            p(0, 0),
+            p(100, 10),
+            p(90, 110),
+            p(-10, 100),
+            p(-20, -20),
+            p(130, -30),
+            p(140, 140),
+        ];
+        // Confirm every turn is the same direction (the old test's basis).
+        let n = spiral.len();
+        let mut sign = 0_i8;
+        let mut all_same = true;
+        for i in 0..n {
+            let a = spiral[i];
+            let b = spiral[(i + 1) % n];
+            let c = spiral[(i + 2) % n];
+            let cross = (i128::from(b.x) - i128::from(a.x)) * (i128::from(c.y) - i128::from(a.y))
+                - (i128::from(b.y) - i128::from(a.y)) * (i128::from(c.x) - i128::from(a.x));
+            if cross == 0 {
+                continue;
+            }
+            let s = if cross > 0 { 1 } else { -1 };
+            if sign == 0 {
+                sign = s;
+            } else if sign != s {
+                all_same = false;
+            }
+        }
+        assert!(
+            all_same,
+            "test fixture must be all-same-turn to be meaningful"
+        );
+        // The sound test rejects it (more than one revolution).
+        assert!(!is_convex_ring(&spiral), "spiral must not read as convex");
+        // A genuine convex ring still passes.
+        let square: Contour = vec![p(0, 0), p(100, 0), p(100, 100), p(0, 100)];
+        assert!(is_convex_ring(&square), "square must read as convex");
+        let pentagon: Contour = vec![p(50, 0), p(100, 40), p(80, 100), p(20, 100), p(0, 40)];
+        assert!(
+            is_convex_ring(&pentagon),
+            "convex pentagon must read as convex"
         );
     }
 
