@@ -29,6 +29,7 @@
 //!     assemble_batch_budget: 0,
 //!     sort_chunk_size: 0,
 //!     locations_on_ways: false,
+//!     global_shared_node_pins: false,
 //!     tile_format: elivagar::TilePayloadFormat::Mvt,
 //!     tile_compression: elivagar::TileCompression::Gzip,
 //!     compress_sort_chunks: elivagar::sort::ChunkCompression::None,

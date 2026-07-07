@@ -189,6 +189,13 @@ pub struct TilegenConfig {
     /// Auto-detected from the PBF header's `LocationsOnWays` optional feature
     /// when not set explicitly.
     pub locations_on_ways: bool,
+    /// Run the global shared-node prepass and pin cross-block shared way
+    /// vertices during line and polygon simplification. Disabled by default:
+    /// block-local pins preserve common junctions within each PBF primitive
+    /// block while avoiding a second full way scan and a large long-lived set.
+    /// Enabling this preserves more low-zoom detail on very thin linear water
+    /// and polygon edges, at a substantial runtime and RSS cost.
+    pub global_shared_node_pins: bool,
     /// Tile payload format (`mvt` default, `mlt` planned).
     pub tile_format: TilePayloadFormat,
     /// Tile compression algorithm for MVT payloads (`gzip` default, `brotli` optional).

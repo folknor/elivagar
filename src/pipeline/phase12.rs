@@ -213,14 +213,19 @@ pub(super) fn phase_read_and_process(
     let prepass_tmp_dir = config.tmp_dir.join("shared_node_prepass");
     let prepass_sort_budget = sort_chunk_budget;
     let mut prepass_handle: Option<std::thread::JoinHandle<Result<FxHashSet<i64>, PipelineError>>> =
-        Some(std::thread::spawn(move || {
-            prepass_shared_nodes(
-                &prepass_pbf_path,
-                decode_threads,
-                &prepass_tmp_dir,
-                prepass_sort_budget,
-            )
-        }));
+        if config.global_shared_node_pins {
+            Some(std::thread::spawn(move || {
+                prepass_shared_nodes(
+                    &prepass_pbf_path,
+                    decode_threads,
+                    &prepass_tmp_dir,
+                    prepass_sort_budget,
+                )
+            }))
+        } else {
+            eprintln!("  Global shared-node prepass disabled - using block-local pins");
+            None
+        };
     let relation_plan_pbf_path = config.pbf_path.clone();
     let mut relation_plan_handle: Option<
         std::thread::JoinHandle<Result<RelationPlan, PipelineError>>,
@@ -343,15 +348,14 @@ pub(super) fn phase_read_and_process(
                     let drain_chunk_id = std::sync::Arc::clone(&way_chunk_id);
                     // First point where the shared-node set is needed: join
                     // the prepass thread spawned before the node phase.
-                    let gsn: std::sync::Arc<FxHashSet<i64>> = std::sync::Arc::new(
-                        prepass_handle
-                            .take()
-                            .expect("prepass joined twice")
-                            .join()
-                            .map_err(|_| {
+                    let gsn: std::sync::Arc<FxHashSet<i64>> =
+                        if let Some(handle) = prepass_handle.take() {
+                            std::sync::Arc::new(handle.join().map_err(|_| {
                                 PipelineError("shared-node prepass thread panicked".to_string())
-                            })??,
-                    );
+                            })??)
+                        } else {
+                            std::sync::Arc::new(FxHashSet::default())
+                        };
                     let relation_plan = std::sync::Arc::new(
                         relation_plan_handle
                             .take()
@@ -1015,6 +1019,7 @@ fn prepass_shared_nodes(
             shared.insert(decode_signed_i64_key(key));
         }
     }
+    shared.shrink_to_fit();
     std::fs::remove_dir_all(tmp_dir)
         .map_err(|e| PipelineError(format!("prepass: remove scratch dir failed: {e}")))?;
 
@@ -1136,6 +1141,7 @@ fn prepass_relation_plan(
             }
         });
     }
+    needed_ways.shrink_to_fit();
 
     eprintln!(
         "  Relation prepass: {:.1}s ({} matching relations, {} member ways)",
@@ -1389,10 +1395,19 @@ pub(super) fn process_planned_way_into(
     let before = acc.sink.records.len();
     let mut preserve_vertex_mask: Vec<bool> = vec![false; coords_e7.len()];
     if !plan.preserve_node_refs.is_empty() {
-        let preserve_nodes: FxHashSet<i64> = plan.preserve_node_refs.iter().copied().collect();
-        for (i, node_id) in resolved_node_refs.iter().enumerate() {
-            if preserve_nodes.contains(node_id) {
-                preserve_vertex_mask[i] = true;
+        const PRESERVE_LINEAR_SCAN_MAX: usize = 8;
+        if plan.preserve_node_refs.len() <= PRESERVE_LINEAR_SCAN_MAX {
+            for (i, node_id) in resolved_node_refs.iter().enumerate() {
+                if plan.preserve_node_refs.contains(node_id) {
+                    preserve_vertex_mask[i] = true;
+                }
+            }
+        } else {
+            let preserve_nodes: FxHashSet<i64> = plan.preserve_node_refs.iter().copied().collect();
+            for (i, node_id) in resolved_node_refs.iter().enumerate() {
+                if preserve_nodes.contains(node_id) {
+                    preserve_vertex_mask[i] = true;
+                }
             }
         }
     }
