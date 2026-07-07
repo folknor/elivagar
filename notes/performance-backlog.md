@@ -54,14 +54,21 @@ is a planet-scale correctness requirement, not a latency fix.
 
 ---
 
-## P1 - the emission-engine rewrite (IN FLIGHT: spec 4)
+## P1 - DONE (spec 4, landed `c8f8184`..`a0fca65`, kept)
 
-Spec: `notes/spec-4-tile-pyramid-descent.md`. Landing 1 (engine + ocean)
-landed and kept at `7d86aef`: denmark ocean_ms 11.8 to 5.6s, wall 31.8 to
-25.9s; Landing 3's splitter was pulled forward into it (profiling demanded
-it). Landing 2 (OSM emitters + teardown, subsumes item 9 and deletes item
-12) is in implementation. The spec's LANDING 1 STATUS block records the
-design deviations discovered while landing.
+Spec: `notes/spec-4-tile-pyramid-descent.md`. All three landings plus
+Landing 3's splitter (pulled forward) shipped as one campaign. Result:
+denmark ocean 11.8 to 5.9s / wall 31.8 to 26.4s; norway 160.1 to 105.0s.
+Subsumed items 2, 3, 4, 5, 9, 10, 12 and Landing-3's item 1. All polygon
+layers earcut-clean (a late convexity-soundness fix, `a0fca65`, caught 10
+non-simple land polygons the pyramid's convex early-out let through -
+recorded as the standing-gate save it was). Deferred within spec 4: the
+germany verdict (phase12-bound, archives were wiped) and a norway bench-3.
+
+Remaining descent-adjacent backlog items now unblocked and cheap (each a
+few percent, do opportunistically): item 11 (memoize full-tile record),
+item 13 (hoist zoom-independent OSM attrs - the pyramid's per-zoom attrs
+cache already does most of this).
 
 One coherent spec. Attacks the top of every profile simultaneously:
 `intersect_rect_into` (157/721/243 thread-s + 67% of allocation), the

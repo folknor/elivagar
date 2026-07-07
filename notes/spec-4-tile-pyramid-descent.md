@@ -20,6 +20,20 @@ Pre-change baselines (plantasjen) the keep/revert verdicts are read against:
 Brick 0 (norway re-baseline at HEAD) is done: run `8d1d19ca`. The Landing 2
 norway keep bound reads against 160.1s.
 
+SPEC COMPLETE (2026-07-07): Landings 1+2+3 all landed and kept,
+`c8f8184`..`a0fca65`. Denmark ocean 11.8 to 5.9s, wall 31.8 to 26.4s;
+norway 160.1 to 105.0s. Every polygon layer earcut-clean after the
+convexity-soundness fix (`a0fca65`): Landing 2's convex early-out used
+an all-same-turn cross-product test that is necessary but not
+sufficient for convexity, so a lapping/spiral ring passed it and
+shipped self-intersecting - the oracle caught 10 land polygons, the
+fix adds the exactly-one-revolution (2 x-flips, 2 y-flips) condition.
+Denmark re-blessed at a0fca65. Deferred: germany verdict (phase12-
+bound, pre-landing archives wiped) and norway bench-3. Recommend a
+human visual re-check of denmark a0fca65 coastline/land tiles - the
+last human QA was on c8f8184, before Brick 8 seam thinning and the
+convexity fix.
+
 LANDING 1 STATUS (2026-07-07): landed and kept on denmark evidence;
 norway verdict pending machine availability. Landed as `c8f8184` plus
 three perf-fix rounds (`aedc9cf` parallel split + root bisection,

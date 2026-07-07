@@ -34,7 +34,8 @@ landing the post-change numbers are recorded here the same way.
 
 | dataset | commit | run | wall | phase12 | ocean | sort | assemble | reader | peak RSS | output |
 |---|---|---|---|---|---|---|---|---|---|---|
-| denmark | `7d86aef` | `83d03eb4` | 25.9s | 15.4s | 5.6s | 0.02s | 4.2s | - | 2.9 GB | 369 MB, 1.33M tiles / 170K unique |
+| denmark | `a0fca65` | plain | 26.4s | 15.8s | 5.9s | 0.02s | 4.1s | - | 2.9 GB | 365 MB, 1.33M tiles / 170K unique |
+| norway | `b26b335` | plain | 105.0s | 70.5s | 7.8s | - | 26.5s | - | 5.9 GB | 1.38 GB, 16.3M tiles / 804K unique |
 | norway | `661cd1c` | `8d1d19ca` | 160.1s | 121.3s | 14.9s | 0.03s | 23.4s | 23.0s | 5.9 GB | 1.28 GB, 16.3M tiles / 820K unique |
 | germany | `9b51e46` | `15add85d` | 231.5s | 187.6s | 10.8s | 0.02s | 32.2s | 30.6s | 15.0 GB | 2.97 GB, 2.68M tiles / 352K unique |
 
@@ -47,12 +48,16 @@ Superseded rows (kept for delta reading):
 | norway | `95d6d52` | `38dcd3e8` | 171.1s | 131.1s | 4.1 GB | pre prepass-overlap |
 | germany | `95d6d52` | `6fc97675` | 255.9s | 213.1s | 10.3 GB | pre prepass-overlap |
 
-The `661cd1c` norway row and the `9b51e46` germany row predate the
-pyramid descent (spec 4 Landing 1, `c8f8184`..`7d86aef`): their ocean
-and wall figures are stale for descent-era comparisons and will be
-re-measured when the machine is free. Denmark `7d86aef` output grew
-+5.1% vs `9b51e46` (buffer-strip coverage the old z8 pre-split dropped,
-plus pinned seam windows) - expected, within the landing's size bound.
+Descent-era figures are plain single runs (not bench-3), so treat them
+as indicative to ~10%, not verdict-grade; the germany `9b51e46` row
+predates the descent and awaits re-measure. Spec 4 (Landings 1+2 +
+convexity fix) took denmark from `9b51e46` 31.8s / ocean 11.8s to
+`a0fca65` 26.4s / ocean 5.9s, and norway from `661cd1c` 160.1s to
+`b26b335` 105.0s (phase12-dominated there; ocean 14.9 to 7.8s). Output
+grew (+4% denmark, +8% norway after Brick 8's seam thinning): buffer-
+strip coverage the old unbuffered z8 pre-split dropped, now emitted -
+a rendering-correctness gain (edge polygons no longer pop at tile
+borders), matching the ocean/planetiler/tilemaker convention.
 
 The prepass-overlap landing (`9b51e46`, P0 of the perf backlog) cut wall ~9%
 on both gates with byte-identical output, at the cost of germany peak RSS
