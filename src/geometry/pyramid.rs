@@ -92,21 +92,24 @@ pub(crate) fn split_for_parallel(
 
     let target = target_items.max(1);
     let mut items = root_fragments(shape_base, params, scratch);
-    // Expand the shallowest item one level at a time until the pool is
-    // large enough for the parallel fan-out. Expansion emits the expanded
-    // cell (and resolves full/empty subtrees inline), so the returned
-    // items' subtrees are disjoint and complete. Root cells of a large
-    // piece usually already exceed the target, making this loop a no-op;
-    // it matters for single-root ranges (z_top 0).
+    // Expand items one level at a time - largest fragment first - until
+    // the pool is large enough for the parallel fan-out AND no item is
+    // oversized. Expansion emits the expanded cell (and resolves
+    // full/empty subtrees inline), so the returned items' subtrees are
+    // disjoint and complete. The oversize rule exists for the straggler
+    // tail: one dense-coastline cell must not become a near-second work
+    // item while every other worker idles.
+    const OVERSIZED_FRAGMENT_VERTICES: usize = 8192;
     loop {
-        if items.len() >= target {
-            break;
-        }
+        let need_count = items.len() < target;
         let Some(idx) = items
             .iter()
             .enumerate()
-            .filter(|(_, (c, _))| c.z < params.z_bottom)
-            .min_by_key(|(_, (c, _))| c.z)
+            .filter(|(_, (c, frag))| {
+                c.z < params.z_bottom
+                    && (need_count || shapes_vertices(frag) > OVERSIZED_FRAGMENT_VERTICES)
+            })
+            .max_by_key(|(_, (_, frag))| shapes_vertices(frag))
             .map(|(i, _)| i)
         else {
             break;
@@ -541,11 +544,14 @@ fn clip_shape_rect_fast(shape: &Shape, rect: IntRect, out: &mut Shapes) -> bool 
 /// kept chains reconnect along the cut line by pairing SORTED crossings -
 /// for a simple ring, polygon-interior intervals along the line lie
 /// exactly between alternating sorted crossings (Jordan), so adjacent
-/// pairs are the bridge segments. Returns None when the fast path cannot
-/// proceed safely: a vertex exactly on the line (in/out ambiguity), an
-/// odd crossing count, two crossings whose snap-rounded line positions
-/// collide (pairing ambiguity), or a bridge that fails to join an exit to
-/// an entry (non-simple input).
+/// pairs are the bridge segments. Vertices exactly ON the line classify
+/// as inside (the crossing then falls exactly on the vertex, which the
+/// exact rational crossing reproduces verbatim); a tangency touching the
+/// line from outside produces two same-position crossings and is caught
+/// by the tie guard. Returns None when the fast path cannot proceed
+/// safely: an odd crossing count, two crossings whose snap-rounded line
+/// positions collide (pairing ambiguity), or a bridge that fails to join
+/// an exit to an entry (non-simple input).
 #[allow(clippy::too_many_lines)]
 fn clip_ring_half_plane_multi(
     ring: &Contour,
@@ -565,16 +571,13 @@ fn clip_ring_half_plane_multi(
         Axis::X => p.y,
         Axis::Y => p.x,
     };
-    let inside = |c: i32| if keep_le { c < bound } else { c > bound };
+    let inside = |c: i32| if keep_le { c <= bound } else { c >= bound };
 
     let mut any_in = false;
     let mut any_out = false;
     let mut first_out = None;
     for (i, &p) in ring.iter().enumerate() {
         let c = coord(p);
-        if c == bound {
-            return None;
-        }
         if inside(c) {
             any_in = true;
         } else {
@@ -720,6 +723,13 @@ fn round_div(num: i64, den: i64) -> i64 {
     } else {
         -((-n + d / 2) / d)
     }
+}
+
+fn shapes_vertices(shapes: &Shapes) -> usize {
+    shapes
+        .iter()
+        .map(|shape| shape.iter().map(Vec::len).sum::<usize>())
+        .sum()
 }
 
 fn shapes_bbox(shapes: &Shapes) -> Option<IntRect> {
@@ -1218,9 +1228,21 @@ mod tests {
                     &mut fast,
                 );
                 let exact = intersect_rect(subject, rect, 0);
+                // The fast path's snap-rounded crossings can differ from
+                // i_overlay's noding by up to one unit ALONG the cut line,
+                // so equivalence is up to slivers hugging the rect
+                // boundary: total XOR area bounded by one unit times the
+                // cut perimeter. Interior geometry is verbatim, so any
+                // real divergence blows straight past this budget.
+                let perimeter = 2
+                    * (u128::try_from(i64::from(rect.max_x) - i64::from(rect.min_x))
+                        .expect("rect width positive")
+                        + u128::try_from(i64::from(rect.max_y) - i64::from(rect.min_y))
+                            .expect("rect height positive"));
+                let xor_area = xor_shapes_area(&fast, &exact);
                 assert!(
-                    xor_shapes_empty(&fast, &exact),
-                    "fast clip diverges from boolean for {rect:?}"
+                    xor_area <= perimeter,
+                    "fast clip diverges from boolean for {rect:?}: xor area {xor_area} > budget {perimeter}"
                 );
             }
         }
@@ -1280,7 +1302,7 @@ mod tests {
         out
     }
 
-    fn xor_shapes_empty(a: &Shapes, b: &Shapes) -> bool {
+    fn xor_shapes_area(a: &Shapes, b: &Shapes) -> u128 {
         let options = IntOverlayOptions {
             output_direction: i_overlay::core::overlay::ContourDirection::CounterClockwise,
             min_output_area: 0,
@@ -1294,6 +1316,17 @@ mod tests {
             overlay.add_shape(shape, ShapeType::Clip);
         }
         let result = overlay.overlay(OverlayRule::Xor, FillRule::NonZero);
-        result.is_empty()
+        result
+            .iter()
+            .flatten()
+            .map(|ring| signed_area_2x(ring).unsigned_abs() / 2)
+            .sum()
+    }
+
+    /// Set equality up to degenerate boundary artifacts: two equivalent
+    /// decompositions with coincident edges can XOR to zero-AREA residue
+    /// rings, which is_empty() would miscount as divergence.
+    fn xor_shapes_empty(a: &Shapes, b: &Shapes) -> bool {
+        xor_shapes_area(a, b) == 0
     }
 }

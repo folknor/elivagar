@@ -25,7 +25,7 @@ use std::os::unix::fs::FileExt;
 // Types
 // ---------------------------------------------------------------------------
 
-const LARGE_PIECE_VERTICES: usize = 4096;
+const LARGE_PIECE_VERTICES: usize = 1024;
 // Cap each parallel fold accumulator's in-flight payload well below the
 // global sort_budget: with (piece x zoom) fan-out across many rayon workers,
 // letting each balloon to the full budget before flushing would multiply peak
