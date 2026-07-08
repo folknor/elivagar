@@ -117,55 +117,40 @@ pub(super) fn prepare_relation(
     })
 }
 
-/// Per-worker accumulator for streaming relation outputs to chunk files.
-/// Modeled on `OceanAcc` in ocean.rs - each rayon worker flushes directly
-/// to disk, eliminating the `Vec<Vec<SortRecord>>` double-materialization.
+/// Per-worker accumulator for streaming relation outputs. Modeled on
+/// `WayAcc` in phase12.rs - each rayon worker hands its sink to the shared
+/// spill coalescer, eliminating the `Vec<Vec<SortRecord>>`
+/// double-materialization without fragmenting the chunk directory.
 pub(super) struct RelAcc {
     pub(super) sink: RecordSink,
     pub(super) bytes: usize,
-    pub(super) chunk_paths: Vec<std::path::PathBuf>,
     pub(super) count: u64,
     pub(super) point_emit: PointEmitScratch,
     pub(super) line_emit: LineEmitScratch,
     pub(super) multipolygon_emit: MultipolygonEmitScratch,
     pub(super) simp_scratch: geometry::SimplifyMultiScratch,
-    pub(super) compression: sort::ChunkCompression,
     pub(super) fanout: FanoutStats,
 }
 
 impl RelAcc {
-    fn new(compression: sort::ChunkCompression) -> Self {
+    fn new() -> Self {
         RelAcc {
             sink: RecordSink::new(),
             bytes: 0,
-            chunk_paths: Vec::new(),
             count: 0,
             point_emit: PointEmitScratch::new(),
             line_emit: LineEmitScratch::new(),
             multipolygon_emit: MultipolygonEmitScratch::new(),
             simp_scratch: geometry::SimplifyMultiScratch::new(),
-            compression,
             fanout: FanoutStats::new(),
         }
     }
 
-    pub(super) fn flush(
-        &mut self,
-        chunk_dir: &std::path::Path,
-        chunk_id: &std::sync::atomic::AtomicUsize,
-    ) {
+    pub(super) fn flush(&mut self, spill: &sort::SpillCoalescer) {
         if self.sink.records.is_empty() {
             return;
         }
-        let paths = sort::write_partitioned_payload_chunks(
-            &mut self.sink.records,
-            &self.sink.payload,
-            chunk_dir,
-            chunk_id,
-            self.compression,
-        )
-        .expect("relation chunk write failed");
-        self.chunk_paths.extend(paths);
+        spill.append(&self.sink.records, &self.sink.payload);
         self.count += self.sink.records.len() as u64;
         self.sink.clear_payload();
         self.bytes = 0;
@@ -201,6 +186,7 @@ pub(super) fn process_relation_blocks(
     seam_reconcile_layers: &[u8],
     deferral_stats: &DeferralStats,
     sort_writer: &mut SortWriter,
+    spill: &sort::SpillCoalescer,
     fanout_stats: &mut FanoutStats,
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
@@ -208,19 +194,13 @@ pub(super) fn process_relation_blocks(
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-    let chunk_id = AtomicUsize::new(sort_writer.chunk_count());
-    let chunk_dir = sort_writer.tmp_dir().to_path_buf();
     // Per-worker sink flush threshold. The accumulators live for the WHOLE
-    // tail (unlike the way path, where an acc is scoped to one block task),
-    // so flushing at the full sort-chunk budget would let every rayon worker
-    // buffer up to that budget simultaneously - measured as a 5.2 -> 12.1 GB
-    // peak-RSS regression on norway when this streamed tail first landed.
-    // Cap each worker's buffered records well below the chunk budget; the
-    // resulting chunk files are smaller but still far above the merge
-    // fan-in's comfort zone.
-    const REL_ACC_FLUSH_BYTES: usize = 32 * 1024 * 1024;
+    // tail, so a large threshold multiplies across workers - measured as a
+    // 5.2 -> 12.1 GB peak-RSS regression on norway when the streamed tail
+    // first flushed at the full sort budget. A flush is now a memcpy into
+    // the shared coalescer (which handles chunk sizing), so small is cheap.
+    const REL_ACC_FLUSH_BYTES: usize = 8 * 1024 * 1024;
     let flush_threshold = sort_writer.chunk_size_bytes().min(REL_ACC_FLUSH_BYTES);
-    let chunk_compression = sort_writer.compression();
 
     let rel_count = AtomicU64::new(0);
     let inflight_bytes = AtomicUsize::new(0);
@@ -249,7 +229,7 @@ pub(super) fn process_relation_blocks(
         })
         .par_bridge()
         .fold(
-            || RelAcc::new(chunk_compression),
+            RelAcc::new,
             |mut acc, (rel, rel_bytes)| {
                 let before = acc.sink.records.len();
                 process_prepared_relation_into(
@@ -282,17 +262,16 @@ pub(super) fn process_relation_blocks(
                 inflight_bytes.fetch_sub(rel_bytes, Ordering::Relaxed);
                 acc.bytes = acc.sink.bytes();
                 if acc.bytes >= flush_threshold {
-                    acc.flush(&chunk_dir, &chunk_id);
+                    acc.flush(spill);
                 }
                 acc
             },
         )
         // Don't flush in reduce - collect remaining records back for sort_writer
-        // to avoid creating many tiny chunk files (one per rayon accumulator).
+        // to avoid a coalescer append per rayon accumulator.
         .reduce(
-            || RelAcc::new(chunk_compression),
+            RelAcc::new,
             |mut a, mut b| {
-                a.chunk_paths.extend(b.chunk_paths);
                 a.count += b.count;
                 let base = a.sink.payload.len();
                 a.sink.payload.append(&mut b.sink.payload);
@@ -310,7 +289,6 @@ pub(super) fn process_relation_blocks(
         );
 
     fanout_stats.merge(&result.fanout);
-    sort_writer.adopt_chunk_files(result.chunk_paths);
     sort_writer.merge_tally(&result.sink.tally);
     let mut count = result.count;
     // Push remaining records (below chunk_size threshold) through sort_writer's

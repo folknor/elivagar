@@ -953,6 +953,120 @@ pub fn write_partitioned_payload_chunks(
 }
 
 // ---------------------------------------------------------------------------
+// SpillCoalescer - merges many small producer flushes into big sorted chunks
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct CoalesceBuf {
+    records: Vec<PayloadRecord>,
+    payload: Vec<u8>,
+}
+
+impl CoalesceBuf {
+    fn bytes(&self) -> usize {
+        self.payload.len() + self.records.len() * std::mem::size_of::<PayloadRecord>()
+    }
+}
+
+/// Shared accumulator between parallel record producers (way tasks, relation
+/// workers, ocean folds) and the chunk directory. Producers bulk-append their
+/// small sinks (a memcpy under a mutex); the coalescer writes one big sorted
+/// multi-partition chunk per `budget` bytes, outside the lock.
+///
+/// Why it exists: producers flushing their own sinks straight to
+/// `write_partitioned_payload_chunks` fragments the scratch. Measured on the
+/// NA locations re-baseline (`6a13f306`): 2754 chunk files at 4-64 MB, each
+/// splitting into up to 15442 partition sections of ~4 KB, drove 95.8 GB of
+/// assemble-phase disk reads against 68.4 GB of merge bytes (readahead
+/// over-fetch on tiny random reads) plus 210K major faults, regressing
+/// assemble by ~35s versus pre-fragmentation baselines. Coalesced ~1 GB
+/// chunks keep per-partition sections in the tens-of-KB range and the merge
+/// fan-in near the pre-campaign 28-70.
+pub struct SpillCoalescer {
+    buf: std::sync::Mutex<CoalesceBuf>,
+    budget: usize,
+    tmp_dir: PathBuf,
+    chunk_id: Arc<AtomicUsize>,
+    compression: ChunkCompression,
+    paths: std::sync::Mutex<Vec<PathBuf>>,
+}
+
+impl SpillCoalescer {
+    pub fn new(
+        tmp_dir: PathBuf,
+        chunk_id: Arc<AtomicUsize>,
+        budget: usize,
+        compression: ChunkCompression,
+    ) -> Self {
+        Self {
+            buf: std::sync::Mutex::new(CoalesceBuf::default()),
+            budget,
+            tmp_dir,
+            chunk_id,
+            compression,
+            paths: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Bulk-append one producer sink. Record offsets are rebased onto the
+    /// shared payload. If the append trips the budget, the full buffer is
+    /// swapped out and written as a sorted chunk OUTSIDE the lock, so other
+    /// producers only ever wait for memcpys, never disk writes. Two producers
+    /// tripping the budget concurrently both write (each a full-ish buffer);
+    /// the shared chunk-id allocator keeps the files distinct.
+    pub fn append(&self, records: &[PayloadRecord], payload: &[u8]) {
+        if records.is_empty() {
+            return;
+        }
+        let full = {
+            let mut buf = self.buf.lock().expect("spill coalescer lock");
+            let base = buf.payload.len();
+            buf.payload.extend_from_slice(payload);
+            buf.records
+                .extend(records.iter().map(|&(key, off, len)| (key, off + base, len)));
+            if buf.bytes() >= self.budget {
+                Some(std::mem::take(&mut *buf))
+            } else {
+                None
+            }
+        };
+        if let Some(full) = full {
+            self.write(full);
+        }
+    }
+
+    fn write(&self, mut buf: CoalesceBuf) {
+        if buf.records.is_empty() {
+            return;
+        }
+        // Panic: called from rayon workers and phase tails - disk I/O failure
+        // is unrecoverable here, same policy as the producer sinks had.
+        let paths = write_partitioned_payload_chunks(
+            &mut buf.records,
+            &buf.payload,
+            &self.tmp_dir,
+            &self.chunk_id,
+            self.compression,
+        )
+        .expect("coalesced chunk write failed");
+        self.paths
+            .lock()
+            .expect("spill coalescer paths lock")
+            .extend(paths);
+    }
+
+    /// Write any residual buffered records and return every chunk path this
+    /// coalescer produced, ready for `SortWriter::adopt_chunk_files`. The
+    /// coalescer is drained but reusable (a later phase may keep appending;
+    /// call `finish` again for the new paths).
+    pub fn finish(&self) -> Vec<PathBuf> {
+        let residual = std::mem::take(&mut *self.buf.lock().expect("spill coalescer lock"));
+        self.write(residual);
+        std::mem::take(&mut *self.paths.lock().expect("spill coalescer paths lock"))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ChunkReader - reads records sequentially from a single chunk file
 // ---------------------------------------------------------------------------
 

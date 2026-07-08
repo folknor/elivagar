@@ -77,8 +77,10 @@ const LARGE_PIECE_VERTICES: usize = 1024;
 // Cap each parallel fold accumulator's in-flight payload well below the
 // global sort_budget: with (piece x zoom) fan-out across many rayon workers,
 // letting each balloon to the full budget before flushing would multiply peak
-// RSS by the worker count. Smaller, more frequent chunk files cost the sort
-// phase almost nothing (~0.5-0.7s).
+// RSS by the worker count. A flush is a memcpy into the shared spill
+// coalescer (which owns chunk sizing), so small thresholds are cheap - the
+// old direct-to-disk flushes at this size were the main source of the NA
+// chunk fragmentation (2754 chunks, fan-in 1076; see sort::SpillCoalescer).
 const OCEAN_CHUNK_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 const RING_READ_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -113,37 +115,24 @@ struct OceanAcc {
     records: Vec<sort::PayloadRecord>,
     payload: Vec<u8>,
     bytes: usize,
-    chunk_paths: Vec<std::path::PathBuf>,
     count: u64,
-    compression: sort::ChunkCompression,
 }
 
 impl OceanAcc {
-    fn new(compression: sort::ChunkCompression) -> Self {
+    fn new() -> Self {
         Self {
             records: Vec::new(),
             payload: Vec::new(),
             bytes: 0,
-            chunk_paths: Vec::new(),
             count: 0,
-            compression,
         }
     }
 
-    fn flush(&mut self, chunk_dir: &std::path::Path, chunk_id: &std::sync::atomic::AtomicUsize) {
+    fn flush(&mut self, spill: &sort::SpillCoalescer) {
         if self.records.is_empty() {
             return;
         }
-        // Panic: inside rayon fold. Disk I/O failure is unrecoverable here.
-        let paths = sort::write_partitioned_payload_chunks(
-            &mut self.records,
-            &self.payload,
-            chunk_dir,
-            chunk_id,
-            self.compression,
-        )
-        .expect("ocean chunk write failed");
-        self.chunk_paths.extend(paths);
+        spill.append(&self.records, &self.payload);
         self.count += self.records.len() as u64;
         self.records.clear();
         self.payload.clear();
@@ -151,7 +140,6 @@ impl OceanAcc {
     }
 
     fn merge_from(&mut self, other: Self) {
-        self.chunk_paths.extend(other.chunk_paths);
         self.count += other.count;
 
         let payload_base = self.payload.len();
@@ -312,10 +300,14 @@ pub(crate) fn process_ocean_shapefile(
 
     // Ocean chunks use the same chunk_NNNN.bin naming (starting after PBF chunks)
     // so that --skip-to sort (SortReader::from_dir sequential scan) finds them.
-    let chunk_id = AtomicUsize::new(sort_writer.chunk_count());
-    let chunk_dir = sort_writer.tmp_dir().to_path_buf();
+    let chunk_id = std::sync::Arc::new(AtomicUsize::new(sort_writer.chunk_count()));
+    let spill = sort::SpillCoalescer::new(
+        sort_writer.tmp_dir().to_path_buf(),
+        std::sync::Arc::clone(&chunk_id),
+        sort_writer.chunk_size_bytes(),
+        sort_writer.compression(),
+    );
     let chunk_size = sort_writer.chunk_size_bytes().min(OCEAN_CHUNK_SIZE_LIMIT);
-    let chunk_compression = sort_writer.compression();
 
     let params = ocean_params(min_zoom, max_zoom);
     // Per-piece item target for the parallel frontier. Root cells of a
@@ -339,7 +331,7 @@ pub(crate) fn process_ocean_shapefile(
                     None,
                 );
             }
-            let mut acc = OceanAcc::new(chunk_compression);
+            let mut acc = OceanAcc::new();
             let cells = OCEAN_EMIT_SCRATCH.with(|cell| {
                 let mut scratch = cell.borrow_mut();
                 let mut sink = ocean_sink(feature_id, ocean_layer, &empty_attrs_bytes, &mut acc);
@@ -352,7 +344,7 @@ pub(crate) fn process_ocean_shapefile(
                 )
             });
             if acc.bytes >= chunk_size {
-                acc.flush(&chunk_dir, &chunk_id);
+                acc.flush(&spill);
             }
             let items = cells
                 .into_iter()
@@ -366,13 +358,13 @@ pub(crate) fn process_ocean_shapefile(
         .collect();
 
     let mut work_items = Vec::with_capacity(pieces.len());
-    let mut pre_emit = OceanAcc::new(chunk_compression);
+    let mut pre_emit = OceanAcc::new();
     for (items, acc) in piece_prep {
         work_items.extend(items);
         if let Some(acc) = acc {
             pre_emit.merge_from(acc);
             if pre_emit.bytes >= chunk_size {
-                pre_emit.flush(&chunk_dir, &chunk_id);
+                pre_emit.flush(&spill);
             }
         }
     }
@@ -380,7 +372,7 @@ pub(crate) fn process_ocean_shapefile(
     let mut result = work_items
         .into_par_iter()
         .fold(
-            || OceanAcc::new(chunk_compression),
+            OceanAcc::new,
             |mut acc, item| {
                 emit_ocean_piece(
                     item,
@@ -391,25 +383,25 @@ pub(crate) fn process_ocean_shapefile(
                     &mut acc,
                 );
                 if acc.bytes >= chunk_size {
-                    acc.flush(&chunk_dir, &chunk_id);
+                    acc.flush(&spill);
                 }
                 acc
             },
         )
         .reduce(
-            || OceanAcc::new(chunk_compression),
+            OceanAcc::new,
             |mut a, b| {
                 a.merge_from(b);
                 if a.bytes >= chunk_size {
-                    a.flush(&chunk_dir, &chunk_id);
+                    a.flush(&spill);
                 }
                 a
             },
         );
 
     result.merge_from(pre_emit);
-    result.flush(&chunk_dir, &chunk_id);
-    sort_writer.adopt_chunk_files(result.chunk_paths);
+    result.flush(&spill);
+    sort_writer.adopt_chunk_files(spill.finish());
     let count = result.count;
 
     eprintln!("  {poly_count} polygons, {count} features");

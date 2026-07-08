@@ -183,6 +183,11 @@ pub(super) fn phase_read_and_process(
     // ways, extracts RawWay data and processes via rayon. Main thread sends blocks
     // and drains results - no per-way work on the main thread during the way phase.
     let mut block_tx: Option<std::sync::mpsc::SyncSender<PrimitiveBlock>> = None;
+    // Spill coalescer shared by the way tasks and the relation tail; created
+    // with the way worker, finished (residual write + path adoption) after the
+    // relation tail. None until the first way block (or created at the tail
+    // for way-less inputs).
+    let mut way_spill: Option<std::sync::Arc<crate::sort::SpillCoalescer>> = None;
     let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
     let mut drain_handle: Option<
@@ -361,7 +366,6 @@ pub(super) fn phase_read_and_process(
                     let psf = config.polygon_simplify_factor;
                     let way_chunk_dir = config.tmp_dir.join(SORT_CHUNKS_DIR);
                     let way_chunk_size = sort_chunk_budget;
-                    let way_chunk_compression = config.compress_sort_chunks;
                     let way_chunk_id = std::sync::Arc::new(AtomicUsize::new(
                         sort_writer
                             .as_ref()
@@ -373,6 +377,17 @@ pub(super) fn phase_read_and_process(
                     // allocator between them so a drain flush and a task flush never
                     // claim the same chunk_NNNN.bin.
                     let drain_chunk_id = std::sync::Arc::clone(&way_chunk_id);
+                    // Shared spill coalescer: way tasks (and later the relation
+                    // tail) bulk-append their sinks here; it writes ~sort-budget
+                    // sized chunks. See sort::SpillCoalescer for the NA
+                    // fragmentation numbers that motivated it.
+                    let spill = std::sync::Arc::new(crate::sort::SpillCoalescer::new(
+                        way_chunk_dir.clone(),
+                        std::sync::Arc::clone(&way_chunk_id),
+                        sort_chunk_budget,
+                        config.compress_sort_chunks,
+                    ));
+                    way_spill = Some(std::sync::Arc::clone(&spill));
                     // First point where the shared-node set is needed: join
                     // the prepass thread spawned before the node phase. The
                     // joins block the ordered consumer, so they are stall time.
@@ -416,10 +431,7 @@ pub(super) fn phase_read_and_process(
                         let mr_ref = &*missing_ref_stats_clone;
                         let ds_ref = &*deferral_stats_clone;
                         let rp_ref = &*relation_plan_clone;
-                        let chunk_dir_base = way_chunk_dir;
-                        let chunk_size = way_chunk_size;
-                        let chunk_compression = way_chunk_compression;
-                        let chunk_id_base = way_chunk_id;
+                        let spill_ref = &*spill;
                         // Byte-budgeted throttle: (count, estimated_bytes).
                         // Condvar wakes dispatcher when a task completes.
                         let inflight = std::sync::Mutex::new((0usize, 0usize));
@@ -430,17 +442,18 @@ pub(super) fn phase_read_and_process(
                         let way_counter_ref = &*way_counter_clone;
                         // Pool of accumulators shared across block tasks. Accs
                         // live for the whole way phase (not one block), so the
-                        // bulk of the record volume self-flushes to partitioned
-                        // chunk files at WAY_ACC_FLUSH_BYTES instead of funneling
-                        // through the drain thread's serial sort_writer pushes -
-                        // measured on germany locations: 12.3 GB of records
-                        // through one thread, 141s of tasks blocked on
-                        // way_result_send behind it. The drain keeps way_index
-                        // ownership; per-block results carry only the way_puts.
-                        // Buffered ceiling: one acc per concurrently running
-                        // task, each under WAY_ACC_FLUSH_BYTES.
-                        const WAY_ACC_FLUSH_BYTES: usize = 64 * 1024 * 1024;
-                        let acc_flush_bytes = chunk_size.min(WAY_ACC_FLUSH_BYTES);
+                        // bulk of the record volume drains through the shared
+                        // spill coalescer instead of funneling through the drain
+                        // thread's serial sort_writer pushes - measured on
+                        // germany locations: 12.3 GB of records through one
+                        // thread, 141s of tasks blocked on way_result_send
+                        // behind it. The drain keeps way_index ownership;
+                        // per-block results carry only the way_puts. The flush
+                        // threshold is small because a flush is now a memcpy
+                        // into the coalescer, not a chunk-file write; buffered
+                        // ceiling is one acc per concurrently running task.
+                        const WAY_ACC_FLUSH_BYTES: usize = 8 * 1024 * 1024;
+                        let acc_flush_bytes = way_chunk_size.min(WAY_ACC_FLUSH_BYTES);
                         let acc_pool: std::sync::Mutex<Vec<WayAcc>> =
                             std::sync::Mutex::new(Vec::new());
                         let acc_pool_ref = &acc_pool;
@@ -482,8 +495,6 @@ pub(super) fn phase_read_and_process(
                                     );
                                 }
                                 let tx = rtx.clone();
-                                let chunk_dir = chunk_dir_base.clone();
-                                let chunk_id = std::sync::Arc::clone(&chunk_id_base);
                                 let way_hwm_task = std::sync::Arc::clone(&way_hwm_clone);
                                 #[allow(clippy::let_underscore_must_use)]
                                 s.spawn(move |_| {
@@ -513,7 +524,7 @@ pub(super) fn phase_read_and_process(
                                         .lock()
                                         .expect("way acc pool lock")
                                         .pop()
-                                        .unwrap_or_else(|| WayAcc::new(chunk_compression));
+                                        .unwrap_or_else(WayAcc::new);
                                     let mut plans = plans.into_iter();
                                     for element in block.elements() {
                                         let Element::Way(way) = element else {
@@ -533,7 +544,7 @@ pub(super) fn phase_read_and_process(
                                             mr_ref, &fcs, psf, &mut acc,
                                         );
                                         if acc.bytes >= acc_flush_bytes {
-                                            acc.flush(&chunk_dir, &chunk_id);
+                                            acc.flush(spill_ref);
                                         }
                                     }
                                     // Only the way_index puts go to the drain per
@@ -550,7 +561,6 @@ pub(super) fn phase_read_and_process(
                                         // while holding a rayon thread.
                                         let _wait = wait_span(&WAIT.way_result_send);
                                         let _ = tx.send(WayTaskResult {
-                                            chunk_paths: Vec::new(),
                                             count: 0,
                                             sink: RecordSink::new(),
                                             fanout: FanoutStats::new(),
@@ -592,9 +602,10 @@ pub(super) fn phase_read_and_process(
                             count += drain_way_task_result(results, &mut wi, &mut sw, &mut fanout);
                             ds_drain.check_budgets(&srl_drain);
                         }
-                        // All tasks have finished allocating (rtx dropped closed the
-                        // channel); resync chunk_count so ocean/relations/from_dir agree.
-                        sw.detach_chunk_counter();
+                        // The shared chunk counter stays attached: the spill
+                        // coalescer keeps allocating from the same Arc through
+                        // the relation tail. Detached (and chunk_count resynced)
+                        // after the tail adopts the coalescer's paths.
                         (wi, sw, count, fanout)
                     }));
 
@@ -703,6 +714,25 @@ pub(super) fn phase_read_and_process(
         } else {
             Box::new(std::mem::take(&mut relation_blocks).into_iter())
         };
+    // Spill coalescer for the relation tail: reuse the way phase's (the
+    // shared chunk counter is still attached to sort_writer), or create one
+    // now for inputs that had no way blocks.
+    let spill = match way_spill.take() {
+        Some(spill) => spill,
+        None => {
+            let sw = sort_writer
+                .as_mut()
+                .expect("sort_writer not returned from drain");
+            let chunk_id = std::sync::Arc::new(AtomicUsize::new(sw.chunk_count()));
+            sw.attach_chunk_counter(std::sync::Arc::clone(&chunk_id));
+            std::sync::Arc::new(crate::sort::SpillCoalescer::new(
+                config.tmp_dir.join(SORT_CHUNKS_DIR),
+                chunk_id,
+                sort_chunk_budget,
+                config.compress_sort_chunks,
+            ))
+        }
+    };
     // Process relation blocks. Tail of phase12: one streamed parallel pass
     // over all relations (prepare interleaved with emit, a single end
     // barrier). The span deliberately includes the rayon fan-out - it is
@@ -721,6 +751,7 @@ pub(super) fn phase_read_and_process(
         sort_writer
             .as_mut()
             .expect("sort_writer not returned from drain"),
+        &spill,
         &mut fanout_stats,
         &config.fanout_caps,
         config.polygon_simplify_factor,
@@ -730,6 +761,16 @@ pub(super) fn phase_read_and_process(
     let max_rel_inflight_bytes = relation_tail.max_inflight_bytes;
     deferral_stats.check_budgets(&config.seam_reconcile_layers);
     drop(relation_tail_busy);
+    // Way-phase and relation-tail records all flowed through the coalescer;
+    // write its residual, adopt every coalesced chunk, and resync the chunk
+    // counter now that the last concurrent producer is done.
+    {
+        let sw = sort_writer
+            .as_mut()
+            .expect("sort_writer not returned from drain");
+        sw.adopt_chunk_files(spill.finish());
+        sw.detach_chunk_counter();
+    }
 
     let rss_before_relation_drop = current_rss_kb();
     drop(relation_blocks);
@@ -1438,7 +1479,6 @@ pub(super) fn crosses_antimeridian(
 }
 
 pub(super) struct WayTaskResult {
-    pub(super) chunk_paths: Vec<std::path::PathBuf>,
     pub(super) count: u64,
     pub(super) sink: RecordSink,
     pub(super) fanout: FanoutStats,
@@ -1448,7 +1488,6 @@ pub(super) struct WayTaskResult {
 pub(super) struct WayAcc {
     pub(super) sink: RecordSink,
     pub(super) bytes: usize,
-    pub(super) chunk_paths: Vec<std::path::PathBuf>,
     pub(super) count: u64,
     pub(super) fanout: FanoutStats,
     pub(super) way_puts: Vec<(i64, Vec<(i32, i32)>)>,
@@ -1456,15 +1495,13 @@ pub(super) struct WayAcc {
     pub(super) point_emit: PointEmitScratch,
     pub(super) line_emit: LineEmitScratch,
     pub(super) polygon_emit: PolygonEmitScratch,
-    pub(super) compression: crate::sort::ChunkCompression,
 }
 
 impl WayAcc {
-    pub(super) fn new(compression: crate::sort::ChunkCompression) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             sink: RecordSink::new(),
             bytes: 0,
-            chunk_paths: Vec::new(),
             count: 0,
             fanout: FanoutStats::new(),
             way_puts: Vec::new(),
@@ -1472,27 +1509,17 @@ impl WayAcc {
             point_emit: PointEmitScratch::new(),
             line_emit: LineEmitScratch::new(),
             polygon_emit: PolygonEmitScratch::new(),
-            compression,
         }
     }
 
-    pub(super) fn flush(
-        &mut self,
-        chunk_dir: &std::path::Path,
-        chunk_id: &std::sync::atomic::AtomicUsize,
-    ) {
+    /// Hand the sink's records to the shared spill coalescer (a memcpy under
+    /// its lock) and reset for reuse. Tally stays in the sink and is merged
+    /// when the residual acc ships through the drain at end of stream.
+    pub(super) fn flush(&mut self, spill: &crate::sort::SpillCoalescer) {
         if self.sink.records.is_empty() {
             return;
         }
-        let paths = crate::sort::write_partitioned_payload_chunks(
-            &mut self.sink.records,
-            &self.sink.payload,
-            chunk_dir,
-            chunk_id,
-            self.compression,
-        )
-        .expect("way chunk write failed");
-        self.chunk_paths.extend(paths);
+        spill.append(&self.sink.records, &self.sink.payload);
         self.count += self.sink.records.len() as u64;
         self.sink.clear_payload();
         self.bytes = 0;
@@ -1500,7 +1527,6 @@ impl WayAcc {
 
     pub(super) fn finish(self) -> WayTaskResult {
         WayTaskResult {
-            chunk_paths: self.chunk_paths,
             count: self.count,
             sink: self.sink,
             fanout: self.fanout,
@@ -1519,7 +1545,6 @@ pub(super) fn drain_way_task_result(
     for (way_id, coords_e7) in result.way_puts {
         way_index.put(way_id, &coords_e7);
     }
-    sort_writer.adopt_chunk_files(result.chunk_paths);
     sort_writer.merge_tally(&result.sink.tally);
     fanout.merge(&result.fanout);
     let count = result.count + result.sink.records.len() as u64;

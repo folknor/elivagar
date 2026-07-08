@@ -276,6 +276,61 @@ Remaining phase12 stalls: pipeline_decoded_send still 362% (the
 ordered consumer itself is now the frontier again: node blocks 8s +
 way recount 5.7s serial), way_budget 32.6% even at 768M.
 
+CONTINUED same evening (commits 0513cfa..899f436):
+
+- Way counting moved task-side (plans.len()); the consumer no longer
+  re-parses way blocks (5.7s serial gone).
+- Node blocks moved to a dedicated ordered node-worker thread that owns
+  node_store + sort_writer for the node phase. Consumer now only
+  classifies and forwards. Germany wall unchanged: node_block_send
+  wait 8.0s shows the single node worker is the node-phase rate
+  limiter now - the serial work moved threads but did not shrink.
+  Next lever there: parallelize tagged-node processing (locations mode
+  has no node store, embarrassingly parallel, same pooled-acc pattern).
+- Relation-block buffer CAPPED at 1G decompressed (H3 ledger item
+  closed): past the cap the tail re-reads relation blobs via
+  BlobFilter::only_relations instead of holding them - the largest
+  input-scaled RAM stock is now bounded. Spill path forced on denmark
+  via ELIVAGAR_REL_BLOCKS_CAP=1 and regress-verified bit-identical.
+
+Scoreboard at d9351df: denmark 13.7s, norway 44.2s (-35% vs overnight
+baseline), germany 57.4s (-26%), peak RSS 5.0/8.5 GB. Gates: denmark
+regress clean per landing; norway+germany regress clean at 64bdee1 and
+e6f5fad respectively (heavy regress reserved for campaign milestones).
+Denmark's largest phase is now OCEAN (5.6s of 13.7) - H8a's overlap is
+the next denmark-visible lever; germany/norway frontier is way-phase
+CPU (H6 churn) and assemble stragglers (H8b).
+
+NA LOCATIONS RE-BASELINE (H9 step 1, run `6a13f306`, 899f436,
+2026-07-08 late). Wall 364.8s vs 462.6s March baseline (-21%);
+phase12 283s -> 148.4s - the campaign scales. Two planet blockers
+found, one per project:
+
+1. (pbfhogg) Phase12 peak RSS 21.5 GB, anon ramping 0 -> 20.5 GB in
+   the first ~20s at NVMe read rate. Root cause in pbfhogg's pipelined
+   reader: the stage-2 dispatcher spawns a decode task per blob with
+   no in-flight bound (the raw channel drains instantly into the pool
+   queue), and the reorder buffer admits far-ahead decoded blocks
+   unboundedly while one straggler decode lags
+   (pipeline_reorder_high_water 660 on NA vs <=51 germany). Problem
+   statement + proposed fix (token-bounded in-flight decode, cap =
+   decode_ahead) handed to the pbfhogg dev 2026-07-08. Until it lands,
+   planet phase12 RSS is NOT bounded by elivagar's own budgets.
+2. (elivagar) Assemble regressed 164s -> 198.6s: the pooled way-acc
+   64M flushes fragment scratch into 2754 chunks / merge fan-in 1076 /
+   15442 partitions, driving 95.8 GB of assemble reads against
+   68.4 GB of merge bytes plus 210K majflt of page-cache thrash. Fix
+   direction: coalesce acc flushes through a shared bulk-append spill
+   buffer that writes ~1 GB sorted chunks (the old drain path's chunk
+   shape) without the old drain serialization.
+
+Ledger validation from the same run: relation buffer stayed under its
+1 GB cap (236 MB, no spill), pmtiles dedup capped at 1M entries as
+designed, dir entries 20.3M streamed fine. max_rel_inflight_bytes hit
+90 MB - real monster-relation signal, survivable at NA, still wants a
+per-relation gate before planet. way_index at NA: 6.45M member ways,
+1.37 GB data + 103 MB index (mmap'd).
+
 ### H2: Use the pbfhogg preprocessing pass as elivagar's free prepass
 
 **Claim.** The production input is written by pbfhogg, which already
@@ -366,6 +421,36 @@ commit. The standout ledger item is mimalloc retention: `mi_commit`
 RSS - allocator-committed ~2.4 GB above resident, the largest
 unbudgeted stock and another point for H6's churn reduction. The
 extrapolation exercise remains open.
+
+LEDGER EXTRAPOLATION (paper, 2026-07-08 late, post-campaign; NA run
+pending as the calibration check). Phase12 stocks at planet scale,
+with today's bounds in place:
+
+- sort chunk buffer: 1 GB (--sort-budget), input-independent.
+- pooled way accs: workers x 64 MB = 1.5 GB on 24 threads,
+  input-independent (landed today).
+- relation blocks: capped 1 GB, spills to PBF re-read (landed today;
+  was the largest input-scaled stock, est. 6-10 GB at planet).
+- prepared relations in flight: one per worker; germany/norway HWM
+  6-8 MB total. OPEN RISK: a planet monster multipolygon (Antarctic
+  coastline class, ~50K member ways) could prepare to hundreds of MB;
+  worst case is workers x largest-relation, transient. Watch
+  max_rel_inflight_bytes on NA/planet; a per-relation size gate or
+  fanout-cap-style skip is the backstop.
+- pbfhogg reorder buffer: 19-51 blobs germany (~hundreds of MB
+  worst case); consumer is much faster now, high water should stay low.
+- way_index: mmap'd, disk-backed - planet ~30-40M member ways,
+  ~4-6 GB on disk, page-cache pressure not RSS.
+- PMTiles writer: dedup capped ~60 MB + streaming directory. Bounded.
+- mimalloc retention: ~2.4 GB observed above RSS (H6 target).
+
+Sum of bounded phase12 stocks: ~5-7 GB + churn headroom - phase12 fits
+26 GB with room. The two phases WITHOUT planet-ready bounds are ocean
+(H5: planet hits all 28,883 shapes; germany ocean phase RSS 3.1 GB is
+bbox-clipped and not representative) and assemble (germany peak 8.5 GB;
+scales with per-partition density and reader count, needs the NA
+number). Planet go/no-go per H9 step 4 stays gated on the measured NA
+slope for those two.
 
 ### H4: Sort scratch needs page-cache hygiene, maybe compression
 
@@ -532,6 +617,12 @@ hotpath builds do not.
 **First step.** Decide the NA enrichment run (user decision - real-PBF
 runs are explicit per project rules), and add the H1/H3 counters before
 it so one expensive run answers many questions.
+
+Measurement discipline for NA-and-larger inputs: use `--bench 1`, not
+the best-of-3 default - a NA best-of-3 costs ~18 minutes of machine
+time for variance data the ladder does not need yet. Best-of-3 stays
+the standard for extract-scale runs and for record-claim runs (H10),
+where the variance actually matters.
 
 ### H10: Define the record so the claim survives scrutiny
 
