@@ -13,7 +13,7 @@ use crate::wire_format::encode_attrs_bytes;
 use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, MemberId, PrimitiveBlock, Way};
 
 use super::emit::{
-    LineEmitScratch, PointEmitScratch, PolygonEmitScratch, RecordSink,
+    LineEmitScratch, PointEmitScratch, PolygonEmitScratch, RecordSink, RecordTally,
     antimeridian_shifts_for_bbox, emit_line_feature, emit_point_or_centroid, emit_polygon_feature,
     enrich_polygon_matches, push_sort_record, unwrap_antimeridian_path,
 };
@@ -183,11 +183,27 @@ pub(super) fn phase_read_and_process(
     // ways, extracts RawWay data and processes via rayon. Main thread sends blocks
     // and drains results - no per-way work on the main thread during the way phase.
     let mut block_tx: Option<std::sync::mpsc::SyncSender<PrimitiveBlock>> = None;
-    // Spill coalescer shared by the way tasks and the relation tail; created
-    // with the way worker, finished (residual write + path adoption) after the
-    // relation tail. None until the first way block (or created at the tail
-    // for way-less inputs).
-    let mut way_spill: Option<std::sync::Arc<crate::sort::SpillCoalescer>> = None;
+    // Shared chunk-number allocator + spill coalescer, live for the whole
+    // phase: the node worker, way tasks, drain writer, and relation tail all
+    // produce chunks into the same directory concurrently. The counter is
+    // attached to sort_writer here and detached (resyncing chunk_count) after
+    // the relation tail adopts the coalescer's paths.
+    let shared_chunk_id = std::sync::Arc::new(AtomicUsize::new(
+        sort_writer
+            .as_ref()
+            .expect("sort_writer taken before phase12 read")
+            .chunk_count(),
+    ));
+    sort_writer
+        .as_mut()
+        .expect("sort_writer taken before phase12 read")
+        .attach_chunk_counter(std::sync::Arc::clone(&shared_chunk_id));
+    let spill = std::sync::Arc::new(crate::sort::SpillCoalescer::new(
+        config.tmp_dir.join(SORT_CHUNKS_DIR),
+        std::sync::Arc::clone(&shared_chunk_id),
+        sort_chunk_budget,
+        config.compress_sort_chunks,
+    ));
     let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
     let mut drain_handle: Option<
@@ -253,15 +269,20 @@ pub(super) fn phase_read_and_process(
     }));
 
 
-    // Node worker: owns node_store + sort_writer during the node phase and
-    // processes node blocks off the ordered consumer (8s of serial consumer
-    // time on germany locations, all of it stalling decode workers behind
-    // pipeline_decoded_send). Blocks are forwarded in order over a bounded
-    // channel, so the sorted node store's sequential put order is preserved.
-    // Joined at the first way block (the pre-existing "sort_writer taken by
-    // drain thread" panic already guaranteed node blocks never follow ways).
+    // Node worker: owns the node store during the node phase and processes
+    // node blocks off the consumer (8s of serial consumer time on germany
+    // locations, all of it stalling decode workers). Records flow to the
+    // shared spill coalescer, so the worker never owns sort_writer. On the
+    // raw path (ordered source, node store) it is joined at the first way
+    // block, which also preserves sequential store-put order; on the
+    // locations path (unordered source, no store) it runs for the whole read
+    // and is joined after the drain returns.
     let mut node_worker_tx: Option<std::sync::mpsc::SyncSender<PrimitiveBlock>> = None;
     let mut node_worker_handle: Option<std::thread::JoinHandle<NodeWorkerState>> = None;
+    let mut node_worker_joined = false;
+    // Node-worker bookkeeping merged at join time; tally applied to
+    // sort_writer wherever it lives at that point.
+    let mut node_tally: Option<RecordTally> = None;
 
     macro_rules! join_node_worker {
         () => {{
@@ -273,10 +294,11 @@ pub(super) fn phase_read_and_process(
                     .expect("node worker handle missing")
                     .join()
                     .expect("node worker thread panicked");
+                node_worker_joined = true;
                 node_store_opt = st.node_store;
-                sort_writer = Some(st.sort_writer);
                 node_count = st.node_count;
                 features_emitted += st.features_emitted;
+                node_tally = Some(st.tally);
                 min_lat_e7 = st.min_lat_e7;
                 max_lat_e7 = st.max_lat_e7;
                 min_lon_e7 = st.min_lon_e7;
@@ -287,9 +309,12 @@ pub(super) fn phase_read_and_process(
         }};
     }
 
-    for block_result in reader.into_blocks_pipelined() {
-        let block = block_result.map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
-
+    // Block routing shared by both sources. Expanded as a macro (not a
+    // closure) because the body mutably borrows a dozen locals and spawns
+    // threads that capture others.
+    macro_rules! route_block {
+        ($block:expr) => {{
+        let block: PrimitiveBlock = $block;
         // Classify block by reading first wire tag byte per group -
         // no element decoding. Sorted PBFs have single-type blocks.
         match block.block_type() {
@@ -297,15 +322,22 @@ pub(super) fn phase_read_and_process(
                 // Node block - forward to the node worker; spawn it lazily on
                 // the first one. The consumer only classifies and sends.
                 if node_worker_tx.is_none() {
+                    // Raw path only: a node block after the way phase would
+                    // respawn a worker whose store was already consumed and
+                    // silently lose puts. The ordered source makes this
+                    // impossible for sorted PBFs; make violations loud.
+                    assert!(
+                        !node_worker_joined || locations_on_ways,
+                        "node block after way phase on the raw path"
+                    );
                     let (ntx, nrx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(8);
                     let ns = node_store_opt.take();
-                    let sw = sort_writer
-                        .take()
-                        .expect("sort_writer taken before node worker");
+                    let sp = std::sync::Arc::clone(&spill);
                     let mz = min_z;
                     let xz = max_z;
-                    node_worker_handle =
-                        Some(std::thread::spawn(move || run_node_worker(&nrx, ns, sw, mz, xz)));
+                    node_worker_handle = Some(std::thread::spawn(move || {
+                        run_node_worker(&nrx, ns, &sp, mz, xz)
+                    }));
                     node_worker_tx = Some(ntx);
                 }
                 let _wait = wait_span(&WAIT.node_block_send);
@@ -322,9 +354,13 @@ pub(super) fn phase_read_and_process(
                 // locations (phase12_way_count_ns), all of it stalling the
                 // decode workers behind pipeline_decoded_send.
 
-                // The node phase ends at the first way block: reclaim
-                // node_store + sort_writer from the node worker.
-                join_node_worker!();
+                // Raw path: the node phase ends at the first way block -
+                // reclaim the node store before building its reader. On the
+                // locations path the node worker keeps running (no store, no
+                // ordering requirement).
+                if !locations_on_ways {
+                    join_node_worker!();
+                }
 
                 // Spawn worker + drain threads on first way block
                 if block_tx.is_none() {
@@ -364,30 +400,8 @@ pub(super) fn phase_read_and_process(
                     let srl = config.seam_reconcile_layers;
                     let fcs = config.fanout_caps;
                     let psf = config.polygon_simplify_factor;
-                    let way_chunk_dir = config.tmp_dir.join(SORT_CHUNKS_DIR);
                     let way_chunk_size = sort_chunk_budget;
-                    let way_chunk_id = std::sync::Arc::new(AtomicUsize::new(
-                        sort_writer
-                            .as_ref()
-                            .expect("sort_writer taken before way worker")
-                            .chunk_count(),
-                    ));
-                    // The drain writer flushes leftover tails into the same chunk
-                    // directory concurrently with the way tasks. Share ONE chunk-number
-                    // allocator between them so a drain flush and a task flush never
-                    // claim the same chunk_NNNN.bin.
-                    let drain_chunk_id = std::sync::Arc::clone(&way_chunk_id);
-                    // Shared spill coalescer: way tasks (and later the relation
-                    // tail) bulk-append their sinks here; it writes ~sort-budget
-                    // sized chunks. See sort::SpillCoalescer for the NA
-                    // fragmentation numbers that motivated it.
-                    let spill = std::sync::Arc::new(crate::sort::SpillCoalescer::new(
-                        way_chunk_dir.clone(),
-                        std::sync::Arc::clone(&way_chunk_id),
-                        sort_chunk_budget,
-                        config.compress_sort_chunks,
-                    ));
-                    way_spill = Some(std::sync::Arc::clone(&spill));
+                    let worker_spill = std::sync::Arc::clone(&spill);
                     // First point where the shared-node set is needed: join
                     // the prepass thread spawned before the node phase. The
                     // joins block the ordered consumer, so they are stall time.
@@ -431,7 +445,7 @@ pub(super) fn phase_read_and_process(
                         let mr_ref = &*missing_ref_stats_clone;
                         let ds_ref = &*deferral_stats_clone;
                         let rp_ref = &*relation_plan_clone;
-                        let spill_ref = &*spill;
+                        let spill_ref = &*worker_spill;
                         // Byte-budgeted throttle: (count, estimated_bytes).
                         // Condvar wakes dispatcher when a task completes.
                         let inflight = std::sync::Mutex::new((0usize, 0usize));
@@ -594,7 +608,9 @@ pub(super) fn phase_read_and_process(
                     let ds_drain = std::sync::Arc::clone(&deferral_stats);
                     let srl_drain = config.seam_reconcile_layers;
                     drain_handle = Some(std::thread::spawn(move || {
-                        sw.attach_chunk_counter(drain_chunk_id);
+                        // sw arrives with the shared chunk counter already
+                        // attached (phase12 setup) - its own flushes and every
+                        // concurrent producer allocate from the same Arc.
                         let mut count: u64 = 0;
                         let mut fanout = FanoutStats::new();
                         while let Ok(results) = rrx.recv() {
@@ -647,12 +663,41 @@ pub(super) fn phase_read_and_process(
             }
             BlockType::Empty | BlockType::Mixed => {}
         }
+        }};
     }
 
-    // No way blocks arrived: the node worker may still hold node_store +
-    // sort_writer (node-only PBF). Reclaim before the relation tail, and
-    // release the store - nothing after the way phase reads it.
+    if locations_on_ways {
+        // Elivagar-owned bounded read: see UnorderedBlockSource. Everything
+        // downstream of this loop is order-free in locations mode.
+        let source = UnorderedBlockSource::spawn(&config.pbf_path, decode_threads)?;
+        drop(reader);
+        loop {
+            let item = {
+                let _wait = wait_span(&WAIT.read_decoded_recv);
+                source.rx.recv()
+            };
+            let Ok(block_result) = item else {
+                break; // every sender done
+            };
+            route_block!(block_result?);
+        }
+        source.join();
+    } else {
+        for block_result in reader.into_blocks_pipelined() {
+            let block =
+                block_result.map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
+            route_block!(block);
+        }
+    }
+
+    // Close the node worker's channel so it drains and exits. On the raw
+    // path it was already joined at the first way block; on the locations
+    // path it ran for the whole read and is joined below.
     join_node_worker!();
+    // The joined flag guards node-after-way respawns inside the loop; this
+    // final expansion's write is intentionally unread.
+    let _ = node_worker_joined;
+    // Nothing after the way phase reads the node store - release it.
     drop(node_store_opt.take());
 
     // No way blocks arrived (prepass result unused): join so a prepass error
@@ -687,6 +732,17 @@ pub(super) fn phase_read_and_process(
         }
     }
 
+    // Apply the node worker's record tally now that sort_writer is back from
+    // the drain (locations path joins the worker after the read loop; the
+    // raw path merged nothing here because sort_writer was present at its
+    // first-way-block join - the tally rides the same Option either way).
+    if let Some(tally) = node_tally.take() {
+        sort_writer
+            .as_mut()
+            .expect("sort_writer not returned from drain")
+            .merge_tally(&tally);
+    }
+
     // Finalize way index after all way blocks are processed.
     if let Some(ref mut wi) = way_index {
         wi.finish_writing().expect("failed to finalize way index");
@@ -714,25 +770,8 @@ pub(super) fn phase_read_and_process(
         } else {
             Box::new(std::mem::take(&mut relation_blocks).into_iter())
         };
-    // Spill coalescer for the relation tail: reuse the way phase's (the
-    // shared chunk counter is still attached to sort_writer), or create one
-    // now for inputs that had no way blocks.
-    let spill = match way_spill.take() {
-        Some(spill) => spill,
-        None => {
-            let sw = sort_writer
-                .as_mut()
-                .expect("sort_writer not returned from drain");
-            let chunk_id = std::sync::Arc::new(AtomicUsize::new(sw.chunk_count()));
-            sw.attach_chunk_counter(std::sync::Arc::clone(&chunk_id));
-            std::sync::Arc::new(crate::sort::SpillCoalescer::new(
-                config.tmp_dir.join(SORT_CHUNKS_DIR),
-                chunk_id,
-                sort_chunk_budget,
-                config.compress_sort_chunks,
-            ))
-        }
-    };
+    // The relation tail appends to the same phase-wide spill coalescer; the
+    // shared chunk counter is still attached to sort_writer.
     // Process relation blocks. Tail of phase12: one streamed parallel pass
     // over all relations (prepare interleaved with emit, a single end
     // barrier). The span deliberately includes the rayon fan-out - it is
@@ -1034,13 +1073,125 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
     }
 }
 
-/// Everything the node worker owns during the node phase, handed back to the
-/// ordered consumer at the first way block.
+/// Bounded, UNORDERED pipelined block source for the locations-on-ways read.
+///
+/// Replaces pbfhogg's `into_blocks_pipelined` for the production input shape.
+/// That reader's decode fan-out holds unbounded raw blobs in its pool queue
+/// (the dispatcher spawns per blob without backpressure, so effective
+/// read-ahead is the whole file at NVMe rate) and unbounded decoded blocks in
+/// its reorder window whenever one decode straggles - measured on the NA
+/// locations re-baseline: 660-1134-blob reorder windows, a 20 GB RSS ramp in
+/// the first 20s of the run. pbfhogg itself migrated its planet-scale
+/// commands off that reader for the same pathology (see cat_filtered's notes
+/// on cross-thread PrimitiveBlock retention, ~25 GB at planet, OOM at
+/// 28.9 GB); this is elivagar's equivalent move, built on the public
+/// BlobReader + Blob::to_primitiveblock surface.
+///
+/// Locations mode consumes every block order-free - there is no node store,
+/// the external sort erases way emission order, and relation blocks are
+/// buffered or re-read - so no reorder buffer exists AT ALL: raw blobs are
+/// bounded by the raw channel, decoded blocks by the decoded channel, and
+/// total in-flight is raw_cap + decoded_cap + decode workers, each bounded
+/// and input-independent. Backpressure propagates to the reader thread: the
+/// file is read at the rate the consumer absorbs it.
+///
+/// The raw path (node store, order-dependent) stays on pbfhogg's ordered
+/// reader.
+struct UnorderedBlockSource {
+    rx: std::sync::mpsc::Receiver<Result<PrimitiveBlock, PipelineError>>,
+    reader_handle: std::thread::JoinHandle<()>,
+    decode_handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl UnorderedBlockSource {
+    fn spawn(path: &std::path::Path, decode_threads: usize) -> Result<Self, PipelineError> {
+        let raw_cap = (decode_threads * 2).max(8);
+        let decoded_cap = (decode_threads * 2).max(8);
+        let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<pbfhogg::Blob>(raw_cap);
+        let raw_rx = std::sync::Arc::new(std::sync::Mutex::new(raw_rx));
+        let (decoded_tx, decoded_rx) =
+            std::sync::mpsc::sync_channel::<Result<PrimitiveBlock, PipelineError>>(decoded_cap);
+
+        let reader = pbfhogg::BlobReader::from_path(path)
+            .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?;
+
+        let reader_err_tx = decoded_tx.clone();
+        let reader_handle = std::thread::spawn(move || {
+            for blob_result in reader {
+                match blob_result {
+                    Ok(blob) => {
+                        if !matches!(blob.get_type(), pbfhogg::BlobType::OsmData) {
+                            continue;
+                        }
+                        let _wait = wait_span(&WAIT.read_raw_send);
+                        if raw_tx.send(blob).is_err() {
+                            break; // consumer gone (error path); stop reading
+                        }
+                    }
+                    Err(e) => {
+                        drop(
+                            reader_err_tx
+                                .send(Err(PipelineError(format!("PBF read failed: {e}")))),
+                        );
+                        break;
+                    }
+                }
+            }
+            // raw_tx drops: decode workers drain the channel and exit.
+        });
+
+        let mut decode_handles = Vec::with_capacity(decode_threads);
+        for _ in 0..decode_threads {
+            let rx = std::sync::Arc::clone(&raw_rx);
+            let tx = decoded_tx.clone();
+            decode_handles.push(std::thread::spawn(move || {
+                loop {
+                    let blob = {
+                        let guard = rx.lock().expect("raw blob channel lock");
+                        guard.recv()
+                    };
+                    let Ok(blob) = blob else {
+                        break; // reader done and channel drained
+                    };
+                    let item = blob
+                        .to_primitiveblock()
+                        .map_err(|e| PipelineError(format!("PBF decode failed: {e}")));
+                    let _wait = wait_span(&WAIT.read_decoded_send);
+                    if tx.send(item).is_err() {
+                        break; // consumer gone
+                    }
+                }
+            }));
+        }
+        drop(decoded_tx);
+
+        Ok(Self {
+            rx: decoded_rx,
+            reader_handle,
+            decode_handles,
+        })
+    }
+
+    /// Join the source threads after the receiver has been drained (or on
+    /// early error exit - dropping the receiver unblocks every sender).
+    fn join(self) {
+        drop(self.rx);
+        self.reader_handle
+            .join()
+            .expect("blob reader thread panicked");
+        for handle in self.decode_handles {
+            handle.join().expect("blob decode thread panicked");
+        }
+    }
+}
+
+/// Everything the node worker owns during the node phase, handed back when
+/// it is joined (first way block on the raw path; end of read otherwise).
 pub(super) struct NodeWorkerState {
     pub(super) node_store: Option<NodeStore>,
-    pub(super) sort_writer: SortWriter,
     pub(super) node_count: u64,
     pub(super) features_emitted: u64,
+    pub(super) tally: RecordTally,
     pub(super) min_lat_e7: i32,
     pub(super) max_lat_e7: i32,
     pub(super) min_lon_e7: i32,
@@ -1050,15 +1201,20 @@ pub(super) struct NodeWorkerState {
 }
 
 /// Node-phase worker loop: store puts, tagged-node feature emission, and
-/// data-extent tracking, fed whole blocks in order by the consumer. Single
-/// threaded by design - the sorted node store requires sequential put order.
+/// data-extent tracking, fed whole blocks by the consumer. Single threaded
+/// by design - the sorted node store requires sequential put order (the raw
+/// path's ordered source guarantees block order end to end). Records flow to
+/// the shared spill coalescer, so this worker never owns sort_writer and can
+/// outlive the node phase - node blocks interleaved with way blocks (an
+/// unordered source) are fine when there is no node store.
 fn run_node_worker(
     rx: &std::sync::mpsc::Receiver<PrimitiveBlock>,
     mut node_store: Option<NodeStore>,
-    mut sort_writer: SortWriter,
+    spill: &crate::sort::SpillCoalescer,
     min_zoom: u8,
     max_zoom: u8,
 ) -> NodeWorkerState {
+    const NODE_SINK_FLUSH_BYTES: usize = 8 * 1024 * 1024;
     let mut node_count: u64 = 0;
     let mut features_emitted: u64 = 0;
     let mut min_lat_e7: i32 = i32::MAX;
@@ -1068,6 +1224,7 @@ fn run_node_worker(
     let mut min_lon_shifted_e7: i64 = i64::MAX;
     let mut max_lon_shifted_e7: i64 = i64::MIN;
     let mut node_records: Vec<SortRecord> = Vec::new();
+    let mut sink = RecordSink::new();
 
     // Macro to handle Node and DenseNode identically - both types expose the
     // same API (.id(), .decimicro_lat(), .decimicro_lon(), .tags()) but are
@@ -1102,10 +1259,11 @@ fn run_node_worker(
                     max_zoom,
                     &mut node_records,
                 );
-                // Panic: inside PBF callback - can't propagate Result. Disk I/O
-                // failure is unrecoverable.
                 for r in node_records.drain(..) {
-                    sort_writer.push(r).expect("sort push failed");
+                    sink.tally.record(r.key, r.data.len());
+                    sink.records
+                        .push((r.key, sink.payload.len(), r.data.len()));
+                    sink.payload.extend_from_slice(&r.data);
                 }
                 features_emitted += n;
             }
@@ -1119,13 +1277,19 @@ fn run_node_worker(
             Element::Node(node) => handle_node!(node),
             _ => {}
         });
+        if sink.bytes() >= NODE_SINK_FLUSH_BYTES {
+            spill.append(&sink.records, &sink.payload);
+            sink.clear_payload();
+        }
     }
+    spill.append(&sink.records, &sink.payload);
+    sink.clear_payload();
 
     NodeWorkerState {
         node_store,
-        sort_writer,
         node_count,
         features_emitted,
+        tally: sink.tally,
         min_lat_e7,
         max_lat_e7,
         min_lon_e7,
