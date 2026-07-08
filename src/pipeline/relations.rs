@@ -179,19 +179,21 @@ pub(super) struct RelationTail {
     pub(super) max_inflight_bytes: usize,
 }
 
-/// Process all buffered relation blocks: prepare + emit, streaming outputs to
+/// Process a stream of relation blocks: prepare + emit, streaming outputs to
 /// chunk files. One parallel pass over every relation with a single barrier at
 /// the end. `par_bridge` pulls from the preparing iterator under its internal
-/// lock, so `prepare_relation`'s way_index reads (cheap, serial) interleave
-/// with relation processing on the worker threads instead of alternating with
-/// it; per-batch flush barriers previously idled most of the pool on each
-/// batch's slowest relation (giant coastal multipolygons: P99 is ~100x P50).
-/// In-flight prepared memory is bounded by construction: each worker holds at
-/// most one prepared relation at a time (no batch accumulation).
+/// lock, so block decode + `prepare_relation`'s way_index reads (cheap,
+/// serial) interleave with relation processing on the worker threads instead
+/// of alternating with it; per-batch flush barriers previously idled most of
+/// the pool on each batch's slowest relation (giant coastal multipolygons:
+/// P99 is ~100x P50). Blocks are consumed one at a time (prepared eagerly per
+/// block, then dropped), so the source can be the in-RAM buffer or a filtered
+/// PBF re-read without holding more than one block plus each worker's single
+/// in-flight prepared relation.
 #[hotpath::measure]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn process_relation_blocks(
-    relation_blocks: &[pbfhogg::PrimitiveBlock],
+    relation_blocks: impl Iterator<Item = pbfhogg::PrimitiveBlock> + Send,
     way_index: &WayIndex,
     missing_ref_stats: &MissingRefStatsAtomic,
     min_zoom: u8,
@@ -225,18 +227,25 @@ pub(super) fn process_relation_blocks(
     let max_inflight_bytes = AtomicUsize::new(0);
 
     let result = relation_blocks
-        .iter()
-        .flat_map(pbfhogg::PrimitiveBlock::elements)
-        .filter_map(|element| {
-            let pbfhogg::Element::Relation(rel) = element else {
-                return None;
-            };
-            rel_count.fetch_add(1, Ordering::Relaxed);
-            let prepared = prepare_relation(&rel, way_index, missing_ref_stats)?;
-            let bytes = estimate_prepared_rel_bytes(&prepared);
-            let now_inflight = inflight_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
-            max_inflight_bytes.fetch_max(now_inflight, Ordering::Relaxed);
-            Some((prepared, bytes))
+        .flat_map(|block| {
+            // Prepare eagerly per block: PreparedRelation owns its data, so
+            // the block can drop as soon as its relations are extracted. One
+            // block's prepared set (~MBs) is the peak the producer side holds.
+            let prepared: Vec<(PreparedRelation, usize)> = block
+                .elements()
+                .filter_map(|element| {
+                    let pbfhogg::Element::Relation(rel) = element else {
+                        return None;
+                    };
+                    rel_count.fetch_add(1, Ordering::Relaxed);
+                    let prepared = prepare_relation(&rel, way_index, missing_ref_stats)?;
+                    let bytes = estimate_prepared_rel_bytes(&prepared);
+                    let now_inflight = inflight_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
+                    max_inflight_bytes.fetch_max(now_inflight, Ordering::Relaxed);
+                    Some((prepared, bytes))
+                })
+                .collect();
+            prepared.into_iter()
         })
         .par_bridge()
         .fold(

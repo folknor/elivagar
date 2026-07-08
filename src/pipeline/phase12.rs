@@ -38,6 +38,11 @@ pub(super) const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
 pub(super) const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 768 * 1024 * 1024; // 768 MB
 /// Reject unsorted flat-index path above this input size unless explicitly overridden.
 pub(super) const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+/// Relation blocks buffer at most this many decompressed bytes in RAM; past
+/// the cap the tail re-reads relation blobs from the PBF instead (planet-scale
+/// inputs hold several GB of relation blocks - an input-scaled stock the
+/// 30 GB RAM ledger cannot absorb).
+pub(super) const REL_BLOCKS_BUFFER_CAP: usize = 1024 * 1024 * 1024; // 1 GB
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NodeStoreMode {
@@ -187,6 +192,13 @@ pub(super) fn phase_read_and_process(
     // Buffer relation blocks - processed after all PBF blocks are consumed so that
     // late way blocks (common in locations-on-ways PBFs) don't hit a finalized way_index.
     let mut relation_blocks: Vec<PrimitiveBlock> = Vec::new();
+    let mut relation_blocks_spilled = false;
+    // ELIVAGAR_REL_BLOCKS_CAP overrides the buffer cap (bytes) - debug/test
+    // hook to force the re-read path on small extracts.
+    let rel_blocks_buffer_cap: usize = std::env::var("ELIVAGAR_REL_BLOCKS_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(REL_BLOCKS_BUFFER_CAP);
 
     // High-water-mark counters for in-flight memory tracking.
     let way_hwm = std::sync::Arc::new(AtomicUsize::new(0));
@@ -602,8 +614,25 @@ pub(super) fn phase_read_and_process(
                 // are consumed. Locations-on-ways PBFs can have way blocks after
                 // relation blocks; processing relations inline would finalize the
                 // way_index too early.
+                //
+                // The buffer is byte-capped: this stock is input-scaled (planet
+                // holds several GB of decompressed relation blocks) and would
+                // eat the planet RAM budget. Past the cap, drop everything
+                // buffered and re-read relation blobs from the PBF at the tail
+                // via BlobFilter::only_relations (indexed PBFs skip-read).
                 relation_blocks_bytes += block.decompressed_size();
-                relation_blocks.push(block);
+                if !relation_blocks_spilled {
+                    if relation_blocks_bytes > rel_blocks_buffer_cap {
+                        relation_blocks_spilled = true;
+                        relation_blocks = Vec::new();
+                        eprintln!(
+                            "  Relation blocks exceed {} MB buffer cap - re-reading at tail",
+                            rel_blocks_buffer_cap / (1024 * 1024)
+                        );
+                    } else {
+                        relation_blocks.push(block);
+                    }
+                }
             }
             BlockType::Empty | BlockType::Mixed => {}
         }
@@ -656,13 +685,31 @@ pub(super) fn phase_read_and_process(
     eprintln!("  Way index finalized, processing relations...");
 
     let relation_blocks_buffered = relation_blocks.len();
-    // Process buffered relation blocks. Tail of phase12: one streamed
-    // parallel pass over all relations (prepare interleaved with emit, a
-    // single end barrier). The span deliberately includes the rayon fan-out -
-    // it is wall time appended to the phase either way.
+    // Relation source: the in-RAM buffer, or a filtered PBF re-read when the
+    // buffer cap tripped (input-scaled stock; see REL_BLOCKS_BUFFER_CAP).
+    let rel_blocks_source: Box<dyn Iterator<Item = PrimitiveBlock> + Send> =
+        if relation_blocks_spilled {
+            let reader = ElementReader::from_path(&config.pbf_path)
+                .map_err(|e| {
+                    PipelineError(format!("relation re-read: failed to open PBF: {e}"))
+                })?
+                .with_blob_filter(BlobFilter::only_relations())
+                .decode_threads(decode_threads);
+            Box::new(reader.into_blocks_pipelined().map(|r| {
+                // Panic: mid-tail I/O failure is unrecoverable (same policy
+                // as sort pushes).
+                r.expect("relation re-read: PBF read failed")
+            }))
+        } else {
+            Box::new(std::mem::take(&mut relation_blocks).into_iter())
+        };
+    // Process relation blocks. Tail of phase12: one streamed parallel pass
+    // over all relations (prepare interleaved with emit, a single end
+    // barrier). The span deliberately includes the rayon fan-out - it is
+    // wall time appended to the phase either way.
     let relation_tail_busy = wait_span(&BUSY.phase12_relation_tail);
     let relation_tail = process_relation_blocks(
-        &relation_blocks,
+        rel_blocks_source,
         way_index
             .as_ref()
             .expect("way_index not returned from drain"),
@@ -759,6 +806,7 @@ pub(super) fn phase_read_and_process(
         max_rel_inflight_bytes,
         relation_blocks_buffered,
         relation_blocks_bytes,
+        relation_blocks_spilled,
         relation_plan_needed_ways,
         global_shared_nodes,
         relation_blocks_drop_rss_kb,

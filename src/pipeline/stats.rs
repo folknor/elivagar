@@ -107,6 +107,7 @@ pub(super) struct Phase12Stats {
     pub(super) max_rel_inflight_bytes: usize,
     pub(super) relation_blocks_buffered: usize,
     pub(super) relation_blocks_bytes: usize,
+    pub(super) relation_blocks_spilled: bool,
     pub(super) relation_plan_needed_ways: usize,
     pub(super) global_shared_nodes: usize,
     pub(super) relation_blocks_drop_rss_kb: Option<u64>,
