@@ -80,6 +80,14 @@ struct PendingPartitionBatches {
     batches: std::collections::BTreeMap<usize, PartitionBatch>,
 }
 
+fn batch_encoded_bytes(batch: &PartitionBatch) -> usize {
+    batch
+        .encoded_tiles
+        .iter()
+        .map(|t| std::mem::size_of::<EncodedTile>() + t.compressed.len())
+        .sum()
+}
+
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
 pub(super) fn phase_assemble(
@@ -511,6 +519,10 @@ fn phase_assemble_partitions(
     let mut size_diag = TileSizeDiagnostics::default();
     let mut reader_max_ns: u64 = 0;
     let mut reader_total_ns: u64 = 0;
+    let mut parked_bytes: usize = 0;
+    let mut max_parked_bytes: usize = 0;
+    let mut current_partition_encoded: usize = 0;
+    let mut max_partition_encoded: usize = 0;
 
     let scope_result: Result<(), PipelineError> = std::thread::scope(|s| {
         for _ in 0..worker_count {
@@ -594,6 +606,12 @@ fn phase_assemble_partitions(
                     batch.order
                 )));
             }
+            // RAM-ledger instrumentation: bytes parked in the pending map
+            // waiting for their partition's turn, and per-partition encoded
+            // totals - the two candidate holders of assemble's measured
+            // 17-19 GB plateau (live under all three allocators).
+            parked_bytes += batch_encoded_bytes(&batch);
+            max_parked_bytes = max_parked_bytes.max(parked_bytes);
             let batch_order = batch.order;
             let batch_index = batch.batch_index;
             let state = pending.entry(batch_order).or_default();
@@ -615,6 +633,9 @@ fn phase_assemble_partitions(
                     .remove(&next_batch)
                     .expect("ready batch exists");
                 let batch_is_last = batch.is_last;
+                let drained_bytes = batch_encoded_bytes(&batch);
+                parked_bytes = parked_bytes.saturating_sub(drained_bytes);
+                current_partition_encoded += drained_bytes;
                 features_read += batch.features_read;
                 max_batch_bytes = max_batch_bytes.max(batch.max_batch_bytes);
                 reader_total_ns += batch.reader_ns;
@@ -641,6 +662,8 @@ fn phase_assemble_partitions(
                     }
                     reader_max_ns = reader_max_ns.max(current_partition_reader_ns);
                     current_partition_reader_ns = 0;
+                    max_partition_encoded = max_partition_encoded.max(current_partition_encoded);
+                    current_partition_encoded = 0;
                     pending.remove(&next_write);
                     next_write += 1;
                     next_batch = 0;
@@ -677,6 +700,9 @@ fn phase_assemble_partitions(
         writer_result
     });
     scope_result?;
+
+    crate::debug::emit_counter_usize("assemble_parked_bytes_hwm", max_parked_bytes);
+    crate::debug::emit_counter_usize("assemble_partition_encoded_max", max_partition_encoded);
 
     Ok(AssembleCore {
         features_read,
