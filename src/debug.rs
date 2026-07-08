@@ -177,6 +177,7 @@ pub fn wait_span(counter: &'static AtomicU64) -> WaitSpan {
 /// sidecar's /proc sampler instead.
 #[cfg(all(
     feature = "mimalloc-alloc",
+    not(feature = "sys-alloc"),
     not(feature = "jemalloc-alloc"),
     not(feature = "hotpath-alloc")
 ))]
@@ -204,6 +205,7 @@ pub fn emit_alloc_boundary(boundary: &str) {
 
 #[cfg(not(all(
     feature = "mimalloc-alloc",
+    not(feature = "sys-alloc"),
     not(feature = "jemalloc-alloc"),
     not(feature = "hotpath-alloc")
 )))]

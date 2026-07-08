@@ -10,6 +10,7 @@
 // three-way A/B knob.
 #[cfg(all(
     feature = "mimalloc-alloc",
+    not(feature = "sys-alloc"),
     not(feature = "jemalloc-alloc"),
     not(feature = "hotpath-alloc")
 ))]

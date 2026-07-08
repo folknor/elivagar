@@ -337,6 +337,26 @@ found, one per project:
    buffer that writes ~1 GB sorted chunks (the old drain path's chunk
    shape) without the old drain serialization.
 
+   FIXED (`26e4cd6`, sort::SpillCoalescer): NA chunks 2754 -> 73,
+   fan-in 1076 -> 70, assemble majflt 210K -> 0, assemble 198.6 ->
+   172.6s, wall 363 -> 351s.
+
+THE PATTERN (write it down, it has now bitten three times in one day):
+unbounded queue + ordered-or-slow consumer + straggler = input-scaled
+RAM. Instances: pbfhogg's pipelined-read reorder window (20 GB),
+elivagar's own drain result funnel (141s of blocked senders), and
+assemble's pending-partition map (19.5 GB of encoded tiles parked
+behind a dense straggler partition - fixed at `33ce85e` with a
+partition claim window, workers may not start partition N until it is
+within worker_count x 2 of the writer). Every queue between a parallel
+producer and an ordered consumer needs an explicit window or byte
+bound, decided at design time, with a wait counter on the bound.
+
+Remaining planet-RSS items after the claim window: ocean phase 9.4 GB
+at NA (grew ~4 GB with the ocean spill coalescer - fine standalone,
+but planet ocean is all coastlines; H5's precomputed ocean stream
+remains the structural answer), and the H6 churn/retention work.
+
 Ledger validation from the same run: relation buffer stayed under its
 1 GB cap (236 MB, no spill), pmtiles dedup capped at 1M entries as
 designed, dir entries 20.3M streamed fine. max_rel_inflight_bytes hit
@@ -552,6 +572,15 @@ RSS/retention win the 30 GB budget cares about. Today's measured
 retention (mi_commit 2.4 GB above peak RSS, see H3 first reading) is
 the number to beat. Not a pre-H6 priority: at 622 GB/run churn the
 allocator comparison would measure churn H6 is about to delete.
+
+PROMOTED 2026-07-09: the NA claim-window run showed the assemble
+phase's 19.4 GB RSS is mostly allocator retention (mi_commit 14.9 GB
+at phase12 end vs ~2 GB live; 24.5 GB committed by run end) - the
+single largest planet-ledger line after the read-loop fix. The
+three-way feature split landed at `f2184ce` (default mimalloc-alloc /
+--no-default-features system / --features jemalloc-alloc); NA A/B
+running. H6 churn reduction remains worthwhile independently, but the
+allocator decision no longer waits for it.
 
 ### H7: The relation stack is norway's tax today and the planet's tomorrow
 

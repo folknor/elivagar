@@ -21,6 +21,7 @@ use elivagar::node_index::SortedNodeStore;
 // mimalloc-alloc default feature; system allocator otherwise.
 #[cfg(all(
     feature = "mimalloc-alloc",
+    not(feature = "sys-alloc"),
     not(feature = "jemalloc-alloc"),
     not(feature = "hotpath-alloc")
 ))]

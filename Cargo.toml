@@ -87,6 +87,10 @@ io_other_error = "deny"
 default = ["mimalloc-alloc"]
 mimalloc-alloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 jemalloc-alloc = ["dep:tikv-jemallocator"]
+# Overrides the mimalloc-alloc default without needing --no-default-features
+# (brokkr's measured commands only pass --features through): selects the
+# system allocator.
+sys-alloc = []
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 # linux-io-uring = ["dep:io-uring", "dep:libc"]
