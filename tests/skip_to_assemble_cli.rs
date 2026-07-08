@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
+use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -128,10 +131,91 @@ fn run_elivagar(args: &[&str]) -> std::process::Output {
         .expect("run elivagar")
 }
 
-fn metric_value(stderr: &str, key: &str) -> Option<String> {
-    for line in stderr.lines() {
-        if let Some(rest) = line.strip_prefix(key) {
-            return Some(rest.to_string());
+fn run_elivagar_with_fifo(args: &[&str], fifo_path: &Path) -> (std::process::Output, String) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    make_fifo(fifo_path);
+
+    // Drain the FIFO on a background thread while the child runs, exactly as
+    // brokkr's real sidecar does. Reading only after the child exits would
+    // silently lose markers once cumulative output exceeds the ~64 KiB pipe
+    // buffer: the child writes O_NONBLOCK and discards on EAGAIN, so an
+    // undrained pipe drops data instead of blocking. The WAIT_* spans make the
+    // line count large enough that this is a real risk, not a theoretical one.
+    let mut reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(fifo_path)
+        .expect("open fifo reader");
+    // Hold a writer open ourselves for the lifetime of the run. Without a live
+    // writer, a non-blocking read on an empty FIFO returns Ok(0) (EOF), which
+    // the drain loop would hit in the window before the child opens its own
+    // write end and exit immediately. With this writer present that window
+    // reads as WouldBlock instead, so the loop keeps polling until the child
+    // has produced its output.
+    let keepalive = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(fifo_path)
+        .expect("open fifo keepalive writer");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let drain_stop = Arc::clone(&stop);
+    let drainer = std::thread::spawn(move || {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break, // all writers closed
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Only stop on an empty pipe: any pending bytes are read
+                    // (Ok(n)) before a WouldBlock is ever observed, so setting
+                    // `stop` after the child exits cannot truncate its output.
+                    if drain_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("fifo read: {e}"),
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_elivagar"))
+        .args(args)
+        .env("BROKKR_MARKER_FIFO", fifo_path)
+        .output()
+        .expect("run elivagar");
+
+    stop.store(true, Ordering::Relaxed);
+    let fifo = drainer.join().expect("drain thread panicked");
+    drop(keepalive);
+    (output, fifo)
+}
+
+fn make_fifo(path: &Path) {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("fifo path");
+    // SAFETY: mkfifo reads the nul-terminated path and does not retain it.
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(
+        rc,
+        0,
+        "mkfifo {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
+}
+
+fn counter_value(fifo: &str, key: &str) -> Option<String> {
+    let prefix = format!("@{key}=");
+    for line in fifo.lines() {
+        for field in line.split_whitespace().skip(1) {
+            if let Some(rest) = field.strip_prefix(&prefix) {
+                return Some(rest.to_string());
+            }
         }
     }
     None
@@ -149,41 +233,53 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
     let out_s = output_path.to_string_lossy().into_owned();
     let tmp_s = tmp_dir.to_string_lossy().into_owned();
 
-    let first = run_elivagar(&[
-        "run",
-        &pbf_s,
-        "--output",
-        &out_s,
-        "--tmp-dir",
-        &tmp_s,
-        "--no-ocean",
-        "--threads",
-        "1",
-    ]);
+    let first_fifo_path = dir.path().join("first.fifo");
+    let (first, first_fifo) = run_elivagar_with_fifo(
+        &[
+            "run",
+            &pbf_s,
+            "--output",
+            &out_s,
+            "--tmp-dir",
+            &tmp_s,
+            "--no-ocean",
+            "--threads",
+            "1",
+        ],
+        &first_fifo_path,
+    );
     assert!(
         first.status.success(),
         "first run failed: {}",
         String::from_utf8_lossy(&first.stderr)
     );
     let first_err = String::from_utf8_lossy(&first.stderr);
-    assert!(first_err.contains("phase3_ms="));
-    assert!(first_err.contains("tile_bytes_total="));
-    assert!(first_err.contains("tile_max_bytes="));
-    assert!(first_err.contains("oversize_top_1="));
+    assert!(!first_err.contains("phase3_ms="));
+    assert!(!first_err.contains("tile_bytes_total="));
+    assert!(!first_err.contains("tile_max_bytes="));
+    assert!(!first_err.contains("oversize_top_1="));
+    assert!(counter_value(&first_fifo, "phase3_ms").is_some());
+    assert!(counter_value(&first_fifo, "tile_bytes_total").is_some());
+    assert!(counter_value(&first_fifo, "tile_max_bytes").is_some());
+    assert!(counter_value(&first_fifo, "oversize_top_1_bytes").is_some());
 
-    let second = run_elivagar(&[
-        "run",
-        &pbf_s,
-        "--output",
-        &out_s,
-        "--tmp-dir",
-        &tmp_s,
-        "--no-ocean",
-        "--threads",
-        "1",
-        "--skip-to",
-        "assemble",
-    ]);
+    let second_fifo_path = dir.path().join("second.fifo");
+    let (second, second_fifo) = run_elivagar_with_fifo(
+        &[
+            "run",
+            &pbf_s,
+            "--output",
+            &out_s,
+            "--tmp-dir",
+            &tmp_s,
+            "--no-ocean",
+            "--threads",
+            "1",
+            "--skip-to",
+            "assemble",
+        ],
+        &second_fifo_path,
+    );
     assert!(
         second.status.success(),
         "skip-to assemble failed: {}",
@@ -192,9 +288,13 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
     let second_err = String::from_utf8_lossy(&second.stderr);
     assert!(second_err.contains("--- Skipping to assemble (using existing chunks) ---"));
     assert!(!second_err.contains("phase3_ms="));
-    assert!(second_err.contains("tile_bytes_total="));
-    assert!(second_err.contains("tile_max_bytes="));
-    assert!(second_err.contains("oversize_top_1="));
+    assert!(!second_err.contains("tile_bytes_total="));
+    assert!(!second_err.contains("tile_max_bytes="));
+    assert!(!second_err.contains("oversize_top_1="));
+    assert!(counter_value(&second_fifo, "phase3_ms").is_none());
+    assert!(counter_value(&second_fifo, "tile_bytes_total").is_some());
+    assert!(counter_value(&second_fifo, "tile_max_bytes").is_some());
+    assert!(counter_value(&second_fifo, "oversize_top_1_bytes").is_some());
 }
 
 #[test]
@@ -265,61 +365,61 @@ fn missing_ref_metrics_emitted_in_full_run_and_omitted_on_skip_to_sort() {
     let out_s = output_path.to_string_lossy().into_owned();
     let tmp_s = tmp_dir.to_string_lossy().into_owned();
 
-    let first = run_elivagar(&[
-        "run",
-        &pbf_s,
-        "--output",
-        &out_s,
-        "--tmp-dir",
-        &tmp_s,
-        "--no-ocean",
-        "--threads",
-        "1",
-    ]);
+    let first_fifo_path = dir.path().join("missing-first.fifo");
+    let (first, first_fifo) = run_elivagar_with_fifo(
+        &[
+            "run",
+            &pbf_s,
+            "--output",
+            &out_s,
+            "--tmp-dir",
+            &tmp_s,
+            "--no-ocean",
+            "--threads",
+            "1",
+        ],
+        &first_fifo_path,
+    );
     assert!(
         first.status.success(),
         "first run failed: {}",
         String::from_utf8_lossy(&first.stderr)
     );
     let first_err = String::from_utf8_lossy(&first.stderr);
-    assert_eq!(
-        metric_value(&first_err, "missing_way_node_refs="),
-        Some("1".to_string())
-    );
-    assert_eq!(
-        metric_value(&first_err, "ways_with_missing_node_refs="),
-        Some("1".to_string())
-    );
-    assert_eq!(
-        metric_value(&first_err, "missing_relation_way_refs="),
-        Some("1".to_string())
-    );
-    assert_eq!(
-        metric_value(&first_err, "relations_with_missing_way_refs="),
-        Some("1".to_string())
-    );
-    assert_eq!(
-        metric_value(&first_err, "relation_non_way_members="),
-        Some("2".to_string())
-    );
-    assert_eq!(
-        metric_value(&first_err, "relation_nested_members="),
-        Some("1".to_string())
-    );
+    let missing_ref_counters = [
+        ("missing_way_node_refs", "1"),
+        ("ways_with_missing_node_refs", "1"),
+        ("missing_relation_way_refs", "1"),
+        ("relations_with_missing_way_refs", "1"),
+        ("relation_non_way_members", "2"),
+        ("relation_nested_members", "1"),
+    ];
+    for &(key, expected) in &missing_ref_counters {
+        assert!(!first_err.contains(&format!("{key}=")));
+        assert_eq!(
+            counter_value(&first_fifo, key),
+            Some(expected.to_string()),
+            "{key}"
+        );
+    }
 
-    let second = run_elivagar(&[
-        "run",
-        &pbf_s,
-        "--output",
-        &out_s,
-        "--tmp-dir",
-        &tmp_s,
-        "--no-ocean",
-        "--threads",
-        "1",
-        "--skip-to",
-        "sort",
-    ]);
+    let second_fifo_path = dir.path().join("missing-second.fifo");
+    let (second, second_fifo) = run_elivagar_with_fifo(
+        &[
+            "run",
+            &pbf_s,
+            "--output",
+            &out_s,
+            "--tmp-dir",
+            &tmp_s,
+            "--no-ocean",
+            "--threads",
+            "1",
+            "--skip-to",
+            "sort",
+        ],
+        &second_fifo_path,
+    );
     assert!(
         second.status.success(),
         "skip-to sort run failed: {}",
@@ -327,10 +427,8 @@ fn missing_ref_metrics_emitted_in_full_run_and_omitted_on_skip_to_sort() {
     );
     let second_err = String::from_utf8_lossy(&second.stderr);
     assert!(second_err.contains("--- Skipping to sort (using existing chunks) ---"));
-    assert!(metric_value(&second_err, "missing_way_node_refs=").is_none());
-    assert!(metric_value(&second_err, "ways_with_missing_node_refs=").is_none());
-    assert!(metric_value(&second_err, "missing_relation_way_refs=").is_none());
-    assert!(metric_value(&second_err, "relations_with_missing_way_refs=").is_none());
-    assert!(metric_value(&second_err, "relation_non_way_members=").is_none());
-    assert!(metric_value(&second_err, "relation_nested_members=").is_none());
+    for &(key, _) in &missing_ref_counters {
+        assert!(!second_err.contains(&format!("{key}=")));
+        assert!(counter_value(&second_fifo, key).is_none(), "{key}");
+    }
 }

@@ -140,14 +140,15 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bigdecimal"
-version = "0.3.1"
+version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6773ddc0eafc0e509fb60e48dff7f450f8e674a0686ae8605e8d9901bd5eefa"
+checksum = "4d6867f1565b3aad85681f1015055b087fcfd840d6aeee6eee7f2da317603695"
 dependencies = [
+ "autocfg",
+ "libm",
  "num-bigint",
  "num-integer",
  "num-traits",
- "serde",
 ]
 
 [[package]]
@@ -394,18 +395,18 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-channel"
-version = "0.5.15"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
+checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
 dependencies = [
  "crossbeam-utils",
 ]
 
 [[package]]
 name = "crossbeam-deque"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
 dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
@@ -413,18 +414,18 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
 
 [[package]]
 name = "crossbeam-utils"
-version = "0.8.21"
+version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
 name = "derive-debug"
@@ -499,8 +500,9 @@ dependencies = [
  "clap",
  "flate2",
  "geo-types",
- "hotpath 0.20.0",
+ "hotpath 0.21.1",
  "i_overlay 7.0.2",
+ "libc",
  "lz4_flex",
  "memmap2",
  "mimalloc",
@@ -847,16 +849,16 @@ dependencies = [
 
 [[package]]
 name = "hotpath"
-version = "0.20.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e0674287dffa1a67dc780f021c31cb0c249585b7281fe37507a20e62d9c3f50"
+checksum = "1ff6b552a6afa29d9e33f8d555bee9093c142dd449501ae128e6494a303f03dc"
 dependencies = [
  "arc-swap",
  "cfg-if",
  "crossbeam-channel",
  "futures-util",
  "hdrhistogram",
- "hotpath-macros 0.20.0",
+ "hotpath-macros 0.21.1",
  "hotpath-meta",
  "libc",
  "pin-project-lite",
@@ -877,9 +879,9 @@ checksum = "7edb8da2a00454786fbb75ab24c4f72380afeb9b5136776caa7737df9895bfa7"
 
 [[package]]
 name = "hotpath-macros"
-version = "0.20.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e870a5675bcbeb61d8d4ee330bbad2240020e6cebc4cf36a163450110dcb480"
+checksum = "4f15322569d3cfadf84c0de7ef72be435b8f4b4839ee4ace78a7eaca48a87ded"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -888,15 +890,15 @@ dependencies = [
 
 [[package]]
 name = "hotpath-macros-meta"
-version = "0.20.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "582606b125824218b0eabd8213f305f7015844ce57d302bd42e343e7653c07bf"
+checksum = "b3675e29d16c844ccad12763672b33e51d9a000c346720c4f354f7a3bdc649a8"
 
 [[package]]
 name = "hotpath-meta"
-version = "0.20.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "375f1440993dbe1de3b7c412ea803c02a0e6b3887b13bc50fa5f2cd1ec07db25"
+checksum = "d558d972ddc9483fb4e713af3dd41634edf895c7cb18ed13dc58c56431d42e27"
 dependencies = [
  "hotpath-macros-meta",
 ]
@@ -1104,9 +1106,9 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.8.2"
+version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memmap2"
@@ -1237,7 +1239,7 @@ version = "0.4.1"
 dependencies = [
  "bytes",
  "flate2",
- "hotpath 0.20.0",
+ "hotpath 0.21.1",
  "libc",
  "memmap2",
  "protohoggr 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1566,9 +1568,9 @@ dependencies = [
 
 [[package]]
 name = "rustversion"
-version = "1.0.22"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "ryu"
@@ -1578,16 +1580,15 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2"
-version = "0.0.13"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23434007bcef0196e3f083834576ac004241f354001a22c61d2f2208c780e8df"
+checksum = "1a23f65853fad73749bd4cdc1a69b7a18f9af9a2aec1a162066110aef1f4f90a"
 dependencies = [
  "bigdecimal",
  "cgmath",
  "float_extras",
  "lazy_static",
  "libm",
- "serde",
 ]
 
 [[package]]
@@ -2077,18 +2078,18 @@ checksum = "4d93c89cdc2d3a63c3ec48ffe926931bdc069eafa8e4402fe6d8f790c9d1e576"
 
 [[package]]
 name = "zerocopy"
-version = "0.8.52"
+version = "0.8.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce1022995ff5ff5d841ad7d994facc23098cd40152f2c1d11cd607c6f530653f"
+checksum = "75726053136156d419e285b9b7eddaaea9e3fea6ce32eed44a89901f0bd98de1"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.52"
+version = "0.8.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ae7f38b72ec2a254e2b87ef277cf2cd4fb97cbebf944faa6f33354da0867930"
+checksum = "4714fd92cf900833d49538023a9b3915155210801d1c1169eba513b2addefd71"
 dependencies = [
  "proc-macro2",
  "quote",

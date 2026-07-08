@@ -70,6 +70,7 @@ impl MissingRefStatsAtomic {
     }
 }
 
+#[cfg(test)]
 pub(super) fn missing_ref_summary_lines(summary: MissingRefStats) -> [String; 6] {
     [
         format!("missing_way_node_refs={}", summary.missing_way_node_refs),

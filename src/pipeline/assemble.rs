@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::debug::{emit_counter_u64, emit_counter_usize, marker_span};
 use crate::geometry;
 use crate::mlt;
 use crate::mvt::{self, GeomType, LayerBuilder};
@@ -176,7 +177,14 @@ pub(super) fn phase_assemble(
                                 if batch_bytes > max_batch_bytes {
                                     max_batch_bytes = batch_bytes;
                                 }
-                                drop(read_tx.send(batch)); // ignore: encoder may have exited
+                                let send_result = {
+                                    let _wait = marker_span(
+                                        "WAIT_ASSEMBLE_READER_BACKPRESSURE_START",
+                                        "WAIT_ASSEMBLE_READER_BACKPRESSURE_END",
+                                    );
+                                    read_tx.send(batch)
+                                };
+                                drop(send_result); // ignore: encoder may have exited
                             }
                             break;
                         };
@@ -193,7 +201,14 @@ pub(super) fn phase_assemble(
                                     if batch_bytes > max_batch_bytes {
                                         max_batch_bytes = batch_bytes;
                                     }
-                                    if read_tx.send(batch).is_err() {
+                                    let send_result = {
+                                        let _wait = marker_span(
+                                            "WAIT_ASSEMBLE_READER_BACKPRESSURE_START",
+                                            "WAIT_ASSEMBLE_READER_BACKPRESSURE_END",
+                                        );
+                                        read_tx.send(batch)
+                                    };
+                                    if send_result.is_err() {
                                         break;
                                     }
                                     batch = Vec::with_capacity(BATCH_SIZE);
@@ -232,7 +247,17 @@ pub(super) fn phase_assemble(
                     let mut unique_per_zoom = [0u64; 15];
                     let mut bytes_per_zoom = [0u64; 15];
                     let mut size_diag = TileSizeDiagnostics::default();
-                    while let Ok(batch) = encode_rx.recv() {
+                    loop {
+                        let batch = {
+                            let _wait = marker_span(
+                                "WAIT_ASSEMBLE_WRITE_INPUT_START",
+                                "WAIT_ASSEMBLE_WRITE_INPUT_END",
+                            );
+                            match encode_rx.recv() {
+                                Ok(batch) => batch,
+                                Err(_) => break,
+                            }
+                        };
                         for tile in batch {
                             let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
                             let tile_bytes = tile.compressed.len() as u64;
@@ -266,7 +291,17 @@ pub(super) fn phase_assemble(
                 let compression_level = config.compression_level;
                 let tile_format = config.tile_format;
                 let tile_compression = config.tile_compression;
-                for batch in read_rx {
+                loop {
+                    let batch = {
+                        let _wait = marker_span(
+                            "WAIT_ASSEMBLE_ENCODE_INPUT_START",
+                            "WAIT_ASSEMBLE_ENCODE_INPUT_END",
+                        );
+                        match read_rx.recv() {
+                            Ok(batch) => batch,
+                            Err(_) => break,
+                        }
+                    };
                     let encoded = encode_tile_batch(
                         &batch,
                         compression_level,
@@ -275,14 +310,26 @@ pub(super) fn phase_assemble(
                         &config.seam_reconcile_layers,
                         &seam_metrics,
                     )?;
-                    if encode_tx.send(encoded).is_err() {
+                    let send_result = {
+                        let _wait = marker_span(
+                            "WAIT_ASSEMBLE_WRITER_BACKPRESSURE_START",
+                            "WAIT_ASSEMBLE_WRITER_BACKPRESSURE_END",
+                        );
+                        encode_tx.send(encoded)
+                    };
+                    if send_result.is_err() {
                         break;
                     }
                 }
                 drop(encode_tx);
 
-                let (features_read, max_batch_bytes, reader_ns) =
-                    reader.join().expect("reader panicked")?;
+                let (features_read, max_batch_bytes, reader_ns) = {
+                    let _wait = marker_span(
+                        "WAIT_ASSEMBLE_READER_JOIN_START",
+                        "WAIT_ASSEMBLE_READER_JOIN_END",
+                    );
+                    reader.join().expect("reader panicked")
+                }?;
                 let (
                     tiles_written,
                     pmtiles,
@@ -290,7 +337,13 @@ pub(super) fn phase_assemble(
                     unique_per_zoom,
                     bytes_per_zoom,
                     size_diag,
-                ) = writer.join().expect("writer panicked");
+                ) = {
+                    let _wait = marker_span(
+                        "WAIT_ASSEMBLE_WRITER_JOIN_START",
+                        "WAIT_ASSEMBLE_WRITER_JOIN_END",
+                    );
+                    writer.join().expect("writer panicked")
+                };
                 Ok(AssembleCore {
                     features_read,
                     tiles_written,
@@ -332,16 +385,16 @@ pub(super) fn phase_assemble(
             reader_ns as f64 / 1_000_000_000.0,
             total_ns as f64 / 1_000_000_000.0
         );
-        eprintln!("assemble_reader_total_ns={total_ns}");
-        eprintln!("assemble_partition_workers={workers}");
-        eprintln!("assemble_partitions={partitions}");
+        emit_counter_u64("assemble_reader_total_ns", total_ns);
+        emit_counter_usize("assemble_partition_workers", workers);
+        emit_counter_usize("assemble_partitions", partitions);
     } else {
         eprintln!(
             "  Assemble reader thread (k-way merge): {:.1}s",
             reader_ns as f64 / 1_000_000_000.0
         );
     }
-    eprintln!("assemble_reader_ns={reader_ns}");
+    emit_counter_u64("assemble_reader_ns", reader_ns);
     if let Some(filename) = config.pbf_path.file_name().and_then(|s| s.to_str()) {
         pmtiles.set_source_pbf_filename(filename.to_string());
     } else {
@@ -354,7 +407,10 @@ pub(super) fn phase_assemble(
     }
     let unique_tiles = pmtiles.unique_tile_count();
     let dedup_stats = pmtiles.dedup_stats().clone();
-    pmtiles.write_to(&config.output_path)?;
+    {
+        let _wait = marker_span("WAIT_PMTILES_WRITE_START", "WAIT_PMTILES_WRITE_END");
+        pmtiles.write_to(&config.output_path)?;
+    }
 
     // Per-zoom tile breakdown
     eprintln!("  Per-zoom tiles (total / unique / unique MB):");
@@ -392,13 +448,12 @@ pub(super) fn phase_assemble(
             seam_skipped,
             seam_us as f64 / 1000.0,
         );
-        eprintln!("seam_tiles_touched={seam_touched}");
-        eprintln!("seam_rings_decoded={seam_rings}");
-        eprintln!("seam_chains_detected={seam_chains}");
-        eprintln!("seam_chains_reconciled={seam_reconciled}");
-        eprintln!("seam_chains_skipped={seam_skipped}");
-        eprintln!("seam_reconcile_us={seam_us}");
-        eprintln!("seam_layers={}", seam_layer_descs.join("+"));
+        emit_counter_u64("seam_tiles_touched", seam_touched);
+        emit_counter_u64("seam_rings_decoded", seam_rings);
+        emit_counter_u64("seam_chains_detected", seam_chains);
+        emit_counter_u64("seam_chains_reconciled", seam_reconciled);
+        emit_counter_u64("seam_chains_skipped", seam_skipped);
+        emit_counter_u64("seam_reconcile_us", seam_us);
     }
 
     Ok((
@@ -512,7 +567,17 @@ fn phase_assemble_partitions(
         let mut next_write = 0usize;
         let mut next_batch = 0usize;
         let mut current_partition_reader_ns = 0u64;
-        for result in rx {
+        loop {
+            let result = {
+                let _wait = marker_span(
+                    "WAIT_ASSEMBLE_PARTITION_BATCH_START",
+                    "WAIT_ASSEMBLE_PARTITION_BATCH_END",
+                );
+                match rx.recv() {
+                    Ok(result) => result,
+                    Err(_) => break,
+                }
+            };
             let batch = result?;
             if batch.order >= partition_count {
                 return Err(PipelineError(format!(

@@ -21,52 +21,15 @@ use crate::sort;
 
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// Sidecar FIFO: phase markers + counters
-// ---------------------------------------------------------------------------
-
-/// Shared FIFO state for sidecar markers and counters. Cached via OnceLock -
-/// zero overhead when brokkr isn't running (env var absent → None).
-fn fifo_state() -> Option<&'static (std::fs::File, std::time::Instant)> {
-    use std::sync::OnceLock;
-    static STATE: OnceLock<Option<(std::fs::File, std::time::Instant)>> = OnceLock::new();
-    STATE
-        .get_or_init(|| {
-            let path = std::env::var("BROKKR_MARKER_FIFO").ok()?;
-            use std::os::unix::fs::OpenOptionsExt;
-            const O_NONBLOCK: i32 = 0x800; // Linux
-            let f = std::fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(O_NONBLOCK)
-                .open(&path)
-                .ok()?;
-            Some((f, std::time::Instant::now()))
-        })
-        .as_ref()
-}
-
-/// Emit a named phase marker: `<timestamp_us> <name>\n`
-fn emit_marker(name: &str) {
-    use std::io::Write;
-    if let Some((f, start)) = fifo_state() {
-        let us = start.elapsed().as_micros();
-        drop((&*f).write_all(format!("{us} {name}\n").as_bytes()));
-    }
-}
-
-/// Emit a counter: `<timestamp_us> @<name>=<value>\n`
-#[allow(dead_code)]
-fn emit_counter(name: &str, value: i64) {
-    use std::io::Write;
-    if let Some((f, start)) = fifo_state() {
-        let us = start.elapsed().as_micros();
-        drop((&*f).write_all(format!("{us} @{name}={value}\n").as_bytes()));
-    }
-}
+use crate::debug::{
+    emit_counter, emit_counter_u64, emit_counter_usize, emit_mallinfo2, emit_marker, marker_span,
+};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use stats::{Phase12Stats, missing_ref_summary_lines};
+use stats::Phase12Stats;
+#[cfg(test)]
+use stats::missing_ref_summary_lines;
 
 /// Pipeline error type. Stringly-typed because no caller inspects variants -
 /// errors are only displayed or propagated. An enum would add boilerplate for no benefit.
@@ -329,6 +292,11 @@ fn current_rss_kb() -> Option<u64> {
     None
 }
 
+fn emit_allocator_boundary(name: &str) {
+    let prefix = format!("mallinfo_{name}");
+    emit_mallinfo2(&prefix);
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -361,6 +329,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     let total_start = Instant::now();
     let skip = config.skip_to;
+    emit_allocator_boundary("run_start");
 
     eprintln!(
         "=== Tilegen: {} → {}",
@@ -385,7 +354,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     // --- Phase 1+2: PBF read + feature processing ---
     emit_marker("PHASE12_START");
-    let phase12_elapsed;
+    emit_allocator_boundary("phase12_start");
     let ocean_elapsed;
     let mut phase12_rss: Option<u64> = None;
     let mut ocean_rss: Option<u64> = None;
@@ -393,7 +362,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     let mut sort_writer = if matches!(skip, Some(SkipTo::Sort | SkipTo::Assemble)) {
         // Skip straight to later phases - reuse existing chunks on disk.
-        phase12_elapsed = None;
         ocean_elapsed = None;
         if skip == Some(SkipTo::Sort) {
             eprintln!("--- Skipping to sort (using existing chunks) ---");
@@ -410,23 +378,24 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             let phase12_start = Instant::now();
             let (mut sw, bounds_out, p12_stats) = phase12::phase_read_and_process(config)?;
             phase12_stats = Some(p12_stats);
-            phase12_elapsed = Some(phase12_start.elapsed());
+            let phase12_elapsed = phase12_start.elapsed();
             emit_marker("PHASE12_END");
-            if let Some(ms) = phase12_elapsed
-                .as_ref()
-                .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-            {
-                emit_counter("phase12_ms", ms);
-            }
+            emit_counter(
+                "phase12_ms",
+                i64::try_from(phase12_elapsed.as_millis()).unwrap_or(i64::MAX),
+            );
             phase12_rss = peak_rss_kb();
-            sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
+            {
+                let _wait = marker_span("WAIT_SORT_FLUSH_START", "WAIT_SORT_FLUSH_END");
+                sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
+            }
+            emit_allocator_boundary("phase12_end");
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
             sw
         } else {
             // --skip-to ocean: load checkpoint, resume from PBF chunks
             let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir)?;
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
-            phase12_elapsed = None;
             sort::SortWriter::resume(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
                 sort_chunk_size,
@@ -442,6 +411,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         // When a simplified shapefile is provided, use it for z0-7 and the
         // full-resolution shapefile for z8+. Otherwise use the full-res for all zooms.
         emit_marker("OCEAN_START");
+        emit_allocator_boundary("ocean_start");
         ocean_elapsed = if let Some(ref ocean_path) = config.ocean_shapefile {
             let ocean_start = Instant::now();
             eprintln!("--- Ocean shapefile ---");
@@ -492,6 +462,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     };
 
     emit_marker("OCEAN_END");
+    emit_allocator_boundary("ocean_end");
     if let Some((elapsed, features)) = ocean_elapsed {
         emit_counter(
             "ocean_ms",
@@ -505,26 +476,33 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     // --- Phase 3: Sort ---
     emit_marker("SORT_START");
+    emit_allocator_boundary("sort_start");
     // Flush any trailing buffer so chunk_count() reflects all chunks on disk,
     // then save the count for --skip-to sort validation.
     if let Some(ref mut sw) = sort_writer {
+        let _wait = marker_span("WAIT_SORT_FLUSH_START", "WAIT_SORT_FLUSH_END");
         sw.flush()?;
     }
     let sort_chunks = sort_writer.as_ref().map(sort::SortWriter::chunk_count);
     save_sort_chunk_count(&config.tmp_dir, sort_chunks)?;
     let (mut sort_reader, phase3_elapsed, sort_rss) = if skip == Some(SkipTo::Assemble) {
-        let sr = sort::SortReader::from_dir(
-            &config.tmp_dir.join(SORT_CHUNKS_DIR),
-            load_sort_chunk_count(&config.tmp_dir),
-            config.compress_sort_chunks,
-        )?;
+        let sr = {
+            let _wait = marker_span("WAIT_SORT_OPEN_START", "WAIT_SORT_OPEN_END");
+            sort::SortReader::from_dir(
+                &config.tmp_dir.join(SORT_CHUNKS_DIR),
+                load_sort_chunk_count(&config.tmp_dir),
+                config.compress_sort_chunks,
+            )?
+        };
         (sr, None, peak_rss_kb())
     } else {
         let phase3_start = Instant::now();
         eprintln!("--- Sort ---");
         let sr = if let Some(sw) = sort_writer {
+            let _wait = marker_span("WAIT_SORT_FINISH_START", "WAIT_SORT_FINISH_END");
             sw.finish()?
         } else {
+            let _wait = marker_span("WAIT_SORT_OPEN_START", "WAIT_SORT_OPEN_END");
             sort::SortReader::from_dir(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
                 load_sort_chunk_count(&config.tmp_dir),
@@ -535,9 +513,11 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     };
 
     emit_marker("SORT_END");
+    emit_allocator_boundary("sort_end");
 
     // --- Phase 4: Tile assembly + PMTiles write ---
     emit_marker("ASSEMBLE_START");
+    emit_allocator_boundary("assemble_start");
     let phase4_start = Instant::now();
     eprintln!("--- Tile assembly ---");
     let (
@@ -550,6 +530,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     ) = assemble::phase_assemble(&mut sort_reader, config)?;
     let phase4_elapsed = phase4_start.elapsed();
     emit_marker("ASSEMBLE_END");
+    emit_allocator_boundary("assemble_end");
     emit_counter(
         "assemble_ms",
         i64::try_from(phase4_elapsed.as_millis()).unwrap_or(i64::MAX),
@@ -563,253 +544,211 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let assemble_rss = peak_rss_kb();
 
     let total = total_start.elapsed();
+    emit_allocator_boundary("run_end");
 
-    // Machine-readable summary (all times in milliseconds)
-    eprintln!("---");
-    eprintln!("total_ms={}", total.as_millis());
-    if let Some(p12) = phase12_elapsed {
-        eprintln!("phase12_ms={}", p12.as_millis());
-    }
-    if let Some((oe, of)) = ocean_elapsed {
-        eprintln!("ocean_ms={}", oe.as_millis());
-        eprintln!("ocean_features={of}");
-    }
+    emit_counter(
+        "total_ms",
+        i64::try_from(total.as_millis()).unwrap_or(i64::MAX),
+    );
     if let Some(p3) = phase3_elapsed {
-        eprintln!("phase3_ms={}", p3.as_millis());
+        emit_counter(
+            "phase3_ms",
+            i64::try_from(p3.as_millis()).unwrap_or(i64::MAX),
+        );
     }
-    eprintln!("phase4_ms={}", phase4_elapsed.as_millis());
-    eprintln!("features={features_read}");
-    eprintln!("tiles={tiles_written}");
-    eprintln!("unique_tiles={unique_tiles}");
-    eprintln!(
-        "tile_format={}",
-        match config.tile_format {
-            TilePayloadFormat::Mvt => "mvt",
-            TilePayloadFormat::Mlt => "mlt",
-        }
-    );
-    eprintln!(
-        "tile_compression={}",
-        match config.tile_compression {
-            TileCompression::Gzip => "gzip",
-            TileCompression::Brotli => "brotli",
-        }
-    );
     if let Ok(meta) = std::fs::metadata(&config.output_path) {
-        eprintln!("output_bytes={}", meta.len());
+        emit_counter_u64("output_bytes", meta.len());
     }
     if let Some(ref s) = phase12_stats
         && let Some((nodes, groups)) = s.node_store_stats
     {
-        eprintln!("node_store_nodes={nodes}");
-        eprintln!("node_store_groups={groups}");
+        emit_counter_u64("node_store_nodes", nodes);
+        emit_counter_usize("node_store_groups", groups);
     }
     if let Some(n) = sort_chunks {
-        eprintln!("sort_chunks={n}");
+        emit_counter_usize("sort_chunks", n);
     }
     if let Some(ref s) = phase12_stats {
-        eprintln!("sort_records={}", s.sort_records);
-        eprintln!("sort_record_bytes={}", s.sort_record_bytes);
-        eprintln!("phase12_nodes={}", s.node_count);
-        eprintln!("phase12_ways={}", s.way_count);
-        eprintln!("phase12_relations={}", s.rel_count);
-        if s.way_count > 0 {
-            eprintln!(
-                "records_per_way={:.1}",
-                s.sort_records as f64 / s.way_count as f64
-            );
+        emit_counter_u64("sort_records", s.sort_records);
+        emit_counter_u64("sort_record_bytes", s.sort_record_bytes);
+        emit_counter_u64("phase12_nodes", s.node_count);
+        emit_counter_u64("phase12_ways", s.way_count);
+        emit_counter_u64("phase12_relations", s.rel_count);
+        if let Some(records_per_way_x10) =
+            s.sort_records.saturating_mul(10).checked_div(s.way_count)
+        {
+            emit_counter_u64("records_per_way_x10", records_per_way_x10);
         }
-        // Per-layer sort stats: emit all layers with nonzero records.
         for (i, (&recs, &bytes)) in s.layer_records.iter().zip(s.layer_bytes.iter()).enumerate() {
             if recs > 0 && i < shortbread::Layer::ALL.len() {
                 let name = shortbread::Layer::ALL[i].name();
-                eprintln!("sort_layer_{name}_records={recs}");
-                eprintln!("sort_layer_{name}_bytes={bytes}");
-                // Per-zoom breakdown for this layer (records and bytes).
-                let mut zoom_parts = Vec::new();
-                let mut zoom_byte_parts = Vec::new();
+                emit_counter_u64(&format!("sort_layer_{name}_records"), recs);
+                emit_counter_u64(&format!("sort_layer_{name}_bytes"), bytes);
                 for z in 0..15u8 {
                     let idx = i * 15 + z as usize;
                     let zr = s.layer_zoom_records[idx];
                     let zb = s.layer_zoom_bytes[idx];
                     if zr > 0 {
-                        zoom_parts.push(format!("z{z}:{zr}"));
+                        emit_counter_u64(&format!("sort_layer_{name}_z{z}_records"), zr);
                     }
                     if zb > 0 {
-                        zoom_byte_parts.push(format!("z{z}:{zb}"));
+                        emit_counter_u64(&format!("sort_layer_{name}_z{z}_bytes"), zb);
                     }
-                }
-                if !zoom_parts.is_empty() {
-                    eprintln!("sort_layer_{name}_zoom={}", zoom_parts.join(","));
-                }
-                if !zoom_byte_parts.is_empty() {
-                    eprintln!("sort_layer_{name}_zoom_bytes={}", zoom_byte_parts.join(","));
-                }
-                // Fanout tail stats: p50/p95/p99/max tiles_touched per feature.
-                let mut fanout_parts = Vec::new();
-                for z in 0..15u8 {
-                    let max = s.fanout_stats.max_tiles[i * 15 + z as usize];
+                    let max = s.fanout_stats.max_tiles[idx];
                     if max > 0 {
-                        let p50 = s.fanout_stats.percentile(i, z as usize, 0.50);
-                        let p95 = s.fanout_stats.percentile(i, z as usize, 0.95);
-                        let p99 = s.fanout_stats.percentile(i, z as usize, 0.99);
-                        fanout_parts.push(format!("z{z}:p50={p50}/p95={p95}/p99={p99}/max={max}"));
-                    }
-                }
-                if !fanout_parts.is_empty() {
-                    eprintln!("sort_layer_{name}_fanout={}", fanout_parts.join(","));
-                }
-                // Threshold counts: features hitting candidate cap values.
-                for &thresh in &[128u32, 512, 2048] {
-                    let mut thresh_parts = Vec::new();
-                    for z in 0..15u8 {
-                        let n = s.fanout_stats.features_above(i, z as usize, thresh);
-                        if n > 0 {
-                            thresh_parts.push(format!("z{z}:{n}"));
-                        }
-                    }
-                    if !thresh_parts.is_empty() {
-                        eprintln!(
-                            "sort_layer_{name}_above_{thresh}={}",
-                            thresh_parts.join(",")
+                        emit_counter_u64(
+                            &format!("sort_layer_{name}_z{z}_fanout_p50"),
+                            u64::from(s.fanout_stats.percentile(i, z as usize, 0.50)),
+                        );
+                        emit_counter_u64(
+                            &format!("sort_layer_{name}_z{z}_fanout_p95"),
+                            u64::from(s.fanout_stats.percentile(i, z as usize, 0.95)),
+                        );
+                        emit_counter_u64(
+                            &format!("sort_layer_{name}_z{z}_fanout_p99"),
+                            u64::from(s.fanout_stats.percentile(i, z as usize, 0.99)),
+                        );
+                        emit_counter_u64(
+                            &format!("sort_layer_{name}_z{z}_fanout_max"),
+                            u64::from(max),
                         );
                     }
-                }
-                // Cap impact metrics: features capped, tiles saved, estimated bytes saved.
-                let mut cap_feat_parts = Vec::new();
-                let mut cap_tiles_parts = Vec::new();
-                let mut cap_bytes_parts = Vec::new();
-                for z in 0..15u8 {
-                    let idx = i * 15 + z as usize;
                     let cf = s.fanout_stats.capped_features[idx];
                     let ct = s.fanout_stats.capped_tiles[idx];
                     if cf > 0 {
-                        cap_feat_parts.push(format!("z{z}:{cf}"));
-                        cap_tiles_parts.push(format!("z{z}:{ct}"));
-                        // Estimate bytes saved: capped tiles × avg bytes/record for this layer+zoom.
-                        let zr = s.layer_zoom_records[idx];
-                        let zb = s.layer_zoom_bytes[idx];
+                        emit_counter_u64(&format!("fanout_capped_features_{name}_z{z}"), cf);
+                        emit_counter_u64(&format!("fanout_capped_tiles_{name}_z{z}"), ct);
                         let avg_bytes = zb.checked_div(zr).unwrap_or(0);
-                        let estimated_bytes = ct * avg_bytes;
-                        cap_bytes_parts.push(format!("z{z}:{estimated_bytes}"));
+                        emit_counter_u64(
+                            &format!("fanout_capped_bytes_estimated_{name}_z{z}"),
+                            ct.saturating_mul(avg_bytes),
+                        );
                     }
                 }
-                if !cap_feat_parts.is_empty() {
-                    eprintln!("fanout_capped_features_{name}={}", cap_feat_parts.join(","));
-                    eprintln!("fanout_capped_tiles_{name}={}", cap_tiles_parts.join(","));
-                    eprintln!(
-                        "fanout_capped_bytes_estimated_{name}={}",
-                        cap_bytes_parts.join(",")
-                    );
+                for &thresh in &[128u32, 512, 2048] {
+                    for z in 0..15u8 {
+                        let n = s.fanout_stats.features_above(i, z as usize, thresh);
+                        if n > 0 {
+                            emit_counter_u64(&format!("sort_layer_{name}_z{z}_above_{thresh}"), n);
+                        }
+                    }
                 }
             }
         }
-        // Top capped features for visual QA targeting.
-        if !s.fanout_stats.top_capped.is_empty() {
-            for (rank, &(osm_id, layer, zoom, bbox_tiles)) in
-                s.fanout_stats.top_capped.iter().enumerate()
-            {
-                let name = if (layer as usize) < shortbread::Layer::ALL.len() {
-                    shortbread::Layer::ALL[layer as usize].name()
-                } else {
-                    "unknown"
-                };
-                eprintln!(
-                    "fanout_capped_top_{}={name}/z{zoom}/osm_id={osm_id}/bbox_tiles={bbox_tiles}",
-                    rank + 1
-                );
-            }
+        for (rank, &(osm_id, layer, zoom, bbox_tiles)) in
+            s.fanout_stats.top_capped.iter().enumerate()
+        {
+            let prefix = format!("fanout_capped_top_{}", rank + 1);
+            emit_counter_u64(&format!("{prefix}_osm_id"), osm_id);
+            emit_counter_u64(&format!("{prefix}_layer"), u64::from(layer));
+            emit_counter_u64(&format!("{prefix}_zoom"), u64::from(zoom));
+            emit_counter_u64(&format!("{prefix}_bbox_tiles"), bbox_tiles);
         }
-        // Deferral stats: report per-layer deferred vertex counts.
         for (i, max_z) in config.seam_reconcile_layers.iter().enumerate() {
             if *max_z > 0 {
                 let verts = s.deferral_stats.vertices[i].load(Ordering::Relaxed);
                 if verts > 0 {
                     let name = shortbread::Layer::ALL[i].name();
-                    eprintln!("seam_deferred_vertices_{name}={verts}");
+                    emit_counter_u64(&format!("seam_deferred_vertices_{name}"), verts);
                     if s.deferral_stats.disabled[i].load(Ordering::Relaxed) {
-                        eprintln!("seam_deferral_disabled_{name}=1");
+                        emit_counter(&format!("seam_deferral_disabled_{name}"), 1);
                     }
                 }
             }
         }
     }
     if let Some(kb) = phase12_rss {
-        eprintln!("phase12_rss_kb={kb}");
+        emit_counter_u64("phase12_rss_kb", kb);
     }
     if let Some(kb) = ocean_rss {
-        eprintln!("ocean_rss_kb={kb}");
+        emit_counter_u64("ocean_rss_kb", kb);
     }
     if let Some(kb) = sort_rss {
-        eprintln!("sort_rss_kb={kb}");
+        emit_counter_u64("sort_rss_kb", kb);
     }
     if let Some(kb) = assemble_rss {
-        eprintln!("assemble_rss_kb={kb}");
+        emit_counter_u64("assemble_rss_kb", kb);
     }
     let peak_rss = [phase12_rss, ocean_rss, sort_rss, assemble_rss]
         .iter()
         .filter_map(|v| *v)
         .max();
     if let Some(kb) = peak_rss {
-        eprintln!("peak_rss_kb={kb}");
+        emit_counter_u64("peak_rss_kb", kb);
     }
     if let Some(ref s) = phase12_stats {
-        eprintln!("max_way_inflight_bytes={}", s.max_way_inflight_bytes);
-        eprintln!("max_rel_batch_bytes={}", s.max_rel_batch_bytes);
-        eprintln!("relation_blocks_buffered={}", s.relation_blocks_buffered);
+        emit_counter_usize("max_way_inflight_bytes", s.max_way_inflight_bytes);
+        emit_counter_usize("max_rel_batch_bytes", s.max_rel_batch_bytes);
+        emit_counter_usize("relation_blocks_buffered", s.relation_blocks_buffered);
         if let Some(kb) = s.relation_blocks_drop_rss_kb {
-            eprintln!("relation_blocks_drop_rss_kb={kb}");
+            emit_counter_u64("relation_blocks_drop_rss_kb", kb);
         }
+        emit_counter_u64(
+            "missing_way_node_refs",
+            s.missing_refs.missing_way_node_refs,
+        );
+        emit_counter_u64(
+            "ways_with_missing_node_refs",
+            s.missing_refs.ways_with_missing_node_refs,
+        );
+        emit_counter_u64(
+            "missing_relation_way_refs",
+            s.missing_refs.missing_relation_way_refs,
+        );
+        emit_counter_u64(
+            "relations_with_missing_way_refs",
+            s.missing_refs.relations_with_missing_way_refs,
+        );
+        emit_counter_u64(
+            "relation_non_way_members",
+            s.missing_refs.relation_non_way_members,
+        );
+        emit_counter_u64(
+            "relation_nested_members",
+            s.missing_refs.relation_nested_members,
+        );
     }
-    eprintln!("max_assemble_batch_bytes={max_assemble_batch_bytes}");
-    eprintln!("dedup_candidates={}", dedup_stats.candidates);
-    eprintln!("dedup_tiles_reused={}", dedup_stats.tiles_reused);
-    eprintln!("dedup_bytes_saved={}", dedup_stats.bytes_saved);
-    eprintln!(
-        "dedup_reject_len_mismatch={}",
-        dedup_stats.reject_len_mismatch
+    emit_counter_usize("max_assemble_batch_bytes", max_assemble_batch_bytes);
+    emit_counter_u64("dedup_candidates", dedup_stats.candidates);
+    emit_counter_u64("dedup_tiles_reused", dedup_stats.tiles_reused);
+    emit_counter_u64("dedup_bytes_saved", dedup_stats.bytes_saved);
+    emit_counter_u64("dedup_reject_len_mismatch", dedup_stats.reject_len_mismatch);
+    emit_counter_u64("dedup_reject_fp_mismatch", dedup_stats.reject_fp_mismatch);
+    emit_counter_u64("dedup_insert_skipped_cap", dedup_stats.insert_skipped_cap);
+    emit_counter_u64(
+        "dedup_hash_bucket_collisions",
+        dedup_stats.hash_bucket_collisions,
     );
-    eprintln!(
-        "dedup_reject_fp_mismatch={}",
-        dedup_stats.reject_fp_mismatch
-    );
-    eprintln!(
-        "dedup_insert_skipped_cap={}",
-        dedup_stats.insert_skipped_cap
-    );
-    eprintln!(
-        "dedup_hash_bucket_collisions={}",
-        dedup_stats.hash_bucket_collisions
-    );
-    eprintln!("tile_bytes_total={}", tile_size_diag.total_tile_bytes);
-    eprintln!(
-        "tile_bytes_avg={}",
+    emit_counter_u64("tile_bytes_total", tile_size_diag.total_tile_bytes);
+    emit_counter_u64(
+        "tile_bytes_avg",
         tile_size_diag
             .total_tile_bytes
             .checked_div(tiles_written)
-            .unwrap_or(0)
+            .unwrap_or(0),
     );
-    eprintln!("tile_max_bytes={}", tile_size_diag.max_tile.bytes);
+    emit_counter_u64("tile_max_bytes", tile_size_diag.max_tile.bytes);
     if tile_size_diag.max_tile.bytes > 0 {
         let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile_size_diag.max_tile.tile_id);
-        eprintln!("tile_max_zxy={z}/{x}/{y}");
+        emit_counter_u64("tile_max_z", u64::from(z));
+        emit_counter_u64("tile_max_x", u64::from(x));
+        emit_counter_u64("tile_max_y", u64::from(y));
     }
-    eprintln!("oversize_tiles_warn={}", tile_size_diag.oversize_warn_count);
-    eprintln!(
-        "oversize_tiles_severe={}",
-        tile_size_diag.oversize_severe_count
+    emit_counter_u64("oversize_tiles_warn", tile_size_diag.oversize_warn_count);
+    emit_counter_u64(
+        "oversize_tiles_severe",
+        tile_size_diag.oversize_severe_count,
     );
     for (i, t) in tile_size_diag.top_oversized.iter().enumerate() {
         if t.bytes == 0 {
             continue;
         }
         let (z, x, y) = pmtiles_writer::tile_id_to_zxy(t.tile_id);
-        eprintln!("oversize_top_{}={z}/{x}/{y}:{}", i + 1, t.bytes);
-    }
-    if let Some(ref s) = phase12_stats {
-        for line in missing_ref_summary_lines(s.missing_refs) {
-            eprintln!("{line}");
-        }
+        let prefix = format!("oversize_top_{}", i + 1);
+        emit_counter_u64(&format!("{prefix}_z"), u64::from(z));
+        emit_counter_u64(&format!("{prefix}_x"), u64::from(x));
+        emit_counter_u64(&format!("{prefix}_y"), u64::from(y));
+        emit_counter_u64(&format!("{prefix}_bytes"), t.bytes);
     }
     Ok(())
 }
@@ -825,7 +764,6 @@ use crate::geometry::Point;
 use crate::geometry::merc_bbox;
 #[cfg(test)]
 use crate::mlt;
-#[cfg(test)]
 #[cfg(test)]
 use crate::multipolygon::{MemberWay, WayRole};
 #[cfg(test)]

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use crate::debug::marker_span;
 use crate::pipeline::emit::RecordTally;
 
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
@@ -612,6 +613,7 @@ fn write_chunk_records_presorted(
     path: &Path,
     compression: ChunkCompression,
 ) -> io::Result<()> {
+    let _wait = marker_span("WAIT_SORT_CHUNK_WRITE_START", "WAIT_SORT_CHUNK_WRITE_END");
     // Record count as u32. Safe: 1 GB chunk budget yields max ~48.8M records
     // (minimum 22 bytes each), 88x below u32::MAX.
     let count = records.len() as u32;
@@ -708,6 +710,7 @@ fn write_multi_sort_chunk(
     ranges: &[PartitionRange],
     path: &Path,
 ) -> io::Result<()> {
+    let _wait = marker_span("WAIT_SORT_CHUNK_WRITE_START", "WAIT_SORT_CHUNK_WRITE_END");
     let mut sections = Vec::with_capacity(ranges.len());
     let mut offset = 8 + 4 + (ranges.len() as u64 * 16);
     for range in ranges {
@@ -746,6 +749,7 @@ fn write_multi_payload_chunk(
     ranges: &[PartitionRange],
     path: &Path,
 ) -> io::Result<()> {
+    let _wait = marker_span("WAIT_SORT_CHUNK_WRITE_START", "WAIT_SORT_CHUNK_WRITE_END");
     let mut sections = Vec::with_capacity(ranges.len());
     let mut offset = 8 + 4 + (ranges.len() as u64 * 16);
     for range in ranges {
@@ -836,6 +840,7 @@ fn write_payload_chunk_records_presorted(
     path: &Path,
     compression: ChunkCompression,
 ) -> io::Result<()> {
+    let _wait = marker_span("WAIT_SORT_CHUNK_WRITE_START", "WAIT_SORT_CHUNK_WRITE_END");
     let count = records.len() as u32;
 
     if compression != ChunkCompression::None {
