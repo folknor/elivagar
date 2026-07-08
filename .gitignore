@@ -14,3 +14,5 @@ tile_weights.tsv.gz
 research
 scripts/validate/node_modules
 __pycache__
+overnight.sh
+overnight-logs/
