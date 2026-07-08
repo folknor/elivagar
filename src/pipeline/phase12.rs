@@ -29,8 +29,13 @@ pub(super) const LON_E7_FULL_CIRCLE: i64 = 3_600_000_000;
 pub(super) const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 /// Default way in-flight budget for the standard node-store path.
 pub(super) const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
-/// Default way in-flight budget for locations-on-ways mode.
-pub(super) const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 256 * 1024 * 1024; // 256 MB
+/// Default way in-flight budget for locations-on-ways mode. The budget is
+/// compared against estimated cost (raw bytes x WAY_OUTPUT_MULTIPLIER), so
+/// 768M means ~77MB of raw block+plan bytes in flight. Measured on germany
+/// locations at 256M: way_budget wait 31.9s (45% of wall) with the feed
+/// starved at ~25MB raw - the byte budget, not the count ceiling, was the
+/// binding constraint once plan building moved into the tasks.
+pub(super) const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 768 * 1024 * 1024; // 768 MB
 /// Reject unsorted flat-index path above this input size unless explicitly overridden.
 pub(super) const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
 
