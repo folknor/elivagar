@@ -303,6 +303,14 @@ impl SimplifyMultiScratch {
 ///
 /// `tol_scale` multiplies the base simplification tolerance (see
 /// [`for_each_zoom_simplified`] for rationale).
+///
+/// Parked: no production caller. The float-space multipolygon cascade was
+/// superseded by the int_ocean integer geometry engine, which now handles all
+/// polygon emission. Kept (with tests) rather than deleted because its
+/// `SimplifyMultiScratch` is still threaded through the relation/emit pipeline
+/// (`emit.rs` carries it as `_simp_scratch`), holding the path open for
+/// re-enabling. Only the tests exercise it, hence `allow(dead_code)`.
+#[allow(dead_code)]
 #[hotpath::measure]
 pub fn for_each_zoom_simplified_multi<F, S>(
     outer: &[Point],
