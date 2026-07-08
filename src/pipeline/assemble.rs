@@ -703,6 +703,10 @@ fn phase_assemble_partitions(
 
     crate::debug::emit_counter_usize("assemble_parked_bytes_hwm", max_parked_bytes);
     crate::debug::emit_counter_usize("assemble_partition_encoded_max", max_partition_encoded);
+    crate::debug::emit_counter_u64(
+        "assemble_scratch_resets",
+        SCRATCH_RESETS.load(Ordering::Relaxed),
+    );
 
     Ok(AssembleCore {
         features_read,
@@ -910,8 +914,11 @@ impl SeamMetrics {
     }
 }
 
-thread_local! {
-    static ASSEMBLY_SCRATCH: std::cell::RefCell<AssemblyScratch> = std::cell::RefCell::new(
+/// Times a bloated per-thread assembly scratch was dropped back to defaults.
+static SCRATCH_RESETS: AtomicU64 = AtomicU64::new(0);
+
+impl AssemblyScratch {
+    fn new() -> Self {
         AssemblyScratch {
             encode_scratch: mvt::EncodeScratch::new(),
             merge_scratch: mvt::MergeScratch::new(),
@@ -926,7 +933,34 @@ thread_local! {
             seam_provenance: Vec::new(),
             seam_encode_buf: Vec::new(),
         }
-    );
+    }
+
+    /// Canary-based bloat reset, checked before each tile reuses the scratch.
+    ///
+    /// The scratch persists per rayon thread for the whole run and every pool
+    /// in it grows monotonically to the fattest tile the thread has seen -
+    /// geom_pool inner capacities, LayerBuilder feature/interning storage,
+    /// merge scratch, encode buffers. Monster low-zoom tiles poison a
+    /// thread's scratch permanently; across the pool that summed to a
+    /// measured ~17 GB live plateau on the NA locations assemble (identical
+    /// under mimalloc/glibc/jemalloc, so live memory, not retention). The
+    /// raw-MVT buffer capacity tracks the fattest tile encoded and every
+    /// other pool bloats in rough proportion, so it is the canary: past the
+    /// threshold, drop the whole scratch back to defaults. Ordinary z14
+    /// city tiles stay ~1-2 MB raw and keep their pools; only
+    /// monster-poisoned threads pay a rebuild.
+    fn reset_if_bloated(&mut self) {
+        const SCRATCH_CANARY_BYTES: usize = 8 * 1024 * 1024;
+        if self.mvt_buf.capacity() > SCRATCH_CANARY_BYTES {
+            SCRATCH_RESETS.fetch_add(1, Ordering::Relaxed);
+            *self = Self::new();
+        }
+    }
+}
+
+thread_local! {
+    static ASSEMBLY_SCRATCH: std::cell::RefCell<AssemblyScratch> =
+        std::cell::RefCell::new(AssemblyScratch::new());
 }
 
 /// Shared-edge reconciliation for boundary polygon features in a single tile.
@@ -1078,6 +1112,7 @@ pub(super) fn encode_tile_batch_mvt(
         .map(|tile| {
             ASSEMBLY_SCRATCH.with(|cell| {
                 let s = &mut *cell.borrow_mut();
+                s.reset_if_bloated();
 
                 // Reset persisted layers from previous tile (reclaim features + clear interning).
                 for slot in &mut s.layers {
@@ -1249,6 +1284,7 @@ pub(super) fn encode_tile_batch_mlt(
         .map(|tile| {
             ASSEMBLY_SCRATCH.with(|cell| {
                 let s = &mut *cell.borrow_mut();
+                s.reset_if_bloated();
                 let non_empty = prepare_non_empty_layers(s, tile);
                 if non_empty.is_empty() {
                     return Ok(None);
