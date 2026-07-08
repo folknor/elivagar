@@ -17,11 +17,19 @@ use std::time::Instant;
 
 use elivagar::node_index::SortedNodeStore;
 
-// hotpath-alloc provides its own #[global_allocator] for allocation tracking,
-// so mimalloc must be disabled when that feature is active.
-#[cfg(not(feature = "hotpath-alloc"))]
+// Same allocator arbitration as main.rs: hotpath-alloc wins, then the
+// mimalloc-alloc default feature; system allocator otherwise.
+#[cfg(all(
+    feature = "mimalloc-alloc",
+    not(feature = "jemalloc-alloc"),
+    not(feature = "hotpath-alloc")
+))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(all(feature = "jemalloc-alloc", not(feature = "hotpath-alloc")))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
     let _guard = hotpath::HotpathGuardBuilder::new("bench_node_store")

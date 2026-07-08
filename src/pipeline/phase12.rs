@@ -88,6 +88,9 @@ pub(super) fn select_node_store_mode(
 #[hotpath::measure]
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::unwrap_in_result)]
+// Visible only without the hotpath feature (the measure macro's wrapping
+// masks it under --all-features).
+#[allow(clippy::cognitive_complexity)]
 pub(super) fn phase_read_and_process(
     config: &TilegenConfig,
 ) -> Result<(SortWriter, MercBbox, Phase12Stats), PipelineError> {
@@ -1349,6 +1352,9 @@ fn build_way_plans(block: &PrimitiveBlock, global_shared: &FxHashSet<i64>) -> Ve
 /// (indexed PBFs skip decompression; non-indexed still parse cheaply).
 /// No tag matching or coordinate resolution - just node ref counting.
 #[hotpath::measure]
+// Visible only without the hotpath feature (the measure macro's wrapping
+// masks it under --all-features).
+#[allow(clippy::too_many_lines)]
 fn prepass_shared_nodes(
     pbf_path: &std::path::Path,
     decode_threads: usize,

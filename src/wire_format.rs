@@ -346,6 +346,9 @@ pub(crate) fn encode_feature_data(
 /// Logging here would add noise to a billion-call hot path.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_truncation)]
+// Visible only without the hotpath feature (the measure macro's wrapping
+// masks it under --all-features).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn add_feature_to_layer(
     layer: &mut LayerBuilder,
     data: &[u8],

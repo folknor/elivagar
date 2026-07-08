@@ -23,8 +23,9 @@ brotli = "8.0.4"
 lz4_flex = "0.13"
 snap = "1"
 smallvec = "1.15.2"
-mimalloc = { version = "0.1.52", default-features = false }
-libmimalloc-sys = { version = "0.1", features = ["extended"] }
+mimalloc = { version = "0.1.52", default-features = false, optional = true }
+libmimalloc-sys = { version = "0.1", features = ["extended"], optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
 hotpath = "0.21.1"
 rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }
@@ -83,6 +84,9 @@ manual_flatten = "deny"
 io_other_error = "deny"
 
 [features]
+default = ["mimalloc-alloc"]
+mimalloc-alloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
+jemalloc-alloc = ["dep:tikv-jemallocator"]
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 # linux-io-uring = ["dep:io-uring", "dep:libc"]

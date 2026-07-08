@@ -584,6 +584,9 @@ pub(super) fn emit_point_or_centroid(
 
 #[hotpath::measure]
 #[allow(clippy::too_many_arguments)]
+// Visible only without the hotpath feature (the measure macro's wrapping
+// masks it under --all-features).
+#[allow(clippy::too_many_lines)]
 pub(super) fn emit_line_feature(
     osm_id: u64,
     merc: &[Point],

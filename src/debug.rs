@@ -171,9 +171,15 @@ pub fn wait_span(counter: &'static AtomicU64) -> WaitSpan {
 /// above resident bytes and is the signal for allocator retention on a
 /// memory-bound run.
 ///
-/// No-op under `hotpath-alloc`, where mimalloc is not the global allocator and
-/// its accounting would be meaningless.
-#[cfg(not(feature = "hotpath-alloc"))]
+/// No-op when mimalloc is not the global allocator (hotpath-alloc builds,
+/// system-allocator builds via --no-default-features, jemalloc-alloc builds):
+/// its accounting would be meaningless there. The A/B runs read RSS from the
+/// sidecar's /proc sampler instead.
+#[cfg(all(
+    feature = "mimalloc-alloc",
+    not(feature = "jemalloc-alloc"),
+    not(feature = "hotpath-alloc")
+))]
 pub fn emit_alloc_boundary(boundary: &str) {
     let mut current_commit: usize = 0;
     let mut peak_commit: usize = 0;
@@ -196,7 +202,11 @@ pub fn emit_alloc_boundary(boundary: &str) {
     emit_counter_usize(&format!("mi_peak_commit_{boundary}"), peak_commit);
 }
 
-#[cfg(feature = "hotpath-alloc")]
+#[cfg(not(all(
+    feature = "mimalloc-alloc",
+    not(feature = "jemalloc-alloc"),
+    not(feature = "hotpath-alloc")
+)))]
 pub fn emit_alloc_boundary(_boundary: &str) {}
 
 /// Ask glibc to return free chunks above the trim threshold to the OS.

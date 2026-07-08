@@ -1,8 +1,24 @@
-// hotpath-alloc provides its own #[global_allocator] for allocation tracking,
-// so mimalloc must be disabled when that feature is active.
-#[cfg(not(feature = "hotpath-alloc"))]
+// Global allocator selection, mutually exclusive by cfg priority:
+// hotpath-alloc (tracking) > jemalloc-alloc > mimalloc-alloc (default) >
+// system (--no-default-features). Exclusive arms keep --all-features builds
+// legal (jemalloc-alloc wins over mimalloc-alloc there).
+//
+// mimalloc predates all measurement here; the NA locations runs put its
+// retention on the planet RAM ledger (mi_commit 14.9 GB at phase12 end
+// against ~2 GB live; 24.5 GB committed by run end on a 26 GB budget),
+// which is what promoted this from an early experiment to a measured
+// three-way A/B knob.
+#[cfg(all(
+    feature = "mimalloc-alloc",
+    not(feature = "jemalloc-alloc"),
+    not(feature = "hotpath-alloc")
+))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(all(feature = "jemalloc-alloc", not(feature = "hotpath-alloc")))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 // hotpath 0.14 installed CountingAllocator internally under hotpath-alloc; as
 // of 0.20 it is a plain generic type the consumer must declare - the crate no

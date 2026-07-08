@@ -1035,6 +1035,9 @@ pub(super) fn encode_tile_batch(
 /// Encode + compress a batch of MVT tiles in parallel using rayon.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_wrap)]
+// Visible only without the hotpath feature (the measure macro's wrapping
+// masks it under --all-features).
+#[allow(clippy::too_many_lines)]
 pub(super) fn encode_tile_batch_mvt(
     batch: &[PendingTile],
     compression_level: u32,
