@@ -122,12 +122,13 @@ What elivagar emits:
   belongs in the counter channel - a per-event marker would flood the phase
   views. brokkr's `--stalls` rolls up every `*_wait_ns` counter (max per name,
   since they are cumulative) as a fraction of wall.
-- `phase12_*_ns` serial-actor busy counters (`src/debug.rs`: the `BUSY` static,
+- `phase12_*_ns` actor busy counters (`src/debug.rs`: the `BUSY` static,
   same `wait_span` guard, flushed by the same `emit_wait_counters()`). Busy
-  time on phase12's serial actors - ordered consumer node/way-count work,
-  worker-thread plan build, drain-thread result handling, relation tail. The
-  `_ns`-without-`_wait` suffix keeps them out of `--stalls`; paired with the
-  wait counters they split each serial actor into busy vs blocked.
+  time on phase12's actors - ordered-consumer node-block work and
+  drain-thread result handling are serial-stage time; plan build and the
+  relation tail run inside rayon, so read those two as summed thread-time.
+  The `_ns`-without-`_wait` suffix keeps them out of `--stalls`; paired with
+  the wait counters they split each actor into busy vs blocked.
 - `mi_commit_<boundary>` / `mi_peak_commit_<boundary>` at each phase boundary:
   mimalloc's committed bytes via `mi_process_info` (libmimalloc-sys `extended`
   feature). We used to read glibc `mallinfo2` here, but under the mimalloc global

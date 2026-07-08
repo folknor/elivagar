@@ -238,6 +238,44 @@ item 18), (3) drain/channel plumbing (small). Planet has both stresses,
 so the campaign needs shards 1 and 2 both; "up to ~2x on phase12"
 still looks reachable via this decomposition.
 
+CAMPAIGN LANDED 2026-07-08 evening (commits 1ad1d66..e6f5fad), all
+gates green (brokkr check + `elivagar regress` vs the blessed
+9e8dce2 archives: 0 diffs on norway 13.9M tiles and germany 827K):
+
+- Shard 2 first: streamed relation tail (`process_relation_blocks`,
+  par_bridge + single end barrier, replacing 728 per-batch rayon
+  barriers each idling the pool on its straggler). Norway tail
+  31.7s -> 15.1s. First landing regressed peak RSS 5.2 -> 12.1 GB
+  (tail-scoped accs flushing at the 1G chunk budget); capped per-acc
+  flush at 32M -> RSS 4.96 GB, BELOW baseline. --rel-budget deleted
+  (in-flight is one prepared relation per worker by construction).
+- Shard 1: build_way_plans moved off the worker stage into the rayon
+  tasks (the consumer's way_block_send 31.3s was queueing behind that
+  serial loop). Budget reservation split: block bytes pre-spawn, plan
+  bytes added task-side without waiting (condvar wait inside a rayon
+  task can deadlock the pool).
+- The choke then moved to the feed: way_budget wait 31.9s at the 256M
+  locations default (~25MB raw in flight for a 24-thread pool). Raised
+  to 768M: germany 70.1 -> 64.6s, cores 10.7 -> 13.6.
+- Shard 3 turned out structural, not plumbing: ALL record volume
+  funneled through the drain's serial sort_writer push (12.3 GB on
+  germany; way_result_send 141s cumulative). Way accs now pooled
+  across block tasks, self-flushing partitioned chunks at 64M; the
+  drain handles only way_index puts (878K member ways). way_result_send
+  141s -> 0.4s.
+
+Scoreboard (locations, best sidecar run): norway 67.2s -> 48.4s
+(-28%, at 64bdee1, before shards 1/3 - re-measure), germany
+79.3s -> 57.4s (-28%), phase12 54.3 -> 35.3s, avg cores 9.2 -> 16.5.
+Peak RSS: germany 8.8 -> 8.5 GB (pooled accs add a worker-scaled
+~1.6 GB inside phase12 - bounded by workers x 64M, input-independent).
+Sort chunks 46 -> 247, merge fan-in 28 -> 229 with assemble reader
+time unchanged - fine at extract scale, but planet-scale flush sizing
+belongs to H4 (200 GB of scratch at 64M flushes = thousands of chunks).
+Remaining phase12 stalls: pipeline_decoded_send still 362% (the
+ordered consumer itself is now the frontier again: node blocks 8s +
+way recount 5.7s serial), way_budget 32.6% even at 768M.
+
 ### H2: Use the pbfhogg preprocessing pass as elivagar's free prepass
 
 **Claim.** The production input is written by pbfhogg, which already

@@ -104,7 +104,6 @@ counter_group!(WaitCounters {
 // hypothesis (a serial actor whose busy fraction is low is not the choke).
 counter_group!(BusyCounters {
     phase12_node_blocks => "phase12_node_blocks_ns",
-    phase12_way_count => "phase12_way_count_ns",
     phase12_plan_build => "phase12_plan_build_ns",
     phase12_drain => "phase12_drain_ns",
     phase12_relation_tail => "phase12_relation_tail_ns",

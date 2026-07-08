@@ -157,7 +157,6 @@ pub(super) fn phase_read_and_process(
     let mut way_index: Option<WayIndex> = Some(WayIndex::create(idx_dir)?);
 
     let mut node_count: u64 = 0;
-    let mut way_count: u64 = 0;
     let mut rel_count: u64 = 0;
     let mut features_emitted: u64 = 0;
     let mut node_store_stats: Option<(u64, usize)> = None;
@@ -191,6 +190,9 @@ pub(super) fn phase_read_and_process(
 
     // High-water-mark counters for in-flight memory tracking.
     let way_hwm = std::sync::Arc::new(AtomicUsize::new(0));
+    // Ways counted task-side (from plans.len()) so the ordered consumer
+    // never re-parses way blocks.
+    let way_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     // RAM-ledger sizes of the planet-scaling structures phase12 holds:
     // buffered relation blocks (decompressed bytes), the relation plan's
     // member-way set, and the global shared-node pin set.
@@ -291,15 +293,11 @@ pub(super) fn phase_read_and_process(
                 });
             }
             BlockType::Ways => {
-                // Way block - send entire block to worker thread.
-                // Count ways from block (elements() re-parses from bytes, cheap).
-                {
-                    let _busy = wait_span(&BUSY.phase12_way_count);
-                    way_count += block
-                        .elements()
-                        .filter(|e| matches!(e, Element::Way(_)))
-                        .count() as u64;
-                }
+                // Way block - send entire block to worker thread. Ways are
+                // counted task-side from plans.len(): re-parsing the block
+                // here cost 5.7s of ordered-consumer serial time on germany
+                // locations (phase12_way_count_ns), all of it stalling the
+                // decode workers behind pipeline_decoded_send.
 
                 // Spawn worker + drain threads on first way block
                 if block_tx.is_none() {
@@ -331,6 +329,7 @@ pub(super) fn phase_read_and_process(
                     let (rtx, rrx) = std::sync::mpsc::sync_channel::<WayTaskResult>(max_inflight);
                     let nr_clone = nr.clone();
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
+                    let way_counter_clone = std::sync::Arc::clone(&way_counter);
                     let missing_ref_stats_clone = std::sync::Arc::clone(&missing_ref_stats);
                     let deferral_stats_clone = std::sync::Arc::clone(&deferral_stats);
                     let mz = min_z;
@@ -406,6 +405,7 @@ pub(super) fn phase_read_and_process(
                         let inflight_ref = &inflight;
                         let cvar_ref = &inflight_cvar;
                         let gsn_ref = &*gsn;
+                        let way_counter_ref = &*way_counter_clone;
                         // Pool of accumulators shared across block tasks. Accs
                         // live for the whole way phase (not one block), so the
                         // bulk of the record volume self-flushes to partitioned
@@ -470,6 +470,8 @@ pub(super) fn phase_read_and_process(
                                     let plan_busy = wait_span(&BUSY.phase12_plan_build);
                                     let plans = build_way_plans(&block, gsn_ref);
                                     drop(plan_busy);
+                                    way_counter_ref
+                                        .fetch_add(plans.len() as u64, Ordering::Relaxed);
                                     let plan_cost =
                                         estimate_way_plans_bytes(&plans) * WAY_OUTPUT_MULTIPLIER;
                                     {
@@ -633,6 +635,7 @@ pub(super) fn phase_read_and_process(
     if let Some(ref mut wi) = way_index {
         wi.finish_writing().expect("failed to finalize way index");
     }
+    let way_count = way_counter.load(Ordering::Relaxed);
     eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
     eprintln!("  Way index finalized, processing relations...");
 
