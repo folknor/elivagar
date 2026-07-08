@@ -235,42 +235,37 @@ pub(super) fn phase_read_and_process(
         prepass_relation_plan(&relation_plan_pbf_path, decode_threads)
     }));
 
-    let mut node_records: Vec<SortRecord> = Vec::new();
 
-    // Macro to handle Node and DenseNode identically - both types expose the
-    // same API (.id(), .decimicro_lat(), .decimicro_lon(), .tags()) but are
-    // distinct types, so a generic function would not work without a trait.
-    macro_rules! handle_node {
-        ($node:expr) => {{
-            node_count += 1;
-            let lat_e7 = $node.decimicro_lat();
-            let lon_e7 = $node.decimicro_lon();
-            if let Some(ns) = node_store_opt.as_mut() {
-                ns.put($node.id(), lat_e7, lon_e7);
-            }
+    // Node worker: owns node_store + sort_writer during the node phase and
+    // processes node blocks off the ordered consumer (8s of serial consumer
+    // time on germany locations, all of it stalling decode workers behind
+    // pipeline_decoded_send). Blocks are forwarded in order over a bounded
+    // channel, so the sorted node store's sequential put order is preserved.
+    // Joined at the first way block (the pre-existing "sort_writer taken by
+    // drain thread" panic already guaranteed node blocks never follow ways).
+    let mut node_worker_tx: Option<std::sync::mpsc::SyncSender<PrimitiveBlock>> = None;
+    let mut node_worker_handle: Option<std::thread::JoinHandle<NodeWorkerState>> = None;
 
-            min_lat_e7 = min_lat_e7.min(lat_e7);
-            max_lat_e7 = max_lat_e7.max(lat_e7);
-            min_lon_e7 = min_lon_e7.min(lon_e7);
-            max_lon_e7 = max_lon_e7.max(lon_e7);
-            let shifted_lon_e7 = lon_e7_shifted_360(lon_e7);
-            min_lon_shifted_e7 = min_lon_shifted_e7.min(shifted_lon_e7);
-            max_lon_shifted_e7 = max_lon_shifted_e7.max(shifted_lon_e7);
-
-            if $node.tags().next().is_some() {
-                let tags_vec: Vec<(&str, &str)> = $node.tags().collect();
-                node_records.clear();
-                #[allow(clippy::cast_sign_loss)]
-                let n = process_node(
-                    $node.id() as u64, lat_e7, lon_e7,
-                    &tags_vec, min_z, max_z, &mut node_records,
-                );
-                // Panic: inside PBF callback - can't propagate Result. Disk I/O failure is unrecoverable.
-                for r in node_records.drain(..) {
-                    sort_writer.as_mut().expect("sort_writer taken by drain thread")
-                        .push(r).expect("sort push failed");
-                }
-                features_emitted += n;
+    macro_rules! join_node_worker {
+        () => {{
+            if let Some(tx) = node_worker_tx.take() {
+                drop(tx);
+                let _wait = wait_span(&WAIT.node_worker_join);
+                let st = node_worker_handle
+                    .take()
+                    .expect("node worker handle missing")
+                    .join()
+                    .expect("node worker thread panicked");
+                node_store_opt = st.node_store;
+                sort_writer = Some(st.sort_writer);
+                node_count = st.node_count;
+                features_emitted += st.features_emitted;
+                min_lat_e7 = st.min_lat_e7;
+                max_lat_e7 = st.max_lat_e7;
+                min_lon_e7 = st.min_lon_e7;
+                max_lon_e7 = st.max_lon_e7;
+                min_lon_shifted_e7 = st.min_lon_shifted_e7;
+                max_lon_shifted_e7 = st.max_lon_shifted_e7;
             }
         }};
     }
@@ -282,15 +277,26 @@ pub(super) fn phase_read_and_process(
         // no element decoding. Sorted PBFs have single-type blocks.
         match block.block_type() {
             BlockType::DenseNodes | BlockType::Nodes => {
-                // Node block - process inline. This runs on the ordered pbfhogg
-                // consumer thread: its busy time is what decode workers stall
-                // behind (pipeline_decoded_send), so it is timed per block.
-                let _busy = wait_span(&BUSY.phase12_node_blocks);
-                block.for_each_element(|element| match element {
-                    Element::DenseNode(node) => handle_node!(node),
-                    Element::Node(node) => handle_node!(node),
-                    _ => {}
-                });
+                // Node block - forward to the node worker; spawn it lazily on
+                // the first one. The consumer only classifies and sends.
+                if node_worker_tx.is_none() {
+                    let (ntx, nrx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(8);
+                    let ns = node_store_opt.take();
+                    let sw = sort_writer
+                        .take()
+                        .expect("sort_writer taken before node worker");
+                    let mz = min_z;
+                    let xz = max_z;
+                    node_worker_handle =
+                        Some(std::thread::spawn(move || run_node_worker(&nrx, ns, sw, mz, xz)));
+                    node_worker_tx = Some(ntx);
+                }
+                let _wait = wait_span(&WAIT.node_block_send);
+                node_worker_tx
+                    .as_ref()
+                    .expect("node worker not initialized")
+                    .send(block)
+                    .expect("node worker thread panicked");
             }
             BlockType::Ways => {
                 // Way block - send entire block to worker thread. Ways are
@@ -298,6 +304,10 @@ pub(super) fn phase_read_and_process(
                 // here cost 5.7s of ordered-consumer serial time on germany
                 // locations (phase12_way_count_ns), all of it stalling the
                 // decode workers behind pipeline_decoded_send.
+
+                // The node phase ends at the first way block: reclaim
+                // node_store + sort_writer from the node worker.
+                join_node_worker!();
 
                 // Spawn worker + drain threads on first way block
                 if block_tx.is_none() {
@@ -598,6 +608,12 @@ pub(super) fn phase_read_and_process(
             BlockType::Empty | BlockType::Mixed => {}
         }
     }
+
+    // No way blocks arrived: the node worker may still hold node_store +
+    // sort_writer (node-only PBF). Reclaim before the relation tail, and
+    // release the store - nothing after the way phase reads it.
+    join_node_worker!();
+    drop(node_store_opt.take());
 
     // No way blocks arrived (prepass result unused): join so a prepass error
     // still surfaces and the thread does not outlive the phase.
@@ -926,6 +942,107 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
     let counts = shared_node_counts(raw_ways.iter().map(|w| w.node_refs.as_slice()));
     for w in raw_ways.iter_mut() {
         w.preserve_node_refs = preserve_refs_for_way(&w.node_refs, &counts, None);
+    }
+}
+
+/// Everything the node worker owns during the node phase, handed back to the
+/// ordered consumer at the first way block.
+pub(super) struct NodeWorkerState {
+    pub(super) node_store: Option<NodeStore>,
+    pub(super) sort_writer: SortWriter,
+    pub(super) node_count: u64,
+    pub(super) features_emitted: u64,
+    pub(super) min_lat_e7: i32,
+    pub(super) max_lat_e7: i32,
+    pub(super) min_lon_e7: i32,
+    pub(super) max_lon_e7: i32,
+    pub(super) min_lon_shifted_e7: i64,
+    pub(super) max_lon_shifted_e7: i64,
+}
+
+/// Node-phase worker loop: store puts, tagged-node feature emission, and
+/// data-extent tracking, fed whole blocks in order by the consumer. Single
+/// threaded by design - the sorted node store requires sequential put order.
+fn run_node_worker(
+    rx: &std::sync::mpsc::Receiver<PrimitiveBlock>,
+    mut node_store: Option<NodeStore>,
+    mut sort_writer: SortWriter,
+    min_zoom: u8,
+    max_zoom: u8,
+) -> NodeWorkerState {
+    let mut node_count: u64 = 0;
+    let mut features_emitted: u64 = 0;
+    let mut min_lat_e7: i32 = i32::MAX;
+    let mut max_lat_e7: i32 = i32::MIN;
+    let mut min_lon_e7: i32 = i32::MAX;
+    let mut max_lon_e7: i32 = i32::MIN;
+    let mut min_lon_shifted_e7: i64 = i64::MAX;
+    let mut max_lon_shifted_e7: i64 = i64::MIN;
+    let mut node_records: Vec<SortRecord> = Vec::new();
+
+    // Macro to handle Node and DenseNode identically - both types expose the
+    // same API (.id(), .decimicro_lat(), .decimicro_lon(), .tags()) but are
+    // distinct types, so a generic function would not work without a trait.
+    macro_rules! handle_node {
+        ($node:expr) => {{
+            node_count += 1;
+            let lat_e7 = $node.decimicro_lat();
+            let lon_e7 = $node.decimicro_lon();
+            if let Some(ns) = node_store.as_mut() {
+                ns.put($node.id(), lat_e7, lon_e7);
+            }
+
+            min_lat_e7 = min_lat_e7.min(lat_e7);
+            max_lat_e7 = max_lat_e7.max(lat_e7);
+            min_lon_e7 = min_lon_e7.min(lon_e7);
+            max_lon_e7 = max_lon_e7.max(lon_e7);
+            let shifted_lon_e7 = lon_e7_shifted_360(lon_e7);
+            min_lon_shifted_e7 = min_lon_shifted_e7.min(shifted_lon_e7);
+            max_lon_shifted_e7 = max_lon_shifted_e7.max(shifted_lon_e7);
+
+            if $node.tags().next().is_some() {
+                let tags_vec: Vec<(&str, &str)> = $node.tags().collect();
+                node_records.clear();
+                #[allow(clippy::cast_sign_loss)]
+                let n = process_node(
+                    $node.id() as u64,
+                    lat_e7,
+                    lon_e7,
+                    &tags_vec,
+                    min_zoom,
+                    max_zoom,
+                    &mut node_records,
+                );
+                // Panic: inside PBF callback - can't propagate Result. Disk I/O
+                // failure is unrecoverable.
+                for r in node_records.drain(..) {
+                    sort_writer.push(r).expect("sort push failed");
+                }
+                features_emitted += n;
+            }
+        }};
+    }
+
+    while let Ok(block) = rx.recv() {
+        let _busy = wait_span(&BUSY.phase12_node_blocks);
+        block.for_each_element(|element| match element {
+            Element::DenseNode(node) => handle_node!(node),
+            Element::Node(node) => handle_node!(node),
+            _ => {}
+        });
+    }
+
+    NodeWorkerState {
+        node_store,
+        sort_writer,
+        node_count,
+        features_emitted,
+        min_lat_e7,
+        max_lat_e7,
+        min_lon_e7,
+        max_lon_e7,
+        min_lon_shifted_e7,
+        max_lon_shifted_e7,
     }
 }
 

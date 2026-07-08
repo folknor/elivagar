@@ -90,6 +90,8 @@ counter_group!(WaitCounters {
     way_block_send => "way_block_send_wait_ns",
     way_budget => "way_budget_wait_ns",
     way_result_send => "way_result_send_wait_ns",
+    node_block_send => "node_block_send_wait_ns",
+    node_worker_join => "node_worker_join_wait_ns",
     prepass_join => "prepass_join_wait_ns",
 });
 
