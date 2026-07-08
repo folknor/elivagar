@@ -208,7 +208,16 @@ pub(super) fn process_relation_blocks(
 
     let chunk_id = AtomicUsize::new(sort_writer.chunk_count());
     let chunk_dir = sort_writer.tmp_dir().to_path_buf();
-    let chunk_size = sort_writer.chunk_size_bytes();
+    // Per-worker sink flush threshold. The accumulators live for the WHOLE
+    // tail (unlike the way path, where an acc is scoped to one block task),
+    // so flushing at the full sort-chunk budget would let every rayon worker
+    // buffer up to that budget simultaneously - measured as a 5.2 -> 12.1 GB
+    // peak-RSS regression on norway when this streamed tail first landed.
+    // Cap each worker's buffered records well below the chunk budget; the
+    // resulting chunk files are smaller but still far above the merge
+    // fan-in's comfort zone.
+    const REL_ACC_FLUSH_BYTES: usize = 32 * 1024 * 1024;
+    let flush_threshold = sort_writer.chunk_size_bytes().min(REL_ACC_FLUSH_BYTES);
     let chunk_compression = sort_writer.compression();
 
     let rel_count = AtomicU64::new(0);
@@ -263,7 +272,7 @@ pub(super) fn process_relation_blocks(
                 acc.multipolygon_emit.cap_events.clear();
                 inflight_bytes.fetch_sub(rel_bytes, Ordering::Relaxed);
                 acc.bytes = acc.sink.bytes();
-                if acc.bytes >= chunk_size {
+                if acc.bytes >= flush_threshold {
                     acc.flush(&chunk_dir, &chunk_id);
                 }
                 acc
