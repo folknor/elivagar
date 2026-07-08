@@ -93,9 +93,10 @@ counter_group!(WaitCounters {
     prepass_join => "prepass_join_wait_ns",
 });
 
-// Busy time on the serial actors of phase12: the pbfhogg ordered consumer
-// (node-block processing, way counting), the way worker's serial plan build,
-// the drain thread's result handling, and the buffered-relation tail. These
+// Busy time on the actors of phase12: the pbfhogg ordered consumer
+// (node-block processing, way counting), plan building (now inside the rayon
+// way tasks, so read it as summed thread-time, not a serial stage), the drain
+// thread's result handling, and the parallel relation tail (thread-time). These
 // are NOT stalls - the `_ns` suffix without `_wait` keeps them out of the
 // `--stalls` rollup. Together with the wait counters above and pbfhogg's
 // pipeline_decoded_recv/send waits they split phase12's serial actors into

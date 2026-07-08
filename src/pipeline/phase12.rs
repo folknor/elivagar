@@ -400,14 +400,23 @@ pub(super) fn phase_read_and_process(
                         let inflight_cvar = std::sync::Condvar::new();
                         let inflight_ref = &inflight;
                         let cvar_ref = &inflight_cvar;
+                        let gsn_ref = &*gsn;
                         rayon::in_place_scope(|s| {
                             while let Ok(block) = brx.recv() {
-                                let plan_busy = wait_span(&BUSY.phase12_plan_build);
-                                let plans = build_way_plans(&block, &gsn);
-                                let block_bytes =
-                                    block.decompressed_size() + estimate_way_plans_bytes(&plans);
-                                drop(plan_busy);
-                                let block_cost = block_bytes * WAY_OUTPUT_MULTIPLIER;
+                                // Plan build happens inside the spawned task, not
+                                // here: this loop is the pipeline stage the ordered
+                                // consumer blocks behind (way_block_send), so any
+                                // serial work here rate-limits the whole PBF read.
+                                // Measured on germany locations: 26.9s of serial
+                                // build_way_plans - half of phase12.
+                                //
+                                // The budget reservation therefore uses the block's
+                                // decompressed size alone; the task adds the plans'
+                                // measured bytes once built (bounded overshoot: at
+                                // most max_inflight blocks' plan bytes escape the
+                                // wait below).
+                                let block_cost =
+                                    block.decompressed_size() * WAY_OUTPUT_MULTIPLIER;
                                 // Wait for capacity: count limit and byte budget.
                                 // Always allow at least one task - a single block that
                                 // exceeds the byte budget must not deadlock the condvar
@@ -432,8 +441,29 @@ pub(super) fn phase_read_and_process(
                                 let tx = rtx.clone();
                                 let chunk_dir = chunk_dir_base.clone();
                                 let chunk_id = std::sync::Arc::clone(&chunk_id_base);
+                                let way_hwm_task = std::sync::Arc::clone(&way_hwm_clone);
                                 #[allow(clippy::let_underscore_must_use)]
                                 s.spawn(move |_| {
+                                    // Now summed across rayon workers, not a serial
+                                    // stage: read phase12_plan_build_ns as thread-time.
+                                    let plan_busy = wait_span(&BUSY.phase12_plan_build);
+                                    let plans = build_way_plans(&block, gsn_ref);
+                                    drop(plan_busy);
+                                    let plan_cost =
+                                        estimate_way_plans_bytes(&plans) * WAY_OUTPUT_MULTIPLIER;
+                                    {
+                                        // Account the plans' real bytes without waiting:
+                                        // blocking a rayon task on the budget condvar can
+                                        // deadlock the pool (every thread waiting, no
+                                        // completions to free budget).
+                                        let mut guard =
+                                            inflight_ref.lock().expect("inflight lock");
+                                        guard.1 += plan_cost;
+                                        way_hwm_task.fetch_max(
+                                            guard.1 / WAY_OUTPUT_MULTIPLIER,
+                                            Ordering::Relaxed,
+                                        );
+                                    }
                                     let mut acc = WayAcc::new(chunk_compression);
                                     let mut plans = plans.into_iter();
                                     for element in block.elements() {
@@ -467,7 +497,7 @@ pub(super) fn phase_read_and_process(
                                     }
                                     let mut guard = inflight_ref.lock().expect("inflight lock");
                                     guard.0 -= 1;
-                                    guard.1 -= block_cost;
+                                    guard.1 -= block_cost + plan_cost;
                                     cvar_ref.notify_one();
                                 });
                             }
