@@ -80,6 +80,7 @@ counter_group!(WaitCounters {
     sort_open => "sort_open_wait_ns",
     sort_finish => "sort_finish_wait_ns",
     assemble_partition_batch => "assemble_partition_batch_wait_ns",
+    assemble_claim_window => "assemble_claim_window_wait_ns",
     assemble_reader_backpressure => "assemble_reader_backpressure_wait_ns",
     assemble_writer_backpressure => "assemble_writer_backpressure_wait_ns",
     assemble_encode_input => "assemble_encode_input_wait_ns",

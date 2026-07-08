@@ -316,6 +316,19 @@ found, one per project:
    statement + proposed fix (token-bounded in-flight decode, cap =
    decode_ahead) handed to the pbfhogg dev 2026-07-08. Until it lands,
    planet phase12 RSS is NOT bounded by elivagar's own budgets.
+
+   RESOLVED ELIVAGAR-SIDE 2026-07-09 (`72b7c25`): pbfhogg's own
+   research tree showed the precedent - cat_filtered documents the
+   identical retention pathology (~25 GB planet, OOM 28.9 GB,
+   2026-04-26) and pbfhogg migrated its planet commands to bounded
+   pread workers (parallel_classify_phase) instead of patching the
+   pipelined reader. Elivagar made the equivalent move on public API:
+   UnorderedBlockSource (BlobReader + Blob::to_primitiveblock, one
+   reader thread, N decode workers, two bounded channels, NO reorder
+   buffer - locations mode is order-free end to end). Raw path stays
+   on the ordered reader for the sorted node store. The pbfhogg
+   token-bound proposal is now purely their call for their other
+   consumers; nothing on the record path depends on it.
 2. (elivagar) Assemble regressed 164s -> 198.6s: the pooled way-acc
    64M flushes fragment scratch into 2754 chunks / merge fan-in 1076 /
    15442 partitions, driving 95.8 GB of assemble reads against

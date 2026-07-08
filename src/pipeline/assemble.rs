@@ -478,6 +478,18 @@ fn phase_assemble_partitions(
     let next_job = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
     let (tx, rx) = mpsc::channel::<Result<PartitionBatch, PipelineError>>();
+    // Claim window: the writer consumes partitions in order (PMTiles payload
+    // is written clustered in Hilbert order), so batches from partitions
+    // ahead of next_write park in `pending` until their turn. Without a
+    // bound, workers racing ahead of a dense straggler partition accumulate
+    // every finished batch in RAM - measured 19.5 GB of encoded tiles on the
+    // NA locations run (15442 partitions, 4 workers). Workers may not START
+    // partition N until N < next_write + window, bounding parked output to
+    // ~window partitions' worth by construction. The claimer of next_write
+    // itself is always inside the window, so progress is guaranteed.
+    let claim_window = worker_count * 2;
+    let write_progress = (std::sync::Mutex::new(0usize), std::sync::Condvar::new());
+    let write_progress_ref = &write_progress;
 
     let compression = config.compress_sort_chunks;
     let compression_level = config.compression_level;
@@ -516,6 +528,23 @@ fn phase_assemble_partitions(
                     if order >= partitions_ref.len() {
                         break;
                     }
+                    {
+                        let _wait = wait_span(&WAIT.assemble_claim_window);
+                        let mut written = write_progress_ref
+                            .0
+                            .lock()
+                            .expect("assemble write progress lock");
+                        while order >= *written + claim_window && !stop_ref.load(Ordering::Relaxed)
+                        {
+                            written = write_progress_ref
+                                .1
+                                .wait(written)
+                                .expect("assemble write progress wait");
+                        }
+                    }
+                    if stop_ref.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let partition = &partitions_ref[order];
                     let result = read_encode_partition(
                         order,
@@ -546,6 +575,10 @@ fn phase_assemble_partitions(
         let mut next_write = 0usize;
         let mut next_batch = 0usize;
         let mut current_partition_reader_ns = 0u64;
+        // Writer body in an inner closure so every exit path (including `?`
+        // errors) falls through to the stop+notify below - workers parked on
+        // the claim-window condvar must always be woken before scope join.
+        let writer_result: Result<(), PipelineError> = (|| {
         loop {
             let result = {
                 let _wait = wait_span(&WAIT.assemble_partition_batch);
@@ -611,6 +644,13 @@ fn phase_assemble_partitions(
                     pending.remove(&next_write);
                     next_write += 1;
                     next_batch = 0;
+                    // Open the claim window one partition further.
+                    let mut written = write_progress
+                        .0
+                        .lock()
+                        .expect("assemble write progress lock");
+                    *written = next_write;
+                    write_progress.1.notify_all();
                 } else {
                     next_batch += 1;
                 }
@@ -623,6 +663,18 @@ fn phase_assemble_partitions(
             )));
         }
         Ok(())
+        })();
+
+        // Wake any worker parked on the claim window, success or error.
+        stop.store(true, Ordering::Relaxed);
+        {
+            let _guard = write_progress
+                .0
+                .lock()
+                .expect("assemble write progress lock");
+            write_progress.1.notify_all();
+        }
+        writer_result
     });
     scope_result?;
 
