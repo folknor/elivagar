@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// Emit a named phase marker to the sidecar profiler, if active.
 ///
 /// The marker is timestamped with monotonic microseconds since process start
@@ -33,55 +35,136 @@ pub fn emit_counter_usize(name: &str, value: usize) {
     emit_counter(name, i64::try_from(value).unwrap_or(i64::MAX));
 }
 
-pub struct MarkerSpan {
-    end: &'static str,
+// ---------------------------------------------------------------------------
+// Stall accounting: cumulative *_wait_ns counters
+// ---------------------------------------------------------------------------
+//
+// Blocking time is an accumulated quantity, not a phase boundary, so it lives in
+// the counter channel rather than the marker stream. Each `wait_span` measures
+// one blocking interval and, on drop, adds its nanoseconds to a category's
+// atomic; `emit_wait_counters` flushes the accumulated totals once at end of run
+// as `<category>_wait_ns`. brokkr's `--stalls` rolls these up (max per name,
+// since they are cumulative and monotonic) as a fraction of wall.
+//
+// Emitting stalls as FIFO markers instead is a category error: every
+// phase-oriented sidecar view (default summary, --durations, --phase) treats a
+// marker as a segment boundary, so a high-frequency span - one per sort chunk
+// write, hundreds per run - floods those views with thousands of near-zero rows
+// that bury the handful of real phase boundaries. Counters have no such
+// coupling; a stall category is just one more name in the counter stream.
+
+macro_rules! wait_counters {
+    ($($field:ident => $name:literal),* $(,)?) => {
+        pub struct WaitCounters {
+            $(pub $field: AtomicU64,)*
+        }
+        impl WaitCounters {
+            const fn new() -> Self {
+                Self { $($field: AtomicU64::new(0),)* }
+            }
+            fn emit(&self) {
+                $(
+                    let ns = self.$field.load(Ordering::Relaxed);
+                    if ns > 0 {
+                        emit_counter_u64($name, ns);
+                    }
+                )*
+            }
+        }
+    };
 }
 
-impl Drop for MarkerSpan {
+wait_counters! {
+    sort_chunk_write => "sort_chunk_write_wait_ns",
+    sort_flush => "sort_flush_wait_ns",
+    sort_open => "sort_open_wait_ns",
+    sort_finish => "sort_finish_wait_ns",
+    assemble_partition_batch => "assemble_partition_batch_wait_ns",
+    assemble_reader_backpressure => "assemble_reader_backpressure_wait_ns",
+    assemble_writer_backpressure => "assemble_writer_backpressure_wait_ns",
+    assemble_encode_input => "assemble_encode_input_wait_ns",
+    assemble_write_input => "assemble_write_input_wait_ns",
+    assemble_reader_join => "assemble_reader_join_wait_ns",
+    assemble_writer_join => "assemble_writer_join_wait_ns",
+    pmtiles_write => "pmtiles_write_wait_ns",
+}
+
+/// Process-global stall accumulators. There is one tilegen run per process, so
+/// static zero-init is correct and nothing resets between runs.
+pub static WAIT: WaitCounters = WaitCounters::new();
+
+/// Flush the accumulated stall totals to the sidecar as `<category>_wait_ns`.
+/// Call once at end of run; a no-op per counter when nothing blocked.
+pub fn emit_wait_counters() {
+    WAIT.emit();
+}
+
+/// RAII guard timing one blocking interval. On drop it adds the elapsed
+/// nanoseconds to `counter`. Create via [`wait_span`]; a category never exceeds
+/// wall on its own, but the cross-thread sum of concurrent waits can, which is
+/// why `--stalls` reports a fraction that may exceed 100%.
+pub struct WaitSpan {
+    counter: &'static AtomicU64,
+    start: std::time::Instant,
+}
+
+impl Drop for WaitSpan {
     fn drop(&mut self) {
-        emit_marker(self.end);
+        let ns = u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.counter.fetch_add(ns, Ordering::Relaxed);
     }
 }
 
-pub fn marker_span(start: &'static str, end: &'static str) -> MarkerSpan {
-    emit_marker(start);
-    MarkerSpan { end }
-}
-
-/// Snapshot glibc allocator state via `mallinfo2()` and emit the key fields
-/// as counters with `<prefix>_<field>` names.
-///
-/// The normal binary uses mimalloc for Rust allocations, so these counters
-/// cover glibc allocations rather than mimalloc-managed Rust heap blocks.
-/// They become a direct Rust heap view only in builds that use glibc as the
-/// process allocator.
-///
-/// Fields emitted:
-/// - `<prefix>_arena`: total brk-managed heap size in bytes
-/// - `<prefix>_hblks`: count of mmap-managed chunks
-/// - `<prefix>_hblkhd`: total bytes in mmap-managed chunks
-/// - `<prefix>_uordblks`: bytes allocated in normal blocks
-/// - `<prefix>_fordblks`: bytes free in normal blocks
-/// - `<prefix>_keepcost`: top-most releasable block in arena
-///
-/// On non-glibc platforms this is a no-op.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub fn emit_mallinfo2(prefix: &str) {
-    // SAFETY: mallinfo2 is a glibc function safe to call from any thread.
-    let info = unsafe { libc::mallinfo2() };
-    #[allow(clippy::cast_possible_wrap)]
-    {
-        emit_counter(&format!("{prefix}_arena"), info.arena as i64);
-        emit_counter(&format!("{prefix}_hblks"), info.hblks as i64);
-        emit_counter(&format!("{prefix}_hblkhd"), info.hblkhd as i64);
-        emit_counter(&format!("{prefix}_uordblks"), info.uordblks as i64);
-        emit_counter(&format!("{prefix}_fordblks"), info.fordblks as i64);
-        emit_counter(&format!("{prefix}_keepcost"), info.keepcost as i64);
+/// Time a blocking interval into `counter` (a field of [`WAIT`]). Hold the
+/// returned guard across the wait; it records on drop.
+#[must_use]
+pub fn wait_span(counter: &'static AtomicU64) -> WaitSpan {
+    WaitSpan {
+        counter,
+        start: std::time::Instant::now(),
     }
 }
 
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub fn emit_mallinfo2(_prefix: &str) {}
+/// Snapshot mimalloc's committed memory at a phase boundary and emit it as
+/// `mi_commit_<boundary>` / `mi_peak_commit_<boundary>` counters (bytes).
+///
+/// Why commit and not the glibc `mallinfo2` we used to read: the normal binary
+/// uses mimalloc as the global allocator, so `mallinfo2` (which only sees
+/// glibc-direct allocations) reported a few MB of arena against a multi-GB RSS -
+/// dead signal. `mi_process_info` reports mimalloc's own accounting. RSS, peak
+/// RSS, and page faults are already covered per phase by the sidecar's /proc
+/// sampler, so the one number worth pulling from the allocator is committed
+/// bytes: how much address space mimalloc has committed, which can sit well
+/// above resident bytes and is the signal for allocator retention on a
+/// memory-bound run.
+///
+/// No-op under `hotpath-alloc`, where mimalloc is not the global allocator and
+/// its accounting would be meaningless.
+#[cfg(not(feature = "hotpath-alloc"))]
+pub fn emit_alloc_boundary(boundary: &str) {
+    let mut current_commit: usize = 0;
+    let mut peak_commit: usize = 0;
+    // SAFETY: mi_process_info null-checks each out-pointer before writing, so
+    // passing null for the fields we don't want is the documented way to select
+    // a subset. It reads no input and is safe from any thread.
+    unsafe {
+        libmimalloc_sys::mi_process_info(
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut current_commit,
+            &mut peak_commit,
+            std::ptr::null_mut(),
+        );
+    }
+    emit_counter_usize(&format!("mi_commit_{boundary}"), current_commit);
+    emit_counter_usize(&format!("mi_peak_commit_{boundary}"), peak_commit);
+}
+
+#[cfg(feature = "hotpath-alloc")]
+pub fn emit_alloc_boundary(_boundary: &str) {}
 
 /// Ask glibc to return free chunks above the trim threshold to the OS.
 /// Returns 1 if memory was released, 0 otherwise.

@@ -20,6 +20,54 @@ use crate::sort::{self, SortWriter};
 use crate::wire_format::{append_feature_data_with_attrs, encode_attrs_bytes};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// ---------------------------------------------------------------------------
+// Ocean input stats
+// ---------------------------------------------------------------------------
+//
+// process_ocean_shapefile runs up to twice per pipeline (simplified z0-7 plus
+// full-resolution z8+), so its input-side counts accumulate into these
+// process-global atomics and are flushed once at OCEAN_END by
+// emit_ocean_counters. Per-zoom ocean *output* is already covered by the
+// sort_layer_ocean_z* firehose; the gap was the input side - how many shapefile
+// shapes were read, how many overlapped the data bounds, how many polygon
+// pieces they parsed into, and how many shapefile bytes were mapped. Ocean is
+// ~30% of wall and a top allocator, so this is the phase most worth a look.
+
+struct OceanStats {
+    shapes: AtomicU64,
+    shapes_hit: AtomicU64,
+    pieces: AtomicU64,
+    shapefile_bytes: AtomicU64,
+}
+
+static OCEAN_STATS: OceanStats = OceanStats {
+    shapes: AtomicU64::new(0),
+    shapes_hit: AtomicU64::new(0),
+    pieces: AtomicU64::new(0),
+    shapefile_bytes: AtomicU64::new(0),
+};
+
+/// Flush accumulated ocean input counters to the sidecar. Called once at
+/// OCEAN_END; a no-op when no shapefile was processed.
+pub(crate) fn emit_ocean_counters() {
+    use crate::debug::emit_counter_u64;
+    let shapes = OCEAN_STATS.shapes.load(Ordering::Relaxed);
+    if shapes == 0 {
+        return;
+    }
+    emit_counter_u64("ocean_shapes", shapes);
+    emit_counter_u64(
+        "ocean_shapes_hit",
+        OCEAN_STATS.shapes_hit.load(Ordering::Relaxed),
+    );
+    emit_counter_u64("ocean_pieces", OCEAN_STATS.pieces.load(Ordering::Relaxed));
+    emit_counter_u64(
+        "ocean_shapefile_bytes",
+        OCEAN_STATS.shapefile_bytes.load(Ordering::Relaxed),
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -193,6 +241,10 @@ pub(crate) fn process_ocean_shapefile(
         "  Mmapped {:.1} MB",
         shp_mmap.len() as f64 / (1024.0 * 1024.0)
     );
+    OCEAN_STATS.shapefile_bytes.fetch_add(
+        u64::try_from(shp_mmap.len()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
 
     let data_rect = data_bounds_rect(data_bounds, max_zoom);
 
@@ -231,6 +283,17 @@ pub(crate) fn process_ocean_shapefile(
     let poly_count = pieces.len();
     eprintln!(
         "  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons - processing in parallel"
+    );
+    OCEAN_STATS.shapes.fetch_add(
+        u64::try_from(shape_count).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+    OCEAN_STATS
+        .shapes_hit
+        .fetch_add(shapes_hit, Ordering::Relaxed);
+    OCEAN_STATS.pieces.fetch_add(
+        u64::try_from(poly_count).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
     );
 
     // --- Process phase: parallel with rayon, direct chunk flushing ---

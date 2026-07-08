@@ -141,8 +141,10 @@ fn run_elivagar_with_fifo(args: &[&str], fifo_path: &Path) -> (std::process::Out
     // brokkr's real sidecar does. Reading only after the child exits would
     // silently lose markers once cumulative output exceeds the ~64 KiB pipe
     // buffer: the child writes O_NONBLOCK and discards on EAGAIN, so an
-    // undrained pipe drops data instead of blocking. The WAIT_* spans make the
-    // line count large enough that this is a real risk, not a theoretical one.
+    // undrained pipe drops data instead of blocking. A bare run is well under
+    // the buffer, but ELIVAGAR_LAYER_STATS or a larger fixture pushes counter
+    // volume past it, so draining concurrently (not after exit) is the robust
+    // pattern - and it mirrors what brokkr's real sidecar does.
     let mut reader = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)

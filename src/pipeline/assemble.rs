@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::debug::{emit_counter_u64, emit_counter_usize, marker_span};
+use crate::debug::{WAIT, emit_counter_u64, emit_counter_usize, wait_span};
 use crate::geometry;
 use crate::mlt;
 use crate::mvt::{self, GeomType, LayerBuilder};
@@ -178,10 +178,7 @@ pub(super) fn phase_assemble(
                                     max_batch_bytes = batch_bytes;
                                 }
                                 let send_result = {
-                                    let _wait = marker_span(
-                                        "WAIT_ASSEMBLE_READER_BACKPRESSURE_START",
-                                        "WAIT_ASSEMBLE_READER_BACKPRESSURE_END",
-                                    );
+                                    let _wait = wait_span(&WAIT.assemble_reader_backpressure);
                                     read_tx.send(batch)
                                 };
                                 drop(send_result); // ignore: encoder may have exited
@@ -202,10 +199,7 @@ pub(super) fn phase_assemble(
                                         max_batch_bytes = batch_bytes;
                                     }
                                     let send_result = {
-                                        let _wait = marker_span(
-                                            "WAIT_ASSEMBLE_READER_BACKPRESSURE_START",
-                                            "WAIT_ASSEMBLE_READER_BACKPRESSURE_END",
-                                        );
+                                        let _wait = wait_span(&WAIT.assemble_reader_backpressure);
                                         read_tx.send(batch)
                                     };
                                     if send_result.is_err() {
@@ -249,10 +243,7 @@ pub(super) fn phase_assemble(
                     let mut size_diag = TileSizeDiagnostics::default();
                     loop {
                         let batch = {
-                            let _wait = marker_span(
-                                "WAIT_ASSEMBLE_WRITE_INPUT_START",
-                                "WAIT_ASSEMBLE_WRITE_INPUT_END",
-                            );
+                            let _wait = wait_span(&WAIT.assemble_write_input);
                             match encode_rx.recv() {
                                 Ok(batch) => batch,
                                 Err(_) => break,
@@ -293,10 +284,7 @@ pub(super) fn phase_assemble(
                 let tile_compression = config.tile_compression;
                 loop {
                     let batch = {
-                        let _wait = marker_span(
-                            "WAIT_ASSEMBLE_ENCODE_INPUT_START",
-                            "WAIT_ASSEMBLE_ENCODE_INPUT_END",
-                        );
+                        let _wait = wait_span(&WAIT.assemble_encode_input);
                         match read_rx.recv() {
                             Ok(batch) => batch,
                             Err(_) => break,
@@ -311,10 +299,7 @@ pub(super) fn phase_assemble(
                         &seam_metrics,
                     )?;
                     let send_result = {
-                        let _wait = marker_span(
-                            "WAIT_ASSEMBLE_WRITER_BACKPRESSURE_START",
-                            "WAIT_ASSEMBLE_WRITER_BACKPRESSURE_END",
-                        );
+                        let _wait = wait_span(&WAIT.assemble_writer_backpressure);
                         encode_tx.send(encoded)
                     };
                     if send_result.is_err() {
@@ -324,10 +309,7 @@ pub(super) fn phase_assemble(
                 drop(encode_tx);
 
                 let (features_read, max_batch_bytes, reader_ns) = {
-                    let _wait = marker_span(
-                        "WAIT_ASSEMBLE_READER_JOIN_START",
-                        "WAIT_ASSEMBLE_READER_JOIN_END",
-                    );
+                    let _wait = wait_span(&WAIT.assemble_reader_join);
                     reader.join().expect("reader panicked")
                 }?;
                 let (
@@ -338,10 +320,7 @@ pub(super) fn phase_assemble(
                     bytes_per_zoom,
                     size_diag,
                 ) = {
-                    let _wait = marker_span(
-                        "WAIT_ASSEMBLE_WRITER_JOIN_START",
-                        "WAIT_ASSEMBLE_WRITER_JOIN_END",
-                    );
+                    let _wait = wait_span(&WAIT.assemble_writer_join);
                     writer.join().expect("writer panicked")
                 };
                 Ok(AssembleCore {
@@ -408,7 +387,7 @@ pub(super) fn phase_assemble(
     let unique_tiles = pmtiles.unique_tile_count();
     let dedup_stats = pmtiles.dedup_stats().clone();
     {
-        let _wait = marker_span("WAIT_PMTILES_WRITE_START", "WAIT_PMTILES_WRITE_END");
+        let _wait = wait_span(&WAIT.pmtiles_write);
         pmtiles.write_to(&config.output_path)?;
     }
 
@@ -569,10 +548,7 @@ fn phase_assemble_partitions(
         let mut current_partition_reader_ns = 0u64;
         loop {
             let result = {
-                let _wait = marker_span(
-                    "WAIT_ASSEMBLE_PARTITION_BATCH_START",
-                    "WAIT_ASSEMBLE_PARTITION_BATCH_END",
-                );
+                let _wait = wait_span(&WAIT.assemble_partition_batch);
                 match rx.recv() {
                     Ok(result) => result,
                     Err(_) => break,

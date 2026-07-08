@@ -24,6 +24,7 @@ lz4_flex = "0.13"
 snap = "1"
 smallvec = "1.15.2"
 mimalloc = { version = "0.1.52", default-features = false }
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 hotpath = "0.21.1"
 rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }

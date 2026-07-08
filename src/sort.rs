@@ -10,12 +10,41 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 
-use crate::debug::marker_span;
+use crate::debug::{WAIT, wait_span};
 use crate::pipeline::emit::RecordTally;
 
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
+
+// ---------------------------------------------------------------------------
+// K-way merge stats
+// ---------------------------------------------------------------------------
+//
+// The merge is consumed lazily during assemble, so decompression work lands in
+// assemble_reader_ns rather than the sort phase. These process-global atoms
+// capture what that timing hides: `sort_merge_bytes` is the total decompressed
+// record volume pulled through every chunk reader (per-reader local tally,
+// flushed once on drop to keep the per-record path atomic-free), and
+// `sort_merge_max_fanin` is the widest k-way merge (max concurrent chunk
+// readers in one partition), which grows with dataset size and drives the
+// per-record heap-compare cost. Flushed by emit_sort_counters after the reader
+// is dropped. `sort_chunks` already reports the chunk count.
+static SORT_MERGE_BYTES: AtomicU64 = AtomicU64::new(0);
+static SORT_MERGE_MAX_FANIN: AtomicU64 = AtomicU64::new(0);
+
+/// Flush accumulated k-way merge counters to the sidecar. Call after the
+/// `SortReader` has been dropped (so all chunk readers have flushed their
+/// tallies); a no-op when nothing was merged.
+pub fn emit_sort_counters() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let bytes = SORT_MERGE_BYTES.load(Relaxed);
+    if bytes == 0 {
+        return;
+    }
+    crate::debug::emit_counter_u64("sort_merge_bytes", bytes);
+    crate::debug::emit_counter_u64("sort_merge_max_fanin", SORT_MERGE_MAX_FANIN.load(Relaxed));
+}
 
 /// Zoom level used to split each zoom block into ordered Hilbert ranges.
 ///
@@ -613,7 +642,7 @@ fn write_chunk_records_presorted(
     path: &Path,
     compression: ChunkCompression,
 ) -> io::Result<()> {
-    let _wait = marker_span("WAIT_SORT_CHUNK_WRITE_START", "WAIT_SORT_CHUNK_WRITE_END");
+    let _wait = wait_span(&WAIT.sort_chunk_write);
     // Record count as u32. Safe: 1 GB chunk budget yields max ~48.8M records
     // (minimum 22 bytes each), 88x below u32::MAX.
     let count = records.len() as u32;
@@ -710,7 +739,7 @@ fn write_multi_sort_chunk(
     ranges: &[PartitionRange],
     path: &Path,
 ) -> io::Result<()> {
-    let _wait = marker_span("WAIT_SORT_CHUNK_WRITE_START", "WAIT_SORT_CHUNK_WRITE_END");
+    let _wait = wait_span(&WAIT.sort_chunk_write);
     let mut sections = Vec::with_capacity(ranges.len());
     let mut offset = 8 + 4 + (ranges.len() as u64 * 16);
     for range in ranges {
@@ -749,7 +778,7 @@ fn write_multi_payload_chunk(
     ranges: &[PartitionRange],
     path: &Path,
 ) -> io::Result<()> {
-    let _wait = marker_span("WAIT_SORT_CHUNK_WRITE_START", "WAIT_SORT_CHUNK_WRITE_END");
+    let _wait = wait_span(&WAIT.sort_chunk_write);
     let mut sections = Vec::with_capacity(ranges.len());
     let mut offset = 8 + 4 + (ranges.len() as u64 * 16);
     for range in ranges {
@@ -840,7 +869,7 @@ fn write_payload_chunk_records_presorted(
     path: &Path,
     compression: ChunkCompression,
 ) -> io::Result<()> {
-    let _wait = marker_span("WAIT_SORT_CHUNK_WRITE_START", "WAIT_SORT_CHUNK_WRITE_END");
+    let _wait = wait_span(&WAIT.sort_chunk_write);
     let count = records.len() as u32;
 
     if compression != ChunkCompression::None {
@@ -1010,6 +1039,15 @@ fn read_multi_chunk_sections(path: &Path) -> io::Result<Vec<MultiChunkSection>> 
 struct ChunkReader {
     reader: ChunkRead,
     remaining: u32,
+    // Decompressed record bytes read from this chunk, flushed to
+    // SORT_MERGE_BYTES on drop so the per-record path stays atomic-free.
+    bytes_read: u64,
+}
+
+impl Drop for ChunkReader {
+    fn drop(&mut self) {
+        SORT_MERGE_BYTES.fetch_add(self.bytes_read, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl ChunkReader {
@@ -1026,7 +1064,11 @@ impl ChunkReader {
         reader.read_exact(&mut buf4)?;
         let remaining = u32::from_le_bytes(buf4);
 
-        Ok(ChunkReader { reader, remaining })
+        Ok(ChunkReader {
+            reader,
+            remaining,
+            bytes_read: 0,
+        })
     }
 
     fn open_source(
@@ -1051,6 +1093,7 @@ impl ChunkReader {
                 Ok(ChunkReader {
                     reader: ChunkRead::Plain(buf),
                     remaining: section.count,
+                    bytes_read: 0,
                 })
             }
         }
@@ -1076,6 +1119,7 @@ impl ChunkReader {
         self.reader.read_exact(&mut data)?;
 
         self.remaining -= 1;
+        self.bytes_read += 12 + u64::from(data_len);
         Ok(Some((key, data)))
     }
 }
@@ -1141,6 +1185,11 @@ impl PartitionMergeReader {
             }
             chunk_readers.push(cr);
         }
+
+        SORT_MERGE_MAX_FANIN.fetch_max(
+            u64::try_from(chunk_readers.len()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         Ok(Self {
             chunk_readers,

@@ -86,20 +86,80 @@ Pipeline flags on `tilegen` (`--tile-format`, `--tile-compression`, `--compress-
 
 ### Sidecar profiler
 
-Every `--bench`, `--hotpath`, and `--alloc` run automatically samples `/proc/{pid}/status` and `/proc/{pid}/io` at 100ms intervals. Data stored in `.brokkr/sidecar.db` (gitignored, local-only). Preserved even if the child is OOM-killed.
+Every `--bench`, `--hotpath`, and `--alloc` run automatically samples
+`/proc/{pid}/{stat,io,status}` at 100ms intervals AND reads phase markers plus
+application counters from a FIFO. All of it lands in `.brokkr/sidecar.db`
+(gitignored, local-only), NOT results.db. Preserved even if the child is
+OOM-killed. The git-tracked `.brokkr/results.db` keeps only the small per-run
+row (`elapsed_ms` plus git/host/env metadata and the literal `cli_args`); the
+whole metric firehose lives in the sidecar.
 
-Phase markers and counters via FIFO: brokkr creates a FIFO, sets `BROKKR_MARKER_FIFO` in the child's environment, spawns a sidecar thread for `/proc` sampling, reads markers/counters from the FIFO, and bulk-inserts everything into results.db after exit.
+brokkr creates the FIFO, sets `BROKKR_MARKER_FIFO` in the child's environment,
+and drains it on a background thread. Two line formats share the FIFO:
+- Markers: `{timestamp_us} {NAME}\n`
+- Counters: `{timestamp_us} @{name}={value}\n` (value must parse as i64 or the
+  line is dropped - there is no string/categorical counter channel)
 
-Protocol (two line formats, same FIFO):
-- Markers: `{timestamp_us} {PHASE_NAME}\n`
-- Counters: `{timestamp_us} @{name}={value}\n` (i64 value)
+Emission lives in `src/debug.rs` (`emit_marker`, `emit_counter`,
+`emit_counter_u64`/`_usize`, `marker_span`, `emit_mallinfo2`) - OnceLock fd
+caching, O_NONBLOCK, silent no-op when `BROKKR_MARKER_FIFO` is unset. That means
+the metrics are visible ONLY through `brokkr sidecar <uuid>` after a measured
+run: a bare `elivagar run`, or `brokkr tilegen` with no measurement flag, emits
+none of them (run mode stores nothing and attaches no sidecar).
 
-Elivagar emits markers at phase boundaries (`PHASE12_START/END`, `OCEAN_START/END`, `SORT_START/END`, `ASSEMBLE_START/END`) and counters for key metrics (`phase12_ms`, `ocean_ms`, `ocean_features`, `assemble_ms`, `tiles`, `unique_tiles`, `features`). Implementation is in `pipeline/mod.rs` via `emit_marker()`/`emit_counter()` - OnceLock fd caching, O_NONBLOCK, no-op when brokkr isn't running.
+What elivagar emits:
+- Phase boundary markers, and ONLY these: `PHASE12_START/END`, `OCEAN_START/END`,
+  `SORT_START/END`, `ASSEMBLE_START/END`. Markers are reserved for phase
+  boundaries - the marker-consuming views (default summary, `--durations`,
+  `--phase`) each treat a marker as a segment boundary, so keeping the stream to
+  ~4 boundaries is what keeps those views compact.
+- `<category>_wait_ns` cumulative stall counters (`src/debug.rs`: the `WAIT`
+  static plus the `wait_span` RAII guard). One per blocking category
+  (`sort_chunk_write`, `assemble_partition_batch`, `assemble_encode_input`,
+  `pmtiles_write`, ...); each `wait_span` adds its measured nanoseconds to the
+  category atomic on drop, and `emit_wait_counters()` flushes the totals once at
+  end of run. Blocking time is an accumulated quantity, not a boundary, so it
+  belongs in the counter channel - a per-event marker would flood the phase
+  views. brokkr's `--stalls` rolls up every `*_wait_ns` counter (max per name,
+  since they are cumulative) as a fraction of wall.
+- `mi_commit_<boundary>` / `mi_peak_commit_<boundary>` at each phase boundary:
+  mimalloc's committed bytes via `mi_process_info` (libmimalloc-sys `extended`
+  feature). We used to read glibc `mallinfo2` here, but under the mimalloc global
+  allocator that saw only a few MB against a multi-GB RSS - dead signal. RSS/peak
+  RSS/faults are already covered per phase by the /proc sampler, so the one
+  number worth pulling from the allocator is committed memory, which can sit well
+  above resident and is the signal for allocator retention. No-op under
+  `hotpath-alloc` (mimalloc is not the allocator there).
+- Coarse metric counters: `total_ms`, `phase12_ms`, `ocean_ms`, `phase3_ms`,
+  `assemble_ms`, `features`, `tiles`, `unique_tiles`, `output_bytes`,
+  `peak_rss_kb` + per-phase rss, `tile_format`/`tile_compression` (enum ints:
+  format 0=mvt/1=mlt, compression 0=gzip/1=brotli), ocean input
+  (`ocean_shapes`/`_shapes_hit`/`_pieces`/`_shapefile_bytes`), sort merge
+  (`sort_merge_bytes`, `sort_merge_max_fanin`), plus dedup, oversize, and
+  missing-ref stats. This is the ~100-counter set that a bare measured run emits.
+- The per-layer per-zoom firehose (`sort_layer_<layer>_z<z>_records`/`_bytes`
+  /`_fanout_p50`/`p95`/`p99`/`max`/`above_N`, ~800 counters) is gated behind
+  `ELIVAGAR_LAYER_STATS`. Left off, `--counters` stays readable; set it (like
+  `ELIVAGAR_NODE_STATS`) when doing layer or fanout-cap analysis. The per-layer
+  totals (`sort_layer_<name>_records`/`_bytes`) are always emitted.
 
-Query with:
-- `brokkr results <uuid> --markers --durations` - phase timing table
-- `brokkr results <uuid> --markers --counters` - counter values
-- `brokkr results <uuid> --markers --phases` - phases with peak RSS + counters inline
+pbfhogg, used as the PBF reader, emits its OWN counters into the same FIFO
+(`pipeline_decode_tasks`, `pipeline_reorder_high_water`, and its own
+`pipeline_*_wait_ns` stall counters). They show up in `--counters` alongside
+elivagar's, and because `--stalls` rolls up any `*_wait_ns` counter, pbfhogg's
+decode-pipeline stalls appear there too - one stall view, both projects.
+
+Query with `brokkr sidecar <uuid>` (JSONL by default, `--human` for tables):
+- (no selector) - per-phase summary: duration, peak RSS/anon, disk IO, avg cores
+- `--durations` - phase START/END pair timings (the four phases; no WAIT noise)
+- `--stalls` - `*_wait_ns` counters as a fraction of wall, biggest first. The
+  fraction may exceed 100%: a category's counter is summed across concurrent
+  threads, so e.g. 430% reads as "on average ~4.3 threads blocked here."
+- `--counters` - application counter values over time
+- `--markers` / `--samples` - raw marker or /proc-sample JSONL
+- `--stat <field>` - min/max/avg/p50/p95 for one sample field (`rss`, `anon`,
+  `majflt`, `rd`, `wr`, ...)
+- `--compare <a> <b>` - phase-aligned comparison of two runs
 
 ### Common flags
 
@@ -129,7 +189,20 @@ seq = 4704
 - `brokkr tilegen --dataset denmark --variant locations` - elivagar auto-detects `LocationsOnWays` from the PBF header. The `--locations-on-ways` flag is only needed to force it when the PBF doesn't have the header flag.
 - `xxhash` - XXH128 file hash. Run `brokkr env` to see computed values.
 
-Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git for cross-host access). Runs with different flags are distinguishable via the `cli_args` and `brokkr_args` columns - the literal subprocess and brokkr invocations are stored verbatim, so `brokkr results --grep ...` finds any flag combination. Bench and hotpath commands require a clean git tree (ignoring `*.md` and `.brokkr/results.db`); use `--force` to run anyway (results will not be stored). Example: `brokkr tilegen --bench --force --dataset denmark`.
+Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git). Each
+`--bench` row is one number plus provenance: brokkr's OWN external wall-clock
+`elapsed_ms` (best-of-N, measured by brokkr wrapping the subprocess start to
+exit - the same pbfhogg-parity path), plus git/host/env metadata and the literal
+`cli_args`/`brokkr_args`. tilegen no longer self-reports timing on stderr: brokkr
+reads nothing from tilegen's stderr in `--bench`, and every pipeline metric goes
+to sidecar.db (above), not the results row. `--hotpath`/`--alloc` rows
+additionally carry the hotpath JSON timing/alloc report (and that capture path
+still scrapes stderr, so those rows also show node-store stats and the
+locations-on-ways flag - the `--bench` row does not). Runs with different flags
+are distinguishable via `cli_args`/`brokkr_args` - `brokkr results --grep ...`
+finds any flag combination. Bench and hotpath require a clean git tree (ignoring
+`*.md` and `.brokkr/results.db`); use `--force` to run anyway (results will not
+be stored). Example: `brokkr tilegen --bench --force --dataset denmark`.
 
 **NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath uses conflicting cargo feature flags (causes build conflicts). Always run sequentially.
 
@@ -246,13 +319,34 @@ Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, 
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)
 - **Test geometry must fit in one tile at the test zoom level.** World-spanning polygons (e.g. [0.1-0.9] Mercator) at z14 iterate 268M tiles and OOM the machine. If a test needs high zoom, use geometry confined to a single tile at that zoom.
 - `ELIVAGAR_NODE_STATS=1` - enables detailed SortedNodeStore diagnostic scan (chunk counts, compression ratio, blob bytes). Runs during PBF phase so it adds to `phase12_ms` - safe for hotpath runs but not for bench timing. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after all timing kv pairs and never affect benchmarks.
+- `ELIVAGAR_LAYER_STATS=1` - emits the per-layer per-zoom sort-stats firehose (`sort_layer_<name>_z<z>_records`/`_bytes`/`_fanout_p50`/`p95`/`p99`/`max`/`above_N`, ~800 counters). Off by default so `brokkr sidecar --counters` stays readable; the per-layer totals (`sort_layer_<name>_records`/`_bytes`) are always emitted. Emitted at end of run, so it never affects timing. Set it (it is inherited by the child through `brokkr`) for layer or fanout-cap analysis.
 - Memory instrumentation (`3a729ab`) - always-on, not feature-gated. Emits per-phase peak RSS (`phase12_rss_kb`, `ocean_rss_kb`, `sort_rss_kb`, `assemble_rss_kb`), `sort_chunks`, and in-flight HWM counters (`max_way_inflight_bytes`, `max_rel_batch_bytes`, `max_assemble_batch_bytes`). Overhead is negligible: 4 `/proc` reads total, per-block byte estimation, per-feature counter increment. Nothing in hot inner loops.
 
 ## Benchmarks
 
 Baselines, benchmark machines, gate commands, discipline, and the rules for
 reading hotpath/alloc/bench numbers live in `reference/performance.md`. That
-document plus `.brokkr/results.db` is the measurement record specs cite.
+document plus `.brokkr/results.db` is the measurement record specs cite - though
+after the sidecar migration the tracked results row holds only wall-clock
+`elapsed_ms`; the per-phase timings and per-layer stats a spec wants to quote now
+come from the local-only `.brokkr/sidecar.db` (`brokkr sidecar <uuid>`), so
+capture those numbers into the spec or `reference/performance.md` when they
+matter, since sidecar.db does not travel between machines.
+
+Typical loop, from a clean tree:
+
+```
+brokkr tilegen --bench --dataset denmark      # -> UUID, wall-clock best-of-3
+brokkr results <uuid>                          # row: elapsed_ms + provenance
+brokkr sidecar <uuid> --human                  # per-phase RSS / IO / cores
+brokkr sidecar <uuid> --stalls --human         # WAIT_ blocking-time breakdown
+brokkr sidecar <uuid> --counters               # all ~900 metric counters
+brokkr tilegen --hotpath --dataset denmark     # function-level timing report
+brokkr tilegen --alloc  --dataset denmark      # per-function allocation report
+```
+
+Never run two elivagar processes at once (shared `tilegen_tmp/`, conflicting
+hotpath feature flags) - the three modes go one at a time.
 
 ## Data
 

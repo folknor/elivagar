@@ -22,7 +22,8 @@ use crate::sort;
 use std::path::PathBuf;
 
 use crate::debug::{
-    emit_counter, emit_counter_u64, emit_counter_usize, emit_mallinfo2, emit_marker, marker_span,
+    WAIT, emit_alloc_boundary, emit_counter, emit_counter_u64, emit_counter_usize, emit_marker,
+    emit_wait_counters, wait_span,
 };
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -293,8 +294,18 @@ fn current_rss_kb() -> Option<u64> {
 }
 
 fn emit_allocator_boundary(name: &str) {
-    let prefix = format!("mallinfo_{name}");
-    emit_mallinfo2(&prefix);
+    emit_alloc_boundary(name);
+}
+
+/// The per-layer per-zoom sort stats (records, bytes, fanout percentiles,
+/// threshold counts) are a ~800-counter firehose - roughly 26 layers x 15 zooms
+/// x several metrics - that swamps `brokkr sidecar --counters` and floods an
+/// optimizer's context. They are diagnostic detail wanted only during layer or
+/// fanout-cap analysis, so they are emitted only when ELIVAGAR_LAYER_STATS is
+/// set (mirroring ELIVAGAR_NODE_STATS). The per-layer totals
+/// (`sort_layer_<name>_records`/`_bytes`) are always emitted.
+fn layer_stats_enabled() -> bool {
+    std::env::var_os("ELIVAGAR_LAYER_STATS").is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +397,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             );
             phase12_rss = peak_rss_kb();
             {
-                let _wait = marker_span("WAIT_SORT_FLUSH_START", "WAIT_SORT_FLUSH_END");
+                let _wait = wait_span(&WAIT.sort_flush);
                 sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
             }
             emit_allocator_boundary("phase12_end");
@@ -463,6 +474,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     emit_marker("OCEAN_END");
     emit_allocator_boundary("ocean_end");
+    crate::ocean::emit_ocean_counters();
     if let Some((elapsed, features)) = ocean_elapsed {
         emit_counter(
             "ocean_ms",
@@ -480,14 +492,14 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // Flush any trailing buffer so chunk_count() reflects all chunks on disk,
     // then save the count for --skip-to sort validation.
     if let Some(ref mut sw) = sort_writer {
-        let _wait = marker_span("WAIT_SORT_FLUSH_START", "WAIT_SORT_FLUSH_END");
+        let _wait = wait_span(&WAIT.sort_flush);
         sw.flush()?;
     }
     let sort_chunks = sort_writer.as_ref().map(sort::SortWriter::chunk_count);
     save_sort_chunk_count(&config.tmp_dir, sort_chunks)?;
     let (mut sort_reader, phase3_elapsed, sort_rss) = if skip == Some(SkipTo::Assemble) {
         let sr = {
-            let _wait = marker_span("WAIT_SORT_OPEN_START", "WAIT_SORT_OPEN_END");
+            let _wait = wait_span(&WAIT.sort_open);
             sort::SortReader::from_dir(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
                 load_sort_chunk_count(&config.tmp_dir),
@@ -499,10 +511,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         let phase3_start = Instant::now();
         eprintln!("--- Sort ---");
         let sr = if let Some(sw) = sort_writer {
-            let _wait = marker_span("WAIT_SORT_FINISH_START", "WAIT_SORT_FINISH_END");
+            let _wait = wait_span(&WAIT.sort_finish);
             sw.finish()?
         } else {
-            let _wait = marker_span("WAIT_SORT_OPEN_START", "WAIT_SORT_OPEN_END");
+            let _wait = wait_span(&WAIT.sort_open);
             sort::SortReader::from_dir(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
                 load_sort_chunk_count(&config.tmp_dir),
@@ -528,6 +540,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         dedup_stats,
         tile_size_diag,
     ) = assemble::phase_assemble(&mut sort_reader, config)?;
+    // Drop the reader so every chunk reader flushes its byte tally before we
+    // emit the merge counters.
+    drop(sort_reader);
+    sort::emit_sort_counters();
     let phase4_elapsed = phase4_start.elapsed();
     emit_marker("ASSEMBLE_END");
     emit_allocator_boundary("assemble_end");
@@ -549,6 +565,25 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     emit_counter(
         "total_ms",
         i64::try_from(total.as_millis()).unwrap_or(i64::MAX),
+    );
+    emit_wait_counters();
+    // Record the run's tile encoding config as enum-int counters. Counters are
+    // i64-only, so these categorical settings would otherwise be unrecorded in
+    // the sidecar; they are only otherwise recoverable from cli_args, and then
+    // only when the flags were passed explicitly rather than left at defaults.
+    emit_counter(
+        "tile_format",
+        match config.tile_format {
+            TilePayloadFormat::Mvt => 0,
+            TilePayloadFormat::Mlt => 1,
+        },
+    );
+    emit_counter(
+        "tile_compression",
+        match config.tile_compression {
+            TileCompression::Gzip => 0,
+            TileCompression::Brotli => 1,
+        },
     );
     if let Some(p3) = phase3_elapsed {
         emit_counter(
@@ -579,11 +614,15 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         {
             emit_counter_u64("records_per_way_x10", records_per_way_x10);
         }
+        let layer_stats = layer_stats_enabled();
         for (i, (&recs, &bytes)) in s.layer_records.iter().zip(s.layer_bytes.iter()).enumerate() {
             if recs > 0 && i < shortbread::Layer::ALL.len() {
                 let name = shortbread::Layer::ALL[i].name();
                 emit_counter_u64(&format!("sort_layer_{name}_records"), recs);
                 emit_counter_u64(&format!("sort_layer_{name}_bytes"), bytes);
+                if !layer_stats {
+                    continue;
+                }
                 for z in 0..15u8 {
                     let idx = i * 15 + z as usize;
                     let zr = s.layer_zoom_records[idx];
