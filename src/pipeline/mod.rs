@@ -135,10 +135,6 @@ pub struct TilegenConfig {
     /// Controls memory during the PBF way phase. Lower values reduce peak RSS
     /// at the cost of less parallelism.
     pub way_inflight_budget: usize,
-    /// Byte budget for relation batch accumulation (0 = default 64 MB).
-    /// Controls memory during relation processing. Flush triggers when either
-    /// the count limit or byte budget is reached.
-    pub rel_batch_budget: usize,
     /// Byte budget for assemble tile batches (0 = default 32 MB).
     /// Controls memory during tile assembly. Dense urban tiles at z14 can
     /// make fixed-count batches very large.
@@ -717,7 +713,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     }
     if let Some(ref s) = phase12_stats {
         emit_counter_usize("max_way_inflight_bytes", s.max_way_inflight_bytes);
-        emit_counter_usize("max_rel_batch_bytes", s.max_rel_batch_bytes);
+        emit_counter_usize("max_rel_inflight_bytes", s.max_rel_inflight_bytes);
         emit_counter_usize("relation_blocks_buffered", s.relation_blocks_buffered);
         emit_counter_usize("relation_blocks_bytes", s.relation_blocks_bytes);
         emit_counter_usize("relation_plan_needed_ways", s.relation_plan_needed_ways);

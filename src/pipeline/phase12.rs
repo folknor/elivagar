@@ -17,10 +17,7 @@ use super::emit::{
     antimeridian_shifts_for_bbox, emit_line_feature, emit_point_or_centroid, emit_polygon_feature,
     enrich_polygon_matches, push_sort_record, unwrap_antimeridian_path,
 };
-use super::relations::{
-    PreparedRelation, REL_BATCH_BUDGET_DEFAULT, REL_BATCH_SIZE, estimate_prepared_rel_bytes,
-    flush_rel_batch, prepare_relation,
-};
+use super::relations::process_relation_blocks;
 use super::stats::{
     DeferralStats, FanoutStats, MissingRefStatsAtomic, Phase12Stats,
     record_fanout_from_payload_records,
@@ -173,13 +170,6 @@ pub(super) fn phase_read_and_process(
     let min_z = config.min_zoom;
     let max_z = config.max_zoom;
 
-    let mut rel_batch: Vec<PreparedRelation> = Vec::with_capacity(REL_BATCH_SIZE);
-    let rel_budget = if config.rel_batch_budget > 0 {
-        config.rel_batch_budget
-    } else {
-        REL_BATCH_BUDGET_DEFAULT
-    };
-
     // Block-level dispatch: worker thread receives entire PrimitiveBlocks containing
     // ways, extracts RawWay data and processes via rayon. Main thread sends blocks
     // and drains results - no per-way work on the main thread during the way phase.
@@ -196,8 +186,6 @@ pub(super) fn phase_read_and_process(
 
     // High-water-mark counters for in-flight memory tracking.
     let way_hwm = std::sync::Arc::new(AtomicUsize::new(0));
-    let mut rel_batch_bytes: usize = 0;
-    let mut max_rel_batch_bytes: usize = 0;
     // RAM-ledger sizes of the planet-scaling structures phase12 holds:
     // buffered relation blocks (decompressed bytes), the relation plan's
     // member-way set, and the global shared-node pin set.
@@ -572,74 +560,40 @@ pub(super) fn phase_read_and_process(
     eprintln!("  Way index finalized, processing relations...");
 
     let relation_blocks_buffered = relation_blocks.len();
-    // Process buffered relation blocks. Serial tail of phase12: prepare +
-    // batch + flush all run on this thread (flush_rel_batch fans out
-    // internally via rayon, which this span deliberately includes - it is
-    // wall time appended to the phase either way).
+    // Process buffered relation blocks. Tail of phase12: one streamed
+    // parallel pass over all relations (prepare interleaved with emit, a
+    // single end barrier). The span deliberately includes the rayon fan-out -
+    // it is wall time appended to the phase either way.
     let relation_tail_busy = wait_span(&BUSY.phase12_relation_tail);
-    for block in &relation_blocks {
-        block.for_each_element(|element| {
-            if let Element::Relation(rel) = element {
-                rel_count += 1;
-                if let Some(prepared) = prepare_relation(
-                    &rel,
-                    way_index
-                        .as_ref()
-                        .expect("way_index not returned from drain"),
-                    &missing_ref_stats,
-                ) {
-                    rel_batch_bytes += estimate_prepared_rel_bytes(&prepared);
-                    rel_batch.push(prepared);
-                    if rel_batch_bytes > max_rel_batch_bytes {
-                        max_rel_batch_bytes = rel_batch_bytes;
-                    }
-                    if rel_batch.len() >= REL_BATCH_SIZE || rel_batch_bytes >= rel_budget {
-                        let batch =
-                            std::mem::replace(&mut rel_batch, Vec::with_capacity(REL_BATCH_SIZE));
-                        rel_batch_bytes = 0;
-                        features_emitted += flush_rel_batch(
-                            batch,
-                            min_z,
-                            max_z,
-                            &config.seam_reconcile_layers,
-                            &deferral_stats,
-                            sort_writer
-                                .as_mut()
-                                .expect("sort_writer not returned from drain"),
-                            &mut fanout_stats,
-                            &config.fanout_caps,
-                            config.polygon_simplify_factor,
-                        );
-                        deferral_stats.check_budgets(&config.seam_reconcile_layers);
-                    }
-                }
-            }
-        });
-    }
+    let relation_tail = process_relation_blocks(
+        &relation_blocks,
+        way_index
+            .as_ref()
+            .expect("way_index not returned from drain"),
+        &missing_ref_stats,
+        min_z,
+        max_z,
+        &config.seam_reconcile_layers,
+        &deferral_stats,
+        sort_writer
+            .as_mut()
+            .expect("sort_writer not returned from drain"),
+        &mut fanout_stats,
+        &config.fanout_caps,
+        config.polygon_simplify_factor,
+    );
+    rel_count += relation_tail.rel_count;
+    features_emitted += relation_tail.features;
+    let max_rel_inflight_bytes = relation_tail.max_inflight_bytes;
+    deferral_stats.check_budgets(&config.seam_reconcile_layers);
+    drop(relation_tail_busy);
+
     let rss_before_relation_drop = current_rss_kb();
     drop(relation_blocks);
     let rss_after_relation_drop = current_rss_kb();
     let relation_blocks_drop_rss_kb = rss_before_relation_drop
         .zip(rss_after_relation_drop)
         .map(|(before, after)| before.saturating_sub(after));
-
-    if !rel_batch.is_empty() {
-        features_emitted += flush_rel_batch(
-            rel_batch,
-            min_z,
-            max_z,
-            &config.seam_reconcile_layers,
-            &deferral_stats,
-            sort_writer
-                .as_mut()
-                .expect("sort_writer not returned from drain"),
-            &mut fanout_stats,
-            &config.fanout_caps,
-            config.polygon_simplify_factor,
-        );
-        deferral_stats.check_budgets(&config.seam_reconcile_layers);
-    }
-    drop(relation_tail_busy);
 
     // Drop way_index to release compressed data + index memory before
     // ocean/sort/assemble phases.
@@ -706,7 +660,7 @@ pub(super) fn phase_read_and_process(
         rel_count,
         node_store_stats,
         max_way_inflight_bytes,
-        max_rel_batch_bytes,
+        max_rel_inflight_bytes,
         relation_blocks_buffered,
         relation_blocks_bytes,
         relation_plan_needed_ways,

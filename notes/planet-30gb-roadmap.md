@@ -1,10 +1,6 @@
 # Planet on 30 GB: hypotheses toward world-record tile generation
 
-Status: 2026-07-08, hypotheses only - no code, no landings. Everything here
-is a theory to be priced, specced per
-`reference/technical-implementation-spec.md`, and then kept or discarded on
-measurement. Measured facts are anchored to host + commit + run UUID;
-everything else is explicitly labeled hypothesis or estimate.
+Status: 2026-07-08, hypotheses only - no code, no landings.
 
 ## The goal
 
@@ -91,7 +87,10 @@ campaigns. This document is about what comes after the backlog.
    hotpath + alloc, germany locations hotpath. Clean bench runs are
    comfortable (8.8 GB peak). Consequence: planet-scale profiling cannot
    use hotpath/alloc builds; the sidecar (OOM-surviving by design) plus
-   sampling profilers are the planet instruments.
+   sampling profilers are the planet instruments. (Re-run on `9e8dce2`,
+   2026-07-08 afternoon: germany locations alloc ALSO died - five kills -
+   so germany-scale instrumented builds are now fully off the table on
+   this host.)
 
 6. **The enriched PBF already deletes most node work.** Germany locations
    processes 21.1M nodes vs 429.2M raw - add-locations-to-ways drops
@@ -208,6 +207,37 @@ build_way_plans), `phase12_drain_ns` (drain thread),
 with pbfhogg's `pipeline_decoded_recv/send` waits these close the
 phase12 accounting; the next measured run reads the verdict.
 
+VERDICT READ 2026-07-08 (overnight suite on `9e8dce2`, germany locations
+bench `c51205b3`, norway locations bench `63eade98`). Confirmed, with a
+different decomposition than "delete the ordered drain":
+
+- Germany locations (wall 79.3s, phase12 54.3s): the serial chain
+  accounts for the phase almost exactly - consumer inline 13.2s
+  (node blocks 8.4s + way recount 4.8s) + serial `build_way_plans`
+  worker 26.9s + serial relation tail 9.6s = 49.7s of 54.3s. The
+  dominant serial actor is PLAN BUILD at 26.9s (half the phase, one
+  thread); the consumer corroborates from the other side with 31.3s
+  blocked on `way_block_send` waiting for it. The drain thread is busy
+  only 14.6s - drain removal alone would not have fixed germany.
+- Norway locations (wall 67.2s, phase12 43.6s): completely different
+  shape - the serial RELATION TAIL is 31.7s, 73% of phase12. Plan
+  build 8.1s, drain 2.7s, consumer inline 2.5s. On relation-heavy
+  coastal data the lever is H7 tier 1 (parallelize relation prep,
+  backlog item 18), and it dwarfs anything the drain buys.
+- Oddity to check during the campaign: germany rayon tasks accumulated
+  112s (141% of wall) blocked on `way_result_send` while the drain was
+  mostly idle - smells like bounded-channel burstiness, cheap capacity
+  tuning, not drain CPU.
+- `prepass_join_wait` ~0 on both datasets - the prepass overlap is
+  genuinely free.
+
+Consequence for sequencing: the H1+H6 campaign is three shards with
+measured prices - (1) parallelize/pipeline plan build (26.9s germany),
+(2) parallelize the relation tail (31.7s norway; merges with H7
+item 18), (3) drain/channel plumbing (small). Planet has both stresses,
+so the campaign needs shards 1 and 2 both; "up to ~2x on phase12"
+still looks reachable via this decomposition.
+
 ### H2: Use the pbfhogg preprocessing pass as elivagar's free prepass
 
 **Claim.** The production input is written by pbfhogg, which already
@@ -287,6 +317,18 @@ counters: `relation_blocks_bytes`, `relation_plan_needed_ways`,
 exercise - planet ledger estimate from germany/norway per-unit numbers,
 published in this note.
 
+FIRST READING 2026-07-08 (germany locations `c51205b3`, norway
+locations `63eade98`): the stocks are all small at extract scale -
+germany `relation_blocks_bytes` 199 MB (111 blocks), way_index 126 MB,
+PMTiles dedup 16.8 MB / 332K dir entries / 724 KB leaf dirs.
+`pipeline_reorder_high_water` came in at 51 blobs (germany) / 264
+(norway); the feared 847-blob high water did not reappear on this
+commit. The standout ledger item is mimalloc retention: `mi_commit`
+7.37 GB at germany phase12 end and 11.2 GB at run end vs 8.8 GB peak
+RSS - allocator-committed ~2.4 GB above resident, the largest
+unbudgeted stock and another point for H6's churn reduction. The
+extrapolation exercise remains open.
+
 ### H4: Sort scratch needs page-cache hygiene, maybe compression
 
 **Claim.** ~200 GB of scratch write+read through a 30 GB host will
@@ -359,6 +401,22 @@ retention.
 counters exist (the two land in the same region of code; sequence them as
 one campaign to avoid double churn).
 
+**Allocator addendum (2026-07-08).** mimalloc predates all measurement
+here (early experiment, never defended at current scale), and pbfhogg
+reached record numbers on the plain system allocator - after its
+arena/scratch work removed the churn. Same sequence applies: once H6
+lands, run a three-way A/B (mimalloc default-feature vs system via
+no-default-features vs jemalloc 5.3.1 via tikv-jemallocator 0.7, which
+now tracks the release with the dealloc-only-thread tcache work aimed
+at exactly our decode-worker -> consumer free pattern) on germany +
+norway locations. Decision rule: system allocator within wall noise ->
+delete mimalloc (simpler main.rs, two deps gone, glibc mallinfo2
+becomes a live signal again); jemalloc stays on the table only for an
+RSS/retention win the 30 GB budget cares about. Today's measured
+retention (mi_commit 2.4 GB above peak RSS, see H3 first reading) is
+the number to beat. Not a pre-H6 priority: at 622 GB/run churn the
+allocator comparison would measure churn H6 is about to delete.
+
 ### H7: The relation stack is norway's tax today and the planet's tomorrow
 
 **Claim.** Multipolygon assembly + emission is the second-largest CPU
@@ -378,6 +436,12 @@ profiles still bleed, precompute ring assembly adjacency at altw time
 
 **First step.** NA locations re-baseline (below) to see what the stack
 costs at 4x norway scale post-P1/P2/P3, before choosing a tier.
+
+MEASURED 2026-07-08 (H1 counters, norway locations `63eade98`): the
+serial relation tail is 31.7s of norway's 43.6s phase12 - 73% of the
+dominant phase on coastal data. Tier 1 (parallelize relation prep,
+backlog item 18) is promoted into the H1+H6 campaign as shard 2; see
+the H1 verdict block.
 
 ### H8: Overlap the phases; stream the archive
 

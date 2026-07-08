@@ -28,11 +28,8 @@ pub(super) struct PreparedRelation {
     pub(super) is_boundary: bool,
 }
 
-pub(super) const REL_BATCH_SIZE: usize = 1024;
-pub(super) const REL_BATCH_BUDGET_DEFAULT: usize = 64 * 1024 * 1024; // 64 MB
-
 /// Estimate heap bytes for a single prepared relation (struct + member way coords).
-pub(super) fn estimate_prepared_rel_bytes(r: &PreparedRelation) -> usize {
+fn estimate_prepared_rel_bytes(r: &PreparedRelation) -> usize {
     std::mem::size_of::<PreparedRelation>()
         + r.member_ways
             .iter()
@@ -137,6 +134,21 @@ pub(super) struct RelAcc {
 }
 
 impl RelAcc {
+    fn new(compression: sort::ChunkCompression) -> Self {
+        RelAcc {
+            sink: RecordSink::new(),
+            bytes: 0,
+            chunk_paths: Vec::new(),
+            count: 0,
+            point_emit: PointEmitScratch::new(),
+            line_emit: LineEmitScratch::new(),
+            multipolygon_emit: MultipolygonEmitScratch::new(),
+            simp_scratch: geometry::SimplifyMultiScratch::new(),
+            compression,
+            fanout: FanoutStats::new(),
+        }
+    }
+
     pub(super) fn flush(
         &mut self,
         chunk_dir: &std::path::Path,
@@ -160,11 +172,28 @@ impl RelAcc {
     }
 }
 
-/// Process a batch of prepared relations in parallel, streaming outputs to chunk files.
+/// Totals from the streamed relation tail.
+pub(super) struct RelationTail {
+    pub(super) rel_count: u64,
+    pub(super) features: u64,
+    pub(super) max_inflight_bytes: usize,
+}
+
+/// Process all buffered relation blocks: prepare + emit, streaming outputs to
+/// chunk files. One parallel pass over every relation with a single barrier at
+/// the end. `par_bridge` pulls from the preparing iterator under its internal
+/// lock, so `prepare_relation`'s way_index reads (cheap, serial) interleave
+/// with relation processing on the worker threads instead of alternating with
+/// it; per-batch flush barriers previously idled most of the pool on each
+/// batch's slowest relation (giant coastal multipolygons: P99 is ~100x P50).
+/// In-flight prepared memory is bounded by construction: each worker holds at
+/// most one prepared relation at a time (no batch accumulation).
 #[hotpath::measure]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn flush_rel_batch(
-    batch: Vec<PreparedRelation>,
+pub(super) fn process_relation_blocks(
+    relation_blocks: &[pbfhogg::PrimitiveBlock],
+    way_index: &WayIndex,
+    missing_ref_stats: &MissingRefStatsAtomic,
     min_zoom: u8,
     max_zoom: u8,
     seam_reconcile_layers: &[u8],
@@ -173,30 +202,37 @@ pub(super) fn flush_rel_batch(
     fanout_stats: &mut FanoutStats,
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
-) -> u64 {
+) -> RelationTail {
     use rayon::prelude::*;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-    let chunk_id = std::sync::atomic::AtomicUsize::new(sort_writer.chunk_count());
+    let chunk_id = AtomicUsize::new(sort_writer.chunk_count());
     let chunk_dir = sort_writer.tmp_dir().to_path_buf();
     let chunk_size = sort_writer.chunk_size_bytes();
     let chunk_compression = sort_writer.compression();
 
-    let result = batch
-        .into_par_iter()
+    let rel_count = AtomicU64::new(0);
+    let inflight_bytes = AtomicUsize::new(0);
+    let max_inflight_bytes = AtomicUsize::new(0);
+
+    let result = relation_blocks
+        .iter()
+        .flat_map(pbfhogg::PrimitiveBlock::elements)
+        .filter_map(|element| {
+            let pbfhogg::Element::Relation(rel) = element else {
+                return None;
+            };
+            rel_count.fetch_add(1, Ordering::Relaxed);
+            let prepared = prepare_relation(&rel, way_index, missing_ref_stats)?;
+            let bytes = estimate_prepared_rel_bytes(&prepared);
+            let now_inflight = inflight_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
+            max_inflight_bytes.fetch_max(now_inflight, Ordering::Relaxed);
+            Some((prepared, bytes))
+        })
+        .par_bridge()
         .fold(
-            || RelAcc {
-                sink: RecordSink::new(),
-                bytes: 0,
-                chunk_paths: Vec::new(),
-                count: 0,
-                point_emit: PointEmitScratch::new(),
-                line_emit: LineEmitScratch::new(),
-                multipolygon_emit: MultipolygonEmitScratch::new(),
-                simp_scratch: geometry::SimplifyMultiScratch::new(),
-                compression: chunk_compression,
-                fanout: FanoutStats::new(),
-            },
-            |mut acc, rel| {
+            || RelAcc::new(chunk_compression),
+            |mut acc, (rel, rel_bytes)| {
                 let before = acc.sink.records.len();
                 process_prepared_relation_into(
                     rel,
@@ -225,6 +261,7 @@ pub(super) fn flush_rel_batch(
                     acc.fanout.record_cap(layer, zoom, tiles, oid);
                 }
                 acc.multipolygon_emit.cap_events.clear();
+                inflight_bytes.fetch_sub(rel_bytes, Ordering::Relaxed);
                 acc.bytes = acc.sink.bytes();
                 if acc.bytes >= chunk_size {
                     acc.flush(&chunk_dir, &chunk_id);
@@ -232,21 +269,10 @@ pub(super) fn flush_rel_batch(
                 acc
             },
         )
-        // Don't flush in .map() - collect remaining records back for sort_writer
+        // Don't flush in reduce - collect remaining records back for sort_writer
         // to avoid creating many tiny chunk files (one per rayon accumulator).
         .reduce(
-            || RelAcc {
-                sink: RecordSink::new(),
-                bytes: 0,
-                chunk_paths: Vec::new(),
-                count: 0,
-                point_emit: PointEmitScratch::new(),
-                line_emit: LineEmitScratch::new(),
-                multipolygon_emit: MultipolygonEmitScratch::new(),
-                simp_scratch: geometry::SimplifyMultiScratch::new(),
-                compression: chunk_compression,
-                fanout: FanoutStats::new(),
-            },
+            || RelAcc::new(chunk_compression),
             |mut a, mut b| {
                 a.chunk_paths.extend(b.chunk_paths);
                 a.count += b.count;
@@ -284,7 +310,11 @@ pub(super) fn flush_rel_batch(
             })
             .expect("sort push failed");
     }
-    count
+    RelationTail {
+        rel_count: rel_count.into_inner(),
+        features: count,
+        max_inflight_bytes: max_inflight_bytes.into_inner(),
+    }
 }
 
 /// Process a prepared relation's geometry into an external buffer (CPU-bound).

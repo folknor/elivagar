@@ -30,7 +30,6 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--locations-on-ways` | PBF has node coordinates embedded in ways |
 | `--sort-budget size` | Sort chunk memory budget (default: 1G, min: 64M). Accepts `256M`, `1G`, or raw bytes |
 | `--way-budget size` | In-flight way processing budget (default: 128M standard / 256M with `--locations-on-ways`, min: 1M) |
-| `--rel-budget size` | Relation batch accumulation budget (default: 64M, min: 1M) |
 | `--assemble-budget size` | Tile assembly batch budget (default: 32M, min: 1M) |
 | `--tile-format mvt\|mlt` | Tile payload format (default: `mvt`). `mlt` is wired but not yet implemented |
 | `--tile-compression gzip\|brotli` | Tile compression algorithm (default: `gzip`, MVT only) |

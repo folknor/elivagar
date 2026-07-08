@@ -104,7 +104,7 @@ pub(super) struct Phase12Stats {
     pub(super) rel_count: u64,
     pub(super) node_store_stats: Option<(u64, usize)>,
     pub(super) max_way_inflight_bytes: usize,
-    pub(super) max_rel_batch_bytes: usize,
+    pub(super) max_rel_inflight_bytes: usize,
     pub(super) relation_blocks_buffered: usize,
     pub(super) relation_blocks_bytes: usize,
     pub(super) relation_plan_needed_ways: usize,

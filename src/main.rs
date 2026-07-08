@@ -113,10 +113,6 @@ struct RunArgs {
     #[arg(long, value_parser = parse_byte_size_min_1m)]
     way_budget: Option<usize>,
 
-    /// Relation batch accumulation budget (e.g. 64M). Minimum 1M.
-    #[arg(long, value_parser = parse_byte_size_min_1m)]
-    rel_budget: Option<usize>,
-
     /// Tile assembly batch budget (e.g. 32M). Minimum 1M.
     #[arg(long, value_parser = parse_byte_size_min_1m)]
     assemble_budget: Option<usize>,
@@ -772,7 +768,6 @@ fn run(args: RunArgs) {
         allow_unsafe_flat_index,
         threads,
         way_inflight_budget: args.way_budget.unwrap_or(0),
-        rel_batch_budget: args.rel_budget.unwrap_or(0),
         assemble_batch_budget: args.assemble_budget.unwrap_or(0),
         sort_chunk_size: args.sort_budget.unwrap_or(0),
         locations_on_ways: args.locations_on_ways,
