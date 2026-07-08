@@ -122,6 +122,12 @@ What elivagar emits:
   belongs in the counter channel - a per-event marker would flood the phase
   views. brokkr's `--stalls` rolls up every `*_wait_ns` counter (max per name,
   since they are cumulative) as a fraction of wall.
+- `phase12_*_ns` serial-actor busy counters (`src/debug.rs`: the `BUSY` static,
+  same `wait_span` guard, flushed by the same `emit_wait_counters()`). Busy
+  time on phase12's serial actors - ordered consumer node/way-count work,
+  worker-thread plan build, drain-thread result handling, relation tail. The
+  `_ns`-without-`_wait` suffix keeps them out of `--stalls`; paired with the
+  wait counters they split each serial actor into busy vs blocked.
 - `mi_commit_<boundary>` / `mi_peak_commit_<boundary>` at each phase boundary:
   mimalloc's committed bytes via `mi_process_info` (libmimalloc-sys `extended`
   feature). We used to read glibc `mallinfo2` here, but under the mimalloc global
@@ -239,7 +245,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `ocean.rs` - ocean shapefile processing (mmap reader + scanline fill + quantize-early integer boolean clipping; no S-H, no LandMask)
 
 **Infrastructure:**
-- `sort.rs` - external merge sort (gzip-compressed chunk files, k-way merge via binary heap)
+- `sort.rs` - external sort partitioned by Hilbert tile-id range at write time (z6-calibrated partitions; chunk files uncompressed by default, LZ4/Snappy via `--compress-sort-chunks`; per-partition k-way merge via binary heap, consumed lazily by the assemble partition readers)
 - `pmtiles_writer.rs` - PMTiles v3 writer with Hilbert tile IDs
 - `inspect.rs` - PMTiles v3 archive inspector (header + metadata reader)
 - `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG)
@@ -249,10 +255,10 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 ### Pipeline phases
 
 Sequential, same PBF input:
-- **phase12**: PBF read + OSM feature emission → sort chunks + checkpoint
+- **phase12**: PBF read + OSM feature emission → partitioned sort chunks + checkpoint
 - **ocean**: shapefile read + ocean feature emission → more sort chunks
-- **sort**: external merge sort all chunks
-- **assemble**: MVT encode + gzip + PMTiles write
+- **sort**: partition bookkeeping only (near-zero; the merge is deferred)
+- **assemble**: streamed per-partition merge → MVT encode + gzip + PMTiles write (parallel partition readers; merge/decompress cost lands in `assemble_reader_ns`)
 
 `--skip-to ocean` reuses PBF chunks from a previous full run.
 `--skip-to sort` reuses all chunks (PBF + ocean).

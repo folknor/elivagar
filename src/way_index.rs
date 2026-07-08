@@ -482,8 +482,13 @@ impl WayIndex {
         // SAFETY: file is written and flushed above, no other process modifies it.
         self.data_mmap = Some(unsafe { Mmap::map(&data_file)? });
 
-        let data_mb = self.data_mmap.as_ref().map_or(0, |m| m.len()) as f64 / (1024.0 * 1024.0);
-        let index_mb = (self.entry_count * OFFSET_ENTRY_SIZE) as f64 / (1024.0 * 1024.0);
+        let data_bytes = self.data_mmap.as_ref().map_or(0, |m| m.len());
+        let index_bytes = self.entry_count * OFFSET_ENTRY_SIZE;
+        crate::debug::emit_counter_u64("way_index_ways", self.way_count);
+        crate::debug::emit_counter_usize("way_index_data_bytes", data_bytes);
+        crate::debug::emit_counter_usize("way_index_index_bytes", index_bytes);
+        let data_mb = data_bytes as f64 / (1024.0 * 1024.0);
+        let index_mb = index_bytes as f64 / (1024.0 * 1024.0);
         eprintln!(
             "  Way index: {} ways, {data_mb:.1} MB compressed data, {index_mb:.1} MB index (mmap'd)",
             self.way_count

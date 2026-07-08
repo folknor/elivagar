@@ -415,12 +415,25 @@ impl PmtilesWriter {
     /// Returns `io::Error` if file creation, directory encoding, or data copy fails.
     #[hotpath::measure]
     pub fn write_to(&mut self, path: &Path) -> io::Result<()> {
+        // RAM-ledger snapshot of the dedup map at its final (largest) size,
+        // taken before it is dropped. The byte figure is an estimate: bucket
+        // entries are 24-byte (u64, u32, u64) tuples plus per-bucket Vec
+        // headers and the map's own table, dominated by the entry payload.
+        crate::debug::emit_counter_usize("pmtiles_dedup_entries", self.dedup_count);
+        let dedup_bytes_est = self.dedup_count * std::mem::size_of::<(u64, u32, u64)>()
+            + self.dedup.len()
+                * (std::mem::size_of::<u64>() + std::mem::size_of::<Vec<(u64, u32, u64)>>());
+        crate::debug::emit_counter_usize("pmtiles_dedup_bytes_est", dedup_bytes_est);
+
         // Free dedup map - no longer needed after all tiles are added.
         drop(std::mem::take(&mut self.dedup));
 
         // Build directories: streaming mode reads entries from temp file in
         // LEAF_SIZE chunks (O(1) memory), in-memory mode collects all entries.
         let (root_bytes, leaf_bytes, num_entries) = self.finalize_directories()?;
+        crate::debug::emit_counter_u64("pmtiles_dir_entries", num_entries);
+        crate::debug::emit_counter_usize("pmtiles_root_dir_bytes", root_bytes.len());
+        crate::debug::emit_counter_usize("pmtiles_leaf_dirs_bytes", leaf_bytes.len());
         let metadata_json = build_metadata(
             &self.config,
             self.tile_data_format,

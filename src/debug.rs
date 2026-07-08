@@ -53,12 +53,12 @@ pub fn emit_counter_usize(name: &str, value: usize) {
 // that bury the handful of real phase boundaries. Counters have no such
 // coupling; a stall category is just one more name in the counter stream.
 
-macro_rules! wait_counters {
-    ($($field:ident => $name:literal),* $(,)?) => {
-        pub struct WaitCounters {
+macro_rules! counter_group {
+    ($struct_name:ident { $($field:ident => $name:literal),* $(,)? }) => {
+        pub struct $struct_name {
             $(pub $field: AtomicU64,)*
         }
-        impl WaitCounters {
+        impl $struct_name {
             const fn new() -> Self {
                 Self { $($field: AtomicU64::new(0),)* }
             }
@@ -74,7 +74,7 @@ macro_rules! wait_counters {
     };
 }
 
-wait_counters! {
+counter_group!(WaitCounters {
     sort_chunk_write => "sort_chunk_write_wait_ns",
     sort_flush => "sort_flush_wait_ns",
     sort_open => "sort_open_wait_ns",
@@ -87,16 +87,43 @@ wait_counters! {
     assemble_reader_join => "assemble_reader_join_wait_ns",
     assemble_writer_join => "assemble_writer_join_wait_ns",
     pmtiles_write => "pmtiles_write_wait_ns",
-}
+    way_block_send => "way_block_send_wait_ns",
+    way_budget => "way_budget_wait_ns",
+    way_result_send => "way_result_send_wait_ns",
+    prepass_join => "prepass_join_wait_ns",
+});
+
+// Busy time on the serial actors of phase12: the pbfhogg ordered consumer
+// (node-block processing, way counting), the way worker's serial plan build,
+// the drain thread's result handling, and the buffered-relation tail. These
+// are NOT stalls - the `_ns` suffix without `_wait` keeps them out of the
+// `--stalls` rollup. Together with the wait counters above and pbfhogg's
+// pipeline_decoded_recv/send waits they split phase12's serial actors into
+// busy vs blocked: the falsification kit for the ordered-drain-removal
+// hypothesis (a serial actor whose busy fraction is low is not the choke).
+counter_group!(BusyCounters {
+    phase12_node_blocks => "phase12_node_blocks_ns",
+    phase12_way_count => "phase12_way_count_ns",
+    phase12_plan_build => "phase12_plan_build_ns",
+    phase12_drain => "phase12_drain_ns",
+    phase12_relation_tail => "phase12_relation_tail_ns",
+});
 
 /// Process-global stall accumulators. There is one tilegen run per process, so
 /// static zero-init is correct and nothing resets between runs.
 pub static WAIT: WaitCounters = WaitCounters::new();
 
-/// Flush the accumulated stall totals to the sidecar as `<category>_wait_ns`.
-/// Call once at end of run; a no-op per counter when nothing blocked.
+/// Process-global serial-actor busy-time accumulators; same lifecycle as
+/// [`WAIT`]. Timed with the same [`wait_span`] RAII guard - the guard is just
+/// an interval accumulator; whether the interval is a stall or busy work is
+/// decided by which counter it feeds.
+pub static BUSY: BusyCounters = BusyCounters::new();
+
+/// Flush the accumulated stall and busy totals to the sidecar. Call once at
+/// end of run; a no-op per counter when nothing accumulated.
 pub fn emit_wait_counters() {
     WAIT.emit();
+    BUSY.emit();
 }
 
 /// RAII guard timing one blocking interval. On drop it adds the elapsed

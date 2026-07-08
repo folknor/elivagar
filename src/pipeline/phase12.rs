@@ -1,6 +1,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::debug::{BUSY, WAIT, wait_span};
 use crate::geometry::{self, MercBbox, Point, merc_bbox};
 use crate::mvt::{self, GeomType};
 use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
@@ -197,6 +198,12 @@ pub(super) fn phase_read_and_process(
     let way_hwm = std::sync::Arc::new(AtomicUsize::new(0));
     let mut rel_batch_bytes: usize = 0;
     let mut max_rel_batch_bytes: usize = 0;
+    // RAM-ledger sizes of the planet-scaling structures phase12 holds:
+    // buffered relation blocks (decompressed bytes), the relation plan's
+    // member-way set, and the global shared-node pin set.
+    let mut relation_blocks_bytes: usize = 0;
+    let mut relation_plan_needed_ways: usize = 0;
+    let mut global_shared_nodes: usize = 0;
 
     // Reusable buffer hoisted out of the PBF closure to avoid per-element
     // allocation (~200M allocs at planet scale). Cleared each iteration.
@@ -280,7 +287,10 @@ pub(super) fn phase_read_and_process(
         // no element decoding. Sorted PBFs have single-type blocks.
         match block.block_type() {
             BlockType::DenseNodes | BlockType::Nodes => {
-                // Node block - process inline
+                // Node block - process inline. This runs on the ordered pbfhogg
+                // consumer thread: its busy time is what decode workers stall
+                // behind (pipeline_decoded_send), so it is timed per block.
+                let _busy = wait_span(&BUSY.phase12_node_blocks);
                 block.for_each_element(|element| match element {
                     Element::DenseNode(node) => handle_node!(node),
                     Element::Node(node) => handle_node!(node),
@@ -290,10 +300,13 @@ pub(super) fn phase_read_and_process(
             BlockType::Ways => {
                 // Way block - send entire block to worker thread.
                 // Count ways from block (elements() re-parses from bytes, cheap).
-                way_count += block
-                    .elements()
-                    .filter(|e| matches!(e, Element::Way(_)))
-                    .count() as u64;
+                {
+                    let _busy = wait_span(&BUSY.phase12_way_count);
+                    way_count += block
+                        .elements()
+                        .filter(|e| matches!(e, Element::Way(_)))
+                        .count() as u64;
+                }
 
                 // Spawn worker + drain threads on first way block
                 if block_tx.is_none() {
@@ -347,7 +360,9 @@ pub(super) fn phase_read_and_process(
                     // claim the same chunk_NNNN.bin.
                     let drain_chunk_id = std::sync::Arc::clone(&way_chunk_id);
                     // First point where the shared-node set is needed: join
-                    // the prepass thread spawned before the node phase.
+                    // the prepass thread spawned before the node phase. The
+                    // joins block the ordered consumer, so they are stall time.
+                    let prepass_join_guard = wait_span(&WAIT.prepass_join);
                     let gsn: std::sync::Arc<FxHashSet<i64>> =
                         if let Some(handle) = prepass_handle.take() {
                             std::sync::Arc::new(handle.join().map_err(|_| {
@@ -365,6 +380,9 @@ pub(super) fn phase_read_and_process(
                                 PipelineError("relation prepass thread panicked".to_string())
                             })??,
                     );
+                    drop(prepass_join_guard);
+                    global_shared_nodes = gsn.len();
+                    relation_plan_needed_ways = relation_plan.needed_ways.len();
                     let relation_plan_clone = std::sync::Arc::clone(&relation_plan);
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. Byte-budgeted in-flight control
@@ -396,15 +414,18 @@ pub(super) fn phase_read_and_process(
                         let cvar_ref = &inflight_cvar;
                         rayon::in_place_scope(|s| {
                             while let Ok(block) = brx.recv() {
+                                let plan_busy = wait_span(&BUSY.phase12_plan_build);
                                 let plans = build_way_plans(&block, &gsn);
                                 let block_bytes =
                                     block.decompressed_size() + estimate_way_plans_bytes(&plans);
+                                drop(plan_busy);
                                 let block_cost = block_bytes * WAY_OUTPUT_MULTIPLIER;
                                 // Wait for capacity: count limit and byte budget.
                                 // Always allow at least one task - a single block that
                                 // exceeds the byte budget must not deadlock the condvar
                                 // (no in-flight tasks → no notify_one → permanent sleep).
                                 {
+                                    let _wait = wait_span(&WAIT.way_budget);
                                     let mut guard = inflight_ref.lock().expect("inflight lock");
                                     guard = inflight_cvar
                                         .wait_while(guard, |&mut (count, bytes)| {
@@ -449,7 +470,13 @@ pub(super) fn phase_read_and_process(
                                         }
                                     }
                                     let result = acc.finish();
-                                    let _ = tx.send(result);
+                                    {
+                                        // Blocked here means the drain thread is the
+                                        // choke - tasks queue behind its result channel
+                                        // while holding a rayon thread.
+                                        let _wait = wait_span(&WAIT.way_result_send);
+                                        let _ = tx.send(result);
+                                    }
                                     let mut guard = inflight_ref.lock().expect("inflight lock");
                                     guard.0 -= 1;
                                     guard.1 -= block_cost;
@@ -472,6 +499,7 @@ pub(super) fn phase_read_and_process(
                         let mut count: u64 = 0;
                         let mut fanout = FanoutStats::new();
                         while let Ok(results) = rrx.recv() {
+                            let _busy = wait_span(&BUSY.phase12_drain);
                             count += drain_way_task_result(results, &mut wi, &mut sw, &mut fanout);
                             ds_drain.check_budgets(&srl_drain);
                         }
@@ -485,6 +513,7 @@ pub(super) fn phase_read_and_process(
                 }
 
                 // send() blocks if worker is still processing previous block (backpressure)
+                let _wait = wait_span(&WAIT.way_block_send);
                 block_tx
                     .as_ref()
                     .expect("worker not initialized")
@@ -496,6 +525,7 @@ pub(super) fn phase_read_and_process(
                 // are consumed. Locations-on-ways PBFs can have way blocks after
                 // relation blocks; processing relations inline would finalize the
                 // way_index too early.
+                relation_blocks_bytes += block.decompressed_size();
                 relation_blocks.push(block);
             }
             BlockType::Empty | BlockType::Mixed => {}
@@ -542,7 +572,11 @@ pub(super) fn phase_read_and_process(
     eprintln!("  Way index finalized, processing relations...");
 
     let relation_blocks_buffered = relation_blocks.len();
-    // Process buffered relation blocks.
+    // Process buffered relation blocks. Serial tail of phase12: prepare +
+    // batch + flush all run on this thread (flush_rel_batch fans out
+    // internally via rayon, which this span deliberately includes - it is
+    // wall time appended to the phase either way).
+    let relation_tail_busy = wait_span(&BUSY.phase12_relation_tail);
     for block in &relation_blocks {
         block.for_each_element(|element| {
             if let Element::Relation(rel) = element {
@@ -605,6 +639,7 @@ pub(super) fn phase_read_and_process(
         );
         deferral_stats.check_budgets(&config.seam_reconcile_layers);
     }
+    drop(relation_tail_busy);
 
     // Drop way_index to release compressed data + index memory before
     // ocean/sort/assemble phases.
@@ -673,6 +708,9 @@ pub(super) fn phase_read_and_process(
         max_way_inflight_bytes,
         max_rel_batch_bytes,
         relation_blocks_buffered,
+        relation_blocks_bytes,
+        relation_plan_needed_ways,
+        global_shared_nodes,
         relation_blocks_drop_rss_kb,
         missing_refs: missing_ref_snapshot,
         deferral_stats,
