@@ -1047,8 +1047,11 @@ fn test_merge_reclaims_to_pools() {
     let mut tp: Vec<Vec<(u16, u16)>> = Vec::new();
     layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
 
-    // Secondary features' vecs should be reclaimed into pools
-    assert_eq!(gp.len(), 2); // 2 secondaries reclaimed
+    // Secondary features' vecs are reclaimed into the pools, and the merged
+    // primary's ORIGINAL geometry Vec joins the geom pool too (the merged
+    // stream is copied into a pooled Vec rather than swapped out of scratch,
+    // so the primary's old buffer is freed up for reuse).
+    assert_eq!(gp.len(), 3); // 2 secondaries + the primary's old geometry
     assert_eq!(tp.len(), 2);
 }
 

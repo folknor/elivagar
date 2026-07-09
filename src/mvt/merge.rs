@@ -135,9 +135,18 @@ impl LayerBuilder {
                         &mut cy,
                     );
                 }
-                // Swap merged geometry into first feature
+                // Copy the merged stream into a pooled Vec instead of
+                // donating scratch.geom via swap: the swap left the scratch
+                // to regrow through a doubling-realloc chain on every merged
+                // run (310K runs / 3.8 GB exclusive churn on the denmark
+                // alloc profile). The copy keeps scratch.geom at high-water
+                // capacity forever and pooled destinations warm alongside it.
                 let first = scratch.indices[i];
-                std::mem::swap(&mut self.features[first].geometry, &mut scratch.geom);
+                let mut dest = geom_pool.pop().unwrap_or_default();
+                dest.clear();
+                dest.extend_from_slice(&scratch.geom);
+                let old = std::mem::replace(&mut self.features[first].geometry, dest);
+                geom_pool.push(old);
                 self.features[first].id = None;
                 // Reclaim secondary features' Vecs into pools (mem::take leaves
                 // zero-capacity Vecs so retain can identify dead features).
