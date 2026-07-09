@@ -688,9 +688,29 @@ readers cost ~150 thread-s (k-way merge + lz4 decode) against ~19.2
 avg cores; writer idle (partition_batch wait) is pipeline shape, not
 a defect. Remaining assemble ideas, unpriced: reader/encode overlap
 inside a worker (reader blocks during its rayon encode today),
-split z6 -> z7 partitions (germany's 921 MB max partition is a z6
-prefix artifact; would also shrink claim-window quantum), pmtiles
-write path (7.3% of wall, output target is hdd).
+pmtiles write path (7.3% of wall).
+
+SPLIT Z7 LANDED same day: PARTITION_SPLIT_Z 6 -> 7 (z14 partitions go
+from one z6 prefix / 65,536 tile ids to one z7 prefix / 16,384).
+Germany was the proof case: it spans so few z6 prefixes at high zoom
+that one partition encoded 921 MB - a third of total output behind a
+single claim-window slot. At z7: max partition 294 MB, partitions
+234 -> 634, germany assemble 17.0 -> 11.6s (-31%), wall 55.2 -> 49.9s
+(-9.6%) against the same-code z6 baseline (`dbe5f576`), chunks and
+fan-in unchanged, claim wait ~0. NA confirmation run pending
+(partitions 15,442 -> ~60K expected; watch section-table overhead).
+
+BLESSING ROTATION 2026-07-09: the toml blessed (a0fca65) predated the
+intentional output change in aec278c (cross-block node pins made
+optional), so brokkr regress against it ground for 15+ minutes in the
+geometric ocean matcher diffing accepted deltas - the 9e8dce2 archives
+were the de-facto baseline all along, and archive rotation had deleted
+them. Re-blessed from denmark-f3e71b0.pmtiles (verified bit-identical
+to 9e8dce2 twice today) as denmark-c9362c4.pmtiles. Lesson: bless
+IMMEDIATELY after accepting an output-changing landing; the blessed
+entry in brokkr.toml is the only baseline that survives archive
+rotation. z7 denmark gate vs the new blessed: 1,296,996 tiles
+identical, tol 0.
 
 ### H5: Ocean becomes a durable precomputed tile stream
 

@@ -48,11 +48,14 @@ pub fn emit_sort_counters() {
 
 /// Zoom level used to split each zoom block into ordered Hilbert ranges.
 ///
-/// For z14 this makes each partition exactly one z6 Hilbert prefix, or 65,536
+/// For z14 this makes each partition exactly one z7 Hilbert prefix, or 16,384
 /// child tile ids. The previous equal-width split over the whole PMTiles id
 /// space left Germany with one 8 GB hot partition, which erased the assemble
-/// parallelism the partitioned path was meant to expose.
-const PARTITION_SPLIT_Z: u8 = 6;
+/// parallelism the partitioned path was meant to expose. z6 prefixes were
+/// still too coarse for country extracts: germany spans only ~8 z6 prefixes
+/// at z14, and its fattest partition encoded 921 MB - a third of total
+/// output behind one claim-window slot.
+const PARTITION_SPLIT_Z: u8 = 7;
 
 const TILE_ID_BASES: [u64; 16] = {
     let mut bases = [0u64; 16];
@@ -1692,30 +1695,32 @@ mod tests {
     }
 
     #[test]
-    fn partition_from_key_uses_z6_hilbert_prefixes() {
-        assert_eq!(SORT_PARTITIONS, 38_229);
+    fn partition_from_key_uses_split_z_hilbert_prefixes() {
+        assert_eq!(SORT_PARTITIONS, 136_533);
 
+        // One z7 prefix at z14 spans 4^(14-7) = 16,384 child tile ids.
         let z14_base = TILE_ID_BASES[14];
         let first = partition_from_key(make_sort_key(z14_base, 0, 0));
-        let last_same_prefix = partition_from_key(make_sort_key(z14_base + 65_535, 0, 0));
-        let next_prefix = partition_from_key(make_sort_key(z14_base + 65_536, 0, 0));
+        let last_same_prefix = partition_from_key(make_sort_key(z14_base + 16_383, 0, 0));
+        let next_prefix = partition_from_key(make_sort_key(z14_base + 16_384, 0, 0));
         assert_eq!(first, PARTITION_BASES[14]);
         assert_eq!(last_same_prefix, first);
         assert_eq!(next_prefix, first + 1);
         assert_eq!(
             partition_next_key(first),
-            make_sort_key(z14_base + 65_536, 0, 0)
+            make_sort_key(z14_base + 16_384, 0, 0)
         );
-        assert!(make_sort_key(z14_base + 65_535, u8::MAX, u8::MAX) < partition_next_key(first));
+        assert!(make_sort_key(z14_base + 16_383, u8::MAX, u8::MAX) < partition_next_key(first));
 
+        // One z7 prefix at z13 spans 4^(13-7) = 4,096 child tile ids.
         let z13_base = TILE_ID_BASES[13];
         let z13_first = partition_from_key(make_sort_key(z13_base, 0, 0));
-        let z13_next = partition_from_key(make_sort_key(z13_base + 16_384, 0, 0));
+        let z13_next = partition_from_key(make_sort_key(z13_base + 4_096, 0, 0));
         assert_eq!(z13_first, PARTITION_BASES[13]);
         assert_eq!(z13_next, z13_first + 1);
         assert_eq!(
             partition_next_key(z13_first),
-            make_sort_key(z13_base + 16_384, 0, 0)
+            make_sort_key(z13_base + 4_096, 0, 0)
         );
     }
 
