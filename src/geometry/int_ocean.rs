@@ -1,15 +1,13 @@
 use crate::geometry::Point;
+use crate::geometry::overlay::{BoolOverlay, BoolRule, ShapeType};
 use crate::mvt;
 
-use i_overlay::core::fill_rule::FillRule;
-use i_overlay::core::overlay::{ContourDirection, IntOverlayOptions, Overlay, ShapeType};
-use i_overlay::core::overlay_rule::OverlayRule;
-use i_overlay::i_float::int::point::IntPoint;
+pub(crate) use crate::geometry::overlay::IntPoint;
 use std::ops::Range;
 
-pub(crate) type Contour = Vec<IntPoint>;
-pub(crate) type Shape = Vec<Contour>;
-pub(crate) type Shapes = Vec<Shape>;
+pub(crate) type Contour = crate::geometry::overlay::Contour;
+pub(crate) type Shape = crate::geometry::overlay::Shape;
+pub(crate) type Shapes = crate::geometry::overlay::Shapes;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct IntRect {
@@ -29,7 +27,7 @@ pub(crate) struct IntEmitScratch {
     pub tile_ranges: Vec<Range<usize>>,
     pub geom_buf: Vec<u32>,
     pub dp: DpScratch,
-    overlay: Overlay<i32>,
+    overlay: BoolOverlay,
     rect_contour: Contour,
 }
 
@@ -40,9 +38,18 @@ impl IntEmitScratch {
             tile_ranges: Vec::new(),
             geom_buf: Vec::new(),
             dp: DpScratch::default(),
-            overlay: Overlay::new_custom(0, overlay_options(0), Default::default()),
+            overlay: BoolOverlay::new(),
             rect_contour: Vec::with_capacity(4),
         }
+    }
+
+    pub(crate) fn recycle_shapes(&mut self, shapes: &mut Shapes) {
+        self.overlay.recycle(shapes);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn recycle_shape(&mut self, shape: &mut Shape) {
+        self.overlay.recycle_shape(shape);
     }
 }
 
@@ -312,34 +319,27 @@ pub(crate) fn normalize_into(
     min_area: u64,
     out: &mut Shapes,
 ) {
-    out.clear();
+    scratch.overlay.recycle(out);
     if shape.is_empty() {
         return;
     }
-    scratch.overlay.options = overlay_options(min_area);
-    let mut shapes = if shape.len() == 1 {
-        match scratch
-            .overlay
-            .simplify_contour(&shape[0], FillRule::NonZero)
-        {
-            Some(shapes) => shapes,
-            None => {
-                clean_shape_in_place(&mut shape, min_area);
-                if shape.first().is_some_and(|outer| outer.len() >= 3) {
-                    out.push(shape);
-                }
-                return;
-            }
+    scratch.overlay.min_output_area = min_area;
+    if shape.len() == 1 {
+        if scratch.overlay.simplify_contour_into(&shape[0], out) {
+            clean_shapes_in_place(out, min_area);
+            return;
         }
-    } else {
-        scratch.overlay.clear();
-        scratch.overlay.add_shape(&shape, ShapeType::Subject);
-        scratch
-            .overlay
-            .overlay(OverlayRule::Subject, FillRule::NonZero)
-    };
-    clean_shapes_in_place(&mut shapes, min_area);
-    out.append(&mut shapes);
+        clean_shape_in_place(&mut shape, min_area);
+        if shape.first().is_some_and(|outer| outer.len() >= 3) {
+            out.push(shape);
+        }
+        return;
+    }
+
+    scratch.overlay.clear();
+    scratch.overlay.add_shape(&shape, ShapeType::Subject);
+    scratch.overlay.overlay_nested(BoolRule::Subject, out);
+    clean_shapes_in_place(out, min_area);
 }
 
 #[cfg(test)]
@@ -358,23 +358,20 @@ pub(crate) fn intersect_rect_into(
     min_area: u64,
     out: &mut Shapes,
 ) {
-    out.clear();
+    scratch.overlay.recycle(out);
     if shape.is_empty() || rect.min_x >= rect.max_x || rect.min_y >= rect.max_y {
         return;
     }
 
     fill_rect_contour(&mut scratch.rect_contour, rect);
-    scratch.overlay.options = overlay_options(min_area);
+    scratch.overlay.min_output_area = min_area;
     scratch.overlay.clear();
     scratch.overlay.add_shape(shape, ShapeType::Subject);
     scratch
         .overlay
         .add_contour(&scratch.rect_contour, ShapeType::Clip);
-    let mut shapes = scratch
-        .overlay
-        .overlay(OverlayRule::Intersect, FillRule::NonZero);
-    clean_shapes_in_place(&mut shapes, min_area);
-    out.append(&mut shapes);
+    scratch.overlay.overlay_nested(BoolRule::Intersect, out);
+    clean_shapes_in_place(out, min_area);
 }
 
 #[allow(dead_code)]
@@ -383,14 +380,6 @@ pub(crate) fn point_in_shape(x: i32, y: i32, shape: &Shape) -> bool {
         return false;
     }
     point_in_contour(x, y, &shape[0]) && !shape[1..].iter().any(|hole| point_in_contour(x, y, hole))
-}
-
-fn overlay_options(min_area: u64) -> IntOverlayOptions<u64> {
-    IntOverlayOptions {
-        output_direction: ContourDirection::CounterClockwise,
-        min_output_area: min_area,
-        ..Default::default()
-    }
 }
 
 fn fill_rect_contour(out: &mut Contour, rect: IntRect) {
@@ -866,7 +855,7 @@ fn rect_intersection(a: IntRect, b: IntRect) -> Option<IntRect> {
 }
 
 pub(crate) fn encode_tile_shape(
-    tile_shape: Shape,
+    tile_shape: &Shape,
     tx: u32,
     ty: u32,
     scratch: &mut IntEmitScratch,
@@ -876,12 +865,12 @@ pub(crate) fn encode_tile_shape(
     let oy = tile_origin(ty);
     scratch.tile_points.clear();
     scratch.tile_ranges.clear();
-    for (i, contour) in tile_shape.into_iter().enumerate() {
+    for (i, contour) in tile_shape.iter().enumerate() {
         if contour.len() < 3 {
             continue;
         }
         append_translated_ring(
-            &contour,
+            contour,
             ox,
             oy,
             i == 0,

@@ -61,6 +61,8 @@
 //! clustered PMTiles v3 archives with Hilbert-ordered tile IDs and content
 //! deduplication.
 
+extern crate alloc;
+
 pub(crate) mod debug;
 pub(crate) mod geometry;
 pub mod inspect;

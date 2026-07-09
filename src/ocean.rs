@@ -244,7 +244,7 @@ pub(crate) fn process_ocean_shapefile(
 
     let parsed_records: Vec<ParsedOceanRecord> = records
         .par_iter()
-        .map(|&record| {
+        .map_init(IntEmitScratch::new, |scratch, &record| {
             parse_ocean_record(
                 record,
                 &shp_mmap,
@@ -252,6 +252,7 @@ pub(crate) fn process_ocean_shapefile(
                 data_bounds,
                 max_zoom,
                 data_rect,
+                scratch,
             )
         })
         .collect();
@@ -412,6 +413,7 @@ fn parse_ocean_record(
     data_bounds: &MercBbox,
     max_zoom: u8,
     data_rect: IntRect,
+    scratch: &mut IntEmitScratch,
 ) -> ParsedOceanRecord {
     let mut out = ParsedOceanRecord {
         pieces: Vec::new(),
@@ -449,11 +451,6 @@ fn parse_ocean_record(
 
     out.shapes_hit = 1;
 
-    // One scratch suffices: the data-rect clip and the pre-split intersect run
-    // strictly sequentially (never simultaneously), and each i_overlay op clears
-    // the scratch on entry. Two separate scratches doubled the per-record Overlay
-    // allocation for no benefit.
-    let mut scratch = IntEmitScratch::new();
     let source = ShapeRecordSource {
         record,
         rec,
@@ -462,7 +459,7 @@ fn parse_ocean_record(
         header: &header,
     };
     out.source_pieces +=
-        push_shape_record_pieces(&source, &mut scratch, &mut out.pieces, max_zoom, data_rect);
+        push_shape_record_pieces(&source, scratch, &mut out.pieces, max_zoom, data_rect);
 
     out
 }

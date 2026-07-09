@@ -1,9 +1,9 @@
 use crate::geometry::int_ocean::{
-    Contour, DpScratch, IntEmitScratch, IntRect, Shape, Shapes, TILE_BUFFER_I32, TILE_EXTENT_I32,
-    contour_area_is_below, emit_full_tile, encode_tile_shape, intersect_rect_into, normalize_into,
-    point_in_contour, rescale_shape_pinned, shape_bbox, signed_area_2x, simplify_shape_dp,
+    Contour, DpScratch, IntEmitScratch, IntPoint, IntRect, Shape, Shapes, TILE_BUFFER_I32,
+    TILE_EXTENT_I32, contour_area_is_below, emit_full_tile, encode_tile_shape, intersect_rect_into,
+    normalize_into, point_in_contour, rescale_shape_pinned, shape_bbox, signed_area_2x,
+    simplify_shape_dp,
 };
-use i_overlay::i_float::int::point::IntPoint;
 use rustc_hash::FxHashSet;
 
 pub(crate) struct PyramidParams<'a> {
@@ -37,7 +37,7 @@ impl PyramidScratch {
     }
 
     fn return_shapes(&mut self, mut shapes: Shapes) {
-        shapes.clear();
+        self.int.recycle_shapes(&mut shapes);
         self.frag_pool.push(shapes);
     }
 }
@@ -343,7 +343,7 @@ fn emit_cell(
         if dp_tol > 0 && is_convex_single_ring(&shape_z) {
             if !contour_area_is_below(&shape_z[0], min_area) {
                 encode_tile_shape(
-                    shape_z,
+                    &shape_z,
                     cell.tx,
                     cell.ty,
                     &mut scratch.int,
@@ -357,7 +357,7 @@ fn emit_cell(
 
         let mut normalized = scratch.take_shapes();
         normalize_into(&mut scratch.int, shape_z, min_area, &mut normalized);
-        for tile_shape in normalized.drain(..) {
+        for tile_shape in &normalized {
             encode_tile_shape(
                 tile_shape,
                 cell.tx,
@@ -1020,7 +1020,17 @@ mod tests {
     use i_overlay::core::fill_rule::FillRule;
     use i_overlay::core::overlay::{IntOverlayOptions, Overlay, ShapeType};
     use i_overlay::core::overlay_rule::OverlayRule;
+    use i_overlay::i_float::int::point::IntPoint as OraclePoint;
     use std::collections::BTreeMap;
+
+    // The in-tree engine's IntPoint and the dev-dep i_overlay XOR oracle's
+    // IntPoint are now distinct types; convert at the boundary.
+    fn to_oracle_shape(shape: &Shape) -> Vec<Vec<OraclePoint>> {
+        shape
+            .iter()
+            .map(|c| c.iter().map(|q| OraclePoint::new(q.x, q.y)).collect())
+            .collect()
+    }
 
     fn p(x: i32, y: i32) -> IntPoint {
         IntPoint::new(x, y)
@@ -1095,7 +1105,7 @@ mod tests {
                                 );
                             } else {
                                 encode_tile_shape(
-                                    tile_shape,
+                                    &tile_shape,
                                     tx,
                                     ty,
                                     &mut scratch,
@@ -1164,14 +1174,14 @@ mod tests {
         for quad in quads {
             assert!(is_convex_single_ring(&quad));
             let mut fast = Vec::new();
-            encode_tile_shape(quad.clone(), 0, 0, &mut scratch, &mut |_, _, geom| {
+            encode_tile_shape(&quad, 0, 0, &mut scratch, &mut |_, _, geom| {
                 fast.push(geom.to_vec());
             });
 
             let mut normalized = Vec::new();
             normalize_into(&mut scratch, quad, 0, &mut normalized);
             let mut normal = Vec::new();
-            for shape in normalized {
+            for shape in &normalized {
                 encode_tile_shape(shape, 0, 0, &mut scratch, &mut |_, _, geom| {
                     normal.push(geom.to_vec());
                 });
@@ -1544,16 +1554,19 @@ mod tests {
         };
         let mut overlay = Overlay::new_custom(0, options, Default::default());
         for shape in a {
-            overlay.add_shape(shape, ShapeType::Subject);
+            overlay.add_shape(&to_oracle_shape(shape), ShapeType::Subject);
         }
         for shape in b {
-            overlay.add_shape(shape, ShapeType::Clip);
+            overlay.add_shape(&to_oracle_shape(shape), ShapeType::Clip);
         }
         let result = overlay.overlay(OverlayRule::Xor, FillRule::NonZero);
         result
             .iter()
             .flatten()
-            .map(|ring| signed_area_2x(ring).unsigned_abs() / 2)
+            .map(|ring| {
+                let ours: Vec<IntPoint> = ring.iter().map(|q| IntPoint::new(q.x, q.y)).collect();
+                signed_area_2x(&ours).unsigned_abs() / 2
+            })
             .sum()
     }
 
