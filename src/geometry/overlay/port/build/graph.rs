@@ -1,8 +1,8 @@
 use crate::geometry::overlay::port::build::builder::{GraphBuilder, GraphNode};
 use crate::geometry::overlay::port::core::solver::Solver;
 use crate::geometry::overlay::port::geom::end::End;
-use crate::geometry::overlay::port::ksort::sort::two_keys::TwoKeysSort;
 use crate::geometry::overlay::port::segm::winding::WindingCount;
+use crate::geometry::overlay::port::sort::TwoKeysSort;
 use alloc::vec::Vec;
 
 impl<C, N> GraphBuilder<C, N>
@@ -102,7 +102,6 @@ where
             });
         }
         self.ends.sort_by_two_keys_and_buffer(
-            false,
             &mut self.ends_sort_buffer,
             |e| e.point.x,
             |e| e.point.y,

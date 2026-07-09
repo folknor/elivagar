@@ -1,7 +1,6 @@
 use crate::geometry::overlay::port::geom::x_segment::XSegment;
 use crate::geometry::overlay::port::prim::IntPoint;
 use crate::geometry::overlay::port::prim::Triangle;
-use crate::geometry::overlay::port::tree::{Expiration, ExpiredKey};
 use core::cmp::Ordering;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,13 +82,6 @@ impl Ord for VSegment {
     #[inline(always)]
     fn cmp(&self, other: &Self) -> Ordering {
         self.is_under_segment_order(other)
-    }
-}
-
-impl ExpiredKey<i32> for VSegment {
-    #[inline]
-    fn expiration(&self) -> i32 {
-        self.b.x
     }
 }
 

@@ -200,6 +200,38 @@ mod tests {
             port::core::solver::Solver::FRAG,
             OracleSolver::FRAG,
         );
+
+        // Intersect above the 4,000 / 16,000 thresholds, forced-strategy: the
+        // clip is a rect covering part of the dense grid, so the boolean stays
+        // in the tree / fragment split band while exercising the Intersect
+        // link filter and hole binder there (not just Subject).
+        let tree_clip = rect(3, 3, 150, 150);
+        assert_same_intersect_with_solver(
+            &tree_case,
+            &tree_clip,
+            port::core::solver::Solver::AUTO,
+            OracleSolver::AUTO,
+        );
+        assert_same_intersect_with_solver(
+            &tree_case,
+            &tree_clip,
+            port::core::solver::Solver::TREE,
+            OracleSolver::TREE,
+        );
+
+        let frag_clip = rect(3, 3, 180, 180);
+        assert_same_intersect_with_solver(
+            &frag_case,
+            &frag_clip,
+            port::core::solver::Solver::AUTO,
+            OracleSolver::AUTO,
+        );
+        assert_same_intersect_with_solver(
+            &frag_case,
+            &frag_clip,
+            port::core::solver::Solver::FRAG,
+            OracleSolver::FRAG,
+        );
     }
 
     #[test]
@@ -304,6 +336,24 @@ mod tests {
         );
 
         let expected = oracle_overlay(shape, None, OracleRule::Subject, oracle_solver);
+        assert_eq!(actual_out, expected);
+    }
+
+    fn assert_same_intersect_with_solver(
+        shape: &Shape,
+        clip: &Contour,
+        solver: port::core::solver::Solver,
+        oracle_solver: OracleSolver,
+    ) {
+        let mut actual = port::core::overlay::Overlay::new_custom(0, port_options(), solver);
+        actual.add_shape(shape, port::core::overlay::ShapeType::Subject);
+        actual.add_contour(clip, port::core::overlay::ShapeType::Clip);
+        let actual_out = actual.overlay(
+            port::core::overlay_rule::OverlayRule::Intersect,
+            port::core::fill_rule::FillRule::NonZero,
+        );
+
+        let expected = oracle_overlay(shape, Some(clip), OracleRule::Intersect, oracle_solver);
         assert_eq!(actual_out, expected);
     }
 

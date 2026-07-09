@@ -1,34 +1,237 @@
-use crate::geometry::overlay::port::tree::key::entity::Entity;
-use crate::geometry::overlay::port::tree::key::exp::KeyExpCollection;
-use crate::geometry::overlay::port::tree::key::node::{Color, Node};
-use crate::geometry::overlay::port::tree::key::pool::Pool;
-use crate::geometry::overlay::port::tree::{EMPTY_REF, Expiration, ExpiredKey};
-use core::cmp::Ordering;
-use core::marker::PhantomData;
+//! Sweep-line scan structures, collapsed and monomorphized from i_tree 0.19.0.
+//!
+//! Upstream is a multi-file generic crate (key trees over any `ExpiredKey` /
+//! `Expiration`, plus a segment tree). The overlay engine instantiates the key
+//! structures only at key = `VSegment`, expiration = i32 (the segment's right
+//! x), so this consolidates the used surface - the ordered `KeyExpList` and the
+//! red-black `KeyExpTree`, both keyed by VSegment with i32 expiration and
+//! generic over the stored value - into one module, fixing those two axes and
+//! dropping the unused segment tree (the tree-split keeps its own inlined
+//! layout in `solver_tree`). The list search and the red-black balancing are
+//! byte-for-byte the upstream algorithm; the pristine reference stays under
+//! `research/i_tree`.
 
-pub struct KeyExpTree<K, E, V> {
-    pub(super) store: Pool<K, E, V>,
-    pub(super) root: u32,
-    phantom_data: PhantomData<E>,
+use crate::geometry::overlay::port::geom::v_segment::VSegment;
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+
+const EMPTY_REF: u32 = u32::MAX;
+
+/// A scan structure keyed by `VSegment` with i32 expiration (the segment's
+/// right x), storing a `Copy` value per key. Both the ordered-list and the
+/// red-black-tree implementations satisfy it.
+pub(crate) trait KeyExpCollection<V> {
+    fn insert(&mut self, key: VSegment, val: V, time: i32);
+    fn first_less(&mut self, time: i32, default: V, key: VSegment) -> V;
+    fn first_less_or_equal_by<F>(&mut self, time: i32, default: V, f: F) -> V
+    where
+        F: Fn(VSegment) -> Ordering;
+    fn clear(&mut self);
+}
+
+#[derive(Clone, Copy)]
+struct Entity<V> {
+    key: VSegment,
+    val: V,
+}
+
+// --- ordered list (i_tree key/list.rs) --------------------------------------
+
+pub(crate) struct KeyExpList<V> {
+    buffer: Vec<Entity<V>>,
+    min_exp: i32,
+}
+
+impl<V: Copy> KeyExpList<V> {
+    #[inline(always)]
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            buffer: Vec::with_capacity(capacity),
+            min_exp: i32::MAX,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn reserve_capacity(&mut self, capacity: usize) {
+        let additional = capacity.saturating_sub(self.buffer.capacity());
+        if additional > 0 {
+            self.buffer.reserve(additional);
+        }
+    }
+
+    #[inline]
+    fn clear_expired(&mut self, time: i32) {
+        if self.min_exp > time {
+            return;
+        }
+        let mut new_min_exp = i32::MAX;
+        self.buffer.retain(|s| {
+            let exp = s.key.b.x;
+            let keep = exp > time;
+            if keep {
+                new_min_exp = new_min_exp.min(exp);
+            }
+            keep
+        });
+        self.min_exp = new_min_exp;
+    }
+}
+
+impl<V: Copy> KeyExpCollection<V> for KeyExpList<V> {
+    #[inline]
+    fn insert(&mut self, key: VSegment, val: V, time: i32) {
+        self.clear_expired(time);
+        self.min_exp = self.min_exp.min(key.b.x);
+        let index = self
+            .buffer
+            .binary_search_by_key(&key, |e| e.key)
+            .unwrap_or_else(|index| index);
+        self.buffer.insert(index, Entity { key, val });
+    }
+
+    #[inline]
+    fn first_less(&mut self, time: i32, default: V, key: VSegment) -> V {
+        self.clear_expired(time);
+        let index = self
+            .buffer
+            .binary_search_by(|e| e.key.cmp(&key))
+            .unwrap_or_else(|index| index);
+
+        if index > 0 {
+            unsafe { self.buffer.get_unchecked(index - 1) }.val
+        } else {
+            default
+        }
+    }
+
+    #[inline]
+    fn first_less_or_equal_by<F>(&mut self, time: i32, default: V, f: F) -> V
+    where
+        F: Fn(VSegment) -> Ordering,
+    {
+        self.clear_expired(time);
+        match self.buffer.binary_search_by(|e| f(e.key)) {
+            Ok(index) => unsafe { self.buffer.get_unchecked(index) }.val,
+            Err(index) => {
+                if index > 0 {
+                    unsafe { self.buffer.get_unchecked(index - 1) }.val
+                } else {
+                    default
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.min_exp = i32::MAX;
+        self.buffer.clear();
+    }
+}
+
+// --- red-black tree (i_tree key/{tree,node,pool}.rs) ------------------------
+
+#[derive(PartialEq, Clone, Copy)]
+enum Color {
+    Red,
+    Black,
+}
+
+#[derive(Clone, Copy)]
+struct Node<V> {
+    parent: u32,
+    left: u32,
+    right: u32,
+    color: Color,
+    entity: Entity<V>,
+}
+
+impl<V: Copy> Node<V> {
+    #[inline(always)]
+    fn is_not_expired(&self, time: i32) -> bool {
+        self.entity.key.b.x > time
+    }
+}
+
+impl<V: Copy> Default for Node<V> {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            parent: 0,
+            left: 0,
+            right: 0,
+            color: Color::Red,
+            entity: unsafe { core::mem::zeroed() },
+        }
+    }
+}
+
+struct Pool<V> {
+    buffer: Vec<Node<V>>,
+    unused: Vec<u32>,
+}
+
+impl<V: Copy> Pool<V> {
+    #[inline(always)]
+    fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(8);
+        let mut store = Self {
+            buffer: Vec::with_capacity(capacity),
+            unused: Vec::with_capacity(capacity),
+        };
+        store.reserve(capacity);
+        store
+    }
+
+    #[inline]
+    fn reserve(&mut self, additional: usize) {
+        debug_assert!(additional > 0);
+        let n = self.buffer.len() as u32;
+        let l = additional as u32;
+        self.buffer.reserve(additional);
+        self.buffer
+            .resize(self.buffer.len() + additional, Node::default());
+        self.unused.reserve(additional);
+        self.unused.extend((n..n + l).rev());
+    }
+
+    #[inline(always)]
+    fn get_free_index(&mut self) -> u32 {
+        if self.unused.is_empty() {
+            self.reserve(self.unused.capacity());
+        }
+        self.unused
+            .pop()
+            .expect("pool reserve guarantees a free index")
+    }
+
+    #[inline(always)]
+    fn put_back(&mut self, index: u32) {
+        self.unused.push(index)
+    }
+}
+
+pub(crate) struct KeyExpTree<V> {
+    store: Pool<V>,
+    root: u32,
 }
 
 const NIL_INDEX: u32 = 0;
 
-impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
+impl<V: Copy> KeyExpTree<V> {
     #[inline]
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         let mut store = Pool::new(capacity);
         let nil_index = store.get_free_index();
         assert_eq!(nil_index, NIL_INDEX);
         Self {
             store,
             root: EMPTY_REF,
-            phantom_data: Default::default(),
         }
     }
 
     #[inline]
-    pub fn reserve_capacity(&mut self, capacity: usize) {
+    pub(crate) fn reserve_capacity(&mut self, capacity: usize) {
         let additional = capacity.saturating_sub(self.store.buffer.capacity());
         if additional > 0 {
             self.store.reserve(additional)
@@ -36,22 +239,22 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 }
 
-impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpCollection<K, E, V> for KeyExpTree<K, E, V> {
+impl<V: Copy> KeyExpCollection<V> for KeyExpTree<V> {
     #[inline(always)]
-    fn insert(&mut self, key: K, val: V, time: E) {
-        debug_assert!(key.expiration() >= time, "The value is already expired");
-        self.insert_entity(Entity::new(key, val), time);
+    fn insert(&mut self, key: VSegment, val: V, time: i32) {
+        debug_assert!(key.b.x >= time, "The value is already expired");
+        self.insert_entity(Entity { key, val }, time);
     }
 
     #[inline]
-    fn first_less(&mut self, time: E, default: V, key: K) -> V {
+    fn first_less(&mut self, time: i32, default: V, key: VSegment) -> V {
         self.search_first_less(time, default, key)
     }
 
     #[inline]
-    fn first_less_or_equal_by<F>(&mut self, time: E, default: V, f: F) -> V
+    fn first_less_or_equal_by<F>(&mut self, time: i32, default: V, f: F) -> V
     where
-        F: Fn(K) -> Ordering,
+        F: Fn(VSegment) -> Ordering,
     {
         self.search_first_less_or_equal_by(time, default, f)
     }
@@ -85,24 +288,24 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpCollection<K, E, V> for Key
     }
 }
 
-impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
+impl<V: Copy> KeyExpTree<V> {
     #[inline(always)]
     fn is_black(&self, index: u32) -> bool {
         index == EMPTY_REF || self.node(index).color == Color::Black
     }
 
     #[inline(always)]
-    pub(super) fn node(&self, index: u32) -> &Node<K, E, V> {
+    fn node(&self, index: u32) -> &Node<V> {
         unsafe { self.store.buffer.get_unchecked(index as usize) }
     }
 
     #[inline(always)]
-    pub(super) fn node_mut(&mut self, index: u32) -> &mut Node<K, E, V> {
+    fn node_mut(&mut self, index: u32) -> &mut Node<V> {
         unsafe { self.store.buffer.get_unchecked_mut(index as usize) }
     }
 
     #[inline]
-    pub(super) fn expire_root(&mut self, time: E) -> u32 {
+    fn expire_root(&mut self, time: i32) -> u32 {
         let mut index = self.root;
 
         while index != EMPTY_REF {
@@ -117,7 +320,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     #[inline]
-    pub(super) fn expire_left(&mut self, n_index: u32, time: E) -> u32 {
+    fn expire_left(&mut self, n_index: u32, time: i32) -> u32 {
         let mut index = self.node(n_index).left;
 
         while index != EMPTY_REF {
@@ -132,7 +335,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     #[inline]
-    pub(super) fn expire_right(&mut self, n_index: u32, time: E) -> u32 {
+    fn expire_right(&mut self, n_index: u32, time: i32) -> u32 {
         let mut index = self.node(n_index).right;
 
         while index != EMPTY_REF {
@@ -156,7 +359,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     #[inline]
-    fn insert_root(&mut self, entity: Entity<K, E, V>) {
+    fn insert_root(&mut self, entity: Entity<V>) {
         let new_index = self.store.get_free_index();
         let new_node = self.node_mut(new_index);
         new_node.parent = EMPTY_REF;
@@ -168,7 +371,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     #[inline]
-    fn search_first_less(&mut self, time: E, default: V, key: K) -> V {
+    fn search_first_less(&mut self, time: i32, default: V, key: VSegment) -> V {
         let mut index = self.expire_root(time);
         let mut result = default;
         while index != EMPTY_REF {
@@ -186,9 +389,9 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     #[inline]
-    fn search_first_less_or_equal_by<F>(&mut self, time: E, default: V, f: F) -> V
+    fn search_first_less_or_equal_by<F>(&mut self, time: i32, default: V, f: F) -> V
     where
-        F: Fn(K) -> Ordering,
+        F: Fn(VSegment) -> Ordering,
     {
         let mut index = self.expire_root(time);
         let mut result = default;
@@ -208,7 +411,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     #[inline]
-    fn insert_entity(&mut self, entity: Entity<K, E, V>, time: E) {
+    fn insert_entity(&mut self, entity: Entity<V>, time: i32) {
         let mut index = self.expire_root(time);
         if index == EMPTY_REF {
             self.insert_root(entity);
@@ -236,7 +439,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     #[inline]
-    fn insert_new(&mut self, entity: Entity<K, E, V>, p_index: u32) -> u32 {
+    fn insert_new(&mut self, entity: Entity<V>, p_index: u32) -> u32 {
         let new_index = self.store.get_free_index();
         let new_node = self.node_mut(new_index);
         new_node.parent = p_index;
@@ -249,7 +452,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     #[inline]
-    fn insert_as_left(&mut self, entity: Entity<K, E, V>, p_index: u32) {
+    fn insert_as_left(&mut self, entity: Entity<V>, p_index: u32) {
         let new_index = self.insert_new(entity, p_index);
 
         let parent = self.node_mut(p_index);
@@ -261,7 +464,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     #[inline]
-    fn insert_as_right(&mut self, entity: Entity<K, E, V>, p_index: u32) {
+    fn insert_as_right(&mut self, entity: Entity<V>, p_index: u32) {
         let new_index = self.insert_new(entity, p_index);
 
         let parent = self.node_mut(p_index);
@@ -275,14 +478,8 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     fn fix_red_black_properties_after_insert(&mut self, n_index: u32, p_origin: u32) {
         // parent is red!
         let mut p_index = p_origin;
-        // Case 2:
-        // Not having a grandparent means that parent is the root. If we enforce black roots
-        // (rule 2), grandparent will never be null, and the following if-then block can be
-        // removed.
         let g_index = self.node(p_index).parent;
         if g_index == EMPTY_REF {
-            // As this method is only called on red nodes (either on newly inserted ones - or -
-            // recursively on red grandparents), all we have to do is to recolor the root black.
             self.node_mut(p_index).color = Color::Black;
             return;
         }
@@ -295,44 +492,26 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
             self.node_mut(g_index).color = Color::Red;
             self.node_mut(u_index).color = Color::Black;
 
-            // Call recursively for grandparent, which is now red.
-            // It might be root or have a red parent, in which case we need to fix more...
             let gg_index = self.node(g_index).parent;
             if gg_index != EMPTY_REF && self.node(gg_index).color == Color::Red {
                 self.fix_red_black_properties_after_insert(g_index, gg_index);
             }
         } else if p_index == self.node(g_index).left {
             // Parent is left child of grandparent
-            // Case 4a: Uncle is black and node is left->right "inner child" of its grandparent
             if n_index == self.node(p_index).right {
                 self.rotate_left(p_index);
-
-                // Let "parent" point to the new root node of the rotated subtree.
-                // It will be recolored in the next step, which we're going to fall-through to.
                 p_index = n_index;
             }
-
-            // Case 5a: Uncle is black and node is left->left "outer child" of its grandparent
             self.rotate_right(g_index);
-
-            // Recolor original parent and grandparent
             self.node_mut(p_index).color = Color::Black;
             self.node_mut(g_index).color = Color::Red;
         } else {
             // Parent is right child of grandparent
-            // Case 4b: Uncle is black and node is right->left "inner child" of its grandparent
             if n_index == self.node(p_index).left {
                 self.rotate_right(p_index);
-
-                // Let "parent" point to the new root node of the rotated subtree.
-                // It will be recolored in the next step, which we're going to fall-through to.
                 p_index = n_index;
             }
-
-            // Case 5b: Uncle is black and node is right->right "outer child" of its grandparent
             self.rotate_left(g_index);
-
-            // Recolor original parent and grandparent
             self.node_mut(p_index).color = Color::Black;
             self.node_mut(g_index).color = Color::Red;
         }
@@ -406,7 +585,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
         i
     }
 
-    pub(super) fn delete_index(&mut self, index: u32) {
+    fn delete_index(&mut self, index: u32) {
         // Node has zero or one child
         let mut delete_index = index;
 
@@ -442,9 +621,6 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
         } else if nd_parent == EMPTY_REF {
             self.root = EMPTY_REF;
         } else {
-            // Node has no children -->
-            // * node is red --> just remove it
-            // * node is black --> replace it by a temporary NIL node (needed to fix the R-B rules)
             if nd_color == Color::Black {
                 self.create_nil_node(nd_parent);
                 self.set_nil_parents_child(nd_parent, delete_index);
@@ -459,9 +635,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     fn fix_red_black_properties_after_delete(&mut self, n_index: u32) {
-        // Case 1: Examined node is root, end of recursion
         if n_index == self.root {
-            // do not color root to black
             return;
         }
 
@@ -470,7 +644,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
         // Case 2: Red sibling
         if self.node(s_index).color == Color::Red {
             self.handle_red_sibling(n_index, s_index);
-            s_index = self.get_sibling(n_index) // Get new sibling for fall-through to cases 3-6
+            s_index = self.get_sibling(n_index)
         }
 
         let sibling = self.node(s_index);
@@ -480,16 +654,13 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
             self.node_mut(s_index).color = Color::Red;
             let p_index = self.node(n_index).parent;
 
-            // Case 3: Black sibling with two black children + red parent
             let parent = self.node_mut(p_index);
             if parent.color == Color::Red {
                 parent.color = Color::Black;
             } else {
-                // Case 4: Black sibling with two black children + black parent
                 self.fix_red_black_properties_after_delete(p_index);
             }
         } else {
-            // Case 5+6: Black sibling with at least one red child
             self.handle_black_sibling_with_at_least_one_red_child(n_index, s_index);
         }
     }
@@ -505,8 +676,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
 
         let node_is_left_child = n_index == self.node(p_index).left;
 
-        // Case 5: Black sibling with at least one red child + "outer nephew" is black
-        // --> Recolor sibling and its child, and rotate around sibling
+        // Case 5
         if node_is_left_child && self.is_black(sibling_right) {
             if sibling_left != EMPTY_REF {
                 self.node_mut(sibling_left).color = Color::Black;
@@ -531,10 +701,7 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
             sibling_right = sibling.right;
         }
 
-        // Fall-through to case 6...
-
-        // Case 6: Black sibling with at least one red child + "outer nephew" is red
-        // --> Recolor sibling + parent + sibling's child, and rotate around parent
+        // Case 6
         self.node_mut(s_index).color = self.node(p_index).color;
         self.node_mut(p_index).color = Color::Black;
         if node_is_left_child {
@@ -551,15 +718,12 @@ impl<K: ExpiredKey<E>, E: Expiration, V: Copy> KeyExpTree<K, E, V> {
     }
 
     fn handle_red_sibling(&mut self, n_index: u32, s_index: u32) {
-        // Recolor...
-
         self.node_mut(s_index).color = Color::Black;
         let p_index = self.node(n_index).parent;
         let parent = self.node_mut(p_index);
 
         parent.color = Color::Red;
 
-        // ... and rotate
         if n_index == parent.left {
             self.rotate_left(p_index)
         } else {

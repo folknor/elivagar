@@ -86,7 +86,9 @@ impl IdSegments for IntPath {
             x_min: i32,
             x_max: i32,
         ) {
-            let first = iter.next().unwrap();
+            let Some(first) = iter.next() else {
+                return;
+            };
             let mut b = first;
             for a in iter {
                 if a.x < b.x && x_min < b.x && a.x <= x_max {

@@ -7,7 +7,6 @@ use crate::geometry::overlay::port::core::extract::BooleanExtractionBuffer;
 use crate::geometry::overlay::port::core::fill_rule::FillRule;
 use crate::geometry::overlay::port::core::overlay_rule::OverlayRule;
 use crate::geometry::overlay::port::core::solver::Solver;
-use crate::geometry::overlay::port::ksort::sort::key::SortKey;
 use crate::geometry::overlay::port::prim::IntPoint;
 use crate::geometry::overlay::port::segm::boolean::ShapeCountBoolean;
 use crate::geometry::overlay::port::segm::build::BuildSegments;
@@ -16,7 +15,6 @@ use crate::geometry::overlay::port::shape::FlatContoursBuffer;
 use crate::geometry::overlay::port::shape::PointsCount;
 use crate::geometry::overlay::port::shape::{IntContour, IntShape, IntShapes};
 use crate::geometry::overlay::port::split::solver::SplitSolver;
-use crate::geometry::overlay::port::tree::{Expiration, LayoutNumber};
 use alloc::vec::Vec;
 
 use super::graph::{OverlayGraph, OverlayNode};

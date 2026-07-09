@@ -1,14 +1,18 @@
 use crate::geometry::overlay::port::core::solver::Solver;
 use crate::geometry::overlay::port::geom::line_range::LineRange;
 use crate::geometry::overlay::port::geom::x_segment::XSegment;
-use crate::geometry::overlay::port::ksort::sort::key::SortKey;
 use crate::geometry::overlay::port::segm::boolean::ShapeCountBoolean;
 use crate::geometry::overlay::port::segm::segment::Segment;
 use crate::geometry::overlay::port::split::snap_radius::SnapRadius;
 use crate::geometry::overlay::port::split::solver::SplitSolver;
-use crate::geometry::overlay::port::tree::seg::exp::SegRange;
-use crate::geometry::overlay::port::tree::{Expiration, LayoutNumber, LayoutUInt};
 use alloc::vec::Vec;
+
+/// Inclusive integer y-range, from i_tree's `SegRange` at `R = i32`.
+#[derive(Debug, Clone, Copy)]
+struct SegRange {
+    min: i32,
+    max: i32,
+}
 
 #[derive(Clone, Copy)]
 struct IdSegment {
@@ -43,7 +47,7 @@ impl SplitSolver {
         segments: &mut Vec<Segment<ShapeCountBoolean>>,
         solver: &Solver,
     ) -> bool {
-        let range: SegRange<i32> = if let Some(range) = segments.ver_range() {
+        let range: SegRange = if let Some(range) = segments.ver_range() {
             range.into()
         } else {
             return false;
@@ -121,7 +125,7 @@ impl ReusableSegExpTree {
 
 impl ReusableSegExpTree {
     #[inline]
-    fn reset(&mut self, range: SegRange<i32>) -> bool {
+    fn reset(&mut self, range: SegRange) -> bool {
         let Some(layout) = TreeLayout::new(range.min, range.max) else {
             return false;
         };
@@ -138,7 +142,7 @@ impl ReusableSegExpTree {
     }
 
     #[inline]
-    fn insert_by_range(&mut self, range: SegRange<i32>, val: IdSegment) {
+    fn insert_by_range(&mut self, range: SegRange, val: IdSegment) {
         let layout = self.layout.as_ref().expect("tree layout initialized");
         let mask = layout.insert_mask(range.min, range.max);
         let entity = TreeEntity { val, mask };
@@ -148,7 +152,7 @@ impl ReusableSegExpTree {
     }
 
     #[inline]
-    fn iter_by_range(&mut self, range: SegRange<i32>, time: i32) -> ReusableSegExpTreeIter<'_> {
+    fn iter_by_range(&mut self, range: SegRange, time: i32) -> ReusableSegExpTreeIter<'_> {
         let layout = self.layout.as_ref().expect("tree layout initialized");
         let mask = layout.intersect_mask(range.min, range.max);
         ReusableSegExpTreeIter::new(mask, time, self)
@@ -291,8 +295,12 @@ impl TreeLayout {
     fn new(start: i32, end: i32) -> Option<Self> {
         let min = start;
         let max = end;
-        let span = i32::range_span(min, max)?;
-        if span < <i32 as LayoutNumber>::UInt::HEAP_MIN_SPAN {
+        if max < min {
+            return None;
+        }
+        let span = (max as i64 - min as i64) as u32;
+        // i_tree's LayoutUInt::HEAP_MIN_SPAN for u32.
+        if span < 31 {
             return None;
         }
         let p = span.ilog2() + 1;
@@ -306,7 +314,7 @@ impl TreeLayout {
 
     #[inline]
     fn index(&self, value: i32) -> u32 {
-        (value.offset_from(self.min) >> self.scale).to_u32()
+        ((value as i64 - self.min as i64) as u32) >> self.scale
     }
 
     #[inline]
@@ -452,7 +460,7 @@ impl Iterator for BitIter {
     }
 }
 
-impl From<LineRange> for SegRange<i32> {
+impl From<LineRange> for SegRange {
     #[inline]
     fn from(value: LineRange) -> Self {
         Self {

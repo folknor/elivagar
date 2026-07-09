@@ -7,10 +7,10 @@
     unexpected_cfgs
 )]
 
-pub(crate) mod ksort;
 pub(crate) mod prim;
+pub(crate) mod scan;
 pub(crate) mod shape;
-pub(crate) mod tree;
+pub(crate) mod sort;
 
 pub(crate) mod bind {
     pub(crate) mod segment;

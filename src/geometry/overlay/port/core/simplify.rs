@@ -6,7 +6,6 @@ use crate::geometry::overlay::port::core::overlay::ContourDirection;
 use crate::geometry::overlay::port::core::overlay::ContourDirection::Clockwise;
 use crate::geometry::overlay::port::core::overlay::{IntOverlayOptions, Overlay, ShapeType};
 use crate::geometry::overlay::port::core::overlay_rule::OverlayRule;
-use crate::geometry::overlay::port::ksort::sort::key::SortKey;
 use crate::geometry::overlay::port::prim::IntPoint;
 use crate::geometry::overlay::port::shape::FlatContoursBuffer;
 use alloc::vec;
@@ -15,7 +14,6 @@ use crate::geometry::overlay::port::segm::build::BuildSegments;
 use crate::geometry::overlay::port::shape::ContourExtension;
 use crate::geometry::overlay::port::shape::PointsCount;
 use crate::geometry::overlay::port::shape::{IntContour, IntShape, IntShapes};
-use crate::geometry::overlay::port::tree::{Expiration, LayoutNumber};
 
 /// Trait `Simplify` provides a method to simplify geometric shapes by reducing the number of points in contours or shapes
 /// while preserving overall shape and topology. The method applies a minimum area threshold and a build rule to

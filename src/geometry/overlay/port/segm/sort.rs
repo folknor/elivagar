@@ -1,9 +1,9 @@
-use crate::geometry::overlay::port::ksort::sort::two_keys_cmp::TwoKeysAndCmpSort;
 use crate::geometry::overlay::port::segm::segment::Segment;
+use crate::geometry::overlay::port::sort::TwoKeysAndCmpSort;
 use alloc::vec::Vec;
 
 pub(crate) trait ShapeSegmentsSort {
-    fn sort_by_ab(&mut self, parallel: bool, reusable_buffer: &mut Vec<Self::Item>);
+    fn sort_by_ab(&mut self, reusable_buffer: &mut Vec<Self::Item>);
     type Item;
 }
 
@@ -11,9 +11,8 @@ impl<C: Send + Sync + Copy> ShapeSegmentsSort for [Segment<C>] {
     type Item = Segment<C>;
 
     #[inline]
-    fn sort_by_ab(&mut self, parallel: bool, reusable_buffer: &mut Vec<Segment<C>>) {
+    fn sort_by_ab(&mut self, reusable_buffer: &mut Vec<Segment<C>>) {
         self.sort_by_two_keys_then_by_and_buffer(
-            parallel,
             reusable_buffer,
             |s| s.x_segment.a.x,
             |s| s.x_segment.a.y,

@@ -1,8 +1,7 @@
 use crate::geometry::overlay::port::build::builder::{GraphBuilder, GraphNode};
-use crate::geometry::overlay::port::ksort::sort::key::SortKey;
-use crate::geometry::overlay::port::ksort::sort::two_keys::TwoKeysSort;
 use crate::geometry::overlay::port::prim::IntPoint;
 use crate::geometry::overlay::port::segm::winding::WindingCount;
+use crate::geometry::overlay::port::sort::TwoKeysSort;
 use alloc::vec::Vec;
 
 impl<C, N> GraphBuilder<C, N>
@@ -27,7 +26,7 @@ where
 
         buffer.clear();
         buffer.extend_from_slice(contour);
-        buffer.sort_by_two_keys_and_buffer(false, &mut self.point_sort_buffer, |p| p.x, |p| p.y);
+        buffer.sort_by_two_keys_and_buffer(&mut self.point_sort_buffer, |p| p.x, |p| p.y);
 
         buffer.windows(2).any(|w| w[0] == w[1])
     }

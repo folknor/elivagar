@@ -1,14 +1,10 @@
 use crate::geometry::overlay::port::bind::segment::{ContourIndex, IdSegment, IdSegments};
 use crate::geometry::overlay::port::geom::v_segment::{BottomSegment, VSegment};
-use crate::geometry::overlay::port::ksort::sort::key::SortKey;
-use crate::geometry::overlay::port::ksort::sort::two_keys_cmp::TwoKeysAndCmpSort;
 use crate::geometry::overlay::port::prim::IntPoint;
+use crate::geometry::overlay::port::scan::{KeyExpCollection, KeyExpList, KeyExpTree};
 use crate::geometry::overlay::port::shape::IntPath;
 use crate::geometry::overlay::port::shape::{IntContour, IntShape};
-use crate::geometry::overlay::port::tree::Expiration;
-use crate::geometry::overlay::port::tree::key::exp::KeyExpCollection;
-use crate::geometry::overlay::port::tree::key::list::KeyExpList;
-use crate::geometry::overlay::port::tree::key::tree::KeyExpTree;
+use crate::geometry::overlay::port::sort::TwoKeysAndCmpSort;
 use crate::geometry::overlay::port::util::log::Int;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -19,8 +15,8 @@ pub(crate) struct BinderScratch {
     pub(crate) parent_for_child: Vec<usize>,
     pub(crate) children_count_for_parent: Vec<usize>,
     sort_buffer: Vec<IdSegment>,
-    scan_list: Option<KeyExpList<VSegment, i32, ContourIndex>>,
-    scan_tree: Option<KeyExpTree<VSegment, i32, ContourIndex>>,
+    scan_list: Option<KeyExpList<ContourIndex>>,
+    scan_tree: Option<KeyExpTree<ContourIndex>>,
 }
 
 impl Default for BinderScratch {
@@ -50,7 +46,7 @@ impl BinderScratch {
     }
 
     #[inline]
-    fn take_scan_list(&mut self, capacity: usize) -> KeyExpList<VSegment, i32, ContourIndex> {
+    fn take_scan_list(&mut self, capacity: usize) -> KeyExpList<ContourIndex> {
         if let Some(mut list) = self.scan_list.take() {
             list.clear();
             list.reserve_capacity(capacity);
@@ -61,7 +57,7 @@ impl BinderScratch {
     }
 
     #[inline]
-    fn take_scan_tree(&mut self, capacity: usize) -> KeyExpTree<VSegment, i32, ContourIndex> {
+    fn take_scan_tree(&mut self, capacity: usize) -> KeyExpTree<ContourIndex> {
         if let Some(mut tree) = self.scan_tree.take() {
             tree.clear();
             tree.reserve_capacity(capacity);
@@ -85,7 +81,7 @@ impl ShapeBinder {
         if shape_count < 32 {
             let capacity = segments.len().log2_sqrt().max(4) * 2;
             let mut list = scratch.take_scan_list(capacity);
-            Self::private_solve::<KeyExpList<VSegment, i32, ContourIndex>>(
+            Self::private_solve::<KeyExpList<ContourIndex>>(
                 &mut list,
                 shape_count,
                 hole_segments,
@@ -96,7 +92,7 @@ impl ShapeBinder {
         } else {
             let capacity = segments.len().log2_sqrt().max(8);
             let mut tree = scratch.take_scan_tree(capacity);
-            Self::private_solve::<KeyExpTree<VSegment, i32, ContourIndex>>(
+            Self::private_solve::<KeyExpTree<ContourIndex>>(
                 &mut tree,
                 shape_count,
                 hole_segments,
@@ -114,7 +110,7 @@ impl ShapeBinder {
         segments: &[IdSegment],
         scratch: &mut BinderScratch,
     ) where
-        S: KeyExpCollection<VSegment, i32, ContourIndex>,
+        S: KeyExpCollection<ContourIndex>,
     {
         let children_count = anchors.len();
         scratch.prepare(children_count, shape_count);
@@ -288,7 +284,7 @@ pub(crate) trait LeftBottomSegment {
 
 impl LeftBottomSegment for IntContour {
     fn left_bottom_segment(&self) -> VSegment {
-        let mut a = *self.first().unwrap();
+        let mut a = *self.first().expect("bind contour is non-empty");
         for &p in self.iter().skip(1) {
             if p < a {
                 a = p;
@@ -352,7 +348,6 @@ impl SortByAngle for [IdSegment] {
     #[inline]
     fn sort_by_a_then_by_angle_and_buffer(&mut self, reusable_buffer: &mut Vec<IdSegment>) {
         self.sort_by_two_keys_then_by_and_buffer(
-            false,
             reusable_buffer,
             |s| s.v_segment.a.x,
             |s| s.v_segment.a.y,

@@ -1,6 +1,5 @@
 use crate::geometry::overlay::port::core::solver::Solver;
 use crate::geometry::overlay::port::geom::x_segment::XSegment;
-use crate::geometry::overlay::port::ksort::sort::key::SortKey;
 use crate::geometry::overlay::port::prim::IntPoint;
 use crate::geometry::overlay::port::segm::boolean::ShapeCountBoolean;
 use crate::geometry::overlay::port::segm::merge::ShapeSegmentsMerge;
@@ -10,7 +9,6 @@ use crate::geometry::overlay::port::split::cross_solver::{CrossSolver, CrossType
 use crate::geometry::overlay::port::split::grid_layout::FragmentBuffer;
 use crate::geometry::overlay::port::split::line_mark::{LineMark, SortMarkByIndexAndPoint};
 use crate::geometry::overlay::port::split::solver_tree::TreeSplitBuffer;
-use crate::geometry::overlay::port::tree::{Expiration, LayoutNumber};
 use alloc::vec::Vec;
 
 pub(crate) struct SplitSolver {
@@ -47,7 +45,7 @@ impl SplitSolver {
             return false;
         }
 
-        segments.sort_by_ab(false, &mut self.segment_sort_buffer);
+        segments.sort_by_ab(&mut self.segment_sort_buffer);
         let any_merged = segments.merge_if_needed();
         if segments.is_empty() {
             return true;
@@ -151,8 +149,7 @@ impl SplitSolver {
     }
 
     pub(super) fn apply(&mut self, segments: &mut Vec<Segment<ShapeCountBoolean>>) {
-        self.marks
-            .sort_by_index_and_point(false, &mut self.reusable_marks);
+        self.marks.sort_by_index_and_point(&mut self.reusable_marks);
         self.marks.dedup();
 
         segments.reserve(self.marks.len());
@@ -205,7 +202,7 @@ impl SplitSolver {
             segments.push(Segment::create_and_validate(p0, x_seg.b, count));
         }
 
-        segments.sort_by_ab(false, &mut self.segment_sort_buffer);
+        segments.sort_by_ab(&mut self.segment_sort_buffer);
         segments.merge_if_needed();
     }
 

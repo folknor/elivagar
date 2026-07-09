@@ -1,5 +1,4 @@
 use crate::geometry::overlay::port::core::solver::Solver;
-use crate::geometry::overlay::port::ksort::sort::key::SortKey;
 use crate::geometry::overlay::port::segm::boolean::ShapeCountBoolean;
 use crate::geometry::overlay::port::segm::segment::Segment;
 use crate::geometry::overlay::port::split::cross_solver::{CrossSolver, CrossType, EndMask};
@@ -10,7 +9,6 @@ use crate::geometry::overlay::port::split::grid_layout::{
 use crate::geometry::overlay::port::split::line_mark::LineMark;
 use crate::geometry::overlay::port::split::snap_radius::SnapRadius;
 use crate::geometry::overlay::port::split::solver::SplitSolver;
-use crate::geometry::overlay::port::tree::{Expiration, LayoutNumber};
 use alloc::vec::Vec;
 
 impl SplitSolver {

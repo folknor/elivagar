@@ -6,7 +6,6 @@ use crate::geometry::overlay::port::core::link::OverlayLink;
 use crate::geometry::overlay::port::core::link::OverlayLinkFilter;
 use crate::geometry::overlay::port::core::nearest_vector::NearestVector;
 use crate::geometry::overlay::port::core::overlay::ContourDirection;
-use crate::geometry::overlay::port::ksort::sort::key::SortKey;
 use crate::geometry::overlay::port::prim::IntPoint;
 use crate::geometry::overlay::port::prim::Triangle;
 use crate::geometry::overlay::port::shape::ContourExtension;
@@ -14,7 +13,6 @@ use crate::geometry::overlay::port::shape::FlatContoursBuffer;
 use crate::geometry::overlay::port::shape::Reserve;
 use crate::geometry::overlay::port::shape::Simplify;
 use crate::geometry::overlay::port::shape::{IntContour, IntShape, IntShapes};
-use crate::geometry::overlay::port::tree::Expiration;
 use alloc::vec;
 use alloc::vec::Vec;
 

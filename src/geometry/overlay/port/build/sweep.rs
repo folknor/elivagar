@@ -3,12 +3,9 @@ use crate::geometry::overlay::port::core::solver::Solver;
 use crate::geometry::overlay::port::geom::end::End;
 use crate::geometry::overlay::port::geom::v_segment::VSegment;
 use crate::geometry::overlay::port::prim::Triangle;
+use crate::geometry::overlay::port::scan::{KeyExpCollection, KeyExpList, KeyExpTree};
 use crate::geometry::overlay::port::segm::segment::{Segment, SegmentFill};
 use crate::geometry::overlay::port::segm::winding::WindingCount;
-use crate::geometry::overlay::port::tree::Expiration;
-use crate::geometry::overlay::port::tree::key::exp::KeyExpCollection;
-use crate::geometry::overlay::port::tree::key::list::KeyExpList;
-use crate::geometry::overlay::port::tree::key::tree::KeyExpTree;
 use crate::geometry::overlay::port::util::log::Int;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
@@ -38,7 +35,7 @@ fn sweep_with_handler<C, F, S, H>(
 where
     C: WindingCount,
     F: FillStrategy<C>,
-    S: KeyExpCollection<VSegment, i32, C>,
+    S: KeyExpCollection<C>,
     H: FillHandler<C>,
 {
     node.clear();
@@ -90,8 +87,8 @@ where
 }
 
 pub(crate) struct SweepRunner<C> {
-    list: Option<KeyExpList<VSegment, i32, C>>,
-    tree: Option<KeyExpTree<VSegment, i32, C>>,
+    list: Option<KeyExpList<C>>,
+    tree: Option<KeyExpTree<C>>,
     node: Vec<End>,
 }
 
@@ -135,7 +132,7 @@ impl<C: WindingCount> SweepRunner<C> {
     }
 
     #[inline]
-    fn take_scan_list(&mut self, capacity: usize) -> KeyExpList<VSegment, i32, C> {
+    fn take_scan_list(&mut self, capacity: usize) -> KeyExpList<C> {
         if let Some(mut list) = self.list.take() {
             list.clear();
             list.reserve_capacity(capacity);
@@ -146,7 +143,7 @@ impl<C: WindingCount> SweepRunner<C> {
     }
 
     #[inline]
-    fn take_scan_tree(&mut self, capacity: usize) -> KeyExpTree<VSegment, i32, C> {
+    fn take_scan_tree(&mut self, capacity: usize) -> KeyExpTree<C> {
         if let Some(mut tree) = self.tree.take() {
             tree.clear();
             tree.reserve_capacity(capacity);
