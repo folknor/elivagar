@@ -28,6 +28,7 @@ pub(crate) struct IntEmitScratch {
     pub tile_points: Vec<(i32, i32)>,
     pub tile_ranges: Vec<Range<usize>>,
     pub geom_buf: Vec<u32>,
+    pub dp: DpScratch,
     overlay: Overlay<i32>,
     rect_contour: Contour,
 }
@@ -38,10 +39,32 @@ impl IntEmitScratch {
             tile_points: Vec::new(),
             tile_ranges: Vec::new(),
             geom_buf: Vec::new(),
+            dp: DpScratch::default(),
             overlay: Overlay::new_custom(0, overlay_options(0), Default::default()),
             rect_contour: Vec::with_capacity(4),
         }
     }
+}
+
+/// Reusable temporaries for `simplify_shape_dp`. The DP simplifier ran at
+/// ~10M calls per denmark build with ~11 heap allocations per contour
+/// (ring clone, pin flags, two chains, two chain-flag vecs, two keep vecs,
+/// two DP stacks, output) - 10.7 GB of churn, the largest exclusive
+/// allocation sink in the 2026-07-09 profile. All of them live here now,
+/// cleared per call, warm after the first contour. Output is written back
+/// into the input contour's own allocation.
+#[derive(Default)]
+pub(crate) struct DpScratch {
+    ring: Contour,
+    pin_flags: Vec<bool>,
+    chain_a: Contour,
+    chain_b: Contour,
+    pins_a: Vec<bool>,
+    pins_b: Vec<bool>,
+    keep_a: Vec<bool>,
+    keep_b: Vec<bool>,
+    stack: Vec<(usize, usize)>,
+    out: Contour,
 }
 
 pub(crate) fn quantize_polygon(outer: &[Point], inners: &[Vec<Point>], maxz: u8) -> Shape {
@@ -58,29 +81,123 @@ pub(crate) fn quantize_polygon(outer: &[Point], inners: &[Vec<Point>], maxz: u8)
     shape
 }
 
-pub(crate) fn quantize_polygon_pinned<F>(
+/// `quantize_polygon` writing into a reused Shape: each ring slot's Vec is
+/// recycled (cleared, refilled) so a warm scratch quantizes with zero heap
+/// allocations. Behavior identical to `quantize_polygon`; on an invalid
+/// outer the output is left empty. Part of the H6 churn reduction -
+/// `emit_polygon_feature` quantized 4.5M polygons per denmark build at one
+/// fresh Shape each (5.2 GB exclusive).
+pub(crate) fn quantize_polygon_into(
+    outer: &[Point],
+    inners: &[Vec<Point>],
+    maxz: u8,
+    out: &mut Shape,
+) {
+    let mut used = 0usize;
+    if quantize_ring_at(out, &mut used, outer, maxz, true) {
+        for inner in inners {
+            quantize_ring_at(out, &mut used, inner, maxz, false);
+        }
+    } else {
+        used = 0;
+    }
+    out.truncate(used);
+}
+
+/// `quantize_polygon_pinned` writing into reused Shape + flags buffers.
+/// Same recycling contract as `quantize_polygon_into`.
+pub(crate) fn quantize_polygon_pinned_into<F>(
     outer: &[Point],
     inners: &[Vec<Point>],
     maxz: u8,
     mut pin_test: F,
-) -> (Shape, Vec<Vec<bool>>)
+    out: &mut Shape,
+    out_flags: &mut Vec<Vec<bool>>,
+) where
+    F: FnMut(&Point) -> bool,
+{
+    let mut used = 0usize;
+    if quantize_ring_pinned_at(out, out_flags, &mut used, outer, maxz, true, &mut pin_test) {
+        for inner in inners {
+            quantize_ring_pinned_at(out, out_flags, &mut used, inner, maxz, false, &mut pin_test);
+        }
+    } else {
+        used = 0;
+    }
+    out.truncate(used);
+    out_flags.truncate(used);
+}
+
+/// Quantize one ring into slot `*used` of `out`, reusing the slot's Vec.
+/// Advances `*used` only when the ring is valid, so an invalid ring's
+/// leftovers are overwritten by the next candidate.
+fn quantize_ring_at(
+    out: &mut Shape,
+    used: &mut usize,
+    points: &[Point],
+    maxz: u8,
+    outer: bool,
+) -> bool {
+    if *used == out.len() {
+        out.push(Vec::new());
+    }
+    let ring = &mut out[*used];
+    ring.clear();
+    let scale = 1_i64 << (u32::from(maxz) + 12);
+    for p in points {
+        push_nonduplicate(
+            ring,
+            IntPoint::new(quantize_coord(p.x, scale), quantize_coord(p.y, scale)),
+        );
+    }
+    remove_closing_duplicate(ring);
+    if !ring_is_valid(ring) {
+        return false;
+    }
+    orient_ring(ring, outer);
+    *used += 1;
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quantize_ring_pinned_at<F>(
+    out: &mut Shape,
+    out_flags: &mut Vec<Vec<bool>>,
+    used: &mut usize,
+    points: &[Point],
+    maxz: u8,
+    outer: bool,
+    pin_test: &mut F,
+) -> bool
 where
     F: FnMut(&Point) -> bool,
 {
-    let Some((outer, outer_flags)) = quantize_ring_pinned(outer, maxz, true, &mut pin_test) else {
-        return (Vec::new(), Vec::new());
-    };
-    let mut shape = Vec::with_capacity(1 + inners.len());
-    let mut flags = Vec::with_capacity(1 + inners.len());
-    shape.push(outer);
-    flags.push(outer_flags);
-    for inner in inners {
-        if let Some((ring, ring_flags)) = quantize_ring_pinned(inner, maxz, false, &mut pin_test) {
-            shape.push(ring);
-            flags.push(ring_flags);
-        }
+    if *used == out.len() {
+        out.push(Vec::new());
     }
-    (shape, flags)
+    if *used == out_flags.len() {
+        out_flags.push(Vec::new());
+    }
+    let ring = &mut out[*used];
+    let flags = &mut out_flags[*used];
+    ring.clear();
+    flags.clear();
+    let scale = 1_i64 << (u32::from(maxz) + 12);
+    for p in points {
+        push_nonduplicate_pinned(
+            ring,
+            flags,
+            IntPoint::new(quantize_coord(p.x, scale), quantize_coord(p.y, scale)),
+            pin_test(p),
+        );
+    }
+    remove_closing_duplicate_pinned(ring, flags);
+    if !ring_is_valid(ring) {
+        return false;
+    }
+    orient_ring_pinned(ring, flags, outer);
+    *used += 1;
+    true
 }
 
 /// Test-only reference: production rescaling goes through
@@ -151,24 +268,32 @@ pub(crate) fn rescale_shape_pinned(
 }
 
 #[hotpath::measure]
-pub(crate) fn simplify_shape_dp(shape: &mut Shape, tol: i64, pins: Option<&[Vec<bool>]>) {
+pub(crate) fn simplify_shape_dp(
+    shape: &mut Shape,
+    tol: i64,
+    pins: Option<&[Vec<bool>]>,
+    dp: &mut DpScratch,
+) {
     if tol <= 0 {
         return;
     }
 
-    let mut out = Vec::with_capacity(shape.len());
-    for (i, contour) in shape.drain(..).enumerate() {
-        let pin_ring = pins.and_then(|p| p.get(i)).map(Vec::as_slice);
-        if let Some(mut ring) = simplify_contour_dp(&contour, tol, pin_ring) {
-            orient_ring(&mut ring, i == 0);
-            out.push(ring);
+    // In place: each surviving contour is rewritten inside its own
+    // allocation and compacted forward; dead contours drop with truncate.
+    // Orientation follows the ORIGINAL ring index (index 0 is the outer),
+    // matching the previous drain-and-rebuild semantics exactly.
+    let mut write = 0usize;
+    for read in 0..shape.len() {
+        let pin_ring = pins.and_then(|p| p.get(read)).map(Vec::as_slice);
+        if simplify_contour_dp_in_place(&mut shape[read], tol, pin_ring, read == 0, dp) {
+            shape.swap(write, read);
+            write += 1;
         }
     }
-    *shape = if out.first().is_some_and(|outer| outer.len() >= 3) {
-        out
-    } else {
-        Vec::new()
-    };
+    shape.truncate(write);
+    if !shape.first().is_some_and(|outer| outer.len() >= 3) {
+        shape.clear();
+    }
 }
 
 #[cfg(test)]
@@ -293,34 +418,6 @@ fn quantize_ring(points: &[Point], maxz: u8, outer: bool) -> Option<Contour> {
     Some(ring)
 }
 
-fn quantize_ring_pinned<F>(
-    points: &[Point],
-    maxz: u8,
-    outer: bool,
-    pin_test: &mut F,
-) -> Option<(Contour, Vec<bool>)>
-where
-    F: FnMut(&Point) -> bool,
-{
-    let scale = 1_i64 << (u32::from(maxz) + 12);
-    let mut ring = Vec::with_capacity(points.len());
-    let mut flags = Vec::with_capacity(points.len());
-    for p in points {
-        push_nonduplicate_pinned(
-            &mut ring,
-            &mut flags,
-            IntPoint::new(quantize_coord(p.x, scale), quantize_coord(p.y, scale)),
-            pin_test(p),
-        );
-    }
-    remove_closing_duplicate_pinned(&mut ring, &mut flags);
-    if !ring_is_valid(&ring) {
-        return None;
-    }
-    orient_ring_pinned(&mut ring, &mut flags, outer);
-    Some((ring, flags))
-}
-
 fn quantize_coord(v: f64, scale: i64) -> i32 {
     #[allow(clippy::cast_possible_truncation)]
     let rounded = (v * scale as f64).round() as i64;
@@ -418,48 +515,72 @@ pub(crate) fn signed_area_2x(ring: &Contour) -> i128 {
     area
 }
 
-fn simplify_contour_dp(contour: &Contour, tol: i64, pins: Option<&[bool]>) -> Option<Contour> {
-    let mut ring = contour.clone();
-    remove_closing_duplicate(&mut ring);
-    let mut pin_flags = pins.map_or_else(Vec::new, ToOwned::to_owned);
-    if pin_flags.len() > ring.len() {
-        pin_flags.truncate(ring.len());
-    } else if pin_flags.len() < ring.len() {
-        pin_flags.resize(ring.len(), false);
+fn simplify_contour_dp_in_place(
+    contour: &mut Contour,
+    tol: i64,
+    pins: Option<&[bool]>,
+    outer: bool,
+    dp: &mut DpScratch,
+) -> bool {
+    dp.ring.clear();
+    dp.ring.extend_from_slice(contour);
+    remove_closing_duplicate(&mut dp.ring);
+    dp.pin_flags.clear();
+    if let Some(p) = pins {
+        dp.pin_flags.extend_from_slice(p);
     }
-    if ring.len() <= 3 {
-        return ring_is_valid(&ring).then_some(ring);
+    if dp.pin_flags.len() > dp.ring.len() {
+        dp.pin_flags.truncate(dp.ring.len());
+    } else if dp.pin_flags.len() < dp.ring.len() {
+        dp.pin_flags.resize(dp.ring.len(), false);
+    }
+    if dp.ring.len() <= 3 {
+        if !ring_is_valid(&dp.ring) {
+            return false;
+        }
+        contour.clear();
+        contour.extend_from_slice(&dp.ring);
+        orient_ring(contour, outer);
+        return true;
     }
 
-    let a0 = anchor_min_lex(&ring);
-    let a1 = anchor_farthest(&ring, a0)?;
+    let a0 = anchor_min_lex(&dp.ring);
+    let Some(a1) = anchor_farthest(&dp.ring, a0) else {
+        return false;
+    };
     if a0 == a1 {
-        return None;
+        return false;
     }
 
-    let chain_a = collect_chain(&ring, a0, a1);
-    let chain_b = collect_chain(&ring, a1, a0);
-    let pins_a = collect_chain_flags(&pin_flags, a0, a1);
-    let pins_b = collect_chain_flags(&pin_flags, a1, a0);
-    let keep_a = dp_keep(&chain_a, tol, Some(&pins_a));
-    let keep_b = dp_keep(&chain_b, tol, Some(&pins_b));
+    collect_chain_into(&dp.ring, a0, a1, &mut dp.chain_a);
+    collect_chain_into(&dp.ring, a1, a0, &mut dp.chain_b);
+    collect_chain_flags_into(&dp.pin_flags, a0, a1, &mut dp.pins_a);
+    collect_chain_flags_into(&dp.pin_flags, a1, a0, &mut dp.pins_b);
+    dp_keep_into(&dp.chain_a, tol, &dp.pins_a, &mut dp.keep_a, &mut dp.stack);
+    dp_keep_into(&dp.chain_b, tol, &dp.pins_b, &mut dp.keep_b, &mut dp.stack);
 
-    let mut out = Vec::with_capacity(keep_a.len() + keep_b.len());
-    for (idx, &keep) in keep_a.iter().enumerate() {
+    dp.out.clear();
+    for (idx, &keep) in dp.keep_a.iter().enumerate() {
         if keep {
-            push_nonduplicate(&mut out, chain_a[idx]);
+            push_nonduplicate(&mut dp.out, dp.chain_a[idx]);
         }
     }
-    for (idx, &keep) in keep_b.iter().enumerate() {
-        if idx == 0 || idx + 1 == keep_b.len() {
+    for (idx, &keep) in dp.keep_b.iter().enumerate() {
+        if idx == 0 || idx + 1 == dp.keep_b.len() {
             continue;
         }
         if keep {
-            push_nonduplicate(&mut out, chain_b[idx]);
+            push_nonduplicate(&mut dp.out, dp.chain_b[idx]);
         }
     }
-    remove_closing_duplicate(&mut out);
-    ring_is_valid(&out).then_some(out)
+    remove_closing_duplicate(&mut dp.out);
+    if !ring_is_valid(&dp.out) {
+        return false;
+    }
+    contour.clear();
+    contour.extend_from_slice(&dp.out);
+    orient_ring(contour, outer);
+    true
 }
 
 fn anchor_min_lex(ring: &Contour) -> usize {
@@ -485,8 +606,8 @@ fn distance_sq(a: IntPoint, b: IntPoint) -> i128 {
     dx * dx + dy * dy
 }
 
-fn collect_chain(ring: &Contour, start: usize, end: usize) -> Contour {
-    let mut chain = Vec::new();
+fn collect_chain_into(ring: &Contour, start: usize, end: usize, chain: &mut Contour) {
+    chain.clear();
     let mut idx = start;
     loop {
         chain.push(ring[idx]);
@@ -495,11 +616,10 @@ fn collect_chain(ring: &Contour, start: usize, end: usize) -> Contour {
         }
         idx = (idx + 1) % ring.len();
     }
-    chain
 }
 
-fn collect_chain_flags(flags: &[bool], start: usize, end: usize) -> Vec<bool> {
-    let mut chain = Vec::new();
+fn collect_chain_flags_into(flags: &[bool], start: usize, end: usize, chain: &mut Vec<bool>) {
+    chain.clear();
     let mut idx = start;
     loop {
         chain.push(flags.get(idx).copied().unwrap_or(false));
@@ -508,26 +628,31 @@ fn collect_chain_flags(flags: &[bool], start: usize, end: usize) -> Vec<bool> {
         }
         idx = (idx + 1) % flags.len();
     }
-    chain
 }
 
-fn dp_keep(chain: &Contour, tol: i64, pins: Option<&[bool]>) -> Vec<bool> {
-    let mut keep = vec![false; chain.len()];
+fn dp_keep_into(
+    chain: &Contour,
+    tol: i64,
+    pins: &[bool],
+    keep: &mut Vec<bool>,
+    stack: &mut Vec<(usize, usize)>,
+) {
+    keep.clear();
+    keep.resize(chain.len(), false);
     if chain.is_empty() {
-        return keep;
+        return;
     }
     keep[0] = true;
     keep[chain.len() - 1] = true;
-    if let Some(pins) = pins {
-        for (idx, &pinned) in pins.iter().enumerate().take(keep.len()) {
-            if pinned {
-                keep[idx] = true;
-            }
+    for (idx, &pinned) in pins.iter().enumerate().take(keep.len()) {
+        if pinned {
+            keep[idx] = true;
         }
     }
 
     let tol_sq = i128::from(tol) * i128::from(tol);
-    let mut stack = vec![(0_usize, chain.len() - 1)];
+    stack.clear();
+    stack.push((0_usize, chain.len() - 1));
     while let Some((start, end)) = stack.pop() {
         if end <= start + 1 {
             continue;
@@ -552,7 +677,6 @@ fn dp_keep(chain: &Contour, tol: i64, pins: Option<&[bool]>) -> Vec<bool> {
             stack.push((idx, end));
         }
     }
-    keep
 }
 
 fn farthest_from_segment(chain: &Contour, start: usize, end: usize) -> Option<(usize, i128, i128)> {
@@ -941,8 +1065,9 @@ mod tests {
         let mut rotated = ring[3..].to_vec();
         rotated.extend_from_slice(&ring[..3]);
         let mut shape_b = vec![rotated];
-        simplify_shape_dp(&mut shape_a, 16, None);
-        simplify_shape_dp(&mut shape_b, 16, None);
+        let mut dp = DpScratch::default();
+        simplify_shape_dp(&mut shape_a, 16, None, &mut dp);
+        simplify_shape_dp(&mut shape_b, 16, None, &mut dp);
         assert_eq!(sorted_points(&shape_a[0]), sorted_points(&shape_b[0]));
     }
 
@@ -955,7 +1080,7 @@ mod tests {
         }
         ring.extend([p(40, 20), p(0, 20)]);
         let mut shape = vec![ring];
-        simplify_shape_dp(&mut shape, 16, None);
+        simplify_shape_dp(&mut shape, 16, None, &mut DpScratch::default());
         assert_eq!(shape[0].len(), 4);
     }
 
@@ -963,7 +1088,7 @@ mod tests {
     fn simplify_shape_dp_old_ring_seam_not_privileged() {
         let ring = vec![p(0, 0), p(1, 8), p(2, 0), p(40, 0), p(40, 40), p(0, 40)];
         let mut shape = vec![ring];
-        simplify_shape_dp(&mut shape, 16, None);
+        simplify_shape_dp(&mut shape, 16, None, &mut DpScratch::default());
         assert!(!shape[0].contains(&p(1, 8)));
     }
 
@@ -1120,8 +1245,9 @@ mod tests {
         ]];
         let mut pinned = plain.clone();
         let flags = vec![vec![false, false, true, false, false, false, false]];
-        simplify_shape_dp(&mut plain, 16, None);
-        simplify_shape_dp(&mut pinned, 16, Some(&flags));
+        let mut dp = DpScratch::default();
+        simplify_shape_dp(&mut plain, 16, None, &mut dp);
+        simplify_shape_dp(&mut pinned, 16, Some(&flags), &mut dp);
         assert!(!plain[0].contains(&target));
         assert!(pinned[0].contains(&target));
     }

@@ -2,8 +2,8 @@ use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use crate::geometry::int_ocean::{
-    IntRect, OSM_DP_TOL_PX, Shape, TILE_EXTENT_I32, quantize_polygon, quantize_polygon_pinned,
-    shape_bbox,
+    IntRect, OSM_DP_TOL_PX, Shape, TILE_EXTENT_I32, quantize_polygon_into,
+    quantize_polygon_pinned_into, shape_bbox,
 };
 use crate::geometry::pyramid::{PyramidParams, PyramidScratch, emit_shape_pyramid};
 use crate::geometry::{self, BUFFER_FRACTION, ClipRect, MercBbox, Point, merc_bbox};
@@ -197,6 +197,10 @@ pub(super) struct PolygonEmitScratch {
     pub(super) base_pins: FxHashSet<(i32, i32)>,
     /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64, osm_id as u64).
     pub(super) cap_events: Vec<(u16, u64, u64)>,
+    /// Quantized base shape + pin flags, ring Vecs recycled across features
+    /// (H6: one fresh Shape per feature was 5.2 GB per denmark build).
+    pub(super) shape_base: Shape,
+    pub(super) flags_base: Vec<Vec<bool>>,
 }
 
 impl PolygonEmitScratch {
@@ -207,6 +211,8 @@ impl PolygonEmitScratch {
             pin_keys: FxHashSet::default(),
             base_pins: FxHashSet::default(),
             cap_events: Vec::new(),
+            shape_base: Shape::new(),
+            flags_base: Vec::new(),
         }
     }
 }
@@ -217,6 +223,9 @@ pub(super) struct MultipolygonEmitScratch {
     pub(super) base_pins: FxHashSet<(i32, i32)>,
     /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64, osm_id as u64).
     pub(super) cap_events: Vec<(u16, u64, u64)>,
+    /// See `PolygonEmitScratch::shape_base`.
+    pub(super) shape_base: Shape,
+    pub(super) flags_base: Vec<Vec<bool>>,
 }
 
 impl MultipolygonEmitScratch {
@@ -226,6 +235,8 @@ impl MultipolygonEmitScratch {
             attrs_by_zoom: std::array::from_fn(|_| None),
             base_pins: FxHashSet::default(),
             cap_events: Vec::new(),
+            shape_base: Shape::new(),
+            flags_base: Vec::new(),
         }
     }
 }
@@ -741,23 +752,34 @@ pub(super) fn emit_polygon_feature(
     }
     fill_pin_keys_from_mask(merc, preserve_vertex_mask, &mut scratch.pin_keys);
     let has_pins = !scratch.pin_keys.is_empty();
-    let (shape_base, flags_base) = if has_pins {
-        quantize_polygon_pinned(merc, &[], OSM_POLYGON_MAX_Z, |p| {
-            scratch.pin_keys.contains(&merc_point_key(p))
-        })
+    if has_pins {
+        let pin_keys = &scratch.pin_keys;
+        quantize_polygon_pinned_into(
+            merc,
+            &[],
+            OSM_POLYGON_MAX_Z,
+            |p| pin_keys.contains(&merc_point_key(p)),
+            &mut scratch.shape_base,
+            &mut scratch.flags_base,
+        );
     } else {
-        (quantize_polygon(merc, &[], OSM_POLYGON_MAX_Z), Vec::new())
-    };
-    if shape_base.is_empty() {
+        quantize_polygon_into(merc, &[], OSM_POLYGON_MAX_Z, &mut scratch.shape_base);
+        scratch.flags_base.clear();
+    }
+    if scratch.shape_base.is_empty() {
         return 0;
     }
-    fill_base_pins(&shape_base, &flags_base, &mut scratch.base_pins);
+    fill_base_pins(
+        &scratch.shape_base,
+        &scratch.flags_base,
+        &mut scratch.base_pins,
+    );
 
     let Some(z_start) = polygon_z_start(merc, z_lo, z_hi) else {
         return 0;
     };
     let Some(z_bottom) = polygon_z_bottom_after_caps(
-        &shape_base,
+        &scratch.shape_base,
         z_start,
         z_hi,
         m.layer,
@@ -812,7 +834,7 @@ pub(super) fn emit_polygon_feature(
         );
         count += 1;
     };
-    emit_shape_pyramid(&shape_base, &params, pyramid, &mut sink);
+    emit_shape_pyramid(&scratch.shape_base, &params, pyramid, &mut sink);
     count
 }
 
@@ -841,27 +863,38 @@ pub(super) fn emit_multipolygon_feature(
             seam_max_zoom
         };
     emit_scratch.cap_events.clear();
-    let (shape_base, flags_base) =
-        if let Some(keys) = preserve_vertex_keys.filter(|k| !k.is_empty()) {
-            quantize_polygon_pinned(outer, inners, OSM_POLYGON_MAX_Z, |p| {
-                keys.contains(&merc_point_key(p))
-            })
-        } else {
-            (
-                quantize_polygon(outer, inners, OSM_POLYGON_MAX_Z),
-                Vec::new(),
-            )
-        };
-    if shape_base.is_empty() {
+    if let Some(keys) = preserve_vertex_keys.filter(|k| !k.is_empty()) {
+        quantize_polygon_pinned_into(
+            outer,
+            inners,
+            OSM_POLYGON_MAX_Z,
+            |p| keys.contains(&merc_point_key(p)),
+            &mut emit_scratch.shape_base,
+            &mut emit_scratch.flags_base,
+        );
+    } else {
+        quantize_polygon_into(
+            outer,
+            inners,
+            OSM_POLYGON_MAX_Z,
+            &mut emit_scratch.shape_base,
+        );
+        emit_scratch.flags_base.clear();
+    }
+    if emit_scratch.shape_base.is_empty() {
         return 0;
     }
-    fill_base_pins(&shape_base, &flags_base, &mut emit_scratch.base_pins);
+    fill_base_pins(
+        &emit_scratch.shape_base,
+        &emit_scratch.flags_base,
+        &mut emit_scratch.base_pins,
+    );
 
     let Some(z_start) = polygon_z_start(outer, z_lo, z_hi) else {
         return 0;
     };
     let Some(z_bottom) = polygon_z_bottom_after_caps(
-        &shape_base,
+        &emit_scratch.shape_base,
         z_start,
         z_hi,
         m.layer,
@@ -917,7 +950,7 @@ pub(super) fn emit_multipolygon_feature(
         );
         count += 1;
     };
-    emit_shape_pyramid(&shape_base, &params, pyramid, &mut sink);
+    emit_shape_pyramid(&emit_scratch.shape_base, &params, pyramid, &mut sink);
     count
 }
 
@@ -983,7 +1016,8 @@ mod landing2_tests {
 
     #[test]
     fn cap_suffix_property() {
-        let shape = quantize_polygon(&square(0.1, 0.9), &[], OSM_POLYGON_MAX_Z);
+        let mut shape = Shape::new();
+        quantize_polygon_into(&square(0.1, 0.9), &[], OSM_POLYGON_MAX_Z, &mut shape);
         let mut cap_events = Vec::new();
         let z_bottom =
             polygon_z_bottom_after_caps(&shape, 0, 4, Layer::Buildings, 777, 4, &mut cap_events)

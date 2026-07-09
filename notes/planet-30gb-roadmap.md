@@ -779,6 +779,28 @@ retention.
 counters exist (the two land in the same region of code; sequence them as
 one campaign to avoid double churn).
 
+FIRST H6 BATCH LANDED 2026-07-09. Fresh denmark alloc profile
+(`98b9f1f0`, 593.8 GB total churn) re-ranked the sinks - the stale
+germany numbers above predate the H1 campaign. Top exclusive:
+simplify_shape_dp 10.7 GB / 9.8M calls (~11 allocs per contour),
+emit_ocean_piece 8.1 GB (partly the deliberate per-item scratch
+trade), intersect_rect_into 8.1 GB + normalize_into 7.0 GB (both
+i_overlay-internal, library-owned, not tractable from here),
+emit_polygon_feature 5.2 GB (fresh Shape per quantize),
+add_feature_to_layer 5.0 GB (assemble side). Landed: (1)
+simplify_shape_dp rewritten in place - all temporaries live in a
+DpScratch inside IntEmitScratch, cleared per call, output written
+back into the input contour's own allocation; (2)
+quantize_polygon_into / quantize_polygon_pinned_into recycle the
+scratch Shape's ring Vecs across features in both
+emit_polygon_feature and emit_multipolygon_feature; the unpinned
+originals stay for ocean + tests, the pinned originals are deleted.
+Both changes bit-identical at the denmark gate (tol 0), which also
+subsumes the earcut oracle for pure refactors. Remaining tractable
+sinks: add_feature_to_layer (assemble), merge_same_attr_geometries
+3.8 GB, process_planned_way_into 2.6 GB; the i_overlay returns want
+an upstream API that fills a caller buffer.
+
 **Allocator addendum (2026-07-08).** mimalloc predates all measurement
 here (early experiment, never defended at current scale), and pbfhogg
 reached record numbers on the plain system allocator - after its

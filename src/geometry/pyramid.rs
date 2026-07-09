@@ -1,5 +1,5 @@
 use crate::geometry::int_ocean::{
-    Contour, IntEmitScratch, IntRect, Shape, Shapes, TILE_BUFFER_I32, TILE_EXTENT_I32,
+    Contour, DpScratch, IntEmitScratch, IntRect, Shape, Shapes, TILE_BUFFER_I32, TILE_EXTENT_I32,
     contour_area_is_below, emit_full_tile, encode_tile_shape, intersect_rect_into, normalize_into,
     point_in_contour, rescale_shape_pinned, shape_bbox, signed_area_2x, simplify_shape_dp,
 };
@@ -315,7 +315,7 @@ fn emit_cell(
         if shape_z.is_empty() {
             continue;
         }
-        simplify_shape_dp(&mut shape_z, dp_tol, Some(&flags_z));
+        simplify_shape_dp(&mut shape_z, dp_tol, Some(&flags_z), &mut scratch.int.dp);
         if shape_z.is_empty() {
             continue;
         }
@@ -329,7 +329,12 @@ fn emit_cell(
         // budget matches. Skipped when dp_tol <= 2 (seam-deferral layers
         // stay verbatim).
         if dp_tol > 2 {
-            thin_window_runs(&mut shape_z, cell, &mut scratch.edge_flags);
+            thin_window_runs(
+                &mut shape_z,
+                cell,
+                &mut scratch.edge_flags,
+                &mut scratch.int.dp,
+            );
             if shape_z.is_empty() {
                 continue;
             }
@@ -833,7 +838,12 @@ fn is_full_buffered_cell(frag: &Shapes, maxz: u8, cell: PyramidCell) -> bool {
 /// within the 128-unit buffer of the cell's tile edge lines, in zoom
 /// coordinates). Run endpoints include the cut vertices on clip lines, so
 /// fragment bounds survive; run interiors thin to 2-unit fidelity.
-fn thin_window_runs(shape_z: &mut Shape, cell: PyramidCell, flags_buf: &mut Vec<Vec<bool>>) {
+fn thin_window_runs(
+    shape_z: &mut Shape,
+    cell: PyramidCell,
+    flags_buf: &mut Vec<Vec<bool>>,
+    dp: &mut DpScratch,
+) {
     let left = i64::from(cell.tx) * i64::from(TILE_EXTENT_I32);
     let right = (i64::from(cell.tx) + 1) * i64::from(TILE_EXTENT_I32);
     let top = i64::from(cell.ty) * i64::from(TILE_EXTENT_I32);
@@ -865,7 +875,7 @@ fn thin_window_runs(shape_z: &mut Shape, cell: PyramidCell, flags_buf: &mut Vec<
         flags_buf.push(flags);
     }
     if any_window {
-        simplify_shape_dp(shape_z, 2, Some(flags_buf));
+        simplify_shape_dp(shape_z, 2, Some(flags_buf), dp);
     }
 }
 
