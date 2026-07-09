@@ -280,7 +280,7 @@ pub(super) fn phase_read_and_process(
     // locations path (unordered source, no store) it runs for the whole read
     // and is joined after the drain returns.
     let mut node_worker_tx: Option<std::sync::mpsc::SyncSender<PrimitiveBlock>> = None;
-    let mut node_worker_handle: Option<std::thread::JoinHandle<NodeWorkerState>> = None;
+    let mut node_worker_handles: Vec<std::thread::JoinHandle<NodeWorkerState>> = Vec::new();
     let mut node_worker_joined = false;
     // Node-worker bookkeeping merged at join time; tally applied to
     // sort_writer wherever it lives at that point.
@@ -291,22 +291,25 @@ pub(super) fn phase_read_and_process(
             if let Some(tx) = node_worker_tx.take() {
                 drop(tx);
                 let _wait = wait_span(&WAIT.node_worker_join);
-                let st = node_worker_handle
-                    .take()
-                    .expect("node worker handle missing")
-                    .join()
-                    .expect("node worker thread panicked");
+                for handle in node_worker_handles.drain(..) {
+                    let st = handle.join().expect("node worker thread panicked");
+                    if st.node_store.is_some() {
+                        node_store_opt = st.node_store;
+                    }
+                    node_count += st.node_count;
+                    features_emitted += st.features_emitted;
+                    match node_tally.as_mut() {
+                        Some(tally) => tally.merge(&st.tally),
+                        None => node_tally = Some(st.tally),
+                    }
+                    min_lat_e7 = min_lat_e7.min(st.min_lat_e7);
+                    max_lat_e7 = max_lat_e7.max(st.max_lat_e7);
+                    min_lon_e7 = min_lon_e7.min(st.min_lon_e7);
+                    max_lon_e7 = max_lon_e7.max(st.max_lon_e7);
+                    min_lon_shifted_e7 = min_lon_shifted_e7.min(st.min_lon_shifted_e7);
+                    max_lon_shifted_e7 = max_lon_shifted_e7.max(st.max_lon_shifted_e7);
+                }
                 node_worker_joined = true;
-                node_store_opt = st.node_store;
-                node_count = st.node_count;
-                features_emitted += st.features_emitted;
-                node_tally = Some(st.tally);
-                min_lat_e7 = st.min_lat_e7;
-                max_lat_e7 = st.max_lat_e7;
-                min_lon_e7 = st.min_lon_e7;
-                max_lon_e7 = st.max_lon_e7;
-                min_lon_shifted_e7 = st.min_lon_shifted_e7;
-                max_lon_shifted_e7 = st.max_lon_shifted_e7;
             }
         }};
     }
@@ -332,14 +335,31 @@ pub(super) fn phase_read_and_process(
                         !node_worker_joined || locations_on_ways,
                         "node block after way phase on the raw path"
                     );
-                    let (ntx, nrx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(8);
-                    let ns = node_store_opt.take();
-                    let sp = std::sync::Arc::clone(&spill);
-                    let mz = min_z;
-                    let xz = max_z;
-                    node_worker_handle = Some(std::thread::spawn(move || {
-                        run_node_worker(&nrx, ns, &sp, mz, xz)
-                    }));
+                    // The raw path is pinned to ONE worker: the sorted node
+                    // store requires sequential put order. Locations mode has
+                    // no store and an unordered source - tagged-node emission
+                    // and extent tracking are order-free, so the blocks fan
+                    // out to a small worker pool (the single worker was the
+                    // node-phase rate limiter: 16.6s serial on NA locations,
+                    // node_block_send wait 16.5s from the consumer side).
+                    let worker_count = if locations_on_ways {
+                        (config.threads / 4).clamp(2, 6)
+                    } else {
+                        1
+                    };
+                    let (ntx, nrx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(16);
+                    let shared_rx = std::sync::Arc::new(std::sync::Mutex::new(nrx));
+                    let mut ns = node_store_opt.take();
+                    for _ in 0..worker_count {
+                        let rx = std::sync::Arc::clone(&shared_rx);
+                        let sp = std::sync::Arc::clone(&spill);
+                        let ns_taken = ns.take();
+                        let mz = min_z;
+                        let xz = max_z;
+                        node_worker_handles.push(std::thread::spawn(move || {
+                            run_node_worker(&rx, ns_taken, &sp, mz, xz)
+                        }));
+                    }
                     node_worker_tx = Some(ntx);
                 }
                 let _wait = wait_span(&WAIT.node_block_send);
@@ -433,13 +453,21 @@ pub(super) fn phase_read_and_process(
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
                     const WAY_OUTPUT_MULTIPLIER: usize = 10;
-                    let way_budget = if config.way_inflight_budget > 0 {
-                        config.way_inflight_budget
-                    } else if locations_on_ways {
-                        DEFAULT_WAY_BUDGET_LOCATIONS
-                    } else {
-                        DEFAULT_WAY_BUDGET
-                    };
+                    // ELIVAGAR_WAY_BUDGET (bytes) outranks the flag: brokkr's
+                    // tilegen wrapper has no --way-budget passthrough, and the
+                    // budget is under active A/B (way_budget wait 93.4s
+                    // cumulative on NA locations at the 768M default).
+                    let way_budget = std::env::var("ELIVAGAR_WAY_BUDGET")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .filter(|&v| v > 0)
+                        .unwrap_or(if config.way_inflight_budget > 0 {
+                            config.way_inflight_budget
+                        } else if locations_on_ways {
+                            DEFAULT_WAY_BUDGET_LOCATIONS
+                        } else {
+                            DEFAULT_WAY_BUDGET
+                        });
                     worker_handle = Some(std::thread::spawn(move || {
                         // Take refs outside loop - Copy into each move closure,
                         // avoids Arc::clone per spawn.
@@ -1199,14 +1227,16 @@ pub(super) struct NodeWorkerState {
 }
 
 /// Node-phase worker loop: store puts, tagged-node feature emission, and
-/// data-extent tracking, fed whole blocks by the consumer. Single threaded
-/// by design - the sorted node store requires sequential put order (the raw
-/// path's ordered source guarantees block order end to end). Records flow to
-/// the shared spill coalescer, so this worker never owns sort_writer and can
-/// outlive the node phase - node blocks interleaved with way blocks (an
-/// unordered source) are fine when there is no node store.
+/// data-extent tracking, fed whole blocks by the consumer through a shared
+/// receiver. The raw path runs exactly ONE of these - the sorted node store
+/// requires sequential put order (the raw path's ordered source guarantees
+/// block order end to end). Locations mode runs a small pool: no store, an
+/// unordered source, and per-worker sinks make node work order-free.
+/// Records flow to the shared spill coalescer, so workers never own
+/// sort_writer and can outlive the node phase - node blocks interleaved
+/// with way blocks are fine when there is no node store.
 fn run_node_worker(
-    rx: &std::sync::mpsc::Receiver<PrimitiveBlock>,
+    rx: &std::sync::Mutex<std::sync::mpsc::Receiver<PrimitiveBlock>>,
     mut node_store: Option<NodeStore>,
     spill: &crate::sort::SpillCoalescer,
     min_zoom: u8,
@@ -1267,7 +1297,14 @@ fn run_node_worker(
         }};
     }
 
-    while let Ok(block) = rx.recv() {
+    loop {
+        // Take the lock only to receive; blocks are processed lock-free so
+        // pool siblings pull work concurrently.
+        let received = {
+            let guard = rx.lock().expect("node worker receiver lock");
+            guard.recv()
+        };
+        let Ok(block) = received else { break };
         let _busy = wait_span(&BUSY.phase12_node_blocks);
         block.for_each_element(|element| match element {
             Element::DenseNode(node) => handle_node!(node),

@@ -625,6 +625,66 @@ ONLY - a denmark bench + regress is minutes cheaper than a germany one
 and catches the same format/geometry regressions. Germany/NA regress
 only at blessing rotations.
 
+NA A/B READ 2026-07-09 (`dffccc5f` vs `b66fcc6e`): lz4 costs +2.0%
+wall at NA (361.6 -> 369.0s; phase12 +6.5s of compression CPU,
+assemble flat) and cuts phase12 physical writes 60.1 -> 26.3 GB,
+assemble reads 79.3 -> 30.8 GB, scratch on disk ~2.6x. Assemble was
+flat because NVMe was never its NA bottleneck - encode CPU is; at
+planet, where merge reads overflow the page cache, the trade should
+invert. Verdict: lz4 is the planet-run configuration; extract-scale
+default stays uncompressed until a record run cares.
+
+RIP-AND-TEAR CAMPAIGN, SAME DAY (perf hunt on germany/NA, user
+directive to explore the major theories aggressively):
+
+- Assemble worker cap + BYTE-BUDGETED CLAIM WINDOW. The 4-worker cap
+  and the partition-count window were both binding: 8 workers cut
+  assemble 186.4 -> 173.0s but claim-window wait hit 83.6% of wall
+  (workers parked behind stragglers while holding under 1.3 GB of a
+  multi-GB budget); 12 workers made it WORSE (176.1s, RSS 8.7 GB) -
+  count is saturated. The structural fix: workers may claim any
+  distance ahead while the writer's parked bytes are under a byte
+  budget (2 GiB default, ELIVAGAR_ASSEMBLE_PARK_BUDGET), collapsing
+  to the tight window only over budget. Claim wait 83.6% -> 1.0%,
+  assemble 186.4 -> 160.7s (-14%), cores 17.3 -> 19.2, parked HWM
+  2.51 GB (budget + in-flight overshoot, as designed). Worker default
+  still 4 (ELIVAGAR_ASSEMBLE_WORKERS=8 used in runs); promote 8 +
+  window to defaults when committed numbers settle.
+- OCEAN SCRATCH RIP-OUT. OCEAN_EMIT_SCRATCH was a per-thread
+  PyramidScratch pool - the same input-scaled retention the assemble
+  scratch pool had (deleted 69c0f18). Now built per work item; NA
+  ocean RSS 9.9 -> 7.7 GB, ocean wall unchanged. Run peak moved to
+  assemble (8.6 GB, mostly the parked window).
+- PARALLEL NODE WORKERS (locations mode only; raw path stays 1 for
+  store ordering). Pool of threads/4 clamped 2-6 sharing the node
+  channel. NA: node_block_send wait 16.5 -> 2.7s but phase12 wall
+  UNCHANGED - the freed consumer time moved into way_block_send/
+  way_budget; node time was hidden behind the way path. Denmark wins
+  outright: 13.7 -> 11.8s wall. Keep.
+- Full-NA scoreboard with all three + lz4 (dirty-tree run, f3e71b0
+  code + knobs): wall 343.9s (-4.9% vs 361.6 baseline), phase12
+  162.3s (+6.8 lz4 CPU), ocean 20.1s / 7.7 GB, assemble 161.0s /
+  8.6 GB. Denmark gate + regress clean (1,296,996 tiles identical).
+- Way-budget A/B: 1.5G vs 768M was a NO-OP (wait 93.4 -> 91.3s,
+  max_way_inflight peaked at 1.25 GB estimated, under the raised cap).
+  The binding constraint is the task-count ceiling / way-stage CPU,
+  not bytes - 768M default stands, and the way-path frontier is
+  H6 churn reduction, not knobs. ELIVAGAR_WAY_BUDGET env override
+  added for future A/Bs (brokkr's tilegen wrapper has no --way-budget
+  passthrough).
+- Defaults promoted after gates: assemble workers 4 -> 8, byte-budget
+  claim window 2 GiB (both env-overridable). Denmark gate at final
+  defaults: 11.7s wall, regress vs blessed clean.
+
+Assemble ceiling note for the next hunt: at 8 workers + byte window,
+readers cost ~150 thread-s (k-way merge + lz4 decode) against ~19.2
+avg cores; writer idle (partition_batch wait) is pipeline shape, not
+a defect. Remaining assemble ideas, unpriced: reader/encode overlap
+inside a worker (reader blocks during its rayon encode today),
+split z6 -> z7 partitions (germany's 921 MB max partition is a z6
+prefix artifact; would also shrink claim-window quantum), pmtiles
+write path (7.3% of wall, output target is hdd).
+
 ### H5: Ocean becomes a durable precomputed tile stream
 
 **Claim.** At planet scale, backlog item 23 stops being an optimization

@@ -482,7 +482,17 @@ fn phase_assemble_partitions(
         });
     }
 
-    let worker_count = config.threads.clamp(1, 4).min(partition_count);
+    // Measured on NA locations (2026-07-09): 4 workers left the writer idle
+    // 68% of assemble; 8 workers cut assemble 186.4 -> 173.0s under the old
+    // count window and 160.7s with the byte-budgeted claim window; 12 was
+    // WORSE (176.1s, +3 GB RSS) - encode CPU saturates around 8. Env
+    // override for future A/Bs.
+    let worker_cap = std::env::var("ELIVAGAR_ASSEMBLE_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(8);
+    let worker_count = config.threads.clamp(1, worker_cap).min(partition_count);
     let next_job = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
     let (tx, rx) = mpsc::channel::<Result<PartitionBatch, PipelineError>>();
@@ -496,7 +506,33 @@ fn phase_assemble_partitions(
     // ~window partitions' worth by construction. The claimer of next_write
     // itself is always inside the window, so progress is guaranteed.
     let claim_window = worker_count * 2;
-    let write_progress = (std::sync::Mutex::new(0usize), std::sync::Condvar::new());
+    // Byte-budgeted claim relaxation: the partition-count window alone parks
+    // workers behind every straggler even when almost nothing is held in RAM
+    // (measured at 8 workers on NA locations: claim-window wait 83.6% of
+    // assemble wall while parked HWM stayed under 1.3 GB of a multi-GB
+    // budget). Workers may claim ANY distance ahead while the writer's
+    // parked bytes sit under the budget; past it, claims collapse back to
+    // the tight window. Progress guarantee unchanged - the claimer of
+    // next_write is always inside the window. RAM bound: parked bytes stop
+    // growing once over budget except for the <= worker_count partitions
+    // already claimed, so worst case is budget + workers x fattest
+    // partition - the same exposure class as the count window.
+    let park_budget = std::env::var("ELIVAGAR_ASSEMBLE_PARK_BUDGET")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(2 * 1024 * 1024 * 1024);
+    struct ClaimState {
+        next_write: usize,
+        parked_bytes: usize,
+    }
+    let write_progress = (
+        std::sync::Mutex::new(ClaimState {
+            next_write: 0,
+            parked_bytes: 0,
+        }),
+        std::sync::Condvar::new(),
+    );
     let write_progress_ref = &write_progress;
 
     let compression = config.compress_sort_chunks;
@@ -519,7 +555,6 @@ fn phase_assemble_partitions(
     let mut size_diag = TileSizeDiagnostics::default();
     let mut reader_max_ns: u64 = 0;
     let mut reader_total_ns: u64 = 0;
-    let mut parked_bytes: usize = 0;
     let mut max_parked_bytes: usize = 0;
     let mut current_partition_encoded: usize = 0;
     let mut max_partition_encoded: usize = 0;
@@ -542,15 +577,17 @@ fn phase_assemble_partitions(
                     }
                     {
                         let _wait = wait_span(&WAIT.assemble_claim_window);
-                        let mut written = write_progress_ref
+                        let mut state = write_progress_ref
                             .0
                             .lock()
                             .expect("assemble write progress lock");
-                        while order >= *written + claim_window && !stop_ref.load(Ordering::Relaxed)
+                        while order >= state.next_write + claim_window
+                            && state.parked_bytes >= park_budget
+                            && !stop_ref.load(Ordering::Relaxed)
                         {
-                            written = write_progress_ref
+                            state = write_progress_ref
                                 .1
-                                .wait(written)
+                                .wait(state)
                                 .expect("assemble write progress wait");
                         }
                     }
@@ -609,9 +646,17 @@ fn phase_assemble_partitions(
                 // RAM-ledger instrumentation: bytes parked in the pending map
                 // waiting for their partition's turn, and per-partition encoded
                 // totals - the two candidate holders of assemble's measured
-                // 17-19 GB plateau (live under all three allocators).
-                parked_bytes += batch_encoded_bytes(&batch);
-                max_parked_bytes = max_parked_bytes.max(parked_bytes);
+                // 17-19 GB plateau (live under all three allocators). The
+                // parked total lives inside the claim mutex: workers consult
+                // it for the byte-budgeted claim rule.
+                {
+                    let mut state = write_progress
+                        .0
+                        .lock()
+                        .expect("assemble write progress lock");
+                    state.parked_bytes += batch_encoded_bytes(&batch);
+                    max_parked_bytes = max_parked_bytes.max(state.parked_bytes);
+                }
                 let batch_order = batch.order;
                 let batch_index = batch.batch_index;
                 let state = pending.entry(batch_order).or_default();
@@ -634,7 +679,16 @@ fn phase_assemble_partitions(
                         .expect("ready batch exists");
                     let batch_is_last = batch.is_last;
                     let drained_bytes = batch_encoded_bytes(&batch);
-                    parked_bytes = parked_bytes.saturating_sub(drained_bytes);
+                    {
+                        let mut state = write_progress
+                            .0
+                            .lock()
+                            .expect("assemble write progress lock");
+                        state.parked_bytes = state.parked_bytes.saturating_sub(drained_bytes);
+                        // Parked bytes dropped - claims blocked on the byte
+                        // budget may proceed.
+                        write_progress.1.notify_all();
+                    }
                     current_partition_encoded += drained_bytes;
                     features_read += batch.features_read;
                     max_batch_bytes = max_batch_bytes.max(batch.max_batch_bytes);
@@ -669,11 +723,11 @@ fn phase_assemble_partitions(
                         next_write += 1;
                         next_batch = 0;
                         // Open the claim window one partition further.
-                        let mut written = write_progress
+                        let mut state = write_progress
                             .0
                             .lock()
                             .expect("assemble write progress lock");
-                        *written = next_write;
+                        state.next_write = next_write;
                         write_progress.1.notify_all();
                     } else {
                         next_batch += 1;
