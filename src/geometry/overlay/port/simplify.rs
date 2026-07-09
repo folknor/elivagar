@@ -1,16 +1,15 @@
 //! This module provides methods to simplify paths and shapes by reducing complexity
 //! (e.g., removing small artifacts or shapes below a certain area threshold) based on a build rule.
 
-use crate::geometry::overlay::port::core::fill_rule::FillRule;
-use crate::geometry::overlay::port::core::overlay::ContourDirection;
-use crate::geometry::overlay::port::core::overlay::ContourDirection::Clockwise;
-use crate::geometry::overlay::port::core::overlay::{Overlay, ShapeType};
-use crate::geometry::overlay::port::core::overlay_rule::OverlayRule;
-use crate::geometry::overlay::port::prim::IntPoint;
-
-use crate::geometry::overlay::port::segm::build::BuildSegments;
-use crate::geometry::overlay::port::shape::ContourExtension;
-use crate::geometry::overlay::port::shape::IntShapes;
+use crate::geometry::overlay::port::ContourDirection;
+use crate::geometry::overlay::port::ContourDirection::Clockwise;
+use crate::geometry::overlay::port::FillRule;
+use crate::geometry::overlay::port::extract::ContourExtension;
+use crate::geometry::overlay::port::extract::IntShapes;
+use crate::geometry::overlay::port::extract::OverlayRule;
+use crate::geometry::overlay::port::point::IntPoint;
+use crate::geometry::overlay::port::segment::BuildSegments;
+use crate::geometry::overlay::port::{Overlay, ShapeType};
 
 enum ContourFillDirection {
     Reverse,

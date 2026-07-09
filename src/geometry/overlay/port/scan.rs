@@ -11,7 +11,7 @@
 //! byte-for-byte the upstream algorithm; the pristine reference stays under
 //! `research/i_tree`.
 
-use crate::geometry::overlay::port::geom::v_segment::VSegment;
+use crate::geometry::overlay::port::segment::VSegment;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 

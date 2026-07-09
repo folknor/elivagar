@@ -6,11 +6,10 @@
 
 mod port;
 
-use port::core::fill_rule::FillRule;
-use port::core::overlay::{ContourDirection, IntOverlayOptions, Overlay};
-use port::core::overlay_rule::OverlayRule;
+use port::FillRule;
+use port::{ContourDirection, IntOverlayOptions, Overlay, OverlayRule};
 
-pub(crate) use port::prim::IntPoint;
+pub(crate) use port::IntPoint;
 
 pub(crate) type Contour = Vec<IntPoint>;
 pub(crate) type Shape = Vec<Contour>;
@@ -81,10 +80,10 @@ impl BoolOverlay {
 }
 
 impl ShapeType {
-    fn into_port_shape_type(self) -> port::core::overlay::ShapeType {
+    fn into_port_shape_type(self) -> port::ShapeType {
         match self {
-            Self::Subject => port::core::overlay::ShapeType::Subject,
-            Self::Clip => port::core::overlay::ShapeType::Clip,
+            Self::Subject => port::ShapeType::Subject,
+            Self::Clip => port::ShapeType::Clip,
         }
     }
 }
@@ -164,33 +163,13 @@ mod tests {
     #[test]
     fn differential_oracle_large_split_strategies() {
         let tree_case = grid_rects(35, 35, 6);
-        assert_same_subject_with_solver(
-            &tree_case,
-            port::core::solver::Solver::AUTO,
-            OracleSolver::AUTO,
-        );
-        assert_same_subject_with_solver(
-            &tree_case,
-            port::core::solver::Solver::TREE,
-            OracleSolver::TREE,
-        );
-        assert_same_subject_with_solver(
-            &tree_case,
-            port::core::solver::Solver::LIST,
-            OracleSolver::LIST,
-        );
+        assert_same_subject_with_solver(&tree_case, port::Solver::AUTO, OracleSolver::AUTO);
+        assert_same_subject_with_solver(&tree_case, port::Solver::TREE, OracleSolver::TREE);
+        assert_same_subject_with_solver(&tree_case, port::Solver::LIST, OracleSolver::LIST);
 
         let frag_case = grid_rects(65, 65, 4);
-        assert_same_subject_with_solver(
-            &frag_case,
-            port::core::solver::Solver::AUTO,
-            OracleSolver::AUTO,
-        );
-        assert_same_subject_with_solver(
-            &frag_case,
-            port::core::solver::Solver::FRAG,
-            OracleSolver::FRAG,
-        );
+        assert_same_subject_with_solver(&frag_case, port::Solver::AUTO, OracleSolver::AUTO);
+        assert_same_subject_with_solver(&frag_case, port::Solver::FRAG, OracleSolver::FRAG);
 
         // Intersect above the 4,000 / 16,000 thresholds, forced-strategy: the
         // clip is a rect covering part of the dense grid, so the boolean stays
@@ -200,13 +179,13 @@ mod tests {
         assert_same_intersect_with_solver(
             &tree_case,
             &tree_clip,
-            port::core::solver::Solver::AUTO,
+            port::Solver::AUTO,
             OracleSolver::AUTO,
         );
         assert_same_intersect_with_solver(
             &tree_case,
             &tree_clip,
-            port::core::solver::Solver::TREE,
+            port::Solver::TREE,
             OracleSolver::TREE,
         );
 
@@ -214,13 +193,13 @@ mod tests {
         assert_same_intersect_with_solver(
             &frag_case,
             &frag_clip,
-            port::core::solver::Solver::AUTO,
+            port::Solver::AUTO,
             OracleSolver::AUTO,
         );
         assert_same_intersect_with_solver(
             &frag_case,
             &frag_clip,
-            port::core::solver::Solver::FRAG,
+            port::Solver::FRAG,
             OracleSolver::FRAG,
         );
     }
@@ -316,15 +295,12 @@ mod tests {
 
     fn assert_same_subject_with_solver(
         shape: &Shape,
-        solver: port::core::solver::Solver,
+        solver: port::Solver,
         oracle_solver: OracleSolver,
     ) {
-        let mut actual = port::core::overlay::Overlay::new_custom(0, port_options(), solver);
-        actual.add_shape(shape, port::core::overlay::ShapeType::Subject);
-        let actual_out = actual.overlay(
-            port::core::overlay_rule::OverlayRule::Subject,
-            port::core::fill_rule::FillRule::NonZero,
-        );
+        let mut actual = port::Overlay::new_custom(0, port_options(), solver);
+        actual.add_shape(shape, port::ShapeType::Subject);
+        let actual_out = actual.overlay(port::OverlayRule::Subject, port::FillRule::NonZero);
 
         let expected = oracle_overlay(shape, None, OracleRule::Subject, oracle_solver);
         assert_eq!(actual_out, expected);
@@ -333,16 +309,13 @@ mod tests {
     fn assert_same_intersect_with_solver(
         shape: &Shape,
         clip: &Contour,
-        solver: port::core::solver::Solver,
+        solver: port::Solver,
         oracle_solver: OracleSolver,
     ) {
-        let mut actual = port::core::overlay::Overlay::new_custom(0, port_options(), solver);
-        actual.add_shape(shape, port::core::overlay::ShapeType::Subject);
-        actual.add_contour(clip, port::core::overlay::ShapeType::Clip);
-        let actual_out = actual.overlay(
-            port::core::overlay_rule::OverlayRule::Intersect,
-            port::core::fill_rule::FillRule::NonZero,
-        );
+        let mut actual = port::Overlay::new_custom(0, port_options(), solver);
+        actual.add_shape(shape, port::ShapeType::Subject);
+        actual.add_contour(clip, port::ShapeType::Clip);
+        let actual_out = actual.overlay(port::OverlayRule::Intersect, port::FillRule::NonZero);
 
         let expected = oracle_overlay(shape, Some(clip), OracleRule::Intersect, oracle_solver);
         assert_eq!(actual_out, expected);
@@ -362,9 +335,9 @@ mod tests {
         from_oracle_shapes(overlay.overlay(rule, OracleFillRule::NonZero))
     }
 
-    fn port_options() -> port::core::overlay::IntOverlayOptions {
-        port::core::overlay::IntOverlayOptions {
-            output_direction: port::core::overlay::ContourDirection::CounterClockwise,
+    fn port_options() -> port::IntOverlayOptions {
+        port::IntOverlayOptions {
+            output_direction: port::ContourDirection::CounterClockwise,
             min_output_area: 0,
             ..Default::default()
         }

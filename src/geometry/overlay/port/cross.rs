@@ -1,7 +1,7 @@
-use crate::geometry::overlay::port::geom::x_segment::XSegment;
-use crate::geometry::overlay::port::prim::IntCoord;
-use crate::geometry::overlay::port::prim::IntPoint;
-use crate::geometry::overlay::port::prim::Triangle;
+use crate::geometry::overlay::port::point::IntCoord;
+use crate::geometry::overlay::port::point::IntPoint;
+use crate::geometry::overlay::port::point::Triangle;
+use crate::geometry::overlay::port::segment::XSegment;
 use core::marker::PhantomData;
 
 pub(super) type CollinearMask = u8;
@@ -290,19 +290,19 @@ impl CrossSolver {
             let udiv = div.unsigned_abs();
 
             let kx =
-                crate::geometry::overlay::port::prim::product_multiply(a1x.unsigned_abs(), uxy_b);
+                crate::geometry::overlay::port::point::product_multiply(a1x.unsigned_abs(), uxy_b);
             let ky =
-                crate::geometry::overlay::port::prim::product_multiply(a1y.unsigned_abs(), uxy_b);
+                crate::geometry::overlay::port::point::product_multiply(a1y.unsigned_abs(), uxy_b);
 
             let ux = kx.divide_with_rounding(udiv);
             let uy = ky.divide_with_rounding(udiv);
 
-            x0 = sx * crate::geometry::overlay::port::prim::wide_from_uint(ux);
-            y0 = sy * crate::geometry::overlay::port::prim::wide_from_uint(uy);
+            x0 = sx * crate::geometry::overlay::port::point::wide_from_uint(ux);
+            y0 = sy * crate::geometry::overlay::port::point::wide_from_uint(uy);
         }
 
-        let x = crate::geometry::overlay::port::prim::i_from_wide(x0 + a0x);
-        let y = crate::geometry::overlay::port::prim::i_from_wide(y0 + a0y);
+        let x = crate::geometry::overlay::port::point::i_from_wide(x0 + a0x);
+        let y = crate::geometry::overlay::port::point::i_from_wide(y0 + a0y);
 
         IntPoint::new(x, y)
     }
@@ -310,9 +310,9 @@ impl CrossSolver {
 
 #[cfg(test)]
 mod tests {
-    use crate::geometry::overlay::port::geom::x_segment::XSegment;
-    use crate::geometry::overlay::port::prim::IntPoint;
-    use crate::geometry::overlay::port::split::cross_solver::{CrossSolver, CrossType};
+    use crate::geometry::overlay::port::cross::{CrossSolver, CrossType};
+    use crate::geometry::overlay::port::point::IntPoint;
+    use crate::geometry::overlay::port::segment::XSegment;
 
     impl XSegment {
         fn new(a: IntPoint, b: IntPoint) -> Self {

@@ -808,17 +808,35 @@ Germany wall 52.2 -> 50.2s (`39d085b8`). emit_polygon_feature only
 5.2 -> 4.8 GB - the residue is pin-key hashing and pyramid-internal
 allocs attributed to it, a later pass.
 
-OPEN DOOR (user, 2026-07-09): i_overlay is NOT a fixed dependency.
-The two ops we use (simplify_contour / overlay Subject+NonZero, and
-the rect intersect) can be extracted from the crate, inlined, and
-optimized for our shapes - caller-provided output buffers, reused
-internal graph storage, integer-only paths. That would attack the
-15 GB of library-internal churn (normalize_into 7.0 GB +
-intersect_rect_into 8.1 GB) plus their ~41s of denmark thread-time,
-which no amount of caller-side scratch can reach. It is a
-spec-worthy campaign (the topology engine is earcut-oracle-gated),
-not a quick win - parked here deliberately, to pick up when the
-churn ledger says it is the next biggest lever.
+OPEN DOOR (user, 2026-07-09) - TAKEN, campaign in flight: i_overlay
+is no longer a dependency. The two ops we use (simplify_contour /
+overlay Subject+NonZero, and the rect intersect) are extracted and
+inlined per `notes/i-overlay-extraction-spec.md`. Landing 1 status:
+verbatim in-tree engine with the Cargo path-deps/patch removed
+(`d570daa`), sort + scan monomorphized to i32 with the vendored
+helper subsets deleted (`fbca741`), dead-surface pruning + strict
+lints restored (`b97cddc`); the 12-file layout collapse (spec task
+12) is the last L1 brick. i_overlay survives only as a
+dev-dependency: the 2,000-case differential oracle, kept
+independent (crates.io build, boundary point conversion, no
+[patch]) precisely so it can gate the remaining surgery.
+
+Why this campaign stops where it does: Landing 1 is verbatim
+semantics, Landing 2 is allocation-structural only (same values,
+same order, different storage), because the bit-identical gate -
+denmark regress at tol 0 plus the differential oracle - is what
+makes the port trustworthy at all. The deeper point of owning the
+code comes AFTER: once it is ours and i32-flat, it becomes
+optimizable beyond this campaign's stopping rule in future
+campaigns - caller-provided buffers end to end, integer-only paths
+shaped to our data - options a crates.io dependency structurally
+could not offer. Those stay out of scope here by design; breaking
+the bit-identical contract mid-port would cost the only instrument
+that proves the port correct. Landing 2 (the de-churn: engine-owned
+scratch, CSR nodes, pooled extraction, caller recycling) attacks
+the 15 GB of formerly library-internal churn (normalize_into
+7.0 GB + intersect_rect_into 8.1 GB) plus their ~41s of denmark
+thread-time, which no amount of caller-side scratch could reach.
 
 **Allocator addendum (2026-07-08).** mimalloc predates all measurement
 here (early experiment, never defended at current scale), and pbfhogg

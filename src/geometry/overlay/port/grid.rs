@@ -1,8 +1,7 @@
-use crate::geometry::overlay::port::geom::line_range::LineRange;
-use crate::geometry::overlay::port::geom::x_segment::XSegment;
-use crate::geometry::overlay::port::prim::IntRect;
-use crate::geometry::overlay::port::prim::{IntCoord, WideCoord};
-use crate::geometry::overlay::port::split::fragment::Fragment;
+use crate::geometry::overlay::port::point::IntRect;
+use crate::geometry::overlay::port::point::{IntCoord, WideCoord};
+use crate::geometry::overlay::port::segment::LineRange;
+use crate::geometry::overlay::port::segment::XSegment;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -163,27 +162,27 @@ impl FragmentBuffer {
                 h_max = hw.div_ceil(width);
             }
 
-            let max_x = x0 + crate::geometry::overlay::port::prim::i_from_uint(w);
+            let max_x = x0 + crate::geometry::overlay::port::point::i_from_uint(w);
 
             let rect = if is_inc {
-                let max_y = y0 + crate::geometry::overlay::port::prim::i_from_uint(h_max);
+                let max_y = y0 + crate::geometry::overlay::port::point::i_from_uint(h_max);
                 let rect = IntRect {
                     min_x: prev_x,
                     max_x,
                     min_y: prev_y,
                     max_y,
                 };
-                prev_y = y0 + crate::geometry::overlay::port::prim::i_from_uint(h_min);
+                prev_y = y0 + crate::geometry::overlay::port::point::i_from_uint(h_min);
                 rect
             } else {
-                let min_y = y0 - crate::geometry::overlay::port::prim::i_from_uint(h_max);
+                let min_y = y0 - crate::geometry::overlay::port::point::i_from_uint(h_max);
                 let rect = IntRect {
                     min_x: prev_x,
                     max_x,
                     min_y,
                     max_y: prev_y,
                 };
-                prev_y = y0 - crate::geometry::overlay::port::prim::i_from_uint(h_min);
+                prev_y = y0 - crate::geometry::overlay::port::point::i_from_uint(h_min);
                 rect
             };
 
@@ -304,7 +303,7 @@ impl GridLayout {
 
     #[inline]
     pub(super) fn pos(&self, index: usize) -> i32 {
-        crate::geometry::overlay::port::prim::i_from_usize(index << self.power) + self.min_x
+        crate::geometry::overlay::port::point::i_from_usize(index << self.power) + self.min_x
     }
 
     pub(super) fn new<It>(iter: It, count: usize) -> Option<Self>
@@ -346,12 +345,12 @@ impl GridLayout {
 mod tests {
     #![allow(clippy::useless_vec)]
 
-    use crate::geometry::overlay::port::geom::x_segment::XSegment;
-    use crate::geometry::overlay::port::prim::IntPoint;
-    use crate::geometry::overlay::port::prim::IntRect;
-    use crate::geometry::overlay::port::prim::Triangle;
-    use crate::geometry::overlay::port::split::grid_layout::vec;
-    use crate::geometry::overlay::port::split::grid_layout::{FragmentBuffer, GridLayout};
+    use crate::geometry::overlay::port::grid::vec;
+    use crate::geometry::overlay::port::grid::{FragmentBuffer, GridLayout};
+    use crate::geometry::overlay::port::point::IntPoint;
+    use crate::geometry::overlay::port::point::IntRect;
+    use crate::geometry::overlay::port::point::Triangle;
+    use crate::geometry::overlay::port::segment::XSegment;
 
     struct TestRng(u64);
 
@@ -1663,5 +1662,36 @@ mod tests {
         }
 
         None
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct Fragment {
+    pub(super) index: usize,
+    pub(super) rect: IntRect,
+    pub(super) x_segment: XSegment,
+}
+
+impl Fragment {
+    #[inline]
+    pub(super) fn with_index_and_segment(index: usize, x_segment: XSegment) -> Self {
+        let (min_y, max_y) = if x_segment.a.y < x_segment.b.y {
+            (x_segment.a.y, x_segment.b.y)
+        } else {
+            (x_segment.b.y, x_segment.a.y)
+        };
+
+        let rect = IntRect {
+            min_x: x_segment.a.x,
+            max_x: x_segment.b.x,
+            min_y,
+            max_y,
+        };
+
+        Self {
+            index,
+            rect,
+            x_segment,
+        }
     }
 }
