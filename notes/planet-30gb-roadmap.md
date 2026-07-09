@@ -357,6 +357,43 @@ at NA (grew ~4 GB with the ocean spill coalescer - fine standalone,
 but planet ocean is all coastlines; H5's precomputed ocean stream
 remains the structural answer), and the H6 churn/retention work.
 
+SESSION CLOSE 2026-07-09 (~05:30, commits 1ad1d66..69c0f18, 15
+landings). The assemble plateau hunt concluded the day:
+
+- Claim window (33ce85e): bounded parked batches, but the HWM counter
+  showed only 1.29 GB parked - not the eater. Kept: it bounds a real
+  worst case (max single partition encodes to 459 MB; planet
+  straggler exposure is window x that).
+- Allocator three-way A/B (f2184ce/a32c960): NA wall within 1.7%
+  across mimalloc/system/jemalloc, assemble RSS 19.4/19.0/17.0 GB -
+  ruled out retention, memory is live. mimalloc is now
+  rip-out-eligible on simplicity (system allocator costs nothing
+  measurable); decision parked, mi_commit stays useful meanwhile.
+- The eater: per-thread AssemblyScratch pools growing to the fattest
+  tile each rayon thread ever saw. Canary reset never fired (wrong
+  proxy); the ELIVAGAR_SCRATCH_RESET=always diagnostic proved it
+  (germany assemble-only 7.2 -> 1.8 GB, wall unchanged 21.6s), and
+  69c0f18 deleted the pool entirely - scratch is per-tile now.
+
+FINAL NA LOCATIONS NUMBERS (`b66fcc6e`, 69c0f18, single run):
+wall 361.6s (March baseline 462.6s, -22%; morning-of re-baseline
+364.8s), phase12 155.5s / 5.5 GB RSS (was 283s / 21.5 GB), ocean
+19.5s / 9.9 GB, assemble 186.4s / 5.0 GB (was 19.4 GB). Run peak is
+now the OCEAN phase at 9.9 GB - every phase under 10 GB at NA scale
+on this 30 GB host, with all input-scaled stocks bounded except
+ocean's (H5) and the per-partition claim-window exposure.
+
+Next session's queue, in leverage order: (1) H3 extrapolation of the
+two open terms - planet ocean RSS (H5 decides) and planet partition
+counts / claim-window exposure - to produce the planet go/no-go
+number; (2) ocean phase RSS grew ~4 GB with the spill coalescer,
+worth one look (reduce-tree merge_from concatenation is the suspect);
+(3) assemble wall is now the biggest phase at NA (186s at 17.3 cores,
+80 GB of reads: H4's I/O pricing - LZ4 chunks - and H8b partition
+sizing); (4) the mimalloc rip-out decision; (5) NA/germany/norway
+outputs at 69c0f18 regress-verified against blessed before the next
+blessing rotation.
+
 Ledger validation from the same run: relation buffer stayed under its
 1 GB cap (236 MB, no spill), pmtiles dedup capped at 1M entries as
 designed, dir entries 20.3M streamed fine. max_rel_inflight_bytes hit
