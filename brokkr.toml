@@ -9,11 +9,14 @@ data = "data"
 scratch = "data/tilegen_tmp"
 target = "target"
 
+# All four paths verified 2026-07-09: data/scratch/target resolve to
+# /dev/nvme1n1p1 (Banan), source to the same; rotational=0. The old
+# ssd/hdd classes were stale hardware.
 [plantasjen.drives]
 source = "nvme"
-data = "ssd"
-scratch = "ssd"
-target = "hdd"
+data = "nvme"
+scratch = "nvme"
+target = "nvme"
 
 [plantasjen.datasets.denmark]
 origin = "Geofabrik"

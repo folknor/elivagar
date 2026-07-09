@@ -17,7 +17,7 @@ comparable tools. elivagar is the remaining half of the story.
 
 The only sacred thing is a correct PMTiles artifact. The standing gates
 define correct: `elivagar verify`, the earcut oracle
-(`scripts/validate/earcut-oracle.mjs`), and `elivagar regress` against a
+(`scripts/validate/earcut-oracle.mjs`), and `brokkr regress` against the
 blessed archive. Nothing in the current pipeline structure is protected.
 
 Companion: `notes/virtual-planet-serving.md` - the hypothesis that
@@ -559,6 +559,13 @@ plus the ocean bbox term. Phase12 itself bends only mildly
   to planet ENABLER - at ~2x ratio scratch drops to ~130 GB and the
   run fits with ~70 GB headroom. Alternative/complement: unlink
   chunks as assemble consumes them, and/or free space on the drive.
+  UPDATE same day: user freed space - Banan now has ~607 GB free, so
+  disk is GO even uncompressed; lz4 remains the planet configuration
+  for the page-cache effect, not survival. Also corrected
+  brokkr.toml drive classes: data/scratch/target are ALL on NVMe
+  (nvme1n1p1); the ssd/hdd labels in earlier results rows are stale
+  hardware provenance, and the "output goes to hdd" caveat above is
+  obsolete.
 - Ledger addendum: pmtiles dedup cap skipped 17.0M inserts at NA
   (101.8M tiles still reused, 6.2 GB saved); at planet the 1M cap
   costs output bytes (missed dedup), not RAM - price before H10

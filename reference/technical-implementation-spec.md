@@ -30,10 +30,11 @@ Specifications are saved to the ./notes folder.
    clipping, or the MVT/PMTiles container (zero errors is the bar);
    targeted tile inspection (`elivagar svg` / `elivagar diag` /
    `brokkr compare-tiles`) for named regression tiles when the change aims
-   at a specific visual defect; `elivagar regress <current> --against
-   <blessed>` for changes intended to be output-neutral (tol 0, zero
-   diffs) or geometry-changing landings (explicit --tol and --max-moved
-   stated in the spec, verdict read with the displacement percentiles);
+   at a specific visual defect; `brokkr regress` (resolves current vs
+   blessed itself, defaults denmark) for changes intended to be
+   output-neutral (tol 0, zero diffs) or geometry-changing landings
+   (explicit tolerance gates stated in the spec, verdict read with the
+   displacement percentiles);
    the `brokkr tilegen --bench` invocation for
    anything claiming or risking a performance effect (the win, its
    neutrality, or - when a feature knowingly pays for capability with

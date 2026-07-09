@@ -127,7 +127,7 @@ These cost little today and are expensive to retrofit:
   win (finer assemble scheduling, roadmap H8) - when either track builds
   it, build it once for both.
 - A serve-path variant of the correctness gate: on-demand output for a
-  tile must match the batch output (`elivagar regress` against a blessed
+  tile must match the batch output (`brokkr regress` against a blessed
   full-build archive is the natural instrument).
 - Record-store format changes should start carrying a version marker the
   moment anything outside one run reads it.
