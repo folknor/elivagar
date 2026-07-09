@@ -271,7 +271,6 @@ pub(super) fn phase_read_and_process(
         prepass_relation_plan(&relation_plan_pbf_path, decode_threads)
     }));
 
-
     // Node worker: owns the node store during the node phase and processes
     // node blocks off the consumer (8s of serial consumer time on germany
     // locations, all of it stalling decode workers). Records flow to the
@@ -687,8 +686,7 @@ pub(super) fn phase_read_and_process(
         source.join();
     } else {
         for block_result in reader.into_blocks_pipelined() {
-            let block =
-                block_result.map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
+            let block = block_result.map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
             route_block!(block);
         }
     }
@@ -760,9 +758,7 @@ pub(super) fn phase_read_and_process(
     let rel_blocks_source: Box<dyn Iterator<Item = PrimitiveBlock> + Send> =
         if relation_blocks_spilled {
             let reader = ElementReader::from_path(&config.pbf_path)
-                .map_err(|e| {
-                    PipelineError(format!("relation re-read: failed to open PBF: {e}"))
-                })?
+                .map_err(|e| PipelineError(format!("relation re-read: failed to open PBF: {e}")))?
                 .with_blob_filter(BlobFilter::only_relations())
                 .decode_threads(decode_threads);
             Box::new(reader.into_blocks_pipelined().map(|r| {
@@ -1133,8 +1129,7 @@ impl UnorderedBlockSource {
                     }
                     Err(e) => {
                         drop(
-                            reader_err_tx
-                                .send(Err(PipelineError(format!("PBF read failed: {e}")))),
+                            reader_err_tx.send(Err(PipelineError(format!("PBF read failed: {e}")))),
                         );
                         break;
                     }
@@ -1264,8 +1259,7 @@ fn run_node_worker(
                 );
                 for r in node_records.drain(..) {
                     sink.tally.record(r.key, r.data.len());
-                    sink.records
-                        .push((r.key, sink.payload.len(), r.data.len()));
+                    sink.records.push((r.key, sink.payload.len(), r.data.len()));
                     sink.payload.extend_from_slice(&r.data);
                 }
                 features_emitted += n;

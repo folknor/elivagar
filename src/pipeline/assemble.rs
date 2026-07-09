@@ -591,101 +591,102 @@ fn phase_assemble_partitions(
         // errors) falls through to the stop+notify below - workers parked on
         // the claim-window condvar must always be woken before scope join.
         let writer_result: Result<(), PipelineError> = (|| {
-        loop {
-            let result = {
-                let _wait = wait_span(&WAIT.assemble_partition_batch);
-                match rx.recv() {
-                    Ok(result) => result,
-                    Err(_) => break,
+            loop {
+                let result = {
+                    let _wait = wait_span(&WAIT.assemble_partition_batch);
+                    match rx.recv() {
+                        Ok(result) => result,
+                        Err(_) => break,
+                    }
+                };
+                let batch = result?;
+                if batch.order >= partition_count {
+                    return Err(PipelineError(format!(
+                        "assemble partition batch has invalid order {} of {partition_count}",
+                        batch.order
+                    )));
                 }
-            };
-            let batch = result?;
-            if batch.order >= partition_count {
-                return Err(PipelineError(format!(
-                    "assemble partition batch has invalid order {} of {partition_count}",
-                    batch.order
-                )));
-            }
-            // RAM-ledger instrumentation: bytes parked in the pending map
-            // waiting for their partition's turn, and per-partition encoded
-            // totals - the two candidate holders of assemble's measured
-            // 17-19 GB plateau (live under all three allocators).
-            parked_bytes += batch_encoded_bytes(&batch);
-            max_parked_bytes = max_parked_bytes.max(parked_bytes);
-            let batch_order = batch.order;
-            let batch_index = batch.batch_index;
-            let state = pending.entry(batch_order).or_default();
-            if state.batches.insert(batch_index, batch).is_some() {
-                return Err(PipelineError(format!(
-                    "duplicate assemble partition batch {batch_index} for partition {batch_order}"
-                )));
-            }
+                // RAM-ledger instrumentation: bytes parked in the pending map
+                // waiting for their partition's turn, and per-partition encoded
+                // totals - the two candidate holders of assemble's measured
+                // 17-19 GB plateau (live under all three allocators).
+                parked_bytes += batch_encoded_bytes(&batch);
+                max_parked_bytes = max_parked_bytes.max(parked_bytes);
+                let batch_order = batch.order;
+                let batch_index = batch.batch_index;
+                let state = pending.entry(batch_order).or_default();
+                if state.batches.insert(batch_index, batch).is_some() {
+                    return Err(PipelineError(format!(
+                        "duplicate assemble partition batch {batch_index} for partition {batch_order}"
+                    )));
+                }
 
-            while pending
-                .get(&next_write)
-                .is_some_and(|state| state.batches.contains_key(&next_batch))
-            {
-                let state = pending
-                    .get_mut(&next_write)
-                    .expect("ready partition exists");
-                let batch = state
-                    .batches
-                    .remove(&next_batch)
-                    .expect("ready batch exists");
-                let batch_is_last = batch.is_last;
-                let drained_bytes = batch_encoded_bytes(&batch);
-                parked_bytes = parked_bytes.saturating_sub(drained_bytes);
-                current_partition_encoded += drained_bytes;
-                features_read += batch.features_read;
-                max_batch_bytes = max_batch_bytes.max(batch.max_batch_bytes);
-                reader_total_ns += batch.reader_ns;
-                current_partition_reader_ns += batch.reader_ns;
-                for tile in batch.encoded_tiles {
-                    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-                    let tile_bytes = tile.compressed.len() as u64;
-                    record_tile_size_diagnostics(&mut size_diag, tile.tile_id, tile_bytes);
-                    let is_unique = pmtiles.add_tile(z, x, y, &tile.compressed)?;
-                    tiles_written += 1;
-                    if (z as usize) < 15 {
-                        tiles_per_zoom[z as usize] += 1;
-                        if is_unique {
-                            unique_per_zoom[z as usize] += 1;
-                            bytes_per_zoom[z as usize] += tile_bytes;
+                while pending
+                    .get(&next_write)
+                    .is_some_and(|state| state.batches.contains_key(&next_batch))
+                {
+                    let state = pending
+                        .get_mut(&next_write)
+                        .expect("ready partition exists");
+                    let batch = state
+                        .batches
+                        .remove(&next_batch)
+                        .expect("ready batch exists");
+                    let batch_is_last = batch.is_last;
+                    let drained_bytes = batch_encoded_bytes(&batch);
+                    parked_bytes = parked_bytes.saturating_sub(drained_bytes);
+                    current_partition_encoded += drained_bytes;
+                    features_read += batch.features_read;
+                    max_batch_bytes = max_batch_bytes.max(batch.max_batch_bytes);
+                    reader_total_ns += batch.reader_ns;
+                    current_partition_reader_ns += batch.reader_ns;
+                    for tile in batch.encoded_tiles {
+                        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+                        let tile_bytes = tile.compressed.len() as u64;
+                        record_tile_size_diagnostics(&mut size_diag, tile.tile_id, tile_bytes);
+                        let is_unique = pmtiles.add_tile(z, x, y, &tile.compressed)?;
+                        tiles_written += 1;
+                        if (z as usize) < 15 {
+                            tiles_per_zoom[z as usize] += 1;
+                            if is_unique {
+                                unique_per_zoom[z as usize] += 1;
+                                bytes_per_zoom[z as usize] += tile_bytes;
+                            }
                         }
                     }
-                }
-                if batch_is_last {
-                    if !state.batches.is_empty() {
-                        return Err(PipelineError(format!(
-                            "assemble partition {next_write} received batches after final marker"
-                        )));
+                    if batch_is_last {
+                        if !state.batches.is_empty() {
+                            return Err(PipelineError(format!(
+                                "assemble partition {next_write} received batches after final marker"
+                            )));
+                        }
+                        reader_max_ns = reader_max_ns.max(current_partition_reader_ns);
+                        current_partition_reader_ns = 0;
+                        max_partition_encoded =
+                            max_partition_encoded.max(current_partition_encoded);
+                        current_partition_encoded = 0;
+                        pending.remove(&next_write);
+                        next_write += 1;
+                        next_batch = 0;
+                        // Open the claim window one partition further.
+                        let mut written = write_progress
+                            .0
+                            .lock()
+                            .expect("assemble write progress lock");
+                        *written = next_write;
+                        write_progress.1.notify_all();
+                    } else {
+                        next_batch += 1;
                     }
-                    reader_max_ns = reader_max_ns.max(current_partition_reader_ns);
-                    current_partition_reader_ns = 0;
-                    max_partition_encoded = max_partition_encoded.max(current_partition_encoded);
-                    current_partition_encoded = 0;
-                    pending.remove(&next_write);
-                    next_write += 1;
-                    next_batch = 0;
-                    // Open the claim window one partition further.
-                    let mut written = write_progress
-                        .0
-                        .lock()
-                        .expect("assemble write progress lock");
-                    *written = next_write;
-                    write_progress.1.notify_all();
-                } else {
-                    next_batch += 1;
                 }
             }
-        }
 
-        if next_write != partition_count {
-            return Err(PipelineError(format!(
-                "assemble partition worker stopped after {next_write} of {partition_count} partitions"
-            )));
-        }
-        Ok(())
+            if next_write != partition_count {
+                return Err(PipelineError(format!(
+                    "assemble partition worker stopped after {next_write} of {partition_count} partitions"
+                )));
+            }
+            Ok(())
         })();
 
         // Wake any worker parked on the claim window, success or error.

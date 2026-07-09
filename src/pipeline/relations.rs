@@ -228,65 +228,59 @@ pub(super) fn process_relation_blocks(
             prepared.into_iter()
         })
         .par_bridge()
-        .fold(
-            RelAcc::new,
-            |mut acc, (rel, rel_bytes)| {
-                let before = acc.sink.records.len();
-                process_prepared_relation_into(
-                    rel,
-                    min_zoom,
-                    max_zoom,
-                    seam_reconcile_layers,
-                    deferral_stats,
-                    &mut acc.sink,
-                    &mut acc.point_emit,
-                    &mut acc.line_emit,
-                    &mut acc.multipolygon_emit,
-                    &mut acc.simp_scratch,
-                    fanout_caps,
-                    polygon_simplify_factor,
-                );
-                // Track fanout for this relation's records.
-                record_fanout_from_payload_records(&acc.sink.records[before..], &mut acc.fanout);
-                // Harvest cap events from multipolygon emit scratch.
-                // `emit_multipolygon_feature` only clears cap_events when it runs,
-                // so a relation that emits only points/lines would re-harvest the
-                // previous relation's events across this fold accumulator. Clear
-                // after harvesting to count each cap event exactly once.
-                for &(idx, tiles, oid) in &acc.multipolygon_emit.cap_events {
-                    let layer = idx as usize / 15;
-                    let zoom = idx as usize % 15;
-                    acc.fanout.record_cap(layer, zoom, tiles, oid);
-                }
-                acc.multipolygon_emit.cap_events.clear();
-                inflight_bytes.fetch_sub(rel_bytes, Ordering::Relaxed);
-                acc.bytes = acc.sink.bytes();
-                if acc.bytes >= flush_threshold {
-                    acc.flush(spill);
-                }
-                acc
-            },
-        )
+        .fold(RelAcc::new, |mut acc, (rel, rel_bytes)| {
+            let before = acc.sink.records.len();
+            process_prepared_relation_into(
+                rel,
+                min_zoom,
+                max_zoom,
+                seam_reconcile_layers,
+                deferral_stats,
+                &mut acc.sink,
+                &mut acc.point_emit,
+                &mut acc.line_emit,
+                &mut acc.multipolygon_emit,
+                &mut acc.simp_scratch,
+                fanout_caps,
+                polygon_simplify_factor,
+            );
+            // Track fanout for this relation's records.
+            record_fanout_from_payload_records(&acc.sink.records[before..], &mut acc.fanout);
+            // Harvest cap events from multipolygon emit scratch.
+            // `emit_multipolygon_feature` only clears cap_events when it runs,
+            // so a relation that emits only points/lines would re-harvest the
+            // previous relation's events across this fold accumulator. Clear
+            // after harvesting to count each cap event exactly once.
+            for &(idx, tiles, oid) in &acc.multipolygon_emit.cap_events {
+                let layer = idx as usize / 15;
+                let zoom = idx as usize % 15;
+                acc.fanout.record_cap(layer, zoom, tiles, oid);
+            }
+            acc.multipolygon_emit.cap_events.clear();
+            inflight_bytes.fetch_sub(rel_bytes, Ordering::Relaxed);
+            acc.bytes = acc.sink.bytes();
+            if acc.bytes >= flush_threshold {
+                acc.flush(spill);
+            }
+            acc
+        })
         // Don't flush in reduce - collect remaining records back for sort_writer
         // to avoid a coalescer append per rayon accumulator.
-        .reduce(
-            RelAcc::new,
-            |mut a, mut b| {
-                a.count += b.count;
-                let base = a.sink.payload.len();
-                a.sink.payload.append(&mut b.sink.payload);
-                a.sink.records.extend(
-                    b.sink
-                        .records
-                        .drain(..)
-                        .map(|(key, off, len)| (key, off + base, len)),
-                );
-                a.sink.tally.merge(&b.sink.tally);
-                a.bytes += b.bytes;
-                a.fanout.merge(&b.fanout);
-                a
-            },
-        );
+        .reduce(RelAcc::new, |mut a, mut b| {
+            a.count += b.count;
+            let base = a.sink.payload.len();
+            a.sink.payload.append(&mut b.sink.payload);
+            a.sink.records.extend(
+                b.sink
+                    .records
+                    .drain(..)
+                    .map(|(key, off, len)| (key, off + base, len)),
+            );
+            a.sink.tally.merge(&b.sink.tally);
+            a.bytes += b.bytes;
+            a.fanout.merge(&b.fanout);
+            a
+        });
 
     fanout_stats.merge(&result.fanout);
     sort_writer.merge_tally(&result.sink.tally);

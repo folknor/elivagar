@@ -522,6 +522,56 @@ scales with per-partition density and reader count, needs the NA
 number). Planet go/no-go per H9 step 4 stays gated on the measured NA
 slope for those two.
 
+PLANET GO/NO-GO (paper, 2026-07-09, calibrated on NA `b66fcc6e` at
+69c0f18). Assumptions: 90 GB enriched planet, ~5.3x NA ways (1.1B vs
+209M), ocean features 2.5-3x NA (NA already hits 16,990 of 28,883
+shapes and pays 106.5M ocean features), unique tiles 3-4x NA
+(~60-70M; tiles scale with area, not input bytes - NA is 18.0M).
+
+Per-unit constants from the NA run: 52.7 MB/s end-to-end (19.06 GB /
+361.6s), phase12 8.2 s/GB, 32.7M features/GB, sort scratch 2.83 GB
+per GB of input (54.0 GB records), assemble 0.30 us/feature. That
+last one answers the open slope question: germany was 71 MB/s and
+0.11 us/feature - the germany->NA bend is concentrated in assemble
+(60x the unique tiles for 3.4x the input, 79.3 GB of merge reads)
+plus the ocean bbox term. Phase12 itself bends only mildly
+(6.4 -> 8.2 s/GB).
+
+- RAM: CONDITIONAL GO. Phase12 ~6-7 GB (all stocks bounded; relation
+  blocks will hit the 1 GB cap and take the verified spill path - NA
+  used 236 MB at ~1/5 of planet relations). Assemble ~6-9 GB
+  (claim-window worst case = window 8 x ~0.9 GB planet max
+  partition; observed NA parked HWM only 1.28 GB against a 459 MB
+  max partition). Ocean is the peak and the one open term: 9.9 GB at
+  NA; if it scales with shapes-hit (x1.7) that is ~12-17 GB - fits
+  standalone (phase12 releases to 1.35 GB before ocean starts) but
+  eats all headroom. The coalescer look (next-session item 2) or H5
+  is wanted before the run, not necessarily blocking it.
+- WALL: ~25-35 min. Phase12 730-820s + ocean 50-60s + assemble
+  700-900s, with the assemble band wide because ~370 GB of merge
+  reads through a 30 GB page cache is the untested term (H4). Even
+  the pessimistic end is ~5x under the 2h38m published 16cpu/32GB
+  record; the resource-classed claim survives the margin.
+- DISK: NO-GO TODAY - this is the hard blocker, not RAM. Input
+  90 GB + uncompressed scratch ~255 GB = ~345 GB on the NVMe that
+  has 292 GB free (output goes to the hdd target). Consequence: H4
+  knob 2 (LZ4 chunks, plumbing exists) is promoted from optimization
+  to planet ENABLER - at ~2x ratio scratch drops to ~130 GB and the
+  run fits with ~70 GB headroom. Alternative/complement: unlink
+  chunks as assemble consumes them, and/or free space on the drive.
+- Ledger addendum: pmtiles dedup cap skipped 17.0M inserts at NA
+  (101.8M tiles still reused, 6.2 GB saved); at planet the 1M cap
+  costs output bytes (missed dedup), not RAM - price before H10
+  record runs. Dir entries ~80-100M streamed, leaf dirs ~150 MB,
+  fine. way_index ~7 GB on disk, page cache pressure only.
+  mi_commit ended 20.3 GB vs 10.0 GB RSS at NA - the rip-out
+  decision (queue item 4) stands on its own.
+
+Sequencing consequence: H4's LZ4 A/B (NA-scale, --compress-sort-chunks
+on vs off) is now first in line - it is simultaneously the disk
+enabler, the assemble I/O price probe, and cheap. Ocean RSS (item 2)
+second. Planet dry run gates on both landing green.
+
 ### H4: Sort scratch needs page-cache hygiene, maybe compression
 
 **Claim.** ~200 GB of scratch write+read through a 30 GB host will
@@ -543,6 +593,37 @@ germany - already fine, verify at planet partition counts).
 **First step.** NA-scale A/B: `--compress-sort-chunks` on vs off (bench 3),
 plus majflt/PSI from the sidecar samples. No code needed to start pricing
 knob (2); knob (1) is a small change priced by the same run.
+
+PRICED AND UNBLOCKED 2026-07-09 (germany locations, 9ecbdd4). The
+go/no-go block above promoted LZ4 chunks to planet enabler; the pricing
+run then exposed a format blocker: compressed chunks bypassed the
+multi-partition section format and wrote one FILE per partition range
+per flush (1334 files at germany's 234 partitions vs 18 coalesced;
+at NA's 15442 partitions that is the exact tiny-file fragmentation the
+SpillCoalescer was built to kill). Fix landed: per-section compression
+inside the multi-section chunk file - each partition section is an
+independent LZ4/Snappy frame, the section table stores frame-start
+offsets (written as a placeholder, patched by seek-back once compressed
+sizes are known), and readers seek+stream-decode exactly count records.
+Per-compression magics (ELVGSRT1/ELVGSRL1/ELVGSRS1) make a --skip-to
+resume with a flipped flag fail loud. All compressed writes now route
+through the partitioned coalesced path; the file-per-range branches are
+deleted.
+
+Germany numbers (locations, bench): baseline `ab34dc54` 61.6s, lz4 old
+format 66.8s, lz4 sectioned 67.5s dirty-tree run - chunks 18, fan-in 17,
+compression CPU cost ~8-9% of wall where the page cache already holds
+everything. Physical writes 13.78 -> 6.17 GB in phase12 (ratio ~2.6x on
+chunk bytes); assemble disk reads 5.49 GB -> ~0 (compressed scratch fits
+in cache). At planet: scratch ~255 -> ~100 GB (disk NO-GO becomes GO),
+and the CPU-vs-I/O trade should invert once merge reads stop fitting in
+RAM - the NA A/B prices that. Correctness: germany regress vs 18e1656
+archive, 827010 tiles identical, 0 diffs.
+
+Gate policy from here (user call, 2026-07-09): regress runs on DENMARK
+ONLY - a denmark bench + regress is minutes cheaper than a germany one
+and catches the same format/geometry regressions. Germany/NA regress
+only at blessing rotations.
 
 ### H5: Ocean becomes a durable precomputed tile stream
 

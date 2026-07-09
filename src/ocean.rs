@@ -371,33 +371,27 @@ pub(crate) fn process_ocean_shapefile(
 
     let mut result = work_items
         .into_par_iter()
-        .fold(
-            OceanAcc::new,
-            |mut acc, item| {
-                emit_ocean_piece(
-                    item,
-                    &pieces,
-                    &params,
-                    ocean_layer,
-                    &empty_attrs_bytes,
-                    &mut acc,
-                );
-                if acc.bytes >= chunk_size {
-                    acc.flush(&spill);
-                }
-                acc
-            },
-        )
-        .reduce(
-            OceanAcc::new,
-            |mut a, b| {
-                a.merge_from(b);
-                if a.bytes >= chunk_size {
-                    a.flush(&spill);
-                }
-                a
-            },
-        );
+        .fold(OceanAcc::new, |mut acc, item| {
+            emit_ocean_piece(
+                item,
+                &pieces,
+                &params,
+                ocean_layer,
+                &empty_attrs_bytes,
+                &mut acc,
+            );
+            if acc.bytes >= chunk_size {
+                acc.flush(&spill);
+            }
+            acc
+        })
+        .reduce(OceanAcc::new, |mut a, b| {
+            a.merge_from(b);
+            if a.bytes >= chunk_size {
+                a.flush(&spill);
+            }
+            a
+        });
 
     result.merge_from(pre_emit);
     result.flush(&spill);
