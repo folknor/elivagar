@@ -1,22 +1,20 @@
 use crate::geometry::overlay::port::build::builder::{GraphBuilder, GraphNode};
-use crate::geometry::overlay::port::core::solver::Solver;
 use crate::geometry::overlay::port::geom::end::End;
 use crate::geometry::overlay::port::segm::winding::WindingCount;
 use crate::geometry::overlay::port::sort::TwoKeysSort;
-use alloc::vec::Vec;
 
 impl<C, N> GraphBuilder<C, N>
 where
     C: WindingCount,
     N: GraphNode,
 {
-    pub(super) fn build_nodes_and_connect_links(&mut self, solver: &Solver) {
+    pub(super) fn build_nodes_and_connect_links(&mut self) {
         let n = self.links.len();
         if n == 0 {
             return;
         }
 
-        self.build_ends(solver);
+        self.build_ends();
 
         self.nodes.clear();
         self.nodes.reserve(n);
@@ -92,7 +90,7 @@ where
     }
 
     #[inline]
-    fn build_ends(&mut self, solver: &Solver) {
+    fn build_ends(&mut self) {
         self.ends.clear();
         self.ends.reserve(self.links.len());
         for (i, link) in self.links.iter().enumerate() {

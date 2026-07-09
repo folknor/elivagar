@@ -1,7 +1,5 @@
-use crate::geometry::overlay::port::core::fill_rule::FillRule;
 use crate::geometry::overlay::port::core::solver::Solver;
 use crate::geometry::overlay::port::geom::end::End;
-use crate::geometry::overlay::port::geom::v_segment::VSegment;
 use crate::geometry::overlay::port::prim::Triangle;
 use crate::geometry::overlay::port::scan::{KeyExpCollection, KeyExpList, KeyExpTree};
 use crate::geometry::overlay::port::segm::segment::{Segment, SegmentFill};

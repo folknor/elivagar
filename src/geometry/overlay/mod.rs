@@ -4,15 +4,6 @@
 //! copyright Nail Sharipov and licensed under MIT OR Apache-2.0. The pristine
 //! reference sources are kept under `research/`.
 
-#![allow(
-    clippy::all,
-    clippy::cargo,
-    clippy::nursery,
-    clippy::pedantic,
-    clippy::restriction,
-    unexpected_cfgs
-)]
-
 mod port;
 
 use port::core::fill_rule::FillRule;
@@ -136,7 +127,7 @@ mod tests {
     }
 
     fn to_oracle_shape(shape: &Shape) -> Vec<Vec<OraclePoint>> {
-        shape.iter().map(|c| to_oracle_contour(c)).collect()
+        shape.iter().map(to_oracle_contour).collect()
     }
 
     fn from_oracle_shapes(shapes: Vec<Vec<Vec<OraclePoint>>>) -> Shapes {

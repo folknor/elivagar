@@ -55,8 +55,8 @@ impl BottomSegment for Option<VSegment> {
     #[inline(always)]
     fn update_if_under(&mut self, segment: VSegment) {
         if let Some(best) = self {
-            if segment.is_under_segment(&best) {
-                *best = segment
+            if segment.is_under_segment(best) {
+                *best = segment;
             }
         } else {
             *self = Some(segment);

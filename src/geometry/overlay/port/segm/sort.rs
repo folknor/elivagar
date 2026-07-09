@@ -17,6 +17,6 @@ impl<C: Send + Sync + Copy> ShapeSegmentsSort for [Segment<C>] {
             |s| s.x_segment.a.x,
             |s| s.x_segment.a.y,
             |s0, s1| s0.x_segment.b.cmp(&s1.x_segment.b),
-        )
+        );
     }
 }

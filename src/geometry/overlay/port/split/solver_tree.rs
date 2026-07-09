@@ -479,7 +479,7 @@ impl<C: Send> VerticalRange for Vec<Segment<C>> {
         let mut min_y = self.first()?.x_segment.a.y;
         let mut max_y = min_y;
 
-        for edge in self.iter() {
+        for edge in self {
             min_y = min_y.min(edge.x_segment.a.y);
             max_y = max_y.max(edge.x_segment.a.y);
             min_y = min_y.min(edge.x_segment.b.y);

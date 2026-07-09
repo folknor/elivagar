@@ -6,10 +6,10 @@ use crate::geometry::overlay::port::shape::IntPath;
 use crate::geometry::overlay::port::shape::{IntContour, IntShape};
 use crate::geometry::overlay::port::sort::TwoKeysAndCmpSort;
 use crate::geometry::overlay::port::util::log::Int;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+#[derive(Default)]
 pub(crate) struct BinderScratch {
     pub(crate) segments: Vec<IdSegment>,
     pub(crate) parent_for_child: Vec<usize>,
@@ -17,19 +17,6 @@ pub(crate) struct BinderScratch {
     sort_buffer: Vec<IdSegment>,
     scan_list: Option<KeyExpList<ContourIndex>>,
     scan_tree: Option<KeyExpTree<ContourIndex>>,
-}
-
-impl Default for BinderScratch {
-    fn default() -> Self {
-        Self {
-            segments: Vec::new(),
-            parent_for_child: Vec::new(),
-            children_count_for_parent: Vec::new(),
-            sort_buffer: Vec::new(),
-            scan_list: None,
-            scan_tree: None,
-        }
-    }
 }
 
 impl BinderScratch {
@@ -129,7 +116,7 @@ impl ShapeBinder {
                 if id_segment.v_segment.b.x > p.x {
                     scan_list.insert(id_segment.v_segment, id_segment.contour_index, p.x);
                 }
-                j += 1
+                j += 1;
             }
 
             let target_id =
@@ -151,7 +138,6 @@ impl ShapeBinder {
 }
 
 pub(crate) trait JoinHoles {
-    fn join_unsorted_holes(&mut self, holes: Vec<IntContour>, clockwise: bool);
     fn join_sorted_holes(
         &mut self,
         holes: &mut Vec<IntContour>,
@@ -169,35 +155,6 @@ pub(crate) trait JoinHoles {
 }
 
 impl JoinHoles for Vec<IntShape> {
-    #[inline]
-    fn join_unsorted_holes(&mut self, holes: Vec<IntPath>, clockwise: bool) {
-        let mut holes = holes;
-        if self.is_empty() || holes.is_empty() {
-            return;
-        }
-
-        if self.len() == 1 {
-            self[0].reserve(holes.len());
-            let mut hole_paths = holes;
-            self[0].append(&mut hole_paths);
-            return;
-        }
-
-        let mut hole_segments: Vec<_> = holes
-            .iter()
-            .enumerate()
-            .map(|(id, path)| IdSegment {
-                contour_index: ContourIndex::new_hole(id),
-                v_segment: path.left_bottom_segment(),
-            })
-            .collect();
-
-        hole_segments.sort_by_a_then_by_angle();
-
-        let mut scratch = BinderScratch::default();
-        self.scan_join(&mut holes, &mut hole_segments, clockwise, &mut scratch);
-    }
-
     #[inline]
     fn join_sorted_holes(
         &mut self,
@@ -217,7 +174,7 @@ impl JoinHoles for Vec<IntShape> {
             anchors.clear();
             return;
         }
-        debug_assert!(is_sorted(&anchors));
+        debug_assert!(is_sorted(anchors));
 
         anchors.add_sort_by_angle();
         self.scan_join(holes, anchors, clockwise, scratch);
@@ -333,18 +290,11 @@ impl IdSegment {
 }
 
 pub(crate) trait SortByAngle {
-    fn sort_by_a_then_by_angle(&mut self);
     fn sort_by_a_then_by_angle_and_buffer(&mut self, reusable_buffer: &mut Vec<IdSegment>);
     fn add_sort_by_angle(&mut self);
 }
 
 impl SortByAngle for [IdSegment] {
-    #[inline]
-    fn sort_by_a_then_by_angle(&mut self) {
-        let mut reusable_buffer = Vec::new();
-        self.sort_by_a_then_by_angle_and_buffer(&mut reusable_buffer);
-    }
-
     #[inline]
     fn sort_by_a_then_by_angle_and_buffer(&mut self, reusable_buffer: &mut Vec<IdSegment>) {
         self.sort_by_two_keys_then_by_and_buffer(
@@ -379,10 +329,14 @@ impl SortByAngle for [IdSegment] {
 
 #[cfg(test)]
 mod tests {
-    use crate::geometry::overlay::port::bind::solver::JoinHoles;
+    use crate::geometry::overlay::port::bind::segment::{ContourIndex, IdSegment};
+    use crate::geometry::overlay::port::bind::solver::{
+        BinderScratch, JoinHoles, LeftBottomSegment, SortByAngle,
+    };
     use crate::geometry::overlay::port::geom::v_segment::VSegment;
     use crate::geometry::overlay::port::prim::IntPoint;
     use alloc::vec;
+    use alloc::vec::Vec;
     use core::cmp::Ordering;
 
     #[test]
@@ -409,7 +363,7 @@ mod tests {
             ]],
         ];
 
-        let holes = vec![
+        let mut holes = vec![
             vec![
                 IntPoint::new(2, 3),
                 IntPoint::new(4, 4),
@@ -422,7 +376,21 @@ mod tests {
             ],
         ];
 
-        shapes.join_unsorted_holes(holes, false);
+        // Upstream test_0 went through join_unsorted_holes; that wrapper is
+        // pruned (production always arrives pre-sorted), so build and sort
+        // the anchors here and drive the same scan_join path directly.
+        let mut hole_segments: Vec<_> = holes
+            .iter()
+            .enumerate()
+            .map(|(id, path)| IdSegment {
+                contour_index: ContourIndex::new_hole(id),
+                v_segment: path.left_bottom_segment(),
+            })
+            .collect();
+        hole_segments.sort_by_a_then_by_angle_and_buffer(&mut Vec::new());
+
+        let mut scratch = BinderScratch::default();
+        shapes.scan_join(&mut holes, &mut hole_segments, false, &mut scratch);
 
         assert_eq!(shapes[0].len(), 1);
         assert_eq!(shapes[1].len(), 3);

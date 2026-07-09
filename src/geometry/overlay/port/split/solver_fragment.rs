@@ -118,7 +118,7 @@ impl SplitSolver {
                     Self::cross_fragments(fj, fi, radius, marks)
                 };
 
-                any_round = any_round || is_round
+                any_round = any_round || is_round;
             }
         }
 
@@ -132,9 +132,9 @@ impl SplitSolver {
         vertical_segments: &mut [BorderVSegment],
     ) {
         self.border_points.clear();
-        for fragment in fragments.iter() {
+        for fragment in fragments {
             if fragment.x_segment.b.x == border_x {
-                self.border_points.push(fragment.x_segment.b)
+                self.border_points.push(fragment.x_segment.b);
             }
         }
 
@@ -146,7 +146,7 @@ impl SplitSolver {
         vertical_segments.sort_by_key(|s0| s0.y_range.min);
 
         let mut i = 0;
-        for s in vertical_segments.iter() {
+        for s in &*vertical_segments {
             while i < self.border_points.len() && self.border_points[i].y <= s.y_range.min {
                 i += 1;
             }

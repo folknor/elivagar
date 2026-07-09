@@ -1,10 +1,10 @@
+// The ported engine keeps i_overlay's original integer narrowing/widening
+// casts verbatim; their value ranges are guaranteed by the snap-rounding
+// arithmetic, not visible to the lint.
 #![allow(
-    clippy::all,
-    clippy::cargo,
-    clippy::nursery,
-    clippy::pedantic,
-    clippy::restriction,
-    unexpected_cfgs
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
 )]
 
 pub(crate) mod prim;

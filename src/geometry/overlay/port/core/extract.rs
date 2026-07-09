@@ -9,11 +9,9 @@ use crate::geometry::overlay::port::core::overlay::ContourDirection;
 use crate::geometry::overlay::port::prim::IntPoint;
 use crate::geometry::overlay::port::prim::Triangle;
 use crate::geometry::overlay::port::shape::ContourExtension;
-use crate::geometry::overlay::port::shape::FlatContoursBuffer;
 use crate::geometry::overlay::port::shape::Reserve;
 use crate::geometry::overlay::port::shape::Simplify;
 use crate::geometry::overlay::port::shape::{IntContour, IntShape, IntShapes};
-use alloc::vec;
 use alloc::vec::Vec;
 
 #[repr(u8)]
@@ -26,6 +24,7 @@ pub(crate) enum VisitState {
     HullVisited = 3,
 }
 
+#[derive(Default)]
 pub struct BooleanExtractionBuffer {
     pub(crate) points: Vec<IntPoint>,
     pub(crate) visited: Vec<VisitState>,
@@ -34,20 +33,6 @@ pub struct BooleanExtractionBuffer {
     binder: BinderScratch,
     contour_pool: Vec<IntContour>,
     shape_pool: Vec<IntShape>,
-}
-
-impl Default for BooleanExtractionBuffer {
-    fn default() -> Self {
-        Self {
-            points: Vec::new(),
-            visited: Vec::new(),
-            holes: Vec::new(),
-            anchors: Vec::new(),
-            binder: BinderScratch::default(),
-            contour_pool: Vec::new(),
-            shape_pool: Vec::new(),
-        }
-    }
 }
 
 impl BooleanExtractionBuffer {
@@ -89,28 +74,6 @@ impl BooleanExtractionBuffer {
 }
 
 impl OverlayGraph<'_> {
-    /// Extracts shapes from the overlay graph based on the specified overlay rule. This method is used to retrieve the final geometric shapes after boolean operations have been applied. It's suitable for most use cases where the minimum area of shapes is not a concern.
-    /// - `overlay_rule`: The boolean operation rule to apply when extracting shapes from the graph, such as union or intersection.
-    /// - `buffer`: Reusable buffer, optimisation purpose only.
-    /// - Returns: A vector of `IntShape`, representing the geometric result of the applied overlay rule.
-    /// # Shape Representation
-    /// The output is a `IntShapes`, where:
-    /// - The outer `Vec<IntShape>` represents a set of shapes.
-    /// - Each shape `Vec<IntContour>` represents a collection of contours, where the first contour is the outer boundary, and all subsequent contours are holes in this boundary.
-    /// - Each path `Vec<IntPoint>` is a sequence of points, forming a closed path.
-    ///
-    /// Note: Outer boundary paths have a counterclockwise order, and holes have a clockwise order.
-    #[inline]
-    pub fn extract_shapes(
-        &self,
-        overlay_rule: OverlayRule,
-        buffer: &mut BooleanExtractionBuffer,
-    ) -> IntShapes {
-        let mut out = Vec::new();
-        self.extract_shapes_into(overlay_rule, buffer, &mut out);
-        out
-    }
-
     #[inline]
     pub fn extract_shapes_into(
         &self,
@@ -121,39 +84,6 @@ impl OverlayGraph<'_> {
         self.links
             .filter_by_overlay_into(overlay_rule, &mut buffer.visited);
         self.extract_into(overlay_rule, buffer, out);
-    }
-
-    /// Extracts the flat contours from the overlay graph based on the specified overlay rule.
-    ///
-    /// This method performs a Boolean operation (e.g., union or intersection) and stores the result
-    /// directly into a flat buffer of contours, without nesting them into shapes (i.e., no hole-joining or grouping).
-    ///
-    /// It is optimized for performance and suitable when raw contour data is sufficient,
-    /// such as during intermediate processing, visualization, or tesselation.
-    ///
-    /// - `overlay_rule`: The boolean operation rule to apply (e.g., union, intersection, xor).
-    /// - `buffer`: Reusable working buffer to avoid reallocations.
-    /// - `output`: A flat buffer to which the resulting valid contours will be written.
-    #[inline]
-    pub fn extract_contours_into(
-        &self,
-        overlay_rule: OverlayRule,
-        buffer: &mut BooleanExtractionBuffer,
-        output: &mut FlatContoursBuffer,
-    ) {
-        self.links
-            .filter_by_overlay_into(overlay_rule, &mut buffer.visited);
-        self.extract_contours(overlay_rule, buffer, output);
-    }
-
-    pub(crate) fn extract(
-        &self,
-        overlay_rule: OverlayRule,
-        buffer: &mut BooleanExtractionBuffer,
-    ) -> IntShapes {
-        let mut out = Vec::new();
-        self.extract_into(overlay_rule, buffer, &mut out);
-        out
     }
 
     pub(crate) fn extract_into(
@@ -300,68 +230,6 @@ impl OverlayGraph<'_> {
             node_id = points.push_node_and_get_other(link, node_id);
 
             visited.visit_edge(link_id, visited_state);
-        }
-    }
-
-    fn extract_contours(
-        &self,
-        overlay_rule: OverlayRule,
-        buffer: &mut BooleanExtractionBuffer,
-        output: &mut FlatContoursBuffer,
-    ) {
-        let clockwise = self.options.output_direction == ContourDirection::Clockwise;
-        let len = buffer.visited.len();
-        buffer.points.reserve_capacity(len);
-        output.clear_and_reserve(len, 4);
-
-        let mut link_index = 0;
-        while link_index < len {
-            if buffer.visited.is_visited(link_index) {
-                link_index += 1;
-                continue;
-            }
-
-            let left_top_link = unsafe {
-                // Safety: `link_index` walks 0..buffer.visited.len(), and buffer.visited.len() <= self.links.len().
-                GraphUtil::find_left_top_link(
-                    self.links,
-                    self.nodes,
-                    self.node_indices,
-                    link_index,
-                    &buffer.visited,
-                )
-            };
-
-            let link = unsafe {
-                // Safety: `left_top_link` originates from `find_left_top_link`, which only returns
-                // indices in 0..self.links.len(), so this lookup cannot go out of bounds.
-                self.links.get_unchecked(left_top_link)
-            };
-            let is_hole = overlay_rule.is_fill_top(link.fill);
-            let visited_state =
-                [VisitState::HullVisited, VisitState::HoleVisited][is_hole as usize];
-
-            let direction = is_hole == clockwise;
-            let start_data = StartPathData::new(direction, link, left_top_link);
-
-            self.find_contour(
-                &start_data,
-                direction,
-                visited_state,
-                &mut buffer.visited,
-                &mut buffer.points,
-            );
-            let (is_valid, _) = buffer.points.validate(
-                self.options.min_output_area,
-                self.options.preserve_output_collinear,
-            );
-
-            if !is_valid {
-                link_index += 1;
-                continue;
-            }
-
-            output.add_contour(buffer.points.as_slice());
         }
     }
 }

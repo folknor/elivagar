@@ -11,7 +11,11 @@ use crate::geometry::overlay::port::segm::segment::Segment;
 /// - `Auto`: Delegates the choice of solver to the system, which determines the most suitable approach based on the size and complexity of the dataset. This option is designed to dynamically select between `list` and `tree` strategies, aiming to optimize performance without requiring a priori knowledge of the data's characteristics. It's the recommended choice for users looking for a balance between performance and ease of use, as it adapts to the specific requirements of each operation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Strategy {
+    // Production always runs AUTO; the forced-strategy variants exist so the
+    // differential oracle can pin the list/tree/fragment paths explicitly.
+    #[allow(dead_code)]
     List,
+    #[allow(dead_code)]
     Tree,
     Frag,
     Auto,
@@ -57,16 +61,21 @@ impl Default for Solver {
 }
 
 impl Solver {
+    // The forced-strategy presets are constructed only by the differential
+    // oracle tests; production always uses AUTO.
+    #[allow(dead_code)]
     pub const LIST: Self = Self {
         strategy: List,
         precision: Precision::HIGH,
     };
 
+    #[allow(dead_code)]
     pub const TREE: Self = Self {
         strategy: Tree,
         precision: Precision::HIGH,
     };
 
+    #[allow(dead_code)]
     pub const FRAG: Self = Self {
         strategy: Frag,
         precision: Precision::HIGH,

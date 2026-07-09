@@ -2,32 +2,17 @@
 //!
 //! Upstream is generic over the `IntNumber` coordinate; the overlay engine only
 //! uses i32, so the contour/shape aliases, the `ContourExtension` predicates,
-//! the `Simplify` collinear-cleanup path, area/points-count, the `Reserve`
-//! helper, and the flat contour buffer are all fixed at i32 here. Behaviour is
-//! byte-for-byte the generic code at `I = i32`; the reference lives in
-//! `research/i_shape`.
+//! the `Simplify` collinear-cleanup path, and the `Reserve` helper are all
+//! fixed at i32 here. Behaviour is byte-for-byte the generic code at
+//! `I = i32`; the reference lives in `research/i_shape`.
 
 use crate::geometry::overlay::port::prim::IntPoint;
 use alloc::vec::Vec;
-use core::ops::Range;
 
 pub(crate) type IntContour = Vec<IntPoint>;
 pub(crate) type IntShape = Vec<IntContour>;
 pub(crate) type IntShapes = Vec<IntShape>;
 pub(crate) type IntPath = Vec<IntPoint>;
-
-/// Build an `IntShape` from nested `[x, y]` literals (i_shape's `int_shape!`).
-#[allow(unused_macros)]
-macro_rules! int_shape {
-    ($([$([$x:expr, $y:expr]),* $(,)?]),* $(,)?) => {
-        alloc::vec![$(
-            alloc::vec![$(
-                $crate::geometry::overlay::port::prim::IntPoint::new($x, $y)
-            ),*]
-        ),*]
-    };
-}
-pub(crate) use int_shape;
 
 /// Grows a `Vec` toward `new_capacity` without ever shrinking (i_shape's
 /// `Reserve`).
@@ -45,77 +30,9 @@ impl<T> Reserve for Vec<T> {
     }
 }
 
-pub(crate) trait PointsCount {
-    fn points_count(&self) -> usize;
-}
-
-impl PointsCount for [IntContour] {
-    #[inline(always)]
-    fn points_count(&self) -> usize {
-        self.iter().fold(0, |acc, path| acc + path.len())
-    }
-}
-
-impl PointsCount for [IntShape] {
-    #[inline(always)]
-    fn points_count(&self) -> usize {
-        self.iter().fold(0, |acc, shape| acc + shape.points_count())
-    }
-}
-
-pub(crate) trait Area {
-    fn area_two(&self) -> i64;
-    fn area(&self) -> i64;
-}
-
-impl Area for [IntPoint] {
-    #[inline]
-    fn area_two(&self) -> i64 {
-        self.unsafe_area()
-    }
-
-    #[inline]
-    fn area(&self) -> i64 {
-        self.area_two() / 2
-    }
-}
-
-impl Area for [IntContour] {
-    #[inline]
-    fn area_two(&self) -> i64 {
-        let mut s = 0i64;
-        for path in self.iter() {
-            s = s.wrapping_add(path.area_two());
-        }
-        s
-    }
-
-    #[inline]
-    fn area(&self) -> i64 {
-        self.area_two() / 2
-    }
-}
-
-impl Area for [IntShape] {
-    #[inline]
-    fn area_two(&self) -> i64 {
-        let mut s = 0i64;
-        for shape in self.iter() {
-            s = s.wrapping_add(shape.area_two());
-        }
-        s
-    }
-
-    #[inline]
-    fn area(&self) -> i64 {
-        self.area_two() / 2
-    }
-}
-
 pub(crate) trait ContourExtension {
     fn unsafe_area(&self) -> i64;
     fn is_clockwise_ordered(&self) -> bool;
-    fn contains(&self, point: IntPoint) -> bool;
 }
 
 impl ContourExtension for [IntPoint] {
@@ -124,7 +41,7 @@ impl ContourExtension for [IntPoint] {
         let n = self.len();
         let mut p0 = self[n - 1];
         let mut area = 0i64;
-        for &p1 in self.iter() {
+        for &p1 in self {
             let a = (p0.x as i64).wrapping_mul(p1.y as i64);
             let b = (p0.y as i64).wrapping_mul(p1.x as i64);
             area = area.wrapping_add(a).wrapping_sub(b);
@@ -136,25 +53,6 @@ impl ContourExtension for [IntPoint] {
     #[inline(always)]
     fn is_clockwise_ordered(&self) -> bool {
         self.unsafe_area() <= 0
-    }
-
-    fn contains(&self, point: IntPoint) -> bool {
-        let n = self.len();
-        let mut is_contain = false;
-        let mut b = self[n - 1];
-        for &a in self.iter() {
-            let is_in_range = (a.y > point.y) != (b.y > point.y);
-            if is_in_range {
-                let dx = b.x - a.x;
-                let dy = b.y - a.y;
-                let sx = (point.y - a.y) * dx / dy + a.x;
-                if point.x < sx {
-                    is_contain = !is_contain;
-                }
-            }
-            b = a;
-        }
-        is_contain
     }
 }
 
@@ -195,7 +93,7 @@ impl SimpleContour for [IntPoint] {
         let p1 = self[count - 1];
         let mut v0 = p1 - p0;
         p0 = p1;
-        for &pi in self.iter() {
+        for &pi in self {
             let vi = pi - p0;
             if vi.cross_product(v0) == 0 {
                 return false;
@@ -309,66 +207,4 @@ struct SimplifyNode {
     next: usize,
     index: usize,
     prev: usize,
-}
-
-/// Flat point-plus-ranges contour store (i_shape's `FlatContoursBuffer`),
-/// fixed to i32. Used as the extraction scratch inside the engine.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct FlatContoursBuffer {
-    pub points: Vec<IntPoint>,
-    pub ranges: Vec<Range<usize>>,
-}
-
-impl FlatContoursBuffer {
-    #[inline]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            points: Vec::with_capacity(capacity),
-            ranges: Vec::new(),
-        }
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.points.is_empty()
-    }
-
-    #[inline]
-    pub fn is_single_contour(&self) -> bool {
-        self.ranges.len() == 1
-    }
-
-    #[inline]
-    pub fn as_first_contour(&self) -> &[IntPoint] {
-        if let Some(first_contour_range) = self.ranges.first() {
-            &self.points[first_contour_range.clone()]
-        } else {
-            &self.points
-        }
-    }
-
-    #[inline]
-    pub fn as_first_contour_mut(&mut self) -> &mut [IntPoint] {
-        if let Some(first_contour_range) = self.ranges.first() {
-            &mut self.points[first_contour_range.clone()]
-        } else {
-            &mut self.points
-        }
-    }
-
-    #[inline]
-    pub fn clear_and_reserve(&mut self, points: usize, contours: usize) {
-        self.points.reserve_capacity(points);
-        self.points.clear();
-        self.ranges.reserve_capacity(contours);
-        self.ranges.clear();
-    }
-
-    #[inline]
-    pub fn add_contour(&mut self, contour: &[IntPoint]) {
-        let start = self.points.len();
-        let end = start + contour.len();
-        self.ranges.push(start..end);
-        self.points.extend_from_slice(contour);
-    }
 }

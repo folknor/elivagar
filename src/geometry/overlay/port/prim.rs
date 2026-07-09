@@ -135,6 +135,9 @@ pub(crate) struct IntVector {
 }
 
 impl IntVector {
+    // Production builds vectors via IntPoint subtraction; only the
+    // nearest-vector unit tests construct them directly.
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn new(x: i64, y: i64) -> Self {
         Self { x, y }
@@ -179,6 +182,8 @@ impl Triangle {
         Self::area_two(p0, p1, p2) < 0
     }
 
+    // Only the grid-layout unit tests assert with this predicate.
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn is_cw_or_line(p0: IntPoint, p1: IntPoint, p2: IntPoint) -> bool {
         Self::area_two(p0, p1, p2) <= 0
@@ -240,6 +245,9 @@ impl IntRect {
 ///
 /// Preconditions (upstream `debug_assert`s): `0 < divisor < 2^63`, and the
 /// rounded quotient fits in u64.
+// Production calls product_multiply/divide_with_rounding separately (the
+// cross solver); this composition exists for the numeric round-trip tests.
+#[allow(dead_code)]
 #[inline(always)]
 pub(crate) fn mul_div_round(a: u64, b: u64, divisor: u64) -> u64 {
     product_multiply(a, b).divide_with_rounding(divisor)

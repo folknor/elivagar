@@ -1,7 +1,7 @@
 use crate::geometry::overlay::port::geom::x_segment::XSegment;
+use crate::geometry::overlay::port::prim::IntCoord;
 use crate::geometry::overlay::port::prim::IntPoint;
 use crate::geometry::overlay::port::prim::Triangle;
-use crate::geometry::overlay::port::prim::{IntCoord, WideCoord};
 use core::marker::PhantomData;
 
 pub(super) type CollinearMask = u8;
@@ -327,7 +327,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(0, -s), IntPoint::new(0, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -346,7 +346,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(0, -s), IntPoint::new(0, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -365,7 +365,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(1024, -s), IntPoint::new(1024, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -385,7 +385,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, -s), IntPoint::new(s, s));
         let eb = XSegment::new(IntPoint::new(q, -s), IntPoint::new(q, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -404,7 +404,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(-s, -s), IntPoint::new(-s, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::TargetEnd => {
@@ -423,7 +423,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s, 0));
         let eb = XSegment::new(IntPoint::new(s, -s), IntPoint::new(s, s));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::TargetEnd => {
@@ -451,7 +451,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(7256, -14637), IntPoint::new(7454, -15045));
         let eb = XSegment::new(IntPoint::new(7343, -14833), IntPoint::new(7506, -15144));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {}
@@ -472,7 +472,7 @@ mod tests {
             IntPoint::new(-1023948, -10239),
         );
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Pure => {
@@ -495,7 +495,7 @@ mod tests {
             IntPoint::new(513224, -5243),
         );
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Overlay => {
@@ -518,7 +518,7 @@ mod tests {
             IntPoint::new(-276659430, 380789040),
         );
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Overlay => {
@@ -537,7 +537,7 @@ mod tests {
         let ea = XSegment::new(IntPoint::new(-s, 0), IntPoint::new(s / 2, 0));
         let eb = XSegment::new(IntPoint::new(0, 0), IntPoint::new(s, 0));
 
-        let result = CrossSolver::cross(&ea, &eb, 2).unwrap();
+        let result = CrossSolver::cross(&ea, &eb, 2).expect("segments must cross");
 
         match result.cross_type {
             CrossType::Overlay => {

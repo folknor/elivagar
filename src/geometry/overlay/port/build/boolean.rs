@@ -32,7 +32,7 @@ impl GraphBuilder<ShapeCountBoolean, OverlayNode> {
             OverlayRule::Subject => self.build_links_by_filter::<SubjectFilter>(segments),
             OverlayRule::Intersect => self.build_links_by_filter::<IntersectFilter>(segments),
         }
-        self.boolean_graph(options, solver)
+        self.boolean_graph(options)
     }
 
     #[inline]
@@ -44,14 +44,14 @@ impl GraphBuilder<ShapeCountBoolean, OverlayNode> {
     ) {
         match fill_rule {
             FillRule::NonZero => {
-                self.build_fills_with_strategy::<NonZeroStrategy>(solver, segments)
+                self.build_fills_with_strategy::<NonZeroStrategy>(solver, segments);
             }
         }
     }
 
     #[inline]
-    fn boolean_graph(&mut self, options: IntOverlayOptions, solver: &Solver) -> OverlayGraph<'_> {
-        self.build_nodes_and_connect_links(solver);
+    fn boolean_graph(&mut self, options: IntOverlayOptions) -> OverlayGraph<'_> {
+        self.build_nodes_and_connect_links();
         OverlayGraph {
             nodes: &self.nodes,
             node_indices: &self.node_indices,
@@ -133,7 +133,7 @@ impl OverlayLinkFilter for [OverlayLink] {
 fn filter_subject_into(links: &[OverlayLink], buffer: &mut Vec<VisitState>) {
     buffer.clear();
     buffer.reserve_capacity(links.len());
-    for link in links.iter() {
+    for link in links {
         buffer.push(VisitState::new(!link.fill.is_subject()));
     }
 }
@@ -142,7 +142,7 @@ fn filter_subject_into(links: &[OverlayLink], buffer: &mut Vec<VisitState>) {
 fn filter_intersect_into(links: &[OverlayLink], buffer: &mut Vec<VisitState>) {
     buffer.clear();
     buffer.reserve_capacity(links.len());
-    for link in links.iter() {
+    for link in links {
         buffer.push(VisitState::new(!link.fill.is_intersect()));
     }
 }

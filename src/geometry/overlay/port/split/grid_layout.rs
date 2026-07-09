@@ -32,6 +32,9 @@ impl FragmentBuffer {
         }
     }
 
+    // Production recycles the buffer via reset_layout; the upstream
+    // grid-layout tests build fresh buffers with this.
+    #[allow(dead_code)]
     #[inline]
     pub(super) fn new(layout: GridLayout) -> Self {
         let n = layout.index(layout.max_x) + 1;
@@ -157,7 +160,7 @@ impl FragmentBuffer {
 
             let hw = height * w;
             if h_max * width < hw {
-                h_max = (hw + width - 1u64) / width;
+                h_max = hw.div_ceil(width);
             }
 
             let max_x = x0 + crate::geometry::overlay::port::prim::i_from_uint(w);

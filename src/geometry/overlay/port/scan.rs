@@ -207,7 +207,7 @@ impl<V: Copy> Pool<V> {
 
     #[inline(always)]
     fn put_back(&mut self, index: u32) {
-        self.unused.push(index)
+        self.unused.push(index);
     }
 }
 
@@ -234,7 +234,7 @@ impl<V: Copy> KeyExpTree<V> {
     pub(crate) fn reserve_capacity(&mut self, capacity: usize) {
         let additional = capacity.saturating_sub(self.store.buffer.capacity());
         if additional > 0 {
-            self.store.reserve(additional)
+            self.store.reserve(additional);
         }
     }
 }
@@ -644,7 +644,7 @@ impl<V: Copy> KeyExpTree<V> {
         // Case 2: Red sibling
         if self.node(s_index).color == Color::Red {
             self.handle_red_sibling(n_index, s_index);
-            s_index = self.get_sibling(n_index)
+            s_index = self.get_sibling(n_index);
         }
 
         let sibling = self.node(s_index);
@@ -708,12 +708,12 @@ impl<V: Copy> KeyExpTree<V> {
             if sibling_right != EMPTY_REF {
                 self.node_mut(sibling_right).color = Color::Black;
             }
-            self.rotate_left(p_index)
+            self.rotate_left(p_index);
         } else {
             if sibling_left != EMPTY_REF {
                 self.node_mut(sibling_left).color = Color::Black;
             }
-            self.rotate_right(p_index)
+            self.rotate_right(p_index);
         }
     }
 
@@ -725,9 +725,9 @@ impl<V: Copy> KeyExpTree<V> {
         parent.color = Color::Red;
 
         if n_index == parent.left {
-            self.rotate_left(p_index)
+            self.rotate_left(p_index);
         } else {
-            self.rotate_right(p_index)
+            self.rotate_right(p_index);
         }
     }
 

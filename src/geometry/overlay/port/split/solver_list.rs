@@ -36,7 +36,7 @@ impl SplitSolver {
                     }
 
                     let is_round = Self::cross(i, j, xsi, xsj, &mut self.marks, radius);
-                    need_to_fix = need_to_fix || is_round
+                    need_to_fix = need_to_fix || is_round;
                 }
             }
 
