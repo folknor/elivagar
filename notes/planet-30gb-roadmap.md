@@ -697,8 +697,25 @@ that one partition encoded 921 MB - a third of total output behind a
 single claim-window slot. At z7: max partition 294 MB, partitions
 234 -> 634, germany assemble 17.0 -> 11.6s (-31%), wall 55.2 -> 49.9s
 (-9.6%) against the same-code z6 baseline (`dbe5f576`), chunks and
-fan-in unchanged, claim wait ~0. NA confirmation run pending
-(partitions 15,442 -> ~60K expected; watch section-table overhead).
+fan-in unchanged, claim wait ~0.
+
+NA CONFIRMATION (`88dc2385`, stored, lz4+8 workers): wall 348.5s,
+assemble 166.4s - a ~5s assemble REGRESSION vs the z6 byte-window run
+(341.1s / 161.0s). Partitions 15,442 -> 52,220, max partition
+459 -> 199 MB, reader thread-time actually fell 150 -> 132s; the cost
+is per-partition fixed overhead (52K partition opens x ~20 section
+opens+seeks each). VERDICT: KEEP z7 anyway - planet contains Europe,
+and Europe at z6 is germany's 921 MB-partition pathology multiplied;
+the quartered straggler tail is planet insurance worth NA's +1.6%.
+Claw-back candidate if it matters later: a per-chunk file-handle
+cache (pread per section instead of open+seek per section).
+
+Day scoreboard (stored runs, locations): germany 77.8s (07-08 suite)
+-> 52.2s (`3c365742`, -33%); NA 462.6s (March) -> 361.6s (morning
+baseline) -> 348.5s (`88dc2385`, -3.6% on the day with lz4's +2%
+absorbed); denmark 13.7 -> 11.4s. Peak RSS at NA: 8.6 GB assemble,
+ocean 7.8 GB, phase12 6.1 GB - all comfortably inside the 30 GB
+ledger.
 
 BLESSING ROTATION 2026-07-09: the toml blessed (a0fca65) predated the
 intentional output change in aec278c (cross-block node pins made
