@@ -11,6 +11,7 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 - The user can exempt you from any rule at any time.
 - ./docs/* and ./notes/* are transient. Do not reference them from code comments. Code comments should contain the full context - it will outlive the docs.
 - ./reference/* is durable and lives on. Code comments may reference these.
+- ./research/* holds full vendored source for related projects, readable from any agent sandbox. Two are our own dependencies, not competitors: `research/pbfhogg/` (Rust, our PBF reader and the injection/preprocessing counterpart) and `research/iOverlay/` (Rust, the `i_overlay` polygon topology engine we call for Simplify/Intersect). Consult these directly when a task involves changing what pbfhogg injects into the PBF, or extracting/inlining i_overlay internals. (The competitor sources - planetiler, tilemaker, tippecanoe, stedsplakat - live here too.)
 - In general ./docs/ and ./notes/ documents, try to refrain from referencing direct line numbers in the rust source. You can use line numbers, but they drift fast.
 - When asked to write a plan or a specification, read `reference/technical-implementation-spec.md` first; it defines what such a document must contain.
 - **Never run the full pipeline on real PBF data (brokkr tilegen, brokkr tilegen --bench) unless the user explicitly asks.** Use synthetic benchmarks (brokkr node-store, brokkr pmtiles-writer) for iteration. Full pipeline runs are expensive and should only happen when the user decides it's time.
