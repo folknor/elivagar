@@ -801,6 +801,25 @@ sinks: add_feature_to_layer (assemble), merge_same_attr_geometries
 3.8 GB, process_planned_way_into 2.6 GB; the i_overlay returns want
 an upstream API that fills a caller buffer.
 
+MEASURED (`e1afc38d` vs `98b9f1f0`, same denmark input):
+simplify_shape_dp exclusive churn 10.7 GB -> 609 MB (-94%), its
+thread-time 13.4 -> 10.4s; total run churn 593.8 -> 583.3 GB.
+Germany wall 52.2 -> 50.2s (`39d085b8`). emit_polygon_feature only
+5.2 -> 4.8 GB - the residue is pin-key hashing and pyramid-internal
+allocs attributed to it, a later pass.
+
+OPEN DOOR (user, 2026-07-09): i_overlay is NOT a fixed dependency.
+The two ops we use (simplify_contour / overlay Subject+NonZero, and
+the rect intersect) can be extracted from the crate, inlined, and
+optimized for our shapes - caller-provided output buffers, reused
+internal graph storage, integer-only paths. That would attack the
+15 GB of library-internal churn (normalize_into 7.0 GB +
+intersect_rect_into 8.1 GB) plus their ~41s of denmark thread-time,
+which no amount of caller-side scratch can reach. It is a
+spec-worthy campaign (the topology engine is earcut-oracle-gated),
+not a quick win - parked here deliberately, to pick up when the
+churn ledger says it is the next biggest lever.
+
 **Allocator addendum (2026-07-08).** mimalloc predates all measurement
 here (early experiment, never defended at current scale), and pbfhogg
 reached record numbers on the plain system allocator - after its
