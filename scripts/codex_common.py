@@ -29,7 +29,7 @@ import subprocess
 import sys
 import time
 
-MODEL = "gpt-5.5"
+MODEL = "gpt-5.6-sol"
 
 
 def _shorten(text, limit=1000):
