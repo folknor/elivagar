@@ -703,10 +703,6 @@ fn phase_assemble_partitions(
 
     crate::debug::emit_counter_usize("assemble_parked_bytes_hwm", max_parked_bytes);
     crate::debug::emit_counter_usize("assemble_partition_encoded_max", max_partition_encoded);
-    crate::debug::emit_counter_u64(
-        "assemble_scratch_resets",
-        SCRATCH_RESETS.load(Ordering::Relaxed),
-    );
 
     Ok(AssembleCore {
         features_read,
@@ -914,10 +910,15 @@ impl SeamMetrics {
     }
 }
 
-/// Times a bloated per-thread assembly scratch was dropped back to defaults.
-static SCRATCH_RESETS: AtomicU64 = AtomicU64::new(0);
-
 impl AssemblyScratch {
+    /// Built fresh per tile, NOT pooled per thread. The pooled version grew
+    /// every buffer to the fattest tile each rayon thread ever saw - geom
+    /// pool inner capacities, LayerBuilder feature/interning storage, merge
+    /// scratch - summing to a measured ~17 GB live plateau on NA locations
+    /// assemble (identical under mimalloc/glibc/jemalloc: live, not
+    /// retention). Rebuilding per tile measured RSS 7.2 -> 1.8 GB on germany
+    /// assemble-only with wall UNCHANGED (21.6s both ways) - the reuse
+    /// bought nothing the encode work didn't dwarf.
     fn new() -> Self {
         AssemblyScratch {
             encode_scratch: mvt::EncodeScratch::new(),
@@ -934,33 +935,6 @@ impl AssemblyScratch {
             seam_encode_buf: Vec::new(),
         }
     }
-
-    /// Canary-based bloat reset, checked before each tile reuses the scratch.
-    ///
-    /// The scratch persists per rayon thread for the whole run and every pool
-    /// in it grows monotonically to the fattest tile the thread has seen -
-    /// geom_pool inner capacities, LayerBuilder feature/interning storage,
-    /// merge scratch, encode buffers. Monster low-zoom tiles poison a
-    /// thread's scratch permanently; across the pool that summed to a
-    /// measured ~17 GB live plateau on the NA locations assemble (identical
-    /// under mimalloc/glibc/jemalloc, so live memory, not retention). The
-    /// raw-MVT buffer capacity tracks the fattest tile encoded and every
-    /// other pool bloats in rough proportion, so it is the canary: past the
-    /// threshold, drop the whole scratch back to defaults. Ordinary z14
-    /// city tiles stay ~1-2 MB raw and keep their pools; only
-    /// monster-poisoned threads pay a rebuild.
-    fn reset_if_bloated(&mut self) {
-        const SCRATCH_CANARY_BYTES: usize = 8 * 1024 * 1024;
-        if self.mvt_buf.capacity() > SCRATCH_CANARY_BYTES {
-            SCRATCH_RESETS.fetch_add(1, Ordering::Relaxed);
-            *self = Self::new();
-        }
-    }
-}
-
-thread_local! {
-    static ASSEMBLY_SCRATCH: std::cell::RefCell<AssemblyScratch> =
-        std::cell::RefCell::new(AssemblyScratch::new());
 }
 
 /// Shared-edge reconciliation for boundary polygon features in a single tile.
@@ -1110,16 +1084,9 @@ pub(super) fn encode_tile_batch_mvt(
     batch
         .par_iter()
         .map(|tile| {
-            ASSEMBLY_SCRATCH.with(|cell| {
-                let s = &mut *cell.borrow_mut();
-                s.reset_if_bloated();
-
-                // Reset persisted layers from previous tile (reclaim features + clear interning).
-                for slot in &mut s.layers {
-                    if let Some(lb) = slot.as_mut() {
-                        lb.prepare_for_reuse(&mut s.geom_pool, &mut s.tags_pool);
-                    }
-                }
+            {
+                let mut scratch = AssemblyScratch::new();
+                let s = &mut scratch;
 
                 for &(layer_idx, ref data) in &tile.features {
                     if (layer_idx as usize) < s.layers.len() {
@@ -1223,13 +1190,11 @@ pub(super) fn encode_tile_batch_mvt(
                         compress_buf
                     }
                 };
-                s.gz_buf = Vec::with_capacity(compressed.len());
-
                 Some(EncodedTile {
                     tile_id: tile.tile_id,
                     compressed,
                 })
-            })
+            }
         })
         .flatten()
         .collect()
@@ -1282,9 +1247,9 @@ pub(super) fn encode_tile_batch_mlt(
     let results: Vec<Result<Option<EncodedTile>, PipelineError>> = batch
         .par_iter()
         .map(|tile| {
-            ASSEMBLY_SCRATCH.with(|cell| {
-                let s = &mut *cell.borrow_mut();
-                s.reset_if_bloated();
+            {
+                let mut scratch = AssemblyScratch::new();
+                let s = &mut scratch;
                 let non_empty = prepare_non_empty_layers(s, tile);
                 if non_empty.is_empty() {
                     return Ok(None);
@@ -1297,7 +1262,7 @@ pub(super) fn encode_tile_batch_mlt(
                     tile_id: tile.tile_id,
                     compressed: encoded, // MLT path currently uses no per-tile compression.
                 }))
-            })
+            }
         })
         .collect();
 
