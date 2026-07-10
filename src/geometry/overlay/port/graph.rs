@@ -5,7 +5,7 @@
 use crate::geometry::overlay::port::IntOverlayOptions;
 use crate::geometry::overlay::port::extract::OverlayRule;
 use crate::geometry::overlay::port::extract::VisitState;
-use crate::geometry::overlay::port::fill::{GraphBuilder, GraphNode};
+use crate::geometry::overlay::port::fill::GraphBuilder;
 use crate::geometry::overlay::port::segment::End;
 use crate::geometry::overlay::port::segment::IdPoint;
 use crate::geometry::overlay::port::segment::SegmentFill;
@@ -21,36 +21,9 @@ use alloc::vec::Vec;
 /// [More information](https://ishape-rust.github.io/iShape-js/overlay/overlay_graph/overlay_graph.html) about Overlay Graph.
 pub struct OverlayGraph<'a> {
     pub(crate) options: IntOverlayOptions,
-    pub(crate) nodes: &'a [OverlayNode],
+    pub(crate) node_offsets: &'a [u32],
     pub(crate) node_indices: &'a [u32],
     pub(crate) links: &'a [OverlayLink],
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct OverlayNode {
-    offset: u32,
-    len: u32,
-}
-
-impl GraphNode for OverlayNode {
-    #[inline]
-    fn with_indices(indices: &[usize], node_indices: &mut Vec<u32>) -> Self {
-        let offset = node_indices.len();
-        node_indices.extend(indices.iter().map(|&index| index as u32));
-        Self {
-            offset: offset as u32,
-            len: indices.len() as u32,
-        }
-    }
-}
-
-impl OverlayNode {
-    #[inline]
-    pub(crate) fn indices<'a>(&self, node_indices: &'a [u32]) -> &'a [u32] {
-        let start = self.offset as usize;
-        let end = start + self.len as usize;
-        unsafe { node_indices.get_unchecked(start..end) }
-    }
 }
 
 #[derive(Clone)]
@@ -81,22 +54,21 @@ pub(crate) trait OverlayLinkFilter {
     fn filter_by_overlay_into(&self, overlay_rule: OverlayRule, buffer: &mut Vec<VisitState>);
 }
 
-impl<C, N> GraphBuilder<C, N>
+impl<C> GraphBuilder<C>
 where
     C: WindingCount,
-    N: GraphNode,
 {
     pub(super) fn build_nodes_and_connect_links(&mut self) {
         let n = self.links.len();
+        self.node_offsets.clear();
+        self.node_indices.clear();
         if n == 0 {
             return;
         }
 
         self.build_ends();
 
-        self.nodes.clear();
-        self.nodes.reserve(n);
-        self.node_indices.clear();
+        self.node_offsets.reserve(n + 1);
         self.node_indices.reserve(n * 2);
 
         let mut ai = 0;
@@ -135,7 +107,7 @@ where
                 (None, None) => break,
             };
 
-            let node_id = self.nodes.len();
+            let node_id = self.node_offsets.len();
 
             if consume_a > 0 {
                 let start = ai;
@@ -159,12 +131,12 @@ where
             }
 
             debug_assert!(!self.node_scratch.is_empty());
-            self.nodes.push(N::with_indices(
-                self.node_scratch.as_slice(),
-                &mut self.node_indices,
-            ));
+            self.node_offsets.push(self.node_indices.len() as u32);
+            self.node_indices
+                .extend(self.node_scratch.iter().map(|&index| index as u32));
             self.node_scratch.clear();
         }
+        self.node_offsets.push(self.node_indices.len() as u32);
     }
 
     #[inline]

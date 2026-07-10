@@ -87,8 +87,8 @@ pyramid in base (z14-grid) coordinates, per piece:
 - At cell (z, tx, ty) hold the piece's fragment clipped to the cell's
   buffered rect, in base coords.
 - Emit the tile for zoom z from the fragment: shift-round rescale (exact, as
-  today), dedup, pin-aware DP, normalize (the fragment is tiny, so i_overlay
-  here is cheap), encode.
+  today), dedup, pin-aware DP, normalize (the fragment is tiny, so the
+  boolean engine is cheap here), encode.
 - Recurse: cut the base-coord fragment into 4 children (two axis bisections),
   reusing the ancestor-containment identity already proven and tested for
   `cut_row_bands` ((shape INTERSECT parent) INTERSECT child == shape
@@ -172,11 +172,12 @@ cut line is on the grid, snap-round, sort crossings, reconnect;
 O(V + K log K), plausibly 10-50x cheaper per cut than the general boolean).
 
 Sequencing per the per-zoom report, unchanged by the new data: land the
-descent (item 10) on trusted i_overlay booleans FIRST, then swap the splitter
-in as a separate measured landing. Correctness burden: snap-round crossings
-can create slivers/self-touches (the R23 class). Mitigation: keep
-normalize/i_overlay as a debug-assert oracle on the splitter's output during
-bring-up; earcut oracle as the gate. Known failure mode of half-plane
+descent (item 10) on the trusted in-tree boolean engine FIRST, then swap the
+splitter in as a separate measured landing. Correctness burden: snap-round
+crossings can create slivers/self-touches (the R23 class). Mitigation: keep
+normalize (the boolean engine) as a debug-assert oracle on the splitter's
+output during bring-up; earcut oracle as the gate. Known failure mode of
+half-plane
 clipping (concave subject crossing a clip edge twice yields one bridged ring)
 is what i_overlay's `ContourDecomposition::decompose_contours` solves cheaply;
 fall back to the full `Overlay` boolean if classification fails a cheap

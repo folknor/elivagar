@@ -1,7 +1,7 @@
 use crate::geometry::int_ocean::{
-    Contour, DpScratch, IntEmitScratch, IntPoint, IntRect, Shape, Shapes, TILE_BUFFER_I32,
-    TILE_EXTENT_I32, contour_area_is_below, emit_full_tile, encode_tile_shape, intersect_rect_into,
-    normalize_into, point_in_contour, rescale_shape_pinned, shape_bbox, signed_area_2x,
+    Contour, IntEmitScratch, IntPoint, IntRect, Shape, Shapes, TILE_BUFFER_I32, TILE_EXTENT_I32,
+    contour_area_is_below, copy_shape_into, emit_full_tile, encode_tile_shape, intersect_rect_into,
+    normalize_into, point_in_contour, rescale_shape_pinned_into, shape_bbox, signed_area_2x,
     simplify_shape_dp,
 };
 use rustc_hash::FxHashSet;
@@ -21,6 +21,7 @@ pub(crate) struct PyramidScratch {
     pub int: IntEmitScratch,
     frag_pool: Vec<Shapes>,
     edge_flags: Vec<Vec<bool>>,
+    flags_z: Vec<Vec<bool>>,
 }
 
 impl PyramidScratch {
@@ -29,6 +30,7 @@ impl PyramidScratch {
             int: IntEmitScratch::new(),
             frag_pool: Vec::new(),
             edge_flags: Vec::new(),
+            flags_z: Vec::new(),
         }
     }
 
@@ -151,7 +153,9 @@ fn root_fragments(
     scratch: &mut PyramidScratch,
 ) -> Vec<(PyramidCell, Shapes)> {
     let mut normalized = scratch.take_shapes();
-    normalize_into(&mut scratch.int, shape_base.clone(), 0, &mut normalized);
+    let mut root_shape = scratch.int.take_shape(shape_base.len());
+    copy_shape_into(shape_base, &mut root_shape);
+    normalize_into(&mut scratch.int, root_shape, 0, &mut normalized);
     if normalized.is_empty() {
         scratch.return_shapes(normalized);
         return Vec::new();
@@ -311,12 +315,27 @@ fn emit_cell(
     let min_area = (params.min_area)(cell.z);
     for shape in frag {
         build_edge_flags(shape, params, cell, &mut scratch.edge_flags);
-        let (mut shape_z, flags_z) = rescale_shape_pinned(shape, shift, &scratch.edge_flags);
+        let mut shape_z = scratch.int.take_shape(shape.len());
+        rescale_shape_pinned_into(
+            &mut scratch.int,
+            shape,
+            shift,
+            &scratch.edge_flags,
+            &mut shape_z,
+            &mut scratch.flags_z,
+        );
         if shape_z.is_empty() {
+            scratch.int.recycle_owned_shape(shape_z);
             continue;
         }
-        simplify_shape_dp(&mut shape_z, dp_tol, Some(&flags_z), &mut scratch.int.dp);
+        simplify_shape_dp(
+            &mut scratch.int,
+            &mut shape_z,
+            dp_tol,
+            Some(&scratch.flags_z),
+        );
         if shape_z.is_empty() {
+            scratch.int.recycle_owned_shape(shape_z);
             continue;
         }
         // Brick 8 (spec 3.3 contingency, tripped by norway +34-38% coastal
@@ -333,9 +352,10 @@ fn emit_cell(
                 &mut shape_z,
                 cell,
                 &mut scratch.edge_flags,
-                &mut scratch.int.dp,
+                &mut scratch.int,
             );
             if shape_z.is_empty() {
+                scratch.int.recycle_owned_shape(shape_z);
                 continue;
             }
         }
@@ -352,6 +372,7 @@ fn emit_cell(
                     },
                 );
             }
+            scratch.int.recycle_owned_shape(shape_z);
             continue;
         }
 
@@ -427,7 +448,7 @@ fn intersect_shapes_with_rect(
     _min_area: u64,
     out: &mut Shapes,
 ) {
-    out.clear();
+    scratch.recycle_shapes(out);
     let mut clipped = Vec::new();
     for shape in shapes {
         let Some(bb) = shape_bbox(shape) else {
@@ -445,7 +466,13 @@ fn intersect_shapes_with_rect(
             && bb.min_y >= rect.min_y
             && bb.max_y <= rect.max_y
         {
-            out.push(shape.clone());
+            // Identity tier: the cut is a no-op, so the output is a verbatim
+            // copy - built from pooled rings instead of a fresh clone (this
+            // is the most-hit tier in the descent, one copy per contained
+            // shape per cell).
+            let mut copy = scratch.take_shape(shape.len());
+            copy_shape_into(shape, &mut copy);
+            out.push(copy);
             continue;
         }
         if clip_shape_rect_fast(shape, rect, out) {
@@ -842,7 +869,7 @@ fn thin_window_runs(
     shape_z: &mut Shape,
     cell: PyramidCell,
     flags_buf: &mut Vec<Vec<bool>>,
-    dp: &mut DpScratch,
+    int: &mut IntEmitScratch,
 ) {
     let left = i64::from(cell.tx) * i64::from(TILE_EXTENT_I32);
     let right = (i64::from(cell.tx) + 1) * i64::from(TILE_EXTENT_I32);
@@ -875,7 +902,7 @@ fn thin_window_runs(
         flags_buf.push(flags);
     }
     if any_window {
-        simplify_shape_dp(shape_z, 2, Some(flags_buf), dp);
+        simplify_shape_dp(int, shape_z, 2, Some(flags_buf));
     }
 }
 

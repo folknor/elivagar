@@ -808,35 +808,149 @@ Germany wall 52.2 -> 50.2s (`39d085b8`). emit_polygon_feature only
 5.2 -> 4.8 GB - the residue is pin-key hashing and pyramid-internal
 allocs attributed to it, a later pass.
 
-OPEN DOOR (user, 2026-07-09) - TAKEN, campaign in flight: i_overlay
-is no longer a dependency. The two ops we use (simplify_contour /
-overlay Subject+NonZero, and the rect intersect) are extracted and
-inlined per `notes/i-overlay-extraction-spec.md`. Landing 1 status:
-verbatim in-tree engine with the Cargo path-deps/patch removed
-(`d570daa`), sort + scan monomorphized to i32 with the vendored
-helper subsets deleted (`fbca741`), dead-surface pruning + strict
-lints restored (`b97cddc`); the 12-file layout collapse (spec task
-12) is the last L1 brick. i_overlay survives only as a
-dev-dependency: the 2,000-case differential oracle, kept
-independent (crates.io build, boundary point conversion, no
-[patch]) precisely so it can gate the remaining surgery.
+CAMPAIGN LANDED (user open door 2026-07-09, both landings closed
+2026-07-10): i_overlay is no longer a production dependency. The
+two ops elivagar used (simplify_contour / overlay Subject+NonZero,
+and the rect intersect) were extracted and inlined into
+`src/geometry/overlay/`. Landing 1 (verbatim in-tree engine, i32
+monomorphized, dead-surface pruned, 12-file layout) landed across
+commits `d570daa`, `fbca741`, `b97cddc`, `659a187`. Landing 2 (the
+de-churn: engine-owned scratch, CSR nodes, pooled extraction, caller
+recycling) landed at `8eaa8bf`-and-after with denmark regress
+bit-identical at tol 0, earcut oracle clean, verify clean, wall
+~12% faster (13.3s -> 11.7s). Post-fix allocation-churn totals and
+the L2 bench/alloc UUIDs: TBD (post-commit measurement). i_overlay
+survives only as a dev-dependency: the 2,000-case differential
+oracle, kept independent (crates.io build, boundary point
+conversion, no [patch]) so it can keep gating the in-tree engine.
+Full port rationale, kill list, and brick-by-brick history live in
+git log (`d570daa`..`659a187` and the Landing 2 commits that follow).
 
-Why this campaign stops where it does: Landing 1 is verbatim
-semantics, Landing 2 is allocation-structural only (same values,
-same order, different storage), because the bit-identical gate -
-denmark regress at tol 0 plus the differential oracle - is what
-makes the port trustworthy at all. The deeper point of owning the
-code comes AFTER: once it is ours and i32-flat, it becomes
-optimizable beyond this campaign's stopping rule in future
-campaigns - caller-provided buffers end to end, integer-only paths
-shaped to our data - options a crates.io dependency structurally
-could not offer. Those stay out of scope here by design; breaking
-the bit-identical contract mid-port would cost the only instrument
-that proves the port correct. Landing 2 (the de-churn: engine-owned
-scratch, CSR nodes, pooled extraction, caller recycling) attacks
-the 15 GB of formerly library-internal churn (normalize_into
-7.0 GB + intersect_rect_into 8.1 GB) plus their ~41s of denmark
-thread-time, which no amount of caller-side scratch could reach.
+THE POST-PORT SURFACE (forward-looking, 2026-07-10). Once owned and
+i32-flat, the engine is optimizable beyond the port campaign's
+stopping rule - options a crates.io dependency structurally could not
+offer. None of this is scheduled; it is the theorized surface, ordered
+by expected leverage on planet-on-30GB, each entry honest about what
+is measured versus speculated. Two framing facts first.
+
+Why engine CPU is planet-relevant at all: the overlay ops sit on the
+exact path planet stresses hardest. `normalize_into` is rank 4 in the
+norway hotpath (129.2 thread-s) and executes inside ranks 1-2
+(`process_prepared_relation_into` 267.8, `emit_multipolygon_feature`
+243.9) - the coastal/relation stack H7 names as planet's tomorrow.
+On denmark the call shape is 11.41M `normalize_into` calls against
+6,550 `intersect_rect_into` calls (alloc `546b9d58`): the engine's
+planet bill is millions of tiny per-feature normalizes, not the rare
+big boolean. And churn is the 30 GB budget's enemy independently of
+wall (the H3 first reading pinned allocator commit ~2.4 GB above RSS).
+
+The gate insight that reshapes what "forbidden" meant: the port
+campaign's stopping rule banned everything below because the
+instruments were still being built. Now that the tol-0 denmark regress
+plus the in-tree 2,000-case differential oracle (including the
+warm-engine recycle test) exist, most of this surface is
+representation- or schedule-only - values and order unchanged - and
+lands under the SAME bit-identical gate as Landing 2 did, no
+re-blessing. Only changes that alter noding (E4c below) need a future
+campaign willing to rotate the baseline. Port history and rationale:
+git log `d570daa`..`659a187` plus the Landing 2 commits after
+`8eaa8bf`.
+
+- **E1: input-shaped fast paths on the 11.4M-call normalize.**
+  Evidence: the single-contour arm already has a "perfect input"
+  verdict (`simplify_contour_into` returns false and the caller keeps
+  its own allocation), but reaching that verdict still pays the full
+  segment build + split solver per call - on contours that are
+  post-DP tile-space rings, typically tiny and usually simple.
+  `emit_cell` proved the pattern pays: its convex-single-ring screen
+  skips normalize entirely. Theory: a conservative simplicity screen
+  (exact O(n^2) segment-pair test is fine at n<=32; monotonicity or
+  the existing convexity check cheaper still) that proves
+  no-self-intersection + no collinear/dup removal + correct winding
+  and skips the engine, falling through to the full path on any doubt.
+  Must reproduce the engine's exact verdict - the oracle asserts the
+  None/Some verdict itself, so a wrong screen fails in `brokkr check`,
+  not in production. Gate: bit-identical. First step: a counter pair
+  (screen-pass vs fall-through) plus a hotpath diff on norway, where
+  the coastal normalize volume lives.
+- **E2: flat point+range output at the module boundary.** Evidence:
+  the engine already builds every output contour flat -
+  `BooleanExtractionBuffer.points` is one `Vec<IntPoint>` - and then
+  copies it into a pooled per-ring Vec (`take_contour_from_points`),
+  where `take_vec_with_capacity` linear-scans the pool per take. The
+  entire two-level recycle protocol Landing 2 added (shape shells +
+  ring bodies, the six-method take/recycle pool API on `BoolOverlay`)
+  exists only to keep the nested `Vec<Vec<Vec<IntPoint>>>` boundary
+  alive. Downstream consumers (`emit_cell` -> `encode_tile_shape`,
+  `clean_shapes_in_place`, the pyramid descent) iterate rings
+  sequentially and never need owned per-ring Vecs. Theory: replace
+  `Shapes` at the boundary with one points buffer plus a
+  (shape, ring) range index; the copy, the pool scan, and the recycle
+  API all delete. Same values, same order - gate: bit-identical.
+  First step: prototype at the engine boundary only, with nested
+  converters at the int_ocean seam, and read the alloc + hotpath diff
+  before threading ranges further.
+- **E3: pool `clip_shape_rect_fast` through the reconnection logic.**
+  Evidence: the Landing 2 review flagged this as the next-largest
+  sound churn target and correctly declined it - every call clones
+  the outer and each hole, allocates fresh chain vectors per
+  half-plane pass, and builds fresh component shells. It is the
+  middle tier of `intersect_shapes_with_rect` (the identity tier is
+  already pooled), sitting on the pyramid descent that EVERY polygon
+  layer's emission drives - this survives H5 deleting the ocean
+  recompute. Theory: thread `IntEmitScratch` in, ping-pong two pooled
+  contour lists across the four passes, pooled shells for components.
+  Real surgery through `clip_ring_half_plane_multi`'s chain
+  lifetimes - tractable now that both sides are crate-local. Gate:
+  bit-identical. First step: it is a self-contained brick; spec it as
+  the opener of whichever campaign touches the descent next.
+- **E4: fusions, in three gate classes.** (a) Iterator-fed segments:
+  `add_contour` consumes any point iterator (`append_path_iter`), so
+  producers that today materialize a `Shape` purely to hand it to
+  `normalize_into`'s multi-contour arm can feed segments directly -
+  `root_fragments` copying the base shape into a pooled `Shape` just
+  to transfer ownership is the concrete instance, and the same move
+  is what a fused quantize-to-segments path would look like for the
+  `emit_polygon_feature` residue (4.8 GB post-H6). Gate:
+  bit-identical (same segments). (b) Rect-specialized boolean: the
+  clip in `intersect_rect_into` is always a 4-segment axis-aligned
+  rect, yet it runs the general cross solver and sweep; axis-aligned
+  crossings are single exact divisions and fill-vs-rect is an
+  interval test. Plausibly bit-identical if the rounding is
+  reproduced exactly - the oracle decides, cheaply. Only 6,550
+  calls/2.3 GB on denmark, so this is a churn-and-code-size play,
+  not a wall play. (c) Fuse the guarded integer S-H fast path with
+  the boolean (extend fast-path coverage, skip the overlay for more
+  of the common cases): the two paths nod differently by up to one
+  unit along the cut line (documented in the pyramid XOR tests), so
+  this CHANGES BITS - re-bless territory, for a campaign that wants
+  it badly enough to rotate the baseline.
+- **E5: caller-provided buffers end to end.** E2's ranges extended
+  through the whole emission chain: quantize -> DP -> normalize ->
+  `encode_tile_shape` -> wire record as one per-worker arena, no
+  intermediate ownership transfers. This is the H6 endgame
+  (remaining sinks: `add_feature_to_layer` 5.0 GB assemble-side,
+  `merge_same_attr_geometries` 3.8 GB), and it is speculative in
+  shape - do it after E1/E2 have shown where the remaining bytes
+  actually are, not before.
+- **E6: knobs the port made ours (lateral finds).** The solver
+  thresholds (list/tree split at 4,000 segments, fragmentation at
+  16,000, list fill at 8,000) are upstream's generic tuning; our
+  distribution is bimodal - millions of tiny ops plus rare huge
+  coastline shapes - and the thresholds are now a measurable knob.
+  The oracle already pins each forced strategy point-for-point, and
+  whether strategies agree on our data is exactly what the tol-0
+  regress answers for free. Likewise the arithmetic is ours: the
+  cross solver and fill sweep are i32-monomorphized with exact i64
+  cross products, a fixed-lane-width shape that admits vectorization
+  without changing results. Both speculative on payoff; both cheap
+  to price (one norway hotpath run per variant).
+
+Sequencing honesty: none of this outranks the open phase-level items
+(H5 ocean stream, H8b assemble stragglers, H4 I/O pricing) on planet
+leverage today. E1-E3 are the ones with measured evidence behind
+them; they belong in the next campaign that is already in this code
+region, not in a dedicated engine campaign.
 
 **Allocator addendum (2026-07-08).** mimalloc predates all measurement
 here (early experiment, never defended at current scale), and pbfhogg

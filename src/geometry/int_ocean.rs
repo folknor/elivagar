@@ -26,7 +26,7 @@ pub(crate) struct IntEmitScratch {
     pub tile_points: Vec<(i32, i32)>,
     pub tile_ranges: Vec<Range<usize>>,
     pub geom_buf: Vec<u32>,
-    pub dp: DpScratch,
+    dp: DpScratch,
     overlay: BoolOverlay,
     rect_contour: Contour,
 }
@@ -47,9 +47,25 @@ impl IntEmitScratch {
         self.overlay.recycle(shapes);
     }
 
+    pub(crate) fn take_shape(&mut self, ring_count: usize) -> Shape {
+        self.overlay.take_shape(ring_count)
+    }
+
+    pub(crate) fn recycle_owned_shape(&mut self, shape: Shape) {
+        self.overlay.recycle_owned_shape(shape);
+    }
+
+    fn recycle_shapes_from(&mut self, shapes: &mut Shapes, start: usize) {
+        self.overlay.recycle_from(shapes, start);
+    }
+
     #[allow(dead_code)]
     pub(crate) fn recycle_shape(&mut self, shape: &mut Shape) {
         self.overlay.recycle_shape(shape);
+    }
+
+    fn recycle_contours_from(&mut self, shape: &mut Shape, start: usize) {
+        self.overlay.recycle_contours_from(shape, start);
     }
 }
 
@@ -237,69 +253,96 @@ pub(crate) fn rescale_shape(shape: &Shape, s: u8) -> Shape {
     }
 }
 
-pub(crate) fn rescale_shape_pinned(
+pub(crate) fn copy_shape_into(shape: &Shape, out: &mut Shape) {
+    debug_assert_eq!(out.len(), shape.len());
+    for (source, target) in shape.iter().zip(out.iter_mut()) {
+        target.clear();
+        target.extend_from_slice(source);
+    }
+}
+
+pub(crate) fn rescale_shape_pinned_into(
+    scratch: &mut IntEmitScratch,
     shape: &Shape,
     s: u8,
     flags: &[Vec<bool>],
-) -> (Shape, Vec<Vec<bool>>) {
+    out: &mut Shape,
+    out_flags: &mut Vec<Vec<bool>>,
+) {
+    debug_assert_eq!(out.len(), shape.len());
     if s == 0 {
-        return (shape.clone(), flags.to_vec());
+        copy_shape_into(shape, out);
+        resize_flag_rings(out_flags, flags.len());
+        for (source, target) in flags.iter().zip(out_flags.iter_mut()) {
+            target.clear();
+            target.extend_from_slice(source);
+        }
+        return;
     }
 
-    let mut out = Vec::with_capacity(shape.len());
-    let mut out_flags = Vec::with_capacity(shape.len());
+    resize_flag_rings(out_flags, shape.len());
+    let mut used = 0usize;
     for (i, contour) in shape.iter().enumerate() {
         let ring_flags = flags.get(i).map_or(&[][..], Vec::as_slice);
-        let mut ring = Vec::with_capacity(contour.len());
-        let mut flags_ring = Vec::with_capacity(contour.len());
+        let ring = &mut out[used];
+        let flags_ring = &mut out_flags[used];
+        ring.clear();
+        flags_ring.clear();
         for (idx, &p) in contour.iter().enumerate() {
             push_nonduplicate_pinned(
-                &mut ring,
-                &mut flags_ring,
+                ring,
+                flags_ring,
                 IntPoint::new(shift_round(p.x, s), shift_round(p.y, s)),
                 ring_flags.get(idx).copied().unwrap_or(false),
             );
         }
-        remove_closing_duplicate_pinned(&mut ring, &mut flags_ring);
-        if ring_is_valid(&ring) {
-            orient_ring_pinned(&mut ring, &mut flags_ring, i == 0);
-            out.push(ring);
-            out_flags.push(flags_ring);
+        remove_closing_duplicate_pinned(ring, flags_ring);
+        if ring_is_valid(ring) {
+            orient_ring_pinned(ring, flags_ring, i == 0);
+            used += 1;
         }
     }
-    if out.first().is_some_and(|outer| outer.len() >= 3) {
-        (out, out_flags)
-    } else {
-        (Vec::new(), Vec::new())
+    if !out.first().is_some_and(|outer| outer.len() >= 3) {
+        used = 0;
+    }
+    scratch.recycle_contours_from(out, used);
+    out_flags.truncate(used);
+}
+
+fn resize_flag_rings(flags: &mut Vec<Vec<bool>>, len: usize) {
+    flags.resize_with(len, Vec::new);
+    for ring in flags.iter_mut() {
+        ring.clear();
     }
 }
 
 #[hotpath::measure]
 pub(crate) fn simplify_shape_dp(
+    scratch: &mut IntEmitScratch,
     shape: &mut Shape,
     tol: i64,
     pins: Option<&[Vec<bool>]>,
-    dp: &mut DpScratch,
 ) {
     if tol <= 0 {
         return;
     }
 
     // In place: each surviving contour is rewritten inside its own
-    // allocation and compacted forward; dead contours drop with truncate.
-    // Orientation follows the ORIGINAL ring index (index 0 is the outer),
-    // matching the previous drain-and-rebuild semantics exactly.
+    // allocation and compacted forward; dead contours return to the ring
+    // pool. Orientation follows the ORIGINAL ring index (index 0 is the
+    // outer), matching the previous drain-and-rebuild semantics exactly.
     let mut write = 0usize;
     for read in 0..shape.len() {
         let pin_ring = pins.and_then(|p| p.get(read)).map(Vec::as_slice);
-        if simplify_contour_dp_in_place(&mut shape[read], tol, pin_ring, read == 0, dp) {
+        if simplify_contour_dp_in_place(&mut shape[read], tol, pin_ring, read == 0, &mut scratch.dp)
+        {
             shape.swap(write, read);
             write += 1;
         }
     }
-    shape.truncate(write);
+    scratch.recycle_contours_from(shape, write);
     if !shape.first().is_some_and(|outer| outer.len() >= 3) {
-        shape.clear();
+        scratch.recycle_contours_from(shape, 0);
     }
 }
 
@@ -321,25 +364,33 @@ pub(crate) fn normalize_into(
 ) {
     scratch.overlay.recycle(out);
     if shape.is_empty() {
+        scratch.overlay.recycle_owned_shape(shape);
         return;
     }
     scratch.overlay.min_output_area = min_area;
     if shape.len() == 1 {
         if scratch.overlay.simplify_contour_into(&shape[0], out) {
-            clean_shapes_in_place(out, min_area);
+            scratch.overlay.recycle_owned_shape(shape);
+            clean_shapes_in_place(scratch, out, min_area);
             return;
         }
-        clean_shape_in_place(&mut shape, min_area);
+        clean_shape_in_place(scratch, &mut shape, min_area);
         if shape.first().is_some_and(|outer| outer.len() >= 3) {
             out.push(shape);
+        } else {
+            // The cleaned shape is dead (clean keeps only >= 3-point rings,
+            // so this means it is empty): return the pooled shell instead of
+            // dropping it.
+            scratch.overlay.recycle_owned_shape(shape);
         }
         return;
     }
 
     scratch.overlay.clear();
     scratch.overlay.add_shape(&shape, ShapeType::Subject);
+    scratch.overlay.recycle_owned_shape(shape);
     scratch.overlay.overlay_nested(BoolRule::Subject, out);
-    clean_shapes_in_place(out, min_area);
+    clean_shapes_in_place(scratch, out, min_area);
 }
 
 #[cfg(test)]
@@ -371,7 +422,7 @@ pub(crate) fn intersect_rect_into(
         .overlay
         .add_contour(&scratch.rect_contour, ShapeType::Clip);
     scratch.overlay.overlay_nested(BoolRule::Intersect, out);
-    clean_shapes_in_place(out, min_area);
+    clean_shapes_in_place(scratch, out, min_area);
 }
 
 #[allow(dead_code)]
@@ -467,11 +518,16 @@ fn ring_is_valid(ring: &Contour) -> bool {
     if ring.len() < 3 || signed_area_2x(ring) == 0 {
         return false;
     }
-    let mut unique = Vec::with_capacity(3);
+    // Distinct-point count saturating at 3, tracked in a fixed array: this
+    // runs per ring inside the clean/rescale hot paths (millions of calls
+    // per build), so it must not heap-allocate.
+    let mut unique = [IntPoint::new(0, 0); 3];
+    let mut count = 0usize;
     for &p in ring {
-        if !unique.contains(&p) {
-            unique.push(p);
-            if unique.len() >= 3 {
+        if !unique[..count].contains(&p) {
+            unique[count] = p;
+            count += 1;
+            if count >= 3 {
                 return true;
             }
         }
@@ -695,10 +751,10 @@ fn farthest_from_segment(chain: &Contour, start: usize, end: usize) -> Option<(u
     best.map(|(idx, num, _, _)| (idx, num, den))
 }
 
-fn clean_shapes_in_place(shapes: &mut Shapes, min_area: u64) {
+fn clean_shapes_in_place(scratch: &mut IntEmitScratch, shapes: &mut Shapes, min_area: u64) {
     let mut write = 0usize;
     for read in 0..shapes.len() {
-        clean_shape_in_place(&mut shapes[read], min_area);
+        clean_shape_in_place(scratch, &mut shapes[read], min_area);
         if shapes[read].first().is_some_and(|outer| outer.len() >= 3) {
             if write != read {
                 shapes.swap(write, read);
@@ -706,10 +762,10 @@ fn clean_shapes_in_place(shapes: &mut Shapes, min_area: u64) {
             write += 1;
         }
     }
-    shapes.truncate(write);
+    scratch.recycle_shapes_from(shapes, write);
 }
 
-fn clean_shape_in_place(shape: &mut Shape, min_area: u64) {
+fn clean_shape_in_place(scratch: &mut IntEmitScratch, shape: &mut Shape, min_area: u64) {
     let mut write = 0usize;
     for read in 0..shape.len() {
         clean_contour_in_place(&mut shape[read]);
@@ -721,7 +777,7 @@ fn clean_shape_in_place(shape: &mut Shape, min_area: u64) {
             write += 1;
         }
     }
-    shape.truncate(write);
+    scratch.recycle_contours_from(shape, write);
 }
 
 fn clean_contour_in_place(ring: &mut Contour) {
@@ -1054,9 +1110,9 @@ mod tests {
         let mut rotated = ring[3..].to_vec();
         rotated.extend_from_slice(&ring[..3]);
         let mut shape_b = vec![rotated];
-        let mut dp = DpScratch::default();
-        simplify_shape_dp(&mut shape_a, 16, None, &mut dp);
-        simplify_shape_dp(&mut shape_b, 16, None, &mut dp);
+        let mut scratch = IntEmitScratch::new();
+        simplify_shape_dp(&mut scratch, &mut shape_a, 16, None);
+        simplify_shape_dp(&mut scratch, &mut shape_b, 16, None);
         assert_eq!(sorted_points(&shape_a[0]), sorted_points(&shape_b[0]));
     }
 
@@ -1069,7 +1125,7 @@ mod tests {
         }
         ring.extend([p(40, 20), p(0, 20)]);
         let mut shape = vec![ring];
-        simplify_shape_dp(&mut shape, 16, None, &mut DpScratch::default());
+        simplify_shape_dp(&mut IntEmitScratch::new(), &mut shape, 16, None);
         assert_eq!(shape[0].len(), 4);
     }
 
@@ -1077,7 +1133,7 @@ mod tests {
     fn simplify_shape_dp_old_ring_seam_not_privileged() {
         let ring = vec![p(0, 0), p(1, 8), p(2, 0), p(40, 0), p(40, 40), p(0, 40)];
         let mut shape = vec![ring];
-        simplify_shape_dp(&mut shape, 16, None, &mut DpScratch::default());
+        simplify_shape_dp(&mut IntEmitScratch::new(), &mut shape, 16, None);
         assert!(!shape[0].contains(&p(1, 8)));
     }
 
@@ -1234,9 +1290,9 @@ mod tests {
         ]];
         let mut pinned = plain.clone();
         let flags = vec![vec![false, false, true, false, false, false, false]];
-        let mut dp = DpScratch::default();
-        simplify_shape_dp(&mut plain, 16, None, &mut dp);
-        simplify_shape_dp(&mut pinned, 16, Some(&flags), &mut dp);
+        let mut scratch = IntEmitScratch::new();
+        simplify_shape_dp(&mut scratch, &mut plain, 16, None);
+        simplify_shape_dp(&mut scratch, &mut pinned, 16, Some(&flags));
         assert!(!plain[0].contains(&target));
         assert!(pinned[0].contains(&target));
     }

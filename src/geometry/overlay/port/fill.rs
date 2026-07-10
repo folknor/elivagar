@@ -8,7 +8,6 @@ use crate::geometry::overlay::port::extract::VisitState;
 use crate::geometry::overlay::port::graph::OverlayGraph;
 use crate::geometry::overlay::port::graph::OverlayLink;
 use crate::geometry::overlay::port::graph::OverlayLinkFilter;
-use crate::geometry::overlay::port::graph::OverlayNode;
 use crate::geometry::overlay::port::point::IntPoint;
 use crate::geometry::overlay::port::point::Triangle;
 use crate::geometry::overlay::port::scan::{KeyExpCollection, KeyExpList, KeyExpTree};
@@ -58,14 +57,10 @@ impl<C> FillHandler<C> for StoreFillsHandler<'_> {
     fn finalize(self) {}
 }
 
-pub(crate) trait GraphNode {
-    fn with_indices(indices: &[usize], node_indices: &mut Vec<u32>) -> Self;
-}
-
-pub(crate) struct GraphBuilder<C, N> {
+pub(crate) struct GraphBuilder<C> {
     sweep_runner: SweepRunner<C>,
     pub(super) links: Vec<OverlayLink>,
-    pub(super) nodes: Vec<N>,
+    pub(super) node_offsets: Vec<u32>,
     pub(super) node_indices: Vec<u32>,
     pub(super) node_scratch: Vec<usize>,
     pub(super) fills: Vec<SegmentFill>,
@@ -74,17 +69,16 @@ pub(crate) struct GraphBuilder<C, N> {
     pub(super) point_sort_buffer: Vec<IntPoint>,
 }
 
-impl<C, N> GraphBuilder<C, N>
+impl<C> GraphBuilder<C>
 where
     C: WindingCount,
-    N: GraphNode,
 {
     #[inline]
     pub(crate) fn new() -> Self {
         Self {
             sweep_runner: SweepRunner::new(),
             links: Vec::new(),
-            nodes: Vec::new(),
+            node_offsets: Vec::new(),
             node_indices: Vec::new(),
             node_scratch: Vec::with_capacity(4),
             fills: Vec::new(),
@@ -272,7 +266,7 @@ impl<C: WindingCount> SweepRunner<C> {
 
 pub(crate) struct NonZeroStrategy;
 
-impl GraphBuilder<ShapeCountBoolean, OverlayNode> {
+impl GraphBuilder<ShapeCountBoolean> {
     #[inline]
     pub(crate) fn build_boolean_overlay(
         &mut self,
@@ -308,7 +302,7 @@ impl GraphBuilder<ShapeCountBoolean, OverlayNode> {
     fn boolean_graph(&mut self, options: IntOverlayOptions) -> OverlayGraph<'_> {
         self.build_nodes_and_connect_links();
         OverlayGraph {
-            nodes: &self.nodes,
+            node_offsets: &self.node_offsets,
             node_indices: &self.node_indices,
             links: &self.links,
             options,
@@ -402,10 +396,9 @@ fn filter_intersect_into(links: &[OverlayLink], buffer: &mut Vec<VisitState>) {
     }
 }
 
-impl<C, N> GraphBuilder<C, N>
+impl<C> GraphBuilder<C>
 where
     C: WindingCount,
-    N: GraphNode,
 {
     pub(crate) fn test_contour_for_loops(
         &mut self,

@@ -7,9 +7,9 @@
 //! `I = i32`; the reference lives in `research/i_shape`.
 
 use crate::geometry::overlay::port::ContourDirection;
+use crate::geometry::overlay::port::graph::OverlayGraph;
 use crate::geometry::overlay::port::graph::OverlayLink;
 use crate::geometry::overlay::port::graph::OverlayLinkFilter;
-use crate::geometry::overlay::port::graph::{OverlayGraph, OverlayNode};
 use crate::geometry::overlay::port::point::IntPoint;
 use crate::geometry::overlay::port::point::IntVector;
 use crate::geometry::overlay::port::point::Triangle;
@@ -70,19 +70,16 @@ impl ContourExtension for [IntPoint] {
 /// In-place collinear simplification (i_shape's `Simplify` for a contour).
 pub(crate) trait Simplify {
     /// `true` if the contour was modified, `false` if it was already simple.
-    fn simplify_contour(&mut self) -> bool;
+    fn simplify_contour(&mut self, scratch: &mut ContourSimplifier) -> bool;
 }
 
 impl Simplify for IntContour {
     #[inline]
-    fn simplify_contour(&mut self) -> bool {
+    fn simplify_contour(&mut self, scratch: &mut ContourSimplifier) -> bool {
         if self.is_simple() {
             return false;
         }
-        if let Some(contour) = self.simplified() {
-            self.clear();
-            self.extend(contour);
-        } else {
+        if !scratch.simplify_contour(self) {
             self.clear();
         }
         true
@@ -91,7 +88,6 @@ impl Simplify for IntContour {
 
 trait SimpleContour {
     fn is_simple(&self) -> bool;
-    fn simplified(&self) -> Option<IntContour>;
 }
 
 impl SimpleContour for [IntPoint] {
@@ -114,24 +110,20 @@ impl SimpleContour for [IntPoint] {
         }
         true
     }
-
-    #[inline]
-    fn simplified(&self) -> Option<IntContour> {
-        ContourSimplifier::default().simplify_contour(self)
-    }
 }
 
 #[derive(Default)]
-struct ContourSimplifier {
+pub(crate) struct ContourSimplifier {
     nodes: Vec<SimplifyNode>,
     validated: Vec<bool>,
+    output: IntContour,
 }
 
 impl ContourSimplifier {
-    fn simplify_contour(&mut self, contour: &[IntPoint]) -> Option<IntContour> {
+    fn simplify_contour(&mut self, contour: &mut IntContour) -> bool {
         let mut n = contour.len();
         if n < 3 {
-            return None;
+            return false;
         }
 
         self.validated.clear();
@@ -171,7 +163,7 @@ impl ContourSimplifier {
             if (p1 - p0).cross_product(p2 - p1) == 0 {
                 n -= 1;
                 if n < 3 {
-                    return None;
+                    return false;
                 }
 
                 self.nodes[node.prev].next = node.next;
@@ -202,14 +194,17 @@ impl ContourSimplifier {
             }
         }
 
-        let mut buffer = alloc::vec![IntPoint::ZERO; n];
+        self.output.clear();
+        self.output.reserve_capacity(n);
         node = self.nodes[first];
-        for item in buffer.iter_mut().take(n) {
-            *item = contour[node.index];
+        for _ in 0..n {
+            self.output.push(contour[node.index]);
             node = self.nodes[node.next];
         }
+        contour.clear();
+        contour.extend_from_slice(&self.output);
 
-        Some(buffer)
+        true
     }
 }
 
@@ -966,6 +961,7 @@ pub(crate) enum VisitState {
 pub struct BooleanExtractionBuffer {
     pub(crate) points: Vec<IntPoint>,
     pub(crate) visited: Vec<VisitState>,
+    simplifier: ContourSimplifier,
     holes: Vec<IntContour>,
     anchors: Vec<IdSegment>,
     binder: BinderScratch,
@@ -974,41 +970,83 @@ pub struct BooleanExtractionBuffer {
 }
 
 impl BooleanExtractionBuffer {
+    pub(crate) fn take_shape(&mut self, ring_count: usize) -> IntShape {
+        let mut shape = take_vec_with_capacity(&mut self.shape_pool, ring_count);
+        shape.clear();
+        shape.reserve_capacity(ring_count);
+        for _ in 0..ring_count {
+            let mut contour = take_vec_with_capacity(&mut self.contour_pool, 0);
+            contour.clear();
+            shape.push(contour);
+        }
+        shape
+    }
+
+    pub(crate) fn recycle_owned_shape(&mut self, mut shape: IntShape) {
+        self.recycle_shape(&mut shape);
+        self.shape_pool.push(shape);
+    }
+
     pub(crate) fn recycle_shapes(&mut self, shapes: &mut IntShapes) {
-        for mut shape in shapes.drain(..) {
+        self.recycle_shapes_from(shapes, 0);
+    }
+
+    pub(crate) fn recycle_shapes_from(&mut self, shapes: &mut IntShapes, start: usize) {
+        for mut shape in shapes.drain(start..) {
             self.recycle_shape(&mut shape);
             self.shape_pool.push(shape);
         }
     }
 
     pub(crate) fn recycle_shape(&mut self, shape: &mut IntShape) {
-        for mut contour in shape.drain(..) {
-            contour.clear();
-            self.contour_pool.push(contour);
+        self.recycle_contours_from(shape, 0);
+    }
+
+    pub(crate) fn recycle_contours_from(&mut self, shape: &mut IntShape, start: usize) {
+        for contour in shape.drain(start..) {
+            self.recycle_contour(contour);
         }
     }
 
     fn take_contour_from_points(&mut self) -> IntContour {
-        let mut contour = self.contour_pool.pop().unwrap_or_default();
+        let mut contour = take_vec_with_capacity(&mut self.contour_pool, self.points.len());
         contour.clear();
-        contour.extend_from_slice(self.points.as_slice());
+        contour.extend_from_slice(&self.points);
         contour
     }
 
+    fn recycle_contour(&mut self, mut contour: IntContour) {
+        contour.clear();
+        self.contour_pool.push(contour);
+    }
+
     fn take_shape_with_contour(&mut self, contour: IntContour) -> IntShape {
-        let mut shape = self.shape_pool.pop().unwrap_or_default();
+        let mut shape = take_vec_with_capacity(&mut self.shape_pool, 1);
         shape.clear();
         shape.push(contour);
         shape
     }
 
     pub(crate) fn push_reversed_contour_into(&mut self, contour: &[IntPoint], out: &mut IntShapes) {
-        let mut reversed = self.contour_pool.pop().unwrap_or_default();
+        let mut reversed = take_vec_with_capacity(&mut self.contour_pool, contour.len());
         reversed.clear();
         reversed.extend(contour.iter().rev().copied());
         let shape = self.take_shape_with_contour(reversed);
         out.push(shape);
     }
+}
+
+fn take_vec_with_capacity<T>(pool: &mut Vec<Vec<T>>, needed: usize) -> Vec<T> {
+    let index = pool
+        .iter()
+        .rposition(|buffer| buffer.capacity() >= needed)
+        .or_else(|| {
+            pool.iter()
+                .enumerate()
+                .max_by_key(|(_, buffer)| buffer.capacity())
+                .map(|(index, _)| index)
+        });
+    index.map_or_else(Vec::new, |index| pool.swap_remove(index))
 }
 
 impl OverlayGraph<'_> {
@@ -1049,7 +1087,7 @@ impl OverlayGraph<'_> {
                 // Safety: `link_index` walks 0..buffer.visited.len(), and buffer.visited.len() <= self.links.len().
                 GraphUtil::find_left_top_link(
                     self.links,
-                    self.nodes,
+                    self.node_offsets,
                     self.node_indices,
                     link_index,
                     &buffer.visited,
@@ -1078,6 +1116,7 @@ impl OverlayGraph<'_> {
             let (is_valid, is_modified) = buffer.points.validate(
                 self.options.min_output_area,
                 self.options.preserve_output_collinear,
+                &mut buffer.simplifier,
             );
 
             if !is_valid {
@@ -1140,7 +1179,7 @@ impl OverlayGraph<'_> {
 
         let last_link_id = GraphUtil::next_link(
             self.links,
-            self.nodes,
+            self.node_offsets,
             self.node_indices,
             link_id,
             last_node_id,
@@ -1152,7 +1191,7 @@ impl OverlayGraph<'_> {
         while link_id != last_link_id {
             link_id = GraphUtil::next_link(
                 self.links,
-                self.nodes,
+                self.node_offsets,
                 self.node_indices,
                 link_id,
                 node_id,
@@ -1201,15 +1240,25 @@ impl StartPathData {
 }
 
 pub(crate) trait GraphContour {
-    fn validate(&mut self, min_output_area: u64, preserve_output_collinear: bool) -> (bool, bool);
+    fn validate(
+        &mut self,
+        min_output_area: u64,
+        preserve_output_collinear: bool,
+        simplifier: &mut ContourSimplifier,
+    ) -> (bool, bool);
     fn push_node_and_get_other(&mut self, link: &OverlayLink, node_id: usize) -> usize;
 }
 
 impl GraphContour for IntContour {
     #[inline]
-    fn validate(&mut self, min_output_area: u64, preserve_output_collinear: bool) -> (bool, bool) {
+    fn validate(
+        &mut self,
+        min_output_area: u64,
+        preserve_output_collinear: bool,
+        simplifier: &mut ContourSimplifier,
+    ) -> (bool, bool) {
         let is_modified = if !preserve_output_collinear {
-            self.simplify_contour()
+            self.simplify_contour(simplifier)
         } else {
             false
         };
@@ -1295,7 +1344,7 @@ impl GraphUtil {
     #[inline]
     pub(crate) unsafe fn find_left_top_link(
         links: &[OverlayLink],
-        nodes: &[OverlayNode],
+        node_offsets: &[u32],
         node_indices: &[u32],
         link_index: usize,
         visited: &[VisitState],
@@ -1305,12 +1354,7 @@ impl GraphUtil {
             // pull the value from visited, which mirrors links.
             links.get_unchecked(link_index)
         };
-        let node = unsafe {
-            // SAFETY: GraphBuilder assigns `a.id` from the index in the `nodes` vector,
-            // so every `id` is guaranteed to lie in 0..nodes.len().
-            nodes.get_unchecked(top.a.id)
-        };
-        let indices = node.indices(node_indices);
+        let indices = unsafe { Self::node_indices(node_offsets, node_indices, top.a.id) };
 
         debug_assert!(top.is_direct());
 
@@ -1378,19 +1422,14 @@ impl GraphUtil {
     #[inline(always)]
     pub(crate) fn next_link(
         links: &[OverlayLink],
-        nodes: &[OverlayNode],
+        node_offsets: &[u32],
         node_indices: &[u32],
         link_id: usize,
         node_id: usize,
         clockwise: bool,
         visited: &[VisitState],
     ) -> usize {
-        let node = unsafe {
-            // SAFETY: all node ids flowing through traversal originate from GraphBuilder,
-            // hence are within `0..nodes.len()`.
-            nodes.get_unchecked(node_id)
-        };
-        let indices = node.indices(node_indices);
+        let indices = unsafe { Self::node_indices(node_offsets, node_indices, node_id) };
         if indices.len() == 2 {
             let first = indices[0] as usize;
             let second = indices[1] as usize;
@@ -1398,6 +1437,17 @@ impl GraphUtil {
         } else {
             GraphUtil::find_nearest_link_to(links, link_id, node_id, clockwise, indices, visited)
         }
+    }
+
+    #[inline(always)]
+    unsafe fn node_indices<'a>(
+        node_offsets: &[u32],
+        node_indices: &'a [u32],
+        node_id: usize,
+    ) -> &'a [u32] {
+        let start = unsafe { *node_offsets.get_unchecked(node_id) as usize };
+        let end = unsafe { *node_offsets.get_unchecked(node_id + 1) as usize };
+        unsafe { node_indices.get_unchecked(start..end) }
     }
 
     // Assumes: `indices` comes from GraphBuilder's CSR node storage, so every

@@ -29,7 +29,6 @@ pub(crate) use point::IntPoint;
 use crate::geometry::overlay::port::extract::BooleanExtractionBuffer;
 use crate::geometry::overlay::port::extract::{IntContour, IntShape, IntShapes};
 use crate::geometry::overlay::port::fill::GraphBuilder;
-use crate::geometry::overlay::port::graph::OverlayNode;
 use crate::geometry::overlay::port::segment::BuildSegments;
 use crate::geometry::overlay::port::segment::Segment;
 use crate::geometry::overlay::port::segment::ShapeCountBoolean;
@@ -79,7 +78,7 @@ pub struct Overlay {
     pub boolean_buffer: Option<BooleanExtractionBuffer>,
     pub(crate) segments: Vec<Segment<ShapeCountBoolean>>,
     pub(crate) split_solver: SplitSolver,
-    pub(crate) graph_builder: GraphBuilder<ShapeCountBoolean, OverlayNode>,
+    pub(crate) graph_builder: GraphBuilder<ShapeCountBoolean>,
 }
 
 impl Overlay {
@@ -95,7 +94,7 @@ impl Overlay {
             boolean_buffer: Some(Default::default()),
             segments: Vec::with_capacity(capacity),
             split_solver: SplitSolver::new(),
-            graph_builder: GraphBuilder::<ShapeCountBoolean, OverlayNode>::new(),
+            graph_builder: GraphBuilder::<ShapeCountBoolean>::new(),
         }
     }
 
@@ -140,9 +139,34 @@ impl Overlay {
         self.boolean_buffer = Some(buffer);
     }
 
+    pub fn take_shape(&mut self, ring_count: usize) -> IntShape {
+        let mut buffer = self.boolean_buffer.take().unwrap_or_default();
+        let shape = buffer.take_shape(ring_count);
+        self.boolean_buffer = Some(buffer);
+        shape
+    }
+
+    pub fn recycle_owned_shape(&mut self, shape: IntShape) {
+        let mut buffer = self.boolean_buffer.take().unwrap_or_default();
+        buffer.recycle_owned_shape(shape);
+        self.boolean_buffer = Some(buffer);
+    }
+
+    pub fn recycle_shapes_from(&mut self, shapes: &mut IntShapes, start: usize) {
+        let mut buffer = self.boolean_buffer.take().unwrap_or_default();
+        buffer.recycle_shapes_from(shapes, start);
+        self.boolean_buffer = Some(buffer);
+    }
+
     pub fn recycle_shape(&mut self, shape: &mut IntShape) {
         let mut buffer = self.boolean_buffer.take().unwrap_or_default();
         buffer.recycle_shape(shape);
+        self.boolean_buffer = Some(buffer);
+    }
+
+    pub fn recycle_contours_from(&mut self, shape: &mut IntShape, start: usize) {
+        let mut buffer = self.boolean_buffer.take().unwrap_or_default();
+        buffer.recycle_contours_from(shape, start);
         self.boolean_buffer = Some(buffer);
     }
 

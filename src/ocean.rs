@@ -96,13 +96,16 @@ struct ShxRecord {
     content_len: usize,
 }
 
-// Pyramid scratch is built per work item, NOT pooled per thread: a
-// thread-local pool grows to the fattest piece each rayon thread ever
-// descends and retains it for the whole phase - the same input-scaled
-// retention the assemble per-thread scratch pool had (7.2 -> 1.8 GB on
-// germany assemble when deleted, wall unchanged). Items are whole pieces
-// or split cells, so construction cost amortizes to noise while intra-item
-// reuse (the descent's frag pool) is preserved.
+// Pyramid recursion scratch is built per work item, NOT pooled per thread: a
+// thread-local fragment pool grows to the fattest piece each rayon thread ever
+// descends and retains it for the whole phase. Only IntEmitScratch is reused by
+// a rayon worker thread. Its overlay buffers are bounded by one operation, and
+// root/rescale inputs are drawn from its ring and shape pools, so the pools do
+// not grow once the worker is warm.
+thread_local! {
+    static OCEAN_INT_SCRATCH: std::cell::RefCell<IntEmitScratch> =
+        std::cell::RefCell::new(IntEmitScratch::new());
+}
 
 enum OceanWorkKind {
     Whole(usize),
@@ -738,16 +741,21 @@ fn emit_ocean_piece(
     attrs_bytes: &[u8],
     acc: &mut OceanAcc,
 ) {
-    let mut scratch = PyramidScratch::new();
-    let mut sink = ocean_sink(item.feature_id, layer_idx, attrs_bytes, acc);
-    match item.kind {
-        OceanWorkKind::Whole(piece_idx) => {
-            emit_shape_pyramid(&pieces[piece_idx], params, &mut scratch, &mut sink);
+    OCEAN_INT_SCRATCH.with(|int_cell| {
+        let mut int_scratch = int_cell.borrow_mut();
+        let mut scratch = PyramidScratch::new();
+        std::mem::swap(&mut scratch.int, &mut *int_scratch);
+        let mut sink = ocean_sink(item.feature_id, layer_idx, attrs_bytes, acc);
+        match item.kind {
+            OceanWorkKind::Whole(piece_idx) => {
+                emit_shape_pyramid(&pieces[piece_idx], params, &mut scratch, &mut sink);
+            }
+            OceanWorkKind::Cell(cell, frag) => {
+                emit_shape_pyramid_cell(cell, frag, params, &mut scratch, &mut sink);
+            }
         }
-        OceanWorkKind::Cell(cell, frag) => {
-            emit_shape_pyramid_cell(cell, frag, params, &mut scratch, &mut sink);
-        }
-    }
+        std::mem::swap(&mut scratch.int, &mut *int_scratch);
+    });
 }
 
 #[cfg(test)]
