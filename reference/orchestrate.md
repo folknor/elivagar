@@ -29,14 +29,22 @@ stage is auditable after the fact.
 Two scripts wrap the canonical `codex exec` call, one per role. Launch in the
 background, one Bash call, nothing before or after it:
 
-- Critique: `python3 scripts/codex-review.py '<prompt>'` (gpt-5.5 at xhigh).
+- Critique: `python3 scripts/codex-review.py '<prompt>'` (gpt-5.6-sol at
+  xhigh).
 - Implement: `python3 scripts/codex-implement.py '<prompt>'` (gpt-5.5 at
   medium; the script adds the `/goal` prefix).
 
 The single argument is the prompt: one line, no linebreaks, plain ascii, no
 escapes or quoting tricks, single-quoted; substitute X and Y with plain paths.
-The script owns the model, the reasoning effort, the workspace-write sandbox,
-and `/goal`. The caller owns only the prompt.
+Each script sets the role's defaults - the model, the reasoning effort, the
+workspace-write sandbox, and `/goal` - so the caller normally owns only the
+prompt. Two defaults are overridable when a step explicitly calls for it:
+`--model <name>` on either script (defaults: review gpt-5.6-sol, implement
+gpt-5.5), and `--effort <low|medium|high|xhigh>` on codex-implement.py
+(default medium; e.g. `--effort xhigh` to staff a hard landing at a stronger
+implementer tier). codex-review.py is fixed at xhigh; the sandbox and `/goal`
+are not overridable. The canonical default model lives in one place,
+`MODEL` at the top of `scripts/codex_common.py`.
 
 The sandbox is also network-isolated: no outbound connections, no git fetch,
 no cargo download. The load-bearing consequence is that codex cannot add a
@@ -161,7 +169,7 @@ more.
 Launch simultaneously, both background:
 
 - Agent(opus)
-- codex `gpt-5.5` at `xhigh`
+- codex `gpt-5.6-sol` at `xhigh`
 
 Both get the same prompt:
 

@@ -29,6 +29,9 @@ import subprocess
 import sys
 import time
 
+# Default codex model. Each role script passes its own model into run_codex
+# (overridable with --model): codex-review.py defaults to this, codex-implement.py
+# to gpt-5.5.
 MODEL = "gpt-5.6-sol"
 
 
@@ -177,7 +180,7 @@ def _find_transcript(start_time, cwd):
 #    flipping state back to idle.
 
 
-def run_codex(prompt, effort, goal):
+def run_codex(prompt, effort, goal, model=MODEL):
     if not prompt or not prompt.strip():
         print("usage: pass exactly one argument - the prompt, one line, in ''",
               file=sys.stderr)
@@ -191,7 +194,7 @@ def run_codex(prompt, effort, goal):
         "codex", "exec",
         "--json",
         "--sandbox", "workspace-write",
-        "-m", MODEL,
+        "-m", model,
         "-c", f"model_reasoning_effort={effort}",
         "-o", last_msg_path,
         prompt,
