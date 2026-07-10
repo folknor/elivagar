@@ -44,7 +44,21 @@ Specifications are saved to the ./notes folder.
    needs a human: the spec names the exact tiles/zooms to eyeball and what
    correct looks like. A brick whose load is unproven is not laid. Per
    gate, the spec contains the EXACT command to run - copy-pasteable,
-   flags and all, not "run the relevant tests" or "check some tiles". If
+   flags and all, not "run the relevant tests" or "check some tiles".
+   Gate commands pin the dataset AND the variant explicitly
+   (`--dataset`, `--variant`); "the denmark gate" without a variant is
+   underspecified. The variant is not a performance knob - it changes
+   the output itself (the ocean clip runs against the data-bounds rect
+   derived from the PBF phase, so a raw-variant run legitimately diffs
+   in the ocean layer against a locations-blessed archive), and the
+   blessed regress references and scoreboard rows are locations-variant
+   runs. A regress or bench read across variants is not a verdict; it
+   is the 2026-07-09 false alarm, which burned a session tail proving
+   the code innocent. A gate also uses the smallest dataset that can
+   answer its question: sometimes that is norway (coastal/ocean and
+   relation load denmark lacks), usually denmark, rarely germany, and
+   almost never NA (NA is an explicit user decision per
+   `reference/performance.md`). If
    no command exists that can verify a gate (no test pins the behavior, no
    tool decodes the artifact), building that instrument is itself a brick
    of the spec - specified to the same standard and laid before the brick

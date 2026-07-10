@@ -413,19 +413,23 @@ Bricks, in order (all one commit; order is the build order):
   read L1 against (bench) and to anchor the L2 churn delta (alloc,
   hotpath):
   ```
-  brokkr tilegen --bench 3 --dataset denmark
-  brokkr tilegen --bench 3 --dataset norway
-  brokkr tilegen --bench 3 --dataset germany
-  brokkr tilegen --alloc --dataset denmark
-  brokkr tilegen --hotpath --dataset denmark
+  brokkr tilegen --bench 3 --dataset denmark --variant locations
+  brokkr tilegen --alloc --dataset denmark --variant locations
+  brokkr tilegen --hotpath --dataset denmark --variant locations
   ```
-  Record UUIDs + the parent commit hash in this document's Results
-  section when run. Also ask the user whether to bless a norway
-  reference at the parent commit (`brokkr tilegen --dataset norway` then
-  `brokkr bless --dataset norway --file <output>`) so L1/L2 identity is
-  regress-gated on coastal data too; blessing is user-say-so per
-  AGENTS.md. Without it, norway is covered by bench + verify only and
-  denmark regress carries the identity gate.
+  All gate runs are `--variant locations`: that is the production input
+  shape, the blessed regress references are locations runs, and a
+  bench/regress read across variants is not a verdict (see the gate
+  discipline in `reference/technical-implementation-spec.md`). Record
+  UUIDs + the parent commit hash in this document's Results section when
+  run. Also ask the user whether to bless a norway locations reference at
+  the parent commit (`brokkr tilegen --dataset norway --variant
+  locations` then `brokkr bless --dataset norway --file <output>`) so
+  L1/L2 identity is regress-gated on coastal data too - the ops being
+  ported are the ocean boolean ops, so coastal coverage is worth more
+  here than usual; blessing is user-say-so per AGENTS.md. Without it,
+  norway is not separately gated and denmark regress carries the identity
+  gate.
 - **1.0.5 Vendor the helper crates + record attribution.** Copy the
   pinned i_float 3.0.0, i_shape 3.0.0, i_tree 0.19.0, i_key_sort 0.10.3
   sources from the local registry into `research/` (alongside
@@ -494,14 +498,18 @@ Gates (exact commands, run in this order; every one must pass):
 brokkr fmt
 brokkr check
 # commit here (bench requires a clean tree; never benchmark uncommitted)
-brokkr tilegen --bench 3 --dataset denmark
-brokkr regress
+brokkr tilegen --bench 3 --dataset denmark --variant locations
+brokkr regress --dataset denmark
 brokkr verify pmtiles --dataset denmark
 cd scripts/validate && node earcut-oracle.mjs ../../data/tilegen_tmp/bench-self-output.pmtiles
-brokkr tilegen --bench 3 --dataset norway
-brokkr tilegen --bench 3 --dataset germany
-brokkr regress --dataset norway   # only if the user blessed a reference
+brokkr regress --dataset norway   # only if a norway locations reference was blessed
 ```
+
+Denmark carries the full battery (identity + wall + correctness); the
+verbatim port's real gate is regress bit-identity, not a three-dataset
+wall survey. A blessed norway reference adds coastal-identity coverage,
+which the ocean ops being ported make worth having; it is the one
+extra run justified here, and only if blessed.
 
 Verdict rules:
 - `brokkr regress` (denmark, and norway if blessed): zero diffs, tol 0.
@@ -509,9 +517,9 @@ Verdict rules:
   verbatim port.
 - Earcut oracle: 0 deviant polygons, 0 misattached holes, every polygon
   layer.
-- Bench: this landing claims neutrality. Denmark/norway/germany best-of-3
-  within +-5% of the 1.0 baselines. A regression past 5% on any gate
-  dataset = investigate; past 10% = revert.
+- Bench: this landing claims neutrality. Denmark best-of-3 within +-5%
+  of the 1.0 baseline. A regression past 5% = investigate; past
+  10% = revert.
 - `brokkr check` and `elivagar verify` green (the landing is a single
   commit, so the boundary condition is trivially ordered).
 
@@ -520,6 +528,15 @@ Verdict rules:
 One landing, one commit, all changes allocation-structural
 (value-and-order preserving). Bricks:
 
+- **2.0 Baseline (already recorded at HEAD `8eaa8bf`).** Post-L1
+  denmark-locations runs exist and are the L2 reference set (Results
+  section): alloc `546b9d58`, hotpath `dec0d7f8`, bench `bcac01ad`. The
+  churn keep gate below measures against `546b9d58`'s combined
+  `normalize_into` + `intersect_rect_into` = 5.8 + 2.3 = 8.1 GB. L1's
+  i32 monomorphization already pulled the pair down from section 1's
+  stale 15.1 GB (pre-port `d20ddd5`), so the gate follows the recorded
+  8.1 GB. No new baseline run is needed unless the tree moves before
+  L2 lands.
 - **2.1 Engine-owned temporaries.** Kill list items c, e, g and the
   binder arrays of b: route every bin sort through `sort_buf`; persist
   `seg_tree`, `frag` (GridLayout re-inited in place per call - its
@@ -542,15 +559,22 @@ Gates (same order discipline: fmt, check, commit, then measure):
 brokkr fmt
 brokkr check
 # commit
-brokkr tilegen --bench 3 --dataset denmark
-brokkr regress
+brokkr tilegen --bench 3 --dataset denmark --variant locations
+brokkr regress --dataset denmark
 brokkr verify pmtiles --dataset denmark
 cd scripts/validate && node earcut-oracle.mjs ../../data/tilegen_tmp/bench-self-output.pmtiles
-brokkr tilegen --bench 3 --dataset germany
-brokkr tilegen --alloc --dataset denmark
-brokkr tilegen --hotpath --dataset denmark
+brokkr tilegen --alloc --dataset denmark --variant locations
+brokkr tilegen --hotpath --dataset denmark --variant locations
 brokkr results --compare-last --mode hotpath
 ```
+
+The churn win is measured on denmark alloc and the identity on denmark
+regress; germany adds nothing L2 gates on, so it is dropped. If a norway
+locations reference is blessed, `brokkr regress --dataset norway` (after
+a `brokkr tilegen --dataset norway --variant locations` run) is the
+cheapest guard for the CSR-node-ordering risk on coastal shapes denmark
+lacks - but the brick-1.6 differential oracle is the designed instrument
+for it and runs inside `brokkr check`.
 
 Verdict rules:
 - **The brick-1.6 differential oracle MUST re-run green after L2.** It was
@@ -566,19 +590,19 @@ Verdict rules:
 - `brokkr regress`: zero diffs, tol 0. Pooling changes storage, never
   values or order; a diff means a bug, not a tolerance question.
 - Earcut oracle: clean, as above.
-- **Primary keep gate - churn:** measured against the RECORDED 1.0 parent
-  alloc profile (the brick-1.0 baseline UUID in Results), NOT the stale
-  15.1 GB from section 1's `e1afc38d`. Section 1's figure sizes the prize;
-  the gate math uses the number 1.0 actually recorded at the parent commit.
-  (L1 is a verbatim, alloc-neutral port, so the two should agree closely -
-  but if the parent alloc baseline has drifted from 15.1 GB, the gate
-  follows the baseline.) In the fresh L2 alloc profile, `normalize_into` +
-  `intersect_rect_into` combined exclusive allocation must fall to under
-  5 GB (expected: under 3 GB); equivalently the combined drop from the 1.0
-  baseline must be at least ~10 GB. If the drop is less than 10 GB, the
-  landing failed its purpose: diagnose or revert.
-- Wall neutral-or-better: denmark and germany best-of-3 not worse than
-  -5% vs the 1.0 baselines; any wall win is a bonus recorded, not the
+- **Primary keep gate - churn:** measured against the recorded brick-2.0
+  alloc baseline `546b9d58` - combined `normalize_into` +
+  `intersect_rect_into` = 8.1 GB at HEAD `8eaa8bf`. NOT section 1's stale
+  15.1 GB: that was pre-port `d20ddd5`, and L1's i32 monomorphization
+  already took the pair to 8.1 GB, which is why the gate follows the
+  recorded baseline and not the prize figure. In the fresh L2 alloc
+  profile the two functions' combined exclusive allocation must fall
+  under 3 GB - a cut of at least ~5 GB (>=60%) from the 8.1 GB baseline.
+  Between 3 and 4 GB is a soft pass to diagnose; above 4 GB (less than
+  half the baseline removed) the de-churn underdelivered against a kill
+  list aimed squarely at these two frames: diagnose or revert.
+- Wall neutral-or-better: denmark best-of-3 not worse than
+  -5% vs the brick-2.0 baseline; any wall win is a bonus recorded, not the
   gate (thread-time in the 41 s region is expected to fall with the
   churn, but hotpath ranks rather than measures - report the delta from
   `--compare-last --mode hotpath`, gate on nothing).
@@ -621,8 +645,38 @@ whichever landing ships last.
 
 ## 7. Results
 
-(Filled at landing time: 1.0 baseline UUIDs + parent hash; L1 commit +
-gate readings; L2 commit + gate readings + churn delta.)
+### Landing 1 (verbatim port + dependency demotion) - LANDED
+
+L1 landed across commits `d570daa` (vendor + in-tree engine, path-deps
+removed), `fbca741` (sort + scan monomorphized to i32), `b97cddc`
+(dead-surface prune + strict lints), `659a187` (12-file layout collapse).
+i_overlay is now a dev-dependency (the 2,000-case differential oracle).
+
+Post-L1 baselines at HEAD `8eaa8bf`, plantasjen, denmark **locations** -
+the L2 reference set:
+
+| mode | uuid | elapsed | note |
+|---|---|---|---|
+| bench | `bcac01ad` | 13.3 s | wall neutrality anchor |
+| hotpath | `dec0d7f8` | 16.0 s | thread-time ranks |
+| alloc | `546b9d58` | 14.4 s | churn baseline (below) |
+
+Churn baseline (`546b9d58`, exclusive alloc): `normalize_into` 5.8 GB
+(13.44%, 11.41M calls) + `intersect_rect_into` 2.3 GB (5.42%, 6,550
+calls) = **8.1 GB combined**. Total run churn 578.4 GB alloc /
+576.8 GB dealloc, peak RSS 9.2 GB. L1's i32 monomorphization already
+cut the pair from section 1's stale 15.1 GB (`e1afc38d`, pre-port
+`d20ddd5`) to 8.1 GB; the L2 churn gate measures against 8.1 GB.
+
+Coastal/scale context, also at `8eaa8bf`: norway locations bench
+`0e54fdd7` 50.4 s / alloc `982e4021`; germany locations bench
+`a6d1cb9e` 84.5 s. Raw-variant runs exist but are not the gate (blessed
+references are locations).
+
+### Landing 2 (de-churn)
+
+(Filled at L2 landing: commit + gate readings + churn delta vs
+`546b9d58`.)
 
 ## 8. Review reconciliation (2026-07-09)
 
