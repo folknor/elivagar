@@ -816,10 +816,20 @@ and the rect intersect) were extracted and inlined into
 monomorphized, dead-surface pruned, 12-file layout) landed across
 commits `d570daa`, `fbca741`, `b97cddc`, `659a187`. Landing 2 (the
 de-churn: engine-owned scratch, CSR nodes, pooled extraction, caller
-recycling) landed at `8eaa8bf`-and-after with denmark regress
-bit-identical at tol 0, earcut oracle clean, verify clean, wall
-~12% faster (13.3s -> 11.7s). Post-fix allocation-churn totals and
-the L2 bench/alloc UUIDs: TBD (post-commit measurement). i_overlay
+recycling, plus a review pass that closed four churn/pool leaks in the
+gated frames - a per-call Vec in ring_is_valid, a dropped shape shell,
+an intersect-identity clone, and dead-ring drops in simplify_shape_dp)
+landed at `e2284ec` with denmark regress bit-identical at tol 0
+(1,296,996 tiles), earcut oracle clean, verify clean, wall best-of-3
+13.3s -> 11.6s (-13%, bench `c1053012` vs baseline `bcac01ad`).
+Post-fix churn normalize_into + intersect_rect_into 8.1 -> 6.3 GB
+combined (-22%; normalize 5.8 -> 4.5, intersect_rect 2.3 -> 1.8, alloc
+`0433cbc1` vs baseline `546b9d58`), peak RSS 9.2 -> 7.3 GB. The spec's
+under-3 GB churn keep gate proved mis-calibrated against the
+L1-reduced 8.1 GB baseline - L1's i32 monomorphization had already
+cut the pair from the pre-port 15.1 GB to 8.1 GB, so ~6.3 GB is the
+achievable floor from this kill list; the win was landed by user
+decision. i_overlay
 survives only as a dev-dependency: the 2,000-case differential
 oracle, kept independent (crates.io build, boundary point
 conversion, no [patch]) so it can keep gating the in-tree engine.

@@ -78,6 +78,18 @@ external merge-sort instead of an in-memory `seen` set. Germany bench-3
 25 percent, output regress-identical (denmark tol 0, germany counts
 bit-identical).
 
+The i_overlay extraction took the polygon boolean engine in-tree at
+`src/geometry/overlay/` in two landings, both denmark-regress bit-identical at
+tol 0. Landing 1 (verbatim i32-monomorphized port, `659a187`) is dependency
+removal at neutral wall; i_overlay stays only as the dev-dependency differential
+oracle. Landing 2 (`e2284ec`, the de-churn: engine-owned scratch, CSR nodes,
+two-level ring/shell pooling) cut the two hot boolean frames normalize_into +
+intersect_rect_into from 8.1 to 6.3 GB combined exclusive alloc (-22%; alloc
+`0433cbc1` vs baseline `546b9d58`), peak RSS 9.2 to 7.3 GB, denmark bench-3 wall
+13.3 to 11.6s (`c1053012` vs `bcac01ad`). The spec's under-3 GB churn target
+proved mis-calibrated - L1's monomorphization had already cut the pair from the
+pre-port 15.1 GB to 8.1 GB, so ~6.3 GB is the floor from that kill list.
+
 "reader" is the `assemble_reader_ns` counter: serial k-way merge reader time
 inside the assemble phase. The Denmark reader value is from the instrumented
 runs at the same code state (bench-mode counter not captured for `1a6ca281`).
