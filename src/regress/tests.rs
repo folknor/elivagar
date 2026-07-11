@@ -185,6 +185,36 @@ fn polygon_tile(rings: &[&[(i32, i32)]]) -> Vec<u8> {
     crate::mvt::encode_tile(&[&layer])
 }
 
+fn duplicate_id_tile(paths: &[&[(i32, i32)]]) -> Vec<u8> {
+    let mut layer = LayerBuilder::new("roads");
+    let key = layer.intern_key("class");
+    let value = layer.intern_value(Value::String("service".to_string()));
+    for path in paths {
+        let mut geometry = Vec::new();
+        encode_linestring(&mut geometry, path);
+        layer.add_feature(Feature {
+            id: Some(99),
+            geom_type: GeomType::LineString,
+            geometry,
+            tags: vec![(key, value)],
+        });
+    }
+    crate::mvt::encode_tile(&[&layer])
+}
+
+fn anonymous_ocean_tile(rings: &[&[(i32, i32)]]) -> Vec<u8> {
+    let mut layer = LayerBuilder::new("ocean");
+    let mut geometry = Vec::new();
+    encode_polygon(&mut geometry, rings);
+    layer.add_feature(Feature {
+        id: None,
+        geom_type: GeomType::Polygon,
+        geometry,
+        tags: Vec::new(),
+    });
+    crate::mvt::encode_tile(&[&layer])
+}
+
 #[test]
 fn canonical_decoder_round_trips_two_layer_tile() {
     let (tile, decoded_poly) = two_layer_tile();
@@ -447,7 +477,7 @@ fn run_length_directory_expansion_compares_each_addressed_tile() {
 }
 
 #[test]
-fn dedup_memo_hit_is_counted() {
+fn deduplicated_run_collapses_to_one_raw_pair() {
     let dir = TestDir::new("dedup");
     let current = dir.path.join("current.pmtiles");
     let blessed = dir.path.join("blessed.pmtiles");
@@ -459,6 +489,83 @@ fn dedup_memo_hit_is_counted() {
     write_archive(&blessed, vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile)]);
     let cfg = RegressConfig::default();
     let report = regress(&current, &blessed, &cfg).expect("regress");
-    assert!(report.decode_memo_hits >= 2);
+    assert_eq!(report.counters.unique_blob_pairs, 1);
+    assert_eq!(report.counters.raw_equal_pairs, 1);
+    assert_eq!(report.counters.raw_equal_tiles, 2);
     assert_eq!(report.identical_tiles, 2);
+}
+
+#[test]
+fn detailed_pair_multiplicity_and_legacy_oracle_match() {
+    let dir = TestDir::new("detailed-pair-multiplicity");
+    let current = dir.path.join("current.pmtiles");
+    let blessed = dir.path.join("blessed.pmtiles");
+    let moved = line_tile(Some(1), "a", &[(0, 0), (13, 10)]);
+    let original = line_tile(Some(1), "a", &[(0, 0), (10, 10)]);
+    write_archive(&current, vec![(1, 0, 0, moved.clone()), (1, 0, 1, moved)]);
+    write_archive(
+        &blessed,
+        vec![(1, 0, 0, original.clone()), (1, 0, 1, original)],
+    );
+    let cfg = RegressConfig {
+        tol: 4,
+        max_moved: 2,
+        max_examples: 20,
+    };
+    let report = regress(&current, &blessed, &cfg).expect("regress");
+    assert_eq!(report.counters.unique_blob_pairs, 1);
+    assert_eq!(report.counters.detailed_pairs, 1);
+    assert_eq!(report.counters.detailed_tiles, 2);
+    assert_eq!(report.totals.tolerance_moved, 2);
+    assert_regress_differential_oracle(&current, &blessed, &cfg).expect("differential oracle");
+}
+
+#[test]
+fn differential_oracle_covers_canonical_edge_cases() {
+    let dir = TestDir::new("differential-edge-cases");
+    let current = dir.path.join("current.pmtiles");
+    let blessed = dir.path.join("blessed.pmtiles");
+    let p1 = &[(0, 0), (10, 10)][..];
+    let p2 = &[(20, 20), (30, 30)][..];
+    let outer_a = &[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)][..];
+    let hole_a = &[(20, 20), (20, 40), (40, 40), (40, 20), (20, 20)][..];
+    let outer_b = &[(200, 200), (300, 200), (300, 300), (200, 300), (200, 200)][..];
+    let ocean_a = &[(0, 0), (80, 0), (80, 80), (0, 80), (0, 0)][..];
+    let ocean_b = &[(2, 0), (82, 0), (82, 80), (2, 80), (2, 0)][..];
+    write_archive(
+        &current,
+        vec![
+            (2, 0, 0, multiline_tile(&[p1, p2])),
+            (
+                2,
+                0,
+                1,
+                float_attr_tile(Value::Float(f32::from_bits(0x7fc0_0001))),
+            ),
+            (2, 1, 0, duplicate_id_tile(&[p1, p2])),
+            (2, 1, 1, anonymous_ocean_tile(&[ocean_a])),
+            (2, 2, 0, polygon_tile(&[outer_a, outer_b, hole_a])),
+        ],
+    );
+    write_archive(
+        &blessed,
+        vec![
+            (2, 0, 0, multiline_tile(&[p2, p1])),
+            (
+                2,
+                0,
+                1,
+                float_attr_tile(Value::Float(f32::from_bits(0x7fc0_0002))),
+            ),
+            (2, 1, 0, duplicate_id_tile(&[p2, p1])),
+            (2, 1, 1, anonymous_ocean_tile(&[ocean_b])),
+            (2, 2, 0, polygon_tile(&[outer_a, hole_a, outer_b])),
+        ],
+    );
+    let cfg = RegressConfig {
+        tol: 3,
+        max_moved: 10,
+        max_examples: 20,
+    };
+    assert_regress_differential_oracle(&current, &blessed, &cfg).expect("differential oracle");
 }
