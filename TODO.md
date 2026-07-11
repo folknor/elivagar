@@ -27,8 +27,29 @@ re-establish per-dataset baselines when run.
 
 ## Tile output optimizations
 
-- [ ] Sort keys within layers: emit feature order hints (e.g. road importance) so renderers
-  stack correctly without client-side sorting. Audit whether MapLibre depends on this (#323).
+- [ ] Deterministic within-layer feature order with a deliberate paint-order key.
+  Feature order within a tile layer is nondeterministic run-to-run (established
+  2026-07-11, visually confirmed: parks inside cities vanish under the residential
+  landuse fill when the order flips; two same-commit denmark builds differ in
+  byte-level dedup). Root causes, all verified in code: ocean chunk ids from an
+  `AtomicUsize` raced by rayon workers; the k-way merge tie-breaking equal sort
+  keys by chunk index; `sort_unstable_by_key` within chunks; and a sort key that
+  carries no tiebreak - `SortKey` has had an unused `priority: u8` field since the
+  first commit, reserved for exactly this and never wired (every call site passes
+  0). The fix: populate `priority` with a paint-order key (land-cover kinds
+  background-first so parks/forest paint above residential/industrial; road
+  importance for streets per the competitor convention, upstream context #323) and
+  add a deterministic final tiebreak (e.g. osm_id) so equal-key order is stable
+  regardless of chunk assignment. Payoffs beyond stacking correctness: builds
+  become byte-reproducible, PMTiles dedup stops leaking (~28 denmark tiles/build
+  measured), and the regress engine's raw byte-equality tier catches far more
+  tiles (currently 1.22M of 1.30M on an identical denmark pair; reproducible
+  builds push that toward all of them). No gate today can catch paint-order
+  regressions - regress canonicalization is deliberately blind to order - so the
+  landing needs its own verification instrument. History: the old regress spec
+  (git show 9ee474a:notes/spec-5-output-regression.md, "Determinism is NOT
+  established") documents the nondeterminism as a discovered fact tolerated by
+  the comparison tool, never ratified as a design decision.
 - [ ] Feature dropping: iteratively drop least-important features from oversized tiles until
   they fit a size budget. Needed for dense urban areas at planet scale. Tippecanoe (#378)
   hit an infinite loop bug here - need a guaranteed convergence invariant (also #340, #45).
