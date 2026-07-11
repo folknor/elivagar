@@ -165,6 +165,27 @@ lands). The blessed denmark archive predates the pins geometry change, so
 the standing bare `brokkr regress` gate is stale until a user-gated
 `brokkr bless` rotation.
 
+The paint-order determinism landing (`a631b5f` + comparator optimization
+`2c770c7`, 2026-07-11) made archives byte-reproducible and wired the
+SortKey priority byte to paint-rank tables (land background-first,
+streets kind-major). Gates, plantasjen, denmark locations: FOUR
+independent full-pipeline builds across both commits hash to one archive
+(`git hash-object eb6bd7c3...`) - reproducible builds achieved; semantic
+regress vs the pins archive (`acbe400`) zero-diff across 1,296,996 tiles
+(the reorder is invisible to content comparison); earcut oracle clean on
+ocean and land; the new `verify` within-layer order check passes on all
+tiles. Wall: the landed fused comparator read 12.9-13.0s vs the 12.0s
+pins baseline (`acf5ea76`), breaking the +5% bound - entirely phase12
+chunk-sort cost, as the spec review predicted. The adjudicated fix
+(two-pass sort: bare key, then equal-key runs on a gathered 8-byte
+big-endian osm_id prefix, full payload compare only on prefix collision)
+brought it to 12.3s stored (`ba1db6a8`), +2.5%, within bound. A/B chain
+for the record (forced, unstored): fused 12.9/13.0, two-pass unprefixed
+12.6/12.7, by-key-only control 11.9, final 12.3/12.3. The residual
++0.3s is the intrinsic price of the determinism guarantee. Guarantee
+scope: MVT + gzip (the MLT encoder re-sorts for size and is out of
+scope by spec).
+
 "reader" is the `assemble_reader_ns` counter: serial k-way merge reader time
 inside the assemble phase. The Denmark reader value is from the instrumented
 runs at the same code state (bench-mode counter not captured for `1a6ca281`).
