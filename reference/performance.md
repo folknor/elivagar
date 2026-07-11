@@ -90,6 +90,26 @@ intersect_rect_into from 8.1 to 6.3 GB combined exclusive alloc (-22%; alloc
 proved mis-calibrated - L1's monomorphization had already cut the pair from the
 pre-port 15.1 GB to 8.1 GB, so ~6.3 GB is the floor from that kill list.
 
+The injected-prepass wait-work (2026-07-11) landed two neutrality-claiming
+commits while the pbfhogg producer is still being built: `430f28b` (way
+membership resolved once at plan build) and `f683129` (dormant injected
+way-members consumption plumbing; see notes/injected-prepass-spec.md for the
+design it pre-lands). Gate readings, all plantasjen: denmark raw bench-3
+17.0s (`1157a31a`) vs 16.7s at `430f28b` (`262d55f3`) vs 17.5s at `8eaa8bf`
+(`928725a5`); denmark locations bench-3 11.7s (`9933e811`) vs 11.6s at
+`e2284ec` (`c1053012`); germany locations bench 53.1s (`65e499f2`) vs 51.8s
+at `4ceacd1` (`f2b93719`). Neutrality: raw regress `f683129` vs `430f28b`
+zero-diff at tol 0 (1,326,395 tiles), locations regress `f683129` vs
+`4ceacd1` zero-diff at tol 0 (1,296,996 tiles; that reference predates both
+commits, so it spans the pair). The germany locations regress was attempted
+and OOM-killed mid-decode (two 2.8 GB archives while pbfhogg builds competed
+for RAM) and was judged redundant for a dormant-path landing: the injected
+arm is unreachable on every existing input, so branch-level neutrality is
+dataset-independent and denmark carries it. The spec's `verify pmtiles` gate
+is unrunnable as written - brokkr's verify resolves only brokkr.toml-pinned
+pmtiles entries and this project pins none - and is subsumed here by the
+full-decode zero-diff regress against a verified-lineage reference.
+
 "reader" is the `assemble_reader_ns` counter: serial k-way merge reader time
 inside the assemble phase. The Denmark reader value is from the instrumented
 runs at the same code state (bench-mode counter not captured for `1a6ca281`).
