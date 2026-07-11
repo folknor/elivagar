@@ -234,6 +234,7 @@ pub(super) fn phase_read_and_process(
     // member-way set, and the global shared-node pin set.
     let mut relation_blocks_bytes: usize = 0;
     let mut relation_plan_needed_ways: usize = 0;
+    let mut relation_plan_superset_ways: usize = 0;
     let mut global_shared_nodes: usize = 0;
 
     // Reusable buffer hoisted out of the PBF closure to avoid per-element
@@ -448,6 +449,7 @@ pub(super) fn phase_read_and_process(
                     drop(prepass_join_guard);
                     global_shared_nodes = gsn.len();
                     relation_plan_needed_ways = relation_plan.needed_ways.len();
+                    relation_plan_superset_ways = relation_plan.superset_ways_count;
                     let relation_plan_clone = std::sync::Arc::clone(&relation_plan);
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. Byte-budgeted in-flight control
@@ -915,6 +917,7 @@ pub(super) fn phase_read_and_process(
         relation_blocks_bytes,
         relation_blocks_spilled,
         relation_plan_needed_ways,
+        relation_plan_superset_ways,
         global_shared_nodes,
         relation_blocks_drop_rss_kb,
         missing_refs: missing_ref_snapshot,
@@ -1575,6 +1578,13 @@ impl PartialOrd for NodeRefHeapEntry {
 
 pub(super) struct RelationPlan {
     pub(super) needed_ways: FxHashSet<i64>,
+    /// Size of the union of `needed_ways` with the member ways of
+    /// mp/boundary relations that FAIL the shortbread match - i.e. members
+    /// of ALL type=multipolygon/boundary relations. This is exactly the set
+    /// an enrichment-time producer with no shortbread knowledge would mark
+    /// (superset semantics), so `superset_ways_count / needed_ways.len()`
+    /// is the superset inflation factor. Count only; the set is transient.
+    pub(super) superset_ways_count: usize,
 }
 
 #[hotpath::measure]
@@ -1589,6 +1599,10 @@ fn prepass_relation_plan(
         .decode_threads(decode_threads);
 
     let mut needed_ways: FxHashSet<i64> = FxHashSet::default();
+    // Members of ALL mp/boundary relations, shortbread match or not - what
+    // an enrichment-time superset bitmap would contain. Only the count is
+    // kept; the set is dropped before the plan is returned.
+    let mut superset_ways: FxHashSet<i64> = FxHashSet::default();
     let mut matched_relations: u64 = 0;
     for block_result in reader.into_blocks_pipelined() {
         let block = block_result
@@ -1609,26 +1623,36 @@ fn prepass_relation_plan(
             }
             let tags: smallvec::SmallVec<[(&str, &str); 16]> = rel.tags().collect();
             let tag_helper = Tags(&tags);
-            if shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon).is_empty() {
-                return;
+            let matched =
+                !shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon).is_empty();
+            if matched {
+                matched_relations += 1;
             }
-            matched_relations += 1;
             for member in rel.members() {
                 if let MemberId::Way(way_id) = member.id {
-                    needed_ways.insert(way_id);
+                    superset_ways.insert(way_id);
+                    if matched {
+                        needed_ways.insert(way_id);
+                    }
                 }
             }
         });
     }
     needed_ways.shrink_to_fit();
+    let superset_ways_count = superset_ways.len();
+    drop(superset_ways);
 
     eprintln!(
-        "  Relation prepass: {:.1}s ({} matching relations, {} member ways)",
+        "  Relation prepass: {:.1}s ({} matching relations, {} member ways, {} superset ways)",
         start.elapsed().as_secs_f64(),
         matched_relations,
         needed_ways.len(),
+        superset_ways_count,
     );
-    Ok(RelationPlan { needed_ways })
+    Ok(RelationPlan {
+        needed_ways,
+        superset_ways_count,
+    })
 }
 
 /// Annotate ways with globally-shared node refs (cross-block junctions).

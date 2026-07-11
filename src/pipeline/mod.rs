@@ -721,6 +721,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             usize::from(s.relation_blocks_spilled),
         );
         emit_counter_usize("relation_plan_needed_ways", s.relation_plan_needed_ways);
+        emit_counter_usize("relation_plan_superset_ways", s.relation_plan_superset_ways);
         emit_counter_usize("global_shared_nodes", s.global_shared_nodes);
         if let Some(kb) = s.relation_blocks_drop_rss_kb {
             emit_counter_u64("relation_blocks_drop_rss_kb", kb);
