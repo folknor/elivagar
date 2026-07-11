@@ -33,8 +33,8 @@ xxhash = "55760485369644887ae34df411b8034e"
 seq = 4704
 
 [plantasjen.datasets.denmark.pbf.locations]
-file = "denmark-20260220-seq4704-locations.osm.pbf"
-xxhash = "c1b990d199a9053b9026ea98ead61b5f"
+file = "denmark-20260220-seq4704-locations-prepass.osm.pbf"
+xxhash = "58c47f32d3a55b04a56813565efc78ac"
 seq = 4704
 
 [plantasjen.datasets.denmark.blessed]
@@ -76,8 +76,8 @@ xxhash = "a5499f39be2fb1ceebef35dd0e3627fb"
 seq = 4704
 
 [plantasjen.datasets.germany.pbf.locations]
-file = "germany-20260224-seq4704-locations.osm.pbf"
-xxhash = "798b2d971057897ff0e86934c7d5f66a"
+file = "germany-20260224-seq4704-locations-prepass.osm.pbf"
+xxhash = "b464aa0bd3118f89606a3982d37f2195"
 seq = 4704
 
 [plantasjen.datasets.north-america]
