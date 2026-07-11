@@ -145,6 +145,25 @@ bench, no regress, by explicit decision); its pre-enrichment baseline
 archive `norway-20c8bd7.pmtiles` (`525c553a`) is banked for a later
 regress. The old locations files remain on disk unregistered.
 
+The injected-pins landing (H2b, `acbe400`, 2026-07-11) consumed field-20
+shared-node pins on the enriched path and deleted the global shared-node
+prepass (net -626 lines). Readings, plantasjen, denmark locations bench-3
+`acf5ea76`: wall 12.0s vs 11.7s pre-pins (noise), `way_pins_marked`
+11,615,766, `phase12_plan_build_ns` halved (4.47 to 1.91 s thread-time,
+block-local counting skipped), features +0.4%, output_bytes +4.4% (347.9 to
+363.1 MB) concentrated in land +14.8% / streets +6.7% / water_polygons
++7.2% - cross-block junction retention paying its byte cost. Earcut oracle
+clean (0 over threshold, 0 misattached) on ocean, water_polygons, and land.
+The parent's <=2% wall / <=3% bytes keep bounds were defined on germany
+locations, which is UNMEASURED (bench freeze by user decision) - those
+verdicts are unread, denmark readings stand in. The displacement-percentile
+diagnostic regress was killed after 30+ min: the first diff-heavy regress
+ever run exposed the tool's cubic matched-feature path (hunt findings and
+rewrite plan in notes/regress.md; rerun the diagnostic after the rewrite
+lands). The blessed denmark archive predates the pins geometry change, so
+the standing bare `brokkr regress` gate is stale until a user-gated
+`brokkr bless` rotation.
+
 "reader" is the `assemble_reader_ns` counter: serial k-way merge reader time
 inside the assemble phase. The Denmark reader value is from the instrumented
 runs at the same code state (bench-mode counter not captured for `1a6ca281`).
