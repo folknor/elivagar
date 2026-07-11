@@ -9,6 +9,22 @@ resolved-refs refinement proposed by the paired pbfhogg spec is RATIFIED
 is accepted with a corresponding Brick 4 validation. Brick 1 landed the
 `relation_plan_superset_ways` instrumentation.
 
+2026-07-11 status, end of day: Bricks 1-4 are DONE. Brick 1 measured
+1.23x on germany (screen passed, tag_expr contingency closed). pbfhogg
+landed Brick 2 whole (their `29e4eabd`). Brick 3 re-enriched denmark,
+germany, norway (registered as the `locations` variants, elivagar
+`20c8bd7` + follow-up; on-disk growth ~1-2%). Brick 4's consumption
+landed ahead of the data as dormant plumbing (`f683129`) and activated
+on registration with no further code change; activation gates and
+measured readings (denmark zero-diff, germany 50.2s / 1.31x way_index
+bytes, prepass deleted on the injected path) are in
+`reference/performance.md`. One Brick 4 gate deviation: the germany
+semantic regress OOM-killed at archive scale (performance-backlog item
+27) - the germany equality claim rests on counter identity plus the
+denmark zero-diff; norway is enriched and registered but unvalidated
+(baseline archive banked). REMAINING: Brick 5 (H2b, pins consumption +
+global-prepass teardown) and Brick 6 (NA reading, user-gated).
+
 Written against `reference/technical-implementation-spec.md` (the contract
 for this document). Spawned from `notes/planet-30gb-roadmap.md`, hypothesis
 H2, items (a) "Relation plan" and (b) "Exact shared-node pins". Measurement

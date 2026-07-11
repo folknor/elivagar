@@ -347,6 +347,16 @@ change.
   3.9-40s thread-time, wide spread but dominated by phase12 items). Parked.
 - **Item 26 (PMTiles writer sharding + faster dedup fingerprint)**: gated on
   item 14; `write_to`/`add_tile` are 0.1-3.4s today.
+- **Item 27 (streaming or per-partition regress)**: `elivagar regress` at
+  germany scale (two 2.8 GB archives, full decode both sides) was OOM-killed
+  twice on plantasjen (2026-07-11, injected-prepass activation gates) while
+  concurrent builds held part of the 30 GB. Tooling, not pipeline: the diff
+  currently materializes both canonicalized archives; a Hilbert-range
+  partitioned walk (decode and diff one tile-id range at a time, the sort
+  partitioner precedent) would bound memory at any archive scale. Until then
+  germany+ regress runs need a quiet machine, and norway's deferred
+  activation regress (baseline `norway-20c8bd7.pmtiles`, run `525c553a`)
+  waits on this or on quiet time.
 
 ---
 

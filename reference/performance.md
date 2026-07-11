@@ -89,6 +89,13 @@ intersect_rect_into from 8.1 to 6.3 GB combined exclusive alloc (-22%; alloc
 13.3 to 11.6s (`c1053012` vs `bcac01ad`). The spec's under-3 GB churn target
 proved mis-calibrated - L1's monomorphization had already cut the pair from the
 pre-port 15.1 GB to 8.1 GB, so ~6.3 GB is the floor from that kill list.
+Landing 2's germany-locations effect, attributed post-hoc from sidecar
+(`--compare a6d1cb9e f2b93719`, the only code commit in the interval): wall
+84.5s at `8eaa8bf` to 51.8s at `4ceacd1`, all of it phase12 (67.1 to 34.2s,
+-49%), with phase12 peak RSS 22.8 to 6.3 GB and avg cores 11.4 to 16.9 -
+germany's polygon volume was allocator-bound and at 22.8 GB the 30 GB host
+was under memory pressure, so the de-churn paid off far beyond its denmark
+reading (13.3 to 11.6s).
 
 The injected-prepass wait-work (2026-07-11) landed two neutrality-claiming
 commits while the pbfhogg producer is still being built: `430f28b` (way
@@ -109,6 +116,34 @@ dataset-independent and denmark carries it. The spec's `verify pmtiles` gate
 is unrunnable as written - brokkr's verify resolves only brokkr.toml-pinned
 pmtiles entries and this project pins none - and is subsumed here by the
 full-decode zero-diff regress against a verified-lineage reference.
+
+The injected-prepass activation (2026-07-11, Brick 3 + Brick 4 in effect):
+the pbfhogg producer (their `29e4eabd`) re-enriched denmark, germany, and
+norway via `pbfhogg add-locations-to-ways --index-type external
+--inject-prepass --compression zlib:6` over the same-hash indexed inputs;
+the enriched files are registered as the `locations` variants (`20c8bd7`
+denmark + germany, norway in the follow-up commit) and the dormant
+consumption plumbing from `f683129` activates on them with no code change.
+On-disk growth (honesty clause): denmark 525 to 532 MB (+1.3%), germany
+5.5 to 5.6 GB (~+2%), norway 1.4 GB unchanged at GB rounding. Activation
+readings, plantasjen at `20c8bd7`: denmark locations bench-3 11.7s
+(`67474f0d`), wall level with pre-enrichment, `prepass_join` 490ns,
+`relation_plan_*` 0, `way_members_marked` 84,249 vs the old exact plan's
+78,275, way_index data 9.26 to 11.30 MB; semantic regress vs the
+`f683129` archive zero-diff at tol 0 (1,296,996 tiles). germany locations
+bench 50.2s (`da63d783`) vs 53.1s pre-enrichment - the win is the deleted
+3.36s prepass-join stall; `way_members_marked` 1,064,174 vs 886,109
+needed (1.20x), way_index data 112.3 to 146.9 MB = 1.31x against the
+Brick 4 bound of 2x, peak RSS 6.55 vs 6.38 GB; features, tiles, and every
+per-layer sort counter bit-identical to pre-enrichment; the germany
+semantic regress was OOM-killed twice mid-decode (full-decode diff of two
+2.8 GB archives does not fit beside concurrent builds on this host - a
+regress-tooling capacity limit at germany scale, not a verdict) and the
+germany equality claim rests on the counter identity plus the denmark
+zero-diff. norway is enriched and registered but unvalidated here (no
+bench, no regress, by explicit decision); its pre-enrichment baseline
+archive `norway-20c8bd7.pmtiles` (`525c553a`) is banked for a later
+regress. The old locations files remain on disk unregistered.
 
 "reader" is the `assemble_reader_ns` counter: serial k-way merge reader time
 inside the assemble phase. The Denmark reader value is from the instrumented

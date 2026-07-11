@@ -57,8 +57,8 @@ xxhash = "114169ea198b41c9249b6b54ee1ec4e9"
 seq = 4709
 
 [plantasjen.datasets.norway.pbf.locations]
-file = "norway-20260225-seq4709-locations.osm.pbf"
-xxhash = "872f97cde6a59c6584ed55c3f1cabaab"
+file = "norway-20260225-seq4709-locations-prepass.osm.pbf"
+xxhash = "f5923dcfb30d43db3e2faf0d414be758"
 seq = 4709
 
 [plantasjen.datasets.germany]
