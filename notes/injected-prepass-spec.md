@@ -3,6 +3,12 @@
 Status: specified 2026-07-09, review-refined 2026-07-09 (R1 Opus + R2
 codex folded, see Review resolutions), not implemented.
 
+2026-07-11 contract amendments (see "Cross-repo ratifications"): the D9
+resolved-refs refinement proposed by the paired pbfhogg spec is RATIFIED
+(pin = shared AND resolved), and the `Blob::way_member_count()` accessor
+is accepted with a corresponding Brick 4 validation. Brick 1 landed the
+`relation_plan_superset_ways` instrumentation.
+
 Written against `reference/technical-implementation-spec.md` (the contract
 for this document). Spawned from `notes/planet-30gb-roadmap.md`, hypothesis
 H2, items (a) "Relation plan" and (b) "Exact shared-node pins". Measurement
@@ -251,8 +257,13 @@ input): for each way take its refs, minus the trailing ref when
 `len >= 4 && first == last` (ring-closure duplicate). Count occurrences of
 each node id across all these slices, all ways, including repeats within
 one way. A node id with total count >= 2 is shared. The bitmap sets the
-bit at EVERY position holding a shared id, including a closed ring's
-trailing duplicate (it mirrors bit 0 by construction).
+bit at every position holding a shared id THAT RESOLVED TO A LOCATION
+(pin = shared AND resolved - the D9 resolved-refs refinement, ratified
+2026-07-11, see "Cross-repo ratifications"), including a closed ring's
+trailing duplicate (it mirrors bit 0 by construction; the closure
+duplicate resolves iff position 0 does). A shared id whose node is absent
+from the input carries bit 0 at every position; a way whose only shared
+positions are unresolved legitimately omits field 20.
 
 Two deliberate divergences from elivagar's block-local semantics, both
 quality-positive and inside this landing's geometry-change budget:
@@ -294,6 +305,14 @@ the earcut oracle would not necessarily catch.
   read path (and every other consumer) leaves it off and skips the field.
   This is the concrete answer to "how elivagar enables field 5": it is
   opt-in, keyed to the feature flag, set at reader construction.
+- `Blob::way_member_count(&self) -> Option<u32>` - the encoded field-5
+  way_count from the preamble (None under the same conditions as
+  `way_members()`). Accepted 2026-07-11 (see "Cross-repo ratifications"):
+  without it the contract's "field-5 bitmap vs the blob's way count" hard
+  error is unverifiable whenever encoded and actual counts differ within
+  one bitmap byte. elivagar's Brick 4 validation compares it against the
+  blob's actual decoded Way element count as a third release-checked
+  hard error beside the bitmap-length check.
 - `Way::shared_node_pins(&self) -> Option<&[u8]>` - the field-20 bitmap,
   `None` when omitted.
 - `HeaderBuilder` grows nothing structurally (it already owns
@@ -325,6 +344,49 @@ paired document in that repository; THIS contract section is the interface
 both implementations are written against. That is a named exclusion, not a
 deferral: the format, semantics, feature strings, and API surface are all
 pinned here.
+
+### Cross-repo ratifications (2026-07-11)
+
+The paired pbfhogg spec raised two contract questions back to this
+document (the normative side). Both are decided here so the contract has
+one text again.
+
+**D9 resolved-refs refinement: RATIFIED.** pbfhogg's D9 narrows the
+field-20 pin definition from "every position holding a shared id,
+regardless of whether the node exists" to pin = shared AND resolved
+(their external mode can only pin slots that receive a resolved entry;
+the sparse mode mirrors it as `pin_i = shared(id_i) && resolved_i`).
+elivagar accepts, on three grounds verified against the consuming code:
+
+1. Length validations are unaffected. Both release-checked guards
+   (`bitmap.len() == refs.len().div_ceil(8)` and
+   `coords_e7.len() == refs.len()`) are structurally independent of which
+   bits are set; D9 changes bit values only, never bitmap length or the
+   presence rule. Field-20 omission was already the legal "no pins" case
+   and is indistinguishable from a genuinely pinless way, so more ways
+   omitting it (those whose only shared positions are unresolved) costs
+   nothing.
+2. The unrefined semantics would be actively wrong for this consumer. On
+   the enriched path `Way::node_locations()` yields one coordinate per
+   ref verbatim - a shared-but-absent node arrives as altw's (0,0)
+   unresolved sentinel, a garbage Null Island vertex. Pinning that
+   position would force DP simplification to RETAIN the garbage vertex.
+   A missing node must not pin simplification.
+3. D9 preserves like-for-like semantics with today's pipeline. On the
+   node-store path missing refs are compacted out of `resolved_node_refs`
+   before `preserve_vertex_mask` is filled, so pins never land on
+   unresolved refs today either.
+
+The pbfhogg fallback (survey-faithful zero-coordinate ResolvedEntry
+records carrying the pin bit) is declined and closed; nothing on this
+side wants a pinned position without a real coordinate.
+
+**`Blob::way_member_count()`: ACCEPTED** (see the pbfhogg public API
+bullet above). pbfhogg's review found that with the count stripped from
+`way_members()`, a producer bug where encoded and actual way counts
+differ within one bitmap byte is undetectable end-to-end. The accessor
+closes that; Brick 4's validation grows the corresponding
+encoded-vs-actual count compare.
 
 ## Target artifacts (elivagar)
 
@@ -485,6 +547,18 @@ gates directly via `way_index_data_bytes`. Passing the cheap count proxy
 here does not by itself imply passing Brick 4's bytes bound; Brick 4
 governs. Brick 1 exists to catch a gross count blowup before any format
 work, cheaply.
+
+**MEASURED 2026-07-11, screen PASSED** (instrumentation commit `4ceacd1`,
+plantasjen). germany locations (`brokkr tilegen --bench`, run
+`f2b93719`): `relation_plan_superset_ways` 1,092,149 vs
+`relation_plan_needed_ways` 886,109 - inflation 1.23x, under the 1.5x
+threshold. denmark locations (run `fc55fca5`): 90,837 superset vs 78,275
+needed - 1.16x. Superset semantics proceed as specified; per the
+below-threshold rule the `tag_expr` filter contingency is closed and the
+filter is never built. Brick 4's `way_index_data_bytes` bound still
+governs the real byte cost (germany locations reading at the same run:
+112.3 MB data + 14.1 MB index under the EXACT plan; the superset feed
+lands with Brick 4).
 
 Above 1.5x -> the membership contract gains a relation tag filter: altw
 takes the filter as a CLI argument evaluated with pbfhogg's existing
