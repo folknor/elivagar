@@ -440,8 +440,12 @@ Data flow changes:
 
 - Detection, next to the existing `LocationsOnWays` sniff:
   `injected_members` / `injected_pins` from the two feature strings,
-  honored only when `locations_on_ways` (altw output always is; a flagged
-  file on the raw path ignores the injection and logs it).
+  honored only when `locations_on_ways` (altw output always is). A file
+  that declares either flag WITHOUT `LocationsOnWays` is a hard error at
+  detection (malformed enrichment, per the Header feature flags section
+  above - not a silent ignore-and-log, correcting this bullet's earlier
+  text). Landed on the elivagar side, dormant on every input that exists
+  today (see git history).
 - `prepass_relation_plan` is spawned only when `!injected_members`.
   `prepass_shared_nodes` is DELETED (see teardown), so nothing spawns for
   pins in any mode.
@@ -625,6 +629,17 @@ and north-america figures (Brick 6) into `reference/performance.md`.
 `WayPlan.is_member`, counters - the full H2a target-artifact list above,
 as one coherent change. Both paths (injected, fallback) live; no
 env-vars, no experiment switches; keep or revert on the gates.
+
+STATUS: the code-side plumbing (detection, `WayBlock`, `MemberSource`,
+`MembersForBlock`, the release-checked validations, `WayPlan.is_member`
+filled from either arm, `way_members_marked`) already landed as a
+behavior-neutral subset, dormant on every input that exists today since
+no current file declares `WayMembers-v1` (see git history). `build_way_plans`
+keeps its `global_shared` parameter and has no `PinSource` argument in the
+landed shape - a named deviation from this section's signature, since
+Brick 5 (pins) is separate and unlanded; Brick 5 turns the signature into
+the form above. What remains for this brick's activation is the Brick 3
+enriched data plus the gates below, not a fresh implementation.
 
 Gates, in order:
 ```

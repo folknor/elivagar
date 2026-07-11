@@ -722,6 +722,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         );
         emit_counter_usize("relation_plan_needed_ways", s.relation_plan_needed_ways);
         emit_counter_usize("relation_plan_superset_ways", s.relation_plan_superset_ways);
+        emit_counter_u64("way_members_marked", s.way_members_marked);
         emit_counter_usize("global_shared_nodes", s.global_shared_nodes);
         if let Some(kb) = s.relation_blocks_drop_rss_kb {
             emit_counter_u64("relation_blocks_drop_rss_kb", kb);
@@ -827,8 +828,8 @@ use emit::{
 };
 #[cfg(test)]
 use phase12::{
-    NodeStoreMode, RawWay, annotate_block_shared_node_refs, crosses_antimeridian,
-    lon_e7_shifted_360, select_node_store_mode,
+    MembersForBlock, NodeStoreMode, RawWay, annotate_block_shared_node_refs, build_way_plans,
+    crosses_antimeridian, lon_e7_shifted_360, phase_read_and_process, select_node_store_mode,
 };
 #[cfg(test)]
 use stats::{

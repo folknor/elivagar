@@ -24,6 +24,79 @@ use super::stats::{
 };
 use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb};
 
+/// A way block plus its optional injected per-blob membership bitmap.
+struct WayBlock {
+    block: PrimitiveBlock,
+    members: Option<Box<[u8]>>,
+}
+
+type DecodedWayBlock = Result<(PrimitiveBlock, Option<Box<[u8]>>), PipelineError>;
+
+/// Where membership information is supplied for this run.
+enum MemberSource {
+    Injected,
+    Plan(std::sync::Arc<RelationPlan>),
+}
+
+/// Per-block membership input used when constructing way plans.
+pub(super) enum MembersForBlock<'a> {
+    Bitmap(&'a [u8]),
+    Set(&'a FxHashSet<i64>),
+}
+
+/// Injected-enrichment features declared by the PBF header.
+struct InjectedFeatures {
+    members: bool,
+    pins: bool,
+}
+
+fn detect_injected_features(
+    has_members: bool,
+    has_pins: bool,
+    has_locations: bool,
+) -> Result<InjectedFeatures, PipelineError> {
+    if (has_members || has_pins) && !has_locations {
+        return Err(PipelineError(
+            "injected WayMembers-v1 or SharedNodePins-v1 requires LocationsOnWays".to_string(),
+        ));
+    }
+    Ok(InjectedFeatures {
+        members: has_members,
+        pins: has_pins,
+    })
+}
+
+fn validate_and_take_members(
+    members: Option<(&[u8], u32)>,
+    actual_way_count: usize,
+) -> Result<Box<[u8]>, PipelineError> {
+    let (bitmap, encoded_count) = members.ok_or_else(|| {
+        PipelineError("injected way-members bitmap missing or malformed".to_string())
+    })?;
+    let actual_way_count_u64 = u64::try_from(actual_way_count)
+        .map_err(|_| PipelineError("decoded way count does not fit in u64".to_string()))?;
+    if u64::from(encoded_count) != actual_way_count_u64 {
+        return Err(PipelineError(format!(
+            "injected way-members count mismatch: encoded {encoded_count}, decoded {actual_way_count}"
+        )));
+    }
+    let expected_len = actual_way_count.div_ceil(8);
+    if bitmap.len() != expected_len {
+        return Err(PipelineError(format!(
+            "injected way-members bitmap length mismatch: got {}, expected {expected_len}",
+            bitmap.len()
+        )));
+    }
+    Ok(bitmap.into())
+}
+
+fn member_bit(bitmap: &[u8], i: usize) -> bool {
+    let byte = bitmap
+        .get(i / 8)
+        .expect("validated way-members bitmap shorter than decoded way count");
+    byte & (1 << (i % 8)) != 0
+}
+
 pub(super) const LON_E7_FULL_CIRCLE: i64 = 3_600_000_000;
 /// Default memory budget per sort chunk (1 GB).
 pub(super) const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
@@ -117,12 +190,19 @@ pub(super) fn phase_read_and_process(
 
     let idx_dir = &config.tmp_dir;
     // Option so we can consume it via .take() on first Way element.
-    let locations_on_ways = config.locations_on_ways
-        || reader
-            .header()
-            .optional_features()
-            .iter()
-            .any(|f| f == "LocationsOnWays");
+    let header = reader.header();
+    let injected = detect_injected_features(
+        header.has_way_members_v1(),
+        header.has_shared_node_pins_v1(),
+        header.has_locations_on_ways(),
+    )?;
+    if injected.members {
+        eprintln!("  WayMembers-v1 detected - using injected membership");
+    }
+    if injected.pins {
+        eprintln!("  SharedNodePins-v1 declared - not yet consumed; using block-local pins");
+    }
+    let locations_on_ways = config.locations_on_ways || header.has_locations_on_ways();
 
     let pbf_size = std::fs::metadata(&config.pbf_path)
         .map(|m| m.len())
@@ -185,7 +265,7 @@ pub(super) fn phase_read_and_process(
     // Block-level dispatch: worker thread receives entire PrimitiveBlocks containing
     // ways, extracts RawWay data and processes via rayon. Main thread sends blocks
     // and drains results - no per-way work on the main thread during the way phase.
-    let mut block_tx: Option<std::sync::mpsc::SyncSender<PrimitiveBlock>> = None;
+    let mut block_tx: Option<std::sync::mpsc::SyncSender<WayBlock>> = None;
     // Shared chunk-number allocator + spill coalescer, live for the whole
     // phase: the node worker, way tasks, drain writer, and relation tail all
     // produce chunks into the same directory concurrently. The counter is
@@ -229,6 +309,7 @@ pub(super) fn phase_read_and_process(
     // Ways counted task-side (from plans.len()) so the ordered consumer
     // never re-parses way blocks.
     let way_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let way_members_marked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     // RAM-ledger sizes of the planet-scaling structures phase12 holds:
     // buffered relation blocks (decompressed bytes), the relation plan's
     // member-way set, and the global shared-node pin set.
@@ -268,9 +349,13 @@ pub(super) fn phase_read_and_process(
     let relation_plan_pbf_path = config.pbf_path.clone();
     let mut relation_plan_handle: Option<
         std::thread::JoinHandle<Result<RelationPlan, PipelineError>>,
-    > = Some(std::thread::spawn(move || {
-        prepass_relation_plan(&relation_plan_pbf_path, decode_threads)
-    }));
+    > = if injected.members {
+        None
+    } else {
+        Some(std::thread::spawn(move || {
+            prepass_relation_plan(&relation_plan_pbf_path, decode_threads)
+        }))
+    };
 
     // Node worker: owns the node store during the node phase and processes
     // node blocks off the consumer (8s of serial consumer time on germany
@@ -319,8 +404,9 @@ pub(super) fn phase_read_and_process(
     // closure) because the body mutably borrows a dozen locals and spawns
     // threads that capture others.
     macro_rules! route_block {
-        ($block:expr) => {{
+        ($block:expr, $members:expr) => {{
         let block: PrimitiveBlock = $block;
+        let members: Option<Box<[u8]>> = $members;
         // Classify block by reading first wire tag byte per group -
         // no element decoding. Sorted PBFs have single-type blocks.
         match block.block_type() {
@@ -406,7 +492,7 @@ pub(super) fn phase_read_and_process(
                         );
                     }
 
-                    let (btx, brx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(1);
+                    let (btx, brx) = std::sync::mpsc::sync_channel::<WayBlock>(1);
                     // Capacity must be at least the in-flight task ceiling: rayon tasks block on send()
                     // while holding a rayon thread. If capacity < inflight tasks,
                     // blocked senders tie up all rayon threads → worker (which runs
@@ -416,6 +502,7 @@ pub(super) fn phase_read_and_process(
                     let nr_clone = nr.clone();
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
                     let way_counter_clone = std::sync::Arc::clone(&way_counter);
+                    let way_members_marked_clone = std::sync::Arc::clone(&way_members_marked);
                     let missing_ref_stats_clone = std::sync::Arc::clone(&missing_ref_stats);
                     let deferral_stats_clone = std::sync::Arc::clone(&deferral_stats);
                     let mz = min_z;
@@ -437,20 +524,25 @@ pub(super) fn phase_read_and_process(
                         } else {
                             std::sync::Arc::new(FxHashSet::default())
                         };
-                    let relation_plan = std::sync::Arc::new(
-                        relation_plan_handle
-                            .take()
-                            .expect("relation prepass joined twice")
-                            .join()
-                            .map_err(|_| {
-                                PipelineError("relation prepass thread panicked".to_string())
-                            })??,
-                    );
+                    let member_source = if injected.members {
+                        MemberSource::Injected
+                    } else {
+                        MemberSource::Plan(std::sync::Arc::new(
+                            relation_plan_handle
+                                .take()
+                                .expect("relation prepass missing")
+                                .join()
+                                .map_err(|_| {
+                                    PipelineError("relation prepass thread panicked".to_string())
+                                })??,
+                        ))
+                    };
                     drop(prepass_join_guard);
                     global_shared_nodes = gsn.len();
-                    relation_plan_needed_ways = relation_plan.needed_ways.len();
-                    relation_plan_superset_ways = relation_plan.superset_ways_count;
-                    let relation_plan_clone = std::sync::Arc::clone(&relation_plan);
+                    if let MemberSource::Plan(plan) = &member_source {
+                        relation_plan_needed_ways = plan.needed_ways.len();
+                        relation_plan_superset_ways = plan.superset_ways_count;
+                    }
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
@@ -476,7 +568,7 @@ pub(super) fn phase_read_and_process(
                         let nr_ref: Option<&NodeStoreReader> = nr_clone.as_deref();
                         let mr_ref = &*missing_ref_stats_clone;
                         let ds_ref = &*deferral_stats_clone;
-                        let rp_ref = &*relation_plan_clone;
+                        let member_source_ref = &member_source;
                         let spill_ref = &*worker_spill;
                         // Byte-budgeted throttle: (count, estimated_bytes).
                         // Condvar wakes dispatcher when a task completes.
@@ -486,6 +578,7 @@ pub(super) fn phase_read_and_process(
                         let cvar_ref = &inflight_cvar;
                         let gsn_ref = &*gsn;
                         let way_counter_ref = &*way_counter_clone;
+                        let way_members_marked_ref = &*way_members_marked_clone;
                         // Pool of accumulators shared across block tasks. Accs
                         // live for the whole way phase (not one block), so the
                         // bulk of the record volume drains through the shared
@@ -504,7 +597,7 @@ pub(super) fn phase_read_and_process(
                             std::sync::Mutex::new(Vec::new());
                         let acc_pool_ref = &acc_pool;
                         rayon::in_place_scope(|s| {
-                            while let Ok(block) = brx.recv() {
+                            while let Ok(way_block) = brx.recv() {
                                 // Plan build happens inside the spawned task, not
                                 // here: this loop is the pipeline stage the ordered
                                 // consumer blocks behind (way_block_send), so any
@@ -517,8 +610,7 @@ pub(super) fn phase_read_and_process(
                                 // measured bytes once built (bounded overshoot: at
                                 // most max_inflight blocks' plan bytes escape the
                                 // wait below).
-                                let block_cost =
-                                    block.decompressed_size() * WAY_OUTPUT_MULTIPLIER;
+                                let block_cost = way_block.block.decompressed_size() * WAY_OUTPUT_MULTIPLIER;
                                 // Wait for capacity: count limit and byte budget.
                                 // Always allow at least one task - a single block that
                                 // exceeds the byte budget must not deadlock the condvar
@@ -547,11 +639,22 @@ pub(super) fn phase_read_and_process(
                                     // Now summed across rayon workers, not a serial
                                     // stage: read phase12_plan_build_ns as thread-time.
                                     let plan_busy = wait_span(&BUSY.phase12_plan_build);
-                                    let plans =
-                                        build_way_plans(&block, gsn_ref, &rp_ref.needed_ways);
+                                    let members = match member_source_ref {
+                                        MemberSource::Injected => MembersForBlock::Bitmap(
+                                            way_block.members.as_deref().expect(
+                                                "way block without members bitmap on injected path",
+                                            ),
+                                        ),
+                                        MemberSource::Plan(plan) => {
+                                            MembersForBlock::Set(&plan.needed_ways)
+                                        }
+                                    };
+                                    let (plans, marked) =
+                                        build_way_plans(&way_block.block, gsn_ref, &members);
                                     drop(plan_busy);
                                     way_counter_ref
                                         .fetch_add(plans.len() as u64, Ordering::Relaxed);
+                                    way_members_marked_ref.fetch_add(marked, Ordering::Relaxed);
                                     let plan_cost =
                                         estimate_way_plans_bytes(&plans) * WAY_OUTPUT_MULTIPLIER;
                                     {
@@ -573,7 +676,7 @@ pub(super) fn phase_read_and_process(
                                         .pop()
                                         .unwrap_or_else(WayAcc::new);
                                     let mut plans = plans.into_iter();
-                                    for element in block.elements() {
+                                    for element in way_block.block.elements() {
                                         let Element::Way(way) = element else {
                                             continue;
                                         };
@@ -665,7 +768,7 @@ pub(super) fn phase_read_and_process(
                 block_tx
                     .as_ref()
                     .expect("worker not initialized")
-                    .send(block)
+                    .send(WayBlock { block, members })
                     .expect("worker thread panicked");
             }
             BlockType::Relations => {
@@ -701,7 +804,8 @@ pub(super) fn phase_read_and_process(
     if locations_on_ways {
         // Elivagar-owned bounded read: see UnorderedBlockSource. Everything
         // downstream of this loop is order-free in locations mode.
-        let source = UnorderedBlockSource::spawn(&config.pbf_path, decode_threads)?;
+        let source =
+            UnorderedBlockSource::spawn(&config.pbf_path, decode_threads, injected.members)?;
         drop(reader);
         loop {
             let item = {
@@ -711,13 +815,14 @@ pub(super) fn phase_read_and_process(
             let Ok(block_result) = item else {
                 break; // every sender done
             };
-            route_block!(block_result?);
+            let (block, members) = block_result?;
+            route_block!(block, members);
         }
         source.join();
     } else {
         for block_result in reader.into_blocks_pipelined() {
             let block = block_result.map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
-            route_block!(block);
+            route_block!(block, None);
         }
     }
 
@@ -918,6 +1023,7 @@ pub(super) fn phase_read_and_process(
         relation_blocks_spilled,
         relation_plan_needed_ways,
         relation_plan_superset_ways,
+        way_members_marked: way_members_marked.load(Ordering::Relaxed),
         global_shared_nodes,
         relation_blocks_drop_rss_kb,
         missing_refs: missing_ref_snapshot,
@@ -1128,22 +1234,27 @@ pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
 /// The raw path (node store, order-dependent) stays on pbfhogg's ordered
 /// reader.
 struct UnorderedBlockSource {
-    rx: std::sync::mpsc::Receiver<Result<PrimitiveBlock, PipelineError>>,
+    rx: std::sync::mpsc::Receiver<DecodedWayBlock>,
     reader_handle: std::thread::JoinHandle<()>,
     decode_handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl UnorderedBlockSource {
-    fn spawn(path: &std::path::Path, decode_threads: usize) -> Result<Self, PipelineError> {
+    fn spawn(
+        path: &std::path::Path,
+        decode_threads: usize,
+        injected_members: bool,
+    ) -> Result<Self, PipelineError> {
         let raw_cap = (decode_threads * 2).max(8);
         let decoded_cap = (decode_threads * 2).max(8);
         let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<pbfhogg::Blob>(raw_cap);
         let raw_rx = std::sync::Arc::new(std::sync::Mutex::new(raw_rx));
         let (decoded_tx, decoded_rx) =
-            std::sync::mpsc::sync_channel::<Result<PrimitiveBlock, PipelineError>>(decoded_cap);
+            std::sync::mpsc::sync_channel::<DecodedWayBlock>(decoded_cap);
 
-        let reader = pbfhogg::BlobReader::from_path(path)
+        let mut reader = pbfhogg::BlobReader::from_path(path)
             .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?;
+        reader.set_parse_waymembers(injected_members);
 
         let reader_err_tx = decoded_tx.clone();
         let reader_handle = std::thread::spawn(move || {
@@ -1182,9 +1293,22 @@ impl UnorderedBlockSource {
                     let Ok(blob) = blob else {
                         break; // reader done and channel drained
                     };
-                    let item = blob
-                        .to_primitiveblock()
-                        .map_err(|e| PipelineError(format!("PBF decode failed: {e}")));
+                    let item = (|| {
+                        let members = blob.way_members().zip(blob.way_member_count());
+                        let block = blob
+                            .to_primitiveblock()
+                            .map_err(|e| PipelineError(format!("PBF decode failed: {e}")))?;
+                        let members = if injected_members && block.block_type() == BlockType::Ways {
+                            let actual_way_count = block
+                                .elements()
+                                .filter(|element| matches!(element, Element::Way(_)))
+                                .count();
+                            Some(validate_and_take_members(members, actual_way_count)?)
+                        } else {
+                            None
+                        };
+                        Ok((block, members))
+                    })();
                     let _wait = wait_span(&WAIT.read_decoded_send);
                     if tx.send(item).is_err() {
                         break; // consumer gone
@@ -1357,11 +1481,13 @@ fn estimate_way_plans_bytes(plans: &[WayPlan]) -> usize {
         .sum()
 }
 
-fn build_way_plans(
+pub(super) fn build_way_plans(
     block: &PrimitiveBlock,
     global_shared: &FxHashSet<i64>,
-    needed_ways: &FxHashSet<i64>,
-) -> Vec<WayPlan> {
+    members: &MembersForBlock<'_>,
+) -> (Vec<WayPlan>, u64) {
+    let mut way_pos = 0usize;
+    let mut marked = 0u64;
     let mut plans: Vec<WayPlan> = block
         .elements()
         .filter_map(|element| {
@@ -1374,6 +1500,12 @@ fn build_way_plans(
             // plan onto the wrong way. Empty-ref ways resolve to empty coords and
             // are dropped inside `process_planned_way_into`.
             let way_id = way.id();
+            let is_member = match members {
+                MembersForBlock::Bitmap(bitmap) => member_bit(bitmap, way_pos),
+                MembersForBlock::Set(needed_ways) => needed_ways.contains(&way_id),
+            };
+            way_pos += 1;
+            marked += u64::from(is_member);
             Some(WayPlan {
                 way_id,
                 node_refs: way.refs().collect(),
@@ -1381,7 +1513,7 @@ fn build_way_plans(
                 // Membership resolved once, at plan build, from the relation
                 // plan's needed_ways set - formerly a per-way `contains` lookup
                 // at the process_planned_way_into call site.
-                is_member: needed_ways.contains(&way_id),
+                is_member,
             })
         })
         .collect();
@@ -1391,7 +1523,7 @@ fn build_way_plans(
         plan.preserve_node_refs =
             preserve_refs_for_way(&plan.node_refs, &counts, Some(global_shared));
     }
-    plans
+    (plans, marked)
 }
 
 /// First pass over the PBF: count node ref occurrences across all ways.
@@ -2042,7 +2174,10 @@ pub(super) fn process_planned_way_into(
 
 #[cfg(test)]
 mod shared_node_helper_tests {
-    use super::{FxHashSet, preserve_refs_for_way, shared_node_counts};
+    use super::{
+        FxHashSet, detect_injected_features, member_bit, preserve_refs_for_way, shared_node_counts,
+        validate_and_take_members,
+    };
 
     // The block-local counting + scan-slice behaviour is exercised through
     // `annotate_block_shared_node_refs` in pipeline_tests.rs, which now delegates
@@ -2086,5 +2221,41 @@ mod shared_node_helper_tests {
             vec![1],
             "closing node pinned once via its leading occurrence, not duplicated"
         );
+    }
+
+    #[test]
+    fn detect_injected_features_requires_locations() {
+        for (members, pins) in [(true, false), (false, true), (true, true)] {
+            assert!(detect_injected_features(members, pins, false).is_err());
+        }
+        let both = detect_injected_features(true, true, true).expect("locations permits flags");
+        assert!(both.members);
+        assert!(both.pins);
+        let neither = detect_injected_features(false, false, false).expect("no flags permitted");
+        assert!(!neither.members);
+        assert!(!neither.pins);
+    }
+
+    #[test]
+    fn way_members_validation_rejects_missing_and_mismatched() {
+        assert!(validate_and_take_members(None, 0).is_err());
+        assert!(validate_and_take_members(Some((&[0], 9)), 9).is_err());
+        assert!(validate_and_take_members(Some((&[0, 0], 9)), 10).is_err());
+        assert_eq!(
+            validate_and_take_members(Some((&[0x05], 3)), 3)
+                .expect("valid bitmap")
+                .as_ref(),
+            &[0x05]
+        );
+    }
+
+    #[test]
+    fn member_bit_is_lsb_first() {
+        let bitmap = [0b0000_0101, 0b0000_0001];
+        assert!(member_bit(&bitmap, 0));
+        assert!(!member_bit(&bitmap, 1));
+        assert!(member_bit(&bitmap, 2));
+        assert!(!member_bit(&bitmap, 3));
+        assert!(member_bit(&bitmap, 8));
     }
 }

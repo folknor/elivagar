@@ -6,7 +6,304 @@ use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 use smallvec::smallvec;
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
+
+fn way_block_for_members(ids: &[i64]) -> pbfhogg::PrimitiveBlock {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = dir.path().join("ways.osm.pbf");
+    let file = File::create(&path).expect("create pbf");
+    let mut writer = PbfWriter::new(file, PbfCompression::None);
+    let header = block_builder::HeaderBuilder::new()
+        .optional_feature("LocationsOnWays")
+        .build()
+        .expect("build header");
+    writer.write_header(&header).expect("write header");
+    let mut builder = block_builder::BlockBuilder::new();
+    for &id in ids {
+        builder.add_way_with_locations(
+            id,
+            [],
+            &[id * 10, id * 10 + 1],
+            &[(590_000_000, 100_000_000), (590_000_100, 100_000_100)],
+            None,
+        );
+    }
+    let bytes = builder.take().expect("take block").expect("way block");
+    writer.write_primitive_block(bytes).expect("write block");
+    writer.flush().expect("flush pbf");
+    pbfhogg::ElementReader::from_path(&path)
+        .expect("open pbf")
+        .into_blocks_pipelined()
+        .next()
+        .expect("way block result")
+        .expect("decode way block")
+}
+
+#[test]
+fn build_way_plans_bitmap_arm_marks_positionally() {
+    let empty = rustc_hash::FxHashSet::default();
+    let three = way_block_for_members(&[10, 11, 12]);
+    let (plans, marked) = build_way_plans(&three, &empty, &MembersForBlock::Bitmap(&[0x05]));
+    assert_eq!(marked, 2);
+    assert_eq!(
+        plans.iter().map(|plan| plan.is_member).collect::<Vec<_>>(),
+        [true, false, true]
+    );
+
+    let nine = way_block_for_members(&(1..=9).collect::<Vec<_>>());
+    let (plans, marked) = build_way_plans(&nine, &empty, &MembersForBlock::Bitmap(&[0, 1]));
+    assert_eq!(marked, 1);
+    assert_eq!(
+        plans.iter().map(|plan| plan.is_member).collect::<Vec<_>>(),
+        [false, false, false, false, false, false, false, false, true]
+    );
+}
+
+#[test]
+fn bitmap_and_set_arms_agree() {
+    let block = way_block_for_members(&[10, 11, 12]);
+    let empty = rustc_hash::FxHashSet::default();
+    let expected: rustc_hash::FxHashSet<i64> = [11].into_iter().collect();
+    let (bitmap, _) = build_way_plans(&block, &empty, &MembersForBlock::Bitmap(&[0x02]));
+    let (set, _) = build_way_plans(&block, &empty, &MembersForBlock::Set(&expected));
+    assert_eq!(
+        bitmap.iter().map(|plan| plan.is_member).collect::<Vec<_>>(),
+        set.iter().map(|plan| plan.is_member).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        bitmap
+            .iter()
+            .map(|plan| &plan.preserve_node_refs)
+            .collect::<Vec<_>>(),
+        set.iter()
+            .map(|plan| &plan.preserve_node_refs)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn append_varint(bytes: &mut Vec<u8>, mut value: usize) {
+    while value >= 0x80 {
+        bytes.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    bytes.push(value as u8);
+}
+
+fn read_varint(bytes: &[u8], cursor: &mut usize) -> usize {
+    let mut value = 0usize;
+    let mut shift = 0usize;
+    loop {
+        let byte = *bytes.get(*cursor).expect("truncated protobuf varint");
+        *cursor += 1;
+        value |= usize::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+        shift += 7;
+    }
+}
+
+fn blob_data_size(header: &[u8]) -> usize {
+    let mut cursor = 0usize;
+    while cursor < header.len() {
+        let tag = read_varint(header, &mut cursor);
+        let field = tag >> 3;
+        match tag & 7 {
+            0 => {
+                let value = read_varint(header, &mut cursor);
+                if field == 3 {
+                    return value;
+                }
+            }
+            2 => {
+                let len = read_varint(header, &mut cursor);
+                cursor += len;
+            }
+            5 => cursor += 4,
+            1 => cursor += 8,
+            wire => panic!("unexpected BlobHeader wire type {wire}"),
+        }
+    }
+    panic!("BlobHeader missing datasize field")
+}
+
+/// Append BlobHeader field 5 to the first OSMData frame. PBF frame headers are
+/// length-prefixed, and the injected payload is version, varint way count, bitmap.
+fn splice_way_members(pbf: &mut Vec<u8>, payload: &[u8]) {
+    let first_header_len = u32::from_be_bytes(pbf[0..4].try_into().expect("header length"));
+    let first_header_start = 4usize;
+    let first_header_end = first_header_start + first_header_len as usize;
+    let first_frame_end =
+        first_header_end + blob_data_size(&pbf[first_header_start..first_header_end]);
+    let header_len_start = first_frame_end;
+    let header_len = u32::from_be_bytes(
+        pbf[header_len_start..header_len_start + 4]
+            .try_into()
+            .expect("data header length"),
+    );
+    let header_start = header_len_start + 4;
+    let header_end = header_start + header_len as usize;
+    let mut field = vec![0x2a];
+    append_varint(&mut field, payload.len());
+    field.extend_from_slice(payload);
+    pbf.splice(header_end..header_end, field.iter().copied());
+    let new_len = header_len
+        .checked_add(u32::try_from(field.len()).expect("field length fits u32"))
+        .expect("BlobHeader length fits u32");
+    pbf[header_len_start..header_len_start + 4].copy_from_slice(&new_len.to_be_bytes());
+}
+
+fn way_members_payload(count: u32, bitmap: &[u8]) -> Vec<u8> {
+    let mut payload = vec![1];
+    append_varint(&mut payload, count as usize);
+    payload.extend_from_slice(bitmap);
+    payload
+}
+
+#[allow(clippy::unwrap_in_result)]
+fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineError> {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let pbf_path = dir.path().join("injected.osm.pbf");
+    let file = File::create(&pbf_path).expect("create pbf");
+    let mut writer = PbfWriter::new(file, PbfCompression::None);
+    let header = block_builder::HeaderBuilder::new()
+        .optional_feature("LocationsOnWays")
+        .optional_feature("pbfhogg.WayMembers-v1")
+        .build()
+        .expect("build header");
+    writer.write_header(&header).expect("write header");
+    // Three tagless ways (positions 0..=2). Ways 0 and 1 are short open ways;
+    // way 2 is a small closed square (single-tile at the test zoom) so it can
+    // stand as the outer ring of the multipolygon below. Its id (3) sits at
+    // bitmap position 2 - the positional check the end-to-end test relies on.
+    let mut builder = block_builder::BlockBuilder::new();
+    builder.add_way_with_locations(
+        1,
+        [],
+        &[10, 11],
+        &[(590_000_000, 100_000_000), (590_000_100, 100_000_100)],
+        None,
+    );
+    builder.add_way_with_locations(
+        2,
+        [],
+        &[20, 21],
+        &[(590_000_000, 100_000_000), (590_000_100, 100_000_100)],
+        None,
+    );
+    builder.add_way_with_locations(
+        3,
+        [],
+        &[30, 31, 32, 33, 30],
+        &[
+            (590_000_000, 100_000_000),
+            (590_000_000, 100_001_000),
+            (590_001_000, 100_001_000),
+            (590_001_000, 100_000_000),
+            (590_000_000, 100_000_000),
+        ],
+        None,
+    );
+    writer
+        .write_primitive_block(builder.take().expect("take block").expect("way block"))
+        .expect("write block");
+    // One shortbread-matching multipolygon (landuse=forest) whose only member
+    // is way position 2 (id 3). Resolving it back through the way_index proves
+    // the injected bit was consumed at the right position: an off-by-one marks
+    // a different way, way 3 misses the index, and missing_relation_way_refs
+    // fires.
+    let mut rel_builder = block_builder::BlockBuilder::new();
+    rel_builder.add_relation(
+        100,
+        [("type", "multipolygon"), ("landuse", "forest")],
+        &[block_builder::MemberData {
+            id: pbfhogg::MemberId::Way(3),
+            role: "outer",
+        }],
+        None,
+    );
+    writer
+        .write_primitive_block(
+            rel_builder
+                .take()
+                .expect("take relation block")
+                .expect("relation block"),
+        )
+        .expect("write relation block");
+    writer.flush().expect("flush pbf");
+    if let Some(payload) = payload {
+        let mut pbf = std::fs::read(&pbf_path).expect("read pbf");
+        splice_way_members(&mut pbf, payload);
+        let mut file = File::create(&pbf_path).expect("rewrite pbf");
+        file.write_all(&pbf).expect("write enriched pbf");
+    }
+    let config = TilegenConfig {
+        pbf_path,
+        output_path: dir.path().join("unused.pmtiles"),
+        tmp_dir: dir.path().join("tmp"),
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean_shapefile: None,
+        ocean_simplified_shapefile: None,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: false,
+        allow_unsafe_flat_index: false,
+        threads: 1,
+        way_inflight_budget: 0,
+        assemble_batch_budget: 0,
+        sort_chunk_size: 0,
+        locations_on_ways: false,
+        global_shared_node_pins: false,
+        tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: sort::ChunkCompression::None,
+        seam_reconcile_layers: [0; Layer::count()],
+        fanout_caps: [0; Layer::count()],
+        polygon_simplify_factor: 1.0,
+    };
+    phase_read_and_process(&config).map(|(_, _, stats)| stats)
+}
+
+#[test]
+fn injected_members_end_to_end_marks_ways_and_skips_prepass() {
+    let stats = injected_fixture(Some(&way_members_payload(3, &[0x04])))
+        .expect("valid injected PBF should succeed");
+    // Prepass never spawned on the injected path: both counters stay 0.
+    assert_eq!(stats.relation_plan_needed_ways, 0);
+    assert_eq!(stats.relation_plan_superset_ways, 0);
+    // Exactly the one set bit (position 2) was consumed - no over-marking.
+    assert_eq!(stats.way_members_marked, 1);
+    // The relation resolved its member way in the way_index, proving the bit
+    // marked way position 2 and not some neighbour: an off-by-one leaves way 3
+    // out of the index and this counter fires.
+    assert_eq!(stats.rel_count, 1);
+    assert_eq!(stats.missing_refs.missing_relation_way_refs, 0);
+}
+
+#[test]
+fn injected_members_missing_field5_fails_run() {
+    // Header still declares WayMembers-v1 but no field 5 is present: absence is
+    // corrupt enrichment.
+    assert!(injected_fixture(None).is_err());
+}
+
+#[test]
+fn injected_members_malformed_field5_fails_run() {
+    // Version byte 0x02 - pbfhogg's accessor yields None, same corrupt class,
+    // proving the malformed arm flows through the decode worker and the `?`.
+    assert!(injected_fixture(Some(&[2, 3, 4])).is_err());
+}
+
+#[test]
+fn injected_members_count_mismatch_fails_run() {
+    // Encoded count 4 with a one-byte bitmap over 3 actual ways. 4.div_ceil(8)
+    // == 1, so pbfhogg's internal length check passes; the failure comes from
+    // elivagar's encoded-vs-actual compare - the within-one-byte producer bug.
+    assert!(injected_fixture(Some(&way_members_payload(4, &[0x04]))).is_err());
+}
 
 fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
     let mut writer = sort::SortWriter::new(chunks_dir, 1024, sort::ChunkCompression::None)
