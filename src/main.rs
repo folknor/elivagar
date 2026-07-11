@@ -138,11 +138,6 @@ struct RunArgs {
     #[arg(long)]
     locations_on_ways: bool,
 
-    /// Preserve old cross-block shared-node pins. Improves some very thin
-    /// low-zoom lines/polygons, but adds a second way scan and higher RSS.
-    #[arg(long)]
-    global_shared_node_pins: bool,
-
     /// Disable ocean shapefile processing (skip auto-detection).
     #[arg(long)]
     no_ocean: bool,
@@ -788,7 +783,6 @@ fn run(args: RunArgs) {
         assemble_batch_budget: args.assemble_budget.unwrap_or(0),
         sort_chunk_size: args.sort_budget.unwrap_or(0),
         locations_on_ways: args.locations_on_ways,
-        global_shared_node_pins: args.global_shared_node_pins,
         tile_format: match args.tile_format {
             TileFormatArg::Mvt => elivagar::TilePayloadFormat::Mvt,
             TileFormatArg::Mlt => elivagar::TilePayloadFormat::Mlt,

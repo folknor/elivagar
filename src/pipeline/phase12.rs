@@ -50,6 +50,15 @@ struct InjectedFeatures {
     pins: bool,
 }
 
+/// Where DP pins come from for this run.
+#[derive(Clone, Copy)]
+pub(super) enum PinSource {
+    /// Header declares pbfhogg.SharedNodePins-v1: read Way field 20.
+    Injected,
+    /// Count shared refs within each primitive block.
+    BlockLocal,
+}
+
 fn detect_injected_features(
     has_members: bool,
     has_pins: bool,
@@ -95,6 +104,32 @@ fn member_bit(bitmap: &[u8], i: usize) -> bool {
         .get(i / 8)
         .expect("validated way-members bitmap shorter than decoded way count");
     byte & (1 << (i % 8)) != 0
+}
+
+fn validate_way_pin_bitmaps(block: &PrimitiveBlock) -> Result<(), PipelineError> {
+    for element in block.elements() {
+        let Element::Way(way) = element else {
+            continue;
+        };
+        if let Some(bitmap) = way.shared_node_pins() {
+            let ref_count = way.refs().count();
+            let expected_len = ref_count.div_ceil(8);
+            if bitmap.len() != expected_len {
+                return Err(PipelineError(format!(
+                    "injected shared-node pins bitmap length mismatch for way {}: got {}, expected {expected_len}",
+                    way.id(),
+                    bitmap.len()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fill_mask_from_pin_bitmap(bitmap: &[u8], mask: &mut [bool]) {
+    for (i, pinned) in mask.iter_mut().enumerate() {
+        *pinned = bitmap[i / 8] & (1 << (i % 8)) != 0;
+    }
 }
 
 pub(super) const LON_E7_FULL_CIRCLE: i64 = 3_600_000_000;
@@ -199,9 +234,12 @@ pub(super) fn phase_read_and_process(
     if injected.members {
         eprintln!("  WayMembers-v1 detected - using injected membership");
     }
-    if injected.pins {
-        eprintln!("  SharedNodePins-v1 declared - not yet consumed; using block-local pins");
-    }
+    let pin_source = if injected.pins {
+        eprintln!("  SharedNodePins-v1 detected - using injected pins");
+        PinSource::Injected
+    } else {
+        PinSource::BlockLocal
+    };
     let locations_on_ways = config.locations_on_ways || header.has_locations_on_ways();
 
     let pbf_size = std::fs::metadata(&config.pbf_path)
@@ -310,42 +348,18 @@ pub(super) fn phase_read_and_process(
     // never re-parses way blocks.
     let way_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let way_members_marked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let way_pins_marked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     // RAM-ledger sizes of the planet-scaling structures phase12 holds:
     // buffered relation blocks (decompressed bytes), the relation plan's
-    // member-way set, and the global shared-node pin set.
+    // member-way set.
     let mut relation_blocks_bytes: usize = 0;
     let mut relation_plan_needed_ways: usize = 0;
     let mut relation_plan_superset_ways: usize = 0;
-    let mut global_shared_nodes: usize = 0;
 
     // Reusable buffer hoisted out of the PBF closure to avoid per-element
     // allocation (~200M allocs at planet scale). Cleared each iteration.
     // tags_vec cannot be hoisted: it holds &str references into PBF elements
     // that don't outlive the closure body (mutable reference invariance).
-    // Global shared-node prepass: detect junction nodes across PBF blocks.
-    // Runs on its own thread, overlapping the node phase: the prepass reads
-    // only way blobs (BlobFilter::only_ways) while the main read below is
-    // still consuming node blobs, so the two scan disjoint file sections.
-    // The result is not needed until the first way block arrives - joined
-    // there. If the prepass outlives the node phase, the join blocks and the
-    // overlap is partial; the produced set is identical either way.
-    let prepass_pbf_path = config.pbf_path.clone();
-    let prepass_tmp_dir = config.tmp_dir.join("shared_node_prepass");
-    let prepass_sort_budget = sort_chunk_budget;
-    let mut prepass_handle: Option<std::thread::JoinHandle<Result<FxHashSet<i64>, PipelineError>>> =
-        if config.global_shared_node_pins {
-            Some(std::thread::spawn(move || {
-                prepass_shared_nodes(
-                    &prepass_pbf_path,
-                    decode_threads,
-                    &prepass_tmp_dir,
-                    prepass_sort_budget,
-                )
-            }))
-        } else {
-            eprintln!("  Global shared-node prepass disabled - using block-local pins");
-            None
-        };
     let relation_plan_pbf_path = config.pbf_path.clone();
     let mut relation_plan_handle: Option<
         std::thread::JoinHandle<Result<RelationPlan, PipelineError>>,
@@ -503,6 +517,7 @@ pub(super) fn phase_read_and_process(
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
                     let way_counter_clone = std::sync::Arc::clone(&way_counter);
                     let way_members_marked_clone = std::sync::Arc::clone(&way_members_marked);
+                    let way_pins_marked_clone = std::sync::Arc::clone(&way_pins_marked);
                     let missing_ref_stats_clone = std::sync::Arc::clone(&missing_ref_stats);
                     let deferral_stats_clone = std::sync::Arc::clone(&deferral_stats);
                     let mz = min_z;
@@ -512,18 +527,9 @@ pub(super) fn phase_read_and_process(
                     let psf = config.polygon_simplify_factor;
                     let way_chunk_size = sort_chunk_budget;
                     let worker_spill = std::sync::Arc::clone(&spill);
-                    // First point where the shared-node set is needed: join
-                    // the prepass thread spawned before the node phase. The
-                    // joins block the ordered consumer, so they are stall time.
+                    // The fallback relation plan is first needed here. Its join
+                    // blocks the ordered consumer, so it is stall time.
                     let prepass_join_guard = wait_span(&WAIT.prepass_join);
-                    let gsn: std::sync::Arc<FxHashSet<i64>> =
-                        if let Some(handle) = prepass_handle.take() {
-                            std::sync::Arc::new(handle.join().map_err(|_| {
-                                PipelineError("shared-node prepass thread panicked".to_string())
-                            })??)
-                        } else {
-                            std::sync::Arc::new(FxHashSet::default())
-                        };
                     let member_source = if injected.members {
                         MemberSource::Injected
                     } else {
@@ -538,7 +544,6 @@ pub(super) fn phase_read_and_process(
                         ))
                     };
                     drop(prepass_join_guard);
-                    global_shared_nodes = gsn.len();
                     if let MemberSource::Plan(plan) = &member_source {
                         relation_plan_needed_ways = plan.needed_ways.len();
                         relation_plan_superset_ways = plan.superset_ways_count;
@@ -576,9 +581,9 @@ pub(super) fn phase_read_and_process(
                         let inflight_cvar = std::sync::Condvar::new();
                         let inflight_ref = &inflight;
                         let cvar_ref = &inflight_cvar;
-                        let gsn_ref = &*gsn;
                         let way_counter_ref = &*way_counter_clone;
                         let way_members_marked_ref = &*way_members_marked_clone;
+                        let way_pins_marked_ref = &*way_pins_marked_clone;
                         // Pool of accumulators shared across block tasks. Accs
                         // live for the whole way phase (not one block), so the
                         // bulk of the record volume drains through the shared
@@ -650,7 +655,7 @@ pub(super) fn phase_read_and_process(
                                         }
                                     };
                                     let (plans, marked) =
-                                        build_way_plans(&way_block.block, gsn_ref, &members);
+                                        build_way_plans(&way_block.block, &members, pin_source);
                                     drop(plan_busy);
                                     way_counter_ref
                                         .fetch_add(plans.len() as u64, Ordering::Relaxed);
@@ -688,10 +693,12 @@ pub(super) fn phase_read_and_process(
                                             way.id(),
                                             "way plan misaligned with block ways"
                                         );
-                                        process_planned_way_into(
-                                            &way, &plan, plan.is_member, nr_ref, mz, xz, &srl,
-                                            ds_ref, mr_ref, &fcs, psf, &mut acc,
+                                        let pins_marked = process_planned_way_into(
+                                            &way, &plan, nr_ref, mz, xz, &srl, ds_ref, mr_ref,
+                                            &fcs, psf, pin_source, &mut acc,
                                         );
+                                        way_pins_marked_ref
+                                            .fetch_add(pins_marked, Ordering::Relaxed);
                                         if acc.bytes >= acc_flush_bytes {
                                             acc.flush(spill_ref);
                                         }
@@ -804,8 +811,12 @@ pub(super) fn phase_read_and_process(
     if locations_on_ways {
         // Elivagar-owned bounded read: see UnorderedBlockSource. Everything
         // downstream of this loop is order-free in locations mode.
-        let source =
-            UnorderedBlockSource::spawn(&config.pbf_path, decode_threads, injected.members)?;
+        let source = UnorderedBlockSource::spawn(
+            &config.pbf_path,
+            decode_threads,
+            injected.members,
+            matches!(pin_source, PinSource::Injected),
+        )?;
         drop(reader);
         loop {
             let item = {
@@ -836,15 +847,6 @@ pub(super) fn phase_read_and_process(
     // Nothing after the way phase reads the node store - release it.
     drop(node_store_opt.take());
 
-    // No way blocks arrived (prepass result unused): join so a prepass error
-    // still surfaces and the thread does not outlive the phase.
-    if let Some(handle) = prepass_handle.take() {
-        drop(
-            handle
-                .join()
-                .map_err(|_| PipelineError("shared-node prepass thread panicked".to_string()))??,
-        );
-    }
     if let Some(handle) = relation_plan_handle.take() {
         drop(
             handle
@@ -1024,7 +1026,7 @@ pub(super) fn phase_read_and_process(
         relation_plan_needed_ways,
         relation_plan_superset_ways,
         way_members_marked: way_members_marked.load(Ordering::Relaxed),
-        global_shared_nodes,
+        way_pins_marked: way_pins_marked.load(Ordering::Relaxed),
         relation_blocks_drop_rss_kb,
         missing_refs: missing_ref_snapshot,
         deferral_stats,
@@ -1173,17 +1175,11 @@ fn shared_node_counts<'a>(ways: impl Iterator<Item = &'a [i64]>) -> FxHashMap<i6
     counts
 }
 
-/// Compute the preserve set for one way: refs that are shared by 2+ ways in this
-/// block, or (when `global_shared` is supplied) known cross-block junctions.
-fn preserve_refs_for_way(
-    node_refs: &[i64],
-    counts: &FxHashMap<i64, u8>,
-    global_shared: Option<&FxHashSet<i64>>,
-) -> Vec<i64> {
+/// Compute the preserve set for one way from block-local shared refs.
+fn preserve_refs_for_way(node_refs: &[i64], counts: &FxHashMap<i64, u8>) -> Vec<i64> {
     let mut preserve: Vec<i64> = Vec::new();
     for &node_id in shared_scan_slice(node_refs) {
-        let shared = counts.get(&node_id).is_some_and(|&c| c >= 2)
-            || global_shared.is_some_and(|g| g.contains(&node_id));
+        let shared = counts.get(&node_id).is_some_and(|&c| c >= 2);
         if shared && !preserve.contains(&node_id) {
             preserve.push(node_id);
         }
@@ -1205,7 +1201,7 @@ fn preserve_refs_for_way(
 pub(super) fn annotate_block_shared_node_refs(raw_ways: &mut [RawWay]) {
     let counts = shared_node_counts(raw_ways.iter().map(|w| w.node_refs.as_slice()));
     for w in raw_ways.iter_mut() {
-        w.preserve_node_refs = preserve_refs_for_way(&w.node_refs, &counts, None);
+        w.preserve_node_refs = preserve_refs_for_way(&w.node_refs, &counts);
     }
 }
 
@@ -1244,6 +1240,7 @@ impl UnorderedBlockSource {
         path: &std::path::Path,
         decode_threads: usize,
         injected_members: bool,
+        injected_pins: bool,
     ) -> Result<Self, PipelineError> {
         let raw_cap = (decode_threads * 2).max(8);
         let decoded_cap = (decode_threads * 2).max(8);
@@ -1307,6 +1304,9 @@ impl UnorderedBlockSource {
                         } else {
                             None
                         };
+                        if injected_pins {
+                            validate_way_pin_bitmaps(&block)?;
+                        }
                         Ok((block, members))
                     })();
                     let _wait = wait_span(&WAIT.read_decoded_send);
@@ -1483,8 +1483,8 @@ fn estimate_way_plans_bytes(plans: &[WayPlan]) -> usize {
 
 pub(super) fn build_way_plans(
     block: &PrimitiveBlock,
-    global_shared: &FxHashSet<i64>,
     members: &MembersForBlock<'_>,
+    pins: PinSource,
 ) -> (Vec<WayPlan>, u64) {
     let mut way_pos = 0usize;
     let mut marked = 0u64;
@@ -1518,209 +1518,13 @@ pub(super) fn build_way_plans(
         })
         .collect();
 
-    let counts = shared_node_counts(plans.iter().map(|p| p.node_refs.as_slice()));
-    for plan in &mut plans {
-        plan.preserve_node_refs =
-            preserve_refs_for_way(&plan.node_refs, &counts, Some(global_shared));
+    if matches!(pins, PinSource::BlockLocal) {
+        let counts = shared_node_counts(plans.iter().map(|p| p.node_refs.as_slice()));
+        for plan in &mut plans {
+            plan.preserve_node_refs = preserve_refs_for_way(&plan.node_refs, &counts);
+        }
     }
     (plans, marked)
-}
-
-/// First pass over the PBF: count node ref occurrences across all ways.
-/// Returns the set of node IDs that appear in 2+ ways (junction nodes).
-///
-/// Uses `BlobFilter::only_ways()` to skip node/relation blobs entirely
-/// (indexed PBFs skip decompression; non-indexed still parse cheaply).
-/// No tag matching or coordinate resolution - just node ref counting.
-#[hotpath::measure]
-// Visible only without the hotpath feature (the measure macro's wrapping
-// masks it under --all-features).
-#[allow(clippy::too_many_lines)]
-fn prepass_shared_nodes(
-    pbf_path: &std::path::Path,
-    decode_threads: usize,
-    tmp_dir: &std::path::Path,
-    chunk_budget: usize,
-) -> Result<FxHashSet<i64>, PipelineError> {
-    let start = std::time::Instant::now();
-    match std::fs::remove_dir_all(tmp_dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(PipelineError(format!(
-                "prepass: remove old scratch dir failed: {e}"
-            )));
-        }
-    }
-    std::fs::create_dir_all(tmp_dir)
-        .map_err(|e| PipelineError(format!("prepass: create scratch dir failed: {e}")))?;
-    let reader = ElementReader::from_path(pbf_path)
-        .map_err(|e| PipelineError(format!("prepass: failed to open PBF: {e}")))?
-        .with_blob_filter(BlobFilter::only_ways())
-        .decode_threads(decode_threads);
-
-    let mut refs: Vec<u64> = Vec::with_capacity((chunk_budget / 8).clamp(1024, 8_000_000));
-    let mut chunk_paths: Vec<std::path::PathBuf> = Vec::new();
-    let mut total_refs: u64 = 0;
-    let flush_refs = |refs: &mut Vec<u64>,
-                      chunk_paths: &mut Vec<std::path::PathBuf>|
-     -> Result<(), PipelineError> {
-        if refs.is_empty() {
-            return Ok(());
-        }
-        refs.sort_unstable();
-        let path = tmp_dir.join(format!("refs_{:04}.bin", chunk_paths.len()));
-        let file = std::fs::File::create(&path)
-            .map_err(|e| PipelineError(format!("prepass: create ref chunk failed: {e}")))?;
-        let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
-        use std::io::Write;
-        for key in refs.iter() {
-            writer
-                .write_all(&key.to_le_bytes())
-                .map_err(|e| PipelineError(format!("prepass: write ref chunk failed: {e}")))?;
-        }
-        writer
-            .flush()
-            .map_err(|e| PipelineError(format!("prepass: flush ref chunk failed: {e}")))?;
-        refs.clear();
-        chunk_paths.push(path);
-        Ok(())
-    };
-
-    let target_refs = (chunk_budget / 8).max(1024);
-    for block_result in reader.into_blocks_pipelined() {
-        let block =
-            block_result.map_err(|e| PipelineError(format!("prepass: PBF read failed: {e}")))?;
-        for element in block.elements() {
-            if let Element::Way(way) = element {
-                for node_id in way.refs() {
-                    refs.push(encode_signed_i64_key(node_id));
-                    total_refs += 1;
-                    if refs.len() >= target_refs {
-                        flush_refs(&mut refs, &mut chunk_paths)?;
-                    }
-                }
-            }
-        }
-    }
-    flush_refs(&mut refs, &mut chunk_paths)?;
-
-    let mut shared: FxHashSet<i64> = FxHashSet::default();
-    let mut readers = Vec::with_capacity(chunk_paths.len());
-    let mut heap = std::collections::BinaryHeap::new();
-    for path in &chunk_paths {
-        let mut reader = NodeRefChunkReader::open(path)?;
-        if let Some(key) = reader.next_key()? {
-            heap.push(NodeRefHeapEntry {
-                key,
-                chunk_idx: readers.len(),
-            });
-        }
-        readers.push(reader);
-    }
-
-    let mut unique_count: u64 = 0;
-    let mut prev: Option<u64> = None;
-    let mut prev_count: u8 = 0;
-    while let Some(entry) = heap.pop() {
-        if prev == Some(entry.key) {
-            prev_count = prev_count.saturating_add(1);
-        } else {
-            if let Some(key) = prev {
-                unique_count += 1;
-                if prev_count >= 2 {
-                    shared.insert(decode_signed_i64_key(key));
-                }
-            }
-            prev = Some(entry.key);
-            prev_count = 1;
-        }
-        if let Some(next) = readers[entry.chunk_idx].next_key()? {
-            heap.push(NodeRefHeapEntry {
-                key: next,
-                chunk_idx: entry.chunk_idx,
-            });
-        }
-    }
-    if let Some(key) = prev {
-        unique_count += 1;
-        if prev_count >= 2 {
-            shared.insert(decode_signed_i64_key(key));
-        }
-    }
-    shared.shrink_to_fit();
-    std::fs::remove_dir_all(tmp_dir)
-        .map_err(|e| PipelineError(format!("prepass: remove scratch dir failed: {e}")))?;
-
-    let elapsed = start.elapsed();
-    eprintln!(
-        "  Shared-node prepass: {:.1}s ({} refs, {} unique nodes, {} shared)",
-        elapsed.as_secs_f64(),
-        total_refs,
-        unique_count,
-        shared.len(),
-    );
-    Ok(shared)
-}
-
-#[inline]
-#[allow(clippy::cast_sign_loss)]
-fn encode_signed_i64_key(value: i64) -> u64 {
-    (value as u64) ^ (1_u64 << 63)
-}
-
-#[inline]
-#[allow(clippy::cast_possible_wrap)]
-fn decode_signed_i64_key(key: u64) -> i64 {
-    (key ^ (1_u64 << 63)) as i64
-}
-
-struct NodeRefChunkReader {
-    reader: std::io::BufReader<std::fs::File>,
-    buf: [u8; 8],
-}
-
-impl NodeRefChunkReader {
-    fn open(path: &std::path::Path) -> Result<Self, PipelineError> {
-        let file = std::fs::File::open(path)
-            .map_err(|e| PipelineError(format!("prepass: open ref chunk failed: {e}")))?;
-        Ok(Self {
-            reader: std::io::BufReader::with_capacity(256 * 1024, file),
-            buf: [0; 8],
-        })
-    }
-
-    fn next_key(&mut self) -> Result<Option<u64>, PipelineError> {
-        use std::io::Read;
-        match self.reader.read_exact(&mut self.buf) {
-            Ok(()) => Ok(Some(u64::from_le_bytes(self.buf))),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(e) => Err(PipelineError(format!(
-                "prepass: read ref chunk failed: {e}"
-            ))),
-        }
-    }
-}
-
-#[derive(Eq, PartialEq)]
-struct NodeRefHeapEntry {
-    key: u64,
-    chunk_idx: usize,
-}
-
-impl Ord for NodeRefHeapEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other
-            .key
-            .cmp(&self.key)
-            .then_with(|| other.chunk_idx.cmp(&self.chunk_idx))
-    }
-}
-
-impl PartialOrd for NodeRefHeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 pub(super) struct RelationPlan {
@@ -1800,32 +1604,6 @@ fn prepass_relation_plan(
         needed_ways,
         superset_ways_count,
     })
-}
-
-/// Annotate ways with globally-shared node refs (cross-block junctions).
-///
-/// Supplements `annotate_block_shared_node_refs` which only detects junctions
-/// within a single PBF block. Nodes in `global_shared` that appear in a way's
-/// node refs are added to `preserve_node_refs` so DP simplification pins them.
-#[cfg(test)]
-#[allow(dead_code)]
-fn annotate_global_shared_node_refs(raw_ways: &mut [RawWay], global_shared: &FxHashSet<i64>) {
-    for w in raw_ways.iter_mut() {
-        if w.node_refs.len() <= 2 {
-            continue;
-        }
-        let is_closed = w.node_refs.len() >= 4 && w.node_refs.first() == w.node_refs.last();
-        let scan_slice = if is_closed {
-            &w.node_refs[..w.node_refs.len() - 1]
-        } else {
-            &w.node_refs[..]
-        };
-        for &node_id in scan_slice {
-            if global_shared.contains(&node_id) && !w.preserve_node_refs.contains(&node_id) {
-                w.preserve_node_refs.push(node_id);
-            }
-        }
-    }
 }
 
 #[inline]
@@ -1950,7 +1728,6 @@ fn harvest_way_cap_events(acc: &mut WayAcc) {
 pub(super) fn process_planned_way_into(
     way: &Way<'_>,
     plan: &WayPlan,
-    is_member: bool,
     node_reader: Option<&NodeStoreReader>,
     min_zoom: u8,
     max_zoom: u8,
@@ -1959,23 +1736,24 @@ pub(super) fn process_planned_way_into(
     missing_ref_stats: &MissingRefStatsAtomic,
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
+    pins: PinSource,
     acc: &mut WayAcc,
-) {
+) -> u64 {
     let tags_ref: Vec<(&str, &str)> = way.tags().collect();
-    if tags_ref.is_empty() && !is_member {
-        return;
+    if tags_ref.is_empty() && !plan.is_member {
+        return 0;
     }
     let tag_helper = Tags(&tags_ref);
     // Members are always resolved (a relation reads their geometry back), so the
     // both-geom pre-filter is only worth computing for non-members, where it
     // gates the early return. Computing it for members would run two
     // `match_element` passes whose result is never inspected.
-    if !is_member {
+    if !plan.is_member {
         let possible_feature = !shortbread::match_element(&tag_helper, OsmGeomType::ClosedWay)
             .is_empty()
             || !shortbread::match_element(&tag_helper, OsmGeomType::OpenWay).is_empty();
         if !possible_feature {
-            return;
+            return 0;
         }
     }
 
@@ -2006,9 +1784,9 @@ pub(super) fn process_planned_way_into(
     };
 
     if coords_e7.is_empty() {
-        return;
+        return 0;
     }
-    if is_member {
+    if plan.is_member {
         acc.way_puts.push((plan.way_id, coords_e7.clone()));
     }
 
@@ -2021,30 +1799,52 @@ pub(super) fn process_planned_way_into(
     let mut matches = shortbread::match_element(&tag_helper, geom_type);
 
     if matches.is_empty() {
-        return;
+        return 0;
     }
 
     #[allow(clippy::cast_sign_loss)]
     let osm_id = plan.way_id as u64;
     let before = acc.sink.records.len();
     let mut preserve_vertex_mask: Vec<bool> = vec![false; coords_e7.len()];
-    if !plan.preserve_node_refs.is_empty() {
-        const PRESERVE_LINEAR_SCAN_MAX: usize = 8;
-        if plan.preserve_node_refs.len() <= PRESERVE_LINEAR_SCAN_MAX {
-            for (i, node_id) in resolved_node_refs.iter().enumerate() {
-                if plan.preserve_node_refs.contains(node_id) {
-                    preserve_vertex_mask[i] = true;
-                }
+    match pins {
+        PinSource::Injected => {
+            assert_eq!(
+                coords_e7.len(),
+                plan.node_refs.len(),
+                "injected shared-node pins coordinates/ref count mismatch for way {}: {} coords, {} refs",
+                way.id(),
+                coords_e7.len(),
+                plan.node_refs.len(),
+            );
+            if let Some(bitmap) = way.shared_node_pins() {
+                fill_mask_from_pin_bitmap(bitmap, &mut preserve_vertex_mask);
             }
-        } else {
-            let preserve_nodes: FxHashSet<i64> = plan.preserve_node_refs.iter().copied().collect();
-            for (i, node_id) in resolved_node_refs.iter().enumerate() {
-                if preserve_nodes.contains(node_id) {
-                    preserve_vertex_mask[i] = true;
+        }
+        PinSource::BlockLocal if !plan.preserve_node_refs.is_empty() => {
+            const PRESERVE_LINEAR_SCAN_MAX: usize = 8;
+            if plan.preserve_node_refs.len() <= PRESERVE_LINEAR_SCAN_MAX {
+                for (i, node_id) in resolved_node_refs.iter().enumerate() {
+                    if plan.preserve_node_refs.contains(node_id) {
+                        preserve_vertex_mask[i] = true;
+                    }
+                }
+            } else {
+                let preserve_nodes: FxHashSet<i64> =
+                    plan.preserve_node_refs.iter().copied().collect();
+                for (i, node_id) in resolved_node_refs.iter().enumerate() {
+                    if preserve_nodes.contains(node_id) {
+                        preserve_vertex_mask[i] = true;
+                    }
                 }
             }
         }
+        PinSource::BlockLocal => {}
     }
+    #[allow(clippy::cast_possible_truncation)]
+    let pins_marked = preserve_vertex_mask
+        .iter()
+        .filter(|&&pinned| pinned)
+        .count() as u64;
 
     acc.merc.clear();
     acc.merc.extend(
@@ -2170,58 +1970,14 @@ pub(super) fn process_planned_way_into(
     record_fanout_from_payload_records(&acc.sink.records[before..], &mut acc.fanout);
     harvest_way_cap_events(acc);
     acc.bytes = acc.sink.bytes();
+    pins_marked
 }
 
 #[cfg(test)]
 mod shared_node_helper_tests {
     use super::{
-        FxHashSet, detect_injected_features, member_bit, preserve_refs_for_way, shared_node_counts,
-        validate_and_take_members,
+        detect_injected_features, fill_mask_from_pin_bitmap, member_bit, validate_and_take_members,
     };
-
-    // The block-local counting + scan-slice behaviour is exercised through
-    // `annotate_block_shared_node_refs` in pipeline_tests.rs, which now delegates
-    // to the same helpers as the production `build_way_plans`. These tests cover
-    // the one branch `build_way_plans` adds on top: the `global_shared` union,
-    // which the RawWay wrapper (called with `None`) cannot reach.
-
-    #[test]
-    fn global_shared_pins_a_non_block_local_node() {
-        // node 20 appears in exactly one way here, so block-local counting alone
-        // never pins it; the global cross-block set must force the pin.
-        let refs = [10_i64, 20, 30];
-        let counts = shared_node_counts([refs.as_slice()].into_iter());
-
-        let without_global = preserve_refs_for_way(&refs, &counts, None);
-        assert!(
-            without_global.is_empty(),
-            "block-local alone must not pin a singly-occurring node"
-        );
-
-        let global: FxHashSet<i64> = [20].into_iter().collect();
-        let with_global = preserve_refs_for_way(&refs, &counts, Some(&global));
-        assert_eq!(
-            with_global,
-            vec![20],
-            "a node in the global-shared set must be pinned even if block-local count is 1"
-        );
-    }
-
-    #[test]
-    fn global_shared_never_pins_the_closing_dup_vertex() {
-        // The closing vertex is excluded from the scan slice, so a closed ring's
-        // node is still reachable via its first occurrence but the trailing
-        // duplicate must not produce a second entry.
-        let refs = [1_i64, 2, 3, 4, 1];
-        let counts = shared_node_counts([refs.as_slice()].into_iter());
-        let global: FxHashSet<i64> = [1].into_iter().collect();
-        let preserve = preserve_refs_for_way(&refs, &counts, Some(&global));
-        assert_eq!(
-            preserve,
-            vec![1],
-            "closing node pinned once via its leading occurrence, not duplicated"
-        );
-    }
 
     #[test]
     fn detect_injected_features_requires_locations() {
@@ -2257,5 +2013,21 @@ mod shared_node_helper_tests {
         assert!(member_bit(&bitmap, 2));
         assert!(!member_bit(&bitmap, 3));
         assert!(member_bit(&bitmap, 8));
+    }
+
+    #[test]
+    fn pin_bitmap_mask_is_lsb_first_across_bytes() {
+        let mut mask = vec![false; 10];
+        fill_mask_from_pin_bitmap(&[0b0000_0101, 0b0000_0010], &mut mask);
+        assert_eq!(
+            mask,
+            [
+                true, false, true, false, false, false, false, false, false, true
+            ]
+        );
+
+        let mut zeroes = vec![true; 5];
+        fill_mask_from_pin_bitmap(&[0], &mut zeroes);
+        assert_eq!(zeroes, [false; 5]);
     }
 }

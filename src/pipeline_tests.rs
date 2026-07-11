@@ -41,9 +41,12 @@ fn way_block_for_members(ids: &[i64]) -> pbfhogg::PrimitiveBlock {
 
 #[test]
 fn build_way_plans_bitmap_arm_marks_positionally() {
-    let empty = rustc_hash::FxHashSet::default();
     let three = way_block_for_members(&[10, 11, 12]);
-    let (plans, marked) = build_way_plans(&three, &empty, &MembersForBlock::Bitmap(&[0x05]));
+    let (plans, marked) = build_way_plans(
+        &three,
+        &MembersForBlock::Bitmap(&[0x05]),
+        PinSource::BlockLocal,
+    );
     assert_eq!(marked, 2);
     assert_eq!(
         plans.iter().map(|plan| plan.is_member).collect::<Vec<_>>(),
@@ -51,7 +54,11 @@ fn build_way_plans_bitmap_arm_marks_positionally() {
     );
 
     let nine = way_block_for_members(&(1..=9).collect::<Vec<_>>());
-    let (plans, marked) = build_way_plans(&nine, &empty, &MembersForBlock::Bitmap(&[0, 1]));
+    let (plans, marked) = build_way_plans(
+        &nine,
+        &MembersForBlock::Bitmap(&[0, 1]),
+        PinSource::BlockLocal,
+    );
     assert_eq!(marked, 1);
     assert_eq!(
         plans.iter().map(|plan| plan.is_member).collect::<Vec<_>>(),
@@ -62,10 +69,17 @@ fn build_way_plans_bitmap_arm_marks_positionally() {
 #[test]
 fn bitmap_and_set_arms_agree() {
     let block = way_block_for_members(&[10, 11, 12]);
-    let empty = rustc_hash::FxHashSet::default();
     let expected: rustc_hash::FxHashSet<i64> = [11].into_iter().collect();
-    let (bitmap, _) = build_way_plans(&block, &empty, &MembersForBlock::Bitmap(&[0x02]));
-    let (set, _) = build_way_plans(&block, &empty, &MembersForBlock::Set(&expected));
+    let (bitmap, _) = build_way_plans(
+        &block,
+        &MembersForBlock::Bitmap(&[0x02]),
+        PinSource::BlockLocal,
+    );
+    let (set, _) = build_way_plans(
+        &block,
+        &MembersForBlock::Set(&expected),
+        PinSource::BlockLocal,
+    );
     assert_eq!(
         bitmap.iter().map(|plan| plan.is_member).collect::<Vec<_>>(),
         set.iter().map(|plan| plan.is_member).collect::<Vec<_>>()
@@ -152,6 +166,162 @@ fn splice_way_members(pbf: &mut Vec<u8>, payload: &[u8]) {
         .checked_add(u32::try_from(field.len()).expect("field length fits u32"))
         .expect("BlobHeader length fits u32");
     pbf[header_len_start..header_len_start + 4].copy_from_slice(&new_len.to_be_bytes());
+}
+
+/// Locate the `occurrence`-th (0-based) length-delimited field `field` in a raw
+/// protobuf message. Returns byte offsets relative to `msg`: entry start (the
+/// tag), value start, value end. Panics if not found.
+fn find_ld_field(msg: &[u8], field: usize, occurrence: usize) -> (usize, usize, usize) {
+    let mut cursor = 0usize;
+    let mut seen = 0usize;
+    while cursor < msg.len() {
+        let entry_start = cursor;
+        let tag = read_varint(msg, &mut cursor);
+        let f = tag >> 3;
+        match tag & 7 {
+            0 => {
+                let _ = read_varint(msg, &mut cursor);
+            }
+            1 => cursor += 8,
+            5 => cursor += 4,
+            2 => {
+                let len = read_varint(msg, &mut cursor);
+                let value_start = cursor;
+                let value_end = value_start + len;
+                if f == field {
+                    if seen == occurrence {
+                        return (entry_start, value_start, value_end);
+                    }
+                    seen += 1;
+                }
+                cursor = value_end;
+            }
+            wire => panic!("unexpected protobuf wire type {wire}"),
+        }
+    }
+    panic!("length-delimited field {field} occurrence {occurrence} not found");
+}
+
+/// Re-emit a BlobHeader with its datasize (field 3) set to `new_datasize`,
+/// preserving every other field verbatim.
+fn rebuild_blobheader_datasize(header: &[u8], new_datasize: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < header.len() {
+        let entry_start = cursor;
+        let tag = read_varint(header, &mut cursor);
+        let field = tag >> 3;
+        match tag & 7 {
+            0 => {
+                let _ = read_varint(header, &mut cursor);
+                if field == 3 {
+                    append_varint(&mut out, tag);
+                    append_varint(&mut out, new_datasize);
+                } else {
+                    out.extend_from_slice(&header[entry_start..cursor]);
+                }
+            }
+            2 => {
+                let len = read_varint(header, &mut cursor);
+                cursor += len;
+                out.extend_from_slice(&header[entry_start..cursor]);
+            }
+            1 => {
+                cursor += 8;
+                out.extend_from_slice(&header[entry_start..cursor]);
+            }
+            5 => {
+                cursor += 4;
+                out.extend_from_slice(&header[entry_start..cursor]);
+            }
+            wire => panic!("unexpected BlobHeader wire type {wire}"),
+        }
+    }
+    out
+}
+
+/// Append a Way field-20 shared-node pin bitmap to the `way_ordinal`-th way of
+/// the first OSMData frame, rebuilding every enclosing length prefix. Mirrors
+/// `splice_way_members` but reaches into the blob body: the fixture is written
+/// with `PbfCompression::None`, so the frame's blob is a bare `Blob.raw`
+/// (field 1) wrapping the `PrimitiveBlock`. Walks
+/// Blob.raw -> PrimitiveBlock.primitivegroup (field 2) ->
+/// PrimitiveGroup.ways (field 3, by ordinal), appends field 20 (tag 0xA2 0x01),
+/// and re-encodes the group, primitive block, blob, BlobHeader datasize, and the
+/// 4-byte frame header-length prefix. Bottom-up rebuild so varint growth in any
+/// length prefix cannot corrupt downstream offsets.
+fn splice_way_pins(pbf: &mut Vec<u8>, way_ordinal: usize, pin_bitmap: &[u8]) {
+    let first_header_len = u32::from_be_bytes(pbf[0..4].try_into().expect("header length"));
+    let first_header_start = 4usize;
+    let first_header_end = first_header_start + first_header_len as usize;
+    let first_frame_end =
+        first_header_end + blob_data_size(&pbf[first_header_start..first_header_end]);
+    // Second frame = the OSMData (way) frame.
+    let hdr_len_pos = first_frame_end;
+    let hdr_len = u32::from_be_bytes(
+        pbf[hdr_len_pos..hdr_len_pos + 4]
+            .try_into()
+            .expect("data header length"),
+    ) as usize;
+    let hdr_start = hdr_len_pos + 4;
+    let hdr_end = hdr_start + hdr_len;
+    let blob_start = hdr_end;
+    let blob_len = blob_data_size(&pbf[hdr_start..hdr_end]);
+    let blob_end = blob_start + blob_len;
+
+    let header = pbf[hdr_start..hdr_end].to_vec();
+    let blob = pbf[blob_start..blob_end].to_vec();
+
+    // Blob.raw (field 1) -> PrimitiveBlock.
+    let (raw_entry, raw_val_start, raw_val_end) = find_ld_field(&blob, 1, 0);
+    let pb = &blob[raw_val_start..raw_val_end];
+    // PrimitiveBlock.primitivegroup (field 2). The fixture writes one group.
+    let (grp_entry, grp_val_start, grp_val_end) = find_ld_field(pb, 2, 0);
+    let grp = &pb[grp_val_start..grp_val_end];
+    // PrimitiveGroup.ways (field 3), selected by ordinal.
+    let (way_entry, way_val_start, way_val_end) = find_ld_field(grp, 3, way_ordinal);
+
+    // Field 20 (shared_node_pins): tag (20 << 3 | 2) = 162 = varint 0xA2 0x01.
+    let mut field20 = vec![0xA2u8, 0x01u8];
+    append_varint(&mut field20, pin_bitmap.len());
+    field20.extend_from_slice(pin_bitmap);
+
+    let mut new_way_val = grp[way_val_start..way_val_end].to_vec();
+    new_way_val.extend_from_slice(&field20);
+    let mut new_way_entry = vec![0x1Au8]; // ways: field 3, wire 2.
+    append_varint(&mut new_way_entry, new_way_val.len());
+    new_way_entry.extend_from_slice(&new_way_val);
+    let mut new_grp = Vec::new();
+    new_grp.extend_from_slice(&grp[..way_entry]);
+    new_grp.extend_from_slice(&new_way_entry);
+    new_grp.extend_from_slice(&grp[way_val_end..]);
+
+    let mut new_grp_entry = vec![0x12u8]; // primitivegroup: field 2, wire 2.
+    append_varint(&mut new_grp_entry, new_grp.len());
+    new_grp_entry.extend_from_slice(&new_grp);
+    let mut new_pb = Vec::new();
+    new_pb.extend_from_slice(&pb[..grp_entry]);
+    new_pb.extend_from_slice(&new_grp_entry);
+    new_pb.extend_from_slice(&pb[grp_val_end..]);
+
+    let mut new_raw_entry = vec![0x0Au8]; // raw: field 1, wire 2.
+    append_varint(&mut new_raw_entry, new_pb.len());
+    new_raw_entry.extend_from_slice(&new_pb);
+    let mut new_blob = Vec::new();
+    new_blob.extend_from_slice(&blob[..raw_entry]);
+    new_blob.extend_from_slice(&new_raw_entry);
+    new_blob.extend_from_slice(&blob[raw_val_end..]);
+
+    let new_header = rebuild_blobheader_datasize(&header, new_blob.len());
+    let mut new_frame = Vec::new();
+    new_frame.extend_from_slice(
+        &u32::try_from(new_header.len())
+            .expect("header length fits u32")
+            .to_be_bytes(),
+    );
+    new_frame.extend_from_slice(&new_header);
+    new_frame.extend_from_slice(&new_blob);
+    pbf.splice(hdr_len_pos..blob_end, new_frame);
 }
 
 fn way_members_payload(count: u32, bitmap: &[u8]) -> Vec<u8> {
@@ -256,7 +426,6 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
         assemble_batch_budget: 0,
         sort_chunk_size: 0,
         locations_on_ways: false,
-        global_shared_node_pins: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
@@ -268,10 +437,13 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
 }
 
 #[test]
-fn injected_members_end_to_end_marks_ways_and_skips_prepass() {
+fn injected_members_end_to_end_marks_ways_with_block_local_pins() {
     let stats = injected_fixture(Some(&way_members_payload(3, &[0x04])))
         .expect("valid injected PBF should succeed");
-    // Prepass never spawned on the injected path: both counters stay 0.
+    // The header declares WayMembers-v1 but NOT SharedNodePins-v1, so membership
+    // is injected while pins fall back to the block-local path. This proves the
+    // two injected sources compose independently: MemberSource::Injected riding
+    // alongside PinSource::BlockLocal.
     assert_eq!(stats.relation_plan_needed_ways, 0);
     assert_eq!(stats.relation_plan_superset_ways, 0);
     // Exactly the one set bit (position 2) was consumed - no over-marking.
@@ -303,6 +475,147 @@ fn injected_members_count_mismatch_fails_run() {
     // == 1, so pbfhogg's internal length check passes; the failure comes from
     // elivagar's encoded-vs-actual compare - the within-one-byte producer bug.
     assert!(injected_fixture(Some(&way_members_payload(4, &[0x04]))).is_err());
+}
+
+/// Build an injected PBF whose single way is a shortbread-matching
+/// `highway=motorway` open way (streets layer) with three collinear vertices.
+/// The header declares LocationsOnWays + WayMembers-v1 + SharedNodePins-v1 and a
+/// valid all-zero field 5 (matching altw output shape). When `pin_bitmap` is
+/// `Some`, field 20 is spliced onto the way. Returns the tempdir (kept alive so
+/// the sort chunks survive), the filled `SortWriter`, and the phase stats.
+#[allow(clippy::unwrap_in_result)]
+fn injected_pins_fixture(
+    pin_bitmap: Option<&[u8]>,
+) -> Result<(tempfile::TempDir, sort::SortWriter, Phase12Stats), PipelineError> {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let pbf_path = dir.path().join("injected-pins.osm.pbf");
+    let file = File::create(&pbf_path).expect("create pbf");
+    let mut writer = PbfWriter::new(file, PbfCompression::None);
+    let header = block_builder::HeaderBuilder::new()
+        .optional_feature("LocationsOnWays")
+        .optional_feature("pbfhogg.WayMembers-v1")
+        .optional_feature("pbfhogg.SharedNodePins-v1")
+        .build()
+        .expect("build header");
+    writer.write_header(&header).expect("write header");
+    // One open way, highway=motorway (streets layer, shown from low zoom). Three
+    // vertices at constant latitude, so the middle vertex B lies exactly on the
+    // A-C chord: plain DP drops it at every simplified zoom while a pin on ref
+    // position 1 forces its retention. The 0.01 deg longitude span stays inside a
+    // single tile across the mid zooms this test reads.
+    let mut builder = block_builder::BlockBuilder::new();
+    builder.add_way_with_locations(
+        1,
+        [("highway", "motorway")],
+        &[10, 11, 12],
+        &[
+            (590_000_000, 100_000_000),
+            (590_000_000, 100_050_000),
+            (590_000_000, 100_100_000),
+        ],
+        None,
+    );
+    writer
+        .write_primitive_block(builder.take().expect("take block").expect("way block"))
+        .expect("write block");
+    writer.flush().expect("flush pbf");
+
+    let mut pbf = std::fs::read(&pbf_path).expect("read pbf");
+    // altw always emits field 5 beside field 20; the way is no relation member,
+    // so its membership bit is zero. Splice members first, then pins.
+    splice_way_members(&mut pbf, &way_members_payload(1, &[0x00]));
+    if let Some(bitmap) = pin_bitmap {
+        splice_way_pins(&mut pbf, 0, bitmap);
+    }
+    let mut out = File::create(&pbf_path).expect("rewrite pbf");
+    out.write_all(&pbf).expect("write enriched pbf");
+    drop(out);
+
+    let config = TilegenConfig {
+        pbf_path,
+        output_path: dir.path().join("unused.pmtiles"),
+        tmp_dir: dir.path().join("tmp"),
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean_shapefile: None,
+        ocean_simplified_shapefile: None,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: false,
+        allow_unsafe_flat_index: false,
+        threads: 1,
+        way_inflight_budget: 0,
+        assemble_batch_budget: 0,
+        sort_chunk_size: 0,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: sort::ChunkCompression::None,
+        seam_reconcile_layers: [0; Layer::count()],
+        fanout_caps: [0; Layer::count()],
+        polygon_simplify_factor: 1.0,
+    };
+    phase_read_and_process(&config).map(|(sw, _, stats)| (dir, sw, stats))
+}
+
+/// Drain a sort reader, returning (record count, total geometry command words).
+/// The wire record layout is [8 osm_id][1 geom_type][4 cmd_count][cmd_count * 4
+/// geometry words][attrs]; a line that retains one more vertex carries two more
+/// command words, so the total is a monotone proxy for retained vertices.
+fn sum_geometry_cmd_words(mut reader: sort::SortReader) -> (u64, u64) {
+    let mut records = 0u64;
+    let mut words = 0u64;
+    while let Some(rec) = reader.next().expect("read sort record") {
+        records += 1;
+        if rec.data.len() >= 13 {
+            let cmd_count = u32::from_le_bytes(rec.data[9..13].try_into().expect("cmd_count"));
+            words += u64::from(cmd_count);
+        }
+    }
+    (records, words)
+}
+
+#[test]
+fn injected_pins_end_to_end_pins_vertex_through_dp() {
+    // Pinned: field 20 = 0x02 pins ref position 1, the collinear middle vertex.
+    let (pin_dir, pin_sw, pin_stats) =
+        injected_pins_fixture(Some(&[0x02])).expect("pinned injected PBF should succeed");
+    assert_eq!(
+        pin_stats.way_pins_marked, 1,
+        "one vertex pinned via field 20"
+    );
+    let (pin_records, pin_words) = sum_geometry_cmd_words(pin_sw.finish().expect("finish pinned"));
+    drop(pin_dir);
+
+    // Unpinned: no field 20 -> all-false mask, DP free to drop the middle vertex.
+    let (nopin_dir, nopin_sw, nopin_stats) =
+        injected_pins_fixture(None).expect("unpinned injected PBF should succeed");
+    assert_eq!(
+        nopin_stats.way_pins_marked, 0,
+        "no field 20 -> nothing pinned"
+    );
+    let (nopin_records, nopin_words) =
+        sum_geometry_cmd_words(nopin_sw.finish().expect("finish unpinned"));
+    drop(nopin_dir);
+
+    assert!(
+        pin_records > 0 && nopin_records > 0,
+        "the motorway emits records at simplified zooms in both runs"
+    );
+    assert!(
+        pin_words > nopin_words,
+        "the pin retains the collinear middle vertex that DP otherwise drops: \
+         pinned {pin_words} geometry words vs unpinned {nopin_words}"
+    );
+}
+
+#[test]
+fn injected_pins_wrong_length_bitmap_fails_run() {
+    // A 3-ref way needs ceil(3/8) = 1 bitmap byte; a 2-byte field 20 is corrupt
+    // enrichment, caught in the decode worker as a PipelineError (mirrors the
+    // field-5 count-mismatch test - is_err, not should_panic).
+    assert!(injected_pins_fixture(Some(&[0x02, 0x00])).is_err());
 }
 
 fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
@@ -1222,7 +1535,6 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         assemble_batch_budget: 0,
         sort_chunk_size: 0,
         locations_on_ways: false,
-        global_shared_node_pins: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
@@ -1283,7 +1595,6 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         assemble_batch_budget: 0,
         sort_chunk_size: 0,
         locations_on_ways: false,
-        global_shared_node_pins: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
@@ -1336,7 +1647,6 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         assemble_batch_budget: 0,
         sort_chunk_size: 0,
         locations_on_ways: false,
-        global_shared_node_pins: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
@@ -1391,7 +1701,6 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         assemble_batch_budget: 0,
         sort_chunk_size: 0,
         locations_on_ways: false,
-        global_shared_node_pins: false,
         tile_format: TilePayloadFormat::Mlt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,

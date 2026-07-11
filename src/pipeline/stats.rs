@@ -111,7 +111,7 @@ pub(super) struct Phase12Stats {
     pub(super) relation_plan_needed_ways: usize,
     pub(super) relation_plan_superset_ways: usize,
     pub(super) way_members_marked: u64,
-    pub(super) global_shared_nodes: usize,
+    pub(super) way_pins_marked: u64,
     pub(super) relation_blocks_drop_rss_kb: Option<u64>,
     pub(super) missing_refs: MissingRefStats,
     pub(super) deferral_stats: std::sync::Arc<DeferralStats>,

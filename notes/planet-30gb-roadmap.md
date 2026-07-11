@@ -446,6 +446,16 @@ must publish both framings (see H10).
 today. Requires a paired pbfhogg change; the injection format is pbfhogg's
 domain (BlobHeader extension fields), the consumption is elivagar's.
 
+LANDED 2026-07-11: (a) and (b) are both consumed on the injected path
+(paired pbfhogg change, their `29e4eabd`, plus two elivagar landings; see
+git history and `reference/performance.md` for the commits and gate
+readings). The relation-plan prepass now runs only on non-enriched input;
+the global shared-node prepass (`prepass_shared_nodes`,
+`global_shared_node_pins`) is deleted outright - exact pins are read
+straight from the injected per-way bitmap at zero elivagar runtime cost.
+Both fallbacks (block-local pins, the runtime relation plan) remain
+first-class for raw Geofabrik input. (c) and (d) remain open.
+
 ### H3: A planet RAM ledger before any planet run
 
 **Claim.** "Comfortably on 30 GB" is an engineering property, not a hope.

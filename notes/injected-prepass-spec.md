@@ -1,7 +1,7 @@
 # Spec: injected relation plan and exact shared-node pins (H2a + H2b)
 
 Status: specified 2026-07-09, review-refined 2026-07-09 (R1 Opus + R2
-codex folded, see Review resolutions), not implemented.
+codex folded, see Review resolutions). Bricks 1-5 landed; see status below.
 
 2026-07-11 contract amendments (see "Cross-repo ratifications"): the D9
 resolved-refs refinement proposed by the paired pbfhogg spec is RATIFIED
@@ -22,8 +22,18 @@ bytes, prepass deleted on the injected path) are in
 semantic regress OOM-killed at archive scale (performance-backlog item
 27) - the germany equality claim rests on counter identity plus the
 denmark zero-diff; norway is enriched and registered but unvalidated
-(baseline archive banked). REMAINING: Brick 5 (H2b, pins consumption +
-global-prepass teardown) and Brick 6 (NA reading, user-gated).
+(baseline archive banked).
+
+Brick 5 (H2b, pins consumption + global-prepass teardown) has since
+landed: `PinSource` consumption in `build_way_plans` and
+`process_planned_way_into`, the field-20 bitmap-length check in the
+decode workers, the coords-length mask-build backstop, and the full
+`prepass_shared_nodes` / `global_shared_node_pins` teardown are in the
+tree (see git history for the commit; the standalone implementation
+spec that carried the detailed target artifacts and gates is retired
+at landing, per this project's spec-lifecycle convention). Gates and
+measured readings land in `reference/performance.md` once run. REMAINING:
+Brick 6 (NA reading, user-gated).
 
 Written against `reference/technical-implementation-spec.md` (the contract
 for this document). Spawned from `notes/planet-30gb-roadmap.md`, hypothesis
@@ -650,12 +660,12 @@ STATUS: the code-side plumbing (detection, `WayBlock`, `MemberSource`,
 `MembersForBlock`, the release-checked validations, `WayPlan.is_member`
 filled from either arm, `way_members_marked`) already landed as a
 behavior-neutral subset, dormant on every input that exists today since
-no current file declares `WayMembers-v1` (see git history). `build_way_plans`
-keeps its `global_shared` parameter and has no `PinSource` argument in the
-landed shape - a named deviation from this section's signature, since
-Brick 5 (pins) is separate and unlanded; Brick 5 turns the signature into
-the form above. What remains for this brick's activation is the Brick 3
-enriched data plus the gates below, not a fresh implementation.
+no current file declares `WayMembers-v1` (see git history). At this
+brick's landing `build_way_plans` still kept its `global_shared`
+parameter and had no `PinSource` argument - a named deviation from this
+section's signature, since Brick 5 (pins) was separate and unlanded at
+the time. Brick 5 has since landed and turned the signature into the
+form above (see git history for the commit).
 
 Gates, in order:
 ```
@@ -764,6 +774,27 @@ locations. Outside either bound -> revert and record the finding in the
 roadmap (the pins would then need a zoom cap, which would be a new spec).
 Record post-landing numbers in `reference/performance.md`.
 
+STATUS: landed (see git history for the commit). The implementation
+matches the plumbing above (`PinSource`, positional mask consumption in
+`process_planned_way_into`, the `build_way_plans` counting skip on the
+injected path, the full `prepass_shared_nodes` /
+`global_shared_node_pins` teardown), with two refinements found during
+implementation review: (1) the two field-20 validations split by where
+every way is visible - the bitmap-length-vs-ref-count check moved to the
+decode workers as a release-checked `PipelineError` (mirroring the
+field-5 check, and covering non-emitted ways), while the coords-length
+check stays a mask-build `assert!` backstop, since a rayon-task assert's
+payload does not survive the `worker_handle.join().expect(...)` chain;
+(2) the compare-tiles/regress framing above overstates what this landing's
+gates can require - pin-aware DP is not vertex-monotonic (a pin split can
+drop a vertex plain DP would have kept, and `regress` measures
+vertex-to-nearest-vertex Hausdorff distance, not point-to-line DP error),
+so "any vertex decrease is a bug" does not hold and `regress`'s built-in
+`passed()` is a diagnostic, not the verdict, for this landing; true
+structural integrity (component/ring/hole, attrs, extent) on matched
+features is still a hard gate. Gates and measured readings land in
+`reference/performance.md` once run.
+
 ### Brick 6 - the planet-slope reading (measurement, no code)
 
 Re-enrich north-america locations with the new altw, register in
@@ -803,8 +834,13 @@ both repos' suites green and the standing denmark gate zero-diff.
 - pbfhogg internals beyond the contract section (pass structure, radix
   join details, passthrough handling) are the paired pbfhogg spec's
   ground.
-- No blessing: the blessed denmark archive is raw-variant and stays valid
-  throughout; nothing here rotates the regress baseline.
+- Blessing: this bullet originally assumed the blessed denmark archive
+  was raw-variant and that nothing here would rotate the regress
+  baseline. That assumption was wrong - the blessed reference is a
+  locations-variant run, and Brick 5 changes locations-path geometry, so
+  it legitimately diffs against Brick 5 output. A post-landing bless
+  rotation (user say-so) is required follow-through; see git history for
+  the commit and `reference/performance.md` for the readings.
 
 ## Review resolutions
 

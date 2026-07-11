@@ -149,13 +149,6 @@ pub struct TilegenConfig {
     /// Auto-detected from the PBF header's `LocationsOnWays` optional feature
     /// when not set explicitly.
     pub locations_on_ways: bool,
-    /// Run the global shared-node prepass and pin cross-block shared way
-    /// vertices during line and polygon simplification. Disabled by default:
-    /// block-local pins preserve common junctions within each PBF primitive
-    /// block while avoiding a second full way scan and a large long-lived set.
-    /// Enabling this preserves more low-zoom detail on very thin linear water
-    /// and polygon edges, at a substantial runtime and RSS cost.
-    pub global_shared_node_pins: bool,
     /// Tile payload format (`mvt` default, `mlt` planned).
     pub tile_format: TilePayloadFormat,
     /// Tile compression algorithm for MVT payloads (`gzip` default, `brotli` optional).
@@ -723,7 +716,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         emit_counter_usize("relation_plan_needed_ways", s.relation_plan_needed_ways);
         emit_counter_usize("relation_plan_superset_ways", s.relation_plan_superset_ways);
         emit_counter_u64("way_members_marked", s.way_members_marked);
-        emit_counter_usize("global_shared_nodes", s.global_shared_nodes);
+        emit_counter_u64("way_pins_marked", s.way_pins_marked);
         if let Some(kb) = s.relation_blocks_drop_rss_kb {
             emit_counter_u64("relation_blocks_drop_rss_kb", kb);
         }
@@ -828,8 +821,9 @@ use emit::{
 };
 #[cfg(test)]
 use phase12::{
-    MembersForBlock, NodeStoreMode, RawWay, annotate_block_shared_node_refs, build_way_plans,
-    crosses_antimeridian, lon_e7_shifted_360, phase_read_and_process, select_node_store_mode,
+    MembersForBlock, NodeStoreMode, PinSource, RawWay, annotate_block_shared_node_refs,
+    build_way_plans, crosses_antimeridian, lon_e7_shifted_360, phase_read_and_process,
+    select_node_store_mode,
 };
 #[cfg(test)]
 use stats::{
