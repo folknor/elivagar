@@ -547,7 +547,8 @@ pub(super) fn phase_read_and_process(
                                     // Now summed across rayon workers, not a serial
                                     // stage: read phase12_plan_build_ns as thread-time.
                                     let plan_busy = wait_span(&BUSY.phase12_plan_build);
-                                    let plans = build_way_plans(&block, gsn_ref);
+                                    let plans =
+                                        build_way_plans(&block, gsn_ref, &rp_ref.needed_ways);
                                     drop(plan_busy);
                                     way_counter_ref
                                         .fetch_add(plans.len() as u64, Ordering::Relaxed);
@@ -584,10 +585,9 @@ pub(super) fn phase_read_and_process(
                                             way.id(),
                                             "way plan misaligned with block ways"
                                         );
-                                        let is_member = rp_ref.needed_ways.contains(&plan.way_id);
                                         process_planned_way_into(
-                                            &way, &plan, is_member, nr_ref, mz, xz, &srl, ds_ref,
-                                            mr_ref, &fcs, psf, &mut acc,
+                                            &way, &plan, plan.is_member, nr_ref, mz, xz, &srl,
+                                            ds_ref, mr_ref, &fcs, psf, &mut acc,
                                         );
                                         if acc.bytes >= acc_flush_bytes {
                                             acc.flush(spill_ref);
@@ -1340,6 +1340,12 @@ pub(super) struct WayPlan {
     pub(super) way_id: i64,
     pub(super) node_refs: Vec<i64>,
     pub(super) preserve_node_refs: Vec<i64>,
+    /// Whether this way is a member of a shortbread-matched multipolygon/
+    /// boundary relation. Resolved once here from the relation plan's
+    /// `needed_ways` set, replacing the former per-way `contains` lookup at
+    /// the `process_planned_way_into` call site - one place computes
+    /// membership.
+    pub(super) is_member: bool,
 }
 
 fn estimate_way_plans_bytes(plans: &[WayPlan]) -> usize {
@@ -1351,7 +1357,11 @@ fn estimate_way_plans_bytes(plans: &[WayPlan]) -> usize {
         .sum()
 }
 
-fn build_way_plans(block: &PrimitiveBlock, global_shared: &FxHashSet<i64>) -> Vec<WayPlan> {
+fn build_way_plans(
+    block: &PrimitiveBlock,
+    global_shared: &FxHashSet<i64>,
+    needed_ways: &FxHashSet<i64>,
+) -> Vec<WayPlan> {
     let mut plans: Vec<WayPlan> = block
         .elements()
         .filter_map(|element| {
@@ -1363,10 +1373,15 @@ fn build_way_plans(block: &PrimitiveBlock, global_shared: &FxHashSet<i64>) -> Ve
             // `block.ways()`; dropping any way here would shift every following
             // plan onto the wrong way. Empty-ref ways resolve to empty coords and
             // are dropped inside `process_planned_way_into`.
+            let way_id = way.id();
             Some(WayPlan {
-                way_id: way.id(),
+                way_id,
                 node_refs: way.refs().collect(),
                 preserve_node_refs: Vec::new(),
+                // Membership resolved once, at plan build, from the relation
+                // plan's needed_ways set - formerly a per-way `contains` lookup
+                // at the process_planned_way_into call site.
+                is_member: needed_ways.contains(&way_id),
             })
         })
         .collect();
