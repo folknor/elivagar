@@ -178,9 +178,94 @@ pub fn priority_from_key(key: SortKey) -> u8 {
 
 /// Total order on sort records. Payload bytes are a pure function of a
 /// feature, so this is independent of producer scheduling and chunk layout.
+/// Used by the k-way merge heap, where every comparison already touches the
+/// record anyway. The chunk-write funnels must NOT use a fused comparator like
+/// this one: see `sort_records_total` / `sort_payload_records_total`.
 #[inline]
 fn record_cmp(a_key: SortKey, a_data: &[u8], b_key: SortKey, b_data: &[u8]) -> Ordering {
     a_key.cmp(&b_key).then_with(|| a_data.cmp(b_data))
+}
+
+/// Walk runs of equal keys in a key-sorted slice, handing each multi-record
+/// run to `sort_run` for payload ordering. Records with equal (key, payload)
+/// serialize to identical bytes, so their relative order is irrelevant and
+/// unstable sorting inside a run is fine.
+fn for_each_equal_key_run<T>(
+    records: &mut [T],
+    key_of: impl Fn(&T) -> SortKey,
+    mut sort_run: impl FnMut(&mut [T]),
+) {
+    let mut start = 0;
+    while start < records.len() {
+        let key = key_of(&records[start]);
+        let mut end = start + 1;
+        while end < records.len() && key_of(&records[end]) == key {
+            end += 1;
+        }
+        if end - start > 1 {
+            sort_run(&mut records[start..end]);
+        }
+        start = end;
+    }
+}
+
+/// Sort records into the total record order (key, then payload bytes) in two
+/// passes: a pure u64 key sort, then a payload-order pass over each equal-key
+/// run. The split keeps the dominant pass on the trivial integer comparator
+/// (the `sort_unstable_by_key` fast path); payload indirection is paid only
+/// inside actual key ties, where the determinism guarantee needs it. The
+/// original single fused comparator regressed phase12 chunk sorting ~28% on
+/// the denmark bench because payload access costs applied to every comparison,
+/// ties or not.
+fn sort_records_total(records: &mut [SortRecord]) {
+    records.sort_unstable_by_key(|r| r.key);
+    for_each_equal_key_run(
+        records,
+        |r| r.key,
+        |run| run.sort_unstable_by(|a, b| a.data.cmp(&b.data)),
+    );
+}
+
+/// First 8 payload bytes as a big-endian, zero-padded u64. Lex-consistent
+/// with full payload comparison: it may collide to equal (resolved by the
+/// full compare) but can never invert an ordering, so (prefix, full-lex)
+/// equals full-lex.
+fn payload_prefix8(bytes: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    let n = bytes.len().min(8);
+    buf[..n].copy_from_slice(&bytes[..n]);
+    u64::from_be_bytes(buf)
+}
+
+/// `sort_records_total` for arena-backed `(key, offset, len)` records. The
+/// tie pass gathers an 8-byte payload prefix once per record (one arena read
+/// each) instead of comparing arena slices directly (two random reads into a
+/// multi-hundred-MB arena per comparison). Payloads begin with the feature's
+/// osm_id, so within a run the prefix resolves nearly every comparison and
+/// the full slice compare runs only on true prefix collisions. Measured on
+/// the denmark locations bench: direct within-run slice comparison cost
+/// ~0.7s of wall; the by-key pass alone is baseline-neutral.
+fn sort_payload_records_total(records: &mut [PayloadRecord], payload: &[u8]) {
+    records.sort_unstable_by_key(|r| r.0);
+    let mut scratch: Vec<(u64, PayloadRecord)> = Vec::new();
+    for_each_equal_key_run(
+        records,
+        |r| r.0,
+        |run| {
+            scratch.clear();
+            scratch.extend(
+                run.iter()
+                    .map(|&r| (payload_prefix8(&payload[r.1..r.1 + r.2]), r)),
+            );
+            scratch.sort_unstable_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| payload[a.1.1..a.1.1 + a.1.2].cmp(&payload[b.1.1..b.1.1 + b.1.2]))
+            });
+            for (dst, &(_, r)) in run.iter_mut().zip(scratch.iter()) {
+                *dst = r;
+            }
+        },
+    );
 }
 
 /// Extract zoom level from a tile_id. Uses the PMTiles base offset formula:
@@ -605,8 +690,7 @@ impl SortWriter {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        self.buffer
-            .sort_unstable_by(|a, b| record_cmp(a.key, &a.data, b.key, &b.data));
+        sort_records_total(&mut self.buffer);
         let chunk_no = match &self.chunk_counter {
             Some(counter) => counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             None => self.chunk_count,
@@ -644,7 +728,7 @@ pub fn write_sorted_chunk(
     path: &Path,
     compression: ChunkCompression,
 ) -> io::Result<()> {
-    records.sort_unstable_by(|a, b| record_cmp(a.key, &a.data, b.key, &b.data));
+    sort_records_total(records);
     write_chunk_records_presorted(records, path, compression)
 }
 
@@ -953,9 +1037,7 @@ pub fn write_sorted_payload_chunk(
     path: &Path,
     compression: ChunkCompression,
 ) -> io::Result<()> {
-    records.sort_unstable_by(|a, b| {
-        record_cmp(a.0, &payload[a.1..a.1 + a.2], b.0, &payload[b.1..b.1 + b.2])
-    });
+    sort_payload_records_total(records, payload);
     write_payload_chunk_records_presorted(records, payload, path, compression)
 }
 
@@ -1026,9 +1108,7 @@ pub fn write_partitioned_payload_chunks(
     if records.is_empty() {
         return Ok(Vec::new());
     }
-    records.sort_unstable_by(|a, b| {
-        record_cmp(a.0, &payload[a.1..a.1 + a.2], b.0, &payload[b.1..b.1 + b.2])
-    });
+    sort_payload_records_total(records, payload);
     let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = write_partitioned_payload_chunk(records, payload, tmp_dir, id, compression)?;
     Ok(vec![path])
