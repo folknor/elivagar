@@ -313,8 +313,15 @@ Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids 
 archive (`datasets.<D>.blessed` in brokkr.toml) itself; no paths, defaults
 to denmark. What it computes: a semantic diff of two PMTiles archives
 (MVT + gzip only). Decodes every tile into a canonical form (layers sorted,
-features sorted, merged-feature components sorted - erasing the pipeline's
-intra-layer order nondeterminism and nothing else), then classifies:
+features sorted, merged-feature components sorted - erasing intra-layer
+feature order, the one dimension the pipeline deliberately leaves
+unconstrained across archives, and nothing else). Within-run record order is
+total (chunk-independent sort + paint-order key, `src/sort.rs` +
+`src/shortbread/paint_order.rs`), so two builds of the same commit are
+byte-identical and never need this canonicalization; two builds of
+*different* commits can still legitimately reorder features (e.g. a
+paint-rank table change) without any semantic difference, which is what the
+canonicalization tier continues to absorb. It then classifies:
 tiles/layers added or removed, extent mismatches, missing/added features,
 attr changes (bit-exact values), and matched-feature geometry moves split
 into tolerance vs structural (component-count / ring-role /

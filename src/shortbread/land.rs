@@ -14,6 +14,7 @@ pub(super) fn match_land(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
             min_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
+            paint_rank: paint_order::land_paint_rank(kind),
             attrs: smallvec![attr_str("kind", kind)],
         });
     }
@@ -26,6 +27,7 @@ pub(super) fn match_land_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
+            paint_rank: paint_order::land_paint_rank("cliff"),
             attrs: smallvec![attr_str("kind", "cliff")],
         });
     }
@@ -135,6 +137,7 @@ pub(super) fn match_sites(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) 
             min_zoom: 14,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
+            paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],
         });
     }
@@ -193,6 +196,7 @@ pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
             min_zoom: 14,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
+            paint_rank: 0,
             attrs,
         });
     }
@@ -306,6 +310,7 @@ fn match_addresses(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<
         min_zoom: 14,
         max_zoom: 14,
         geom_expect,
+        paint_rank: 0,
         attrs,
     });
 }

@@ -384,16 +384,18 @@ impl FeatureRecordSink for RecordSink {
 /// Push a single encoded feature into the sort record buffer.
 /// Shared by all geometry emitters (point, line, polygon, multipolygon).
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_sort_record<T: FeatureRecordSink + ?Sized>(
     tile_id: u64,
     osm_id: u64,
     layer: Layer,
+    paint_rank: u8,
     geom_type: GeomType,
     geom_buf: &[u32],
     attrs_buf: &[u8],
     records: &mut T,
 ) {
-    let key = sort::make_sort_key(tile_id, layer as u8, 0);
+    let key = sort::make_sort_key(tile_id, layer as u8, paint_rank);
     records.push_feature(key, osm_id, geom_type, geom_buf, attrs_buf);
 }
 
@@ -582,6 +584,7 @@ pub(super) fn emit_point_or_centroid(
                 tile_id,
                 osm_id,
                 m.layer,
+                m.paint_rank,
                 GeomType::Point,
                 &scratch.geom_buf,
                 &scratch.attrs_buf,
@@ -646,6 +649,7 @@ pub(super) fn emit_line_feature(
                     tile_id,
                     osm_id,
                     m.layer,
+                    m.paint_rank,
                     GeomType::LineString,
                     &scratch.geom_buf,
                     &scratch.attrs_buf,
@@ -671,6 +675,7 @@ pub(super) fn emit_line_feature(
                         tile_id,
                         osm_id,
                         m.layer,
+                        m.paint_rank,
                         GeomType::LineString,
                         &scratch.geom_buf,
                         &scratch.attrs_buf,
@@ -827,6 +832,7 @@ pub(super) fn emit_polygon_feature(
             tile_id,
             osm_id,
             m.layer,
+            m.paint_rank,
             GeomType::Polygon,
             geom,
             attrs_buf,
@@ -943,6 +949,7 @@ pub(super) fn emit_multipolygon_feature(
             tile_id,
             osm_id,
             m.layer,
+            m.paint_rank,
             GeomType::Polygon,
             geom,
             attrs_buf,
@@ -1043,6 +1050,7 @@ mod landing2_tests {
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
+            paint_rank: 0,
             attrs: smallvec![
                 ("kind", AttrValue::Str(Cow::Borrowed("test")), 0),
                 ("height", AttrValue::Float(12.0), 13),

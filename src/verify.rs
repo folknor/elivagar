@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::pmtiles_reader::{self, PmtilesReader};
 use crate::pmtiles_writer::tile_id_to_zxy;
-use crate::shortbread::Layer;
+use crate::shortbread::{Layer, paint_order};
 use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
 /// Maximum number of tile-level errors before aborting traversal.
@@ -485,19 +485,7 @@ fn validate_mvt_geometry(data: &[u8], z: u8, x: u32) -> Result<(), String> {
             let layer = tile_cursor
                 .read_len_delimited()
                 .map_err(|e| format!("layer decode failed: {e}"))?;
-            // Extract layer name for error context
-            let mut name_cursor = Cursor::new(layer);
-            let mut layer_name = String::new();
-            while let Ok(Some((lf, lw))) = name_cursor.read_tag() {
-                if lf == 1 && lw == WIRE_LEN {
-                    if let Ok(sub) = name_cursor.read_len_delimited() {
-                        layer_name = String::from_utf8_lossy(sub).to_string();
-                    }
-                } else {
-                    drop(name_cursor.skip_field(lw));
-                }
-            }
-            validate_mvt_layer_geometry(layer, z, x).map_err(|e| format!("[{layer_name}] {e}"))?;
+            validate_mvt_layer_geometry(layer, z, x)?;
         } else {
             tile_cursor
                 .skip_field(wire_type)
@@ -509,22 +497,231 @@ fn validate_mvt_geometry(data: &[u8], z: u8, x: u32) -> Result<(), String> {
 
 fn validate_mvt_layer_geometry(layer: &[u8], z: u8, x: u32) -> Result<(), String> {
     let mut layer_cursor = Cursor::new(layer);
-    let mut feat_idx = 0u32;
+    let mut layer_name = None;
+    let mut features = Vec::new();
+    let mut keys = Vec::new();
+    let mut values: Vec<&[u8]> = Vec::new();
     while let Ok(Some((field, wire_type))) = layer_cursor.read_tag() {
-        if field == 2 && wire_type == WIRE_LEN {
-            let feature = layer_cursor
-                .read_len_delimited()
-                .map_err(|e| format!("feature decode failed: {e}"))?;
-            validate_mvt_feature_geometry(feature, z, x)
-                .map_err(|e| format!("feat {feat_idx}: {e}"))?;
-            feat_idx += 1;
-        } else {
-            layer_cursor
+        match (field, wire_type) {
+            (1, WIRE_LEN) => {
+                let bytes = layer_cursor
+                    .read_len_delimited()
+                    .map_err(|e| format!("layer name decode failed: {e}"))?;
+                layer_name = Some(
+                    std::str::from_utf8(bytes)
+                        .map_err(|_| "layer name is not UTF-8".to_string())?,
+                );
+            }
+            (2, WIRE_LEN) => {
+                let feature = layer_cursor
+                    .read_len_delimited()
+                    .map_err(|e| format!("feature decode failed: {e}"))?;
+                features.push(feature);
+            }
+            (3, WIRE_LEN) => {
+                let bytes = layer_cursor
+                    .read_len_delimited()
+                    .map_err(|e| format!("layer key decode failed: {e}"))?;
+                keys.push(
+                    std::str::from_utf8(bytes).map_err(|_| "layer key is not UTF-8".to_string())?,
+                );
+            }
+            // Retain the raw value bytes; decoding is deferred to the paint-order
+            // check so it only ever runs on values a targeted layer references,
+            // never on every value of every layer.
+            (4, WIRE_LEN) => {
+                let bytes = layer_cursor
+                    .read_len_delimited()
+                    .map_err(|e| format!("layer value decode failed: {e}"))?;
+                values.push(bytes);
+            }
+            _ => layer_cursor
                 .skip_field(wire_type)
-                .map_err(|e| format!("layer parse failed: {e}"))?;
+                .map_err(|e| format!("layer parse failed: {e}"))?,
         }
     }
+    let layer_name = layer_name.unwrap_or("");
+    for (feat_idx, feature) in features.iter().enumerate() {
+        validate_mvt_feature_geometry(feature, z, x)
+            .map_err(|e| format!("[{layer_name}] feat {feat_idx}: {e}"))?;
+    }
+    validate_paint_order(layer_name, &features, &keys, &values, z)
+        .map_err(|e| format!("[{layer_name}] {e}"))?;
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum MvtValue<'a> {
+    String(&'a str),
+    Bool(bool),
+    Other,
+}
+
+fn decode_mvt_value(value: &[u8]) -> Result<MvtValue<'_>, String> {
+    let mut cursor = Cursor::new(value);
+    let mut decoded = MvtValue::Other;
+    let mut seen = false;
+    while let Some((field, wire_type)) = cursor
+        .read_tag()
+        .map_err(|e| format!("value tag decode failed: {e}"))?
+    {
+        let next = match (field, wire_type) {
+            (1, WIRE_LEN) => {
+                let bytes = cursor
+                    .read_len_delimited()
+                    .map_err(|e| format!("value string decode failed: {e}"))?;
+                MvtValue::String(
+                    std::str::from_utf8(bytes)
+                        .map_err(|_| "value string is not UTF-8".to_string())?,
+                )
+            }
+            (7, WIRE_VARINT) => MvtValue::Bool(
+                cursor
+                    .read_varint()
+                    .map_err(|e| format!("value bool decode failed: {e}"))?
+                    != 0,
+            ),
+            _ => {
+                cursor
+                    .skip_field(wire_type)
+                    .map_err(|e| format!("value parse failed: {e}"))?;
+                MvtValue::Other
+            }
+        };
+        if seen {
+            return Err("value message has multiple fields".to_string());
+        }
+        decoded = next;
+        seen = true;
+    }
+    Ok(decoded)
+}
+
+fn validate_paint_order<'a>(
+    layer: &str,
+    features: &[&'a [u8]],
+    keys: &[&'a str],
+    values: &[&'a [u8]],
+    z: u8,
+) -> Result<(), String> {
+    let target = matches!(layer, "land" | "streets" | "street_polygons");
+    if !target {
+        return Ok(());
+    }
+    let mut previous = None;
+    for (feature_idx, feature) in features.iter().enumerate() {
+        let attrs = decode_feature_attrs(feature, keys, values)
+            .map_err(|e| format!("feat {feature_idx}: {e}"))?;
+        let kind = attrs
+            .kind
+            .ok_or_else(|| format!("feat {feature_idx}: missing kind attribute"))?;
+        let rank = match layer {
+            "land" => {
+                if !paint_order::is_known_land_kind(kind) {
+                    return Err(format!("feat {feature_idx}: unknown land kind {kind:?}"));
+                }
+                paint_order::land_paint_rank(kind)
+            }
+            "streets" if z < 11 => {
+                if !paint_order::is_known_street_kind(kind) {
+                    return Err(format!("feat {feature_idx}: unknown street kind {kind:?}"));
+                }
+                paint_order::street_class_rank(kind)
+            }
+            "streets" | "street_polygons" => {
+                if !paint_order::is_known_street_kind(kind) {
+                    return Err(format!("feat {feature_idx}: unknown street kind {kind:?}"));
+                }
+                paint_order::street_paint_rank(kind, attrs.link, attrs.tunnel, attrs.bridge)
+            }
+            _ => unreachable!(),
+        };
+        if let Some(previous) = previous
+            && rank < previous
+        {
+            return Err(format!(
+                "feat {feature_idx}: paint rank {rank} follows {previous}"
+            ));
+        }
+        previous = Some(rank);
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct PaintAttrs<'a> {
+    kind: Option<&'a str>,
+    link: bool,
+    tunnel: bool,
+    bridge: bool,
+    seen_link: bool,
+    seen_tunnel: bool,
+    seen_bridge: bool,
+}
+
+fn decode_feature_attrs<'a>(
+    feature: &'a [u8],
+    keys: &[&'a str],
+    values: &[&'a [u8]],
+) -> Result<PaintAttrs<'a>, String> {
+    let mut cursor = Cursor::new(feature);
+    let mut attrs = PaintAttrs::default();
+    while let Some((field, wire_type)) = cursor
+        .read_tag()
+        .map_err(|e| format!("feature tag decode failed: {e}"))?
+    {
+        if field != 2 || wire_type != WIRE_LEN {
+            cursor
+                .skip_field(wire_type)
+                .map_err(|e| format!("feature parse failed: {e}"))?;
+            continue;
+        }
+        let packed = cursor
+            .read_len_delimited()
+            .map_err(|e| format!("feature tags decode failed: {e}"))?;
+        let pairs = decode_packed_varints(packed)?;
+        if pairs.len() % 2 != 0 {
+            return Err("feature tags have an odd index count".to_string());
+        }
+        for pair in pairs.as_chunks::<2>().0 {
+            let key_idx = usize::try_from(pair[0])
+                .map_err(|_| "tag key index overflows usize".to_string())?;
+            let value_idx = usize::try_from(pair[1])
+                .map_err(|_| "tag value index overflows usize".to_string())?;
+            let key = keys
+                .get(key_idx)
+                .ok_or_else(|| format!("tag key index {key_idx} out of bounds"))?;
+            let raw_value = values
+                .get(value_idx)
+                .ok_or_else(|| format!("tag value index {value_idx} out of bounds"))?;
+            match *key {
+                "kind" => match decode_mvt_value(raw_value)? {
+                    MvtValue::String(kind) if attrs.kind.replace(kind).is_none() => {}
+                    MvtValue::String(_) => return Err("duplicate kind attribute".to_string()),
+                    _ => return Err("kind attribute is not a string".to_string()),
+                },
+                "link" | "tunnel" | "bridge" => {
+                    let flag = match decode_mvt_value(raw_value)? {
+                        MvtValue::Bool(flag) => flag,
+                        _ => return Err(format!("{key} attribute is not a bool")),
+                    };
+                    let (slot, seen) = match *key {
+                        "link" => (&mut attrs.link, &mut attrs.seen_link),
+                        "tunnel" => (&mut attrs.tunnel, &mut attrs.seen_tunnel),
+                        "bridge" => (&mut attrs.bridge, &mut attrs.seen_bridge),
+                        _ => unreachable!(),
+                    };
+                    if *seen {
+                        return Err(format!("duplicate {key} attribute"));
+                    }
+                    *slot = flag;
+                    *seen = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(attrs)
 }
 
 fn validate_mvt_feature_geometry(feature: &[u8], z: u8, x: u32) -> Result<(), String> {
@@ -850,6 +1047,22 @@ fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, Ve
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::mvt::{Feature, GeomType, LayerBuilder, Value, encode_tile};
+
+    fn land_tile(kinds: &[&str]) -> Vec<u8> {
+        let mut layer = LayerBuilder::new("land");
+        let key = layer.intern_key("kind");
+        for (id, kind) in kinds.iter().enumerate() {
+            let value = layer.intern_value(Value::String((*kind).to_string()));
+            layer.add_feature(Feature {
+                id: Some(id as u64),
+                geom_type: GeomType::Point,
+                geometry: vec![9, 0, 0],
+                tags: vec![(key, value)],
+            });
+        }
+        encode_tile(&[&layer])
+    }
 
     #[test]
     fn full_tile_rect_detects_buffered_fill() {
@@ -981,5 +1194,29 @@ mod tests {
             .expect_err("seam tile should reject 20k delta");
         assert!(err.contains("suspicious geometry delta"));
         assert!(err.contains(&MVT_DELTA_LIMIT_SEAM.to_string()));
+    }
+
+    #[test]
+    fn order_check_flags_out_of_order_land_kinds() {
+        let tile = land_tile(&["forest", "residential"]);
+        let err = validate_mvt_geometry(&tile, 11, 1)
+            .expect_err("forest before residential must fail paint order validation");
+        assert!(err.contains("paint rank 0 follows 5"));
+    }
+
+    #[test]
+    fn order_check_fails_closed_on_undecodable_kind() {
+        let mut layer = LayerBuilder::new("land");
+        let key = layer.intern_key("kind");
+        let value = layer.intern_value(Value::Bool(true));
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::Point,
+            geometry: vec![9, 0, 0],
+            tags: vec![(key, value)],
+        });
+        let tile = encode_tile(&[&layer]);
+        let err = validate_mvt_geometry(&tile, 11, 1).expect_err("mistyped kind must fail closed");
+        assert!(err.contains("kind attribute is not a string"));
     }
 }

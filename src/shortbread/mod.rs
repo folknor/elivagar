@@ -16,6 +16,7 @@ use std::borrow::Cow;
 
 mod boundaries;
 mod land;
+pub(crate) mod paint_order;
 mod streets;
 mod transport;
 mod water;
@@ -227,6 +228,7 @@ pub struct LayerMatch {
     pub min_zoom: u8,
     pub max_zoom: u8,
     pub geom_expect: GeomExpect,
+    pub paint_rank: u8,
     pub attrs: SmallVec<[Attr; 8]>,
 }
 const _: () = assert!(std::mem::size_of::<LayerMatch>() == 408);

@@ -115,11 +115,14 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
     if let Some(v) = tags.get("horse") {
         attrs.push(attr_dyn_z("horse", v, 14));
     }
+    let paint_rank =
+        paint_order::street_paint_rank(kind, is_link, is_tunnel(tags), is_bridge(tags));
     out.push(LayerMatch {
         layer: Layer::Streets,
         min_zoom,
         max_zoom: 14,
         geom_expect: GeomExpect::Line,
+        paint_rank,
         attrs,
     });
 }
@@ -143,11 +146,14 @@ pub(super) fn match_street_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
         if let Some(v) = tags.get("surface") {
             attrs.push(attr_dyn("surface", v));
         }
+        let paint_rank =
+            paint_order::street_paint_rank(kind, false, is_tunnel(tags), is_bridge(tags));
         out.push(LayerMatch {
             layer: Layer::StreetPolygons,
             min_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
+            paint_rank,
             attrs,
         });
     }
@@ -214,6 +220,7 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
         min_zoom,
         max_zoom: 14,
         geom_expect: GeomExpect::Line,
+        paint_rank: 0,
         attrs,
     });
 }
@@ -289,6 +296,7 @@ pub(super) fn match_street_labels_points(tags: &Tags<'_>, out: &mut SmallVec<[La
         min_zoom: 12,
         max_zoom: 14,
         geom_expect: GeomExpect::Point,
+        paint_rank: 0,
         attrs,
     });
 }
@@ -309,6 +317,7 @@ pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<
             min_zoom: 14,
             max_zoom: 14,
             geom_expect: GeomExpect::PolygonPointOnSurface,
+            paint_rank: 0,
             attrs,
         });
     }
@@ -325,6 +334,7 @@ pub(super) fn match_bridges(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
+            paint_rank: 0,
             attrs: smallvec![attr_str("kind", "bridge")],
         });
     }

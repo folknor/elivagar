@@ -14,6 +14,7 @@ pub(super) fn match_aerialways(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
+            paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],
         });
     }
@@ -55,6 +56,7 @@ pub(super) fn match_ferries(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
         min_zoom,
         max_zoom: 14,
         geom_expect: GeomExpect::Line,
+        paint_rank: 0,
         attrs,
     });
 }
@@ -90,6 +92,7 @@ fn match_public_transport(
             min_zoom,
             max_zoom: 14,
             geom_expect,
+            paint_rank: 0,
             attrs,
         });
     }

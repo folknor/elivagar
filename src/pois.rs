@@ -41,6 +41,7 @@ fn match_pois(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<[Laye
             min_zoom: 14,
             max_zoom: 14,
             geom_expect,
+            paint_rank: 0,
             attrs,
         });
     }

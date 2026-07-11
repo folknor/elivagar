@@ -169,6 +169,20 @@ pub fn layer_from_key(key: SortKey) -> u8 {
     ((key >> 8) & 0xFF) as u8
 }
 
+/// Extract the paint-order priority from a sort key.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+pub fn priority_from_key(key: SortKey) -> u8 {
+    (key & 0xFF) as u8
+}
+
+/// Total order on sort records. Payload bytes are a pure function of a
+/// feature, so this is independent of producer scheduling and chunk layout.
+#[inline]
+fn record_cmp(a_key: SortKey, a_data: &[u8], b_key: SortKey, b_data: &[u8]) -> Ordering {
+    a_key.cmp(&b_key).then_with(|| a_data.cmp(b_data))
+}
+
 /// Extract zoom level from a tile_id. Uses the PMTiles base offset formula:
 /// `base(z) = (4^z - 1) / 3`. Zoom is the largest z where `base(z) <= tile_id`.
 #[inline]
@@ -586,12 +600,13 @@ impl SortWriter {
         self.chunk_paths.extend(paths);
     }
 
-    /// Sort the in-memory buffer by key and write a chunk file to disk.
+    /// Sort the in-memory buffer by the total record order and write it to disk.
     fn flush_chunk(&mut self) -> io::Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        self.buffer.sort_unstable_by_key(|r| r.key);
+        self.buffer
+            .sort_unstable_by(|a, b| record_cmp(a.key, &a.data, b.key, &b.data));
         let chunk_no = match &self.chunk_counter {
             Some(counter) => counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             None => self.chunk_count,
@@ -611,7 +626,7 @@ impl SortWriter {
 
 /// Write records as a sorted chunk file in the standard format.
 ///
-/// Records are sorted in-place by key, then written as:
+/// Records are sorted in-place by key and payload, then written as:
 /// ```text
 /// u32 record_count
 /// For each record:
@@ -629,7 +644,7 @@ pub fn write_sorted_chunk(
     path: &Path,
     compression: ChunkCompression,
 ) -> io::Result<()> {
-    records.sort_unstable_by_key(|r| r.key);
+    records.sort_unstable_by(|a, b| record_cmp(a.key, &a.data, b.key, &b.data));
     write_chunk_records_presorted(records, path, compression)
 }
 
@@ -938,7 +953,9 @@ pub fn write_sorted_payload_chunk(
     path: &Path,
     compression: ChunkCompression,
 ) -> io::Result<()> {
-    records.sort_unstable_by_key(|r| r.0);
+    records.sort_unstable_by(|a, b| {
+        record_cmp(a.0, &payload[a.1..a.1 + a.2], b.0, &payload[b.1..b.1 + b.2])
+    });
     write_payload_chunk_records_presorted(records, payload, path, compression)
 }
 
@@ -1009,7 +1026,9 @@ pub fn write_partitioned_payload_chunks(
     if records.is_empty() {
         return Ok(Vec::new());
     }
-    records.sort_unstable_by_key(|r| r.0);
+    records.sort_unstable_by(|a, b| {
+        record_cmp(a.0, &payload[a.1..a.1 + a.2], b.0, &payload[b.1..b.1 + b.2])
+    });
     let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = write_partitioned_payload_chunk(records, payload, tmp_dir, id, compression)?;
     Ok(vec![path])
@@ -1338,17 +1357,14 @@ impl Eq for HeapEntry {}
 
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.chunk_idx == other.chunk_idx
+        self.key == other.key && self.data == other.data && self.chunk_idx == other.chunk_idx
     }
 }
 
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering: smallest key should come out first from a max-heap
-        // wrapped in `Reverse`. We compare (key, chunk_idx).
-        other
-            .key
-            .cmp(&self.key)
+        // Reverse ordering: smallest record should come out first from a max-heap.
+        record_cmp(other.key, &other.data, self.key, &self.data)
             .then_with(|| other.chunk_idx.cmp(&self.chunk_idx))
     }
 }
@@ -1691,7 +1707,68 @@ mod tests {
                 layer,
                 "layer mismatch for ({tile_id}, {layer}, {priority})"
             );
+            assert_eq!(
+                priority_from_key(key),
+                priority,
+                "priority mismatch for ({tile_id}, {layer}, {priority})"
+            );
         }
+    }
+
+    #[test]
+    fn merge_order_is_chunk_assignment_independent() {
+        fn merged(dir: &Path, chunks: &[&[(&[u8], u64)]]) -> Vec<(u64, Vec<u8>)> {
+            let mut paths = Vec::new();
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let mut records: Vec<SortRecord> = chunk
+                    .iter()
+                    .map(|(data, key)| SortRecord {
+                        key: *key,
+                        data: Box::from(*data),
+                    })
+                    .collect();
+                let path = dir.join(format!("split-{idx}"));
+                write_sorted_chunk(&mut records, &path, ChunkCompression::None).unwrap();
+                paths.push(path);
+            }
+            let mut reader = SortReader::new(&paths, ChunkCompression::None).unwrap();
+            let mut result = Vec::new();
+            while let Some(record) = reader.next().unwrap() {
+                result.push((record.key, record.data.into_vec()));
+            }
+            result
+        }
+
+        let key = make_sort_key(7, 11, 2);
+        let other = make_sort_key(7, 11, 3);
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        let first = merged(
+            left.path(),
+            &[
+                &[(b"c", key), (b"a", key)],
+                &[(b"d", key), (b"b", key), (b"z", other)],
+            ],
+        );
+        let second = merged(
+            right.path(),
+            &[
+                &[(b"z", other), (b"b", key)],
+                &[(b"d", key)],
+                &[(b"a", key), (b"c", key)],
+            ],
+        );
+        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            vec![
+                (key, b"a".to_vec()),
+                (key, b"b".to_vec()),
+                (key, b"c".to_vec()),
+                (key, b"d".to_vec()),
+                (other, b"z".to_vec()),
+            ]
+        );
     }
 
     #[test]

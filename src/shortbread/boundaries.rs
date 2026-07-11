@@ -30,6 +30,7 @@ pub(super) fn match_boundaries_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
             min_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
+            paint_rank: 0,
             attrs: smallvec![
                 attr_int("admin_level", admin_level),
                 attr_bool("maritime", maritime),
@@ -50,6 +51,7 @@ pub(super) fn match_boundary_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
             min_zoom: 5,
             max_zoom: 14,
             geom_expect: GeomExpect::PolygonPointOnSurface,
+            paint_rank: 0,
             attrs,
         });
     }
@@ -80,6 +82,7 @@ pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
             min_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Point,
+            paint_rank: 0,
             attrs,
         });
     }

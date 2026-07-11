@@ -20,6 +20,12 @@ Identical pair, `20c8bd7` vs `f683129` (1,296,996 addressed tiles/side):
   canonical_equal 56,701 pairs / 77,427 tiles, detailed 662 pairs (all
   semantically identical - ring rotations hash differently but classify at
   distance 0). Pass times: raw 4 ms, canonical ~1.45 s, detail ~0.2 s.
+  This pair predates the paint-order-determinism landing (total record
+  order + paint-rank key): most of the canonical/detailed share above is
+  the record-order race that landing closes, not semantic content. A
+  same-commit pair measured after that landing is expected to land almost
+  entirely in raw_equal instead; unmeasured here, noted so the split above
+  is not misread as the ongoing expected shape.
 
 Diff-heavy pins pair, `acbe400` vs `20c8bd7`, `--tol 24 --max-moved 10000000`:
 

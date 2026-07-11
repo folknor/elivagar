@@ -42,9 +42,21 @@ fn encode_mvt_layer(name: &str) -> Vec<u8> {
     // field 1: name (string)
     encode_bytes_field_always(&mut layer, 1, name.as_bytes());
 
-    // field 2: feature (one point at 0,0)
-    let feature = encode_mvt_point_feature();
+    // field 2: feature (one point at 0,0). Targeted paint-order layers need
+    // their required attributes even in this minimal valid fixture.
+    let feature = if name == "streets" {
+        encode_mvt_point_feature_with_kind()
+    } else {
+        encode_mvt_point_feature()
+    };
     encode_bytes_field_always(&mut layer, 2, &feature);
+
+    if name == "streets" {
+        encode_bytes_field_always(&mut layer, 3, b"kind");
+        let mut value = Vec::new();
+        encode_bytes_field_always(&mut value, 1, b"residential");
+        encode_bytes_field_always(&mut layer, 4, &value);
+    }
 
     // field 5: extent (varint) = 4096
     encode_varint_field_always(&mut layer, 5, 4096);
@@ -88,6 +100,19 @@ fn encode_mvt_point_feature() -> Vec<u8> {
     encode_varint(&mut geom, 0); // dy=0
     encode_bytes_field_always(&mut feature, 4, &geom);
 
+    feature
+}
+
+fn encode_mvt_point_feature_with_kind() -> Vec<u8> {
+    let mut feature = Vec::new();
+    // field 2: one (key=0, value=0) tag pair.
+    encode_bytes_field_always(&mut feature, 2, &[0, 0]);
+    encode_varint_field_always(&mut feature, 3, 1);
+    let mut geom = Vec::new();
+    encode_varint(&mut geom, 9);
+    encode_varint(&mut geom, 0);
+    encode_varint(&mut geom, 0);
+    encode_bytes_field_always(&mut feature, 4, &geom);
     feature
 }
 

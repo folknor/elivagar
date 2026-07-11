@@ -634,6 +634,40 @@ fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
     writer.finish().expect("finish sort writer")
 }
 
+#[test]
+fn tile_features_ordered_by_paint_rank() {
+    let dir = tempfile::tempdir().expect("create sort directory");
+    // A one-record budget forces each adversarial producer append into a separate
+    // chunk, so this exercises both chunk sorting and the k-way merge.
+    let mut writer = sort::SortWriter::new(dir.path(), 1, sort::ChunkCompression::None)
+        .expect("create sort writer");
+    let tile_id = pmtiles_writer::xy_to_tile_id(10, 1, 1);
+    let ranks = [5u8, 0, 3, 2];
+    for (osm_id, rank) in ranks.into_iter().enumerate() {
+        let osm_id = u8::try_from(osm_id).expect("test id fits in u8");
+        writer
+            .push(SortRecord {
+                key: sort::make_sort_key(tile_id, Layer::Land as u8, rank),
+                data: Box::from([osm_id]),
+            })
+            .expect("push rank-tagged record");
+    }
+    let mut reader = writer.finish().expect("finish sort writer");
+    let mut grouped = PendingTile {
+        tile_id,
+        features: Vec::new(),
+    };
+    let mut observed = Vec::new();
+    while let Some(record) = reader.next().expect("read sorted record") {
+        assert_eq!(sort::tile_id_from_key(record.key), grouped.tile_id);
+        assert_eq!(sort::layer_from_key(record.key), Layer::Land as u8);
+        observed.push(sort::priority_from_key(record.key));
+        grouped.features.push((Layer::Land as u8, record.data));
+    }
+    assert_eq!(observed, [0, 2, 3, 5]);
+    assert_eq!(grouped.features.len(), observed.len());
+}
+
 fn parity_pending_tile(tile_id: u64) -> PendingTile {
     let point_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("city")), 0)];
     let line_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("street")), 0)];
@@ -827,6 +861,7 @@ fn boundary_labels_match(admin_level: i64) -> LayerMatch {
         min_zoom: 5,
         max_zoom: 14,
         geom_expect: GeomExpect::PolygonPointOnSurface,
+        paint_rank: 0,
         attrs: smallvec![
             ("admin_level", AttrValue::Int(admin_level), 0),
             ("name", AttrValue::Str(Cow::Borrowed("TestCountry")), 0),
@@ -900,6 +935,7 @@ fn non_boundary_labels_unchanged() {
         min_zoom: 14,
         max_zoom: 14,
         geom_expect: GeomExpect::Polygon,
+        paint_rank: 0,
         attrs: smallvec![],
     }];
     let original_min_zoom = matches[0].min_zoom;
@@ -1745,6 +1781,7 @@ fn test_layer_match(layer: Layer, geom_expect: GeomExpect) -> LayerMatch {
         min_zoom: 0,
         max_zoom: 14,
         geom_expect,
+        paint_rank: 0,
         attrs: smallvec![("kind", AttrValue::Str(Cow::Borrowed("test")), 0)],
     }
 }
@@ -2215,6 +2252,7 @@ fn emit_polygon_zoom_dependent_attrs() {
         min_zoom: 0,
         max_zoom: 14,
         geom_expect: GeomExpect::Polygon,
+        paint_rank: 0,
         attrs: smallvec![
             ("kind", AttrValue::Str(Cow::Borrowed("building")), 0),
             ("height", AttrValue::Float(15.0), 10),
@@ -2259,6 +2297,7 @@ fn emit_polygon_zoom_dependent_attrs() {
         min_zoom: 14,
         max_zoom: 14,
         geom_expect: GeomExpect::Polygon,
+        paint_rank: 0,
         attrs: smallvec![
             ("kind", AttrValue::Str(Cow::Borrowed("building")), 0),
             ("height", AttrValue::Float(15.0), 10),

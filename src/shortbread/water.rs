@@ -42,6 +42,7 @@ pub(super) fn match_water_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMat
             min_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
+            paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],
         });
     }
@@ -61,6 +62,7 @@ pub(super) fn match_water_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<[L
             min_zoom: label_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::PolygonCentroid,
+            paint_rank: 0,
             attrs,
         });
     }
@@ -96,6 +98,7 @@ pub(super) fn match_water_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch;
             min_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
+            paint_rank: 0,
             attrs,
         });
     }
@@ -124,6 +127,7 @@ pub(super) fn match_water_lines_labels(tags: &Tags<'_>, out: &mut SmallVec<[Laye
             min_zoom: label_zoom,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
+            paint_rank: 0,
             attrs,
         });
     }
@@ -140,6 +144,7 @@ pub(super) fn match_dam_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
+            paint_rank: 0,
             attrs: smallvec![attr_str("kind", "dam")],
         });
     }
@@ -152,6 +157,7 @@ pub(super) fn match_dam_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
+            paint_rank: 0,
             attrs: smallvec![attr_str("kind", "dam")],
         });
     }
@@ -164,6 +170,7 @@ pub(super) fn match_pier_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Line,
+            paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],
         });
     }
@@ -176,6 +183,7 @@ pub(super) fn match_pier_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatc
             min_zoom: 12,
             max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
+            paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],
         });
     }

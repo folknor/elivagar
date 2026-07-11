@@ -1090,6 +1090,7 @@ pub(super) fn process_node(
                     tile_id,
                     osm_id,
                     m.layer,
+                    m.paint_rank,
                     GeomType::Point,
                     &geom_buf,
                     &attrs_buf,
