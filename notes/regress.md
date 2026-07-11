@@ -34,13 +34,15 @@ Both runs: unique_blob_pairs ~170K from ~469K directory runs and ~336K unique
 blobs - the span grouping does its job; the memo that caused the germany OOM
 no longer exists.
 
-## Remaining open
+Germany-scale validation (the old engine's OOM case, 2x 2.6 GB archives):
+completed post-landing at `7178425` - zero diffs across 827,010 tiles,
+~36 s (raw 0.4 s / canonical 13.0 s / detail 22.0 s), peak RSS 5.8 GB.
+Tier split: raw_equal 78,683 pairs / 593,931 tiles, canonical_equal
+218,675 pairs / 228,205 tiles, detailed 4,874. This also retroactively
+completes the injected-prepass Brick 4 germany activation gate that the
+old engine could not finish.
 
-- **Germany-scale validation.** The 2.6 GB pair OOM-killed the old engine
-  twice on a 30 GB host; the structure responsible is deleted and the peak
-  memory model is now directory runs + fingerprints + O(workers x tile), but
-  the pair has not been rerun since the rewrite. One run to confirm, when the
-  machine is free for it.
+## Remaining open
 - **Streaming fingerprint mode.** Tier-2 semantic fingerprints currently
   decode a full `DetailTile` per blob and drop it; the canonical pass
   (~1.45 s) dominates the identical-pair wall. A true streaming digest (no

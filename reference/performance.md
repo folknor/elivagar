@@ -136,14 +136,15 @@ bench 50.2s (`da63d783`) vs 53.1s pre-enrichment - the win is the deleted
 needed (1.20x), way_index data 112.3 to 146.9 MB = 1.31x against the
 Brick 4 bound of 2x, peak RSS 6.55 vs 6.38 GB; features, tiles, and every
 per-layer sort counter bit-identical to pre-enrichment; the germany
-semantic regress was OOM-killed twice mid-decode (full-decode diff of two
-2.8 GB archives does not fit beside concurrent builds on this host - a
-regress-tooling capacity limit at germany scale, not a verdict) and the
-germany equality claim rests on the counter identity plus the denmark
-zero-diff. norway is enriched and registered but unvalidated here (no
-bench, no regress, by explicit decision); its pre-enrichment baseline
-archive `norway-20c8bd7.pmtiles` (`525c553a`) is banked for a later
-regress. The old locations files remain on disk unregistered.
+semantic regress was OOM-killed twice mid-decode under the old regress
+engine (a tooling capacity limit, not a verdict) and was left resting on
+counter identity - until the regress engine rewrite (`7178425`), after
+which the pair completed: ZERO diffs across 827,010 tiles, ~36s, peak RSS
+5.8 GB (notes/regress.md), so the germany activation equality is now
+proven semantically. norway is enriched and registered but unvalidated
+here (no bench, no regress, by explicit decision); its pre-enrichment
+baseline archive `norway-20c8bd7.pmtiles` (`525c553a`) is banked for a
+later regress. The old locations files remain on disk unregistered.
 
 The injected-pins landing (H2b, `acbe400`, 2026-07-11) consumed field-20
 shared-node pins on the enriched path and deleted the global shared-node
