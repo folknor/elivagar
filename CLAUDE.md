@@ -31,38 +31,11 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
 
 ### Never destroy state you did not create
 
-- Never run a destructive or irreversible operation - `git restore`, `git
-  checkout -- <path>`, `git clean`, `git reset --hard`, `rm`, or overwriting a
-  file - on a tracked or pre-existing file you did not create in this session,
-  without first inspecting it AND being able to fully account for what it is.
-  This explicitly includes data and binary files: `.brokkr/results.db`,
-  lockfiles, PBF/PMTiles artifacts, anything under `data/`.
-- An unexpected dirty, modified, or untracked file is a STOP-AND-LOOK signal,
-  never a tidy-up target. It is evidence your model of the tree is wrong, not
-  evidence the file is wrong. Inspect it (`git diff`, `git log`, `git show`) or
-  ask. If it is binary and you cannot cheaply inspect it, that RAISES the bar:
-  surface it to the user and wait. It never lowers the bar to "probably
-  spurious, discard".
-- The burden of proof runs one way: you need a positive, verified reason to
-  destroy something, not merely the absence of a reason to keep it. "I can't
-  see why this is here" means do not touch it - not delete it.
-- To produce a clean commit, stage explicitly (`git add` the exact files you
-  mean); never revert or clean the working tree to force it into the shape you
-  expected. A dirty file you are not committing is simply left unstaged.
 - `.brokkr/results.db` and lockfiles (`Cargo.lock`) ride along with any commit
   per AGENTS.md and this file - a dirty results.db is the EXPECTED state, to be
   staged into the accompanying commit, never questioned as a mess and never
   discarded. There is no "clean tree" to protect from it; it belongs in the
   commit.
-- Why this rule exists, in full so it outlives the memory of it: while a
-  landing commit was being assembled, `.brokkr/results.db` showed dirty and was
-  `git restore`d on the invented premise that fmt/check must have written it
-  spuriously. That destroyed a bench result written by codex inside its
-  history-blind sandbox - unrecoverable, because the working-tree file was
-  never a git object. The reflex was doubly wrong: the convention above says
-  that file is meant to be committed along, so the correct action was `git add
-  .brokkr/results.db`, the exact opposite of discarding it. The tidy-commit
-  reflex cost real measured data. Do not repeat it.
 
 ## Orchestration loop
 
