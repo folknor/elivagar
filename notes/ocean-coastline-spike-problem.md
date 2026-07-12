@@ -211,6 +211,136 @@ the logged failure.
 - A **coverage / notch oracle** to gate any fix (earcut is blind here).
 - The **latent seam** guard - a separate item.
 
+## VW fix attempt: gate results (2026-07-12) - FAILED, oracle in question
+
+The VW fix (Landings 1-2, `OCEAN_VW_AREA_2X = 256`, committed at `41d0227` as a
+spec + implemented uncommitted) was gated on norway via the shapefile path
+(artifact moved to `.disabled`). Three archives: `<DP>` = `norway-3f4ca38`
+(pre-fix DP), `<VW>` = `norway-41d0227-vw`, `<REF>` = `norway-41d0227-ref`
+(`--no-ocean-simplify` verbatim baseline).
+
+### Passed
+- `brokkr check` green (VW + the discrimination unit test + the parser rewrite).
+- earcut oracle on the VW ocean layer: exit 0, no tessellation regression.
+- Coverage oracle DISCRIMINATION - the instrument prices the bug: `<DP>` vs `<REF>`
+  at z1-6 shows large one-sided coverage loss concentrated at the exact spike
+  tiles - z4/8/4 **188,793**, z3/4/2 **130,746**, z4/8/3 **80,436** 2x-px^2, all
+  hundreds of times over the 512 threshold. The oracle genuinely detects the
+  coverage-cutting DP chords where we found the spikes.
+
+### FAILED - VW does not clear
+- Coverage oracle `<VW>` vs `<REF>` at z1-6: STILL loses 100K+ at the worst tiles
+  (z4/8/4 **146,342**, z3/4/2 **86,108**, z4/8/3 **65,120**). VW reduces the loss
+  only **~20-40%** vs DP and does NOT clear the 512 threshold anywhere in z1-6.
+
+### Geometry (z4/8/3, feature id=551, path p18)
+- DP: 8 vertices, a sharp zigzag reaching the notch apex x=3857.
+- VW: ~14 vertices, smoother and more faithful to the real coastline, but STILL
+  reaching x=3857. VW improves fidelity; the notch region's outer extent is
+  essentially unchanged.
+
+### How to reproduce, and what to look for
+
+All three archives are shapefile-path builds (artifact `.disabled`). The coverage
+oracle runs via `scripts/ocean-coverage.sh` (builds a fresh elivagar, caches the
+`--no-ocean-simplify` verbatim REF, runs `elivagar ocean-coverage`), because
+brokkr has no wrapper.
+
+- **earcut (RAN, passed):**
+  `node scripts/validate/earcut-oracle.mjs data/tilegen/norway-41d0227-vw.pmtiles ocean`
+  -> `0 over_thresh, 0 misattached` at every zoom 0-14, worst deviation 1.349e-4
+  (z11), "No polygon exceeded the deviation threshold." VW ocean does not
+  self-intersect.
+
+- **Discrimination - DP must FIRE (RAN, confirmed):**
+  `scripts/ocean-coverage.sh data/tilegen/norway-3f4ca38.pmtiles --zmin 1 --zmax 6`
+  Output: one `zN/x/y: lost <N> 2x-pixel^2` line per offender tile, then a per-zoom
+  `zN: max=.. p99=.. worst=x/y` summary. FIRES = large losses. Recorded worst per
+  zoom: z1 74,043 / z2 57,054 / z3 130,746 (worst 4/2) / z4 188,793 (worst 8/4) /
+  z5 234,073 / z6 192,119; the worst tiles are the spike tiles - z4/8/4, z3/4/2,
+  and z4/8/3 = 80,436 - all hundreds of times over the 512 threshold.
+
+- **VW must CLEAR - it does NOT (RAN, confirmed):**
+  `scripts/ocean-coverage.sh data/tilegen/norway-41d0227-vw.pmtiles --zmin 1 --zmax 6`
+  Recorded worst per zoom: z1 29,393 / z2 41,373 / z3 86,108 / z4 146,342
+  (worst 8/4) / z5 141,523 / z6 117,131 - every zoom still far over 512, only
+  ~20-40% below DP. This is the failed gate.
+
+- **Geometry - the notch reaches the same extent (RAN, confirmed):**
+  `brokkr svg --file data/tilegen/norway-3f4ca38.pmtiles -z 4 -x 8 -y 3 -l ocean`
+  vs the same with `--file data/tilegen/norway-41d0227-vw.pmtiles`. In both,
+  feature `id=551` path `p18` reaches apex x=3857: DP
+  `...3899,2232 -> 3857,2272 -> 3882,2295...` (8-vertex sharp zigzag); VW
+  `...3899,2232 -> 3877,2241 -> 3857,2261 -> 3869,2286 -> 3892,2295...` (~14
+  vertices, smoother, same outer reach).
+
+- **NOT yet run (would finish the gate):** the discrimination false-positive floor
+  (`scripts/ocean-coverage.sh data/tilegen/norway-3f4ca38.pmtiles --zmin 12 --zmax 14`,
+  expected near-zero, must PASS) and the VW high-zoom floor (same on
+  `norway-41d0227-vw.pmtiles --zmin 7 --zmax 14`). These matter only if the oracle
+  design is retained - see interpretation.
+
+### Interpretation - three hypotheses (resolved by the visual gate below)
+1. **The oracle conflates legitimate simplification with the spike (likely a
+   design flaw).** The baseline is verbatim - every fjord and skerry. At z4
+   (~10 km/px), correctly removing sub-pixel coastline detail loses large area vs
+   verbatim, so ANY simplifier shows big "lost area" at low zoom, and the 512
+   threshold ("a good simplifier loses ~0") is probably unachievable. The
+   discrimination "worked" only because DP loses MORE than VW; both lose a lot. If
+   this is right, the oracle measures total simplification loss, not the spike, and
+   cannot gate the fix. The codex+Fable review validated this
+   same-source/same-zoom-vs-verbatim design - it may have traded the cross-source
+   confound for a legitimate-simplification confound.
+2. **`OCEAN_VW_AREA_2X = 256` is too aggressive** - codex committed it without the
+   deferred Landing-3 sweep; a lower value keeps more vertices. But even the
+   smallest sweep value still loses SOME area vs verbatim, so this alone may not
+   clear the gate.
+3. **The fix is genuinely insufficient** - VW at the ocean tolerance still cuts
+   coverage.
+
+### The unanswered question
+Whether the VISIBLE spike is actually gone needs the human visual gate; the
+coverage oracle (aggregate lost area) cannot answer it, and the z4/8/3 geometry
+shows VW smoother but reaching the same extent.
+
+### Instrument gaps found while gating
+- `brokkr tilegen` has no `--no-ocean-simplify` passthrough (it is an `elivagar
+  run` flag); `brokkr ocean-coverage` and `brokkr ocean-build` wrappers do not
+  exist. The spec's gate commands are not runnable via `brokkr` as written - the
+  REF build and every `ocean-coverage` run had to invoke the `elivagar` binary
+  directly. The brokkr wrappers are unbuilt bricks (brokkr is external to this
+  repo).
+
+### RESOLUTION - the fix works; the oracle is the flaw (visual gate, 2026-07-12)
+
+The human visual gate settled it. Loaded in the viewer:
+- `norway-41d0227-vw.pmtiles` (the VW fix): **looks perfect - the spike is gone.**
+- `norway-3f4ca38.pmtiles` (DP, before): **has the spikes** (bug confirmed).
+- `norway-41d0227-ref.pmtiles` (verbatim baseline): also looks good - expected,
+  since it is the un-simplified full-detail coastline (no simplification, no
+  artifact). It confirms the spike is purely a DP-simplification artifact that
+  both VW (good simplification) and verbatim (none) avoid.
+
+So **hypothesis 1 is confirmed and hypothesis 3 is rejected**: the VW fix
+eliminates the visible spike, and the coverage oracle's failure to clear was a
+FALSE NEGATIVE. The oracle measures one-sided lost area vs a verbatim baseline,
+but at low zoom ANY correct simplification removes large sub-pixel coastline
+detail vs verbatim, so the oracle cannot separate legitimate detail removal from
+the spike. The 100K+ lost area on the VW build is legitimate low-zoom
+generalization, not a defect; the `--threshold-2x 512` gate is unachievable by
+design.
+
+### Status
+The VW fix is CORRECT (visual gate perfect, earcut clean); the L1 coverage oracle
+is BROKEN as a gate. To land, the authoritative signals are the human visual gate
+(passed), earcut (passed), and an `elivagar regress` ocean-only diff (pending).
+The coverage oracle must either be redesigned to isolate the spike (e.g. compare
+VW-vs-DP, or net one-sided loss beyond what the same simplifier removes on a
+smooth control coast) or dropped as a gate and replaced by the visual gate on the
+record. Do NOT tune `OCEAN_VW_AREA_2X` against the current oracle - it measures the
+wrong thing. The spec's Landings 1/3 (coverage oracle + threshold sweep) need
+rework before this lands.
+
 ## Reproduction
 
 - Shapefile-built archives already on disk (both show it):

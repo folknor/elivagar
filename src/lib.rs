@@ -21,6 +21,7 @@
 //!     ocean_tiles: None,
 //!     ocean_artifact_key: None,
 //!     ocean_only_metadata: false,
+//!     no_ocean_simplify: false,
 //!     skip_to: None,
 //!     in_memory: false,
 //!     compression_level: 6,
@@ -73,6 +74,7 @@ pub(crate) mod multipolygon;
 pub(crate) mod mvt;
 pub mod node_index;
 pub(crate) mod ocean;
+pub mod ocean_coverage;
 mod pipeline;
 pub mod pmtiles_reader;
 pub mod pmtiles_writer;

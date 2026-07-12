@@ -4,6 +4,7 @@ use crate::mvt;
 
 pub(crate) use crate::geometry::overlay::IntPoint;
 use std::ops::Range;
+use std::{cmp::Reverse, collections::BinaryHeap};
 
 pub(crate) type Contour = crate::geometry::overlay::Contour;
 pub(crate) type Shape = crate::geometry::overlay::Shape;
@@ -18,6 +19,7 @@ pub(crate) struct IntRect {
 }
 
 pub(crate) const OCEAN_DP_TOL_PX: i64 = 16;
+pub(crate) const OCEAN_VW_AREA_2X: i128 = 256;
 pub(crate) const OSM_DP_TOL_PX: i64 = 16;
 pub(crate) const TILE_EXTENT_I32: i32 = 4096;
 pub(crate) const TILE_BUFFER_I32: i32 = 128;
@@ -27,6 +29,7 @@ pub(crate) struct IntEmitScratch {
     pub tile_ranges: Vec<Range<usize>>,
     pub geom_buf: Vec<u32>,
     dp: DpScratch,
+    vw: VwScratch,
     overlay: BoolOverlay,
     rect_contour: Contour,
 }
@@ -38,6 +41,7 @@ impl IntEmitScratch {
             tile_ranges: Vec::new(),
             geom_buf: Vec::new(),
             dp: DpScratch::default(),
+            vw: VwScratch::default(),
             overlay: BoolOverlay::new(),
             rect_contour: Vec::with_capacity(4),
         }
@@ -67,6 +71,31 @@ impl IntEmitScratch {
     fn recycle_contours_from(&mut self, shape: &mut Shape, start: usize) {
         self.overlay.recycle_contours_from(shape, start);
     }
+}
+
+#[derive(Default)]
+struct VwScratch {
+    work: Contour,
+    pin_flags: Vec<bool>,
+    prev: Vec<u32>,
+    next: Vec<u32>,
+    alive: Vec<bool>,
+    heap: BinaryHeap<Reverse<VwEntry>>,
+    seq: Vec<u32>,
+    out: Contour,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct VwEntry {
+    area2x: i128,
+    x: i32,
+    y: i32,
+    generation: u32,
+    idx: u32,
+}
+
+pub(crate) fn vw_area_threshold(dp_tol: i64) -> i128 {
+    if dp_tol <= 0 { 0 } else { OCEAN_VW_AREA_2X }
 }
 
 /// Reusable temporaries for `simplify_shape_dp`. The DP simplifier ran at
@@ -346,6 +375,153 @@ pub(crate) fn simplify_shape_dp(
     }
 }
 
+#[hotpath::measure]
+pub(crate) fn simplify_shape_vw(
+    scratch: &mut IntEmitScratch,
+    shape: &mut Shape,
+    area_2x_thresh: i128,
+    pins: Option<&[Vec<bool>]>,
+) {
+    if area_2x_thresh <= 0 {
+        return;
+    }
+    if shape.is_empty() {
+        return;
+    }
+    let outer_pins = pins.and_then(|p| p.first()).map(Vec::as_slice);
+    if !simplify_contour_vw_in_place(
+        &mut shape[0],
+        area_2x_thresh,
+        outer_pins,
+        true,
+        &mut scratch.vw,
+    ) {
+        scratch.recycle_contours_from(shape, 0);
+        return;
+    }
+    let mut write = 1usize;
+    for read in 1..shape.len() {
+        let pin_ring = pins.and_then(|p| p.get(read)).map(Vec::as_slice);
+        if simplify_contour_vw_in_place(
+            &mut shape[read],
+            area_2x_thresh,
+            pin_ring,
+            false,
+            &mut scratch.vw,
+        ) {
+            shape.swap(write, read);
+            write += 1;
+        }
+    }
+    scratch.recycle_contours_from(shape, write);
+}
+
+fn simplify_contour_vw_in_place(
+    contour: &mut Contour,
+    threshold: i128,
+    pins: Option<&[bool]>,
+    outer: bool,
+    vw: &mut VwScratch,
+) -> bool {
+    vw.work.clear();
+    vw.work.extend_from_slice(contour);
+    remove_closing_duplicate(&mut vw.work);
+    vw.pin_flags.clear();
+    if let Some(p) = pins {
+        vw.pin_flags.extend_from_slice(p);
+    }
+    vw.pin_flags.truncate(vw.work.len());
+    vw.pin_flags.resize(vw.work.len(), false);
+    let n = vw.work.len();
+    if n <= 3 {
+        if !ring_is_valid(&vw.work) {
+            return false;
+        }
+        contour.clear();
+        contour.extend_from_slice(&vw.work);
+        orient_ring(contour, outer);
+        return true;
+    }
+    vw.prev.clear();
+    vw.next.clear();
+    vw.alive.clear();
+    vw.seq.clear();
+    vw.heap.clear();
+    vw.prev
+        .extend((0..n).map(|i| u32::try_from((i + n - 1) % n).expect("ring index fits u32")));
+    vw.next
+        .extend((0..n).map(|i| u32::try_from((i + 1) % n).expect("ring index fits u32")));
+    vw.alive.resize(n, true);
+    vw.seq.resize(n, 0);
+    for i in 0..n {
+        vw_refresh(i, vw);
+    }
+    let mut live = n;
+    while live > 3 {
+        let Some(Reverse(entry)) = vw.heap.pop() else {
+            break;
+        };
+        let idx = entry.idx as usize;
+        if !vw.alive[idx] || vw.seq[idx] != entry.generation {
+            continue;
+        }
+        if entry.area2x >= threshold {
+            break;
+        }
+        let left = usize::try_from(vw.prev[idx]).expect("ring index fits usize");
+        let right = usize::try_from(vw.next[idx]).expect("ring index fits usize");
+        vw.alive[idx] = false;
+        vw.next[left] = u32::try_from(right).expect("ring index fits u32");
+        vw.prev[right] = u32::try_from(left).expect("ring index fits u32");
+        live -= 1;
+        vw_refresh(left, vw);
+        vw_refresh(right, vw);
+    }
+    let Some(start) = (0..n)
+        .filter(|&i| vw.alive[i])
+        .min_by_key(|&i| (vw.work[i].x, vw.work[i].y))
+    else {
+        return false;
+    };
+    vw.out.clear();
+    let mut i = start;
+    loop {
+        push_nonduplicate(&mut vw.out, vw.work[i]);
+        i = usize::try_from(vw.next[i]).expect("ring index fits usize");
+        if i == start {
+            break;
+        }
+    }
+    remove_closing_duplicate(&mut vw.out);
+    if !ring_is_valid(&vw.out) {
+        return false;
+    }
+    contour.clear();
+    contour.extend_from_slice(&vw.out);
+    orient_ring(contour, outer);
+    true
+}
+
+fn vw_refresh(i: usize, vw: &mut VwScratch) {
+    if !vw.alive[i] || vw.pin_flags[i] {
+        return;
+    }
+    let a = vw.work[vw.prev[i] as usize];
+    let b = vw.work[i];
+    let c = vw.work[vw.next[i] as usize];
+    let cross = (i128::from(b.x - a.x) * i128::from(c.y - a.y)
+        - i128::from(b.y - a.y) * i128::from(c.x - a.x))
+    .abs();
+    vw.seq[i] = vw.seq[i].wrapping_add(1);
+    vw.heap.push(Reverse(VwEntry {
+        area2x: cross,
+        x: b.x,
+        y: b.y,
+        generation: vw.seq[i],
+        idx: u32::try_from(i).expect("ring index fits u32"),
+    }));
+}
+
 #[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn normalize(shape: Shape, min_area: u64) -> Shapes {
@@ -423,6 +599,23 @@ pub(crate) fn intersect_rect_into(
         .add_contour(&scratch.rect_contour, ShapeType::Clip);
     scratch.overlay.overlay_nested(BoolRule::Intersect, out);
     clean_shapes_in_place(scratch, out, min_area);
+}
+
+pub(crate) fn intersect_shapes_into(
+    scratch: &mut IntEmitScratch,
+    subject: &Shape,
+    clip: &Shape,
+    out: &mut Shapes,
+) {
+    scratch.overlay.recycle(out);
+    if subject.is_empty() || clip.is_empty() {
+        return;
+    }
+    scratch.overlay.clear();
+    scratch.overlay.add_shape(subject, ShapeType::Subject);
+    scratch.overlay.add_shape(clip, ShapeType::Clip);
+    scratch.overlay.overlay_nested(BoolRule::Intersect, out);
+    clean_shapes_in_place(scratch, out, 0);
 }
 
 #[allow(dead_code)]
@@ -1135,6 +1328,129 @@ mod tests {
         let mut shape = vec![ring];
         simplify_shape_dp(&mut IntEmitScratch::new(), &mut shape, 16, None);
         assert!(!shape[0].contains(&p(1, 8)));
+    }
+
+    #[test]
+    fn simplify_shape_vw_rotation_invariance() {
+        let ring = vec![p(0, 0), p(40, 0), p(40, 2), p(40, 40), p(0, 40), p(0, 2)];
+        let mut a = vec![ring.clone()];
+        let mut b = vec![ring[3..].to_vec()];
+        b[0].extend_from_slice(&ring[..3]);
+        let mut scratch = IntEmitScratch::new();
+        simplify_shape_vw(&mut scratch, &mut a, 256, None);
+        simplify_shape_vw(&mut scratch, &mut b, 256, None);
+        assert_eq!(sorted_points(&a[0]), sorted_points(&b[0]));
+    }
+
+    #[test]
+    fn simplify_shape_vw_keeps_pinned_vertices_under_aggressive_threshold() {
+        let target = p(50, 1);
+        let ring = vec![
+            p(0, 0),
+            p(25, 0),
+            target,
+            p(75, 0),
+            p(100, 0),
+            p(100, 100),
+            p(0, 100),
+        ];
+        let mut plain = vec![ring.clone()];
+        let mut pinned = vec![ring];
+        let flags = vec![vec![false, false, true, false, false, false, false]];
+        let mut scratch = IntEmitScratch::new();
+        simplify_shape_vw(&mut scratch, &mut plain, 10_000, None);
+        simplify_shape_vw(&mut scratch, &mut pinned, 10_000, Some(&flags));
+        assert!(!plain[0].contains(&target));
+        assert!(pinned[0].contains(&target));
+    }
+
+    #[test]
+    fn simplify_shape_vw_ring_floor_keeps_triangle() {
+        let mut shape = vec![vec![p(0, 0), p(1, 0), p(100, 0), p(0, 100)]];
+        simplify_shape_vw(&mut IntEmitScratch::new(), &mut shape, 10_000, None);
+        assert_eq!(shape[0].len(), 3);
+    }
+
+    #[test]
+    fn simplify_shape_vw_drops_shape_when_outer_dies() {
+        let mut shape = vec![
+            vec![p(0, 0), p(1, 0), p(2, 0)],
+            vec![p(10, 10), p(20, 10), p(20, 20), p(10, 20)],
+        ];
+        simplify_shape_vw(&mut IntEmitScratch::new(), &mut shape, 16, None);
+        assert!(shape.is_empty());
+    }
+
+    #[test]
+    fn simplify_shape_vw_threshold_zero_is_verbatim() {
+        let mut shape = vec![vec![p(5, 0), p(0, 0), p(0, 5), p(5, 5), p(5, 0)]];
+        let original = shape.clone();
+        simplify_shape_vw(&mut IntEmitScratch::new(), &mut shape, 0, None);
+        assert_eq!(shape, original);
+    }
+
+    /// One-sided coverage lost when `result` is used in place of `source`:
+    /// `area(source) - area(source INTERSECT result)`, in 2x-pixel^2 units.
+    fn one_sided_lost(source: &Contour, result: &Shape) -> i128 {
+        let src_area = signed_area_2x(source).abs();
+        if result.is_empty() {
+            return src_area;
+        }
+        let source_shape = vec![source.clone()];
+        let mut scratch = IntEmitScratch::new();
+        let mut inter = Vec::new();
+        intersect_shapes_into(&mut scratch, &source_shape, result, &mut inter);
+        let inter_area: i128 = inter
+            .iter()
+            .map(|s| {
+                s.iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        if i == 0 {
+                            signed_area_2x(r).abs()
+                        } else {
+                            -signed_area_2x(r).abs()
+                        }
+                    })
+                    .sum::<i128>()
+            })
+            .sum();
+        (src_area - inter_area).max(0)
+    }
+
+    #[test]
+    fn simplify_shape_vw_preserves_coverage_on_thin_fjord() {
+        // A long, thin water finger: DP at tol 16 bounds only perpendicular
+        // deviation, so the two near-coincident long sides flatten into a
+        // chord and the whole feature is dropped, losing all its coverage.
+        // VW bounds triangle area instead, so the finger's corner triangles
+        // (base 400, height 2 -> area_2x 800) clear the 256 threshold and it
+        // survives. This is the exact property the whole fix turns on.
+        let fjord = vec![p(0, 0), p(400, 0), p(400, 2), p(0, 2)];
+
+        let mut vw_shape = vec![fjord.clone()];
+        simplify_shape_vw(
+            &mut IntEmitScratch::new(),
+            &mut vw_shape,
+            OCEAN_VW_AREA_2X,
+            None,
+        );
+        let vw_lost = one_sided_lost(&fjord, &vw_shape);
+
+        let mut dp_shape = vec![fjord.clone()];
+        simplify_shape_dp(
+            &mut IntEmitScratch::new(),
+            &mut dp_shape,
+            OCEAN_DP_TOL_PX,
+            None,
+        );
+        let dp_lost = one_sided_lost(&fjord, &dp_shape);
+
+        assert!(vw_lost <= 8, "VW lost {vw_lost} of the thin finger");
+        assert!(
+            dp_lost > 100 * vw_lost.max(1),
+            "DP lost {dp_lost}, VW lost {vw_lost}; VW should preserve coverage"
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--ocean path.shp` | Ocean shapefile (`water-polygons-split-3857`). Auto-detected from `data/` when omitted |
 | `--ocean-simplified path.shp` | Simplified ocean shapefile for z0-7. Auto-detected from `data/` when omitted |
 | `--no-ocean` | Disable ocean shapefile processing (skip auto-detection) |
+| `--no-ocean-simplify` | Emit ocean polygons verbatim (skip the ocean VW simplifier) for a same-source coverage baseline. Diagnostic only |
 | `--tmp-dir path` | Directory for temporary sort files (default: `data/tilegen_tmp`) |
 | `--skip-to ocean\|sort\|assemble` | Resume from a previous run's checkpoint |
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |

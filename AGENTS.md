@@ -224,7 +224,11 @@ be stored). Example: `brokkr tilegen --bench --force --dataset denmark`.
 
 ## Scripts
 
-No shell scripts. Build/bench/verify tooling is in `brokkr`.
+Build/bench/verify tooling is in `brokkr`. One helper shell script lives in
+`scripts/` for a gate brokkr does not wrap.
+
+**Shell (`scripts/`, run from repo root):**
+- `ocean-coverage.sh <archive.pmtiles> [<archive.pmtiles> ...] [-- <ocean-coverage flags>]` - drives the ocean coverage discriminator that `brokkr` cannot: there is no `ocean-coverage` wrapper and no `--no-ocean-simplify` passthrough on `tilegen`, so it invokes the `elivagar` binary directly. It builds a fresh `elivagar` release, builds and caches a `--no-ocean-simplify` verbatim baseline for the dataset (rebuilt when the binary or the PBF is newer than the cache), then runs `elivagar ocean-coverage` for EACH archive passed, so one invocation runs a whole comparison (e.g. a DP build that should FIRE and a VW build that should CLEAR). Flags after `--` pass through to `ocean-coverage`. Dataset paths default to the norway locations extract; override via env (`PBF=`, `OCEAN=`, `OCEAN_SIMPLIFIED=`, `REF=` - change `REF` when you change dataset, the baseline is dataset-specific). Diagnostic, not a gate - see the `ocean-coverage` subcommand caveat.
 
 **Node (`scripts/validate/`, pnpm; run from that directory):**
 - `earcut-oracle.mjs <file.pmtiles> [layer] [threshold]` - **the MapLibre tessellation-fidelity gate.** Decodes every tile with @mapbox/vector-tile, groups rings with maplibre-gl's verbatim self-calibrating `classifyRings` (maxRings=500), tessellates each polygon with earcut, and reports per-zoom `earcut.deviation` plus misattached-hole counts (hole bbox outside its assigned outer). Pass = 0 over threshold, 0 misattached, on every polygon layer. This is the oracle that caught the R23 ClosePath cursor bug after every internal validator passed for three months - run it on any change that touches geometry or MVT encoding.
@@ -236,7 +240,7 @@ No shell scripts. Build/bench/verify tooling is in `brokkr`.
 
 ## Architecture
 
-Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`, `verify`, `svg`, `diag`).
+Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`, `verify`, `svg`, `diag`, `regress`, `ocean-coverage`).
 
 ### Modules
 
@@ -261,6 +265,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `pmtiles_writer.rs` - PMTiles v3 writer with Hilbert tile IDs
 - `inspect.rs` - PMTiles v3 archive inspector (header + metadata reader)
 - `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG)
+- `ocean_coverage.rs` - same-source one-sided ocean coverage diff (the `ocean-coverage` subcommand); decodes both archives' ocean polygons and integrates lost area per tile. Diagnostic, not a gate.
 - `node_index.rs` - node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
 - `way_index.rs` - flat mmap'd way geometry index
 
@@ -295,6 +300,7 @@ Sequential, same PBF input:
 - `--ocean path.shp` - ocean polygon shapefile (water-polygons-split-3857). Auto-detected from `data/` when omitted.
 - `--ocean-simplified path.shp` - simplified ocean shapefile for z0-7. Auto-detected from `data/` when omitted.
 - `--no-ocean` - disable ocean shapefile processing (skip auto-detection)
+- `--no-ocean-simplify` - emit ocean polygons verbatim, skipping the ocean VW simplifier, to build a same-source coverage baseline. Diagnostic only; not for production tiles.
 - `--skip-to ocean|sort` - resume from checkpoint
 - `--in-memory` - keep tile blob in RAM (faster for small extracts)
 - `--compression-level 0-10` - compression level (default 6)
@@ -346,6 +352,25 @@ settled in the spec-5 output-regression landing (see git history).
 ### `elivagar diag <FILE> -z <Z> -x <X> -y <Y>`
 
 Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, finds polygon features across all layers, and prints per-ring vertex count, signed area, and winding direction (CW = outer, CCW = hole). Prints first/last 3 vertices for large rings, full vertices for small ones (≤6).
+
+### `elivagar ocean-coverage <FILE> --baseline <REF> [--zmin Z] [--zmax Z] [--threshold-2x N] [--layer L]`
+
+Diagnostic, NOT a landing gate. Measures per-tile one-sided ocean coverage
+loss of FILE against a verbatim same-source baseline REF (built with `--no-ocean-simplify`).
+For each z in `[zmin, zmax]` it clips both archives to the tile extent, computes
+`area(ref) - area(ref INTERSECT file)` in 2x-pixel^2 units, prints every tile
+over `--threshold-2x` plus a per-zoom max/p99/worst summary, and exits nonzero
+if any tile exceeds the threshold. Defaults: zmin 1, zmax 6, threshold-2x 512,
+layer `ocean`.
+
+Known limitation: at low zoom ANY correct simplifier removes large sub-pixel
+coastline detail versus a verbatim baseline, so this over-reports and cannot
+separate legitimate generalization from a real coverage defect (a confirmed
+false negative on the 2026-07-12 ocean VW landing - see
+`notes/ocean-coastline-spike-problem.md`). Use it as a discriminator - compare
+two builds' losses to price a regression - never as a pass/fail gate. The
+authoritative ocean gates remain the earcut oracle and the human visual check.
+Driven by `scripts/ocean-coverage.sh` (brokkr has no wrapper).
 
 ## Key conventions
 

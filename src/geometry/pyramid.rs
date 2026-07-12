@@ -2,7 +2,7 @@ use crate::geometry::int_ocean::{
     Contour, IntEmitScratch, IntPoint, IntRect, Shape, Shapes, TILE_BUFFER_I32, TILE_EXTENT_I32,
     contour_area_is_below, copy_shape_into, emit_full_tile, encode_tile_shape, intersect_rect_into,
     normalize_into, point_in_contour, rescale_shape_pinned_into, shape_bbox, signed_area_2x,
-    simplify_shape_dp,
+    simplify_shape_dp, simplify_shape_vw, vw_area_threshold,
 };
 use rustc_hash::FxHashSet;
 
@@ -16,6 +16,13 @@ pub(crate) struct PyramidParams<'a> {
     /// Ocean supplies this ownership predicate so artifact-interior cells are
     /// pruned before geometry work. OSM leaves it unset.
     pub tile_filter: Option<&'a (dyn Fn(u8, u32, u32) -> bool + Sync)>,
+    pub simplifier: Simplifier,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Simplifier {
+    DouglasPeucker,
+    Visvalingam,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,12 +353,20 @@ fn emit_cell(
             scratch.int.recycle_owned_shape(shape_z);
             continue;
         }
-        simplify_shape_dp(
-            &mut scratch.int,
-            &mut shape_z,
-            dp_tol,
-            Some(&scratch.flags_z),
-        );
+        match params.simplifier {
+            Simplifier::DouglasPeucker => simplify_shape_dp(
+                &mut scratch.int,
+                &mut shape_z,
+                dp_tol,
+                Some(&scratch.flags_z),
+            ),
+            Simplifier::Visvalingam => simplify_shape_vw(
+                &mut scratch.int,
+                &mut shape_z,
+                vw_area_threshold(dp_tol),
+                Some(&scratch.flags_z),
+            ),
+        }
         if shape_z.is_empty() {
             scratch.int.recycle_owned_shape(shape_z);
             continue;
@@ -1110,6 +1125,7 @@ mod tests {
             min_area: &|_| 0,
             pins: None,
             tile_filter: None,
+            simplifier: Simplifier::DouglasPeucker,
         }
     }
 
@@ -1378,6 +1394,77 @@ mod tests {
         // With Brick 8's window thinning, cross-side seam drift is bounded
         // by the 2-unit strip tolerance instead of zero: budget the XOR at
         // 2 units times the window height per side.
+        let budget = 2 * 2 * u128::try_from(window.max_y - window.min_y).expect("window height");
+        let xor_area = xor_shapes_area(&left_shapes, &right_shapes);
+        assert!(
+            xor_area <= budget,
+            "seam window drift {xor_area} exceeds budget {budget}"
+        );
+    }
+
+    #[test]
+    fn seam_window_vw_xor_empty_for_shared_window() {
+        // Clone of the DP seam test with the Visvalingam simplifier: the
+        // edge-window pins are never removed under either simplifier, so the
+        // shared seam vertices are identical on both sides and the tol-2
+        // window thinning applies equally. Cross-side drift stays inside the
+        // same 2-unit-per-side budget.
+        let mut params = params(1, 1, 1, 16);
+        params.simplifier = Simplifier::Visvalingam;
+        let source = shape(
+            &[
+                (3300, 600),
+                (4850, 3500),
+                (4620, 3650),
+                (4230, 2450),
+                (4090, 2520),
+                (3970, 2380),
+                (3650, 800),
+            ],
+            &[],
+        );
+        let mut int = IntEmitScratch::new();
+        let left_frag = intersect_rect(
+            &source,
+            buffered_cell_rect_base(1, PyramidCell { z: 1, tx: 0, ty: 0 }),
+            0,
+        );
+        let right_frag = intersect_rect(
+            &source,
+            buffered_cell_rect_base(1, PyramidCell { z: 1, tx: 1, ty: 0 }),
+            0,
+        );
+
+        let mut left = BTreeMap::new();
+        let mut right = BTreeMap::new();
+        let mut ps = PyramidScratch::new();
+        emit_shape_pyramid_cell(
+            PyramidCell { z: 1, tx: 0, ty: 0 },
+            left_frag,
+            &params,
+            &mut ps,
+            &mut |z, tx, ty, geom, _kind| {
+                left.insert((z, tx, ty), geom.to_vec());
+            },
+        );
+        emit_shape_pyramid_cell(
+            PyramidCell { z: 1, tx: 1, ty: 0 },
+            right_frag,
+            &params,
+            &mut ps,
+            &mut |z, tx, ty, geom, _kind| {
+                right.insert((z, tx, ty), geom.to_vec());
+            },
+        );
+
+        let window = IntRect {
+            min_x: 4096 - 128,
+            min_y: -128,
+            max_x: 4096 + 128,
+            max_y: 4096 + 128,
+        };
+        let left_shapes = commands_to_window_shapes(&left, window, &mut int);
+        let right_shapes = commands_to_window_shapes(&right, window, &mut int);
         let budget = 2 * 2 * u128::try_from(window.max_y - window.min_y).expect("window height");
         let xor_area = xor_shapes_area(&left_shapes, &right_shapes);
         assert!(

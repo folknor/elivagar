@@ -9,7 +9,7 @@ use crate::geometry::int_ocean::{
     shape_bbox,
 };
 use crate::geometry::pyramid::{
-    PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, emit_shape_pyramid,
+    PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid,
     emit_shape_pyramid_cell, split_for_parallel,
 };
 use crate::geometry::{self, MercBbox, Point};
@@ -623,6 +623,7 @@ pub(crate) fn process_ocean_shapefile(
     max_zoom: u8,
     sort_writer: &mut SortWriter,
     pass_grid: Option<&OceanPassGrid>,
+    no_simplify: bool,
 ) -> Result<u64, std::io::Error> {
     if pass_grid.is_some_and(|grid| grid.band_is_empty(min_zoom, max_zoom)) {
         eprintln!("  Ocean band is empty; skipping shapefile geometry");
@@ -769,7 +770,7 @@ pub(crate) fn process_ocean_shapefile(
     let tile_filter = |z, tx, ty| pass_grid.is_none_or(|grid| ocean_band_tile(z, tx, ty, grid));
     let tile_filter_dyn: Option<&(dyn Fn(u8, u32, u32) -> bool + Sync)> =
         pass_grid.map(|_| &tile_filter as &(dyn Fn(u8, u32, u32) -> bool + Sync));
-    let params = ocean_params(min_zoom, max_zoom, tile_filter_dyn);
+    let params = ocean_params(min_zoom, max_zoom, tile_filter_dyn, no_simplify);
     // Per-piece item target for the parallel frontier. Root cells of a
     // large piece usually exceed this on their own (the frontier loop is
     // then a no-op); it only forces expansion for single-root ranges.
@@ -1173,20 +1174,30 @@ fn ocean_params<'a>(
     min_zoom: u8,
     max_zoom: u8,
     tile_filter: Option<&'a (dyn Fn(u8, u32, u32) -> bool + Sync)>,
+    no_simplify: bool,
 ) -> PyramidParams<'a> {
     PyramidParams {
         maxz: max_zoom,
         z_top: min_zoom,
         z_bottom: max_zoom,
-        dp_tol: &ocean_dp_tol,
+        dp_tol: if no_simplify {
+            &ocean_no_simplify_tol
+        } else {
+            &ocean_dp_tol
+        },
         min_area: &ocean_min_area,
         pins: None,
         tile_filter,
+        simplifier: Simplifier::Visvalingam,
     }
 }
 
 fn ocean_dp_tol(_z: u8) -> i64 {
     OCEAN_DP_TOL_PX
+}
+
+fn ocean_no_simplify_tol(_z: u8) -> i64 {
+    0
 }
 
 fn ocean_min_area(_z: u8) -> u64 {
@@ -1737,7 +1748,8 @@ mod tests {
         };
 
         let emitted =
-            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
+            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
+                .unwrap();
 
         assert!(emitted > 0, "expected ocean features to be emitted");
 
@@ -1765,9 +1777,16 @@ mod tests {
             max_y: 3.0,
         };
 
-        let emitted =
-            process_ocean_shapefile(&shp_path, &disjoint_bounds, 0, 0, &mut sort_writer, None)
-                .unwrap();
+        let emitted = process_ocean_shapefile(
+            &shp_path,
+            &disjoint_bounds,
+            0,
+            0,
+            &mut sort_writer,
+            None,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(emitted, 0, "expected no ocean features for disjoint bounds");
     }
@@ -1788,7 +1807,8 @@ mod tests {
         };
 
         let emitted =
-            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
+            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
+                .unwrap();
         assert!(emitted > 0, "expected ocean features to be emitted");
 
         let mut reader = sort_writer.finish().unwrap();
@@ -1818,7 +1838,7 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
             .expect_err("short .shx header should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("invalid .shx file"));
@@ -1839,7 +1859,7 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
             .expect_err("missing .shx should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
@@ -1863,7 +1883,8 @@ mod tests {
             max_y: 1.0,
         };
         let emitted =
-            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
+            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
+                .unwrap();
         assert_eq!(emitted, 0, "truncated record should be skipped");
     }
 }

@@ -126,6 +126,8 @@ pub struct TilegenConfig {
     pub ocean_artifact_key: Option<crate::ocean::OceanArtifactKey>,
     /// Restrict PMTiles metadata to the ocean layer for an ocean artifact.
     pub ocean_only_metadata: bool,
+    /// Disable ocean simplification for a same-source coverage baseline.
+    pub no_ocean_simplify: bool,
     /// Skip to a later phase, reusing checkpoint data from a previous run.
     pub skip_to: Option<SkipTo>,
     /// Keep tile blob in memory instead of streaming to a temp file.
@@ -579,6 +581,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                         active_ocean_artifact
                             .as_ref()
                             .and_then(|artifact| artifact.grids().first()),
+                        config.no_ocean_simplify,
                     )?;
                 }
                 if config.max_zoom >= 8 {
@@ -593,6 +596,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                         active_ocean_artifact
                             .as_ref()
                             .and_then(|artifact| artifact.grids().last()),
+                        config.no_ocean_simplify,
                     )?;
                 }
             } else {
@@ -605,6 +609,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     active_ocean_artifact
                         .as_ref()
                         .and_then(|artifact| artifact.grids().first()),
+                    config.no_ocean_simplify,
                 )?;
             }
 
@@ -996,10 +1001,26 @@ pub fn ocean_build(
         max_y: 1.0,
     };
     if let Some(simplified) = simplified_shapefile {
-        crate::ocean::process_ocean_shapefile(simplified, &world, 0, 7, &mut writer, None)?;
-        crate::ocean::process_ocean_shapefile(full_shapefile, &world, 8, 14, &mut writer, None)?;
+        crate::ocean::process_ocean_shapefile(simplified, &world, 0, 7, &mut writer, None, false)?;
+        crate::ocean::process_ocean_shapefile(
+            full_shapefile,
+            &world,
+            8,
+            14,
+            &mut writer,
+            None,
+            false,
+        )?;
     } else {
-        crate::ocean::process_ocean_shapefile(full_shapefile, &world, 0, 14, &mut writer, None)?;
+        crate::ocean::process_ocean_shapefile(
+            full_shapefile,
+            &world,
+            0,
+            14,
+            &mut writer,
+            None,
+            false,
+        )?;
     }
     writer.flush()?;
     let mut reader = writer.finish()?;
@@ -1014,6 +1035,7 @@ pub fn ocean_build(
         ocean_tiles: None,
         ocean_artifact_key: Some(key),
         ocean_only_metadata: true,
+        no_ocean_simplify: false,
         skip_to: None,
         in_memory: false,
         compression_level,

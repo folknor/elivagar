@@ -58,6 +58,8 @@ enum Command {
     Diag(DiagArgs),
     /// Compare two PMTiles archives semantically.
     Regress(RegressArgs),
+    /// Compare ocean coverage against a verbatim same-source baseline.
+    OceanCoverage(OceanCoverageArgs),
 }
 
 /// Arguments for the `diag` subcommand.
@@ -147,6 +149,10 @@ struct RunArgs {
     /// Disable ocean shapefile processing (skip auto-detection).
     #[arg(long)]
     no_ocean: bool,
+
+    /// Disable ocean polygon simplification for a same-source coverage baseline.
+    #[arg(long)]
+    no_ocean_simplify: bool,
 
     /// Tile payload format.
     #[arg(long, value_enum, default_value_t = TileFormatArg::Mvt)]
@@ -290,6 +296,21 @@ struct RegressArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Parser)]
+struct OceanCoverageArgs {
+    file: PathBuf,
+    #[arg(long)]
+    baseline: PathBuf,
+    #[arg(long, default_value_t = 1)]
+    zmin: u8,
+    #[arg(long, default_value_t = 6)]
+    zmax: u8,
+    #[arg(long, default_value_t = 512)]
+    threshold_2x: i128,
+    #[arg(long, default_value = "ocean")]
+    layer: String,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -475,6 +496,22 @@ fn main() {
         }
         Command::Regress(args) => {
             run_regress(&args);
+        }
+        Command::OceanCoverage(args) => {
+            let cfg = elivagar::ocean_coverage::CoverageConfig {
+                zmin: args.zmin,
+                zmax: args.zmax,
+                threshold_2x: args.threshold_2x,
+                layer: args.layer,
+            };
+            match elivagar::ocean_coverage::coverage(&args.file, &args.baseline, &cfg) {
+                Ok(true) => {}
+                Ok(false) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }
@@ -835,6 +872,7 @@ fn run(args: RunArgs) {
         ocean_tiles,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
+        no_ocean_simplify: args.no_ocean_simplify,
         skip_to,
         in_memory: args.in_memory,
         compression_level: args.compression_level,

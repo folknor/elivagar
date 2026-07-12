@@ -5,7 +5,7 @@ use crate::geometry::int_ocean::{
     IntRect, OSM_DP_TOL_PX, Shape, TILE_EXTENT_I32, quantize_polygon_into,
     quantize_polygon_pinned_into, shape_bbox,
 };
-use crate::geometry::pyramid::{PyramidParams, PyramidScratch, emit_shape_pyramid};
+use crate::geometry::pyramid::{PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid};
 use crate::geometry::{self, BUFFER_FRACTION, ClipRect, MercBbox, Point, merc_bbox};
 use crate::multipolygon::MemberWay;
 use crate::mvt::{self, GeomType};
@@ -815,6 +815,7 @@ pub(super) fn emit_polygon_feature(
         min_area: &min_area,
         pins,
         tile_filter: None,
+        simplifier: Simplifier::DouglasPeucker,
     };
     let mut count: u64 = 0;
     let attrs_by_zoom = &mut scratch.attrs_by_zoom;
@@ -933,6 +934,7 @@ pub(super) fn emit_multipolygon_feature(
         min_area: &min_area,
         pins,
         tile_filter: None,
+        simplifier: Simplifier::DouglasPeucker,
     };
     let mut count: u64 = 0;
     let attrs_by_zoom = &mut emit_scratch.attrs_by_zoom;
