@@ -342,6 +342,33 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
     Ok(OceanMode::Band { key })
 }
 
+/// Downgrade artifact activation to the computed path unless this run's data
+/// bounds leave an EMPTY band on every pass grid - i.e. bounds that cover the
+/// world. Measured on denmark (2026-07-12, regress vs blessed at `92ed329`):
+/// interior tiles are NOT independent of the ocean clip rect - the pyramid's
+/// root-cell selection and row-band bisection depend on each piece's clipped
+/// extent, so a world-clipped piece descends with different seam structure
+/// than a bounds-clipped one (27 structural ocean diffs, one on a tile whose
+/// buffered footprint never touches the clip edge). No band width fixes a
+/// non-edge effect, so extracts keep the computed path; the artifact serves
+/// only runs where nothing is computed and no seam can exist.
+fn refine_ocean_mode(mode: OceanMode, bounds: &MercBbox, config: &TilegenConfig) -> OceanMode {
+    match mode {
+        OceanMode::Band { key } => {
+            let band_empty = ocean_pass_max_zooms(config).into_iter().all(|max_zoom| {
+                crate::ocean::OceanPassGrid::for_bounds(bounds, max_zoom)
+                    .band_is_empty(config.min_zoom, config.max_zoom)
+            });
+            if band_empty {
+                OceanMode::Band { key }
+            } else {
+                OceanMode::Computed
+            }
+        }
+        other => other,
+    }
+}
+
 fn ocean_pass_max_zooms(config: &TilegenConfig) -> Vec<u8> {
     let mut zooms = Vec::with_capacity(2);
     if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
@@ -433,9 +460,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     let total_start = Instant::now();
     let skip = config.skip_to;
-    let ocean_mode = resolved_ocean_mode(config)?;
+    let mut ocean_mode = resolved_ocean_mode(config)?;
     if skip.is_some() {
-        let (_, _, checkpoint_ocean_mode) = load_checkpoint(&config.tmp_dir)?;
+        let (checkpoint_bounds, _, checkpoint_ocean_mode) = load_checkpoint(&config.tmp_dir)?;
+        ocean_mode = refine_ocean_mode(ocean_mode, &checkpoint_bounds, config);
         if checkpoint_ocean_mode != ocean_mode {
             return Err(PipelineError("checkpoint ocean mode differs from this run; --skip-to ocean, sort, and assemble cannot resume".to_string()));
         }
@@ -502,6 +530,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
             }
             emit_allocator_boundary("phase12_end");
+            ocean_mode = refine_ocean_mode(ocean_mode, &bounds_out, config);
             save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count(), &ocean_mode)?;
             sw
         } else {
@@ -527,18 +556,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         active_ocean_artifact = if let (OceanMode::Band { key }, Some(path)) =
             (&ocean_mode, config.ocean_tiles.as_deref())
         {
-            let mut pass_max_zooms = Vec::new();
-            if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
-                pass_max_zooms.push(config.max_zoom.min(7));
-            }
-            if config.ocean_simplified_shapefile.is_none() || config.max_zoom >= 8 {
-                pass_max_zooms.push(config.max_zoom);
-            }
+            // refine_ocean_mode already downgraded extract bounds to
+            // Computed; reaching here means the band is empty everywhere.
             let artifact = std::sync::Arc::new(crate::ocean::OceanTiles::open(
                 path,
                 key,
                 &data_bounds,
-                &pass_max_zooms,
+                &ocean_pass_max_zooms(config),
             )?);
             eprintln!(
                 "  Ocean artifact active: {} runs, {} pass grids",
@@ -549,6 +573,11 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         } else {
             None
         };
+        if matches!(ocean_mode, OceanMode::Computed) && config.ocean_tiles.is_some() {
+            eprintln!(
+                "  Ocean artifact inactive: extract bounds leave a computed band; using computed ocean"
+            );
+        }
 
         // --- Ocean shapefile processing ---
         // When a simplified shapefile is provided, use it for z0-7 and the

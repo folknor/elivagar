@@ -786,10 +786,23 @@ codex critique rounds plus a competitor-comparison review folded). Key
 survey deltas vs the theory above: dedup is post-gzip storage-only, so
 the reused 85% of NA's addressed tiles still pay merge+encode+gzip -
 the artifact deletes that, not just the phase; the artifact is itself a
-PMTiles archive consumed run-aware at assemble; extracts keep a
-recomputed boundary band so the standing denmark gate exercises the
-artifact path. Awaiting implementation go-ahead (benches queued ahead
-of it).
+PMTiles archive consumed run-aware at assemble.
+
+IMPLEMENTED same day (`92ed329` + follow-up): the world artifact exists
+- 942.7 MB, 212.4M addressed tiles, 9.2M unique blobs, 13.97M directory
+runs, 95.7% deduplicated, verify + earcut clean in the new run-aware
+gate modes. The spec's extract hybrid (boundary band + artifact
+interior) was REFUTED by its own gate: interior tiles depend on the
+piece clip extent through the pyramid's root/bisection structure (27
+structural ocean diffs on denmark, one strictly interior), so the
+pre-agreed stopping-rule fallback engaged - the artifact activates only
+on world-covering bounds. Consequences for this ledger: extracts (and
+the NA reading) keep today's computed numbers; the ocean phase
+deletion, its 12-17 GB planet RSS line, the ~290M-record sort share,
+and the ~236M assemble encode chains are all claimed at PLANET bounds
+only, where the activation test (empty band everywhere) guarantees no
+computed/artifact seam exists. The planet dry run is where H5's win is
+first measured end to end.
 
 ### H6: Kill the way-path allocation churn with per-worker scratch
 
