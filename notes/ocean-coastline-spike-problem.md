@@ -157,10 +157,57 @@ separately, pin shared boundaries for the latent seam.
   (`seam_window_dp_tol_16_xor_empty_for_shared_window`, `pyramid.rs:1322`) shows
   cell seams were budgeted but *piece* seams and coverage loss were never modeled.
 
+## Prior Visvalingam attempt (failure reconciled)
+
+Visvalingam-Whyatt was tried before and reverted (2026-02-26). The full writeup
+`notes/vw-simplification-experiment.md` was deleted in commit `8e0d77f`; recover it
+with `git show 8e0d77f~1:notes/vw-simplification-experiment.md`. What actually
+happened:
+
+- It was a **global** swap of `for_each_zoom_simplified` - the **OSM** per-feature
+  DP cascade - to VW, motivated purely by **performance** (that function was the #1
+  CPU consumer). It did NOT touch the ocean path (`simplify_shape_dp` in the
+  pyramid).
+- Reverted because it was **slower** (+0.6s), for two reasons: (1) VW's per-call
+  allocation (five vecs plus a heap) is dwarfed by DP's zero-alloc recursive scan
+  for the **~10-vertex average OSM geometry**; (2) VW as implemented was
+  **non-cascading** (filters the original at each zoom), so it produced **more**
+  low-zoom output (+7 MB, +112K features) than DP's cascade, which double-simplifies
+  z14 down to z0 and so yields less low-zoom data and less downstream work. A hybrid
+  (small to DP, large to VW at 24 vertices) also failed to help.
+- Crucially the failure was **perf plus output size, never correctness** - the
+  writeup notes VW produced "more detailed (higher quality)" geometry. Its own
+  conclusion: VW "would only help if the geometry distribution were different -
+  fewer, larger geometries where O(n log n) vs O(n squared) actually matters."
+
+That conclusion points straight at the ocean case, and none of the failure reasons
+transfer:
+
+- Ocean coastline rings are **large** (the located spike's source ring had 700+
+  vertices) - exactly the "fewer, larger geometries" VW is for; the alloc overhead
+  amortizes.
+- Ocean is a **tiny fraction** of features and uses a **different** simplify
+  function (`simplify_shape_dp`, untouched by the prior attempt), so the global OSM
+  perf regression does not arise.
+- VW's **area-based** metric is inherently more coverage-preserving than DP's
+  perpendicular-distance metric - which is the exact cause of the long
+  coverage-cutting chords here.
+- VW producing "more low-zoom detail" is the **desired** direction for a coverage
+  mask (the bug is too little coverage, not too much).
+
+So VW is a well-motivated candidate. The Phase B spec must still (a) scope it to
+ocean only, (b) measure the low-zoom ocean output-size increase against the perf
+budget, and (c) decide cascading vs non-cascading - but it is applying VW to the
+geometry class the prior experiment itself named as where VW wins, not re-proposing
+the logged failure.
+
 ## Still open (for the fix, not the diagnosis)
 
-- The **fix choice** - tighter tolerance vs Visvalingam vs a coverage-preserving
-  rule - is unspecced.
+- The **fix approach is Visvalingam**, scoped to the ocean simplify path.
+  Tighter DP tolerance and a global DP-to-VW swap were both tried before and did
+  not pan out, so the path is a targeted ocean-only VW, not a tolerance tweak.
+  Remaining spec work: exact scope, cascading vs non-cascading, and the low-zoom
+  ocean output-size measurement against the perf budget.
 - A **coverage / notch oracle** to gate any fix (earcut is blind here).
 - The **latent seam** guard - a separate item.
 
