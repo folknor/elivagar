@@ -1,26 +1,34 @@
 #!/usr/bin/env bash
 #
-# Ocean-coverage gate helper.
+# Ocean-coverage DIAGNOSTIC helper (NOT a gate).
+#
+# Measures per-tile one-sided ocean coverage loss of each archive against a
+# verbatim same-source baseline. This is a discriminator for triage, not a
+# pass/fail gate: at low zoom any correct simplifier loses large sub-pixel
+# coastline detail vs a verbatim baseline, so a good build still reports large
+# losses. It false-negatived a working fix on the 2026-07-12 VW landing - the
+# authoritative ocean gates are the earcut oracle and the human visual check.
+# The nonzero exit on threshold overflow is a triage signal, not a verdict.
 #
 # brokkr has no `ocean-coverage` wrapper and no `--no-ocean-simplify` passthrough
-# on `tilegen`, so the ocean coverage gate cannot be driven through brokkr. This
-# script drives the `elivagar` binary directly. It:
+# on `tilegen`, so this cannot be driven through brokkr. The script drives the
+# `elivagar` binary directly. It:
 #   1. builds a fresh elivagar release (so the binary is always up to date),
 #   2. builds/caches a `--no-ocean-simplify` verbatim baseline for the dataset
 #      (rebuilt when the binary or the PBF is newer than the cached baseline),
 #   3. runs `elivagar ocean-coverage <archive> --baseline <ref>` for EACH archive
-#      passed - so one invocation runs the whole comparison (e.g. the DP build,
-#      which must FIRE, and the VW build, which must CLEAR).
+#      passed - so one invocation compares several builds at once (e.g. a DP
+#      build against a VW build, to see which loses more coverage where).
 #
 # Usage:
 #   scripts/ocean-coverage.sh <archive.pmtiles> [<archive.pmtiles> ...] [-- <ocean-coverage flags>]
 #
-# The full z1-6 gate (DP must fire large losses, VW must come back clean):
+# Compare two builds across z1-6 (which loses more at the spike tiles):
 #   scripts/ocean-coverage.sh \
 #     data/tilegen/norway-3f4ca38.pmtiles \
 #     data/tilegen/norway-41d0227-vw.pmtiles
 #
-# The full-resolution false-positive floor (both should be near-zero):
+# The full-resolution floor (z7-14, where losses should be near-zero):
 #   scripts/ocean-coverage.sh \
 #     data/tilegen/norway-3f4ca38.pmtiles \
 #     data/tilegen/norway-41d0227-vw.pmtiles \
@@ -76,21 +84,21 @@ else
 fi
 
 # 3. Coverage comparison against the baseline, once per archive. ocean-coverage
-#    exits nonzero when a tile exceeds the threshold; DP is EXPECTED to fire and
-#    VW is expected to clear, so we do not let a nonzero exit abort the loop -
-#    each result is labelled and any failure is remembered for the exit code.
-any_offenders=0
+#    exits nonzero when a tile exceeds the threshold, which for this diagnostic
+#    means "worth a look", not "failed" - so we do not let it abort the loop;
+#    each result is labelled and any overflow is remembered for the exit code.
+any_overflow=0
 for archive in "${archives[@]}"; do
   echo
   echo "==================================================================="
   echo "==> ocean-coverage $archive --baseline $REF ${cov_flags[*]}"
   echo "==================================================================="
   if "$elivagar" ocean-coverage "$archive" --baseline "$REF" "${cov_flags[@]}"; then
-    echo "--> CLEAN: no tile over threshold (exit 0)"
+    echo "--> no tile over threshold (exit 0)"
   else
-    echo "--> OFFENDERS: tiles over threshold (nonzero exit) - see the 'lost' lines above"
-    any_offenders=1
+    echo "--> tiles over threshold - see the 'lost' lines above (triage, not a failure)"
+    any_overflow=1
   fi
 done
 
-exit "$any_offenders"
+exit "$any_overflow"

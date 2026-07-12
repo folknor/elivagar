@@ -338,8 +338,117 @@ The coverage oracle must either be redesigned to isolate the spike (e.g. compare
 VW-vs-DP, or net one-sided loss beyond what the same simplifier removes on a
 smooth control coast) or dropped as a gate and replaced by the visual gate on the
 record. Do NOT tune `OCEAN_VW_AREA_2X` against the current oracle - it measures the
-wrong thing. The spec's Landings 1/3 (coverage oracle + threshold sweep) need
-rework before this lands.
+wrong thing. LANDED at 31b8298, gated on the human visual check plus earcut, with
+the coverage oracle demoted to a diagnostic and the now-implemented spec removed;
+the `elivagar regress` diff was skipped as redundant with the enum-level
+ocean-only scoping. See "Why every automated verdict was wrong" below for the
+validation reckoning this near-miss prompted.
+
+## Why every automated verdict was wrong (validation reckoning, 2026-07-12)
+
+The arc above has a worse story inside it: EVERY automated signal we built to
+gate the VW fix reported FAILURE, and only a human loading the tiles and looking
+confirmed the fix works. A Fable advisory agent was tasked with "what do we do
+about that." Its findings, recorded here because they generalize past this bug.
+
+### The oracle's real failure: an impossible pass criterion
+
+The coverage oracle (`src/ocean_coverage.rs`) is a CORRECT instrument bolted to
+an unachievable threshold. It thresholds one-sided lost water area at
+`threshold_2x = 512` (one rendered pixel squared). But any correct 1-px-scale
+generalization of a coastline legitimately loses ~ (coast length x sub-pixel
+width). The recorded VW z4 worst of 146,342 2x-units backs out to roughly two
+tile-widths of fjord coast - the "failure" magnitude is exactly what a CORRECT
+simplifier must produce. The threshold sat two-plus orders of magnitude below
+the legitimate floor. The gate was only ever calibrated on the BAD side (it
+fires on DP at the spike tiles); nobody ran the null hypothesis - "what does a
+known-good build score?" - which any measure merely correlated with
+simplification aggressiveness would also have passed.
+
+Structural insight: the oracle measured at 4096-unit tile precision a defect
+that only exists at ~256-px raster precision. The sub-pixel legitimate loss that
+sank it DOES NOT SURVIVE RASTERIZATION. Measuring in pixel space would make the
+confound vanish structurally instead of needing a threshold to separate it.
+
+### The trustworthy-oracle template (three properties, not one)
+
+"Trust consumer-path oracles" is too weak: the coverage oracle IS consumer-path
+(it decodes MVT correctly, ClosePath cursor rule included). The oracles that have
+ever been authoritative here - earcut, boundary-line - share three properties;
+the coverage oracle had only the first:
+
+1. Consumer-path decode - reads geometry the way MapLibre does.
+2. A CATEGORICAL defect with near-zero base rate on good output
+   (self-intersection, misattached hole, palindrome, spur). Pass = count 0, and
+   0 is actually achievable. The coverage oracle instead thresholded a
+   CONTINUOUS quantity that is legitimately large on good output.
+3. Calibration in BOTH directions before being trusted: fires on known-bad AND
+   clears on known-good.
+
+Every false verdict this project has produced missed property 2 or 3. The "false
+trail" (the boundaries palindrome fix committed against the wrong bug) is the
+same failure mirrored: a real signal acted on without confirming it was THE
+rendered symptom. Unifying rule: the defect is defined at the renderer; a gate's
+verdict counts only once its link to the rendered symptom is demonstrated, in
+both directions.
+
+### Recommended actions (ranked, not yet executed)
+
+1. Formalize the visual gate as a blessed-render pixel diff. A new
+   `scripts/validate/render-gate.mjs` in the existing oracle family: decode via
+   `@mapbox/vector-tile`, rasterize the ocean layer to display resolution, diff
+   against in-repo blessed PNGs on a curated tile set (the known-bad coords
+   z4/8/3, z4/8/4, z3/4/2, z2/2/1 plus smooth-coast, archipelago, and full-ocean
+   controls). Judge on CONNECTED-COMPONENT size, not aggregate pixel count - a
+   1x50-px spike is one 50-px component, legitimate jitter is scattered 1-4-px
+   specks. Re-bless flow mirrors `brokkr bless`; the human eye stays in the loop
+   only at bless time. Cheapest change that would have flipped this episode, and
+   it also catches the latent seam below.
+2. Demote `ocean-coverage` from gate to diagnostic (its per-zoom worst-tile
+   ranking genuinely located the spikes - keep it for triage). Strip the "must
+   CLEAR" gate language from `scripts/ocean-coverage.sh`. Do NOT tune
+   `OCEAN_VW_AREA_2X` against it.
+3. Reject both earlier sketched reframings as STANDING gates. VW-vs-DP compares
+   against a known-broken referent that vanishes once DP leaves the ocean path
+   and can only certify "not worse than last time." Smooth-control-coast
+   normalization is a geography-dependent fudge factor - a fjord coast
+   legitimately loses far more per tile than any smooth control. If a
+   geometry-level gate is still wanted, the right shape is a BASELINE-FREE needle
+   detector on the emitted ring, analogous to the boundary oracle's spur
+   detector: flag point pairs a sub-pixel straight-line distance apart but a long
+   path-length apart, excursion on the land side. Categorical, no REF build - but
+   the render gate covers the same defect class with less new machinery.
+4. Codify an oracle-calibration protocol in AGENTS.md. Before any validator gates
+   work: (a) it fires on the known-bad artifact, (b) it clears on a known-good
+   artifact or defect-free control region, and (c) it measures the defect itself,
+   or the correlation is demonstrated - including the null-score arithmetic before
+   choosing any threshold. Advisory until all three. Nearly free, and it prevents
+   both the false negative (this episode) and the false trail.
+
+### Lateral findings (line refs unverified; symbols given so they survive drift)
+
+- `src/ocean_coverage.rs` smell: `shape_area` treats every ring after the first
+  as a hole regardless of winding. Holds today only because `encode_tile_shape`
+  emits one feature per Shape (outer first, holes after); if ocean emission ever
+  packs multiple outers into one MVT feature, `shape_area` silently subtracts
+  outer areas and the numbers go garbage. If the tool survives as a diagnostic,
+  classify rings by winding like the earcut oracle does.
+- `src/ocean_coverage.rs` smell: `lost_area` sums pairwise intersections over all
+  reference/low shape pairs - correct only while the low shapes are mutually
+  disjoint (true for ocean pieces today, unstated in the code).
+- Latent cross-piece seam (also flagged above): VW inherits `pins: None` exactly
+  as DP had it, so a boundary shared between two source pieces away from tile
+  edges is still simplified independently per side. The render gate (item 1)
+  would catch an opened seam as a visible pixel component; no current gate would.
+  Fix machinery exists unused (`quantize_polygon_pinned_into`,
+  `PyramidParams.pins`).
+- The per-zoom `ocean_dp_tol` / `vw_area_threshold` hooks still return constants
+  at every zoom (the VW threshold ignores `dp_tol`'s magnitude entirely). The "16
+  units at every zoom" shape of the original bug is therefore structurally still
+  available to a future tuning mistake - another argument for a renderer-level
+  standing gate rather than a parameter-level one.
+- Stale doc, still unfixed: `ocean.rs` header and AGENTS.md both say "scanline
+  fill"; no scanline fill remains in the file.
 
 ## Reproduction
 

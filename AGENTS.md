@@ -20,23 +20,6 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 - Never read or write from /tmp. All data lives in the project.
 - Never run raw cargo, curl, pkill. Use `brokkr`.
 
-### git commit rules
-
-- Always run `brokkr fmt` before a commit.
-- Never commit markdown changes alone. Bundle them with upcoming code commits.
-- When committing other changes: always tag along markdown files if dirty.
-- Write substantive engineering-focused commit messages.
-- Hard-wrap the message body at ~72 columns, matching the existing history; the
-  subject stays one concise line. The wall-of-text we keep producing comes from
-  `git commit -m "<whole paragraph>"`: a single `-m` is recorded as ONE unwrapped
-  line. Embed real line breaks so every body line wraps at ~72 (one `-m` per
-  paragraph is fine only when each paragraph already carries its own newlines).
-  Newlines are not metacharacters, so this composes with the no-metacharacters-in
-  `-m` rule (CLAUDE.md Bash rules) - wrap with literal newlines while still
-  avoiding braces, brackets, parens, angle brackets and the hash sign.
-- Has `Cargo.lock` changed? Commit it.
-- Never `git push` unless the user explicitly asks. Stop after the commit.
-
 ## Brokkr tool
 
 Invoked as `brokkr` from the project root (reads `./brokkr.toml` for project detection).
@@ -238,6 +221,30 @@ Build/bench/verify tooling is in `brokkr`. One helper shell script lives in
 - `boundary-line-oracle.mjs <file.pmtiles> [--only categories]` - the `boundaries`-layer line-fidelity gate. Decodes every line feature into its MoveTo-delimited sub-lines and flags, per zoom, palindromes (a sub-line equal to its own reverse), spurs (a retrace apex not at the sub-line ends, closure pair excluded for closed loops), intra-feature duplicates, and cross-feature duplicates (exact and reversed) - the last catches the maritime=true/false double-draw that `merge_same_attr_geometries` cannot merge across differing attributes. Categories are separately selectable via `--only`. Run on any change touching boundary-line emission, the line merger, or closed-line simplification.
 - `line-probe.mjs <file.pmtiles> <z> <x> <y> <featIdx> <subIdx>` - dumps one `boundaries` sub-line exactly as MapLibre decodes it (per-vertex coordinates) plus any spur apexes, for drilling into a boundary-line-oracle offender.
 
+## Oracle discipline
+
+A validator gates work only after it is calibrated in BOTH directions; until
+then it is advisory, never blocking. Before promoting any new oracle to a gate:
+
+- (a) it FIRES on a known-bad artifact - the defect it targets,
+- (b) it CLEARS on a known-good artifact, or absent one, a defect-free control
+  region, and
+- (c) it measures the defect itself, or its correlation to the defect is
+  demonstrated - including the null-hypothesis arithmetic ("what does a correct
+  build score?") before any threshold is chosen.
+
+The gates that have ever been authoritative here (earcut, boundary-line) share
+three properties, and consumer-path decode is only the first: consumer-path
+decode (read geometry the way MapLibre does), a CATEGORICAL defect with
+near-zero base rate on good output (pass = count 0, and 0 is achievable), and
+both-direction calibration. A gate that thresholds a CONTINUOUS quantity that is
+legitimately large on good output is a false negative waiting to happen: the
+ocean coverage measure did exactly this, reporting a working low-zoom ocean fix
+as FAILED because any correct simplifier loses large sub-pixel coastline detail
+versus a verbatim baseline. That case is why this rule exists; it was caught
+only by the human visual check, so the visual check and earcut - not aggregate
+area - are the standing ocean gates. `ocean-coverage` is triage, never a gate.
+
 ## Architecture
 
 Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`, `verify`, `svg`, `diag`, `regress`, `ocean-coverage`).
@@ -258,7 +265,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `geometry/int_ocean.rs` - integer polygon geometry engine (ocean AND OSM layers): early quantization to max_zoom pixel space (unclamped, antimeridian-safe), exact shift-round per-zoom rescale, rotation-invariant pin-aware integer DP, Simplify/Intersect (NonZero) topology ops via the in-tree `geometry/overlay/` boolean engine (ported from i_overlay, no longer a dependency - i_overlay lives on only as a dev-dependency differential oracle), recursive row-band bisection, shared per-zoom emission engine (emit_shape_for_zoom). ALL polygon emission goes through this - see specs/. The earcut oracle (scripts/validate/) is the standing gate: 0 deviant polygons, 0 misattached holes, every polygon layer, every build that touches geometry or MVT encoding.
 - `mvt.rs` - MVT protobuf encoder. CRITICAL: ClosePath does NOT move the delta cursor (MVT spec 4.3.3.3) - a symmetric encoder/decoder violation of this was invisible to all internal round-trips for three months (ledger R23)
 - `multipolygon.rs` - relation ring assembly
-- `ocean.rs` - ocean shapefile processing (mmap reader + scanline fill + quantize-early integer boolean clipping; no S-H, no LandMask)
+- `ocean.rs` - ocean shapefile processing (mmap reader + quantize-early integer boolean clipping via the shared int_ocean pyramid; no scanline fill, no point-in-polygon, no S-H, no LandMask)
 
 **Infrastructure:**
 - `sort.rs` - external sort partitioned by Hilbert tile-id range at write time (z6-calibrated partitions; chunk files uncompressed by default, LZ4/Snappy via `--compress-sort-chunks`; per-partition k-way merge via binary heap, consumed lazily by the assemble partition readers)

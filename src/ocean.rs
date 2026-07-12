@@ -2,7 +2,9 @@
 //
 // Reads a water-polygons-split-3857 shapefile (mmap + .shx index), filters to
 // data bounds, parses polygons, and processes them in parallel with rayon.
-// Uses scanline fill to minimize point-in-polygon tests.
+// Emits tiles through the shared int_ocean pyramid engine: quantize-early to
+// max-zoom pixel space, then per-tile integer boolean clipping. No scanline
+// fill, no point-in-polygon, no Sutherland-Hodgman, no LandMask.
 
 use crate::geometry::int_ocean::{
     IntEmitScratch, IntRect, OCEAN_DP_TOL_PX, Shape, Shapes, intersect_rect_into, quantize_polygon,

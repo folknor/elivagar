@@ -28,6 +28,23 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
 - One Bash() invocation === one command
 - Keep `git commit -m` messages free of zsh metacharacters - braces `{}`, brackets `[]`, parens `()`, angle brackets `<>`, `#`. They trip the permission matcher and block the commit. Spell lists out (`syntax, vm, data and runner`, not `{syntax,vm,data,runner}`), write `5.1 per bar` not `5.1/bar`, name attributes in prose not `#[attr]`.
 
+### git commit rules
+- Always run `brokkr fmt` before a commit.
+- Never commit markdown changes alone. Bundle them with upcoming code commits.
+- When committing other changes: always tag along markdown files if dirty.
+- Write substantive engineering-focused commit messages.
+- Hard-wrap the message body at ~72 columns, matching the existing history; the
+  subject stays one concise line. The wall-of-text we keep producing comes from
+  `git commit -m "<whole paragraph>"`: a single `-m` is recorded as ONE unwrapped
+  line. Embed real line breaks so every body line wraps at ~72 (one `-m` per
+  paragraph is fine only when each paragraph already carries its own newlines).
+  Newlines are not metacharacters, so this composes with the no-metacharacters-in
+  `-m` rule (CLAUDE.md Bash rules) - wrap with literal newlines while still
+  avoiding braces, brackets, parens, angle brackets and the hash sign.
+- Has `Cargo.lock` changed? Commit it.
+- Never `git push` unless the user explicitly asks. Stop after the commit.
+- DISABLED UNTIL WE MAKE OUR FIRST RELEASE: Remember to update CHANGELOG.md for relevant commits (but not general small performance improvements.)
+- Never offer to commit or tell the user "per your rules I've left things uncommitted". Don't mention git commits, ever. The user will instruct you when to commit.
 
 ### Never destroy state you did not create
 
