@@ -781,6 +781,16 @@ for the planet shapefile (the counters exist per-zoom on any run;
 extrapolation from the shapefile's global shape count is a paper
 exercise). Then a spec.
 
+SPEC WRITTEN 2026-07-12: `notes/ocean-tile-stream-spec.md` (v5; three
+codex critique rounds plus a competitor-comparison review folded). Key
+survey deltas vs the theory above: dedup is post-gzip storage-only, so
+the reused 85% of NA's addressed tiles still pay merge+encode+gzip -
+the artifact deletes that, not just the phase; the artifact is itself a
+PMTiles archive consumed run-aware at assemble; extracts keep a
+recomputed boundary band so the standing denmark gate exercises the
+artifact path. Awaiting implementation go-ahead (benches queued ahead
+of it).
+
 ### H6: Kill the way-path allocation churn with per-worker scratch
 
 **Claim.** 622 GB of alloc traffic per germany run is a phase12 throughput
