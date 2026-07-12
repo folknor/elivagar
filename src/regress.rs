@@ -2731,11 +2731,33 @@ fn remaining_pairs<T, K: Eq + std::hash::Hash + Copy>(
         );
     }
 
-    let mut edges = Vec::new();
+    let candidates = residual_candidates(
+        current,
+        blessed,
+        &remaining_current,
+        &remaining_blessed,
+        &key,
+        &lower,
+        &proxy,
+    );
+    let mut paired =
+        sparse_min_cost_pairs(current, blessed, cur_used, bl_used, &candidates, &distance);
+
+    // Same-key completion: the K-nearest candidate graph need not contain a
+    // matching that saturates the smaller side of every key group (clusters
+    // larger than K can starve each other), and the pre-sparse contract was
+    // that same-key pairings are exhausted before any cross-key fallback.
+    // Sweep the leftovers with the old proxy-greedy, per key; leftover
+    // counts are the starvation excess, so the quadratic edge enumeration
+    // stays small.
+    let mut completion_edges = Vec::new();
     for &ci in &remaining_current {
+        if cur_used[ci] {
+            continue;
+        }
         for &bi in &remaining_blessed {
-            if key(&current[ci]) == key(&blessed[bi]) {
-                edges.push((
+            if !bl_used[bi] && key(&current[ci]) == key(&blessed[bi]) {
+                completion_edges.push((
                     lower(&current[ci], &blessed[bi]),
                     proxy(&current[ci], &blessed[bi]),
                     ci,
@@ -2744,9 +2766,8 @@ fn remaining_pairs<T, K: Eq + std::hash::Hash + Copy>(
             }
         }
     }
-    edges.sort_unstable();
-    let mut paired = Vec::new();
-    for (_, _, ci, bi) in edges {
+    completion_edges.sort_unstable();
+    for (_, _, ci, bi) in completion_edges {
         if !cur_used[ci] && !bl_used[bi] {
             cur_used[ci] = true;
             bl_used[bi] = true;
@@ -2771,6 +2792,183 @@ fn remaining_pairs<T, K: Eq + std::hash::Hash + Copy>(
         cur_used[ci] = true;
         bl_used[bi] = true;
         paired.push((ci, bi));
+    }
+    paired
+}
+
+const RESIDUAL_CANDIDATES: usize = 8;
+
+#[allow(clippy::too_many_arguments)]
+fn residual_candidates<T, K: Eq + std::hash::Hash + Copy>(
+    current: &[T],
+    blessed: &[T],
+    remaining_current: &[usize],
+    remaining_blessed: &[usize],
+    key: &impl Fn(&T) -> K,
+    lower: &impl Fn(&T, &T) -> u64,
+    proxy: &impl Fn(&T, &T) -> u64,
+) -> Vec<(usize, usize)> {
+    let mut edges = FxHashSet::default();
+    for &ci in remaining_current {
+        let mut nearest: Vec<_> = remaining_blessed
+            .iter()
+            .copied()
+            .filter(|&bi| key(&current[ci]) == key(&blessed[bi]))
+            .map(|bi| {
+                (
+                    lower(&current[ci], &blessed[bi]),
+                    proxy(&current[ci], &blessed[bi]),
+                    bi,
+                )
+            })
+            .collect();
+        nearest.sort_unstable();
+        edges.extend(
+            nearest
+                .into_iter()
+                .take(RESIDUAL_CANDIDATES)
+                .map(|(_, _, bi)| (ci, bi)),
+        );
+    }
+    for &bi in remaining_blessed {
+        let mut nearest: Vec<_> = remaining_current
+            .iter()
+            .copied()
+            .filter(|&ci| key(&current[ci]) == key(&blessed[bi]))
+            .map(|ci| {
+                (
+                    lower(&current[ci], &blessed[bi]),
+                    proxy(&current[ci], &blessed[bi]),
+                    ci,
+                )
+            })
+            .collect();
+        nearest.sort_unstable();
+        edges.extend(
+            nearest
+                .into_iter()
+                .take(RESIDUAL_CANDIDATES)
+                .map(|(_, _, ci)| (ci, bi)),
+        );
+    }
+    let mut edges: Vec<_> = edges.into_iter().collect();
+    edges.sort_unstable();
+    edges
+}
+
+fn sparse_min_cost_pairs<T>(
+    current: &[T],
+    blessed: &[T],
+    cur_used: &mut [bool],
+    bl_used: &mut [bool],
+    candidates: &[(usize, usize)],
+    distance: &impl Fn(&T, &T) -> i32,
+) -> Vec<(usize, usize)> {
+    // Successive shortest augmenting paths give a minimum-cost maximum-
+    // cardinality matching while evaluating Hausdorff once per candidate
+    // edge. Bellman-Ford handles the negative reverse (matched) edges.
+    // Relaxation is STRICTLY improving: a predecessor-pointer cycle would
+    // require a strict distance decrease around a zero-cost alternating
+    // loop, which is impossible, and matchings built by shortest-path
+    // augmentation stay extreme, so the residual graph never has a negative
+    // cycle and Bellman-Ford converges within one pass per residual vertex.
+    // Ties between equal-cost paths resolve to whichever the fixed edge
+    // order relaxes first, which keeps the result deterministic.
+    let edges: Vec<_> = candidates
+        .iter()
+        .map(|&(ci, bi)| (ci, bi, i64::from(distance(&current[ci], &blessed[bi]))))
+        .collect();
+    let edge_cost: FxHashMap<(usize, usize), i64> = edges
+        .iter()
+        .map(|&(ci, bi, cost)| ((ci, bi), cost))
+        .collect();
+    let mut residual_blessed: Vec<usize> = candidates.iter().map(|&(_, bi)| bi).collect();
+    residual_blessed.sort_unstable();
+    residual_blessed.dedup();
+    // Candidates are sorted by (ci, bi), so ci values arrive grouped.
+    let mut residual_current: Vec<usize> = candidates.iter().map(|&(ci, _)| ci).collect();
+    residual_current.dedup();
+    let vertex_bound = residual_current.len() + residual_blessed.len();
+
+    let mut cur_match: Vec<Option<usize>> = vec![None; current.len()];
+    let mut bl_match: Vec<Option<usize>> = vec![None; blessed.len()];
+    let mut cur_cost = vec![0_i64; current.len()];
+
+    loop {
+        let mut cur_dist = vec![i64::MAX; current.len()];
+        let mut bl_dist = vec![i64::MAX; blessed.len()];
+        let mut prev_blessed: Vec<Option<usize>> = vec![None; blessed.len()];
+        for &ci in &residual_current {
+            if !cur_used[ci] && cur_match[ci].is_none() {
+                cur_dist[ci] = 0;
+            }
+        }
+
+        for _ in 0..=vertex_bound {
+            let mut changed = false;
+            for &(ci, bi, cost) in &edges {
+                if cur_dist[ci] == i64::MAX || cur_match[ci] == Some(bi) {
+                    continue;
+                }
+                let relaxed = cur_dist[ci].saturating_add(cost);
+                if relaxed < bl_dist[bi] {
+                    bl_dist[bi] = relaxed;
+                    prev_blessed[bi] = Some(ci);
+                    // The only edge back out of a matched blessed node is its
+                    // matched current, so the reverse relaxation rides along
+                    // here instead of needing its own scan.
+                    if let Some(mi) = bl_match[bi] {
+                        let back = relaxed.saturating_sub(cur_cost[mi]);
+                        if back < cur_dist[mi] {
+                            cur_dist[mi] = back;
+                        }
+                    }
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let target = (0..blessed.len())
+            .filter(|&bi| !bl_used[bi] && bl_match[bi].is_none() && bl_dist[bi] != i64::MAX)
+            .min_by_key(|&bi| (bl_dist[bi], bi));
+        let Some(mut bi) = target else {
+            break;
+        };
+        // Alternate forward predecessor and matched edge back to a free
+        // current. Consistent pointers cannot revisit a vertex, so the walk
+        // is bounded; exceeding the bound means the invariant broke.
+        let mut hops = 0usize;
+        loop {
+            hops += 1;
+            assert!(
+                hops <= vertex_bound,
+                "augmenting path exceeds its vertex bound"
+            );
+            let ci = prev_blessed[bi].expect("augmenting path reaches a relaxed blessed node");
+            let previous_bi = cur_match[ci];
+            cur_match[ci] = Some(bi);
+            bl_match[bi] = Some(ci);
+            cur_cost[ci] = *edge_cost
+                .get(&(ci, bi))
+                .expect("augmenting path uses a candidate edge");
+            let Some(old_bi) = previous_bi else {
+                break;
+            };
+            bl_match[old_bi] = None;
+            bi = old_bi;
+        }
+    }
+
+    let mut paired = Vec::new();
+    for (ci, matched) in cur_match.into_iter().enumerate() {
+        if let Some(bi) = matched {
+            cur_used[ci] = true;
+            bl_used[bi] = true;
+            paired.push((ci, bi));
+        }
     }
     paired
 }

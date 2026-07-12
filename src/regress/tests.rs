@@ -215,6 +215,228 @@ fn anonymous_ocean_tile(rings: &[&[(i32, i32)]]) -> Vec<u8> {
     crate::mvt::encode_tile(&[&layer])
 }
 
+#[derive(Clone, Copy)]
+struct ResidualMatchPoint(usize);
+
+fn crossing_residual_cost(ci: usize, bi: usize) -> i32 {
+    match (ci, bi) {
+        (0, 0) => 1,
+        (0, 1) | (1, 0) => 2,
+        (1, 1) => 100,
+        (ci, bi) if ci == bi => 0,
+        _ => 1_000,
+    }
+}
+
+fn crossing_residual_pairs() -> Vec<(usize, usize)> {
+    let current: Vec<_> = (0..9).map(ResidualMatchPoint).collect();
+    let blessed: Vec<_> = (0..9).map(ResidualMatchPoint).collect();
+    let mut cur_used = vec![false; current.len()];
+    let mut bl_used = vec![false; blessed.len()];
+    remaining_pairs(
+        &current,
+        &blessed,
+        &mut cur_used,
+        &mut bl_used,
+        |_| (),
+        |_, _| 0,
+        |left, right| {
+            u64::try_from(crossing_residual_cost(left.0, right.0)).expect("non-negative proxy cost")
+        },
+        |left, right| crossing_residual_cost(left.0, right.0),
+    )
+}
+
+#[test]
+fn residual_matcher_uses_minimum_cost_assignment_over_greedy_crossing() {
+    let pairs = crossing_residual_pairs();
+    assert_eq!(
+        pairs,
+        vec![
+            (0, 1),
+            (1, 0),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 5),
+            (6, 6),
+            (7, 7),
+            (8, 8)
+        ]
+    );
+    let total: i32 = pairs
+        .iter()
+        .map(|&(ci, bi)| crossing_residual_cost(ci, bi))
+        .sum();
+    assert_eq!(total, 4);
+}
+
+#[test]
+fn residual_matcher_is_deterministic() {
+    let expected = crossing_residual_pairs();
+    for _ in 0..16 {
+        assert_eq!(crossing_residual_pairs(), expected);
+    }
+}
+
+// Exhaustive min-cost max-cardinality reference: try every assignment.
+fn brute_force_best(costs: &[Vec<Option<i32>>]) -> (usize, i64) {
+    fn recurse(
+        costs: &[Vec<Option<i32>>],
+        ci: usize,
+        used: &mut [bool],
+        matched: usize,
+        cost: i64,
+        best: &mut (usize, i64),
+    ) {
+        if ci == costs.len() {
+            if matched > best.0 || (matched == best.0 && cost < best.1) {
+                *best = (matched, cost);
+            }
+            return;
+        }
+        recurse(costs, ci + 1, used, matched, cost, best);
+        for (bi, slot) in costs[ci].iter().enumerate() {
+            if let Some(edge) = slot
+                && !used[bi]
+            {
+                used[bi] = true;
+                recurse(
+                    costs,
+                    ci + 1,
+                    used,
+                    matched + 1,
+                    cost + i64::from(*edge),
+                    best,
+                );
+                used[bi] = false;
+            }
+        }
+    }
+    let width = costs.first().map_or(0, Vec::len);
+    let mut best = (0, i64::MAX);
+    recurse(costs, 0, &mut vec![false; width], 0, 0, &mut best);
+    if best.0 == 0 {
+        best.1 = 0;
+    }
+    best
+}
+
+fn sparse_pairs_for(costs: &[Vec<Option<i32>>]) -> Vec<(usize, usize)> {
+    let width = costs.first().map_or(0, Vec::len);
+    let current: Vec<_> = (0..costs.len()).map(ResidualMatchPoint).collect();
+    let blessed: Vec<_> = (0..width).map(ResidualMatchPoint).collect();
+    let mut cur_used = vec![false; current.len()];
+    let mut bl_used = vec![false; blessed.len()];
+    let mut candidates = Vec::new();
+    for (ci, row) in costs.iter().enumerate() {
+        for (bi, slot) in row.iter().enumerate() {
+            if slot.is_some() {
+                candidates.push((ci, bi));
+            }
+        }
+    }
+    sparse_min_cost_pairs(
+        &current,
+        &blessed,
+        &mut cur_used,
+        &mut bl_used,
+        &candidates,
+        &|l, r| costs[l.0][r.0].expect("distance is only asked for candidate edges"),
+    )
+}
+
+#[test]
+fn sparse_matcher_matches_brute_force_oracle() {
+    fn dense(rows: &[&[i32]]) -> Vec<Vec<Option<i32>>> {
+        rows.iter()
+            .map(|row| row.iter().map(|&cost| Some(cost)).collect())
+            .collect()
+    }
+    let cases: Vec<Vec<Vec<Option<i32>>>> = vec![
+        // Review counterexample: equal-cost alternating structure that broke
+        // the tie-relaxing Bellman-Ford (predecessor cycle, endless augment).
+        dense(&[&[1, 1, 3, 1], &[0, 0, 2, 3], &[2, 2, 4, 3], &[2, 4, 4, 2]]),
+        // All-zero ties: any perfect matching, but it must terminate and
+        // stay maximum-cardinality.
+        dense(&[&[0, 0, 0], &[0, 0, 0], &[0, 0, 0]]),
+        // Crossing: greedy takes 1 then 100; optimum is 2 + 2.
+        dense(&[&[1, 2], &[2, 100]]),
+        // Rectangular with ties on every row.
+        dense(&[&[0, 0, 1], &[0, 1, 0]]),
+        // Sparse edges force cardinality-first choices.
+        vec![
+            vec![Some(5), None, None],
+            vec![Some(1), Some(1), None],
+            vec![None, Some(0), Some(9)],
+        ],
+        // Zero-cost alternatives: two ways around at equal cost.
+        dense(&[&[0, 1, 0], &[1, 0, 0], &[0, 0, 1]]),
+    ];
+    for costs in cases {
+        let pairs = sparse_pairs_for(&costs);
+        let (cardinality, best_cost) = brute_force_best(&costs);
+        assert_eq!(pairs.len(), cardinality, "cardinality for {costs:?}");
+        let total: i64 = pairs
+            .iter()
+            .map(|&(ci, bi)| i64::from(costs[ci][bi].expect("paired edge exists")))
+            .sum();
+        assert_eq!(total, best_cost, "cost for {costs:?}");
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StarvedPoint {
+    key: u8,
+    cluster: u8,
+}
+
+#[test]
+fn residual_matcher_exhausts_same_key_pairs_before_force_zip() {
+    fn push(list: &mut Vec<StarvedPoint>, key: u8, cluster: u8, n: usize) {
+        for _ in 0..n {
+            list.push(StarvedPoint { key, cluster });
+        }
+    }
+    // Each key holds a 9-current/8-blessed cluster and an 8-current/9-blessed
+    // cluster: the K=8 candidate graph cannot bridge the clusters, so
+    // min-cost matching strands one current and one blessed per key. Blessed
+    // key order is reversed so a key-blind force-zip would pair the
+    // leftovers across keys; the same-key completion sweep must not.
+    let mut current = Vec::new();
+    let mut blessed = Vec::new();
+    push(&mut current, 0, 1, 9);
+    push(&mut current, 0, 2, 8);
+    push(&mut current, 1, 1, 9);
+    push(&mut current, 1, 2, 8);
+    push(&mut blessed, 1, 1, 8);
+    push(&mut blessed, 1, 2, 9);
+    push(&mut blessed, 0, 1, 8);
+    push(&mut blessed, 0, 2, 9);
+    let mut cur_used = vec![false; current.len()];
+    let mut bl_used = vec![false; blessed.len()];
+    let cluster_cost = |l: &StarvedPoint, r: &StarvedPoint| -> u16 {
+        if l.cluster == r.cluster { 1 } else { 1000 }
+    };
+    let paired = remaining_pairs(
+        &current,
+        &blessed,
+        &mut cur_used,
+        &mut bl_used,
+        |point| point.key,
+        |_, _| 0,
+        |l, r| u64::from(cluster_cost(l, r)),
+        |l, r| i32::from(cluster_cost(l, r)),
+    );
+    assert_eq!(paired.len(), 34);
+    for (ci, bi) in paired {
+        assert_eq!(
+            current[ci].key, blessed[bi].key,
+            "pair {ci} {bi} crosses keys"
+        );
+    }
+}
+
 #[test]
 fn canonical_decoder_round_trips_two_layer_tile() {
     let (tile, decoded_poly) = two_layer_tile();

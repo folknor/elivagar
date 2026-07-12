@@ -63,13 +63,25 @@ old engine could not finish.
   dictionary re-indexing, layer permutation, duplicate layer names,
   multipoint order, zero-area rings, hole order, repeated-count line
   MoveTo, and feature multiplicity, all against `detail_tile_hash`.
-- **Residual matcher endpoint.** Non-exact anonymous pairing is
-  proxy-greedy (bbox lower bound, then bbox-center distance) with exact
-  greedy kept for groups where k^2 <= 64, and leftovers force-zipped so a
-  type/topology change stays one structural move instead of an added/missing
-  pair. The plan's stronger endpoint - sparse-candidate-graph deterministic
-  minimum-cost matching - remains unbuilt; revisit only if greedy
-  misclassification is observed on a real landing.
+- **Residual matcher endpoint.** Landed. Large non-exact residual groups now
+  form a deterministic sparse same-key candidate graph: eight nearest items
+  per side by bbox lower bound, bbox-center proxy, and index, unioned in both
+  directions. Real KD/bbox-pruned Hausdorff distance is evaluated only for
+  those candidate edges. A deterministic successive-shortest-augmenting-path
+  minimum-cost maximum-cardinality matcher replaces proxy-greedy pairing for
+  both feature and component call sites. Review-folded hardening: relaxation
+  is strictly improving (a tie-relaxing variant could corrupt predecessor
+  chains and hang the augment walk - caught with a concrete 4x4
+  counterexample, now a fixture), reverse edges ride the forward relaxation
+  through cur_match instead of an O of m times n scan per pass, the augment
+  walk carries a vertex-bound assert, and a same-key completion sweep
+  restores the exhaust-same-key-before-force-zip contract that K-starved
+  cluster splits could violate. Exact digest pre-pairing, the k^2 <= 64
+  exact short circuit, and final force-zip cardinality fallback are
+  unchanged. Unit coverage: greedy-crossing, repeated-run determinism, a
+  brute-force min-cost max-cardinality oracle differential over tie-heavy
+  and sparse cost matrices including the counterexample, and a two-key
+  starvation case proving no cross-key zip.
 - **`PmtilesReader` still expands runs into per-tile entries** for its other
   consumers (inspect, verify, svg, diag, the legacy oracle). The regress path
   no longer touches it. Run-preserving cleanup is the explicitly-deferred
