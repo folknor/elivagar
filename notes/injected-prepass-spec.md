@@ -18,11 +18,12 @@ landed ahead of the data as dormant plumbing (`f683129`) and activated
 on registration with no further code change; activation gates and
 measured readings (denmark zero-diff, germany 50.2s / 1.31x way_index
 bytes, prepass deleted on the injected path) are in
-`reference/performance.md`. One Brick 4 gate deviation: the germany
-semantic regress OOM-killed at archive scale (performance-backlog item
-27) - the germany equality claim rests on counter identity plus the
-denmark zero-diff; norway is enriched and registered but unvalidated
-(baseline archive banked).
+`reference/performance.md`. The one Brick 4 gate deviation (germany
+semantic regress OOM-killed at archive scale, then-backlog item 27) is
+resolved: the regress engine rewrite (`7178425`) completed the pair with
+zero diffs across 827,010 tiles (~36s, 5.8 GB peak; notes/regress.md),
+so the germany activation equality is proven semantically. norway is
+enriched and registered but unvalidated (baseline archive banked).
 
 Brick 5 (H2b, pins consumption + global-prepass teardown) has since
 landed: `PinSource` consumption in `build_way_plans` and
