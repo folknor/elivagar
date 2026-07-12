@@ -15,7 +15,7 @@
 //     before its outer attaches to the WRONG polygon; we count holes whose
 //     bbox is not contained in their assigned outer's bbox as misattached).
 //
-// Usage: node earcut-oracle.mjs <file.pmtiles> [layer] [deviation-threshold]
+// Usage: node earcut-oracle.mjs <file.pmtiles> [layer] [deviation-threshold] [--unique]
 import { readFileSync } from "node:fs";
 import { PMTiles, tileIdToZxy } from "pmtiles";
 import { VectorTile } from "@mapbox/vector-tile";
@@ -23,7 +23,10 @@ import { PbfReader } from "pbf";
 import earcut, { deviation, flatten } from "earcut";
 import { gunzipSync } from "node:zlib";
 
-const [, , path, layerName = "ocean", thresholdArg = "0.01"] = process.argv;
+const args = process.argv.slice(2);
+const unique = args.includes("--unique");
+const positional = args.filter(arg => arg !== "--unique");
+const [path, layerName = "ocean", thresholdArg = "0.01"] = positional;
 if (!path) {
   console.error("usage: node earcut-oracle.mjs <file.pmtiles> [layer] [threshold]");
   process.exit(2);
@@ -116,8 +119,12 @@ function bboxOf(ring) {
 const perZoom = new Map();
 const offenders = [];
 let checked = 0;
+const seenPayloads = new Set();
 
 for await (const t of allTiles()) {
+  const payloadKey = `${t.offset}:${t.length}`;
+  if (unique && seenPayloads.has(payloadKey)) continue;
+  if (unique) seenPayloads.add(payloadKey);
   const [z, x, y] = tileIdToZxy(t.tileId);
   const raw = buf.subarray(header.tileDataOffset + t.offset, header.tileDataOffset + t.offset + t.length);
   let data;
@@ -165,7 +172,7 @@ for await (const t of allTiles()) {
 }
 
 console.log(`${path}  layer=${layerName}  threshold=${THRESHOLD}  (faithful maplibre classifyRings, maxRings=${EARCUT_MAX_RINGS})`);
-console.log(`tiles scanned: ${checked}`);
+console.log(`${unique ? "unique payloads" : "tiles"} scanned: ${checked}`);
 console.log("zoom  features     polys  over_thresh  misattached  worst_deviation  worst_at");
 for (const z of [...perZoom.keys()].sort((a, b) => a - b)) {
   const s = perZoom.get(z);

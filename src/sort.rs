@@ -295,7 +295,7 @@ pub fn partition_from_key(key: SortKey) -> usize {
     partition
 }
 
-fn partition_start_tile_id(partition: usize) -> u64 {
+pub fn partition_start_tile_id(partition: usize) -> u64 {
     debug_assert!(partition < SORT_PARTITIONS);
     let mut zoom = 14usize;
     while partition < PARTITION_BASES[zoom] {
@@ -304,6 +304,19 @@ fn partition_start_tile_id(partition: usize) -> u64 {
     let split_z = zoom.min(PARTITION_SPLIT_Z as usize);
     let prefix = partition - PARTITION_BASES[zoom];
     TILE_ID_BASES[zoom] + ((prefix as u64) << (2 * (zoom - split_z)))
+}
+
+/// Tile-id interval covered by one partition. This is public because an
+/// external PMTiles run may cross a sort-partition boundary even when that
+/// partition has no OSM records.
+pub fn partition_tile_range(partition: usize) -> (u64, u64) {
+    let start = partition_start_tile_id(partition);
+    let end = if partition + 1 >= SORT_PARTITIONS {
+        TILE_ID_LIMIT_EXCLUSIVE
+    } else {
+        partition_start_tile_id(partition + 1)
+    };
+    (start, end)
 }
 
 fn partition_next_key(partition: usize) -> SortKey {
@@ -1526,6 +1539,7 @@ impl PartitionMergeReader {
 }
 
 /// One tile-id range partition of sort chunk files.
+#[derive(Clone)]
 pub struct SortPartition {
     pub index: usize,
     sources: Vec<SortPartitionSource>,

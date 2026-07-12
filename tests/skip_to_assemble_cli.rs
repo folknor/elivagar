@@ -309,6 +309,10 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
     std::fs::create_dir_all(&chunks_dir).expect("create chunks dir");
     write_tiny_pbf(&pbf_path);
 
+    // A coherent v3 checkpoint so the ocean-mode resume guard passes (the
+    // run uses --no-ocean, matching "none") and the flow reaches the
+    // chunk-state validation this test is about.
+    std::fs::write(tmp_dir.join("checkpoint.txt"), "v3 0 0 1 1 1 none").expect("write checkpoint");
     // Missing chunk path: checkpoint expects 1 chunk but there are none.
     std::fs::write(tmp_dir.join("sort_chunks.count"), "1").expect("write chunk checkpoint");
 

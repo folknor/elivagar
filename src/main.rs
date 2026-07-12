@@ -46,6 +46,8 @@ struct Cli {
 enum Command {
     /// Generate PMTiles from an OSM PBF file.
     Run(Box<RunArgs>),
+    /// Build the durable world-ocean PMTiles artifact.
+    OceanBuild(OceanBuildArgs),
     /// Inspect a PMTiles archive.
     Inspect(InspectArgs),
     /// Verify a PMTiles archive.
@@ -95,6 +97,10 @@ struct RunArgs {
     /// Simplified ocean shapefile for z0-7.
     #[arg(long)]
     ocean_simplified: Option<PathBuf>,
+
+    /// Precomputed world-ocean PMTiles artifact.
+    #[arg(long)]
+    ocean_tiles: Option<PathBuf>,
 
     /// Resume from a checkpoint.
     #[arg(long)]
@@ -180,6 +186,22 @@ struct RunArgs {
     polygon_simplify_factor: f64,
 }
 
+#[derive(Parser)]
+struct OceanBuildArgs {
+    #[arg(long)]
+    ocean: PathBuf,
+    #[arg(long)]
+    ocean_simplified: Option<PathBuf>,
+    #[arg(short, long)]
+    output: PathBuf,
+    #[arg(long, default_value = "data/ocean-build_tmp")]
+    tmp_dir: PathBuf,
+    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(0..=10))]
+    compression_level: u32,
+    #[arg(short = 'j', long)]
+    threads: Option<usize>,
+}
+
 /// Arguments for the `inspect` subcommand.
 #[derive(Parser)]
 struct InspectArgs {
@@ -197,6 +219,11 @@ struct VerifyArgs {
     /// counts, consecutive duplicates, full-tile rectangle features).
     #[arg(long)]
     geometry_stats: bool,
+
+    /// Validate each distinct compressed payload once while retaining
+    /// addressed-tile accounting. Intended for very large run-heavy archives.
+    #[arg(long)]
+    unique_payloads: bool,
 }
 
 /// Arguments for the `svg` subcommand.
@@ -337,6 +364,29 @@ fn detect_ocean(data_dir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
     )
 }
 
+fn ocean_build_command(args: &OceanBuildArgs) {
+    let threads = args.threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4)
+    });
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .expect("failed to configure rayon thread pool");
+    if let Err(e) = elivagar::ocean_build(
+        &args.ocean,
+        args.ocean_simplified.as_deref(),
+        &args.output,
+        &args.tmp_dir,
+        args.compression_level,
+        threads,
+    ) {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     // Disable hotpath metrics server by default - elivagar is a sync binary
     // with no async runtime, so the metrics server is never useful.
@@ -350,6 +400,7 @@ fn main() {
 
     match cli.command {
         Command::Run(args) => run(*args),
+        Command::OceanBuild(args) => ocean_build_command(&args),
         Command::Inspect(args) => {
             if let Err(e) = elivagar::inspect::inspect(&args.file) {
                 eprintln!("Error: {e}");
@@ -357,7 +408,11 @@ fn main() {
             }
         }
         Command::Verify(args) => {
-            match elivagar::verify::verify_opts(&args.file, args.geometry_stats) {
+            match elivagar::verify::verify_opts_unique(
+                &args.file,
+                args.geometry_stats,
+                args.unique_payloads,
+            ) {
                 Ok(report) => {
                     report.print_summary();
                     if let Some(stats) = &report.geometry_stats {
@@ -753,11 +808,17 @@ fn run(args: RunArgs) {
 
     // Resolve ocean shapefiles: explicit flags take priority, then auto-detect
     // from data/ relative to cwd, unless --no-ocean suppresses it entirely.
-    let (ocean, ocean_simplified) = if args.no_ocean {
-        (None, None)
+    let (ocean, ocean_simplified, ocean_tiles) = if args.no_ocean {
+        (None, None, None)
     } else {
         let auto = detect_ocean(Path::new("data"));
-        (args.ocean.or(auto.0), args.ocean_simplified.or(auto.1))
+        let artifact = Path::new("data").join("ocean-tiles.pmtiles");
+        (
+            args.ocean.or(auto.0),
+            args.ocean_simplified.or(auto.1),
+            args.ocean_tiles
+                .or_else(|| artifact.exists().then_some(artifact)),
+        )
     };
 
     let allow_unsafe_flat_index =
@@ -771,6 +832,9 @@ fn run(args: RunArgs) {
         max_zoom: 14,
         ocean_shapefile: ocean,
         ocean_simplified_shapefile: ocean_simplified,
+        ocean_tiles,
+        ocean_artifact_key: None,
+        ocean_only_metadata: false,
         skip_to,
         in_memory: args.in_memory,
         compression_level: args.compression_level,

@@ -31,6 +31,26 @@ pub(super) struct EncodedTile {
     pub(super) tile_id: u64,
     pub(super) compressed: Vec<u8>,
 }
+
+/// Ordered work scheduled into the single PMTiles writer. `RunCopy` keeps a
+/// shared artifact payload out of worker batches until the writer needs it.
+pub(super) enum PartitionItem {
+    Encoded(EncodedTile),
+    RunCopy {
+        tile_id: u64,
+        run_length: u32,
+        offset: u64,
+        length: u32,
+    },
+}
+
+/// Partition scheduling is the union of ordinary sort sources and durable
+/// ocean-only ranges. The latter deliberately avoids creating an empty merge
+/// heap for copy-only work.
+enum UnionPartition<'a> {
+    Sort(&'a sort::SortPartition),
+    ArtifactOnly { start: u64, end: u64 },
+}
 const _: () = assert!(std::mem::size_of::<EncodedTile>() == 32);
 
 struct AssembleCore {
@@ -55,7 +75,7 @@ struct PartitionBatch {
     features_read: u64,
     max_batch_bytes: usize,
     reader_ns: u64,
-    encoded_tiles: Vec<EncodedTile>,
+    items: Vec<PartitionItem>,
 }
 
 struct PartitionBatchMeta {
@@ -75,6 +95,12 @@ struct PartitionEncodeCtx<'a> {
     seam_metrics: &'a SeamMetrics,
 }
 
+#[derive(Clone, Copy)]
+struct ArtifactPartitionCtx<'a> {
+    ocean: &'a crate::ocean::OceanTiles,
+    band_empty: bool,
+}
+
 #[derive(Default)]
 struct PendingPartitionBatches {
     batches: std::collections::BTreeMap<usize, PartitionBatch>,
@@ -82,9 +108,16 @@ struct PendingPartitionBatches {
 
 fn batch_encoded_bytes(batch: &PartitionBatch) -> usize {
     batch
-        .encoded_tiles
+        .items
         .iter()
-        .map(|t| std::mem::size_of::<EncodedTile>() + t.compressed.len())
+        .filter_map(|item| match item {
+            PartitionItem::Encoded(tile) => {
+                Some(std::mem::size_of::<EncodedTile>() + tile.compressed.len())
+            }
+            // Artifact run copies borrow their payload from the mmap until the
+            // writer reaches them, so they do not consume parking budget.
+            PartitionItem::RunCopy { .. } => None,
+        })
         .sum()
 }
 
@@ -93,6 +126,26 @@ fn batch_encoded_bytes(batch: &PartitionBatch) -> usize {
 pub(super) fn phase_assemble(
     sort_reader: &mut sort::SortReader,
     config: &TilegenConfig,
+) -> Result<
+    (
+        u64,
+        u64,
+        u64,
+        usize,
+        pmtiles_writer::DedupStats,
+        TileSizeDiagnostics,
+    ),
+    PipelineError,
+> {
+    phase_assemble_with_ocean(sort_reader, config, None)
+}
+
+#[allow(clippy::too_many_lines)]
+#[hotpath::measure]
+pub(super) fn phase_assemble_with_ocean(
+    sort_reader: &mut sort::SortReader,
+    config: &TilegenConfig,
+    ocean_tiles: Option<std::sync::Arc<crate::ocean::OceanTiles>>,
 ) -> Result<
     (
         u64,
@@ -129,6 +182,12 @@ pub(super) fn phase_assemble(
             pmtiles.set_tile_contract(TileDataFormat::Mlt, TileDataCompression::None);
         }
     }
+    if let Some(key) = &config.ocean_artifact_key {
+        pmtiles.set_metadata_extension(format!("\"ocean_artifact\":{}", key.json()));
+    }
+    if config.ocean_only_metadata {
+        pmtiles.set_ocean_only_metadata();
+    }
 
     const BATCH_SIZE: usize = 4096;
     let assemble_budget = if config.assemble_batch_budget > 0 {
@@ -148,7 +207,13 @@ pub(super) fn phase_assemble(
     let seam_metrics = SeamMetrics::new();
     let scope_result: Result<AssembleCore, PipelineError> =
         if let Some(partitions) = sort_reader.take_partitions() {
-            phase_assemble_partitions(&partitions, pmtiles, config, &seam_metrics)
+            phase_assemble_partitions(
+                &partitions,
+                pmtiles,
+                config,
+                &seam_metrics,
+                ocean_tiles.as_deref(),
+            )
         } else {
             std::thread::scope(|s| {
                 // --- Reader thread: k-way merge → PendingTile batches ---
@@ -459,12 +524,14 @@ fn phase_assemble_partitions(
     mut pmtiles: PmtilesWriter,
     config: &TilegenConfig,
     seam_metrics: &SeamMetrics,
+    ocean: Option<&crate::ocean::OceanTiles>,
 ) -> Result<AssembleCore, PipelineError> {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::mpsc;
 
-    let partition_count = partitions.len();
+    let union = partition_union(partitions, ocean);
+    let partition_count = union.len();
     if partition_count == 0 {
         return Ok(AssembleCore {
             features_read: 0,
@@ -545,6 +612,13 @@ fn phase_assemble_partitions(
     } else {
         32 * 1024 * 1024
     };
+    let artifact_ctx = ocean.map(|ocean| ArtifactPartitionCtx {
+        ocean,
+        band_empty: ocean
+            .grids()
+            .iter()
+            .all(|grid| grid.band_is_empty(config.min_zoom, config.max_zoom)),
+    });
 
     let mut features_read: u64 = 0;
     let mut tiles_written: u64 = 0;
@@ -562,7 +636,7 @@ fn phase_assemble_partitions(
     let scope_result: Result<(), PipelineError> = std::thread::scope(|s| {
         for _ in 0..worker_count {
             let tx = tx.clone();
-            let partitions_ref = &partitions;
+            let union_ref = &union;
             let next_job_ref = &next_job;
             let stop_ref = &stop;
             let seam_layers = seam_reconcile_layers;
@@ -572,7 +646,7 @@ fn phase_assemble_partitions(
                         break;
                     }
                     let order = next_job_ref.fetch_add(1, Ordering::Relaxed);
-                    if order >= partitions_ref.len() {
+                    if order >= union_ref.len() {
                         break;
                     }
                     {
@@ -594,19 +668,47 @@ fn phase_assemble_partitions(
                     if stop_ref.load(Ordering::Relaxed) {
                         break;
                     }
-                    let partition = &partitions_ref[order];
-                    let result = read_encode_partition(
-                        order,
-                        partition,
-                        compression,
-                        compression_level,
-                        tile_format,
-                        tile_compression,
-                        &seam_layers,
-                        seam_metrics,
-                        assemble_budget,
-                        &tx,
-                    );
+                    let result = match union_ref[order] {
+                        UnionPartition::Sort(partition) => read_encode_partition(
+                            order,
+                            partition,
+                            compression,
+                            compression_level,
+                            tile_format,
+                            tile_compression,
+                            &seam_layers,
+                            seam_metrics,
+                            assemble_budget,
+                            artifact_ctx,
+                            &tx,
+                        ),
+                        UnionPartition::ArtifactOnly { start, end } => artifact_ctx
+                            .ok_or_else(|| {
+                                PipelineError(
+                                    "artifact-only partition without an ocean artifact".to_string(),
+                                )
+                            })
+                            .and_then(|artifact| {
+                                let items = artifact_run_copy_items(
+                                    artifact.ocean,
+                                    start,
+                                    end,
+                                    artifact.band_empty,
+                                )?;
+                                send_partition_batch(
+                                    &tx,
+                                    PartitionBatch {
+                                        order,
+                                        batch_index: 0,
+                                        is_last: true,
+                                        features_read: 0,
+                                        max_batch_bytes: 0,
+                                        reader_ns: 0,
+                                        items,
+                                    },
+                                )
+                            }),
+                    };
                     if result.is_err() {
                         stop_ref.store(true, Ordering::Relaxed);
                     }
@@ -694,17 +796,39 @@ fn phase_assemble_partitions(
                     max_batch_bytes = max_batch_bytes.max(batch.max_batch_bytes);
                     reader_total_ns += batch.reader_ns;
                     current_partition_reader_ns += batch.reader_ns;
-                    for tile in batch.encoded_tiles {
-                        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-                        let tile_bytes = tile.compressed.len() as u64;
-                        record_tile_size_diagnostics(&mut size_diag, tile.tile_id, tile_bytes);
-                        let is_unique = pmtiles.add_tile(z, x, y, &tile.compressed)?;
-                        tiles_written += 1;
-                        if (z as usize) < 15 {
-                            tiles_per_zoom[z as usize] += 1;
-                            if is_unique {
-                                unique_per_zoom[z as usize] += 1;
-                                bytes_per_zoom[z as usize] += tile_bytes;
+                    for item in batch.items {
+                        match item {
+                            PartitionItem::Encoded(tile) => write_encoded_item(
+                                &mut pmtiles,
+                                &tile,
+                                &mut tiles_written,
+                                &mut tiles_per_zoom,
+                                &mut unique_per_zoom,
+                                &mut bytes_per_zoom,
+                                &mut size_diag,
+                            )?,
+                            PartitionItem::RunCopy {
+                                tile_id,
+                                run_length,
+                                offset,
+                                length,
+                            } => {
+                                let ocean = ocean.ok_or_else(|| {
+                                    PipelineError(
+                                        "artifact run copy without an ocean artifact".to_string(),
+                                    )
+                                })?;
+                                write_run_copy(
+                                    &mut pmtiles,
+                                    tile_id,
+                                    run_length,
+                                    ocean.raw_blob(offset, length)?,
+                                    &mut tiles_written,
+                                    &mut tiles_per_zoom,
+                                    &mut unique_per_zoom,
+                                    &mut bytes_per_zoom,
+                                    &mut size_diag,
+                                )?;
                             }
                         }
                     }
@@ -786,6 +910,7 @@ fn read_encode_partition(
     seam_reconcile_layers: &[u8],
     seam_metrics: &SeamMetrics,
     assemble_budget: usize,
+    artifact: Option<ArtifactPartitionCtx<'_>>,
     tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
 ) -> Result<(), PipelineError> {
     const BATCH_SIZE: usize = 4096;
@@ -801,6 +926,8 @@ fn read_encode_partition(
     let mut batch_bytes: usize = 0;
     let mut batch_index = 0usize;
     let mut read_started = std::time::Instant::now();
+    let (partition_start, partition_end) = sort::partition_tile_range(partition.index);
+    let mut artifact_cursor = partition_start;
     let encode_ctx = PartitionEncodeCtx {
         compression_level,
         tile_format,
@@ -830,6 +957,9 @@ fn read_encode_partition(
                     reader_ns,
                 },
                 &batch,
+                artifact,
+                &mut artifact_cursor,
+                Some(partition_end),
             )?;
             break;
         };
@@ -856,6 +986,9 @@ fn read_encode_partition(
                             reader_ns,
                         },
                         &batch,
+                        artifact,
+                        &mut artifact_cursor,
+                        None,
                     )?;
                     batch_index += 1;
                     batch_features_read = 0;
@@ -878,11 +1011,248 @@ fn read_encode_partition(
     Ok(())
 }
 
+fn artifact_run_copy_items(
+    ocean: &crate::ocean::OceanTiles,
+    start: u64,
+    end: u64,
+    band_empty: bool,
+) -> Result<Vec<PartitionItem>, PipelineError> {
+    let mut items = Vec::new();
+    if start >= end {
+        return Ok(items);
+    }
+    for run in ocean.runs_in(start, end) {
+        let mut cursor = start.max(run.tile_id);
+        let run_end = end.min(run.tile_id.saturating_add(u64::from(run.run_length)));
+        if !band_empty {
+            // A computed band suppresses the artifact even when it emits no
+            // tile. Coalesce the remaining members, while retaining zoom
+            // boundaries for the per-zoom writer counters.
+            let mut copy_start = None;
+            let mut copy_zoom = None;
+            while cursor < run_end {
+                let (z, x, y) = pmtiles_writer::tile_id_to_zxy(cursor);
+                let copy = !ocean.band_tile(z, x, y);
+                if copy && copy_zoom.is_none_or(|previous| previous == z) {
+                    copy_start.get_or_insert(cursor);
+                    copy_zoom = Some(z);
+                } else {
+                    if let Some(start) = copy_start.take() {
+                        items.push(PartitionItem::RunCopy {
+                            tile_id: start,
+                            run_length: u32::try_from(cursor - start).map_err(|_| {
+                                PipelineError("artifact split run length exceeds u32".to_string())
+                            })?,
+                            offset: run.offset,
+                            length: run.length,
+                        });
+                    }
+                    copy_zoom = None;
+                    if copy {
+                        copy_start = Some(cursor);
+                        copy_zoom = Some(z);
+                    }
+                }
+                cursor += 1;
+            }
+            if let Some(start) = copy_start {
+                items.push(PartitionItem::RunCopy {
+                    tile_id: start,
+                    run_length: u32::try_from(run_end - start).map_err(|_| {
+                        PipelineError("artifact split run length exceeds u32".to_string())
+                    })?,
+                    offset: run.offset,
+                    length: run.length,
+                });
+            }
+            continue;
+        }
+        while cursor < run_end {
+            let (z, _x, _y) = pmtiles_writer::tile_id_to_zxy(cursor);
+            let zoom_end = if z == 14 {
+                run_end
+            } else {
+                ((1_u64 << (2 * u32::from(z + 1))) - 1) / 3
+            };
+            let sub_end = run_end.min(zoom_end);
+            let length = u32::try_from(sub_end - cursor)
+                .map_err(|_| PipelineError("artifact split run length exceeds u32".to_string()))?;
+            items.push(PartitionItem::RunCopy {
+                tile_id: cursor,
+                run_length: length,
+                offset: run.offset,
+                length: run.length,
+            });
+            cursor = sub_end;
+        }
+    }
+    Ok(items)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_run_copy(
+    pmtiles: &mut PmtilesWriter,
+    tile_id: u64,
+    run_length: u32,
+    data: &[u8],
+    tiles_written: &mut u64,
+    tiles_per_zoom: &mut [u64; 15],
+    unique_per_zoom: &mut [u64; 15],
+    bytes_per_zoom: &mut [u64; 15],
+    size_diag: &mut TileSizeDiagnostics,
+) -> Result<(), PipelineError> {
+    let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let bytes = u64::try_from(data.len())
+        .map_err(|_| PipelineError("tile payload length exceeds u64".to_string()))?;
+    let unique = pmtiles.add_run(tile_id, run_length, data)?;
+    *tiles_written += u64::from(run_length);
+    tiles_per_zoom[z as usize] += u64::from(run_length);
+    if unique {
+        unique_per_zoom[z as usize] += 1;
+        bytes_per_zoom[z as usize] += bytes;
+    }
+    record_tile_size_diagnostics(size_diag, tile_id, bytes);
+    if run_length > 1 {
+        size_diag.total_tile_bytes += bytes * u64::from(run_length - 1);
+        if bytes > super::stats::TILE_OVERSIZE_WARN_BYTES {
+            size_diag.oversize_warn_count += u64::from(run_length - 1);
+        }
+        if bytes > super::stats::TILE_OVERSIZE_SEVERE_BYTES {
+            size_diag.oversize_severe_count += u64::from(run_length - 1);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_encoded_item(
+    pmtiles: &mut PmtilesWriter,
+    tile: &EncodedTile,
+    tiles_written: &mut u64,
+    tiles_per_zoom: &mut [u64; 15],
+    unique_per_zoom: &mut [u64; 15],
+    bytes_per_zoom: &mut [u64; 15],
+    size_diag: &mut TileSizeDiagnostics,
+) -> Result<(), PipelineError> {
+    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+    let bytes = tile.compressed.len() as u64;
+    record_tile_size_diagnostics(size_diag, tile.tile_id, bytes);
+    let unique = pmtiles.add_tile(z, x, y, &tile.compressed)?;
+    *tiles_written += 1;
+    tiles_per_zoom[z as usize] += 1;
+    if unique {
+        unique_per_zoom[z as usize] += 1;
+        bytes_per_zoom[z as usize] += bytes;
+    }
+    Ok(())
+}
+
+fn raw_contains_ocean(raw: &[u8]) -> Result<bool, PipelineError> {
+    Ok(crate::pmtiles_reader::decode_mvt_layers(raw)?
+        .iter()
+        .any(|layer| layer.name == "ocean"))
+}
+
+fn ocean_layer_field(compressed: &[u8]) -> Result<Vec<u8>, PipelineError> {
+    let raw = crate::pmtiles_reader::gzip_decompress(compressed)?;
+    let layers = crate::pmtiles_reader::decode_mvt_layers(&raw)?;
+    if layers.len() != 1 || layers[0].name != "ocean" {
+        return Err(PipelineError(
+            "artifact tile must contain exactly one ocean layer".to_string(),
+        ));
+    }
+    let mut i = 0;
+    while i < raw.len() {
+        let begin = i;
+        let tag = read_varint(&raw, &mut i)?;
+        let field = tag >> 3;
+        match tag & 7 {
+            0 => {
+                let _ = read_varint(&raw, &mut i)?;
+            }
+            1 => {
+                i = i
+                    .checked_add(8)
+                    .filter(|end| *end <= raw.len())
+                    .ok_or_else(|| {
+                        PipelineError("MVT fixed64 field exceeds payload".to_string())
+                    })?;
+            }
+            2 => {
+                let length = usize::try_from(read_varint(&raw, &mut i)?)
+                    .map_err(|_| PipelineError("MVT field length too large".to_string()))?;
+                let end = i
+                    .checked_add(length)
+                    .filter(|end| *end <= raw.len())
+                    .ok_or_else(|| PipelineError("MVT field exceeds payload".to_string()))?;
+                if field == 3 {
+                    return Ok(raw[begin..end].to_vec());
+                }
+                i = end;
+            }
+            5 => {
+                i = i
+                    .checked_add(4)
+                    .filter(|end| *end <= raw.len())
+                    .ok_or_else(|| {
+                        PipelineError("MVT fixed32 field exceeds payload".to_string())
+                    })?;
+            }
+            _ => return Err(PipelineError("unsupported MVT field wire type".to_string())),
+        }
+    }
+    Err(PipelineError(
+        "artifact ocean tile missing layer field".to_string(),
+    ))
+}
+
+fn read_varint(data: &[u8], cursor: &mut usize) -> Result<u64, PipelineError> {
+    let mut value = 0_u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *data
+            .get(*cursor)
+            .ok_or_else(|| PipelineError("truncated MVT varint".to_string()))?;
+        *cursor += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(PipelineError("overlong MVT varint".to_string()))
+}
+
+fn splice_ocean_layer(
+    mut raw: Vec<u8>,
+    field: &[u8],
+    tile_id: u64,
+    compression_level: u32,
+) -> Result<Vec<u8>, PipelineError> {
+    raw.extend_from_slice(field);
+    let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let level = compression_level_for_zoom(z, compression_level);
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(level));
+    use std::io::Write;
+    encoder.write_all(&raw)?;
+    Ok(encoder.finish()?)
+}
+
+/// Match the compression regime used by normal MVT batch encoding.
+fn compression_level_for_zoom(z: u8, compression_level: u32) -> u32 {
+    match z {
+        0..=8 => compression_level.clamp(9, 10),
+        13..=14 => compression_level.min(3),
+        _ => compression_level,
+    }
+}
+
 fn encode_and_send_partition_batch(
     tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
     ctx: &PartitionEncodeCtx<'_>,
     meta: &PartitionBatchMeta,
     pending_tiles: &[PendingTile],
+    artifact: Option<ArtifactPartitionCtx<'_>>,
+    artifact_cursor: &mut u64,
+    final_end: Option<u64>,
 ) -> Result<(), PipelineError> {
     let encoded_tiles = if pending_tiles.is_empty() {
         Vec::new()
@@ -896,6 +1266,46 @@ fn encode_and_send_partition_batch(
             ctx.seam_metrics,
         )?
     };
+    let mut items = Vec::with_capacity(encoded_tiles.len());
+    if let Some(artifact) = artifact {
+        let mut encoded = encoded_tiles.into_iter().peekable();
+        for tile in pending_tiles {
+            items.extend(artifact_run_copy_items(
+                artifact.ocean,
+                *artifact_cursor,
+                tile.tile_id,
+                artifact.band_empty,
+            )?);
+            if encoded
+                .peek()
+                .is_some_and(|encoded| encoded.tile_id == tile.tile_id)
+            {
+                let Some(mut encoded) = encoded.next() else {
+                    return Err(PipelineError(
+                        "peeked encoded tile disappeared from partition batch".to_string(),
+                    ));
+                };
+                splice_artifact_ocean(&mut encoded, artifact, ctx.compression_level)?;
+                items.push(PartitionItem::Encoded(encoded));
+            }
+            *artifact_cursor = tile.tile_id.saturating_add(1);
+        }
+        if encoded.next().is_some() {
+            return Err(PipelineError(
+                "encoded tile did not correspond to a partition input tile".to_string(),
+            ));
+        }
+        if let Some(end) = final_end {
+            items.extend(artifact_run_copy_items(
+                artifact.ocean,
+                *artifact_cursor,
+                end,
+                artifact.band_empty,
+            )?);
+        }
+    } else {
+        items.extend(encoded_tiles.into_iter().map(PartitionItem::Encoded));
+    }
     send_partition_batch(
         tx,
         PartitionBatch {
@@ -905,9 +1315,56 @@ fn encode_and_send_partition_batch(
             features_read: meta.features_read,
             max_batch_bytes: meta.max_batch_bytes,
             reader_ns: meta.reader_ns,
-            encoded_tiles,
+            items,
         },
     )
+}
+
+fn splice_artifact_ocean(
+    encoded: &mut EncodedTile,
+    artifact: ArtifactPartitionCtx<'_>,
+    compression_level: u32,
+) -> Result<(), PipelineError> {
+    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(encoded.tile_id);
+    let band = !artifact.band_empty && artifact.ocean.band_tile(z, x, y);
+    if band {
+        return Ok(());
+    }
+    let Some(run) = artifact.ocean.run_covering(encoded.tile_id) else {
+        return Ok(());
+    };
+    let raw = crate::pmtiles_reader::gzip_decompress(&encoded.compressed)?;
+    if raw_contains_ocean(&raw)? {
+        return Err(PipelineError(
+            "non-band OSM tile unexpectedly contains computed ocean".to_string(),
+        ));
+    }
+    let ocean_field = ocean_layer_field(artifact.ocean.raw_blob(run.offset, run.length)?)?;
+    encoded.compressed = splice_ocean_layer(raw, &ocean_field, encoded.tile_id, compression_level)?;
+    Ok(())
+}
+
+fn partition_union<'a>(
+    partitions: &'a [sort::SortPartition],
+    ocean: Option<&crate::ocean::OceanTiles>,
+) -> Vec<UnionPartition<'a>> {
+    let Some(ocean) = ocean else {
+        return partitions.iter().map(UnionPartition::Sort).collect();
+    };
+    let mut by_index = std::collections::BTreeMap::new();
+    for partition in partitions {
+        by_index.insert(partition.index, partition);
+    }
+    let mut union = Vec::new();
+    for index in 0..sort::SORT_PARTITIONS {
+        let (start, end) = sort::partition_tile_range(index);
+        if let Some(partition) = by_index.get(&index) {
+            union.push(UnionPartition::Sort(partition));
+        } else if !ocean.runs_in(start, end).is_empty() {
+            union.push(UnionPartition::ArtifactOnly { start, end });
+        }
+    }
+    union
 }
 
 fn send_partition_batch(
@@ -1214,12 +1671,8 @@ pub(super) fn encode_tile_batch_mvt(
                 }
 
                 // Per-zoom compression: boost low zooms, speed up high zooms.
-                #[allow(clippy::cast_possible_truncation)]
-                let level = match z {
-                    0..=8 => compression_level.clamp(9, 10),
-                    13..=14 => compression_level.min(3),
-                    _ => compression_level,
-                } as usize;
+                let level = usize::try_from(compression_level_for_zoom(z, compression_level))
+                    .expect("compression level fits usize");
 
                 let mut compress_buf = std::mem::take(&mut s.gz_buf);
                 compress_buf.clear();
@@ -1338,4 +1791,30 @@ fn get_or_create_layer(layers: &mut [Option<LayerBuilder>], idx: usize) -> &mut 
         layers[idx] = Some(LayerBuilder::new(Layer::ALL[idx].name()));
     }
     layers[idx].as_mut().expect("just inserted")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn ocean_layer_field_skips_non_length_delimited_tile_fields() {
+        // Unknown varint and fixed32 fields precede the MVT layer field. The
+        // extractor must skip by wire type, rather than treating every field
+        // as length-delimited.
+        let layer = [10, 5, b'o', b'c', b'e', b'a', b'n'];
+        let raw = [
+            8, 1, 21, 0, 0, 0, 0, 26, 7, 10, 5, b'o', b'c', b'e', b'a', b'n',
+        ];
+        assert_eq!(&raw[9..], layer);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&raw).expect("gzip raw tile");
+        let compressed = encoder.finish().expect("finish gzip");
+        assert_eq!(
+            ocean_layer_field(&compressed).expect("extract layer"),
+            raw[7..]
+        );
+    }
 }

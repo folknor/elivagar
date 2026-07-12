@@ -206,6 +206,8 @@ pub struct PmtilesWriter {
     tile_data_compression: TileDataCompression,
     source_pbf_filename: Option<String>,
     osmosis_replication_timestamp: Option<i64>,
+    metadata_extension: Option<String>,
+    ocean_only_metadata: bool,
     /// Concatenated compressed tile data (in-memory or file-backed).
     blob: TileBlob,
     /// Total number of tiles addressed (including deduped references).
@@ -262,6 +264,18 @@ impl PmtilesWriter {
         self.tile_data_format = tile_data_format;
         self.tile_data_compression = tile_data_compression;
     }
+
+    /// Add a trusted JSON member to archive metadata. The caller owns the
+    /// schema; this keeps PMTiles metadata extensible without changing the
+    /// ordinary Shortbread contract.
+    pub fn set_metadata_extension(&mut self, json_member: impl Into<String>) {
+        self.metadata_extension = Some(json_member.into());
+    }
+
+    /// Write an ocean-only vector layer declaration for the durable artifact.
+    pub fn set_ocean_only_metadata(&mut self) {
+        self.ocean_only_metadata = true;
+    }
 }
 
 impl PmtilesWriter {
@@ -273,6 +287,8 @@ impl PmtilesWriter {
             tile_data_compression: TileDataCompression::Gzip,
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
+            metadata_extension: None,
+            ocean_only_metadata: false,
             blob: TileBlob::Memory(Vec::new()),
             num_addressed: 0,
             current_run: None,
@@ -304,6 +320,8 @@ impl PmtilesWriter {
             tile_data_compression: TileDataCompression::Gzip,
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
+            metadata_extension: None,
+            ocean_only_metadata: false,
             blob: TileBlob::File {
                 writer,
                 path: blob_path,
@@ -409,6 +427,75 @@ impl PmtilesWriter {
         Ok(true)
     }
 
+    /// Add a consecutive run sharing one compressed payload. This deliberately
+    /// preserves intra-run sharing even after the global dedup insertion cap.
+    pub fn add_run(&mut self, tile_id: u64, run_length: u32, data: &[u8]) -> io::Result<bool> {
+        if run_length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "PMTiles run length must be non-zero",
+            ));
+        }
+        if data.len() > u32::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tile data exceeds 4 GB",
+            ));
+        }
+        let data_len = u32::try_from(data.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "tile data exceeds 4 GB"))?;
+        let mut h1 = DefaultHasher::new();
+        data.hash(&mut h1);
+        let hash1 = h1.finish();
+        let mut h2 = DefaultHasher::new();
+        DEDUP_FP2_SALT.hash(&mut h2);
+        data.hash(&mut h2);
+        let hash2 = h2.finish();
+        let existing = self.dedup.get(&hash1).and_then(|candidates| {
+            self.dedup_stats.candidates += 1;
+            candidates.iter().find_map(|&(offset, length, fp)| {
+                (length == data_len && fp == hash2).then_some((offset, length))
+            })
+        });
+        let (offset, stored) = if let Some(found) = existing {
+            self.dedup_stats.tiles_reused += u64::from(run_length);
+            self.dedup_stats.bytes_saved += u64::from(data_len) * u64::from(run_length);
+            (found.0, false)
+        } else {
+            let offset = match &mut self.blob {
+                TileBlob::Memory(blob) => {
+                    let offset = blob.len() as u64;
+                    blob.extend_from_slice(data);
+                    offset
+                }
+                TileBlob::File { writer, offset, .. } => {
+                    let current = *offset;
+                    writer.write_all(data)?;
+                    *offset += u64::from(data_len);
+                    current
+                }
+            };
+            if self.dedup_count < self.dedup_cap {
+                let bucket = self.dedup.entry(hash1).or_default();
+                if !bucket.is_empty() {
+                    self.dedup_stats.hash_bucket_collisions += 1;
+                }
+                bucket.push((offset, data_len, hash2));
+                self.dedup_count += 1;
+            } else {
+                self.dedup_stats.insert_skipped_cap += 1;
+            }
+            self.unique_count += 1;
+            (offset, true)
+        };
+        self.push_dir_run(tile_id, run_length, offset, data_len)?;
+        if stored && run_length > 1 {
+            self.dedup_stats.tiles_reused += u64::from(run_length - 1);
+            self.dedup_stats.bytes_saved += u64::from(data_len) * u64::from(run_length - 1);
+        }
+        Ok(stored)
+    }
+
     /// Write the complete PMTiles archive to a file.
     ///
     /// # Errors
@@ -440,6 +527,8 @@ impl PmtilesWriter {
             self.tile_data_compression,
             self.source_pbf_filename.as_deref(),
             self.osmosis_replication_timestamp,
+            self.metadata_extension.as_deref(),
+            self.ocean_only_metadata,
         );
         let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
 
@@ -565,6 +654,35 @@ impl PmtilesWriter {
             offset,
             length,
             run_length: 1,
+        });
+        Ok(())
+    }
+
+    fn push_dir_run(
+        &mut self,
+        tile_id: u64,
+        run_length: u32,
+        offset: u64,
+        length: u32,
+    ) -> io::Result<()> {
+        self.num_addressed += u64::from(run_length);
+        if let Some(run) = &mut self.current_run
+            && tile_id == run.tile_id + u64::from(run.run_length)
+            && offset == run.offset
+            && length == run.length
+        {
+            run.run_length = run
+                .run_length
+                .checked_add(run_length)
+                .ok_or_else(|| io::Error::other("PMTiles run length overflow"))?;
+            return Ok(());
+        }
+        self.flush_run()?;
+        self.current_run = Some(DirEntry {
+            tile_id,
+            offset,
+            length,
+            run_length,
         });
         Ok(())
     }
@@ -897,11 +1015,18 @@ fn build_metadata(
     tile_data_compression: TileDataCompression,
     source_pbf_filename: Option<&str>,
     osmosis_replication_timestamp: Option<i64>,
+    metadata_extension: Option<&str>,
+    ocean_only_metadata: bool,
 ) -> String {
     use crate::shortbread::Layer;
 
     let mut layer_arr = String::from("[");
-    for (i, &layer) in Layer::ALL.iter().enumerate() {
+    let metadata_layers: Vec<Layer> = if ocean_only_metadata {
+        vec![Layer::Ocean]
+    } else {
+        Layer::ALL.to_vec()
+    };
+    for (i, layer) in metadata_layers.into_iter().enumerate() {
         if i > 0 {
             layer_arr.push(',');
         }
@@ -931,6 +1056,10 @@ fn build_metadata(
     }
     if let Some(ts) = osmosis_replication_timestamp {
         json.push_str(&format!(r#","osmosis_replication_timestamp":{ts}"#));
+    }
+    if let Some(extension) = metadata_extension {
+        json.push(',');
+        json.push_str(extension);
     }
     json.push('}');
     json

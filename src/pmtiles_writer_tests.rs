@@ -261,6 +261,8 @@ fn test_metadata_json() {
         TileDataCompression::Gzip,
         None,
         None,
+        None,
+        false,
     );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["name"], "Shortbread");
@@ -290,6 +292,8 @@ fn test_metadata_json_with_source_provenance() {
         TileDataCompression::Gzip,
         Some("denmark-latest.osm.pbf"),
         Some(1_708_000_000),
+        None,
+        false,
     );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["source_pbf"], "denmark-latest.osm.pbf");
@@ -311,6 +315,8 @@ fn test_metadata_json_escapes_source_pbf_special_chars() {
         TileDataCompression::Gzip,
         Some(source),
         None,
+        None,
+        false,
     );
 
     // Escaped JSON should parse and roundtrip to the exact original filename.
@@ -332,6 +338,8 @@ fn test_metadata_json_mlt_contract() {
         TileDataCompression::None,
         None,
         None,
+        None,
+        false,
     );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["format"], "mlt");
@@ -572,6 +580,99 @@ fn test_dedup_metrics_basic() {
     assert_eq!(writer.dedup_stats.bytes_saved, 2 * data_a.len() as u64);
 
     assert_eq!(writer.unique_count, 2);
+}
+
+#[test]
+fn add_run_records_one_blob_and_all_addressed_tiles() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let mut writer = PmtilesWriter::new(config);
+    let base = xy_to_tile_id(3, 0, 0);
+    assert!(writer.add_run(base, 4, b"ocean").expect("add run"));
+    assert_eq!(writer.num_addressed, 4);
+    assert_eq!(writer.unique_tile_count(), 1);
+    let entries = writer.collect_dir_entries().expect("collect directory");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].run_length, 4);
+}
+
+#[test]
+fn add_run_matches_expanded_add_tile_below_dedup_cap() {
+    let run_config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let tile_config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let base = xy_to_tile_id(3, 0, 0);
+    let payload = b"ocean";
+    let mut run_writer = PmtilesWriter::new(run_config);
+    let mut tile_writer = PmtilesWriter::new(tile_config);
+    assert!(run_writer.add_run(base, 4, payload).expect("add run"));
+    for tile_id in base..base + 4 {
+        let (z, x, y) = tile_id_to_zxy(tile_id);
+        let _ = tile_writer.add_tile(z, x, y, payload).expect("add tile");
+    }
+    let run_entries = run_writer.collect_dir_entries().expect("run entries");
+    let tile_entries = tile_writer.collect_dir_entries().expect("tile entries");
+    assert_eq!(run_writer.num_addressed, tile_writer.num_addressed);
+    assert_eq!(run_writer.unique_count, tile_writer.unique_count);
+    assert_eq!(run_entries.len(), tile_entries.len());
+    assert_eq!(run_entries[0].tile_id, tile_entries[0].tile_id);
+    assert_eq!(run_entries[0].offset, tile_entries[0].offset);
+    assert_eq!(run_entries[0].length, tile_entries[0].length);
+    assert_eq!(run_entries[0].run_length, tile_entries[0].run_length);
+}
+
+#[test]
+fn add_run_preserves_run_sharing_after_the_dedup_cap() {
+    let run_config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let tile_config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let base = xy_to_tile_id(3, 0, 0);
+    let payload = b"ocean";
+    let mut run_writer = PmtilesWriter::new(run_config);
+    let mut tile_writer = PmtilesWriter::new(tile_config);
+    run_writer.set_dedup_cap(0);
+    tile_writer.set_dedup_cap(0);
+    assert!(run_writer.add_run(base, 4, payload).expect("add run"));
+    for tile_id in base..base + 4 {
+        let (z, x, y) = tile_id_to_zxy(tile_id);
+        assert!(tile_writer.add_tile(z, x, y, payload).expect("add tile"));
+    }
+    assert_eq!(run_writer.num_addressed, tile_writer.num_addressed);
+    assert_eq!(run_writer.unique_count, 1);
+    assert_eq!(tile_writer.unique_count, 4);
+    assert_eq!(
+        run_writer.collect_dir_entries().expect("run entries").len(),
+        1
+    );
+    assert_eq!(
+        tile_writer
+            .collect_dir_entries()
+            .expect("tile entries")
+            .len(),
+        4
+    );
 }
 
 #[test]

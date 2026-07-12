@@ -8,6 +8,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use memmap2::{Mmap, MmapOptions};
+
 use flate2::read::GzDecoder;
 use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
@@ -73,6 +75,159 @@ pub struct RawDirEntry {
     pub offset: u64,
     pub length: u32,
     pub run_length: u32,
+}
+
+/// A reference to one stored tile payload. Multiple directory entries may
+/// point at the same blob.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct BlobRef {
+    pub offset: u64,
+    pub length: u32,
+}
+
+/// Memory-mapped PMTiles view for workloads which repeatedly inspect raw tile
+/// blobs. Unlike `PmtilesReader`, reads borrow the map and allocate nothing.
+pub struct ArchiveView {
+    map: Mmap,
+    header: [u8; HEADER_SIZE],
+    root_dir_offset: u64,
+    root_dir_length: u64,
+    leaf_dirs_offset: u64,
+    data_offset: u64,
+    internal_compression: u8,
+}
+
+impl ArchiveView {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let file = File::open(path)?;
+        // SAFETY: mapping is read-only, retained by self, and every public
+        // slice is bounds checked before it is exposed.
+        let map = unsafe { MmapOptions::new().map(&file)? };
+        if map.len() < HEADER_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "archive shorter than PMTiles header",
+            ));
+        }
+        let mut header = [0_u8; HEADER_SIZE];
+        header.copy_from_slice(&map[..HEADER_SIZE]);
+        if &header[..7] != b"PMTiles" || header[7] != 3 {
+            return Err(io::Error::other("not PMTiles v3"));
+        }
+        if header[97] != 1 && header[97] != 2 {
+            return Err(io::Error::other("unsupported PMTiles internal compression"));
+        }
+        if header[99] != 1 {
+            return Err(io::Error::other("ArchiveView requires MVT tiles"));
+        }
+        if header[98] != 2 {
+            return Err(io::Error::other(
+                "ArchiveView requires gzip tile compression",
+            ));
+        }
+        Ok(Self {
+            root_dir_offset: read_u64_le(&header, 8),
+            root_dir_length: read_u64_le(&header, 16),
+            leaf_dirs_offset: read_u64_le(&header, 40),
+            data_offset: read_u64_le(&header, 56),
+            internal_compression: header[97],
+            map,
+            header,
+        })
+    }
+
+    pub fn header(&self) -> &[u8; HEADER_SIZE] {
+        &self.header
+    }
+    pub fn min_zoom(&self) -> u8 {
+        self.header[100]
+    }
+    pub fn max_zoom(&self) -> u8 {
+        self.header[101]
+    }
+    pub fn tile_type(&self) -> u8 {
+        self.header[99]
+    }
+    pub fn tile_compression(&self) -> u8 {
+        self.header[98]
+    }
+    pub fn num_addressed(&self) -> u64 {
+        read_u64_le(&self.header, 72)
+    }
+
+    fn slice(&self, offset: u64, length: u64, label: &str) -> io::Result<&[u8]> {
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| io::Error::other(format!("{label} range overflow")))?;
+        let start = usize::try_from(offset)
+            .map_err(|_| io::Error::other(format!("{label} offset too large")))?;
+        let end =
+            usize::try_from(end).map_err(|_| io::Error::other(format!("{label} end too large")))?;
+        self.map.get(start..end).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("{label} outside archive"),
+            )
+        })
+    }
+
+    fn directory(&self, offset: u64, length: u64) -> io::Result<Vec<RawDirEntry>> {
+        let raw = self.slice(offset, length, "directory")?;
+        if self.internal_compression == 2 {
+            decode_directory(&gzip_decompress(raw)?)
+        } else {
+            decode_directory(raw)
+        }
+    }
+
+    pub fn read_all_runs(&self) -> io::Result<Vec<RawDirEntry>> {
+        let root = self.directory(self.root_dir_offset, self.root_dir_length)?;
+        let mut runs = Vec::new();
+        for entry in root {
+            if entry.run_length == 0 {
+                let offset = self
+                    .leaf_dirs_offset
+                    .checked_add(entry.offset)
+                    .ok_or_else(|| io::Error::other("leaf directory offset overflow"))?;
+                runs.extend(
+                    self.directory(offset, u64::from(entry.length))?
+                        .into_iter()
+                        .filter(|run| run.run_length != 0),
+                );
+            } else {
+                runs.push(entry);
+            }
+        }
+        runs.sort_unstable_by_key(|entry| entry.tile_id);
+        check_run_invariants(&runs)?;
+        Ok(runs)
+    }
+
+    pub fn raw_blob(&self, blob: BlobRef) -> io::Result<&[u8]> {
+        self.raw_blob_at(blob.offset, blob.length)
+    }
+
+    pub fn raw_blob_at(&self, offset: u64, length: u32) -> io::Result<&[u8]> {
+        let offset = self
+            .data_offset
+            .checked_add(offset)
+            .ok_or_else(|| io::Error::other("tile data offset overflow"))?;
+        self.slice(offset, u64::from(length), "tile payload")
+    }
+
+    pub fn metadata(&self) -> io::Result<String> {
+        let compressed = self.slice(
+            read_u64_le(&self.header, 24),
+            read_u64_le(&self.header, 32),
+            "metadata",
+        )?;
+        let raw = if self.internal_compression == 2 {
+            gzip_decompress(compressed)?
+        } else {
+            compressed.to_vec()
+        };
+        String::from_utf8(raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
 }
 
 impl PmtilesReader {

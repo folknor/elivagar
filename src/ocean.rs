@@ -9,18 +9,162 @@ use crate::geometry::int_ocean::{
     shape_bbox,
 };
 use crate::geometry::pyramid::{
-    PyramidCell, PyramidParams, PyramidScratch, emit_shape_pyramid, emit_shape_pyramid_cell,
-    split_for_parallel,
+    PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, emit_shape_pyramid,
+    emit_shape_pyramid_cell, split_for_parallel,
 };
 use crate::geometry::{self, MercBbox, Point};
 use crate::mvt::GeomType;
+use crate::pmtiles_reader::{ArchiveView, RawDirEntry};
 use crate::pmtiles_writer;
 use crate::shortbread::Layer;
 use crate::sort::{self, SortWriter};
 use crate::wire_format::{append_feature_data_with_attrs, encode_attrs_bytes};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Bump whenever a change affects durable ocean tile bytes.
+pub const OCEAN_POLICY_VERSION: u32 = 1;
+
+/// The durable artifact invalidation key, encoded under `ocean_artifact`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OceanArtifactKey {
+    pub full_shp_xxh128: u128,
+    pub full_shx_xxh128: u128,
+    pub simplified_shp_xxh128: Option<u128>,
+    pub simplified_shx_xxh128: Option<u128>,
+    pub min_zoom: u8,
+    pub max_zoom: u8,
+    pub compression_level: u32,
+    pub policy_version: u32,
+}
+
+impl OceanArtifactKey {
+    pub fn from_inputs(
+        full_shp: &std::path::Path,
+        full_shx: &std::path::Path,
+        simplified_shp: Option<&std::path::Path>,
+        simplified_shx: Option<&std::path::Path>,
+        min_zoom: u8,
+        max_zoom: u8,
+        compression_level: u32,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            full_shp_xxh128: hash_file(full_shp)?,
+            full_shx_xxh128: hash_file(full_shx)?,
+            simplified_shp_xxh128: simplified_shp.map(hash_file).transpose()?,
+            simplified_shx_xxh128: simplified_shx.map(hash_file).transpose()?,
+            min_zoom,
+            max_zoom,
+            compression_level,
+            policy_version: OCEAN_POLICY_VERSION,
+        })
+    }
+
+    pub fn json(&self) -> String {
+        fn hash(v: u128) -> String {
+            format!("{v:032x}")
+        }
+        fn optional(v: Option<u128>) -> String {
+            v.map_or_else(|| "null".to_string(), |v| format!("\"{}\"", hash(v)))
+        }
+        format!(
+            r#"{{"full_shp_xxh128":"{}","full_shx_xxh128":"{}","simplified_shp_xxh128":{},"simplified_shx_xxh128":{},"min_zoom":{},"max_zoom":{},"compression_level":{},"policy_version":{}}}"#,
+            hash(self.full_shp_xxh128),
+            hash(self.full_shx_xxh128),
+            optional(self.simplified_shp_xxh128),
+            optional(self.simplified_shx_xxh128),
+            self.min_zoom,
+            self.max_zoom,
+            self.compression_level,
+            self.policy_version,
+        )
+    }
+
+    pub fn from_json(value: &serde_json::Value) -> std::io::Result<Self> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| std::io::Error::other("ocean_artifact must be an object"))?;
+        let parse_hash = |name: &str| -> std::io::Result<u128> {
+            let value = object
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| std::io::Error::other(format!("ocean_artifact missing {name}")))?;
+            if value.len() != 32
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(std::io::Error::other(format!(
+                    "invalid ocean_artifact {name}"
+                )));
+            }
+            u128::from_str_radix(value, 16)
+                .map_err(|_| std::io::Error::other(format!("invalid ocean_artifact {name}")))
+        };
+        let parse_optional_hash = |name: &str| -> std::io::Result<Option<u128>> {
+            match object.get(name) {
+                Some(serde_json::Value::Null) => Ok(None),
+                Some(value) => value
+                    .as_str()
+                    .ok_or_else(|| std::io::Error::other(format!("invalid ocean_artifact {name}")))
+                    .and_then(|s| {
+                        if s.len() != 32
+                            || !s
+                                .bytes()
+                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                        {
+                            return Err(std::io::Error::other(format!(
+                                "invalid ocean_artifact {name}"
+                            )));
+                        }
+                        u128::from_str_radix(s, 16).map(Some).map_err(|_| {
+                            std::io::Error::other(format!("invalid ocean_artifact {name}"))
+                        })
+                    }),
+                None => Err(std::io::Error::other(format!(
+                    "ocean_artifact missing {name}"
+                ))),
+            }
+        };
+        let number = |name: &str| -> std::io::Result<u64> {
+            object
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| std::io::Error::other(format!("ocean_artifact missing {name}")))
+        };
+        Ok(Self {
+            full_shp_xxh128: parse_hash("full_shp_xxh128")?,
+            full_shx_xxh128: parse_hash("full_shx_xxh128")?,
+            simplified_shp_xxh128: parse_optional_hash("simplified_shp_xxh128")?,
+            simplified_shx_xxh128: parse_optional_hash("simplified_shx_xxh128")?,
+            min_zoom: u8::try_from(number("min_zoom")?)
+                .map_err(|_| std::io::Error::other("invalid ocean_artifact min_zoom"))?,
+            max_zoom: u8::try_from(number("max_zoom")?)
+                .map_err(|_| std::io::Error::other("invalid ocean_artifact max_zoom"))?,
+            compression_level: u32::try_from(number("compression_level")?)
+                .map_err(|_| std::io::Error::other("invalid ocean_artifact compression_level"))?,
+            policy_version: u32::try_from(number("policy_version")?)
+                .map_err(|_| std::io::Error::other("invalid ocean_artifact policy_version"))?,
+        })
+    }
+}
+
+fn hash_file(path: &std::path::Path) -> std::io::Result<u128> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    let mut buf = [0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hasher.digest128())
+}
 
 // ---------------------------------------------------------------------------
 // Ocean input stats
@@ -29,17 +173,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // process_ocean_shapefile runs up to twice per pipeline (simplified z0-7 plus
 // full-resolution z8+), so its input-side counts accumulate into these
 // process-global atomics and are flushed once at OCEAN_END by
-// emit_ocean_counters. Per-zoom ocean *output* is already covered by the
-// sort_layer_ocean_z* firehose; the gap was the input side - how many shapefile
-// shapes were read, how many overlapped the data bounds, how many polygon
-// pieces they parsed into, and how many shapefile bytes were mapped. Ocean is
-// ~30% of wall and a top allocator, so this is the phase most worth a look.
+// emit_ocean_counters. OceanAcc records its output at each spill flush because
+// the phase12 sort snapshot predates the ocean pass. The output counters use
+// payload bytes only, matching the other sort_layer_*_bytes counters; its
+// accumulator byte budget also includes PayloadRecord storage and is not a
+// comparable measure. The input side records how many shapefile shapes were
+// read, how many overlapped the data bounds, how many polygon pieces they
+// parsed into, and how many shapefile bytes were mapped. Ocean is ~30% of wall
+// and a top allocator, so this is the phase most worth a look.
 
 struct OceanStats {
     shapes: AtomicU64,
     shapes_hit: AtomicU64,
     pieces: AtomicU64,
     shapefile_bytes: AtomicU64,
+    records: AtomicU64,
+    payload_bytes: AtomicU64,
+    zoom_records: [AtomicU64; 15],
+    zoom_payload_bytes: [AtomicU64; 15],
 }
 
 static OCEAN_STATS: OceanStats = OceanStats {
@@ -47,7 +198,262 @@ static OCEAN_STATS: OceanStats = OceanStats {
     shapes_hit: AtomicU64::new(0),
     pieces: AtomicU64::new(0),
     shapefile_bytes: AtomicU64::new(0),
+    records: AtomicU64::new(0),
+    payload_bytes: AtomicU64::new(0),
+    zoom_records: [const { AtomicU64::new(0) }; 15],
+    zoom_payload_bytes: [const { AtomicU64::new(0) }; 15],
 };
+
+static OCEAN_LAYER_STATS_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn ocean_layer_stats_enabled() -> bool {
+    *OCEAN_LAYER_STATS_ENABLED.get_or_init(|| std::env::var_os("ELIVAGAR_LAYER_STATS").is_some())
+}
+
+/// Integer grid describing one ocean pass for artifact ownership.
+#[derive(Clone, Copy, Debug)]
+pub struct OceanPassGrid {
+    pub max_zoom: u8,
+    pub inner_rect: IntRect,
+    pub world_rect: IntRect,
+}
+
+impl OceanPassGrid {
+    pub fn for_bounds(data_bounds: &MercBbox, max_zoom: u8) -> Self {
+        let scale = 1_i64 << (u32::from(max_zoom) + 12);
+        Self {
+            max_zoom,
+            inner_rect: IntRect {
+                min_x: merc_ceil(data_bounds.min_x, scale),
+                min_y: merc_ceil(data_bounds.min_y, scale),
+                max_x: merc_floor(data_bounds.max_x, scale),
+                max_y: merc_floor(data_bounds.max_y, scale),
+            },
+            world_rect: IntRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: i32::try_from(scale).expect("world grid fits i32"),
+                max_y: i32::try_from(scale).expect("world grid fits i32"),
+            },
+        }
+    }
+
+    pub fn band_is_empty(&self, min_zoom: u8, max_zoom: u8) -> bool {
+        let _ = (min_zoom, max_zoom); // the containment condition is zoom-invariant.
+        rect_contains(self.inner_rect, self.world_rect)
+    }
+}
+
+/// Whether the computed pass owns this tile rather than the artifact.
+pub fn ocean_band_tile(z: u8, tx: u32, ty: u32, pass: &OceanPassGrid) -> bool {
+    if z > pass.max_zoom {
+        return true;
+    }
+    // A regional extract touching the antimeridian has no representable
+    // neighbour beyond x=0/x=max. Keep that column computed unless this pass
+    // is the complete world, so a clipped world-edge fragment never leaks in
+    // from the durable artifact.
+    let max_tile = (1_u32 << z) - 1;
+    if !rect_contains(pass.inner_rect, pass.world_rect)
+        && ((tx == 0 && pass.inner_rect.min_x == pass.world_rect.min_x)
+            || (tx == max_tile && pass.inner_rect.max_x == pass.world_rect.max_x))
+    {
+        return true;
+    }
+    let shift = u32::from(pass.max_zoom - z);
+    let cell = 4096_i64 << shift;
+    let buffer = 128_i64 << shift;
+    let limit = 1_i64 << (u32::from(pass.max_zoom) + 12);
+    let clamp = |v: i64| i32::try_from(v.clamp(0, limit)).expect("ocean base coordinate fits i32");
+    let buffered = IntRect {
+        min_x: clamp(i64::from(tx) * cell - buffer),
+        min_y: clamp(i64::from(ty) * cell - buffer),
+        max_x: clamp((i64::from(tx) + 1) * cell + buffer),
+        max_y: clamp((i64::from(ty) + 1) * cell + buffer),
+    };
+    let clipped = IntRect {
+        min_x: buffered.min_x.max(pass.world_rect.min_x),
+        min_y: buffered.min_y.max(pass.world_rect.min_y),
+        max_x: buffered.max_x.min(pass.world_rect.max_x),
+        max_y: buffered.max_y.min(pass.world_rect.max_y),
+    };
+    !rect_contains(pass.inner_rect, clipped)
+}
+
+fn pass_owns_root_range(
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+    pass: &OceanPassGrid,
+    z_top: u8,
+) -> bool {
+    // This deliberately follows pyramid::root_fragments rather than using the
+    // raw shapefile bbox. Root selection snaps the quantized bbox outward to
+    // z_top cells; a raw-bbox test can incorrectly discard a root touching the
+    // computed band.
+    let scale = 1_i64 << (u32::from(pass.max_zoom) + 12);
+    let snap = |value: f64| -> i32 {
+        #[allow(clippy::cast_possible_truncation)]
+        let value = (value * scale as f64).round() as i64;
+        i32::try_from(value.clamp(0, scale)).expect("ocean base coordinate fits i32")
+    };
+    let bbox = IntRect {
+        min_x: snap(min_x),
+        min_y: snap(min_y),
+        max_x: snap(max_x),
+        max_y: snap(max_y),
+    };
+    let shift = u32::from(pass.max_zoom - z_top);
+    let cell = 4096_i64 << shift;
+    let max_tile = (1_u32 << z_top) - 1;
+    let index = |v: i32| -> u32 {
+        if v <= 0 {
+            0
+        } else {
+            u32::try_from(i64::from(v).div_euclid(cell))
+                .expect("ocean root tile fits u32")
+                .min(max_tile)
+        }
+    };
+    let tx0 = index(bbox.min_x);
+    let tx1 = index(bbox.max_x);
+    let ty0 = index(bbox.min_y);
+    let ty1 = index(bbox.max_y);
+    for ty in ty0..=ty1 {
+        for tx in tx0..=tx1 {
+            if ocean_band_tile(z_top, tx, ty, pass) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Bound, mmap-backed ocean artifact shared by assembly workers.
+pub struct OceanTiles {
+    view: ArchiveView,
+    runs: Vec<RawDirEntry>,
+    grids: Vec<OceanPassGrid>,
+}
+
+impl OceanTiles {
+    pub fn declared_key(path: &std::path::Path) -> std::io::Result<OceanArtifactKey> {
+        let view = ArchiveView::open(path)?;
+        let metadata: serde_json::Value = serde_json::from_str(&view.metadata()?)
+            .map_err(|e| std::io::Error::other(format!("invalid ocean artifact metadata: {e}")))?;
+        OceanArtifactKey::from_json(metadata.get("ocean_artifact").ok_or_else(|| {
+            std::io::Error::other("ocean artifact missing ocean_artifact metadata")
+        })?)
+    }
+    pub fn open(
+        path: &std::path::Path,
+        expected: &OceanArtifactKey,
+        data_bounds: &MercBbox,
+        pass_max_zooms: &[u8],
+    ) -> std::io::Result<Self> {
+        let view = ArchiveView::open(path)?;
+        if view.tile_type() != 1 || view.tile_compression() != 2 {
+            return Err(std::io::Error::other("ocean artifact must use MVT + gzip"));
+        }
+        if view.min_zoom() != 0 || view.max_zoom() != 14 {
+            return Err(std::io::Error::other("ocean artifact must cover z0-14"));
+        }
+        let header = view.header();
+        let min_lon = crate::pmtiles_reader::read_i32_le(header, 102);
+        let min_lat = crate::pmtiles_reader::read_i32_le(header, 106);
+        let max_lon = crate::pmtiles_reader::read_i32_le(header, 110);
+        let max_lat = crate::pmtiles_reader::read_i32_le(header, 114);
+        if min_lon > -1_800_000_000
+            || min_lat > -850_500_000
+            || max_lon < 1_800_000_000
+            || max_lat < 850_500_000
+        {
+            return Err(std::io::Error::other(
+                "ocean artifact header bounds must cover the world",
+            ));
+        }
+        let metadata: serde_json::Value = serde_json::from_str(&view.metadata()?)
+            .map_err(|e| std::io::Error::other(format!("invalid ocean artifact metadata: {e}")))?;
+        let layers = metadata
+            .get("vector_layers")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| std::io::Error::other("ocean artifact missing vector_layers"))?;
+        if layers.len() != 1
+            || layers[0].get("id").and_then(serde_json::Value::as_str) != Some("ocean")
+        {
+            return Err(std::io::Error::other(
+                "ocean artifact must declare exactly one ocean layer",
+            ));
+        }
+        let key =
+            OceanArtifactKey::from_json(metadata.get("ocean_artifact").ok_or_else(|| {
+                std::io::Error::other("ocean artifact missing ocean_artifact metadata")
+            })?)?;
+        if &key != expected {
+            return Err(std::io::Error::other(
+                "ocean artifact key does not match current shapefile inputs",
+            ));
+        }
+        let runs = view.read_all_runs()?;
+        let z14_end = ((1_u64 << 30) - 1) / 3 + 1;
+        if runs.iter().any(|run| {
+            run.tile_id >= z14_end
+                || run
+                    .tile_id
+                    .checked_add(u64::from(run.run_length))
+                    .is_none_or(|end| end > z14_end)
+        }) {
+            return Err(std::io::Error::other(
+                "ocean artifact directory run lies outside z0-14 tile space",
+            ));
+        }
+        let grids = pass_max_zooms
+            .iter()
+            .map(|&zoom| OceanPassGrid::for_bounds(data_bounds, zoom))
+            .collect();
+        Ok(Self { view, runs, grids })
+    }
+
+    pub fn grids(&self) -> &[OceanPassGrid] {
+        &self.grids
+    }
+    /// Select the one pass which owns a tile. A simplified z0-7 pass precedes
+    /// the full-resolution pass when both shapefiles are configured.
+    pub fn band_tile(&self, z: u8, tx: u32, ty: u32) -> bool {
+        let grid = selected_pass_grid(&self.grids, z);
+        let Some(grid) = grid else {
+            return false;
+        };
+        ocean_band_tile(z, tx, ty, grid)
+    }
+    pub fn runs_in(&self, start: u64, end: u64) -> &[RawDirEntry] {
+        let first = self
+            .runs
+            .partition_point(|run| run.tile_id.saturating_add(u64::from(run.run_length)) <= start);
+        let last = self.runs.partition_point(|run| run.tile_id < end);
+        &self.runs[first..last]
+    }
+    pub fn run_covering(&self, tile_id: u64) -> Option<RawDirEntry> {
+        let index = self.runs.partition_point(|run| run.tile_id <= tile_id);
+        index
+            .checked_sub(1)
+            .and_then(|index| self.runs.get(index))
+            .copied()
+            .filter(|run| tile_id < run.tile_id.saturating_add(u64::from(run.run_length)))
+    }
+    pub fn raw_blob(&self, offset: u64, length: u32) -> std::io::Result<&[u8]> {
+        self.view.raw_blob_at(offset, length)
+    }
+}
+
+fn selected_pass_grid(grids: &[OceanPassGrid], z: u8) -> Option<&OceanPassGrid> {
+    if grids.len() == 2 && z <= 7 {
+        grids.first()
+    } else {
+        grids.last()
+    }
+}
 
 /// Flush accumulated ocean input counters to the sidecar. Called once at
 /// OCEAN_END; a no-op when no shapefile was processed.
@@ -67,6 +473,29 @@ pub(crate) fn emit_ocean_counters() {
         "ocean_shapefile_bytes",
         OCEAN_STATS.shapefile_bytes.load(Ordering::Relaxed),
     );
+
+    let records = OCEAN_STATS.records.load(Ordering::Relaxed);
+    if records == 0 {
+        return;
+    }
+    emit_counter_u64("sort_layer_ocean_records", records);
+    emit_counter_u64(
+        "sort_layer_ocean_bytes",
+        OCEAN_STATS.payload_bytes.load(Ordering::Relaxed),
+    );
+    if !ocean_layer_stats_enabled() {
+        return;
+    }
+    for z in 0..15 {
+        let records = OCEAN_STATS.zoom_records[z].load(Ordering::Relaxed);
+        let bytes = OCEAN_STATS.zoom_payload_bytes[z].load(Ordering::Relaxed);
+        if records > 0 {
+            emit_counter_u64(&format!("sort_layer_ocean_z{z}_records"), records);
+        }
+        if bytes > 0 {
+            emit_counter_u64(&format!("sort_layer_ocean_z{z}_bytes"), bytes);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +568,21 @@ impl OceanAcc {
             return;
         }
         spill.append(&self.records, &self.payload);
+        OCEAN_STATS
+            .records
+            .fetch_add(self.records.len() as u64, Ordering::Relaxed);
+        OCEAN_STATS
+            .payload_bytes
+            .fetch_add(self.payload.len() as u64, Ordering::Relaxed);
+        if ocean_layer_stats_enabled() {
+            for &(key, _, len) in &self.records {
+                let zoom = sort::zoom_from_tile_id(sort::tile_id_from_key(key)) as usize;
+                if zoom < 15 {
+                    OCEAN_STATS.zoom_records[zoom].fetch_add(1, Ordering::Relaxed);
+                    OCEAN_STATS.zoom_payload_bytes[zoom].fetch_add(len as u64, Ordering::Relaxed);
+                }
+            }
+        }
         self.count += self.records.len() as u64;
         self.records.clear();
         self.payload.clear();
@@ -178,7 +622,12 @@ pub(crate) fn process_ocean_shapefile(
     min_zoom: u8,
     max_zoom: u8,
     sort_writer: &mut SortWriter,
+    pass_grid: Option<&OceanPassGrid>,
 ) -> Result<u64, std::io::Error> {
+    if pass_grid.is_some_and(|grid| grid.band_is_empty(min_zoom, max_zoom)) {
+        eprintln!("  Ocean band is empty; skipping shapefile geometry");
+        return Ok(0);
+    }
     eprintln!("  Opening {}", path.display());
 
     // --- Read .shx index to get record offsets ---
@@ -245,18 +694,19 @@ pub(crate) fn process_ocean_shapefile(
     // --- Parse phase: extract and clip polygons in parallel ---
     use rayon::prelude::*;
 
+    let parse_ctx = OceanRecordParseCtx {
+        shp_mmap: &shp_mmap,
+        shp_file: &shp_file,
+        data_bounds,
+        max_zoom,
+        data_rect,
+        pass_grid,
+        min_zoom,
+    };
     let parsed_records: Vec<ParsedOceanRecord> = records
         .par_iter()
         .map_init(IntEmitScratch::new, |scratch, &record| {
-            parse_ocean_record(
-                record,
-                &shp_mmap,
-                &shp_file,
-                data_bounds,
-                max_zoom,
-                data_rect,
-                scratch,
-            )
+            parse_ocean_record(record, &parse_ctx, scratch)
         })
         .collect();
     #[cfg(unix)]
@@ -316,7 +766,10 @@ pub(crate) fn process_ocean_shapefile(
     );
     let chunk_size = sort_writer.chunk_size_bytes().min(OCEAN_CHUNK_SIZE_LIMIT);
 
-    let params = ocean_params(min_zoom, max_zoom);
+    let tile_filter = |z, tx, ty| pass_grid.is_none_or(|grid| ocean_band_tile(z, tx, ty, grid));
+    let tile_filter_dyn: Option<&(dyn Fn(u8, u32, u32) -> bool + Sync)> =
+        pass_grid.map(|_| &tile_filter as &(dyn Fn(u8, u32, u32) -> bool + Sync));
+    let params = ocean_params(min_zoom, max_zoom, tile_filter_dyn);
     // Per-piece item target for the parallel frontier. Root cells of a
     // large piece usually exceed this on their own (the frontier loop is
     // then a no-op); it only forces expansion for single-root ranges.
@@ -409,13 +862,19 @@ pub(crate) fn process_ocean_shapefile(
     Ok(count)
 }
 
-fn parse_ocean_record(
-    record: ShxRecord,
-    shp_mmap: &memmap2::Mmap,
-    shp_file: &std::fs::File,
-    data_bounds: &MercBbox,
+struct OceanRecordParseCtx<'a> {
+    shp_mmap: &'a memmap2::Mmap,
+    shp_file: &'a std::fs::File,
+    data_bounds: &'a MercBbox,
     max_zoom: u8,
     data_rect: IntRect,
+    pass_grid: Option<&'a OceanPassGrid>,
+    min_zoom: u8,
+}
+
+fn parse_ocean_record(
+    record: ShxRecord,
+    ctx: &OceanRecordParseCtx<'_>,
     scratch: &mut IntEmitScratch,
 ) -> ParsedOceanRecord {
     let mut out = ParsedOceanRecord {
@@ -425,12 +884,12 @@ fn parse_ocean_record(
     };
 
     let rec = record.offset + 8;
-    if record.content_len < 44 || rec + 44 > shp_mmap.len() {
+    if record.content_len < 44 || rec + 44 > ctx.shp_mmap.len() {
         return out;
     }
 
     let header = {
-        let shp = &shp_mmap[..];
+        let shp = &ctx.shp_mmap[..];
         let mut header = [0_u8; 44];
         header.copy_from_slice(&shp[rec..rec + 44]);
         header
@@ -444,10 +903,23 @@ fn parse_ocean_record(
     let merc_min = geometry::from_epsg3857(xmin, ymax);
     let merc_max = geometry::from_epsg3857(xmax, ymin);
 
-    if merc_max.x < data_bounds.min_x
-        || merc_min.x > data_bounds.max_x
-        || merc_max.y < data_bounds.min_y
-        || merc_min.y > data_bounds.max_y
+    if merc_max.x < ctx.data_bounds.min_x
+        || merc_min.x > ctx.data_bounds.max_x
+        || merc_max.y < ctx.data_bounds.min_y
+        || merc_min.y > ctx.data_bounds.max_y
+    {
+        return out;
+    }
+
+    if let Some(pass) = ctx.pass_grid
+        && !pass_owns_root_range(
+            merc_min.x,
+            merc_min.y,
+            merc_max.x,
+            merc_max.y,
+            pass,
+            ctx.min_zoom,
+        )
     {
         return out;
     }
@@ -457,12 +929,17 @@ fn parse_ocean_record(
     let source = ShapeRecordSource {
         record,
         rec,
-        shp_len: shp_mmap.len(),
-        shp_file,
+        shp_len: ctx.shp_mmap.len(),
+        shp_file: ctx.shp_file,
         header: &header,
     };
-    out.source_pieces +=
-        push_shape_record_pieces(&source, scratch, &mut out.pieces, max_zoom, data_rect);
+    out.source_pieces += push_shape_record_pieces(
+        &source,
+        scratch,
+        &mut out.pieces,
+        ctx.max_zoom,
+        ctx.data_rect,
+    );
 
     out
 }
@@ -692,7 +1169,11 @@ fn total_vertices(piece: &Shape) -> usize {
     piece.iter().map(Vec::len).sum()
 }
 
-fn ocean_params(min_zoom: u8, max_zoom: u8) -> PyramidParams<'static> {
+fn ocean_params<'a>(
+    min_zoom: u8,
+    max_zoom: u8,
+    tile_filter: Option<&'a (dyn Fn(u8, u32, u32) -> bool + Sync)>,
+) -> PyramidParams<'a> {
     PyramidParams {
         maxz: max_zoom,
         z_top: min_zoom,
@@ -700,6 +1181,7 @@ fn ocean_params(min_zoom: u8, max_zoom: u8) -> PyramidParams<'static> {
         dp_tol: &ocean_dp_tol,
         min_area: &ocean_min_area,
         pins: None,
+        tile_filter,
     }
 }
 
@@ -716,13 +1198,17 @@ fn ocean_sink<'a>(
     layer_idx: u8,
     attrs_bytes: &'a [u8],
     acc: &'a mut OceanAcc,
-) -> impl FnMut(u8, u32, u32, &[u32]) + 'a {
-    move |z: u8, tx: u32, ty: u32, geom: &[u32]| {
+) -> impl FnMut(u8, u32, u32, &[u32], PyramidEmitKind) + 'a {
+    move |z: u8, tx: u32, ty: u32, geom: &[u32], kind: PyramidEmitKind| {
         let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
         let key = sort::make_sort_key(tile_id, layer_idx, 0);
         let range = append_feature_data_with_attrs(
             &mut acc.payload,
-            feature_id,
+            if kind == PyramidEmitKind::FullFill {
+                0
+            } else {
+                feature_id
+            },
             GeomType::Polygon,
             geom,
             attrs_bytes,
@@ -766,6 +1252,229 @@ mod tests {
     use crate::sort::SortWriter;
     use std::fs;
     use std::path::Path;
+
+    fn record_osm_id(data: &[u8]) -> u64 {
+        // The sort record payload leads with the raw little-endian osm_id
+        // (wire_format.rs layout), not a protobuf message.
+        u64::from_le_bytes(data[0..8].try_into().expect("record osm_id"))
+    }
+
+    #[test]
+    fn full_fill_uses_canonical_zero_id_and_fragment_keeps_piece_id() {
+        let mut acc = OceanAcc::new();
+        let attrs = Vec::new();
+        let mut sink = ocean_sink(77, Layer::Ocean as u8, &attrs, &mut acc);
+        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::FullFill);
+        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::Fragment);
+        drop(sink);
+        let (_, first_start, first_len) = acc.records[0];
+        assert_eq!(
+            record_osm_id(&acc.payload[first_start..first_start + first_len]),
+            0
+        );
+        let (_, second_start, second_len) = acc.records[1];
+        assert_eq!(
+            record_osm_id(&acc.payload[second_start..second_start + second_len]),
+            77
+        );
+    }
+
+    #[test]
+    fn full_fill_round_trips_as_explicit_some_zero_id() {
+        let mut acc = OceanAcc::new();
+        // The decode side expects the encoded attrs-table form, exactly as
+        // process_ocean_shapefile builds it - a bare empty Vec parses as a
+        // truncated record and add_feature_to_layer would emit nothing.
+        let mut attrs = Vec::new();
+        encode_attrs_bytes(&mut attrs, &[], 14);
+        let mut sink = ocean_sink(77, Layer::Ocean as u8, &attrs, &mut acc);
+        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::FullFill);
+        drop(sink);
+        let (_, start, len) = acc.records[0];
+        let data = &acc.payload[start..start + len];
+        let mut layer = crate::mvt::LayerBuilder::new("ocean");
+        let mut geom_pool = Vec::new();
+        let mut tags_pool = Vec::new();
+        crate::wire_format::add_feature_to_layer(&mut layer, data, &mut geom_pool, &mut tags_pool);
+        assert_eq!(layer.features()[0].id, Some(0));
+
+        let mut encoded = Vec::new();
+        let mut scratch = crate::mvt::EncodeScratch::new();
+        crate::mvt::encode_tile_into(&mut encoded, &[&layer], &mut scratch);
+        // Feature id 0 is present as the explicit varint field form, not
+        // elided as a protobuf default.
+        assert!(encoded.windows(2).any(|bytes| bytes == [8, 0]));
+    }
+
+    #[test]
+    fn ocean_artifact_hashes_require_32_lowercase_hex_characters() {
+        let valid = serde_json::json!({
+            "full_shp_xxh128": "0123456789abcdef0123456789abcdef",
+            "full_shx_xxh128": "fedcba9876543210fedcba9876543210",
+            "simplified_shp_xxh128": null,
+            "simplified_shx_xxh128": null,
+            "min_zoom": 0,
+            "max_zoom": 14,
+            "compression_level": 6,
+            "policy_version": OCEAN_POLICY_VERSION,
+        });
+        OceanArtifactKey::from_json(&valid).expect("valid artifact key");
+        for invalid in [
+            "0123456789abcdef0123456789abcde",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcdef0",
+        ] {
+            let mut value = valid.clone();
+            value["full_shp_xxh128"] = serde_json::Value::String(invalid.to_string());
+            assert!(OceanArtifactKey::from_json(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn ocean_band_tile_world_has_no_band_at_edges_or_corners() {
+        let grid = OceanPassGrid::for_bounds(
+            &MercBbox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 1.0,
+                max_y: 1.0,
+            },
+            14,
+        );
+        for z in [0, 7, 8, 14] {
+            let edge = (1_u32 << z) - 1;
+            for (x, y) in [(0, 0), (edge, 0), (0, edge), (edge, edge)] {
+                assert!(!ocean_band_tile(z, x, y, &grid));
+            }
+        }
+    }
+
+    #[test]
+    fn ocean_band_tile_inward_sliver_and_world_edge_are_safe_band() {
+        let bounds = MercBbox {
+            min_x: 0.000_000_01,
+            min_y: 0.2,
+            max_x: 0.8,
+            max_y: 0.8,
+        };
+        let grid = OceanPassGrid::for_bounds(&bounds, 14);
+        assert!(ocean_band_tile(14, 0, 4_000, &grid));
+        let edge_bounds = MercBbox {
+            min_x: 0.0,
+            min_y: 0.2,
+            max_x: 0.8,
+            max_y: 0.8,
+        };
+        let edge = OceanPassGrid::for_bounds(&edge_bounds, 14);
+        assert!(ocean_band_tile(14, 0, 4_000, &edge));
+    }
+
+    #[test]
+    fn ocean_band_tile_respects_the_128_unit_inner_edge_buffer() {
+        let cell = 4096;
+        let world = IntRect {
+            min_x: 0,
+            min_y: 0,
+            max_x: 1 << 26,
+            max_y: 1 << 26,
+        };
+        // Tile (14, 100, 200) has a buffered footprint starting at
+        // 100*cell - 128. Containment (non-band) requires the inner rect to
+        // reach at or below that edge; one unit short of the buffer leaves
+        // the tile band.
+        let just_inside = OceanPassGrid {
+            max_zoom: 14,
+            inner_rect: IntRect {
+                min_x: 100 * cell - 127,
+                min_y: 200 * cell - 128,
+                max_x: world.max_x,
+                max_y: world.max_y,
+            },
+            world_rect: world,
+        };
+        let at_buffer = OceanPassGrid {
+            inner_rect: IntRect {
+                min_x: 100 * cell - 128,
+                ..just_inside.inner_rect
+            },
+            ..just_inside
+        };
+        assert!(ocean_band_tile(14, 100, 200, &just_inside));
+        assert!(!ocean_band_tile(14, 100, 200, &at_buffer));
+    }
+
+    #[test]
+    fn ocean_band_tile_keeps_the_right_world_edge_computed() {
+        let grid = OceanPassGrid::for_bounds(
+            &MercBbox {
+                min_x: 0.2,
+                min_y: 0.2,
+                max_x: 1.0,
+                max_y: 0.8,
+            },
+            14,
+        );
+        assert!(ocean_band_tile(14, (1 << 14) - 1, 4_000, &grid));
+    }
+
+    #[test]
+    fn two_pass_grid_selection_keeps_z14_on_the_full_resolution_grid() {
+        let low = OceanPassGrid::for_bounds(
+            &MercBbox {
+                min_x: 0.4,
+                min_y: 0.4,
+                max_x: 0.6,
+                max_y: 0.6,
+            },
+            7,
+        );
+        let high = OceanPassGrid::for_bounds(
+            &MercBbox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 1.0,
+                max_y: 1.0,
+            },
+            14,
+        );
+        let grids = [low, high];
+        assert_eq!(selected_pass_grid(&grids, 7).expect("z7 grid").max_zoom, 7);
+        assert_eq!(
+            selected_pass_grid(&grids, 14).expect("z14 grid").max_zoom,
+            14
+        );
+        // This z14 interior tile is outside the low-resolution bounds, but
+        // belongs to the full-world grid and must not be a computed band tile.
+        assert!(ocean_band_tile(14, 2_000, 2_000, &grids[0]));
+        assert!(!ocean_band_tile(
+            14,
+            2_000,
+            2_000,
+            selected_pass_grid(&grids, 14).expect("z14 grid")
+        ));
+    }
+
+    #[test]
+    fn ocean_band_tile_clamps_polar_edges() {
+        let grid = OceanPassGrid::for_bounds(
+            &MercBbox {
+                min_x: 0.2,
+                min_y: 0.0,
+                max_x: 0.8,
+                max_y: 0.7,
+            },
+            14,
+        );
+        // Bounds that REACH the world top edge behave like the world there:
+        // the buffered footprint is clipped by the world rect before the
+        // containment test, and the computed clip at y=0 is identical to the
+        // world build's - so the top row is NOT band.
+        assert!(!ocean_band_tile(14, 5_000, 0, &grid));
+        // The bottom row lies entirely OUTSIDE the data bounds: it must be
+        // band (computed owns it and emits nothing), or the artifact would
+        // inject ocean beyond the extract's coverage.
+        assert!(ocean_band_tile(14, 5_000, (1 << 14) - 1, &grid));
+    }
 
     fn write_u32_be(buf: &mut [u8], off: usize, v: u32) {
         buf[off..off + 4].copy_from_slice(&v.to_be_bytes());
@@ -1027,7 +1736,8 @@ mod tests {
             max_y: 1.0,
         };
 
-        let emitted = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer).unwrap();
+        let emitted =
+            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
 
         assert!(emitted > 0, "expected ocean features to be emitted");
 
@@ -1056,7 +1766,8 @@ mod tests {
         };
 
         let emitted =
-            process_ocean_shapefile(&shp_path, &disjoint_bounds, 0, 0, &mut sort_writer).unwrap();
+            process_ocean_shapefile(&shp_path, &disjoint_bounds, 0, 0, &mut sort_writer, None)
+                .unwrap();
 
         assert_eq!(emitted, 0, "expected no ocean features for disjoint bounds");
     }
@@ -1076,7 +1787,8 @@ mod tests {
             max_y: 1.0,
         };
 
-        let emitted = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer).unwrap();
+        let emitted =
+            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
         assert!(emitted > 0, "expected ocean features to be emitted");
 
         let mut reader = sort_writer.finish().unwrap();
@@ -1106,7 +1818,7 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer)
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
             .expect_err("short .shx header should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("invalid .shx file"));
@@ -1127,7 +1839,7 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer)
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
             .expect_err("missing .shx should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
@@ -1150,7 +1862,8 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let emitted = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer).unwrap();
+        let emitted =
+            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
         assert_eq!(emitted, 0, "truncated record should be skipped");
     }
 }

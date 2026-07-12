@@ -18,6 +18,9 @@
 //!     max_zoom: 14,
 //!     ocean_shapefile: None,
 //!     ocean_simplified_shapefile: None,
+//!     ocean_tiles: None,
+//!     ocean_artifact_key: None,
+//!     ocean_only_metadata: false,
 //!     skip_to: None,
 //!     in_memory: false,
 //!     compression_level: 6,
@@ -84,4 +87,4 @@ pub(crate) mod wire_format;
 
 pub use pipeline::TileCompression;
 pub use pipeline::TilePayloadFormat;
-pub use pipeline::{PipelineError, SkipTo, TilegenConfig, run};
+pub use pipeline::{OceanMode, PipelineError, SkipTo, TilegenConfig, ocean_build, run};

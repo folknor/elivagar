@@ -13,9 +13,18 @@ pub(crate) struct PyramidParams<'a> {
     pub dp_tol: &'a (dyn Fn(u8) -> i64 + Sync),
     pub min_area: &'a (dyn Fn(u8) -> u64 + Sync),
     pub pins: Option<&'a FxHashSet<(i32, i32)>>,
+    /// Ocean supplies this ownership predicate so artifact-interior cells are
+    /// pruned before geometry work. OSM leaves it unset.
+    pub tile_filter: Option<&'a (dyn Fn(u8, u32, u32) -> bool + Sync)>,
 }
 
-pub(crate) type PyramidSink<'a> = &'a mut dyn FnMut(u8, u32, u32, &[u32]);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PyramidEmitKind {
+    Fragment,
+    FullFill,
+}
+
+pub(crate) type PyramidSink<'a> = &'a mut dyn FnMut(u8, u32, u32, &[u32], PyramidEmitKind);
 
 pub(crate) struct PyramidScratch {
     pub int: IntEmitScratch,
@@ -117,6 +126,10 @@ pub(crate) fn split_for_parallel(
             break;
         };
         let (cell, frag) = items.swap_remove(idx);
+        if !cell_is_owned(cell, params) {
+            scratch.return_shapes(frag);
+            continue;
+        }
         if is_full_buffered_cell(&frag, params.maxz, cell) {
             emit_full_subtree(cell, params, scratch, sink);
             scratch.return_shapes(frag);
@@ -277,6 +290,11 @@ fn descend(
         return;
     }
 
+    if !cell_is_owned(cell, params) {
+        scratch.return_shapes(frag);
+        return;
+    }
+
     if is_full_buffered_cell(&frag, params.maxz, cell) {
         emit_full_subtree(cell, params, scratch, sink);
         scratch.return_shapes(frag);
@@ -368,7 +386,7 @@ fn emit_cell(
                     cell.ty,
                     &mut scratch.int,
                     &mut |tx, ty, geom| {
-                        sink(cell.z, tx, ty, geom);
+                        sink(cell.z, tx, ty, geom, PyramidEmitKind::Fragment);
                     },
                 );
             }
@@ -385,7 +403,7 @@ fn emit_cell(
                 cell.ty,
                 &mut scratch.int,
                 &mut |tx, ty, geom| {
-                    sink(cell.z, tx, ty, geom);
+                    sink(cell.z, tx, ty, geom, PyramidEmitKind::Fragment);
                 },
             );
         }
@@ -399,18 +417,28 @@ fn emit_full_subtree(
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
 ) {
-    for z in cell.z..=params.z_bottom {
-        let delta = u32::from(z - cell.z);
-        let scale = 1_u32 << delta;
-        let tx0 = cell.tx << delta;
-        let ty0 = cell.ty << delta;
-        for ty in ty0..ty0 + scale {
-            for tx in tx0..tx0 + scale {
-                emit_full_tile(tx, ty, &mut scratch.int, &mut |out_tx, out_ty, geom| {
-                    sink(z, out_tx, out_ty, geom);
-                });
-            }
+    if !cell_is_owned(cell, params) {
+        return;
+    }
+    emit_full_tile(
+        cell.tx,
+        cell.ty,
+        &mut scratch.int,
+        &mut |out_tx, out_ty, geom| {
+            sink(cell.z, out_tx, out_ty, geom, PyramidEmitKind::FullFill);
+        },
+    );
+    if cell.z < params.z_bottom {
+        for child in children(cell) {
+            emit_full_subtree(child, params, scratch, sink);
         }
+    }
+}
+
+fn cell_is_owned(cell: PyramidCell, params: &PyramidParams<'_>) -> bool {
+    match params.tile_filter {
+        Some(filter) => filter(cell.z, cell.tx, cell.ty),
+        None => true,
     }
 }
 
@@ -1081,6 +1109,7 @@ mod tests {
             dp_tol,
             min_area: &|_| 0,
             pins: None,
+            tile_filter: None,
         }
     }
 
@@ -1090,11 +1119,16 @@ mod tests {
     ) -> BTreeMap<(u8, u32, u32), Vec<u32>> {
         let mut scratch = PyramidScratch::new();
         let mut out = BTreeMap::new();
-        emit_shape_pyramid(shape, params, &mut scratch, &mut |z, tx, ty, geom| {
-            out.entry((z, tx, ty))
-                .or_insert_with(Vec::new)
-                .extend_from_slice(geom);
-        });
+        emit_shape_pyramid(
+            shape,
+            params,
+            &mut scratch,
+            &mut |z, tx, ty, geom, _kind| {
+                out.entry((z, tx, ty))
+                    .or_insert_with(Vec::new)
+                    .extend_from_slice(geom);
+            },
+        );
         out
     }
 
@@ -1319,7 +1353,7 @@ mod tests {
             left_frag,
             &params,
             &mut ps,
-            &mut |z, tx, ty, geom| {
+            &mut |z, tx, ty, geom, _kind| {
                 left.insert((z, tx, ty), geom.to_vec());
             },
         );
@@ -1328,7 +1362,7 @@ mod tests {
             right_frag,
             &params,
             &mut ps,
-            &mut |z, tx, ty, geom| {
+            &mut |z, tx, ty, geom, _kind| {
                 right.insert((z, tx, ty), geom.to_vec());
             },
         );

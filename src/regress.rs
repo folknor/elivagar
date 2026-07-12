@@ -1,20 +1,19 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use flate2::read::GzDecoder;
-use memmap2::{Mmap, MmapOptions};
 use protohoggr::{Cursor, WIRE_32BIT, WIRE_64BIT, WIRE_LEN, WIRE_VARINT};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::json;
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::pmtiles_reader::{HEADER_SIZE, RawDirEntry, decode_directory, read_u64_le};
+use crate::pmtiles_reader::{ArchiveView, BlobRef};
 use crate::pmtiles_writer::tile_id_to_zxy;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -353,12 +352,6 @@ impl RegressReport {
 // Immutable PMTiles view and run-span planning
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct BlobRef {
-    offset: u64,
-    length: u32,
-}
-
 #[derive(Clone, Debug)]
 struct TileRun {
     start: u64,
@@ -380,162 +373,25 @@ impl PairSpan {
     }
 }
 
-struct ArchiveView {
-    map: Mmap,
-    root_dir_offset: u64,
-    root_dir_length: u64,
-    leaf_dirs_offset: u64,
-    data_offset: u64,
-    internal_compression: u8,
-    num_addressed: u64,
-}
-
-impl ArchiveView {
-    fn open(path: &Path) -> io::Result<Self> {
-        let file = File::open(path)?;
-        // SAFETY: the mapping is read-only and owned by this ArchiveView. The
-        // mapped bytes are never exposed mutably, and every later offset is
-        // range-checked before slicing.
-        let map = unsafe { MmapOptions::new().map(&file)? };
-        if map.len() < HEADER_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("{} is shorter than a PMTiles header", path.display()),
-            ));
-        }
-        let header = &map[..HEADER_SIZE];
-        if &header[..7] != b"PMTiles" || header[7] != 3 {
-            return Err(io::Error::other("not PMTiles v3"));
-        }
-        if header[99] != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{} is not an MVT PMTiles archive", path.display()),
-            ));
-        }
-        if header[98] != 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{} uses non-gzip tile compression", path.display()),
-            ));
-        }
-        // Internal compression: 1 = none, 2 = gzip; directory() handles both.
-        if header[97] != 1 && header[97] != 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{} uses unsupported internal compression", path.display()),
-            ));
-        }
-
-        let root_dir_offset = read_u64_le(header, 8);
-        let root_dir_length = read_u64_le(header, 16);
-        let leaf_dirs_offset = read_u64_le(header, 40);
-        let data_offset = read_u64_le(header, 56);
-        let internal_compression = header[97];
-        let num_addressed = read_u64_le(header, 72);
-        Ok(Self {
-            map,
-            root_dir_offset,
-            root_dir_length,
-            leaf_dirs_offset,
-            data_offset,
-            internal_compression,
-            num_addressed,
+fn archive_runs(archive: &ArchiveView) -> io::Result<Vec<TileRun>> {
+    archive
+        .read_all_runs()?
+        .into_iter()
+        .map(|entry| {
+            let end = entry
+                .tile_id
+                .checked_add(u64::from(entry.run_length))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "tile run overflows"))?;
+            Ok(TileRun {
+                start: entry.tile_id,
+                end,
+                blob: BlobRef {
+                    offset: entry.offset,
+                    length: entry.length,
+                },
+            })
         })
-    }
-
-    fn slice(&self, offset: u64, length: u64, what: &str) -> io::Result<&[u8]> {
-        let end = offset.checked_add(length).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("{what} range overflow"))
-        })?;
-        let start = usize::try_from(offset).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{what} offset too large"),
-            )
-        })?;
-        let end = usize::try_from(end).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("{what} end too large"))
-        })?;
-        self.map.get(start..end).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("{what} lies outside archive"),
-            )
-        })
-    }
-
-    fn directory(&self, offset: u64, length: u64) -> io::Result<Vec<RawDirEntry>> {
-        let compressed = self.slice(offset, length, "directory")?;
-        let raw = if self.internal_compression == 2 {
-            let mut scratch = Vec::new();
-            gzip_decompress_into(compressed, &mut scratch)?;
-            scratch
-        } else {
-            compressed.to_vec()
-        };
-        decode_directory(&raw)
-    }
-
-    fn runs(&self) -> io::Result<Vec<TileRun>> {
-        let root = self.directory(self.root_dir_offset, self.root_dir_length)?;
-        let mut runs = Vec::new();
-        for entry in root {
-            if entry.run_length == 0 {
-                let offset = self
-                    .leaf_dirs_offset
-                    .checked_add(entry.offset)
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidData, "leaf directory offset overflow")
-                    })?;
-                let leaf = self.directory(offset, u64::from(entry.length))?;
-                append_tile_runs(&mut runs, &leaf)?;
-            } else {
-                append_tile_runs(&mut runs, std::slice::from_ref(&entry))?;
-            }
-        }
-        Ok(runs)
-    }
-
-    fn raw_blob(&self, blob: BlobRef) -> io::Result<&[u8]> {
-        let offset = self.data_offset.checked_add(blob.offset).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "tile data offset overflow")
-        })?;
-        self.slice(offset, u64::from(blob.length), "tile payload")
-    }
-}
-
-fn append_tile_runs(out: &mut Vec<TileRun>, entries: &[RawDirEntry]) -> io::Result<()> {
-    for entry in entries {
-        if entry.run_length == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "leaf directory contains a directory pointer",
-            ));
-        }
-        let end = entry
-            .tile_id
-            .checked_add(u64::from(entry.run_length))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "tile run overflows"))?;
-        if out
-            .last()
-            .is_some_and(|previous| previous.end > entry.tile_id)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "PMTiles directory runs overlap or are out of order",
-            ));
-        }
-        out.push(TileRun {
-            start: entry.tile_id,
-            end,
-            blob: BlobRef {
-                offset: entry.offset,
-                length: entry.length,
-            },
-        });
-    }
-    Ok(())
+        .collect()
 }
 
 fn merge_runs(current: &[TileRun], blessed: &[TileRun]) -> Vec<PairSpan> {
@@ -621,13 +477,13 @@ struct PairState {
 pub fn regress(current: &Path, blessed: &Path, cfg: &RegressConfig) -> io::Result<RegressReport> {
     let current = ArchiveView::open(current)?;
     let blessed = ArchiveView::open(blessed)?;
-    let current_runs = current.runs()?;
-    let blessed_runs = blessed.runs()?;
+    let current_runs = archive_runs(&current)?;
+    let blessed_runs = archive_runs(&blessed)?;
     let spans = merge_runs(&current_runs, &blessed_runs);
 
     let mut report = RegressReport::default();
-    report.counters.addressed_current = current.num_addressed;
-    report.counters.addressed_blessed = blessed.num_addressed;
+    report.counters.addressed_current = current.num_addressed();
+    report.counters.addressed_blessed = blessed.num_addressed();
     report.counters.addressed_tiles = spans.iter().map(|span| span.tiles()).sum();
     report.counters.directory_runs =
         u64::try_from(current_runs.len() + blessed_runs.len()).unwrap_or(u64::MAX);

@@ -814,11 +814,12 @@ pub(super) fn emit_polygon_feature(
         dp_tol: &dp_tol,
         min_area: &min_area,
         pins,
+        tile_filter: None,
     };
     let mut count: u64 = 0;
     let attrs_by_zoom = &mut scratch.attrs_by_zoom;
     let pyramid = &mut scratch.pyramid;
-    let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32]| {
+    let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32], _kind| {
         let attrs_buf = attrs_by_zoom
             .get_mut(z as usize)
             .expect("OSM polygon zoom fits attr cache")
@@ -931,11 +932,12 @@ pub(super) fn emit_multipolygon_feature(
         dp_tol: &dp_tol,
         min_area: &min_area,
         pins,
+        tile_filter: None,
     };
     let mut count: u64 = 0;
     let attrs_by_zoom = &mut emit_scratch.attrs_by_zoom;
     let pyramid = &mut emit_scratch.pyramid;
-    let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32]| {
+    let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32], _kind| {
         let attrs_buf = attrs_by_zoom
             .get_mut(z as usize)
             .expect("OSM polygon zoom fits attr cache")

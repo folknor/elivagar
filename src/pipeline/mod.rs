@@ -19,7 +19,7 @@ use crate::pmtiles_writer;
 use crate::shortbread;
 use crate::sort;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::debug::{
     WAIT, emit_alloc_boundary, emit_counter, emit_counter_u64, emit_counter_usize, emit_marker,
@@ -73,6 +73,14 @@ pub enum SkipTo {
     Assemble,
 }
 
+/// Ocean producer selected for the checkpointed chunk set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OceanMode {
+    None,
+    Computed,
+    Band { key: crate::ocean::OceanArtifactKey },
+}
+
 /// Tile payload encoding format stored in PMTiles tile data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TilePayloadFormat {
@@ -109,6 +117,14 @@ pub struct TilegenConfig {
     /// Simplified ocean shapefile for z0-7 (fewer vertices, faster at low zooms).
     /// When set, `ocean_shapefile` is used only for z8+.
     pub ocean_simplified_shapefile: Option<PathBuf>,
+    /// Optional durable world-ocean PMTiles artifact. It activates only for
+    /// the exact MVT/gzip z0-14 contract; every other configuration keeps the
+    /// computed shapefile path.
+    pub ocean_tiles: Option<PathBuf>,
+    /// Metadata key written by the ocean-only artifact builder.
+    pub ocean_artifact_key: Option<crate::ocean::OceanArtifactKey>,
+    /// Restrict PMTiles metadata to the ocean layer for an ocean artifact.
+    pub ocean_only_metadata: bool,
     /// Skip to a later phase, reusing checkpoint data from a previous run.
     pub skip_to: Option<SkipTo>,
     /// Keep tile blob in memory instead of streaming to a temp file.
@@ -174,6 +190,7 @@ pub struct TilegenConfig {
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
+const CHECKPOINT_VERSION: u32 = 3;
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
@@ -187,10 +204,16 @@ fn save_checkpoint(
     tmp_dir: &std::path::Path,
     bounds: &MercBbox,
     chunk_count: usize,
+    ocean_mode: &OceanMode,
 ) -> Result<(), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
+    let ocean = match ocean_mode {
+        OceanMode::None => "none".to_string(),
+        OceanMode::Computed => "computed".to_string(),
+        OceanMode::Band { key } => format!("band:{}", key.json()),
+    };
     let content = format!(
-        "{} {} {} {} {}",
+        "v{CHECKPOINT_VERSION} {} {} {} {} {} {ocean}",
         bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y, chunk_count
     );
     std::fs::write(path, content)?; // io::Error message is sufficient context.
@@ -218,7 +241,9 @@ fn load_sort_chunk_count(tmp_dir: &std::path::Path) -> Option<usize> {
     }
 }
 
-fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), PipelineError> {
+fn load_checkpoint(
+    tmp_dir: &std::path::Path,
+) -> Result<(MercBbox, usize, OceanMode), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let content = std::fs::read_to_string(&path).map_err(|e| {
         PipelineError(format!(
@@ -227,9 +252,9 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
         ))
     })?;
     let parts: Vec<&str> = content.split_whitespace().collect();
-    if parts.len() != 5 {
+    if parts.len() != 7 || parts[0] != "v3" {
         return Err(PipelineError(format!(
-            "invalid checkpoint format: expected 5 fields, got {}",
+            "invalid checkpoint format: expected v3 with 7 fields, got {}",
             parts.len()
         )));
     }
@@ -238,15 +263,94 @@ fn load_checkpoint(tmp_dir: &std::path::Path) -> Result<(MercBbox, usize), Pipel
             .map_err(|e| PipelineError(format!("checkpoint parse {name}: {e}")))
     };
     let bounds = MercBbox {
-        min_x: parse(parts[0], "min_x")?,
-        min_y: parse(parts[1], "min_y")?,
-        max_x: parse(parts[2], "max_x")?,
-        max_y: parse(parts[3], "max_y")?,
+        min_x: parse(parts[1], "min_x")?,
+        min_y: parse(parts[2], "min_y")?,
+        max_x: parse(parts[3], "max_x")?,
+        max_y: parse(parts[4], "max_y")?,
     };
-    let chunks: usize = parts[4]
+    let chunks: usize = parts[5]
         .parse()
         .map_err(|e| PipelineError(format!("checkpoint parse chunk count: {e}")))?;
-    Ok((bounds, chunks))
+    let ocean_mode = match parts[6] {
+        "none" => OceanMode::None,
+        "computed" => OceanMode::Computed,
+        band if band.starts_with("band:") => {
+            let value: serde_json::Value = serde_json::from_str(&band[5..])
+                .map_err(|e| PipelineError(format!("checkpoint ocean key: {e}")))?;
+            OceanMode::Band {
+                key: crate::ocean::OceanArtifactKey::from_json(&value)?,
+            }
+        }
+        _ => return Err(PipelineError("invalid checkpoint ocean mode".to_string())),
+    };
+    Ok((bounds, chunks, ocean_mode))
+}
+
+fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineError> {
+    let Some(path) = config.ocean_tiles.as_deref() else {
+        return Ok(if config.ocean_shapefile.is_some() {
+            OceanMode::Computed
+        } else {
+            OceanMode::None
+        });
+    };
+    if config.tile_format != TilePayloadFormat::Mvt
+        || config.tile_compression != TileCompression::Gzip
+        || config.min_zoom != 0
+        || config.max_zoom != 14
+    {
+        eprintln!(
+            "  Ocean artifact inactive: this tile format, compression, or zoom range uses computed ocean"
+        );
+        return Ok(if config.ocean_shapefile.is_some() {
+            OceanMode::Computed
+        } else {
+            OceanMode::None
+        });
+    }
+    if !path.exists() {
+        return Err(PipelineError(format!(
+            "configured ocean artifact does not exist: {}",
+            path.display()
+        )));
+    }
+    let declared = crate::ocean::OceanTiles::declared_key(path)?;
+    if declared.compression_level != config.compression_level {
+        eprintln!("  Ocean artifact inactive: compression level differs; using computed ocean");
+        return Ok(if config.ocean_shapefile.is_some() {
+            OceanMode::Computed
+        } else {
+            OceanMode::None
+        });
+    }
+    let full = config.ocean_shapefile.as_deref().ok_or_else(|| {
+        PipelineError("ocean artifact requires the full shapefile for key validation".to_string())
+    })?;
+    let simplified_shx = config
+        .ocean_simplified_shapefile
+        .as_ref()
+        .map(|path| path.with_extension("shx"));
+    let key = crate::ocean::OceanArtifactKey::from_inputs(
+        full,
+        &full.with_extension("shx"),
+        config.ocean_simplified_shapefile.as_deref(),
+        simplified_shx.as_deref(),
+        0,
+        14,
+        config.compression_level,
+    )?;
+    Ok(OceanMode::Band { key })
+}
+
+fn ocean_pass_max_zooms(config: &TilegenConfig) -> Vec<u8> {
+    let mut zooms = Vec::with_capacity(2);
+    if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
+        zooms.push(config.max_zoom.min(7));
+    }
+    if config.ocean_simplified_shapefile.is_none() || config.max_zoom >= 8 {
+        zooms.push(config.max_zoom);
+    }
+    zooms
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +433,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     let total_start = Instant::now();
     let skip = config.skip_to;
+    let ocean_mode = resolved_ocean_mode(config)?;
+    if skip.is_some() {
+        let (_, _, checkpoint_ocean_mode) = load_checkpoint(&config.tmp_dir)?;
+        if checkpoint_ocean_mode != ocean_mode {
+            return Err(PipelineError("checkpoint ocean mode differs from this run; --skip-to ocean, sort, and assemble cannot resume".to_string()));
+        }
+    }
     emit_allocator_boundary("run_start");
 
     eprintln!(
@@ -359,6 +470,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let mut phase12_rss: Option<u64> = None;
     let mut ocean_rss: Option<u64> = None;
     let mut phase12_stats: Option<Phase12Stats> = None;
+    let mut active_ocean_artifact: Option<std::sync::Arc<crate::ocean::OceanTiles>> = None;
 
     let mut sort_writer = if matches!(skip, Some(SkipTo::Sort | SkipTo::Assemble)) {
         // Skip straight to later phases - reuse existing chunks on disk.
@@ -390,11 +502,16 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
             }
             emit_allocator_boundary("phase12_end");
-            save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count())?;
+            save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count(), &ocean_mode)?;
             sw
         } else {
             // --skip-to ocean: load checkpoint, resume from PBF chunks
-            let (_, pbf_chunks) = load_checkpoint(&config.tmp_dir)?;
+            let (_, pbf_chunks, checkpoint_ocean_mode) = load_checkpoint(&config.tmp_dir)?;
+            if checkpoint_ocean_mode != ocean_mode {
+                return Err(PipelineError(
+                    "checkpoint ocean mode differs from this run; resume is unsafe".to_string(),
+                ));
+            }
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
             sort::SortWriter::resume(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
@@ -405,7 +522,33 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         };
 
         // Load data_bounds (needed for ocean, always available from checkpoint or just computed)
-        let (data_bounds, _) = load_checkpoint(&config.tmp_dir)?;
+        let (data_bounds, _, _) = load_checkpoint(&config.tmp_dir)?;
+
+        active_ocean_artifact = if let (OceanMode::Band { key }, Some(path)) =
+            (&ocean_mode, config.ocean_tiles.as_deref())
+        {
+            let mut pass_max_zooms = Vec::new();
+            if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
+                pass_max_zooms.push(config.max_zoom.min(7));
+            }
+            if config.ocean_simplified_shapefile.is_none() || config.max_zoom >= 8 {
+                pass_max_zooms.push(config.max_zoom);
+            }
+            let artifact = std::sync::Arc::new(crate::ocean::OceanTiles::open(
+                path,
+                key,
+                &data_bounds,
+                &pass_max_zooms,
+            )?);
+            eprintln!(
+                "  Ocean artifact active: {} runs, {} pass grids",
+                artifact.runs_in(0, u64::MAX).len(),
+                artifact.grids().len()
+            );
+            Some(artifact)
+        } else {
+            None
+        };
 
         // --- Ocean shapefile processing ---
         // When a simplified shapefile is provided, use it for z0-7 and the
@@ -427,6 +570,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                         config.min_zoom,
                         simplified_max,
                         &mut sort_writer,
+                        active_ocean_artifact
+                            .as_ref()
+                            .and_then(|artifact| artifact.grids().first()),
                     )?;
                 }
                 if config.max_zoom >= 8 {
@@ -438,6 +584,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                         full_min,
                         config.max_zoom,
                         &mut sort_writer,
+                        active_ocean_artifact
+                            .as_ref()
+                            .and_then(|artifact| artifact.grids().last()),
                     )?;
                 }
             } else {
@@ -447,6 +596,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     config.min_zoom,
                     config.max_zoom,
                     &mut sort_writer,
+                    active_ocean_artifact
+                        .as_ref()
+                        .and_then(|artifact| artifact.grids().first()),
                 )?;
             }
 
@@ -516,6 +668,19 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     emit_marker("SORT_END");
     emit_allocator_boundary("sort_end");
 
+    if active_ocean_artifact.is_none()
+        && let (OceanMode::Band { key }, Some(path)) = (&ocean_mode, config.ocean_tiles.as_deref())
+    {
+        let (bounds, _, _) = load_checkpoint(&config.tmp_dir)?;
+        let pass_max_zooms = ocean_pass_max_zooms(config);
+        active_ocean_artifact = Some(std::sync::Arc::new(crate::ocean::OceanTiles::open(
+            path,
+            key,
+            &bounds,
+            &pass_max_zooms,
+        )?));
+    }
+
     // --- Phase 4: Tile assembly + PMTiles write ---
     emit_marker("ASSEMBLE_START");
     emit_allocator_boundary("assemble_start");
@@ -528,7 +693,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         max_assemble_batch_bytes,
         dedup_stats,
         tile_size_diag,
-    ) = assemble::phase_assemble(&mut sort_reader, config)?;
+    ) = assemble::phase_assemble_with_ocean(&mut sort_reader, config, active_ocean_artifact)?;
     // Drop the reader so every chunk reader flushes its byte tally before we
     // emit the merge counters.
     drop(sort_reader);
@@ -787,6 +952,80 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         emit_counter_u64(&format!("{prefix}_y"), u64::from(y));
         emit_counter_u64(&format!("{prefix}_bytes"), t.bytes);
     }
+    Ok(())
+}
+
+/// Build the durable world-ocean artifact without opening an OSM PBF. It uses
+/// the normal ocean, external-sort, and partitioned assembly path so artifact
+/// bytes obey the same encoding and compression rules as runtime ocean tiles.
+pub fn ocean_build(
+    full_shapefile: &Path,
+    simplified_shapefile: Option<&Path>,
+    output_path: &Path,
+    tmp_dir: &Path,
+    compression_level: u32,
+    threads: usize,
+) -> Result<(), PipelineError> {
+    let simplified_shx = simplified_shapefile.map(|path| path.with_extension("shx"));
+    let key = crate::ocean::OceanArtifactKey::from_inputs(
+        full_shapefile,
+        &full_shapefile.with_extension("shx"),
+        simplified_shapefile,
+        simplified_shx.as_deref(),
+        0,
+        14,
+        compression_level,
+    )?;
+    drop(std::fs::remove_dir_all(tmp_dir));
+    let chunks_dir = tmp_dir.join(SORT_CHUNKS_DIR);
+    let mut writer = sort::SortWriter::new(
+        &chunks_dir,
+        DEFAULT_SORT_CHUNK_SIZE,
+        sort::ChunkCompression::None,
+    )?;
+    let world = MercBbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 1.0,
+        max_y: 1.0,
+    };
+    if let Some(simplified) = simplified_shapefile {
+        crate::ocean::process_ocean_shapefile(simplified, &world, 0, 7, &mut writer, None)?;
+        crate::ocean::process_ocean_shapefile(full_shapefile, &world, 8, 14, &mut writer, None)?;
+    } else {
+        crate::ocean::process_ocean_shapefile(full_shapefile, &world, 0, 14, &mut writer, None)?;
+    }
+    writer.flush()?;
+    let mut reader = writer.finish()?;
+    let config = TilegenConfig {
+        pbf_path: PathBuf::new(),
+        output_path: output_path.to_path_buf(),
+        tmp_dir: tmp_dir.to_path_buf(),
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean_shapefile: None,
+        ocean_simplified_shapefile: None,
+        ocean_tiles: None,
+        ocean_artifact_key: Some(key),
+        ocean_only_metadata: true,
+        skip_to: None,
+        in_memory: false,
+        compression_level,
+        force_sorted: false,
+        allow_unsafe_flat_index: false,
+        threads,
+        way_inflight_budget: 0,
+        assemble_batch_budget: 0,
+        sort_chunk_size: DEFAULT_SORT_CHUNK_SIZE,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: sort::ChunkCompression::None,
+        seam_reconcile_layers: [0; shortbread::Layer::count()],
+        fanout_caps: [0; shortbread::Layer::count()],
+        polygon_simplify_factor: 1.0,
+    };
+    let _ = assemble::phase_assemble(&mut reader, &config)?;
     Ok(())
 }
 

@@ -416,6 +416,9 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
         max_zoom: 14,
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
+        ocean_tiles: None,
+        ocean_artifact_key: None,
+        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -539,6 +542,9 @@ fn injected_pins_fixture(
         max_zoom: 14,
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
+        ocean_tiles: None,
+        ocean_artifact_key: None,
+        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1561,6 +1567,9 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         max_zoom: 14,
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
+        ocean_tiles: None,
+        ocean_artifact_key: None,
+        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1621,6 +1630,9 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         max_zoom: 14,
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
+        ocean_tiles: None,
+        ocean_artifact_key: None,
+        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1673,6 +1685,9 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         max_zoom: 14,
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
+        ocean_tiles: None,
+        ocean_artifact_key: None,
+        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1727,6 +1742,9 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         max_zoom: 14,
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
+        ocean_tiles: None,
+        ocean_artifact_key: None,
+        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -3389,13 +3407,46 @@ fn checkpoint_roundtrip() {
         max_x: 0.8,
         max_y: 0.9,
     };
-    save_checkpoint(dir.path(), &bounds, 42).unwrap();
-    let (loaded_bounds, loaded_chunks) = load_checkpoint(dir.path()).unwrap();
+    save_checkpoint(dir.path(), &bounds, 42, &OceanMode::Computed).unwrap();
+    let (loaded_bounds, loaded_chunks, ocean_mode) = load_checkpoint(dir.path()).unwrap();
     assert!((loaded_bounds.min_x - 0.1).abs() < 1e-10);
     assert!((loaded_bounds.min_y - 0.2).abs() < 1e-10);
     assert!((loaded_bounds.max_x - 0.8).abs() < 1e-10);
     assert!((loaded_bounds.max_y - 0.9).abs() < 1e-10);
     assert_eq!(loaded_chunks, 42);
+    assert_eq!(ocean_mode, OceanMode::Computed);
+}
+
+#[test]
+fn checkpoint_preserves_all_ocean_modes() {
+    let key = crate::ocean::OceanArtifactKey {
+        full_shp_xxh128: 1,
+        full_shx_xxh128: 2,
+        simplified_shp_xxh128: None,
+        simplified_shx_xxh128: None,
+        min_zoom: 0,
+        max_zoom: 14,
+        compression_level: 6,
+        policy_version: crate::ocean::OCEAN_POLICY_VERSION,
+    };
+    let bounds = geometry::MercBbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 1.0,
+        max_y: 1.0,
+    };
+    for mode in [
+        OceanMode::None,
+        OceanMode::Computed,
+        OceanMode::Band { key },
+    ] {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        save_checkpoint(dir.path(), &bounds, 1, &mode).expect("save checkpoint");
+        assert_eq!(
+            load_checkpoint(dir.path()).expect("load checkpoint").2,
+            mode
+        );
+    }
 }
 
 #[test]

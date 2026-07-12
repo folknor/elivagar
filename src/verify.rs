@@ -53,6 +53,14 @@ impl From<io::Error> for VerifyError {
 
 pub struct VerifyReport {
     pub tiles_checked: u64,
+    /// Number of distinct stored payloads in --unique-payloads mode.
+    pub unique_blobs: u64,
+    /// Number of PMTiles directory tile runs traversed.
+    pub directory_runs: u64,
+    /// Addressed tiles, grouped by zoom, retained even when shared payloads
+    /// are checked only once.
+    pub addressed_per_zoom: [u64; 15],
+    pub unique_payloads: bool,
     pub tile_errors: Vec<String>,
     pub layers_observed: HashSet<String>,
     pub layers_declared: Vec<String>,
@@ -128,6 +136,18 @@ impl VerifyReport {
             println!("PASS  ({} tiles checked)", self.tiles_checked);
         } else {
             println!("FAIL  ({} tiles checked)", self.tiles_checked);
+        }
+
+        if self.unique_payloads {
+            println!(
+                "Unique payloads: {} blobs across {} directory runs",
+                self.unique_blobs, self.directory_runs
+            );
+            for (z, addressed) in self.addressed_per_zoom.iter().enumerate() {
+                if *addressed != 0 {
+                    println!("  z{z}: {addressed} addressed tiles");
+                }
+            }
         }
 
         if !self.tile_errors.is_empty() {
@@ -208,6 +228,18 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
 /// ocean-layer geometry statistics into the report.
 #[allow(clippy::too_many_lines)]
 pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, VerifyError> {
+    verify_opts_unique(path, geometry_stats, false)
+}
+
+/// Verify with optional unique-payload traversal. The unique mode validates a
+/// blob once per `(offset, length, zoom, seam)` while retaining addressed-tile
+/// accounting.
+#[allow(clippy::too_many_lines)]
+pub fn verify_opts_unique(
+    path: &Path,
+    geometry_stats: bool,
+    unique_payloads: bool,
+) -> Result<VerifyReport, VerifyError> {
     // -- Open and validate header --
     let mut reader = PmtilesReader::open(path)?;
     let file_size = reader.file_size()?;
@@ -286,6 +318,9 @@ pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, Ve
     let mut tile_errors: Vec<String> = Vec::new();
     let mut layers_observed: HashSet<String> = HashSet::new();
     let mut stats: Option<GeometryStats> = geometry_stats.then(GeometryStats::default);
+    let mut seen_payloads: HashSet<(u64, u32, u8, bool)> = HashSet::new();
+    let mut unique_blobs: HashSet<(u64, u32)> = HashSet::new();
+    let mut addressed_per_zoom = [0_u64; 15];
 
     for run in &runs {
         if tile_errors.len() >= MAX_TILE_ERRORS {
@@ -295,6 +330,21 @@ pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, Ve
             .tile_id
             .checked_add(u64::from(run.run_length))
             .ok_or_else(|| VerifyError::Container("tile run overflows".to_string()))?;
+        let mut unique_tiles = Vec::new();
+        for tile_id in run.tile_id..run_end {
+            let (z, x, y) = tile_id_to_zxy(tile_id);
+            if let Some(addressed) = addressed_per_zoom.get_mut(z as usize) {
+                *addressed += 1;
+            }
+            let seam = x == 0 || x == (1_u32 << z).saturating_sub(1);
+            if unique_payloads && seen_payloads.insert((run.offset, run.length, z, seam)) {
+                unique_blobs.insert((run.offset, run.length));
+                unique_tiles.push((tile_id, z, x, y));
+            }
+        }
+        if unique_payloads && unique_tiles.is_empty() {
+            continue;
+        }
         let representative = pmtiles_reader::TileEntry {
             tile_id: run.tile_id,
             offset: run.offset,
@@ -306,11 +356,19 @@ pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, Ve
         let decompressed = match reader.read_tile(&representative) {
             Ok(data) => data,
             Err(e) => {
-                for tile_id in run.tile_id..run_end {
+                let error_tiles: Box<dyn Iterator<Item = (u64, u8, u32, u32)>> = if unique_payloads
+                {
+                    Box::new(unique_tiles.iter().copied())
+                } else {
+                    Box::new((run.tile_id..run_end).map(|tile_id| {
+                        let (z, x, y) = tile_id_to_zxy(tile_id);
+                        (tile_id, z, x, y)
+                    }))
+                };
+                for (_tile_id, z, x, y) in error_tiles {
                     if tile_errors.len() >= MAX_TILE_ERRORS {
                         break;
                     }
-                    let (z, x, y) = tile_id_to_zxy(tile_id);
                     tile_errors.push(format!("z{z}/{x}/{y}: decompression failed: {e}"));
                     tiles_checked += 1;
                 }
@@ -318,18 +376,23 @@ pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, Ve
             }
         };
 
-        // Geometry validation of the shared blob depends only on (z, seam):
-        // validate once per group, then REPLAY the cached outcome for every
-        // tile so the report is byte-identical to the old per-tile loop
-        // (same error per addressed tile, same ordering, same cap behavior).
+        // Geometry validation of the shared blob depends only on (z, seam).
+        // Default traversal replays that outcome for every addressed tile;
+        // unique mode selects one representative of each validation group.
         let mut geometry_outcomes: std::collections::HashMap<(u8, bool), Option<String>> =
             std::collections::HashMap::new();
-        for tile_id in run.tile_id..run_end {
+        let validation_tiles: Box<dyn Iterator<Item = (u64, u8, u32, u32)>> = if unique_payloads {
+            Box::new(unique_tiles.into_iter())
+        } else {
+            Box::new((run.tile_id..run_end).map(|tile_id| {
+                let (z, x, y) = tile_id_to_zxy(tile_id);
+                (tile_id, z, x, y)
+            }))
+        };
+        for (_tile_id, z, x, y) in validation_tiles {
             if tile_errors.len() >= MAX_TILE_ERRORS {
                 break;
             }
-            let (z, x, y) = tile_id_to_zxy(tile_id);
-
             // Decode MVT structure.
             match pmtiles_reader::decode_mvt_layers(&decompressed) {
                 Ok(layers) => {
@@ -380,6 +443,10 @@ pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, Ve
 
     Ok(VerifyReport {
         tiles_checked,
+        unique_blobs: u64::try_from(unique_blobs.len()).unwrap_or(u64::MAX),
+        directory_runs: u64::try_from(runs.len()).unwrap_or(u64::MAX),
+        addressed_per_zoom,
+        unique_payloads,
         tile_errors,
         layers_observed,
         layers_declared,
