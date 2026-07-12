@@ -77,37 +77,6 @@ fn line_tile(id: Option<u64>, attr: &str, coords: &[(i32, i32)]) -> Vec<u8> {
     crate::mvt::encode_tile(&[&layer])
 }
 
-fn two_layer_tile() -> (Vec<u8>, Vec<Vec<(i32, i32)>>) {
-    let mut roads = LayerBuilder::new("roads");
-    let key = roads.intern_key("class");
-    let val = roads.intern_value(Value::String("primary".to_string()));
-    let mut line = Vec::new();
-    encode_linestring(&mut line, &[(10, 10), (20, 20)]);
-    roads.add_feature(Feature {
-        id: Some(9),
-        geom_type: GeomType::LineString,
-        geometry: line,
-        tags: vec![(key, val)],
-    });
-
-    let outer = [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)];
-    let hole = [(20, 20), (20, 40), (40, 40), (40, 20), (20, 20)];
-    let mut land = LayerBuilder::new("land");
-    let lk = land.intern_key("kind");
-    let lv = land.intern_value(Value::String("park".to_string()));
-    let mut poly = Vec::new();
-    encode_polygon(&mut poly, &[&outer, &hole]);
-    let decoded_poly = crate::geometry::decode_mvt_polygon(&poly);
-    land.add_feature(Feature {
-        id: Some(7),
-        geom_type: GeomType::Polygon,
-        geometry: poly,
-        tags: vec![(lk, lv)],
-    });
-
-    (crate::mvt::encode_tile(&[&roads, &land]), decoded_poly)
-}
-
 fn empty_layer_tile(name: &str, extent: u64) -> Vec<u8> {
     let mut layer = Vec::new();
     encode_bytes_field_always(&mut layer, 1, name.as_bytes());
@@ -437,112 +406,6 @@ fn residual_matcher_exhausts_same_key_pairs_before_force_zip() {
     }
 }
 
-#[test]
-fn canonical_decoder_round_trips_two_layer_tile() {
-    let (tile, decoded_poly) = two_layer_tile();
-    let canon = decode_canonical(&tile).expect("decode canonical tile");
-    assert_eq!(canon.layers.len(), 2);
-    let land = canon
-        .layers
-        .iter()
-        .find(|layer| layer.name == "land")
-        .expect("land layer");
-    assert_eq!(land.extent, 4096);
-    assert_eq!(land.features[0].id, Some(7));
-    assert_eq!(
-        land.features[0].attrs,
-        vec![("kind".to_string(), AttrVal::String("park".to_string()))]
-    );
-    let rings: Vec<_> = land.features[0].components[0]
-        .rings
-        .iter()
-        .map(|ring| ring.points.clone())
-        .collect();
-    assert_eq!(rings, decoded_poly);
-}
-
-#[test]
-fn canonicalization_erases_feature_order() {
-    let mut layer_a = LayerBuilder::new("roads");
-    let key_a = layer_a.intern_key("class");
-    let val_a = layer_a.intern_value(Value::String("path".to_string()));
-    for (id, coords) in [
-        (Some(2), &[(20, 20), (30, 30)][..]),
-        (Some(1), &[(0, 0), (10, 10)][..]),
-    ] {
-        let mut geom = Vec::new();
-        encode_linestring(&mut geom, coords);
-        layer_a.add_feature(Feature {
-            id,
-            geom_type: GeomType::LineString,
-            geometry: geom,
-            tags: vec![(key_a, val_a)],
-        });
-    }
-
-    let mut layer_b = LayerBuilder::new("roads");
-    let key_b = layer_b.intern_key("class");
-    let val_b = layer_b.intern_value(Value::String("path".to_string()));
-    for (id, coords) in [
-        (Some(1), &[(0, 0), (10, 10)][..]),
-        (Some(2), &[(20, 20), (30, 30)][..]),
-    ] {
-        let mut geom = Vec::new();
-        encode_linestring(&mut geom, coords);
-        layer_b.add_feature(Feature {
-            id,
-            geom_type: GeomType::LineString,
-            geometry: geom,
-            tags: vec![(key_b, val_b)],
-        });
-    }
-
-    let a = decode_canonical(&crate::mvt::encode_tile(&[&layer_a])).expect("decode a");
-    let b = decode_canonical(&crate::mvt::encode_tile(&[&layer_b])).expect("decode b");
-    assert_eq!(a, b);
-}
-
-#[test]
-fn canon_hash_catches_geometry_attrs_features_and_attr_bits() {
-    let base = decode_canonical(&line_tile(Some(1), "a", &[(0, 0), (10, 10)])).expect("base");
-    let moved = decode_canonical(&line_tile(Some(1), "a", &[(0, 0), (11, 10)])).expect("moved");
-    let attr = decode_canonical(&line_tile(Some(1), "b", &[(0, 0), (10, 10)])).expect("attr");
-    let dropped = decode_canonical(&empty_layer_tile("roads", 4096)).expect("dropped");
-    assert_ne!(canon_hash(&base), canon_hash(&moved));
-    assert_ne!(canon_hash(&base), canon_hash(&attr));
-    assert_ne!(canon_hash(&base), canon_hash(&dropped));
-
-    let float = decode_canonical(&float_attr_tile(Value::Float(1.0))).expect("float");
-    let double = decode_canonical(&float_attr_tile(Value::Double(1.0))).expect("double");
-    assert_ne!(canon_hash(&float), canon_hash(&double));
-
-    let nan_a = decode_canonical(&float_attr_tile(Value::Float(f32::from_bits(0x7fc0_0001))))
-        .expect("nan a");
-    let nan_b = decode_canonical(&float_attr_tile(Value::Float(f32::from_bits(0x7fc0_0002))))
-        .expect("nan b");
-    assert_ne!(canon_hash(&nan_a), canon_hash(&nan_b));
-
-    let pos_zero = decode_canonical(&float_attr_tile(Value::Float(0.0))).expect("pos zero");
-    let neg_zero = decode_canonical(&float_attr_tile(Value::Float(-0.0))).expect("neg zero");
-    assert_ne!(canon_hash(&pos_zero), canon_hash(&neg_zero));
-}
-
-#[test]
-fn canonicalization_erases_merged_component_order_but_not_polygon_ring_order() {
-    let p1 = &[(0, 0), (10, 10)][..];
-    let p2 = &[(20, 20), (30, 30)][..];
-    let a = decode_canonical(&multiline_tile(&[p1, p2])).expect("decode a");
-    let b = decode_canonical(&multiline_tile(&[p2, p1])).expect("decode b");
-    assert_eq!(a, b);
-
-    let outer = &[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)][..];
-    let hole_a = &[(10, 10), (10, 20), (20, 20), (20, 10), (10, 10)][..];
-    let hole_b = &[(30, 30), (30, 40), (40, 40), (40, 30), (30, 30)][..];
-    let poly_a = decode_canonical(&polygon_tile(&[outer, hole_a, hole_b])).expect("poly a");
-    let poly_b = decode_canonical(&polygon_tile(&[outer, hole_b, hole_a])).expect("poly b");
-    assert_ne!(poly_a, poly_b);
-}
-
 // Both hashes must agree AND deliver the expected verdict: asserting
 // agreement alone would let correlated mistakes pass.
 fn assert_fingerprint_verdict(left: &[u8], right: &[u8], expect_equal: bool) {
@@ -650,6 +513,19 @@ fn streaming_fingerprint_matches_detail_hash_on_layers_and_features() {
     assert_verdict(
         &repeated_feature_tile(&[first, first, second]),
         &repeated_feature_tile(&[first, second, second]),
+        false,
+    );
+
+    // Attribute values are bit-exact: float and double wire types differ
+    // even for the same numeric value, and signed zeros differ.
+    assert_verdict(
+        &float_attr_tile(Value::Float(1.0)),
+        &float_attr_tile(Value::Double(1.0)),
+        false,
+    );
+    assert_verdict(
+        &float_attr_tile(Value::Float(0.0)),
+        &float_attr_tile(Value::Float(-0.0)),
         false,
     );
 
@@ -941,6 +817,38 @@ fn polygon_hole_reassigned_at_zero_distance_is_structural() {
 }
 
 #[test]
+fn polygon_hole_escaping_its_outer_is_structural_not_tolerance() {
+    // Equal ring counts, equal roles, displacement 2px under tol 3: only the
+    // hole-containment predicate can classify this pair as structural. The
+    // hole's first vertex crosses the outer boundary (99 -> 101 with the
+    // outer ending at x=100), so containment differs while every other
+    // structural signal matches; a tolerance verdict would mean the
+    // containment branch was skipped.
+    let dir = TestDir::new("hole-containment");
+    let current = dir.path.join("current.pmtiles");
+    let blessed = dir.path.join("blessed.pmtiles");
+    let outer = &[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)][..];
+    let hole_inside = &[(99, 50), (89, 50), (89, 60), (99, 60), (99, 50)][..];
+    let hole_escaped = &[(101, 50), (91, 50), (91, 60), (101, 60), (101, 50)][..];
+    write_archive(
+        &current,
+        vec![(0, 0, 0, polygon_tile(&[outer, hole_inside]))],
+    );
+    write_archive(
+        &blessed,
+        vec![(0, 0, 0, polygon_tile(&[outer, hole_escaped]))],
+    );
+    let cfg = RegressConfig {
+        tol: 3,
+        max_moved: 10,
+        max_examples: 20,
+    };
+    let report = regress(&current, &blessed, &cfg).expect("regress");
+    assert_eq!(report.totals.structural_moved, 1);
+    assert_eq!(report.totals.tolerance_moved, 0);
+}
+
+#[test]
 fn run_length_directory_preserves_each_addressed_tile() {
     let dir = TestDir::new("run-length");
     let current = dir.path.join("current.pmtiles");
@@ -981,7 +889,7 @@ fn deduplicated_run_collapses_to_one_raw_pair() {
 }
 
 #[test]
-fn detailed_pair_multiplicity_and_legacy_oracle_match() {
+fn detailed_pair_multiplicity_is_reported_per_addressed_tile() {
     let dir = TestDir::new("detailed-pair-multiplicity");
     let current = dir.path.join("current.pmtiles");
     let blessed = dir.path.join("blessed.pmtiles");
@@ -1002,11 +910,10 @@ fn detailed_pair_multiplicity_and_legacy_oracle_match() {
     assert_eq!(report.counters.detailed_pairs, 1);
     assert_eq!(report.counters.detailed_tiles, 2);
     assert_eq!(report.totals.tolerance_moved, 2);
-    assert_regress_differential_oracle(&current, &blessed, &cfg).expect("differential oracle");
 }
 
 #[test]
-fn differential_oracle_covers_canonical_edge_cases() {
+fn canonical_edge_cases_have_expected_live_engine_outcomes() {
     let dir = TestDir::new("differential-edge-cases");
     let current = dir.path.join("current.pmtiles");
     let blessed = dir.path.join("blessed.pmtiles");
@@ -1052,5 +959,21 @@ fn differential_oracle_covers_canonical_edge_cases() {
         max_moved: 10,
         max_examples: 20,
     };
-    assert_regress_differential_oracle(&current, &blessed, &cfg).expect("differential oracle");
+    let report = regress(&current, &blessed, &cfg).expect("regress");
+    // Identical: the permuted multiline and the permuted duplicate-id tile.
+    // attr_changed: the bit-distinct NaN floats. tolerance_moved: the ocean
+    // polygon shifted 2px under tol 3. structural_moved: moving hole_a after
+    // outer_b reattaches it to a different outer (MVT holes bind to the
+    // preceding outer ring), so hole containment differs between archives.
+    assert_eq!(report.identical_tiles, 2);
+    assert_eq!(report.diff_count, 3);
+    assert_eq!(
+        report.totals,
+        DiffTotals {
+            attr_changed: 1,
+            tolerance_moved: 1,
+            structural_moved: 1,
+            ..DiffTotals::default()
+        }
+    );
 }

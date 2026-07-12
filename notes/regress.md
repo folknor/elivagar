@@ -4,8 +4,8 @@
 directory merge, three tiered parallel passes, comparison-native `DetailTile`
 decoder, digest-bucketed matcher with bbox-pruned/KD-indexed Hausdorff,
 bounded report aggregation) is implemented in `src/regress.rs`, validated by
-the unit suite plus the test-only legacy differential oracle, and measured on
-the live denmark archive pairs. This document records the measured outcome
+the unit suite (originally also by a test-only legacy differential oracle,
+since retired - see below), and measured on the live denmark archive pairs. This document records the measured outcome
 and what genuinely remains open; the diagnosis, design, and minor-wins ledger
 that drove the rewrite are done and removed (see git history for the full
 plan).
@@ -97,11 +97,13 @@ old engine could not finish.
   interiors, boundaries, misses, overlap/overflow rejection, a mixed
   seam/non-seam run proving the stricter seam limit is grouped separately,
   and a same-group run proving the shared error replays per tile.
-- **Legacy differential oracle retirement.** The pre-rewrite canonical-graph
-  comparator survives as a `#[cfg(test)]` oracle
-  (`regress::legacy_oracle`) exercised on synthetic fixtures covering
-  permuted order, bit-distinct floats, duplicate ids, anonymous ocean
-  features, holes, and multipart geometry. A full-report differential over
-  the real diff-heavy pairs is unattainable - the old engine cannot complete
-  them - so decide deliberately when the oracle has paid for itself and
-  delete it; it is never a runtime switch.
+- **Legacy differential oracle retirement.** Landed. Removed the test-only
+  canonical-graph comparator, its wrapper, the canonical decoder plumbing
+  (`geometry/mvt_decode.rs` keeps only the live polygon codec -
+  decode_mvt_polygon has production consumers in verify and assemble), and
+  the canonical-only tests. The former edge-case fixture now asserts the
+  live engine's direct semantic outcomes: permuted multilines and permuted
+  duplicate-id features are identical; bit-distinct float attributes are
+  attr_changed; anonymous ocean geometry moved 2px is tolerance_moved at
+  tol 3; and a hole re-encoded after a different outer is structural_moved
+  (MVT holes bind to the preceding outer, so containment differs).
