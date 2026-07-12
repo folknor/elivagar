@@ -49,11 +49,20 @@ completes the injected-prepass Brick 4 germany activation gate that the
 old engine could not finish.
 
 ## Remaining open
-- **Streaming fingerprint mode.** Tier-2 semantic fingerprints currently
-  decode a full `DetailTile` per blob and drop it; the canonical pass
-  (~1.45 s) dominates the identical-pair wall. A true streaming digest (no
-  point-vector materialization) would cut that further. Optional - the
-  current shape is already within the plan's peak-memory model.
+- **Streaming fingerprint mode.** Landed. Tier 2 now streams geometry points
+  into xxh3-128 ring digests, retaining only dictionary entries, small attr
+  lists, and fixed-size component/feature digests. Feature and component
+  ordering is erased by hashing sorted child digests (not wrapping-add sums,
+  which have additive collision structure); layers mirror the detail
+  decoder's stable name sort so even duplicate-name layers (invalid MVT,
+  accepted by both decoders) keep identical equivalence. Layer names/extents,
+  feature ids/types/attrs, ring order, and ring point order remain bound.
+  The `DetailTile` decoder and detail/report tiers are unchanged. The
+  differential unit test asserts expected verdicts (not just agreement)
+  over feature/component/attr permutations, rotated rings, moved vertices,
+  dictionary re-indexing, layer permutation, duplicate layer names,
+  multipoint order, zero-area rings, hole order, repeated-count line
+  MoveTo, and feature multiplicity, all against `detail_tile_hash`.
 - **Residual matcher endpoint.** Non-exact anonymous pairing is
   proxy-greedy (bbox lower bound, then bbox-center distance) with exact
   greedy kept for groups where k^2 <= 64, and leftovers force-zipped so a

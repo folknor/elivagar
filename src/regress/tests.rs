@@ -321,6 +321,273 @@ fn canonicalization_erases_merged_component_order_but_not_polygon_ring_order() {
     assert_ne!(poly_a, poly_b);
 }
 
+// Both hashes must agree AND deliver the expected verdict: asserting
+// agreement alone would let correlated mistakes pass.
+fn assert_fingerprint_verdict(left: &[u8], right: &[u8], expect_equal: bool) {
+    let detail_equal = detail_tile_hash(&decode_detail_tile(left).expect("decode left"))
+        == detail_tile_hash(&decode_detail_tile(right).expect("decode right"));
+    let streaming_equal = streaming_tile_hash(left).expect("hash left")
+        == streaming_tile_hash(right).expect("hash right");
+    assert_eq!(detail_equal, expect_equal, "detail verdict");
+    assert_eq!(streaming_equal, expect_equal, "streaming verdict");
+}
+
+#[test]
+fn streaming_fingerprint_matches_detail_hash_on_geometry() {
+    let assert_verdict = assert_fingerprint_verdict;
+    let first = &[(0, 0), (10, 10)][..];
+    let second = &[(20, 20), (30, 30)][..];
+    assert_verdict(
+        &multiline_tile(&[first, second]),
+        &multiline_tile(&[second, first]),
+        true,
+    );
+
+    let outer = &[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)][..];
+    let rotated = &[(100, 0), (100, 100), (0, 100), (0, 0), (100, 0)][..];
+    assert_verdict(&polygon_tile(&[outer]), &polygon_tile(&[rotated]), false);
+    assert_verdict(
+        &line_tile(Some(1), "a", &[(0, 0), (10, 10)]),
+        &line_tile(Some(1), "a", &[(0, 0), (11, 10)]),
+        false,
+    );
+
+    // Hole order within a component stays semantic in both hashes.
+    let hole_a = &[(10, 10), (10, 20), (20, 20), (20, 10), (10, 10)][..];
+    let hole_b = &[(30, 30), (30, 40), (40, 40), (40, 30), (30, 30)][..];
+    assert_verdict(
+        &polygon_tile(&[outer, hole_a, hole_b]),
+        &polygon_tile(&[outer, hole_b, hole_a]),
+        false,
+    );
+
+    // A zero-area ring classifies as a hole in both decoders; adding one
+    // changes the geometry. Four points so encode_polygon_ring keeps it
+    // (it drops rings with fewer than two LineTo segments).
+    let degenerate = &[(50, 50), (60, 50), (70, 50), (50, 50)][..];
+    assert_verdict(
+        &polygon_tile(&[outer, degenerate]),
+        &polygon_tile(&[outer]),
+        false,
+    );
+
+    // Multipoint point order stays semantic in both hashes.
+    assert_verdict(
+        &point_tile(&[(0, 0), (10, 10)]),
+        &point_tile(&[(10, 10), (0, 0)]),
+        false,
+    );
+
+    // A repeated-count line MoveTo (invalid but accepted by the detail
+    // decoder) splits into a single-point component plus the continuing
+    // path, identically in both decoders: MoveTo{a,b} LineTo{c} must equal
+    // the conventional encoding of path [a,c] plus lone point [b].
+    let mut repeated = Vec::new();
+    repeated.push(crate::mvt::command(1, 2));
+    repeated.extend([crate::mvt::zigzag(0), crate::mvt::zigzag(0)]);
+    repeated.extend([crate::mvt::zigzag(5), crate::mvt::zigzag(5)]);
+    repeated.push(crate::mvt::command(2, 1));
+    repeated.extend([crate::mvt::zigzag(5), crate::mvt::zigzag(5)]);
+    let mut conventional = Vec::new();
+    conventional.push(crate::mvt::command(1, 1));
+    conventional.extend([crate::mvt::zigzag(0), crate::mvt::zigzag(0)]);
+    conventional.push(crate::mvt::command(2, 1));
+    conventional.extend([crate::mvt::zigzag(10), crate::mvt::zigzag(10)]);
+    conventional.push(crate::mvt::command(1, 1));
+    conventional.extend([crate::mvt::zigzag(-5), crate::mvt::zigzag(-5)]);
+    assert_verdict(
+        &raw_geometry_tile(GeomType::LineString, repeated),
+        &raw_geometry_tile(GeomType::LineString, conventional),
+        true,
+    );
+}
+
+#[test]
+fn streaming_fingerprint_matches_detail_hash_on_layers_and_features() {
+    let assert_verdict = assert_fingerprint_verdict;
+    let first = &[(0, 0), (10, 10)][..];
+    let second = &[(20, 20), (30, 30)][..];
+
+    // Distinct layer names: encoding order is erased by both hashes.
+    assert_verdict(
+        &two_named_layers_tile(false),
+        &two_named_layers_tile(true),
+        true,
+    );
+
+    // Duplicate layer names (invalid MVT, accepted by both decoders): the
+    // detail hash stably sorts by name so encounter order stays bound, and
+    // the streaming hash must agree - swapped content is a difference.
+    assert_verdict(
+        &duplicate_name_layers_tile(false),
+        &duplicate_name_layers_tile(true),
+        false,
+    );
+
+    // Feature multiplicity: [A, A, B] vs [A, B, B] differ as multisets.
+    assert_verdict(
+        &repeated_feature_tile(&[first, first, second]),
+        &repeated_feature_tile(&[first, second, second]),
+        false,
+    );
+
+    fn attrs_tile(reverse: bool) -> Vec<u8> {
+        let mut layer = LayerBuilder::new("roads");
+        let (class, name, primary, main) = if reverse {
+            (
+                layer.intern_key("name"),
+                layer.intern_key("class"),
+                layer.intern_value(Value::String("main".to_string())),
+                layer.intern_value(Value::String("primary".to_string())),
+            )
+        } else {
+            (
+                layer.intern_key("class"),
+                layer.intern_key("name"),
+                layer.intern_value(Value::String("primary".to_string())),
+                layer.intern_value(Value::String("main".to_string())),
+            )
+        };
+        let mut geometry = Vec::new();
+        encode_linestring(&mut geometry, &[(0, 0), (10, 10)]);
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::LineString,
+            geometry,
+            tags: vec![(class, primary), (name, main)],
+        });
+        crate::mvt::encode_tile(&[&layer])
+    }
+    assert_verdict(&attrs_tile(false), &attrs_tile(true), true);
+
+    let mut ordered = LayerBuilder::new("roads");
+    let key = ordered.intern_key("class");
+    let value = ordered.intern_value(Value::String("path".to_string()));
+    for (id, coords) in [(Some(1), first), (Some(2), second)] {
+        let mut geometry = Vec::new();
+        encode_linestring(&mut geometry, coords);
+        ordered.add_feature(Feature {
+            id,
+            geom_type: GeomType::LineString,
+            geometry,
+            tags: vec![(key, value)],
+        });
+    }
+    let mut permuted = LayerBuilder::new("roads");
+    let key = permuted.intern_key("class");
+    let value = permuted.intern_value(Value::String("path".to_string()));
+    for (id, coords) in [(Some(2), second), (Some(1), first)] {
+        let mut geometry = Vec::new();
+        encode_linestring(&mut geometry, coords);
+        permuted.add_feature(Feature {
+            id,
+            geom_type: GeomType::LineString,
+            geometry,
+            tags: vec![(key, value)],
+        });
+    }
+    assert_verdict(
+        &crate::mvt::encode_tile(&[&ordered]),
+        &crate::mvt::encode_tile(&[&permuted]),
+        true,
+    );
+}
+
+fn point_tile(points: &[(i32, i32)]) -> Vec<u8> {
+    let mut geometry = Vec::new();
+    geometry.push(crate::mvt::command(
+        1,
+        u32::try_from(points.len()).expect("point count fits u32"),
+    ));
+    let (mut cx, mut cy) = (0, 0);
+    for &(x, y) in points {
+        geometry.push(crate::mvt::zigzag(x - cx));
+        geometry.push(crate::mvt::zigzag(y - cy));
+        cx = x;
+        cy = y;
+    }
+    raw_geometry_tile(GeomType::Point, geometry)
+}
+
+fn raw_geometry_tile(geom_type: GeomType, geometry: Vec<u32>) -> Vec<u8> {
+    let mut layer = LayerBuilder::new("raw");
+    layer.add_feature(Feature {
+        id: Some(1),
+        geom_type,
+        geometry,
+        tags: Vec::new(),
+    });
+    crate::mvt::encode_tile(&[&layer])
+}
+
+fn two_named_layers_tile(swapped: bool) -> Vec<u8> {
+    let mut roads = LayerBuilder::new("roads");
+    let mut line = Vec::new();
+    encode_linestring(&mut line, &[(0, 0), (10, 10)]);
+    roads.add_feature(Feature {
+        id: Some(1),
+        geom_type: GeomType::LineString,
+        geometry: line,
+        tags: Vec::new(),
+    });
+    let mut land = LayerBuilder::new("land");
+    let outer = [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)];
+    let mut poly = Vec::new();
+    encode_polygon(&mut poly, &[&outer]);
+    land.add_feature(Feature {
+        id: Some(2),
+        geom_type: GeomType::Polygon,
+        geometry: poly,
+        tags: Vec::new(),
+    });
+    if swapped {
+        crate::mvt::encode_tile(&[&land, &roads])
+    } else {
+        crate::mvt::encode_tile(&[&roads, &land])
+    }
+}
+
+fn duplicate_name_layers_tile(swapped: bool) -> Vec<u8> {
+    let mut a = LayerBuilder::new("roads");
+    let mut line_a = Vec::new();
+    encode_linestring(&mut line_a, &[(0, 0), (10, 10)]);
+    a.add_feature(Feature {
+        id: Some(1),
+        geom_type: GeomType::LineString,
+        geometry: line_a,
+        tags: Vec::new(),
+    });
+    let mut b = LayerBuilder::new("roads");
+    let mut line_b = Vec::new();
+    encode_linestring(&mut line_b, &[(20, 20), (30, 30)]);
+    b.add_feature(Feature {
+        id: Some(2),
+        geom_type: GeomType::LineString,
+        geometry: line_b,
+        tags: Vec::new(),
+    });
+    if swapped {
+        crate::mvt::encode_tile(&[&b, &a])
+    } else {
+        crate::mvt::encode_tile(&[&a, &b])
+    }
+}
+
+fn repeated_feature_tile(paths: &[&[(i32, i32)]]) -> Vec<u8> {
+    let mut layer = LayerBuilder::new("roads");
+    for path in paths {
+        let mut geometry = Vec::new();
+        encode_linestring(&mut geometry, path);
+        layer.add_feature(Feature {
+            id: None,
+            geom_type: GeomType::LineString,
+            geometry,
+            tags: Vec::new(),
+        });
+    }
+    crate::mvt::encode_tile(&[&layer])
+}
+
 #[test]
 fn identical_archive_report_passes() {
     let dir = TestDir::new("identical");
