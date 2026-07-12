@@ -182,15 +182,18 @@ and unique-mode earcut clean over 17.7M polygons. Extract gates,
 denmark locations: computed-path regress vs blessed zero-diff across
 1,296,996 tiles at tol 0 (the canonical full-fill id change is
 geometry-invisible), verify PASS, earcut clean, bench-3 12.5s
-(`f005ae56` at `92ed329`) vs the 12.3s + 3% keep bound. The spec's
-extract hybrid (boundary band + artifact interior) was REFUTED by its
-own gate - 27 structural ocean diffs, one strictly interior
-(z8/121/81): the pyramid's root/bisection structure depends on the
-piece clip extent, so interior tiles are not clip-independent - and the
-pre-agreed stopping-rule fallback engaged: activation requires an empty
-band on every pass grid, extracts stay computed (final regress
-zero-diff), and H5's runtime win is claimed at planet bounds only,
-first measurable on the planet dry run.
+(`f005ae56` at `92ed329`) vs the 12.3s + 3% keep bound. The extract hybrid's
+gate read 27 structural ocean diffs, one strictly interior (z8/121/81):
+the pyramid's root/bisection structure depends on the piece clip
+extent, so artifact-served interior tiles legitimately differ from
+extract-computed ones. Adjudication: the human viewer gate judged the
+artifact-active archive equivalent (displacements mostly 10-97 units,
+the accepted seam-drift class), the hybrid stands, and the blessed
+baseline rotated to the artifact-active build. Artifact-active denmark:
+ocean phase 5.75s -> 1.87s (7,141 band features vs 1.39M computed),
+wall ~9.8s plain-run vs 12.5s computed bench. Standing caveat: regress
+gates assume the gate machine carries the same data/ocean-tiles.pmtiles
+the blessed archive was built with.
 
 The paint-order determinism landing (`a631b5f` + comparator optimization
 `2c770c7`, 2026-07-11) made archives byte-reproducible and wired the

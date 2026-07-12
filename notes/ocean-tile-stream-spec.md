@@ -1,26 +1,29 @@
 # Spec: durable precomputed ocean tile stream (H5)
 
-Status: v5 IMPLEMENTED 2026-07-12 (`92ed329` + the world-only activation
-follow-up), with the stopping rule's hybrid retraction ENGAGED by
-measurement: the brick 5 denmark regress produced 27 structural ocean
-diffs, including one on a tile whose buffered footprint never touches
-the clip edge (z8/121/81, displacement 23-69 units) - interior tiles are
-NOT independent of the ocean clip rect, because the pyramid's root-cell
-selection and row-band bisection depend on each piece's clipped extent.
-No band width fixes a non-edge effect. Per the pre-agreed fallback, the
-artifact now activates only when the run's data bounds leave an empty
-band on every pass grid (world-covering bounds, i.e. planet runs);
-extracts keep the computed path unchanged and regress byte-identically.
-The band predicate, pruning, and consumption machinery all remain - the
-world precheck IS the activation test - and the artifact's own gates
-(unique-payloads verify, unique earcut, 942.7 MB / 9.2M blobs / 13.97M
-runs vs the 8 GB / 25M / 40M bounds) all passed. Three same-day codex
-spec critiques (R1: 19 findings, R2: 14, R3: 6) plus a
-competitor-comparison review (R4, Opus agent over research/planetiler,
-tilemaker, tippecanoe, stedsplakat) are folded - see "Review
-resolutions". One spec erratum found at the gates: the brick 4 eyeball
-tile z10/544/316 named as inland is actually the Great Belt strait (sea)
-- the artifact's content there matches the computed path exactly. Written against `reference/technical-implementation-spec.md`
+Status: v5 IMPLEMENTED AND ADJUDICATED 2026-07-12 (`92ed329` and
+follow-ups). The brick 5 denmark regress read 27 structural ocean diffs
+vs the computed blessed baseline, including one on a tile whose buffered
+footprint never touches the clip edge (z8/121/81) - so interior tiles
+are NOT independent of the ocean clip rect: the pyramid's root-cell
+selection and row-band bisection depend on each piece's clipped extent,
+and the artifact's world-descent seams legitimately differ from the
+extract-clip descent's. The stopping-rule retraction was briefly landed,
+then REVERSED by the human gate: the artifact-active archive was judged
+equivalent in the MapLibre viewer (displacements mostly 10-97 units, the
+same class as the accepted 2-unit seam-thinning drift), so extracts DO
+consume the artifact and the blessed baseline rotated to the
+artifact-active build. Standing consequence: extract output depends on
+artifact presence - regress gates assume the gate machine carries the
+same data/ocean-tiles.pmtiles the blessed archive was built with. The
+artifact's own gates (unique-payloads verify, unique earcut, 942.7 MB /
+9.2M blobs / 13.97M runs vs the 8 GB / 25M / 40M bounds) all passed.
+Three same-day codex spec critiques (R1: 19 findings, R2: 14, R3: 6)
+plus a competitor-comparison review (R4, Opus agent over
+research/planetiler, tilemaker, tippecanoe, stedsplakat) are folded -
+see "Review resolutions". One spec erratum found at the gates: the
+brick 4 eyeball tile z10/544/316 named as inland is actually the Great
+Belt strait (sea) - the artifact's content there matches the computed
+path exactly. Written against `reference/technical-implementation-spec.md`
 (the contract). Spawned from `notes/planet-30gb-roadmap.md` hypothesis H5,
 which carries the claim and evidence. Measurement record:
 `reference/performance.md` + `.brokkr/results.db`.

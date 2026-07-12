@@ -269,12 +269,15 @@ Sequential, same PBF input:
 - **ocean**: shapefile read + ocean feature emission → more sort chunks.
   When `data/ocean-tiles.pmtiles` (the durable world-ocean artifact,
   built once per shapefile release by `elivagar ocean-build`) is present
-  AND the run's data bounds cover the world (planet runs; the activation
-  test is an empty boundary band on every pass grid), this phase does no
-  geometry work and assemble merges the artifact as run copies instead.
-  Extract runs always compute (measured 2026-07-12: interior tile
-  geometry depends on the piece clip extent, so extracts cannot consume
-  the world artifact; see notes/ocean-tile-stream-spec.md).
+  and the run matches the MVT+gzip z0-14 build shape, this phase
+  computes only the boundary band near the extract bbox edge (empty at
+  world bounds) and assemble merges the artifact as run copies for the
+  interior. Artifact-served tiles differ benignly from extract-computed
+  ones (descent seams depend on the piece clip extent; adjudicated
+  equivalent in the viewer 2026-07-12, see
+  notes/ocean-tile-stream-spec.md) - so the blessed regress baseline is
+  artifact-active, the gate machine must carry the same artifact, and
+  rotating the artifact forces a bless rotation.
 - **sort**: partition bookkeeping only (near-zero; the merge is deferred)
 - **assemble**: streamed per-partition merge → MVT encode + gzip + PMTiles write (parallel partition readers; merge/decompress cost lands in `assemble_reader_ns`)
 

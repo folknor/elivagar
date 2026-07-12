@@ -788,21 +788,24 @@ the reused 85% of NA's addressed tiles still pay merge+encode+gzip -
 the artifact deletes that, not just the phase; the artifact is itself a
 PMTiles archive consumed run-aware at assemble.
 
-IMPLEMENTED same day (`92ed329` + follow-up): the world artifact exists
-- 942.7 MB, 212.4M addressed tiles, 9.2M unique blobs, 13.97M directory
-runs, 95.7% deduplicated, verify + earcut clean in the new run-aware
-gate modes. The spec's extract hybrid (boundary band + artifact
-interior) was REFUTED by its own gate: interior tiles depend on the
-piece clip extent through the pyramid's root/bisection structure (27
-structural ocean diffs on denmark, one strictly interior), so the
-pre-agreed stopping-rule fallback engaged - the artifact activates only
-on world-covering bounds. Consequences for this ledger: extracts (and
-the NA reading) keep today's computed numbers; the ocean phase
-deletion, its 12-17 GB planet RSS line, the ~290M-record sort share,
-and the ~236M assemble encode chains are all claimed at PLANET bounds
-only, where the activation test (empty band everywhere) guarantees no
-computed/artifact seam exists. The planet dry run is where H5's win is
-first measured end to end.
+IMPLEMENTED AND ADJUDICATED same day (`92ed329` + follow-ups): the
+world artifact exists - 942.7 MB, 212.4M addressed tiles, 9.2M unique
+blobs, 13.97M directory runs, 95.7% deduplicated, verify + earcut clean
+in the new run-aware gate modes. The brick 5 gate found that interior
+tiles depend on the piece clip extent through the pyramid's
+root/bisection structure (27 structural ocean diffs on denmark, one
+strictly interior) - artifact output is DIFFERENT from extract-computed
+output, not wrong: the human viewer gate judged the artifact-active
+archive equivalent, the hybrid stands, and the blessed baseline rotated
+to the artifact-active build. Ledger consequences: H5's win applies to
+extracts AND planet - denmark ocean phase 5.75s -> 1.87s band-only,
+wall ~12.5 -> ~10s, and at planet the ocean phase RSS line (12-17 GB),
+the ~290M-record sort share, and the ~236M assemble encode chains are
+deleted. Standing caveat: extract output now depends on artifact
+presence; regress gates assume the gate machine carries the same
+data/ocean-tiles.pmtiles the blessed archive was built with, and a
+shapefile-release rotation of the artifact is an output-changing event
+that forces a bless rotation.
 
 ### H6: Kill the way-path allocation churn with per-worker scratch
 
