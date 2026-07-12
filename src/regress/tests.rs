@@ -8,7 +8,7 @@ use protohoggr::{encode_bytes_field_always, encode_varint_field_always};
 
 use super::*;
 use crate::mvt::{Feature, GeomType, LayerBuilder, Value, encode_linestring, encode_polygon};
-use crate::pmtiles_reader::{PmtilesReader, expand_entries};
+use crate::pmtiles_reader::PmtilesReader;
 use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter, xy_to_tile_id};
 
 static TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
@@ -941,7 +941,7 @@ fn polygon_hole_reassigned_at_zero_distance_is_structural() {
 }
 
 #[test]
-fn run_length_directory_expansion_compares_each_addressed_tile() {
+fn run_length_directory_preserves_each_addressed_tile() {
     let dir = TestDir::new("run-length");
     let current = dir.path.join("current.pmtiles");
     let blessed = dir.path.join("blessed.pmtiles");
@@ -952,13 +952,9 @@ fn run_length_directory_expansion_compares_each_addressed_tile() {
     );
     write_archive(&blessed, vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile)]);
     let mut reader = PmtilesReader::open(&current).expect("open current");
-    let root = reader
-        .read_directory(reader.root_dir_offset(), reader.root_dir_length())
-        .expect("read root dir");
-    let mut expanded = Vec::new();
-    expand_entries(&root, &mut expanded);
-    assert_eq!(expanded.len(), 2);
-    assert_eq!(expanded[0].offset, expanded[1].offset);
+    let runs = reader.read_all_runs().expect("read runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].run_length, 2);
 
     let cfg = RegressConfig::default();
     let report = regress(&current, &blessed, &cfg).expect("regress");

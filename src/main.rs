@@ -463,18 +463,16 @@ fn run_regress(args: &RegressArgs) {
 }
 
 fn diag_ocean_rings(path: &Path, z: u8, x: u32, y: u32) -> std::io::Result<()> {
-    use elivagar::pmtiles_reader::PmtilesReader;
+    use elivagar::pmtiles_reader::{PmtilesReader, find_entry};
     use elivagar::pmtiles_writer::xy_to_tile_id;
     use protohoggr::{Cursor, WIRE_LEN};
 
     let mut reader = PmtilesReader::open(path)?;
-    let entries = reader.read_all_entries()?;
+    let runs = reader.read_all_runs()?;
     let tile_id = xy_to_tile_id(z, x, y);
-    let entry = entries
-        .iter()
-        .find(|e| e.tile_id == tile_id)
+    let entry = find_entry(&runs, tile_id)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "tile not found"))?;
-    let raw = reader.read_tile(entry)?;
+    let raw = reader.read_tile(&entry)?;
 
     println!(
         "Tile z{z}/{x}/{y} - {raw_len} bytes decompressed",

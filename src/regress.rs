@@ -3601,10 +3601,8 @@ mod legacy_oracle {
     ) -> io::Result<RegressReport> {
         let mut current_reader = PmtilesReader::open(current)?;
         let mut blessed_reader = PmtilesReader::open(blessed)?;
-        let mut current_entries = current_reader.read_all_entries()?;
-        let mut blessed_entries = blessed_reader.read_all_entries()?;
-        current_entries.sort_by_key(|entry| entry.tile_id);
-        blessed_entries.sort_by_key(|entry| entry.tile_id);
+        let current_entries = expand_runs(&current_reader.read_all_runs()?);
+        let blessed_entries = expand_runs(&blessed_reader.read_all_runs()?);
 
         let mut report = RegressReport::default();
         let mut interner = LayerInterner::default();
@@ -3685,6 +3683,26 @@ mod legacy_oracle {
                 length: entry.length,
             }),
         }
+    }
+
+    fn expand_runs(
+        runs: &[crate::pmtiles_reader::RawDirEntry],
+    ) -> Vec<crate::pmtiles_reader::TileEntry> {
+        let mut entries = Vec::new();
+        for run in runs {
+            let end = run
+                .tile_id
+                .checked_add(u64::from(run.run_length))
+                .expect("test archive tile run must not overflow");
+            for tile_id in run.tile_id..end {
+                entries.push(crate::pmtiles_reader::TileEntry {
+                    tile_id,
+                    offset: run.offset,
+                    length: run.length,
+                });
+            }
+        }
+        entries
     }
 
     pub(super) fn assert_equivalent(

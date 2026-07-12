@@ -82,10 +82,21 @@ old engine could not finish.
   brute-force min-cost max-cardinality oracle differential over tie-heavy
   and sparse cost matrices including the counterexample, and a two-key
   starvation case proving no cross-key zip.
-- **`PmtilesReader` still expands runs into per-tile entries** for its other
-  consumers (inspect, verify, svg, diag, the legacy oracle). The regress path
-  no longer touches it. Run-preserving cleanup is the explicitly-deferred
-  "afterwards" refactor, outside the rewrite's blast radius.
+- **PmtilesReader run-preserving cleanup.** Landed. `read_all_runs()` keeps
+  root and leaf directory runs intact and sorted, and rejects overlapping or
+  end-overflowing runs as container errors (the invariant `find_entry`'s
+  predecessor-only binary search depends on); `find_entry` serves svg and
+  diag. The production per-tile expansion helpers are gone, while test-only
+  consumers expand locally. Verify now reads and gzip-decompresses each run
+  once and validates shared geometry once per `(z, seam)` group, but REPLAYS
+  the cached outcome for every addressed tile, so the report is
+  byte-identical to the old per-tile loop: same per-z/x/y error per tile,
+  same ordering, same MAX_TILE_ERRORS interaction, same tiles_checked and
+  geometry-stat accumulation (an earlier first-tile-only attribution draft
+  was caught in review as a silent semantics change). Coverage: run
+  interiors, boundaries, misses, overlap/overflow rejection, a mixed
+  seam/non-seam run proving the stricter seam limit is grouped separately,
+  and a same-group run proving the shared error replays per tile.
 - **Legacy differential oracle retirement.** The pre-rewrite canonical-graph
   comparator survives as a `#[cfg(test)]` oracle
   (`regress::legacy_oracle`) exercised on synthetic fixtures covering

@@ -280,69 +280,100 @@ pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, Ve
     let layers_declared = extract_declared_layers(&parsed)?;
 
     // -- Tile traversal --
-    let entries = reader.read_all_entries()?;
+    let runs = reader.read_all_runs()?;
 
     let mut tiles_checked: u64 = 0;
     let mut tile_errors: Vec<String> = Vec::new();
     let mut layers_observed: HashSet<String> = HashSet::new();
     let mut stats: Option<GeometryStats> = geometry_stats.then(GeometryStats::default);
 
-    for entry in &entries {
+    for run in &runs {
         if tile_errors.len() >= MAX_TILE_ERRORS {
             break;
         }
+        let run_end = run
+            .tile_id
+            .checked_add(u64::from(run.run_length))
+            .ok_or_else(|| VerifyError::Container("tile run overflows".to_string()))?;
+        let representative = pmtiles_reader::TileEntry {
+            tile_id: run.tile_id,
+            offset: run.offset,
+            length: run.length,
+        };
 
-        let (z, x, y) = tile_id_to_zxy(entry.tile_id);
-
-        // Read and decompress.
-        let decompressed = match reader.read_tile(entry) {
+        // Every addressed tile in a run has the same blob. Read and decompress
+        // it once, then retain per-tile report attribution below.
+        let decompressed = match reader.read_tile(&representative) {
             Ok(data) => data,
             Err(e) => {
-                tile_errors.push(format!("z{z}/{x}/{y}: decompression failed: {e}"));
-                tiles_checked += 1;
+                for tile_id in run.tile_id..run_end {
+                    if tile_errors.len() >= MAX_TILE_ERRORS {
+                        break;
+                    }
+                    let (z, x, y) = tile_id_to_zxy(tile_id);
+                    tile_errors.push(format!("z{z}/{x}/{y}: decompression failed: {e}"));
+                    tiles_checked += 1;
+                }
                 continue;
             }
         };
 
-        // Decode MVT structure.
-        match pmtiles_reader::decode_mvt_layers(&decompressed) {
-            Ok(layers) => {
-                if layers.is_empty() {
-                    tile_errors.push(format!("z{z}/{x}/{y}: no MVT layers"));
-                }
-                for layer in &layers {
-                    if layer.name.is_empty() {
-                        tile_errors.push(format!("z{z}/{x}/{y}: empty layer name"));
+        // Geometry validation of the shared blob depends only on (z, seam):
+        // validate once per group, then REPLAY the cached outcome for every
+        // tile so the report is byte-identical to the old per-tile loop
+        // (same error per addressed tile, same ordering, same cap behavior).
+        let mut geometry_outcomes: std::collections::HashMap<(u8, bool), Option<String>> =
+            std::collections::HashMap::new();
+        for tile_id in run.tile_id..run_end {
+            if tile_errors.len() >= MAX_TILE_ERRORS {
+                break;
+            }
+            let (z, x, y) = tile_id_to_zxy(tile_id);
+
+            // Decode MVT structure.
+            match pmtiles_reader::decode_mvt_layers(&decompressed) {
+                Ok(layers) => {
+                    if layers.is_empty() {
+                        tile_errors.push(format!("z{z}/{x}/{y}: no MVT layers"));
                     }
-                    layers_observed.insert(layer.name.clone());
+                    for layer in &layers {
+                        if layer.name.is_empty() {
+                            tile_errors.push(format!("z{z}/{x}/{y}: empty layer name"));
+                        }
+                        layers_observed.insert(layer.name.clone());
+                    }
+                }
+                Err(e) => {
+                    tile_errors.push(format!("z{z}/{x}/{y}: MVT decode failed: {e}"));
                 }
             }
-            Err(e) => {
-                tile_errors.push(format!("z{z}/{x}/{y}: MVT decode failed: {e}"));
-            }
-        }
-        if tile_errors.len() < MAX_TILE_ERRORS
-            && let Err(msg) = validate_mvt_geometry(&decompressed, z, x)
-        {
-            tile_errors.push(format!("z{z}/{x}/{y}: {msg}"));
-        }
-
-        // Ocean polygon ring validity: check for self-intersections.
-        if tile_errors.len() < MAX_TILE_ERRORS {
-            let ocean_problems = validate_ocean_rings(&decompressed);
-            for problem in ocean_problems {
-                tile_errors.push(format!("z{z}/{x}/{y}: {problem}"));
-                if tile_errors.len() >= MAX_TILE_ERRORS {
-                    break;
+            let seam = x == 0 || x == (1u32 << z).saturating_sub(1);
+            if tile_errors.len() < MAX_TILE_ERRORS {
+                let outcome = geometry_outcomes
+                    .entry((z, seam))
+                    .or_insert_with(|| validate_mvt_geometry(&decompressed, z, x).err());
+                if let Some(msg) = outcome {
+                    tile_errors.push(format!("z{z}/{x}/{y}: {msg}"));
                 }
             }
-        }
 
-        if let Some(stats) = stats.as_mut() {
-            collect_ocean_geometry_stats(&decompressed, z, stats);
-        }
+            // Ocean polygon ring validity: check for self-intersections.
+            if tile_errors.len() < MAX_TILE_ERRORS {
+                let ocean_problems = validate_ocean_rings(&decompressed);
+                for problem in ocean_problems {
+                    tile_errors.push(format!("z{z}/{x}/{y}: {problem}"));
+                    if tile_errors.len() >= MAX_TILE_ERRORS {
+                        break;
+                    }
+                }
+            }
 
-        tiles_checked += 1;
+            if let Some(stats) = stats.as_mut() {
+                collect_ocean_geometry_stats(&decompressed, z, stats);
+            }
+
+            tiles_checked += 1;
+        }
     }
 
     let passed = tile_errors.is_empty();
@@ -1048,6 +1079,10 @@ fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, Ve
 mod tests {
     use super::*;
     use crate::mvt::{Feature, GeomType, LayerBuilder, Value, encode_tile};
+    use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter, xy_to_tile_id};
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
 
     fn land_tile(kinds: &[&str]) -> Vec<u8> {
         let mut layer = LayerBuilder::new("land");
@@ -1194,6 +1229,109 @@ mod tests {
             .expect_err("seam tile should reject 20k delta");
         assert!(err.contains("suspicious geometry delta"));
         assert!(err.contains(&MVT_DELTA_LIMIT_SEAM.to_string()));
+    }
+
+    #[test]
+    fn verify_counts_run_tiles_and_groups_seam_geometry_errors() {
+        let mut coordinates: Vec<(u32, u32)> =
+            (0..4).flat_map(|x| (0..4).map(move |y| (x, y))).collect();
+        coordinates.sort_unstable_by_key(|&(x, y)| xy_to_tile_id(2, x, y));
+        let pair = coordinates
+            .windows(2)
+            .find(|pair| {
+                let seam = |x| x == 0 || x == 3;
+                seam(pair[0].0) != seam(pair[1].0)
+            })
+            .expect("z2 Hilbert order must cross a seam boundary");
+
+        // Not a paint-order-checked layer: the delta must be the only error.
+        let mut layer = LayerBuilder::new("water_lines");
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::LineString,
+            geometry: vec![cmd(1, 1), zz(0), zz(0), cmd(2, 1), zz(20_000), zz(0)],
+            tags: Vec::new(),
+        });
+        let tile = encode_tile(&[&layer]);
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&tile).expect("gzip tile");
+        let gzip = gzip.finish().expect("finish gzip tile");
+
+        let mut writer = PmtilesWriter::new(PmtilesConfig {
+            min_zoom: 2,
+            max_zoom: 2,
+            bounds: (-180.0, -85.0, 180.0, 85.0),
+            center: (0.0, 0.0, 2),
+        });
+        for &(x, y) in pair {
+            writer.add_tile(2, x, y, &gzip).expect("add tile");
+        }
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("mixed-seam-run.pmtiles");
+        writer.write_to(&path).expect("write archive");
+
+        let report = verify(&path).expect("verify archive");
+        assert_eq!(report.tiles_checked, 2);
+        assert_eq!(report.tile_errors.len(), 1);
+        let seam_tile = pair
+            .iter()
+            .find(|&&(x, _)| x == 0 || x == 3)
+            .expect("pair includes a seam tile");
+        assert!(report.tile_errors[0].starts_with(&format!(
+            "z2/{}/{}: [water_lines] feat 0: suspicious geometry delta",
+            seam_tile.0, seam_tile.1
+        )));
+    }
+
+    #[test]
+    fn verify_replays_shared_geometry_error_for_every_run_tile() {
+        // Two consecutive-Hilbert interior tiles (same z, same non-seam
+        // group) sharing one bad blob: the cached validation outcome must be
+        // replayed per tile, exactly like the old per-tile loop.
+        let mut coordinates: Vec<(u32, u32)> =
+            (1..3).flat_map(|x| (0..4).map(move |y| (x, y))).collect();
+        coordinates.sort_unstable_by_key(|&(x, y)| xy_to_tile_id(2, x, y));
+        let pair = coordinates
+            .windows(2)
+            .find(|pair| {
+                xy_to_tile_id(2, pair[1].0, pair[1].1) == xy_to_tile_id(2, pair[0].0, pair[0].1) + 1
+            })
+            .expect("interior z2 tiles include a consecutive pair");
+
+        // Delta above even the non-seam limit, so the shared group errors.
+        let mut layer = LayerBuilder::new("water_lines");
+        layer.add_feature(Feature {
+            id: Some(1),
+            geom_type: GeomType::LineString,
+            geometry: vec![cmd(1, 1), zz(0), zz(0), cmd(2, 1), zz(70_000), zz(0)],
+            tags: Vec::new(),
+        });
+        let tile = encode_tile(&[&layer]);
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&tile).expect("gzip tile");
+        let gzip = gzip.finish().expect("finish gzip tile");
+
+        let mut writer = PmtilesWriter::new(PmtilesConfig {
+            min_zoom: 2,
+            max_zoom: 2,
+            bounds: (-180.0, -85.0, 180.0, 85.0),
+            center: (0.0, 0.0, 2),
+        });
+        for &(x, y) in pair {
+            writer.add_tile(2, x, y, &gzip).expect("add tile");
+        }
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("shared-error-run.pmtiles");
+        writer.write_to(&path).expect("write archive");
+
+        let report = verify(&path).expect("verify archive");
+        assert_eq!(report.tiles_checked, 2);
+        assert_eq!(report.tile_errors.len(), 2);
+        for (error, &(x, y)) in report.tile_errors.iter().zip(pair) {
+            assert!(error.starts_with(&format!(
+                "z2/{x}/{y}: [water_lines] feat 0: suspicious geometry delta"
+            )));
+        }
     }
 
     #[test]

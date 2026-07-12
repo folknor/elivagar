@@ -60,12 +60,14 @@ pub struct PmtilesReader {
     internal_compression: u8,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TileEntry {
     pub tile_id: u64,
     pub offset: u64,
     pub length: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RawDirEntry {
     pub tile_id: u64,
     pub offset: u64,
@@ -187,23 +189,35 @@ impl PmtilesReader {
         }
     }
 
-    /// Read all tile entries by traversing root + leaf directories.
-    pub fn read_all_entries(&mut self) -> io::Result<Vec<TileEntry>> {
+    /// Read all tile runs by traversing root and leaf directories.
+    ///
+    /// The returned entries are sorted by tile ID and retain PMTiles run
+    /// lengths, so callers do not need memory proportional to addressed tiles.
+    pub fn read_all_runs(&mut self) -> io::Result<Vec<RawDirEntry>> {
         let root_entries = self.read_directory(self.root_dir_offset, self.root_dir_length)?;
-        let mut all_entries = Vec::new();
+        let mut runs = Vec::new();
 
         for entry in &root_entries {
             if entry.run_length == 0 {
-                let leaf_offset = self.leaf_dirs_offset + entry.offset;
+                let leaf_offset = self
+                    .leaf_dirs_offset
+                    .checked_add(entry.offset)
+                    .ok_or_else(|| io::Error::other("leaf directory offset overflow"))?;
                 #[allow(clippy::cast_possible_truncation)]
                 let leaf_entries = self.read_directory(leaf_offset, u64::from(entry.length))?;
-                expand_entries(&leaf_entries, &mut all_entries);
+                runs.extend(
+                    leaf_entries
+                        .into_iter()
+                        .filter(|entry| entry.run_length != 0),
+                );
             } else {
-                expand_single(entry, &mut all_entries);
+                runs.push(*entry);
             }
         }
 
-        Ok(all_entries)
+        runs.sort_unstable_by_key(|entry| entry.tile_id);
+        check_run_invariants(&runs)?;
+        Ok(runs)
     }
 
     /// Read and decode a single directory section.
@@ -247,22 +261,37 @@ impl PmtilesReader {
 // Directory decoding
 // ---------------------------------------------------------------------------
 
-pub fn expand_entries(dir_entries: &[RawDirEntry], out: &mut Vec<TileEntry>) {
-    for e in dir_entries {
-        if e.run_length == 0 {
-            continue;
+/// Sorted runs must not overlap and their ends must not overflow, or
+/// `find_entry`'s predecessor-only probe would silently miss covered tiles.
+/// A malformed archive becomes a container error instead.
+fn check_run_invariants(runs: &[RawDirEntry]) -> io::Result<()> {
+    let mut prev_end = 0u64;
+    for run in runs {
+        if run.tile_id < prev_end {
+            return Err(io::Error::other("tile runs overlap"));
         }
-        expand_single(e, out);
+        prev_end = run
+            .tile_id
+            .checked_add(u64::from(run.run_length))
+            .ok_or_else(|| io::Error::other("tile run end overflows"))?;
     }
+    Ok(())
 }
 
-pub fn expand_single(e: &RawDirEntry, out: &mut Vec<TileEntry>) {
-    for r in 0..e.run_length {
-        out.push(TileEntry {
-            tile_id: e.tile_id + u64::from(r),
-            offset: e.offset,
-            length: e.length,
-        });
+/// Find one addressed tile in a sorted list of non-overlapping PMTiles
+/// directory runs (the `read_all_runs` invariant).
+pub fn find_entry(runs: &[RawDirEntry], tile_id: u64) -> Option<TileEntry> {
+    let index = runs.partition_point(|run| run.tile_id <= tile_id);
+    let run = runs.get(index.checked_sub(1)?)?;
+    let run_end = run.tile_id.checked_add(u64::from(run.run_length))?;
+    if tile_id < run_end {
+        Some(TileEntry {
+            tile_id,
+            offset: run.offset,
+            length: run.length,
+        })
+    } else {
+        None
     }
 }
 
@@ -416,7 +445,7 @@ fn decode_mvt_layer(data: &[u8]) -> MvtLayer {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::decode_directory;
+    use super::{RawDirEntry, decode_directory, find_entry};
     use protohoggr::encode_varint;
 
     fn encode_directory_raw(
@@ -451,9 +480,7 @@ mod tests {
         let mut raw = Vec::new();
         encode_varint(&mut raw, 1);
         encode_varint(&mut raw, 5);
-        let err = decode_directory(&raw)
-            .err()
-            .expect("should fail on truncated directory");
+        let err = decode_directory(&raw).expect_err("should fail on truncated directory");
         assert!(
             err.to_string().contains("run_length")
                 || err.to_string().contains("length")
@@ -464,9 +491,7 @@ mod tests {
     #[test]
     fn decode_directory_rejects_zero_offset_for_first_entry() {
         let raw = encode_directory_raw(&[5], &[1], &[10], &[0]);
-        let err = decode_directory(&raw)
-            .err()
-            .expect("first entry offset sentinel must fail");
+        let err = decode_directory(&raw).expect_err("first entry offset sentinel must fail");
         assert!(err.to_string().contains("invalid for first entry"));
     }
 
@@ -475,9 +500,7 @@ mod tests {
         // Entry 0: explicit offset v=u64::MAX => offset=u64::MAX-1, length=10.
         // Entry 1: contiguous sentinel (v=0) => (u64::MAX-1)+10 overflows.
         let raw = encode_directory_raw(&[5, 1], &[1, 1], &[10, 1], &[u64::MAX, 0]);
-        let err = decode_directory(&raw)
-            .err()
-            .expect("contiguous offset overflow should fail");
+        let err = decode_directory(&raw).expect_err("contiguous offset overflow should fail");
         assert!(err.to_string().contains("overflow"));
     }
 
@@ -485,10 +508,84 @@ mod tests {
     fn decode_directory_rejects_tile_id_delta_overflow() {
         // Entry 0 sets cumulative tile_id to u64::MAX; entry 1 overflows by +1.
         let raw = encode_directory_raw(&[u64::MAX, 1], &[1, 1], &[1, 1], &[1, 2]);
-        let err = decode_directory(&raw)
-            .err()
-            .expect("tile_id overflow should fail");
+        let err = decode_directory(&raw).expect_err("tile_id overflow should fail");
         assert!(err.to_string().contains("tile_id delta"));
         assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn run_invariants_reject_overlap_and_overflow() {
+        let overlapping = [
+            RawDirEntry {
+                tile_id: 10,
+                offset: 100,
+                length: 7,
+                run_length: 3,
+            },
+            RawDirEntry {
+                tile_id: 12,
+                offset: 200,
+                length: 9,
+                run_length: 1,
+            },
+        ];
+        let err = super::check_run_invariants(&overlapping).expect_err("overlap must fail");
+        assert!(err.to_string().contains("overlap"));
+
+        let overflowing = [RawDirEntry {
+            tile_id: u64::MAX,
+            offset: 100,
+            length: 7,
+            run_length: 2,
+        }];
+        let err = super::check_run_invariants(&overflowing).expect_err("overflow must fail");
+        assert!(err.to_string().contains("overflow"));
+
+        let adjacent = [
+            RawDirEntry {
+                tile_id: 10,
+                offset: 100,
+                length: 7,
+                run_length: 3,
+            },
+            RawDirEntry {
+                tile_id: 13,
+                offset: 200,
+                length: 9,
+                run_length: 1,
+            },
+        ];
+        super::check_run_invariants(&adjacent).expect("adjacent runs are valid");
+    }
+
+    #[test]
+    fn find_entry_covers_run_interiors_boundaries_and_misses() {
+        let runs = [
+            RawDirEntry {
+                tile_id: 10,
+                offset: 100,
+                length: 7,
+                run_length: 3,
+            },
+            RawDirEntry {
+                tile_id: 20,
+                offset: 200,
+                length: 9,
+                run_length: 2,
+            },
+        ];
+
+        let first = find_entry(&runs, 10).expect("first run boundary");
+        let interior = find_entry(&runs, 11).expect("run interior");
+        let last = find_entry(&runs, 12).expect("last tile in first run");
+        let second = find_entry(&runs, 20).expect("second run boundary");
+        assert_eq!(
+            (first.offset, interior.offset, last.offset),
+            (100, 100, 100)
+        );
+        assert_eq!(second.length, 9);
+        assert!(find_entry(&runs, 9).is_none());
+        assert!(find_entry(&runs, 13).is_none());
+        assert!(find_entry(&runs, 22).is_none());
     }
 }

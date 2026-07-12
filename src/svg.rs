@@ -5,7 +5,7 @@ use std::path::Path;
 
 use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
-use crate::pmtiles_reader::PmtilesReader;
+use crate::pmtiles_reader::{PmtilesReader, find_entry};
 use crate::pmtiles_writer::xy_to_tile_id;
 
 const EXTENT: f64 = 4096.0;
@@ -42,7 +42,7 @@ pub fn render_tile_grid_svg(
     out: &mut dyn Write,
 ) -> io::Result<()> {
     let mut reader = PmtilesReader::open(pmtiles_path)?;
-    let entries = reader.read_all_entries()?;
+    let runs = reader.read_all_runs()?;
 
     // Collect decoded layers per tile position
     let mut tile_layers: Vec<(u32, u32, Vec<SvgLayer>)> = Vec::new();
@@ -51,8 +51,8 @@ pub fn render_tile_grid_svg(
             let tx = x0 + dx;
             let ty = y0 + dy;
             let target_id = xy_to_tile_id(z, tx, ty);
-            if let Some(entry) = entries.iter().find(|e| e.tile_id == target_id) {
-                let decompressed = reader.read_tile(entry)?;
+            if let Some(entry) = find_entry(&runs, target_id) {
+                let decompressed = reader.read_tile(&entry)?;
                 let layers = decode_mvt_geometry(&decompressed)?;
                 tile_layers.push((dx, dy, layers));
             }

@@ -15,11 +15,29 @@ use std::fs::OpenOptions;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use elivagar::pmtiles_reader::{PmtilesReader, decode_mvt_layers};
+use elivagar::pmtiles_reader::{PmtilesReader, RawDirEntry, TileEntry, decode_mvt_layers};
 use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use protohoggr::{encode_bytes_field_always, encode_varint, encode_varint_field_always};
+
+fn expand_runs(runs: &[RawDirEntry]) -> Vec<TileEntry> {
+    let mut entries = Vec::new();
+    for run in runs {
+        let end = run
+            .tile_id
+            .checked_add(u64::from(run.run_length))
+            .expect("test archive tile run must not overflow");
+        for tile_id in run.tile_id..end {
+            entries.push(TileEntry {
+                tile_id,
+                offset: run.offset,
+                length: run.length,
+            });
+        }
+    }
+    entries
+}
 
 // ---------------------------------------------------------------------------
 // MVT protobuf encoder (minimal - builds tiles with named layers)
@@ -271,7 +289,7 @@ fn test_tile_roundtrip() {
 
     // Read back and verify every tile matches its original payload.
     let mut reader = PmtilesReader::open(&path).unwrap();
-    let entries = reader.read_all_entries().unwrap();
+    let entries = expand_runs(&reader.read_all_runs().unwrap());
     assert_eq!(entries.len(), 5);
 
     for (i, entry) in entries.iter().enumerate() {
@@ -319,7 +337,7 @@ fn test_mvt_layer_decode() {
 
     // Read back and decode MVT layers.
     let mut reader = PmtilesReader::open(&path).unwrap();
-    let entries = reader.read_all_entries().unwrap();
+    let entries = expand_runs(&reader.read_all_runs().unwrap());
     assert_eq!(entries.len(), 3);
 
     for (i, entry) in entries.iter().enumerate() {
@@ -393,7 +411,7 @@ fn test_deduplication() {
     assert_eq!(reader.num_unique(), 2);
 
     // All 5 tiles should still be readable and decompressible.
-    let entries = reader.read_all_entries().unwrap();
+    let entries = expand_runs(&reader.read_all_runs().unwrap());
     assert_eq!(entries.len(), 5);
 
     for entry in &entries {
@@ -474,7 +492,7 @@ fn test_full_pipeline() {
     assert_eq!(reader.max_zoom(), 14);
     assert_eq!(reader.tile_type(), 1); // MVT
 
-    let entries = reader.read_all_entries().unwrap();
+    let entries = expand_runs(&reader.read_all_runs().unwrap());
     assert!(
         entries.len() > 100,
         "expected many tiles, got {}",
