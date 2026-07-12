@@ -456,6 +456,20 @@ straight from the injected per-way bitmap at zero elivagar runtime cost.
 Both fallbacks (block-local pins, the runtime relation plan) remain
 first-class for raw Geofabrik input. (c) and (d) remain open.
 
+REMAINING from the retired injected-prepass spec - the NA planet-slope
+reading (measurement only, no code; user-gated, real-PBF run):
+re-enrich north-america locations with the new altw
+(`pbfhogg add-locations-to-ways --index-type external --inject-prepass
+--compression zlib:6`), register in brokkr.toml, then one
+`brokkr tilegen --bench --dataset north-america --variant locations`
+plus the sidecar readings (`--human`, `--stalls`, `--counters`).
+Numbers that feed the H3 ledger: phase12 s/GB with the prepass deleted
+(baseline 8.2 s/GB at NA `b66fcc6e` / `69c0f18`),
+`way_index_data_bytes` under superset membership at NA scale,
+`way_members_marked` vs the old `relation_plan_needed_ways`, and peak
+RSS with the `needed_ways` stock gone. Write the row here (H3) and in
+`reference/performance.md`.
+
 ### H3: A planet RAM ledger before any planet run
 
 **Claim.** "Comfortably on 30 GB" is an engineering property, not a hope.

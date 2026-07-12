@@ -100,8 +100,8 @@ reading (13.3 to 11.6s).
 The injected-prepass wait-work (2026-07-11) landed two neutrality-claiming
 commits while the pbfhogg producer is still being built: `430f28b` (way
 membership resolved once at plan build) and `f683129` (dormant injected
-way-members consumption plumbing; see notes/injected-prepass-spec.md for the
-design it pre-lands). Gate readings, all plantasjen: denmark raw bench-3
+way-members consumption plumbing; the spec it pre-landed is retired, see
+git history). Gate readings, all plantasjen: denmark raw bench-3
 17.0s (`1157a31a`) vs 16.7s at `430f28b` (`262d55f3`) vs 17.5s at `8eaa8bf`
 (`928725a5`); denmark locations bench-3 11.7s (`9933e811`) vs 11.6s at
 `e2284ec` (`c1053012`); germany locations bench 53.1s (`65e499f2`) vs 51.8s
@@ -140,8 +140,7 @@ semantic regress was OOM-killed twice mid-decode under the old regress
 engine (a tooling capacity limit, not a verdict) and was left resting on
 counter identity - until the regress engine rewrite (`7178425`), after
 which the pair completed: ZERO diffs across 827,010 tiles, ~36s, peak RSS
-5.8 GB (notes/regress.md), so the germany activation equality is now
-proven semantically. norway is enriched and registered but unvalidated
+5.8 GB, so the germany activation equality is now proven semantically. norway is enriched and registered but unvalidated
 here (no bench, no regress, by explicit decision); its pre-enrichment
 baseline archive `norway-20c8bd7.pmtiles` (`525c553a`) is banked for a
 later regress. The old locations files remain on disk unregistered.
@@ -159,11 +158,18 @@ The parent's <=2% wall / <=3% bytes keep bounds were defined on germany
 locations, which is UNMEASURED (bench freeze by user decision) - those
 verdicts are unread, denmark readings stand in. The displacement-percentile
 diagnostic regress was killed after 30+ min: the first diff-heavy regress
-ever run exposed the tool's cubic matched-feature path (hunt findings and
-rewrite plan in notes/regress.md; rerun the diagnostic after the rewrite
-lands). The blessed denmark archive predates the pins geometry change, so
-the standing bare `brokkr regress` gate is stale until a user-gated
-`brokkr bless` rotation.
+ever run exposed the tool's cubic matched-feature path. The regress engine
+rewrite (`7178425`, blob-pair spans + tiered passes) fixed that: the
+identical denmark pair completes in 1.9s (was ~4-5 min), the diff-heavy
+pins pair in 3.5s with the full report (9,983 differing tiles,
+tolerance_moved 28,886, structural_moved 204,769; was unfinishable), and
+the germany-scale pair in ~36s at 5.8 GB peak (was OOM). Post-rewrite
+refinements (2026-07-12, four landings): streaming tier-2 fingerprints,
+sparse min-cost residual matching, the run-preserving PmtilesReader with
+per-run verify decompression, and legacy-oracle retirement - see git
+history. The blessed denmark archive rotated to the paint-order build
+(`blessed/denmark-506b9bc.pmtiles`, blessed 2026-07-12), so the standing
+bare `brokkr regress` gate is current again.
 
 The paint-order determinism landing (`a631b5f` + comparator optimization
 `2c770c7`, 2026-07-11) made archives byte-reproducible and wired the
