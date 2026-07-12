@@ -171,6 +171,27 @@ history. The blessed denmark archive rotated to the paint-order build
 (`blessed/denmark-506b9bc.pmtiles`, blessed 2026-07-12), so the standing
 bare `brokkr regress` gate is current again.
 
+The H5 ocean tile stream landing (`92ed329` + world-only activation
+`b2e8f2c`, 2026-07-12; spec notes/ocean-tile-stream-spec.md) precomputes
+the world's ocean into a durable PMTiles artifact and merges it into
+assemble as run copies on world-covering runs. The world build itself
+(plantasjen, one shot): data/ocean-tiles.pmtiles at 942.7 MB, 212.4M
+addressed tiles, 9.2M unique blobs, 13.97M directory runs, 95.7%
+deduplicated; unique-payloads verify PASS (9,208,945 group validations)
+and unique-mode earcut clean over 17.7M polygons. Extract gates,
+denmark locations: computed-path regress vs blessed zero-diff across
+1,296,996 tiles at tol 0 (the canonical full-fill id change is
+geometry-invisible), verify PASS, earcut clean, bench-3 12.5s
+(`f005ae56` at `92ed329`) vs the 12.3s + 3% keep bound. The spec's
+extract hybrid (boundary band + artifact interior) was REFUTED by its
+own gate - 27 structural ocean diffs, one strictly interior
+(z8/121/81): the pyramid's root/bisection structure depends on the
+piece clip extent, so interior tiles are not clip-independent - and the
+pre-agreed stopping-rule fallback engaged: activation requires an empty
+band on every pass grid, extracts stay computed (final regress
+zero-diff), and H5's runtime win is claimed at planet bounds only,
+first measurable on the planet dry run.
+
 The paint-order determinism landing (`a631b5f` + comparator optimization
 `2c770c7`, 2026-07-11) made archives byte-reproducible and wired the
 SortKey priority byte to paint-rank tables (land background-first,

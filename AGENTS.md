@@ -266,7 +266,15 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 
 Sequential, same PBF input:
 - **phase12**: PBF read + OSM feature emission → partitioned sort chunks + checkpoint
-- **ocean**: shapefile read + ocean feature emission → more sort chunks
+- **ocean**: shapefile read + ocean feature emission → more sort chunks.
+  When `data/ocean-tiles.pmtiles` (the durable world-ocean artifact,
+  built once per shapefile release by `elivagar ocean-build`) is present
+  AND the run's data bounds cover the world (planet runs; the activation
+  test is an empty boundary band on every pass grid), this phase does no
+  geometry work and assemble merges the artifact as run copies instead.
+  Extract runs always compute (measured 2026-07-12: interior tile
+  geometry depends on the piece clip extent, so extracts cannot consume
+  the world artifact; see notes/ocean-tile-stream-spec.md).
 - **sort**: partition bookkeeping only (near-zero; the merge is deferred)
 - **assemble**: streamed per-partition merge → MVT encode + gzip + PMTiles write (parallel partition readers; merge/decompress cost lands in `assemble_reader_ns`)
 
