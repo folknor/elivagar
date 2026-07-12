@@ -12,6 +12,7 @@ use crate::way_index::WayIndex;
 use crate::wire_format::encode_attrs_bytes;
 use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, MemberId, PrimitiveBlock, Way};
 
+use super::boundary_prescan::{BoundaryWayMeta, fold_relation};
 use super::emit::{
     LineEmitScratch, PointEmitScratch, PolygonEmitScratch, RecordSink, RecordTally,
     antimeridian_shifts_for_bbox, emit_line_feature, emit_point_or_centroid, emit_polygon_feature,
@@ -363,13 +364,9 @@ pub(super) fn phase_read_and_process(
     let relation_plan_pbf_path = config.pbf_path.clone();
     let mut relation_plan_handle: Option<
         std::thread::JoinHandle<Result<RelationPlan, PipelineError>>,
-    > = if injected.members {
-        None
-    } else {
-        Some(std::thread::spawn(move || {
-            prepass_relation_plan(&relation_plan_pbf_path, decode_threads)
-        }))
-    };
+    > = Some(std::thread::spawn(move || {
+        prepass_relation_plan(&relation_plan_pbf_path, decode_threads)
+    }));
 
     // Node worker: owns the node store during the node phase and processes
     // node blocks off the consumer (8s of serial consumer time on germany
@@ -530,18 +527,18 @@ pub(super) fn phase_read_and_process(
                     // The fallback relation plan is first needed here. Its join
                     // blocks the ordered consumer, so it is stall time.
                     let prepass_join_guard = wait_span(&WAIT.prepass_join);
+                    let relation_plan = std::sync::Arc::new(
+                        relation_plan_handle
+                            .take()
+                            .expect("relation prepass missing")
+                            .join()
+                            .map_err(|_| PipelineError("relation prepass thread panicked".to_string()))??,
+                    );
+                    let boundary_way_meta = std::sync::Arc::new(relation_plan.boundary_way_meta.clone());
                     let member_source = if injected.members {
                         MemberSource::Injected
                     } else {
-                        MemberSource::Plan(std::sync::Arc::new(
-                            relation_plan_handle
-                                .take()
-                                .expect("relation prepass missing")
-                                .join()
-                                .map_err(|_| {
-                                    PipelineError("relation prepass thread panicked".to_string())
-                                })??,
-                        ))
+                        MemberSource::Plan(std::sync::Arc::clone(&relation_plan))
                     };
                     drop(prepass_join_guard);
                     if let MemberSource::Plan(plan) = &member_source {
@@ -574,6 +571,7 @@ pub(super) fn phase_read_and_process(
                         let mr_ref = &*missing_ref_stats_clone;
                         let ds_ref = &*deferral_stats_clone;
                         let member_source_ref = &member_source;
+                        let boundary_way_meta_ref = &*boundary_way_meta;
                         let spill_ref = &*worker_spill;
                         // Byte-budgeted throttle: (count, estimated_bytes).
                         // Condvar wakes dispatcher when a task completes.
@@ -695,7 +693,7 @@ pub(super) fn phase_read_and_process(
                                         );
                                         let pins_marked = process_planned_way_into(
                                             &way, &plan, nr_ref, mz, xz, &srl, ds_ref, mr_ref,
-                                            &fcs, psf, pin_source, &mut acc,
+                                            &fcs, psf, pin_source, boundary_way_meta_ref, &mut acc,
                                         );
                                         way_pins_marked_ref
                                             .fetch_add(pins_marked, Ordering::Relaxed);
@@ -1530,6 +1528,7 @@ pub(super) fn build_way_plans(
 
 pub(super) struct RelationPlan {
     pub(super) needed_ways: FxHashSet<i64>,
+    pub(super) boundary_way_meta: BoundaryWayMeta,
     /// Size of the union of `needed_ways` with the member ways of
     /// mp/boundary relations that FAIL the shortbread match - i.e. members
     /// of ALL type=multipolygon/boundary relations. This is exactly the set
@@ -1551,6 +1550,7 @@ fn prepass_relation_plan(
         .decode_threads(decode_threads);
 
     let mut needed_ways: FxHashSet<i64> = FxHashSet::default();
+    let mut boundary_way_meta: BoundaryWayMeta = BoundaryWayMeta::default();
     // Members of ALL mp/boundary relations, shortbread match or not - what
     // an enrichment-time superset bitmap would contain. Only the count is
     // kept; the set is dropped before the plan is returned.
@@ -1563,6 +1563,19 @@ fn prepass_relation_plan(
             let Element::Relation(rel) = element else {
                 return;
             };
+            let tags: smallvec::SmallVec<[(&str, &str); 16]> = rel.tags().collect();
+            let tag_helper = Tags(&tags);
+            // Boundary metadata deliberately has no type gate: canonical
+            // Shortbread resolves boundary=administrative/disputed membership
+            // regardless of the relation's type tag.
+            fold_relation(
+                &tag_helper,
+                rel.members().filter_map(|member| match member.id {
+                    MemberId::Way(way_id) => Some(way_id),
+                    _ => None,
+                }),
+                &mut boundary_way_meta,
+            );
             let mut rel_type = "";
             for (k, v) in rel.tags() {
                 if k == "type" {
@@ -1573,8 +1586,6 @@ fn prepass_relation_plan(
             if rel_type != "multipolygon" && rel_type != "boundary" {
                 return;
             }
-            let tags: smallvec::SmallVec<[(&str, &str); 16]> = rel.tags().collect();
-            let tag_helper = Tags(&tags);
             let matched =
                 !shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon).is_empty();
             if matched {
@@ -1603,6 +1614,7 @@ fn prepass_relation_plan(
     );
     Ok(RelationPlan {
         needed_ways,
+        boundary_way_meta,
         superset_ways_count,
     })
 }
@@ -1738,10 +1750,11 @@ pub(super) fn process_planned_way_into(
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
     pins: PinSource,
+    boundary_way_meta: &BoundaryWayMeta,
     acc: &mut WayAcc,
 ) -> u64 {
     let tags_ref: Vec<(&str, &str)> = way.tags().collect();
-    if tags_ref.is_empty() && !plan.is_member {
+    if tags_ref.is_empty() && !plan.is_member && !boundary_way_meta.contains_key(&plan.way_id) {
         return 0;
     }
     let tag_helper = Tags(&tags_ref);
@@ -1749,7 +1762,7 @@ pub(super) fn process_planned_way_into(
     // both-geom pre-filter is only worth computing for non-members, where it
     // gates the early return. Computing it for members would run two
     // `match_element` passes whose result is never inspected.
-    if !plan.is_member {
+    if !plan.is_member && !boundary_way_meta.contains_key(&plan.way_id) {
         let possible_feature = !shortbread::match_element(&tag_helper, OsmGeomType::ClosedWay)
             .is_empty()
             || !shortbread::match_element(&tag_helper, OsmGeomType::OpenWay).is_empty();
@@ -1798,6 +1811,7 @@ pub(super) fn process_planned_way_into(
         OsmGeomType::OpenWay
     };
     let mut matches = shortbread::match_element(&tag_helper, geom_type);
+    resolve_boundary_match(&tag_helper, plan.way_id, boundary_way_meta, &mut matches);
 
     if matches.is_empty() {
         return 0;
@@ -1974,6 +1988,49 @@ pub(super) fn process_planned_way_into(
     pins_marked
 }
 
+fn resolve_boundary_match(
+    tags: &Tags<'_>,
+    way_id: i64,
+    boundary_way_meta: &BoundaryWayMeta,
+    matches: &mut smallvec::SmallVec<[shortbread::LayerMatch; 4]>,
+) {
+    let meta = boundary_way_meta.get(&way_id).copied().unwrap_or_default();
+    let own = crate::shortbread::boundaries::boundary_match(tags);
+    let level = match (own.map(|(level, _)| level), meta.min_admin_level) {
+        (Some(own_level), Some(meta_level)) => Some(own_level.min(i64::from(meta_level))),
+        (Some(level), None) => Some(level),
+        (None, Some(level)) => Some(i64::from(level)),
+        (None, None) => None,
+    };
+    let Some(level) = level else { return };
+    let level_u8 = u8::try_from(level).expect("boundary level must fit u8");
+    let min_zoom = crate::shortbread::boundaries::boundary_min_zoom(level_u8)
+        .expect("boundary metadata only contains supported levels");
+    let maritime = tags.has_value("maritime", "yes") || tags.has_value("natural", "coastline");
+    let disputed = meta.disputed || tags.has_value("disputed", "yes");
+    let attrs = smallvec::smallvec![
+        shortbread::attr_int("admin_level", level),
+        shortbread::attr_bool("maritime", maritime),
+        shortbread::attr_bool("disputed", disputed),
+    ];
+    if let Some(existing) = matches
+        .iter_mut()
+        .find(|m| m.layer == shortbread::Layer::Boundaries)
+    {
+        existing.min_zoom = min_zoom;
+        existing.attrs = attrs;
+    } else {
+        matches.push(shortbread::LayerMatch {
+            layer: shortbread::Layer::Boundaries,
+            min_zoom,
+            max_zoom: 14,
+            geom_expect: GeomExpect::Line,
+            paint_rank: 0,
+            attrs,
+        });
+    }
+}
+
 #[cfg(test)]
 mod shared_node_helper_tests {
     use super::{
@@ -2030,5 +2087,119 @@ mod shared_node_helper_tests {
         let mut zeroes = vec![true; 5];
         fill_mask_from_pin_bitmap(&[0], &mut zeroes);
         assert_eq!(zeroes, [false; 5]);
+    }
+}
+
+#[cfg(test)]
+mod boundary_synthesis_tests {
+    use super::super::boundary_prescan::{BoundaryWayMeta, fold_relation};
+    use super::resolve_boundary_match;
+    use crate::shortbread::{self, AttrValue, Layer, Tags};
+    use smallvec::SmallVec;
+
+    fn synthesize(
+        way_tags: &[(&str, &str)],
+        meta: &BoundaryWayMeta,
+    ) -> SmallVec<[shortbread::LayerMatch; 4]> {
+        let mut matches: SmallVec<[shortbread::LayerMatch; 4]> = SmallVec::new();
+        resolve_boundary_match(&Tags(way_tags), 42, meta, &mut matches);
+        matches
+    }
+
+    fn admin_level(m: &shortbread::LayerMatch) -> i64 {
+        for (k, v, _) in &m.attrs {
+            if *k == "admin_level"
+                && let AttrValue::Int(n) = v
+            {
+                return *n;
+            }
+        }
+        panic!("expected an admin_level int attribute");
+    }
+
+    fn bool_attr(m: &shortbread::LayerMatch, key: &str) -> bool {
+        for (k, v, _) in &m.attrs {
+            if *k == key
+                && let AttrValue::Bool(b) = v
+            {
+                return *b;
+            }
+        }
+        panic!("expected a {key} bool attribute");
+    }
+
+    #[test]
+    fn shared_member_takes_min_admin_level() {
+        let mut meta = BoundaryWayMeta::default();
+        fold_relation(
+            &Tags(&[("boundary", "administrative"), ("admin_level", "2")]),
+            [42],
+            &mut meta,
+        );
+        fold_relation(
+            &Tags(&[("boundary", "administrative"), ("admin_level", "4")]),
+            [42],
+            &mut meta,
+        );
+        let matches = synthesize(&[], &meta);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].layer, Layer::Boundaries);
+        assert_eq!(admin_level(&matches[0]), 2, "min of the two relations");
+        assert_eq!(matches[0].min_zoom, 0);
+    }
+
+    #[test]
+    fn untagged_member_synthesizes_match() {
+        let mut meta = BoundaryWayMeta::default();
+        fold_relation(
+            &Tags(&[("boundary", "administrative"), ("admin_level", "2")]),
+            [42],
+            &mut meta,
+        );
+        // Way carries no admin tags of its own: the member must still emit.
+        let matches = synthesize(&[], &meta);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(admin_level(&matches[0]), 2);
+    }
+
+    #[test]
+    fn maritime_comes_from_way_own_tags() {
+        let mut meta = BoundaryWayMeta::default();
+        fold_relation(
+            &Tags(&[("boundary", "administrative"), ("admin_level", "2")]),
+            [42],
+            &mut meta,
+        );
+        let matches = synthesize(&[("natural", "coastline")], &meta);
+        assert_eq!(matches.len(), 1);
+        assert!(
+            bool_attr(&matches[0], "maritime"),
+            "maritime from way-own natural=coastline"
+        );
+        assert_eq!(admin_level(&matches[0]), 2);
+    }
+
+    #[test]
+    fn independent_admin_and_disputed_parentage() {
+        let mut meta = BoundaryWayMeta::default();
+        fold_relation(
+            &Tags(&[("boundary", "administrative"), ("admin_level", "2")]),
+            [42],
+            &mut meta,
+        );
+        fold_relation(&Tags(&[("boundary", "disputed")]), [42], &mut meta);
+        let matches = synthesize(&[], &meta);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(admin_level(&matches[0]), 2);
+        assert!(
+            bool_attr(&matches[0], "disputed"),
+            "disputed OR'd from the disputed parent"
+        );
+    }
+
+    #[test]
+    fn no_meta_and_no_own_tags_synthesizes_nothing() {
+        let meta = BoundaryWayMeta::default();
+        assert!(synthesize(&[("highway", "residential")], &meta).is_empty());
     }
 }

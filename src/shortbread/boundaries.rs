@@ -8,17 +8,22 @@ use smallvec::{SmallVec, smallvec};
 // ---------------------------------------------------------------------------
 
 /// Returns admin_level (int) and min_zoom if boundary matches.
-fn boundary_match(tags: &Tags<'_>) -> Option<(i64, u8)> {
+pub(crate) fn boundary_min_zoom(admin_level: u8) -> Option<u8> {
+    match admin_level {
+        2 => Some(0),
+        4 => Some(7),
+        _ => None,
+    }
+}
+
+pub(crate) fn boundary_match(tags: &Tags<'_>) -> Option<(i64, u8)> {
     if !tags.has_value("boundary", "administrative") {
         return None;
     }
     let level_str = tags.get("admin_level")?;
     let level = parse_i64(level_str)?;
-    match level {
-        2 => Some((2, 0)),
-        4 => Some((4, 7)),
-        _ => None,
-    }
+    let level_u8 = u8::try_from(level).ok()?;
+    boundary_min_zoom(level_u8).map(|min_zoom| (level, min_zoom))
 }
 
 pub(super) fn match_boundaries_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {

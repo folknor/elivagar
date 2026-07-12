@@ -319,6 +319,11 @@ fn merge_line_segments(
         std::mem::swap(segments, merged);
         return;
     }
+    dedup_parallel_segments(segments);
+    if segments.len() < 2 {
+        std::mem::swap(segments, merged);
+        return;
+    }
 
     // Build endpoint graph
     let mut endpoints: FxHashMap<(i32, i32), Vec<SegEnd>> = FxHashMap::default();
@@ -372,6 +377,23 @@ fn merge_line_segments(
         }
         build_chain(segments, &endpoints, visited, chain, i, false, merged);
     }
+}
+
+/// Remove coordinate-identical segments before endpoint graph construction.
+/// A segment and its reverse describe the same line, so canonicalize on the
+/// lexicographically smaller orientation.
+fn dedup_parallel_segments(segments: &mut Vec<Vec<(i32, i32)>>) {
+    let mut seen: std::collections::HashSet<Vec<(i32, i32)>> = std::collections::HashSet::new();
+    segments.retain(|segment| {
+        let mut reversed = segment.clone();
+        reversed.reverse();
+        let key = if segment <= &reversed {
+            segment.clone()
+        } else {
+            reversed
+        };
+        seen.insert(key)
+    });
 }
 
 /// Build one chain starting from `seg_idx` entered at `entering_back`.
@@ -448,6 +470,13 @@ fn build_chain(
         // If the "other" is still the same segment (both ends at same point,
         // but different is_back), it's a closed self-loop - stop.
         if next.seg_idx == current_seg {
+            break;
+        }
+
+        // The upfront dedup makes this unreachable for current inputs, but keep
+        // the traversal guard so a future multi-pass merger cannot append a
+        // duplicate segment as an out-and-back continuation.
+        if segments[next.seg_idx] == *seg || segments[next.seg_idx].iter().rev().eq(seg.iter()) {
             break;
         }
 

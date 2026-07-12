@@ -9,10 +9,9 @@ use crate::way_index::WayIndex;
 use pbfhogg::MemberId;
 
 use super::emit::{
-    LineEmitScratch, MultipolygonEmitScratch, PointEmitScratch, RecordSink,
-    antimeridian_shifts_for_bbox, emit_line_feature, emit_multipolygon_feature,
-    emit_point_or_centroid, enrich_polygon_matches, relation_shared_vertex_keys,
-    unwrap_antimeridian_path,
+    MultipolygonEmitScratch, PointEmitScratch, RecordSink, antimeridian_shifts_for_bbox,
+    emit_multipolygon_feature, emit_point_or_centroid, enrich_polygon_matches,
+    relation_shared_vertex_keys, unwrap_antimeridian_path,
 };
 use super::stats::{
     DeferralStats, FanoutStats, MissingRefStatsAtomic, record_fanout_from_payload_records,
@@ -25,7 +24,6 @@ pub(super) struct PreparedRelation {
     pub(super) osm_id: u64,
     pub(super) matches: SmallVec<[LayerMatch; 4]>,
     pub(super) member_ways: Vec<MemberWay>,
-    pub(super) is_boundary: bool,
 }
 
 /// Estimate heap bytes for a single prepared relation (struct + member way coords).
@@ -67,8 +65,6 @@ pub(super) fn prepare_relation(
     if matches.is_empty() {
         return None;
     }
-
-    let is_boundary = tag_helper.has_value("boundary", "administrative");
 
     let mut member_ways: Vec<MemberWay> = Vec::new();
     let mut had_missing_way_ref = false;
@@ -113,7 +109,6 @@ pub(super) fn prepare_relation(
         osm_id: rel.id() as u64,
         matches,
         member_ways,
-        is_boundary,
     })
 }
 
@@ -126,7 +121,6 @@ pub(super) struct RelAcc {
     pub(super) bytes: usize,
     pub(super) count: u64,
     pub(super) point_emit: PointEmitScratch,
-    pub(super) line_emit: LineEmitScratch,
     pub(super) multipolygon_emit: MultipolygonEmitScratch,
     pub(super) simp_scratch: geometry::SimplifyMultiScratch,
     pub(super) fanout: FanoutStats,
@@ -139,7 +133,6 @@ impl RelAcc {
             bytes: 0,
             count: 0,
             point_emit: PointEmitScratch::new(),
-            line_emit: LineEmitScratch::new(),
             multipolygon_emit: MultipolygonEmitScratch::new(),
             simp_scratch: geometry::SimplifyMultiScratch::new(),
             fanout: FanoutStats::new(),
@@ -238,7 +231,6 @@ pub(super) fn process_relation_blocks(
                 deferral_stats,
                 &mut acc.sink,
                 &mut acc.point_emit,
-                &mut acc.line_emit,
                 &mut acc.multipolygon_emit,
                 &mut acc.simp_scratch,
                 fanout_caps,
@@ -321,7 +313,6 @@ pub(super) fn process_prepared_relation_into(
     deferral_stats: &DeferralStats,
     sink: &mut RecordSink,
     point_emit: &mut PointEmitScratch,
-    line_emit: &mut LineEmitScratch,
     multipolygon_emit: &mut MultipolygonEmitScratch,
     simp_scratch: &mut geometry::SimplifyMultiScratch,
     fanout_caps: &[u32],
@@ -447,51 +438,9 @@ pub(super) fn process_prepared_relation_into(
                     );
                 }
             }
-            GeomExpect::Line => {
-                if !rel.is_boundary {
-                    continue;
-                }
-                for mw in &rel.member_ways {
-                    if mw.coords.len() < 2 {
-                        continue;
-                    }
-                    let mut coords = mw.coords.clone();
-                    let _ = unwrap_antimeridian_path(&mut coords, false);
-                    let bbox = merc_bbox(&coords);
-                    for shift in antimeridian_shifts_for_bbox(&bbox) {
-                        if shift == 0.0 {
-                            emit_line_feature(
-                                rel.osm_id,
-                                &coords,
-                                &[],
-                                m,
-                                z_lo,
-                                z_hi,
-                                sink,
-                                line_emit,
-                            );
-                        } else {
-                            let shifted: Vec<Point> = coords
-                                .iter()
-                                .map(|p| Point {
-                                    x: p.x + shift,
-                                    y: p.y,
-                                })
-                                .collect();
-                            emit_line_feature(
-                                rel.osm_id,
-                                &shifted,
-                                &[],
-                                m,
-                                z_lo,
-                                z_hi,
-                                sink,
-                                line_emit,
-                            );
-                        }
-                    }
-                }
-            }
+            // Boundary lines are now emitted once per way in phase12
+            // (boundary prescan + resolve_boundary_match); relations no longer
+            // produce them, so GeomExpect::Line falls through to a no-op here.
             _ => {}
         }
     }

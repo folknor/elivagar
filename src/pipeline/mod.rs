@@ -7,6 +7,7 @@
 //   Phase 4:   Tile assembly (MVT encode + gzip) + PMTiles write
 
 mod assemble;
+mod boundary_prescan;
 pub(crate) mod emit;
 mod phase12;
 mod relations;

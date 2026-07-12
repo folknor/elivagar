@@ -1371,3 +1371,87 @@ fn line_merge_self_loop_not_merged_through() {
     // Self-loop and the other segment should remain separate.
     assert_eq!(segs.len(), 2, "self-loop should prevent merging");
 }
+
+// --- L2: parallel-edge dedup guard (cluster C) -----------------------------
+
+/// True when a sub-line equals its own reverse (the fabricated-spike shape).
+fn is_palindrome(line: &[(i32, i32)]) -> bool {
+    let n = line.len();
+    (0..n).all(|i| line[i] == line[n - 1 - i])
+}
+
+fn merged_segments(geom: Vec<u32>) -> Vec<Vec<(i32, i32)>> {
+    let mut layer = LayerBuilder::new("test");
+    let k = layer.intern_key("k");
+    let v = layer.intern_value(Value::String("v".into()));
+    layer.add_feature(Feature {
+        id: None,
+        geom_type: GeomType::LineString,
+        geometry: geom,
+        tags: vec![(k, v)],
+    });
+    let mut scratch = LineMergeScratch::new();
+    layer.merge_connected_lines(&mut scratch);
+    decode_segments(&layer.features[0].geometry)
+}
+
+#[test]
+fn line_merge_dedup_duplicate_at_junction() {
+    // Two identical A->B segments plus a third A->C segment: A is a junction
+    // (degree 3 before dedup), B is degree-2. Dedup collapses the duplicate so
+    // no out-and-back spike can form.
+    let geom = build_multi_line(&[&[(0, 0), (10, 0)], &[(0, 0), (10, 0)], &[(0, 0), (0, 10)]]);
+    let segs = merged_segments(geom);
+    assert_eq!(
+        segs.len(),
+        1,
+        "duplicate must be dropped, distinct chain kept"
+    );
+    assert!(
+        !segs.iter().any(|s| is_palindrome(s)),
+        "no sub-line may equal its own reverse, got {segs:?}"
+    );
+}
+
+#[test]
+fn line_merge_dedup_duplicate_pair_pass2() {
+    // Two identical A->B segments and nothing else: both endpoints degree-2,
+    // the pass-2 cycle route that previously fabricated [A,B,A]. Dedup leaves a
+    // single segment.
+    let geom = build_multi_line(&[&[(0, 0), (10, 0)], &[(0, 0), (10, 0)]]);
+    let segs = merged_segments(geom);
+    assert_eq!(segs.len(), 1);
+    assert!(
+        !is_palindrome(&segs[0]),
+        "duplicate pair must not palindrome"
+    );
+    assert_eq!(segs[0], vec![(0, 0), (10, 0)]);
+}
+
+#[test]
+fn line_merge_dedup_reversed_duplicate() {
+    // A->B and B->A describe the same edge; canonicalization drops one.
+    let geom = build_multi_line(&[&[(0, 0), (10, 0)], &[(10, 0), (0, 0)]]);
+    let segs = merged_segments(geom);
+    assert_eq!(segs.len(), 1, "reversed duplicate must collapse to one");
+    assert!(!is_palindrome(&segs[0]));
+}
+
+#[test]
+fn line_merge_keeps_distinct_coincident_lines() {
+    // Two DIFFERENT arcs sharing only endpoints A and B: not duplicates, so
+    // both survive and merge into a valid (non-palindrome) loop.
+    let geom = build_multi_line(&[&[(0, 0), (5, 5), (10, 0)], &[(0, 0), (5, -5), (10, 0)]]);
+    let segs = merged_segments(geom);
+    assert_eq!(
+        segs.len(),
+        1,
+        "distinct coincident arcs merge into one loop"
+    );
+    assert!(!is_palindrome(&segs[0]));
+    let flat: Vec<(i32, i32)> = segs[0].clone();
+    assert!(
+        flat.contains(&(5, 5)) && flat.contains(&(5, -5)),
+        "both arcs retained"
+    );
+}

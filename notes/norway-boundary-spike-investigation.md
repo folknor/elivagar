@@ -21,6 +21,16 @@ program. It is not one bug. At least five distinct defects are recorded below
 parent-attribute mis-application, latent closed-ring DP), each carrying a cluster
 of atoms.
 
+**Resolution (2026-07-12):** every cluster below is fixed - `merge_line_segments`
+gained an upfront parallel-edge dedup plus a `build_chain` guard (cluster C),
+`simplify_into`/`simplify_into_with_required` became ring-aware with a
+farthest-pair split and a 3-distinct-vertex floor (cluster DP), and boundary
+lines are now emitted exactly once, in the way phase, from a concurrent
+relation-metadata prescan that resolves `admin_level`/`disputed` independently
+of `maritime` (clusters R and AT). The claims below are a frozen snapshot of the
+pre-fix code, kept for the diagnostic trail; they no longer describe the current
+implementation. See git history for the landing commits.
+
 ---
 
 ## 1. Narrative

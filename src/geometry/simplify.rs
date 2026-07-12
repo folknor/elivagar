@@ -30,17 +30,7 @@ pub fn simplify_into(
         output.extend_from_slice(points);
         return 0.0;
     }
-    keep_buf.clear();
-    keep_buf.resize(points.len(), false);
-    keep_buf[0] = true;
-    keep_buf[points.len() - 1] = true;
-    let max_dev_sq = dp_recurse(points, 0, points.len() - 1, tolerance * tolerance, keep_buf);
-    for (i, &k) in keep_buf.iter().enumerate() {
-        if k {
-            output.push(points[i]);
-        }
-    }
-    max_dev_sq
+    simplify_impl(points, tolerance, &[], keep_buf, output)
 }
 
 /// Simplify with required vertex indices that must survive simplification.
@@ -59,24 +49,143 @@ pub fn simplify_into_with_required(
         output.extend_from_slice(points);
         return 0.0;
     }
+    simplify_impl(points, tolerance, required_indices, keep_buf, output)
+}
+
+fn simplify_impl(
+    points: &[Point],
+    tolerance: f64,
+    required_indices: &[usize],
+    keep_buf: &mut Vec<bool>,
+    output: &mut Vec<Point>,
+) -> f64 {
     keep_buf.clear();
     keep_buf.resize(points.len(), false);
-    keep_buf[0] = true;
-    keep_buf[points.len() - 1] = true;
     for &idx in required_indices {
         if idx < points.len() {
             keep_buf[idx] = true;
         }
     }
-
-    let max_dev_sq =
-        dp_recurse_with_required(points, 0, points.len() - 1, tolerance * tolerance, keep_buf);
-    for (i, &k) in keep_buf.iter().enumerate() {
-        if k {
+    let closed = points.len() > 3
+        && points
+            .first()
+            .zip(points.last())
+            .is_some_and(|(first, last)| {
+                first.x.to_bits() == last.x.to_bits() && first.y.to_bits() == last.y.to_bits()
+            });
+    let max_dev_sq = if closed {
+        simplify_closed(points, tolerance * tolerance, keep_buf)
+    } else {
+        keep_buf[0] = true;
+        keep_buf[points.len() - 1] = true;
+        if required_indices.is_empty() {
+            dp_recurse(points, 0, points.len() - 1, tolerance * tolerance, keep_buf)
+        } else {
+            dp_recurse_with_required(points, 0, points.len() - 1, tolerance * tolerance, keep_buf)
+        }
+    };
+    for (i, &keep) in keep_buf.iter().enumerate() {
+        if keep {
             output.push(points[i]);
         }
     }
+    if closed {
+        // The closed path retains vertices among indices 0..len-1 only (the
+        // source closing duplicate at len-1 is never forced), so `output` holds
+        // no trailing duplicate at this point - count distinct over the whole
+        // slice. Keep the ring only when three distinct vertices survived; a
+        // fully-collapsed input yields the forced {p0, pa, pb} and drops here
+        // when those are not three distinct points.
+        let mut distinct: Vec<(u64, u64)> = Vec::new();
+        for point in output.iter() {
+            let key = (point.x.to_bits(), point.y.to_bits());
+            if !distinct.contains(&key) {
+                distinct.push(key);
+            }
+        }
+        let distinct = distinct.len();
+        if distinct < 3 {
+            output.clear();
+        } else if output
+            .first()
+            .zip(output.last())
+            .is_some_and(|(first, last)| {
+                first.x.to_bits() != last.x.to_bits() || first.y.to_bits() != last.y.to_bits()
+            })
+        {
+            output.push(output[0]);
+        }
+        // A valid simplified ring is never its own reverse (that is the
+        // fabricated-spike shape L3 exists to prevent).
+        debug_assert!(
+            output.len() < 2 || !is_own_reverse(output.as_slice()),
+            "closed-line simplify produced a palindrome"
+        );
+    }
     max_dev_sq
+}
+
+/// Simplify a closed line around a non-degenerate chord found by a two-sweep
+/// farthest-pair search. This is a long real chord, not a geometric diameter.
+fn simplify_closed(points: &[Point], tol_sq: f64, keep: &mut [bool]) -> f64 {
+    let unique_len = points.len() - 1;
+    let a = farthest_point(points, 0, unique_len);
+    let b = farthest_point(points, a, unique_len);
+    keep[0] = true;
+    keep[a] = true;
+    keep[b] = true;
+
+    let mut rotated = Vec::with_capacity(points.len());
+    let mut original = Vec::with_capacity(points.len());
+    for offset in 0..unique_len {
+        let idx = (a + offset) % unique_len;
+        rotated.push(points[idx]);
+        original.push(idx);
+    }
+    rotated.push(rotated[0]);
+    original.push(a);
+    let b_rotated = original[..unique_len]
+        .iter()
+        .position(|&idx| idx == b)
+        .expect("farthest-pair anchor must be in rotated ring");
+    let mut rotated_keep = vec![false; rotated.len()];
+    for (rotated_idx, &original_idx) in original.iter().enumerate() {
+        rotated_keep[rotated_idx] = keep[original_idx];
+    }
+    rotated_keep[0] = true;
+    rotated_keep[b_rotated] = true;
+    rotated_keep[unique_len] = true;
+    let left = dp_recurse_with_required(&rotated, 0, b_rotated, tol_sq, &mut rotated_keep);
+    let right =
+        dp_recurse_with_required(&rotated, b_rotated, unique_len, tol_sq, &mut rotated_keep);
+    for (rotated_idx, &original_idx) in original.iter().enumerate() {
+        keep[original_idx] |= rotated_keep[rotated_idx];
+    }
+    left.max(right)
+}
+
+/// True when the vertex sequence equals its own reverse (bit-exact), i.e. the
+/// palindrome / out-and-back shape.
+fn is_own_reverse(points: &[Point]) -> bool {
+    let n = points.len();
+    (0..n).all(|i| {
+        let a = points[i];
+        let b = points[n - 1 - i];
+        a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()
+    })
+}
+
+fn farthest_point(points: &[Point], source: usize, unique_len: usize) -> usize {
+    (0..unique_len)
+        .max_by(|&left, &right| {
+            let distance = |idx: usize| {
+                let dx = points[idx].x - points[source].x;
+                let dy = points[idx].y - points[source].y;
+                dx * dx + dy * dy
+            };
+            distance(left).total_cmp(&distance(right))
+        })
+        .expect("closed ring has at least one unique vertex")
 }
 
 /// Convenience wrapper that allocates its own buffers. Use [`simplify_into`] in hot paths.
@@ -393,5 +502,95 @@ pub fn for_each_zoom_simplified_multi<F, S>(
             break;
         }
         callback(z, cascade_outer, cascade_inners);
+    }
+}
+
+#[cfg(test)]
+mod closed_ring_tests {
+    use super::{Point, is_own_reverse, simplify};
+
+    fn p(x: f64, y: f64) -> Point {
+        Point { x, y }
+    }
+
+    fn simplify_required(points: &[Point], tolerance: f64, required: &[usize]) -> Vec<Point> {
+        let mut keep = Vec::new();
+        let mut out = Vec::new();
+        super::simplify_into_with_required(points, tolerance, required, &mut keep, &mut out);
+        out
+    }
+
+    fn eq(a: Point, b: Point) -> bool {
+        a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()
+    }
+
+    #[test]
+    fn thin_closed_ring_drops_or_stays_valid() {
+        // A long narrow loop: the thin dimension collapses under a coarse
+        // tolerance. Either it drops entirely or it survives as a valid,
+        // non-palindromic ring - never the fabricated hair shape.
+        let ring = [
+            p(0.0, 0.0),
+            p(10.0, 0.001),
+            p(20.0, 0.0),
+            p(10.0, -0.001),
+            p(0.0, 0.0),
+        ];
+        let out = simplify(&ring, 1.0);
+        assert!(
+            out.is_empty() || (out.len() >= 4 && !is_own_reverse(&out)),
+            "thin ring must drop or stay a valid non-palindrome loop, got {out:?}"
+        );
+        if !out.is_empty() {
+            // First == last (re-closed) and at least 3 distinct vertices.
+            assert!(eq(out[0], out[out.len() - 1]), "result must be closed");
+            assert!(
+                !(out.len() == 4 && eq(out[0], out[2])),
+                "must not be a [start, apex, start] hair"
+            );
+        }
+    }
+
+    #[test]
+    fn fat_closed_ring_keeps_shape() {
+        let square = [
+            p(0.0, 0.0),
+            p(10.0, 0.0),
+            p(10.0, 10.0),
+            p(0.0, 10.0),
+            p(0.0, 0.0),
+        ];
+        let out = simplify(&square, 0.5);
+        assert!(out.len() > 3, "fat ring must retain its shape, got {out:?}");
+        assert!(eq(out[0], out[out.len() - 1]), "result must stay closed");
+        assert!(!is_own_reverse(&out));
+    }
+
+    #[test]
+    fn open_line_untouched_by_closed_path() {
+        // Distinct endpoints: not a ring, so the closed path never runs.
+        let line = [p(0.0, 0.0), p(10.0, 0.2), p(20.0, 0.0)];
+        let out = simplify(&line, 0.001);
+        assert_eq!(out.len(), 3);
+        assert!(eq(out[0], line[0]) && eq(out[2], line[2]));
+    }
+
+    #[test]
+    fn closed_ring_preserves_required_pin() {
+        // Even with a coarse tolerance that would collapse the arcs, a pinned
+        // interior vertex survives (pin machinery preserved on the ring path).
+        let square = [
+            p(0.0, 0.0),
+            p(10.0, 0.0),
+            p(10.0, 10.0),
+            p(0.0, 10.0),
+            p(0.0, 0.0),
+        ];
+        let out = simplify_required(&square, 1000.0, &[1]);
+        assert!(
+            out.iter().any(|&v| eq(v, square[1])),
+            "pinned vertex must survive, got {out:?}"
+        );
+        assert!(!is_own_reverse(&out));
     }
 }

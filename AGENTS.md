@@ -231,6 +231,8 @@ No shell scripts. Build/bench/verify tooling is in `brokkr`.
 - `feature-probe.mjs <file.pmtiles> <z> <x> <y> <layer> <featIdx>` - dumps one feature exactly as MapLibre sees it: per-ring vertex count, signed area, bbox, then classifyRings grouping and per-polygon deviation. For drilling into an oracle offender.
 - `winding-probe.mjs <file.pmtiles> <z> <x> <y> [layer]` - per-ring signed-area/winding summary for every polygon feature in one tile.
 - `validate.mjs` / `roundtrip.mjs` - vtvalidate structural checks and decode/re-encode round-trip (NOTE: a round-trip through any single decoder cannot catch symmetric encoder/decoder convention bugs - that is what the earcut oracle is for).
+- `boundary-line-oracle.mjs <file.pmtiles> [--only categories]` - the `boundaries`-layer line-fidelity gate. Decodes every line feature into its MoveTo-delimited sub-lines and flags, per zoom, palindromes (a sub-line equal to its own reverse), spurs (a retrace apex not at the sub-line ends, closure pair excluded for closed loops), intra-feature duplicates, and cross-feature duplicates (exact and reversed) - the last catches the maritime=true/false double-draw that `merge_same_attr_geometries` cannot merge across differing attributes. Categories are separately selectable via `--only`. Run on any change touching boundary-line emission, the line merger, or closed-line simplification.
+- `line-probe.mjs <file.pmtiles> <z> <x> <y> <featIdx> <subIdx>` - dumps one `boundaries` sub-line exactly as MapLibre decodes it (per-vertex coordinates) plus any spur apexes, for drilling into a boundary-line-oracle offender.
 
 ## Architecture
 

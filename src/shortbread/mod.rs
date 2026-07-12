@@ -14,7 +14,7 @@
 use smallvec::SmallVec;
 use std::borrow::Cow;
 
-mod boundaries;
+pub(crate) mod boundaries;
 mod land;
 pub(crate) mod paint_order;
 mod streets;
@@ -314,8 +314,6 @@ fn match_multipolygon(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     streets::match_street_polygons(tags, out);
     streets::match_streets_polygons_labels(tags, out);
     streets::match_bridges(tags, out);
-    // Boundaries are line from relation members
-    boundaries::match_boundaries_line(tags, out);
     // Point layers on multipolygons
     transport::match_public_transport_centroid(tags, out);
     pois::match_pois_centroid(tags, out);
