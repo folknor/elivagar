@@ -484,7 +484,6 @@ fn children(cell: PyramidCell) -> [PyramidCell; 4] {
 ///   line more than twice (would bridge into multiple components) or
 ///   carrying a vertex exactly on the line (in/out ambiguity) falls back
 ///   to the full i_overlay boolean - the R23-class safety net.
-#[hotpath::measure]
 fn intersect_shapes_with_rect(
     scratch: &mut IntEmitScratch,
     shapes: &Shapes,
@@ -519,7 +518,7 @@ fn intersect_shapes_with_rect(
             out.push(copy);
             continue;
         }
-        if clip_shape_rect_fast(scratch, shape, rect, out) {
+        if clip_shape_rect_fast(shape, rect, out) {
             continue;
         }
         intersect_rect_into(scratch, shape, rect, 0, &mut clipped);
@@ -541,13 +540,7 @@ enum Axis {
 /// components. Hole runs coincident with the outer along a cut line are
 /// legal here - emission-time normalization resolves tangencies, exactly
 /// as it does for the boolean's output.
-#[hotpath::measure]
-fn clip_shape_rect_fast(
-    scratch: &mut IntEmitScratch,
-    shape: &Shape,
-    rect: IntRect,
-    out: &mut Shapes,
-) -> bool {
+fn clip_shape_rect_fast(shape: &Shape, rect: IntRect, out: &mut Shapes) -> bool {
     let passes: [(Axis, i32, bool); 4] = [
         (Axis::X, rect.min_x, false),
         (Axis::X, rect.max_x, true),
@@ -555,157 +548,86 @@ fn clip_shape_rect_fast(
         (Axis::Y, rect.max_y, true),
     ];
 
-    let mut rc = scratch.take_rect_clip();
-    let mut outers = std::mem::take(&mut rc.list_a);
-    let mut next = std::mem::take(&mut rc.list_b);
-    recycle_contour_list(scratch, &mut outers);
-    recycle_contour_list(scratch, &mut next);
-    recycle_contour_list(scratch, &mut rc.outers_final);
-    recycle_contour_list(scratch, &mut rc.holes_final);
-    let mut outer = scratch.take_contour(shape[0].len());
-    outer.extend_from_slice(&shape[0]);
-    outers.push(outer);
+    let mut outers: Vec<Contour> = vec![shape[0].clone()];
     for &(axis, bound, keep_le) in &passes {
+        let mut next = Vec::with_capacity(outers.len());
         for ring in &outers {
-            if !clip_ring_half_plane_multi(scratch, &mut rc, ring, axis, bound, keep_le, &mut next)
-            {
-                return finish_rect_clip(scratch, rc, outers, next, false);
-            }
+            let Some(parts) = clip_ring_half_plane_multi(ring, axis, bound, keep_le) else {
+                return false;
+            };
+            next.extend(parts);
         }
-        recycle_contour_list(scratch, &mut outers);
-        std::mem::swap(&mut outers, &mut next);
+        outers = next;
         if outers.is_empty() {
             // Outer vanished: holes are subsets of it, the whole shape's
             // intersection is empty. Handled.
-            return finish_rect_clip(scratch, rc, outers, next, true);
+            return true;
         }
     }
-    for ring in outers.drain(..) {
-        if ring.len() >= 3 && !contour_area_is_below(&ring, 1) {
-            rc.outers_final.push(ring);
-        } else {
-            scratch.recycle_owned_contour(ring);
-        }
-    }
-    if rc.outers_final.is_empty() {
-        return finish_rect_clip(scratch, rc, outers, next, true);
+    outers.retain(|r| r.len() >= 3 && !contour_area_is_below(r, 1));
+    if outers.is_empty() {
+        return true;
     }
 
-    // Reuse the now-empty `outers`/`next` buffers as the hole ping-pong
-    // (spec buffer-role table: `list_a` serves outers then parts, `list_b`
-    // serves next in both phases). `outers` was drained into `outers_final`
-    // above, so it is empty and free to hold each hole's parts - no fresh
-    // list allocation per hole.
+    let mut holes: Vec<Contour> = Vec::new();
     for hole in &shape[1..] {
-        let mut part = scratch.take_contour(hole.len());
-        part.extend_from_slice(hole);
-        outers.push(part);
+        let mut parts = vec![hole.clone()];
         for &(axis, bound, keep_le) in &passes {
-            for ring in &outers {
-                if !clip_ring_half_plane_multi(
-                    scratch, &mut rc, ring, axis, bound, keep_le, &mut next,
-                ) {
-                    return finish_rect_clip(scratch, rc, outers, next, false);
-                }
+            let mut next = Vec::with_capacity(parts.len());
+            for ring in &parts {
+                let Some(sub) = clip_ring_half_plane_multi(ring, axis, bound, keep_le) else {
+                    return false;
+                };
+                next.extend(sub);
             }
-            recycle_contour_list(scratch, &mut outers);
-            std::mem::swap(&mut outers, &mut next);
-            if outers.is_empty() {
+            parts = next;
+            if parts.is_empty() {
                 break;
             }
         }
-        for ring in outers.drain(..) {
-            if ring.len() >= 3 && !contour_area_is_below(&ring, 1) {
-                rc.holes_final.push(ring);
-            } else {
-                scratch.recycle_owned_contour(ring);
-            }
-        }
+        holes.extend(
+            parts
+                .into_iter()
+                .filter(|r| r.len() >= 3 && !contour_area_is_below(r, 1)),
+        );
     }
 
     // Enforce role winding (reconnection preserves geometry, not
     // necessarily traversal direction).
-    for o in &mut rc.outers_final {
+    for o in &mut outers {
         if signed_area_2x(o) < 0 {
             o.reverse();
         }
     }
-    for h in &mut rc.holes_final {
+    for h in &mut holes {
         if signed_area_2x(h) > 0 {
             h.reverse();
         }
     }
 
-    if rc.outers_final.len() == 1 {
-        let mut component = scratch.take_shape(0);
-        component.push(rc.outers_final.pop().expect("one outer is present"));
-        component.append(&mut rc.holes_final);
+    if outers.len() == 1 {
+        let mut component = Vec::with_capacity(1 + holes.len());
+        component.extend(outers);
+        component.extend(holes);
         out.push(component);
-        return finish_rect_clip(scratch, rc, outers, next, true);
+        return true;
     }
 
-    // Check every nesting relation before appending any shell to `out`: a
-    // fallback must see precisely the caller's original output.
-    for hole in &rc.holes_final {
+    let mut components: Vec<Shape> = outers.into_iter().map(|o| vec![o]).collect();
+    'holes: for hole in holes {
         let probe = hole[0];
-        if !rc
-            .outers_final
-            .iter()
-            .any(|outer| point_in_contour(probe.x, probe.y, outer))
-        {
-            return finish_rect_clip(scratch, rc, outers, next, false);
-        }
-    }
-    let mut holes = std::mem::take(&mut rc.holes_final);
-    for outer in rc.outers_final.drain(..) {
-        let mut component = scratch.take_shape(0);
-        component.push(outer);
-        let mut index = 0;
-        while index < holes.len() {
-            let probe = holes[index][0];
+        for component in &mut components {
             if point_in_contour(probe.x, probe.y, &component[0]) {
-                // `remove` (not `swap_remove`): preserve the original hole
-                // order within a component so the fast path stays
-                // byte-identical to the pre-pooling body, which assigned
-                // holes in ascending source order.
-                component.push(holes.remove(index));
-            } else {
-                index += 1;
+                component.push(hole);
+                continue 'holes;
             }
         }
-        out.push(component);
+        // A hole not inside any outer: rounding put its probe vertex on
+        // or outside every boundary - ambiguous, let the boolean decide.
+        return false;
     }
-    debug_assert!(holes.is_empty());
-    // Return the emptied `holes` list buffer to the pool (its contours were
-    // all moved into components); it was detached above to satisfy the borrow
-    // checker against the `rc.outers_final.drain` above.
-    rc.holes_final = holes;
-    finish_rect_clip(scratch, rc, outers, next, true)
-}
-
-fn recycle_contour_list(scratch: &mut IntEmitScratch, contours: &mut Vec<Contour>) {
-    for contour in contours.drain(..) {
-        scratch.recycle_owned_contour(contour);
-    }
-}
-
-fn finish_rect_clip(
-    scratch: &mut IntEmitScratch,
-    mut rc: crate::geometry::int_ocean::RectClipScratch,
-    mut list_a: Vec<Contour>,
-    mut list_b: Vec<Contour>,
-    handled: bool,
-) -> bool {
-    recycle_contour_list(scratch, &mut list_a);
-    recycle_contour_list(scratch, &mut list_b);
-    recycle_contour_list(scratch, &mut rc.list_a);
-    recycle_contour_list(scratch, &mut rc.list_b);
-    recycle_contour_list(scratch, &mut rc.outers_final);
-    recycle_contour_list(scratch, &mut rc.holes_final);
-    rc.list_a = list_a;
-    rc.list_b = list_b;
-    scratch.put_rect_clip(rc);
-    handled
+    out.extend(components);
+    true
 }
 
 /// Half-plane clip of one simple ring with multi-crossing reconnection:
@@ -720,20 +642,16 @@ fn finish_rect_clip(
 /// safely: an odd crossing count, two crossings whose snap-rounded line
 /// positions collide (pairing ambiguity), or a bridge that fails to join
 /// an exit to an entry (non-simple input).
-#[hotpath::measure]
 #[allow(clippy::too_many_lines)]
 fn clip_ring_half_plane_multi(
-    scratch: &mut IntEmitScratch,
-    rc: &mut crate::geometry::int_ocean::RectClipScratch,
     ring: &Contour,
     axis: Axis,
     bound: i32,
     keep_le: bool,
-    out: &mut Vec<Contour>,
-) -> bool {
+) -> Option<Vec<Contour>> {
     let n = ring.len();
     if n < 3 {
-        return true;
+        return Some(Vec::new());
     }
     let coord = |p: IntPoint| match axis {
         Axis::X => p.x,
@@ -760,83 +678,67 @@ fn clip_ring_half_plane_multi(
         }
     }
     if !any_out {
-        let mut copy = scratch.take_contour(ring.len());
-        copy.extend_from_slice(ring);
-        out.push(copy);
-        return true;
+        return Some(vec![ring.clone()]);
     }
     if !any_in {
-        return true;
+        return Some(Vec::new());
     }
-    let Some(start) = first_out else {
-        return false;
-    };
+    let start = first_out?;
 
     // Walk edges from an OUTSIDE vertex so every kept chain is contiguous:
     // entry crossing, kept vertices, exit crossing.
-    let mut chains = std::mem::take(&mut rc.chains);
-    chains.clear();
-    let mut current: Option<usize> = None;
+    let mut chains: Vec<Contour> = Vec::new();
+    let mut current: Option<Contour> = None;
     for k in 0..n {
         let a = ring[(start + k) % n];
         let b = ring[(start + k + 1) % n];
         let a_in = inside(coord(a));
         let b_in = inside(coord(b));
         if a_in
-            && let Some(index) = current
-            && chains[index].last().copied() != Some(a)
+            && let Some(chain) = current.as_mut()
+            && chain.last().copied() != Some(a)
         {
-            chains[index].push(a);
+            chain.push(a);
         }
         if a_in != b_in {
             let c = crossing_point(a, b, axis, bound);
             if a_in {
-                let Some(index) = current.take() else {
-                    return finish_ring_clip(scratch, rc, chains, false);
-                };
-                let chain = &mut chains[index];
+                let mut chain = current.take()?;
                 if chain.last().copied() != Some(c) {
                     chain.push(c);
                 }
-            } else {
-                let mut chain = scratch.take_contour(1);
-                chain.push(c);
                 chains.push(chain);
-                current = Some(chains.len() - 1);
+            } else {
+                current = Some(vec![c]);
             }
         }
     }
     if current.is_some() {
-        return finish_ring_clip(scratch, rc, chains, false);
+        return None;
     }
     if chains.is_empty() {
-        return finish_ring_clip(scratch, rc, chains, true);
+        return Some(Vec::new());
     }
     // Degenerate chains (entry == exit after rounding) poison pairing.
     if chains.iter().any(|ch| ch.len() < 2) {
-        return finish_ring_clip(scratch, rc, chains, false);
+        return None;
     }
 
     // Endpoint list: (position along line, chain index, is_entry).
-    let mut endpoints = std::mem::take(&mut rc.endpoints);
-    endpoints.clear();
-    endpoints.reserve(chains.len() * 2);
+    let mut endpoints: Vec<(i32, usize, bool)> = Vec::with_capacity(chains.len() * 2);
     for (idx, chain) in chains.iter().enumerate() {
         endpoints.push((along(chain[0]), idx, true));
         endpoints.push((along(chain[chain.len() - 1]), idx, false));
     }
     endpoints.sort_unstable_by_key(|&(pos, _, _)| pos);
     if endpoints.windows(2).any(|w| w[0].0 == w[1].0) {
-        rc.endpoints = endpoints;
-        return finish_ring_clip(scratch, rc, chains, false);
+        return None;
     }
 
     // Adjacent sorted pairs are bridges; each must join an exit to an
     // entry. entry_partner[chain] = chain whose entry the bridge from
     // this chain's exit reaches.
-    let mut exit_to_entry = std::mem::take(&mut rc.exit_to_entry);
-    exit_to_entry.clear();
-    exit_to_entry.resize(chains.len(), usize::MAX);
+    let mut exit_to_entry = vec![usize::MAX; chains.len()];
     let (pairs, _) = endpoints.as_chunks::<2>();
     for pair in pairs {
         let (_, i0, entry0) = pair[0];
@@ -844,27 +746,20 @@ fn clip_ring_half_plane_multi(
         match (entry0, entry1) {
             (true, false) => exit_to_entry[i1] = i0,
             (false, true) => exit_to_entry[i0] = i1,
-            _ => {
-                rc.endpoints = endpoints;
-                rc.exit_to_entry = exit_to_entry;
-                return finish_ring_clip(scratch, rc, chains, false);
-            }
+            _ => return None,
         }
     }
     if exit_to_entry.contains(&usize::MAX) {
-        rc.endpoints = endpoints;
-        rc.exit_to_entry = exit_to_entry;
-        return finish_ring_clip(scratch, rc, chains, false);
+        return None;
     }
 
-    let mut visited = std::mem::take(&mut rc.visited);
-    visited.clear();
-    visited.resize(chains.len(), false);
+    let mut visited = vec![false; chains.len()];
+    let mut rings_out = Vec::new();
     for start_chain in 0..chains.len() {
         if visited[start_chain] {
             continue;
         }
-        let mut ring_out = scratch.take_contour(chains[start_chain].len());
+        let mut ring_out: Contour = Vec::new();
         let mut c = start_chain;
         loop {
             visited[c] = true;
@@ -878,37 +773,17 @@ fn clip_ring_half_plane_multi(
                 break;
             }
             if visited[c] {
-                scratch.recycle_owned_contour(ring_out);
-                rc.endpoints = endpoints;
-                rc.exit_to_entry = exit_to_entry;
-                rc.visited = visited;
-                return finish_ring_clip(scratch, rc, chains, false);
+                return None;
             }
         }
         if ring_out.len() >= 2 && ring_out.first() == ring_out.last() {
             ring_out.pop();
         }
         if ring_out.len() >= 3 {
-            out.push(ring_out);
-        } else {
-            scratch.recycle_owned_contour(ring_out);
+            rings_out.push(ring_out);
         }
     }
-    rc.endpoints = endpoints;
-    rc.exit_to_entry = exit_to_entry;
-    rc.visited = visited;
-    finish_ring_clip(scratch, rc, chains, true)
-}
-
-fn finish_ring_clip(
-    scratch: &mut IntEmitScratch,
-    rc: &mut crate::geometry::int_ocean::RectClipScratch,
-    mut chains: Vec<Contour>,
-    handled: bool,
-) -> bool {
-    recycle_contour_list(scratch, &mut chains);
-    rc.chains = chains;
-    handled
+    Some(rings_out)
 }
 
 /// Exact rational crossing of segment (a, b) with an axis line, rounded to
@@ -1763,123 +1638,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn fast_rect_clip_pool_is_reused_and_leak_free() {
-        // Fixtures for the pooled clip. Case 0 is a straddle that survives,
-        // case 1 clips to empty, cases 2-4 are single-outer straddles (one
-        // with a hole), and case 5 is a U whose horizontal cut splits it into
-        // two disjoint outers, exercising the multi-outer assembly + hole
-        // nesting tail (`take_shape` per component, `out.push`, per-component
-        // hole matching) that the other fixtures never reach. All five clip
-        // successfully; the boolean-fallback cleanup paths inside
-        // `clip_ring_half_plane_multi` are exercised in aggregate by the
-        // equivalence oracle (`fast_rect_clip_equivalent_to_boolean`), not
-        // here.
-        let cases = [
-            (
-                shape(&[(0, 0), (40, 0), (40, 40), (0, 40)], &[]),
-                IntRect {
-                    min_x: 10,
-                    min_y: -10,
-                    max_x: 30,
-                    max_y: 50,
-                },
-            ),
-            (
-                shape(&[(0, 0), (10, 0), (10, 10), (0, 10)], &[]),
-                IntRect {
-                    min_x: 20,
-                    min_y: 20,
-                    max_x: 30,
-                    max_y: 30,
-                },
-            ),
-            (
-                shape(
-                    &[(0, 0), (20, 0), (20, 20), (10, 20), (10, 10), (0, 10)],
-                    &[],
-                ),
-                IntRect {
-                    min_x: 10,
-                    min_y: -5,
-                    max_x: 25,
-                    max_y: 25,
-                },
-            ),
-            (
-                shape(
-                    &[(0, 0), (50, 0), (50, 50), (0, 50)],
-                    &[&[(10, 10), (10, 30), (30, 30), (30, 10)]],
-                ),
-                IntRect {
-                    min_x: 10,
-                    min_y: -5,
-                    max_x: 45,
-                    max_y: 55,
-                },
-            ),
-            (
-                shape(
-                    &[
-                        (0, 0),
-                        (100, 0),
-                        (100, 50),
-                        (60, 50),
-                        (60, 20),
-                        (40, 20),
-                        (40, 50),
-                        (0, 50),
-                    ],
-                    &[
-                        &[(5, 33), (5, 37), (12, 37), (12, 33)],
-                        &[(20, 42), (20, 47), (30, 47), (30, 42)],
-                        &[(70, 35), (70, 45), (85, 45), (85, 35)],
-                    ],
-                ),
-                IntRect {
-                    min_x: 0,
-                    min_y: 30,
-                    max_x: 100,
-                    max_y: 50,
-                },
-            ),
-        ];
-        let mut scratch = IntEmitScratch::new();
-        let mut out = Vec::new();
-
-        // Confirm case 4 genuinely reaches the multi-outer assembly: the cut
-        // splits the U into two outers and every hole nests. This is the tail
-        // the pre-pooling body ended with (`out.extend(components)`), and no
-        // other fixture reaches it.
-        {
-            let (subject, rect) = &cases[4];
-            assert!(clip_shape_rect_fast(&mut scratch, subject, *rect, &mut out));
-            assert_eq!(out.len(), 2, "the cut must split the U into two outers");
-            let holes: usize = out.iter().map(|component| component.len() - 1).sum();
-            assert_eq!(holes, 3, "all three holes must nest into a component");
-            scratch.recycle_shapes(&mut out);
-            assert!(scratch.rect_clip_buffers_restored());
-        }
-
-        let mut last_pool_len = None;
-        for iteration in 0..1_000 {
-            let (subject, rect) = &cases[iteration % cases.len()];
-            let _handled = clip_shape_rect_fast(&mut scratch, subject, *rect, &mut out);
-            scratch.recycle_shapes(&mut out);
-            assert!(scratch.rect_clip_buffers_restored());
-            if iteration >= 998 {
-                let len = scratch.contour_pool_len();
-                if let Some(previous) = last_pool_len {
-                    assert_eq!(len, previous, "contour pool must settle after warmup");
-                }
-                last_pool_len = Some(len);
-            }
-        }
-        let balance = scratch.pool_balance();
-        assert_eq!(balance.contour_takes, balance.contour_recycles);
-        assert_eq!(balance.shape_takes, balance.shape_recycles);
     }
 
     #[test]

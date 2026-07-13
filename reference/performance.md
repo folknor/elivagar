@@ -355,3 +355,54 @@ classifier priced by avoided solver cost - see
 `src/geometry/overlay/port/simplify.rs`) is removed; `is_perfect_ccw_convex`,
 its slow-body reference helper, and the soundness tests are retained under
 `cfg(test)` as the predicate and gate for E1b.
+
+## E3 rect-clip pooling close (2026-07-13, REVERTED, denmark locations)
+
+E3 pooled the descent rect clip (`clip_shape_rect_fast` /
+`clip_ring_half_plane_multi`), threading `IntEmitScratch` in and recycling
+contour lists and component shells across the four half-plane passes instead
+of allocating fresh per call. It won its churn gate decisively but failed both
+perf gates, so it is CLOSED as regressive and its code has been reverted. The
+engine sits back at the pre-E3 state.
+
+Alloc pricing (Brick 0, baseline commit `32bda50`): `clip_ring_half_plane_multi`
+14.9 GB + `clip_shape_rect_fast` 4.1 GB = **19.0 GB combined exclusive
+allocation**, far above the spec 1.0 GB proceed threshold - so the item
+proceeded to the rewrite.
+
+The pooled rewrite (Brick 1) landed at commit `d1f26b6`. Post-change alloc:
+`clip_ring_half_plane_multi` 14.9 -> 2.5 GB and `clip_shape_rect_fast` below
+1.0 GB, roughly 3 GB combined - an **82 to 87 percent churn reduction**,
+clearing the 80 percent gate. Total run churn 571 -> 554 GB. Output was
+byte-identical: `brokkr compare-tiles` reported plus 0 percent on every layer
+and every zoom z0 to z14 (both archives 1,296,996 tiles), and the earcut oracle
+was clean (0 over threshold, 0 misattached).
+
+The perf gates failed. Bench baseline `34b3e7cc` at `32bda50` vs post-change
+`beaa3cbc` at `d1f26b6` (best-of-3, same host):
+
+| gate | before | after | delta | verdict |
+|---|---|---|---|---|
+| wall | 13,400 ms | 14,300 ms | +6.7% | FAIL (noise band ~5%) |
+| peak RSS | 3.54 GB | 4.36 GB | +23% | FAIL (gate 2%) |
+| retained memory (alloc, end of run) | 161 MB | 1.2 GB | +7.4x | corroborates |
+
+Verdict (codex xhigh adjudication): REVERT. The RSS regression is per-worker
+shared-pool retention growing to the fattest tile - the exact input-scaled
+retention pattern the roadmap already deleted twice (the per-thread
+AssemblyScratch pool and the ocean PyramidScratch pool, both removed in favor
+of per-item scratch with large RSS wins and unchanged wall). E3 reintroduced an
+abandoned architecture. The larger-dataset argument does not rescue it: bigger
+datasets give MORE opportunity for an outlier tile to poison every worker's
+pool, so an NA or planet bench would only be testing a known unbounded-retention
+mechanism against the 30 GB objective - so `d1f26b6` was NOT benched on NA and
+the campaign did NOT restart from Brick 2.
+
+The lasting value: the 19 GB churn surface is real evidence that the descent
+rect clip deserves a STRUCTURAL fix, not indefinite pooling. The roadmap E2
+direction (flat point and range storage at the engine boundary) is the aligned
+answer - it removes the copy, the linear pool scan, and the recycle protocol
+rather than retaining their capacities. If rect-clip churn is revisited, it
+should be as a new item under E2 or an E3b that specifies a bounded
+retained-byte budget BEFORE implementation, started from the pre-E3 code state,
+not from this pooled design.

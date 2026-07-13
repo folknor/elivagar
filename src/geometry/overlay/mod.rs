@@ -10,8 +10,6 @@ use port::FillRule;
 use port::{ContourDirection, IntOverlayOptions, Overlay, OverlayRule};
 
 pub(crate) use port::IntPoint;
-#[cfg(test)]
-pub(crate) use port::PoolBalance;
 
 pub(crate) type Contour = Vec<IntPoint>;
 pub(crate) type Shape = Vec<Contour>;
@@ -80,14 +78,6 @@ impl BoolOverlay {
         self.inner.recycle_owned_shape(shape);
     }
 
-    pub(crate) fn take_contour(&mut self, cap: usize) -> Contour {
-        self.inner.take_contour(cap)
-    }
-
-    pub(crate) fn recycle_owned_contour(&mut self, contour: Contour) {
-        self.inner.recycle_owned_contour(contour);
-    }
-
     pub(crate) fn recycle_from(&mut self, shapes: &mut Shapes, start: usize) {
         self.inner.recycle_shapes_from(shapes, start);
     }
@@ -98,16 +88,6 @@ impl BoolOverlay {
 
     pub(crate) fn recycle_contours_from(&mut self, shape: &mut Shape, start: usize) {
         self.inner.recycle_contours_from(shape, start);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pool_balance(&self) -> port::PoolBalance {
-        self.inner.pool_balance()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn contour_pool_len(&self) -> usize {
-        self.inner.contour_pool_len()
     }
 
     fn sync_options(&mut self) {

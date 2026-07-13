@@ -980,20 +980,38 @@ git log `d570daa`..`659a187` plus the Landing 2 commits after
   First step: prototype at the engine boundary only, with nested
   converters at the int_ocean seam, and read the alloc + hotpath diff
   before threading ranges further.
-- **E3: pool `clip_shape_rect_fast` through the reconnection logic.**
-  Evidence: the Landing 2 review flagged this as the next-largest
-  sound churn target and correctly declined it - every call clones
-  the outer and each hole, allocates fresh chain vectors per
-  half-plane pass, and builds fresh component shells. It is the
-  middle tier of `intersect_shapes_with_rect` (the identity tier is
-  already pooled), sitting on the pyramid descent that EVERY polygon
-  layer's emission drives - this survives H5 deleting the ocean
-  recompute. Theory: thread `IntEmitScratch` in, ping-pong two pooled
-  contour lists across the four passes, pooled shells for components.
-  Real surgery through `clip_ring_half_plane_multi`'s chain
-  lifetimes - tractable now that both sides are crate-local. Gate:
-  bit-identical. First step: it is a self-contained brick; spec it as
-  the opener of whichever campaign touches the descent next.
+- **E3: pool `clip_shape_rect_fast` through the reconnection logic -
+  IMPLEMENTED, MEASURED, CLOSED AS REGRESSIVE 2026-07-13 (reverted).**
+  The target was real: alloc pricing at `32bda50` put
+  `clip_ring_half_plane_multi` at 14.9 GB + `clip_shape_rect_fast` at
+  4.1 GB = 19.0 GB combined exclusive churn on denmark locations, the
+  next-largest sound churn surface and the one Landing 2's review had
+  flagged and declined. The pooled rewrite (threaded `IntEmitScratch`
+  in, ping-ponged two pooled contour lists across the four half-plane
+  passes, pooled shells for components) landed at `d1f26b6` and WON the
+  churn gate: the pair dropped to ~3 GB combined (82 to 87 percent
+  reduction, clearing the 80 percent gate), total run churn 571 ->
+  554 GB, output byte-identical (compare-tiles +0% on every layer/zoom,
+  earcut clean). But both perf gates FAILED - denmark wall
+  13,400 -> 14,300 ms (+6.7 percent, outside the ~5 percent noise band)
+  and peak RSS 3.54 -> 4.36 GB (+23 percent, far over the 2 percent
+  gate); the alloc run corroborated with end-of-run retained memory
+  161 MB -> 1.2 GB. The regression is per-worker shared-pool retention
+  growing to the fattest tile - the SAME input-scaled retention pattern
+  this roadmap deleted twice (the per-thread AssemblyScratch pool,
+  69c0f18; the ocean PyramidScratch pool, H4 rip-out), so E3
+  reintroduced an abandoned architecture, and a bigger dataset only
+  gives an outlier tile MORE chances to poison every worker's pool -
+  `d1f26b6` was therefore not benched on NA and the campaign did not
+  restart from a later brick. The 19 GB churn surface remains real
+  evidence that this clip deserves a STRUCTURAL fix, not indefinite
+  pooling: the aligned answer is E2's flat point+range storage at the
+  engine boundary, which removes the copy, the linear pool scan, and
+  the recycle protocol rather than retaining their capacities. If
+  rect-clip churn is revisited it must be a new item under E2, or an
+  E3b that specifies a bounded retained-byte budget BEFORE
+  implementation and starts from the pre-E3 code state - never from
+  this pooled design.
 - **E4: fusions, in three gate classes.** (a) Iterator-fed segments:
   `add_contour` consumes any point iterator (`append_path_iter`), so
   producers that today materialize a `Shape` purely to hand it to

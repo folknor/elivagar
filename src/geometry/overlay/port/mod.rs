@@ -24,8 +24,6 @@ mod sort;
 mod split;
 
 pub(super) use extract::OverlayRule;
-#[cfg(test)]
-pub(crate) use extract::PoolBalance;
 pub(crate) use point::IntPoint;
 
 use crate::geometry::overlay::port::extract::BooleanExtractionBuffer;
@@ -154,19 +152,6 @@ impl Overlay {
         self.boolean_buffer = Some(buffer);
     }
 
-    pub(crate) fn take_contour(&mut self, cap: usize) -> IntContour {
-        let mut buffer = self.boolean_buffer.take().unwrap_or_default();
-        let contour = buffer.take_contour(cap);
-        self.boolean_buffer = Some(buffer);
-        contour
-    }
-
-    pub(crate) fn recycle_owned_contour(&mut self, contour: IntContour) {
-        let mut buffer = self.boolean_buffer.take().unwrap_or_default();
-        buffer.recycle_owned_contour(contour);
-        self.boolean_buffer = Some(buffer);
-    }
-
     pub fn recycle_shapes_from(&mut self, shapes: &mut IntShapes, start: usize) {
         let mut buffer = self.boolean_buffer.take().unwrap_or_default();
         buffer.recycle_shapes_from(shapes, start);
@@ -193,20 +178,6 @@ impl Overlay {
         let result = f(&mut buffer);
         self.boolean_buffer = Some(buffer);
         result
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pool_balance(&self) -> PoolBalance {
-        self.boolean_buffer
-            .as_ref()
-            .map_or_else(Default::default, BooleanExtractionBuffer::pool_balance)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn contour_pool_len(&self) -> usize {
-        self.boolean_buffer
-            .as_ref()
-            .map_or(0, BooleanExtractionBuffer::contour_pool_len)
     }
 
     /// Executes a single Boolean operation on the current geometry using the specified overlay and build rules.
