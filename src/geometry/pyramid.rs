@@ -484,6 +484,7 @@ fn children(cell: PyramidCell) -> [PyramidCell; 4] {
 ///   line more than twice (would bridge into multiple components) or
 ///   carrying a vertex exactly on the line (in/out ambiguity) falls back
 ///   to the full i_overlay boolean - the R23-class safety net.
+#[hotpath::measure]
 fn intersect_shapes_with_rect(
     scratch: &mut IntEmitScratch,
     shapes: &Shapes,
@@ -540,6 +541,7 @@ enum Axis {
 /// components. Hole runs coincident with the outer along a cut line are
 /// legal here - emission-time normalization resolves tangencies, exactly
 /// as it does for the boolean's output.
+#[hotpath::measure]
 fn clip_shape_rect_fast(shape: &Shape, rect: IntRect, out: &mut Shapes) -> bool {
     let passes: [(Axis, i32, bool); 4] = [
         (Axis::X, rect.min_x, false),
@@ -642,6 +644,7 @@ fn clip_shape_rect_fast(shape: &Shape, rect: IntRect, out: &mut Shapes) -> bool 
 /// safely: an odd crossing count, two crossings whose snap-rounded line
 /// positions collide (pairing ambiguity), or a bridge that fails to join
 /// an exit to an entry (non-simple input).
+#[hotpath::measure]
 #[allow(clippy::too_many_lines)]
 fn clip_ring_half_plane_multi(
     ring: &Contour,
