@@ -967,22 +967,53 @@ pub struct BooleanExtractionBuffer {
     binder: BinderScratch,
     contour_pool: Vec<IntContour>,
     shape_pool: Vec<IntShape>,
+    #[cfg(test)]
+    pool_balance: PoolBalance,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PoolBalance {
+    pub(crate) contour_takes: u64,
+    pub(crate) contour_recycles: u64,
+    pub(crate) shape_takes: u64,
+    pub(crate) shape_recycles: u64,
 }
 
 impl BooleanExtractionBuffer {
+    pub(crate) fn take_contour(&mut self, cap: usize) -> IntContour {
+        #[cfg(test)]
+        {
+            self.pool_balance.contour_takes += 1;
+        }
+        let mut contour = take_vec_with_capacity(&mut self.contour_pool, cap);
+        contour.clear();
+        contour
+    }
+
+    pub(crate) fn recycle_owned_contour(&mut self, contour: IntContour) {
+        self.recycle_contour(contour);
+    }
+
     pub(crate) fn take_shape(&mut self, ring_count: usize) -> IntShape {
+        #[cfg(test)]
+        {
+            self.pool_balance.shape_takes += 1;
+        }
         let mut shape = take_vec_with_capacity(&mut self.shape_pool, ring_count);
         shape.clear();
         shape.reserve_capacity(ring_count);
         for _ in 0..ring_count {
-            let mut contour = take_vec_with_capacity(&mut self.contour_pool, 0);
-            contour.clear();
-            shape.push(contour);
+            shape.push(self.take_contour(0));
         }
         shape
     }
 
     pub(crate) fn recycle_owned_shape(&mut self, mut shape: IntShape) {
+        #[cfg(test)]
+        {
+            self.pool_balance.shape_recycles += 1;
+        }
         self.recycle_shape(&mut shape);
         self.shape_pool.push(shape);
     }
@@ -993,6 +1024,10 @@ impl BooleanExtractionBuffer {
 
     pub(crate) fn recycle_shapes_from(&mut self, shapes: &mut IntShapes, start: usize) {
         for mut shape in shapes.drain(start..) {
+            #[cfg(test)]
+            {
+                self.pool_balance.shape_recycles += 1;
+            }
             self.recycle_shape(&mut shape);
             self.shape_pool.push(shape);
         }
@@ -1016,8 +1051,22 @@ impl BooleanExtractionBuffer {
     }
 
     fn recycle_contour(&mut self, mut contour: IntContour) {
+        #[cfg(test)]
+        {
+            self.pool_balance.contour_recycles += 1;
+        }
         contour.clear();
         self.contour_pool.push(contour);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pool_balance(&self) -> PoolBalance {
+        self.pool_balance
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contour_pool_len(&self) -> usize {
+        self.contour_pool.len()
     }
 
     fn take_shape_with_contour(&mut self, contour: IntContour) -> IntShape {

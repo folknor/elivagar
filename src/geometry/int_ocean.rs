@@ -32,6 +32,19 @@ pub(crate) struct IntEmitScratch {
     vw: VwScratch,
     overlay: BoolOverlay,
     rect_contour: Contour,
+    rect_clip: RectClipScratch,
+}
+
+#[derive(Default)]
+pub(crate) struct RectClipScratch {
+    pub(crate) list_a: Vec<Contour>,
+    pub(crate) list_b: Vec<Contour>,
+    pub(crate) outers_final: Vec<Contour>,
+    pub(crate) holes_final: Vec<Contour>,
+    pub(crate) chains: Vec<Contour>,
+    pub(crate) endpoints: Vec<(i32, usize, bool)>,
+    pub(crate) exit_to_entry: Vec<usize>,
+    pub(crate) visited: Vec<bool>,
 }
 
 impl IntEmitScratch {
@@ -44,6 +57,7 @@ impl IntEmitScratch {
             vw: VwScratch::default(),
             overlay: BoolOverlay::new(),
             rect_contour: Vec::with_capacity(4),
+            rect_clip: RectClipScratch::default(),
         }
     }
 
@@ -57,6 +71,42 @@ impl IntEmitScratch {
 
     pub(crate) fn recycle_owned_shape(&mut self, shape: Shape) {
         self.overlay.recycle_owned_shape(shape);
+    }
+
+    pub(crate) fn take_contour(&mut self, cap: usize) -> Contour {
+        self.overlay.take_contour(cap)
+    }
+
+    pub(crate) fn recycle_owned_contour(&mut self, contour: Contour) {
+        self.overlay.recycle_owned_contour(contour);
+    }
+
+    pub(crate) fn take_rect_clip(&mut self) -> RectClipScratch {
+        std::mem::take(&mut self.rect_clip)
+    }
+
+    pub(crate) fn put_rect_clip(&mut self, rect_clip: RectClipScratch) {
+        self.rect_clip = rect_clip;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pool_balance(&self) -> crate::geometry::overlay::PoolBalance {
+        self.overlay.pool_balance()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contour_pool_len(&self) -> usize {
+        self.overlay.contour_pool_len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rect_clip_buffers_restored(&self) -> bool {
+        let rc = &self.rect_clip;
+        rc.list_a.is_empty()
+            && rc.list_b.is_empty()
+            && rc.outers_final.is_empty()
+            && rc.holes_final.is_empty()
+            && rc.chains.is_empty()
     }
 
     fn recycle_shapes_from(&mut self, shapes: &mut Shapes, start: usize) {
