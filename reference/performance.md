@@ -306,3 +306,52 @@ geometry sink everywhere; the serial merge reader is 97-98% of the assemble
 phase everywhere; the shared-node prepass is 7-79s of pure serial latency
 scaling with way volume; the ocean phase itself is flat (11-16s) at every
 scale measured.
+
+## E1 normalize fast-path close (2026-07-13, commit 65ae629, norway locations)
+
+E1 added a strictly-convex/CCW/non-self-intersecting screen
+(`is_perfect_ccw_convex`) on the single-contour arm of `normalize_into`, plus a
+fall-through instrument, to test whether a cheap O(n) screen could skip the
+segment-build + split-solver body on the "already perfect" fraction of calls.
+Measured on a norway `--variant locations` bench at `65ae629`, the screen is
+below its spec 0.30 proceed threshold and is CLOSED without landing the fast
+path.
+
+Instrument counters:
+
+| counter | value |
+|---|---|
+| `normalize_screen_pass` | 5,282,144 |
+| `normalize_screen_reject` | 14,118,318 |
+| total single-contour calls | 19,400,462 |
+| `normalize_screen_perfect_return` | 13,610,939 |
+
+- `f = pass / (pass + reject) = 0.272` - below the 0.30 proceed threshold.
+- pass + perfect_return = 18,893,083, a **0.974 ceiling** the strict screen
+  captures only 28% of: the engine itself found perfect (returned
+  `false`/untouched) on 13.6M of the rejected calls, so a looser but still
+  exact classifier could in principle reach ~97% of calls.
+
+Size buckets (n = outer vertex count):
+
+| bucket | pass | reject |
+|---|---|---|
+| n3 | 82,732 | - |
+| n4_8 | 4,923,309 | 4,445,750 |
+| n9_32 | 276,069 | 7,631,905 |
+| n33p | 34 | 2,040,663 |
+
+93% of passes are cheap n4_8 solves; the expensive rings (n9_32, n33p) are
+mostly rejected and mostly perfect-return. Weighting the pass fraction by
+solver cost therefore sinks the flat 0.272 further, not toward the threshold.
+
+Verdict: the strict-convex screen is mispriced - it proves the wrong predicate
+(convexity, not the engine's exact perfect-input verdict) and captures a small,
+cheap slice while the real cost sits in the rejected large rings. The 0.974
+ceiling is a genuine opportunity, deferred to E1b (an exact perfect-CCW
+classifier priced by avoided solver cost - see
+`notes/planet-30gb-roadmap.md`). The per-call instrument
+(`ScreenCounters`/`SCREEN` in `src/debug.rs`, the screen invocation in
+`src/geometry/overlay/port/simplify.rs`) is removed; `is_perfect_ccw_convex`,
+its slow-body reference helper, and the soundness tests are retained under
+`cfg(test)` as the predicate and gate for E1b.

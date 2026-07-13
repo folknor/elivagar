@@ -916,23 +916,53 @@ campaign willing to rotate the baseline. Port history and rationale:
 git log `d570daa`..`659a187` plus the Landing 2 commits after
 `8eaa8bf`.
 
-- **E1: input-shaped fast paths on the 11.4M-call normalize.**
-  Evidence: the single-contour arm already has a "perfect input"
-  verdict (`simplify_contour_into` returns false and the caller keeps
-  its own allocation), but reaching that verdict still pays the full
-  segment build + split solver per call - on contours that are
-  post-DP tile-space rings, typically tiny and usually simple.
-  `emit_cell` proved the pattern pays: its convex-single-ring screen
-  skips normalize entirely. Theory: a conservative simplicity screen
-  (exact O(n^2) segment-pair test is fine at n<=32; monotonicity or
-  the existing convexity check cheaper still) that proves
-  no-self-intersection + no collinear/dup removal + correct winding
-  and skips the engine, falling through to the full path on any doubt.
-  Must reproduce the engine's exact verdict - the oracle asserts the
-  None/Some verdict itself, so a wrong screen fails in `brokkr check`,
-  not in production. Gate: bit-identical. First step: a counter pair
-  (screen-pass vs fall-through) plus a hotpath diff on norway, where
-  the coastal normalize volume lives.
+- **E1: input-shaped fast paths on the 11.4M-call normalize -
+  CLOSED 2026-07-13, below threshold.** The single-contour arm already
+  has a "perfect input" verdict (`simplify_contour_into` returns false
+  and the caller keeps its own allocation), but reaching that verdict
+  still pays the full segment build + split solver per call - on
+  contours that are post-DP tile-space rings, typically tiny and
+  usually simple. `emit_cell` proved the pattern pays: its
+  convex-single-ring screen skips normalize entirely. E1 implemented a
+  strictly-convex, CCW, non-self-intersecting screen
+  (`is_perfect_ccw_convex`) plus a fall-through instrument (per-call
+  pass/reject + size buckets + perfect-return counters), landed at
+  `65ae629` and measured on a norway locations bench. The screen was
+  mispriced: it passes f=0.272 of single-contour calls
+  (pass 5,282,144, reject 14,118,318, total 19,400,462), below the
+  spec 0.30 proceed threshold. The richer counters make it worse:
+  `normalize_screen_perfect_return` 13,610,939, so pass+perfect_return
+  is 18,893,083 - a 0.974 ceiling the strict screen captures only 28%
+  of. Size buckets: passes are n3 82,732 / n4_8 4,923,309 /
+  n9_32 276,069 / n33p 34 (93% cheap n4to8 solves); rejects are
+  n4_8 4,445,750 / n9_32 7,631,905 / n33p 2,040,663 - the expensive
+  rings are mostly rejected and mostly perfect-return, so
+  solver-cost weighting sinks the flat 0.272 further. Verdict:
+  strict convexity is the wrong screen; the 97% ceiling is a real
+  opportunity but belongs to a broader exact classifier (E1b).
+  Instrument removed (the per-call scan + shard counters in
+  `src/debug.rs`); `is_perfect_ccw_convex`, its slow-body reference
+  helper, and the soundness tests are retained under `cfg(test)` in
+  `src/geometry/overlay/port/simplify.rs` as the predicate and gate
+  for E1b. See reference/performance.md for the dated evidence.
+- **E1b: an EXACT perfect-CCW classifier priced by avoided solver
+  cost.** The E1 ceiling (`perfect_return` 0.974 vs strict-screen pass
+  0.272) says the opportunity is real but the screen must be exact, not
+  merely convex. Design: keep strict convexity as an immediate accept,
+  then for non-convex rejects test the actual engine invariants - no
+  dropped collinear/duplicate vertex, no crossing/overlap, no
+  repeated-vertex loop, and correct CCW winding - accepting only rings
+  the engine would return `false`/untouched on (the same soundness
+  invariant the retained tests pin). Price it per size bucket by
+  AVOIDED SOLVER COST, not raw call fraction: add perfect_return size
+  buckets to the instrument so the pass fraction is weighted by the
+  solver work each bucket actually skips (the E1 buckets show the
+  passes cluster in cheap n4_8 while the costly rings are the rejects).
+  The classifier needs a proved large-ring cutoff or a solver fallback
+  - a segment-pair test can duplicate the split solver's own work at
+  large n, so beyond some n it stops being cheaper than the body it
+  replaces. Set a NEW proceed threshold on avoided solver cost rather
+  than the flat call ratio that mispriced E1.
 - **E2: flat point+range output at the module boundary.** Evidence:
   the engine already builds every output contour flat -
   `BooleanExtractionBuffer.points` is one `Vec<IntPoint>` - and then

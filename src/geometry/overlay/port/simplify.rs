@@ -24,14 +24,7 @@ impl Overlay {
         fill_rule: FillRule,
         out: &mut IntShapes,
     ) -> bool {
-        let screen_hit = is_perfect_ccw_convex(contour);
-        crate::debug::screen_record(screen_hit, contour.len());
-
-        let rebuilt = self.simplify_contour_into_slow(contour, fill_rule, out);
-        if !screen_hit && !rebuilt {
-            crate::debug::screen_record_perfect_return();
-        }
-        rebuilt
+        self.simplify_contour_into_slow(contour, fill_rule, out)
     }
 
     /// The un-screened engine body. Kept separate so the screen's soundness
@@ -135,6 +128,12 @@ impl Overlay {
 /// duplicate vertices while fixing both convexity and winding. The two sign
 /// flips in each edge-vector component prove one revolution; left turns alone
 /// would also admit a self-lapping spiral.
+///
+/// Retained after the E1 close (the strict-convex screen priced out below its
+/// proceed threshold on norway - see reference/performance.md) as the predicate
+/// and soundness gate for the follow-up E1b exact-classifier item. Currently
+/// exercised only by the tests below, hence `cfg(test)`.
+#[cfg(test)]
 fn is_perfect_ccw_convex(contour: &[IntPoint]) -> bool {
     let n = contour.len();
     if n < 3 {
@@ -159,6 +158,7 @@ fn is_perfect_ccw_convex(contour: &[IntPoint]) -> bool {
     x.finish() == 2 && y.finish() == 2
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct FlipCounter {
     first: i8,
@@ -166,6 +166,7 @@ struct FlipCounter {
     flips: u32,
 }
 
+#[cfg(test)]
 impl FlipCounter {
     #[inline]
     fn push(&mut self, delta: i64) {
