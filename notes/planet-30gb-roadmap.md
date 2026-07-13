@@ -977,9 +977,30 @@ git log `d570daa`..`659a187` plus the Landing 2 commits after
   `Shapes` at the boundary with one points buffer plus a
   (shape, ring) range index; the copy, the pool scan, and the recycle
   API all delete. Same values, same order - gate: bit-identical.
-  First step: prototype at the engine boundary only, with nested
-  converters at the int_ocean seam, and read the alloc + hotpath diff
-  before threading ranges further.
+  BOUNDARY-ONLY PROTOTYPE DESIGN-REFUTED 2026-07-13 (spec written,
+  two reviews, codex xhigh adjudication; no code written). Static
+  caller ordering already proves the prototype is NET-NEGATIVE, so no
+  Brick-0 measurement was spent: every production caller recycles `out`
+  before calling the producer, so the `materialize_nested` seam
+  converter gets an empty `out` and must redo the existing per-ring
+  pool scan and nested copy AFTER the new flat-buffer copy - an added
+  copy, not a deleted one. And `FlatShapes::clear` retains all
+  capacities, growing to each worker's fattest overlay result ON TOP of
+  the still-needed nested pools - the exact additive per-worker
+  retention that reverted E3. The alloc gate cannot even price this
+  (the extraction copy is a warm-pool memcpy, zero allocations; the
+  real cost is CPU and the linear `take_vec_with_capacity` scan). The
+  engine de-churn surface (E1-E6) is PAUSED here per the sequencing
+  note below: it does not outrank open phase-level work and is not a
+  dedicated campaign. Flat storage returns ONLY as E5 - delete the seam
+  converter so the flat buffer REPLACES the nested pools rather than
+  adding to them - and only as a phase-level campaign instrumented on
+  copied-point bytes, pool-probe CPU, and retained bytes (never alloc
+  attribution), following evidence about the remaining bytes rather
+  than preceding it. Note for any future bit-identity gate: `cmp -s`
+  over complete deterministic archives, NOT `brokkr compare-tiles`
+  (which samples 200 tiles/zoom and compares aggregate counts, never
+  proving byte identity).
 - **E3: pool `clip_shape_rect_fast` through the reconnection logic -
   IMPLEMENTED, MEASURED, CLOSED AS REGRESSIVE 2026-07-13 (reverted).**
   The target was real: alloc pricing at `32bda50` put
