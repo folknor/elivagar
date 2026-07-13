@@ -394,6 +394,28 @@ both directions.
 
 ### Recommended actions (ranked, not yet executed)
 
+2026-07-14 CALIBRATION RESULT - the connected-component render gate (item 1
+below) is REFUTED, not a gate. A minimal harness (rasterize the ocean layer to
+a binary mask, XOR two archives, size the largest connected component of
+disagreement, with cross-tile seam stitching and an apex ROI) was calibrated
+two-directionally against shapefile-path reproductions: pair A = DP (spike,
+commit 3f4ca38) vs VW (fixed, 31b8298), pair B = VW vs verbatim
+(--no-ocean-simplify) as the null the coverage oracle skipped. Sweeping
+resolution and 4/8 connectivity, the pair-A / pair-B largest-component ratio
+was 2.33 (256/4), 1.38 (256/8), 2.79 (512/4), 3.29 (512/8) - never reaching the
+4x separation the threshold math requires (a geometric-mean threshold that is
+also >= 2x the pair-B floor implies spike >= 4x floor). Worse, pair A's largest
+component MISSED the pinned apex ROI in every cell and was not predominantly
+ref_only: the DP-vs-VW difference is dominated by general along-coast
+smoothing, not the notch (VW and DP share the apex; the notch is a thin sliver
+between two curves with the same outer extent). So connected-component size
+does NOT separate a coastline spike from legitimate simplification - the same
+failure the coverage oracle had with aggregate area, measured differently. The
+standing ocean gates remain the human visual check and earcut; the throwaway
+harness was removed. Item 1 below is what was refuted; a future geometry-level
+ocean gate should look to the baseline-free needle detector sketched in item 3,
+not a rendered-area or rendered-component measure.
+
 1. Formalize the visual gate as a blessed-render pixel diff. A new
    `scripts/validate/render-gate.mjs` in the existing oracle family: decode via
    `@mapbox/vector-tile`, rasterize the ocean layer to display resolution, diff
