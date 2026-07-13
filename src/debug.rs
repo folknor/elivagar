@@ -115,6 +115,97 @@ counter_group!(BusyCounters {
     phase12_relation_tail => "phase12_relation_tail_ns",
 });
 
+// `simplify_contour_into` is called millions of times from rayon workers. A
+// single process-wide atomic here would make the instrumentation itself a
+// contended hot-path cost, so each worker writes a separate cache-line-sized
+// shard. The end-of-run flush folds those shards into one counter per name.
+const SCREEN_COUNTER_SHARDS: usize = 256;
+
+#[repr(align(128))]
+struct ScreenCounterShard {
+    normalize_screen_pass: AtomicU64,
+    normalize_screen_reject: AtomicU64,
+    normalize_screen_perfect_return: AtomicU64,
+    normalize_screen_pass_n3: AtomicU64,
+    normalize_screen_reject_n3: AtomicU64,
+    normalize_screen_pass_n4_8: AtomicU64,
+    normalize_screen_reject_n4_8: AtomicU64,
+    normalize_screen_pass_n9_32: AtomicU64,
+    normalize_screen_reject_n9_32: AtomicU64,
+    normalize_screen_pass_n33p: AtomicU64,
+    normalize_screen_reject_n33p: AtomicU64,
+}
+
+impl ScreenCounterShard {
+    const fn new() -> Self {
+        Self {
+            normalize_screen_pass: AtomicU64::new(0),
+            normalize_screen_reject: AtomicU64::new(0),
+            normalize_screen_perfect_return: AtomicU64::new(0),
+            normalize_screen_pass_n3: AtomicU64::new(0),
+            normalize_screen_reject_n3: AtomicU64::new(0),
+            normalize_screen_pass_n4_8: AtomicU64::new(0),
+            normalize_screen_reject_n4_8: AtomicU64::new(0),
+            normalize_screen_pass_n9_32: AtomicU64::new(0),
+            normalize_screen_reject_n9_32: AtomicU64::new(0),
+            normalize_screen_pass_n33p: AtomicU64::new(0),
+            normalize_screen_reject_n33p: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Per-worker counters for the normalize screen, folded at end of run.
+pub struct ScreenCounters {
+    shards: [ScreenCounterShard; SCREEN_COUNTER_SHARDS],
+}
+
+impl ScreenCounters {
+    const fn new() -> Self {
+        Self {
+            shards: [const { ScreenCounterShard::new() }; SCREEN_COUNTER_SHARDS],
+        }
+    }
+
+    #[inline]
+    fn shard(&self) -> &ScreenCounterShard {
+        let worker = rayon::current_thread_index().unwrap_or(0);
+        &self.shards[worker % SCREEN_COUNTER_SHARDS]
+    }
+
+    fn emit(&self) {
+        macro_rules! emit_screen_counter {
+            ($field:ident, $name:literal) => {{
+                let value = self
+                    .shards
+                    .iter()
+                    .map(|shard| shard.$field.load(Ordering::Relaxed))
+                    .sum();
+                if value > 0 {
+                    emit_counter_u64($name, value);
+                }
+            }};
+        }
+
+        emit_screen_counter!(normalize_screen_pass, "normalize_screen_pass");
+        emit_screen_counter!(normalize_screen_reject, "normalize_screen_reject");
+        emit_screen_counter!(
+            normalize_screen_perfect_return,
+            "normalize_screen_perfect_return"
+        );
+        emit_screen_counter!(normalize_screen_pass_n3, "normalize_screen_pass_n3");
+        emit_screen_counter!(normalize_screen_reject_n3, "normalize_screen_reject_n3");
+        emit_screen_counter!(normalize_screen_pass_n4_8, "normalize_screen_pass_n4_8");
+        emit_screen_counter!(normalize_screen_reject_n4_8, "normalize_screen_reject_n4_8");
+        emit_screen_counter!(normalize_screen_pass_n9_32, "normalize_screen_pass_n9_32");
+        emit_screen_counter!(
+            normalize_screen_reject_n9_32,
+            "normalize_screen_reject_n9_32"
+        );
+        emit_screen_counter!(normalize_screen_pass_n33p, "normalize_screen_pass_n33p");
+        emit_screen_counter!(normalize_screen_reject_n33p, "normalize_screen_reject_n33p");
+    }
+}
+
 /// Process-global stall accumulators. There is one tilegen run per process, so
 /// static zero-init is correct and nothing resets between runs.
 pub static WAIT: WaitCounters = WaitCounters::new();
@@ -125,11 +216,72 @@ pub static WAIT: WaitCounters = WaitCounters::new();
 /// decided by which counter it feeds.
 pub static BUSY: BusyCounters = BusyCounters::new();
 
+/// Process-global normalize-screen counters, sharded by rayon worker to avoid
+/// a contended atomic on the single-contour normalization hot path.
+pub static SCREEN: ScreenCounters = ScreenCounters::new();
+
 /// Flush the accumulated stall and busy totals to the sidecar. Call once at
 /// end of run; a no-op per counter when nothing accumulated.
 pub fn emit_wait_counters() {
     WAIT.emit();
     BUSY.emit();
+    SCREEN.emit();
+}
+
+/// Record one screen decision and its contour-size bucket. This touches only
+/// the current worker's shard; the shards are folded when the run finishes.
+#[inline]
+pub fn screen_record(pass: bool, vertices: usize) {
+    let shard = SCREEN.shard();
+    let (total, bucket) = match (pass, vertices) {
+        // n < 3 contours are always rejects (the screen requires n >= 3) and are
+        // the cheapest possible input, so they belong in the smallest bucket,
+        // not lumped into the n33p tail by the `_` arm below.
+        (true, 3) => (
+            &shard.normalize_screen_pass,
+            &shard.normalize_screen_pass_n3,
+        ),
+        (false, 0..=3) => (
+            &shard.normalize_screen_reject,
+            &shard.normalize_screen_reject_n3,
+        ),
+        (true, 4..=8) => (
+            &shard.normalize_screen_pass,
+            &shard.normalize_screen_pass_n4_8,
+        ),
+        (false, 4..=8) => (
+            &shard.normalize_screen_reject,
+            &shard.normalize_screen_reject_n4_8,
+        ),
+        (true, 9..=32) => (
+            &shard.normalize_screen_pass,
+            &shard.normalize_screen_pass_n9_32,
+        ),
+        (false, 9..=32) => (
+            &shard.normalize_screen_reject,
+            &shard.normalize_screen_reject_n9_32,
+        ),
+        (true, _) => (
+            &shard.normalize_screen_pass,
+            &shard.normalize_screen_pass_n33p,
+        ),
+        (false, _) => (
+            &shard.normalize_screen_reject,
+            &shard.normalize_screen_reject_n33p,
+        ),
+    };
+    total.fetch_add(1, Ordering::Relaxed);
+    bucket.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a rejected screen call for which the slow engine still returned its
+/// perfect-input verdict, the ceiling a looser screen could capture.
+#[inline]
+pub fn screen_record_perfect_return() {
+    SCREEN
+        .shard()
+        .normalize_screen_perfect_return
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 /// RAII guard timing one blocking interval. On drop it adds the elapsed
