@@ -356,6 +356,30 @@ classifier priced by avoided solver cost - see
 its slow-body reference helper, and the soundness tests are retained under
 `cfg(test)` as the predicate and gate for E1b.
 
+## E1b exact perfect-CCW classifier close (2026-07-13, uncommitted Landing 1, norway locations)
+
+E1b shadowed a conservatively-sound perfect-CCW classifier on every
+single-contour normalize call. The slow solver still ran unconditionally, so
+the measurement did not change output. The Norway locations hotpath run took
+48.700s on the current host and retained its dirty-run sidecar. The shadow
+classifier accepted 12,302,148 contours; its unsound-accept counter was zero.
+
+| measure | thread time |
+|---|---:|
+| avoided slow-body time on accepted, slow-false calls | 13.651s |
+| always-paid O(n) screen | 2.395s |
+| O(n^2) distinctness and pair scan | 36.169s |
+| total classifier cost | 38.564s |
+| net avoided minus cost | -24.914s |
+
+The cumulative cutoff cannot make this positive: the full scan is already
+25.0s slower than the solver work it would replace, and the required proceed
+bar is positive net plus at least 6.5s, five percent of the pre-instrument
+Norway `normalize_into` baseline. E1b is CLOSED. The Landing 1 classifier,
+timers, sharded counters, and shadow wiring were removed; the prior
+test-only strict-convex predicate and slow-body soundness reference remain.
+No Landing 2 production skip was attempted.
+
 ## E3 rect-clip pooling close (2026-07-13, REVERTED, denmark locations)
 
 E3 pooled the descent rect clip (`clip_shape_rect_fast` /

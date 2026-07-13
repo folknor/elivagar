@@ -946,7 +946,7 @@ git log `d570daa`..`659a187` plus the Landing 2 commits after
   `src/geometry/overlay/port/simplify.rs` as the predicate and gate
   for E1b. See reference/performance.md for the dated evidence.
 - **E1b: an EXACT perfect-CCW classifier priced by avoided solver
-  cost.** The E1 ceiling (`perfect_return` 0.974 vs strict-screen pass
+  cost - CLOSED 2026-07-13, below threshold.** The E1 ceiling (`perfect_return` 0.974 vs strict-screen pass
   0.272) says the opportunity is real but the screen must be exact, not
   merely convex. Design: keep strict convexity as an immediate accept,
   then for non-convex rejects test the actual engine invariants - no
@@ -962,7 +962,13 @@ git log `d570daa`..`659a187` plus the Landing 2 commits after
   - a segment-pair test can duplicate the split solver's own work at
   large n, so beyond some n it stops being cheaper than the body it
   replaces. Set a NEW proceed threshold on avoided solver cost rather
-  than the flat call ratio that mispriced E1.
+  than the flat call ratio that mispriced E1. Landing 1 shadowed the
+  conservatively-sound classifier on norway locations: 13.651s avoided solver
+  time minus 38.564s classifier cost gave -24.914s net, with zero unsound
+  accepts. This fails both positive-net and the 6.5s (five percent of the
+  pre-instrument normalize baseline) proceed thresholds. The instrument and
+  classifier were removed and Landing 2 was not attempted. See
+  `reference/performance.md` for the measured close.
 - **E2: flat point+range output at the module boundary.** Evidence:
   the engine already builds every output contour flat -
   `BooleanExtractionBuffer.points` is one `Vec<IntPoint>` - and then
