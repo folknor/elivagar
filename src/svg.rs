@@ -170,7 +170,7 @@ fn build_grid_svg(
                             }
                             if !d.is_empty() {
                                 s.push_str(&format!(
-                                    "    <path id=\"p{path_id}\" d=\"{d}\" fill=\"{color}\" fill-rule=\"evenodd\" stroke=\"{color}\" stroke-width=\"0.5\"/>\n"
+                                    "    <path id=\"p{path_id}\" d=\"{d}\" fill=\"{color}\" fill-rule=\"nonzero\" stroke=\"{color}\" stroke-width=\"0.5\"/>\n"
                                 ));
                             }
                         }
