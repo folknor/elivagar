@@ -111,7 +111,9 @@ impl Input {
 pub struct OceanContract {
     /// `none`, `shapefile`, or `artifact`.
     pub mode: &'static str,
-    /// False when `--no-ocean-simplify` built a verbatim coverage baseline.
+    /// Whether the ocean VW simplifier ran. Always true on archives built
+    /// after `--no-ocean-simplify` was removed; false on older archives that
+    /// used it to build a verbatim coverage baseline.
     pub runtime_simplification: bool,
     /// `simplified` when a separate low-zoom shapefile serves z0-7, `full`
     /// when the full-resolution shapefile serves every zoom, `none` when

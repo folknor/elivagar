@@ -21,7 +21,6 @@
 //!     ocean_tiles: None,
 //!     ocean_artifact_key: None,
 //!     ocean_only_metadata: false,
-//!     no_ocean_simplify: false,
 //!     skip_to: None,
 //!     in_memory: false,
 //!     compression_level: 6,

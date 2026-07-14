@@ -18,10 +18,7 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | Flag | Description |
 |------|-------------|
 | `-o path` / `--output path` | Output PMTiles path (required) |
-| `--ocean path.shp` | Ocean shapefile (`water-polygons-split-3857`). Auto-detected from `data/` when omitted |
-| `--ocean-simplified path.shp` | Simplified ocean shapefile for z0-7. Auto-detected from `data/` when omitted |
-| `--no-ocean` | Disable ocean shapefile processing (skip auto-detection) |
-| `--no-ocean-simplify` | Emit ocean polygons verbatim (skip the ocean VW simplifier) for a same-source coverage baseline. Diagnostic only |
+| `--ocean SPEC` | Ocean input, repeatable. Omit entirely for no ocean. See below |
 | `--tmp-dir path` | Directory for temporary sort files (default: `data/tilegen_tmp`) |
 | `--skip-to ocean\|sort\|assemble` | Resume from a previous run's checkpoint |
 | `--in-memory` | Keep tile blob in RAM instead of streaming to disk |
@@ -65,14 +62,46 @@ Output goes to stdout by default.
 | `ELIVAGAR_NODE_STATS=1` | Print detailed SortedNodeStore diagnostics (chunk count, compression ratio, blob bytes). Requires a full scan of the node store during the PBF phase - fast on regional extracts, slow at planet scale. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after timing, without this variable. |
 | `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1` | Same as `--allow-unsafe-flat-index`. Bypasses unsorted-size and flat-index-size guardrails. |
 
+### Ocean input
+
+`--ocean` is repeatable and is the only ocean input. **Omit it entirely and the
+archive has no ocean.** Each value is one of:
+
+| Spec | Meaning |
+|------|---------|
+| `z0-z14:<file.shp>` | One shapefile serves every zoom |
+| `z0-z7:<file.shp>` | Low-zoom shapefile (the pre-generalized one) |
+| `z8-z14:<file.shp>` | Full-resolution shapefile |
+| `<file.pmtiles>` | Precomputed world-ocean artifact, built by `elivagar ocean-build` |
+
+Shapefiles must partition z0-z14, as either a single `z0-z14` or the `z0-z7` +
+`z8-z14` pair - the engine splits at z7/z8 and nowhere else, so any other
+partition is rejected rather than silently rounded to the split it can do. The
+two shapefiles are the OSM standard datasets from
+[osmdata.openstreetmap.de](https://osmdata.openstreetmap.de/): same coastlines,
+differing vertex density. At z0-z7 the whole world is at most 256x128 pixels,
+so full-resolution coastline detail is sub-pixel and the split just avoids
+paying for it.
+
+The `.pmtiles` artifact is a cache over the shapefiles, not a substitute, and
+is rejected on its own: an extract still computes its boundary band from the
+shapefiles, and the artifact's key is validated by re-hashing them.
+
+Nothing is auto-detected. A run's ocean is a function of its arguments, so two
+runs of the same binary on the same input cannot differ by which files happen
+to be on disk.
+
 ### Example
 
 ```
-elivagar run denmark-latest.osm.pbf -o denmark.pmtiles
+elivagar run denmark-latest.osm.pbf -o denmark.pmtiles \
+  --ocean z0-z7:data/simplified-water-polygons-split-3857/simplified_water_polygons.shp \
+  --ocean z8-z14:data/water-polygons-split-3857/water_polygons.shp \
+  --ocean data/ocean-tiles.pmtiles
 ```
 
-Ocean shapefiles are auto-detected from `data/water-polygons-split-3857/` and
-`data/simplified-water-polygons-split-3857/` if present. Use `--no-ocean` to skip.
+Drop the last line to compute the ocean from the shapefiles; drop all three for
+an archive with no ocean.
 
 ## Pipeline
 
@@ -80,7 +109,9 @@ Ocean shapefiles are auto-detected from `data/water-polygons-split-3857/` and
    If the PBF declares `Sort.Type_then_ID` (all major producers do), nodes are stored in a
    compact in-RAM index with FOR compression (~420 MB for Denmark, 75% of raw for large
    extracts). Unsorted PBFs fall back to a flat mmap file.
-2. **Ocean** -- ocean shapefile processing (auto-detected from `data/`, or explicit `--ocean`)
+2. **Ocean** -- ocean processing from the `--ocean` inputs. With an artifact, this
+   computes only the boundary band near the extract bbox edge and assemble merges
+   the artifact for the interior
 3. **Sort** -- external merge sort by Hilbert tile ID
 4. **Assembly** -- MVT encode + gzip + PMTiles write
 

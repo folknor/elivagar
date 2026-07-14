@@ -419,7 +419,6 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
         ocean_tiles: None,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
-        no_ocean_simplify: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -546,7 +545,6 @@ fn injected_pins_fixture(
         ocean_tiles: None,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
-        no_ocean_simplify: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1572,7 +1570,6 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         ocean_tiles: None,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
-        no_ocean_simplify: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1636,7 +1633,6 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         ocean_tiles: None,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
-        no_ocean_simplify: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1692,7 +1688,6 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         ocean_tiles: None,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
-        no_ocean_simplify: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1750,7 +1745,6 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         ocean_tiles: None,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
-        no_ocean_simplify: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -3417,7 +3411,7 @@ fn checkpoint_roundtrip() {
         dir.path(),
         &bounds,
         42,
-        &OceanMode::Computed,
+        &computed_ocean(),
         &checkpoint_provenance(),
     )
     .unwrap();
@@ -3428,8 +3422,27 @@ fn checkpoint_roundtrip() {
     assert!((loaded_bounds.max_x - 0.8).abs() < 1e-10);
     assert!((loaded_bounds.max_y - 0.9).abs() < 1e-10);
     assert_eq!(loaded_chunks, 42);
-    assert_eq!(ocean_mode, OceanMode::Computed);
+    assert_eq!(ocean_mode, computed_ocean());
     assert_eq!(provenance, checkpoint_provenance());
+}
+
+/// A computed-ocean mode with a synthetic source key.
+///
+/// Built by hand rather than through `OceanSourceKey::from_inputs`, which
+/// hashes real shapefiles off disk; these tests are about the checkpoint's
+/// encoding, not the hashing.
+fn computed_ocean() -> OceanMode {
+    OceanMode::Computed {
+        key: crate::ocean::OceanSourceKey {
+            full_shp_xxh128: 0xdead_beef,
+            full_shx_xxh128: 0xfeed_face,
+            simplified_shp_xxh128: Some(7),
+            simplified_shx_xxh128: Some(8),
+            min_zoom: 0,
+            max_zoom: 14,
+            policy_version: crate::ocean::OCEAN_POLICY_VERSION,
+        },
+    }
 }
 
 fn checkpoint_provenance() -> crate::pipeline::CheckpointProvenance {
@@ -3477,7 +3490,6 @@ fn minimal_config() -> TilegenConfig {
         ocean_tiles: None,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
-        no_ocean_simplify: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -3567,7 +3579,7 @@ fn checkpoint_records_the_input_it_was_built_from() {
         dir.path(),
         &bounds,
         1,
-        &OceanMode::Computed,
+        &computed_ocean(),
         &checkpoint_provenance(),
     )
     .expect("save checkpoint");
@@ -3599,7 +3611,7 @@ fn checkpoint_preserves_effective_paths() {
         dir.path(),
         &bounds,
         1,
-        &OceanMode::Computed,
+        &computed_ocean(),
         &crate::pipeline::CheckpointProvenance {
             input_xxh3_128: "aa5bb8650000000000000000deadbeef".to_string(),
             producer_config: crate::provenance::producer_config(&minimal_config()),
@@ -3629,11 +3641,7 @@ fn checkpoint_preserves_all_ocean_modes() {
         max_x: 1.0,
         max_y: 1.0,
     };
-    for mode in [
-        OceanMode::None,
-        OceanMode::Computed,
-        OceanMode::Band { key },
-    ] {
+    for mode in [OceanMode::None, computed_ocean(), OceanMode::Band { key }] {
         let dir = tempfile::tempdir().expect("create tempdir");
         save_checkpoint(dir.path(), &bounds, 1, &mode, &checkpoint_provenance())
             .expect("save checkpoint");
@@ -3642,6 +3650,61 @@ fn checkpoint_preserves_all_ocean_modes() {
             mode
         );
     }
+}
+
+/// The resume guards in `run` are `checkpoint_ocean_mode != ocean_mode`, so
+/// they only refuse a swapped computed source if the source is part of the
+/// mode's identity. Before the key existed, both sides of that comparison were
+/// the bare `Computed` and every swap compared equal: chunks built from one
+/// shapefile were reused by a `--skip-to sort` naming another, and the archive
+/// then described inputs that produced none of its ocean.
+#[test]
+fn computed_ocean_modes_differ_when_the_shapefile_differs() {
+    let base = computed_ocean();
+    let OceanMode::Computed { key } = &base else {
+        panic!("computed_ocean built the wrong variant");
+    };
+
+    let mut swapped_full = key.clone();
+    swapped_full.full_shp_xxh128 ^= 1;
+    assert_ne!(base, OceanMode::Computed { key: swapped_full });
+
+    // The split selection is identity too: the same full shapefile serving
+    // z0-z14 alone produces different chunks than it does at z8-z14 with a
+    // simplified pass below it.
+    let mut dropped_simplified = key.clone();
+    dropped_simplified.simplified_shp_xxh128 = None;
+    dropped_simplified.simplified_shx_xxh128 = None;
+    assert_ne!(
+        base,
+        OceanMode::Computed {
+            key: dropped_simplified
+        }
+    );
+
+    let mut narrower = key.clone();
+    narrower.max_zoom = 12;
+    assert_ne!(base, OceanMode::Computed { key: narrower });
+
+    assert_eq!(base, computed_ocean());
+}
+
+/// A computed source key survives the checkpoint round-trip exactly, including
+/// the absent-simplified case, which encodes as null rather than a hash.
+#[test]
+fn computed_ocean_source_key_roundtrips_without_a_simplified_pass() {
+    let key = crate::ocean::OceanSourceKey {
+        full_shp_xxh128: u128::MAX,
+        full_shx_xxh128: 0,
+        simplified_shp_xxh128: None,
+        simplified_shx_xxh128: None,
+        min_zoom: 0,
+        max_zoom: 14,
+        policy_version: crate::ocean::OCEAN_POLICY_VERSION,
+    };
+    let decoded =
+        crate::ocean::OceanSourceKey::from_json(&key.to_json()).expect("decode source key");
+    assert_eq!(decoded, key);
 }
 
 #[test]

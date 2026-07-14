@@ -1106,7 +1106,12 @@ fn write_provenance(
     };
     let ocean = crate::provenance::OceanContract {
         mode,
-        runtime_simplification: !config.no_ocean_simplify,
+        // Invariably true since --no-ocean-simplify was removed. The field
+        // stays because it is part of the comparability contract and archives
+        // built before that removal can carry false: dropping it would make
+        // those archives incomparable to these, which is the opposite of what
+        // the block is for.
+        runtime_simplification: true,
         low_zoom_source,
         // The artifact builder supplies its own key via config; a run that
         // consumes an artifact gets it from the resolved ocean mode instead.

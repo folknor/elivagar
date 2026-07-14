@@ -29,6 +29,112 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Bump whenever a change affects durable ocean tile bytes.
 pub const OCEAN_POLICY_VERSION: u32 = 1;
 
+/// Identity of the shapefile inputs behind computed ocean sort chunks.
+///
+/// Deliberately NOT `OceanArtifactKey`, which carries `compression_level`.
+/// This key exists to answer one question - may a `--skip-to` resume reuse
+/// the ocean chunks already on disk - so it covers exactly what the ocean
+/// phase bakes into those chunks: the source files and the zoom span. Chunks
+/// hold geometry records, not encoded tiles, so compression level cannot
+/// change them and gating on it would refuse a resume that is legitimate
+/// (`--compression-level` is an assemble-side setting, and the checkpoint
+/// producer config excludes those by design).
+///
+/// Without this the resume contract had a hole: a checkpoint recorded ocean
+/// mode as the bare string "computed", so chunks built from one shapefile
+/// could be reused by a resume naming another, and the archive's metadata
+/// would then describe inputs that produced none of its ocean geometry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OceanSourceKey {
+    pub full_shp_xxh128: u128,
+    pub full_shx_xxh128: u128,
+    pub simplified_shp_xxh128: Option<u128>,
+    pub simplified_shx_xxh128: Option<u128>,
+    pub min_zoom: u8,
+    pub max_zoom: u8,
+    pub policy_version: u32,
+}
+
+impl OceanSourceKey {
+    pub fn from_inputs(
+        full_shp: &std::path::Path,
+        simplified_shp: Option<&std::path::Path>,
+        min_zoom: u8,
+        max_zoom: u8,
+    ) -> std::io::Result<Self> {
+        let simplified_shx = simplified_shp.map(|p| p.with_extension("shx"));
+        Ok(Self {
+            full_shp_xxh128: hash_file(full_shp)?,
+            full_shx_xxh128: hash_file(&full_shp.with_extension("shx"))?,
+            simplified_shp_xxh128: simplified_shp.map(hash_file).transpose()?,
+            simplified_shx_xxh128: simplified_shx.as_deref().map(hash_file).transpose()?,
+            min_zoom,
+            max_zoom,
+            policy_version: OCEAN_POLICY_VERSION,
+        })
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        fn hash(v: u128) -> serde_json::Value {
+            serde_json::Value::String(format!("{v:032x}"))
+        }
+        fn optional(v: Option<u128>) -> serde_json::Value {
+            v.map_or(serde_json::Value::Null, hash)
+        }
+        serde_json::json!({
+            "full_shp_xxh128": hash(self.full_shp_xxh128),
+            "full_shx_xxh128": hash(self.full_shx_xxh128),
+            "simplified_shp_xxh128": optional(self.simplified_shp_xxh128),
+            "simplified_shx_xxh128": optional(self.simplified_shx_xxh128),
+            "min_zoom": self.min_zoom,
+            "max_zoom": self.max_zoom,
+            "policy_version": self.policy_version,
+        })
+    }
+
+    pub fn from_json(value: &serde_json::Value) -> std::io::Result<Self> {
+        let invalid =
+            || std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid ocean source key");
+        let parse = |field: &str| -> std::io::Result<u128> {
+            u128::from_str_radix(
+                value
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(invalid)?,
+                16,
+            )
+            .map_err(|_| invalid())
+        };
+        let parse_optional = |field: &str| -> std::io::Result<Option<u128>> {
+            match value.get(field) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::String(s)) => {
+                    u128::from_str_radix(s, 16).map(Some).map_err(|_| invalid())
+                }
+                Some(_) => Err(invalid()),
+            }
+        };
+        let small = |field: &str| -> std::io::Result<u32> {
+            u32::try_from(
+                value
+                    .get(field)
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(invalid)?,
+            )
+            .map_err(|_| invalid())
+        };
+        Ok(Self {
+            full_shp_xxh128: parse("full_shp_xxh128")?,
+            full_shx_xxh128: parse("full_shx_xxh128")?,
+            simplified_shp_xxh128: parse_optional("simplified_shp_xxh128")?,
+            simplified_shx_xxh128: parse_optional("simplified_shx_xxh128")?,
+            min_zoom: u8::try_from(small("min_zoom")?).map_err(|_| invalid())?,
+            max_zoom: u8::try_from(small("max_zoom")?).map_err(|_| invalid())?,
+            policy_version: small("policy_version")?,
+        })
+    }
+}
+
 /// The durable artifact invalidation key, encoded under `ocean_artifact`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OceanArtifactKey {
@@ -625,7 +731,6 @@ pub(crate) fn process_ocean_shapefile(
     max_zoom: u8,
     sort_writer: &mut SortWriter,
     pass_grid: Option<&OceanPassGrid>,
-    no_simplify: bool,
 ) -> Result<u64, std::io::Error> {
     if pass_grid.is_some_and(|grid| grid.band_is_empty(min_zoom, max_zoom)) {
         eprintln!("  Ocean band is empty; skipping shapefile geometry");
@@ -772,7 +877,7 @@ pub(crate) fn process_ocean_shapefile(
     let tile_filter = |z, tx, ty| pass_grid.is_none_or(|grid| ocean_band_tile(z, tx, ty, grid));
     let tile_filter_dyn: Option<&(dyn Fn(u8, u32, u32) -> bool + Sync)> =
         pass_grid.map(|_| &tile_filter as &(dyn Fn(u8, u32, u32) -> bool + Sync));
-    let params = ocean_params(min_zoom, max_zoom, tile_filter_dyn, no_simplify);
+    let params = ocean_params(min_zoom, max_zoom, tile_filter_dyn);
     // Per-piece item target for the parallel frontier. Root cells of a
     // large piece usually exceed this on their own (the frontier loop is
     // then a no-op); it only forces expansion for single-root ranges.
@@ -1176,17 +1281,12 @@ fn ocean_params<'a>(
     min_zoom: u8,
     max_zoom: u8,
     tile_filter: Option<&'a (dyn Fn(u8, u32, u32) -> bool + Sync)>,
-    no_simplify: bool,
 ) -> PyramidParams<'a> {
     PyramidParams {
         maxz: max_zoom,
         z_top: min_zoom,
         z_bottom: max_zoom,
-        dp_tol: if no_simplify {
-            &ocean_no_simplify_tol
-        } else {
-            &ocean_dp_tol
-        },
+        dp_tol: &ocean_dp_tol,
         min_area: &ocean_min_area,
         pins: None,
         tile_filter,
@@ -1196,10 +1296,6 @@ fn ocean_params<'a>(
 
 fn ocean_dp_tol(_z: u8) -> i64 {
     OCEAN_DP_TOL_PX
-}
-
-fn ocean_no_simplify_tol(_z: u8) -> i64 {
-    0
 }
 
 fn ocean_min_area(_z: u8) -> u64 {
@@ -1750,8 +1846,7 @@ mod tests {
         };
 
         let emitted =
-            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
-                .unwrap();
+            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
 
         assert!(emitted > 0, "expected ocean features to be emitted");
 
@@ -1779,16 +1874,9 @@ mod tests {
             max_y: 3.0,
         };
 
-        let emitted = process_ocean_shapefile(
-            &shp_path,
-            &disjoint_bounds,
-            0,
-            0,
-            &mut sort_writer,
-            None,
-            false,
-        )
-        .unwrap();
+        let emitted =
+            process_ocean_shapefile(&shp_path, &disjoint_bounds, 0, 0, &mut sort_writer, None)
+                .unwrap();
 
         assert_eq!(emitted, 0, "expected no ocean features for disjoint bounds");
     }
@@ -1809,8 +1897,7 @@ mod tests {
         };
 
         let emitted =
-            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
-                .unwrap();
+            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
         assert!(emitted > 0, "expected ocean features to be emitted");
 
         let mut reader = sort_writer.finish().unwrap();
@@ -1840,7 +1927,7 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
             .expect_err("short .shx header should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("invalid .shx file"));
@@ -1861,7 +1948,7 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
             .expect_err("missing .shx should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
@@ -1885,8 +1972,7 @@ mod tests {
             max_y: 1.0,
         };
         let emitted =
-            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None, false)
-                .unwrap();
+            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
         assert_eq!(emitted, 0, "truncated record should be skipped");
     }
 }

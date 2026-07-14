@@ -92,17 +92,25 @@ struct RunArgs {
     #[arg(long, default_value = "data/tilegen_tmp")]
     tmp_dir: PathBuf,
 
-    /// Ocean polygon shapefile (water-polygons-split-3857).
-    #[arg(long)]
-    ocean: Option<PathBuf>,
-
-    /// Simplified ocean shapefile for z0-7.
-    #[arg(long)]
-    ocean_simplified: Option<PathBuf>,
-
-    /// Precomputed world-ocean PMTiles artifact.
-    #[arg(long)]
-    ocean_tiles: Option<PathBuf>,
+    /// Ocean input. Repeatable; omit entirely for no ocean.
+    ///
+    ///   --ocean z0-z14:water_polygons.shp        one shapefile, all zooms
+    ///   --ocean z0-z7:simplified_water_polygons.shp
+    ///   --ocean z8-z14:water_polygons.shp        the two-pass split
+    ///   --ocean ocean-tiles.pmtiles              precomputed artifact
+    ///
+    /// Shapefile entries must partition z0-z14 exactly. The engine implements
+    /// one split, at z7/z8, so the only accepted partitions are a single
+    /// z0-z14 entry or the z0-z7 + z8-z14 pair; anything else is rejected
+    /// rather than silently rounded to the split it can actually do.
+    ///
+    /// A .pmtiles entry is a cache over the shapefile entries, not a
+    /// substitute for them: an extract still computes its boundary band from
+    /// the shapefiles, and validating the artifact's key means re-hashing the
+    /// source it claims to be built from. So it is additive, and rejected on
+    /// its own.
+    #[arg(long, value_name = "SPEC")]
+    ocean: Vec<String>,
 
     /// Resume from a checkpoint.
     #[arg(long)]
@@ -146,14 +154,6 @@ struct RunArgs {
     #[arg(long)]
     locations_on_ways: bool,
 
-    /// Disable ocean shapefile processing (skip auto-detection).
-    #[arg(long)]
-    no_ocean: bool,
-
-    /// Disable ocean polygon simplification for a same-source coverage baseline.
-    #[arg(long)]
-    no_ocean_simplify: bool,
-
     /// Tile payload format.
     #[arg(long, value_enum, default_value_t = TileFormatArg::Mvt)]
     tile_format: TileFormatArg,
@@ -194,10 +194,16 @@ struct RunArgs {
 
 #[derive(Parser)]
 struct OceanBuildArgs {
-    #[arg(long)]
-    ocean: PathBuf,
-    #[arg(long)]
-    ocean_simplified: Option<PathBuf>,
+    /// Ocean shapefile input, repeatable, same spelling as `run --ocean`:
+    /// either a single `z0-z14:<shp>` or the `z0-z7:<shp>` + `z8-z14:<shp>`
+    /// split. A `.pmtiles` entry is rejected here - this is the command that
+    /// builds one.
+    ///
+    /// The zoom split is part of the artifact's identity, so it has to be
+    /// stated the same way on both sides: an artifact built here is only valid
+    /// for a `run` whose --ocean names the same shapefiles.
+    #[arg(long, value_name = "SPEC", required = true)]
+    ocean: Vec<String>,
     #[arg(short, long)]
     output: PathBuf,
     #[arg(long, default_value = "data/ocean-build_tmp")]
@@ -369,23 +375,110 @@ fn parse_byte_size_min_1m(s: &str) -> Result<usize, String> {
     }
 }
 
-/// Detect ocean shapefiles in the given data directory.
+/// The ocean inputs named by `--ocean`, after parsing and validation.
 ///
-/// Returns (full-resolution, simplified) paths if they exist on disk.
-fn detect_ocean(data_dir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
-    let full = data_dir
-        .join("water-polygons-split-3857")
-        .join("water_polygons.shp");
-    let simplified = data_dir
-        .join("simplified-water-polygons-split-3857")
-        .join("simplified_water_polygons.shp");
-    (
-        full.exists().then_some(full),
-        simplified.exists().then_some(simplified),
-    )
+/// `low` is `Some` only for the two-pass z0-z7 + z8-z14 split; a single
+/// z0-z14 entry lands in `high` alone and serves every zoom, matching
+/// `ocean::selected_pass_grid`, which picks the last grid unless two grids are
+/// configured and z <= 7.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OceanInputs {
+    low: Option<PathBuf>,
+    high: Option<PathBuf>,
+    artifact: Option<PathBuf>,
+}
+
+/// Parse one `--ocean` value into either a zoom-ranged shapefile or an
+/// artifact. Nothing here consults the filesystem: a spec means what it says,
+/// and a path that does not exist is diagnosed later, by the code that opens
+/// it, rather than silently changing what the run is.
+fn parse_ocean_spec(spec: &str) -> Result<(Option<(u8, u8)>, PathBuf), String> {
+    let Some((range, path)) = spec.split_once(':') else {
+        // No range prefix: only the artifact is accepted bare, because it is
+        // the one input whose zoom coverage is a property of the file.
+        if Path::new(spec).extension().is_some_and(|e| e == "pmtiles") {
+            return Ok((None, PathBuf::from(spec)));
+        }
+        return Err(format!(
+            "'{spec}' needs a zoom range, e.g. z0-z14:{spec} (bare paths are accepted only for a .pmtiles artifact)"
+        ));
+    };
+    let parse_z = |t: &str| -> Result<u8, String> {
+        t.strip_prefix('z')
+            .ok_or_else(|| format!("'{t}' is not a zoom (expected z0-z14)"))?
+            .parse::<u8>()
+            .map_err(|_| format!("'{t}' is not a zoom (expected z0-z14)"))
+    };
+    let (lo, hi) = range
+        .split_once("-")
+        .ok_or_else(|| format!("'{range}' is not a zoom range (expected z0-z7)"))?;
+    let (lo, hi) = (parse_z(lo)?, parse_z(hi)?);
+    if lo > hi || hi > 14 {
+        return Err(format!("'{range}' is not a zoom range within z0-z14"));
+    }
+    Ok((Some((lo, hi)), PathBuf::from(path)))
+}
+
+/// Validate the whole `--ocean` set and map it onto the two shapefile passes.
+///
+/// The zoom ranges are checked against what the engine can actually do rather
+/// than accepted and rounded: `selected_pass_grid` implements exactly one
+/// split, at z7/z8, so those are the only partitions expressible. Accepting
+/// `z0-z5` and quietly serving a z7 split would put a false statement in the
+/// recorded invocation, which is the whole thing this flag exists to prevent.
+fn resolve_ocean_inputs(specs: &[String]) -> Result<OceanInputs, String> {
+    let mut out = OceanInputs::default();
+    let mut ranges: Vec<((u8, u8), PathBuf)> = Vec::new();
+    for spec in specs {
+        match parse_ocean_spec(spec)? {
+            (None, path) => {
+                if out.artifact.replace(path).is_some() {
+                    return Err("--ocean names more than one .pmtiles artifact".to_string());
+                }
+            }
+            (Some(range), path) => ranges.push((range, path)),
+        }
+    }
+    ranges.sort_by_key(|(r, _)| *r);
+    match ranges.as_slice() {
+        [] => {}
+        [((0, 14), full)] => out.high = Some(full.clone()),
+        [((0, 7), low), ((8, 14), high)] => {
+            out.low = Some(low.clone());
+            out.high = Some(high.clone());
+        }
+        _ => {
+            return Err(
+                "--ocean shapefiles must partition z0-z14 as either z0-z14 alone or z0-z7 plus z8-z14 (the engine splits at z7/z8 and nowhere else)"
+                    .to_string(),
+            );
+        }
+    }
+    if out.artifact.is_some() && out.high.is_none() {
+        return Err(
+            "--ocean names a .pmtiles artifact but no shapefile: an extract computes its boundary band from the shapefiles, and the artifact's key is validated by re-hashing them"
+                .to_string(),
+        );
+    }
+    Ok(out)
 }
 
 fn ocean_build_command(args: &OceanBuildArgs) {
+    let inputs = match resolve_ocean_inputs(&args.ocean) {
+        Ok(inputs) if inputs.artifact.is_some() => {
+            eprintln!("error: ocean-build --ocean takes shapefiles, not a .pmtiles artifact");
+            std::process::exit(2);
+        }
+        Ok(inputs) => inputs,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    };
+    let Some(full) = inputs.high.as_deref() else {
+        eprintln!("error: ocean-build needs a full-resolution shapefile");
+        std::process::exit(2);
+    };
     let threads = args.threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(std::num::NonZeroUsize::get)
@@ -396,8 +489,8 @@ fn ocean_build_command(args: &OceanBuildArgs) {
         .build_global()
         .expect("failed to configure rayon thread pool");
     if let Err(e) = elivagar::ocean_build(
-        &args.ocean,
-        args.ocean_simplified.as_deref(),
+        full,
+        inputs.low.as_deref(),
         &args.output,
         &args.tmp_dir,
         args.compression_level,
@@ -843,19 +936,17 @@ fn run(args: RunArgs) {
         SkipToArg::Assemble => elivagar::SkipTo::Assemble,
     });
 
-    // Resolve ocean shapefiles: explicit flags take priority, then auto-detect
-    // from data/ relative to cwd, unless --no-ocean suppresses it entirely.
-    let (ocean, ocean_simplified, ocean_tiles) = if args.no_ocean {
-        (None, None, None)
-    } else {
-        let auto = detect_ocean(Path::new("data"));
-        let artifact = Path::new("data").join("ocean-tiles.pmtiles");
-        (
-            args.ocean.or(auto.0),
-            args.ocean_simplified.or(auto.1),
-            args.ocean_tiles
-                .or_else(|| artifact.exists().then_some(artifact)),
-        )
+    // The ocean is exactly what --ocean names. Nothing is inferred from the
+    // filesystem: a run used to change its ocean path depending on whether
+    // data/ocean-tiles.pmtiles happened to exist, which made two runs of the
+    // same binary on the same input differ with nothing in the recorded
+    // invocation to say how.
+    let ocean_inputs = match resolve_ocean_inputs(&args.ocean) {
+        Ok(inputs) => inputs,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
     };
 
     let allow_unsafe_flat_index =
@@ -867,12 +958,11 @@ fn run(args: RunArgs) {
         tmp_dir: args.tmp_dir,
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: ocean,
-        ocean_simplified_shapefile: ocean_simplified,
-        ocean_tiles,
+        ocean_shapefile: ocean_inputs.high,
+        ocean_simplified_shapefile: ocean_inputs.low,
+        ocean_tiles: ocean_inputs.artifact,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
-        no_ocean_simplify: args.no_ocean_simplify,
         skip_to,
         in_memory: args.in_memory,
         compression_level: args.compression_level,
@@ -994,6 +1084,86 @@ fn env_var_true(name: &str) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn ocean(specs: &[&str]) -> Result<OceanInputs, String> {
+        let owned: Vec<String> = specs.iter().map(|s| (*s).to_string()).collect();
+        resolve_ocean_inputs(&owned)
+    }
+
+    #[test]
+    fn ocean_absent_means_no_ocean() {
+        assert_eq!(ocean(&[]).unwrap(), OceanInputs::default());
+    }
+
+    #[test]
+    fn ocean_single_full_range_serves_every_zoom() {
+        let got = ocean(&["z0-z14:full.shp"]).unwrap();
+        assert_eq!(got.high, Some(PathBuf::from("full.shp")));
+        assert_eq!(got.low, None);
+        assert_eq!(got.artifact, None);
+    }
+
+    #[test]
+    fn ocean_split_maps_low_and_high_passes() {
+        // Order of the flags must not matter; the ranges decide the passes.
+        let got = ocean(&["z8-z14:full.shp", "z0-z7:simple.shp"]).unwrap();
+        assert_eq!(got.low, Some(PathBuf::from("simple.shp")));
+        assert_eq!(got.high, Some(PathBuf::from("full.shp")));
+    }
+
+    #[test]
+    fn ocean_artifact_is_additive_to_the_shapefiles() {
+        let got = ocean(&["z0-z14:full.shp", "ocean-tiles.pmtiles"]).unwrap();
+        assert_eq!(got.high, Some(PathBuf::from("full.shp")));
+        assert_eq!(got.artifact, Some(PathBuf::from("ocean-tiles.pmtiles")));
+    }
+
+    #[test]
+    fn ocean_artifact_alone_is_rejected() {
+        // An extract computes its boundary band from the shapefiles and the
+        // artifact key is validated by re-hashing them, so an artifact with no
+        // shapefile is an incomplete spec, not a world build.
+        let err = ocean(&["ocean-tiles.pmtiles"]).unwrap_err();
+        assert!(err.contains("no shapefile"), "{err}");
+    }
+
+    #[test]
+    fn ocean_rejects_a_split_the_engine_cannot_do() {
+        // selected_pass_grid splits at z7/z8 and nowhere else. Accepting this
+        // and serving a z7 split would put a false statement in the recorded
+        // invocation.
+        let err = ocean(&["z0-z5:simple.shp", "z6-z14:full.shp"]).unwrap_err();
+        assert!(err.contains("partition z0-z14"), "{err}");
+    }
+
+    #[test]
+    fn ocean_rejects_ranges_that_leave_a_gap() {
+        let err = ocean(&["z0-z7:simple.shp"]).unwrap_err();
+        assert!(err.contains("partition z0-z14"), "{err}");
+    }
+
+    #[test]
+    fn ocean_rejects_a_bare_shapefile() {
+        let err = ocean(&["full.shp"]).unwrap_err();
+        assert!(err.contains("needs a zoom range"), "{err}");
+    }
+
+    #[test]
+    fn ocean_rejects_two_artifacts() {
+        let err = ocean(&["z0-z14:full.shp", "a.pmtiles", "b.pmtiles"]).unwrap_err();
+        assert!(err.contains("more than one"), "{err}");
+    }
+
+    #[test]
+    fn ocean_rejects_malformed_ranges() {
+        assert!(
+            ocean(&["0-14:full.shp"])
+                .unwrap_err()
+                .contains("not a zoom")
+        );
+        assert!(ocean(&["z9-z2:full.shp"]).unwrap_err().contains("range"));
+        assert!(ocean(&["z0-z15:full.shp"]).unwrap_err().contains("range"));
+    }
 
     #[test]
     fn test_parse_byte_size_megabytes() {

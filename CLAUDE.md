@@ -8,23 +8,15 @@
 - Never chain commands with ;
 - Never pipe commands with |
 
-### Listing `data/`
+### Listing files
 
-`data/` is a symlink (it points at the big NVMe mount, see `brokkr env`). The
-harness refuses to traverse it, so `ls data/...` comes back as a permission
-denial rather than a listing - that denial is the symlink, not a real
-restriction, and it is not something to work around by other means.
+`ls` is the default and works everywhere except one place.
 
-Use zsh's builtin `print` instead, which globs without the traversal:
+`data/` is a symlink to the big NVMe mount (see `brokkr env`), and the
+claude code harness refuses to traverse it, so `ls data/...` returns a
+permission denial. That denial is because of the symlink.
 
-```
-print -l data/*.pmtiles data/blessed/* data/tilegen/*
-```
-
-`print` only expands globs - it does not stat. There is no `-la`; flags like
-that are echoed back as literal words. For sizes and mtimes, reach for a tool
-that reads the file itself, or use `brokkr` (`brokkr env` for datasets,
-`brokkr pmtiles-inspect` for archive headers).
+To ls files in data/, use `print` instead.
 
 ### Communication rules
 

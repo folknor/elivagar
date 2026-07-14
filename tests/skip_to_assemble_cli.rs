@@ -10,7 +10,7 @@ use pbfhogg::MemberId;
 use pbfhogg::block_builder::{self, BlockBuilder, MemberData, Metadata};
 use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 
-/// A v5 checkpoint that a default-flag `--skip-to assemble` run will accept.
+/// A v6 checkpoint that a default-flag `--skip-to assemble` run will accept.
 ///
 /// The producer config must equal what the CLI resolves, so it is built from
 /// a `TilegenConfig` carrying the documented CLI defaults - zooms 0-14,
@@ -18,6 +18,11 @@ use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 /// `--polygon-simplify-factor 1.0` - and run through the same
 /// `producer_config` the pipeline uses, rather than hand-encoded JSON that
 /// would drift out of agreement silently.
+///
+/// The version is the one hand-encoded field. Bumping CHECKPOINT_VERSION
+/// without updating it fails this test loudly, which is the intent: the
+/// version is what a resume checks first, so a test asserting resume
+/// behaviour must state which format it is asserting about.
 fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
     let mut seam = [0u8; elivagar::shortbread::Layer::count()];
     seam[elivagar::shortbread::Layer::Boundaries as usize] = 8;
@@ -32,7 +37,6 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         ocean_tiles: None,
         ocean_artifact_key: None,
         ocean_only_metadata: false,
-        no_ocean_simplify: false,
         skip_to: None,
         in_memory: false,
         compression_level: 6,
@@ -51,7 +55,7 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         polygon_simplify_factor: 1.0,
     };
     serde_json::json!({
-        "version": 5,
+        "version": 6,
         "bounds": [0.0, 0.0, 1.0, 1.0],
         "chunks": 1,
         "ocean": "none",
@@ -299,7 +303,6 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
             &out_s,
             "--tmp-dir",
             &tmp_s,
-            "--no-ocean",
             "--threads",
             "1",
         ],
@@ -329,7 +332,6 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
             &out_s,
             "--tmp-dir",
             &tmp_s,
-            "--no-ocean",
             "--threads",
             "1",
             "--skip-to",
@@ -366,7 +368,7 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
 
     // A coherent checkpoint, so every resume guard passes and the flow reaches
     // the chunk-state validation this test is about: the ocean-mode guard (the
-    // run uses --no-ocean, matching "none"), the input-identity guard (needs
+    // run names no --ocean, matching "none"), the input-identity guard (needs
     // this very PBF's hash), and the producer-config guard (must match what
     // the CLI resolves for the flags below).
     //
@@ -391,7 +393,6 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
         &out_s,
         "--tmp-dir",
         &tmp_s,
-        "--no-ocean",
         "--threads",
         "1",
         "--skip-to",
@@ -413,7 +414,6 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
         &out_s,
         "--tmp-dir",
         &tmp_s,
-        "--no-ocean",
         "--threads",
         "1",
         "--skip-to",
@@ -445,7 +445,6 @@ fn missing_ref_metrics_emitted_in_full_run_and_omitted_on_skip_to_sort() {
             &out_s,
             "--tmp-dir",
             &tmp_s,
-            "--no-ocean",
             "--threads",
             "1",
         ],
@@ -483,7 +482,6 @@ fn missing_ref_metrics_emitted_in_full_run_and_omitted_on_skip_to_sort() {
             &out_s,
             "--tmp-dir",
             &tmp_s,
-            "--no-ocean",
             "--threads",
             "1",
             "--skip-to",

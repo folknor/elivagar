@@ -210,7 +210,17 @@ Build/bench/verify tooling is in `brokkr`. One helper shell script lives in
 `scripts/` for a gate brokkr does not wrap.
 
 **Shell (`scripts/`, run from repo root):**
-- `ocean-coverage.sh <archive.pmtiles> [<archive.pmtiles> ...] [-- <ocean-coverage flags>]` - drives the ocean coverage discriminator that `brokkr` cannot: there is no `ocean-coverage` wrapper and no `--no-ocean-simplify` passthrough on `tilegen`, so it invokes the `elivagar` binary directly. It builds a fresh `elivagar` release, builds and caches a `--no-ocean-simplify` verbatim baseline for the dataset (rebuilt when the binary or the PBF is newer than the cache), then runs `elivagar ocean-coverage` for EACH archive passed, so one invocation runs a whole comparison (e.g. a DP build that should FIRE and a VW build that should CLEAR). Flags after `--` pass through to `ocean-coverage`. Dataset paths default to the norway locations extract; override via env (`PBF=`, `OCEAN=`, `OCEAN_SIMPLIFIED=`, `REF=` - change `REF` when you change dataset, the baseline is dataset-specific). Diagnostic, not a gate - see the `ocean-coverage` subcommand caveat.
+- `ocean-coverage.sh` - **BROKEN as of 2026-07-14, pending a decision to fix or
+  delete.** It drives the ocean coverage discriminator by invoking the
+  `elivagar` binary directly, and its step 2 builds the verbatim baseline with
+  `--ocean`/`--ocean-simplified`/`--no-ocean-simplify`. All three spellings
+  were removed with the ocean CLI rework: the first two have a new syntax, but
+  `--no-ocean-simplify` is gone outright, so the baseline it caches cannot be
+  produced at all and the script cannot be repaired by rewriting flags. It
+  drove a diagnostic that was already demoted from gate to triage (one
+  confirmed false negative; see the `ocean-coverage` subcommand caveat), so the
+  live question is whether that diagnostic is worth keeping a verbatim-emit
+  path in the production binary for.
 
 **Node (`scripts/validate/`, pnpm; run from that directory):**
 - `earcut-oracle.mjs <file.pmtiles> [layer] [threshold]` - **the MapLibre tessellation-fidelity gate.** Decodes every tile with @mapbox/vector-tile, groups rings with maplibre-gl's verbatim self-calibrating `classifyRings` (maxRings=500), tessellates each polygon with earcut, and reports per-zoom `earcut.deviation` plus misattached-hole counts (hole bbox outside its assigned outer). Pass = 0 over threshold, 0 misattached, on every polygon layer. This is the oracle that caught the R23 ClosePath cursor bug after every internal validator passed for three months - run it on any change that touches geometry or MVT encoding.
@@ -280,16 +290,18 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 Sequential, same PBF input:
 - **phase12**: PBF read + OSM feature emission → partitioned sort chunks + checkpoint
 - **ocean**: shapefile read + ocean feature emission → more sort chunks.
-  When `data/ocean-tiles.pmtiles` (the durable world-ocean artifact,
-  built once per shapefile release by `elivagar ocean-build`) is present
-  and the run matches the MVT+gzip z0-14 build shape, this phase
-  computes only the boundary band near the extract bbox edge (empty at
-  world bounds) and assemble merges the artifact as run copies for the
-  interior. Artifact-served tiles differ benignly from extract-computed
-  ones (descent seams depend on the piece clip extent; adjudicated
-  equivalent in the viewer 2026-07-12, see
+  When `--ocean` names the durable world-ocean artifact (built once per
+  shapefile release by `elivagar ocean-build`), this phase computes only
+  the boundary band near the extract bbox edge (empty at world bounds)
+  and assemble merges the artifact as run copies for the interior. The
+  artifact is used because it was named, never because it was found: it
+  serves only the MVT+gzip z0-14 contract at a matching compression
+  level, and naming it for any other run is an error, not a silent
+  fallback to computed ocean. Artifact-served tiles differ benignly from
+  extract-computed ones (descent seams depend on the piece clip extent;
+  adjudicated equivalent in the viewer 2026-07-12, see
   notes/ocean-tile-stream-spec.md) - so the blessed regress baseline is
-  artifact-active, the gate machine must carry the same artifact, and
+  artifact-active, the gate machine must pass the same artifact, and
   rotating the artifact forces a bless rotation.
 - **sort**: partition bookkeeping only (near-zero; the merge is deferred)
 - **assemble**: streamed per-partition merge → MVT encode + gzip + PMTiles write (parallel partition readers; merge/decompress cost lands in `assemble_reader_ns`)
@@ -299,26 +311,42 @@ Sequential, same PBF input:
 
 ## CLI
 
+**`reference/cli.md` is the complete surface.** It is the reference; this
+section covers only what a session reaches for most, and does not repeat the
+flag lists - the duplicate list that used to live here is how `--ocean-tiles`
+stayed undocumented for the two days it mattered.
+
+### The rule
+
+**Either it is explicit, or it is not set.** Nothing is inferred from the
+filesystem. Ocean auto-detection was removed on 2026-07-14 because it put the
+run's meaning in the filesystem instead of the invocation: `cli_args` records
+the literal subprocess call, so no bench row could be classified after the fact
+as artifact-active or computed, and a denmark archive was blessed as the
+regress baseline while the artifact was silently absent.
+
 ### `elivagar run <INPUT> -o <OUTPUT> [flags]`
 
-- `-o` / `--output` - output PMTiles path (required)
-- `--tmp-dir path` - temporary directory for sort chunks (default: `data/tilegen_tmp`)
-- `--ocean path.shp` - ocean polygon shapefile (water-polygons-split-3857). Auto-detected from `data/` when omitted.
-- `--ocean-simplified path.shp` - simplified ocean shapefile for z0-7. Auto-detected from `data/` when omitted.
-- `--no-ocean` - disable ocean shapefile processing (skip auto-detection)
-- `--no-ocean-simplify` - emit ocean polygons verbatim, skipping the ocean VW simplifier, to build a same-source coverage baseline. Diagnostic only; not for production tiles.
-- `--skip-to ocean|sort` - resume from checkpoint
-- `--in-memory` - keep tile blob in RAM (faster for small extracts)
-- `--compression-level 0-10` - compression level (default 6)
-- `--tile-compression gzip|brotli` - tile compression algorithm (default gzip)
-- `--force-sorted` - force compact node store even without PBF header flag
-- `--locations-on-ways` - PBF has node coordinates embedded in ways
-- `-j N` / `--threads N` - thread count (default: logical CPUs)
-- `--sort-budget <size>` - sort chunk memory budget (default 1G). Accepts `256M`, `512M`, `1G`, or raw bytes. Minimum 64M. Lower values reduce peak RSS during PBF processing at the cost of more merge chunks.
-- `--way-budget <size>` - in-flight way processing budget (default 128M standard, 256M in `--locations-on-ways` mode). Minimum 1M.
-- `--assemble-budget <size>` - tile assembly batch budget (default 32M). Minimum 1M.
-- `--fanout-cap-default N` - default fanout cap for all polygon layers (0 = uncapped). Per-layer overrides take precedence.
-- `--fanout-cap layer=N,...` - per-layer fanout caps (e.g. `water_polygons=2048,boundaries=4096`). Features whose bbox tile count exceeds the cap are skipped at that zoom. Comma-separated, strict layer name validation.
+Ocean input is `--ocean <SPEC>`, repeatable; **omit it entirely for no ocean.**
+Specs are `z0-z7:<shp>`, `z8-z14:<shp>`, `z0-z14:<shp>`, or `<file.pmtiles>`.
+Shapefiles must partition z0-z14 as either `z0-z14` alone or the `z0-z7` +
+`z8-z14` pair - the engine splits at z7/z8 and nowhere else, and any other
+partition is rejected rather than silently rounded. The `.pmtiles` artifact is
+a cache over the shapefiles, not a substitute: an extract computes its boundary
+band from them and the artifact key is validated by re-hashing them, so the
+artifact is rejected on its own. The production shape:
+
+```
+--ocean z0-z7:data/simplified-water-polygons-split-3857/simplified_water_polygons.shp
+--ocean z8-z14:data/water-polygons-split-3857/water_polygons.shp
+--ocean data/ocean-tiles.pmtiles
+```
+
+Everything else - budgets (`--sort-budget`, `--way-budget`,
+`--assemble-budget`), formats (`--tile-format`, `--tile-compression`,
+`--compress-sort-chunks`), geometry (`--fanout-cap`, `--seam-reconcile-layers`,
+`--polygon-simplify-factor`), `--skip-to`, `--locations-on-ways`, `--threads` -
+is in `reference/cli.md`.
 
 ### `elivagar inspect <FILE>`
 
@@ -365,8 +393,11 @@ Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, 
 
 ### `elivagar ocean-coverage <FILE> --baseline <REF> [--zmin Z] [--zmax Z] [--threshold-2x N] [--layer L]`
 
-Diagnostic, NOT a landing gate. Measures per-tile one-sided ocean coverage
-loss of FILE against a verbatim same-source baseline REF (built with `--no-ocean-simplify`).
+Diagnostic, NOT a landing gate, and currently UNFEEDABLE: its baseline was
+built with `--no-ocean-simplify`, removed 2026-07-14, and there is no other way
+to produce a verbatim same-source comparand. Only an archive built before that
+removal still works as `--baseline`. Measures per-tile one-sided ocean coverage
+loss of FILE against that baseline REF.
 For each z in `[zmin, zmax]` it clips both archives to the tile extent, computes
 `area(ref) - area(ref INTERSECT file)` in 2x-pixel^2 units, prints every tile
 over `--threshold-2x` plus a per-zoom max/p99/worst summary, and exits nonzero

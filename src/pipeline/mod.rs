@@ -75,10 +75,14 @@ pub enum SkipTo {
 }
 
 /// Ocean producer selected for the checkpointed chunk set.
+///
+/// Every arm that produces chunks carries the identity of what produced them,
+/// so a `--skip-to` resume can refuse chunks built from different inputs
+/// instead of blending two contracts into one archive.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OceanMode {
     None,
-    Computed,
+    Computed { key: crate::ocean::OceanSourceKey },
     Band { key: crate::ocean::OceanArtifactKey },
 }
 
@@ -126,8 +130,6 @@ pub struct TilegenConfig {
     pub ocean_artifact_key: Option<crate::ocean::OceanArtifactKey>,
     /// Restrict PMTiles metadata to the ocean layer for an ocean artifact.
     pub ocean_only_metadata: bool,
-    /// Disable ocean simplification for a same-source coverage baseline.
-    pub no_ocean_simplify: bool,
     /// Skip to a later phase, reusing checkpoint data from a previous run.
     pub skip_to: Option<SkipTo>,
     /// Keep tile blob in memory instead of streaming to a temp file.
@@ -193,15 +195,22 @@ pub struct TilegenConfig {
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
-/// v5 is JSON and records everything a resume must verify: the input hash, the
+/// v6 is JSON and records everything a resume must verify: the input hash, the
 /// producer config the chunks were built under, and the effective paths.
+///
+/// v6 closed the last hole in that list. v5 recorded computed ocean as the bare
+/// string "computed", naming no source, so chunks built from one shapefile
+/// could be reused by a resume naming another while the archive's metadata
+/// described the second - the artifact arm had carried its key since it was
+/// introduced, and the computed arm simply had not. Both arms now carry the
+/// identity of their producer.
 ///
 /// v3 and earlier stored only bounds, chunk count and ocean mode, so a resume
 /// could silently reuse chunks built from a different PBF or a different zoom
 /// range. v4 added the input hash and effective paths but kept the
 /// whitespace-positional encoding, where every new field shifts an index and a
 /// miscount is a silent misparse. Neither is accepted; re-run a full tilegen.
-const CHECKPOINT_VERSION: u32 = 5;
+const CHECKPOINT_VERSION: u32 = 6;
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
@@ -238,7 +247,7 @@ fn save_checkpoint(
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let ocean = match ocean_mode {
         OceanMode::None => serde_json::json!("none"),
-        OceanMode::Computed => serde_json::json!("computed"),
+        OceanMode::Computed { key } => serde_json::json!({ "computed": key.to_json() }),
         OceanMode::Band { key } => serde_json::json!({
             "band": serde_json::from_str::<serde_json::Value>(&key.json())
                 .map_err(|e| PipelineError(format!("ocean key is not valid JSON: {e}")))?,
@@ -324,7 +333,9 @@ fn load_checkpoint(
     .map_err(|_| stale())?;
     let ocean_mode = match &doc["ocean"] {
         serde_json::Value::String(s) if s == "none" => OceanMode::None,
-        serde_json::Value::String(s) if s == "computed" => OceanMode::Computed,
+        serde_json::Value::Object(o) if o.contains_key("computed") => OceanMode::Computed {
+            key: crate::ocean::OceanSourceKey::from_json(&o["computed"])?,
+        },
         serde_json::Value::Object(o) if o.contains_key("band") => OceanMode::Band {
             key: crate::ocean::OceanArtifactKey::from_json(&o["band"])?,
         },
@@ -359,27 +370,46 @@ fn load_checkpoint(
     Ok((bounds, chunks, ocean_mode, provenance))
 }
 
+/// Resolve the ocean producer from the config, or fail.
+///
+/// Nothing here degrades silently. Every input is named explicitly on the
+/// command line, so a named artifact that cannot be activated is a mistake in
+/// the invocation, not a cue to quietly build something else: this used to
+/// print "Ocean artifact inactive" to stderr and carry on computing, and
+/// brokkr reads nothing from tilegen's stderr under `--bench`, so a bench run
+/// could switch ocean paths on four different conditions and leave no trace in
+/// the results row, the sidecar, or the archive.
 fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineError> {
+    let computed = |config: &TilegenConfig| -> Result<OceanMode, PipelineError> {
+        let Some(full) = config.ocean_shapefile.as_deref() else {
+            return Ok(OceanMode::None);
+        };
+        Ok(OceanMode::Computed {
+            key: crate::ocean::OceanSourceKey::from_inputs(
+                full,
+                config.ocean_simplified_shapefile.as_deref(),
+                config.min_zoom,
+                config.max_zoom,
+            )
+            .map_err(|e| PipelineError(format!("ocean shapefile is unreadable: {e}")))?,
+        })
+    };
     let Some(path) = config.ocean_tiles.as_deref() else {
-        return Ok(if config.ocean_shapefile.is_some() {
-            OceanMode::Computed
-        } else {
-            OceanMode::None
-        });
+        return computed(config);
     };
     if config.tile_format != TilePayloadFormat::Mvt
         || config.tile_compression != TileCompression::Gzip
         || config.min_zoom != 0
         || config.max_zoom != 14
     {
-        eprintln!(
-            "  Ocean artifact inactive: this tile format, compression, or zoom range uses computed ocean"
-        );
-        return Ok(if config.ocean_shapefile.is_some() {
-            OceanMode::Computed
-        } else {
-            OceanMode::None
-        });
+        return Err(PipelineError(format!(
+            "ocean artifact {} was named but cannot serve this run: it is built for the MVT + gzip + z0-14 contract, and this run is {:?} + {:?} + z{}-z{}. Drop the artifact from --ocean to compute the ocean instead.",
+            path.display(),
+            config.tile_format,
+            config.tile_compression,
+            config.min_zoom,
+            config.max_zoom,
+        )));
     }
     if !path.exists() {
         return Err(PipelineError(format!(
@@ -389,12 +419,12 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
     }
     let declared = crate::ocean::OceanTiles::declared_key(path)?;
     if declared.compression_level != config.compression_level {
-        eprintln!("  Ocean artifact inactive: compression level differs; using computed ocean");
-        return Ok(if config.ocean_shapefile.is_some() {
-            OceanMode::Computed
-        } else {
-            OceanMode::None
-        });
+        return Err(PipelineError(format!(
+            "ocean artifact {} was built at compression level {} but this run uses {}. Rebuild the artifact, match --compression-level, or drop the artifact from --ocean.",
+            path.display(),
+            declared.compression_level,
+            config.compression_level,
+        )));
     }
     let full = config.ocean_shapefile.as_deref().ok_or_else(|| {
         PipelineError("ocean artifact requires the full shapefile for key validation".to_string())
@@ -706,7 +736,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                         active_ocean_artifact
                             .as_ref()
                             .and_then(|artifact| artifact.grids().first()),
-                        config.no_ocean_simplify,
                     )?;
                 }
                 if config.max_zoom >= 8 {
@@ -721,7 +750,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                         active_ocean_artifact
                             .as_ref()
                             .and_then(|artifact| artifact.grids().last()),
-                        config.no_ocean_simplify,
                     )?;
                 }
             } else {
@@ -734,7 +762,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     active_ocean_artifact
                         .as_ref()
                         .and_then(|artifact| artifact.grids().first()),
-                    config.no_ocean_simplify,
                 )?;
             }
 
@@ -846,14 +873,14 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             }),
             ocean_artifact_key: match &ocean_mode {
                 OceanMode::Band { key } => serde_json::from_str(&key.json()).ok(),
-                OceanMode::None | OceanMode::Computed => None,
+                OceanMode::None | OceanMode::Computed { .. } => None,
             },
             // The resolved mode, not a guess from which paths are set: ocean
             // runs only when the full shapefile is present, so a
             // simplified-only config produces no ocean at all.
             ocean_mode: match &ocean_mode {
                 OceanMode::None => "none",
-                OceanMode::Computed => "shapefile",
+                OceanMode::Computed { .. } => "shapefile",
                 OceanMode::Band { .. } => "artifact",
             },
         },
@@ -1154,26 +1181,10 @@ pub fn ocean_build(
         max_y: 1.0,
     };
     if let Some(simplified) = simplified_shapefile {
-        crate::ocean::process_ocean_shapefile(simplified, &world, 0, 7, &mut writer, None, false)?;
-        crate::ocean::process_ocean_shapefile(
-            full_shapefile,
-            &world,
-            8,
-            14,
-            &mut writer,
-            None,
-            false,
-        )?;
+        crate::ocean::process_ocean_shapefile(simplified, &world, 0, 7, &mut writer, None)?;
+        crate::ocean::process_ocean_shapefile(full_shapefile, &world, 8, 14, &mut writer, None)?;
     } else {
-        crate::ocean::process_ocean_shapefile(
-            full_shapefile,
-            &world,
-            0,
-            14,
-            &mut writer,
-            None,
-            false,
-        )?;
+        crate::ocean::process_ocean_shapefile(full_shapefile, &world, 0, 14, &mut writer, None)?;
     }
     writer.flush()?;
     let mut reader = writer.finish()?;
@@ -1188,7 +1199,6 @@ pub fn ocean_build(
         ocean_tiles: None,
         ocean_artifact_key: Some(key),
         ocean_only_metadata: true,
-        no_ocean_simplify: false,
         skip_to: None,
         in_memory: false,
         compression_level,
