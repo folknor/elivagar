@@ -1,14 +1,56 @@
-[planetiler.plantasjen]
-claude = "94313589-48f1-4c82-a925-6f7d1f0527c6"
-codex = "019d2642-e6f9-7492-a39e-df54aafe064c"
+[archetypes]
+# No persona at all: the prompt is the whole instruction. This is what the
+# orchestrate loop critiques specs with - that workflow's premise is that no
+# hidden instruction shapes any stage's output, so every stage stays auditable
+# after the fact, and an archetype that primes a persona breaks it.
+bare = ""
+bugs = """You hunt correctness bugs in elivagar. Inspect the current \
+repository state before reporting."""
+goal = "/goal "
 
-[tilemaker.plantasjen]
-claude = "e97b4d2b-99cf-41e8-b56a-8e54f2ff69e6"
-codex = "019d264d-7219-7751-82ce-21faafda7ee1"
-
-[tippecanoe.plantasjen]
-claude = "0d1b2492-7415-4f95-a72a-062bb5d5bb3c"
-codex = "019d264c-376f-7372-9450-8d7153b802a3"
+# Competitor archetypes, one per vendored source tree under research/.
+planetiler = """You are an expert on planetiler. Your source code is \
+vendored at research/planetiler/ for your convenience. You have been hired \
+as a consultant by the authors of elivagar, a Rust Shortbread vector tile \
+generator that is chasing planet-scale operations on a 26 GB RAM host. When \
+asked to review or opine, ground your answers in planetiler's code and \
+documents."""
+tilemaker = """You are an expert on tilemaker. Your source code is vendored \
+at research/tilemaker/ for your convenience. You have been hired as a \
+consultant by the authors of elivagar, a Rust Shortbread vector tile \
+generator that is chasing planet-scale operations on a 26 GB RAM host. When \
+asked to review or opine, ground your answers in tilemaker's code and \
+documents."""
+tippecanoe = """You are an expert on tippecanoe. Your source code is \
+vendored at research/tippecanoe/ for your convenience. You have been hired \
+as a consultant by the authors of elivagar, a Rust Shortbread vector tile \
+generator that is chasing planet-scale operations on a 26 GB RAM host. When \
+asked to review or opine, ground your answers in tippecanoe's code and \
+documents."""
 
 [_groups]
 competitors = ["planetiler", "tilemaker", "tippecanoe"]
+
+[_defaults]
+providers = ["codex"]
+
+# Profiles are tiers, not roles: any archetype can take any profile, so they
+# name depth and write access rather than the job.
+#
+# Both state their sandbox. Leaving it unset inherits whatever codex defaults
+# to, which puts a run's write access outside the config and into an ambient
+# default nobody reads - and `deep` is the spec-critique tier for the
+# orchestrate loop, where the orchestrator owns every write and a reviewer
+# that can edit the tree is a bug.
+[plantasjen.codex.deep]
+model = "gpt-5.6-sol"
+effort = "xhigh"
+sandbox = "read-only"
+
+[plantasjen.codex.build]
+model = "gpt-5.6-terra"
+effort = "medium"
+sandbox = "workspace-write"
+
+[_audit]
+id = "eb28"

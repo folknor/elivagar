@@ -18,6 +18,26 @@ data = "nvme"
 scratch = "nvme"
 target = "nvme"
 
+# The tilegen contract. `brokkr tilegen` is configured entirely from here -
+# there are no override flags, and nothing is auto-detected. brokkr used to
+# stat data/ for the ocean shapefiles and pass whichever it found, which meant
+# two runs of the same binary on the same PBF could produce different ocean
+# geometry with nothing in the recorded invocation saying which; on 2026-07-14
+# a denmark archive was built, verified and blessed as the regress baseline
+# while ocean-tiles.pmtiles was absent, taking the computed path throughout
+# while every gate passed.
+#
+# Paths are relative to `data` above, like every other path in this file.
+# Omitting `ocean` entirely means no ocean - the statement the removed
+# --no-ocean flag used to make. Drop the .pmtiles line for an
+# artifact-absent arm; `brokkr results --grep-v ocean-tiles` selects it.
+[plantasjen.tilegen.default]
+ocean = [
+    "z0-z7:simplified-water-polygons-split-3857/simplified_water_polygons.shp",
+    "z8-z14:water-polygons-split-3857/water_polygons.shp",
+    "ocean-tiles.pmtiles",
+]
+
 [plantasjen.datasets.denmark]
 origin = "Geofabrik"
 download_date = "2026-02-20"
@@ -109,6 +129,15 @@ source = "nvme"
 data = "nvme"
 scratch = "nvme"
 target = "nvme"
+
+# Shapefiles only - the paths `brokkr download-ocean` extracts to. dm6 has no
+# ocean-tiles.pmtiles registered because building one is an `ocean-build` run
+# per shapefile release, not per host; add the line here once it has one.
+[dm6.tilegen.default]
+ocean = [
+    "z0-z7:simplified-water-polygons-split-3857/simplified_water_polygons.shp",
+    "z8-z14:water-polygons-split-3857/water_polygons.shp",
+]
 
 [dm6.datasets.denmark]
 origin = "Geofabrik"

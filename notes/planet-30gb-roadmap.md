@@ -1,6 +1,26 @@
 # Planet on 30 GB: hypotheses toward world-record tile generation
 
-Status: 2026-07-08, hypotheses only - no code, no landings.
+Status: 2026-07-14. No longer hypotheses-only - H1, H5 and most of the
+RAM campaign have landed; each hypothesis carries its own dated landing
+and verdict notes below.
+
+**Start here: planet RAM is NO-GO.** Allocator commitment has roughly
+doubled on every dataset measured - NA `mi_commit` 20.3 to 44.4 GB,
+germany 7.37 to 16.2 GB, the same 2.2x - and at NA that means 44.4 GB
+committed against 23.3 GB resident on a 30 GB host, with 1.93M major
+faults. The under-10-GB-per-phase property this document reports as
+achieved does not hold at HEAD, and the H3 go/no-go verdict is void until
+it does.
+
+Two traps if you pick this up. **Do not read RSS on germany and conclude
+it is fine** - germany's RSS is 6.58 GB, better than its own baseline,
+because 16.2 GB of commitment fits on this host; the defect is fully
+visible there in `mi_commit_phase12_end` and nowhere else. And the first
+test is the allocator A/B at HEAD, not a bisect. See the void notice at
+the end of H3.
+
+Dated notes elsewhere in this document describe the state on their own
+date, not today's.
 
 ## The goal
 
@@ -383,6 +403,12 @@ now the OCEAN phase at 9.9 GB - every phase under 10 GB at NA scale
 on this 30 GB host, with all input-scaled stocks bounded except
 ocean's (H5) and the per-partition claim-window exposure.
 
+**NO LONGER TRUE (2026-07-14): phase12 measures 23.3 GB at HEAD, worse
+than the 21.5 GB this campaign fixed.** The under-10-GB property is
+broken and the planet RAM go/no-go with it - see the void notice in H3.
+These 69c0f18 numbers stand as the record of what the campaign achieved
+and as the target to get back to; they are not a description of HEAD.
+
 Next session's queue, in leverage order: (1) H3 extrapolation of the
 two open terms - planet ocean RSS (H5 decides) and planet partition
 counts / claim-window exposure - to produce the planet go/no-go
@@ -393,6 +419,14 @@ worth one look (reduce-tree merge_from concatenation is the suspect);
 sizing); (4) the mimalloc rip-out decision; (5) NA/germany/norway
 outputs at 69c0f18 regress-verified against blessed before the next
 blessing rotation.
+
+THIS QUEUE IS SPENT (2026-07-14), and item 3 is a trap - it sent a
+session at H8b believing NA assemble was the biggest phase. It was, at
+69c0f18. It is not now: NA assemble is 91.5s against phase12's 206.3s,
+and items 1 and 2 were both settled by H5's artifact, which deleted the
+ocean phase's RSS line entirely (NA ocean now 0.3s / 1.1 GB). The live
+item is the phase12 RSS regression in the H3 void notice. Read that
+instead.
 
 Ledger validation from the same run: relation buffer stayed under its
 1 GB cap (236 MB, no spill), pmtiles dedup capped at 1M entries as
@@ -602,6 +636,107 @@ Sequencing consequence: H4's LZ4 A/B (NA-scale, --compress-sort-chunks
 on vs off) is now first in line - it is simultaneously the disk
 enabler, the assemble I/O price probe, and cheap. Ocean RSS (item 2)
 second. Planet dry run gates on both landing green.
+
+**THE RAM VERDICT ABOVE IS VOID (2026-07-14). Allocator commitment has
+roughly DOUBLED on every dataset measured, and at NA that puts phase12 at
+44.4 GB committed against 23.3 GB resident on a 30 GB host.** Peak RSS at
+NA is 23.3 GB against the 5.5 GB this go/no-go is calibrated on and the
+6-7 GB it extrapolates to planet - worse than the 21.5 GB that was logged
+as planet blocker 1 on 2026-07-08. The headline result of the 07-08..09
+campaign, "every phase under 10 GB at NA scale", does not hold. Planet RAM
+is NO-GO; nothing below the go/no-go should be read as current.
+
+The regression is `mi_commit`, and it is systemic and proportional, not an
+NA phenomenon:
+
+| dataset | mi_commit recorded | mi_commit now | factor |
+|---|---|---|---|
+| north-america | 20.3 GB (run end, 69c0f18) | 44.4 GB (`b9d6c12c`) | 2.19x |
+| germany | 7.37 GB (phase12 end, 9e8dce2) | 16.2 GB (`2d715357`) | 2.20x |
+
+The same factor on both. What differs is only whether the host can absorb
+it: NA's 44.4 GB of commitment on a 30 GB box forces the resident set into
+conflict and produces 1.93M major faults, while germany's 16.2 GB fits and
+its RSS reads 6.58 GB - BETTER than its own 8.8 GB baseline. **Germany is
+not a negative control.** Reading RSS on germany hides this defect
+completely; read `mi_commit_phase12_end`.
+
+At NA the commitment is also frozen: `mi_commit` is byte-identical at
+44,412,502,016 from PHASE12_END through ocean, sort, assemble and run end -
+mimalloc commits it all during phase12 and never returns a byte for the
+remaining 104s.
+
+Per-phase re-measurement (`b9d6c12c`, b833fc8, NA locations,
+artifact-active) against the same PBF, host and byte-identical invocation
+as `6a13f306` at 899f436:
+
+| phase | 899f436 | 69c0f18 recorded | b833fc8 measured |
+|---|---|---|---|
+| phase12 | 148.4s / 21.5 GB / 18.9 cores | 155.5s / 5.5 GB | 206.3s / 23.3 GB / 15.4 cores |
+| phase12 majflt | 12,053 | - | 1,933,730 |
+| gap to ocean | 0.2s | - | 12.4s / 0.5 cores / 18.7 GB read |
+| ocean | 15.5s | 19.5s / 9.9 GB | 0.3s / 1.1 GB |
+| assemble | 198.6s / 16.2 GB / 16.0 cores | 186.4s / 5.0 GB | 91.5s / 4.7 GB / 14.9 cores |
+| wall | 364.8s | 361.6s | 311.2s |
+
+Wall improved, which is how this hid: H5's artifact took ocean from 19.5s
+to 0.3s and assemble from 186.4s to 91.5s, more than paying for phase12's
++58s. Nothing gates RSS or commitment - regress compares tiles, earcut
+compares geometry, verify checks structure - so this is invisible to every
+standing gate by construction.
+
+Reading of the numbers, and what is NOT yet established:
+- The +58s of phase12 wall is probably a symptom, not a second bug:
+  1.93M major faults at roughly 30us each is ~58s, which is the whole
+  delta. Arithmetic only - not confirmed.
+- CHEAPEST TEST FIRST, and it needs no old commits: the allocator A/B at
+  HEAD. `f2184ce` and `a32c960` already built the three-way switch
+  (`--features sys-alloc`, `--features jemalloc-alloc`). If phase12's
+  numbers collapse under either arm, this is mimalloc retention and the
+  answer is queue item 4 - the parked rip-out decision, whose own note
+  says the system allocator "costs nothing measurable" and that mimalloc
+  "predates all measurement here". Prior A/B evidence is narrow, not a
+  refutation: `18e1656` ruled out retention for ASSEMBLE's plateau at NA
+  (19.4 / 19.0 / 17.0 GB across the three arms - memory was live there).
+  Phase12 has never been A/B'd.
+- If a bisect is still wanted after that, run it on GERMANY against
+  `mi_commit_phase12_end` at ~1 min a step, not NA at ~7. The 2.20x factor
+  is fully visible there.
+- Window `e34cc7b..b833fc8`, ~60 commits. Do NOT bisect 899f436..e34cc7b:
+  the campaign's own commit messages price that window and `72b7c25` is
+  the commit that took phase12 from 21.5 to 5.5 GB.
+- Suspects have NOT been narrowed. Commit subjects suggest `4f2cd90` and
+  `d20ddd5` on cross-run scratch retention - the failure mode `69c0f18`
+  and `c6d4e16` deleted twice and E3 was reverted for - but subject-line
+  pattern matching produced two wrong hypotheses already that day, so
+  treat it as unexamined.
+- Corroborating, not causal: reference/performance.md records germany
+  phase12 peak RSS at 22.8 GB at `8eaa8bf`, falling to 6.3 GB via the
+  i_overlay de-churn at `e2284ec`, with the note that germany's polygon
+  volume was allocator-bound and the host under memory pressure at that
+  figure. `e2284ec` is INSIDE this window, so it is not the cause. It
+  establishes that phase12 churn on this host can hold this much, and that
+  de-churn is the shape of the fix.
+- **BLOCKER: brokkr.** It passes `--ocean path` and `--ocean-simplified
+  path`, both removed at `38250b9`, so every measured command fails until
+  it emits the new spelling. That gates the A/B, any bisect, and any
+  re-measurement. Note also that `brokkr tilegen --commit <hash>` cannot
+  straddle `38250b9`: it builds old code but passes one flag dialect, so
+  bisecting a window that predates the CLI change needs that handled
+  first. The A/B does not - it runs at HEAD.
+- New and unexplained: a serial gap between PHASE12_END and OCEAN_START
+  that scales with input (germany 5.15s / 5.3 GB read; NA 12.4s / 18.7 GB
+  read) at 0.3-0.5 cores, against 0.2s at 899f436. It pairs with a
+  `prepass_join` stall of 13.5s where this document records
+  prepass_join_wait at ~0 on germany and norway. ~8% of germany's wall.
+- Confound to respect: b833fc8 is artifact-active and the comparands are
+  not, which moves work between the ocean and assemble phases. Phase12 is
+  unaffected - it does not touch ocean - so the RSS finding stands, but
+  the ocean and assemble rows above are not like-for-like.
+
+All of this is sidecar data (`brokkr sidecar b9d6c12c --human`), which is
+local to plantasjen and gitignored; the numbers are transcribed here
+because the results row keeps only elapsed_ms.
 
 ### H4: Sort scratch needs page-cache hygiene, maybe compression
 
@@ -1103,6 +1238,28 @@ retention (mi_commit 2.4 GB above peak RSS, see H3 first reading) is
 the number to beat. Not a pre-H6 priority: at 622 GB/run churn the
 allocator comparison would measure churn H6 is about to delete.
 
+**PROMOTED TO FIRST IN LINE (2026-07-14).** Both preconditions are met and
+the framing above is now too modest. H6 has landed, so the A/B no longer
+measures churn about to be deleted. And retention is no longer 2.4 GB
+above RSS: mi_commit is 44.4 GB against 23.3 GB resident at NA and 16.2 GB
+against 6.58 GB at germany, roughly 2.2x its recorded value on both. That
+is the largest single line on the 30 GB ledger by a wide margin and it is
+what makes planet RAM NO-GO - see the H3 void notice.
+
+Run it at HEAD on NA and germany locations, not norway: the arms are
+`--features sys-alloc` and `--features jemalloc-alloc` against the
+mimalloc default (`f2184ce`, `a32c960`), and brokkr passes `--features`
+through. Read `mi_commit_phase12_end` and phase12 majflt, NOT peak RSS -
+germany's RSS hides this entirely. Prior evidence does not pre-empt the
+result: `18e1656`'s three-way A/B ruled out retention for ASSEMBLE's
+plateau (19.4 / 19.0 / 17.0 GB across arms - live memory), but phase12 has
+never been A/B'd, and phase12 is where the commitment is taken and never
+returned.
+
+Decision rule is unchanged and now has teeth: if an arm collapses phase12
+commitment, the rip-out stops being a simplicity decision and becomes the
+fix.
+
 PROMOTED 2026-07-09: the NA claim-window run showed the assemble
 phase's 19.4 GB RSS is mostly allocator retention (mi_commit 14.9 GB
 at phase12 end vs ~2 GB live; 24.5 GB committed by run end) - the
@@ -1164,6 +1321,23 @@ alone.
 **First step.** (b) is a knob + counter exercise on existing machinery.
 (a) needs a small spec (sort-writer sharing). (c) waits for H3's
 directory audit.
+
+RE-MEASURED 2026-07-14. The knob in (b) is already turned and the NA half
+of the claim is dead; the germany half is alive and unchanged.
+
+- H8b's "more, smaller partitions" landed at `e34cc7b` (equal-width -> z6
+  -> z7), the day after the NA evidence above was taken. NA assemble is
+  now 91.5s at 14.9 cores (`b9d6c12c`), against the 186.4s that made
+  next-session item 3 call it "the biggest phase at NA". It is now less
+  than half of phase12's 206.3s. `e34cc7b`, `33ce85e`, `c6d4e16` and H5's
+  artifact did this between them; no straggler campaign remains at NA.
+- The germany figure at the top of this section is EXACT and current:
+  germany assemble still averages 12.3 cores at HEAD (`2d715357`,
+  16.7s), unchanged from `92803833`. Recursive splitting of hot
+  partitions is still untried and still the live part of (b). Norway's
+  20.0 remains the comparand.
+- Do not read the 12.3 as an NA number. It is germany's, and conflating
+  the two is what made this item look bigger than it is.
 
 ### H9: Planet measurement is its own workstream
 

@@ -70,9 +70,11 @@ If and when the users asks for the orchestration loop, read `reference/orchestra
 
 Competitor reference sources remain available for research: `research/planetiler/` (Java), `research/tilemaker/` (C++), `research/tippecanoe/` (C++), `research/stedsplakat/` (TypeScript/JSTS Overpass→SVG poster renderer).
 
-- `scripts/codex-review.py '<prompt>'` - codex gpt-5.5 at xhigh reasoning, no goal. Spec critique before code exists.
-- `scripts/codex-implement.py [--effort LEVEL] '<prompt>'` - codex gpt-5.5, /goal-driven, medium default. Implements from a spec.
-- `scripts/codex_common.py` - shared launcher: runs `codex exec`, captures NDJSON internally, prints a clean digest (final message, usage, transcript path). Never resume a run; relaunch fresh.
+- `review` fans a prompt out to fresh AI sessions, one per archetype; config is `.review.toml`, and the prompt arrives on stdin (the one sanctioned pipe). `review --help` for the full surface, `--dry-run` to see the assembled prompt without sending.
+- `echo '<prompt>' | review bare --profile deep` - codex gpt-5.6-sol at xhigh, no persona, no goal. Spec critique before code exists.
+- `echo '<prompt>' | review goal --profile build` - codex gpt-5.6-terra at medium, /goal-driven, workspace-write.
+- A role is an archetype plus a profile and needs both: the archetype is the persona, the profile is the tier (model, effort, sandbox). Both are named for what they are, not the job they do, since any archetype takes any profile. Without `--profile build` there is no workspace-write sandbox and the agent cannot edit a file. Profiles are per host, so check `.review.toml` has a block for this one.
+- Never resume a run; relaunch fresh. `--session` exists and this workflow does not use it.
 
 ## Subagents
 

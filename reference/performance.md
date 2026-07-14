@@ -39,6 +39,36 @@ landing the post-change numbers are recorded here the same way.
 | norway | `661cd1c` | `8d1d19ca` | 160.1s | 121.3s | 14.9s | 0.03s | 23.4s | 23.0s | 5.9 GB | 1.28 GB, 16.3M tiles / 820K unique |
 | germany | `c3c1520` | `28e2b5b4` | 180.6s | 142.8s | 5.1s | 0.01s | 31.9s | 30.5s | 11.1 GB | 3.0 GB, 2.69M tiles / 347K unique |
 
+Current HEAD readings, both artifact-active, locations variant, plantasjen
+(2026-07-14, `b833fc8`). Per-phase RSS, core counts and `mi_commit` are
+sidecar values transcribed here because the results row keeps only
+`elapsed_ms`:
+
+| dataset | run | wall | phase12 | ocean | assemble | peak RSS | mi_commit at phase12 end | phase12 majflt |
+|---|---|---|---|---|---|---|---|---|
+| north-america | `b9d6c12c` | 311.2s | 206.3s / 23.3 GB / 15.4 cores | 0.3s | 91.5s / 4.7 GB / 14.9 cores | 23.3 GB | **44.4 GB** | 1,933,730 |
+| germany | `2d715357` | 61.3s | 36.7s / 6.58 GB / 16.6 cores | 2.0s | 16.7s / 3.2 GB / 12.3 cores | 6.9 GB | **16.2 GB** | 1,133 |
+
+**These are live regressions, not baselines, and the regressed quantity is
+`mi_commit` - not RSS.** Allocator commitment has roughly doubled on both
+datasets: NA 20.3 GB recorded at `69c0f18` to 44.4 GB (2.19x), germany
+7.37 GB recorded at `9e8dce2` to 16.2 GB (2.20x). The same factor, so this
+is systemic and proportional.
+
+Only the consequence differs. NA's 44.4 GB of commitment against 23.3 GB
+resident on a 30 GB host produces 1.93M major faults and +58s of phase12
+wall; germany's 16.2 GB fits, so germany's RSS reads 6.58 GB - BETTER than
+its own 8.8 GB baseline - while carrying the identical defect. **Do not
+read peak RSS on germany and conclude the pipeline is healthy.** At NA the
+commitment is also frozen byte-identical from PHASE12_END to run end:
+mimalloc takes 44.4 GB during phase12 and returns none of it.
+
+This voids the planet RAM go/no-go. Full evidence, the allocator A/B that
+tests it at HEAD, and the open leads are in `notes/planet-30gb-roadmap.md`
+under the H3 void notice. Both rows also carry a 12.4s (NA) / 5.15s
+(germany) serial gap between PHASE12_END and OCEAN_START at 0.3-0.5 cores
+that did not exist at 899f436.
+
 Superseded rows (kept for delta reading):
 
 | dataset | commit | run | wall | phase12 | peak RSS | note |
@@ -96,6 +126,14 @@ Landing 2's germany-locations effect, attributed post-hoc from sidecar
 germany's polygon volume was allocator-bound and at 22.8 GB the 30 GB host
 was under memory pressure, so the de-churn paid off far beyond its denmark
 reading (13.3 to 11.6s).
+
+That germany reading corroborates the 2026-07-14 allocator-commitment
+regression (see the HEAD table above): it establishes on this host that
+phase12 polygon churn alone can hold ~22.8 GB and put the machine into
+memory pressure, and that the shape of the fix is de-churn. It does NOT
+establish cause - `e2284ec` is inside the regression window, so the commit
+that fixed germany then cannot be what broke both datasets since. The test
+is the allocator A/B at HEAD, not a bisect; see the H3 void notice.
 
 The injected-prepass wait-work (2026-07-11) landed two neutrality-claiming
 commits while the pbfhogg producer is still being built: `430f28b` (way

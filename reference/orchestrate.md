@@ -13,11 +13,11 @@ stage is auditable after the fact.
   Never delegates the commit.
 - **Claude Opus agents (Agent tool)** author and repair: they write the spec,
   co-review it, and review-and-fix the implementation.
-- **Codex xhigh** (`scripts/codex-review.py`) is the deepest reasoner in the
+- **Codex xhigh** (`review bare --profile deep`) is the deepest reasoner in the
   system. That depth is spent where an error is cheapest to catch: critiquing
   the spec document, before any code exists.
-- **Codex medium** (`scripts/codex-implement.py`) implements. This is not a
-  cost compromise - it is the falsifiability test of
+- **Codex medium** (`review goal --profile build`) implements. This is
+  not a cost compromise - it is the falsifiability test of
   `reference/technical-implementation-spec.md` itself. The contract promises
   "two implementers working from it independently produce the same artifact"
   and "no step is left to discover during implementation." If the spec is real,
@@ -26,25 +26,36 @@ stage is auditable after the fact.
 
 ### Codex invocation
 
-Two scripts wrap the canonical `codex exec` call, one per role. Launch in the
-background, one Bash call, nothing before or after it:
+The `review` tool fans a prompt out to fresh sessions, one per archetype. It
+replaced `scripts/codex-*.py` on 2026-07-14; the config is `.review.toml`.
+Launch in the background, one Bash call, nothing before or after it. The
+prompt arrives on stdin - this is the one place the no-pipes rule does not
+apply:
 
-- Critique: `python3 scripts/codex-review.py '<prompt>'` (gpt-5.6-sol at
+- Critique: `echo '<prompt>' | review bare --profile deep` (gpt-5.6-sol at
   xhigh).
-- Implement: `python3 scripts/codex-implement.py '<prompt>'` (gpt-5.5 at
-  medium; the script adds the `/goal` prefix).
+- Implement: `echo '<prompt>' | review goal --profile build` (gpt-5.6-terra
+  at medium, workspace-write).
 
-The single argument is the prompt: one line, no linebreaks, plain ascii, no
-escapes or quoting tricks, single-quoted; substitute X and Y with plain paths.
-Each script sets the role's defaults - the model, the reasoning effort, the
-workspace-write sandbox, and `/goal` - so the caller normally owns only the
-prompt. Two defaults are overridable when a step explicitly calls for it:
-`--model <name>` on either script (defaults: review gpt-5.6-sol, implement
-gpt-5.5), and `--effort <low|medium|high|xhigh>` on codex-implement.py
-(default medium; e.g. `--effort xhigh` to staff a hard landing at a stronger
-implementer tier). codex-review.py is fixed at xhigh; the sandbox and `/goal`
-are not overridable. The canonical default model lives in one place,
-`MODEL` at the top of `scripts/codex_common.py`.
+The prompt is one line, no linebreaks, plain ascii, no escapes or quoting
+tricks, single-quoted; substitute X and Y with plain paths.
+
+Both roles use an archetype carrying no persona, and that is the point: this
+workflow's prompts are minimal by design, so nothing hidden shapes a stage's
+output. `bare` is empty; `goal` is the bare `/goal` prefix and nothing else.
+`bugs` and the competitor archetypes in `.review.toml` DO prime a persona and
+have no place in this loop.
+
+A role is an archetype plus a profile and BOTH halves are required. The
+archetype is the persona; the profile is the tier - model, effort, sandbox -
+and both are named for what they are rather than the job they are used for,
+since any archetype takes any profile. `review goal` without `--profile
+build` runs the default model with no workspace-write sandbox and cannot edit
+a file. Profiles resolve per host from `[<host>.<provider>.<profile>]`, so
+one not defined for the host running the loop silently supplies nothing;
+check `.review.toml` carries a block for this host before relying on it.
+`--dry-run` prints the assembled prompt without sending, which is the cheap
+way to confirm both halves resolved.
 
 The sandbox is also network-isolated: no outbound connections, no git fetch,
 no cargo download. The load-bearing consequence is that codex cannot add a
@@ -59,20 +70,20 @@ crate will fail at compile time with no path to recovery inside that run;
 the mitigation belongs in the spec review (steps 2-3) or a pre-step-4
 side-step, not inside the codex run itself.
 
-The script keeps the raw NDJSON inside its own process and prints a clean
-digest at exit: the final agent message in full, the token usage, and any
-plain-text log lines codex emitted (surfaced, not dropped). The final message
-is captured via `--output-last-message`, so it survives even when a mid-run
-codex error halts the stream. There is nothing to peek at and nothing to flood
-context: a run is opaque until it exits, and its exit IS the signal.
+`review` prints the agent's response at exit, with the new session id above
+it. There is nothing to peek at and nothing to flood context: a run is opaque
+until it exits, and its exit IS the signal.
 
 We never resume a codex thread. A run that ends with its goal unmet - a gate
 honestly reported unpassed, bricks left unbuilt, victory wrongly declared - is
-replaced by a FRESH `codex-implement.py` run pointed at what remains, never
-`codex exec resume`. Fresh-from-spec is the methodology: the spec is the only
-communication channel, so a second implementer reads it exactly as the first.
+replaced by a FRESH `review goal` run pointed at what remains. `review`
+offers `--session <id>` to resume a warm session and this loop does not use
+it: fresh-from-spec is the methodology, because the spec is the only
+communication channel and a second implementer must read it exactly as the
+first did. A resumed session has the first implementer's dead ends in
+context, which is precisely the state the method excludes.
 
-The `/goal` prefix (added by codex-implement.py) is mechanical, not
+The `/goal` prefix (the `implement` archetype) is mechanical, not
 motivational: whenever the agent yields - a status report, a question, a
 premature wrap-up - the harness auto-replies "that is not what the user said,
 continue work" and the agent resumes. It structurally cannot hand back control
@@ -223,19 +234,19 @@ recoverable; it does not license the instruction.
 
 ### 4. Implement
 
-Launch `scripts/codex-implement.py`, background, with the prompt (the script
-adds `/goal`):
+Launch `review goal --profile build`, background, with the prompt on stdin
+(the archetype supplies `/goal`):
 
 > Please implement Y from beginning to end. If you hit a gate, please try
 > honestly to overcome it. Do not commit.
 
-When the run ends, read the digest - do not take "done" on faith. If
-`final_message_captured: false`, the run ended without a final report
-(crashed, killed, or yielded out); if it is `true` but the message says the
-goal is unmet (a gate honestly reported unpassed, bricks left unbuilt, victory
-wrongly declared), it is likewise not done. In either case launch a FRESH
-`codex-implement.py` run whose prompt names what remains. Never resume. Repeat
-until the implementation is whole, then go to step 5.
+When the run ends, read the response - do not take "done" on faith. If no
+final message came back, the run ended without a report (crashed, killed, or
+yielded out); if one did but says the goal is unmet (a gate honestly reported
+unpassed, bricks left unbuilt, victory wrongly declared), it is likewise not
+done. In either case launch a FRESH `review goal` run whose prompt names
+what remains. Never `--session`. Repeat until the implementation is whole,
+then go to step 5.
 
 ### 5. Review and fix
 
@@ -330,8 +341,8 @@ These are rules, not guidance:
   ("continue: spec C, step 4 in flight") wakes you cleanly; the heartbeat does
   not need to re-enter any skill to do its job.
 - On each wake: check whether the task returned. "Returned" means exactly one
-  thing - the background process exited (for codex, the script then printed its
-  digest). A codex run is opaque until then: there is no live stream to read
+  thing - the background process exited (for codex, `review` then printed the
+  response). A codex run is opaque until then: there is no live stream to read
   and no mid-run completion claim to misjudge. Process running = step running.
 - While the task has not returned, schedule the next wakeup and nothing else.
   Never kill a run (see Codex invocation).
@@ -405,10 +416,10 @@ nested second return into the work, and never reconstruct a contract document
 
 ## Telemetry
 
-`codex-review.py` and `codex-implement.py` print a digest at exit: the final
-agent message in full, the summed token usage, and any plain-text log lines
-codex emitted. Read the final message in full when a run ends - never a
-truncated excerpt. The closing report is where deferred work, honest gate
-failures, and wrongly-declared victories surface; a capped read is how they get
-missed. Each codex call's usage folds into the per-item cost ledger alongside
-the Agent calls, so each landed item gets a true cost figure.
+`review` prints the agent's response at exit, with the session id above it.
+Read it in full when a run ends - never a truncated excerpt. The closing
+report is where deferred work, honest gate failures, and wrongly-declared
+victories surface; a capped read is how they get missed. Fold each codex
+call's usage into the per-item cost ledger alongside the Agent calls, so each
+landed item gets a true cost figure - `review` does not itself sum tokens the
+way the retired scripts did, so take the figure from the run's own report.
