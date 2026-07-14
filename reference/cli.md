@@ -183,10 +183,85 @@ same artifact the baseline was built with.
 
 ## `elivagar inspect <FILE>`
 
-Header, tile statistics, section layout, and metadata (layer list with zoom
-ranges) for a PMTiles archive. Wrapped by `brokkr pmtiles-inspect` - the
-brokkr name avoids colliding with `brokkr inspect`, which is pbfhogg's PBF
+Header, tile statistics, section layout, provenance, and metadata (layer list
+with zoom ranges) for a PMTiles archive. Wrapped by `brokkr pmtiles-inspect` -
+the brokkr name avoids colliding with `brokkr inspect`, which is pbfhogg's PBF
 inspector.
+
+### Provenance
+
+The `elivagar` metadata member (`reference/metadata.md`, schema at
+`src/provenance.rs`), contract first:
+
+```
+  Provenance:  schema 1
+    Input:      north-america-seq4710-locations.osm.pbf
+                xxh3 8122bcc83873ef95349e6a3522827fd9  17.8 GB
+                features: sorted, locations-on-ways
+    Config:     shortbread, z0-z14, polygon simplify x1
+                tile: mvt gzip, base level 6, policy zoom-v1
+                seam: boundaries=8
+                fanout: none
+    Ocean:      artifact, low zoom simplified, simplifier on
+                key: shp c10be1c7843c simplified b3417e31c287 level 6 policy 1
+    Build:      elivagar b833fc8730cd, pbfhogg 0f1eb01a1c1e
+    Effective:  coords inline, way members relation_scan, pins block_local
+```
+
+`Input` and `Config` together are the comparability contract, and the **whole**
+of both is printed - not a selection. That matters: two archives differing only
+in `polygon_simplify_factor` or one fanout cap would otherwise display
+identically, and a reader told these lines are the contract would conclude a
+geometry diff between them says something about the code. It is cheap to print
+in full because the seam and fanout maps omit defaults, so they are a line each
+at most.
+
+`Build`, `Effective` and `Resumed` (only on a `--skip-to` run) are diagnostic.
+They explain a diff once the contract matches and must never be
+equality-gated - given identical input and config they are a function of the
+code, and a regression gate exists to compare revisions.
+
+**Reporting is not enforcement.** `brokkr regress` does not read the block, so
+these lines let a human refuse a comparison; they do not refuse it. See the
+consumer-contract gap in `reference/metadata.md`.
+
+`Ocean` answers "was this artifact-active or computed", which before this
+existed could only be recovered by dumping the raw metadata - and on
+2026-07-14 was not recovered at all, which is how a computed-path archive was
+blessed as the baseline for an artifact-active pipeline. Its `key` line
+carries the shapefile identities, which appear nowhere else in the block: an
+artifact-active archive's contract is incomplete without them.
+
+`features` reports the PBF header bits, not the filename. A name ending
+`-locations-prepass` is a label and can lie; the bits decide which coordinate,
+membership and pin paths the run took, and `Effective` says which it then
+used. Unset features are omitted, so `features: none` means a plain PBF - but
+a *missing* flag reports `unknown` rather than being read as false, since
+`none` is a positive claim and must not be derived from absent data.
+
+Commits are abbreviated to 12 characters for reading; the block stores them in
+full and that remains the identity. `(dirty)` means the commit names the
+nearest ancestor of the code that ran, not the code that ran.
+
+**Every way of having no contract names itself**, because "no block",
+"unreadable metadata" and "not JSON" are different facts and reporting any of
+them as silence would read as nothing to report:
+
+```
+  Provenance:  absent - archive predates the elivagar metadata block
+  Provenance:  unavailable - archive stores no metadata
+  Provenance:  unavailable - metadata could not be read or decompressed
+  Provenance:  invalid - metadata is not JSON
+  Provenance:  schema 99 - this build understands 1; not interpreted
+  Contract:    INCOMPLETE - block is missing input and config
+```
+
+A schema this build does not know is refused rather than summarised: a bump
+means an existing field changed meaning, so interpreting it with these
+meanings would report confident nonsense. Adding members does not bump, so
+unknown members at a known schema are ignored silently.
+
+For the raw block use `scripts/dump-pmtiles-metadata.py`.
 
 ## `elivagar verify <FILE> [--geometry-stats] [--unique-payloads]`
 

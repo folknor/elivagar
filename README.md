@@ -43,7 +43,31 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 elivagar inspect <file.pmtiles>
 ```
 
-Prints header info, tile statistics, section layout, and metadata (layer list with zoom ranges).
+Prints header info, tile statistics, section layout, provenance, and metadata
+(layer list with zoom ranges).
+
+Provenance records what the archive was built from and under which contract:
+
+```
+  Provenance:  schema 1
+    Input:      north-america-seq4710-locations.osm.pbf
+                xxh3 8122bcc83873ef95349e6a3522827fd9  17.8 GB
+                features: sorted, locations-on-ways
+    Config:     shortbread, z0-z14, polygon simplify x1
+                tile: mvt gzip, base level 6, policy zoom-v1
+                seam: boundaries=8
+                fanout: none
+    Ocean:      artifact, low zoom simplified, simplifier on
+                key: shp c10be1c7843c simplified b3417e31c287 level 6 policy 1
+    Build:      elivagar b833fc8730cd, pbfhogg 0f1eb01a1c1e
+    Effective:  coords inline, way members relation_scan, pins block_local
+```
+
+`Input` plus the whole of `Config` is the comparability contract - two archives
+whose contract differs describe different work, so a geometry diff between them
+says nothing about the code. `Build` and `Effective` explain a diff once the
+contract matches. Archives built before the metadata block existed print
+`Provenance: absent`.
 
 ### Render a tile as SVG
 

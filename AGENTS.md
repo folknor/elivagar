@@ -40,7 +40,9 @@ Commands are top-level (no `bench`/`hotpath` namespace). Measurement modes are f
 
 ```
 # Measured commands
-brokkr tilegen [--bench [N] | --hotpath [N] | --alloc [N]] [pipeline flags...]
+brokkr tilegen [--bench [N] | --hotpath [N] | --alloc [N]] [--dataset D]
+               [--variant V] [--skip-to ocean|sort|assemble] [--dry-run]
+               [--stop MARKER]
 brokkr pmtiles-writer [--bench [N] | --hotpath [N] | --alloc [N]] [--tiles N]
 brokkr node-store [--bench [N] | --hotpath [N] | --alloc [N]] [--nodes N]
 brokkr planetiler [--bench [N]] [--dataset D] [--variant V]
@@ -73,7 +75,27 @@ brokkr download <region> [--osc-seq N]  # PBF + indexed + OSC diffs, auto-regist
 brokkr suite elivagar [--bench [N]] [--dataset D] [--variant V]
 ```
 
-Pipeline flags on `tilegen` (`--tile-format`, `--tile-compression`, `--compress-sort-chunks`, `--in-memory`, `--locations-on-ways`, etc.) are passed through to the elivagar binary. They land in the results DB as the literal subprocess invocation in `cli_args` - query by flag with `brokkr results --grep tile-compression=brotli`. `meta.*` kv pairs are reserved for runtime observations only (detected locations-on-ways mode, resolved paths); anything derivable from the invocation is not duplicated there.
+**`tilegen` has no pipeline flags.** Ocean inputs, tile format, budgets and
+geometry all live in `[<host>.tilegen.default]` in brokkr.toml: either it is
+explicit in the block, or it is not set. What remains on the command line is
+the input axis (`--dataset`, `--variant`), the measurement mode, and the
+per-invocation resume point (`--skip-to`). To A/B a setting, edit the block -
+the resolved value lands in the results DB as the literal subprocess
+invocation in `cli_args`, so `brokkr results --grep` still finds any arm after
+the fact.
+
+That inversion is deliberate. A flag that can be omitted has a default
+somewhere else, and this pipeline kept losing to exactly that: brokkr used to
+stat `data/` for ocean shapefiles and pass whichever it found, so two runs of
+the same binary on the same PBF could differ with nothing in the recorded
+invocation saying how. `meta.*` kv pairs remain reserved for runtime
+observations only; anything derivable from the invocation is not duplicated
+there.
+
+Two flags worth knowing: `--dry-run` validates argv, config and path
+resolution without building or running, which is how you sanity-check a queued
+script before leaving it overnight; `--stop MARKER` kills the child when that
+sidecar marker fires, for benchmarking one phase.
 
 ### Sidecar profiler
 
@@ -172,6 +194,15 @@ project = "elivagar"
 data = "data"
 scratch = "data/scratch"
 
+# The tilegen contract. Everything `brokkr tilegen` passes to elivagar comes
+# from here; there are no override flags. Paths are relative to `data`.
+[plantasjen.tilegen.default]
+ocean = [
+    "z0-z7:simplified-water-polygons-split-3857/simplified_water_polygons.shp",
+    "z8-z14:water-polygons-split-3857/water_polygons.shp",
+    "ocean-tiles.pmtiles",
+]
+
 [plantasjen.datasets.denmark]
 origin = "Geofabrik"
 download_date = "2026-02-20"
@@ -183,8 +214,13 @@ xxhash = "aa5bb865..."
 seq = 4704
 ```
 
+- `tilegen.default` - the pipeline contract, per host. `ocean` is the repeatable
+  `--ocean` spelling from `reference/cli.md`: zoom-ranged shapefiles plus an
+  optional `.pmtiles` artifact. Omit `ocean` entirely and the run has no ocean.
+  Drop the `.pmtiles` line for an artifact-absent arm; `brokkr results --grep`
+  separates the arms afterwards, because the resolved value is in `cli_args`.
 - `pbf.<variant>` - PBF files keyed by variant name. `--variant` selects (default: `raw`).
-- `brokkr tilegen --dataset denmark --variant locations` - elivagar auto-detects `LocationsOnWays` from the PBF header. The `--locations-on-ways` flag is only needed to force it when the PBF doesn't have the header flag.
+- `brokkr tilegen --dataset denmark --variant locations` - elivagar auto-detects `LocationsOnWays` from the PBF header. That detection reads the header, not the filesystem, and survives on purpose: it is a property of an input that is itself named explicitly and hashed into provenance. `elivagar inspect` prints the header features it found.
 - `xxhash` - XXH128 file hash. Run `brokkr env` to see computed values.
 
 Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git). Each
@@ -277,7 +313,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `ocean.rs` - ocean shapefile processing (mmap reader + quantize-early integer boolean clipping via the shared int_ocean pyramid; no scanline fill, no point-in-polygon, no S-H, no LandMask)
 
 **Infrastructure:**
-- `sort.rs` - external sort partitioned by Hilbert tile-id range at write time (z6-calibrated partitions; chunk files uncompressed by default, LZ4/Snappy via `--compress-sort-chunks`; per-partition k-way merge via binary heap, consumed lazily by the assemble partition readers)
+- `sort.rs` - external sort partitioned by Hilbert tile-id range at write time (z7-calibrated partitions, `PARTITION_SPLIT_Z`; chunk files uncompressed by default, LZ4/Snappy via `--compress-sort-chunks`; per-partition k-way merge via binary heap, consumed lazily by the assemble partition readers)
 - `pmtiles_writer.rs` - PMTiles v3 writer with Hilbert tile IDs
 - `inspect.rs` - PMTiles v3 archive inspector (header + metadata reader)
 - `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG)
@@ -350,7 +386,23 @@ is in `reference/cli.md`.
 
 ### `elivagar inspect <FILE>`
 
-Reads a PMTiles archive and prints header info, tile statistics, section layout, and metadata (layer list with zoom ranges).
+Reads a PMTiles archive and prints header info, tile statistics, section
+layout, provenance, and metadata (layer list with zoom ranges).
+
+The provenance section is how you answer "was this archive artifact-active or
+computed" and "is it comparable to that one". `Input` plus the whole of
+`Config` is the comparability contract and is printed in full, not sampled -
+a partial contract would let two archives differing in a fanout cap or the
+simplify factor display identically. `Build`, `Effective` and `Resumed` are
+diagnostic and must never be equality-gated.
+
+Reporting is not enforcement: `brokkr regress` still does not read the block,
+so these lines let you refuse a comparison, they do not refuse it.
+
+Every way of having no contract names itself - `absent`, `unavailable`,
+`invalid`, an uninterpretable schema, an `INCOMPLETE` contract - because
+silence would read as nothing to report. Full detail in `reference/cli.md`;
+the raw block via `scripts/dump-pmtiles-metadata.py`.
 
 ### `elivagar verify <FILE>`
 

@@ -61,11 +61,8 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
         0.0
     };
 
-    let metadata_json = if metadata_length > 0 && metadata_length <= 10 * 1024 * 1024 {
-        reader.read_metadata().ok()
-    } else {
-        None
-    };
+    let metadata_state = read_metadata_state(&mut reader, metadata_length);
+    let metadata_json = metadata_state.json().map(ToOwned::to_owned);
     let metadata_payload_format = metadata_json
         .as_deref()
         .and_then(|j| extract_json_string(j, "\"tile_payload_format\":\""));
@@ -129,6 +126,8 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
         data_length,
     )?;
 
+    print_provenance(out, &metadata_state)?;
+
     if let Some(json) = metadata_json {
         writeln!(out)?;
         writeln!(out, "  Metadata:")?;
@@ -139,9 +138,367 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
     Ok(())
 }
 
-/// Print metadata JSON in a readable format.
-/// We avoid pulling in serde_json as a non-dev dependency by doing minimal
-/// parsing: extract vector_layers names + zoom ranges.
+/// Metadata is not read above this size. A tile archive's metadata is a layer
+/// list and a provenance block; anything larger is not something to page into
+/// memory on an inspect.
+const MAX_METADATA_READ: u64 = 10 * 1024 * 1024;
+
+/// Why the metadata is or is not available.
+///
+/// The three failures are kept apart rather than collapsed into one `None`,
+/// because provenance must be able to say WHICH of them happened. "No block"
+/// and "the block could not be read" are different facts about an archive, and
+/// reporting either as silence is what this whole section exists to prevent.
+enum MetadataState {
+    Json(String),
+    /// The archive stores no metadata at all.
+    Absent,
+    /// Present but too large to read here.
+    TooLarge(u64),
+    /// Present, sized sanely, and the read or decompression failed.
+    Unreadable,
+}
+
+impl MetadataState {
+    fn json(&self) -> Option<&str> {
+        match self {
+            Self::Json(j) => Some(j),
+            _ => None,
+        }
+    }
+}
+
+fn read_metadata_state(reader: &mut PmtilesReader, metadata_length: u64) -> MetadataState {
+    if metadata_length == 0 {
+        return MetadataState::Absent;
+    }
+    if metadata_length > MAX_METADATA_READ {
+        return MetadataState::TooLarge(metadata_length);
+    }
+    match reader.read_metadata() {
+        Ok(json) => MetadataState::Json(json),
+        Err(_) => MetadataState::Unreadable,
+    }
+}
+
+/// Print a summary of the `elivagar` provenance member.
+///
+/// Prints the WHOLE comparability contract - `input` plus every field of
+/// `config` - not a selection from it. A partial contract summary is worse
+/// than none: two archives differing only in `polygon_simplify_factor` or a
+/// fanout cap would display identically, and a reader who has been told these
+/// lines are the contract would conclude a geometry diff between them means
+/// something about the code. The contract is cheap to print in full because
+/// `layer_map` omits zeros, so the seam and fanout maps are a line each at
+/// most. `build`, `effective` and `execution` follow as diagnostics, which
+/// explain a diff once the contract matches and must never be equality-gated.
+///
+/// Every path that cannot produce a contract says which one it is. An archive
+/// with no block, a block this build cannot interpret, and metadata that could
+/// not be read are three different facts, and reporting any of them as silence
+/// would read as "nothing to report" - the exact ambiguity this section exists
+/// to remove.
+///
+/// Reporting is not enforcement: `brokkr regress` does not read the block, so
+/// these lines let a human refuse a comparison, they do not refuse it. See the
+/// consumer-contract gap in reference/metadata.md.
+fn print_provenance(out: &mut dyn Write, state: &MetadataState) -> io::Result<()> {
+    writeln!(out)?;
+    let json = match state {
+        MetadataState::Json(json) => json,
+        MetadataState::Absent => {
+            return writeln!(
+                out,
+                "  Provenance:  unavailable - archive stores no metadata"
+            );
+        }
+        MetadataState::TooLarge(len) => {
+            return writeln!(
+                out,
+                "  Provenance:  unavailable - metadata is {}, over the {} read limit",
+                format_bytes(*len),
+                format_bytes(MAX_METADATA_READ),
+            );
+        }
+        MetadataState::Unreadable => {
+            return writeln!(
+                out,
+                "  Provenance:  unavailable - metadata could not be read or decompressed"
+            );
+        }
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(json) else {
+        return writeln!(out, "  Provenance:  invalid - metadata is not JSON");
+    };
+    let Some(p) = doc.get("elivagar") else {
+        return writeln!(
+            out,
+            "  Provenance:  absent - archive predates the elivagar metadata block"
+        );
+    };
+
+    // A schema bump means an existing field changed meaning, so a block this
+    // build does not know cannot be summarised with this build's meanings -
+    // that would report confident nonsense. Adding members does not bump, so
+    // an equal schema with unknown members is fine and is ignored silently.
+    match p.get("schema").and_then(serde_json::Value::as_u64) {
+        Some(v) if v == u64::from(crate::provenance::SCHEMA_VERSION) => {
+            writeln!(out, "  Provenance:  schema {v}")?;
+        }
+        Some(v) => {
+            return writeln!(
+                out,
+                "  Provenance:  schema {v} - this build understands {}; not interpreted",
+                crate::provenance::SCHEMA_VERSION,
+            );
+        }
+        None => {
+            return writeln!(
+                out,
+                "  Provenance:  invalid - block declares no schema version"
+            );
+        }
+    }
+
+    // input and config are the contract. Either missing means the block cannot
+    // establish comparability at all, which is a fact worth stating rather
+    // than a group to skip.
+    let (Some(input), Some(config)) = (p.get("input"), p.get("config")) else {
+        writeln!(
+            out,
+            "    Contract:   INCOMPLETE - block is missing {}",
+            match (p.get("input"), p.get("config")) {
+                (None, None) => "input and config",
+                (None, _) => "input",
+                _ => "config",
+            }
+        )?;
+        return Ok(());
+    };
+
+    print_contract(out, input, config)?;
+    print_diagnostics(out, p)?;
+    Ok(())
+}
+
+/// The comparability contract: `input` plus every field of `config`.
+fn print_contract(
+    out: &mut dyn Write,
+    input: &serde_json::Value,
+    config: &serde_json::Value,
+) -> io::Result<()> {
+    let name = json_str(input.get("name"));
+    writeln!(out, "    Input:      {name}")?;
+    let hash = json_str(input.get("xxh3_128"));
+    match input.get("bytes").and_then(serde_json::Value::as_u64) {
+        Some(bytes) => writeln!(out, "                xxh3 {hash}  {}", format_bytes(bytes))?,
+        None => writeln!(out, "                xxh3 {hash}")?,
+    }
+    // The PBF header features, not the filename: these decide which
+    // coordinate, membership and pin paths the run actually took, and a
+    // name like "-locations-prepass" is a label that can lie.
+    writeln!(
+        out,
+        "                features: {}",
+        pbf_feature_list(input.get("features"))
+    )?;
+
+    let profile = json_str(config.get("profile"));
+    let min_zoom = json_num(config.get("min_zoom"));
+    let max_zoom = json_num(config.get("max_zoom"));
+    let simplify = config
+        .get("polygon_simplify_factor")
+        .and_then(serde_json::Value::as_f64)
+        .map_or_else(|| "unknown".to_string(), |v| format!("x{v}"));
+    writeln!(
+        out,
+        "    Config:     {profile}, z{min_zoom}-z{max_zoom}, polygon simplify {simplify}"
+    )?;
+    if let Some(tile) = config.get("tile") {
+        writeln!(
+            out,
+            "                tile: {} {}, base level {}, policy {}",
+            json_str(tile.get("format")),
+            json_str(tile.get("compression")),
+            json_num(tile.get("base_compression_level")),
+            json_str(tile.get("compression_policy")),
+        )?;
+    }
+    writeln!(
+        out,
+        "                seam: {}",
+        layer_map_display(config.get("seam_reconcile_layers"))
+    )?;
+    writeln!(
+        out,
+        "                fanout: {}",
+        layer_map_display(config.get("fanout_caps"))
+    )?;
+
+    if let Some(ocean) = config.get("ocean") {
+        writeln!(
+            out,
+            "    Ocean:      {}, low zoom {}, simplifier {}",
+            json_str(ocean.get("mode")),
+            json_str(ocean.get("low_zoom_source")),
+            match ocean
+                .get("runtime_simplification")
+                .and_then(serde_json::Value::as_bool)
+            {
+                Some(true) => "on",
+                Some(false) => "off",
+                None => "unknown",
+            },
+        )?;
+        // The shapefile identities live only here, so an artifact-active
+        // archive's contract is incomplete without them.
+        if let Some(key) = ocean.get("artifact_key").filter(|k| !k.is_null()) {
+            writeln!(
+                out,
+                "                key: shp {} simplified {} level {} policy {}",
+                abbreviate_hash(&json_str(key.get("full_shp_xxh128"))),
+                abbreviate_hash(&json_str(key.get("simplified_shp_xxh128"))),
+                json_num(key.get("compression_level")),
+                json_num(key.get("policy_version")),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// `build`, `effective` and `execution`: what explains a diff once the
+/// contract matches. Each is optional and absence is not an error - effective
+/// is absent on an ocean-artifact build, resumed_from on any full run - so
+/// unlike the contract, a missing group here is silence by design.
+fn print_diagnostics(out: &mut dyn Write, p: &serde_json::Value) -> io::Result<()> {
+    if let Some(build) = p.get("build") {
+        let elivagar = repo_display(build.get("elivagar"));
+        let pbfhogg = repo_display(build.get("pbfhogg_reader"));
+        writeln!(
+            out,
+            "    Build:      elivagar {elivagar}, pbfhogg {pbfhogg}"
+        )?;
+    }
+
+    if let Some(effective) = p.get("effective") {
+        writeln!(
+            out,
+            "    Effective:  coords {}, way members {}, pins {}",
+            json_str(effective.get("coordinate_source")),
+            json_str(effective.get("way_members")),
+            json_str(effective.get("shared_node_pins")),
+        )?;
+    }
+
+    if let Some(phase) = p
+        .get("execution")
+        .and_then(|e| e.get("resumed_from"))
+        .and_then(serde_json::Value::as_str)
+    {
+        writeln!(out, "    Resumed:    from {phase}")?;
+    }
+
+    Ok(())
+}
+
+/// A JSON string field, or `unknown` when absent, null, or not a string.
+fn json_str(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// A JSON number field, or `unknown`.
+fn json_num(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(serde_json::Value::as_u64)
+        .map_or_else(|| "unknown".to_string(), |v| v.to_string())
+}
+
+/// A `layer_map` object rendered as `name=value`, or `none` when empty.
+///
+/// `layer_map` omits zeros, so an empty object means every layer is at its
+/// default - which is why the whole contract fits on a few lines.
+fn layer_map_display(value: Option<&serde_json::Value>) -> String {
+    let Some(map) = value.and_then(serde_json::Value::as_object) else {
+        return "unknown".to_string();
+    };
+    if map.is_empty() {
+        return "none".to_string();
+    }
+    map.iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The true PBF header features, comma separated, or `none`.
+fn pbf_feature_list(features: Option<&serde_json::Value>) -> String {
+    let Some(features) = features else {
+        return "unknown".to_string();
+    };
+    let names = [
+        ("sort_type_then_id", "sorted"),
+        ("locations_on_ways", "locations-on-ways"),
+        ("way_members_v1", "way-members-v1"),
+        ("shared_node_pins_v1", "shared-node-pins-v1"),
+    ];
+    // Every flag must be present. A missing one defaulted to false would let a
+    // malformed block print "features: none", which is a positive claim about
+    // the PBF - a default wearing a fact's clothes, and the exact shape of
+    // every other bug this pipeline has had.
+    let mut set = Vec::new();
+    for (key, label) in names {
+        match features.get(key).and_then(serde_json::Value::as_bool) {
+            Some(true) => set.push(label),
+            Some(false) => {}
+            None => return format!("unknown - block declares no {key}"),
+        }
+    }
+    if set.is_empty() {
+        "none".to_string()
+    } else {
+        set.join(", ")
+    }
+}
+
+/// `<commit>`, or `<commit> (dirty)` - a dirty tree means the commit names the
+/// nearest ancestor of the code that ran, not the code that ran, so the flag is
+/// what decides how much the hash is worth.
+///
+/// The hash is abbreviated for reading. The block stores it in full and that
+/// remains the identity; this line is a summary, and 12 hex digits is what a
+/// human matches against a git log.
+fn repo_display(repo: Option<&serde_json::Value>) -> String {
+    let Some(repo) = repo else {
+        return "unknown".to_string();
+    };
+    let commit = repo
+        .get("commit")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let commit = abbreviate_hash(commit);
+    match repo.get("dirty").and_then(serde_json::Value::as_bool) {
+        Some(true) => format!("{commit} (dirty)"),
+        Some(false) => commit,
+        None => format!("{commit} (dirty unknown)"),
+    }
+}
+
+/// First 12 characters of a hex hash, unchanged if it is shorter or is a
+/// non-hex sentinel such as `unknown`.
+fn abbreviate_hash(hash: &str) -> String {
+    if hash.len() > 12 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        hash[..12].to_string()
+    } else {
+        hash.to_string()
+    }
+}
+
+/// Print metadata JSON in a readable format: extract vector_layers names and
+/// zoom ranges.
 fn print_metadata_json(out: &mut dyn Write, json: &str) -> io::Result<()> {
     // Print top-level key=value pairs (simple string/number values).
     // This is a minimal approach - we look for "key":"value" or "key":number patterns.
@@ -535,6 +892,223 @@ mod tests {
         assert!(output.contains("Payload format:     mvt (header)"));
         assert!(output.contains("Payload compress:   gzip (header)"));
         assert!(!output.contains("  Metadata:\n"));
+    }
+
+    fn provenance_of(json: &str) -> String {
+        let mut out = Vec::new();
+        super::print_provenance(&mut out, &super::MetadataState::Json(json.to_string())).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn provenance_output(member: &str) -> String {
+        provenance_of(&format!(
+            "{{\"name\":\"Shortbread\",\"elivagar\":{member}}}"
+        ))
+    }
+
+    /// Every field of the contract, so the reader can compare two archives on
+    /// all of it rather than on a selection that hides the field they differ in.
+    const FULL_BLOCK: &str = r#"{
+        "schema": 1,
+        "input": {
+            "name": "denmark-locations-prepass.osm.pbf",
+            "xxh3_128": "aa5bb865deadbeef",
+            "bytes": 2048,
+            "features": {
+                "sort_type_then_id": true,
+                "locations_on_ways": true,
+                "way_members_v1": true,
+                "shared_node_pins_v1": false
+            }
+        },
+        "config": {
+            "profile": "shortbread",
+            "min_zoom": 0,
+            "max_zoom": 14,
+            "tile": {
+                "format": "mvt",
+                "compression": "gzip",
+                "base_compression_level": 6,
+                "compression_policy": "zoom-v1"
+            },
+            "seam_reconcile_layers": { "boundaries": 8 },
+            "fanout_caps": {},
+            "polygon_simplify_factor": 1.0,
+            "ocean": {
+                "mode": "artifact",
+                "runtime_simplification": true,
+                "low_zoom_source": "simplified",
+                "artifact_key": {
+                    "full_shp_xxh128": "8122bcc83873ef95349e6a3522827fd9",
+                    "simplified_shp_xxh128": "4a1c2de9900177889900112233445566",
+                    "compression_level": 6,
+                    "policy_version": 1
+                }
+            }
+        },
+        "build": {
+            "elivagar": { "commit": "b833fc8", "dirty": false },
+            "pbfhogg_reader": { "commit": "4a1c2de", "dirty": true }
+        },
+        "effective": {
+            "coordinate_source": "inline",
+            "way_members": "injected_v1",
+            "shared_node_pins": "block_local"
+        },
+        "execution": { "resumed_from": "sort" }
+    }"#;
+
+    #[test]
+    fn provenance_prints_the_whole_contract_not_a_selection() {
+        let out = provenance_output(FULL_BLOCK);
+        assert!(out.contains("Provenance:  schema 1"), "{out}");
+        assert!(out.contains("denmark-locations-prepass.osm.pbf"), "{out}");
+        assert!(out.contains("xxh3 aa5bb865deadbeef  2.0 KB"), "{out}");
+        // Reported from the header bits, so an unset feature is absent from the
+        // list rather than listed as false.
+        assert!(
+            out.contains("features: sorted, locations-on-ways, way-members-v1"),
+            "{out}"
+        );
+        assert!(!out.contains("shared-node-pins-v1"), "{out}");
+        // The config fields two archives can silently differ in. Omitting any
+        // of these would let incomparable archives display identically.
+        assert!(
+            out.contains("Config:     shortbread, z0-z14, polygon simplify x1"),
+            "{out}"
+        );
+        assert!(
+            out.contains("tile: mvt gzip, base level 6, policy zoom-v1"),
+            "{out}"
+        );
+        assert!(out.contains("seam: boundaries=8"), "{out}");
+        assert!(out.contains("fanout: none"), "{out}");
+        assert!(
+            out.contains("Ocean:      artifact, low zoom simplified, simplifier on"),
+            "{out}"
+        );
+        // The shapefile identities exist nowhere else in the block.
+        assert!(
+            out.contains("key: shp 8122bcc83873 simplified 4a1c2de99001 level 6 policy 1"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Build:      elivagar b833fc8, pbfhogg 4a1c2de (dirty)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("coords inline, way members injected_v1, pins block_local"),
+            "{out}"
+        );
+        assert!(out.contains("Resumed:    from sort"), "{out}");
+    }
+
+    #[test]
+    fn provenance_absence_is_reported_not_omitted() {
+        // The case that motivated this: a blessed baseline built before the
+        // block existed. Saying nothing would read as nothing to report.
+        let out = provenance_of(r#"{"name":"Shortbread"}"#);
+        assert!(out.contains("Provenance:  absent"), "{out}");
+    }
+
+    /// Each way of having no contract names itself. "No block", "unreadable
+    /// metadata" and "not JSON" are different facts about an archive, and all
+    /// three used to print nothing at all.
+    #[test]
+    fn provenance_names_every_unavailable_reason() {
+        let of = |state: &super::MetadataState| {
+            let mut out = Vec::new();
+            super::print_provenance(&mut out, state).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert!(
+            of(&super::MetadataState::Absent).contains("unavailable - archive stores no metadata"),
+            "absent"
+        );
+        let too_large = of(&super::MetadataState::TooLarge(64 * 1024 * 1024));
+        assert!(too_large.contains("unavailable"), "{too_large}");
+        assert!(too_large.contains("64.0 MB"), "{too_large}");
+        assert!(
+            of(&super::MetadataState::Unreadable).contains("could not be read"),
+            "unreadable"
+        );
+        assert!(
+            provenance_of("not json at all").contains("invalid - metadata is not JSON"),
+            "invalid"
+        );
+    }
+
+    /// A schema bump means an existing field changed meaning, so summarising an
+    /// unknown one with this build's meanings would report confident nonsense.
+    #[test]
+    fn provenance_refuses_a_schema_it_does_not_understand() {
+        let out = provenance_output(r#"{"schema":99,"input":{},"config":{}}"#);
+        assert!(out.contains("schema 99"), "{out}");
+        assert!(out.contains("not interpreted"), "{out}");
+        assert!(!out.contains("Input:"), "{out}");
+
+        let out = provenance_output(r#"{"input":{},"config":{}}"#);
+        assert!(out.contains("invalid - block declares no schema"), "{out}");
+    }
+
+    /// input and config ARE the contract, so a block missing either cannot
+    /// establish comparability - a fact to state, not a group to skip.
+    #[test]
+    fn provenance_reports_an_incomplete_contract() {
+        let out = provenance_output(r#"{"schema":1}"#);
+        assert!(out.contains("INCOMPLETE"), "{out}");
+        assert!(out.contains("input and config"), "{out}");
+
+        let out = provenance_output(r#"{"schema":1,"input":{}}"#);
+        assert!(out.contains("INCOMPLETE"), "{out}");
+        assert!(out.contains("missing config"), "{out}");
+    }
+
+    #[test]
+    fn provenance_omits_absent_diagnostic_groups() {
+        // effective is absent on an ocean-artifact build and resumed_from on
+        // any full run. Both are diagnostics, so neither is an error.
+        let out = provenance_output(
+            r#"{"schema":1,"input":{},"config":{},"execution":{"resumed_from":null}}"#,
+        );
+        assert!(out.contains("schema 1"), "{out}");
+        assert!(!out.contains("Effective:"), "{out}");
+        assert!(!out.contains("Resumed:"), "{out}");
+    }
+
+    #[test]
+    fn provenance_reports_a_pbf_with_no_declared_features() {
+        let out = provenance_output(
+            r#"{"schema":1,"config":{},"input":{"name":"raw.osm.pbf","xxh3_128":"ab","bytes":1,
+                "features":{"sort_type_then_id":false,"locations_on_ways":false,
+                "way_members_v1":false,"shared_node_pins_v1":false}}}"#,
+        );
+        assert!(out.contains("features: none"), "{out}");
+    }
+
+    /// A missing flag defaulted to false would print "features: none", which is
+    /// a positive claim about the PBF derived from missing data.
+    #[test]
+    fn provenance_will_not_infer_features_from_a_missing_flag() {
+        let out = provenance_output(
+            r#"{"schema":1,"config":{},"input":{"name":"x.pbf","xxh3_128":"ab","bytes":1,
+                "features":{"sort_type_then_id":false}}}"#,
+        );
+        assert!(!out.contains("features: none"), "{out}");
+        assert!(
+            out.contains("unknown - block declares no locations_on_ways"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn provenance_abbreviates_commits_but_not_sentinels() {
+        assert_eq!(
+            super::abbreviate_hash("b833fc8730cdbb7891b952c116c048876c2ad62c"),
+            "b833fc8730cd"
+        );
+        assert_eq!(super::abbreviate_hash("unknown"), "unknown");
+        assert_eq!(super::abbreviate_hash("b833fc8"), "b833fc8");
     }
 
     #[test]

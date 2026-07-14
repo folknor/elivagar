@@ -266,9 +266,12 @@ assuming comparability.
 
 Recorded here so they are not rediscovered as bugs:
 
-- **Nothing consumes this yet.** `brokkr regress` does not read the block, so
-  the 2026-07-14 comparison would still be reported today. The metadata is
-  inert until step 1 of the consumer contract exists.
+- **No consumer ENFORCES this yet.** `elivagar inspect` reports the block as of
+  2026-07-15 - contract first, and absence stated rather than omitted - so a
+  human can establish comparability before running a diff. But `brokkr regress`
+  still does not read it, so the 2026-07-14 comparison would be reported today
+  exactly as it was. Reporting is not the contract; refusing is. Step 1 of the
+  consumer contract remains open.
 - `input.replication_sequence` is not recorded (the pbfhogg header API for it
   is unconfirmed). `replication_timestamp` is.
 - `config.ocean` records shapefile hashes only via `artifact_key`, so a

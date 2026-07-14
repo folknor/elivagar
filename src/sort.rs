@@ -85,7 +85,7 @@ const PARTITION_BASES: [usize; 16] = {
     bases
 };
 
-/// Number of ordered partition ids produced by the z6-calibrated scheme.
+/// Number of ordered partition ids produced by the `PARTITION_SPLIT_Z` scheme.
 pub const SORT_PARTITIONS: usize = PARTITION_BASES[15];
 
 const TILE_ID_LIMIT_EXCLUSIVE: u64 = TILE_ID_BASES[15];
