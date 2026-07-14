@@ -322,8 +322,11 @@ coastal-multipolygon cost is not proven on denmark alone.
   "48.6 GB Denmark" figure) undercount and are not comparable to current ones.
 - Timing percentages over 100% in hotpath reports are cross-thread seconds
   relative to wall clock, not errors.
-- `ELIVAGAR_NODE_STATS=1` adds a diagnostic scan inside `phase12_ms`: fine for
-  hotpath runs, never for bench timing.
+- `ELIVAGAR_NODE_STATS=1` added a diagnostic scan inside `phase12_ms` and was
+  never safe for bench timing. Deleted 2026-07-15: it profiled the node store,
+  which only the raw path builds, and printed to a stderr that `--bench`
+  discards - so it charged the runs whose output it could not reach. Numbers
+  from runs with it set are still suspect for that reason.
 
 ## Reference profiles (2026-07-06 campaign, commit 95d6d52)
 

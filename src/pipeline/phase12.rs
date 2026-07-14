@@ -549,21 +549,21 @@ pub(super) fn phase_read_and_process(
                     // in the pool simultaneously. Byte-budgeted in-flight control
                     // limits total estimated memory, with a count ceiling as safety net.
                     const WAY_OUTPUT_MULTIPLIER: usize = 10;
-                    // ELIVAGAR_WAY_BUDGET (bytes) outranks the flag: brokkr's
-                    // tilegen wrapper has no --way-budget passthrough, and the
-                    // budget is under active A/B (way_budget wait 93.4s
-                    // cumulative on NA locations at the 768M default).
-                    let way_budget = std::env::var("ELIVAGAR_WAY_BUDGET")
-                        .ok()
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .filter(|&v| v > 0)
-                        .unwrap_or(if config.way_inflight_budget > 0 {
-                            config.way_inflight_budget
-                        } else if locations_on_ways {
-                            DEFAULT_WAY_BUDGET_LOCATIONS
-                        } else {
-                            DEFAULT_WAY_BUDGET
-                        });
+                    // --way-budget is the only way to set this. An
+                    // ELIVAGAR_WAY_BUDGET env override used to outrank the
+                    // flag, so a run passing --way-budget 256M could use 768M
+                    // while cli_args recorded 256M - the record naming a value
+                    // the run did not use. It was added because brokkr's
+                    // tilegen wrapper had no --way-budget passthrough; the
+                    // wrapper is configured from brokkr.toml now, so the
+                    // workaround outlived its reason.
+                    let way_budget = if config.way_inflight_budget > 0 {
+                        config.way_inflight_budget
+                    } else if locations_on_ways {
+                        DEFAULT_WAY_BUDGET_LOCATIONS
+                    } else {
+                        DEFAULT_WAY_BUDGET
+                    };
                     worker_handle = Some(std::thread::spawn(move || {
                         // Take refs outside loop - Copy into each move closure,
                         // avoids Arc::clone per spawn.

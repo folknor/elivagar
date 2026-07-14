@@ -836,43 +836,16 @@ impl SortedNodeStore {
         let node_count = self.node_count;
         let group_count = self.groups.len();
 
-        // Detailed diagnostic scan: walks every group blob to count chunks and measure bytes.
-        // At planet scale (51 GB, millions of chunks) this is slow, so gate behind env var.
-        // Enable with: ELIVAGAR_NODE_STATS=1
-        if std::env::var_os("ELIVAGAR_NODE_STATS").is_some() {
-            let mut total_blob_bytes: usize = 0;
-            let mut total_chunks: usize = 0;
-            let mut groups_used: usize = 0;
-            let mut uncompressed_chunks: usize = 0;
-            for g in self.groups.iter().flatten() {
-                groups_used += 1;
-                total_blob_bytes += g.data.len();
-                let mut offset = 0;
-                while offset < g.data.len() {
-                    total_chunks += 1;
-                    let fl = u16::from_le_bytes(
-                        g.data[offset + BITMASK_BYTES..offset + BITMASK_BYTES + 2]
-                            .try_into()
-                            .unwrap(),
-                    );
-                    let compressed = fl & 0x8000 != 0;
-                    let packed_len = (fl & 0x7FFF) as usize;
-                    if !compressed {
-                        uncompressed_chunks += 1;
-                    }
-                    offset += CHUNK_HEADER_SIZE + packed_len;
-                }
-            }
-            let groups_vec_bytes = group_count * std::mem::size_of::<Option<Box<Group>>>();
-            let raw_bytes = node_count as usize * 8;
-            let total_bytes = total_blob_bytes + groups_vec_bytes;
-            eprintln!("node_store_groups_used={groups_used}");
-            eprintln!("node_store_chunks={total_chunks}");
-            eprintln!("node_store_uncompressed_chunks={uncompressed_chunks}");
-            eprintln!("node_store_blob_bytes={total_blob_bytes}");
-            eprintln!("node_store_total_bytes={total_bytes}");
-            eprintln!("node_store_raw_bytes={raw_bytes}");
-        }
+        // An ELIVAGAR_NODE_STATS scan used to live here: it walked every group
+        // blob to report chunk counts, compression ratio and blob bytes.
+        // Deleted 2026-07-15, and none of its three problems were about the
+        // env var. It profiled SortedNodeStore, which only the raw path builds
+        // - the record path is locations-on-ways, where the enriched PBF
+        // deletes the node store entirely. It printed to stderr, which brokkr
+        // discards under --bench, so its output was unreachable on the runs it
+        // charged. And it charged them inside phase12_ms. The always-on
+        // node_store_nodes / node_store_groups counters carry the ledger need
+        // and go to the sidecar, where measurements actually live.
 
         SortedNodeStoreReader {
             groups: self.groups,

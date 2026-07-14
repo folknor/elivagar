@@ -1,5 +1,8 @@
 project = "elivagar"
 
+# Env variables that match these are captured by brokkr during runs and stored in the database.
+capture_env = ["ELIVAGAR*", "MALLOC*"]
+
 # ---------------------------------------------------------------------------
 # Per-machine configuration
 # ---------------------------------------------------------------------------

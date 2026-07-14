@@ -81,10 +81,17 @@ Output goes to stdout by default.
 
 ### Environment variables
 
+No variable duplicates a flag or overrides one: a knob is a flag or an env
+var, never both.
+
 | Variable | Description |
 |----------|-------------|
-| `ELIVAGAR_NODE_STATS=1` | Print detailed SortedNodeStore diagnostics (chunk count, compression ratio, blob bytes). Requires a full scan of the node store during the PBF phase - fast on regional extracts, slow at planet scale. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after timing, without this variable. |
-| `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1` | Same as `--allow-unsafe-flat-index`. Bypasses unsorted-size and flat-index-size guardrails. |
+| `ELIVAGAR_ASSEMBLE_WORKERS` | Assemble worker cap (default 8). Encode CPU saturates near 8; 12 measured worse. |
+| `ELIVAGAR_ASSEMBLE_PARK_BUDGET` | Bytes of encoded-but-unwritten tiles workers may run ahead of the writer (default 2 GiB). The RAM ceiling on assemble. |
+| `ELIVAGAR_REL_BLOCKS_CAP` | Relation-block buffer cap in bytes. Past it the tail re-reads relation blobs instead of holding them. |
+| `ELIVAGAR_LAYER_STATS=1` | Per-layer per-zoom sort-stats firehose (~800 counters), emitted at end of run. Per-layer totals are always emitted. |
+
+Full detail, including the harness variables, in [reference/cli.md](reference/cli.md).
 
 ### Ocean input
 
@@ -164,7 +171,7 @@ osmium sort input.pbf -o sorted.pbf
 ```
 
 If you intentionally want to bypass guardrails for expert debugging/CI, use
-`--allow-unsafe-flat-index` (or `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1`).
+`--allow-unsafe-flat-index`.
 
 Host guidance:
 

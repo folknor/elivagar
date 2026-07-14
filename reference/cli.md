@@ -133,7 +133,7 @@ re-run a full tilegen.
 |---|---|
 | `--locations-on-ways` | PBF has node coordinates embedded in ways. Auto-detected from the PBF header; this forces it when the header does not declare it |
 | `--force-sorted` | use the compact node store without the PBF header flag. Errors if nodes are not monotonic |
-| `--allow-unsafe-flat-index` | bypass flat-index guardrails. Expert debugging only; may cause severe IO/RSS degradation. Also `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1` |
+| `--allow-unsafe-flat-index` | bypass flat-index guardrails. Expert debugging only; may cause severe IO/RSS degradation |
 
 `--locations-on-ways` reads a PBF header, not the filesystem, and is the one
 piece of detection that survives: it is a property of the input file, which is
@@ -352,19 +352,30 @@ The authoritative ocean gates are the earcut oracle and the human visual check.
 
 ## Environment variables
 
-Every one of these is invisible to `cli_args`, so a run configured by
-environment cannot be reconstructed from the results row. Prefer a flag where
-one exists; these are diagnostics, not configuration.
+None of these duplicates a flag or outranks one. A knob is a flag or an env
+var, never both, because two ways to say one thing means the quieter one wins
+silently.
+
+They are recordable: brokkr's `capture_env` in brokkr.toml matches `ELIVAGAR*`
+and `MALLOC*` and stores what it finds with the run, so an env-configured run
+can be reconstructed from the results row. That is what makes them legitimate
+rather than ambient - before it, the knob below that moves NA assemble by 26s
+was tunable from any shell and recorded nowhere.
 
 | var | effect |
 |---|---|
-| `ELIVAGAR_NODE_STATS=1` | detailed SortedNodeStore scan. Runs during phase12, so it adds to `phase12_ms` - safe for hotpath, not for bench timing |
-| `ELIVAGAR_LAYER_STATS=1` | per-layer per-zoom sort-stats firehose (~800 counters). Emitted at end of run, so it never affects timing |
-| `ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1` | same as `--allow-unsafe-flat-index` |
+| `ELIVAGAR_ASSEMBLE_WORKERS` | assemble worker cap, default 8. Measured on NA locations: 4 workers left the writer idle 68% of assemble; 8 cut assemble 186.4 to 160.7s; 12 was WORSE at 176.1s and +3 GB RSS - encode CPU saturates near 8 |
+| `ELIVAGAR_ASSEMBLE_PARK_BUDGET` | bytes of encoded-but-unwritten tiles workers may run ahead of the writer, default 2 GiB. The RAM ceiling on assemble, and the term the planet ledger's 6-9 GB assemble estimate is derived from |
+| `ELIVAGAR_REL_BLOCKS_CAP` | relation-block buffer cap in bytes. Past it the tail re-reads relation blobs instead of holding them; set it to 1 to force the spill path on a small extract |
+| `ELIVAGAR_LAYER_STATS=1` | per-layer per-zoom sort-stats firehose (~800 counters). Emitted at end of run, so it never affects timing. The per-layer totals are always emitted |
 | `BROKKR_MARKER_FIFO` | set by brokkr. Phase markers and counters go here; unset means every counter in `src/debug.rs` is a silent no-op |
 
 `BROKKR_MARKER_FIFO` is why a bare `elivagar run` emits no metrics at all: the
 sidecar numbers exist only for runs brokkr started with a measurement flag.
+
+The harness cannot express "allow brokkr with any env assignments", so
+`VAR=x brokkr ...` is blocked in-session; `scripts/envrun.sh` exists only to
+carry that, and gates nothing.
 
 ## What is not on this surface, and why
 

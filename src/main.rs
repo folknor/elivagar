@@ -129,7 +129,6 @@ struct RunArgs {
     force_sorted: bool,
 
     /// Bypass flat-index safety guardrails (unsafe; may cause severe IO/RSS degradation).
-    /// Equivalent env var: ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX=1
     #[arg(long)]
     allow_unsafe_flat_index: bool,
 
@@ -949,9 +948,6 @@ fn run(args: RunArgs) {
         }
     };
 
-    let allow_unsafe_flat_index =
-        args.allow_unsafe_flat_index || env_var_true("ELIVAGAR_ALLOW_UNSAFE_FLAT_INDEX");
-
     let config = elivagar::TilegenConfig {
         pbf_path: args.input,
         output_path: args.output,
@@ -967,7 +963,7 @@ fn run(args: RunArgs) {
         in_memory: args.in_memory,
         compression_level: args.compression_level,
         force_sorted: args.force_sorted,
-        allow_unsafe_flat_index,
+        allow_unsafe_flat_index: args.allow_unsafe_flat_index,
         threads,
         way_inflight_budget: args.way_budget.unwrap_or(0),
         assemble_batch_budget: args.assemble_budget.unwrap_or(0),
@@ -1066,18 +1062,6 @@ fn run(args: RunArgs) {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
-}
-
-fn env_var_true(name: &str) -> bool {
-    std::env::var_os(name)
-        .map(|v| {
-            let v = v.to_string_lossy();
-            matches!(
-                v.as_ref(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

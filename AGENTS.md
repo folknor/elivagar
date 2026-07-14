@@ -159,9 +159,9 @@ What elivagar emits:
   missing-ref stats. This is the ~100-counter set that a bare measured run emits.
 - The per-layer per-zoom firehose (`sort_layer_<layer>_z<z>_records`/`_bytes`
   /`_fanout_p50`/`p95`/`p99`/`max`/`above_N`, ~800 counters) is gated behind
-  `ELIVAGAR_LAYER_STATS`. Left off, `--counters` stays readable; set it (like
-  `ELIVAGAR_NODE_STATS`) when doing layer or fanout-cap analysis. The per-layer
-  totals (`sort_layer_<name>_records`/`_bytes`) are always emitted.
+  `ELIVAGAR_LAYER_STATS`. Left off, `--counters` stays readable; set it when
+  doing layer or fanout-cap analysis. The per-layer totals
+  (`sort_layer_<name>_records`/`_bytes`) are always emitted.
 
 pbfhogg, used as the PBF reader, emits its OWN counters into the same FIFO
 (`pipeline_decode_tasks`, `pipeline_reorder_high_water`, and its own
@@ -472,7 +472,7 @@ Driven by `scripts/ocean-coverage.sh` (brokkr has no wrapper).
 - Cast lints are strict - annotate with `#[allow(clippy::cast_*)]` where needed
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)
 - **Test geometry must fit in one tile at the test zoom level.** World-spanning polygons (e.g. [0.1-0.9] Mercator) at z14 iterate 268M tiles and OOM the machine. If a test needs high zoom, use geometry confined to a single tile at that zoom.
-- `ELIVAGAR_NODE_STATS=1` - enables detailed SortedNodeStore diagnostic scan (chunk counts, compression ratio, blob bytes). Runs during PBF phase so it adds to `phase12_ms` - safe for hotpath runs but not for bench timing. Basic stats (`node_store_nodes`, `node_store_groups`) are always emitted after all timing kv pairs and never affect benchmarks.
+- Env vars: no variable duplicates a flag or overrides one - a knob is a flag or an env var, never both. brokkr's `capture_env` in brokkr.toml matches `ELIVAGAR*`/`MALLOC*` and stores what it finds with the run, so an env-configured run is reconstructable from the results row. The set is `ELIVAGAR_ASSEMBLE_WORKERS`, `ELIVAGAR_ASSEMBLE_PARK_BUDGET`, `ELIVAGAR_REL_BLOCKS_CAP`, `ELIVAGAR_LAYER_STATS`; full detail in `reference/cli.md`. In-session, `VAR=x brokkr ...` is blocked by the harness permission matcher, so use `scripts/envrun.sh VAR=x brokkr ...`.
 - `ELIVAGAR_LAYER_STATS=1` - emits the per-layer per-zoom sort-stats firehose (`sort_layer_<name>_z<z>_records`/`_bytes`/`_fanout_p50`/`p95`/`p99`/`max`/`above_N`, ~800 counters). Off by default so `brokkr sidecar --counters` stays readable; the per-layer totals (`sort_layer_<name>_records`/`_bytes`) are always emitted. Emitted at end of run, so it never affects timing. Set it (it is inherited by the child through `brokkr`) for layer or fanout-cap analysis.
 - Memory instrumentation (`3a729ab`) - always-on, not feature-gated. Emits per-phase peak RSS (`phase12_rss_kb`, `ocean_rss_kb`, `sort_rss_kb`, `assemble_rss_kb`), `sort_chunks`, and in-flight HWM counters (`max_way_inflight_bytes`, `max_rel_inflight_bytes`, `max_assemble_batch_bytes`). Overhead is negligible: 4 `/proc` reads total, per-block byte estimation, per-feature counter increment. Nothing in hot inner loops.
 

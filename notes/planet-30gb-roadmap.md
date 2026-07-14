@@ -835,9 +835,12 @@ directive to explore the major theories aggressively):
   max_way_inflight peaked at 1.25 GB estimated, under the raised cap).
   The binding constraint is the task-count ceiling / way-stage CPU,
   not bytes - 768M default stands, and the way-path frontier is
-  H6 churn reduction, not knobs. ELIVAGAR_WAY_BUDGET env override
-  added for future A/Bs (brokkr's tilegen wrapper has no --way-budget
-  passthrough).
+  H6 churn reduction, not knobs. An ELIVAGAR_WAY_BUDGET env override
+  was added here for future A/Bs, because brokkr's tilegen wrapper had
+  no --way-budget passthrough; it outranked the flag, so a run could
+  record 256M and use 768M. Deleted 2026-07-15 - the wrapper is
+  configured from brokkr.toml now, and --way-budget is the only way to
+  set this.
 - Defaults promoted after gates: assemble workers 4 -> 8, byte-budget
   claim window 2 GiB (both env-overridable). Denmark gate at final
   defaults: 11.7s wall, regress vs blessed clean.

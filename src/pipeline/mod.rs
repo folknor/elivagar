@@ -510,8 +510,12 @@ fn emit_allocator_boundary(name: &str) {
 /// x several metrics - that swamps `brokkr sidecar --counters` and floods an
 /// optimizer's context. They are diagnostic detail wanted only during layer or
 /// fanout-cap analysis, so they are emitted only when ELIVAGAR_LAYER_STATS is
-/// set (mirroring ELIVAGAR_NODE_STATS). The per-layer totals
-/// (`sort_layer_<name>_records`/`_bytes`) are always emitted.
+/// set. The per-layer totals (`sort_layer_<name>_records`/`_bytes`) are always
+/// emitted.
+///
+/// The gate is about volume, not cost: these are emitted at end of run and
+/// never touch timing. brokkr's `capture_env` records the variable with the
+/// run, so a run carrying the firehose is identifiable from its results row.
 fn layer_stats_enabled() -> bool {
     std::env::var_os("ELIVAGAR_LAYER_STATS").is_some()
 }
