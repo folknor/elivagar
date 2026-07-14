@@ -99,6 +99,11 @@ pub(super) fn missing_ref_summary_lines(summary: MissingRefStats) -> [String; 6]
 
 /// Phase12 statistics returned alongside the sort writer.
 pub(super) struct Phase12Stats {
+    /// The paths this run actually took, captured where they are chosen
+    /// rather than re-derived downstream. Assemble writes them into archive
+    /// provenance, and a re-derivation there could disagree with what
+    /// actually ran.
+    pub(super) effective: crate::provenance::Effective,
     pub(super) node_count: u64,
     pub(super) way_count: u64,
     pub(super) rel_count: u64,

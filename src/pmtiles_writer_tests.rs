@@ -261,7 +261,7 @@ fn test_metadata_json() {
         TileDataCompression::Gzip,
         None,
         None,
-        None,
+        &[],
         false,
     );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -292,7 +292,7 @@ fn test_metadata_json_with_source_provenance() {
         TileDataCompression::Gzip,
         Some("denmark-latest.osm.pbf"),
         Some(1_708_000_000),
-        None,
+        &[],
         false,
     );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -315,7 +315,7 @@ fn test_metadata_json_escapes_source_pbf_special_chars() {
         TileDataCompression::Gzip,
         Some(source),
         None,
-        None,
+        &[],
         false,
     );
 
@@ -338,7 +338,7 @@ fn test_metadata_json_mlt_contract() {
         TileDataCompression::None,
         None,
         None,
-        None,
+        &[],
         false,
     );
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();

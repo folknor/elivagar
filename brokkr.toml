@@ -38,9 +38,9 @@ xxhash = "58c47f32d3a55b04a56813565efc78ac"
 seq = 4704
 
 [plantasjen.datasets.denmark.blessed]
-file = "blessed/denmark-a702427.pmtiles"
-commit = "a702427"
-xxhash = "2953c9057f474a24cbbfb131b64d2968"
+file = "blessed/denmark-ec5bd11.pmtiles"
+commit = "ec5bd11"
+xxhash = "209850a4848675aab58250850524812f"
 
 [plantasjen.datasets.norway]
 origin = "Geofabrik"

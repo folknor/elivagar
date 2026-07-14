@@ -1012,6 +1012,22 @@ pub(super) fn phase_read_and_process(
     let missing_ref_snapshot = missing_ref_stats.snapshot();
     let sw = sort_writer.expect("sort_writer not returned from drain");
     let stats = Phase12Stats {
+        effective: crate::provenance::Effective {
+            coordinate_source: if locations_on_ways {
+                "inline"
+            } else {
+                "node_store"
+            },
+            way_members: if injected.members {
+                "injected_v1"
+            } else {
+                "relation_scan"
+            },
+            shared_node_pins: match pin_source {
+                PinSource::Injected => "injected_v1",
+                PinSource::BlockLocal => "block_local",
+            },
+        },
         node_count,
         way_count,
         rel_count,

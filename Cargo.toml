@@ -13,9 +13,12 @@ categories = ["command-line-utilities", "science::geo"]
 name = "elivagar"
 path = "src/main.rs"
 
+[build-dependencies]
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
 [dependencies]
 pbfhogg = { path = "../pbfhogg" }
-protohoggr = { path = "../protohoggr" }
+protohoggr = "0.4.0"
 rayon = "1.5"
 memmap2 = "0.9.11"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }

@@ -334,6 +334,10 @@ Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids 
 
 ### regress - invoke as `brokkr regress`, never the raw binary
 
+A blessed archive is ALWAYS locations-generated - never bless a raw one.
+`tilegen` and `regress` default to `raw`, so pass `--variant locations`
+explicitly; raw vs locations tiles differ legitimately, not as a regression.
+
 `brokkr regress [--dataset D]` resolves the current output and the blessed
 archive (`datasets.<D>.blessed` in brokkr.toml) itself; no paths, defaults
 to denmark. What it computes: a semantic diff of two PMTiles archives

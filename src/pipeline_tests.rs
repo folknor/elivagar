@@ -3413,14 +3413,202 @@ fn checkpoint_roundtrip() {
         max_x: 0.8,
         max_y: 0.9,
     };
-    save_checkpoint(dir.path(), &bounds, 42, &OceanMode::Computed).unwrap();
-    let (loaded_bounds, loaded_chunks, ocean_mode) = load_checkpoint(dir.path()).unwrap();
+    save_checkpoint(
+        dir.path(),
+        &bounds,
+        42,
+        &OceanMode::Computed,
+        &checkpoint_provenance(),
+    )
+    .unwrap();
+    let (loaded_bounds, loaded_chunks, ocean_mode, provenance) =
+        load_checkpoint(dir.path()).unwrap();
     assert!((loaded_bounds.min_x - 0.1).abs() < 1e-10);
     assert!((loaded_bounds.min_y - 0.2).abs() < 1e-10);
     assert!((loaded_bounds.max_x - 0.8).abs() < 1e-10);
     assert!((loaded_bounds.max_y - 0.9).abs() < 1e-10);
     assert_eq!(loaded_chunks, 42);
     assert_eq!(ocean_mode, OceanMode::Computed);
+    assert_eq!(provenance, checkpoint_provenance());
+}
+
+fn checkpoint_provenance() -> crate::pipeline::CheckpointProvenance {
+    crate::pipeline::CheckpointProvenance {
+        input_xxh3_128: "58c47f32d3a55b04a56813565efc78ac".to_string(),
+        producer_config: serde_json::json!({"min_zoom": 0, "max_zoom": 14}),
+        effective: crate::provenance::Effective {
+            coordinate_source: "inline",
+            way_members: "injected_v1",
+            shared_node_pins: "injected_v1",
+        },
+    }
+}
+
+/// The chunks encode the producer config, so a resume must reject a changed
+/// one rather than reinterpret them and record settings the tiles were never
+/// built under.
+#[test]
+fn producer_config_diff_names_the_changed_field() {
+    let chunks = serde_json::json!({"min_zoom": 0, "max_zoom": 14, "polygon_simplify_factor": 1.0});
+    let current =
+        serde_json::json!({"min_zoom": 0, "max_zoom": 12, "polygon_simplify_factor": 1.0});
+    let diffs = crate::provenance::producer_config_diff(&chunks, &current);
+    assert_eq!(diffs.len(), 1, "only max_zoom changed: {diffs:?}");
+    assert!(diffs[0].starts_with("max_zoom"), "{diffs:?}");
+    assert!(diffs[0].contains("14"), "must report the checkpoint value");
+    assert!(diffs[0].contains("12"), "must report this run's value");
+    assert!(
+        crate::provenance::producer_config_diff(&chunks, &chunks).is_empty(),
+        "an unchanged config must not report a diff"
+    );
+}
+
+/// A config with every knob at its default, for producer-config tests that
+/// vary exactly one field.
+fn minimal_config() -> TilegenConfig {
+    TilegenConfig {
+        pbf_path: std::path::PathBuf::from("unused.osm.pbf"),
+        output_path: std::path::PathBuf::from("unused.pmtiles"),
+        tmp_dir: std::path::PathBuf::from("unused"),
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean_shapefile: None,
+        ocean_simplified_shapefile: None,
+        ocean_tiles: None,
+        ocean_artifact_key: None,
+        ocean_only_metadata: false,
+        no_ocean_simplify: false,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: false,
+        allow_unsafe_flat_index: false,
+        threads: 1,
+        way_inflight_budget: 0,
+        assemble_batch_budget: 0,
+        sort_chunk_size: 0,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: sort::ChunkCompression::None,
+        seam_reconcile_layers: [0; Layer::count()],
+        fanout_caps: [0; Layer::count()],
+        polygon_simplify_factor: 1.0,
+    }
+}
+
+/// Assemble-side settings are applied after the chunks are read, so changing
+/// them on a resume is safe and must not be rejected.
+#[test]
+fn producer_config_excludes_assemble_side_settings() {
+    let base = TilegenConfig {
+        tile_compression: TileCompression::Gzip,
+        compression_level: 6,
+        ..minimal_config()
+    };
+    let recompressed = TilegenConfig {
+        tile_compression: TileCompression::Brotli,
+        compression_level: 9,
+        ..minimal_config()
+    };
+    assert_eq!(
+        crate::provenance::producer_config(&base),
+        crate::provenance::producer_config(&recompressed),
+        "tile compression and level are applied at assemble, not baked into chunks"
+    );
+}
+
+/// Zoom range, fanout caps and simplification all decide what lands in the
+/// chunks, so each must be visible to the resume guard.
+#[test]
+fn producer_config_covers_chunk_affecting_settings() {
+    let base = minimal_config();
+    let mut narrower = minimal_config();
+    narrower.max_zoom = 12;
+    assert_ne!(
+        crate::provenance::producer_config(&base),
+        crate::provenance::producer_config(&narrower)
+    );
+
+    let mut simplified = minimal_config();
+    simplified.polygon_simplify_factor = 2.0;
+    assert_ne!(
+        crate::provenance::producer_config(&base),
+        crate::provenance::producer_config(&simplified)
+    );
+
+    let mut capped = minimal_config();
+    capped.fanout_caps[Layer::Ocean as usize] = 2048;
+    assert_ne!(
+        crate::provenance::producer_config(&base),
+        crate::provenance::producer_config(&capped)
+    );
+
+    let mut seamed = minimal_config();
+    seamed.seam_reconcile_layers[Layer::Boundaries as usize] = 10;
+    assert_ne!(
+        crate::provenance::producer_config(&base),
+        crate::provenance::producer_config(&seamed)
+    );
+}
+
+/// A resumed run must not inherit chunks built from a different PBF: the
+/// archive would mix two inputs and carry provenance describing only one.
+#[test]
+fn checkpoint_records_the_input_it_was_built_from() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let bounds = geometry::MercBbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 1.0,
+        max_y: 1.0,
+    };
+    save_checkpoint(
+        dir.path(),
+        &bounds,
+        1,
+        &OceanMode::Computed,
+        &checkpoint_provenance(),
+    )
+    .expect("save checkpoint");
+    let (_, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
+    assert_eq!(loaded.input_xxh3_128, "58c47f32d3a55b04a56813565efc78ac");
+    // The raw variant of the same extract hashes differently, which is what
+    // makes an unsafe resume detectable at all.
+    assert_ne!(loaded.input_xxh3_128, "aa5bb8650000000000000000deadbeef");
+}
+
+/// The effective paths survive a checkpoint round-trip as the same 'static
+/// identifiers phase12 emits, so a resumed archive describes what actually
+/// built its chunks.
+#[test]
+fn checkpoint_preserves_effective_paths() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let bounds = geometry::MercBbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 1.0,
+        max_y: 1.0,
+    };
+    let raw_paths = crate::provenance::Effective {
+        coordinate_source: "node_store",
+        way_members: "relation_scan",
+        shared_node_pins: "block_local",
+    };
+    save_checkpoint(
+        dir.path(),
+        &bounds,
+        1,
+        &OceanMode::Computed,
+        &crate::pipeline::CheckpointProvenance {
+            input_xxh3_128: "aa5bb8650000000000000000deadbeef".to_string(),
+            producer_config: crate::provenance::producer_config(&minimal_config()),
+            effective: raw_paths,
+        },
+    )
+    .expect("save checkpoint");
+    let (_, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
+    assert_eq!(loaded.effective, raw_paths);
 }
 
 #[test]
@@ -3447,7 +3635,8 @@ fn checkpoint_preserves_all_ocean_modes() {
         OceanMode::Band { key },
     ] {
         let dir = tempfile::tempdir().expect("create tempdir");
-        save_checkpoint(dir.path(), &bounds, 1, &mode).expect("save checkpoint");
+        save_checkpoint(dir.path(), &bounds, 1, &mode, &checkpoint_provenance())
+            .expect("save checkpoint");
         assert_eq!(
             load_checkpoint(dir.path()).expect("load checkpoint").2,
             mode

@@ -516,7 +516,7 @@ dependencies = [
  "mlt-core",
  "pbfhogg",
  "pmtiles",
- "protohoggr 0.4.0",
+ "protohoggr",
  "rayon",
  "rustc-hash",
  "serde",
@@ -1251,7 +1251,7 @@ dependencies = [
  "hotpath 0.21.2",
  "libc",
  "memmap2",
- "protohoggr 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "protohoggr",
  "quick-xml",
  "rayon",
  "rustc-hash",
@@ -1340,10 +1340,6 @@ checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "protohoggr"
-version = "0.4.0"
 
 [[package]]
 name = "protohoggr"

@@ -193,7 +193,15 @@ pub struct TilegenConfig {
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
-const CHECKPOINT_VERSION: u32 = 3;
+/// v5 is JSON and records everything a resume must verify: the input hash, the
+/// producer config the chunks were built under, and the effective paths.
+///
+/// v3 and earlier stored only bounds, chunk count and ocean mode, so a resume
+/// could silently reuse chunks built from a different PBF or a different zoom
+/// range. v4 added the input hash and effective paths but kept the
+/// whitespace-positional encoding, where every new field shifts an index and a
+/// miscount is a silent misparse. Neither is accepted; re-run a full tilegen.
+const CHECKPOINT_VERSION: u32 = 5;
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
@@ -203,23 +211,53 @@ const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 // Checkpoint I/O
 // ---------------------------------------------------------------------------
 
+/// Everything a resumed run must verify or inherit, recorded when the PBF
+/// phase produces the chunks.
+///
+/// Chunks on disk are the product of one PBF and one producer config, and
+/// nothing in a later invocation reveals either. Resuming against a different
+/// input, or a different zoom range or fanout cap, silently mixes two
+/// contracts into one archive and then stamps it with provenance describing
+/// only the second - the metadata would be confidently wrong, which is worse
+/// than absent.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CheckpointProvenance {
+    pub(crate) input_xxh3_128: String,
+    /// `provenance::producer_config` of the run that wrote the chunks.
+    pub(crate) producer_config: serde_json::Value,
+    pub(crate) effective: crate::provenance::Effective,
+}
+
 fn save_checkpoint(
     tmp_dir: &std::path::Path,
     bounds: &MercBbox,
     chunk_count: usize,
     ocean_mode: &OceanMode,
+    provenance: &CheckpointProvenance,
 ) -> Result<(), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let ocean = match ocean_mode {
-        OceanMode::None => "none".to_string(),
-        OceanMode::Computed => "computed".to_string(),
-        OceanMode::Band { key } => format!("band:{}", key.json()),
+        OceanMode::None => serde_json::json!("none"),
+        OceanMode::Computed => serde_json::json!("computed"),
+        OceanMode::Band { key } => serde_json::json!({
+            "band": serde_json::from_str::<serde_json::Value>(&key.json())
+                .map_err(|e| PipelineError(format!("ocean key is not valid JSON: {e}")))?,
+        }),
     };
-    let content = format!(
-        "v{CHECKPOINT_VERSION} {} {} {} {} {} {ocean}",
-        bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y, chunk_count
-    );
-    std::fs::write(path, content)?; // io::Error message is sufficient context.
+    let content = serde_json::json!({
+        "version": CHECKPOINT_VERSION,
+        "bounds": [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y],
+        "chunks": chunk_count,
+        "ocean": ocean,
+        "input_xxh3_128": provenance.input_xxh3_128,
+        "producer_config": provenance.producer_config,
+        "effective": {
+            "coordinate_source": provenance.effective.coordinate_source,
+            "way_members": provenance.effective.way_members,
+            "shared_node_pins": provenance.effective.shared_node_pins,
+        },
+    });
+    std::fs::write(path, content.to_string())?; // io::Error message is sufficient context.
     Ok(())
 }
 
@@ -246,7 +284,7 @@ fn load_sort_chunk_count(tmp_dir: &std::path::Path) -> Option<usize> {
 
 fn load_checkpoint(
     tmp_dir: &std::path::Path,
-) -> Result<(MercBbox, usize, OceanMode), PipelineError> {
+) -> Result<(MercBbox, usize, OceanMode, CheckpointProvenance), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let content = std::fs::read_to_string(&path).map_err(|e| {
         PipelineError(format!(
@@ -254,39 +292,71 @@ fn load_checkpoint(
             tmp_dir.display()
         ))
     })?;
-    let parts: Vec<&str> = content.split_whitespace().collect();
-    if parts.len() != 7 || parts[0] != "v3" {
-        return Err(PipelineError(format!(
-            "invalid checkpoint format: expected v3 with 7 fields, got {}",
-            parts.len()
-        )));
+    let stale = || {
+        PipelineError(format!(
+            "checkpoint in {} predates v{CHECKPOINT_VERSION} or is malformed; \
+             re-run a full tilegen to regenerate it",
+            tmp_dir.display()
+        ))
+    };
+    let doc: serde_json::Value = serde_json::from_str(&content).map_err(|_| stale())?;
+    if doc.get("version").and_then(serde_json::Value::as_u64) != Some(u64::from(CHECKPOINT_VERSION))
+    {
+        return Err(stale());
     }
-    let parse = |s: &str, name: &str| -> Result<f64, PipelineError> {
-        s.parse()
-            .map_err(|e| PipelineError(format!("checkpoint parse {name}: {e}")))
+    let coord = |i: usize| -> Result<f64, PipelineError> {
+        doc["bounds"]
+            .get(i)
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(stale)
     };
     let bounds = MercBbox {
-        min_x: parse(parts[1], "min_x")?,
-        min_y: parse(parts[2], "min_y")?,
-        max_x: parse(parts[3], "max_x")?,
-        max_y: parse(parts[4], "max_y")?,
+        min_x: coord(0)?,
+        min_y: coord(1)?,
+        max_x: coord(2)?,
+        max_y: coord(3)?,
     };
-    let chunks: usize = parts[5]
-        .parse()
-        .map_err(|e| PipelineError(format!("checkpoint parse chunk count: {e}")))?;
-    let ocean_mode = match parts[6] {
-        "none" => OceanMode::None,
-        "computed" => OceanMode::Computed,
-        band if band.starts_with("band:") => {
-            let value: serde_json::Value = serde_json::from_str(&band[5..])
-                .map_err(|e| PipelineError(format!("checkpoint ocean key: {e}")))?;
-            OceanMode::Band {
-                key: crate::ocean::OceanArtifactKey::from_json(&value)?,
-            }
-        }
+    let chunks = usize::try_from(
+        doc.get("chunks")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(stale)?,
+    )
+    .map_err(|_| stale())?;
+    let ocean_mode = match &doc["ocean"] {
+        serde_json::Value::String(s) if s == "none" => OceanMode::None,
+        serde_json::Value::String(s) if s == "computed" => OceanMode::Computed,
+        serde_json::Value::Object(o) if o.contains_key("band") => OceanMode::Band {
+            key: crate::ocean::OceanArtifactKey::from_json(&o["band"])?,
+        },
         _ => return Err(PipelineError("invalid checkpoint ocean mode".to_string())),
     };
-    Ok((bounds, chunks, ocean_mode))
+    // Interned back to the same 'static identifiers phase12 emits, so a
+    // resumed value is indistinguishable from a freshly computed one.
+    let path_name = |field: &str, allowed: [&'static str; 2]| {
+        let found = doc["effective"].get(field).and_then(|v| v.as_str());
+        allowed
+            .into_iter()
+            .find(|a| Some(*a) == found)
+            .ok_or_else(|| {
+                PipelineError(format!(
+                    "invalid checkpoint effective.{field}: {}",
+                    found.unwrap_or("(missing)")
+                ))
+            })
+    };
+    let provenance = CheckpointProvenance {
+        input_xxh3_128: doc["input_xxh3_128"]
+            .as_str()
+            .ok_or_else(stale)?
+            .to_string(),
+        producer_config: doc.get("producer_config").cloned().ok_or_else(stale)?,
+        effective: crate::provenance::Effective {
+            coordinate_source: path_name("coordinate_source", ["inline", "node_store"])?,
+            way_members: path_name("way_members", ["injected_v1", "relation_scan"])?,
+            shared_node_pins: path_name("shared_node_pins", ["injected_v1", "block_local"])?,
+        },
+    };
+    Ok((bounds, chunks, ocean_mode, provenance))
 }
 
 fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineError> {
@@ -449,11 +519,48 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let total_start = Instant::now();
     let skip = config.skip_to;
     let ocean_mode = resolved_ocean_mode(config)?;
+    // Identifying the input means reading all of it, so where that read happens
+    // matters. A resume must hash up front to validate the chunks, but then the
+    // PBF is never read again. A full run defers it to just after phase12,
+    // where the file is warm in page cache - hashing here instead would put a
+    // cold serial pass in front of the reader and, at planet scale, cost a
+    // second whole-file read plus the cache it evicts.
+    let mut input_identity: Option<(String, u64)> = None;
+    // Only a full run computes the effective paths; a resume inherits them
+    // from the checkpoint written by the run that built the chunks.
+    let mut resumed_effective = None;
     if skip.is_some() {
-        let (_, _, checkpoint_ocean_mode) = load_checkpoint(&config.tmp_dir)?;
+        let identity = crate::provenance::hash_file(&config.pbf_path)
+            .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?;
+        let (_, _, checkpoint_ocean_mode, checkpoint) = load_checkpoint(&config.tmp_dir)?;
         if checkpoint_ocean_mode != ocean_mode {
             return Err(PipelineError("checkpoint ocean mode differs from this run; --skip-to ocean, sort, and assemble cannot resume".to_string()));
         }
+        if checkpoint.input_xxh3_128 != identity.0 {
+            return Err(PipelineError(format!(
+                "checkpoint was built from a different PBF (chunks: {}, this run: {}); \
+                 --skip-to would mix two inputs into one archive - re-run a full tilegen",
+                checkpoint.input_xxh3_128, identity.0,
+            )));
+        }
+        // The chunks encode the producer config: zoom range, fanout caps,
+        // simplification. They cannot be reinterpreted under different
+        // settings, and reusing them would record settings the tiles were
+        // never built under.
+        let current_producer = crate::provenance::producer_config(config);
+        if checkpoint.producer_config != current_producer {
+            let diffs = crate::provenance::producer_config_diff(
+                &checkpoint.producer_config,
+                &current_producer,
+            );
+            return Err(PipelineError(format!(
+                "checkpoint chunks were produced under a different config: {}; \
+                 --skip-to cannot reinterpret them - re-run a full tilegen",
+                diffs.join("; "),
+            )));
+        }
+        resumed_effective = Some(checkpoint.effective);
+        input_identity = Some(identity);
     }
     emit_allocator_boundary("run_start");
 
@@ -517,11 +624,29 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
             }
             emit_allocator_boundary("phase12_end");
-            save_checkpoint(&config.tmp_dir, &bounds_out, sw.chunk_count(), &ocean_mode)?;
+            // Deferred to here: phase12 has just streamed the whole PBF, so
+            // this reads it back out of page cache rather than off the disk.
+            let identity = crate::provenance::hash_file(&config.pbf_path)
+                .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?;
+            save_checkpoint(
+                &config.tmp_dir,
+                &bounds_out,
+                sw.chunk_count(),
+                &ocean_mode,
+                &CheckpointProvenance {
+                    input_xxh3_128: identity.0.clone(),
+                    producer_config: crate::provenance::producer_config(config),
+                    effective: phase12_stats
+                        .as_ref()
+                        .map(|s| s.effective)
+                        .expect("phase12 stats are set immediately above"),
+                },
+            )?;
+            input_identity = Some(identity);
             sw
         } else {
             // --skip-to ocean: load checkpoint, resume from PBF chunks
-            let (_, pbf_chunks, checkpoint_ocean_mode) = load_checkpoint(&config.tmp_dir)?;
+            let (_, pbf_chunks, checkpoint_ocean_mode, _) = load_checkpoint(&config.tmp_dir)?;
             if checkpoint_ocean_mode != ocean_mode {
                 return Err(PipelineError(
                     "checkpoint ocean mode differs from this run; resume is unsafe".to_string(),
@@ -537,7 +662,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         };
 
         // Load data_bounds (needed for ocean, always available from checkpoint or just computed)
-        let (data_bounds, _, _) = load_checkpoint(&config.tmp_dir)?;
+        let (data_bounds, _, _, _) = load_checkpoint(&config.tmp_dir)?;
 
         active_ocean_artifact = if let (OceanMode::Band { key }, Some(path)) =
             (&ocean_mode, config.ocean_tiles.as_deref())
@@ -682,7 +807,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if active_ocean_artifact.is_none()
         && let (OceanMode::Band { key }, Some(path)) = (&ocean_mode, config.ocean_tiles.as_deref())
     {
-        let (bounds, _, _) = load_checkpoint(&config.tmp_dir)?;
+        let (bounds, _, _, _) = load_checkpoint(&config.tmp_dir)?;
         let pass_max_zooms = ocean_pass_max_zooms(config);
         active_ocean_artifact = Some(std::sync::Arc::new(crate::ocean::OceanTiles::open(
             path,
@@ -704,7 +829,35 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         max_assemble_batch_bytes,
         dedup_stats,
         tile_size_diag,
-    ) = assemble::phase_assemble_with_ocean(&mut sort_reader, config, active_ocean_artifact)?;
+    ) = assemble::phase_assemble_with_ocean(
+        &mut sort_reader,
+        config,
+        active_ocean_artifact,
+        assemble::RunProvenance {
+            input_identity,
+            effective: phase12_stats
+                .as_ref()
+                .map(|s| s.effective)
+                .or(resumed_effective),
+            resumed_from: skip.map(|s| match s {
+                SkipTo::Ocean => "ocean",
+                SkipTo::Sort => "sort",
+                SkipTo::Assemble => "assemble",
+            }),
+            ocean_artifact_key: match &ocean_mode {
+                OceanMode::Band { key } => serde_json::from_str(&key.json()).ok(),
+                OceanMode::None | OceanMode::Computed => None,
+            },
+            // The resolved mode, not a guess from which paths are set: ocean
+            // runs only when the full shapefile is present, so a
+            // simplified-only config produces no ocean at all.
+            ocean_mode: match &ocean_mode {
+                OceanMode::None => "none",
+                OceanMode::Computed => "shapefile",
+                OceanMode::Band { .. } => "artifact",
+            },
+        },
+    )?;
     // Drop the reader so every chunk reader flushes its byte tally before we
     // emit the merge counters.
     drop(sort_reader);

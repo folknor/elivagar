@@ -137,7 +137,30 @@ pub(super) fn phase_assemble(
     ),
     PipelineError,
 > {
-    phase_assemble_with_ocean(sort_reader, config, None)
+    phase_assemble_with_ocean(sort_reader, config, None, RunProvenance::default())
+}
+
+/// Run facts that only the orchestrator knows, for archive provenance.
+///
+/// Passed in rather than re-derived here: `effective` is chosen in phase12
+/// and is `None` when that phase did not run, and the artifact key belongs to
+/// the resolved ocean mode. Re-deriving either in assemble would describe this
+/// invocation rather than the run that produced the tiles.
+#[derive(Debug, Default)]
+pub(super) struct RunProvenance {
+    /// XXH3-128 and byte length of the input PBF, hashed once by the
+    /// orchestrator and shared with the checkpoint rather than recomputed here.
+    /// `None` only if the input could not be read.
+    pub(super) input_identity: Option<(String, u64)>,
+    /// The paths phase12 actually took, or those the checkpoint recorded for
+    /// a resumed run. `None` only when neither is available.
+    pub(super) effective: Option<crate::provenance::Effective>,
+    /// The phase a resumed run started at; `None` for a full run.
+    pub(super) resumed_from: Option<&'static str>,
+    /// Invalidation key of the durable ocean artifact, when one is in play.
+    pub(super) ocean_artifact_key: Option<serde_json::Value>,
+    /// The resolved ocean mode: `none`, `shapefile`, or `artifact`.
+    pub(super) ocean_mode: &'static str,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -146,6 +169,7 @@ pub(super) fn phase_assemble_with_ocean(
     sort_reader: &mut sort::SortReader,
     config: &TilegenConfig,
     ocean_tiles: Option<std::sync::Arc<crate::ocean::OceanTiles>>,
+    run: RunProvenance,
 ) -> Result<
     (
         u64,
@@ -183,7 +207,7 @@ pub(super) fn phase_assemble_with_ocean(
         }
     }
     if let Some(key) = &config.ocean_artifact_key {
-        pmtiles.set_metadata_extension(format!("\"ocean_artifact\":{}", key.json()));
+        pmtiles.add_metadata_member(format!("\"ocean_artifact\":{}", key.json()));
     }
     if config.ocean_only_metadata {
         pmtiles.set_ocean_only_metadata();
@@ -447,16 +471,39 @@ pub(super) fn phase_assemble_with_ocean(
         );
     }
     emit_counter_u64("assemble_reader_ns", reader_ns);
-    if let Some(filename) = config.pbf_path.file_name().and_then(|s| s.to_str()) {
-        pmtiles.set_source_pbf_filename(filename.to_string());
+    let pbf_name = config
+        .pbf_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
+    if let Some(name) = &pbf_name {
+        pmtiles.set_source_pbf_filename(name.clone());
     } else {
         pmtiles.set_source_pbf_filename(config.pbf_path.display().to_string());
     }
-    if let Ok(reader) = ElementReader::from_path(&config.pbf_path)
-        && let Some(ts) = reader.header().osmosis_replication_timestamp()
-    {
-        pmtiles.set_osmosis_replication_timestamp(ts);
+    let mut replication_timestamp = None;
+    let mut pbf_features = crate::provenance::PbfFeatures::default();
+    if let Ok(reader) = ElementReader::from_path(&config.pbf_path) {
+        let header = reader.header();
+        replication_timestamp = header.osmosis_replication_timestamp();
+        pbf_features = crate::provenance::PbfFeatures {
+            sort_type_then_id: header.is_sorted(),
+            locations_on_ways: header.has_locations_on_ways(),
+            way_members_v1: header.has_way_members_v1(),
+            shared_node_pins_v1: header.has_shared_node_pins_v1(),
+        };
+        if let Some(ts) = replication_timestamp {
+            pmtiles.set_osmosis_replication_timestamp(ts);
+        }
     }
+    write_provenance(
+        &mut pmtiles,
+        config,
+        pbf_name,
+        replication_timestamp,
+        pbf_features,
+        &run,
+    );
     let unique_tiles = pmtiles.unique_tile_count();
     let dedup_stats = pmtiles.dedup_stats().clone();
     {
@@ -1009,6 +1056,68 @@ fn read_encode_partition(
     }
 
     Ok(())
+}
+
+/// Write the `elivagar` provenance member describing the contract this
+/// archive was built under.
+///
+/// Every fact here is taken from the resolved run state rather than
+/// re-derived from config, because config admits states the run never enters:
+/// the artifact engages only for the exact MVT/gzip z0-14 contract, and the
+/// ocean phase runs only when the full shapefile is present, so a
+/// simplified-only config yields no ocean at all. Metadata that overstates is
+/// worse than metadata that is absent.
+///
+/// A missing input identity omits the whole block for the same reason: a
+/// partial block claiming an input it could not identify would be actively
+/// harmful, where absent is merely uninformative.
+fn write_provenance(
+    pmtiles: &mut PmtilesWriter,
+    config: &TilegenConfig,
+    pbf_name: Option<String>,
+    replication_timestamp: Option<i64>,
+    features: crate::provenance::PbfFeatures,
+    run: &RunProvenance,
+) {
+    let Some(name) = pbf_name else {
+        eprintln!("  warning: no PBF file name - omitting provenance metadata");
+        return;
+    };
+    let Some((xxh3_128, bytes)) = run.input_identity.clone() else {
+        eprintln!("  warning: input PBF not identified - omitting provenance metadata");
+        return;
+    };
+    let input = crate::provenance::Input {
+        name,
+        xxh3_128,
+        bytes,
+        replication_timestamp,
+        features,
+    };
+    let mode = run.ocean_mode;
+    let low_zoom_source = if mode == "none" {
+        "none"
+    } else if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
+        // Mirrors ocean_pass_max_zooms: a simplified shapefile only serves
+        // z0-7, and only when the run actually reaches those zooms.
+        "simplified"
+    } else {
+        "full"
+    };
+    let ocean = crate::provenance::OceanContract {
+        mode,
+        runtime_simplification: !config.no_ocean_simplify,
+        low_zoom_source,
+        // The artifact builder supplies its own key via config; a run that
+        // consumes an artifact gets it from the resolved ocean mode instead.
+        artifact_key: config
+            .ocean_artifact_key
+            .as_ref()
+            .and_then(|key| serde_json::from_str(&key.json()).ok())
+            .or_else(|| run.ocean_artifact_key.clone()),
+    };
+    let value = crate::provenance::build(&input, config, &ocean, run.effective, run.resumed_from);
+    pmtiles.add_metadata_member(crate::provenance::metadata_member(&value));
 }
 
 fn artifact_run_copy_items(

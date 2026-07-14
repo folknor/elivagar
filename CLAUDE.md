@@ -8,6 +8,24 @@
 - Never chain commands with ;
 - Never pipe commands with |
 
+### Listing `data/`
+
+`data/` is a symlink (it points at the big NVMe mount, see `brokkr env`). The
+harness refuses to traverse it, so `ls data/...` comes back as a permission
+denial rather than a listing - that denial is the symlink, not a real
+restriction, and it is not something to work around by other means.
+
+Use zsh's builtin `print` instead, which globs without the traversal:
+
+```
+print -l data/*.pmtiles data/blessed/* data/tilegen/*
+```
+
+`print` only expands globs - it does not stat. There is no `-la`; flags like
+that are echoed back as literal words. For sizes and mtimes, reach for a tool
+that reads the file itself, or use `brokkr` (`brokkr env` for datasets,
+`brokkr pmtiles-inspect` for archive headers).
+
 ### Communication rules
 
 - Never use the `AskUserQuestion` tool - the harness runs in don't-ask mode and it will be denied. When you need a decision from the user, just ask in chat with the options laid out in prose.

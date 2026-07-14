@@ -206,7 +206,7 @@ pub struct PmtilesWriter {
     tile_data_compression: TileDataCompression,
     source_pbf_filename: Option<String>,
     osmosis_replication_timestamp: Option<i64>,
-    metadata_extension: Option<String>,
+    metadata_extensions: Vec<String>,
     ocean_only_metadata: bool,
     /// Concatenated compressed tile data (in-memory or file-backed).
     blob: TileBlob,
@@ -268,8 +268,15 @@ impl PmtilesWriter {
     /// Add a trusted JSON member to archive metadata. The caller owns the
     /// schema; this keeps PMTiles metadata extensible without changing the
     /// ordinary Shortbread contract.
-    pub fn set_metadata_extension(&mut self, json_member: impl Into<String>) {
-        self.metadata_extension = Some(json_member.into());
+    ///
+    /// Members accumulate in call order. Several independent schemas share
+    /// this hook - `ocean_artifact` and `elivagar` at minimum - and each must
+    /// stay a distinct top-level key: `ocean::OceanArtifactKey::from_json`
+    /// reads `ocean_artifact` at the top level, so a mechanism that let one
+    /// member displace another would silently invalidate every durable ocean
+    /// artifact already built.
+    pub fn add_metadata_member(&mut self, json_member: impl Into<String>) {
+        self.metadata_extensions.push(json_member.into());
     }
 
     /// Write an ocean-only vector layer declaration for the durable artifact.
@@ -287,7 +294,7 @@ impl PmtilesWriter {
             tile_data_compression: TileDataCompression::Gzip,
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
-            metadata_extension: None,
+            metadata_extensions: Vec::new(),
             ocean_only_metadata: false,
             blob: TileBlob::Memory(Vec::new()),
             num_addressed: 0,
@@ -320,7 +327,7 @@ impl PmtilesWriter {
             tile_data_compression: TileDataCompression::Gzip,
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
-            metadata_extension: None,
+            metadata_extensions: Vec::new(),
             ocean_only_metadata: false,
             blob: TileBlob::File {
                 writer,
@@ -527,7 +534,7 @@ impl PmtilesWriter {
             self.tile_data_compression,
             self.source_pbf_filename.as_deref(),
             self.osmosis_replication_timestamp,
-            self.metadata_extension.as_deref(),
+            &self.metadata_extensions,
             self.ocean_only_metadata,
         );
         let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
@@ -1015,7 +1022,7 @@ fn build_metadata(
     tile_data_compression: TileDataCompression,
     source_pbf_filename: Option<&str>,
     osmosis_replication_timestamp: Option<i64>,
-    metadata_extension: Option<&str>,
+    metadata_extensions: &[String],
     ocean_only_metadata: bool,
 ) -> String {
     use crate::shortbread::Layer;
@@ -1057,7 +1064,7 @@ fn build_metadata(
     if let Some(ts) = osmosis_replication_timestamp {
         json.push_str(&format!(r#","osmosis_replication_timestamp":{ts}"#));
     }
-    if let Some(extension) = metadata_extension {
+    for extension in metadata_extensions {
         json.push(',');
         json.push_str(extension);
     }

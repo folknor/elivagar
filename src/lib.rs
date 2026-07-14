@@ -79,6 +79,7 @@ mod pipeline;
 pub mod pmtiles_reader;
 pub mod pmtiles_writer;
 pub(crate) mod pois;
+pub mod provenance;
 pub mod regress;
 pub mod shortbread;
 pub mod sort;

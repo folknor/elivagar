@@ -10,6 +10,61 @@ use pbfhogg::MemberId;
 use pbfhogg::block_builder::{self, BlockBuilder, MemberData, Metadata};
 use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 
+/// A v5 checkpoint that a default-flag `--skip-to assemble` run will accept.
+///
+/// The producer config must equal what the CLI resolves, so it is built from
+/// a `TilegenConfig` carrying the documented CLI defaults - zooms 0-14,
+/// `--seam-reconcile-layers boundaries` (default max zoom 8), no fanout caps,
+/// `--polygon-simplify-factor 1.0` - and run through the same
+/// `producer_config` the pipeline uses, rather than hand-encoded JSON that
+/// would drift out of agreement silently.
+fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
+    let mut seam = [0u8; elivagar::shortbread::Layer::count()];
+    seam[elivagar::shortbread::Layer::Boundaries as usize] = 8;
+    let config = elivagar::TilegenConfig {
+        pbf_path: std::path::PathBuf::from("unused.osm.pbf"),
+        output_path: std::path::PathBuf::from("unused.pmtiles"),
+        tmp_dir: std::path::PathBuf::from("unused"),
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean_shapefile: None,
+        ocean_simplified_shapefile: None,
+        ocean_tiles: None,
+        ocean_artifact_key: None,
+        ocean_only_metadata: false,
+        no_ocean_simplify: false,
+        skip_to: None,
+        in_memory: false,
+        compression_level: 6,
+        force_sorted: false,
+        allow_unsafe_flat_index: false,
+        threads: 1,
+        way_inflight_budget: 0,
+        assemble_batch_budget: 0,
+        sort_chunk_size: 0,
+        locations_on_ways: false,
+        tile_format: elivagar::TilePayloadFormat::Mvt,
+        tile_compression: elivagar::TileCompression::Gzip,
+        compress_sort_chunks: elivagar::sort::ChunkCompression::None,
+        seam_reconcile_layers: seam,
+        fanout_caps: [0; elivagar::shortbread::Layer::count()],
+        polygon_simplify_factor: 1.0,
+    };
+    serde_json::json!({
+        "version": 5,
+        "bounds": [0.0, 0.0, 1.0, 1.0],
+        "chunks": 1,
+        "ocean": "none",
+        "input_xxh3_128": pbf_hash,
+        "producer_config": elivagar::provenance::producer_config(&config),
+        "effective": {
+            "coordinate_source": "node_store",
+            "way_members": "relation_scan",
+            "shared_node_pins": "block_local",
+        },
+    })
+}
+
 fn write_tiny_pbf(path: &Path) {
     let file = std::fs::File::create(path).expect("create pbf");
     let mut writer = PbfWriter::new(file, PbfCompression::default());
@@ -309,10 +364,20 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
     std::fs::create_dir_all(&chunks_dir).expect("create chunks dir");
     write_tiny_pbf(&pbf_path);
 
-    // A coherent v3 checkpoint so the ocean-mode resume guard passes (the
-    // run uses --no-ocean, matching "none") and the flow reaches the
-    // chunk-state validation this test is about.
-    std::fs::write(tmp_dir.join("checkpoint.txt"), "v3 0 0 1 1 1 none").expect("write checkpoint");
+    // A coherent checkpoint, so every resume guard passes and the flow reaches
+    // the chunk-state validation this test is about: the ocean-mode guard (the
+    // run uses --no-ocean, matching "none"), the input-identity guard (needs
+    // this very PBF's hash), and the producer-config guard (must match what
+    // the CLI resolves for the flags below).
+    //
+    // The producer config is generated rather than hand-encoded so it tracks
+    // the CLI defaults instead of silently rotting when one of them changes.
+    let (pbf_hash, _) = elivagar::provenance::hash_file(&pbf_path).expect("hash pbf");
+    std::fs::write(
+        tmp_dir.join("checkpoint.txt"),
+        checkpoint_json(&pbf_hash).to_string(),
+    )
+    .expect("write checkpoint");
     // Missing chunk path: checkpoint expects 1 chunk but there are none.
     std::fs::write(tmp_dir.join("sort_chunks.count"), "1").expect("write chunk checkpoint");
 
