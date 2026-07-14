@@ -3,7 +3,8 @@
 //! Validates a PMTiles archive end-to-end: container integrity, metadata schema,
 //! tile decompression, MVT payload structure, and layer coverage.
 
-use std::collections::HashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -62,7 +63,9 @@ pub struct VerifyReport {
     pub addressed_per_zoom: [u64; 15],
     pub unique_payloads: bool,
     pub tile_errors: Vec<String>,
-    pub layers_observed: HashSet<String>,
+    /// BTreeSet, not a hash set: this is iterated to build the "undeclared
+    /// layers" warning, so the report order must not depend on hash order.
+    pub layers_observed: BTreeSet<String>,
     pub layers_declared: Vec<String>,
     pub passed: bool,
     pub geometry_stats: Option<GeometryStats>,
@@ -162,9 +165,10 @@ impl VerifyReport {
         }
 
         // Layer coverage summary.
-        let shortbread_names: HashSet<&str> = Layer::ALL.iter().map(|l| l.name()).collect();
+        let shortbread_names: FxHashSet<&str> = Layer::ALL.iter().map(|l| l.name()).collect();
 
-        let declared_set: HashSet<&str> = self.layers_declared.iter().map(String::as_str).collect();
+        let declared_set: FxHashSet<&str> =
+            self.layers_declared.iter().map(String::as_str).collect();
 
         // Layers observed in tiles but not declared in metadata.
         let undeclared: Vec<&str> = self
@@ -316,10 +320,10 @@ pub fn verify_opts_unique(
 
     let mut tiles_checked: u64 = 0;
     let mut tile_errors: Vec<String> = Vec::new();
-    let mut layers_observed: HashSet<String> = HashSet::new();
+    let mut layers_observed: BTreeSet<String> = BTreeSet::new();
     let mut stats: Option<GeometryStats> = geometry_stats.then(GeometryStats::default);
-    let mut seen_payloads: HashSet<(u64, u32, u8, bool)> = HashSet::new();
-    let mut unique_blobs: HashSet<(u64, u32)> = HashSet::new();
+    let mut seen_payloads: FxHashSet<(u64, u32, u8, bool)> = FxHashSet::default();
+    let mut unique_blobs: FxHashSet<(u64, u32)> = FxHashSet::default();
     let mut addressed_per_zoom = [0_u64; 15];
 
     for run in &runs {
@@ -379,8 +383,7 @@ pub fn verify_opts_unique(
         // Geometry validation of the shared blob depends only on (z, seam).
         // Default traversal replays that outcome for every addressed tile;
         // unique mode selects one representative of each validation group.
-        let mut geometry_outcomes: std::collections::HashMap<(u8, bool), Option<String>> =
-            std::collections::HashMap::new();
+        let mut geometry_outcomes: FxHashMap<(u8, bool), Option<String>> = FxHashMap::default();
         let validation_tiles: Box<dyn Iterator<Item = (u64, u8, u32, u32)>> = if unique_payloads {
             Box::new(unique_tiles.into_iter())
         } else {

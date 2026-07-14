@@ -1,4 +1,4 @@
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     GeomType, LayerBuilder, LineMergeScratch, MergeScratch, command, decode_zigzag, zigzag,
@@ -383,7 +383,7 @@ fn merge_line_segments(
 /// A segment and its reverse describe the same line, so canonicalize on the
 /// lexicographically smaller orientation.
 fn dedup_parallel_segments(segments: &mut Vec<Vec<(i32, i32)>>) {
-    let mut seen: std::collections::HashSet<Vec<(i32, i32)>> = std::collections::HashSet::new();
+    let mut seen: FxHashSet<Vec<(i32, i32)>> = FxHashSet::default();
     segments.retain(|segment| {
         let mut reversed = segment.clone();
         reversed.reverse();

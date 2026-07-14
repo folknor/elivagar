@@ -506,10 +506,10 @@ mod tests {
     use crate::mvt::{GeomType, LayerBuilder, Value};
     use crate::shortbread::AttrValue;
     use std::borrow::Cow;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
-    fn feature_tag_map(layer: &LayerBuilder, feature_idx: usize) -> HashMap<String, Value> {
-        let mut out = HashMap::new();
+    fn feature_tag_map(layer: &LayerBuilder, feature_idx: usize) -> BTreeMap<String, Value> {
+        let mut out = BTreeMap::new();
         let f = layer.test_feature(feature_idx);
         for (k, v) in &f.tags {
             out.insert(layer.test_key(*k).to_string(), layer.test_value(*v).clone());

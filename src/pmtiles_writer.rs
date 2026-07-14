@@ -24,7 +24,7 @@
 //! writer.write_to(std::path::Path::new("output.pmtiles")).expect("write");
 //! ```
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, BufReader, BufWriter, Write};
@@ -218,7 +218,7 @@ pub struct PmtilesWriter {
     dir_store: DirStore,
     /// Primary hash → Vec<(offset, length, fingerprint2)> for dedup.
     /// Bucketed so primary-hash collisions don't silently evict entries.
-    dedup: HashMap<u64, Vec<(u64, u32, u64)>>,
+    dedup: FxHashMap<u64, Vec<(u64, u32, u64)>>,
     /// Total entries across all dedup buckets.
     dedup_count: usize,
     /// Maximum dedup entries (defaults to MAX_DEDUP_ENTRIES).
@@ -300,7 +300,7 @@ impl PmtilesWriter {
             num_addressed: 0,
             current_run: None,
             dir_store: DirStore::Memory(Vec::new()),
-            dedup: HashMap::new(),
+            dedup: FxHashMap::default(),
             dedup_count: 0,
             dedup_cap: MAX_DEDUP_ENTRIES,
             unique_count: 0,
@@ -341,7 +341,7 @@ impl PmtilesWriter {
                 path: dir_path,
                 count: 0,
             },
-            dedup: HashMap::new(),
+            dedup: FxHashMap::default(),
             dedup_count: 0,
             dedup_cap: MAX_DEDUP_ENTRIES,
             unique_count: 0,

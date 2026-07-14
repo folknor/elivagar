@@ -17,7 +17,7 @@
 //!
 //! Default sample: 200 tiles per zoom level (or all if fewer exist).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -469,8 +469,8 @@ fn main() {
     eprintln!("\nComparing {} sample tiles per zoom...\n", sample_per_zoom);
 
     // Accumulate totals across all zooms
-    let mut grand_totals_a: HashMap<String, (usize, usize, usize, usize, usize)> = HashMap::new();
-    let mut grand_totals_b: HashMap<String, (usize, usize, usize, usize, usize)> = HashMap::new();
+    let mut grand_totals_a: BTreeMap<String, (usize, usize, usize, usize, usize)> = BTreeMap::new();
+    let mut grand_totals_b: BTreeMap<String, (usize, usize, usize, usize, usize)> = BTreeMap::new();
 
     for z in min_zoom..=max_zoom {
         let empty = Vec::new();
@@ -478,7 +478,7 @@ fn main() {
         let zb = entries_by_zoom_b.get(&z).unwrap_or(&empty);
 
         // Build lookup for file B by tile_id
-        let b_map: HashMap<u64, usize> =
+        let b_map: BTreeMap<u64, usize> =
             zb.iter().enumerate().map(|(i, e)| (e.tile_id, i)).collect();
 
         // Find common tile_ids
@@ -513,10 +513,10 @@ fn main() {
             .collect();
 
         // Decode sampled tiles and accumulate per-layer stats
-        let mut layer_stats_a: HashMap<String, (usize, usize, usize, usize, usize)> =
-            HashMap::new(); // (features, points, lines, polys, geom_cmds)
-        let mut layer_stats_b: HashMap<String, (usize, usize, usize, usize, usize)> =
-            HashMap::new();
+        let mut layer_stats_a: BTreeMap<String, (usize, usize, usize, usize, usize)> =
+            BTreeMap::new(); // (features, points, lines, polys, geom_cmds)
+        let mut layer_stats_b: BTreeMap<String, (usize, usize, usize, usize, usize)> =
+            BTreeMap::new();
         let mut total_bytes_a: usize = 0;
         let mut total_bytes_b: usize = 0;
 
@@ -693,8 +693,8 @@ fn main() {
     );
 }
 
-fn group_by_zoom(entries: &[TileEntry]) -> HashMap<u8, Vec<TileEntry>> {
-    let mut map: HashMap<u8, Vec<TileEntry>> = HashMap::new();
+fn group_by_zoom(entries: &[TileEntry]) -> BTreeMap<u8, Vec<TileEntry>> {
+    let mut map: BTreeMap<u8, Vec<TileEntry>> = BTreeMap::new();
     for e in entries {
         let (z, _, _) = tile_id_to_zxy(e.tile_id);
         map.entry(z).or_default().push(TileEntry {

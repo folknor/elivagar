@@ -335,10 +335,9 @@ Sequential, same PBF input:
   level, and naming it for any other run is an error, not a silent
   fallback to computed ocean. Artifact-served tiles differ benignly from
   extract-computed ones (descent seams depend on the piece clip extent;
-  adjudicated equivalent in the viewer 2026-07-12, see
-  notes/ocean-tile-stream-spec.md) - so the blessed regress baseline is
-  artifact-active, the gate machine must pass the same artifact, and
-  rotating the artifact forces a bless rotation.
+  adjudicated equivalent in the viewer 2026-07-12) - so the blessed
+  regress baseline is artifact-active, the gate machine must pass the
+  same artifact, and rotating the artifact forces a bless rotation.
 - **sort**: partition bookkeeping only (near-zero; the merge is deferred)
 - **assemble**: streamed per-partition merge → MVT encode + gzip + PMTiles write (parallel partition readers; merge/decompress cost lands in `assemble_reader_ns`)
 
@@ -410,7 +409,7 @@ Validates a PMTiles archive end-to-end: container integrity, metadata schema, ti
 
 ### `elivagar svg <FILE> -z <Z> -x <X> -y <Y> [-W width] [-H height] [-l layers] [-o output.svg]`
 
-Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids (`-W`/`-H`, default 1x1). `--layers` filters to specific layers (comma-separated, e.g. `ocean,boundaries`). Decodes MVT geometry and draws each layer with a distinct color. Points render as circles, lines as stroked paths, polygons as filled paths with `evenodd` fill-rule. Background is land-colored (`#f2efe9`). Grid lines drawn between tiles when width or height > 1. Output goes to stdout by default, or to a file with `-o`.
+Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids (`-W`/`-H`, default 1x1). `--layers` filters to specific layers (comma-separated, e.g. `ocean,boundaries`). Decodes MVT geometry and draws each layer with a distinct color. Points render as circles, lines as stroked paths, polygons as filled paths with `nonzero` fill-rule (matching MapLibre and OpenLayers, which both fill nonzero; `evenodd` agrees only for well-formed alternating outers/holes and papers over exactly the ring-role bugs worth catching). Background is land-colored (`#f2efe9`). Grid lines drawn between tiles when width or height > 1. Output goes to stdout by default, or to a file with `-o`.
 
 ### regress - invoke as `brokkr regress`, never the raw binary
 
@@ -459,9 +458,9 @@ layer `ocean`.
 Known limitation: at low zoom ANY correct simplifier removes large sub-pixel
 coastline detail versus a verbatim baseline, so this over-reports and cannot
 separate legitimate generalization from a real coverage defect (a confirmed
-false negative on the 2026-07-12 ocean VW landing - see
-`notes/ocean-coastline-spike-problem.md`). Use it as a discriminator - compare
-two builds' losses to price a regression - never as a pass/fail gate. The
+false negative on the 2026-07-12 ocean VW landing). Use it as a
+discriminator - compare two builds' losses to price a regression - never as
+a pass/fail gate. The
 authoritative ocean gates remain the earcut oracle and the human visual check.
 Driven by `scripts/ocean-coverage.sh` (brokkr has no wrapper).
 

@@ -919,9 +919,11 @@ for the planet shapefile (the counters exist per-zoom on any run;
 extrapolation from the shapefile's global shape count is a paper
 exercise). Then a spec.
 
-SPEC WRITTEN 2026-07-12: `notes/ocean-tile-stream-spec.md` (v5; three
-codex critique rounds plus a competitor-comparison review folded). Key
-survey deltas vs the theory above: dedup is post-gzip storage-only, so
+SPEC WRITTEN 2026-07-12 (v5; three codex critique rounds plus a
+competitor-comparison review folded; the spec is implemented and the
+note since deleted - recover it from git history if the design
+rationale is ever wanted). Key survey deltas vs the theory above:
+dedup is post-gzip storage-only, so
 the reused 85% of NA's addressed tiles still pay merge+encode+gzip -
 the artifact deletes that, not just the phase; the artifact is itself a
 PMTiles archive consumed run-aware at assemble.
@@ -944,6 +946,37 @@ presence; regress gates assume the gate machine carries the same
 data/ocean-tiles.pmtiles the blessed archive was built with, and a
 shapefile-release rotation of the artifact is an output-changing event
 that forces a bless rotation.
+
+OPEN, UNGATED: the latent cross-piece ocean seam. `ocean.rs` sets
+`pins: None`, so the only simplification pins come from
+`build_edge_flags`, which pins the current cell's tile-edge window plus
+`params.pins` junctions and nothing else. A boundary genuinely SHARED
+between two ocean source pieces, away from tile edges, is therefore
+simplified independently on each side and can open a seam. The ocean
+shapefile path is the one polygon producer with shared edges and no pin
+source - contrast the OSM path's shared-node pins. The 2026-07-12 VW
+landing inherited `pins: None` from DP unchanged, so the fix is
+orthogonal to that work; the machinery exists unused
+(`quantize_polygon_pinned_into`, `PyramidParams.pins`).
+
+Never observed in the wild - the Norway coastline spikes were within a
+single feature, which is why this stayed latent - and no standing gate
+would catch it if it appeared. earcut cannot: a seam is a vertex in the
+wrong place, not a self-intersection. The connected-component render
+gate that would have covered it was refuted on calibration
+(2026-07-14): sweeping resolution and connectivity, the
+spike-vs-legitimate-simplification separation topped out at 3.29x
+against the 4x the threshold math needs, and the largest disagreement
+component missed the pinned apex ROI in every cell - rendered-area and
+rendered-component measures do not separate an ocean defect from
+legitimate generalization, the same failure the coverage oracle had
+with aggregate area. If a geometry-level ocean gate is wanted, the
+recorded candidate is a baseline-free needle detector on the emitted
+ring, analogous to the boundary oracle's spur detector: flag point
+pairs a sub-pixel straight-line distance apart but a long path-length
+apart, excursion on the land side. Categorical, no REF build, and it
+satisfies the oracle discipline in AGENTS.md that the coverage oracle
+failed.
 
 ### H6: Kill the way-path allocation churn with per-worker scratch
 

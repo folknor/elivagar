@@ -10,7 +10,7 @@
 //! correctly. The always-run tests use synthetic tiles; the `#[ignore]` test
 //! runs the full pipeline on a real PBF.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -503,7 +503,7 @@ fn test_full_pipeline() {
     );
 
     // Verify tiles exist at multiple zoom levels.
-    let zooms: HashSet<u8> = entries
+    let zooms: BTreeSet<u8> = entries
         .iter()
         .map(|e| tile_id_to_zxy(e.tile_id).0)
         .collect();
@@ -515,7 +515,7 @@ fn test_full_pipeline() {
     );
 
     // Valid Shortbread layer names (all 26).
-    let shortbread_layers: HashSet<&str> = [
+    let shortbread_layers: BTreeSet<&str> = [
         "water_polygons",
         "water_polygons_labels",
         "water_lines",
@@ -550,7 +550,7 @@ fn test_full_pipeline() {
     // Sample tiles across zoom levels and verify MVT content.
     let sample_count = entries.len().min(200);
     let step = entries.len() / sample_count;
-    let mut total_layers_seen: HashSet<String> = HashSet::new();
+    let mut total_layers_seen: BTreeSet<String> = BTreeSet::new();
 
     for entry in entries.iter().step_by(step.max(1)).take(sample_count) {
         let raw = reader.read_tile(entry).unwrap();

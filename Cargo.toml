@@ -85,6 +85,10 @@ manual_div_ceil = "deny"
 new_without_default = "deny"
 manual_flatten = "deny"
 io_other_error = "deny"
+# Determinism: the banned containers are listed in clippy.toml. std's
+# HashMap/HashSet seed RandomState per process, so iterating one can reorder
+# output between runs of the same binary on the same input.
+disallowed_types = "deny"
 
 [features]
 default = ["mimalloc-alloc"]

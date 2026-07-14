@@ -1,0 +1,19 @@
+# Determinism enforcement.
+#
+# The archive must be byte-identical across two runs of one commit - regress
+# leans on that property (AGENTS.md: "two builds of the same commit are
+# byte-identical and never need this canonicalization"), and the paint-order
+# sort key plus the record-bytes tiebreak in sort.rs exist to guarantee it.
+# std's HashMap/HashSet seed RandomState per process, so iterating one can
+# reorder output run to run and break it.
+#
+# rustc_hash::FxHashMap / FxHashSet are fixed-seed and iterate deterministically
+# for a given insertion sequence; they are this project's default and stay
+# allowed. Reach for BTreeMap/BTreeSet only when the ordering must be semantic
+# rather than merely stable.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "RandomState is seeded per process, so iteration order varies run to run. Use rustc_hash::FxHashMap (fixed seed, the default here), or BTreeMap when the order must be semantic." },
+    { path = "std::collections::HashSet", reason = "RandomState is seeded per process, so iteration order varies run to run. Use rustc_hash::FxHashSet (fixed seed, the default here), or BTreeSet when the order must be semantic." },
+    { path = "std::collections::hash_map::HashMap", reason = "RandomState is seeded per process, so iteration order varies run to run. Use rustc_hash::FxHashMap (fixed seed, the default here), or BTreeMap when the order must be semantic." },
+    { path = "std::collections::hash_set::HashSet", reason = "RandomState is seeded per process, so iteration order varies run to run. Use rustc_hash::FxHashSet (fixed seed, the default here), or BTreeSet when the order must be semantic." },
+]

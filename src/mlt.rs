@@ -526,7 +526,6 @@ mod tests {
     use serde::Deserialize;
     use serde_json::{Number, Value as JsonValue};
     use std::collections::BTreeMap;
-    use std::collections::HashMap;
 
     fn parse_decoded_layers<'a>(
         encoded: &'a [u8],
@@ -889,7 +888,7 @@ mod tests {
             tags: vec![(k_kind, v_kind_land), (k_visible, v_visible)],
         });
 
-        let expected_by_id: HashMap<u64, (Geometry<i32>, BTreeMap<String, JsonValue>)> = layer
+        let expected_by_id: BTreeMap<u64, (Geometry<i32>, BTreeMap<String, JsonValue>)> = layer
             .features()
             .iter()
             .map(|feature| {
@@ -1042,13 +1041,13 @@ mod tests {
             assert_eq!(parsed.len(), 1, "case {}", case.id);
             let l01 = parsed[0].as_layer01().expect("expected tag01 layer");
 
-            let expected: HashMap<&str, (&str, usize)> = case
+            let expected: BTreeMap<&str, (&str, usize)> = case
                 .expected
                 .iter()
                 .map(|e| (e.key.as_str(), (e.kind.as_str(), e.non_null)))
                 .collect();
 
-            let mut decoded: HashMap<String, (&'static str, usize)> = HashMap::new();
+            let mut decoded: BTreeMap<String, (&'static str, usize)> = BTreeMap::new();
             let mut features = l01.iter_features();
             while let Some(feature) = features.next() {
                 let feature = feature.expect("feature should decode");

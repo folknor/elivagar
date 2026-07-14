@@ -210,7 +210,7 @@ history. The blessed denmark archive rotated to the paint-order build
 bare `brokkr regress` gate is current again.
 
 The H5 ocean tile stream landing (`92ed329` + world-only activation
-`b2e8f2c`, 2026-07-12; spec notes/ocean-tile-stream-spec.md) precomputes
+`b2e8f2c`, 2026-07-12) precomputes
 the world's ocean into a durable PMTiles artifact and merges it into
 assemble as run copies on world-covering runs. The world build itself
 (plantasjen, one shot): data/ocean-tiles.pmtiles at 942.7 MB, 212.4M

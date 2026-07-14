@@ -3,11 +3,20 @@
 // Hand-rolled protobuf encoding - the MVT schema is simple enough that codegen
 // is unnecessary. Produces spec-compliant tiles with extent=4096.
 
-// FxHashMap (rustc-hash): non-cryptographic hash ~3× faster than std SipHash for
-// small keys. Safe here because keys are short strings and interned integers - no
-// adversarial input. Tradeoff: weaker collision resistance (irrelevant for tile
-// encoding). Already a transitive dependency via roaring. To revert, swap back to
-// std::collections::HashMap and remove the rustc-hash direct dependency.
+// FxHashMap (rustc-hash) is load-bearing twice over, and only one of the two is
+// about speed.
+//
+// Determinism: Fx is fixed-seed, so iteration order is a function of the
+// insertion sequence alone. std's HashMap seeds RandomState per process, so
+// iterating one can reorder output between two runs of the same binary on the
+// same input - which would break the byte-identity that regress depends on.
+// Swapping back to std::collections::HashMap is therefore NOT a safe revert; it
+// is banned in clippy.toml for this reason.
+//
+// Speed: non-cryptographic hash ~3x faster than std SipHash for small keys.
+// Safe here because keys are short strings and interned integers - no
+// adversarial input. Tradeoff: weaker collision resistance, irrelevant for tile
+// encoding.
 use protohoggr::{
     WIRE_32BIT, WIRE_64BIT, WIRE_VARINT, encode_bytes_field_always, encode_packed_uint32,
     encode_tag, encode_varint, encode_varint_field_always, zigzag_encode_64,
