@@ -102,9 +102,22 @@ jemalloc measured at par with sys-alloc on germany (60s at pre-fix
 76492b8) and does not pay for its dependency. mimalloc, libmimalloc-sys
 and tikv-jemallocator are removed with their feature arms; the sidecar
 emits `malloc_held_<boundary>` / `malloc_live_<boundary>` from glibc
-`mallinfo2` where pre-2026-07-15 rows carry `mi_commit_*`. The sys-alloc
-rows above are the expected shape of the new baselines; stored bench
-rows at the rip-out commit follow it.
+`mallinfo2` where pre-2026-07-15 rows carry `mi_commit_*`.
+
+Stored baselines at the rip-out commit `4cd8496` (plantasjen, locations,
+artifact-active, system allocator; sidecar values transcribed):
+
+| dataset | run | wall | phase12 | assemble | phase12 peak anon | phase12 majflt |
+|---|---|---|---|---|---|---|
+| denmark | `c7413332` | 8.9s best-of-3 | - | - | - | - |
+| germany | `e5e0cfa0` | 59s | 32.2s | 19.6s | 3.5 GB | ~700 |
+| north-america | `b9d63821` | 276s | 156.4s / 17.7 cores | 102.3s | 4.75 GB | 12.3K |
+
+Against the 07-14 regressed HEAD rows above: NA wall -11% with phase12
+memory at a quarter and the fault storm gone; denmark takes the record
+from 11.4s to 8.9s. Both runs still carry the serial provenance-hash
+tail (the PHASE12_END segment reads the whole PBF once more), which is
+now the largest non-pipeline cost at NA (~16s).
 
 Superseded rows (kept for delta reading):
 
