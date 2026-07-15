@@ -166,6 +166,23 @@ all 1,296,999 tiles, elivagar verify PASS, JS pmtiles reader decode
 confirmed; archive BYTES change by layout (offsets), so blessing-style
 whole-archive hashes rotate, tile blobs do not.
 
+Stored baselines at the writer-layout commit `bc71cf1` (plantasjen,
+locations, artifact-active; NA and germany bench-1, denmark bench-3):
+
+| dataset | run | wall | phase12 | assemble | note |
+|---|---|---|---|---|---|
+| denmark | `186b7627` | 8.8s best-of-3 | - | - | tail was sub-second here; noise vs 8.5s |
+| germany | `3f042746` | 53.8s | 36.8s | 14.6s | pmtiles_write_wait 628ms -> 42ms |
+| north-america | `1e058ff0` | 251.0s | 164.3s | 86.1s | tail ~19s -> 2.3s; root 19 KB -> 10.3 KB |
+
+The decisive read is NA assemble: 98.9s -> 86.1s (-12.9s), with the
+post-worker tail at 2.3s (`pmtiles_write_wait_ns` 2.27s, mostly leaf
+gzip + the 31 MB trailing write). NA phase12 ran 164.3s against its
+154.7s baseline in the same session - bench-1 variance on untouched
+code - so the wall delta (254.2 -> 251.0) understates the tail win;
+read the phase numbers, not the wall. The NA root-directory demotion
+(leaf fanout 4096 -> 8192, root 10,564 B) fired exactly as designed.
+
 Superseded rows (kept for delta reading):
 
 | dataset | commit | run | wall | phase12 | peak RSS | note |

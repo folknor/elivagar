@@ -865,6 +865,13 @@ blessed-baseline situation - denmark regress is un-gateable until a
 re-bless, and a planet run wants the standing gate green before it
 starts, not after.
 
+Same-day addendum: the pmtiles write-path landing (see the H8-adjacent
+note above) trims the terms further - NA assemble 98.9 -> 86.1s
+(~4.8 us/unique-tile), the projected ~90s planet finalize tail is
+deleted outright, and the archive's write traffic halves. It also
+shaves planet DISK: the output no longer exists twice (temp blob +
+archive) at finalize.
+
 ### H4: Sort scratch needs page-cache hygiene, maybe compression
 
 **Claim.** ~200 GB of scratch write+read through a 30 GB host will
