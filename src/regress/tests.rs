@@ -591,6 +591,163 @@ fn streaming_fingerprint_matches_detail_hash_on_layers_and_features() {
     );
 }
 
+// Semantic surface v2: the layer version field, strict unknown-field errors
+// at every message level, and packed-field concatenation. Each MUST case is
+// asserted on BOTH the streaming hash and the detail decoder (the mirror).
+fn versioned_layer_tile(version: Option<u64>) -> Vec<u8> {
+    let mut layer = Vec::new();
+    encode_bytes_field_always(&mut layer, 1, b"roads");
+    encode_varint_field_always(&mut layer, 5, 4096);
+    if let Some(v) = version {
+        encode_varint_field_always(&mut layer, 15, v);
+    }
+    let mut tile = Vec::new();
+    encode_bytes_field_always(&mut tile, 3, &layer);
+    tile
+}
+
+#[test]
+fn layer_version_is_semantic_with_default_one() {
+    // 2 vs 3 differ; an absent version defaults to 1 (equal to explicit 1) but
+    // differs from 2 - the exact R2 fix the streaming hash was missing.
+    assert_fingerprint_verdict(
+        &versioned_layer_tile(Some(2)),
+        &versioned_layer_tile(Some(3)),
+        false,
+    );
+    assert_fingerprint_verdict(
+        &versioned_layer_tile(None),
+        &versioned_layer_tile(Some(1)),
+        true,
+    );
+    assert_fingerprint_verdict(
+        &versioned_layer_tile(None),
+        &versioned_layer_tile(Some(2)),
+        false,
+    );
+}
+
+#[test]
+fn unknown_fields_are_hard_errors_at_every_message_level() {
+    let level_tile = |unknown_at: u8| -> Vec<u8> {
+        // A minimal value message (a string), reused for the Value-level case.
+        let mut value = Vec::new();
+        encode_bytes_field_always(&mut value, 1, b"x");
+        if unknown_at == 3 {
+            encode_varint_field_always(&mut value, 9, 1);
+        }
+        let mut feature = Vec::new();
+        encode_varint_field_always(&mut feature, 3, 1);
+        if unknown_at == 2 {
+            encode_varint_field_always(&mut feature, 9, 1);
+        }
+        let mut layer = Vec::new();
+        encode_bytes_field_always(&mut layer, 1, b"roads");
+        encode_varint_field_always(&mut layer, 5, 4096);
+        encode_bytes_field_always(&mut layer, 4, &value);
+        encode_bytes_field_always(&mut layer, 2, &feature);
+        if unknown_at == 1 {
+            encode_varint_field_always(&mut layer, 9, 1);
+        }
+        let mut tile = Vec::new();
+        encode_bytes_field_always(&mut tile, 3, &layer);
+        if unknown_at == 0 {
+            encode_varint_field_always(&mut tile, 9, 1);
+        }
+        tile
+    };
+    for level in 0..=3 {
+        let tile = level_tile(level);
+        assert!(
+            streaming_tile_hash(&tile).is_err(),
+            "streaming must reject unknown field at level {level}"
+        );
+        assert!(
+            decode_detail_tile(&tile).is_err(),
+            "detail decoder must reject unknown field at level {level}"
+        );
+    }
+}
+
+fn split_geometry_tile(chunks: &[&[u32]]) -> Vec<u8> {
+    let mut feature = Vec::new();
+    encode_varint_field_always(&mut feature, 1, 1);
+    encode_varint_field_always(&mut feature, 3, 2); // LineString
+    for chunk in chunks {
+        let mut g = Vec::new();
+        for &v in *chunk {
+            protohoggr::encode_varint(&mut g, u64::from(v));
+        }
+        encode_bytes_field_always(&mut feature, 4, &g);
+    }
+    let mut layer = Vec::new();
+    encode_bytes_field_always(&mut layer, 1, b"roads");
+    encode_varint_field_always(&mut layer, 5, 4096);
+    encode_bytes_field_always(&mut layer, 2, &feature);
+    let mut tile = Vec::new();
+    encode_bytes_field_always(&mut tile, 3, &layer);
+    tile
+}
+
+fn split_tags_tile(chunks: &[&[u32]]) -> Vec<u8> {
+    let mut feature = Vec::new();
+    encode_varint_field_always(&mut feature, 3, 1); // point
+    let mut g = Vec::new();
+    for v in [
+        crate::mvt::command(1, 1),
+        crate::mvt::zigzag(0),
+        crate::mvt::zigzag(0),
+    ] {
+        protohoggr::encode_varint(&mut g, u64::from(v));
+    }
+    encode_bytes_field_always(&mut feature, 4, &g);
+    for chunk in chunks {
+        let mut t = Vec::new();
+        for &v in *chunk {
+            protohoggr::encode_varint(&mut t, u64::from(v));
+        }
+        encode_bytes_field_always(&mut feature, 2, &t);
+    }
+    let mut layer = Vec::new();
+    encode_bytes_field_always(&mut layer, 1, b"roads");
+    encode_varint_field_always(&mut layer, 5, 4096);
+    encode_bytes_field_always(&mut layer, 2, &feature);
+    encode_bytes_field_always(&mut layer, 3, b"a");
+    encode_bytes_field_always(&mut layer, 3, b"b");
+    let mut v0 = Vec::new();
+    encode_bytes_field_always(&mut v0, 1, b"x");
+    encode_bytes_field_always(&mut layer, 4, &v0);
+    let mut v1 = Vec::new();
+    encode_bytes_field_always(&mut v1, 1, b"y");
+    encode_bytes_field_always(&mut layer, 4, &v1);
+    let mut tile = Vec::new();
+    encode_bytes_field_always(&mut tile, 3, &layer);
+    tile
+}
+
+#[test]
+fn packed_fields_split_across_occurrences_hash_identically() {
+    // Geometry (field 4): MoveTo(0,0) then LineTo(10,10), whole vs split.
+    let mv = crate::mvt::command(1, 1);
+    let lt = crate::mvt::command(2, 1);
+    let z0 = crate::mvt::zigzag(0);
+    let z10 = crate::mvt::zigzag(10);
+    let whole_geom = [mv, z0, z0, lt, z10, z10];
+    let head = [mv, z0, z0];
+    let tail = [lt, z10, z10];
+    assert_fingerprint_verdict(
+        &split_geometry_tile(&[&whole_geom]),
+        &split_geometry_tile(&[&head, &tail]),
+        true,
+    );
+    // Tags (field 2): key0=val0, key1=val1, whole vs split.
+    assert_fingerprint_verdict(
+        &split_tags_tile(&[&[0, 0, 1, 1]]),
+        &split_tags_tile(&[&[0, 0], &[1, 1]]),
+        true,
+    );
+}
+
 fn point_tile(points: &[(i32, i32)]) -> Vec<u8> {
     let mut geometry = Vec::new();
     geometry.push(crate::mvt::command(

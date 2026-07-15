@@ -243,6 +243,9 @@ pub struct PmtilesWriter {
     osmosis_replication_timestamp: Option<i64>,
     metadata_extensions: Vec<String>,
     ocean_only_metadata: bool,
+    /// Exact metadata supplied by an archive-preserving rewrite.  This is
+    /// intentionally narrow: normal production writes always compose metadata.
+    metadata_verbatim: Option<String>,
     /// Concatenated compressed tile data (in-memory or file-backed).
     blob: TileBlob,
     /// Total number of tiles addressed (including deduped references).
@@ -318,6 +321,14 @@ impl PmtilesWriter {
     pub fn set_ocean_only_metadata(&mut self) {
         self.ocean_only_metadata = true;
     }
+
+    /// Preserve an existing metadata document during an archive rewrite.
+    ///
+    /// The corpus mutation instrument uses this so its output remains under
+    /// exactly the source archive's provenance contract.
+    pub fn set_metadata_verbatim(&mut self, json: String) {
+        self.metadata_verbatim = Some(json);
+    }
 }
 
 impl PmtilesWriter {
@@ -331,6 +342,7 @@ impl PmtilesWriter {
             osmosis_replication_timestamp: None,
             metadata_extensions: Vec::new(),
             ocean_only_metadata: false,
+            metadata_verbatim: None,
             blob: TileBlob::Memory(Vec::new()),
             num_addressed: 0,
             current_run: None,
@@ -378,6 +390,7 @@ impl PmtilesWriter {
             osmosis_replication_timestamp: None,
             metadata_extensions: Vec::new(),
             ocean_only_metadata: false,
+            metadata_verbatim: None,
             blob: TileBlob::File {
                 writer,
                 path: blob_path,
@@ -586,15 +599,17 @@ impl PmtilesWriter {
         crate::debug::emit_counter_u64("pmtiles_dir_entries", num_entries);
         crate::debug::emit_counter_usize("pmtiles_root_dir_bytes", root_bytes.len());
         crate::debug::emit_counter_usize("pmtiles_leaf_dirs_bytes", leaf_bytes.len());
-        let metadata_json = build_metadata(
-            &self.config,
-            self.tile_data_format,
-            self.tile_data_compression,
-            self.source_pbf_filename.as_deref(),
-            self.osmosis_replication_timestamp,
-            &self.metadata_extensions,
-            self.ocean_only_metadata,
-        );
+        let metadata_json = self.metadata_verbatim.clone().unwrap_or_else(|| {
+            build_metadata(
+                &self.config,
+                self.tile_data_format,
+                self.tile_data_compression,
+                self.source_pbf_filename.as_deref(),
+                self.osmosis_replication_timestamp,
+                &self.metadata_extensions,
+                self.ocean_only_metadata,
+            )
+        });
         let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
 
         // Clean up streaming dir_entries temp file if it exists.

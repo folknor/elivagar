@@ -312,6 +312,11 @@ alarm was investigated at length on 2026-07-09 and again on 2026-07-14.
 
 Exit 0 only if nothing structural.
 
+The shared canonical decoder is strict on unknown MVT wire fields (v2 surface):
+regress errors rather than silently skipping them, so it is an elivagar-archive
+tool. `elivagar compare-tiles` remains the cross-producer instrument for
+archives that may carry fields elivagar does not emit.
+
 ## `elivagar svg <FILE> -z <Z> -x <X> -y <Y> [OPTIONS]`
 
 Render tiles as SVG. Single tile or an NxM grid.
@@ -358,6 +363,36 @@ over-reports and cannot separate legitimate generalization from a coverage
 defect - a confirmed false negative on the 2026-07-12 ocean VW landing, and the
 reason `reference/performance.md` and AGENTS.md both record it as triage only.
 The authoritative ocean gates are the earcut oracle and the human visual check.
+
+## `elivagar corpus check|bless <ARCHIVE> --corpus <DIR>`
+
+The advisory corpus digest checks the semantic MVT content of every addressed
+tile in an explicit archive. It is not a replacement for `brokkr regress` yet.
+
+`check` compares an archive to the committed `digest` and `contract.json` in
+the supplied directory. It exits 0 on a match, 1 for a content mismatch, and 2
+for a refusal such as a missing baseline, an invalid archive, or a differing
+input/config contract. Input names and build revisions are diagnostic only;
+all other input and config fields must match before content is read.
+
+`bless` writes `contract.json`, `digest`, and, in `--mode leaves` (the default),
+`leaves`. It accepts only a locations-on-ways archive. Replacing an existing
+baseline requires `--rotate`; without it, bless exits 1 without writing.
+`--mode buckets` stores per-zoom z7-ancestor hashes for planet-scale baselines.
+
+`mutate <IN> -o <OUT> --op drop-tile|nudge-geometry|layer-version|regzip`
+is the calibration instrument. The first three operations require
+`--tile z/x/y` and rewrite only that addressed tile, splitting a shared
+directory run first. `regzip` rewrites every payload at gzip level 9 without
+changing decoded content, and is the byte-different known-good control.
+Mutation preserves the source header configuration and metadata verbatim so
+the corpus contract stays identical. It is not a general-purpose tile editor.
+
+The hash absorbs gzip bytes, layer/feature/attribute ordering, key/value-table
+permutation, and multi-geometry component ordering. It covers tile addressing,
+layer names, versions and extents, feature ids and attributes, and geometry.
+Archive metadata, header bounds, and directory layout are outside this digest:
+the provenance contract and `elivagar verify` own those surfaces.
 
 ## Environment variables
 

@@ -296,7 +296,7 @@ area - are the standing ocean gates. `ocean-coverage` is triage, never a gate.
 
 ## Architecture
 
-Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`, `verify`, `svg`, `diag`, `regress`, `ocean-coverage`).
+Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`, `verify`, `svg`, `diag`, `regress`, `corpus`, `ocean-coverage`).
 
 ### Modules
 

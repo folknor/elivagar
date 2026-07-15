@@ -111,68 +111,32 @@ authoritative.
   findings (nonzero fill both viewers, OL submits all rings one path,
   MapLibre 500-ring clamp) are preserved at the end of this note.
 
-## Tier 1: the digest gate
+## Tier 1: the digest gate - landed (Spec A)
 
 - Per dataset, a committed file `corpus/<dataset>/digest` containing: a
-  contract header (below), per-zoom rollup hashes, and a fixed grid of
-  bucket hashes. Bucket hash = multiset hash of member tiles'
-  `streaming_tile_hash` values keyed by tile id.
+  contract header (below), per-zoom rollup hashes, and, for denmark,
+  committed exact leaf hashes in a sibling `corpus/<dataset>/leaves` file.
+  Planet-scale datasets bless in a fixed z7-ancestor bucket grid instead.
+  The granularity choice and the measured denmark/planet sizes that settled
+  it are in git history at the landing, not restated here.
 - `check` decodes every tile of a fresh build (cost ~= regress's canonical
-  tier: seconds on denmark), recomputes, compares: pass = byte-equal
-  digest. Fail names the zoom(s) and bucket(s); tile-level listing within
-  a bucket comes from tier 3 against a comparand archive, OR from committed
-  leaf hashes if the representation below is adopted.
-- MUST accept an explicit archive path, not only fresh-build output. The
-  calibration (oracle-discipline section) feeds an on-disk archive into the
-  digest tier, so digest-compute has to run over any named `.pmtiles`, the
-  way tier 3 already does. State this in spec A.
-
-**Open from review (R1/R2) - the bucket/leaf sizing is unreconciled and
-spec A must resolve it with measured numbers, not the estimates below:**
-
-- The three bucket descriptors in the pre-review draft did not reconcile.
-  "z7 partition granularity, matching `PARTITION_SPLIT_Z`" gives 16,384
-  global z7 cells (`sort.rs`), of which denmark (bbox 8.0,54.5,13.0,58.0)
-  populates only ~9 - so each populated z7 bucket holds ~10k-20k tiles,
-  three orders of magnitude off the "~hundreds of tiles" drill-unit claim.
-  "~hundreds of tiles" and "tens of KB total" are mutually consistent but
-  imply ~z10-z11 prefix granularity, not z7. A fixed full z7 grid is ~1.6 KB
-  (only populated cells) or ~2.2 MB (the full 136,533-partition per-zoom
-  space, `sort.rs`) - neither is "tens of KB". Spec A must pick ONE
-  granularity and make the size claim, the drill-unit claim, and the
-  `PARTITION_SPLIT_Z`-reuse claim actually agree; at true z7 a failure
-  hands ~15k tiles to tier 3, which is weak localization.
-- The 21 MB leaf-hash rejection premise assumed every tile is unique. It is
-  not: the current denmark archive addresses 1,296,999 tiles but has only
-  166,365 unique payloads (87.2% deduplicated; regress already hashes unique
-  blobs over runs). A run-plus-hash-dictionary representation is ~2.7 MB of
-  unique 128-bit hash material before mapping and compression, not 21 MB of
-  independent entropy. Spec A must prototype and MEASURE that deduped
-  representation before refusing committed leaves - exact leaves would name
-  changed tiles without needing a comparand archive, directly strengthening
-  the rotation workflow (see the reviewability finding under blessing).
-- Planet-scale digest sizing is unaddressed and relevant given the in-flight
-  `notes/planet-30gb-roadmap.md` work. Denmark's file is cheap; a planet
-  digest at whatever granularity resolves the above is not obviously "tens
-  of KB". Spec A must state the planet-scale number, not just denmark's.
-- The "~= regress canonical tier: seconds on denmark" cost and the tier-2
-  SVG sizing figures are plausible but uncited to a measurement UUID;
-  capture the numbers when spec A/B run so the claims are anchored.
+  tier: seconds on denmark), recomputes, compares: pass = byte-equal digest
+  (root, plus leaves in mode leaves or the bucket root in mode buckets).
+  Fail names the zoom(s); mode leaves additionally names the exact changed
+  canonical tile runs, mode buckets hands per-tile attribution to tier 3.
+- Accepts an explicit archive path, not only fresh-build output.
 - Style-independent by construction: the digest hashes canonical decoded
   content, so a style change rewrites tier 2 only.
-- **Semantic surface must be defined precisely (review R2).** Reusing
-  `streaming_tile_hash` unchanged does NOT deliver a literal "any semantic
-  output change fails": `streaming_layer_hash` hashes MVT layer fields 1-5
-  (name, features, keys, values, extent) and skips field 15, the layer
-  version - which the encoder emits as a constant 2. Practical risk is low
-  because the version never varies, but the guarantee as written is inexact.
-  Spec A must either hash the version (and any other omitted wire field) or
-  narrow the claim, and must add mutation tests for every component it does
-  claim to cover: tile addressing, layer version, extent, attributes
-  including float bit patterns, geometry, and the accepted reorderings.
+- The semantic surface (what the digest is sensitive to vs. absorbs,
+  including the MVT layer-version field and packed-field splitting across
+  wire occurrences) is pinned and mutation-tested at the landing.
 - Datasets: denmark mandatory (the standing gate, matching the denmark-only
   gate policy); germany/norway digests optional later - the file is cheap,
   the build to produce it is the cost.
+
+Advisory until its calibration readings are recorded (see the oracle
+discipline section below); `brokkr regress` remains the standing gate until
+then.
 
 ## Tier 2: the SVG corpus
 
@@ -257,11 +221,14 @@ spec A must resolve it with measured numbers, not the estimates below:**
 
 ## The contract (comparability guard)
 
-`corpus/<dataset>/contract.toml`, one file per dataset, written at bless
-time: input PBF xxh128 + variant, the full config contract as provenance
-defines it (profile, zooms, tile format/compression, seam/fanout/simplify
-settings), the ocean artifact key (shapefile hashes + OCEAN_POLICY_VERSION
-+ level), and the style file hash (tier 2 only). `check` compares contract
+`corpus/<dataset>/contract.json` (landed as JSON, not TOML: the contract
+already exists as JSON in archive provenance, and `ocean.artifact_key` is
+null for computed-ocean archives, which TOML cannot represent), one file
+per dataset, written at bless time: input PBF xxh128 + variant, the full
+config contract as provenance defines it (profile, zooms, tile
+format/compression, seam/fanout/simplify settings), the ocean artifact key
+(shapefile hashes + OCEAN_POLICY_VERSION + level), and, once tier 2 lands,
+the style file hash. `check` compares contract
 before content and refuses with the mismatch named - never a silent
 cross-contract diff. This is the corpus's equivalent of inspect's
 "comparability contract printed in full, not sampled" rule, and it is what
@@ -273,7 +240,8 @@ Blessing = one command (`elivagar corpus bless`) that writes digest +
 contract + re-renders the manifest, and one git commit containing the
 result. The commit IS the bless; review of that diff is the human gate.
 The 07-14 mis-bless class (wrong-config archive blessed) becomes visible
-in that diff as a contract.toml change plus a mass SVG rewrite.
+in that diff as a contract.json change plus (once tier 2 lands) a mass SVG
+rewrite.
 
 **Reviewability hole (review R2): a rotation is NOT exhaustively reviewable
 as drafted.** `corpus bless` overwrites the digest directly, but the human
@@ -285,10 +253,13 @@ survives - which contradicts "every rotation becomes a reviewable git diff".
 baseline. The rotation workflow must instead require adjudication of every
 changed bucket before acceptance: at minimum an explicit two-archive
 comparison report, and either committed representative overlays or the
-affected tiles appended to the manifest. Committed exact leaf hashes (see the
-tier-1 sizing finding) would name the changed tiles directly and are the
-cleanest way to close this hole - another reason to measure that
-representation before refusing it.
+affected tiles appended to the manifest. **Closed for denmark's committed
+leaves**: tier 1 landed exact leaf hashes as the default mode, so a
+denmark rotation's git diff over `corpus/denmark/leaves` names every
+changed tile run directly - no comparand archive needed. The hole remains
+open for any dataset blessed in bucket mode (planet scale): a bucket hash
+cannot name individual tiles, so bucket-mode rotations still hand exact
+attribution to tier 3 or committed overlays once tier 2 lands.
 
 ## Oracle discipline compliance
 
@@ -296,44 +267,41 @@ Both gates are categorical (byte equality on deterministic canonical
 output; pass = zero diffs, achievable) and must calibrate both directions
 before promotion, per AGENTS.md:
 
-- FIRES on known-bad: `data/tilegen/denmark-bc71cf1.pmtiles` (stale-artifact
-  spikes) vs the d8b5147 baseline - digest must fail naming z0-z8 ocean
-  buckets; the corpus check must flag z5-16-9 and z5-17-9.
-- CLEARS on known-good: a fresh rebuild of the baseline commit must pass
-  bit-clean (digest equal, zero corpus diffs).
+- FIRES on known-bad: for the digest gate (tier 1, landed), controlled
+  defect mutations built by the landed `corpus mutate` instrument against a
+  fresh clean archive - not the bc71cf1/d8b5147 pair below. For the SVG
+  corpus (tier 2, not yet landed), the corpus check must flag z5-16-9 and
+  z5-17-9 (the 2026-07-15 stale-artifact spikes).
+- CLEARS on known-good: a fresh rebuild passes bit-clean; the digest gate
+  additionally requires a byte-different, semantically-identical rebuild
+  (`corpus mutate --op regzip`) to also pass - the reading that would catch
+  a hash accidentally depending on gzip bytes, writer dedup, or run
+  splitting.
 
-**Blocking problem with the proposed pair (reviews R1+R2): it cannot
-exercise the `check` path.** The two named archives do not share a contract:
-`bc71cf1` is ocean policy 1, `d8b5147` is ocean policy 2 - and the contract
-(below) includes `OCEAN_POLICY_VERSION`, so `check` stops at the contract
-guard BEFORE comparing content and never proves the digest detects the
-spikes. `d8b5147` is additionally recorded as a dirty build and so cannot be
-reproduced from source. Compounding this, the stale-artifact defect was a
-stale binary artifact being served, not a source-level bug: rebuilding
-`--commit bc71cf1` today picks up the current policy-2 artifact and will not
-reproduce the spikes, so the known-bad calibrand MUST be the preserved
-on-disk file, never a rebuild - and because it lives in gitignored `data/`,
-its survival is a real prerequisite (if it is cleaned the "fires on
-known-bad" reading is unreproducible). The fix: produce a clean known-good
-and a known-bad under IDENTICAL input and config contract - a controlled
-defective build or a direct tile mutation - and calibrate the actual `check`
-path (contract guard included), not the digest function in isolation.
+The bc71cf1/d8b5147 pair cannot exercise the digest `check` path: the two
+archives differ in `OCEAN_POLICY_VERSION`, so the contract guard refuses
+before any content comparison runs. That pair calibrates only the CONTRACT
+GUARD's fires direction (`bc71cf1` against a committed contract); a
+same-contract known-good/known-bad pair for content calibration is what
+`corpus mutate` is for. This is resolved for tier 1 (Spec A); tier 2 (Spec
+B) still needs its own calibration approach when it lands, and the
+preserved `bc71cf1` file's survival remains a prerequisite for the
+contract-guard reading either way.
 
-Until both readings are recorded, corpus check is advisory and the bless
-machinery remains the gate. The cutover (spec C) is conditional on the
-calibration readings, written into `reference/performance.md`.
+Until the digest gate's calibration readings are recorded, and later tier
+2's, corpus check is advisory and the bless machinery remains the gate.
+The cutover (spec C) is conditional on both.
 
 ## Spec split (three, sequential)
 
-1. **Spec A - digest gate.** `elivagar corpus` subcommand skeleton,
-   contract.toml, digest compute/check (accepting an explicit archive path,
-   not only fresh-build output) reusing `streaming_tile_hash` with its
-   semantic surface pinned and mutation-tested, a resolved bucket/leaf-hash
-   representation with measured sizes (denmark AND planet), and a calibration
-   run over a same-contract known-good/known-bad pair (NOT the bare
-   bc71cf1/d8b5147 archives - they fail the contract guard; see the
-   calibration finding above). Independent of any rendering. Smallest, lands
-   the exhaustive gate first.
+1. **Spec A - digest gate. Landed** (`elivagar corpus check|bless|mutate`,
+   `reference/cli.md`; see git history for the design record). Independent
+   of any rendering, as planned. Calibration against a same-contract
+   known-good/known-bad pair - built with the `corpus mutate` instrument
+   rather than the bare bc71cf1/d8b5147 archives, which fail the contract
+   guard before any content comparison - is the remaining step before the
+   digest gate stops being advisory; `brokkr regress` is the standing gate
+   until those readings are recorded.
 2. **Spec B - canonical render core + corpus.** classifyRings port, style
    file, canonical ordering via the regress detail comparators, integer
    emission, manifest + `corpus bless` re-render + `corpus check`

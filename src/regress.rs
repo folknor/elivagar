@@ -436,7 +436,7 @@ fn merge_runs(current: &[TileRun], blessed: &[TileRun]) -> Vec<PairSpan> {
     spans
 }
 
-fn next_zoom_boundary(tile_id: u64) -> u64 {
+pub(crate) fn next_zoom_boundary(tile_id: u64) -> u64 {
     let (z, _, _) = tile_id_to_zxy(tile_id);
     if z >= 30 {
         return u64::MAX;
@@ -646,12 +646,12 @@ fn raw_equal(current: &[u8], blessed: &[u8]) -> bool {
 }
 
 #[derive(Default)]
-struct DecodeScratch {
+pub(crate) struct DecodeScratch {
     gzip: Vec<u8>,
 }
 
 impl DecodeScratch {
-    fn decompress<'a>(&'a mut self, data: &[u8]) -> io::Result<&'a [u8]> {
+    pub(crate) fn decompress<'a>(&'a mut self, data: &[u8]) -> io::Result<&'a [u8]> {
         gzip_decompress_into(data, &mut self.gzip)?;
         Ok(&self.gzip)
     }
@@ -676,7 +676,7 @@ fn gzip_decompress_into(data: &[u8], out: &mut Vec<u8>) -> io::Result<()> {
     Ok(())
 }
 
-fn semantic_hash(raw: &[u8], scratch: &mut DecodeScratch) -> io::Result<u128> {
+pub(crate) fn semantic_hash(raw: &[u8], scratch: &mut DecodeScratch) -> io::Result<u128> {
     let data = scratch.decompress(raw)?;
     streaming_tile_hash(data).map_err(invalid_tile)
 }
@@ -700,9 +700,7 @@ fn streaming_tile_hash(data: &[u8]) -> Result<u128, String> {
                     .map_err(|error| format!("read tile layer: {error}"))?,
             )?);
         } else {
-            cursor
-                .skip_field(wire_type)
-                .map_err(|error| format!("skip tile field {field}: {error}"))?;
+            return Err(format!("unknown tile field {field}"));
         }
     }
     // Mirror decode_detail_tile's stable sort by name: duplicate layer names
@@ -721,6 +719,7 @@ fn streaming_tile_hash(data: &[u8]) -> Result<u128, String> {
 fn streaming_layer_hash(data: &[u8]) -> Result<(&str, u128), String> {
     let mut name = "";
     let mut extent = 4096u32;
+    let mut version = 1u32;
     let mut keys = Vec::new();
     let mut values = Vec::new();
     let mut features = Vec::new();
@@ -762,9 +761,13 @@ fn streaming_layer_hash(data: &[u8]) -> Result<(&str, u128), String> {
                     .map_err(|error| format!("read layer extent: {error}"))?;
                 extent = u32::try_from(raw).map_err(|_| format!("extent out of range: {raw}"))?;
             }
-            _ => cursor
-                .skip_field(wire_type)
-                .map_err(|error| format!("skip layer field {field}: {error}"))?,
+            (15, WIRE_VARINT) => {
+                let raw = cursor
+                    .read_varint()
+                    .map_err(|error| format!("read layer version: {error}"))?;
+                version = u32::try_from(raw).map_err(|_| format!("version out of range: {raw}"))?;
+            }
+            _ => return Err(format!("unknown layer field {field}")),
         }
     }
     let mut feature_hashes = Vec::with_capacity(features.len());
@@ -772,9 +775,10 @@ fn streaming_layer_hash(data: &[u8]) -> Result<(&str, u128), String> {
         feature_hashes.push(streaming_feature_hash(feature, &keys, &values)?);
     }
     let mut sink = HashSink::new();
-    sink.bytes(b"elivagar-stream-layer-v1");
+    sink.bytes(b"elivagar-stream-layer-v2");
     write_string(&mut sink, name);
     sink.bytes(&extent.to_le_bytes());
+    sink.bytes(&version.to_le_bytes());
     sink.bytes(&multiset_hash(b"features", &mut feature_hashes).to_le_bytes());
     Ok((name, sink.finish()))
 }
@@ -785,7 +789,7 @@ fn streaming_feature_hash(
     values: &[DetailAttr],
 ) -> Result<u128, String> {
     let mut id = None;
-    let mut attrs = Vec::new();
+    let mut tag_bytes = Vec::new();
     let mut geom_type = 0u8;
     let mut geometry = None;
     let mut cursor = Cursor::new(data);
@@ -802,13 +806,11 @@ fn streaming_feature_hash(
                 );
             }
             (2, WIRE_LEN) => {
-                attrs = decode_detail_attrs(
+                tag_bytes.extend_from_slice(
                     cursor
                         .read_len_delimited()
                         .map_err(|error| format!("read feature tags: {error}"))?,
-                    keys,
-                    values,
-                )?;
+                );
             }
             (3, WIRE_VARINT) => {
                 let raw = cursor
@@ -818,20 +820,21 @@ fn streaming_feature_hash(
                     u8::try_from(raw).map_err(|_| format!("geometry type out of range: {raw}"))?;
             }
             (4, WIRE_LEN) => {
-                geometry = Some(
-                    cursor
-                        .read_len_delimited()
-                        .map_err(|error| format!("read feature geometry: {error}"))?,
-                );
+                let bytes = cursor
+                    .read_len_delimited()
+                    .map_err(|error| format!("read feature geometry: {error}"))?;
+                geometry
+                    .get_or_insert_with(Vec::new)
+                    .extend_from_slice(bytes);
             }
-            _ => cursor
-                .skip_field(wire_type)
-                .map_err(|error| format!("skip feature field {field}: {error}"))?,
+            _ => return Err(format!("unknown feature field {field}")),
         }
     }
+    let mut attrs = decode_detail_attrs(&tag_bytes, keys, values)?;
     attrs.sort();
     let attrs_digest = detail_attrs_hash(&attrs);
-    let geometry_digest = streaming_geometry_hash(geom_type, geometry.unwrap_or_default())?;
+    let geometry_digest =
+        streaming_geometry_hash(geom_type, geometry.as_deref().unwrap_or_default())?;
     let mut sink = HashSink::new();
     sink.bytes(b"elivagar-stream-feature-v1");
     match id {
@@ -1218,6 +1221,7 @@ struct DetailFeature {
 struct DetailLayer {
     name: Arc<str>,
     extent: u32,
+    version: u32,
     features: Vec<DetailFeature>,
 }
 
@@ -1329,9 +1333,7 @@ fn decode_detail_tile(data: &[u8]) -> Result<DetailTile, String> {
                 .map_err(|error| format!("read tile layer: {error}"))?;
             layers.push(decode_detail_layer(bytes)?);
         } else {
-            cursor
-                .skip_field(wire_type)
-                .map_err(|error| format!("skip tile field {field}: {error}"))?;
+            return Err(format!("unknown tile field {field}"));
         }
     }
     layers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1341,6 +1343,7 @@ fn decode_detail_tile(data: &[u8]) -> Result<DetailTile, String> {
 fn decode_detail_layer(data: &[u8]) -> Result<DetailLayer, String> {
     let mut name: Arc<str> = Arc::from("");
     let mut extent = 4096u32;
+    let mut version = 1u32;
     let mut keys = Vec::new();
     let mut values = Vec::new();
     let mut feature_bytes = Vec::new();
@@ -1384,9 +1387,13 @@ fn decode_detail_layer(data: &[u8]) -> Result<DetailLayer, String> {
                     .map_err(|error| format!("read layer extent: {error}"))?;
                 extent = u32::try_from(raw).map_err(|_| format!("extent out of range: {raw}"))?;
             }
-            _ => cursor
-                .skip_field(wire_type)
-                .map_err(|error| format!("skip layer field {field}: {error}"))?,
+            (15, WIRE_VARINT) => {
+                let raw = cursor
+                    .read_varint()
+                    .map_err(|error| format!("read layer version: {error}"))?;
+                version = u32::try_from(raw).map_err(|_| format!("version out of range: {raw}"))?;
+            }
+            _ => return Err(format!("unknown layer field {field}")),
         }
     }
     let mut features = Vec::with_capacity(feature_bytes.len());
@@ -1397,6 +1404,7 @@ fn decode_detail_layer(data: &[u8]) -> Result<DetailLayer, String> {
     Ok(DetailLayer {
         name,
         extent,
+        version,
         features,
     })
 }
@@ -1450,12 +1458,7 @@ fn decode_detail_attr(data: &[u8]) -> Result<DetailAttr, String> {
                     .map_err(|error| format!("read bool value: {error}"))?
                     != 0,
             )),
-            _ => {
-                cursor
-                    .skip_field(wire_type)
-                    .map_err(|error| format!("skip value field {field}: {error}"))?;
-                None
-            }
+            _ => return Err(format!("unknown value field {field}")),
         };
         if value.is_some() {
             out = value;
@@ -1470,7 +1473,7 @@ fn decode_detail_feature(
     values: &[DetailAttr],
 ) -> Result<DetailFeature, String> {
     let mut id = None;
-    let mut attrs = Vec::new();
+    let mut tag_bytes = Vec::new();
     let mut geom_type = 0u8;
     let mut geometry = None;
     let mut cursor = Cursor::new(data);
@@ -1487,10 +1490,11 @@ fn decode_detail_feature(
                 );
             }
             (2, WIRE_LEN) => {
-                let tags = cursor
-                    .read_len_delimited()
-                    .map_err(|error| format!("read feature tags: {error}"))?;
-                attrs = decode_detail_attrs(tags, keys, values)?;
+                tag_bytes.extend_from_slice(
+                    cursor
+                        .read_len_delimited()
+                        .map_err(|error| format!("read feature tags: {error}"))?,
+                );
             }
             (3, WIRE_VARINT) => {
                 let raw = cursor
@@ -1500,20 +1504,20 @@ fn decode_detail_feature(
                     u8::try_from(raw).map_err(|_| format!("geometry type out of range: {raw}"))?;
             }
             (4, WIRE_LEN) => {
-                geometry = Some(
-                    cursor
-                        .read_len_delimited()
-                        .map_err(|error| format!("read feature geometry: {error}"))?,
-                );
+                let bytes = cursor
+                    .read_len_delimited()
+                    .map_err(|error| format!("read feature geometry: {error}"))?;
+                geometry
+                    .get_or_insert_with(Vec::new)
+                    .extend_from_slice(bytes);
             }
-            _ => cursor
-                .skip_field(wire_type)
-                .map_err(|error| format!("skip feature field {field}: {error}"))?,
+            _ => return Err(format!("unknown feature field {field}")),
         }
     }
+    let mut attrs = decode_detail_attrs(&tag_bytes, keys, values)?;
     attrs.sort();
     let mut components = match geometry {
-        Some(geometry) => decode_detail_geometry(geom_type, geometry)?,
+        Some(geometry) => decode_detail_geometry(geom_type, &geometry)?,
         None => Vec::new(),
     };
     components.sort_by(compare_detail_components);
@@ -1894,6 +1898,7 @@ fn detail_tile_hash(tile: &DetailTile) -> u128 {
     for layer in &tile.layers {
         write_string(&mut sink, &layer.name);
         sink.bytes(&layer.extent.to_le_bytes());
+        sink.bytes(&layer.version.to_le_bytes());
         write_len(&mut sink, layer.features.len());
         for feature in &layer.features {
             write_detail_feature(&mut sink, feature);
@@ -2108,7 +2113,7 @@ fn compare_detail_tiles(
                     out.record(Arc::clone(&bl.name), None, OutcomeClass::LayerRemoved, 0);
                     bi += 1;
                 }
-                Ordering::Equal if cur.extent != bl.extent => {
+                Ordering::Equal if cur.extent != bl.extent || cur.version != bl.version => {
                     out.record(Arc::clone(&cur.name), None, OutcomeClass::ExtentMismatch, 0);
                     ci += 1;
                     bi += 1;

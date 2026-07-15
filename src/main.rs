@@ -47,6 +47,8 @@ enum Command {
     Diag(DiagArgs),
     /// Compare two PMTiles archives semantically.
     Regress(RegressArgs),
+    /// Create or check an advisory semantic corpus digest.
+    Corpus(CorpusArgs),
     /// Compare ocean coverage against a verbatim same-source baseline.
     OceanCoverage(OceanCoverageArgs),
 }
@@ -290,6 +292,55 @@ struct RegressArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Parser)]
+struct CorpusArgs {
+    #[command(subcommand)]
+    command: CorpusCommand,
+}
+
+#[derive(Subcommand)]
+enum CorpusCommand {
+    Check {
+        archive: PathBuf,
+        #[arg(long)]
+        corpus: PathBuf,
+    },
+    Bless {
+        archive: PathBuf,
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long, value_enum, default_value_t = CorpusModeArg::Leaves)]
+        mode: CorpusModeArg,
+        #[arg(long)]
+        rotate: bool,
+    },
+    /// Produce a same-contract archive with one controlled calibration mutation.
+    Mutate {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Target tile as z/x/y. Required except for regzip.
+        #[arg(long)]
+        tile: Option<String>,
+        #[arg(long, value_enum)]
+        op: CorpusMutationArg,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CorpusModeArg {
+    Leaves,
+    Buckets,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CorpusMutationArg {
+    DropTile,
+    NudgeGeometry,
+    LayerVersion,
+    Regzip,
 }
 
 #[derive(Parser)]
@@ -578,6 +629,7 @@ fn main() {
         Command::Regress(args) => {
             run_regress(&args);
         }
+        Command::Corpus(args) => run_corpus(&args),
         Command::OceanCoverage(args) => {
             let cfg = elivagar::ocean_coverage::CoverageConfig {
                 zmin: args.zmin,
@@ -595,6 +647,101 @@ fn main() {
             }
         }
     }
+}
+
+fn run_corpus(args: &CorpusArgs) {
+    let (result, bless) = match &args.command {
+        CorpusCommand::Check { archive, corpus } => {
+            (elivagar::corpus::check(archive, corpus), false)
+        }
+        CorpusCommand::Bless {
+            archive,
+            corpus,
+            mode,
+            rotate,
+        } => {
+            let mode = match mode {
+                CorpusModeArg::Leaves => elivagar::corpus::DigestMode::Leaves,
+                CorpusModeArg::Buckets => elivagar::corpus::DigestMode::Buckets,
+            };
+            (
+                elivagar::corpus::bless(archive, corpus, mode, *rotate),
+                true,
+            )
+        }
+        CorpusCommand::Mutate {
+            input,
+            output,
+            tile,
+            op,
+        } => {
+            let target = tile.as_deref().map(parse_corpus_tile).transpose();
+            let op = match op {
+                CorpusMutationArg::DropTile => elivagar::corpus::MutationOp::DropTile,
+                CorpusMutationArg::NudgeGeometry => elivagar::corpus::MutationOp::NudgeGeometry,
+                CorpusMutationArg::LayerVersion => elivagar::corpus::MutationOp::LayerVersion,
+                CorpusMutationArg::Regzip => elivagar::corpus::MutationOp::Regzip,
+            };
+            match target
+                .map_err(std::io::Error::other)
+                .and_then(|target| elivagar::corpus::mutate(input, output, target, op))
+            {
+                Ok(()) => println!("corpus mutate: wrote {}", output.display()),
+                Err(error) => {
+                    eprintln!("corpus mutation refused: {error}");
+                    std::process::exit(2);
+                }
+            }
+            return;
+        }
+    };
+    match result {
+        Ok((verdict, report)) => {
+            for warning in &report.warnings {
+                eprintln!("warning: {warning}");
+            }
+            for path in &report.contract_diffs {
+                eprintln!("contract mismatch: {path}");
+            }
+            println!(
+                "corpus {}: {}",
+                if bless { "bless" } else { "check" },
+                report.message
+            );
+            match verdict {
+                elivagar::corpus::CorpusVerdict::Pass => {}
+                elivagar::corpus::CorpusVerdict::ContentMismatch => std::process::exit(1),
+                elivagar::corpus::CorpusVerdict::Refused => std::process::exit(2),
+            }
+        }
+        Err(error) => {
+            eprintln!("corpus refusal: {error}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_corpus_tile(text: &str) -> Result<(u8, u32, u32), String> {
+    let mut parts = text.split('/');
+    let z = parts
+        .next()
+        .ok_or("tile must be z/x/y")?
+        .parse()
+        .map_err(|_| "invalid tile zoom")?;
+    let x = parts
+        .next()
+        .ok_or("tile must be z/x/y")?
+        .parse()
+        .map_err(|_| "invalid tile x")?;
+    let y = parts
+        .next()
+        .ok_or("tile must be z/x/y")?
+        .parse()
+        .map_err(|_| "invalid tile y")?;
+    if parts.next().is_some() {
+        return Err("tile must be z/x/y".into());
+    }
+    Ok((z, x, y))
 }
 
 fn run_regress(args: &RegressArgs) {

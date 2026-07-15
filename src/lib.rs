@@ -65,6 +65,7 @@
 
 extern crate alloc;
 
+pub mod corpus;
 pub(crate) mod debug;
 pub(crate) mod geometry;
 pub mod inspect;
