@@ -181,6 +181,15 @@ Rotating the artifact is an output-changing event. The blessed regress baseline
 must be rebuilt and re-blessed with it, and the gate machine must carry the
 same artifact the baseline was built with.
 
+`OCEAN_POLICY_VERSION` (`src/ocean.rs`) is the code half of the artifact key:
+the shapefile hashes catch input rotations, the version stands in for "the
+geometry pipeline changed". Any change that alters emitted ocean geometry or
+encoding must bump it, which makes every existing artifact fail the key check
+loudly instead of silently serving pre-change geometry - the 2026-07-15
+stale-artifact incident (the VW landing shipped without a bump; DP-era
+coastline spikes served world-wide for three days with all gates green) is
+the motivating case.
+
 ## `elivagar inspect <FILE>`
 
 Header, tile statistics, section layout, provenance, and metadata (layer list

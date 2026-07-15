@@ -27,7 +27,16 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Bump whenever a change affects durable ocean tile bytes.
-pub const OCEAN_POLICY_VERSION: u32 = 1;
+///
+/// v2: the ocean path's Visvalingam simplifier. The VW landing changed
+/// durable ocean tile bytes without bumping this, so a DP-era artifact
+/// kept key-validating and served the pre-VW coastline spikes on every
+/// artifact-active run for three days before a human spotted one at
+/// z5. The version is the code half of the artifact key: shapefile
+/// hashes catch input rotations, this constant is the declared stand-in
+/// for "the geometry pipeline changed", and forgetting it converts a
+/// loud key mismatch into silently stale world geometry.
+pub const OCEAN_POLICY_VERSION: u32 = 2;
 
 /// Identity of the shapefile inputs behind computed ocean sort chunks.
 ///
@@ -1277,6 +1286,14 @@ fn total_vertices(piece: &Shape) -> usize {
     piece.iter().map(Vec::len).sum()
 }
 
+/// Everything this block selects - simplifier, tolerance, minimum area, the
+/// zoom span - determines the durable ocean tile bytes `ocean-build` bakes
+/// into the world artifact. Changing any of it, or the engines it dispatches
+/// into (the pyramid descent, the int_ocean simplifiers, the overlay boolean
+/// engine, the MVT encoder), requires bumping OCEAN_POLICY_VERSION: without
+/// the bump every existing artifact keeps key-validating and silently serves
+/// the pre-change geometry. The VW simplifier switch shipped exactly that way
+/// and served DP-era coastline spikes world-wide for three days.
 fn ocean_params<'a>(
     min_zoom: u8,
     max_zoom: u8,

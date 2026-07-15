@@ -6,6 +6,12 @@ use crate::geometry::int_ocean::{
 };
 use rustc_hash::FxHashSet;
 
+// The ocean producer's output from this engine is cached world-wide in the
+// durable ocean artifact (`ocean-build`, keyed by OCEAN_POLICY_VERSION in
+// src/ocean.rs). A change here that alters emitted bytes reaches artifact
+// consumers only through a version bump - without it, existing artifacts
+// keep key-validating and every artifact-active run serves the pre-change
+// geometry while all standing gates stay green.
 pub(crate) struct PyramidParams<'a> {
     pub maxz: u8,
     pub z_top: u8,

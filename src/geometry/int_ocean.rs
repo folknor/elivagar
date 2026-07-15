@@ -18,6 +18,11 @@ pub(crate) struct IntRect {
     pub max_y: i32,
 }
 
+// The OCEAN_* values, and any change to the bytes this module emits on the
+// ocean path (quantize, rescale, DP/VW simplify, encode), are baked into the
+// durable ocean artifact. Such a change requires bumping OCEAN_POLICY_VERSION
+// in src/ocean.rs so stale artifacts fail the key check instead of silently
+// serving the old geometry.
 pub(crate) const OCEAN_DP_TOL_PX: i64 = 16;
 pub(crate) const OCEAN_VW_AREA_2X: i128 = 256;
 pub(crate) const OSM_DP_TOL_PX: i64 = 16;
