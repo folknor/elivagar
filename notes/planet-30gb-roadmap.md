@@ -805,7 +805,13 @@ note). Findings, in the order they overturned the notice's guesses:
   single-threaded at run end (18.5 GB re-read / ~15s at NA, 5.4 GB /
   ~5.3s germany). It is real wall (~5-8%) and a candidate for
   overlapping with the read or reusing brokkr.toml's recorded hash,
-  but it is reporting, not pipeline.
+  but it is reporting, not pipeline. CLOSED 2026-07-15: the hash now
+  runs on a background thread overlapped with phase12 (streamed, not
+  mmap'd, so it cannot inflate sampled RSS; join instrumented as
+  input_hash_join_wait_ns). Germany gap 5.15s -> 0.30s, join wait
+  ~zero, phase12 unchanged; output regress raw-equal on all 1,296,999
+  denmark tiles. Resumes still hash up front to validate the
+  checkpoint before work runs under it.
 - The blessed denmark baseline (`ec5bd11`) predates the provenance
   block and current `brokkr regress` refuses to gate against it, so
   NOTHING has been regress-gateable against blessed since b833fc8.

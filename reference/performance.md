@@ -83,8 +83,18 @@ arena commitment under churn, owned by the rip-out decision in
 The 12.4s (NA) / 5.15s (germany) serial gap between PHASE12_END and
 OCEAN_START is explained: `b833fc8`'s provenance contract hashes the
 input PBF single-threaded at run end (a full re-read). Real wall, ~5-8%
-of a run, a candidate for overlap with the read - but reporting, not
-pipeline.
+of a run - reporting, not pipeline. CLOSED 2026-07-15 (commit follows
+this note): the hash runs on a background thread spawned before phase12
+starts and joined at the checkpoint save, streamed through a fixed 8 MiB
+buffer instead of a whole-file mmap so file-backed pages never inflate
+the sampled RSS. The join carries `input_hash_join_wait_ns`; a non-zero
+reading means the overlap assumption broke. Germany dirty-run readings
+at the fix: gap 5.15s -> 0.30s, join wait 13us, phase12 31.2s against
+the 32.2s stored baseline (the concurrent hash reader costs nothing
+measurable), wall 47.9s dirty vs 59s stored - cache-warmth flattered,
+the stored rows below are the honest number. Resumes still hash up
+front by design: the checkpoint must be validated before any work runs
+under it.
 
 The post-fix allocator A/B at `98824b4` (stored bench-1 arms, plantasjen,
 locations, artifact-active) ended mimalloc: the system allocator wins
@@ -117,7 +127,9 @@ Against the 07-14 regressed HEAD rows above: NA wall -11% with phase12
 memory at a quarter and the fault storm gone; denmark takes the record
 from 11.4s to 8.9s. Both runs still carry the serial provenance-hash
 tail (the PHASE12_END segment reads the whole PBF once more), which is
-now the largest non-pipeline cost at NA (~16s).
+now the largest non-pipeline cost at NA (~16s) - removed by the hash
+overlap landing above; the stored rows at that commit are the
+post-overlap baselines.
 
 Superseded rows (kept for delta reading):
 

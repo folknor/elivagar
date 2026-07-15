@@ -554,11 +554,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let skip = config.skip_to;
     let ocean_mode = resolved_ocean_mode(config)?;
     // Identifying the input means reading all of it, so where that read happens
-    // matters. A resume must hash up front to validate the chunks, but then the
-    // PBF is never read again. A full run defers it to just after phase12,
-    // where the file is warm in page cache - hashing here instead would put a
-    // cold serial pass in front of the reader and, at planet scale, cost a
-    // second whole-file read plus the cache it evicts.
+    // matters. A resume must hash up front to validate the chunks before any
+    // work is done under them. A full run hashes on a background thread
+    // overlapped with phase12, which reads the same file far slower than the
+    // hash does - hashing serially after phase12 was measured at ~15s on the
+    // 19 GB north-america input, because by then the file's head is evicted
+    // from page cache and the "read it back out of cache" assumption fails at
+    // exactly the scale where the read costs most.
     let mut input_identity: Option<(String, u64)> = None;
     // Only a full run computes the effective paths; a resume inherits them
     // from the checkpoint written by the run that built the chunks.
@@ -643,6 +645,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             drop(std::fs::remove_dir_all(&config.tmp_dir)); // Best-effort: may not exist yet.
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
+            let input_hash = crate::provenance::BackgroundHash::spawn(config.pbf_path.clone());
             let phase12_start = Instant::now();
             let (mut sw, bounds_out, p12_stats) = phase12::phase_read_and_process(config)?;
             phase12_stats = Some(p12_stats);
@@ -658,10 +661,15 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 sw.flush()?; // Flush buffer so chunk_count() is accurate for checkpoint
             }
             emit_allocator_boundary("phase12_end");
-            // Deferred to here: phase12 has just streamed the whole PBF, so
-            // this reads it back out of page cache rather than off the disk.
-            let identity = crate::provenance::hash_file(&config.pbf_path)
-                .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?;
+            // The hash has been running since before phase12 started and
+            // finishes long before it; any wait recorded here means the
+            // overlap assumption broke and the counter names it.
+            let identity = {
+                let _wait = wait_span(&WAIT.input_hash_join);
+                input_hash
+                    .join()
+                    .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?
+            };
             save_checkpoint(
                 &config.tmp_dir,
                 &bounds_out,

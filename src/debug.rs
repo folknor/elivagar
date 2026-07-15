@@ -94,6 +94,7 @@ counter_group!(WaitCounters {
     node_block_send => "node_block_send_wait_ns",
     node_worker_join => "node_worker_join_wait_ns",
     prepass_join => "prepass_join_wait_ns",
+    input_hash_join => "input_hash_join_wait_ns",
     read_raw_send => "read_raw_send_wait_ns",
     read_decoded_send => "read_decoded_send_wait_ns",
     read_decoded_recv => "read_decoded_recv_wait_ns",

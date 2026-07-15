@@ -369,19 +369,63 @@ pub fn metadata_member(value: &Value) -> String {
 
 /// XXH3-128 of a file, lowercase hex, with its byte length.
 ///
-/// mmap and hash in one pass. On a full run the PBF is already in page cache
-/// from the read phase, so this costs page-cache bandwidth rather than disk
-/// IO: ~0.1s for a 1.2 GB extract. Provenance, not pipeline, so it is not
-/// inside any timed phase.
+/// Streamed through a fixed buffer rather than hashed over an mmap of the
+/// whole file: this runs concurrently with phase12 on a full run (see
+/// [`BackgroundHash`]), and a whole-file mapping would let file-backed pages
+/// count into the process RSS the sidecar samples - a planet-sized input
+/// would read as a planet-sized RSS spike in the phase whose memory the
+/// 30 GB ledger watches most closely. Buffered reads populate the same page
+/// cache without ever holding more than one buffer resident.
 pub fn hash_file(path: &Path) -> std::io::Result<(String, u64)> {
-    let file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    // SAFETY: the input PBF is not modified during a run. A concurrent
-    // truncation would be UB, and is the same assumption the PBF reader and
-    // the way index already make about this file.
-    let map = unsafe { memmap2::Mmap::map(&file)? };
-    let digest = xxhash_rust::xxh3::xxh3_128(&map);
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    let mut buf = vec![0_u8; 8 << 20];
+    let mut len: u64 = 0;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        len += n as u64;
+    }
+    let digest = hasher.digest128();
     Ok((format!("{digest:032x}"), len))
+}
+
+/// The input-PBF identity hash running on its own thread, overlapped with the
+/// phase that reads the same file.
+///
+/// Identifying the input means reading all of it, and doing that serially is
+/// real wall: measured at ~15s on the 19 GB north-america input (the
+/// PHASE12_END-to-OCEAN_START gap, 2026-07-15), because by the time phase12
+/// has streamed the file its head is long evicted from page cache. Run
+/// concurrently the hash hides behind phase12, which processes the same bytes
+/// one to two orders of magnitude slower than the hash reads them; the
+/// hasher's readahead also warms the cache ahead of the pipeline reader.
+pub struct BackgroundHash {
+    handle: std::thread::JoinHandle<std::io::Result<(String, u64)>>,
+}
+
+impl BackgroundHash {
+    /// Start hashing `path` on a named background thread.
+    pub fn spawn(path: std::path::PathBuf) -> Self {
+        let handle = std::thread::Builder::new()
+            .name("input-hash".to_string())
+            .spawn(move || hash_file(&path))
+            .expect("spawning the input-hash thread");
+        Self { handle }
+    }
+
+    /// Block until the hash is done and return it. Any residual wait here is
+    /// the caller's to instrument; a panic on the hasher thread propagates as
+    /// an I/O-shaped error rather than being swallowed.
+    pub fn join(self) -> std::io::Result<(String, u64)> {
+        self.handle.join().map_err(|_| {
+            std::io::Error::other("input-hash thread panicked while hashing the input PBF")
+        })?
+    }
 }
 
 #[cfg(test)]
@@ -473,5 +517,49 @@ mod tests {
             format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes))
         );
         assert_eq!(hash.len(), 32, "must be 32 lowercase hex chars like brokkr");
+    }
+
+    #[test]
+    fn hash_file_streams_across_buffer_boundaries() {
+        // Content deliberately larger than one 8 MiB read and not a multiple
+        // of it, so the streaming hasher crosses a buffer boundary and
+        // finishes on a partial read. Must match the one-shot digest.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("input.bin");
+        let mut bytes = vec![0_u8; (8 << 20) + 4097];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *b = (i % 251) as u8;
+            }
+        }
+        std::fs::write(&path, &bytes).expect("write");
+        let (hash, len) = hash_file(&path).expect("hash");
+        assert_eq!(len, bytes.len() as u64);
+        assert_eq!(
+            hash,
+            format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes))
+        );
+    }
+
+    #[test]
+    fn background_hash_matches_synchronous_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("input.bin");
+        std::fs::write(&path, b"elivagar provenance").expect("write");
+        let background = BackgroundHash::spawn(path.clone()).join().expect("join");
+        let synchronous = hash_file(&path).expect("hash");
+        assert_eq!(background.0, synchronous.0);
+        assert_eq!(background.1, synchronous.1);
+    }
+
+    #[test]
+    fn background_hash_join_reports_missing_file() {
+        let err = BackgroundHash::spawn(std::path::PathBuf::from(
+            "/nonexistent/elivagar-provenance-test.pbf",
+        ))
+        .join()
+        .expect_err("missing file must error");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 }
