@@ -1,26 +1,15 @@
-// Global allocator selection, mutually exclusive by cfg priority:
-// hotpath-alloc (tracking) > jemalloc-alloc > mimalloc-alloc (default) >
-// system (--no-default-features). Exclusive arms keep --all-features builds
-// legal (jemalloc-alloc wins over mimalloc-alloc there).
+// The global allocator is the system allocator, on purpose. mimalloc
+// predated all measurement here and lost the measured three-way A/B on
+// 2026-07-15 at commit 98824b4, after the phase12 scratch-retention fix
+// removed the fault-storm confound: glibc beat it on wall on both A/B
+// datasets (NA locations 269s vs 282s, germany 60s vs 65s; phase12
+// 155.0s vs 170.8s and 31.5s vs 39.3s) with a fraction of the minor
+// faults, and mimalloc froze 2-3x the live bytes as never-returned
+// commitment (14.2 GB against 4.2 GB anon on germany), address space a
+// 30 GB planet-RAM ledger cannot trust. jemalloc measured at par with
+// glibc, so it does not pay for its dependency either. pbfhogg reached
+// its records on the system allocator the same way.
 //
-// mimalloc predates all measurement here; the NA locations runs put its
-// retention on the planet RAM ledger (mi_commit 14.9 GB at phase12 end
-// against ~2 GB live; 24.5 GB committed by run end on a 26 GB budget),
-// which is what promoted this from an early experiment to a measured
-// three-way A/B knob.
-#[cfg(all(
-    feature = "mimalloc-alloc",
-    not(feature = "sys-alloc"),
-    not(feature = "jemalloc-alloc"),
-    not(feature = "hotpath-alloc")
-))]
-#[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-#[cfg(all(feature = "jemalloc-alloc", not(feature = "hotpath-alloc")))]
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 // hotpath 0.14 installed CountingAllocator internally under hotpath-alloc; as
 // of 0.20 it is a plain generic type the consumer must declare - the crate no
 // longer wires it up on its own. Without this, hotpath-alloc builds fall back

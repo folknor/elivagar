@@ -1390,6 +1390,21 @@ space the ledger cannot trust. Next step: re-run sys-alloc on NA and
 germany at the fixed commit; if wall holds, delete mimalloc (pbfhogg
 precedent - it dropped mimalloc long ago; user leans the same way).
 
+DECIDED 2026-07-15, mimalloc REMOVED. Post-fix arms at `98824b4`
+(stored bench-1 runs): NA sys-alloc `001930af` 269s wall / phase12
+155.0s at 17.9 cores / 17.6M minflt vs mimalloc `ee259d09` 282s /
+170.8s at 16.1 cores / 50.4M minflt; germany sys-alloc `9399d48c` 60s /
+phase12 31.5s at 19.7 cores vs mimalloc `050f0de1` 65s / 39.3s at 15.8
+cores. The system allocator does not merely hold within noise - it wins
+wall on both datasets - so the decision rule fires on its stronger
+branch. jemalloc measured at par with sys-alloc on germany (60s) and
+does not pay for its dependency. Removed: the mimalloc/libmimalloc-sys/
+tikv-jemallocator deps and the three feature arms; `mallinfo2` is a
+live signal again and the sidecar now emits `malloc_held_<boundary>` /
+`malloc_live_<boundary>` in place of `mi_commit_*` (old rows keep the
+old names). Germany's frozen 14.2 GB mi_commit line leaves the ledger
+with the allocator that produced it.
+
 PROMOTED 2026-07-09: the NA claim-window run showed the assemble
 phase's 19.4 GB RSS is mostly allocator retention (mi_commit 14.9 GB
 at phase12 end vs ~2 GB live; 24.5 GB committed by run end) - the

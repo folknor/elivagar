@@ -17,21 +17,7 @@ use std::time::Instant;
 
 use elivagar::node_index::SortedNodeStore;
 
-// Same allocator arbitration as main.rs: hotpath-alloc wins, then the
-// mimalloc-alloc default feature; system allocator otherwise.
-#[cfg(all(
-    feature = "mimalloc-alloc",
-    not(feature = "sys-alloc"),
-    not(feature = "jemalloc-alloc"),
-    not(feature = "hotpath-alloc")
-))]
-#[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-#[cfg(all(feature = "jemalloc-alloc", not(feature = "hotpath-alloc")))]
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
+// System allocator, like the main binary; see the allocator note in main.rs.
 fn main() {
     let _guard = hotpath::HotpathGuardBuilder::new("bench_node_store")
         .percentiles(&[50.0, 95.0, 99.0])

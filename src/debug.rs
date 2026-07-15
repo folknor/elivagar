@@ -158,62 +158,41 @@ pub fn wait_span(counter: &'static AtomicU64) -> WaitSpan {
     }
 }
 
-/// Snapshot mimalloc's committed memory at a phase boundary and emit it as
-/// `mi_commit_<boundary>` / `mi_peak_commit_<boundary>` counters (bytes).
+/// Snapshot glibc's heap accounting at a phase boundary and emit it as
+/// `malloc_held_<boundary>` / `malloc_live_<boundary>` counters (bytes).
 ///
-/// Why commit and not the glibc `mallinfo2` we used to read: the normal binary
-/// uses mimalloc as the global allocator, so `mallinfo2` (which only sees
-/// glibc-direct allocations) reported a few MB of arena against a multi-GB RSS -
-/// dead signal. `mi_process_info` reports mimalloc's own accounting. RSS, peak
-/// RSS, and page faults are already covered per phase by the sidecar's /proc
-/// sampler, so the one number worth pulling from the allocator is committed
-/// bytes: how much address space mimalloc has committed, which can sit well
-/// above resident bytes and is the signal for allocator retention on a
-/// memory-bound run.
+/// `held` is arena + hblkhd: everything glibc has taken from the OS for the
+/// heap, whether or not it is in use. `live` is uordblks + hblkhd: what the
+/// program actually holds allocated. `held - live` is allocator retention -
+/// the free-list and arena memory glibc keeps rather than returning, the
+/// glibc analogue of the `mi_commit`-vs-RSS gap that flagged the 2026-07-14
+/// regression under mimalloc. RSS, peak RSS, and page faults are already
+/// covered per phase by the sidecar's /proc sampler.
 ///
-/// No-op when mimalloc is not the global allocator (hotpath-alloc builds,
-/// system-allocator builds via --no-default-features, jemalloc-alloc builds):
-/// its accounting would be meaningless there. The A/B runs read RSS from the
-/// sidecar's /proc sampler instead.
-#[cfg(all(
-    feature = "mimalloc-alloc",
-    not(feature = "sys-alloc"),
-    not(feature = "jemalloc-alloc"),
-    not(feature = "hotpath-alloc")
-))]
+/// mallinfo2 became a live signal again when mimalloc was removed
+/// (2026-07-15): under a non-glibc global allocator it only saw
+/// glibc-direct allocations - a few MB against a multi-GB RSS - which is
+/// why the mimalloc-era binary read `mi_process_info` here instead.
+/// Old sidecar rows therefore carry `mi_commit_<boundary>` counters, not
+/// these. hotpath-alloc's CountingAllocator wraps the system allocator, so
+/// the reading stays meaningful in every build.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub fn emit_alloc_boundary(boundary: &str) {
-    let mut current_commit: usize = 0;
-    let mut peak_commit: usize = 0;
-    // SAFETY: mi_process_info null-checks each out-pointer before writing, so
-    // passing null for the fields we don't want is the documented way to select
-    // a subset. It reads no input and is safe from any thread.
-    unsafe {
-        libmimalloc_sys::mi_process_info(
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut current_commit,
-            &mut peak_commit,
-            std::ptr::null_mut(),
-        );
-    }
-    emit_counter_usize(&format!("mi_commit_{boundary}"), current_commit);
-    emit_counter_usize(&format!("mi_peak_commit_{boundary}"), peak_commit);
+    // SAFETY: mallinfo2 fills and returns a struct by value; it reads no
+    // input and is safe to call from any thread.
+    let info = unsafe { libc::mallinfo2() };
+    emit_counter_usize(&format!("malloc_held_{boundary}"), info.arena + info.hblkhd);
+    emit_counter_usize(
+        &format!("malloc_live_{boundary}"),
+        info.uordblks + info.hblkhd,
+    );
 }
 
-#[cfg(not(all(
-    feature = "mimalloc-alloc",
-    not(feature = "sys-alloc"),
-    not(feature = "jemalloc-alloc"),
-    not(feature = "hotpath-alloc")
-)))]
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub fn emit_alloc_boundary(_boundary: &str) {}
 
 /// Ask glibc to return free chunks above the trim threshold to the OS.
 /// Returns 1 if memory was released, 0 otherwise.
-/// In the normal mimalloc binary this does not trim Rust heap blocks.
 ///
 /// On non-glibc or non-Linux this is a no-op returning 0.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -229,7 +208,6 @@ pub fn malloc_trim() -> i32 {
 
 /// Lower glibc's `M_MMAP_THRESHOLD` so allocations at least `bytes` route
 /// through mmap-backed chunks that are released to the OS when freed.
-/// In the normal mimalloc binary this does not route Rust heap blocks.
 ///
 /// Call once early in the run; the setting is process-global. On non-glibc
 /// or non-Linux this is a no-op returning 0.

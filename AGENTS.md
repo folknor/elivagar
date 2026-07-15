@@ -114,7 +114,7 @@ and drains it on a background thread. Two line formats share the FIFO:
   line is dropped - there is no string/categorical counter channel)
 
 Emission lives in `src/debug.rs` (`emit_marker`, `emit_counter`,
-`emit_counter_u64`/`_usize`, `marker_span`, `emit_mallinfo2`) - OnceLock fd
+`emit_counter_u64`/`_usize`, `marker_span`, `emit_alloc_boundary`) - OnceLock fd
 caching, O_NONBLOCK, silent no-op when `BROKKR_MARKER_FIFO` is unset. That means
 the metrics are visible ONLY through `brokkr sidecar <uuid>` after a measured
 run: a bare `elivagar run`, or `brokkr tilegen` with no measurement flag, emits
@@ -142,14 +142,17 @@ What elivagar emits:
   relation tail run inside rayon, so read those two as summed thread-time.
   The `_ns`-without-`_wait` suffix keeps them out of `--stalls`; paired with
   the wait counters they split each actor into busy vs blocked.
-- `mi_commit_<boundary>` / `mi_peak_commit_<boundary>` at each phase boundary:
-  mimalloc's committed bytes via `mi_process_info` (libmimalloc-sys `extended`
-  feature). We used to read glibc `mallinfo2` here, but under the mimalloc global
-  allocator that saw only a few MB against a multi-GB RSS - dead signal. RSS/peak
+- `malloc_held_<boundary>` / `malloc_live_<boundary>` at each phase boundary:
+  glibc heap accounting via `mallinfo2` (held = arena + hblkhd, live =
+  uordblks + hblkhd; held minus live is allocator retention). RSS/peak
   RSS/faults are already covered per phase by the /proc sampler, so the one
-  number worth pulling from the allocator is committed memory, which can sit well
-  above resident and is the signal for allocator retention. No-op under
-  `hotpath-alloc` (mimalloc is not the allocator there).
+  number worth pulling from the allocator is what it holds versus what the
+  program holds. Sidecar rows from before 2026-07-15 carry
+  `mi_commit_<boundary>` / `mi_peak_commit_<boundary>` instead: the binary
+  was mimalloc-allocated then (mallinfo2 was a dead signal under it), and
+  those counters read mimalloc's committed bytes via `mi_process_info` -
+  the signal that exposed the 07-14 scratch-retention regression before
+  mimalloc lost the post-fix allocator A/B and was removed.
 - Coarse metric counters: `total_ms`, `phase12_ms`, `ocean_ms`, `phase3_ms`,
   `assemble_ms`, `features`, `tiles`, `unique_tiles`, `output_bytes`,
   `peak_rss_kb` + per-phase rss, `tile_format`/`tile_compression` (enum ints:
@@ -466,7 +469,9 @@ Driven by `scripts/ocean-coverage.sh` (brokkr has no wrapper).
 
 ## Key conventions
 
-- `#[global_allocator]` mimalloc in main.rs - do not remove
+- The global allocator is the system allocator, decided by measurement - do
+  not reintroduce an allocator dependency without a fresh A/B (main.rs has
+  the numbers; mimalloc and jemalloc lost at `98824b4`)
 - `.unwrap()` forbidden by clippy - use `expect()` or propagate errors
 - Cast lints are strict - annotate with `#[allow(clippy::cast_*)]` where needed
 - Test fixtures live in `tests/fixtures/` (YAML files for Shortbread spec)

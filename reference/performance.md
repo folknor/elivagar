@@ -86,6 +86,26 @@ input PBF single-threaded at run end (a full re-read). Real wall, ~5-8%
 of a run, a candidate for overlap with the read - but reporting, not
 pipeline.
 
+The post-fix allocator A/B at `98824b4` (stored bench-1 arms, plantasjen,
+locations, artifact-active) ended mimalloc: the system allocator wins
+wall outright on both datasets, not merely within noise, with a fraction
+of the minor faults:
+
+| dataset | arm | run | wall | phase12 | avg cores | phase12 minflt |
+|---|---|---|---|---|---|---|
+| north-america | mimalloc | `ee259d09` | 282s | 170.8s | 16.1 | 50.4M |
+| north-america | sys-alloc | `001930af` | 269s | 155.0s | 17.9 | 17.6M |
+| germany | mimalloc | `050f0de1` | 65s | 39.3s | 15.8 | 11.1M |
+| germany | sys-alloc | `9399d48c` | 60s | 31.5s | 19.7 | 4.4M |
+
+jemalloc measured at par with sys-alloc on germany (60s at pre-fix
+76492b8) and does not pay for its dependency. mimalloc, libmimalloc-sys
+and tikv-jemallocator are removed with their feature arms; the sidecar
+emits `malloc_held_<boundary>` / `malloc_live_<boundary>` from glibc
+`mallinfo2` where pre-2026-07-15 rows carry `mi_commit_*`. The sys-alloc
+rows above are the expected shape of the new baselines; stored bench
+rows at the rip-out commit follow it.
+
 Superseded rows (kept for delta reading):
 
 | dataset | commit | run | wall | phase12 | peak RSS | note |

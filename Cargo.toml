@@ -26,9 +26,6 @@ brotli = "8.0.4"
 lz4_flex = "0.13"
 snap = "1"
 smallvec = "1.15.2"
-mimalloc = { version = "0.1.52", default-features = false, optional = true }
-libmimalloc-sys = { version = "0.1", features = ["extended"], optional = true }
-tikv-jemallocator = { version = "0.7", optional = true }
 hotpath = "0.21.1"
 rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }
@@ -91,13 +88,9 @@ io_other_error = "deny"
 disallowed_types = "deny"
 
 [features]
-default = ["mimalloc-alloc"]
-mimalloc-alloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
-jemalloc-alloc = ["dep:tikv-jemallocator"]
-# Overrides the mimalloc-alloc default without needing --no-default-features
-# (brokkr's measured commands only pass --features through): selects the
-# system allocator.
-sys-alloc = []
+# The system allocator is the allocator (see the note in main.rs; mimalloc
+# and jemalloc lost the measured A/B at 98824b4 and were removed).
+default = []
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 # linux-io-uring = ["dep:io-uring", "dep:libc"]
