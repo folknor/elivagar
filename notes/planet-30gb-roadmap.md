@@ -1,23 +1,23 @@
 # Planet on 30 GB: hypotheses toward world-record tile generation
 
-Status: 2026-07-14. No longer hypotheses-only - H1, H5 and most of the
+Status: 2026-07-15. No longer hypotheses-only - H1, H5 and most of the
 RAM campaign have landed; each hypothesis carries its own dated landing
 and verdict notes below.
 
-**Start here: planet RAM is NO-GO.** Allocator commitment has roughly
-doubled on every dataset measured - NA `mi_commit` 20.3 to 44.4 GB,
-germany 7.37 to 16.2 GB, the same 2.2x - and at NA that means 44.4 GB
-committed against 23.3 GB resident on a 30 GB host, with 1.93M major
-faults. The under-10-GB-per-phase property this document reports as
-achieved does not hold at HEAD, and the H3 go/no-go verdict is void until
-it does.
-
-Two traps if you pick this up. **Do not read RSS on germany and conclude
-it is fine** - germany's RSS is 6.58 GB, better than its own baseline,
-because 16.2 GB of commitment fits on this host; the defect is fully
-visible there in `mi_commit_phase12_end` and nowhere else. And the first
-test is the allocator A/B at HEAD, not a bisect. See the void notice at
-the end of H3.
+**Start here: the 2026-07-14 planet-RAM NO-GO is RESOLVED.** The phase12
+memory regression was not the allocator: it was scratch-capacity
+retention in phase-lifetime accumulators, introduced by the i_overlay
+port making buffers scratch-owned (the fourth instance of THE PATTERN,
+see H1). The fix (way accs die with their task; relation scratches drop
+per relation; fold accumulators finalized before queuing for reduce)
+restores NA phase12 to 5.6 GB anon / 12K majflt / 170s - the 69c0f18
+numbers - with tile output byte-identical. The allocator A/B that the
+07-14 notice called for was run first and REFUTED the retention theory:
+sys-alloc holds the same ~21 GB live and pays 3.8M majflt for it.
+Germany's `mi_commit` doubling is the one piece the fix does not touch
+(14.2 GB before and after against 4.2 GB anon): that is mimalloc arena
+commitment under churn, and it belongs to the mimalloc rip-out decision
+(H6 allocator addendum), not to a pipeline defect.
 
 Dated notes elsewhere in this document describe the state on their own
 date, not today's.
@@ -372,6 +372,22 @@ within worker_count x 2 of the writer). Every queue between a parallel
 producer and an ordered consumer needs an explicit window or byte
 bound, decided at design time, with a wait counter on the bound.
 
+THE SIBLING PATTERN (2026-07-15, now bitten five times): warm scratch
+whose lifetime exceeds its work item = capacity ratcheted to the worst
+item it ever served, times the pool width. Instances: the per-thread
+AssemblyScratch pool (69c0f18), the ocean PyramidScratch pool (H4
+rip-out), E3's rect-clip pool (reverted), and - the 07-14 planet-RAM
+NO-GO - the phase12 way-acc pool (24 accs x ~770 MB at NA) plus the
+relation tail's per-worker fold accumulators and their reduce-queue
+copies. The i_overlay port created the exposure: it moved the engine's
+per-op allocations into caller-owned scratch, so any accumulator
+holding that scratch became a ratchet. Scratch lives exactly as long
+as its work item (task, relation, tile); reuse beyond that must prove
+its wall win against the retention it buys, and gated/thresholded
+variants of "mostly reuse" were tried here and lost to the aggregate
+(1 MiB input gate left 14 GB, adding a 2 MiB emission gate left
+12.6 GB, unconditional drop cost zero measurable wall).
+
 Remaining planet-RSS items after the claim window: ocean phase 9.4 GB
 at NA (grew ~4 GB with the ocean spill coalescer - fine standalone,
 but planet ocean is all coastlines; H5's precomputed ocean stream
@@ -408,6 +424,10 @@ than the 21.5 GB this campaign fixed.** The under-10-GB property is
 broken and the planet RAM go/no-go with it - see the void notice in H3.
 These 69c0f18 numbers stand as the record of what the campaign achieved
 and as the target to get back to; they are not a description of HEAD.
+
+RESTORED 2026-07-15: the scratch-retention fix put NA phase12 back at
+5.6 GB anon / 170s / 12K majflt (see the H3 resolution block). The
+69c0f18 numbers describe HEAD again, minus the ocean phase H5 deleted.
 
 Next session's queue, in leverage order: (1) H3 extrapolation of the
 two open terms - planet ocean RSS (H5 decides) and planet partition
@@ -737,6 +757,64 @@ Reading of the numbers, and what is NOT yet established:
 All of this is sidecar data (`brokkr sidecar b9d6c12c --human`), which is
 local to plantasjen and gitignored; the numbers are transcribed here
 because the results row keeps only elapsed_ms.
+
+RESOLVED 2026-07-15 (same-day session; the fix commit follows this
+note). Findings, in the order they overturned the notice's guesses:
+
+- The allocator A/B at HEAD (run first, as instructed) REFUTED the
+  mimalloc-retention theory. NA sys-alloc: phase12 peak RSS 21.3 GB -
+  the same as mimalloc's 21.1 - with 3.8M majflt and wall 413s vs
+  314s. The memory was reachable under every allocator; `mi_commit`
+  was the symptom (mimalloc never decommits what the live peaks force
+  it to take), not the cause. Germany arms: sys-alloc and jemalloc
+  both ~60s wall vs mimalloc 68s, phase12 ~34-35s vs 42.7s at
+  identical output - a standing data point for the rip-out decision.
+- The NA live regression bisected (NA phase12 peak anon, my config,
+  endpoints verified) to the i_overlay port: e34cc7b 5.4 GB good,
+  d20ddd5 5.1 GB good (both named scratch suspects exonerated),
+  659a187 OOM-KILLED at 24.8 GB, e2284ec 21.0 GB, 2c770c7 21.4 GB,
+  HEAD 21.4 GB. e2284ec's de-churn was the germany-scale fix (22.8 to
+  6.3 GB) but only took NA from OOM to 21 GB.
+- Mechanism (sidecar timeline attribution): the port moved the boolean
+  engine's per-op allocations into caller-owned scratch, and every
+  phase-lifetime accumulator holding that scratch became a capacity
+  ratchet - hump 1 was the way-acc pool (24 accs x ~770 MB, freed
+  exactly when the read ends), hump 2 the relation tail's per-worker
+  fold accumulators plus finished accumulators queued for reduce. The
+  ~20 GB of anon evicted the page cache, and the tail's way_index
+  mmap reads became the 1.9-2.0M major faults; the +58s of phase12
+  wall was that thrash, as the notice's arithmetic suspected.
+- Fix (verified attribution-first with a fresh-scratch diagnostic run:
+  5.95 GB, wall unchanged): way accs die with their block task
+  (flush residuals to the coalescer, ship way_puts + tally through
+  the drain); the relation tail drops its geometry-scaled scratches
+  after every relation and finalizes each fold accumulator on its
+  worker before it queues for reduce. Gated "mostly warm" variants
+  measured worse (see THE SIBLING PATTERN in H1).
+- Post-fix NA (dirty-run values; stored bench follows the commit):
+  wall 288s, phase12 170.3s / 5.64 GB peak anon / 11.9K majflt,
+  mi_commit_phase12_end 18.7 GB (from 44.6). Germany: wall 63.5s,
+  phase12 39.1s / 4.2 GB anon. Denmark 10.0s. Output byte-identical
+  vs clean HEAD (regress --file/--against, 1,296,999 tiles, raw-equal
+  on every blob pair).
+- Germany mi_commit_phase12_end is UNCHANGED at 14.2 GB against
+  4.2 GB anon: arena commitment under churn, mimalloc-specific,
+  invisible in RSS, owned by the H6 allocator addendum (rip-out).
+- The serial PHASE12_END-to-OCEAN gap is explained and benign in
+  origin: b833fc8's provenance contract hashes the input PBF
+  single-threaded at run end (18.5 GB re-read / ~15s at NA, 5.4 GB /
+  ~5.3s germany). It is real wall (~5-8%) and a candidate for
+  overlapping with the read or reusing brokkr.toml's recorded hash,
+  but it is reporting, not pipeline.
+- The blessed denmark baseline (`ec5bd11`) predates the provenance
+  block and current `brokkr regress` refuses to gate against it, so
+  NOTHING has been regress-gateable against blessed since b833fc8.
+  This landing gated against a clean-HEAD worktree build instead.
+  A re-bless from a post-provenance build needs a user decision.
+
+Planet RAM go/no-go status: the phase12 stocks are bounded again and
+the 07-09 ledger extrapolation is arguably current again, but re-read
+it against a fresh NA stored run before any planet attempt.
 
 ### H4: Sort scratch needs page-cache hygiene, maybe compression
 
@@ -1295,6 +1373,22 @@ returned.
 Decision rule is unchanged and now has teeth: if an arm collapses phase12
 commitment, the rip-out stops being a simplicity decision and becomes the
 fix.
+
+A/B RUN 2026-07-15 (at pre-fix HEAD 76492b8, bench-1 arms, sidecar
+readings). No arm collapsed phase12 memory - the regression was live
+scratch retention, not the allocator (see the H3 resolution) - so the
+rip-out is NOT the fix. But the arms answered the standing simplicity
+question in the system allocator's favor on germany: sys-alloc 60s wall
+/ phase12 34.3s at 18.2 cores / 5.56 GB, jemalloc 60s / 35.0s / 5.55 GB,
+mimalloc 68s / 42.7s at 14.4 cores / 6.11 GB - both alternatives beat
+mimalloc by ~12% wall at germany, with half the minor faults. At NA
+(pre-fix, under fault-storm confound) sys-alloc was worse (413s vs
+314s); that arm needs a POST-FIX re-run before the rip-out call. What
+mimalloc still costs: mi_commit frozen at 2-3x live (14.2 GB on germany
+against 4.2 GB anon, never returned), which on a 30 GB host is address
+space the ledger cannot trust. Next step: re-run sys-alloc on NA and
+germany at the fixed commit; if wall holds, delete mimalloc (pbfhogg
+precedent - it dropped mimalloc long ago; user leans the same way).
 
 PROMOTED 2026-07-09: the NA claim-window run showed the assemble
 phase's 19.4 GB RSS is mostly allocator retention (mi_commit 14.9 GB

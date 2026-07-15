@@ -249,15 +249,52 @@ pub(super) fn process_relation_blocks(
                 acc.fanout.record_cap(layer, zoom, tiles, oid);
             }
             acc.multipolygon_emit.cap_events.clear();
+            // Drop the geometry-scaled scratches after EVERY relation. The
+            // fold accumulator lives for the whole tail (par_bridge keeps one
+            // per worker), so warm scratch ratchets to the fattest relation a
+            // worker ever processed - measured at NA scale as ~18 GB of
+            // phase12 anon across the pool (24 workers x ~750 MB), evicting
+            // the page cache the tail's own way_index mmap reads depend on
+            // (2M major faults). Gated variants were tried and refuted on the
+            // same day: a 1 MiB prepared-bytes gate left 14 GB and adding a
+            // 2 MiB emitted-bytes gate left 12.6 GB, because the ratchet is
+            // the aggregate of many sub-gate relations, not a few monsters.
+            // The unconditional drop measured 5.95 GB peak phase12 anon at an
+            // identical NA wall (288s): per-relation buffer regrowth is noise
+            // next to the relation's own processing, while the engine-internal
+            // reuse (the e2284ec de-churn win) lives WITHIN a single op and is
+            // untouched by this.
+            acc.multipolygon_emit = MultipolygonEmitScratch::new();
+            acc.simp_scratch = geometry::SimplifyMultiScratch::new();
             inflight_bytes.fetch_sub(rel_bytes, Ordering::Relaxed);
             acc.bytes = acc.sink.bytes();
             if acc.bytes >= flush_threshold {
                 acc.flush(spill);
+                // The flush keeps capacity for the next fill; release it when
+                // a monster emission ratcheted it far beyond the threshold.
+                if acc.sink.payload.capacity() > 4 * flush_threshold {
+                    acc.sink.payload.shrink_to(flush_threshold);
+                    acc.sink.records.shrink_to(flush_threshold / 64);
+                }
             }
             acc
         })
-        // Don't flush in reduce - collect remaining records back for sort_writer
-        // to avoid a coalescer append per rayon accumulator.
+        // Finalize each fold accumulator on its worker the moment its batch
+        // completes: flush the residual records to the coalescer and drop the
+        // scratches. A finished accumulator queues for its reduce sibling
+        // holding whatever capacity it ratcheted, and par_bridge produces
+        // hundreds of batch accumulators - measured at NA as ~13 GB of
+        // phase12 anon AFTER the per-relation monster gates landed. Reduce
+        // then merges empty sinks: tally, count and fanout only.
+        .map(|mut acc| {
+            acc.flush(spill);
+            acc.multipolygon_emit = MultipolygonEmitScratch::new();
+            acc.simp_scratch = geometry::SimplifyMultiScratch::new();
+            acc.point_emit = PointEmitScratch::new();
+            acc.sink.payload = Vec::new();
+            acc.sink.records = Vec::new();
+            acc
+        })
         .reduce(RelAcc::new, |mut a, mut b| {
             a.count += b.count;
             let base = a.sink.payload.len();

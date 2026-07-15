@@ -49,25 +49,42 @@ sidecar values transcribed here because the results row keeps only
 | north-america | `b9d6c12c` | 311.2s | 206.3s / 23.3 GB / 15.4 cores | 0.3s | 91.5s / 4.7 GB / 14.9 cores | 23.3 GB | **44.4 GB** | 1,933,730 |
 | germany | `2d715357` | 61.3s | 36.7s / 6.58 GB / 16.6 cores | 2.0s | 16.7s / 3.2 GB / 12.3 cores | 6.9 GB | **16.2 GB** | 1,133 |
 
-**These are live regressions, not baselines, and the regressed quantity is
-`mi_commit` - not RSS.** Allocator commitment has roughly doubled on both
-datasets: NA 20.3 GB recorded at `69c0f18` to 44.4 GB (2.19x), germany
-7.37 GB recorded at `9e8dce2` to 16.2 GB (2.20x). The same factor, so this
-is systemic and proportional.
+**These rows record the 2026-07-14 regression, RESOLVED 2026-07-15.** The
+regressed quantity was live scratch retention, with `mi_commit` as its
+loudest symptom: the i_overlay port moved the boolean engine's per-op
+allocations into caller-owned scratch, and phase12's phase-lifetime
+accumulators (the way-acc pool: 24 accs x ~770 MB at NA; the relation
+tail's per-worker fold accumulators and their reduce-queue copies)
+ratcheted that scratch capacity to ~20 GB of anon, evicting the page
+cache and turning the tail's way_index mmap reads into the 1.93M major
+faults. Bisect (NA phase12 peak anon): `e34cc7b` 5.4 GB good, `d20ddd5`
+5.1 GB good, `659a187` OOM at 24.8 GB, `e2284ec` 21.0 GB - the port
+introduced it, the de-churn fixed only germany's manifestation. The
+three-way allocator A/B at HEAD, run before the bisect, refuted the
+retention-in-mimalloc theory (sys-alloc: same 21.3 GB phase12 RSS, 3.8M
+majflt, wall 413s vs 314s) and produced a germany data point for the
+rip-out decision (sys-alloc and jemalloc both ~60s wall vs mimalloc 68s,
+phase12 34-35s vs 42.7s).
 
-Only the consequence differs. NA's 44.4 GB of commitment against 23.3 GB
-resident on a 30 GB host produces 1.93M major faults and +58s of phase12
-wall; germany's 16.2 GB fits, so germany's RSS reads 6.58 GB - BETTER than
-its own 8.8 GB baseline - while carrying the identical defect. **Do not
-read peak RSS on germany and conclude the pipeline is healthy.** At NA the
-commitment is also frozen byte-identical from PHASE12_END to run end:
-mimalloc takes 44.4 GB during phase12 and returns none of it.
+The fix: way accs die with their block task, the relation tail drops its
+geometry-scaled scratches per relation and finalizes fold accumulators
+before they queue for reduce. Post-fix dirty-run readings (stored bench
+rows follow the commit): NA wall 288s, phase12 170.3s / 5.64 GB peak
+anon / 11.9K majflt, mi_commit_phase12_end 18.7 GB (from 44.6); germany
+wall 63.5s, phase12 39.1s / 4.2 GB anon; denmark 10.0s. Output
+byte-identical vs a clean-HEAD worktree build (regress
+--file/--against: 1,296,999 tiles, raw-equal on every blob pair; the
+blessed `ec5bd11` baseline predates the provenance block and cannot be
+gated against - re-bless pending user decision). Germany
+`mi_commit_phase12_end` stays at 14.2 GB against 4.2 GB anon: mimalloc
+arena commitment under churn, owned by the rip-out decision in
+`notes/planet-30gb-roadmap.md` (H6 allocator addendum).
 
-This voids the planet RAM go/no-go. Full evidence, the allocator A/B that
-tests it at HEAD, and the open leads are in `notes/planet-30gb-roadmap.md`
-under the H3 void notice. Both rows also carry a 12.4s (NA) / 5.15s
-(germany) serial gap between PHASE12_END and OCEAN_START at 0.3-0.5 cores
-that did not exist at 899f436.
+The 12.4s (NA) / 5.15s (germany) serial gap between PHASE12_END and
+OCEAN_START is explained: `b833fc8`'s provenance contract hashes the
+input PBF single-threaded at run end (a full re-read). Real wall, ~5-8%
+of a run, a candidate for overlap with the read - but reporting, not
+pipeline.
 
 Superseded rows (kept for delta reading):
 

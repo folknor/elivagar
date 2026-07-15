@@ -582,23 +582,18 @@ pub(super) fn phase_read_and_process(
                         let way_counter_ref = &*way_counter_clone;
                         let way_members_marked_ref = &*way_members_marked_clone;
                         let way_pins_marked_ref = &*way_pins_marked_clone;
-                        // Pool of accumulators shared across block tasks. Accs
-                        // live for the whole way phase (not one block), so the
-                        // bulk of the record volume drains through the shared
-                        // spill coalescer instead of funneling through the drain
-                        // thread's serial sort_writer pushes - measured on
-                        // germany locations: 12.3 GB of records through one
-                        // thread, 141s of tasks blocked on way_result_send
-                        // behind it. The drain keeps way_index ownership;
-                        // per-block results carry only the way_puts. The flush
-                        // threshold is small because a flush is now a memcpy
-                        // into the coalescer, not a chunk-file write; buffered
-                        // ceiling is one acc per concurrently running task.
+                        // One accumulator per block task. The bulk of the record
+                        // volume drains through the shared spill coalescer instead
+                        // of funneling through the drain thread's serial
+                        // sort_writer pushes - measured on germany locations:
+                        // 12.3 GB of records through one thread, 141s of tasks
+                        // blocked on way_result_send behind it. The drain keeps
+                        // way_index ownership; per-block results carry the
+                        // way_puts and the tally. The flush threshold is small
+                        // because a flush is a memcpy into the coalescer, not a
+                        // chunk-file write.
                         const WAY_ACC_FLUSH_BYTES: usize = 8 * 1024 * 1024;
                         let acc_flush_bytes = way_chunk_size.min(WAY_ACC_FLUSH_BYTES);
-                        let acc_pool: std::sync::Mutex<Vec<WayAcc>> =
-                            std::sync::Mutex::new(Vec::new());
-                        let acc_pool_ref = &acc_pool;
                         rayon::in_place_scope(|s| {
                             while let Ok(way_block) = brx.recv() {
                                 // Plan build happens inside the spawned task, not
@@ -673,11 +668,7 @@ pub(super) fn phase_read_and_process(
                                             Ordering::Relaxed,
                                         );
                                     }
-                                    let mut acc = acc_pool_ref
-                                        .lock()
-                                        .expect("way acc pool lock")
-                                        .pop()
-                                        .unwrap_or_else(WayAcc::new);
+                                    let mut acc = WayAcc::new();
                                     let mut plans = plans.into_iter();
                                     for element in way_block.block.elements() {
                                         let Element::Way(way) = element else {
@@ -701,25 +692,27 @@ pub(super) fn phase_read_and_process(
                                             acc.flush(spill_ref);
                                         }
                                     }
-                                    // Only the way_index puts go to the drain per
-                                    // block; records stay in the pooled acc.
-                                    let way_puts = std::mem::take(&mut acc.way_puts);
+                                    // The acc dies with the task: residual records
+                                    // flush to the shared coalescer, way_index puts
+                                    // and the tally ship through the drain. Accs
+                                    // deliberately do NOT outlive their task - a
+                                    // phase-lifetime acc pool ratcheted each acc's
+                                    // scratch capacity (sink burst, pyramid, overlay
+                                    // engine buffers) to the worst feature it ever
+                                    // saw: 24 accs x ~770 MB = 18.5 GB of phase12
+                                    // anon at NA scale, page-cache eviction, and a
+                                    // 2M major-fault storm in the relation tail.
+                                    // Scratch reuse across the ~4000 ways WITHIN a
+                                    // block is where the de-churn win lives; reuse
+                                    // across blocks bought nothing measurable.
+                                    acc.flush(spill_ref);
                                     ds_ref.check_budgets(&srl);
-                                    acc_pool_ref
-                                        .lock()
-                                        .expect("way acc pool lock")
-                                        .push(acc);
-                                    if !way_puts.is_empty() {
+                                    {
                                         // Blocked here means the drain thread is the
                                         // choke - tasks queue behind its result channel
                                         // while holding a rayon thread.
                                         let _wait = wait_span(&WAIT.way_result_send);
-                                        let _ = tx.send(WayTaskResult {
-                                            count: 0,
-                                            sink: RecordSink::new(),
-                                            fanout: FanoutStats::new(),
-                                            way_puts,
-                                        });
+                                        let _ = tx.send(acc.finish());
                                     }
                                     let mut guard = inflight_ref.lock().expect("inflight lock");
                                     guard.0 -= 1;
@@ -728,15 +721,6 @@ pub(super) fn phase_read_and_process(
                                 });
                             }
                         });
-                        // Scope waited for all tasks; the pooled accs hold each
-                        // worker's residual records (below the flush threshold).
-                        // Ship them to the drain through the same result path so
-                        // they merge into sort_writer's normal buffering instead
-                        // of becoming tiny chunk files.
-                        for acc in acc_pool.into_inner().expect("way acc pool lock") {
-                            let result = acc.finish();
-                            rtx.send(result).expect("drain thread hung up early");
-                        }
                         // rtx drops here → drain's rrx.recv() returns Err →
                         // drain exits.
                     }));
