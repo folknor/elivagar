@@ -5,8 +5,8 @@ elivagar accepts; `AGENTS.md` summarises the commands a session reaches for
 most, and defers here for the full set.
 
 Note that most work in this repo does not invoke `elivagar` directly - `brokkr`
-wraps the measured paths (`brokkr tilegen`, `brokkr regress`, `brokkr bless`,
-`brokkr pmtiles-inspect`) and records provenance that a raw invocation does
+wraps the measured paths (`brokkr tilegen`, `brokkr pmtiles-inspect`) and
+records provenance that a raw invocation does
 not. Reach for the raw binary when there is no wrapper for what you need.
 
 ## The rule that shapes this surface
@@ -177,9 +177,10 @@ the key a `run` recomputes are derived from the same statement. An artifact is
 valid only for a run naming the same shapefiles at the same compression level
 over z0-14.
 
-Rotating the artifact is an output-changing event. The blessed regress baseline
-must be rebuilt and re-blessed with it, and the gate machine must carry the
-same artifact the baseline was built with.
+Rotating the artifact is an output-changing event. The corpus contract records
+the artifact key, so the next `corpus check` refuses with the key mismatch named
+until the corpus is re-blessed (`corpus bless --rotate`) from a build carrying
+the new artifact - and that rotation commit is the review.
 
 `OCEAN_POLICY_VERSION` (`src/ocean.rs`) is the code half of the artifact key:
 the shapefile hashes catch input rotations, the version stands in for "the
@@ -230,9 +231,10 @@ They explain a diff once the contract matches and must never be
 equality-gated - given identical input and config they are a function of the
 code, and a regression gate exists to compare revisions.
 
-**Reporting is not enforcement.** `brokkr regress` does not read the block, so
-these lines let a human refuse a comparison; they do not refuse it. See the
-consumer-contract gap in `reference/metadata.md`.
+For the standing gate, `corpus check` enforces the contract before reading
+content. `elivagar regress` does not read the block, so for an ad-hoc comparison
+these lines let a human refuse; they do not refuse it. See
+`reference/metadata.md`.
 
 `Ocean` answers "was this artifact-active or computed", which before this
 existed could only be recovered by dumping the raw metadata - and on
@@ -288,14 +290,14 @@ tile-level errors.
 tessellation fault that decodes cleanly. That is what the earcut oracle
 (`scripts/validate/earcut-oracle.mjs`) is for.
 
-## `elivagar regress <CURRENT> --against <BLESSED>`
+## `elivagar regress <CURRENT> --against <BASELINE>`
 
 Semantic diff of two PMTiles archives (MVT + gzip only).
 
 | flag | default | meaning |
 |---|---|---|
 | `<CURRENT>` | | archive to compare (positional) |
-| `--against <PATH>` | | blessed archive to compare against (required) |
+| `--against <PATH>` | | baseline archive to compare against (required) |
 | `--tol <N>` | 0 | geometry tolerance in layer extent units |
 | `--max-moved <N>` | 0 | tolerance-moved features allowed before failure |
 | `--max-examples <N>` | 20 | per-class example cap |
@@ -303,13 +305,12 @@ Semantic diff of two PMTiles archives (MVT + gzip only).
 | `--overlay-max <N>` | 64 | cap on overlay SVGs emitted (first N differing tiles) |
 | `--json` | | machine-readable output |
 
-**Invoke this as `brokkr regress`, not directly.** brokkr resolves the current
-output and the blessed archive from `brokkr.toml` itself, which is what keeps a
-comparison from being made across incomparable archives. Two rules the wrapper
-enforces that the raw binary cannot: a blessed archive is always
-locations-generated, and comparing a locations baseline against a raw build
-reports a six-figure structural diff for two correct builds - that exact false
-alarm was investigated at length on 2026-07-09 and again on 2026-07-14.
+This is an explicit two-archive diff and tier-3 attribution engine.
+Comparability is the caller's responsibility, established from provenance; a
+natural comparand source is `data/tilegen/<dataset>-<commit>.pmtiles`.
+Comparing a locations archive against a raw build reports a six-figure
+structural diff for two correct builds, as the 2026-07-09 and 2026-07-14 false
+alarms showed.
 
 Exit 0 only if nothing structural.
 
@@ -367,8 +368,11 @@ The authoritative ocean gates are the earcut oracle and the human visual check.
 
 ## `elivagar corpus check|bless <ARCHIVE> --corpus <DIR>`
 
-The advisory corpus digest checks the semantic MVT content of every addressed
-tile in an explicit archive. It is not a replacement for `brokkr regress` yet.
+**The standing output gate.** The corpus digest checks the semantic MVT content
+of every addressed tile in an explicit archive against the committed baseline.
+Calibrated both directions 2026-07-15 (`reference/performance.md`); it replaced
+the pmtiles bless machinery (`brokkr bless`/`brokkr regress` and the
+blessed-archive registry) when the standing gate rotated.
 
 `check` compares an archive to the committed `digest` and `contract.json` in
 the supplied directory. It exits 0 on a match, 1 for a content mismatch, and 2

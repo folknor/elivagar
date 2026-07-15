@@ -15,7 +15,7 @@ Generate tiles at request time on cache miss, cache aggressively, and
 pregenerate only the slice of the pyramid where batch amortization
 actually wins. The full-build record track (the roadmap) is unchanged by
 this: it remains the cold-start story, the disaster-recovery story, and
-the blessed baseline that the serve path is verified against.
+the committed corpus baseline that the serve path is verified against.
 
 This is a return to form, not an invention: render-on-demand plus cache
 was the OSM raster architecture for a decade (mod_tile/renderd). Batch
@@ -126,9 +126,10 @@ These cost little today and are expensive to retrofit:
 - The per-tile-range offset index inside partitions doubles as a batch
   win (finer assemble scheduling, roadmap H8) - when either track builds
   it, build it once for both.
-- A serve-path variant of the correctness gate: on-demand output for a
-  tile must match the batch output (`brokkr regress` against a blessed
-  full-build archive is the natural instrument).
+- A serve-path variant of the correctness gate: on-demand output for a tile
+  must match batch output (`elivagar corpus check` for exhaustive semantic
+  equality against the committed baseline, or `elivagar regress --against
+  <batch archive>` for attribution).
 - Record-store format changes should start carrying a version marker the
   moment anything outside one run reads it.
 

@@ -647,3 +647,11 @@ The spec-B gate readings, run by the orchestrator after the landing:
   preserved stale-artifact archive (`denmark-bc71cf1.pmtiles`,
   contract-free path) vs the committed clean corpus tile - 33,375 vs
   39,583 bytes, differing exactly where the 2026-07-15 ocean spike lives.
+
+## Standing gate rotation (2026-07-15, spec C teardown)
+
+`brokkr bless`/`brokkr regress` and `datasets.denmark.blessed` were removed.
+`elivagar corpus check` is now the standing output gate, following the digest
+gate calibration at `a8c4f84` and render-core calibration at `41a953a`; its
+denmark cost is about 2.2 s. The committed corpus baseline supersedes the
+07-15 re-bless-pending-user-decision thread.

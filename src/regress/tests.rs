@@ -199,12 +199,12 @@ fn crossing_residual_cost(ci: usize, bi: usize) -> i32 {
 
 fn crossing_residual_pairs() -> Vec<(usize, usize)> {
     let current: Vec<_> = (0..9).map(ResidualMatchPoint).collect();
-    let blessed: Vec<_> = (0..9).map(ResidualMatchPoint).collect();
+    let baseline: Vec<_> = (0..9).map(ResidualMatchPoint).collect();
     let mut cur_used = vec![false; current.len()];
-    let mut bl_used = vec![false; blessed.len()];
+    let mut bl_used = vec![false; baseline.len()];
     remaining_pairs(
         &current,
-        &blessed,
+        &baseline,
         &mut cur_used,
         &mut bl_used,
         |_| (),
@@ -294,9 +294,9 @@ fn brute_force_best(costs: &[Vec<Option<i32>>]) -> (usize, i64) {
 fn sparse_pairs_for(costs: &[Vec<Option<i32>>]) -> Vec<(usize, usize)> {
     let width = costs.first().map_or(0, Vec::len);
     let current: Vec<_> = (0..costs.len()).map(ResidualMatchPoint).collect();
-    let blessed: Vec<_> = (0..width).map(ResidualMatchPoint).collect();
+    let baseline: Vec<_> = (0..width).map(ResidualMatchPoint).collect();
     let mut cur_used = vec![false; current.len()];
-    let mut bl_used = vec![false; blessed.len()];
+    let mut bl_used = vec![false; baseline.len()];
     let mut candidates = Vec::new();
     for (ci, row) in costs.iter().enumerate() {
         for (bi, slot) in row.iter().enumerate() {
@@ -307,7 +307,7 @@ fn sparse_pairs_for(costs: &[Vec<Option<i32>>]) -> Vec<(usize, usize)> {
     }
     sparse_min_cost_pairs(
         &current,
-        &blessed,
+        &baseline,
         &mut cur_used,
         &mut bl_used,
         &candidates,
@@ -367,29 +367,29 @@ fn residual_matcher_exhausts_same_key_pairs_before_force_zip() {
             list.push(StarvedPoint { key, cluster });
         }
     }
-    // Each key holds a 9-current/8-blessed cluster and an 8-current/9-blessed
+    // Each key holds a 9-current/8-baseline cluster and an 8-current/9-baseline
     // cluster: the K=8 candidate graph cannot bridge the clusters, so
-    // min-cost matching strands one current and one blessed per key. Blessed
+    // min-cost matching strands one current and one baseline per key. Baseline
     // key order is reversed so a key-blind force-zip would pair the
     // leftovers across keys; the same-key completion sweep must not.
     let mut current = Vec::new();
-    let mut blessed = Vec::new();
+    let mut baseline = Vec::new();
     push(&mut current, 0, 1, 9);
     push(&mut current, 0, 2, 8);
     push(&mut current, 1, 1, 9);
     push(&mut current, 1, 2, 8);
-    push(&mut blessed, 1, 1, 8);
-    push(&mut blessed, 1, 2, 9);
-    push(&mut blessed, 0, 1, 8);
-    push(&mut blessed, 0, 2, 9);
+    push(&mut baseline, 1, 1, 8);
+    push(&mut baseline, 1, 2, 9);
+    push(&mut baseline, 0, 1, 8);
+    push(&mut baseline, 0, 2, 9);
     let mut cur_used = vec![false; current.len()];
-    let mut bl_used = vec![false; blessed.len()];
+    let mut bl_used = vec![false; baseline.len()];
     let cluster_cost = |l: &StarvedPoint, r: &StarvedPoint| -> u16 {
         if l.cluster == r.cluster { 1 } else { 1000 }
     };
     let paired = remaining_pairs(
         &current,
-        &blessed,
+        &baseline,
         &mut cur_used,
         &mut bl_used,
         |point| point.key,
@@ -400,7 +400,7 @@ fn residual_matcher_exhausts_same_key_pairs_before_force_zip() {
     assert_eq!(paired.len(), 34);
     for (ci, bi) in paired {
         assert_eq!(
-            current[ci].key, blessed[bi].key,
+            current[ci].key, baseline[bi].key,
             "pair {ci} {bi} crosses keys"
         );
     }
@@ -847,27 +847,27 @@ fn repeated_feature_tile(paths: &[&[(i32, i32)]]) -> Vec<u8> {
 fn identical_archive_report_passes() {
     let dir = TestDir::new("identical");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     let tile = line_tile(Some(1), "a", &[(0, 0), (10, 10)]);
     write_archive(&current, vec![(0, 0, 0, tile.clone())]);
-    write_archive(&blessed, vec![(0, 0, 0, tile)]);
+    write_archive(&baseline, vec![(0, 0, 0, tile)]);
     let cfg = RegressConfig::default();
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     assert!(report.passed(&cfg));
     assert_eq!(report.identical_tiles, 1);
 }
 
 #[test]
-fn one_tile_removed_reports_only_in_blessed() {
+fn one_tile_removed_reports_only_in_baseline() {
     let dir = TestDir::new("removed");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     let tile = line_tile(Some(1), "a", &[(0, 0), (10, 10)]);
     write_archive(&current, vec![(1, 0, 0, tile.clone())]);
-    write_archive(&blessed, vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile)]);
+    write_archive(&baseline, vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile)]);
     let cfg = RegressConfig::default();
-    let report = regress(&current, &blessed, &cfg).expect("regress");
-    assert_eq!(report.totals.only_in_blessed, 1);
+    let report = regress(&current, &baseline, &cfg).expect("regress");
+    assert_eq!(report.totals.only_in_baseline, 1);
     assert!(!report.passed(&cfg));
 }
 
@@ -875,13 +875,13 @@ fn one_tile_removed_reports_only_in_blessed() {
 fn moved_vertex_respects_tolerance() {
     let dir = TestDir::new("tolerance");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     write_archive(
         &current,
         vec![(0, 0, 0, line_tile(Some(1), "a", &[(0, 0), (13, 10)]))],
     );
     write_archive(
-        &blessed,
+        &baseline,
         vec![(0, 0, 0, line_tile(Some(1), "a", &[(0, 0), (10, 10)]))],
     );
 
@@ -890,7 +890,7 @@ fn moved_vertex_respects_tolerance() {
         max_moved: 1,
         max_examples: 20,
     };
-    let report = regress(&current, &blessed, &cfg).expect("regress tol 4");
+    let report = regress(&current, &baseline, &cfg).expect("regress tol 4");
     assert_eq!(report.totals.tolerance_moved, 1);
     assert!(report.passed(&cfg));
 
@@ -899,7 +899,7 @@ fn moved_vertex_respects_tolerance() {
         max_moved: 1,
         max_examples: 20,
     };
-    let report = regress(&current, &blessed, &cfg).expect("regress tol 2");
+    let report = regress(&current, &baseline, &cfg).expect("regress tol 2");
     assert_eq!(report.totals.structural_moved, 1);
     assert!(!report.passed(&cfg));
 }
@@ -908,17 +908,17 @@ fn moved_vertex_respects_tolerance() {
 fn attr_change_reports_attr_changed() {
     let dir = TestDir::new("attr");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     write_archive(
         &current,
         vec![(0, 0, 0, line_tile(Some(1), "b", &[(0, 0), (10, 10)]))],
     );
     write_archive(
-        &blessed,
+        &baseline,
         vec![(0, 0, 0, line_tile(Some(1), "a", &[(0, 0), (10, 10)]))],
     );
     let cfg = RegressConfig::default();
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     assert_eq!(report.totals.attr_changed, 1);
 }
 
@@ -926,11 +926,11 @@ fn attr_change_reports_attr_changed() {
 fn layer_present_empty_on_one_side_reports_removed() {
     let dir = TestDir::new("empty-layer");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     write_archive(&current, vec![(0, 0, 0, Vec::new())]);
-    write_archive(&blessed, vec![(0, 0, 0, empty_layer_tile("empty", 4096))]);
+    write_archive(&baseline, vec![(0, 0, 0, empty_layer_tile("empty", 4096))]);
     let cfg = RegressConfig::default();
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     assert_eq!(report.totals.layers_removed, 1);
 }
 
@@ -938,11 +938,11 @@ fn layer_present_empty_on_one_side_reports_removed() {
 fn extent_mismatch_skips_geometry() {
     let dir = TestDir::new("extent");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     write_archive(&current, vec![(0, 0, 0, empty_layer_tile("roads", 8192))]);
-    write_archive(&blessed, vec![(0, 0, 0, empty_layer_tile("roads", 4096))]);
+    write_archive(&baseline, vec![(0, 0, 0, empty_layer_tile("roads", 4096))]);
     let cfg = RegressConfig::default();
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     assert_eq!(report.totals.extent_mismatch, 1);
     assert_eq!(report.totals.structural_moved, 0);
 }
@@ -951,7 +951,7 @@ fn extent_mismatch_skips_geometry() {
 fn polygon_hole_reassigned_at_zero_distance_is_structural() {
     let dir = TestDir::new("hole");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     let outer_a = &[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)][..];
     let hole_a = &[(20, 20), (20, 40), (40, 40), (40, 20), (20, 20)][..];
     let outer_b = &[(200, 200), (300, 200), (300, 300), (200, 300), (200, 200)][..];
@@ -960,7 +960,7 @@ fn polygon_hole_reassigned_at_zero_distance_is_structural() {
         vec![(0, 0, 0, polygon_tile(&[outer_a, outer_b, hole_a]))],
     );
     write_archive(
-        &blessed,
+        &baseline,
         vec![(0, 0, 0, polygon_tile(&[outer_a, hole_a, outer_b]))],
     );
     let cfg = RegressConfig {
@@ -968,7 +968,7 @@ fn polygon_hole_reassigned_at_zero_distance_is_structural() {
         max_moved: 10,
         max_examples: 20,
     };
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     assert_eq!(report.totals.structural_moved, 1);
     assert_eq!(report.totals.tolerance_moved, 0);
 }
@@ -983,7 +983,7 @@ fn polygon_hole_escaping_its_outer_is_structural_not_tolerance() {
     // containment branch was skipped.
     let dir = TestDir::new("hole-containment");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     let outer = &[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)][..];
     let hole_inside = &[(99, 50), (89, 50), (89, 60), (99, 60), (99, 50)][..];
     let hole_escaped = &[(101, 50), (91, 50), (91, 60), (101, 60), (101, 50)][..];
@@ -992,7 +992,7 @@ fn polygon_hole_escaping_its_outer_is_structural_not_tolerance() {
         vec![(0, 0, 0, polygon_tile(&[outer, hole_inside]))],
     );
     write_archive(
-        &blessed,
+        &baseline,
         vec![(0, 0, 0, polygon_tile(&[outer, hole_escaped]))],
     );
     let cfg = RegressConfig {
@@ -1000,7 +1000,7 @@ fn polygon_hole_escaping_its_outer_is_structural_not_tolerance() {
         max_moved: 10,
         max_examples: 20,
     };
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     assert_eq!(report.totals.structural_moved, 1);
     assert_eq!(report.totals.tolerance_moved, 0);
 }
@@ -1009,20 +1009,20 @@ fn polygon_hole_escaping_its_outer_is_structural_not_tolerance() {
 fn run_length_directory_preserves_each_addressed_tile() {
     let dir = TestDir::new("run-length");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     let tile = line_tile(Some(1), "a", &[(0, 0), (10, 10)]);
     write_archive(
         &current,
         vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile.clone())],
     );
-    write_archive(&blessed, vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile)]);
+    write_archive(&baseline, vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile)]);
     let mut reader = PmtilesReader::open(&current).expect("open current");
     let runs = reader.read_all_runs().expect("read runs");
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].run_length, 2);
 
     let cfg = RegressConfig::default();
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     assert_eq!(report.identical_tiles, 2);
 }
 
@@ -1030,15 +1030,15 @@ fn run_length_directory_preserves_each_addressed_tile() {
 fn deduplicated_run_collapses_to_one_raw_pair() {
     let dir = TestDir::new("dedup");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     let tile = line_tile(Some(1), "a", &[(0, 0), (10, 10)]);
     write_archive(
         &current,
         vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile.clone())],
     );
-    write_archive(&blessed, vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile)]);
+    write_archive(&baseline, vec![(1, 0, 0, tile.clone()), (1, 0, 1, tile)]);
     let cfg = RegressConfig::default();
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     assert_eq!(report.counters.unique_blob_pairs, 1);
     assert_eq!(report.counters.raw_equal_pairs, 1);
     assert_eq!(report.counters.raw_equal_tiles, 2);
@@ -1049,12 +1049,12 @@ fn deduplicated_run_collapses_to_one_raw_pair() {
 fn detailed_pair_multiplicity_is_reported_per_addressed_tile() {
     let dir = TestDir::new("detailed-pair-multiplicity");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     let moved = line_tile(Some(1), "a", &[(0, 0), (13, 10)]);
     let original = line_tile(Some(1), "a", &[(0, 0), (10, 10)]);
     write_archive(&current, vec![(1, 0, 0, moved.clone()), (1, 0, 1, moved)]);
     write_archive(
-        &blessed,
+        &baseline,
         vec![(1, 0, 0, original.clone()), (1, 0, 1, original)],
     );
     let cfg = RegressConfig {
@@ -1062,7 +1062,7 @@ fn detailed_pair_multiplicity_is_reported_per_addressed_tile() {
         max_moved: 2,
         max_examples: 20,
     };
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     assert_eq!(report.counters.unique_blob_pairs, 1);
     assert_eq!(report.counters.detailed_pairs, 1);
     assert_eq!(report.counters.detailed_tiles, 2);
@@ -1073,7 +1073,7 @@ fn detailed_pair_multiplicity_is_reported_per_addressed_tile() {
 fn canonical_edge_cases_have_expected_live_engine_outcomes() {
     let dir = TestDir::new("differential-edge-cases");
     let current = dir.path.join("current.pmtiles");
-    let blessed = dir.path.join("blessed.pmtiles");
+    let baseline = dir.path.join("baseline.pmtiles");
     let p1 = &[(0, 0), (10, 10)][..];
     let p2 = &[(20, 20), (30, 30)][..];
     let outer_a = &[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)][..];
@@ -1097,7 +1097,7 @@ fn canonical_edge_cases_have_expected_live_engine_outcomes() {
         ],
     );
     write_archive(
-        &blessed,
+        &baseline,
         vec![
             (2, 0, 0, multiline_tile(&[p2, p1])),
             (
@@ -1116,7 +1116,7 @@ fn canonical_edge_cases_have_expected_live_engine_outcomes() {
         max_moved: 10,
         max_examples: 20,
     };
-    let report = regress(&current, &blessed, &cfg).expect("regress");
+    let report = regress(&current, &baseline, &cfg).expect("regress");
     // Identical: the permuted multiline and the permuted duplicate-id tile.
     // attr_changed: the bit-distinct NaN floats. tolerance_moved: the ocean
     // polygon shifted 2px under tol 3. structural_moved: moving hole_a after

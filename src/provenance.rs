@@ -19,8 +19,8 @@
 //! Reproducibility constraint: nothing in this block may vary between two
 //! builds of the same commit on the same input. No wall-clock, no hostname,
 //! no absolute paths, no thread counts, no timings, no measured durations.
-//! Same-commit builds are byte-identical and blessing records a hash over the
-//! whole archive; a per-run value here would break both.
+//! Same-commit builds are byte-identical and the corpus digest is recomputed
+//! from archive content; a per-run value here would break both.
 //!
 //! The `ocean_artifact` member stays a separate top-level key rather than
 //! moving under `elivagar`: `ocean::OceanArtifactKey::from_json` reads it at
@@ -41,7 +41,7 @@ use std::path::Path;
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// The archive contract consumed by the corpus gate. Build provenance is kept
-/// for diagnosis and bless reproducibility checks, never comparison gating.
+/// for diagnosis and corpus-rotation review, never comparison gating.
 #[derive(Debug, Clone)]
 pub struct ContractDoc {
     pub input: Value,

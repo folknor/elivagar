@@ -12,12 +12,12 @@ fn feature_id(f: Option<&DetailFeature>) -> String {
 fn attr_diff_lines(
     layer: &str,
     current: Option<&DetailFeature>,
-    blessed: Option<&DetailFeature>,
+    baseline: Option<&DetailFeature>,
 ) -> Vec<String> {
-    let id = feature_id(current.or(blessed));
+    let id = feature_id(current.or(baseline));
     let empty: &[(Arc<str>, DetailAttr)] = &[];
     let cur = current.map_or(empty, |f| &f.attrs);
-    let bl = blessed.map_or(empty, |f| &f.attrs);
+    let bl = baseline.map_or(empty, |f| &f.attrs);
     let mut lines = Vec::new();
     for (key, value) in cur {
         match bl.iter().find(|(bk, _)| bk == key) {
@@ -40,7 +40,7 @@ struct Event {
     class: OutcomeClass,
     displacement: i32,
     current: Option<DetailFeature>,
-    blessed: Option<DetailFeature>,
+    baseline: Option<DetailFeature>,
 }
 #[derive(Default)]
 pub struct OverlayCollector {
@@ -53,36 +53,36 @@ impl DiffSink for OverlayCollector {
         class: OutcomeClass,
         displacement: i32,
         current: Option<&DetailFeature>,
-        blessed: Option<&DetailFeature>,
+        baseline: Option<&DetailFeature>,
     ) {
         self.events.push(Event {
             layer: Arc::clone(layer),
             class,
             displacement,
             current: current.cloned(),
-            blessed: blessed.cloned(),
+            baseline: baseline.cloned(),
         });
     }
-    fn matched(&mut self, layer: &Arc<str>, current: &DetailFeature, blessed: &DetailFeature) {
+    fn matched(&mut self, layer: &Arc<str>, current: &DetailFeature, baseline: &DetailFeature) {
         self.record(
             layer,
             OutcomeClass::ToleranceMoved,
             0,
             Some(current),
-            Some(blessed),
+            Some(baseline),
         );
     }
     fn layer_event(
         &mut self,
         class: OutcomeClass,
         current: Option<&DetailLayer>,
-        blessed: Option<&DetailLayer>,
+        baseline: Option<&DetailLayer>,
     ) {
-        let layer = current.or(blessed).expect("layer event");
+        let layer = current.or(baseline).expect("layer event");
         for f in current.map_or(&[][..], |l| &l.features) {
             self.record(&layer.name, class, 0, Some(f), None);
         }
-        for f in blessed.map_or(&[][..], |l| &l.features) {
+        for f in baseline.map_or(&[][..], |l| &l.features) {
             self.record(&layer.name, class, 0, None, Some(f));
         }
     }
@@ -108,7 +108,7 @@ pub fn render_overlay(collector: &OverlayCollector, background: &str) -> Vec<u8>
         let changed = e
             .current
             .as_ref()
-            .zip(e.blessed.as_ref())
+            .zip(e.baseline.as_ref())
             .is_some_and(|(a, b)| a.geometry_digest != b.geometry_digest);
         match e.class {
             OutcomeClass::AddedFeatures | OutcomeClass::LayerAdded => {
@@ -117,7 +117,7 @@ pub fn render_overlay(collector: &OverlayCollector, background: &str) -> Vec<u8>
                 }
             }
             OutcomeClass::MissingFeatures | OutcomeClass::LayerRemoved => {
-                if let Some(f) = &e.blessed {
+                if let Some(f) = &e.baseline {
                     draw(&mut out, f, "#2196f3", e.class.name(), "0.7");
                 }
             }
@@ -131,13 +131,13 @@ pub fn render_overlay(collector: &OverlayCollector, background: &str) -> Vec<u8>
                         "0.7",
                     );
                 };
-                if changed && let Some(f) = &e.blessed {
+                if changed && let Some(f) = &e.baseline {
                     draw(&mut out, f, "#2196f3", e.class.name(), "0.7");
                 };
                 attrs.extend(attr_diff_lines(
                     &e.layer,
                     e.current.as_ref(),
-                    e.blessed.as_ref(),
+                    e.baseline.as_ref(),
                 ));
             }
             OutcomeClass::ToleranceMoved | OutcomeClass::StructuralMoved => {
@@ -149,7 +149,7 @@ pub fn render_overlay(collector: &OverlayCollector, background: &str) -> Vec<u8>
                     if let Some(f) = &e.current {
                         draw(&mut out, f, "#e91e63", e.class.name(), "0.7");
                     };
-                    if let Some(f) = &e.blessed {
+                    if let Some(f) = &e.baseline {
                         draw(&mut out, f, "#2196f3", e.class.name(), "0.7");
                     }
                 }

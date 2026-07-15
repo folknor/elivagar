@@ -50,14 +50,13 @@ brokkr tilemaker [--bench [N]] [--dataset D] [--variant V]
 
 # Verification
 brokkr verify pmtiles [--dataset D] [--tiles VARIANT] [--geometry-stats]
-brokkr regress [--dataset D]   # current output vs the blessed archive from
-                               # brokkr.toml (datasets.<D>.blessed); no args
-                               # = denmark. THE standing gate: denmark bench
-                               # + brokkr regress after any pipeline change.
-brokkr bless [--dataset D] [--commit H | --file P]  # promote an output to
-                               # the blessed regress reference (copies into
-                               # data/blessed/, updates brokkr.toml). Only on
-                               # user say-so - blessing rotates the baseline.
+# THE standing output gate: fresh denmark locations build + corpus digest
+# check against the committed corpus/denmark/ baseline:
+#   brokkr tilegen --dataset denmark --variant locations
+#   elivagar corpus check data/tilegen/denmark-<commit>.pmtiles \
+#       --corpus corpus/denmark
+# Raw-binary spelling until the brokkr corpus wrapper lands; brokkr bless /
+# brokkr regress are removed from the workflow (see the corpus sections below).
 
 # Archive inspection (wrap the elivagar subcommands; named pmtiles-inspect
 # because brokkr inspect is pbfhogg's PBF inspector)
@@ -340,9 +339,11 @@ Sequential, same PBF input:
   level, and naming it for any other run is an error, not a silent
   fallback to computed ocean. Artifact-served tiles differ benignly from
   extract-computed ones (descent seams depend on the piece clip extent;
-  adjudicated equivalent in the viewer 2026-07-12) - so the blessed
-  regress baseline is artifact-active, the gate machine must pass the
-  same artifact, and rotating the artifact forces a bless rotation.
+  adjudicated equivalent in the viewer 2026-07-12) - so the committed corpus
+  baseline is artifact-active (its contract records the artifact key), the gate
+  machine must pass the same artifact, and rotating the artifact forces a corpus
+  rotation: `corpus check` refuses on the key until the baseline is re-blessed
+  with `--rotate`.
 - **sort**: partition bookkeeping only (near-zero; the merge is deferred)
 - **assemble**: streamed per-partition merge → MVT encode + gzip + PMTiles write (parallel partition readers; merge/decompress cost lands in `assemble_reader_ns`)
 
@@ -400,8 +401,11 @@ a partial contract would let two archives differing in a fanout cap or the
 simplify factor display identically. `Build`, `Effective` and `Resumed` are
 diagnostic and must never be equality-gated.
 
-Reporting is not enforcement: `brokkr regress` still does not read the block,
-so these lines let you refuse a comparison, they do not refuse it.
+For the standing gate, reporting became enforcement: `corpus check` compares
+the committed contract against this block before reading content and refuses a
+mismatch with the field named. `elivagar regress` reads nothing here by design -
+it diffs whatever two archives it is handed - so for ad-hoc comparisons these
+lines let you refuse; nothing refuses for you.
 
 Every way of having no contract names itself - `absent`, `unavailable`,
 `invalid`, an uninterpretable schema, an `INCOMPLETE` contract - because
@@ -416,15 +420,31 @@ Validates a PMTiles archive end-to-end: container integrity, metadata schema, ti
 
 Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids (`-W`/`-H`, default 1x1). `--layers` filters to specific layers (comma-separated, e.g. `ocean,boundaries`). Decodes MVT geometry and draws each layer with a distinct color. Points render as circles, lines as stroked paths, polygons as filled paths with `nonzero` fill-rule (matching MapLibre and OpenLayers, which both fill nonzero; `evenodd` agrees only for well-formed alternating outers/holes and papers over exactly the ring-role bugs worth catching). Background is land-colored (`#f2efe9`). Grid lines drawn between tiles when width or height > 1. Output goes to stdout by default, or to a file with `-o`.
 
-### regress - invoke as `brokkr regress`, never the raw binary
+### The standing gate: `elivagar corpus check`
 
-A blessed archive is ALWAYS locations-generated - never bless a raw one.
-`tilegen` and `regress` default to `raw`, so pass `--variant locations`
-explicitly; raw vs locations tiles differ legitimately, not as a regression.
+For an output-neutral landing, make a fresh locations build and check it:
+`brokkr tilegen --dataset denmark --variant locations`, then `elivagar corpus
+check data/tilegen/denmark-<commit>.pmtiles --corpus corpus/denmark`. Exit 0 is
+a pass; exit 1 names changed content and tiles; exit 2 is a contract refusal,
+never a verdict. For an intended output change, adjudicate the changed leaves
+and use `elivagar corpus bless <archive> --corpus corpus/denmark --rotate` in
+the landing commit. Bless without `--rotate` refuses replacement. For a
+landing that states an explicit geometry tolerance rather than zero-diff, gate
+on `elivagar regress <new> --against <prev> --tol N --max-moved M` with the
+displacement-percentile verdict stated in that spec (the `--max-moved M` budget
+is mandatory: `passed()` requires `tolerance_moved <= max_moved`, which defaults
+to 0). Routine checks are denmark-only. See `reference/cli.md` for the full
+corpus surface and `reference/performance.md` for calibration. `brokkr bless`
+and `brokkr regress`
+are removed from this workflow; their removal and a `brokkr corpus` wrapper are
+a named brokkr-repository task.
 
-`brokkr regress [--dataset D]` resolves the current output and the blessed
-archive (`datasets.<D>.blessed` in brokkr.toml) itself; no paths, defaults
-to denmark. What it computes: a semantic diff of two PMTiles archives
+### `elivagar regress <CURRENT> --against <BASELINE>` - the two-archive semantic diff
+
+This takes two explicit archive paths, with no registry. It is the attribution
+instrument (`--overlay` renders per-tile diff SVGs), not the standing gate; the
+natural comparand source is `data/tilegen/<dataset>-<commit>.pmtiles`. What it
+computes: a semantic diff of two PMTiles archives
 (MVT + gzip only). Decodes every tile into a canonical form (layers sorted,
 features sorted, merged-feature components sorted - erasing intra-layer
 feature order, the one dimension the pipeline deliberately leaves
@@ -442,6 +462,12 @@ hole-containment changes). Ocean features match geometrically (their ids
 are synthetic). Exit 0 only if nothing structural; the report prints
 per-zoom/layer counters and displacement percentiles. Design and gates
 settled in the spec-5 output-regression landing (see git history).
+
+Comparing a locations archive against a raw build reports a six-figure
+structural diff for two correct builds, as 2026-07-09 and 2026-07-14 showed.
+The corpus gate refuses that comparison mechanically via its contract; regress
+does not, so establish comparability from the provenance blocks (`brokkr
+pmtiles-inspect`) before reading a verdict.
 
 ### `elivagar diag <FILE> -z <Z> -x <X> -y <Y>`
 

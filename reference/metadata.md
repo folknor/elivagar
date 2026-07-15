@@ -55,8 +55,8 @@ same input.
 
 No wall-clock, no hostname, no absolute paths, no thread counts, no timings, no
 measured durations, no environment-order-dependent values. Same-commit builds
-are byte-identical (AGENTS.md) and `brokkr bless` records an xxhash over the
-whole archive; a per-run value here would break both.
+are byte-identical (AGENTS.md) and the corpus digest and contract are
+recomputed from archive content; a per-run value here would break both.
 
 Anything that fails this test does not belong in the archive. It belongs in
 `.brokkr/sidecar.db`, which exists for exactly that class of data.
@@ -266,12 +266,13 @@ assuming comparability.
 
 Recorded here so they are not rediscovered as bugs:
 
-- **No consumer ENFORCES this yet.** `elivagar inspect` reports the block as of
-  2026-07-15 - contract first, and absence stated rather than omitted - so a
-  human can establish comparability before running a diff. But `brokkr regress`
-  still does not read it, so the 2026-07-14 comparison would be reported today
-  exactly as it was. Reporting is not the contract; refusing is. Step 1 of the
-  consumer contract remains open.
+- **Enforcement landed for the standing gate only.** `elivagar corpus check`
+  compares the committed `contract.json` against this block before reading
+  content and refuses with the differing field named, including the calibrated
+  stale-artifact mismatch at `config.ocean.artifact_key.policy_version`.
+  `elivagar regress` still reads nothing here: an ad-hoc two-archive diff can
+  be run across incomparable archives, so establish comparability with
+  `elivagar inspect` first.
 - `input.replication_sequence` is not recorded (the pbfhogg header API for it
   is unconfirmed). `replication_timestamp` is.
 - `config.ocean` records shapefile hashes only via `artifact_key`, so a

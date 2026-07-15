@@ -30,11 +30,15 @@ Specifications are saved to the ./notes folder.
    clipping, or the MVT/PMTiles container (zero errors is the bar);
    targeted tile inspection (`elivagar svg` / `elivagar diag` /
    `brokkr compare-tiles`) for named regression tiles when the change aims
-   at a specific visual defect; `brokkr regress` (resolves current vs
-   blessed itself, defaults denmark) for changes intended to be
-   output-neutral (tol 0, zero diffs) or geometry-changing landings
-   (explicit tolerance gates stated in the spec, verdict read with the
-   displacement percentiles);
+   at a specific visual defect; `elivagar corpus check
+   data/tilegen/denmark-<commit>.pmtiles --corpus corpus/denmark` on a fresh
+   `brokkr tilegen --dataset denmark --variant locations` build for output-
+   neutral changes (exit 0 is digest equality over every tile; exit 2 is a
+   contract refusal, not a verdict); intended output changes adjudicate the
+   named leaves and land with `corpus bless --rotate` in the same commit;
+   explicit-tolerance geometry landings gate on `elivagar regress <current>
+   --against <prior> --tol N --max-moved M`, with the tolerance, move budget,
+   and displacement-percentile criteria stated in the spec;
    the `brokkr tilegen --bench` invocation for
    anything claiming or risking a performance effect (the win, its
    neutrality, or - when a feature knowingly pays for capability with
@@ -50,11 +54,11 @@ Specifications are saved to the ./notes folder.
    underspecified. The variant is not a performance knob - it changes
    the output itself (the ocean clip runs against the data-bounds rect
    derived from the PBF phase, so a raw-variant run legitimately diffs
-   in the ocean layer against a locations-blessed archive), and the
-   blessed regress references and scoreboard rows are locations-variant
-   runs. A regress or bench read across variants is not a verdict; it
-   is the 2026-07-09 false alarm, which burned a session tail proving
-   the code innocent. A gate also uses the smallest dataset that can
+   in the ocean layer against a locations corpus baseline). The corpus
+   baseline is locations-variant and its contract records input identity,
+   so a cross-variant corpus check refuses loudly. A raw `elivagar regress`
+   read across variants remains a false alarm; it is the 2026-07-09 false
+   alarm, which burned a session tail proving the code innocent. A gate also uses the smallest dataset that can
    answer its question: sometimes that is norway (coastal/ocean and
    relation load denmark lacks), usually denmark, rarely germany, and
    almost never NA (NA is an explicit user decision per

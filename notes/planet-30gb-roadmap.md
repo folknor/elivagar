@@ -23,14 +23,15 @@ comparable tools. elivagar is the remaining half of the story.
 
 The only sacred thing is a correct PMTiles artifact. The standing gates
 define correct: `elivagar verify`, the earcut oracle
-(`scripts/validate/earcut-oracle.mjs`), and `brokkr regress` against the
-blessed archive. Nothing in the current pipeline structure is protected.
+(`scripts/validate/earcut-oracle.mjs`), and `elivagar corpus check` against
+the committed `corpus/denmark/` baseline. Nothing in the current pipeline
+structure is protected.
 
 Companion: `notes/virtual-planet-serving.md` - the hypothesis that
 production may never store a full planet archive at all (on-demand
 generation + cache over the record store, elivagar as a library). The
 full-build track in THIS document is unchanged by it: cold start,
-disaster recovery, and the blessed baseline the serve path verifies
+disaster recovery, and the committed corpus baseline the serve path verifies
 against. The two tracks share instruments (H2d/H8's per-tile-range index,
 H3's ledger) and should not diverge on them.
 
@@ -112,12 +113,10 @@ NA ways (1.1B vs 209M), unique tiles 3-4x NA at 60-70M.
    user-gated. H2's pending NA re-enrichment reading should ride the
    same decision.
 2. The H9 step-3 disk audit against the real artifact size.
-3. The blessed-baseline situation: the blessed denmark archive predates
-   the provenance block and current `brokkr regress` refuses to gate
-   against it, so nothing has been regress-gateable against blessed
-   since the provenance landing. A re-bless from a post-provenance
-   build needs a user decision, and a planet run wants the standing
-   gate green before it starts, not after.
+3. RESOLVED by the corpus gate (spec C): the committed `corpus/denmark/`
+   baseline is in git and gateable at any commit. A planet run wants a green
+   `corpus check` at the attempt commit before it starts. Planet-scale corpus
+   blessing uses bucket mode; tier-3 overlays provide attribution.
 
 ## Standing policies and lessons
 
@@ -144,13 +143,14 @@ relation, tile); reuse beyond that must prove its wall win against the
 retention it buys. Gated "mostly reuse" variants were tried and lost to
 the aggregate; the unconditional drop cost zero measurable wall.
 
-**Gate policy** (user call, 2026-07-09): regress runs on DENMARK ONLY
-for routine landings; germany/NA regress only at blessing rotations.
+**Gate policy**: the corpus check runs on DENMARK ONLY for routine landings;
+germany/NA archives get checked only at corpus rotations (their corpora are
+optional and currently absent).
 
-**Bless immediately** after accepting an output-changing landing: the
-blessed entry in brokkr.toml is the only baseline that survives archive
-rotation (the 07-09 rotation ground regress for 15+ minutes against a
-stale baseline because the de-facto one had been rotated away).
+**Rotate the corpus in the landing commit** after an accepted output-changing
+landing: `corpus bless --rotate` rewrites digest, contract, and manifest, and
+the commit diff is the review. The baseline lives in git and survives archive
+rotation by construction.
 
 **Bit-identity gates** use `cmp -s` over complete deterministic
 archives, never `brokkr compare-tiles` (samples 200 tiles/zoom,
@@ -282,9 +282,9 @@ implementation).
 Standing caveats: the artifact is used because it is NAMED, never
 found (see AGENTS.md); artifact output differs benignly from
 extract-computed output (descent seams depend on the piece clip
-extent; human-adjudicated equivalent 2026-07-12), so the blessed
-baseline is artifact-active, the gate machine must carry the same
-artifact, and a shapefile-release rotation forces a bless rotation.
+extent; human-adjudicated equivalent 2026-07-12), so the committed corpus
+baseline is artifact-active, its contract records the artifact key, and a
+shapefile-release rotation forces a corpus rotation.
 
 **INCIDENT 2026-07-15: the artifact served pre-VW geometry for three
 days.** The VW landing (`31b8298`, 07-12 21:58) explicitly deferred
@@ -301,7 +301,7 @@ clean archive (`ec5bd11`) was clean only because the 07-14
 mis-blessing built it artifact-absent. Found by human visual
 inspection (a spike at z5 16 9, another at z5 17 9). Resolution:
 OCEAN_POLICY_VERSION bumped to 2 so a stale artifact now fails loud
-at the key check; artifact rebuilt with VW active; bless rotation to
+at the key check; artifact rebuilt with VW active; corpus rotation to
 follow visual verification. Gate lessons: (a) the needle-detector
 candidate recorded below would NOT have fired on this - the defect is
 a cross-feature coverage gap (the north cell's simplified chord
@@ -385,7 +385,7 @@ kept as don't-redo records (measured detail in
   bit-identical gate), (b) rect-specialized boolean (churn/code-size
   play, only 6,550 calls on denmark), (c) fuse the guarded integer S-H
   fast path with the boolean - CHANGES BITS (nods differ by up to one
-  unit along the cut line), re-bless territory.
+  unit along the cut line), corpus-rotation territory.
 - **E5: caller-provided buffers end to end** - the H6 endgame
   (remaining sinks: add_feature_to_layer ~5 GB assemble-side,
   merge_same_attr_geometries ~3.8 GB); do it after evidence shows
@@ -459,8 +459,7 @@ context, profile differences (OpenMapTiles vs Shortbread) disclosed.
 What gates a planet attempt is the go/no-go list above: the enriched
 planet PBF (user-gated pbfhogg altw run, with H2's NA re-enrichment
 reading riding the same decision), the disk audit against the real
-artifact size, and the re-bless that makes `brokkr regress` gateable
-again.
+artifact size, and a green `corpus check` at the attempt commit.
 
 Optimization work that remains, none of it blocking: H8b recursive
 partition splitting (germany), reader/encode overlap in assemble

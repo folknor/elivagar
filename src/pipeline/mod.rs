@@ -452,10 +452,11 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
 // different seam structure (denmark: 27 structural ocean diffs vs the
 // computed baseline, displacements mostly 10-97 units). Both renderings pass
 // every machine gate and the human viewer gate judged the artifact output
-// equivalent, so extracts DO consume the artifact and the blessed baseline
-// is artifact-active. Consequence: extract output depends on artifact
-// presence - the standing regress gate assumes the gate machine carries the
-// same data/ocean-tiles.pmtiles the blessed archive was built with.
+// equivalent, so extracts DO consume the artifact and the committed corpus
+// baseline (corpus/<dataset>/) is artifact-active: its contract records the
+// artifact key, so a gate run must carry the same data/ocean-tiles.pmtiles the
+// baseline was captured from, and rotating the artifact forces a corpus
+// rotation (corpus check refuses on the key until then).
 
 fn ocean_pass_max_zooms(config: &TilegenConfig) -> Vec<u8> {
     let mut zooms = Vec::with_capacity(2);

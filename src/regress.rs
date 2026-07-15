@@ -50,7 +50,7 @@ pub struct TileRange {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiffTotals {
     pub only_in_current: u64,
-    pub only_in_blessed: u64,
+    pub only_in_baseline: u64,
     pub layers_added: u64,
     pub layers_removed: u64,
     pub extent_mismatch: u64,
@@ -120,7 +120,7 @@ pub struct DiffExample {
 pub struct RegressCounters {
     pub addressed_tiles: u64,
     pub addressed_current: u64,
-    pub addressed_blessed: u64,
+    pub addressed_baseline: u64,
     pub directory_runs: u64,
     pub unique_blobs: u64,
     pub unique_blob_pairs: u64,
@@ -153,7 +153,7 @@ pub struct RegressReport {
 impl RegressReport {
     pub fn passed(&self, cfg: &RegressConfig) -> bool {
         self.totals.only_in_current == 0
-            && self.totals.only_in_blessed == 0
+            && self.totals.only_in_baseline == 0
             && self.totals.layers_added == 0
             && self.totals.layers_removed == 0
             && self.totals.extent_mismatch == 0
@@ -166,11 +166,11 @@ impl RegressReport {
 
     pub fn print_text(&self) {
         println!(
-            "identical_tiles={} diffs={} only_current={} only_blessed={} tolerance_moved={} structural_moved={} attr_changed={}",
+            "identical_tiles={} diffs={} only_current={} only_baseline={} tolerance_moved={} structural_moved={} attr_changed={}",
             self.identical_tiles,
             self.diff_count,
             self.totals.only_in_current,
-            self.totals.only_in_blessed,
+            self.totals.only_in_baseline,
             self.totals.tolerance_moved,
             self.totals.structural_moved,
             self.totals.attr_changed
@@ -287,7 +287,7 @@ impl RegressReport {
             "diffs": self.diff_count,
             "totals": {
                 "only_in_current": self.totals.only_in_current,
-                "only_in_blessed": self.totals.only_in_blessed,
+                "only_in_baseline": self.totals.only_in_baseline,
                 "layers_added": self.totals.layers_added,
                 "layers_removed": self.totals.layers_removed,
                 "extent_mismatch": self.totals.extent_mismatch,
@@ -303,7 +303,7 @@ impl RegressReport {
             "counters": {
                 "addressed_tiles": self.counters.addressed_tiles,
                 "addressed_current": self.counters.addressed_current,
-                "addressed_blessed": self.counters.addressed_blessed,
+                "addressed_baseline": self.counters.addressed_baseline,
                 "directory_runs": self.counters.directory_runs,
                 "unique_blobs": self.counters.unique_blobs,
                 "unique_blob_pairs": self.counters.unique_blob_pairs,
@@ -338,7 +338,7 @@ struct PairSpan {
     start: u64,
     end: u64,
     current: Option<BlobRef>,
-    blessed: Option<BlobRef>,
+    baseline: Option<BlobRef>,
 }
 
 impl PairSpan {
@@ -368,28 +368,28 @@ fn archive_runs(archive: &ArchiveView) -> io::Result<Vec<TileRun>> {
         .collect()
 }
 
-fn merge_runs(current: &[TileRun], blessed: &[TileRun]) -> Vec<PairSpan> {
+fn merge_runs(current: &[TileRun], baseline: &[TileRun]) -> Vec<PairSpan> {
     let mut spans = Vec::new();
     let (mut ci, mut bi) = (0usize, 0usize);
     let (mut cpos, mut bpos) = (0u64, 0u64);
 
-    while ci < current.len() || bi < blessed.len() {
+    while ci < current.len() || bi < baseline.len() {
         let cur = current.get(ci);
-        let bl = blessed.get(bi);
+        let bl = baseline.get(bi);
         let next_current = cur.map_or(u64::MAX, |run| run.start.max(cpos));
-        let next_blessed = bl.map_or(u64::MAX, |run| run.start.max(bpos));
-        let start = next_current.min(next_blessed);
+        let next_baseline = bl.map_or(u64::MAX, |run| run.start.max(bpos));
+        let start = next_current.min(next_baseline);
         let cur_active = cur.filter(|run| cpos.max(run.start) == start);
         let bl_active = bl.filter(|run| bpos.max(run.start) == start);
         let mut end = cur_active.map_or(next_current, |run| run.end);
-        end = end.min(bl_active.map_or(next_blessed, |run| run.end));
+        end = end.min(bl_active.map_or(next_baseline, |run| run.end));
         end = end.min(next_zoom_boundary(start));
 
         spans.push(PairSpan {
             start,
             end,
             current: cur_active.map(|run| run.blob),
-            blessed: bl_active.map(|run| run.blob),
+            baseline: bl_active.map(|run| run.blob),
         });
 
         if let Some(run) = cur_active {
@@ -422,7 +422,7 @@ pub(crate) fn next_zoom_boundary(tile_id: u64) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct BlobPair {
     current: BlobRef,
-    blessed: BlobRef,
+    baseline: BlobRef,
 }
 
 #[derive(Clone, Debug)]
@@ -448,21 +448,21 @@ struct PairState {
 // Three-pass parallel engine
 // ---------------------------------------------------------------------------
 
-pub fn regress(current: &Path, blessed: &Path, cfg: &RegressConfig) -> io::Result<RegressReport> {
+pub fn regress(current: &Path, baseline: &Path, cfg: &RegressConfig) -> io::Result<RegressReport> {
     let current = ArchiveView::open(current)?;
-    let blessed = ArchiveView::open(blessed)?;
+    let baseline = ArchiveView::open(baseline)?;
     let current_runs = archive_runs(&current)?;
-    let blessed_runs = archive_runs(&blessed)?;
-    let spans = merge_runs(&current_runs, &blessed_runs);
+    let baseline_runs = archive_runs(&baseline)?;
+    let spans = merge_runs(&current_runs, &baseline_runs);
 
     let mut report = RegressReport::default();
     report.counters.addressed_current = current.num_addressed();
-    report.counters.addressed_blessed = blessed.num_addressed();
+    report.counters.addressed_baseline = baseline.num_addressed();
     report.counters.addressed_tiles = spans.iter().map(|span| span.tiles()).sum();
     report.counters.directory_runs =
-        u64::try_from(current_runs.len() + blessed_runs.len()).unwrap_or(u64::MAX);
+        u64::try_from(current_runs.len() + baseline_runs.len()).unwrap_or(u64::MAX);
     report.counters.unique_blobs =
-        unique_blob_count(&current_runs) + unique_blob_count(&blessed_runs);
+        unique_blob_count(&current_runs) + unique_blob_count(&baseline_runs);
 
     let (mut states, missing) = group_pair_spans(spans);
     report.counters.unique_blob_pairs = u64::try_from(states.len()).unwrap_or(u64::MAX);
@@ -472,7 +472,7 @@ pub fn regress(current: &Path, blessed: &Path, cfg: &RegressConfig) -> io::Resul
         .par_iter_mut()
         .try_for_each(|state| -> io::Result<()> {
             let cur = current.raw_blob(state.work.pair.current)?;
-            let bl = blessed.raw_blob(state.work.pair.blessed)?;
+            let bl = baseline.raw_blob(state.work.pair.baseline)?;
             state.raw_equal = raw_equal(cur, bl);
             Ok(())
         })?;
@@ -481,8 +481,8 @@ pub fn regress(current: &Path, blessed: &Path, cfg: &RegressConfig) -> io::Resul
     let canonical_start = Instant::now();
     let current_fingerprints =
         fingerprint_blobs(&current, unique_work_blobs(&states, |pair| pair.current))?;
-    let blessed_fingerprints =
-        fingerprint_blobs(&blessed, unique_work_blobs(&states, |pair| pair.blessed))?;
+    let baseline_fingerprints =
+        fingerprint_blobs(&baseline, unique_work_blobs(&states, |pair| pair.baseline))?;
     states
         .par_iter_mut()
         .filter(|state| !state.raw_equal)
@@ -491,11 +491,11 @@ pub fn regress(current: &Path, blessed: &Path, cfg: &RegressConfig) -> io::Resul
                 .get(&state.work.pair.current)
                 .copied()
                 .ok_or_else(|| io::Error::other("current fingerprint is missing"))?;
-            let blessed = blessed_fingerprints
-                .get(&state.work.pair.blessed)
+            let baseline = baseline_fingerprints
+                .get(&state.work.pair.baseline)
                 .copied()
-                .ok_or_else(|| io::Error::other("blessed fingerprint is missing"))?;
-            state.canonical_equal = current == blessed;
+                .ok_or_else(|| io::Error::other("baseline fingerprint is missing"))?;
+            state.canonical_equal = current == baseline;
             Ok(())
         })?;
     report.counters.canonical_pass_ms = elapsed_ms(canonical_start);
@@ -507,7 +507,7 @@ pub fn regress(current: &Path, blessed: &Path, cfg: &RegressConfig) -> io::Resul
         .try_for_each_init(DecodeScratch::default, |scratch, state| -> io::Result<()> {
             let cur_bytes = scratch.decompress(current.raw_blob(state.work.pair.current)?)?;
             let cur = decode_detail_tile(cur_bytes).map_err(invalid_tile)?;
-            let bl_bytes = scratch.decompress(blessed.raw_blob(state.work.pair.blessed)?)?;
+            let bl_bytes = scratch.decompress(baseline.raw_blob(state.work.pair.baseline)?)?;
             let bl = decode_detail_tile(bl_bytes).map_err(invalid_tile)?;
             state.detail = Some(compare_detail_tiles::<DetailOutcome>(&cur, &bl, cfg));
             Ok(())
@@ -551,7 +551,7 @@ pub fn regress(current: &Path, blessed: &Path, cfg: &RegressConfig) -> io::Resul
 /// Emit sampled, pair-aware attribution SVGs for the first differing tile IDs.
 pub fn dump_overlays(
     current: &Path,
-    blessed: &Path,
+    baseline: &Path,
     report: &RegressReport,
     cfg: &RegressConfig,
     dir: &Path,
@@ -560,9 +560,9 @@ pub fn dump_overlays(
 ) -> io::Result<u64> {
     fs::create_dir_all(dir)?;
     let current_view = ArchiveView::open(current)?;
-    let blessed_view = ArchiveView::open(blessed)?;
+    let baseline_view = ArchiveView::open(baseline)?;
     let current_runs = current_view.read_all_runs()?;
-    let blessed_runs = blessed_view.read_all_runs()?;
+    let baseline_runs = baseline_view.read_all_runs()?;
     let mut written = 0u64;
     'ranges: for range in &report.differing_ranges {
         for tile_id in range.start..=range.end {
@@ -580,7 +580,7 @@ pub fn dump_overlays(
             let cur =
                 decode_detail_tile(&read(&current_view, &current_runs)?).map_err(invalid_tile)?;
             let bl =
-                decode_detail_tile(&read(&blessed_view, &blessed_runs)?).map_err(invalid_tile)?;
+                decode_detail_tile(&read(&baseline_view, &baseline_runs)?).map_err(invalid_tile)?;
             let collector =
                 compare_detail_tiles::<crate::corpus::overlay::OverlayCollector>(&cur, &bl, cfg);
             let (z, x, y) = tile_id_to_zxy(tile_id);
@@ -599,11 +599,11 @@ fn group_pair_spans(spans: Vec<PairSpan>) -> (Vec<PairState>, Vec<PairSpan>) {
     let mut states: Vec<PairState> = Vec::new();
     let mut missing = Vec::new();
     for span in spans {
-        let (Some(current), Some(blessed)) = (span.current, span.blessed) else {
+        let (Some(current), Some(baseline)) = (span.current, span.baseline) else {
             missing.push(span);
             continue;
         };
-        let pair = BlobPair { current, blessed };
+        let pair = BlobPair { current, baseline };
         if let Some(&idx) = indexes.get(&pair) {
             states[idx].work.spans.push(span);
         } else {
@@ -661,8 +661,8 @@ fn fingerprint_blobs(
 // over the two mmap slices. A digest prefilter would only pay off if digests
 // were computed once per blob and reused across pairs; per pair it is strictly
 // extra passes over the same bytes.
-fn raw_equal(current: &[u8], blessed: &[u8]) -> bool {
-    current == blessed
+fn raw_equal(current: &[u8], baseline: &[u8]) -> bool {
+    current == baseline
 }
 
 #[derive(Default)]
@@ -1173,7 +1173,7 @@ fn peak_rss_kb() -> Option<u64> {
 fn emit_regress_counters(counters: &RegressCounters) {
     crate::debug::emit_counter_u64("regress_addressed_tiles", counters.addressed_tiles);
     crate::debug::emit_counter_u64("regress_addressed_current", counters.addressed_current);
-    crate::debug::emit_counter_u64("regress_addressed_blessed", counters.addressed_blessed);
+    crate::debug::emit_counter_u64("regress_addressed_baseline", counters.addressed_baseline);
     crate::debug::emit_counter_u64("regress_directory_runs", counters.directory_runs);
     crate::debug::emit_counter_u64("regress_unique_blobs", counters.unique_blobs);
     crate::debug::emit_counter_u64("regress_unique_blob_pairs", counters.unique_blob_pairs);
@@ -2135,27 +2135,27 @@ pub(crate) trait DiffSink {
         class: OutcomeClass,
         displacement: i32,
         current: Option<&DetailFeature>,
-        blessed: Option<&DetailFeature>,
+        baseline: Option<&DetailFeature>,
     );
-    fn matched(&mut self, _layer: &Arc<str>, _current: &DetailFeature, _blessed: &DetailFeature) {}
+    fn matched(&mut self, _layer: &Arc<str>, _current: &DetailFeature, _baseline: &DetailFeature) {}
     fn layer_event(
         &mut self,
         _class: OutcomeClass,
         _current: Option<&DetailLayer>,
-        _blessed: Option<&DetailLayer>,
+        _baseline: Option<&DetailLayer>,
     ) {
     }
 }
 
 pub(crate) fn compare_detail_tiles<S: DiffSink + Default>(
     current: &DetailTile,
-    blessed: &DetailTile,
+    baseline: &DetailTile,
     cfg: &RegressConfig,
 ) -> S {
     let mut out = S::default();
     let (mut ci, mut bi) = (0usize, 0usize);
-    while ci < current.layers.len() || bi < blessed.layers.len() {
-        match (current.layers.get(ci), blessed.layers.get(bi)) {
+    while ci < current.layers.len() || bi < baseline.layers.len() {
+        match (current.layers.get(ci), baseline.layers.get(bi)) {
             (Some(cur), Some(bl)) => match cur.name.cmp(&bl.name) {
                 Ordering::Less => {
                     out.layer_event(OutcomeClass::LayerAdded, Some(cur), None);
@@ -2197,7 +2197,7 @@ impl DiffSink for DetailOutcome {
         class: OutcomeClass,
         displacement: i32,
         current: Option<&DetailFeature>,
-        blessed: Option<&DetailFeature>,
+        baseline: Option<&DetailFeature>,
     ) {
         match class {
             OutcomeClass::LayerAdded => self.counts.layers_added += 1,
@@ -2211,7 +2211,7 @@ impl DiffSink for DetailOutcome {
         }
         self.events.push(OutcomeEvent {
             layer: Arc::clone(layer),
-            id: current.or(blessed).and_then(|feature| feature.id),
+            id: current.or(baseline).and_then(|feature| feature.id),
             class,
             displacement,
         });
@@ -2220,16 +2220,16 @@ impl DiffSink for DetailOutcome {
         &mut self,
         class: OutcomeClass,
         current: Option<&DetailLayer>,
-        blessed: Option<&DetailLayer>,
+        baseline: Option<&DetailLayer>,
     ) {
-        let layer = current.or(blessed).expect("layer event has a layer");
+        let layer = current.or(baseline).expect("layer event has a layer");
         self.record(&layer.name, class, 0, None, None);
     }
 }
 
 pub(crate) fn compare_detail_layer<S: DiffSink>(
     current: &DetailLayer,
-    blessed: &DetailLayer,
+    baseline: &DetailLayer,
     cfg: &RegressConfig,
     out: &mut S,
 ) {
@@ -2245,7 +2245,7 @@ pub(crate) fn compare_detail_layer<S: DiffSink>(
             _ => cur_anon.push(feature),
         }
     }
-    for feature in &blessed.features {
+    for feature in &baseline.features {
         match feature.id {
             Some(id) if !ocean => bl_ids.entry(id).or_default().push(feature),
             _ => bl_anon.push(feature),
@@ -2268,7 +2268,7 @@ pub(crate) fn compare_detail_layer<S: DiffSink>(
     let mut groups = cur_anon.merge_with(bl_anon);
     groups.sort_by_key(|group| group.hash);
     for group in groups {
-        compare_anonymous_group(&current.name, &group.current, &group.blessed, cfg, out);
+        compare_anonymous_group(&current.name, &group.current, &group.baseline, cfg, out);
     }
 }
 
@@ -2277,7 +2277,7 @@ type IdGroups<'a> = FxHashMap<u64, Vec<&'a DetailFeature>>;
 /// Anonymous features grouped by attr digest (verified against the actual
 /// attrs on collision). Each side builds its own instance, pushing into
 /// `current`; `merge_with` then folds the other side's features into
-/// `blessed`, so the field names are only meaningful after the merge.
+/// `baseline`, so the field names are only meaningful after the merge.
 #[derive(Default)]
 struct AnonymousGroups<'a> {
     buckets: FxHashMap<u128, Vec<AnonymousGroup<'a>>>,
@@ -2286,13 +2286,13 @@ struct AnonymousGroups<'a> {
 struct AnonymousGroup<'a> {
     attrs: &'a [(Arc<str>, DetailAttr)],
     current: Vec<&'a DetailFeature>,
-    blessed: Vec<&'a DetailFeature>,
+    baseline: Vec<&'a DetailFeature>,
 }
 
 struct MergedAnonymousGroup<'a> {
     hash: u128,
     current: Vec<&'a DetailFeature>,
-    blessed: Vec<&'a DetailFeature>,
+    baseline: Vec<&'a DetailFeature>,
 }
 
 impl<'a> AnonymousGroups<'a> {
@@ -2307,7 +2307,7 @@ impl<'a> AnonymousGroups<'a> {
             groups.push(AnonymousGroup {
                 attrs: &feature.attrs,
                 current: vec![feature],
-                blessed: Vec::new(),
+                baseline: Vec::new(),
             });
         }
     }
@@ -2320,13 +2320,13 @@ impl<'a> AnonymousGroups<'a> {
                     .iter_mut()
                     .find(|existing| existing.attrs == group.attrs)
                 {
-                    existing.blessed.extend(group.current);
-                    existing.blessed.extend(group.blessed);
+                    existing.baseline.extend(group.current);
+                    existing.baseline.extend(group.baseline);
                 } else {
                     ours.push(AnonymousGroup {
                         attrs: group.attrs,
-                        current: group.blessed,
-                        blessed: group.current,
+                        current: group.baseline,
+                        baseline: group.current,
                     });
                 }
             }
@@ -2337,7 +2337,7 @@ impl<'a> AnonymousGroups<'a> {
                 groups.into_iter().map(move |group| MergedAnonymousGroup {
                     hash,
                     current: group.current,
-                    blessed: group.blessed,
+                    baseline: group.baseline,
                 })
             })
             .collect()
@@ -2347,14 +2347,14 @@ impl<'a> AnonymousGroups<'a> {
 fn compare_id_group<S: DiffSink>(
     layer: &Arc<str>,
     current: &[&DetailFeature],
-    blessed: &[&DetailFeature],
+    baseline: &[&DetailFeature],
     cfg: &RegressConfig,
     out: &mut S,
 ) {
-    let pairs = current.len().min(blessed.len());
+    let pairs = current.len().min(baseline.len());
     for idx in 0..pairs {
         let cur = current[idx];
-        let bl = blessed[idx];
+        let bl = baseline[idx];
         if cur.attrs != bl.attrs {
             out.record(layer, OutcomeClass::AttrChanged, 0, Some(cur), Some(bl));
         } else {
@@ -2364,7 +2364,7 @@ fn compare_id_group<S: DiffSink>(
     for feature in current.iter().skip(pairs) {
         out.record(layer, OutcomeClass::AddedFeatures, 0, Some(feature), None);
     }
-    for feature in blessed.iter().skip(pairs) {
+    for feature in baseline.iter().skip(pairs) {
         out.record(layer, OutcomeClass::MissingFeatures, 0, None, Some(feature));
     }
 }
@@ -2372,13 +2372,13 @@ fn compare_id_group<S: DiffSink>(
 fn compare_anonymous_group<S: DiffSink>(
     layer: &Arc<str>,
     current: &[&DetailFeature],
-    blessed: &[&DetailFeature],
+    baseline: &[&DetailFeature],
     cfg: &RegressConfig,
     out: &mut S,
 ) {
-    let pairs = pair_detail_features(current, blessed);
+    let pairs = pair_detail_features(current, baseline);
     for (ci, bi) in pairs.paired {
-        classify_detail_geometry(layer, current[ci], blessed[bi], cfg, out);
+        classify_detail_geometry(layer, current[ci], baseline[bi], cfg, out);
     }
     for ci in pairs.unpaired_current {
         out.record(
@@ -2389,13 +2389,13 @@ fn compare_anonymous_group<S: DiffSink>(
             None,
         );
     }
-    for bi in pairs.unpaired_blessed {
+    for bi in pairs.unpaired_baseline {
         out.record(
             layer,
             OutcomeClass::MissingFeatures,
             0,
             None,
-            Some(blessed[bi]),
+            Some(baseline[bi]),
         );
     }
 }
@@ -2403,16 +2403,16 @@ fn compare_anonymous_group<S: DiffSink>(
 struct PairResult {
     paired: Vec<(usize, usize)>,
     unpaired_current: Vec<usize>,
-    unpaired_blessed: Vec<usize>,
+    unpaired_baseline: Vec<usize>,
 }
 
-fn pair_detail_features(current: &[&DetailFeature], blessed: &[&DetailFeature]) -> PairResult {
+fn pair_detail_features(current: &[&DetailFeature], baseline: &[&DetailFeature]) -> PairResult {
     let mut cur_used = vec![false; current.len()];
-    let mut bl_used = vec![false; blessed.len()];
-    let mut paired = exact_feature_pairs(current, blessed, &mut cur_used, &mut bl_used);
+    let mut bl_used = vec![false; baseline.len()];
+    let mut paired = exact_feature_pairs(current, baseline, &mut cur_used, &mut bl_used);
     let residual = remaining_pairs(
         current,
-        blessed,
+        baseline,
         &mut cur_used,
         &mut bl_used,
         |feature| (feature.geom_type, feature.structure),
@@ -2426,12 +2426,12 @@ fn pair_detail_features(current: &[&DetailFeature], blessed: &[&DetailFeature]) 
 
 fn exact_feature_pairs(
     current: &[&DetailFeature],
-    blessed: &[&DetailFeature],
+    baseline: &[&DetailFeature],
     cur_used: &mut [bool],
     bl_used: &mut [bool],
 ) -> Vec<(usize, usize)> {
     let mut buckets: FxHashMap<u128, Vec<usize>> = FxHashMap::default();
-    for (idx, feature) in blessed.iter().enumerate() {
+    for (idx, feature) in baseline.iter().enumerate() {
         buckets
             .entry(feature.geometry_digest)
             .or_default()
@@ -2444,7 +2444,7 @@ fn exact_feature_pairs(
         };
         if let Some(&bi) = candidates
             .iter()
-            .find(|&&bi| !bl_used[bi] && detail_geometry_equal(feature, blessed[bi]))
+            .find(|&&bi| !bl_used[bi] && detail_geometry_equal(feature, baseline[bi]))
         {
             cur_used[ci] = true;
             bl_used[bi] = true;
@@ -2462,7 +2462,7 @@ fn detail_geometry_equal(left: &DetailFeature, right: &DetailFeature) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn remaining_pairs<T, K: Eq + std::hash::Hash + Copy>(
     current: &[T],
-    blessed: &[T],
+    baseline: &[T],
     cur_used: &mut [bool],
     bl_used: &mut [bool],
     key: impl Fn(&T) -> K,
@@ -2475,38 +2475,38 @@ fn remaining_pairs<T, K: Eq + std::hash::Hash + Copy>(
         .enumerate()
         .filter_map(|(idx, used)| (!*used).then_some(idx))
         .collect();
-    let remaining_blessed: Vec<usize> = bl_used
+    let remaining_baseline: Vec<usize> = bl_used
         .iter()
         .enumerate()
         .filter_map(|(idx, used)| (!*used).then_some(idx))
         .collect();
     if remaining_current
         .len()
-        .saturating_mul(remaining_blessed.len())
+        .saturating_mul(remaining_baseline.len())
         <= 64
     {
         return exact_greedy_pairs(
             current,
-            blessed,
+            baseline,
             cur_used,
             bl_used,
             &remaining_current,
-            &remaining_blessed,
+            &remaining_baseline,
             distance,
         );
     }
 
     let candidates = residual_candidates(
         current,
-        blessed,
+        baseline,
         &remaining_current,
-        &remaining_blessed,
+        &remaining_baseline,
         &key,
         &lower,
         &proxy,
     );
     let mut paired =
-        sparse_min_cost_pairs(current, blessed, cur_used, bl_used, &candidates, &distance);
+        sparse_min_cost_pairs(current, baseline, cur_used, bl_used, &candidates, &distance);
 
     // Same-key completion: the K-nearest candidate graph need not contain a
     // matching that saturates the smaller side of every key group (clusters
@@ -2520,11 +2520,11 @@ fn remaining_pairs<T, K: Eq + std::hash::Hash + Copy>(
         if cur_used[ci] {
             continue;
         }
-        for &bi in &remaining_blessed {
-            if !bl_used[bi] && key(&current[ci]) == key(&blessed[bi]) {
+        for &bi in &remaining_baseline {
+            if !bl_used[bi] && key(&current[ci]) == key(&baseline[bi]) {
                 completion_edges.push((
-                    lower(&current[ci], &blessed[bi]),
-                    proxy(&current[ci], &blessed[bi]),
+                    lower(&current[ci], &baseline[bi]),
+                    proxy(&current[ci], &baseline[bi]),
                     ci,
                     bi,
                 ));
@@ -2566,23 +2566,23 @@ const RESIDUAL_CANDIDATES: usize = 8;
 #[allow(clippy::too_many_arguments)]
 fn residual_candidates<T, K: Eq + std::hash::Hash + Copy>(
     current: &[T],
-    blessed: &[T],
+    baseline: &[T],
     remaining_current: &[usize],
-    remaining_blessed: &[usize],
+    remaining_baseline: &[usize],
     key: &impl Fn(&T) -> K,
     lower: &impl Fn(&T, &T) -> u64,
     proxy: &impl Fn(&T, &T) -> u64,
 ) -> Vec<(usize, usize)> {
     let mut edges = FxHashSet::default();
     for &ci in remaining_current {
-        let mut nearest: Vec<_> = remaining_blessed
+        let mut nearest: Vec<_> = remaining_baseline
             .iter()
             .copied()
-            .filter(|&bi| key(&current[ci]) == key(&blessed[bi]))
+            .filter(|&bi| key(&current[ci]) == key(&baseline[bi]))
             .map(|bi| {
                 (
-                    lower(&current[ci], &blessed[bi]),
-                    proxy(&current[ci], &blessed[bi]),
+                    lower(&current[ci], &baseline[bi]),
+                    proxy(&current[ci], &baseline[bi]),
                     bi,
                 )
             })
@@ -2595,15 +2595,15 @@ fn residual_candidates<T, K: Eq + std::hash::Hash + Copy>(
                 .map(|(_, _, bi)| (ci, bi)),
         );
     }
-    for &bi in remaining_blessed {
+    for &bi in remaining_baseline {
         let mut nearest: Vec<_> = remaining_current
             .iter()
             .copied()
-            .filter(|&ci| key(&current[ci]) == key(&blessed[bi]))
+            .filter(|&ci| key(&current[ci]) == key(&baseline[bi]))
             .map(|ci| {
                 (
-                    lower(&current[ci], &blessed[bi]),
-                    proxy(&current[ci], &blessed[bi]),
+                    lower(&current[ci], &baseline[bi]),
+                    proxy(&current[ci], &baseline[bi]),
                     ci,
                 )
             })
@@ -2623,7 +2623,7 @@ fn residual_candidates<T, K: Eq + std::hash::Hash + Copy>(
 
 fn sparse_min_cost_pairs<T>(
     current: &[T],
-    blessed: &[T],
+    baseline: &[T],
     cur_used: &mut [bool],
     bl_used: &mut [bool],
     candidates: &[(usize, usize)],
@@ -2641,28 +2641,28 @@ fn sparse_min_cost_pairs<T>(
     // order relaxes first, which keeps the result deterministic.
     let edges: Vec<_> = candidates
         .iter()
-        .map(|&(ci, bi)| (ci, bi, i64::from(distance(&current[ci], &blessed[bi]))))
+        .map(|&(ci, bi)| (ci, bi, i64::from(distance(&current[ci], &baseline[bi]))))
         .collect();
     let edge_cost: FxHashMap<(usize, usize), i64> = edges
         .iter()
         .map(|&(ci, bi, cost)| ((ci, bi), cost))
         .collect();
-    let mut residual_blessed: Vec<usize> = candidates.iter().map(|&(_, bi)| bi).collect();
-    residual_blessed.sort_unstable();
-    residual_blessed.dedup();
+    let mut residual_baseline: Vec<usize> = candidates.iter().map(|&(_, bi)| bi).collect();
+    residual_baseline.sort_unstable();
+    residual_baseline.dedup();
     // Candidates are sorted by (ci, bi), so ci values arrive grouped.
     let mut residual_current: Vec<usize> = candidates.iter().map(|&(ci, _)| ci).collect();
     residual_current.dedup();
-    let vertex_bound = residual_current.len() + residual_blessed.len();
+    let vertex_bound = residual_current.len() + residual_baseline.len();
 
     let mut cur_match: Vec<Option<usize>> = vec![None; current.len()];
-    let mut bl_match: Vec<Option<usize>> = vec![None; blessed.len()];
+    let mut bl_match: Vec<Option<usize>> = vec![None; baseline.len()];
     let mut cur_cost = vec![0_i64; current.len()];
 
     loop {
         let mut cur_dist = vec![i64::MAX; current.len()];
-        let mut bl_dist = vec![i64::MAX; blessed.len()];
-        let mut prev_blessed: Vec<Option<usize>> = vec![None; blessed.len()];
+        let mut bl_dist = vec![i64::MAX; baseline.len()];
+        let mut prev_baseline: Vec<Option<usize>> = vec![None; baseline.len()];
         for &ci in &residual_current {
             if !cur_used[ci] && cur_match[ci].is_none() {
                 cur_dist[ci] = 0;
@@ -2678,8 +2678,8 @@ fn sparse_min_cost_pairs<T>(
                 let relaxed = cur_dist[ci].saturating_add(cost);
                 if relaxed < bl_dist[bi] {
                     bl_dist[bi] = relaxed;
-                    prev_blessed[bi] = Some(ci);
-                    // The only edge back out of a matched blessed node is its
+                    prev_baseline[bi] = Some(ci);
+                    // The only edge back out of a matched baseline node is its
                     // matched current, so the reverse relaxation rides along
                     // here instead of needing its own scan.
                     if let Some(mi) = bl_match[bi] {
@@ -2696,7 +2696,7 @@ fn sparse_min_cost_pairs<T>(
             }
         }
 
-        let target = (0..blessed.len())
+        let target = (0..baseline.len())
             .filter(|&bi| !bl_used[bi] && bl_match[bi].is_none() && bl_dist[bi] != i64::MAX)
             .min_by_key(|&bi| (bl_dist[bi], bi));
         let Some(mut bi) = target else {
@@ -2712,7 +2712,7 @@ fn sparse_min_cost_pairs<T>(
                 hops <= vertex_bound,
                 "augmenting path exceeds its vertex bound"
             );
-            let ci = prev_blessed[bi].expect("augmenting path reaches a relaxed blessed node");
+            let ci = prev_baseline[bi].expect("augmenting path reaches a relaxed baseline node");
             let previous_bi = cur_match[ci];
             cur_match[ci] = Some(bi);
             bl_match[bi] = Some(ci);
@@ -2740,11 +2740,11 @@ fn sparse_min_cost_pairs<T>(
 
 fn exact_greedy_pairs<T>(
     current: &[T],
-    blessed: &[T],
+    baseline: &[T],
     cur_used: &mut [bool],
     bl_used: &mut [bool],
     remaining_current: &[usize],
-    remaining_blessed: &[usize],
+    remaining_baseline: &[usize],
     distance: impl Fn(&T, &T) -> i32,
 ) -> Vec<(usize, usize)> {
     let mut paired = Vec::new();
@@ -2754,11 +2754,11 @@ fn exact_greedy_pairs<T>(
             if cur_used[ci] {
                 continue;
             }
-            for &bi in remaining_blessed {
+            for &bi in remaining_baseline {
                 if bl_used[bi] {
                     continue;
                 }
-                let candidate = distance(&current[ci], &blessed[bi]);
+                let candidate = distance(&current[ci], &baseline[bi]);
                 if best.is_none_or(|(_, _, distance)| candidate < distance) {
                     best = Some((ci, bi, candidate));
                 }
@@ -2782,7 +2782,7 @@ fn finish_pairs(cur_used: &[bool], bl_used: &[bool], paired: Vec<(usize, usize)>
             .enumerate()
             .filter_map(|(idx, used)| (!*used).then_some(idx))
             .collect(),
-        unpaired_blessed: bl_used
+        unpaired_baseline: bl_used
             .iter()
             .enumerate()
             .filter_map(|(idx, used)| (!*used).then_some(idx))
@@ -2793,32 +2793,32 @@ fn finish_pairs(cur_used: &[bool], bl_used: &[bool], paired: Vec<(usize, usize)>
 fn classify_detail_geometry<S: DiffSink>(
     layer: &Arc<str>,
     current: &DetailFeature,
-    blessed: &DetailFeature,
+    baseline: &DetailFeature,
     cfg: &RegressConfig,
     out: &mut S,
 ) {
-    if current.geom_type != blessed.geom_type {
+    if current.geom_type != baseline.geom_type {
         out.record(
             layer,
             OutcomeClass::StructuralMoved,
             0,
             Some(current),
-            Some(blessed),
+            Some(baseline),
         );
         return;
     }
-    let Some(distance) = classify_detail_components(current, blessed) else {
+    let Some(distance) = classify_detail_components(current, baseline) else {
         out.record(
             layer,
             OutcomeClass::StructuralMoved,
             0,
             Some(current),
-            Some(blessed),
+            Some(baseline),
         );
         return;
     };
     if distance == 0 {
-        out.matched(layer, current, blessed);
+        out.matched(layer, current, baseline);
         return;
     }
     let class = if distance <= cfg.tol {
@@ -2826,21 +2826,21 @@ fn classify_detail_geometry<S: DiffSink>(
     } else {
         OutcomeClass::StructuralMoved
     };
-    out.record(layer, class, distance, Some(current), Some(blessed));
+    out.record(layer, class, distance, Some(current), Some(baseline));
 }
 
-fn classify_detail_components(current: &DetailFeature, blessed: &DetailFeature) -> Option<i32> {
-    if current.components.len() != blessed.components.len() {
+fn classify_detail_components(current: &DetailFeature, baseline: &DetailFeature) -> Option<i32> {
+    if current.components.len() != baseline.components.len() {
         return None;
     }
-    let pairs = pair_detail_components(&current.components, &blessed.components);
-    if !pairs.unpaired_current.is_empty() || !pairs.unpaired_blessed.is_empty() {
+    let pairs = pair_detail_components(&current.components, &baseline.components);
+    if !pairs.unpaired_current.is_empty() || !pairs.unpaired_baseline.is_empty() {
         return None;
     }
     let mut maximum = 0;
     for (ci, bi) in pairs.paired {
         let cur = &current.components[ci];
-        let bl = &blessed.components[bi];
+        let bl = &baseline.components[bi];
         if !component_structure_matches(cur, bl) {
             return None;
         }
@@ -2849,11 +2849,11 @@ fn classify_detail_components(current: &DetailFeature, blessed: &DetailFeature) 
     Some(maximum)
 }
 
-fn pair_detail_components(current: &[DetailComponent], blessed: &[DetailComponent]) -> PairResult {
+fn pair_detail_components(current: &[DetailComponent], baseline: &[DetailComponent]) -> PairResult {
     let mut cur_used = vec![false; current.len()];
-    let mut bl_used = vec![false; blessed.len()];
+    let mut bl_used = vec![false; baseline.len()];
     let mut buckets: FxHashMap<u128, Vec<usize>> = FxHashMap::default();
-    for (idx, component) in blessed.iter().enumerate() {
+    for (idx, component) in baseline.iter().enumerate() {
         buckets.entry(component.digest).or_default().push(idx);
     }
     let mut paired = Vec::new();
@@ -2861,7 +2861,7 @@ fn pair_detail_components(current: &[DetailComponent], blessed: &[DetailComponen
         if let Some(candidates) = buckets.get(&component.digest)
             && let Some(&bi) = candidates.iter().find(|&&bi| {
                 !bl_used[bi]
-                    && compare_detail_components(component, &blessed[bi]) == Ordering::Equal
+                    && compare_detail_components(component, &baseline[bi]) == Ordering::Equal
             })
         {
             cur_used[ci] = true;
@@ -2871,7 +2871,7 @@ fn pair_detail_components(current: &[DetailComponent], blessed: &[DetailComponen
     }
     paired.extend(remaining_pairs(
         current,
-        blessed,
+        baseline,
         &mut cur_used,
         &mut bl_used,
         |component| component.structure,
@@ -2882,17 +2882,17 @@ fn pair_detail_components(current: &[DetailComponent], blessed: &[DetailComponen
     finish_pairs(&cur_used, &bl_used, paired)
 }
 
-fn component_structure_matches(current: &DetailComponent, blessed: &DetailComponent) -> bool {
-    if current.rings.len() != blessed.rings.len()
+fn component_structure_matches(current: &DetailComponent, baseline: &DetailComponent) -> bool {
+    if current.rings.len() != baseline.rings.len()
         || current
             .rings
             .iter()
-            .zip(&blessed.rings)
+            .zip(&baseline.rings)
             .any(|(left, right)| left.role != right.role)
     {
         return false;
     }
-    polygon_holes_contained(current) == polygon_holes_contained(blessed)
+    polygon_holes_contained(current) == polygon_holes_contained(baseline)
 }
 
 fn polygon_holes_contained(component: &DetailComponent) -> bool {
@@ -2937,13 +2937,13 @@ fn point_in_ring(point: (i32, i32), ring: &[(i32, i32)]) -> bool {
     inside
 }
 
-fn feature_distance(current: &DetailFeature, blessed: &DetailFeature) -> i32 {
-    if current.geom_type != blessed.geom_type {
+fn feature_distance(current: &DetailFeature, baseline: &DetailFeature) -> i32 {
+    if current.geom_type != baseline.geom_type {
         return i32::MAX;
     }
     let mut best = i32::MAX;
     for cur in &current.components {
-        for bl in &blessed.components {
+        for bl in &baseline.components {
             let lower = ceil_sqrt(cur.bbox.lower_bound_sq(bl.bbox));
             if lower >= best {
                 continue;
@@ -2954,11 +2954,11 @@ fn feature_distance(current: &DetailFeature, blessed: &DetailFeature) -> i32 {
     best
 }
 
-fn component_distance(current: &DetailComponent, blessed: &DetailComponent) -> i32 {
+fn component_distance(current: &DetailComponent, baseline: &DetailComponent) -> i32 {
     current
         .rings
         .iter()
-        .zip(&blessed.rings)
+        .zip(&baseline.rings)
         .map(|(left, right)| discrete_hausdorff(&left.points, &right.points))
         .max()
         .unwrap_or(0)
@@ -3210,9 +3210,9 @@ impl ExampleSelector {
 
 fn apply_missing_span(report: &mut RegressReport, span: PairSpan) {
     let count = span.tiles();
-    match (span.current, span.blessed) {
+    match (span.current, span.baseline) {
         (Some(_), None) => report.totals.only_in_current += count,
-        (None, Some(_)) => report.totals.only_in_blessed += count,
+        (None, Some(_)) => report.totals.only_in_baseline += count,
         (Some(_), Some(_)) | (None, None) => return,
     }
     report.diff_count += count;

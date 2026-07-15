@@ -231,7 +231,7 @@ mod tests {
         // reaches: a single BoolOverlay and a single output buffer reused
         // across many ops, recycled between calls exactly as normalize_into
         // and intersect_rect_into drive them. A pooled-ring or recycled-shell
-        // state leak - the class brokkr regress on denmark would only catch if
+        // state leak - the class the denmark corpus digest would only catch if
         // denmark happened to contain the offending shape - shows up here
         // point-for-point against dev-dep i_overlay.
         let mut rng = Lcg::new(0x1234_5678_9abc_def0);

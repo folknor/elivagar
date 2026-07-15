@@ -47,7 +47,7 @@ enum Command {
     Diag(DiagArgs),
     /// Compare two PMTiles archives semantically.
     Regress(RegressArgs),
-    /// Create or check an advisory semantic corpus digest.
+    /// Create or check a semantic corpus digest (the standing output gate).
     Corpus(CorpusArgs),
     /// Compare ocean coverage against a verbatim same-source baseline.
     OceanCoverage(OceanCoverageArgs),
@@ -269,7 +269,7 @@ struct RegressArgs {
     /// Current PMTiles archive to compare.
     current: PathBuf,
 
-    /// Blessed PMTiles archive to compare against.
+    /// Baseline PMTiles archive to compare against.
     #[arg(long)]
     against: PathBuf,
 
