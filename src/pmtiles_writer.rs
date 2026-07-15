@@ -4,6 +4,27 @@
 //! tile IDs and content deduplication. Supports both in-memory and streaming
 //! modes for the tile blob and directory entries.
 //!
+//! # Archive layout
+//!
+//! Sections are laid out as `[header][root dir][zeros to 16384][tile data]
+//! [metadata][leaf dirs]` - tile data at a fixed offset directly after a
+//! reserved 16 KiB init section, directories that depend on the full tile
+//! set appended AFTER the data. PMTiles readers locate every section through
+//! the header's offset/length fields, so section order is a producer choice;
+//! this is the same layout planetiler ships, chosen so streaming mode can
+//! write tile data straight into the destination file while tiles arrive.
+//! The previous layout (`[header][root][metadata][leaf dirs][tile data]`)
+//! forced the whole data section through a temp file and an end-of-run copy
+//! into the archive - 14 GB read + 14 GB written again, ~19s, on a
+//! north-america run - because the leaf-dir size is unknown until the last
+//! tile has been added.
+//!
+//! The reserved init section is the spec's constraint that the root
+//! directory must live in the first 16,384 bytes; `finalize_directories`
+//! grows the leaf fanout until the compressed root fits. The fixed 16,384
+//! data offset also keeps the data section 4 KiB-aligned for O_DIRECT
+//! serving.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -27,7 +48,7 @@
 use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use flate2::Compression;
@@ -119,6 +140,17 @@ const MAX_DEDUP_ENTRIES: usize = 1_000_000;
 /// SipHash passes so they produce different outputs for the same input.
 const DEDUP_FP2_SALT: u64 = 0xA5A5_A5A5_A5A5_A5A5;
 
+/// Reserved prologue: header + root directory + zero padding. Tile data
+/// starts exactly here. 16,384 is the spec's root-directory window (the root
+/// must be contained in the first 16,384 bytes) and is 4 KiB-aligned, which
+/// preserves the O_DIRECT-friendly data alignment the old layout computed
+/// dynamically.
+const INIT_SECTION: u64 = 16384;
+
+/// Compressed root-directory byte budget inside the init section.
+#[allow(clippy::cast_possible_truncation)]
+const MAX_ROOT_BYTES: usize = INIT_SECTION as usize - 127;
+
 // ---------------------------------------------------------------------------
 // Dedup statistics
 // ---------------------------------------------------------------------------
@@ -169,14 +201,17 @@ enum DirStore {
     },
 }
 
-/// Tile data storage: in-memory or streamed to a temp file.
+/// Tile data storage: in-memory or streamed to disk.
 /// Streaming mode avoids buffering all compressed tile data in RAM (~3 GB
-/// for a planet). The blob is written sequentially and read back during
-/// write_to() via io::copy.
+/// for a planet). The blob file IS the destination archive under a
+/// `.partial` name, pre-seeded with the reserved init section, so tile data
+/// lands at its final offset as it arrives and `write_to()` only appends the
+/// trailing sections and patches the prologue - no end-of-run data copy.
 enum TileBlob {
     /// All tile data in a Vec (original behavior, for tests and small runs).
     Memory(Vec<u8>),
-    /// Tile data streamed to a temp file on disk.
+    /// Tile data streamed to `<output>.partial` starting at INIT_SECTION.
+    /// `offset` is relative to the data section start.
     File {
         writer: BufWriter<File>,
         path: PathBuf,
@@ -308,14 +343,28 @@ impl PmtilesWriter {
         }
     }
 
-    /// Create a streaming writer (tile data written to a temp file in `tmp_dir`).
+    /// Create a streaming writer. Tile data is written directly into
+    /// `<output_path>.partial` at its final archive offset; `write_to()`
+    /// completes the prologue and renames it to `output_path`. Directory
+    /// entries stream to a temp file in `tmp_dir` as before.
     ///
     /// # Errors
-    /// Returns `io::Error` if temp file creation fails.
-    pub fn new_streaming(config: PmtilesConfig, tmp_dir: &Path) -> io::Result<Self> {
-        let blob_path = tmp_dir.join("tiles.blob");
+    /// Returns `io::Error` if creating either file fails.
+    pub fn new_streaming(
+        config: PmtilesConfig,
+        tmp_dir: &Path,
+        output_path: &Path,
+    ) -> io::Result<Self> {
+        let mut partial = output_path.as_os_str().to_owned();
+        partial.push(".partial");
+        let blob_path = PathBuf::from(partial);
         let file = File::create(&blob_path)?;
-        let writer = BufWriter::with_capacity(1 << 20, file); // 1 MB buffer
+        let mut writer = BufWriter::with_capacity(1 << 20, file); // 1 MB buffer
+        // Reserve the init section (header + root + zeros); the zeros between
+        // the root's end and INIT_SECTION are written now so write_to() never
+        // has to pad, only to overwrite the front.
+        #[allow(clippy::cast_possible_truncation)]
+        writer.write_all(&vec![0_u8; INIT_SECTION as usize])?;
 
         let dir_path = tmp_dir.join("dir_entries.bin");
         let dir_file = File::create(&dir_path)?;
@@ -503,10 +552,19 @@ impl PmtilesWriter {
         Ok(stored)
     }
 
-    /// Write the complete PMTiles archive to a file.
+    /// Complete the PMTiles archive at `path`.
+    ///
+    /// In-memory mode writes the whole archive in one pass. Streaming mode
+    /// appends metadata and leaf directories after the already-in-place tile
+    /// data, patches the header and root into the reserved init section, and
+    /// renames `<output>.partial` to `path` - so the archive appears at
+    /// `path` only when complete, and `path` must be on the same filesystem
+    /// as the `output_path` given to [`new_streaming`](Self::new_streaming)
+    /// (they are the same path in every production caller).
     ///
     /// # Errors
-    /// Returns `io::Error` if file creation, directory encoding, or data copy fails.
+    /// Returns `io::Error` if file creation, directory encoding, writing, or
+    /// the final rename fails.
     #[hotpath::measure]
     pub fn write_to(&mut self, path: &Path) -> io::Result<()> {
         // RAM-ledger snapshot of the dedup map at its final (largest) size,
@@ -551,19 +609,21 @@ impl PmtilesWriter {
             TileBlob::File { offset, .. } => *offset,
         };
 
-        // Layout: [header 127] [root_dir] [metadata] [leaf_dirs] [tile_data]
+        // Layout: [header 127] [root_dir] [zeros to INIT_SECTION] [tile_data]
+        // [metadata] [leaf_dirs]. finalize_directories() guarantees the root
+        // fits the init section; the assert is the layout's load-bearing
+        // invariant, not a recoverable condition.
         let root_dir_offset: u64 = 127;
         let root_dir_length = root_bytes.len() as u64;
-        let metadata_offset = root_dir_offset + root_dir_length;
+        assert!(
+            root_bytes.len() <= MAX_ROOT_BYTES,
+            "root directory ({root_dir_length} B) exceeds the init section"
+        );
+        let data_offset = INIT_SECTION;
+        let metadata_offset = data_offset + data_length;
         let metadata_length = metadata_compressed.len() as u64;
         let leaf_dirs_offset = metadata_offset + metadata_length;
         let leaf_dirs_length = leaf_bytes.len() as u64;
-        let raw_data_offset = leaf_dirs_offset + leaf_dirs_length;
-
-        // 4K-align the data section start for O_DIRECT / io_uring tile serving.
-        let data_offset = raw_data_offset.div_ceil(4096) * 4096;
-        #[allow(clippy::cast_possible_truncation)]
-        let data_pad = (data_offset - raw_data_offset) as usize;
 
         let header = self.build_header(
             root_dir_offset,
@@ -577,36 +637,40 @@ impl PmtilesWriter {
             num_entries,
         );
 
-        let file = File::create(path)?;
-        let mut w = BufWriter::with_capacity(1 << 20, file);
-        w.write_all(&header)?;
-        w.write_all(&root_bytes)?;
-        w.write_all(&metadata_compressed)?;
-        w.write_all(&leaf_bytes)?;
-        if data_pad > 0 {
-            w.write_all(&vec![0u8; data_pad])?;
-        }
-
-        // Write tile data from the appropriate backend.
         match &mut self.blob {
             TileBlob::Memory(vec) => {
+                // Everything is known up front: one sequential pass.
+                let file = File::create(path)?;
+                let mut w = BufWriter::with_capacity(1 << 20, file);
+                w.write_all(&header)?;
+                w.write_all(&root_bytes)?;
+                w.write_all(&vec![0_u8; MAX_ROOT_BYTES - root_bytes.len()])?;
                 w.write_all(vec)?;
+                w.write_all(&metadata_compressed)?;
+                w.write_all(&leaf_bytes)?;
+                w.flush()?;
             }
             TileBlob::File {
                 writer,
                 path: blob_path,
                 ..
             } => {
+                // The tile data is already in place. Append the trailing
+                // sections, overwrite the reserved prologue (the zeros
+                // between root end and INIT_SECTION were written at
+                // creation), and rename the partial into the archive.
                 writer.flush()?;
-                let blob_file = File::open(&*blob_path)?;
-                let mut reader = BufReader::with_capacity(1 << 20, blob_file);
-                io::copy(&mut reader, &mut w)?;
-                drop(reader);
-                std::fs::remove_file(&*blob_path)?;
+                let mut file = File::options().write(true).open(&*blob_path)?;
+                file.seek(io::SeekFrom::Start(metadata_offset))?;
+                file.write_all(&metadata_compressed)?;
+                file.write_all(&leaf_bytes)?;
+                file.seek(io::SeekFrom::Start(0))?;
+                file.write_all(&header)?;
+                file.write_all(&root_bytes)?;
+                drop(file);
+                std::fs::rename(&*blob_path, path)?;
             }
         }
-
-        w.flush()?;
         Ok(())
     }
 }
@@ -753,9 +817,17 @@ impl PmtilesWriter {
     /// Build root and leaf directory bytes from the dir store.
     ///
     /// For in-memory mode, collects entries and delegates to `build_leaf_directories`.
-    /// For streaming mode, reads entries from the temp file in chunks of 4096,
-    /// building leaf directories incrementally without materializing all entries
-    /// (O(1) memory vs O(n)).
+    /// For streaming mode, reads entries from the temp file in leaf-size
+    /// chunks, building leaf directories incrementally without materializing
+    /// all entries (O(1) memory vs O(n)).
+    ///
+    /// The compressed root MUST fit the init section (the spec's first-16,384
+    /// bytes window, which the fixed data offset turns into a hard budget), so
+    /// both arms retry with a doubled leaf fanout until it does. Termination:
+    /// once the fanout reaches the entry count there is one leaf and the root
+    /// has one entry. The retry re-reads the streaming temp file per attempt -
+    /// a sequential re-read of 24 bytes per entry, paid only when the previous
+    /// attempt's root overflowed ~16 KB.
     ///
     /// Returns `(root_compressed, leaf_compressed, num_entries)`.
     #[hotpath::measure]
@@ -770,13 +842,20 @@ impl PmtilesWriter {
                 let entries = std::mem::take(entries);
                 #[allow(clippy::cast_possible_truncation)]
                 let num = entries.len() as u64;
-                let (root, leaf) = if entries.len() <= MAX_ROOT_ENTRIES {
-                    let root_raw = encode_directory(&entries);
-                    (gzip_compress(&root_raw)?, Vec::new())
-                } else {
-                    build_leaf_directories(&entries, LEAF_SIZE)?
-                };
-                Ok((root, leaf, num))
+                if entries.len() <= MAX_ROOT_ENTRIES {
+                    let root = gzip_compress(&encode_directory(&entries))?;
+                    if root.len() <= MAX_ROOT_BYTES {
+                        return Ok((root, Vec::new(), num));
+                    }
+                }
+                let mut leaf_size = LEAF_SIZE;
+                loop {
+                    let (root, leaf) = build_leaf_directories(&entries, leaf_size)?;
+                    if root.len() <= MAX_ROOT_BYTES {
+                        return Ok((root, leaf, num));
+                    }
+                    leaf_size *= 2;
+                }
             }
             DirStore::Streaming {
                 writer,
@@ -788,47 +867,34 @@ impl PmtilesWriter {
                 let count = *count as usize;
                 let path = path.clone();
 
-                let file = File::open(&path)?;
-                let mut reader = BufReader::with_capacity(1 << 16, file);
-
                 if count <= MAX_ROOT_ENTRIES {
-                    // Small dataset: read all (at most 393 KB), single root directory.
+                    // Small dataset: read all (at most 393 KB), single root
+                    // directory - unless it compresses past the budget.
+                    let file = File::open(&path)?;
+                    let mut reader = BufReader::with_capacity(1 << 16, file);
                     let entries = read_dir_entries(&mut reader, count)?;
-                    let root_raw = encode_directory(&entries);
-                    let root_compressed = gzip_compress(&root_raw)?;
-                    return Ok((root_compressed, Vec::new(), count as u64));
+                    let root = gzip_compress(&encode_directory(&entries))?;
+                    if root.len() <= MAX_ROOT_BYTES {
+                        return Ok((root, Vec::new(), count as u64));
+                    }
+                    let mut leaf_size = LEAF_SIZE;
+                    loop {
+                        let (root, leaf) = build_leaf_directories(&entries, leaf_size)?;
+                        if root.len() <= MAX_ROOT_BYTES {
+                            return Ok((root, leaf, count as u64));
+                        }
+                        leaf_size *= 2;
+                    }
                 }
 
-                // Stream entries in LEAF_SIZE chunks, building leaves incrementally.
-                let mut leaf_blob: Vec<u8> = Vec::new();
-                let mut root_entries: Vec<DirEntry> = Vec::new();
-                let mut remaining = count;
-
-                while remaining > 0 {
-                    let chunk_size = remaining.min(LEAF_SIZE);
-                    let chunk = read_dir_entries(&mut reader, chunk_size)?;
-                    remaining -= chunk_size;
-
-                    let first_tile_id = chunk[0].tile_id;
-                    let leaf_raw = encode_directory(&chunk);
-                    let compressed = gzip_compress(&leaf_raw)?;
-
-                    #[allow(clippy::cast_possible_truncation)]
-                    let leaf_len = compressed.len() as u32;
-                    let leaf_offset = leaf_blob.len() as u64;
-                    leaf_blob.extend_from_slice(&compressed);
-
-                    root_entries.push(DirEntry {
-                        tile_id: first_tile_id,
-                        offset: leaf_offset,
-                        length: leaf_len,
-                        run_length: 0,
-                    });
+                let mut leaf_size = LEAF_SIZE;
+                loop {
+                    let (root, leaf) = build_leaf_directories_streaming(&path, count, leaf_size)?;
+                    if root.len() <= MAX_ROOT_BYTES {
+                        return Ok((root, leaf, count as u64));
+                    }
+                    leaf_size *= 2;
                 }
-
-                let root_raw = encode_directory(&root_entries);
-                let root_compressed = gzip_compress(&root_raw)?;
-                Ok((root_compressed, leaf_blob, count as u64))
             }
         }
     }
@@ -899,6 +965,49 @@ fn write_header_bounds(h: &mut [u8; 127], config: &PmtilesConfig) {
     h[118] = center_zoom;
     write_i32_le(h, 119, f64_to_e7(center_lon));
     write_i32_le(h, 123, f64_to_e7(center_lat));
+}
+
+/// Build leaf directories by streaming entries from the dir-entries temp
+/// file in `leaf_size` chunks, without materializing all entries.
+/// Returns (root_compressed, all_leaves_compressed).
+#[hotpath::measure]
+fn build_leaf_directories_streaming(
+    path: &Path,
+    count: usize,
+    leaf_size: usize,
+) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(1 << 16, file);
+
+    let mut leaf_blob: Vec<u8> = Vec::new();
+    let mut root_entries: Vec<DirEntry> = Vec::new();
+    let mut remaining = count;
+
+    while remaining > 0 {
+        let chunk_size = remaining.min(leaf_size);
+        let chunk = read_dir_entries(&mut reader, chunk_size)?;
+        remaining -= chunk_size;
+
+        let first_tile_id = chunk[0].tile_id;
+        let leaf_raw = encode_directory(&chunk);
+        let compressed = gzip_compress(&leaf_raw)?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let leaf_len = compressed.len() as u32;
+        let leaf_offset = leaf_blob.len() as u64;
+        leaf_blob.extend_from_slice(&compressed);
+
+        root_entries.push(DirEntry {
+            tile_id: first_tile_id,
+            offset: leaf_offset,
+            length: leaf_len,
+            run_length: 0,
+        });
+    }
+
+    let root_raw = encode_directory(&root_entries);
+    let root_compressed = gzip_compress(&root_raw)?;
+    Ok((root_compressed, leaf_blob))
 }
 
 /// Build leaf directories when entries exceed the root limit.

@@ -979,6 +979,24 @@ a defect. Remaining assemble ideas, unpriced: reader/encode overlap
 inside a worker (reader blocks during its rayon encode today),
 pmtiles write path (7.3% of wall).
 
+PMTILES WRITE PATH LANDED 2026-07-15 (the 7.3% above): the wait was
+an end-of-run copy of the entire tile-data section from a temp file
+into the archive - visible in the sidecar as a ~19s serial rd+wr tail
+after the last assemble worker finished at NA (14 GB re-read + 14 GB
+re-written at ~800 MB/s, `pmtiles_write_wait_ns` 18.8s). The writer
+now uses planetiler's archive layout - tile data at a fixed 16,384
+offset directly behind a reserved header+root init section, metadata
+and leaf dirs appended AFTER the data, root patched into the reserve -
+so streaming mode writes each tile once, straight into
+`<output>.partial`, and finalize is rename-only. Section order is a
+producer choice under PMTiles v3 (readers follow header offsets;
+planetiler ships this exact shape). Bonus fix that rode along: the
+compressed root must fit the spec's first-16,384-bytes window, which
+the old layout never enforced - NA's root was 19 KB - and
+finalize_directories now doubles the leaf fanout until it fits. At
+planet output sizes (~60-70 GB data section) the deleted copy is
+~90s of serial tail plus double the write traffic.
+
 SPLIT Z7 LANDED same day: PARTITION_SPLIT_Z 6 -> 7 (z14 partitions go
 from one z6 prefix / 65,536 tile ids to one z7 prefix / 16,384).
 Germany was the proof case: it spans so few z6 prefixes at high zoom

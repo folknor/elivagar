@@ -150,6 +150,22 @@ takes the record again, 8.9s to 8.5s; NA -7.9% wall, germany -13%
 5.76 GB whole-run - the buffered hasher adds nothing the sampler can
 see.
 
+The `52cc955a` sidecar also exposed the next serial tail: assemble
+workers finished at t=235.3 but the run ended at 254.2 - ~19s of
+symmetric rd+wr (14 GB each way at ~800 MB/s, `pmtiles_write_wait_ns`
+18.8s) copying the tile-data temp file into the archive. Landed
+2026-07-15 (commit follows this note): the writer adopts planetiler's
+section layout (tile data at fixed offset 16,384, metadata + leaf dirs
+appended after it, header + root patched into the reserved init
+section), so tile data streams once, directly into `<output>.partial`,
+and finalize is rename-only. Riding along: the compressed root
+directory now always fits the spec's first-16,384-bytes window (leaf
+fanout doubles until it does) - NA's root was 19 KB before, past the
+window. Gates: denmark regress vs the `eb1e36e` archive raw-equal on
+all 1,296,999 tiles, elivagar verify PASS, JS pmtiles reader decode
+confirmed; archive BYTES change by layout (offsets), so blessing-style
+whole-archive hashes rotate, tile blobs do not.
+
 Superseded rows (kept for delta reading):
 
 | dataset | commit | run | wall | phase12 | peak RSS | note |

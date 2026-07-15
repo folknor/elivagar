@@ -417,7 +417,8 @@ fn write_to_streaming_produces_valid_header() {
         center: (0.0, 0.0, 0),
     };
 
-    let mut writer = PmtilesWriter::new_streaming(config, dir.path()).unwrap();
+    let out_path = dir.path().join("test_streaming.pmtiles");
+    let mut writer = PmtilesWriter::new_streaming(config, dir.path(), &out_path).unwrap();
 
     let tile_a = gzip_compress(b"tile-a").unwrap();
     let tile_b = gzip_compress(b"tile-b").unwrap();
@@ -430,8 +431,11 @@ fn write_to_streaming_produces_valid_header() {
     assert_eq!(writer.tile_count(), 3);
     assert_eq!(writer.unique_tile_count(), 3);
 
-    let out_path = dir.path().join("test_streaming.pmtiles");
     writer.write_to(&out_path).unwrap();
+    assert!(
+        !dir.path().join("test_streaming.pmtiles.partial").exists(),
+        "the partial file must be renamed away on completion"
+    );
 
     let bytes = std::fs::read(&out_path).unwrap();
     assert!(bytes.len() > 127);
@@ -463,11 +467,12 @@ fn write_to_streaming_matches_in_memory() {
     mem_writer.write_to(&mem_path).unwrap();
 
     // Streaming writer
-    let mut stream_writer = PmtilesWriter::new_streaming(make_config(), dir.path()).unwrap();
+    let stream_path = dir.path().join("stream.pmtiles");
+    let mut stream_writer =
+        PmtilesWriter::new_streaming(make_config(), dir.path(), &stream_path).unwrap();
     stream_writer.add_tile(0, 0, 0, &tile_a).unwrap();
     stream_writer.add_tile(1, 0, 0, &tile_b).unwrap();
     stream_writer.add_tile(1, 1, 0, &tile_c).unwrap();
-    let stream_path = dir.path().join("stream.pmtiles");
     stream_writer.write_to(&stream_path).unwrap();
 
     let mem_bytes = std::fs::read(&mem_path).unwrap();
@@ -869,26 +874,40 @@ fn root_only_layout_offsets_are_consistent() {
     let data_offset = read_u64_le(&bytes, 56);
     let data_length = read_u64_le(&bytes, 64);
 
+    // Layout: [header][root][zeros to 16384][tile data][metadata][leaf dirs].
     assert_eq!(root_dir_offset, 127);
     assert!(root_dir_length > 0);
-    assert_eq!(metadata_offset, root_dir_offset + root_dir_length);
+    assert!(
+        root_dir_offset + root_dir_length <= 16384,
+        "root directory must live within the spec's first 16,384 bytes"
+    );
+    assert_eq!(data_offset, 16384);
+    assert_eq!(metadata_offset, data_offset + data_length);
     assert!(metadata_length > 0);
     assert_eq!(leaf_dirs_offset, metadata_offset + metadata_length);
     assert_eq!(
         leaf_dirs_length, 0,
         "single-tile archive should be root-only"
     );
-    assert!(data_offset >= leaf_dirs_offset + leaf_dirs_length);
 
     let file_len = bytes.len() as u64;
     assert!(root_dir_offset + root_dir_length <= file_len);
     assert!(metadata_offset + metadata_length <= file_len);
     assert!(data_offset + data_length <= file_len);
+    assert_eq!(
+        file_len,
+        leaf_dirs_offset + leaf_dirs_length,
+        "leaf dirs are the last section"
+    );
 }
 
 #[test]
 fn root_leaf_boundary_switches_at_threshold() {
-    // finalize_directories() uses MAX_ROOT_ENTRIES=16384.
+    // finalize_directories() uses MAX_ROOT_ENTRIES=16384. The monotonic
+    // helper's entries are maximally regular (unit tile-id deltas, constant
+    // lengths, contiguous offsets), so their compressed root stays far under
+    // the init-section byte budget and the entry-count threshold is the
+    // deciding rule for them.
     const ROOT_THRESHOLD: usize = 16384;
     let make_config = || PmtilesConfig {
         min_zoom: 8,
@@ -925,5 +944,65 @@ fn root_leaf_boundary_switches_at_threshold() {
     assert!(
         over_leaf_dirs_length > 0,
         "threshold+1 case should use leaf directories"
+    );
+}
+
+#[test]
+fn oversized_root_demotes_to_leaf_directories() {
+    // The fixed data offset turns the spec's first-16,384-bytes root window
+    // into a hard budget, so the root-vs-leaf decision is byte-driven on top
+    // of the entry-count threshold: entries under MAX_ROOT_ENTRIES whose
+    // compressed root overflows the init section must demote to leaf
+    // directories, with the leaf fanout doubling until the root fits. Build
+    // entries that resist compression - irregular tile-id gaps and varying
+    // payload lengths from a deterministic LCG - so 16,000 of them compress
+    // to a root far over 16 KiB.
+    let config = PmtilesConfig {
+        min_zoom: 14,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 14),
+    };
+    let mut writer = PmtilesWriter::new(config);
+
+    let mut rng: u64 = 0x243F_6A88_85A3_08D3;
+    let mut step = || {
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        rng >> 33
+    };
+    let mut tile_id = xy_to_tile_id(14, 0, 0);
+    let mut payload = Vec::new();
+    for i in 0_u64..16_000 {
+        tile_id += 1 + step() % 1000;
+        let (z, x, y) = tile_id_to_zxy(tile_id);
+        assert_eq!(z, 14);
+        let len = 9 + usize::try_from(step() % 192).expect("fits usize");
+        payload.clear();
+        payload.extend_from_slice(&i.to_le_bytes());
+        payload.resize(len, 0x5A);
+        writer.add_tile(z, x, y, &payload).unwrap();
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oversized_root.pmtiles");
+    writer.write_to(&path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+
+    let root_dir_offset = read_u64_le(&bytes, 8);
+    let root_dir_length = read_u64_le(&bytes, 16);
+    let leaf_dirs_length = read_u64_le(&bytes, 48);
+    let num_entries = read_u64_le(&bytes, 80);
+
+    assert_eq!(num_entries, 16_000);
+    assert_eq!(root_dir_offset, 127);
+    assert!(
+        leaf_dirs_length > 0,
+        "a root over the init-section budget must demote to leaf directories"
+    );
+    assert!(
+        root_dir_offset + root_dir_length <= 16384,
+        "root ({root_dir_length} B) must fit the spec's first 16,384 bytes"
     );
 }

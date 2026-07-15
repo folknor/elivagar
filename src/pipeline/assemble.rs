@@ -192,7 +192,7 @@ pub(super) fn phase_assemble_with_ocean(
     let mut pmtiles = if config.in_memory {
         PmtilesWriter::new(pmtiles_config)
     } else {
-        PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir)?
+        PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir, &config.output_path)?
     };
     match config.tile_format {
         TilePayloadFormat::Mvt => {
