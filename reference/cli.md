@@ -299,7 +299,8 @@ Semantic diff of two PMTiles archives (MVT + gzip only).
 | `--tol <N>` | 0 | geometry tolerance in layer extent units |
 | `--max-moved <N>` | 0 | tolerance-moved features allowed before failure |
 | `--max-examples <N>` | 20 | per-class example cap |
-| `--svg-dump <DIR>` | | side-by-side SVG dumps of structural examples |
+| `--overlay <DIR>` | | sampled diff-attribution SVGs, one per differing tile |
+| `--overlay-max <N>` | 64 | cap on overlay SVGs emitted (first N differing tiles) |
 | `--json` | | machine-readable output |
 
 **Invoke this as `brokkr regress`, not directly.** brokkr resolves the current
@@ -387,6 +388,24 @@ directory run first. `regzip` rewrites every payload at gzip level 9 without
 changing decoded content, and is the byte-different known-good control.
 Mutation preserves the source header configuration and metadata verbatim so
 the corpus contract stays identical. It is not a general-purpose tile editor.
+
+### SVG corpus commands
+
+`elivagar corpus render <ARCHIVE> -z Z -x X -y Y [--layers a,b] [--style PATH] [-o OUT]`
+renders one deterministic, integer-coordinate SVG without requiring a corpus
+contract. `corpus render-manifest <ARCHIVE> --corpus DIR [--style PATH]`
+first verifies the digest baseline, then refreshes the manifest SVGs and their
+style hash. `corpus rings <ARCHIVE> -o OUT` emits the canonical polygon ring
+grouping dump used with `scripts/validate/ring-grouping-oracle.mjs`.
+
+When a corpus directory carries a `manifest.toml`, `corpus check`/`bless` extend
+past the digest: they require the contract to record the style hash, refuse on a
+style-hash mismatch, re-render every manifest tile and byte-compare it against
+the committed SVG (a mismatch under an unchanged digest is reported as
+`svg stale`), flag any orphaned tile file, and surface unstyled-layer and
+ring-clamp warnings. `bless` re-renders the manifest in the same command. This
+SVG corpus is the human-diffable layer; the digest remains the exhaustive
+detector and this compare is only its staleness guard.
 
 The hash absorbs gzip bytes, layer/feature/attribute ordering, key/value-table
 permutation, and multi-geometry component ordering. It covers tile addressing,

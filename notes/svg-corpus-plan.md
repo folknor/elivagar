@@ -134,87 +134,89 @@ authoritative.
   gate policy); germany/norway digests optional later - the file is cheap,
   the build to produce it is the cost.
 
-Advisory until its calibration readings are recorded (see the oracle
-discipline section below); `brokkr regress` remains the standing gate until
-then.
+Calibration readings recorded (see the oracle discipline section below);
+`brokkr regress` remains the standing gate regardless, formally, until
+spec C.
 
-## Tier 2: the SVG corpus
+## Tier 2: the SVG corpus - landed (Spec B)
 
-- `corpus/<dataset>/tiles/z{z}-x{x}-y{y}[-<layerset>].svg`, rendered by a
-  canonical render core (spec B) from the same build the digest was taken
-  from, listed in `corpus/<dataset>/manifest.toml`.
-- Canonical form: layers sorted by name; features sorted by
-  `compare_detail_features`; rings grouped by the classifyRings port;
-  nonzero fill; integer coordinates (the decoded MVT values verbatim - no
-  floats); stable ids derived from canonical order. Within a commit,
-  output is already byte-identical; across commits the canonical sort
-  absorbs legitimate reorder - so an unchanged tile re-renders
-  byte-identical and rotation commits only rewrite genuinely changed
-  files.
+- `corpus/<dataset>/tiles/z{z}-x{x}-y{y}[-<layerset>].svg`, rendered by the
+  canonical render core (`src/corpus/render.rs`) from the same build the
+  digest was taken from, listed in `corpus/<dataset>/manifest.toml`.
+- Canonical form: layers paint in the committed `corpus/style.toml` order
+  (bottom to top - an unstyled layer draws on top in name order and is
+  warned about, since alphabetical order would defeat the "does this
+  render look right" gate the corpus exists for); features sorted by
+  `compare_detail_features`; rings grouped by a verbatim Rust port of
+  MapLibre's classifyRings, run over the rings in WIRE order (not the
+  canonically-grouped components - only wire order reproduces what
+  MapLibre actually draws); nonzero fill; integer coordinates (the decoded
+  MVT values verbatim - no floats); stable ids derived from canonical
+  order. Within a commit, output is already byte-identical; across commits
+  the canonical sort absorbs legitimate reorder - so an unchanged tile
+  re-renders byte-identical and rotation commits only rewrite genuinely
+  changed files.
 - Style from the committed `corpus/style.toml` (layer + attribute-value
   match -> fill/stroke/opacity, mirroring tilepeek's table at adoption
-  time). The style file's hash is recorded in the corpus contract; a style
-  edit is a corpus re-render with a zero-digest-delta commit.
+  time). The style file's xxh3-128 is recorded under `corpus/<dataset>/
+  contract.json`'s `style` key; `corpus check` refuses on a style/contract
+  mismatch, and `corpus render-manifest` re-renders the manifest and
+  updates the hash after a style edit.
 - The >500-ring MapLibre/OL divergence: the renderer emits the MapLibre
-  clamp and flags the tile in `check` output ("cannot match both
-  viewers") rather than silently picking one.
-- **Framing (review R1): tier 2 is the human layer, NOT an independent
-  detection gate.** The corpus check runs over a manifest subset; the digest
-  runs over every tile, so the corpus check can never catch anything the
-  digest misses. Do not subject it to both-direction oracle calibration as a
-  detector - that is ceremony on a redundant detector. Its unique value is
-  human-diffability at rotation time. Keep the digest as the sole exhaustive
-  detection gate; keep only the tier-2 human-review "does this render look
-  right" calibration.
-- **The render core's `classifyRings` port must itself be verified (review
-  R1).** Tier 2 introduces a THIRD ring-classification implementation (after
-  `earcut-oracle.mjs` and the pipeline's own handling), living in the render
-  core. The earcut and boundary-line oracles decode the PMTiles archive, not
-  the corpus SVGs, so a ring-grouping bug in the Rust port would render an
-  SVG wrong, get blessed once, and then pass byte-equality against its own
-  wrong output forever - invisible to every existing oracle. Spec B must
-  cross-check the renderer's ring grouping against the earcut oracle's
-  grouping on the same tiles, or the corpus's human-review value is built on
-  an unverified renderer.
-- **Byte-determinism of the render core needs an explicit acceptance test
-  (review R1).** The "unchanged tile re-renders byte-identical; rotations
-  rewrite only genuinely changed files" property rests on the renderer being
-  a pure deterministic function of canonical content + style. Any hidden
-  nondeterminism - hash-container iteration order in style lookup, a float in
-  an opacity value, a cross-machine difference - silently produces churn
-  diffs that defeat the human-review premise. Spec B must include a "render
-  twice, assert byte-identical" test, ideally cross-machine. Std hash
-  containers are already banned at the lint level (commit 76492b8), which
-  helps, but the render core is new surface that must assert this directly.
+  clamp (largest rings by area survive, MapLibre's own stable sort) and
+  flags the tile with `data-clamped="N"` plus a warning in `check`/`bless`/
+  `render-manifest` output ("cannot match both viewers") rather than
+  silently picking one.
+- **Framing: tier 2 is the human layer, NOT an independent detection
+  gate.** The corpus check runs over a manifest subset; the digest runs
+  over every tile, so the corpus check can never catch anything the digest
+  misses. It is not subject to both-direction oracle calibration as a
+  detector - that would be ceremony on a redundant detector. Its unique
+  value is human-diffability at rotation time; the digest stays the sole
+  exhaustive detection gate.
+- **The render core's classifyRings port is checked against an
+  independent oracle, not trusted on its own.** `elivagar corpus rings`
+  and `scripts/validate/ring-grouping-oracle.mjs` each dump the same
+  MapLibre-verbatim ring grouping over every unique polygon payload of a
+  build, sorted identically on both sides for a `cmp`; any divergence is a
+  port bug by definition, since the node side is verbatim MapLibre. The
+  full-corpus reading of this oracle against a fresh denmark build is a
+  pending post-commit step (see oracle discipline, below) - no SVG is
+  blessed until it reads clean.
+- **Byte-determinism of the render core has an explicit acceptance
+  test.** A synthetic multi-layer tile (points, lines, multi-ring
+  polygons, a >500-ring polygon, a zero-area ring, an unstyled layer)
+  rendered twice through separate style loads asserts byte equality,
+  under `brokkr check`. The whole-corpus reading of the same property
+  (render the manifest twice against a fresh build, assert an empty `git
+  diff`) is a pending post-commit step.
 - Manifest policy (the sizing consequence): each entry may pin a layer
-  subset (a coast tile commits its ocean+boundaries render at ~40 KB, not
-  a 1.2 MB all-layer render); dense z14 all-layer entries are budgeted
-  individually; the corpus targets low tens of MB committed. Seeding:
-  representative classes (coast, dense city, rural, boundary junction,
-  island cluster, empty ocean) plus the hard-tiles ledger - z5 16 9 and
-  z5 17 9 (the 2026-07-15 spikes), the remaining 07-12 spike sites, the
-  R23 ClosePath tile class. Every future fixed visual bug drops its tile
-  in. Accretion is append-only.
+  subset (a coast tile commits its ocean+boundaries render at a fraction
+  of a full-layer render); dense z14 all-layer entries are budgeted
+  individually; the corpus targets low tens of MB committed.
+  `corpus/denmark/manifest.toml` is seeded with representative classes
+  (coast, dense city, rural, boundary junction, island cluster, empty
+  ocean) plus the hard-tiles ledger - z5 16 9 and z5 17 9 (the 2026-07-15
+  spikes), the R23 ClosePath tile class. The render-and-bless of this
+  seeded manifest against a fresh denmark build, and the render-and-eyeball
+  verification of each seeded tile, are pending post-commit steps. Every
+  future fixed visual bug drops its tile in afterward; accretion is
+  append-only.
 
-## Tier 3: overlay attribution
+## Tier 3: overlay attribution - landed (Spec B)
 
-- `elivagar regress <current> --against <comparand>` survives unchanged as
-  the engine. A new overlay emitter renders, for each differing tile, one
-  SVG: matched-unchanged features faint grey, current-only pink,
-  comparand-only blue, with the classification (structural vs tolerance,
-  attr changes) in the SVG title/desc. Extends `dump_svg_examples`'s
-  precedent from side-by-side pairs to a single diff image.
-- **The overlay must render the changed-PAIR category, not only additions
-  and removals (review R2).** current-only / comparand-only / unchanged
-  omits the main regression class: `compare_anonymous_group` ->
-  `pair_detail_features` (regress.rs) pairs features present on BOTH sides
-  and `classify_detail_geometry` then splits them into tolerance-moved,
-  structural-moved, and attr-changed. Those features are neither current-only
-  nor comparand-only, so the three-color scheme renders nothing for them.
-  The emitter must draw BOTH geometries of every changed pair in the two
-  comparison colors; putting the classification only in `<title>`/`<desc>`
-  is not geometry attribution. Attribute-only changes need visible canonical
-  old/new attribute text or another explicit visual treatment.
+- `elivagar regress <current> --against <comparand> --overlay <DIR>
+  [--overlay-max N]` (default 64) is the engine, replacing the old
+  side-by-side-pair dump. It renders one diff SVG per differing tile, up
+  to the sample cap, in `differing_ranges` order: matched-unchanged
+  features faint grey, current-only pink, comparand-only blue, and the
+  changed-PAIR category (tolerance-moved, structural-moved, geom-type
+  change) drawn with BOTH geometries in the two comparison colors - not
+  just a `<title>`/`<desc>` classification, which would not be geometry
+  attribution. Attribute-only changes get canonical old->new text in a
+  panel; if an attr-changed pair's geometry ALSO differs, both geometries
+  still draw so a co-occurring geometry regression is never hidden behind
+  the attribute panel.
 - Comparand resolution is always explicit (two paths). No blessed
   registry. Docs point at `data/tilegen/<dataset>-<commit>.pmtiles` as the
   natural comparand source.
@@ -227,8 +229,9 @@ null for computed-ocean archives, which TOML cannot represent), one file
 per dataset, written at bless time: input PBF xxh128 + variant, the full
 config contract as provenance defines it (profile, zooms, tile
 format/compression, seam/fanout/simplify settings), the ocean artifact key
-(shapefile hashes + OCEAN_POLICY_VERSION + level), and, once tier 2 lands,
-the style file hash. `check` compares contract
+(shapefile hashes + OCEAN_POLICY_VERSION + level), and, once a dataset's
+corpus carries a manifest, the style file hash (`style.path`/
+`style.xxh3_128`, written by `bless`/`render-manifest`). `check` compares contract
 before content and refuses with the mismatch named - never a silent
 cross-contract diff. This is the corpus's equivalent of inspect's
 "comparability contract printed in full, not sampled" rule, and it is what
@@ -240,8 +243,8 @@ Blessing = one command (`elivagar corpus bless`) that writes digest +
 contract + re-renders the manifest, and one git commit containing the
 result. The commit IS the bless; review of that diff is the human gate.
 The 07-14 mis-bless class (wrong-config archive blessed) becomes visible
-in that diff as a contract.json change plus (once tier 2 lands) a mass SVG
-rewrite.
+in that diff as a contract.json change plus, for any dataset with a
+manifest, a mass SVG rewrite.
 
 **Reviewability hole (review R2): a rotation is NOT exhaustively reviewable
 as drafted.** `corpus bless` overwrites the digest directly, but the human
@@ -259,7 +262,8 @@ denmark rotation's git diff over `corpus/denmark/leaves` names every
 changed tile run directly - no comparand archive needed. The hole remains
 open for any dataset blessed in bucket mode (planet scale): a bucket hash
 cannot name individual tiles, so bucket-mode rotations still hand exact
-attribution to tier 3 or committed overlays once tier 2 lands.
+attribution to tier 3's overlay emitter (landed, Spec B) or committed
+corpus overlays.
 
 ## Oracle discipline compliance
 
@@ -267,47 +271,60 @@ Both gates are categorical (byte equality on deterministic canonical
 output; pass = zero diffs, achievable) and must calibrate both directions
 before promotion, per AGENTS.md:
 
-- FIRES on known-bad: for the digest gate (tier 1, landed), controlled
+- FIRES on known-bad: for the digest gate (tier 1, landed and calibrated -
+  `a8c4f84`/`340215a`, readings in `reference/performance.md`), controlled
   defect mutations built by the landed `corpus mutate` instrument against a
   fresh clean archive - not the bc71cf1/d8b5147 pair below. For the SVG
-  corpus (tier 2, not yet landed), the corpus check must flag z5-16-9 and
-  z5-17-9 (the 2026-07-15 stale-artifact spikes).
+  corpus (tier 2, landed): `corpus mutate --op nudge-geometry` against an
+  all-layers manifest tile must move both the digest and the rendered SVG
+  (a layer-filtered manifest entry only reliably moves if the mutator's
+  first-encoded layer happens to be one it renders), and `corpus check`
+  must flag z5-16-9 and z5-17-9 by eyeball via the contract-free `corpus
+  render` against the preserved `bc71cf1` archive (the 2026-07-15
+  stale-artifact spikes). Neither reading is recorded yet.
 - CLEARS on known-good: a fresh rebuild passes bit-clean; the digest gate
   additionally requires a byte-different, semantically-identical rebuild
   (`corpus mutate --op regzip`) to also pass - the reading that would catch
   a hash accidentally depending on gzip bytes, writer dedup, or run
-  splitting.
+  splitting. Tier 2 requires the same regzip control to pass `corpus
+  check` end to end (proving the SVG compare reads decoded content, not
+  bytes) - also not yet recorded.
 
 The bc71cf1/d8b5147 pair cannot exercise the digest `check` path: the two
 archives differ in `OCEAN_POLICY_VERSION`, so the contract guard refuses
 before any content comparison runs. That pair calibrates only the CONTRACT
 GUARD's fires direction (`bc71cf1` against a committed contract); a
 same-contract known-good/known-bad pair for content calibration is what
-`corpus mutate` is for. This is resolved for tier 1 (Spec A); tier 2 (Spec
-B) still needs its own calibration approach when it lands, and the
-preserved `bc71cf1` file's survival remains a prerequisite for the
-contract-guard reading either way.
+`corpus mutate` is for. Tier 2 (Spec B) reuses the same instrument plus the
+preserved `bc71cf1` archive for its own FIRES/CLEARS pair - the mechanism
+is landed, the readings are the pending post-commit step.
 
-Until the digest gate's calibration readings are recorded, and later tier
-2's, corpus check is advisory and the bless machinery remains the gate.
-The cutover (spec C) is conditional on both.
+Tier 1's calibration readings are recorded (see above); tier 2's are not
+yet. Corpus check stays advisory until they are, and the bless machinery
+remains the standing gate. The cutover (spec C) is conditional on both.
 
 ## Spec split (three, sequential)
 
-1. **Spec A - digest gate. Landed** (`elivagar corpus check|bless|mutate`,
-   `reference/cli.md`; see git history for the design record). Independent
-   of any rendering, as planned. Calibration against a same-contract
-   known-good/known-bad pair - built with the `corpus mutate` instrument
-   rather than the bare bc71cf1/d8b5147 archives, which fail the contract
-   guard before any content comparison - is the remaining step before the
-   digest gate stops being advisory; `brokkr regress` is the standing gate
-   until those readings are recorded.
-2. **Spec B - canonical render core + corpus.** classifyRings port, style
-   file, canonical ordering via the regress detail comparators, integer
-   emission, manifest + `corpus bless` re-render + `corpus check`
-   text-compare, seeded manifest, tier 3 overlay emitter (the regress
-   engine is already in tree; the overlay SVG is this spec's second
-   deliverable since it shares the render core).
+1. **Spec A - digest gate. Landed and calibrated** (`elivagar corpus
+   check|bless|mutate`, `reference/cli.md`; see git history for the design
+   record). Independent of any rendering, as planned. Both-direction
+   calibration against a same-contract known-good/known-bad pair (built
+   with `corpus mutate`, not the bare bc71cf1/d8b5147 archives, which fail
+   the contract guard before any content comparison) is recorded in
+   `reference/performance.md`; the gate stays formally advisory until spec
+   C rotates the standing gate.
+2. **Spec B - canonical render core + corpus. Landed** (`elivagar corpus
+   render|render-manifest|rings`, `src/corpus/render.rs`,
+   `src/corpus/overlay.rs`, `corpus/style.toml`; see git history for the
+   design record). classifyRings ported and gated behind an independent
+   differential oracle (`scripts/validate/ring-grouping-oracle.mjs`),
+   canonical ordering via the regress detail comparators, integer
+   emission, the manifest + `corpus bless`/`render-manifest` re-render +
+   `corpus check` text-compare, a seeded denmark manifest, and the tier 3
+   overlay emitter sharing the same render core. The full-corpus oracle
+   run, the fresh-build manifest render/bless, and the FIRES/CLEARS
+   calibration readings are a pending post-commit step; until then tier
+   2/3 stay advisory alongside tier 1's already-recorded calibration.
 3. **Spec C - teardown.** Deletes brokkr.toml blessed entries and
    `data/blessed/` usage, rewires every gate reference (`AGENTS.md`,
    `reference/technical-implementation-spec.md`'s gate list,
@@ -320,8 +337,10 @@ The cutover (spec C) is conditional on both.
    **Cross-repo ordering and inventory (review R2):**
    - The "8 files" grep inventory is incomplete - it misses source and
      user-facing references, at least `src/main.rs` (the `regress`
-     subcommand wiring), `src/regress.rs` (`dump_svg_examples` and the
-     blessed-named comparand parameters), `src/inspect.rs`,
+     subcommand wiring), `src/regress.rs` (the blessed-named comparand
+     parameters throughout the detail diff engine - `dump_svg_examples`
+     itself was deleted at Spec B's landing, replaced by the `--overlay`
+     emitter), `src/inspect.rs`,
      `src/provenance.rs`, `src/pipeline/mod.rs`, and
      `src/geometry/overlay/mod.rs`. Spec C must re-run the inventory over
      source, not just docs, and DECIDE whether `blessed` stays as

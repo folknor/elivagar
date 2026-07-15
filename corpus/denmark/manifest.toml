@@ -1,0 +1,51 @@
+[[tile]]
+z = 5
+x = 16
+y = 9
+layers = ["boundaries", "ocean"]
+note = "2026-07-15 stale-artifact spike"
+[[tile]]
+z = 5
+x = 17
+y = 9
+layers = ["boundaries", "ocean"]
+note = "2026-07-15 stale-artifact spike"
+[[tile]]
+z = 2
+x = 2
+y = 1
+layers = ["ocean"]
+note = "R23 ClosePath multi-ring"
+[[tile]]
+z = 7
+x = 68
+y = 39
+note = "Kattegat"
+[[tile]]
+z = 10
+x = 535
+y = 318
+layers = ["boundaries", "land", "ocean"]
+note = "west Jutland coast"
+[[tile]]
+z = 10
+x = 538
+y = 324
+layers = ["boundaries"]
+note = "DK-DE boundary junction"
+[[tile]]
+z = 11
+x = 1084
+y = 647
+layers = ["land", "ocean", "water_polygons"]
+note = "South Funen"
+[[tile]]
+z = 12
+x = 2150
+y = 1275
+note = "rural mid-Jutland"
+[[tile]]
+z = 14
+x = 8764
+y = 5132
+note = "dense Copenhagen"

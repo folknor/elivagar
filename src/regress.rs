@@ -13,7 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::json;
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::pmtiles_reader::{ArchiveView, BlobRef};
+use crate::pmtiles_reader::{ArchiveView, BlobRef, find_entry, gzip_decompress};
 use crate::pmtiles_writer::tile_id_to_zxy;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -320,32 +320,6 @@ impl RegressReport {
             },
         })
     }
-
-    pub fn dump_svg_examples(
-        &self,
-        current: &Path,
-        blessed: &Path,
-        dir: &Path,
-        max_examples: usize,
-    ) -> io::Result<()> {
-        fs::create_dir_all(dir)?;
-        for (idx, ex) in self
-            .examples
-            .iter()
-            .filter(|ex| ex.class.contains("structural"))
-            .take(max_examples)
-            .enumerate()
-        {
-            let (z, x, y) = tile_id_to_zxy(ex.tile_id);
-            let cur_path = dir.join(format!("{idx:03}-z{z}-x{x}-y{y}-current.svg"));
-            let blessed_path = dir.join(format!("{idx:03}-z{z}-x{x}-y{y}-blessed.svg"));
-            let mut cur_file = fs::File::create(cur_path)?;
-            let mut blessed_file = fs::File::create(blessed_path)?;
-            crate::svg::render_tile_svg(current, z, x, y, &mut cur_file)?;
-            crate::svg::render_tile_svg(blessed, z, x, y, &mut blessed_file)?;
-        }
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +509,7 @@ pub fn regress(current: &Path, blessed: &Path, cfg: &RegressConfig) -> io::Resul
             let cur = decode_detail_tile(cur_bytes).map_err(invalid_tile)?;
             let bl_bytes = scratch.decompress(blessed.raw_blob(state.work.pair.blessed)?)?;
             let bl = decode_detail_tile(bl_bytes).map_err(invalid_tile)?;
-            state.detail = Some(compare_detail_tiles(&cur, &bl, cfg));
+            state.detail = Some(compare_detail_tiles::<DetailOutcome>(&cur, &bl, cfg));
             Ok(())
         })?;
     report.counters.detail_pass_ms = elapsed_ms(detail_start);
@@ -572,6 +546,52 @@ pub fn regress(current: &Path, blessed: &Path, cfg: &RegressConfig) -> io::Resul
     report.counters.peak_rss_kb = peak_rss_kb().unwrap_or(0);
     emit_regress_counters(&report.counters);
     Ok(report)
+}
+
+/// Emit sampled, pair-aware attribution SVGs for the first differing tile IDs.
+pub fn dump_overlays(
+    current: &Path,
+    blessed: &Path,
+    report: &RegressReport,
+    cfg: &RegressConfig,
+    dir: &Path,
+    max: usize,
+    background: &str,
+) -> io::Result<u64> {
+    fs::create_dir_all(dir)?;
+    let current_view = ArchiveView::open(current)?;
+    let blessed_view = ArchiveView::open(blessed)?;
+    let current_runs = current_view.read_all_runs()?;
+    let blessed_runs = blessed_view.read_all_runs()?;
+    let mut written = 0u64;
+    'ranges: for range in &report.differing_ranges {
+        for tile_id in range.start..=range.end {
+            if usize::try_from(written).unwrap_or(usize::MAX) >= max {
+                break 'ranges;
+            }
+            let read = |view: &ArchiveView,
+                        runs: &[crate::pmtiles_reader::RawDirEntry]|
+             -> io::Result<Vec<u8>> {
+                match find_entry(runs, tile_id) {
+                    Some(entry) => gzip_decompress(view.raw_blob_at(entry.offset, entry.length)?),
+                    None => Ok(Vec::new()),
+                }
+            };
+            let cur =
+                decode_detail_tile(&read(&current_view, &current_runs)?).map_err(invalid_tile)?;
+            let bl =
+                decode_detail_tile(&read(&blessed_view, &blessed_runs)?).map_err(invalid_tile)?;
+            let collector =
+                compare_detail_tiles::<crate::corpus::overlay::OverlayCollector>(&cur, &bl, cfg);
+            let (z, x, y) = tile_id_to_zxy(tile_id);
+            fs::write(
+                dir.join(format!("z{z}-x{x}-y{y}.svg")),
+                crate::corpus::overlay::render_overlay(&collector, background),
+            )?;
+            written += 1;
+        }
+    }
+    Ok(written)
 }
 
 fn group_pair_spans(spans: Vec<PairSpan>) -> (Vec<PairState>, Vec<PairSpan>) {
@@ -1180,7 +1200,7 @@ fn emit_regress_counters(counters: &RegressCounters) {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum DetailAttr {
+pub(crate) enum DetailAttr {
     String(Arc<str>),
     Float(u32),
     Double(u64),
@@ -1190,44 +1210,57 @@ enum DetailAttr {
     Bool(bool),
 }
 
+impl DetailAttr {
+    pub(crate) fn matches_toml(&self, value: &toml::Value) -> bool {
+        match (self, value) {
+            (Self::String(a), toml::Value::String(b)) => a.as_ref() == b,
+            (Self::Int(a), toml::Value::Integer(b)) => *a == *b,
+            (Self::UInt(a), toml::Value::Integer(b)) => u64::try_from(*b).ok() == Some(*a),
+            (Self::SInt(a), toml::Value::Integer(b)) => *a == *b,
+            (Self::Bool(a), toml::Value::Boolean(b)) => *a == *b,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct DetailRing {
-    role: CanonRingRole,
-    points: Vec<(i32, i32)>,
+pub(crate) struct DetailRing {
+    pub(crate) role: CanonRingRole,
+    pub(crate) points: Vec<(i32, i32)>,
     bbox: Bbox,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct DetailComponent {
-    rings: Vec<DetailRing>,
+pub(crate) struct DetailComponent {
+    pub(crate) rings: Vec<DetailRing>,
     bbox: Bbox,
     digest: u128,
     structure: ComponentStructure,
 }
 
 #[derive(Clone, Debug)]
-struct DetailFeature {
-    id: Option<u64>,
-    geom_type: u8,
-    attrs: Vec<(Arc<str>, DetailAttr)>,
-    components: Vec<DetailComponent>,
+pub(crate) struct DetailFeature {
+    pub(crate) id: Option<u64>,
+    pub(crate) geom_type: u8,
+    pub(crate) attrs: Vec<(Arc<str>, DetailAttr)>,
+    pub(crate) components: Vec<DetailComponent>,
     attrs_digest: u128,
-    geometry_digest: u128,
+    pub(crate) geometry_digest: u128,
     bbox: Bbox,
     structure: FeatureStructure,
 }
 
 #[derive(Clone, Debug)]
-struct DetailLayer {
-    name: Arc<str>,
-    extent: u32,
-    version: u32,
-    features: Vec<DetailFeature>,
+pub(crate) struct DetailLayer {
+    pub(crate) name: Arc<str>,
+    pub(crate) extent: u32,
+    pub(crate) version: u32,
+    pub(crate) features: Vec<DetailFeature>,
 }
 
 #[derive(Clone, Debug)]
-struct DetailTile {
-    layers: Vec<DetailLayer>,
+pub(crate) struct DetailTile {
+    pub(crate) layers: Vec<DetailLayer>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1320,7 +1353,7 @@ struct FeatureStructure {
     roles: u64,
 }
 
-fn decode_detail_tile(data: &[u8]) -> Result<DetailTile, String> {
+pub(crate) fn decode_detail_tile(data: &[u8]) -> Result<DetailTile, String> {
     let mut layers = Vec::new();
     let mut cursor = Cursor::new(data);
     while let Some((field, wire_type)) = cursor
@@ -1409,7 +1442,7 @@ fn decode_detail_layer(data: &[u8]) -> Result<DetailLayer, String> {
     })
 }
 
-fn decode_detail_attr(data: &[u8]) -> Result<DetailAttr, String> {
+pub(crate) fn decode_detail_attr(data: &[u8]) -> Result<DetailAttr, String> {
     let mut out = None;
     let mut cursor = Cursor::new(data);
     while let Some((field, wire_type)) = cursor
@@ -1467,7 +1500,7 @@ fn decode_detail_attr(data: &[u8]) -> Result<DetailAttr, String> {
     out.ok_or_else(|| "empty MVT value".to_string())
 }
 
-fn decode_detail_feature(
+pub(crate) fn decode_detail_feature(
     data: &[u8],
     keys: &[Arc<str>],
     values: &[DetailAttr],
@@ -1838,7 +1871,7 @@ fn feature_structure(components: &[DetailComponent]) -> FeatureStructure {
     }
 }
 
-fn compare_detail_features(a: &DetailFeature, b: &DetailFeature) -> Ordering {
+pub(crate) fn compare_detail_features(a: &DetailFeature, b: &DetailFeature) -> Ordering {
     a.id.cmp(&b.id)
         .then_with(|| a.geom_type.cmp(&b.geom_type))
         .then_with(|| a.attrs.cmp(&b.attrs))
@@ -2043,7 +2076,7 @@ struct OutcomeEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum OutcomeClass {
+pub(crate) enum OutcomeClass {
     LayerAdded,
     LayerRemoved,
     ExtentMismatch,
@@ -2055,7 +2088,7 @@ enum OutcomeClass {
 }
 
 impl OutcomeClass {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::LayerAdded => "layer_added",
             Self::LayerRemoved => "layer_removed",
@@ -2095,26 +2128,45 @@ impl ContentCounts {
     }
 }
 
-fn compare_detail_tiles(
+pub(crate) trait DiffSink {
+    fn record(
+        &mut self,
+        layer: &Arc<str>,
+        class: OutcomeClass,
+        displacement: i32,
+        current: Option<&DetailFeature>,
+        blessed: Option<&DetailFeature>,
+    );
+    fn matched(&mut self, _layer: &Arc<str>, _current: &DetailFeature, _blessed: &DetailFeature) {}
+    fn layer_event(
+        &mut self,
+        _class: OutcomeClass,
+        _current: Option<&DetailLayer>,
+        _blessed: Option<&DetailLayer>,
+    ) {
+    }
+}
+
+pub(crate) fn compare_detail_tiles<S: DiffSink + Default>(
     current: &DetailTile,
     blessed: &DetailTile,
     cfg: &RegressConfig,
-) -> DetailOutcome {
-    let mut out = DetailOutcome::default();
+) -> S {
+    let mut out = S::default();
     let (mut ci, mut bi) = (0usize, 0usize);
     while ci < current.layers.len() || bi < blessed.layers.len() {
         match (current.layers.get(ci), blessed.layers.get(bi)) {
             (Some(cur), Some(bl)) => match cur.name.cmp(&bl.name) {
                 Ordering::Less => {
-                    out.record(Arc::clone(&cur.name), None, OutcomeClass::LayerAdded, 0);
+                    out.layer_event(OutcomeClass::LayerAdded, Some(cur), None);
                     ci += 1;
                 }
                 Ordering::Greater => {
-                    out.record(Arc::clone(&bl.name), None, OutcomeClass::LayerRemoved, 0);
+                    out.layer_event(OutcomeClass::LayerRemoved, None, Some(bl));
                     bi += 1;
                 }
                 Ordering::Equal if cur.extent != bl.extent || cur.version != bl.version => {
-                    out.record(Arc::clone(&cur.name), None, OutcomeClass::ExtentMismatch, 0);
+                    out.layer_event(OutcomeClass::ExtentMismatch, Some(cur), Some(bl));
                     ci += 1;
                     bi += 1;
                 }
@@ -2125,11 +2177,11 @@ fn compare_detail_tiles(
                 }
             },
             (Some(cur), None) => {
-                out.record(Arc::clone(&cur.name), None, OutcomeClass::LayerAdded, 0);
+                out.layer_event(OutcomeClass::LayerAdded, Some(cur), None);
                 ci += 1;
             }
             (None, Some(bl)) => {
-                out.record(Arc::clone(&bl.name), None, OutcomeClass::LayerRemoved, 0);
+                out.layer_event(OutcomeClass::LayerRemoved, None, Some(bl));
                 bi += 1;
             }
             (None, None) => break,
@@ -2138,8 +2190,15 @@ fn compare_detail_tiles(
     out
 }
 
-impl DetailOutcome {
-    fn record(&mut self, layer: Arc<str>, id: Option<u64>, class: OutcomeClass, displacement: i32) {
+impl DiffSink for DetailOutcome {
+    fn record(
+        &mut self,
+        layer: &Arc<str>,
+        class: OutcomeClass,
+        displacement: i32,
+        current: Option<&DetailFeature>,
+        blessed: Option<&DetailFeature>,
+    ) {
         match class {
             OutcomeClass::LayerAdded => self.counts.layers_added += 1,
             OutcomeClass::LayerRemoved => self.counts.layers_removed += 1,
@@ -2151,19 +2210,28 @@ impl DetailOutcome {
             OutcomeClass::StructuralMoved => self.counts.structural_moved += 1,
         }
         self.events.push(OutcomeEvent {
-            layer,
-            id,
+            layer: Arc::clone(layer),
+            id: current.or(blessed).and_then(|feature| feature.id),
             class,
             displacement,
         });
     }
+    fn layer_event(
+        &mut self,
+        class: OutcomeClass,
+        current: Option<&DetailLayer>,
+        blessed: Option<&DetailLayer>,
+    ) {
+        let layer = current.or(blessed).expect("layer event has a layer");
+        self.record(&layer.name, class, 0, None, None);
+    }
 }
 
-fn compare_detail_layer(
+pub(crate) fn compare_detail_layer<S: DiffSink>(
     current: &DetailLayer,
     blessed: &DetailLayer,
     cfg: &RegressConfig,
-    out: &mut DetailOutcome,
+    out: &mut S,
 ) {
     let ocean = current.name.as_ref() == "ocean";
     let mut cur_ids: IdGroups<'_> = FxHashMap::default();
@@ -2276,66 +2344,58 @@ impl<'a> AnonymousGroups<'a> {
     }
 }
 
-fn compare_id_group(
+fn compare_id_group<S: DiffSink>(
     layer: &Arc<str>,
     current: &[&DetailFeature],
     blessed: &[&DetailFeature],
     cfg: &RegressConfig,
-    out: &mut DetailOutcome,
+    out: &mut S,
 ) {
     let pairs = current.len().min(blessed.len());
     for idx in 0..pairs {
         let cur = current[idx];
         let bl = blessed[idx];
         if cur.attrs != bl.attrs {
-            out.record(Arc::clone(layer), cur.id, OutcomeClass::AttrChanged, 0);
+            out.record(layer, OutcomeClass::AttrChanged, 0, Some(cur), Some(bl));
         } else {
-            classify_detail_geometry(Arc::clone(layer), cur, bl, cfg, out);
+            classify_detail_geometry(layer, cur, bl, cfg, out);
         }
     }
     for feature in current.iter().skip(pairs) {
-        out.record(
-            Arc::clone(layer),
-            feature.id,
-            OutcomeClass::AddedFeatures,
-            0,
-        );
+        out.record(layer, OutcomeClass::AddedFeatures, 0, Some(feature), None);
     }
     for feature in blessed.iter().skip(pairs) {
-        out.record(
-            Arc::clone(layer),
-            feature.id,
-            OutcomeClass::MissingFeatures,
-            0,
-        );
+        out.record(layer, OutcomeClass::MissingFeatures, 0, None, Some(feature));
     }
 }
 
-fn compare_anonymous_group(
+fn compare_anonymous_group<S: DiffSink>(
     layer: &Arc<str>,
     current: &[&DetailFeature],
     blessed: &[&DetailFeature],
     cfg: &RegressConfig,
-    out: &mut DetailOutcome,
+    out: &mut S,
 ) {
     let pairs = pair_detail_features(current, blessed);
     for (ci, bi) in pairs.paired {
-        classify_detail_geometry(Arc::clone(layer), current[ci], blessed[bi], cfg, out);
+        classify_detail_geometry(layer, current[ci], blessed[bi], cfg, out);
     }
     for ci in pairs.unpaired_current {
         out.record(
-            Arc::clone(layer),
-            current[ci].id,
+            layer,
             OutcomeClass::AddedFeatures,
             0,
+            Some(current[ci]),
+            None,
         );
     }
     for bi in pairs.unpaired_blessed {
         out.record(
-            Arc::clone(layer),
-            blessed[bi].id,
+            layer,
             OutcomeClass::MissingFeatures,
             0,
+            None,
+            Some(blessed[bi]),
         );
     }
 }
@@ -2730,22 +2790,35 @@ fn finish_pairs(cur_used: &[bool], bl_used: &[bool], paired: Vec<(usize, usize)>
     }
 }
 
-fn classify_detail_geometry(
-    layer: Arc<str>,
+fn classify_detail_geometry<S: DiffSink>(
+    layer: &Arc<str>,
     current: &DetailFeature,
     blessed: &DetailFeature,
     cfg: &RegressConfig,
-    out: &mut DetailOutcome,
+    out: &mut S,
 ) {
     if current.geom_type != blessed.geom_type {
-        out.record(layer, current.id, OutcomeClass::StructuralMoved, 0);
+        out.record(
+            layer,
+            OutcomeClass::StructuralMoved,
+            0,
+            Some(current),
+            Some(blessed),
+        );
         return;
     }
     let Some(distance) = classify_detail_components(current, blessed) else {
-        out.record(layer, current.id, OutcomeClass::StructuralMoved, 0);
+        out.record(
+            layer,
+            OutcomeClass::StructuralMoved,
+            0,
+            Some(current),
+            Some(blessed),
+        );
         return;
     };
     if distance == 0 {
+        out.matched(layer, current, blessed);
         return;
     }
     let class = if distance <= cfg.tol {
@@ -2753,7 +2826,7 @@ fn classify_detail_geometry(
     } else {
         OutcomeClass::StructuralMoved
     };
-    out.record(layer, current.id, class, distance);
+    out.record(layer, class, distance, Some(current), Some(blessed));
 }
 
 fn classify_detail_components(current: &DetailFeature, blessed: &DetailFeature) -> Option<i32> {

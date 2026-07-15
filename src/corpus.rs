@@ -21,6 +21,11 @@ use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_
 use crate::provenance::{self, ContractDoc, ContractState};
 use crate::regress::{DecodeScratch, next_zoom_boundary, semantic_hash};
 
+pub mod manifest;
+pub mod overlay;
+pub mod render;
+pub mod style;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DigestMode {
     Leaves,
@@ -303,11 +308,86 @@ fn write_atomic(path: &Path, text: String) -> io::Result<()> {
     fs::write(&tmp, text)?;
     fs::rename(tmp, path)
 }
-fn contract_text(c: &ContractDoc) -> io::Result<String> {
-    let v = serde_json::json!({"schema":1,"input":c.input,"config":c.config,"build":c.build});
+// The `style` object (path + xxh3-128 of the style actually used to render) is
+// carried only when a manifest render produced it; bless without a manifest
+// passes None so non-corpus datasets gain no spurious style key. The provenance
+// schema is untouched: extract_contract reads only schema/input/config/build.
+fn contract_text(c: &ContractDoc, style: Option<serde_json::Value>) -> io::Result<String> {
+    let mut v = serde_json::json!({"schema":1,"input":c.input,"config":c.config,"build":c.build});
+    if let Some(style) = style {
+        v["style"] = style;
+    }
     serde_json::to_string_pretty(&v)
         .map(|s| format!("{s}\n"))
         .map_err(io::Error::other)
+}
+
+/// Re-render every committed manifest target after proving the archive equals
+/// the digest baseline. This intentionally never rotates digest material.
+pub fn render_manifest(
+    archive: &Path,
+    corpus_dir: &Path,
+    style_path: &Path,
+) -> io::Result<(CorpusVerdict, CheckReport)> {
+    // Gate on the DIGEST only (run_tier2 = false): SVG staleness and style-hash
+    // drift are exactly what this command fixes, so they must not block it - only
+    // a real digest/contract/format refusal does. SVGs are still only ever
+    // rendered from digest-equal content.
+    let (verdict, report) = check_inner(archive, corpus_dir, false)?;
+    if verdict != CorpusVerdict::Pass {
+        return Ok((verdict, report));
+    }
+    let manifest_path = corpus_dir.join("manifest.toml");
+    if !manifest_path.exists() {
+        return Ok(refused("manifest.toml is absent"));
+    }
+    let manifest = manifest::load(&manifest_path)?;
+    let style = style::Style::load(style_path)?;
+    let view = ArchiveView::open(archive)?;
+    let tiles = corpus_dir.join("tiles");
+    fs::create_dir_all(&tiles)?;
+    let mut wanted = BTreeSet::new();
+    let mut warnings = Vec::new();
+    for entry in &manifest.tile {
+        let name = manifest::file_name(entry);
+        wanted.insert(name.clone());
+        let svg = render::render_archive_tile(
+            &view,
+            entry.z,
+            entry.x,
+            entry.y,
+            &style,
+            if entry.layers.is_empty() {
+                None
+            } else {
+                Some(&entry.layers)
+            },
+        )?;
+        warnings.extend(svg.warnings);
+        fs::write(tiles.join(name), svg.bytes)?;
+    }
+    for entry in fs::read_dir(&tiles)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && !wanted.contains(&entry.file_name().to_string_lossy().to_string())
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    let style_json =
+        serde_json::json!({"path": style_path.to_string_lossy(), "xxh3_128": style.hash_hex()});
+    write_atomic(
+        &corpus_dir.join("contract.json"),
+        contract_text(&candidate_contract(&view)?, Some(style_json))?,
+    )?;
+    Ok((
+        CorpusVerdict::Pass,
+        CheckReport {
+            message: format!("rendered {} manifest SVGs", wanted.len()),
+            warnings,
+            ..Default::default()
+        },
+    ))
 }
 fn contract_from_file(path: &Path) -> io::Result<ContractDoc> {
     let text = fs::read_to_string(path)?;
@@ -703,8 +783,16 @@ fn bucket_delta_lines(committed: &[BucketDigest], current: &[BucketDigest]) -> (
     (changed, out)
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn check(archive: &Path, corpus_dir: &Path) -> io::Result<(CorpusVerdict, CheckReport)> {
+    check_inner(archive, corpus_dir, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn check_inner(
+    archive: &Path,
+    corpus_dir: &Path,
+    run_tier2: bool,
+) -> io::Result<(CorpusVerdict, CheckReport)> {
     let start = Instant::now();
     let base = parse_baseline(&corpus_dir.join("digest"))?;
     let committed_leaves = if base.mode == DigestMode::Leaves {
@@ -747,6 +835,79 @@ pub fn check(archive: &Path, corpus_dir: &Path) -> io::Result<(CorpusVerdict, Ch
     let (d, current_leaves) = compute(&a, base.mode)?;
     let pass = d.root == base.root && (base.mode != DigestMode::Buckets || d.broot == base.broot);
     if pass {
+        if run_tier2 && corpus_dir.join("manifest.toml").exists() {
+            let raw: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(corpus_dir.join("contract.json"))?)
+                    .map_err(io::Error::other)?;
+            let Some(recorded) = raw
+                .pointer("/style/xxh3_128")
+                .and_then(serde_json::Value::as_str)
+            else {
+                return Ok(refused(
+                    "corpus has a manifest but the contract records no style hash - run corpus render-manifest",
+                ));
+            };
+            let style_path = raw
+                .pointer("/style/path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("corpus/style.toml")
+                .to_string();
+            let style = style::Style::load(Path::new(&style_path))?;
+            if recorded != style.hash_hex() {
+                return Ok(refused(
+                    "corpus style hash differs from contract - run corpus render-manifest",
+                ));
+            }
+            let manifest = manifest::load(&corpus_dir.join("manifest.toml"))?;
+            let tiles = corpus_dir.join("tiles");
+            let mut expected = BTreeSet::new();
+            let mut stale = Vec::new();
+            for entry in &manifest.tile {
+                let name = manifest::file_name(entry);
+                expected.insert(name.clone());
+                let svg = render::render_archive_tile(
+                    &a,
+                    entry.z,
+                    entry.x,
+                    entry.y,
+                    &style,
+                    if entry.layers.is_empty() {
+                        None
+                    } else {
+                        Some(&entry.layers)
+                    },
+                )?;
+                let path = tiles.join(&name);
+                if fs::read(&path).ok().as_deref() != Some(svg.bytes.as_slice()) {
+                    stale.push(path.display().to_string());
+                }
+            }
+            if tiles.exists() {
+                for entry in fs::read_dir(&tiles)? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_file()
+                        && !expected.contains(&entry.file_name().to_string_lossy().to_string())
+                    {
+                        stale.push(entry.path().display().to_string());
+                    }
+                }
+            }
+            if !stale.is_empty() {
+                return Ok((
+                    CorpusVerdict::ContentMismatch,
+                    CheckReport {
+                        message: stale
+                            .into_iter()
+                            .map(|p| format!("svg stale (digest unchanged): {p}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        warnings,
+                        changed: 1,
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
         return Ok((
             CorpusVerdict::Pass,
             CheckReport {
@@ -870,11 +1031,22 @@ pub fn bless(
     let contract_path = corpus_dir.join("contract.json");
     let leaves_path = corpus_dir.join("leaves");
     write_atomic(&digest_path, digest_text(&d))?;
-    write_atomic(&contract_path, contract_text(&contract)?)?;
+    write_atomic(&contract_path, contract_text(&contract, None)?)?;
     if mode == DigestMode::Leaves {
         write_atomic(&leaves_path, leaves_text(&l))?;
     } else if leaves_path.exists() {
         fs::remove_file(&leaves_path)?;
+    }
+    // If a manifest exists, re-render every SVG and record the style hash in one
+    // command (spec 5.7): the just-written digest trivially matches, so this
+    // render path passes its own digest gate and leaves the corpus consistent.
+    if corpus_dir.join("manifest.toml").exists() {
+        let (verdict, report) =
+            render_manifest(archive, corpus_dir, Path::new("corpus/style.toml"))?;
+        if verdict != CorpusVerdict::Pass {
+            return Ok((verdict, report));
+        }
+        warnings.extend(report.warnings);
     }
     let size = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     let leaves_note = if mode == DigestMode::Leaves {

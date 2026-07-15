@@ -1,0 +1,92 @@
+# Canonical corpus render style. [[layer]] order is paint order, bottom first.
+background = "#f2efe9"
+
+[[layer]]
+name = "ocean"
+fill = "#aad3df"
+[[layer]]
+name = "water_polygons"
+fill = "#aad3df"
+[[layer]]
+name = "land"
+fill = "#f2efe9"
+[[layer.match]]
+key = "kind"
+value = "forest"
+fill = "#add19e"
+[[layer]]
+name = "sites"
+fill = "#e0dfcc"
+[[layer]]
+name = "buildings"
+fill = "#d9d0c9"
+[[layer]]
+name = "water_lines"
+stroke = "#aad3df"
+stroke_width = "1"
+[[layer]]
+name = "ferries"
+stroke = "#7db3c9"
+stroke_width = "1"
+[[layer]]
+name = "dam_polygons"
+fill = "#cccccc"
+[[layer]]
+name = "dam_lines"
+stroke = "#888888"
+stroke_width = "2"
+[[layer]]
+name = "pier_polygons"
+fill = "#d9d0c9"
+[[layer]]
+name = "pier_lines"
+stroke = "#d9d0c9"
+stroke_width = "1"
+[[layer]]
+name = "bridges"
+fill = "#e8e4df"
+[[layer]]
+name = "public_transport"
+fill = "#b8b8b8"
+[[layer]]
+name = "street_polygons"
+fill = "#cccccc"
+[[layer]]
+name = "streets"
+stroke = "#dddddd"
+stroke_width = "1"
+[[layer]]
+name = "aerialways"
+stroke = "#888888"
+stroke_width = "1"
+[[layer]]
+name = "boundaries"
+stroke = "#9e7bba"
+stroke_width = "1"
+[[layer]]
+name = "addresses"
+fill = "#b6b6b6"
+[[layer]]
+name = "streets_polygons_labels"
+fill = "#333333"
+[[layer]]
+name = "street_labels_points"
+fill = "#333333"
+[[layer]]
+name = "street_labels"
+fill = "#888888"
+[[layer]]
+name = "water_polygons_labels"
+fill = "#4a80a0"
+[[layer]]
+name = "water_lines_labels"
+fill = "#4a80a0"
+[[layer]]
+name = "boundary_labels"
+fill = "#9e7bba"
+[[layer]]
+name = "place_labels"
+fill = "#d63333"
+[[layer]]
+name = "pois"
+fill = "#666666"

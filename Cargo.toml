@@ -30,6 +30,8 @@ hotpath = "0.21.1"
 rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 mlt-core = "0.12.3"
 geo-types = "0.7.19"
@@ -37,7 +39,6 @@ libc = "0.2"
 
 [dev-dependencies]
 i_overlay = "7.0"
-serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 pmtiles = { version = "0.23", default-features = false, features = ["write"] }
 tempfile = "3.27"

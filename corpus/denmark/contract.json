@@ -56,5 +56,9 @@
     "replication_timestamp": 1771622445,
     "xxh3_128": "58c47f32d3a55b04a56813565efc78ac"
   },
-  "schema": 1
+  "schema": 1,
+  "style": {
+    "path": "corpus/style.toml",
+    "xxh3_128": "c5eefe90c48c496f3c7237a8863a7a6d"
+  }
 }

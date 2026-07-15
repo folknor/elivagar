@@ -285,9 +285,11 @@ struct RegressArgs {
     #[arg(long, default_value_t = 20)]
     max_examples: usize,
 
-    /// Directory for side-by-side SVG dumps of structural examples.
+    /// Directory for sampled diff-attribution SVGs.
     #[arg(long)]
-    svg_dump: Option<PathBuf>,
+    overlay: Option<PathBuf>,
+    #[arg(long, default_value_t = 64)]
+    overlay_max: usize,
 
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -315,6 +317,35 @@ enum CorpusCommand {
         mode: CorpusModeArg,
         #[arg(long)]
         rotate: bool,
+    },
+    /// Render one canonical SVG tile (does not require a corpus contract).
+    Render {
+        archive: PathBuf,
+        #[arg(short = 'z')]
+        z: u8,
+        #[arg(short = 'x')]
+        x: u32,
+        #[arg(short = 'y')]
+        y: u32,
+        #[arg(long)]
+        layers: Option<String>,
+        #[arg(long, default_value = "corpus/style.toml")]
+        style: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Dump MapLibre-compatible polygon ring grouping for differential checks.
+    Rings {
+        archive: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    RenderManifest {
+        archive: PathBuf,
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long, default_value = "corpus/style.toml")]
+        style: PathBuf,
     },
     /// Produce a same-contract archive with one controlled calibration mutation.
     Mutate {
@@ -649,6 +680,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_corpus(args: &CorpusArgs) {
     let (result, bless) = match &args.command {
         CorpusCommand::Check { archive, corpus } => {
@@ -694,6 +726,65 @@ fn run_corpus(args: &CorpusArgs) {
             }
             return;
         }
+        CorpusCommand::Render {
+            archive,
+            z,
+            x,
+            y,
+            layers,
+            style,
+            output,
+        } => {
+            let result = (|| -> std::io::Result<()> {
+                let style = elivagar::corpus::style::Style::load(style)?;
+                let view = elivagar::pmtiles_reader::ArchiveView::open(archive)?;
+                let wanted = layers
+                    .as_ref()
+                    .map(|v| v.split(',').map(str::to_string).collect::<Vec<_>>());
+                let svg = elivagar::corpus::render::render_archive_tile(
+                    &view,
+                    *z,
+                    *x,
+                    *y,
+                    &style,
+                    wanted.as_deref(),
+                )?;
+                if let Some(path) = output {
+                    std::fs::write(path, svg.bytes)?;
+                } else {
+                    print!("{}", String::from_utf8_lossy(&svg.bytes));
+                }
+                for warning in svg.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                eprintln!("corpus render refused: {error}");
+                std::process::exit(2);
+            }
+            return;
+        }
+        CorpusCommand::Rings { archive, output } => {
+            let result = (|| -> std::io::Result<()> {
+                let view = elivagar::pmtiles_reader::ArchiveView::open(archive)?;
+                let mut file = std::fs::File::create(output)?;
+                elivagar::corpus::render::dump_ring_grouping(&view, &mut file)
+            })();
+            if let Err(error) = result {
+                eprintln!("corpus rings refused: {error}");
+                std::process::exit(2);
+            }
+            return;
+        }
+        CorpusCommand::RenderManifest {
+            archive,
+            corpus,
+            style,
+        } => (
+            elivagar::corpus::render_manifest(archive, corpus, style),
+            false,
+        ),
     };
     match result {
         Ok((verdict, report)) => {
@@ -753,12 +844,30 @@ fn run_regress(args: &RegressArgs) {
     match elivagar::regress::regress(&args.current, &args.against, &cfg) {
         Ok(report) => {
             let passed = report.passed(&cfg);
-            if let Some(dir) = &args.svg_dump
-                && let Err(e) =
-                    report.dump_svg_examples(&args.current, &args.against, dir, args.max_examples)
-            {
-                eprintln!("Error writing SVG dump: {e}");
-                std::process::exit(1);
+            if let Some(dir) = &args.overlay {
+                let background =
+                    match elivagar::corpus::style::Style::load(Path::new("corpus/style.toml")) {
+                        Ok(style) => style.file.background,
+                        Err(error) => {
+                            eprintln!("overlay style refusal: {error}");
+                            std::process::exit(2);
+                        }
+                    };
+                match elivagar::regress::dump_overlays(
+                    &args.current,
+                    &args.against,
+                    &report,
+                    &cfg,
+                    dir,
+                    args.overlay_max,
+                    &background,
+                ) {
+                    Ok(count) => eprintln!("wrote {count} overlay SVGs to {}", dir.display()),
+                    Err(error) => {
+                        eprintln!("overlay emission failed: {error}");
+                        std::process::exit(2);
+                    }
+                }
             }
             if args.json {
                 match serde_json::to_string_pretty(&report.to_json(passed)) {
