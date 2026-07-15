@@ -616,3 +616,34 @@ The owed `write_to` neutrality read (landing 3 touched
 6,560 ms - +2.3% on a ~6.5 s bench, inside the noise band; neutral. No
 recent comparable baseline existed (the March rows predate the writer-layout
 rewrite), so these two rows are also the fresh microbenchmark baseline pair.
+
+## SVG corpus render core calibration (2026-07-15, commit 41a953a, denmark locations)
+
+The spec-B gate readings, run by the orchestrator after the landing:
+
+- **Differential ring-grouping oracle**: `elivagar corpus rings` vs the
+  independent `scripts/validate/ring-grouping-oracle.mjs`, both over the
+  full `denmark-a8c4f84.pmtiles` (1,296,999 tiles): dumps byte-equal at
+  59,464,966 bytes each. The Rust classifyRings port and the Node
+  implementation agree on every polygon in the archive.
+- **Determinism gate**: `corpus render-manifest` run three times against
+  the same archive; renders two and three byte-identical across all nine
+  manifest SVGs (sha256-compared). The committed corpus only changes when
+  content changes.
+- **Tier-2 FIRES**: a `nudge-geometry` mutant at z7/68/39 (an unfiltered
+  manifest entry, so the first-encoded-layer mutation is visible) renders
+  a canonical SVG that differs from the committed corpus file; the same
+  mutant fails tier 1 first through `corpus check` (`changed 7 68 39`),
+  which short-circuits before tier 2 by design - tier 2 is the human
+  layer, never an independent detector.
+- **Tier-2 CLEARS**: the regzip control renders byte-identical to the
+  committed corpus file, and the full `corpus check` on the regzip
+  archive passes tiers 1 and 2 in 2,376 ms.
+- **Wire-order regeneration**: the step-5 wire-order fix changed 5 of the
+  9 committed SVGs (the multi-component tiles the pre-fix
+  component-order renderer had grouped differently); the corrected
+  baseline is committed with these readings.
+- **Human calibration pair**: `corpus render` of z5/16/9 from the
+  preserved stale-artifact archive (`denmark-bc71cf1.pmtiles`,
+  contract-free path) vs the committed clean corpus tile - 33,375 vs
+  39,583 bytes, differing exactly where the 2026-07-15 ocean spike lives.
