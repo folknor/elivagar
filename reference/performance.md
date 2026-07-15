@@ -131,6 +131,25 @@ now the largest non-pipeline cost at NA (~16s) - removed by the hash
 overlap landing above; the stored rows at that commit are the
 post-overlap baselines.
 
+Stored baselines at the hash-overlap commit `eb1e36e` (plantasjen,
+locations, artifact-active; sidecar values transcribed; NA and germany
+are bench-1 per the NA-and-larger measurement discipline, denmark is
+bench-3):
+
+| dataset | run | wall | phase12 | ocean | assemble | phase12 peak anon | phase12 majflt |
+|---|---|---|---|---|---|---|---|
+| denmark | `c92b7529` | 8.5s best-of-3 | - | - | - | - | - |
+| germany | `fcd3bde4` | 51.4s | 35.0s | 2.0s | 14.1s | - | - |
+| north-america | `52cc955a` | 254.2s | 154.7s / 18.5 cores | 0.2s | 98.9s / 14.3 cores | 5.14 GB | 11,283 |
+
+The PHASE12_END-to-OCEAN_START gap is 0.3-0.5s on every dataset
+(`input_hash_join_wait_ns` 12-13us: the hash always finishes first),
+against 12.4s at NA / 5.15s at germany before the overlap. Denmark
+takes the record again, 8.9s to 8.5s; NA -7.9% wall, germany -13%
+(bench-1, treat the germany figure as indicative to ~5%). NA peak RSS
+5.76 GB whole-run - the buffered hasher adds nothing the sampler can
+see.
+
 Superseded rows (kept for delta reading):
 
 | dataset | commit | run | wall | phase12 | peak RSS | note |

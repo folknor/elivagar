@@ -822,6 +822,49 @@ Planet RAM go/no-go status: the phase12 stocks are bounded again and
 the 07-09 ledger extrapolation is arguably current again, but re-read
 it against a fresh NA stored run before any planet attempt.
 
+GO/NO-GO RE-READ 2026-07-15 (calibrated on NA `52cc955a` at the
+hash-overlap commit, the first stored baseline with the scratch fix,
+system allocator, H5 artifact and hash overlap all in). Fresh NA
+constants: wall 254.2s for 19.06 GB (75.0 MB/s end-to-end, from 52.7
+at the 07-09 calibration), phase12 154.7s (8.1 s/GB - the constant the
+07-09 read used survives), ocean 0.2s (artifact; the phase and its RSS
+line are deleted, and at world bounds the boundary band is empty by
+construction), assemble 98.9s at 14.3 cores for 18.0M unique tiles
+(~5.5 us/unique-tile, from 10.4 at 07-09 - e34cc7b z7 partitions,
+33ce85e byte-window and the artifact between them). Peak whole-run RSS
+5.76 GB; phase12 5.14 GB anon, 11.3K majflt.
+
+Same planet assumptions as 07-09 (90 GB enriched input, ~5.3x NA ways,
+unique tiles 3-4x NA at 60-70M):
+
+- RAM: GO, and no longer conditional. The 07-09 conditional hinged on
+  ocean (9.9 GB at NA, extrapolating 12-17 GB) - that line no longer
+  exists. Phase12 stocks are bounded and input-independent (~6-7 GB
+  with headroom; relation blocks will spill at their 1 GB cap as
+  designed). Assemble is claim-window bounded: 2 GiB park budget plus
+  in-flight, observed 5.1 GB peak at NA with z7 max partitions of
+  ~200 MB. Predicted planet peak stays under ~10 GB on a 27 GB host.
+  Open risks unchanged in kind, none load-bearing: the monster-relation
+  transient (max_rel_inflight 90 MB at NA, watch it, per-relation gate
+  is the backstop), way_index page-cache competition, glibc retention
+  (malloc_held 2.84 GB vs 26 MB live at germany run end - modest, now
+  measurable).
+- WALL: ~19-24 min. Phase12 8.1 s/GB x 90 GB ~ 730s; ocean ~0;
+  assemble 5.5 us x 60-70M unique ~ 330-385s plus the untested
+  page-cache-overflow term on ~370 GB of merge reads (H4: lz4 is the
+  planet configuration, priced at +2% NA wall for 2.6x less scratch
+  I/O). Wide band honest: call it 1100-1450s. Even the pessimistic end
+  is ~6x under planetiler's published 2h38m at 16 cpu / 32 GB.
+- DISK: GO (607 GB free on Banan; lz4 halves scratch besides).
+
+What actually gates a planet attempt now, in order: (1) the enriched
+planet PBF does not exist yet - a pbfhogg altw run, user-gated, and
+H2's pending NA re-enrichment reading should ride the same decision;
+(2) the H9 step-3 disk audit against the real artifact size; (3) the
+blessed-baseline situation - denmark regress is un-gateable until a
+re-bless, and a planet run wants the standing gate green before it
+starts, not after.
+
 ### H4: Sort scratch needs page-cache hygiene, maybe compression
 
 **Claim.** ~200 GB of scratch write+read through a 30 GB host will
