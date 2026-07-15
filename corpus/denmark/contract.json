@@ -1,0 +1,60 @@
+{
+  "build": {
+    "cargo_features": [
+      "default"
+    ],
+    "cargo_lock_xxh3_128": "5db5e4717980cf98258f963781068f45",
+    "elivagar": {
+      "commit": "a8c4f844e611b13c4268256dc7e8d0b1f199e1be",
+      "dirty": false
+    },
+    "pbfhogg_reader": {
+      "commit": "0f1eb01a1c1e9bccdd2b9667a275d636d66bab5b",
+      "dirty": false
+    }
+  },
+  "config": {
+    "fanout_caps": {},
+    "max_zoom": 14,
+    "min_zoom": 0,
+    "ocean": {
+      "artifact_key": {
+        "compression_level": 6,
+        "full_shp_xxh128": "c10be1c7843cf9e59bed0a44c1e232e7",
+        "full_shx_xxh128": "c65e7ee5a2027b4e488f741119218a71",
+        "max_zoom": 14,
+        "min_zoom": 0,
+        "policy_version": 2,
+        "simplified_shp_xxh128": "b3417e31c2873dcfd106aa2e7d5e3b2a",
+        "simplified_shx_xxh128": "55c4a5d3476116d7b800122a074ba70b"
+      },
+      "low_zoom_source": "simplified",
+      "mode": "artifact",
+      "runtime_simplification": true
+    },
+    "polygon_simplify_factor": 1.0,
+    "profile": "shortbread",
+    "seam_reconcile_layers": {
+      "boundaries": 8
+    },
+    "tile": {
+      "base_compression_level": 6,
+      "compression": "gzip",
+      "compression_policy": "zoom-v1",
+      "format": "mvt"
+    }
+  },
+  "input": {
+    "bytes": 531544047,
+    "features": {
+      "locations_on_ways": true,
+      "shared_node_pins_v1": true,
+      "sort_type_then_id": true,
+      "way_members_v1": true
+    },
+    "name": "denmark-20260220-seq4704-locations-prepass.osm.pbf",
+    "replication_timestamp": 1771622445,
+    "xxh3_128": "58c47f32d3a55b04a56813565efc78ac"
+  },
+  "schema": 1
+}

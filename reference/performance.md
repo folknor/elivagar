@@ -585,3 +585,34 @@ rather than retaining their capacities. If rect-clip churn is revisited, it
 should be as a new item under E2 or an E3b that specifies a bounded
 retained-byte budget BEFORE implementation, started from the pre-E3 code state,
 not from this pooled design.
+
+## Corpus digest gate calibration (2026-07-15, commit a8c4f84, denmark locations)
+
+The oracle-discipline readings that promoted `elivagar corpus check` from
+advisory toward gate duty (spec A of the corpus plan; the gate stays
+formally advisory until spec C rotates the standing gate). Baseline archive:
+`data/tilegen/denmark-a8c4f84.pmtiles`, clean build, artifact-active at
+ocean policy 2. Committed baseline: `corpus/denmark/` - contract.json
+1,597 B, digest 949 B, leaves 10,799,001 B (the ~11 MB the spec predicted;
+proceed threshold was 32 MB).
+
+Both directions, all six readings exactly as pinned:
+
+| reading | expectation | result |
+|---|---|---|
+| self check | PASS exit 0 | PASS, 1,296,999 tiles / 166,365 unique, 2,156 ms |
+| regzip control (byte-different, semantically equal; 378,353,776 vs 377,793,332 bytes) | PASS exit 0 | PASS, 2,175 ms |
+| mutate drop-tile 5/16/9 | FAIL exit 1 naming the tile | `zoom 5 tiles 11->10`, `removed 5 16 9` |
+| mutate nudge-geometry 5/16/9 | FAIL exit 1 naming the tile | `changed 5 16 9` with old->new hash |
+| mutate layer-version 5/16/9 | FAIL exit 1 naming the tile | `changed 5 16 9` with old->new hash |
+| stale-artifact archive `denmark-bc71cf1.pmtiles` | REFUSE exit 2 on contract | `contract mismatch: config.ocean.artifact_key.policy_version` |
+
+Check cost on denmark: ~2.2 s for the full 1.3M-tile decode+hash - cheap
+enough to run per landing.
+
+The owed `write_to` neutrality read (landing 3 touched
+`PmtilesWriter::write_to` via `set_metadata_verbatim`): pmtiles-writer bench
+`1279120b` at ecef3b8 (pre) 6,411 ms vs `e0faaadb` at a8c4f84 (post)
+6,560 ms - +2.3% on a ~6.5 s bench, inside the noise band; neutral. No
+recent comparable baseline existed (the March rows predate the writer-layout
+rewrite), so these two rows are also the fresh microbenchmark baseline pair.
