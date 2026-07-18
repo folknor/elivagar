@@ -66,7 +66,7 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
 
 ## Orchestration loop
 
-If and when the users asks for the orchestration loop, read `reference/orchestrate.md` before proceeding.
+If and when the users asks for the orchestration loop, run `orchestrate` before proceeding.
 
 Competitor reference sources remain available for research: `research/planetiler/` (Java), `research/tilemaker/` (C++), `research/tippecanoe/` (C++), `research/stedsplakat/` (TypeScript/JSTS Overpass→SVG poster renderer).
 
@@ -85,7 +85,7 @@ subagents (Explore, general-purpose, fork, anything) is a separate decision the
 user makes explicitly. Before any `Agent`/`Task` launch, stop and ask in chat -
 name what you want to spawn and why - then wait for a yes. Doing the
 investigation yourself with Read/Grep/Bash needs no permission; only delegating
-to subagents does. The sole exception is the orchestrate.md spec-loop, which the
+to subagents does. The sole exception is the orchestrate spec-loop, which the
 user invokes by name and which carries its own standing authorization.
 
 **Do NOT use git worktree isolation for parallel agents.** Worktrees create merge conflicts that silently drop agent work. Instead, launch agents in the same tree with strict file ownership - zero overlap.
