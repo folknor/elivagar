@@ -736,45 +736,47 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             eprintln!("--- Ocean shapefile ---");
             let mut ocean_features: u64 = 0;
 
-            if let Some(ref simplified_path) = config.ocean_simplified_shapefile {
-                let simplified_max = config.max_zoom.min(7);
-                if config.min_zoom <= simplified_max {
-                    eprintln!("  Simplified (z{}-z{}):", config.min_zoom, simplified_max);
-                    ocean_features += crate::ocean::process_ocean_shapefile(
-                        simplified_path,
-                        &data_bounds,
-                        config.min_zoom,
-                        simplified_max,
-                        &mut sort_writer,
-                        active_ocean_artifact
-                            .as_ref()
-                            .and_then(|artifact| artifact.grids().first()),
-                    )?;
+            // The low-zoom pass always exists as its own z0-z7 pass, sourced
+            // from the simplified shapefile when one is named and from the
+            // full shapefile otherwise. The zoom split is what makes the
+            // low-zoom piece union (`process_ocean_shapefile`) fire: a single
+            // z0-z14 pass would keep per-piece descent at low zoom, where the
+            // source split grid is comparable to the tile size and per-piece
+            // simplification renders as seam wedges and dropped fragments.
+            let low_source = config
+                .ocean_simplified_shapefile
+                .as_deref()
+                .unwrap_or(ocean_path);
+            let low_max = config.max_zoom.min(7);
+            if config.min_zoom <= low_max {
+                if config.ocean_simplified_shapefile.is_some() {
+                    eprintln!("  Simplified (z{}-z{}):", config.min_zoom, low_max);
+                } else {
+                    eprintln!("  Low-zoom from full (z{}-z{}):", config.min_zoom, low_max);
                 }
-                if config.max_zoom >= 8 {
-                    let full_min = config.min_zoom.max(8);
-                    eprintln!("  Full-resolution (z{full_min}-z{}):", config.max_zoom);
-                    ocean_features += crate::ocean::process_ocean_shapefile(
-                        ocean_path,
-                        &data_bounds,
-                        full_min,
-                        config.max_zoom,
-                        &mut sort_writer,
-                        active_ocean_artifact
-                            .as_ref()
-                            .and_then(|artifact| artifact.grids().last()),
-                    )?;
-                }
-            } else {
-                ocean_features = crate::ocean::process_ocean_shapefile(
-                    ocean_path,
+                ocean_features += crate::ocean::process_ocean_shapefile(
+                    low_source,
                     &data_bounds,
                     config.min_zoom,
-                    config.max_zoom,
+                    low_max,
                     &mut sort_writer,
                     active_ocean_artifact
                         .as_ref()
                         .and_then(|artifact| artifact.grids().first()),
+                )?;
+            }
+            if config.max_zoom >= 8 {
+                let full_min = config.min_zoom.max(8);
+                eprintln!("  Full-resolution (z{full_min}-z{}):", config.max_zoom);
+                ocean_features += crate::ocean::process_ocean_shapefile(
+                    ocean_path,
+                    &data_bounds,
+                    full_min,
+                    config.max_zoom,
+                    &mut sort_writer,
+                    active_ocean_artifact
+                        .as_ref()
+                        .and_then(|artifact| artifact.grids().last()),
                 )?;
             }
 
@@ -1193,12 +1195,12 @@ pub fn ocean_build(
         max_x: 1.0,
         max_y: 1.0,
     };
-    if let Some(simplified) = simplified_shapefile {
-        crate::ocean::process_ocean_shapefile(simplified, &world, 0, 7, &mut writer, None)?;
-        crate::ocean::process_ocean_shapefile(full_shapefile, &world, 8, 14, &mut writer, None)?;
-    } else {
-        crate::ocean::process_ocean_shapefile(full_shapefile, &world, 0, 14, &mut writer, None)?;
-    }
+    // Mirror the run pipeline's pass structure: z0-z7 always its own pass so
+    // the low-zoom piece union fires, sourced from the simplified shapefile
+    // when given (production) and from the full shapefile otherwise.
+    let low_source = simplified_shapefile.unwrap_or(full_shapefile);
+    crate::ocean::process_ocean_shapefile(low_source, &world, 0, 7, &mut writer, None)?;
+    crate::ocean::process_ocean_shapefile(full_shapefile, &world, 8, 14, &mut writer, None)?;
     writer.flush()?;
     let mut reader = writer.finish()?;
     let config = TilegenConfig {

@@ -7,8 +7,8 @@
 // fill, no point-in-polygon, no Sutherland-Hodgman, no LandMask.
 
 use crate::geometry::int_ocean::{
-    IntEmitScratch, IntRect, OCEAN_DP_TOL_PX, Shape, Shapes, intersect_rect_into, quantize_polygon,
-    shape_bbox,
+    IntEmitScratch, IntRect, OCEAN_DP_TOL_PX, Shape, Shapes, intersect_rect_into, normalize_into,
+    quantize_polygon, shape_bbox,
 };
 use crate::geometry::pyramid::{
     PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid,
@@ -36,7 +36,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// hashes catch input rotations, this constant is the declared stand-in
 /// for "the geometry pipeline changed", and forgetting it converts a
 /// loud key mismatch into silently stale world geometry.
-pub const OCEAN_POLICY_VERSION: u32 = 2;
+///
+/// v3: low-zoom source pieces are unioned before descent. The source
+/// shapefiles arrive pre-split into grid cells, and per-piece descent
+/// simplified each cell's copy of a shared coastline independently and
+/// applied the per-zoom min-area drop per cell fragment - at z2 that
+/// rendered as seam wedges on every cell edge and half-peninsula spikes
+/// where one side of a split landform fell under min-area (the corpus
+/// z2-x2-y1 finding, 2026-07-19).
+pub const OCEAN_POLICY_VERSION: u32 = 3;
 
 /// Identity of the shapefile inputs behind computed ocean sort chunks.
 ///
@@ -620,6 +628,42 @@ pub(crate) fn emit_ocean_counters() {
 // ---------------------------------------------------------------------------
 
 const LARGE_PIECE_VERTICES: usize = 1024;
+
+/// Passes with `max_zoom` at or below this union their source pieces before
+/// pyramid descent (see the comment at the union site). Set to the top of the
+/// simplified-shapefile range: the production z0-z7 pass unions, the z8-z14
+/// full-polygons pass does not. A single z0-z14 full-shapefile pass keeps the
+/// old per-piece behavior at low zoom - extend the guard if that spelling's
+/// low zooms ever matter.
+const LOW_ZOOM_UNION_MAX_ZOOM: u8 = 7;
+
+/// Union pre-split source pieces into seam-free shapes: every contour of
+/// every piece goes into one soup, and the overlay engine's nonzero Simplify
+/// re-derives ring roles geometrically. Quantization gives adjacent cells
+/// bit-identical shared-edge coordinates, so interior cell edges cancel
+/// exactly.
+///
+/// INVARIANT: nonzero composition of a contour soup equals set union only
+/// when piece interiors are disjoint - the mosaic property the split source
+/// data guarantees (cells partition the plane; each piece's holes lie inside
+/// its own outer). If two records' interiors overlapped, an outer from one
+/// could cancel against a hole from the other under summed winding where a
+/// Boolean OR would stay filled. Overlapping source records are an input
+/// defect, not a case this function handles.
+fn union_pieces(pieces: Vec<Shape>) -> Vec<Shape> {
+    if pieces.len() <= 1 {
+        return pieces;
+    }
+    let contour_count: usize = pieces.iter().map(Vec::len).sum();
+    let mut soup: Shape = Vec::with_capacity(contour_count);
+    for mut piece in pieces {
+        soup.append(&mut piece);
+    }
+    let mut scratch = IntEmitScratch::new();
+    let mut merged: Shapes = Vec::new();
+    normalize_into(&mut scratch, soup, 0, &mut merged);
+    merged
+}
 // Cap each parallel fold accumulator's in-flight payload well below the
 // global sort_budget: with (piece x zoom) fan-out across many rayon workers,
 // letting each balloon to the full budget before flushing would multiply peak
@@ -632,7 +676,6 @@ const RING_READ_BUFFER_BYTES: usize = 64 * 1024;
 
 struct ParsedOceanRecord {
     pieces: Vec<Shape>,
-    source_pieces: usize,
     shapes_hit: u64,
 }
 
@@ -842,10 +885,6 @@ pub(crate) fn process_ocean_shapefile(
         pieces.extend(record.pieces);
     }
 
-    let poly_count = pieces.len();
-    eprintln!(
-        "  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons - processing in parallel"
-    );
     OCEAN_STATS.shapes.fetch_add(
         u64::try_from(shape_count).unwrap_or(u64::MAX),
         Ordering::Relaxed,
@@ -853,9 +892,63 @@ pub(crate) fn process_ocean_shapefile(
     OCEAN_STATS
         .shapes_hit
         .fetch_add(shapes_hit, Ordering::Relaxed);
+    // `ocean_pieces` keeps its documented meaning: parsed input pieces,
+    // counted before the low-zoom union below.
     OCEAN_STATS.pieces.fetch_add(
-        u64::try_from(poly_count).unwrap_or(u64::MAX),
+        u64::try_from(pieces.len()).unwrap_or(u64::MAX),
         Ordering::Relaxed,
+    );
+
+    // The source shapefiles arrive pre-split into grid cells, and each cell
+    // used to descend the pyramid independently: adjacent cells simplified
+    // their shared coastline into disagreeing shapes (seam wedges) and the
+    // per-zoom min-area drop applied per cell fragment, deleting the smaller
+    // half of any landform straddling a cell edge (half-peninsula spikes).
+    // For the low-zoom pass the split grid is comparable to the tile size,
+    // which made both artifacts obvious at z2, so its pieces are unioned into
+    // seam-free shapes before descent. The z8-z14 full-polygons pass keeps
+    // per-piece descent: its fixed pixel tolerances keep any seam mismatch
+    // sub-pixel, and a world-scale union of the full polygons would dominate
+    // `ocean-build`. Union input order is deterministic (rayon's indexed
+    // collect preserves record order) and the overlay step is serial, so
+    // emitted bytes stay deterministic.
+    if max_zoom <= LOW_ZOOM_UNION_MAX_ZOOM {
+        let union_start = std::time::Instant::now();
+        let input_pieces = pieces.len();
+        let input_vertices: usize = pieces.iter().map(total_vertices).sum();
+        pieces = union_pieces(pieces);
+        let output_vertices: usize = pieces.iter().map(total_vertices).sum();
+        let union_elapsed = union_start.elapsed();
+        eprintln!(
+            "  Union: {input_pieces} pieces ({input_vertices} vertices) -> {} shapes ({output_vertices} vertices) in {union_elapsed:.2?}",
+            pieces.len()
+        );
+        use crate::debug::emit_counter_u64;
+        emit_counter_u64(
+            "ocean_union_ns",
+            u64::try_from(union_elapsed.as_nanos()).unwrap_or(u64::MAX),
+        );
+        emit_counter_u64(
+            "ocean_union_input_pieces",
+            u64::try_from(input_pieces).unwrap_or(u64::MAX),
+        );
+        emit_counter_u64(
+            "ocean_union_input_vertices",
+            u64::try_from(input_vertices).unwrap_or(u64::MAX),
+        );
+        emit_counter_u64(
+            "ocean_union_shapes",
+            u64::try_from(pieces.len()).unwrap_or(u64::MAX),
+        );
+        emit_counter_u64(
+            "ocean_union_output_vertices",
+            u64::try_from(output_vertices).unwrap_or(u64::MAX),
+        );
+    }
+
+    let poly_count = pieces.len();
+    eprintln!(
+        "  {shape_count} shapes, {shapes_hit} in bounds, {poly_count} polygons - processing in parallel"
     );
 
     // --- Process phase: parallel with rayon, direct chunk flushing ---
@@ -996,7 +1089,6 @@ fn parse_ocean_record(
 ) -> ParsedOceanRecord {
     let mut out = ParsedOceanRecord {
         pieces: Vec::new(),
-        source_pieces: 0,
         shapes_hit: 0,
     };
 
@@ -1050,7 +1142,7 @@ fn parse_ocean_record(
         shp_file: ctx.shp_file,
         header: &header,
     };
-    out.source_pieces += push_shape_record_pieces(
+    push_shape_record_pieces(
         &source,
         scratch,
         &mut out.pieces,
@@ -1075,7 +1167,7 @@ fn push_shape_record_pieces(
     pieces: &mut Vec<Shape>,
     max_zoom: u8,
     data_rect: IntRect,
-) -> usize {
+) {
     let offset = source.record.offset;
     let num_parts_i32 = i32::from_le_bytes(
         source.header[36..40]
@@ -1089,7 +1181,7 @@ fn push_shape_record_pieces(
     );
     if num_parts_i32 < 0 || num_points_i32 < 0 {
         eprintln!("  Warning: negative part/point count at offset {offset}, skipping record");
-        return 0;
+        return;
     }
     #[allow(clippy::cast_sign_loss)]
     let num_parts = num_parts_i32 as usize;
@@ -1101,31 +1193,30 @@ fn push_shape_record_pieces(
     let record_end = points_start + num_points * 16;
     if record_end > source.record.content_len || source.rec + record_end > source.shp_len {
         eprintln!("  Warning: shape record at offset {offset} extends past end of file, skipping");
-        return 0;
+        return;
     }
 
     let Some(mut ring_starts) = read_ring_starts(source, num_parts) else {
-        return 0;
+        return;
     };
     if ring_starts.iter().any(|&v| v > num_points) {
         eprintln!("  Warning: invalid part index at offset {offset}, skipping record");
-        return 0;
+        return;
     }
     ring_starts.push(num_points);
 
-    let mut source_pieces = 0;
     let mut current_outer: Option<Vec<Point>> = None;
     let mut current_inners: Vec<Vec<Point>> = Vec::new();
 
     for (w, window) in ring_starts.windows(2).enumerate() {
         let Some(ring) = read_ring_points(source, points_start, window[0], window[1]) else {
-            return source_pieces;
+            return;
         };
         let is_outer = w == 0 || geometry::signed_area(&ring) >= 0.0;
 
         if is_outer {
             if let Some(outer) = current_outer.take() {
-                source_pieces += push_quantized_pieces(
+                push_quantized_pieces(
                     scratch,
                     pieces,
                     &outer,
@@ -1141,7 +1232,7 @@ fn push_shape_record_pieces(
     }
 
     if let Some(outer) = current_outer {
-        source_pieces += push_quantized_pieces(
+        push_quantized_pieces(
             scratch,
             pieces,
             &outer,
@@ -1150,8 +1241,6 @@ fn push_shape_record_pieces(
             data_rect,
         );
     }
-
-    source_pieces
 }
 
 fn read_ring_starts(source: &ShapeRecordSource<'_>, num_parts: usize) -> Option<Vec<usize>> {
@@ -1230,26 +1319,24 @@ fn push_quantized_pieces(
     inners: &[Vec<Point>],
     max_zoom: u8,
     data_rect: IntRect,
-) -> usize {
+) {
     let shape = quantize_polygon(outer, inners, max_zoom);
     if shape.is_empty() {
-        return 0;
+        return;
     }
 
     // The common case for an in-bounds extract: the shape lies entirely
     // inside the data bounds - the boolean is an expensive identity.
     if shape_bbox(&shape).is_some_and(|bb| rect_contains(data_rect, bb)) {
         pieces.push(shape);
-        return 1;
+        return;
     }
 
     let mut clipped = Vec::new();
     intersect_rect_into(scratch, &shape, data_rect, 0, &mut clipped);
-    let source_pieces = clipped.len();
     for piece in clipped {
         pieces.push(piece);
     }
-    source_pieces
 }
 
 /// True if `outer` contains `inner` (closed containment).
@@ -1430,6 +1517,232 @@ mod tests {
         // Feature id 0 is present as the explicit varint field form, not
         // elided as a protobuf default.
         assert!(encoded.windows(2).any(|bytes| bytes == [8, 0]));
+    }
+
+    fn merc_square(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Vec<Point> {
+        vec![
+            Point { x: min_x, y: min_y },
+            Point { x: max_x, y: min_y },
+            Point { x: max_x, y: max_y },
+            Point { x: min_x, y: max_y },
+        ]
+    }
+
+    #[test]
+    fn union_pieces_merges_adjacent_cells_and_cancels_shared_edge() {
+        use crate::geometry::int_ocean::signed_area_2x;
+        // Two cells sharing the x=0.5 edge, as the pre-split source data
+        // delivers them. Quantization puts the shared edge on bit-identical
+        // coordinates, so the union must merge them into one seam-free shape
+        // whose area is exactly the sum.
+        let a = quantize_polygon(&merc_square(0.25, 0.25, 0.5, 0.5), &[], 7);
+        let b = quantize_polygon(&merc_square(0.5, 0.25, 0.75, 0.5), &[], 7);
+        let sum = signed_area_2x(&a[0]).unsigned_abs() + signed_area_2x(&b[0]).unsigned_abs();
+        let merged = union_pieces(vec![a, b]);
+        assert_eq!(merged.len(), 1, "adjacent cells must merge into one shape");
+        assert_eq!(merged[0].len(), 1, "no holes expected");
+        assert_eq!(signed_area_2x(&merged[0][0]).unsigned_abs(), sum);
+    }
+
+    #[test]
+    fn union_of_split_pieces_restores_unsplit_pyramid_emission() {
+        // The half-peninsula defect, end to end through pyramid emission. A
+        // bump straddles the split edge x=0.5, sized so each half is ~200
+        // z0-px^2 (under ocean_min_area's 256) while the whole is ~400 (over):
+        // per-piece descent drops both halves at z0, the unioned pieces must
+        // emit exactly what the unsplit shape emits at every zoom.
+        let maxz = 2_u8;
+        let w = 20.0 / 4096.0; // 20 z0 pixels in merc units
+        let half = w / 2.0;
+        let s_unsplit = quantize_polygon(
+            &[
+                Point { x: 0.25, y: 0.25 },
+                Point {
+                    x: 0.5 - half,
+                    y: 0.25,
+                },
+                Point {
+                    x: 0.5 - half,
+                    y: 0.25 - w,
+                },
+                Point {
+                    x: 0.5 + half,
+                    y: 0.25 - w,
+                },
+                Point {
+                    x: 0.5 + half,
+                    y: 0.25,
+                },
+                Point { x: 0.75, y: 0.25 },
+                Point { x: 0.75, y: 0.5 },
+                Point { x: 0.25, y: 0.5 },
+            ],
+            &[],
+            maxz,
+        );
+        let piece_a = quantize_polygon(
+            &[
+                Point { x: 0.25, y: 0.25 },
+                Point {
+                    x: 0.5 - half,
+                    y: 0.25,
+                },
+                Point {
+                    x: 0.5 - half,
+                    y: 0.25 - w,
+                },
+                Point {
+                    x: 0.5,
+                    y: 0.25 - w,
+                },
+                Point { x: 0.5, y: 0.5 },
+                Point { x: 0.25, y: 0.5 },
+            ],
+            &[],
+            maxz,
+        );
+        let piece_b = quantize_polygon(
+            &[
+                Point {
+                    x: 0.5,
+                    y: 0.25 - w,
+                },
+                Point {
+                    x: 0.5 + half,
+                    y: 0.25 - w,
+                },
+                Point {
+                    x: 0.5 + half,
+                    y: 0.25,
+                },
+                Point { x: 0.75, y: 0.25 },
+                Point { x: 0.75, y: 0.5 },
+                Point { x: 0.5, y: 0.5 },
+            ],
+            &[],
+            maxz,
+        );
+
+        type Emitted = Vec<(u8, u32, u32, Vec<u32>)>;
+        let emit_shapes = |shapes: &[Shape]| -> Emitted {
+            let params = ocean_params(0, maxz, None);
+            let mut out: Emitted = Vec::new();
+            let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32], _kind: PyramidEmitKind| {
+                out.push((z, tx, ty, geom.to_vec()));
+            };
+            let mut scratch = PyramidScratch::new();
+            for shape in shapes {
+                emit_shape_pyramid(shape, &params, &mut scratch, &mut sink);
+            }
+            out
+        };
+
+        let reference = emit_shapes(&[s_unsplit]);
+        let per_piece = emit_shapes(&[piece_a.clone(), piece_b.clone()]);
+        let unioned = emit_shapes(&union_pieces(vec![piece_a, piece_b]));
+
+        // Calibration, both directions: per-piece emission must actually
+        // exhibit the defect at z0 (bump halves dropped), or this test proves
+        // nothing about the fix.
+        let z0 = |emitted: &Emitted| -> Vec<Vec<u32>> {
+            emitted
+                .iter()
+                .filter(|(z, _, _, _)| *z == 0)
+                .map(|(_, _, _, geom)| geom.clone())
+                .collect()
+        };
+        assert_ne!(
+            z0(&reference),
+            z0(&per_piece),
+            "per-piece z0 emission must differ from unsplit (the defect)"
+        );
+        assert_eq!(
+            reference, unioned,
+            "unioned pieces must emit exactly the unsplit shape's pyramid"
+        );
+    }
+
+    #[test]
+    fn union_pieces_partial_shared_edge_with_extra_segmentation() {
+        use crate::geometry::int_ocean::signed_area_2x;
+        // B shares only part of A's right edge and carries an extra collinear
+        // vertex on the shared segment - the split source's real shape: cell
+        // edges meet with differing vertex segmentation and partial extent.
+        let a = quantize_polygon(&merc_square(0.25, 0.25, 0.5, 0.5), &[], 2);
+        let b = quantize_polygon(
+            &[
+                Point { x: 0.5, y: 0.3 },
+                Point { x: 0.75, y: 0.3 },
+                Point { x: 0.75, y: 0.45 },
+                Point { x: 0.5, y: 0.45 },
+                Point { x: 0.5, y: 0.375 },
+            ],
+            &[],
+            2,
+        );
+        let sum = signed_area_2x(&a[0]).unsigned_abs() + signed_area_2x(&b[0]).unsigned_abs();
+        let merged = union_pieces(vec![a, b]);
+        assert_eq!(merged.len(), 1, "partial-edge neighbours must merge");
+        assert_eq!(merged[0].len(), 1);
+        assert_eq!(signed_area_2x(&merged[0][0]).unsigned_abs(), sum);
+    }
+
+    #[test]
+    fn union_pieces_reassembles_island_split_across_cells() {
+        // An island straddling the cell edge arrives as boundary notches in
+        // both cells' outer rings (a clipped hole touching the clip edge is a
+        // notch, not a hole). The union must close it back into a real hole.
+        let a = quantize_polygon(
+            &[
+                Point { x: 0.25, y: 0.25 },
+                Point { x: 0.5, y: 0.25 },
+                Point { x: 0.5, y: 0.35 },
+                Point { x: 0.45, y: 0.35 },
+                Point { x: 0.45, y: 0.4 },
+                Point { x: 0.5, y: 0.4 },
+                Point { x: 0.5, y: 0.5 },
+                Point { x: 0.25, y: 0.5 },
+            ],
+            &[],
+            2,
+        );
+        let b = quantize_polygon(
+            &[
+                Point { x: 0.5, y: 0.25 },
+                Point { x: 0.75, y: 0.25 },
+                Point { x: 0.75, y: 0.5 },
+                Point { x: 0.5, y: 0.5 },
+                Point { x: 0.5, y: 0.4 },
+                Point { x: 0.55, y: 0.4 },
+                Point { x: 0.55, y: 0.35 },
+                Point { x: 0.5, y: 0.35 },
+            ],
+            &[],
+            2,
+        );
+        let merged = union_pieces(vec![a, b]);
+        assert_eq!(merged.len(), 1, "the two cells must merge into one shape");
+        assert_eq!(
+            merged[0].len(),
+            2,
+            "the split island must come back as a hole"
+        );
+    }
+
+    #[test]
+    fn union_pieces_keeps_holes_and_disjoint_pieces() {
+        let holed = quantize_polygon(
+            &merc_square(0.1, 0.1, 0.4, 0.4),
+            &[merc_square(0.2, 0.2, 0.3, 0.3)],
+            7,
+        );
+        assert_eq!(holed.len(), 2);
+        let solo = quantize_polygon(&merc_square(0.6, 0.6, 0.7, 0.7), &[], 7);
+        let merged = union_pieces(vec![holed, solo]);
+        assert_eq!(merged.len(), 2, "disjoint pieces must stay separate");
+        let mut ring_counts: Vec<usize> = merged.iter().map(Vec::len).collect();
+        ring_counts.sort_unstable();
+        assert_eq!(ring_counts, vec![1, 2], "the hole must survive the union");
     }
 
     #[test]

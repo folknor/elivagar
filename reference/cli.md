@@ -74,7 +74,23 @@ differing in vertex density. At z0-z7 the whole world is at most 256x128
 pixels, so full-resolution coastline vertices are overwhelmingly sub-pixel:
 the split exists to avoid paying for detail that cannot be seen. It is an
 optimization, not a correctness requirement, and `z0-z14:<full>` alone is a
-legal and slower way to say the same thing.
+legal and slower way to say the same thing - internally it still runs as
+two passes, with the full shapefile serving both, so the low-zoom behavior
+below is identical under either spelling.
+
+The low-zoom (z0-z7) pass unions its source pieces before pyramid descent
+(`OCEAN_POLICY_VERSION` v3). The osmdata shapefiles arrive pre-split into
+grid cells comparable to low-zoom tile sizes; descending each cell
+independently simplified shared coastlines into disagreeing shapes (seam
+wedges on every cell edge) and applied the per-zoom min-area drop per cell
+fragment (half-peninsula spikes and dropped slivers), which is exactly what
+the corpus z2 tile showed on 2026-07-19. The union is measured per run:
+stderr prints one `Union:` line (pieces/vertices in and out, duration) and
+the sidecar carries `ocean_union_ns`, `ocean_union_input_pieces`,
+`ocean_union_input_vertices`, `ocean_union_shapes`,
+`ocean_union_output_vertices`. The z8-z14 pass keeps per-piece descent: its
+seam mismatch is sub-pixel at fixed tolerances, and a world-scale union of
+the full polygons would dominate `ocean-build`.
 
 **The `.pmtiles` artifact is a cache over the shapefiles, not a substitute for
 them**, and is rejected on its own. Two things force this. An extract still
@@ -372,7 +388,9 @@ The authoritative ocean gates are the earcut oracle and the human visual check.
 of every addressed tile in an explicit archive against the committed baseline.
 Calibrated both directions 2026-07-15 (`reference/performance.md`); it replaced
 the pmtiles bless machinery (`brokkr bless`/`brokkr regress` and the
-blessed-archive registry) when the standing gate rotated.
+blessed-archive registry) when the standing gate rotated. This section is the
+command surface only; `reference/corpus.md` is the full methodology - rotation
+adjudication, contract semantics, digest modes, calibration discipline.
 
 `check` compares an archive to the committed `digest` and `contract.json` in
 the supplied directory. It exits 0 on a match, 1 for a content mismatch, and 2

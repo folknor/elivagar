@@ -655,3 +655,53 @@ The spec-B gate readings, run by the orchestrator after the landing:
 gate calibration at `a8c4f84` and render-core calibration at `41a953a`; its
 denmark cost is about 2.2 s. The committed corpus baseline supersedes the
 07-15 re-bless-pending-user-decision thread.
+
+## Low-zoom ocean union (2026-07-19, OCEAN_POLICY_VERSION v3, denmark locations)
+
+The corpus z2-x2-y1 finding (human layer, day one): band-computed low-zoom
+ocean rendered seam wedges and dropped fragments on the source split grid.
+Root cause was per-piece pyramid descent of the pre-split osmdata cells -
+independent per-cell VW simplification plus per-fragment min-area drops -
+NOT a band-vs-artifact difference: 1,363 of the committed corpus tile's
+1,421 non-grid coastline edges were bit-identical in the v2 artifact's
+z2/2/1, so the artifact carried the same defect and "serve artifact content
+at low zoom" was rejected as a fix. Landing: union the z0-z7 pass's pieces
+before descent, always split the passes (full-only spelling now serves both
+passes from the full shapefile), policy v2 -> v3. Design critiqued pre-code
+by codex-xhigh (six findings, all folded: pass-orchestration bug, ring-cap
+gate, defect-level tests, mosaic invariant, union resource counters,
+`ocean_pieces` semantics).
+
+Readings at the landing, all on plantasjen:
+
+- **Union cost**: denmark band 394 pieces (153,103 v) -> 361 shapes,
+  69 ms; world (`ocean-build`) 14,282 pieces (1,749,806 v) -> 2,106
+  shapes, 1.03 s. Counters `ocean_union_*` now record this per run.
+- **Defect metric** (z2/2/1, canonical render): 73 subpaths -> 10;
+  128px-lattice-aligned edges 283 (16.6%) -> 11 (0.9%, the bbox clip
+  line). Ocean features in the tile: 71 -> 2.
+- **Earcut oracle**: green pre- and post-fix builds, all zooms, 0 over
+  threshold, 0 misattached (1.27M tiles).
+- **Ring-cap census** (`ring-cap-census.mjs`, new gate: 0 polygons over
+  MapLibre's 500-ring clamp): denmark union zooms max 305 rings (z7);
+  world artifact union zooms max 352 (z7). All offenders are full-pass
+  (z8+) features untouched by the union: the denmark pair (z9/285/148
+  feat 10: 510 rings, z9/286/147 feat 4: 602) is bit-identical pre- and
+  post-fix, and the world artifact adds z10/546/260 feat 1 (725 rings).
+  Both world offender tiles were already over the cap in the DP-era
+  2026-07-12 artifact (z10/546/260: 628 rings, z9/286/147: 544), so the
+  class spans simplifier generations. On record as an open finding, out
+  of this landing's scope: MapLibre silently drops the hole rings beyond
+  500 in those three polygons today.
+- **Determinism**: two full denmark builds of the same dirty tree
+  sha256-identical (687ff258...).
+- **Contract guard**: `corpus check` of the v3 build against the v2
+  baseline refused exit 2 naming `config.ocean.artifact_key.policy_version`.
+- **Regress attribution** (v3 vs 8b7c4a0): 154 changed tiles of
+  1,296,999; every diff ocean-layer z0-z7, zero z8-z14, zero other
+  layers, zero attr changes. Displacements bounded (max 5,129 units at
+  z7 = merged-feature reorganization, not drift).
+- **`elivagar verify`**: PASS, both builds.
+
+The corpus rotation (`bless --rotate` + `render-manifest`) runs against the
+clean rebuild of the landing commit - bless refuses dirty builds.

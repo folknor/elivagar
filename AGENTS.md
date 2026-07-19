@@ -156,7 +156,9 @@ What elivagar emits:
   `assemble_ms`, `features`, `tiles`, `unique_tiles`, `output_bytes`,
   `peak_rss_kb` + per-phase rss, `tile_format`/`tile_compression` (enum ints:
   format 0=mvt/1=mlt, compression 0=gzip/1=brotli), ocean input
-  (`ocean_shapes`/`_shapes_hit`/`_pieces`/`_shapefile_bytes`), sort merge
+  (`ocean_shapes`/`_shapes_hit`/`_pieces`/`_shapefile_bytes`) plus the
+  low-zoom union gauge (`ocean_union_ns`, `ocean_union_input_pieces`/
+  `_input_vertices`, `ocean_union_shapes`/`_output_vertices`), sort merge
   (`sort_merge_bytes`, `sort_merge_max_fanin`), plus dedup, oversize, and
   missing-ref stats. This is the ~100-counter set that a bare measured run emits.
 - The per-layer per-zoom firehose (`sort_layer_<layer>_z<z>_records`/`_bytes`
@@ -264,6 +266,9 @@ Build/bench/verify tooling is in `brokkr`. One helper shell script lives in
 - `earcut-oracle.mjs <file.pmtiles> [layer] [threshold]` - **the MapLibre tessellation-fidelity gate.** Decodes every tile with @mapbox/vector-tile, groups rings with maplibre-gl's verbatim self-calibrating `classifyRings` (maxRings=500), tessellates each polygon with earcut, and reports per-zoom `earcut.deviation` plus misattached-hole counts (hole bbox outside its assigned outer). Pass = 0 over threshold, 0 misattached, on every polygon layer. This is the oracle that caught the R23 ClosePath cursor bug after every internal validator passed for three months - run it on any change that touches geometry or MVT encoding.
 - `feature-probe.mjs <file.pmtiles> <z> <x> <y> <layer> <featIdx>` - dumps one feature exactly as MapLibre sees it: per-ring vertex count, signed area, bbox, then classifyRings grouping and per-polygon deviation. For drilling into an oracle offender.
 - `winding-probe.mjs <file.pmtiles> <z> <x> <y> [layer]` - per-ring signed-area/winding summary for every polygon feature in one tile.
+- `layer-census.mjs <file.pmtiles> <z> <x> <y> [layer]` - lists every layer in one tile with feature count and geometry-type breakdown (plus a per-attribute value histogram for the named layer), consumer-path decode. For adjudicating "is this layer missing from the render or from the tile".
+- `ring-cap-census.mjs <file.pmtiles> [layer]` - archive-wide rings-per-polygon census against MapLibre's 500-ring classifyRings clamp, which silently drops hole rings the earcut oracle then never sees. Gate: 0 polygons over the cap. Run on anything that consolidates features (the ocean union landing was the trigger; two pre-existing z9 offenders are on record in reference/performance.md).
+- `zoom-overlay.mjs <file.pmtiles> <z> <x> <y> <detailZ> [layer] [-o out.svg]` - low-zoom generalization adjudicator: one tile's polygons as fill with the same archive's detailZ geometry superimposed as a rescaled outline. A correct generalization tracks the outline within a few pixels evenhandedly; seam wedges, dropped fragments and spikes show as fill leaving the line locally. Render the same composite from a known-bad archive first to calibrate the eyeball.
 - `ring-grouping-oracle.mjs <file.pmtiles> -o <out.txt>` - emits the canonical polygon ring grouping dump used to differentially inspect corpus rendering.
 - `validate.mjs` / `roundtrip.mjs` - vtvalidate structural checks and decode/re-encode round-trip (NOTE: a round-trip through any single decoder cannot catch symmetric encoder/decoder convention bugs - that is what the earcut oracle is for).
 - `boundary-line-oracle.mjs <file.pmtiles> [--only categories]` - the `boundaries`-layer line-fidelity gate. Decodes every line feature into its MoveTo-delimited sub-lines and flags, per zoom, palindromes (a sub-line equal to its own reverse), spurs (a retrace apex not at the sub-line ends, closure pair excluded for closed loops), intra-feature duplicates, and cross-feature duplicates (exact and reversed) - the last catches the maritime=true/false double-draw that `merge_same_attr_geometries` cannot merge across differing attributes. Categories are separately selectable via `--only`. Run on any change touching boundary-line emission, the line merger, or closed-line simplification.
@@ -314,7 +319,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `geometry/int_ocean.rs` - integer polygon geometry engine (ocean AND OSM layers): early quantization to max_zoom pixel space (unclamped, antimeridian-safe), exact shift-round per-zoom rescale, rotation-invariant pin-aware integer DP, Simplify/Intersect (NonZero) topology ops via the in-tree `geometry/overlay/` boolean engine (ported from i_overlay, no longer a dependency - i_overlay lives on only as a dev-dependency differential oracle), recursive row-band bisection, shared per-zoom emission engine (emit_shape_for_zoom). ALL polygon emission goes through this - see specs/. The earcut oracle (scripts/validate/) is the standing gate: 0 deviant polygons, 0 misattached holes, every polygon layer, every build that touches geometry or MVT encoding.
 - `mvt.rs` - MVT protobuf encoder. CRITICAL: ClosePath does NOT move the delta cursor (MVT spec 4.3.3.3) - a symmetric encoder/decoder violation of this was invisible to all internal round-trips for three months (ledger R23)
 - `multipolygon.rs` - relation ring assembly
-- `ocean.rs` - ocean shapefile processing (mmap reader + quantize-early integer boolean clipping via the shared int_ocean pyramid; no scanline fill, no point-in-polygon, no S-H, no LandMask)
+- `ocean.rs` - ocean shapefile processing (mmap reader + quantize-early integer boolean clipping via the shared int_ocean pyramid; no scanline fill, no point-in-polygon, no S-H, no LandMask). The z0-z7 pass unions the pre-split source cells before descent (OCEAN_POLICY_VERSION v3) - per-cell descent rendered seam wedges and min-area-dropped half-peninsulas at low zoom; the z0-z7/z8-z14 pass split always happens, with the full shapefile serving both passes when no simplified one is named
 
 **Infrastructure:**
 - `sort.rs` - external sort partitioned by Hilbert tile-id range at write time (z7-calibrated partitions, `PARTITION_SPLIT_Z`; chunk files uncompressed by default, LZ4/Snappy via `--compress-sort-chunks`; per-partition k-way merge via binary heap, consumed lazily by the assemble partition readers)
@@ -422,22 +427,20 @@ Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids 
 
 ### The standing gate: `elivagar corpus check`
 
-For an output-neutral landing, make a fresh locations build and check it:
-`brokkr tilegen --dataset denmark --variant locations`, then `elivagar corpus
-check data/tilegen/denmark-<commit>.pmtiles --corpus corpus/denmark`. Exit 0 is
-a pass; exit 1 names changed content and tiles; exit 2 is a contract refusal,
-never a verdict. For an intended output change, adjudicate the changed leaves
-and use `elivagar corpus bless <archive> --corpus corpus/denmark --rotate` in
-the landing commit. Bless without `--rotate` refuses replacement. For a
-landing that states an explicit geometry tolerance rather than zero-diff, gate
-on `elivagar regress <new> --against <prev> --tol N --max-moved M` with the
-displacement-percentile verdict stated in that spec (the `--max-moved M` budget
-is mandatory: `passed()` requires `tolerance_moved <= max_moved`, which defaults
-to 0). Routine checks are denmark-only. See `reference/cli.md` for the full
-corpus surface and `reference/performance.md` for calibration. `brokkr bless`
-and `brokkr regress`
-are removed from this workflow; their removal and a `brokkr corpus` wrapper are
-a named brokkr-repository task.
+**`reference/corpus.md` is the full methodology** - rotation adjudication,
+contract semantics, digest modes, calibration discipline, limitations. The
+terse version: for an output-neutral landing, build fresh and check -
+`brokkr tilegen --dataset denmark --variant locations`, then `elivagar
+corpus check data/tilegen/denmark-<commit>.pmtiles --corpus corpus/denmark`.
+Exit 0 passes; exit 1 names changed tiles; exit 2 is a contract refusal,
+never a verdict. An intended output change rotates the baseline with
+`elivagar corpus bless <archive> --corpus corpus/denmark --rotate` inside
+the landing commit, adjudicated on the corpus git diff. A landing with an
+explicit geometry tolerance gates on `elivagar regress <new> --against
+<prev> --tol N --max-moved M` (the move budget is mandatory - it defaults
+to 0 and `--tol` alone accepts nothing). Routine checks are denmark-only.
+`brokkr bless` and `brokkr regress` are removed from this workflow; their
+brokkr-side removal is a named task in `reference/corpus.md`.
 
 ### `elivagar regress <CURRENT> --against <BASELINE>` - the two-archive semantic diff
 

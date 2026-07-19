@@ -21,8 +21,8 @@ importers:
         specifier: ^5.24.0
         version: 5.24.0
       pbf:
-        specifier: ^5.1.0
-        version: 5.1.0
+        specifier: ^5.1.2
+        version: 5.1.2
       pmtiles:
         specifier: ^4.4.1
         version: 4.4.1
@@ -478,8 +478,8 @@ packages:
     resolution: {integrity: sha512-SuLdBvS42z33m8ejRbInMapQe8n0D3vN/Xd5fmWM3tufNgRQFBpaW2YVJxQZV4iPNqb0vEFvssMEo5w9c6BTIA==}
     hasBin: true
 
-  pbf@5.1.0:
-    resolution: {integrity: sha512-Wv0yo0+uZepnoNEKsquhar1F18LogB8oeEikIhUXG16udbiXG7JecHGySwoo6kuMgjmbQYzdrTZlO+/K9t8eZg==}
+  pbf@5.1.2:
+    resolution: {integrity: sha512-mnvGdvOrIvJOBGUEdGkrVXjN8E/VkIJCkf2eS1DH2yv82ORUlLttmDt0rWY38yYZmVwciZwBUvHM20qxBZf40w==}
     hasBin: true
 
   pmtiles@4.4.1:
@@ -707,7 +707,7 @@ snapshots:
     dependencies:
       '@mapbox/point-geometry': 1.1.0
       '@types/geojson': 7946.0.16
-      pbf: 5.1.0
+      pbf: 5.1.2
 
   '@mapbox/vtvalidate@0.3.1':
     dependencies:
@@ -742,7 +742,7 @@ snapshots:
     dependencies:
       '@mapbox/point-geometry': 1.1.0
       '@types/geojson': 7946.0.16
-      pbf: 5.1.0
+      pbf: 5.1.2
 
   '@types/geojson@7946.0.16': {}
 
@@ -1152,7 +1152,7 @@ snapshots:
     dependencies:
       resolve-protobuf-schema: 2.1.0
 
-  pbf@5.1.0:
+  pbf@5.1.2:
     dependencies:
       resolve-protobuf-schema: 2.1.0
 
