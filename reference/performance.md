@@ -690,9 +690,9 @@ Readings at the landing, all on plantasjen:
   post-fix, and the world artifact adds z10/546/260 feat 1 (725 rings).
   Both world offender tiles were already over the cap in the DP-era
   2026-07-12 artifact (z10/546/260: 628 rings, z9/286/147: 544), so the
-  class spans simplifier generations. On record as an open finding, out
-  of this landing's scope: MapLibre silently drops the hole rings beyond
-  500 in those three polygons today.
+  class spans simplifier generations and is out of this landing's
+  scope. MapLibre silently drops the hole rings beyond 500 in those
+  three polygons today; the follow-up is tracked in the roadmap note.
 - **Determinism**: two full denmark builds of the same dirty tree
   sha256-identical (687ff258...).
 - **Contract guard**: `corpus check` of the v3 build against the v2

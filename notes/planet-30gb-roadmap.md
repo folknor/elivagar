@@ -152,6 +152,17 @@ landing: `corpus bless --rotate` rewrites digest, contract, and manifest, and
 the commit diff is the review. The baseline lives in git and survives archive
 rotation by construction.
 
+**OPEN, BROKKR REPO: finish the bless-machinery teardown.** The
+elivagar-side rotation is complete, but until the brokkr repository
+lands its half, two hazards stand: `brokkr bless` still exists and
+would RECREATE the deleted `datasets.<D>.blessed` table on invocation,
+and `brokkr regress --against <path>` bypasses the now-failing
+resolver. The task: remove `brokkr bless` first, remove or repoint the
+regress resolver, optionally add `brokkr corpus` wrappers as
+ergonomics, and handle the removed `blessed` config field under
+`deny_unknown_fields` - keep a deprecated ignored field or sequence the
+schema change after every checkout's toml is clean.
+
 **Bit-identity gates** use `cmp -s` over complete deterministic
 archives, never `brokkr compare-tiles` (samples 200 tiles/zoom,
 compares aggregate counts, proves nothing about bytes).
@@ -314,17 +325,34 @@ svg-roi.mjs` extracts the edges inside a bbox ROI from `brokkr svg
 -o` dumps, comparing one defect region across archives without
 reading whole tiles.
 
-**OPEN, UNGATED: the latent cross-piece ocean seam.** `ocean.rs` sets
-`pins: None`, so the only simplification pins come from
-`build_edge_flags` (current cell's tile-edge window plus
-`params.pins`). A boundary genuinely SHARED between two ocean source
-pieces, away from tile edges, is simplified independently on each side
-and can open a seam. The ocean shapefile path is the one polygon
-producer with shared edges and no pin source - contrast the OSM path's
-shared-node pins. The machinery exists unused
-(`quantize_polygon_pinned_into`, `PyramidParams.pins`). Never observed
-in the wild, and no standing gate would catch it (earcut cannot: a
-seam is a vertex in the wrong place, not a self-intersection). The
+**LANDED 2026-07-19: low-zoom piece union, OCEAN_POLICY_VERSION v3
+(`2ab6f83`, corpus rotation `a40c077`).** The corpus z2-x2-y1 tile -
+the human layer on its first day - showed the cross-piece seam class
+in the wild at low zoom, plus a second mechanism nobody had named: the
+per-zoom min-area drop applied per cell FRAGMENT, deleting the smaller
+half of any landform straddling a source-cell edge. Root cause was the
+per-piece pyramid descent of the pre-split osmdata cells; the v2
+artifact carried the identical defect (96% of the corpus tile's
+coastline edges bit-identical in the artifact tile), killing the
+"serve artifact interior at low zoom" fix. Resolution: the z0-z7 pass
+unions its pieces before descent, the z0-z7/z8-z14 pass split is now
+unconditional (full-only spelling serves both passes from the full
+shapefile), and the artifact + chunk-resume keys carry v3. Full
+calibration record: reference/performance.md, low-zoom ocean union
+section. Adjudication tooling from the landing:
+`scripts/validate/zoom-overlay.mjs` (tile fill under the same
+archive's higher-zoom outline) and `ring-cap-census.mjs`.
+
+**OPEN, UNGATED: the cross-piece ocean seam, now z8-z14 only.** The
+07-19 union removed the class from z0-z7 outright (merged pieces have
+no shared boundaries to disagree on). The full-resolution pass still
+descends per piece with `pins: None`, so a boundary genuinely shared
+between two source pieces, away from tile edges, is simplified
+independently on each side and can open a seam - bounded sub-pixel by
+the fixed per-zoom tolerances, which is why it stays unobserved. The
+machinery exists unused (`quantize_polygon_pinned_into`,
+`PyramidParams.pins`). No standing gate would catch it (earcut cannot:
+a seam is a vertex in the wrong place, not a self-intersection). The
 connected-component render gate was REFUTED on calibration 2026-07-14
 (separation topped out at 3.29x against the 4x the threshold math
 needs) - rendered-area measures cannot separate an ocean defect from
@@ -335,6 +363,19 @@ boundary oracle's spur detector: flag point pairs a sub-pixel
 straight-line distance apart but a long path-length apart, excursion
 on the land side. Categorical, no REF build, satisfies the oracle
 discipline in AGENTS.md.
+
+**OPEN: three full-pass ocean polygons exceed MapLibre's 500-ring
+clamp.** classifyRings silently drops all but the 500 largest rings of
+a polygon, so the excess hole rings in z9/285/148 feat 10 (510 rings),
+z9/286/147 feat 4 (602) and z10/546/260 feat 1 (725, artifact) are
+invisible to every consumer and to the earcut oracle, which validates
+only retained rings. Pre-existing across simplifier generations (both
+world offenders were over the cap in the DP-era 2026-07-12 artifact);
+not touched by the 07-19 union, whose zooms max at 352 rings. Fix
+shape: partition many-holed features into disjoint sub-cap features
+without duplicating outer rings. Gate exists:
+`scripts/validate/ring-cap-census.mjs`, 0 polygons over cap; readings
+in reference/performance.md.
 
 ### H6: Way-path churn and the engine surface
 

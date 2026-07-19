@@ -295,6 +295,13 @@ Risks: adjacent pieces, holes/islands, winding, canonical output validation;
 ocean feature IDs disappear (acceptable). Note: item 14 removes the serial
 reader structurally and item 10 cuts the clip cost, which together absorb
 most of this item's payoff at extract scale - re-price after P1/P3 land.
+2026-07-19 update: the low-zoom half of this landed for correctness, not
+perf - the z0-z7 pass unions its source pieces before descent
+(OCEAN_POLICY_VERSION v3, `2ab6f83`), so low zooms now emit few merged
+features; union cost measured at 69 ms denmark band / 1.03 s world. The
+z8-z14 pass still emits per-piece features, so the sort-volume angle at
+high zoom - the bulk of the 59% norway share - is unchanged and this
+item's remaining scope is z8-z14 only.
 
 ### Item 23: durable/cached ocean tile source
 

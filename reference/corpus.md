@@ -259,18 +259,12 @@ clean-room OpenLayers review; not restated anywhere else.
 - Raster-only concerns (AA, joins, caps, label collision) live where no
   geometry bug does and are deliberately out of scope.
 
-## Pending brokkr-side task
+## brokkr and the corpus
 
-The elivagar-side rotation is complete, but until the brokkr repository
-lands its half, two hazards stand: `brokkr bless` still exists and would
-RECREATE the deleted `datasets.<D>.blessed` table on invocation, and
-`brokkr regress --against <path>` bypasses the (now failing) resolver.
-The brokkr task: remove `brokkr bless` first, remove or repoint the
-regress resolver, add `brokkr corpus` wrappers as ergonomics (the corpus
-machinery enforces its own guards, so the wrapper adds convenience, not
-safety), and handle the removed `blessed` config field under
-`deny_unknown_fields` - keep a deprecated ignored field or sequence the
-schema change after every checkout's toml is clean.
+The corpus workflow is entirely elivagar-side: brokkr wraps none of the
+corpus subcommands, and the gate is invoked as the raw elivagar binary.
+The corpus machinery enforces its own guards, so any future brokkr
+wrapper is convenience, never safety.
 
 ## History
 

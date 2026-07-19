@@ -267,7 +267,7 @@ Build/bench/verify tooling is in `brokkr`. One helper shell script lives in
 - `feature-probe.mjs <file.pmtiles> <z> <x> <y> <layer> <featIdx>` - dumps one feature exactly as MapLibre sees it: per-ring vertex count, signed area, bbox, then classifyRings grouping and per-polygon deviation. For drilling into an oracle offender.
 - `winding-probe.mjs <file.pmtiles> <z> <x> <y> [layer]` - per-ring signed-area/winding summary for every polygon feature in one tile.
 - `layer-census.mjs <file.pmtiles> <z> <x> <y> [layer]` - lists every layer in one tile with feature count and geometry-type breakdown (plus a per-attribute value histogram for the named layer), consumer-path decode. For adjudicating "is this layer missing from the render or from the tile".
-- `ring-cap-census.mjs <file.pmtiles> [layer]` - archive-wide rings-per-polygon census against MapLibre's 500-ring classifyRings clamp, which silently drops hole rings the earcut oracle then never sees. Gate: 0 polygons over the cap. Run on anything that consolidates features (the ocean union landing was the trigger; two pre-existing z9 offenders are on record in reference/performance.md).
+- `ring-cap-census.mjs <file.pmtiles> [layer]` - archive-wide rings-per-polygon census against MapLibre's 500-ring classifyRings clamp, which silently drops hole rings the earcut oracle then never sees. Gate: 0 polygons over the cap. Run on anything that consolidates features (the ocean union landing was the trigger; three pre-existing full-pass offenders at z9 and z10 are on record in reference/performance.md, tracked in the roadmap note).
 - `zoom-overlay.mjs <file.pmtiles> <z> <x> <y> <detailZ> [layer] [-o out.svg]` - low-zoom generalization adjudicator: one tile's polygons as fill with the same archive's detailZ geometry superimposed as a rescaled outline. A correct generalization tracks the outline within a few pixels evenhandedly; seam wedges, dropped fragments and spikes show as fill leaving the line locally. Render the same composite from a known-bad archive first to calibrate the eyeball.
 - `ring-grouping-oracle.mjs <file.pmtiles> -o <out.txt>` - emits the canonical polygon ring grouping dump used to differentially inspect corpus rendering.
 - `validate.mjs` / `roundtrip.mjs` - vtvalidate structural checks and decode/re-encode round-trip (NOTE: a round-trip through any single decoder cannot catch symmetric encoder/decoder convention bugs - that is what the earcut oracle is for).
@@ -440,7 +440,8 @@ explicit geometry tolerance gates on `elivagar regress <new> --against
 <prev> --tol N --max-moved M` (the move budget is mandatory - it defaults
 to 0 and `--tol` alone accepts nothing). Routine checks are denmark-only.
 `brokkr bless` and `brokkr regress` are removed from this workflow; their
-brokkr-side removal is a named task in `reference/corpus.md`.
+brokkr-side removal is still pending in the brokkr repository (tracked in
+the roadmap note).
 
 ### `elivagar regress <CURRENT> --against <BASELINE>` - the two-archive semantic diff
 
