@@ -3,13 +3,13 @@
     "cargo_features": [
       "default"
     ],
-    "cargo_lock_xxh3_128": "2e87da2a6acce1a7b5a758716d088caf",
+    "cargo_lock_xxh3_128": "c5b28ad0ce54b205ac46bf978eb411ae",
     "elivagar": {
-      "commit": "8b7c4a02fbb3937e4c7307cee1c1d0160216fbbd",
+      "commit": "2ab6f83f7feab3a075d453f3f47e85e6aecdd3a6",
       "dirty": false
     },
     "pbfhogg_reader": {
-      "commit": "0f1eb01a1c1e9bccdd2b9667a275d636d66bab5b",
+      "commit": "e45bd95fc70ebbcf571abfec6202aaadfa6e64f0",
       "dirty": false
     }
   },
@@ -24,7 +24,7 @@
         "full_shx_xxh128": "c65e7ee5a2027b4e488f741119218a71",
         "max_zoom": 14,
         "min_zoom": 0,
-        "policy_version": 2,
+        "policy_version": 3,
         "simplified_shp_xxh128": "b3417e31c2873dcfd106aa2e7d5e3b2a",
         "simplified_shx_xxh128": "55c4a5d3476116d7b800122a074ba70b"
       },
