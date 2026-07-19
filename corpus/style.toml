@@ -5,18 +5,188 @@ background = "#f2efe9"
 name = "ocean"
 fill = "#aad3df"
 [[layer]]
-name = "water_polygons"
-fill = "#aad3df"
-[[layer]]
 name = "land"
+# Every kind is_known_land_kind() accepts has a match below (colors follow
+# OSM Carto where one exists); the base fill only catches unknown kinds.
 fill = "#f2efe9"
+[[layer.match]]
+key = "kind"
+value = "residential"
+fill = "#e0dfdf"
+[[layer.match]]
+key = "kind"
+value = "commercial"
+fill = "#f2dad9"
+[[layer.match]]
+key = "kind"
+value = "retail"
+fill = "#ffd6d1"
+[[layer.match]]
+key = "kind"
+value = "industrial"
+fill = "#ebdbe8"
+[[layer.match]]
+key = "kind"
+value = "garages"
+fill = "#dfddce"
+[[layer.match]]
+key = "kind"
+value = "railway"
+fill = "#ebdbe8"
+[[layer.match]]
+key = "kind"
+value = "brownfield"
+fill = "#c7c7b4"
+[[layer.match]]
+key = "kind"
+value = "greenfield"
+fill = "#c7c7b4"
+[[layer.match]]
+key = "kind"
+value = "landfill"
+fill = "#b6b592"
+[[layer.match]]
+key = "kind"
+value = "quarry"
+fill = "#c5c3c3"
+[[layer.match]]
+key = "kind"
+value = "farmyard"
+fill = "#f5dcba"
+[[layer.match]]
+key = "kind"
+value = "farmland"
+fill = "#eef0d5"
+[[layer.match]]
+key = "kind"
+value = "meadow"
+fill = "#cdebb0"
+[[layer.match]]
+key = "kind"
+value = "orchard"
+fill = "#aedfa3"
+[[layer.match]]
+key = "kind"
+value = "vineyard"
+fill = "#aedfa3"
+[[layer.match]]
+key = "kind"
+value = "allotments"
+fill = "#c9e1bf"
+[[layer.match]]
+key = "kind"
+value = "plant_nursery"
+fill = "#aedfa3"
+[[layer.match]]
+key = "kind"
+value = "greenhouse_horticulture"
+fill = "#eef0d5"
+[[layer.match]]
+key = "kind"
+value = "park"
+fill = "#c8facc"
+[[layer.match]]
+key = "kind"
+value = "golf_course"
+fill = "#def6c0"
+[[layer.match]]
+key = "kind"
+value = "recreation_ground"
+fill = "#def6c0"
+[[layer.match]]
+key = "kind"
+value = "village_green"
+fill = "#cdebb0"
+[[layer.match]]
+key = "kind"
+value = "cemetery"
+fill = "#aacbaf"
+[[layer.match]]
+key = "kind"
+value = "grave_yard"
+fill = "#aacbaf"
+[[layer.match]]
+key = "kind"
+value = "bare_rock"
+fill = "#e4dcd4"
+[[layer.match]]
+key = "kind"
+value = "scree"
+fill = "#e4dcd4"
+[[layer.match]]
+key = "kind"
+value = "shingle"
+fill = "#e4dcd4"
+[[layer.match]]
+key = "kind"
+value = "sand"
+fill = "#f5e9c6"
+[[layer.match]]
+key = "kind"
+value = "beach"
+fill = "#fff1ba"
+[[layer.match]]
+key = "kind"
+value = "grassland"
+fill = "#cdebb0"
+[[layer.match]]
+key = "kind"
+value = "heath"
+fill = "#d6d99f"
+[[layer.match]]
+key = "kind"
+value = "scrub"
+fill = "#c8d7ab"
+[[layer.match]]
+key = "kind"
+value = "bog"
+fill = "#d0e6db"
+[[layer.match]]
+key = "kind"
+value = "marsh"
+fill = "#d0e6db"
+[[layer.match]]
+key = "kind"
+value = "string_bog"
+fill = "#d0e6db"
+[[layer.match]]
+key = "kind"
+value = "swamp"
+fill = "#d0e6db"
+[[layer.match]]
+key = "kind"
+value = "wet_meadow"
+fill = "#d0e6db"
+[[layer.match]]
+key = "kind"
+value = "grass"
+fill = "#cdebb0"
+[[layer.match]]
+key = "kind"
+value = "garden"
+fill = "#cdebb0"
+[[layer.match]]
+key = "kind"
+value = "playground"
+fill = "#dffce2"
+[[layer.match]]
+key = "kind"
+value = "miniature_golf"
+fill = "#b5e3b5"
 [[layer.match]]
 key = "kind"
 value = "forest"
 fill = "#add19e"
+[[layer.match]]
+key = "kind"
+value = "cliff"
+fill = "#9a9a89"
 [[layer]]
 name = "sites"
 fill = "#e0dfcc"
+[[layer]]
+name = "water_polygons"
+fill = "#aad3df"
 [[layer]]
 name = "buildings"
 fill = "#d9d0c9"
@@ -53,8 +223,13 @@ name = "street_polygons"
 fill = "#cccccc"
 [[layer]]
 name = "streets"
-stroke = "#dddddd"
-stroke_width = "1"
+stroke = "#b0b0b0"
+stroke_width = "2"
+[[layer.match]]
+key = "kind"
+value = "motorway"
+stroke = "#e892a2"
+stroke_width = "3"
 [[layer]]
 name = "aerialways"
 stroke = "#888888"

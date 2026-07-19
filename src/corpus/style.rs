@@ -151,4 +151,79 @@ mod tests {
         assert_eq!(s.resolve("nope", &[]).fill.as_deref(), Some("#ff00ff"));
         assert_eq!(s.position("nope"), None);
     }
+
+    /// The committed corpus style holds two visual invariants: land paints
+    /// below water_polygons (an opaque land fill above water erases lakes),
+    /// and every kind the land matcher can emit has its own fill. An
+    /// unmatched kind takes the land base fill - the background color - and
+    /// reads as a missing feature; the magenta fallback only covers unstyled
+    /// LAYERS, so nothing else makes an unstyled kind visible. The kind list
+    /// mirrors is_known_land_kind, and the assert on that predicate keeps the
+    /// two in lockstep the same way every_land_kind_has_rank does.
+    #[test]
+    fn committed_style_covers_every_land_kind() {
+        use crate::shortbread::paint_order::is_known_land_kind;
+        let s = Style::load(std::path::Path::new("corpus/style.toml"))
+            .expect("load committed corpus style");
+        assert!(
+            s.position("land").expect("land layer styled")
+                < s.position("water_polygons").expect("water_polygons styled"),
+            "land must paint below water_polygons"
+        );
+        let base = s.resolve("land", &[]).fill;
+        for kind in [
+            "residential",
+            "commercial",
+            "retail",
+            "industrial",
+            "garages",
+            "railway",
+            "brownfield",
+            "greenfield",
+            "landfill",
+            "quarry",
+            "farmyard",
+            "farmland",
+            "meadow",
+            "orchard",
+            "vineyard",
+            "allotments",
+            "plant_nursery",
+            "greenhouse_horticulture",
+            "park",
+            "golf_course",
+            "recreation_ground",
+            "village_green",
+            "cemetery",
+            "grave_yard",
+            "bare_rock",
+            "scree",
+            "shingle",
+            "sand",
+            "beach",
+            "grassland",
+            "heath",
+            "scrub",
+            "bog",
+            "marsh",
+            "string_bog",
+            "swamp",
+            "wet_meadow",
+            "grass",
+            "garden",
+            "playground",
+            "miniature_golf",
+            "forest",
+            "cliff",
+        ] {
+            assert!(is_known_land_kind(kind), "{kind:?} not a known land kind");
+            let attrs = vec![(Arc::from("kind"), DetailAttr::String(Arc::from(kind)))];
+            let fill = s.resolve("land", &attrs).fill;
+            assert!(fill.is_some(), "land kind {kind:?} has no fill");
+            assert_ne!(
+                fill, base,
+                "land kind {kind:?} renders background-colored (no style match)"
+            );
+        }
+    }
 }

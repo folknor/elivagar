@@ -306,10 +306,10 @@ follow visual verification. Gate lessons: (a) the needle-detector
 candidate recorded below would NOT have fired on this - the defect is
 a cross-feature coverage gap (the north cell's simplified chord
 against the south cell's edge fill), so the candidate must be
-re-scoped to seam gaps between adjacent features; (b) the svg-corpus
-text-diff (notes/svg-corpus-plan.md) would have flagged both tiles
-mechanically - this incident is that plan's strongest concrete
-argument yet. Triage tooling from the hunt: `scripts/validate/
+re-scoped to seam gaps between adjacent features; (b) the corpus
+gate (reference/corpus.md) would have flagged both tiles
+mechanically - this incident was the concrete argument that got the
+corpus built and the standing gate rotated to it the same day. Triage tooling from the hunt: `scripts/validate/
 svg-roi.mjs` extracts the edges inside a bbox ROI from `brokkr svg
 -o` dumps, comparing one defect region across archives without
 reading whole tiles.
