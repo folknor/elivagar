@@ -17,13 +17,16 @@ path = "src/main.rs"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dependencies]
-pbfhogg = { path = "../pbfhogg" }
+# Our PBF reader. The resolved lockfile version is read by build.rs and
+# recorded in every archive's provenance block, so a bump here flows into
+# provenance with no other edit needed.
+pbfhogg = "0.5"
 protohoggr = "0.4.0"
 rayon = "1.5"
 memmap2 = "0.9.11"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 brotli = "8.0.4"
-lz4_flex = "0.13"
+lz4_flex = "0.14"
 snap = "1"
 smallvec = "1.15.2"
 hotpath = "0.21.1"
@@ -31,7 +34,7 @@ rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-toml = "0.9"
+toml = "1.1.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 mlt-core = "0.12.3"
 geo-types = "0.7.19"

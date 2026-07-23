@@ -285,21 +285,19 @@ fn repo_json(commit: &str, dirty: &str) -> Value {
 /// consumer that refused on a build mismatch would refuse every real
 /// comparison.
 ///
-/// protohoggr appears only through `cargo_lock_xxh3_128`. It is a pinned
-/// registry dependency, so the lockfile's content-addressed checksum
-/// identifies it exactly; it needs no commit or dirty flag because it cannot
-/// drift. pbfhogg is a path dependency and can, which is why it is named
-/// separately.
+/// pbfhogg moved from a path dependency to a pinned registry dependency, so it
+/// no longer has a git tree and carries no commit/dirty pair - only its locked
+/// semver, which `cargo_lock_xxh3_128` pins exactly but as an opaque checksum a
+/// reader cannot resolve to a version. protohoggr appears only through that
+/// checksum for the same reason and needs no field of its own. elivagar remains
+/// the one git tree here, so only elivagar carries a commit/dirty pair.
 fn build_json() -> Value {
     json!({
         "elivagar": repo_json(
             env!("ELIVAGAR_BUILD_ELIVAGAR_COMMIT"),
             env!("ELIVAGAR_BUILD_ELIVAGAR_DIRTY"),
         ),
-        "pbfhogg_reader": repo_json(
-            env!("ELIVAGAR_BUILD_PBFHOGG_COMMIT"),
-            env!("ELIVAGAR_BUILD_PBFHOGG_DIRTY"),
-        ),
+        "pbfhogg_reader": { "version": env!("ELIVAGAR_BUILD_PBFHOGG_VERSION") },
         "cargo_lock_xxh3_128": env!("ELIVAGAR_BUILD_CARGO_LOCK_XXH3_128"),
         "cargo_features": env!("ELIVAGAR_BUILD_CARGO_FEATURES")
             .split(',')

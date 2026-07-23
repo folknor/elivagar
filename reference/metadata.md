@@ -133,7 +133,7 @@ the contract comparison is defined over named fields, not the whole object.
 
     "build": {
       "elivagar":       { "commit": "ec5bd11...", "dirty": true },
-      "pbfhogg_reader": { "commit": "0f1eb01...", "dirty": false },
+      "pbfhogg_reader": { "version": "0.5.0" },
       "cargo_lock_xxh3_128": "f850fa82608190a904500b37810e3def",
       "cargo_features": ["default", "mimalloc-alloc"]
     },
@@ -176,12 +176,17 @@ same OSM data.
 
 `build.pbfhogg_reader` is the pbfhogg **linked as our reader**, not the
 pbfhogg that produced the input PBF. Those can differ. The producer is not
-recorded (see gaps); the input hash is authoritative regardless.
+recorded (see gaps); the input hash is authoritative regardless. It is a
+pinned registry dependency now, so it records its locked semver `version`
+rather than a `commit`/`dirty` pair: a registry dependency has no git tree to
+be dirty against, and `cargo_lock_xxh3_128` already pins its exact checksum -
+the version is the reader-legible half of that pin.
 
 `build` has no protohoggr entry by design. It is a pinned registry dependency,
 identified exactly by the content-addressed checksum in `cargo_lock_xxh3_128`,
-and cannot drift. Only path dependencies need naming, which is why pinning it
-removed a whole class of staleness rather than adding a field.
+and cannot drift. pbfhogg is likewise pinned there; it keeps a named entry only
+to surface its human-readable version. Only path dependencies would need a
+commit/dirty pair, and there are none.
 
 `execution.resumed_from` names the phase a `--skip-to` run began at, or is
 `null` for a full run.

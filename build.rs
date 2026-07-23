@@ -8,21 +8,24 @@
 //! Freshness is the hard part. Cargo reruns a build script only when a
 //! declared input changes, but it relinks the crate whenever a path
 //! dependency's sources change - so without the `rerun-if-changed` lines
-//! below, editing pbfhogg would rebuild elivagar while this script kept
-//! reporting the previous commit and dirty state. The declarations cover both
-//! what git records (HEAD and the refs it points into) and what git does not
-//! (uncommitted edits, via the source trees themselves).
+//! below, editing a path dependency would rebuild elivagar while this script
+//! kept reporting the previous commit and dirty state. The declarations cover
+//! both what git records (HEAD and the refs it points into) and what git does
+//! not (uncommitted edits, via the source trees themselves).
 //!
-//! protohoggr is deliberately absent: it is a pinned registry dependency, so
-//! Cargo.lock identifies it by content-addressed checksum and no git
-//! inspection is needed or possible. Only path dependencies need this
-//! treatment, which is why pinning it removed a whole class of staleness.
+//! Registry dependencies are deliberately absent: pbfhogg and protohoggr are
+//! pinned registry dependencies, so Cargo.lock identifies each by
+//! content-addressed checksum and no git inspection is needed or possible.
+//! Only path dependencies need this treatment, which is why pinning them
+//! removed a whole class of staleness. There are currently no path
+//! dependencies, so `PATH_DEPS` is empty; leaving the machinery in place keeps
+//! the closure honest the day one is reintroduced.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Path dependencies whose git state has to be captured by hand.
-const PATH_DEPS: [(&str, &str); 1] = [("PBFHOGG", "../pbfhogg")];
+const PATH_DEPS: [(&str, &str); 0] = [];
 
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
     // current_dir rather than `-C`: same effect, and it fails cleanly when the
@@ -86,6 +89,30 @@ fn emit(name: &str, value: &str) {
     println!("cargo:rustc-env=ELIVAGAR_BUILD_{name}={value}");
 }
 
+/// The locked semver of a registry dependency, read straight from Cargo.lock.
+///
+/// A registry dependency has no git tree to inspect, so it carries no
+/// commit/dirty pair - but its version is still worth recording in provenance,
+/// and `cargo_lock_xxh3_128` pins only an opaque checksum a human cannot read.
+/// The lockfile lists `name` immediately above `version` inside each
+/// `[[package]]` block, so a line scan resolves it without taking a build
+/// dependency on a TOML parser.
+fn locked_version(lock: &str, package: &str) -> Option<String> {
+    let name_line = format!("name = \"{package}\"");
+    let mut in_target = false;
+    for line in lock.lines() {
+        let line = line.trim();
+        if line == "[[package]]" {
+            in_target = false;
+        } else if line == name_line {
+            in_target = true;
+        } else if in_target && let Some(rest) = line.strip_prefix("version = \"") {
+            return rest.strip_suffix('"').map(str::to_string);
+        }
+    }
+    None
+}
+
 fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     println!("cargo:rerun-if-changed=build.rs");
@@ -118,6 +145,16 @@ fn main() {
     emit(
         "CARGO_LOCK_XXH3_128",
         &format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&lock)),
+    );
+
+    // pbfhogg is our PBF reader and moved from path to registry; its semver
+    // still belongs in provenance even though it no longer has a git tree.
+    let lock_text = String::from_utf8_lossy(&lock);
+    emit(
+        "PBFHOGG_VERSION",
+        locked_version(&lock_text, "pbfhogg")
+            .as_deref()
+            .unwrap_or("unknown"),
     );
 
     // Cargo exposes enabled features as CARGO_FEATURE_<NAME>. Sorted so the

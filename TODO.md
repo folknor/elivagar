@@ -22,7 +22,9 @@ re-establish per-dataset baselines when run.
 
 ## Release prep
 
-- [ ] Switch `pbfhogg` dependency from path to crates.io version
+- [x] Switch `pbfhogg` dependency from path to crates.io version.
+  Its provenance version is derived from Cargo.lock at build time
+  (`build.rs` `locked_version`), so no hardcoded version to keep in sync.
 - [ ] Publish `elivagar` to crates.io
 
 ## Tile output optimizations

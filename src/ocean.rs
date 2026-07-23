@@ -1554,70 +1554,41 @@ mod tests {
         let maxz = 2_u8;
         let w = 20.0 / 4096.0; // 20 z0 pixels in merc units
         let half = w / 2.0;
+        let p = |x: f64, y: f64| Point { x, y };
         let s_unsplit = quantize_polygon(
             &[
-                Point { x: 0.25, y: 0.25 },
-                Point {
-                    x: 0.5 - half,
-                    y: 0.25,
-                },
-                Point {
-                    x: 0.5 - half,
-                    y: 0.25 - w,
-                },
-                Point {
-                    x: 0.5 + half,
-                    y: 0.25 - w,
-                },
-                Point {
-                    x: 0.5 + half,
-                    y: 0.25,
-                },
-                Point { x: 0.75, y: 0.25 },
-                Point { x: 0.75, y: 0.5 },
-                Point { x: 0.25, y: 0.5 },
+                p(0.25, 0.25),
+                p(0.5 - half, 0.25),
+                p(0.5 - half, 0.25 - w),
+                p(0.5 + half, 0.25 - w),
+                p(0.5 + half, 0.25),
+                p(0.75, 0.25),
+                p(0.75, 0.5),
+                p(0.25, 0.5),
             ],
             &[],
             maxz,
         );
         let piece_a = quantize_polygon(
             &[
-                Point { x: 0.25, y: 0.25 },
-                Point {
-                    x: 0.5 - half,
-                    y: 0.25,
-                },
-                Point {
-                    x: 0.5 - half,
-                    y: 0.25 - w,
-                },
-                Point {
-                    x: 0.5,
-                    y: 0.25 - w,
-                },
-                Point { x: 0.5, y: 0.5 },
-                Point { x: 0.25, y: 0.5 },
+                p(0.25, 0.25),
+                p(0.5 - half, 0.25),
+                p(0.5 - half, 0.25 - w),
+                p(0.5, 0.25 - w),
+                p(0.5, 0.5),
+                p(0.25, 0.5),
             ],
             &[],
             maxz,
         );
         let piece_b = quantize_polygon(
             &[
-                Point {
-                    x: 0.5,
-                    y: 0.25 - w,
-                },
-                Point {
-                    x: 0.5 + half,
-                    y: 0.25 - w,
-                },
-                Point {
-                    x: 0.5 + half,
-                    y: 0.25,
-                },
-                Point { x: 0.75, y: 0.25 },
-                Point { x: 0.75, y: 0.5 },
-                Point { x: 0.5, y: 0.5 },
+                p(0.5, 0.25 - w),
+                p(0.5 + half, 0.25 - w),
+                p(0.5 + half, 0.25),
+                p(0.75, 0.25),
+                p(0.75, 0.5),
+                p(0.5, 0.5),
             ],
             &[],
             maxz,

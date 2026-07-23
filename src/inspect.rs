@@ -377,7 +377,11 @@ fn print_contract(
 fn print_diagnostics(out: &mut dyn Write, p: &serde_json::Value) -> io::Result<()> {
     if let Some(build) = p.get("build") {
         let elivagar = repo_display(build.get("elivagar"));
-        let pbfhogg = repo_display(build.get("pbfhogg_reader"));
+        let pbfhogg = json_str(
+            build
+                .get("pbfhogg_reader")
+                .and_then(|reader| reader.get("version")),
+        );
         writeln!(
             out,
             "    Build:      elivagar {elivagar}, pbfhogg {pbfhogg}"
@@ -951,7 +955,7 @@ mod tests {
         },
         "build": {
             "elivagar": { "commit": "b833fc8", "dirty": false },
-            "pbfhogg_reader": { "commit": "4a1c2de", "dirty": true }
+            "pbfhogg_reader": { "version": "0.5.0" }
         },
         "effective": {
             "coordinate_source": "inline",
@@ -996,7 +1000,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("Build:      elivagar b833fc8, pbfhogg 4a1c2de (dirty)"),
+            out.contains("Build:      elivagar b833fc8, pbfhogg 0.5.0"),
             "{out}"
         );
         assert!(

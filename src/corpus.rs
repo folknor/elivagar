@@ -961,7 +961,7 @@ pub fn bless(
     }
     let contract = candidate_contract(&a)?;
     let mut warnings = Vec::new();
-    for repo in ["elivagar", "pbfhogg_reader"] {
+    for repo in ["elivagar"] {
         match contract
             .build
             .get(repo)
