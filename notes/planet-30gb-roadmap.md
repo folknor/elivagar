@@ -152,34 +152,21 @@ landing: `corpus bless --rotate` rewrites digest, contract, and manifest, and
 the commit diff is the review. The baseline lives in git and survives archive
 rotation by construction.
 
-**OPEN, BROKKR REPO: finish the bless-machinery teardown.** The
-elivagar-side rotation is complete, but until the brokkr repository
-lands its half, two hazards stand: `brokkr bless` still exists and
-would RECREATE the deleted `datasets.<D>.blessed` table on invocation,
-and `brokkr regress --against <path>` bypasses the now-failing
-resolver. Design settled 2026-07-24, spec handed to the brokkr side;
-the ruling is corpus-only (both tiers), no archive blessing, and every
-elivagar invocation in the dev flow gets a brokkr spelling. Decisions
-of record: the wrapper namespace is `brokkr pmtiles-corpus` (bare
-`corpus` collides with piners' parity-corpus runner in brokkr's flat
-command space - the pmtiles-inspect precedent); `--corpus` defaults
-to `corpus/<dataset>` anchored at build_root, while archives keep
-resolving off project_root; `brokkr regress` becomes an explicit
-two-archive wrapper with a required comparand, no registry, and
-brokkr's provenance comparability gate plus its provenance parser
-DELETED (contract refusal lives only in the corpus gate; a static
-help-text pointer to pmtiles-inspect replaces the gate), with
-pre-exec refusals never exiting 1, since 1 is the regress verdict
-code; passthrough value sets (`--mode`, `--op`) stay strings so
-elivagar remains the only validator, and exit codes pass through
-unchanged; `brokkr ocean-build` derives shapefile specs and output
-path from the `[host.tilegen.default].ocean` block by role partition,
-no override flags, no `--dataset`; wrappers build via cargo_build
-with no stale-binary fast path; the `blessed` schema field is removed
-outright under deny_unknown_fields (plantasjen's brokkr.toml verified
-clean 2026-07-24). When brokkr lands: update AGENTS.md's raw-binary
-spelling, the reference/corpus.md brokkr section, and close this
-item.
+**DONE 2026-07-24: the brokkr bless-machinery teardown landed and is
+verified.** brokkr commits 43e8e51 (bless/blessed-field/provenance-gate
+teardown + explicit two-archive regress), 74cd96f (`pmtiles-corpus`
+namespace), ce63405 (`ocean-build` from the tilegen ocean block); the
+wrapper design of record lives in reference/corpus.md. All acceptance
+gates ran green on plantasjen the same day: unknown-command `bless`,
+comparand refusal at exit 2 (never 1, the regress verdict code),
+wrapped-vs-raw corpus check parity on a fresh denmark locations build,
+drop-tile firing with the tile named, regzip clearing, raw-variant
+contract refusal at exit 2 with fields named, bless-without-rotate
+refusing with nothing written, and the ocean-build dry-run deriving
+the production ocean block. Both standing hazards are gone: `brokkr
+bless` is an unknown command and `datasets.<D>.blessed` fails config
+parse by name. Every elivagar invocation in the dev flow now has a
+brokkr spelling.
 
 **Bit-identity gates** use `cmp -s` over complete deterministic
 archives, never `brokkr compare-tiles` (samples 200 tiles/zoom,

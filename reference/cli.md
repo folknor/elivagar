@@ -323,7 +323,8 @@ Semantic diff of two PMTiles archives (MVT + gzip only).
 
 This is an explicit two-archive diff and tier-3 attribution engine.
 Comparability is the caller's responsibility, established from provenance; a
-natural comparand source is `data/tilegen/<dataset>-<commit>.pmtiles`.
+natural comparand source is
+`data/tilegen/<dataset>-<variant>-<commit>.pmtiles`.
 Comparing a locations archive against a raw build reports a six-figure
 structural diff for two correct builds, as the 2026-07-09 and 2026-07-14 false
 alarms showed.

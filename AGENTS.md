@@ -53,14 +53,22 @@ brokkr verify pmtiles [--dataset D] [--tiles VARIANT] [--geometry-stats]
 # THE standing output gate: fresh denmark locations build + corpus digest
 # check against the committed corpus/denmark/ baseline:
 #   brokkr tilegen --dataset denmark --variant locations
-#   brokkr pmtiles-corpus check --dataset denmark
-# The pmtiles-corpus namespace is landing in the brokkr repo (design
-# settled 2026-07-24; decisions of record in the roadmap note). Until
-# your brokkr build carries it, the raw spelling is
-#   elivagar corpus check data/tilegen/denmark-<commit>.pmtiles \
-#       --corpus corpus/denmark
-# brokkr bless and regress-vs-blessed are gone from the workflow
-# (see the corpus sections below).
+#   brokkr pmtiles-corpus check --dataset denmark --variant locations
+# (wraps elivagar corpus check <archive> --corpus corpus/denmark; landed
+# and verified on-host 2026-07-24. brokkr bless and regress-vs-blessed
+# are gone from the workflow - see the corpus sections below.)
+
+# Corpus, regress, ocean artifact (wrap the elivagar subcommands; corpus
+# dir defaults to corpus/<dataset>, flags/values/exit codes pass through;
+# durable archives are <dataset>-<variant>-<commit>.pmtiles, resolver
+# --variant defaults to raw)
+brokkr pmtiles-corpus check|bless|render|render-manifest|rings|mutate
+                      [--dataset D] [--variant V] [--commit H | --file P]
+                      [--corpus DIR] [...]
+brokkr regress [--dataset D] [--variant V] [--commit H | --file P]
+               (--against PATH | --against-commit H) [--against-variant V]
+               [--tol N --max-moved M ...]
+brokkr ocean-build [--dry-run]
 
 # Archive inspection (wrap the elivagar subcommands; named pmtiles-inspect
 # because brokkr inspect is pbfhogg's PBF inspector)
@@ -427,8 +435,10 @@ Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids 
 **`reference/corpus.md` is the full methodology** - rotation adjudication,
 contract semantics, digest modes, calibration discipline, limitations. The
 terse version: for an output-neutral landing, build fresh and check -
-`brokkr tilegen --dataset denmark --variant locations`, then `elivagar
-corpus check data/tilegen/denmark-<commit>.pmtiles --corpus corpus/denmark`.
+`brokkr tilegen --dataset denmark --variant locations`, then
+`brokkr pmtiles-corpus check --dataset denmark --variant locations`
+(raw equivalent: `elivagar corpus check
+data/tilegen/denmark-locations-<commit>.pmtiles --corpus corpus/denmark`).
 Exit 0 passes; exit 1 names changed tiles; exit 2 is a contract refusal,
 never a verdict. An intended output change rotates the baseline with
 `elivagar corpus bless <archive> --corpus corpus/denmark --rotate` inside
@@ -436,23 +446,27 @@ the landing commit, adjudicated on the corpus git diff. A landing with an
 explicit geometry tolerance gates on `elivagar regress <new> --against
 <prev> --tol N --max-moved M` (the move budget is mandatory - it defaults
 to 0 and `--tol` alone accepts nothing). Routine checks are denmark-only.
-The brokkr alignment (design settled 2026-07-24; decisions of record in
-the roadmap note) is landing in the brokkr repository: `brokkr bless`
-and the blessed registry are deleted, `brokkr regress` becomes an
-explicit two-archive wrapper with a required comparand, the corpus
-subcommands gain a `brokkr pmtiles-corpus` namespace (standing-gate
-spelling: `brokkr pmtiles-corpus check --dataset denmark`), and
-`brokkr ocean-build` builds the ocean artifact from the
-`[host.tilegen.default].ocean` block. The wrappers only resolve paths
-and record invocations; guards, verdicts, and exit codes stay
-elivagar's. Until your brokkr build carries them, use the raw
-spellings above.
+The brokkr alignment landed 2026-07-24 and is verified on-host:
+`brokkr bless` and the blessed registry are deleted, `brokkr regress`
+is an explicit two-archive wrapper with a required comparand, the
+corpus subcommands have the `brokkr pmtiles-corpus` namespace
+(standing-gate spelling: `brokkr pmtiles-corpus check --dataset
+denmark --variant locations`), and `brokkr ocean-build` builds the
+ocean artifact from the `[host.tilegen.default].ocean` block. Durable
+archives are named `<dataset>-<variant>-<commit>.pmtiles` and the
+resolvers take `--variant` (default raw; regress adds
+`--against-variant` for the comparand side, since cross-variant diffs
+are a legitimate use of the attribution instrument); a wrong variant
+fails loudly at resolution, before the archive opens. The wrappers
+only resolve paths and record invocations; guards, verdicts, and exit
+codes stay elivagar's, so the raw spellings remain equivalent.
 
 ### `elivagar regress <CURRENT> --against <BASELINE>` - the two-archive semantic diff
 
 This takes two explicit archive paths, with no registry. It is the attribution
 instrument (`--overlay` renders per-tile diff SVGs), not the standing gate; the
-natural comparand source is `data/tilegen/<dataset>-<commit>.pmtiles`. What it
+natural comparand source is
+`data/tilegen/<dataset>-<variant>-<commit>.pmtiles`. What it
 computes: a semantic diff of two PMTiles archives
 (MVT + gzip only). Decodes every tile into a canonical form (layers sorted,
 features sorted, merged-feature components sorted - erasing intra-layer

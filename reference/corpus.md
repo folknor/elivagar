@@ -60,8 +60,12 @@ For an output-neutral landing:
 
 ```
 brokkr tilegen --dataset denmark --variant locations
-elivagar corpus check data/tilegen/denmark-<commit>.pmtiles --corpus corpus/denmark
+brokkr pmtiles-corpus check --dataset denmark --variant locations
 ```
+
+(Raw equivalent: `elivagar corpus check
+data/tilegen/denmark-locations-<commit>.pmtiles --corpus
+corpus/denmark`.)
 
 Exit 0 is the pass. Exit 1 is a content mismatch and names the changed
 zooms and tiles (`changed z x y ...` / `added` / `removed`). Exit 2 is a
@@ -262,19 +266,22 @@ clean-room OpenLayers review; not restated anywhere else.
 ## brokkr and the corpus
 
 The corpus machinery enforces its own guards, so any brokkr wrapper is
-convenience, never safety. The wrapper surface was settled 2026-07-24
-and is landing in the brokkr repository: a `brokkr pmtiles-corpus`
-namespace mirroring the corpus subcommands (check, bless, render,
-render-manifest, rings, mutate; bare `corpus` collides with piners'
-parity-corpus runner in brokkr's flat command space), an explicit
-two-archive `brokkr regress` with a required comparand, no registry and
-no brokkr-side contract gate, and `brokkr ocean-build` driven by the
-`[host.tilegen.default].ocean` block. brokkr resolves archive paths
-(`--dataset`/`--commit`/`--file`, the pmtiles-inspect resolver) and the
+convenience, never safety. The wrapper surface was settled and landed
+2026-07-24, verified on plantasjen against the calibration gates the
+same day: a `brokkr pmtiles-corpus` namespace mirroring the corpus
+subcommands (check, bless, render, render-manifest, rings, mutate;
+bare `corpus` collides with piners' parity-corpus runner in brokkr's
+flat command space), an explicit two-archive `brokkr regress` with a
+required comparand, no registry and no brokkr-side contract gate, and
+`brokkr ocean-build` driven by the `[host.tilegen.default].ocean`
+block. brokkr resolves archive paths
+(`--dataset`/`--variant`/`--commit`/`--file`, the pmtiles-inspect
+resolver over `<dataset>-<variant>-<commit>.pmtiles` names; regress
+adds `--against-variant` for the comparand side) and the
 corpus directory (`corpus/<dataset>`, anchored at the git root), and
 passes flags, value sets, and exit codes through verbatim - elivagar
-remains the only validator. Until a given brokkr build carries the
-namespace, the gate is invoked as the raw elivagar binary.
+remains the only validator. The raw elivagar spellings stay equivalent;
+the wrapper adds resolution and history recording only.
 
 ## History
 
