@@ -49,3 +49,15 @@ z = 14
 x = 8764
 y = 5132
 note = "dense Copenhagen"
+[[tile]]
+z = 9
+x = 285
+y = 148
+layers = ["ocean"]
+note = "510-ring polygon, MapLibre clamp"
+[[tile]]
+z = 9
+x = 286
+y = 147
+layers = ["ocean"]
+note = "602-ring polygon, MapLibre clamp"

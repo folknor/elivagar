@@ -79,7 +79,8 @@ two passes, with the full shapefile serving both, so the low-zoom behavior
 below is identical under either spelling.
 
 The low-zoom (z0-z7) pass unions its source pieces before pyramid descent
-(`OCEAN_POLICY_VERSION` v3). The osmdata shapefiles arrive pre-split into
+(`OCEAN_POLICY_VERSION` v3; the current version is v4, which adds the
+ring-cap partition below). The osmdata shapefiles arrive pre-split into
 grid cells comparable to low-zoom tile sizes; descending each cell
 independently simplified shared coastlines into disagreeing shapes (seam
 wedges on every cell edge) and applied the per-zoom min-area drop per cell
@@ -91,6 +92,19 @@ the sidecar carries `ocean_union_ns`, `ocean_union_input_pieces`,
 `ocean_union_output_vertices`. The z8-z14 pass keeps per-piece descent: its
 seam mismatch is sub-pixel at fixed tolerances, and a world-scale union of
 the full polygons would dominate `ocean-build`.
+
+No emitted polygon exceeds MapLibre's 500-ring clamp (`OCEAN_POLICY_VERSION`
+v4). classifyRings applies `EARCUT_MAX_RINGS = 500` to each classified polygon
+- an outer plus its following opposite-wound holes - and silently drops all
+but the 500 largest rings of any polygon past it, so three many-holed ocean
+polygons were losing their smallest islands in MapLibre and nowhere else.
+Emission now bisects such a shape's clip rect until every piece fits under the
+cap; the halves share their integer cut coordinate, so the pieces abut exactly
+under nonzero fill. The sidecar carries `ring_cap_partitions` and
+`ring_cap_pieces`; the gate is `scripts/validate/ring-cap-census.mjs` at zero
+over the cap. Note that an artifact-active extract reads its interior tiles
+from the artifact, so those two counters read zero there even when the archive
+carries partitioned geometry - the partition ran during `ocean-build`.
 
 **The `.pmtiles` artifact is a cache over the shapefiles, not a substitute for
 them**, and is rejected on its own. Two things force this. An extract still

@@ -773,3 +773,64 @@ The streaming hash definition is frozen: it is the meaning of every
 committed leaf, so any semantic change to it is a corpus-rotation plus
 recalibration event, never a quiet edit. Recalibration triggers and the
 two-leg drift mechanism live in `reference/corpus.md`.
+
+## Ring-cap partition (2026-07-24, OCEAN_POLICY_VERSION v4, denmark locations)
+
+MapLibre's classifyRings clamps `EARCUT_MAX_RINGS = 500` per CLASSIFIED
+POLYGON - an outer plus its following opposite-wound holes - not per feature,
+and silently drops all but the 500 largest rings past it. The three offenders
+carried over from the v3 landing were single many-holed ocean polygons:
+feature-probe on `denmark-locations-da6995f.pmtiles` showed z9/285/148 to be
+ONE outer of 896 vertices spanning the buffered tile plus 509 holes, so no
+regrouping or merge-side change could help. Emission now bisects an over-cap
+normalized shape's buffered tile rect - longer axis, ties to x, halves closed
+at the shared integer cut coordinate - and recurses until every piece fits
+under the cap. Clipping runs at min-area 0 (island survival was decided by
+`normalize_into` upstream); a piece still over the cap in an indivisible rect
+is a hard error, not an emission. Spec: `notes/ring-cap-partition-spec.md`,
+critiqued pre-code by codex-xhigh (14 findings).
+
+Readings at the landing (`b6b6844`), all on plantasjen:
+
+- **Bench, unchanged**: pre `brokkr tilegen --bench 3 --dataset denmark
+  --variant locations` 10,100 ms best-of-3 (`8023d844`, at `b4f4390`); post
+  10,100 ms (`06d5f2d4`). Same best-of-3 to the recorded resolution - the
+  partition executes on two shapes in the whole world.
+- **Ring-cap census, both directions**: FIRES on the pre-landing archive
+  (`ring-cap-census.mjs ... all`, exit 1, naming exactly `ocean z9/285/148
+  feat 10: 510 rings` and `ocean z9/286/147 feat 4: 602 rings`); CLEARS on
+  the post-landing archive and on the rebuilt world artifact
+  (`ocean-tiles.pmtiles ocean --unique`, 9,175,064 unique payloads, max 500
+  rings at z9, 0 over cap). That is this landing's both-direction
+  calibration.
+- **Coverage preservation** (what the census alone cannot show - a fix that
+  DELETED the excess holes would clear it too): the partition's pieces XOR
+  to zero area against the original shape, refereed by the `i_overlay`
+  dev-dependency rather than the in-tree engine doing the split
+  (`ring_cap_partition_preserves_coverage`).
+- **Earcut oracle**: 0 over threshold, 0 misattached on EVERY polygon layer,
+  pre and post, denmark (1.3M tiles) and the world artifact (9.18M unique
+  payloads). Layer coverage is what the new `all` argument buys; both
+  instruments gained it first, calibrated by the ocean block of an `all`
+  scan being line-identical to the single-layer run.
+- **Corpus preflight**: bless-without-`--rotate` on the fresh archive
+  refused exit 1 naming `config.ocean.artifact_key.policy_version` and
+  exactly two changed leaves, z9/285/148 and z9/286/147. No third tile.
+- **Visual evidence** (`data/ring-cap-evidence/`, canonical clamped renders -
+  plain `elivagar svg` cannot show this defect, and OpenLayers keeps every
+  ring): rings drawn per tile pre -> post, z9/285/148 516 -> 521,
+  z9/286/147 519 -> 621, z10/546/260 (artifact) 501 -> 723. The post counts
+  fall slightly short of unclamped originals (526, 621, 726) because a hole
+  straddling the cut line is absorbed into the pieces' outer boundaries as a
+  notch on each side - ring count drops, covered area does not, which is
+  what the XOR test pins.
+- **`elivagar verify`**: PASS on both the archive (1,296,998 tiles, 26
+  layers) and the artifact (9,177,102 tiles, `--unique-payloads`).
+- **Counters**: `ring_cap_partitions` / `ring_cap_pieces` read ZERO in the
+  gate build, and that is correct rather than a wiring fault - an
+  artifact-active extract takes its interior tiles from the artifact, so the
+  two denmark offenders were partitioned during `ocean-build`, which is not
+  a measured command and attaches no sidecar. (The 20 `*_wait_ns` counters
+  in the same run come through the same `counter_group!` macro and the same
+  end-of-run flush, which is what rules out the wiring fault.) The spec's
+  expectation of "partitions 2" holds only for an artifact-absent run.

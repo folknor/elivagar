@@ -370,18 +370,23 @@ straight-line distance apart but a long path-length apart, excursion
 on the land side. Categorical, no REF build, satisfies the oracle
 discipline in AGENTS.md.
 
-**OPEN: three full-pass ocean polygons exceed MapLibre's 500-ring
-clamp.** classifyRings silently drops all but the 500 largest rings of
-a polygon, so the excess hole rings in z9/285/148 feat 10 (510 rings),
-z9/286/147 feat 4 (602) and z10/546/260 feat 1 (725, artifact) are
-invisible to every consumer and to the earcut oracle, which validates
-only retained rings. Pre-existing across simplifier generations (both
-world offenders were over the cap in the DP-era 2026-07-12 artifact);
-not touched by the 07-19 union, whose zooms max at 352 rings. Fix
-shape: partition many-holed features into disjoint sub-cap features
-without duplicating outer rings. Gate exists:
-`scripts/validate/ring-cap-census.mjs`, 0 polygons over cap; readings
-in reference/performance.md.
+**CLOSED 2026-07-24: three full-pass ocean polygons exceeded
+MapLibre's 500-ring clamp.** classifyRings silently drops all but the
+500 largest rings of a polygon, so the excess hole rings in
+z9/285/148 feat 10 (510 rings), z9/286/147 feat 4 (602) and
+z10/546/260 feat 1 (725, artifact) were invisible to every consumer
+and to the earcut oracle, which validates only retained rings.
+Pre-existing across simplifier generations (both world offenders were
+over the cap in the DP-era 2026-07-12 artifact); not caused by the
+07-19 union, whose zooms max at 352 rings. Resolution
+(`OCEAN_POLICY_VERSION` v4): the z9/285/148 offender turned out to be
+ONE outer spanning the buffered tile plus 509 holes, so no
+re-grouping helps - emission bisects an over-cap shape's clip rect
+until every piece fits, halves closed at the shared integer cut
+coordinate. Census now reads 0 over cap on the world artifact and on
+denmark, every polygon layer. Calibration record:
+reference/performance.md, ring-cap partition section; spec
+notes/ring-cap-partition-spec.md.
 
 ### H6: Way-path churn and the engine surface
 
