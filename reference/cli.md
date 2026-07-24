@@ -194,9 +194,10 @@ valid only for a run naming the same shapefiles at the same compression level
 over z0-14.
 
 Rotating the artifact is an output-changing event. The corpus contract records
-the artifact key, so the next `corpus check` refuses with the key mismatch named
-until the corpus is re-blessed (`corpus bless --rotate`) from a build carrying
-the new artifact - and that rotation commit is the review.
+the artifact key, so the next `brokkr pmtiles-corpus check` refuses with the
+key mismatch named until the corpus is re-blessed (`brokkr pmtiles-corpus
+bless --rotate`) from a build carrying the new artifact - and that rotation
+commit is the review.
 
 `OCEAN_POLICY_VERSION` (`src/ocean.rs`) is the code half of the artifact key:
 the shapefile hashes catch input rotations, the version stands in for "the
@@ -247,10 +248,10 @@ They explain a diff once the contract matches and must never be
 equality-gated - given identical input and config they are a function of the
 code, and a regression gate exists to compare revisions.
 
-For the standing gate, `corpus check` enforces the contract before reading
-content. `elivagar regress` does not read the block, so for an ad-hoc comparison
-these lines let a human refuse; they do not refuse it. See
-`reference/metadata.md`.
+For the standing gate, `brokkr pmtiles-corpus check` enforces the contract
+before reading content, decoding this block through the linked crate. `brokkr
+regress` does not read the block, so for an ad-hoc comparison these lines let
+a human refuse; they do not refuse it. See `reference/metadata.md`.
 
 `Ocean` answers "was this artifact-active or computed", which before this
 existed could only be recovered by dumping the raw metadata - and on
@@ -306,35 +307,33 @@ tile-level errors.
 tessellation fault that decodes cleanly. That is what the earcut oracle
 (`scripts/validate/earcut-oracle.mjs`) is for.
 
-## `elivagar regress <CURRENT> --against <BASELINE>`
+## The corpus gate and `regress` - moved to brokkr (2026-07-24)
 
-Semantic diff of two PMTiles archives (MVT + gzip only).
+The `corpus` namespace (`check`, `bless`, `render`, `render-manifest`,
+`rings`, `mutate`) and `regress` are no longer elivagar subcommands. The
+corpus redesign moved the whole adjudication layer - the canonical semantic
+tile hash, the digest fold, the contract gating policy, the canonical SVG
+render core, the calibration instruments, and every baseline verdict - into
+brokkr, which links this crate and decodes archives in-process. The
+spellings are `brokkr pmtiles-corpus check|bless|render|render-manifest|
+rings|mutate` and `brokkr regress`; there is no raw elivagar spelling.
+`reference/corpus.md` remains the methodology. The baseline state stays
+committed in this repo at `corpus/<dataset>/` + `corpus/style.toml`, read
+and written only by brokkr, so rotations stay atomic with their landing
+commits.
 
-| flag | default | meaning |
-|---|---|---|
-| `<CURRENT>` | | archive to compare (positional) |
-| `--against <PATH>` | | baseline archive to compare against (required) |
-| `--tol <N>` | 0 | geometry tolerance in layer extent units |
-| `--max-moved <N>` | 0 | tolerance-moved features allowed before failure |
-| `--max-examples <N>` | 20 | per-class example cap |
-| `--overlay <DIR>` | | sampled diff-attribution SVGs, one per differing tile |
-| `--overlay-max <N>` | 64 | cap on overlay SVGs emitted (first N differing tiles) |
-| `--json` | | machine-readable output |
+What elivagar exposes instead is a library surface: the pmtiles reader
+(including run-level raw payload access), the `tile_detail` wire-order MVT
+decoder with selectable unknown-field strictness (strict is the gate's mode -
+foreign wire fields error; tolerant skips them, for cross-producer
+comparison), typed provenance in full, and the writer's `add_run` plus the
+mutate-only `set_metadata_verbatim`. The comparability *policy* went with
+the gate: the provenance schema lives here, the decision of which fields
+gate lives in brokkr.
 
-This is an explicit two-archive diff and tier-3 attribution engine.
-Comparability is the caller's responsibility, established from provenance; a
-natural comparand source is
-`data/tilegen/<dataset>-<variant>-<commit>.pmtiles`.
-Comparing a locations archive against a raw build reports a six-figure
-structural diff for two correct builds, as the 2026-07-09 and 2026-07-14 false
-alarms showed.
-
-Exit 0 only if nothing structural.
-
-The shared canonical decoder is strict on unknown MVT wire fields (v2 surface):
-regress errors rather than silently skipping them, so it is an elivagar-archive
-tool. `elivagar compare-tiles` remains the cross-producer instrument for
-archives that may carry fields elivagar does not emit.
+`brokkr compare-tiles`, the lenient cross-producer sampling comparison, is
+likewise brokkr-native (historically an elivagar cargo example, never a
+subcommand).
 
 ## `elivagar svg <FILE> -z <Z> -x <X> -y <Y> [OPTIONS]`
 
@@ -357,59 +356,6 @@ height exceeds 1.
 Ring winding for one tile: per-ring vertex count, signed area, and direction
 (CW outer, CCW hole) for every polygon feature across all layers. Prints
 first/last 3 vertices for large rings, all vertices for rings of 6 or fewer.
-
-## `elivagar corpus check|bless <ARCHIVE> --corpus <DIR>`
-
-**The standing output gate.** The corpus digest checks the semantic MVT content
-of every addressed tile in an explicit archive against the committed baseline.
-Calibrated both directions 2026-07-15 (`reference/performance.md`); it replaced
-the pmtiles bless machinery (`brokkr bless`/`brokkr regress` and the
-blessed-archive registry) when the standing gate rotated. This section is the
-command surface only; `reference/corpus.md` is the full methodology - rotation
-adjudication, contract semantics, digest modes, calibration discipline.
-
-`check` compares an archive to the committed `digest` and `contract.json` in
-the supplied directory. It exits 0 on a match, 1 for a content mismatch, and 2
-for a refusal such as a missing baseline, an invalid archive, or a differing
-input/config contract. Input names and build revisions are diagnostic only;
-all other input and config fields must match before content is read.
-
-`bless` writes `contract.json`, `digest`, and, in `--mode leaves` (the default),
-`leaves`. It accepts only a locations-on-ways archive. Replacing an existing
-baseline requires `--rotate`; without it, bless exits 1 without writing.
-`--mode buckets` stores per-zoom z7-ancestor hashes for planet-scale baselines.
-
-`mutate <IN> -o <OUT> --op drop-tile|nudge-geometry|layer-version|regzip`
-is the calibration instrument. The first three operations require
-`--tile z/x/y` and rewrite only that addressed tile, splitting a shared
-directory run first. `regzip` rewrites every payload at gzip level 9 without
-changing decoded content, and is the byte-different known-good control.
-Mutation preserves the source header configuration and metadata verbatim so
-the corpus contract stays identical. It is not a general-purpose tile editor.
-
-### SVG corpus commands
-
-`elivagar corpus render <ARCHIVE> -z Z -x X -y Y [--layers a,b] [--style PATH] [-o OUT]`
-renders one deterministic, integer-coordinate SVG without requiring a corpus
-contract. `corpus render-manifest <ARCHIVE> --corpus DIR [--style PATH]`
-first verifies the digest baseline, then refreshes the manifest SVGs and their
-style hash. `corpus rings <ARCHIVE> -o OUT` emits the canonical polygon ring
-grouping dump used with `scripts/validate/ring-grouping-oracle.mjs`.
-
-When a corpus directory carries a `manifest.toml`, `corpus check`/`bless` extend
-past the digest: they require the contract to record the style hash, refuse on a
-style-hash mismatch, re-render every manifest tile and byte-compare it against
-the committed SVG (a mismatch under an unchanged digest is reported as
-`svg stale`), flag any orphaned tile file, and surface unstyled-layer and
-ring-clamp warnings. `bless` re-renders the manifest in the same command. This
-SVG corpus is the human-diffable layer; the digest remains the exhaustive
-detector and this compare is only its staleness guard.
-
-The hash absorbs gzip bytes, layer/feature/attribute ordering, key/value-table
-permutation, and multi-geometry component ordering. It covers tile addressing,
-layer names, versions and extents, feature ids and attributes, and geometry.
-Archive metadata, header bounds, and directory layout are outside this digest:
-the provenance contract and `elivagar verify` own those surfaces.
 
 ## Environment variables
 
@@ -439,6 +385,11 @@ The harness cannot express "allow brokkr with any env assignments", so
 carry that, and gates nothing.
 
 ## What is not on this surface, and why
+
+The `corpus` and `regress` subcommands were removed on 2026-07-24 by the
+corpus redesign - see the moved-to-brokkr section above. The gate machinery
+was development tooling in an end-user binary; it now lives in brokkr, which
+links this crate.
 
 `--no-ocean`, `--no-ocean-simplify`, `--ocean-simplified` and `--ocean-tiles`
 were removed on 2026-07-14 along with the auto-detection.

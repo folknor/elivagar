@@ -651,10 +651,12 @@ The spec-B gate readings, run by the orchestrator after the landing:
 ## Standing gate rotation (2026-07-15, spec C teardown)
 
 `brokkr bless`/`brokkr regress` and `datasets.denmark.blessed` were removed.
-`elivagar corpus check` is now the standing output gate, following the digest
+The corpus check became the standing output gate, following the digest
 gate calibration at `a8c4f84` and render-core calibration at `41a953a`; its
 denmark cost is about 2.2 s. The committed corpus baseline supersedes the
-07-15 re-bless-pending-user-decision thread.
+07-15 re-bless-pending-user-decision thread. (Spelled `elivagar corpus
+check` until the 2026-07-24 corpus redesign; the standing spelling is now
+`brokkr pmtiles-corpus check`, native brokkr code over the linked crate.)
 
 ## Low-zoom ocean union (2026-07-19, OCEAN_POLICY_VERSION v3, denmark locations)
 

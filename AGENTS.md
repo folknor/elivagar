@@ -54,14 +54,14 @@ brokkr verify pmtiles [--dataset D] [--tiles VARIANT] [--geometry-stats]
 # check against the committed corpus/denmark/ baseline:
 #   brokkr tilegen --dataset denmark --variant locations
 #   brokkr pmtiles-corpus check --dataset denmark --variant locations
-# (wraps elivagar corpus check <archive> --corpus corpus/denmark; landed
-# and verified on-host 2026-07-24. brokkr bless and regress-vs-blessed
-# are gone from the workflow - see the corpus sections below.)
+# (native brokkr code linking the elivagar crate - the corpus redesign
+# of 2026-07-24 moved the gate machinery into brokkr; there is no raw
+# elivagar spelling anymore. See the corpus sections below.)
 
-# Corpus, regress, ocean artifact (wrap the elivagar subcommands; corpus
-# dir defaults to corpus/<dataset>, flags/values/exit codes pass through;
-# durable archives are <dataset>-<variant>-<commit>.pmtiles, resolver
-# --variant defaults to raw)
+# Corpus, regress, ocean artifact (native brokkr code over the linked
+# elivagar crate; corpus dir defaults to corpus/<dataset>; durable
+# archives are <dataset>-<variant>-<commit>.pmtiles, resolver --variant
+# defaults to raw)
 brokkr pmtiles-corpus check|bless|render|render-manifest|rings|mutate
                       [--dataset D] [--variant V] [--commit H | --file P]
                       [--corpus DIR] [...]
@@ -307,7 +307,7 @@ removal; the lesson outlives it.)
 
 ## Architecture
 
-Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `ocean-build`, `inspect`, `verify`, `svg`, `diag`, `regress`, `corpus`).
+Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)` plus the decode/write surface brokkr's corpus gate links (`pmtiles_reader`, `tile_detail`, `provenance`, `pmtiles_writer`). CLI uses clap derive with subcommands (`run`, `ocean-build`, `inspect`, `verify`, `svg`, `diag`) - the corpus and regress subcommands moved to brokkr in the 2026-07-24 corpus redesign.
 
 ### Modules
 
@@ -331,7 +331,8 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `sort.rs` - external sort partitioned by Hilbert tile-id range at write time (z7-calibrated partitions, `PARTITION_SPLIT_Z`; chunk files uncompressed by default, LZ4/Snappy via `--compress-sort-chunks`; per-partition k-way merge via binary heap, consumed lazily by the assemble partition readers)
 - `pmtiles_writer.rs` - PMTiles v3 writer with Hilbert tile IDs
 - `inspect.rs` - PMTiles v3 archive inspector (header + metadata reader)
-- `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG)
+- `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG). Viewer-flavored and for the eyeball only - corpus tiles are adjudicated from the canonical renders brokkr commits, never from this output
+- `tile_detail.rs` - wire-order MVT decoder for out-of-crate adjudication: structural detail, no canonicalization, no hashing, selectable unknown-field strictness (strict for brokkr's gate, tolerant for cross-producer comparison). The one decode surface brokkr's canonical hash consumes
 - `node_index.rs` - node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
 - `way_index.rs` - flat mmap'd way geometry index
 
@@ -411,11 +412,13 @@ a partial contract would let two archives differing in a fanout cap or the
 simplify factor display identically. `Build`, `Effective` and `Resumed` are
 diagnostic and must never be equality-gated.
 
-For the standing gate, reporting became enforcement: `corpus check` compares
-the committed contract against this block before reading content and refuses a
-mismatch with the field named. `elivagar regress` reads nothing here by design -
-it diffs whatever two archives it is handed - so for ad-hoc comparisons these
-lines let you refuse; nothing refuses for you.
+For the standing gate, reporting became enforcement: `brokkr pmtiles-corpus
+check` compares the committed contract against this block before reading
+content and refuses a mismatch with the field named. `brokkr regress` reads
+nothing here by design - it diffs whatever two archives it is handed - so for
+ad-hoc comparisons these lines let you refuse; nothing refuses for you.
+elivagar itself only prints the block; since the corpus redesign the
+comparison lives in brokkr, which links this crate.
 
 Every way of having no contract names itself - `absent`, `unavailable`,
 `invalid`, an uninterpretable schema, an `INCOMPLETE` contract - because
@@ -430,40 +433,43 @@ Validates a PMTiles archive end-to-end: container integrity, metadata schema, ti
 
 Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids (`-W`/`-H`, default 1x1). `--layers` filters to specific layers (comma-separated, e.g. `ocean,boundaries`). Decodes MVT geometry and draws each layer with a distinct color. Points render as circles, lines as stroked paths, polygons as filled paths with `nonzero` fill-rule (matching MapLibre and OpenLayers, which both fill nonzero; `evenodd` agrees only for well-formed alternating outers/holes and papers over exactly the ring-role bugs worth catching). Background is land-colored (`#f2efe9`). Grid lines drawn between tiles when width or height > 1. Output goes to stdout by default, or to a file with `-o`.
 
-### The standing gate: `elivagar corpus check`
+### The standing gate: `brokkr pmtiles-corpus check`
 
 **`reference/corpus.md` is the full methodology** - rotation adjudication,
 contract semantics, digest modes, calibration discipline, limitations. The
 terse version: for an output-neutral landing, build fresh and check -
 `brokkr tilegen --dataset denmark --variant locations`, then
-`brokkr pmtiles-corpus check --dataset denmark --variant locations`
-(raw equivalent: `elivagar corpus check
-data/tilegen/denmark-locations-<commit>.pmtiles --corpus corpus/denmark`).
+`brokkr pmtiles-corpus check --dataset denmark --variant locations`.
 Exit 0 passes; exit 1 names changed tiles; exit 2 is a contract refusal,
-never a verdict. An intended output change rotates the baseline with
-`elivagar corpus bless <archive> --corpus corpus/denmark --rotate` inside
-the landing commit, adjudicated on the corpus git diff. A landing with an
-explicit geometry tolerance gates on `elivagar regress <new> --against
-<prev> --tol N --max-moved M` (the move budget is mandatory - it defaults
-to 0 and `--tol` alone accepts nothing). Routine checks are denmark-only.
-The brokkr alignment landed 2026-07-24 and is verified on-host:
-`brokkr bless` and the blessed registry are deleted, `brokkr regress`
-is an explicit two-archive wrapper with a required comparand, the
-corpus subcommands have the `brokkr pmtiles-corpus` namespace
-(standing-gate spelling: `brokkr pmtiles-corpus check --dataset
-denmark --variant locations`), and `brokkr ocean-build` builds the
-ocean artifact from the `[host.tilegen.default].ocean` block. Durable
-archives are named `<dataset>-<variant>-<commit>.pmtiles` and the
-resolvers take `--variant` (default raw; regress adds
-`--against-variant` for the comparand side, since cross-variant diffs
-are a legitimate use of the attribution instrument); a wrong variant
-fails loudly at resolution, before the archive opens. The wrappers
-only resolve paths and record invocations; guards, verdicts, and exit
-codes stay elivagar's, so the raw spellings remain equivalent.
+never a verdict; exit 3 is baseline trouble (damaged or stale baseline),
+never a verdict on the archive. An intended output change rotates the
+baseline with `brokkr pmtiles-corpus bless --dataset denmark --variant
+locations --rotate` inside the landing commit, adjudicated on the corpus
+git diff. A landing with an explicit geometry tolerance gates on `brokkr
+regress` with `--tol N --max-moved M` (the move budget is mandatory - it
+defaults to 0 and `--tol` alone accepts nothing). Routine checks are
+denmark-only.
 
-### `elivagar regress <CURRENT> --against <BASELINE>` - the two-archive semantic diff
+Since the corpus redesign (2026-07-24, second landing that day), the gate
+is native brokkr code: brokkr links the elivagar crate and owns the
+canonical hash, the digest fold, the contract gating policy, the render
+core, and all verdicts; elivagar's binary no longer has corpus or regress
+subcommands and never reads `corpus/`. There is no raw elivagar spelling
+anymore - the brokkr spellings above are the only spellings. The baseline
+state (`corpus/<dataset>/`, `corpus/style.toml`) stays committed in THIS
+repo so rotations stay atomic with their landings; brokkr is its sole
+reader and writer. elivagar exposes the library surface brokkr consumes:
+the pmtiles reader (run-level raw access), the `tile_detail` MVT decoder
+with selectable strictness, typed provenance in full, and the writer's
+`add_run`/`set_metadata_verbatim`. Durable archives are named
+`<dataset>-<variant>-<commit>.pmtiles` and the resolvers take `--variant`
+(default raw; regress adds `--against-variant` for the comparand side);
+a wrong variant fails loudly at resolution, before the archive opens.
 
-This takes two explicit archive paths, with no registry. It is the attribution
+### `brokkr regress` - the two-archive semantic diff
+
+This takes two explicit archives, with no registry (native brokkr code since
+the corpus redesign; there is no elivagar subcommand). It is the attribution
 instrument (`--overlay` renders per-tile diff SVGs), not the standing gate; the
 natural comparand source is
 `data/tilegen/<dataset>-<variant>-<commit>.pmtiles`. What it

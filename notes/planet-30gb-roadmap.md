@@ -23,9 +23,10 @@ comparable tools. elivagar is the remaining half of the story.
 
 The only sacred thing is a correct PMTiles artifact. The standing gates
 define correct: `elivagar verify`, the earcut oracle
-(`scripts/validate/earcut-oracle.mjs`), and `elivagar corpus check` against
-the committed `corpus/denmark/` baseline. Nothing in the current pipeline
-structure is protected.
+(`scripts/validate/earcut-oracle.mjs`), and `brokkr pmtiles-corpus check`
+against the committed `corpus/denmark/` baseline (native brokkr code over
+the linked elivagar crate since the 2026-07-24 corpus redesign). Nothing in
+the current pipeline structure is protected.
 
 Companion: `notes/virtual-planet-serving.md` - the hypothesis that
 production may never store a full planet archive at all (on-demand

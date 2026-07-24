@@ -65,7 +65,6 @@
 
 extern crate alloc;
 
-pub mod corpus;
 pub(crate) mod debug;
 pub(crate) mod geometry;
 pub mod inspect;
@@ -79,10 +78,10 @@ pub mod pmtiles_reader;
 pub mod pmtiles_writer;
 pub(crate) mod pois;
 pub mod provenance;
-pub mod regress;
 pub mod shortbread;
 pub mod sort;
 pub mod svg;
+pub mod tile_detail;
 pub mod verify;
 pub(crate) mod way_index;
 pub(crate) mod wire_format;

@@ -199,12 +199,11 @@ fn read_metadata_state(reader: &mut PmtilesReader, metadata_length: u64) -> Meta
 /// would read as "nothing to report" - the exact ambiguity this section exists
 /// to remove.
 ///
-/// Reporting is not enforcement for the ad-hoc path: `elivagar regress` diffs
-/// whatever two archives it is handed and reads nothing here, so for an ad-hoc
-/// comparison these lines let a human refuse; nothing refuses for you. The
-/// standing gate is different: `elivagar corpus check` compares the committed
-/// contract against this block before reading content and refuses a mismatch.
-/// See reference/metadata.md.
+/// Reporting is not enforcement here: `inspect` prints the block, it never
+/// compares it against a reference. The comparison - reading this contract
+/// back and refusing a mismatch before content is walked - lives in the gate,
+/// which now decodes elivagar in-process from brokkr rather than in this
+/// binary. See reference/metadata.md.
 fn print_provenance(out: &mut dyn Write, state: &MetadataState) -> io::Result<()> {
     writeln!(out)?;
     let json = match state {

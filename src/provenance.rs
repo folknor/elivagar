@@ -92,44 +92,6 @@ pub fn extract_contract(metadata_json: &str) -> ContractState {
     })
 }
 
-/// Return the named gated paths which differ. `input.name` and `build` are
-/// intentionally diagnostic: archives from different revisions are what the
-/// gate is meant to compare.
-pub fn contract_diff(baseline: &ContractDoc, candidate: &ContractDoc) -> Vec<String> {
-    let mut out = Vec::new();
-    diff_json("config", &baseline.config, &candidate.config, &mut out);
-    let mut left = baseline.input.clone();
-    let mut right = candidate.input.clone();
-    if let Some(value) = left.as_object_mut() {
-        value.remove("name");
-    }
-    if let Some(value) = right.as_object_mut() {
-        value.remove("name");
-    }
-    diff_json("input", &left, &right, &mut out);
-    out
-}
-
-fn diff_json(path: &str, left: &Value, right: &Value, out: &mut Vec<String>) {
-    match (left, right) {
-        (Value::Object(a), Value::Object(b)) => {
-            let mut keys: Vec<_> = a.keys().chain(b.keys()).collect();
-            keys.sort();
-            keys.dedup();
-            for key in keys {
-                diff_json(
-                    &format!("{path}.{key}"),
-                    a.get(key).unwrap_or(&Value::Null),
-                    b.get(key).unwrap_or(&Value::Null),
-                    out,
-                );
-            }
-        }
-        _ if left != right => out.push(path.to_string()),
-        _ => {}
-    }
-}
-
 /// PBF header features observed on the input.
 ///
 /// These are read from the header, not inferred from a filename, and they are
@@ -690,29 +652,5 @@ mod tests {
             extract_contract(&contract_metadata()),
             ContractState::Contract(_)
         ));
-    }
-
-    #[test]
-    fn contract_diff_gates_config_and_input_but_never_name_or_build() {
-        let ContractState::Contract(base) = extract_contract(&contract_metadata()) else {
-            panic!("baseline must parse");
-        };
-        // Identical contract: no diffs.
-        assert!(contract_diff(&base, &base).is_empty());
-
-        // A name-only change and a build-only change are both ignored.
-        let mut named = base.clone();
-        named.input["name"] = json!("germany");
-        named.build["elivagar"]["commit"] = json!("def");
-        assert!(contract_diff(&base, &named).is_empty());
-
-        // The ocean policy version is gated and named by path.
-        let mut policy = base.clone();
-        policy.config["ocean"]["artifact_key"]["policy_version"] = json!(1);
-        let diffs = contract_diff(&base, &policy);
-        assert_eq!(
-            diffs,
-            vec!["config.ocean.artifact_key.policy_version".to_string()]
-        );
     }
 }

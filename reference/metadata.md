@@ -271,13 +271,14 @@ assuming comparability.
 
 Recorded here so they are not rediscovered as bugs:
 
-- **Enforcement landed for the standing gate only.** `elivagar corpus check`
-  compares the committed `contract.json` against this block before reading
-  content and refuses with the differing field named, including the calibrated
-  stale-artifact mismatch at `config.ocean.artifact_key.policy_version`.
-  `elivagar regress` still reads nothing here: an ad-hoc two-archive diff can
-  be run across incomparable archives, so establish comparability with
-  `elivagar inspect` first.
+- **Enforcement landed for the standing gate only.** `brokkr pmtiles-corpus
+  check` (native brokkr code since the 2026-07-24 corpus redesign, decoding
+  this block through the linked crate) compares the committed `contract.json`
+  against this block before reading content and refuses with the differing
+  field named, including the calibrated stale-artifact mismatch at
+  `config.ocean.artifact_key.policy_version`. `brokkr regress` still reads
+  nothing here: an ad-hoc two-archive diff can be run across incomparable
+  archives, so establish comparability with `elivagar inspect` first.
 - `input.replication_sequence` is not recorded (the pbfhogg header API for it
   is unconfirmed). `replication_timestamp` is.
 - `config.ocean` records shapefile hashes only via `artifact_key`, so a

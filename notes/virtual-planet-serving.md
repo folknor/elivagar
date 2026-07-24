@@ -127,9 +127,12 @@ These cost little today and are expensive to retrofit:
   win (finer assemble scheduling, roadmap H8) - when either track builds
   it, build it once for both.
 - A serve-path variant of the correctness gate: on-demand output for a tile
-  must match batch output (`elivagar corpus check` for exhaustive semantic
-  equality against the committed baseline, or `elivagar regress --against
-  <batch archive>` for attribution).
+  must match batch output (`brokkr pmtiles-corpus check` for exhaustive
+  semantic equality against the committed baseline, or `brokkr regress`
+  against the batch archive for attribution). Note the 2026-07-24 corpus
+  redesign moved the gate into brokkr: a serve-path verifier either invokes
+  brokkr or extracts one deliberately - the gate no longer ships in the
+  elivagar binary.
 - Record-store format changes should start carrying a version marker the
   moment anything outside one run reads it.
 

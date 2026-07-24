@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Independent MapLibre ring-grouping dump.  It deliberately does not invoke
-// elivagar: PMTiles traversal, MVT decoding, and classifyRings all happen in
-// Node so cmp against `elivagar corpus rings` is a real differential check.
+// the gate's decoder: PMTiles traversal, MVT decoding, and classifyRings all
+// happen in Node so cmp against `brokkr pmtiles-corpus rings` is a real
+// differential check.
 import {readFileSync, writeFileSync} from 'node:fs';
 import {gunzipSync} from 'node:zlib';
 import {PMTiles, tileIdToZxy} from 'pmtiles';

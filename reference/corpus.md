@@ -25,8 +25,8 @@ three tiers, all under `corpus/<dataset>/`:
    deliberately NOT an independent detector - the digest subsumes its
    detection duty, and the SVG compare inside `corpus check` exists only
    as a staleness guard on the committed files.
-3. **Overlay attribution** (tier 3, on demand): `elivagar regress
-   <current> --against <comparand> --overlay` renders per-tile diff SVGs -
+3. **Overlay attribution** (tier 3, on demand): `brokkr regress` with
+   `--overlay` renders per-tile diff SVGs -
    added and removed features in the two comparison colors, id-matched
    changed pairs drawn on both sides, per-key attribute old/new lines.
    Takes two explicit archive paths, no registry; the natural comparand
@@ -63,14 +63,19 @@ brokkr tilegen --dataset denmark --variant locations
 brokkr pmtiles-corpus check --dataset denmark --variant locations
 ```
 
-(Raw equivalent: `elivagar corpus check
-data/tilegen/denmark-locations-<commit>.pmtiles --corpus
-corpus/denmark`.)
+(There is no raw elivagar spelling: since the 2026-07-24 corpus redesign
+the gate is native brokkr code linking the elivagar crate, and elivagar's
+binary has no corpus subcommand.)
 
 Exit 0 is the pass. Exit 1 is a content mismatch and names the changed
 zooms and tiles (`changed z x y ...` / `added` / `removed`). Exit 2 is a
-refusal - missing baseline, invalid archive, or a differing input/config
-contract - and is never a verdict on content. Routine gating is
+refusal - invalid archive or a differing input/config contract - and is
+never a verdict on content. Exit 3 is baseline trouble - a damaged
+baseline (self-consistency failure, refused before any archive is read)
+or a stale one (style/SVG staleness) - and is never a verdict on the
+archive either; staleness is subordinate to the content verdict and can
+never mask it, so a content mismatch always reports as exit 1 with
+staleness alongside. Routine gating is
 denmark-only, matching the standing gate policy; heavier datasets gate at
 their own baselines if and when those are blessed.
 
@@ -79,7 +84,7 @@ landing.
 
 For a landing that states an explicit geometry tolerance instead of
 zero-diff, the gate is the two-archive diff with an explicit move budget:
-`elivagar regress <new> --against <prev> --tol N --max-moved M`, verdict
+`brokkr regress` with `--tol N --max-moved M`, verdict
 read against the displacement percentiles stated in that landing's spec.
 `--max-moved` is mandatory - `passed()` requires `tolerance_moved <=
 max_moved`, which defaults to 0, so `--tol` alone can never accept a
@@ -93,7 +98,8 @@ A rotation is one commit, and the commit IS the bless:
 2. Adjudicate: use the changed-leaf names, the corpus SVG diffs, and
    tier-3 overlays against the previous commit's archive to decide the
    change is intended.
-3. `elivagar corpus bless <archive> --corpus corpus/denmark --rotate` -
+3. `brokkr pmtiles-corpus bless --dataset denmark --variant locations
+   --rotate` -
    rewrites contract.json, digest, leaves, and re-renders the manifest
    SVGs in the same command. Without `--rotate`, bless refuses to
    replace an existing baseline. Bless refuses dirty builds (provenance
@@ -184,7 +190,7 @@ is visible, never silent. Style edits are digest-neutral rotations:
 re-render via `corpus render-manifest`, commit.
 
 The classifyRings port is kept honest by a differential oracle:
-`elivagar corpus rings <archive> -o <dump>` must byte-match the output
+`brokkr pmtiles-corpus rings <archive> -o <dump>` must byte-match the output
 of `scripts/validate/ring-grouping-oracle.mjs`, an independent Node
 implementation over the pmtiles and vector-tile libraries. Run it over a
 full denmark archive whenever the ring-grouping code is touched; its
@@ -207,7 +213,7 @@ false-negative trap). Per the AGENTS.md oracle discipline they were
 calibrated in both directions before rotation, and the instrument is
 committed so recalibration is a command away:
 
-`elivagar corpus mutate <in> -o <out> --op
+`brokkr pmtiles-corpus mutate <in> -o <out> --op
 drop-tile|nudge-geometry|layer-version|regzip [--tile z/x/y]` produces
 same-contract calibrands: the first three make a single-tile known-bad
 (splitting shared directory runs so only the named tile changes), and
@@ -218,8 +224,13 @@ both tiers, the self-check passes, and the pre-fix stale-artifact
 archive refuses on `config.ocean.artifact_key.policy_version` - the
 contract guard doing for the corpus what OCEAN_POLICY_VERSION does for
 runs. Recalibrate (rerun mutate + check, plus the ring-grouping oracle)
-whenever the digest hashing, the canonical decode, or the render core
-changes.
+whenever brokkr's gate code changes (the hash, the fold, the gating
+policy, the render core, the diff) AND whenever elivagar's decode
+surface changes (`tile_detail`, the pmtiles reader, the provenance
+schema) - the boundary crossing is itself a trigger, since a semantic
+decoder drift compiles clean on both sides and shifts every hash. The
+calibrand suite lives in brokkr's tests, so it re-runs against the
+currently linked elivagar on every brokkr test run.
 
 ## Limitations, stated plainly
 
@@ -235,7 +246,7 @@ changes.
   attribution needs a comparand archive via tier 3.
 - Bucket-mode rotations are not exhaustively human-reviewable; the
   committed rows are opaque hashes. Open, accepted for planet scale.
-- `elivagar regress` reads no contract by design - it diffs whatever two
+- `brokkr regress` reads no contract by design - it diffs whatever two
   archives it is handed. Comparing across variants or configs produces
   six-figure diffs on two correct builds (2026-07-09, 2026-07-14);
   establish comparability from the provenance blocks first. The corpus
@@ -265,23 +276,32 @@ clean-room OpenLayers review; not restated anywhere else.
 
 ## brokkr and the corpus
 
-The corpus machinery enforces its own guards, so any brokkr wrapper is
-convenience, never safety. The wrapper surface was settled and landed
-2026-07-24, verified on plantasjen against the calibration gates the
-same day: a `brokkr pmtiles-corpus` namespace mirroring the corpus
-subcommands (check, bless, render, render-manifest, rings, mutate;
-bare `corpus` collides with piners' parity-corpus runner in brokkr's
-flat command space), an explicit two-archive `brokkr regress` with a
-required comparand, no registry and no brokkr-side contract gate, and
-`brokkr ocean-build` driven by the `[host.tilegen.default].ocean`
-block. brokkr resolves archive paths
-(`--dataset`/`--variant`/`--commit`/`--file`, the pmtiles-inspect
-resolver over `<dataset>-<variant>-<commit>.pmtiles` names; regress
-adds `--against-variant` for the comparand side) and the
-corpus directory (`corpus/<dataset>`, anchored at the git root), and
-passes flags, value sets, and exit codes through verbatim - elivagar
-remains the only validator. The raw elivagar spellings stay equivalent;
-the wrapper adds resolution and history recording only.
+brokkr OWNS the corpus machinery. The 2026-07-24 corpus redesign - the
+second landing that day, superseding the morning's wrapper alignment -
+moved the whole adjudication layer out of elivagar and into brokkr as
+native code over the linked elivagar crate: the canonical hash and
+canonicalization, the digest fold in both modes, the contract gating
+policy, the canonical SVG render core and style machinery, mutate,
+regress, and the calibration suite. elivagar's binary has no corpus or
+regress subcommands and never reads this baseline; it exposes the
+decode surface (the pmtiles reader with run-level raw access, the
+`tile_detail` wire-order decoder with selectable strictness, typed
+provenance in full, the writer's `add_run` and mutate-only
+`set_metadata_verbatim`), and brokkr decides what the answers mean.
+There is no raw elivagar spelling.
+
+The command surface keeps the wrapper-era spellings (`brokkr
+pmtiles-corpus check|bless|render|render-manifest|rings|mutate`; bare
+`corpus` collides with piners' parity-corpus runner in brokkr's flat
+command space; two-archive `brokkr regress` with a required comparand)
+and the resolution front end
+(`--dataset`/`--variant`/`--commit`/`--file` over
+`<dataset>-<variant>-<commit>.pmtiles` names; regress adds
+`--against-variant`; corpus directory `corpus/<dataset>`, anchored at
+the git root). The baseline state stays committed in elivagar's repo -
+rotation atomicity and review prominence require it - with brokkr as
+its sole reader and writer. The redesign contracts of record live in
+the brokkr repo as `elivagar.md` and `brokkr.md`.
 
 ## History
 

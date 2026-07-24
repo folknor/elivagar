@@ -189,7 +189,8 @@ being reproducible mid-landing, so this comes first:
   locations`. Record the best-of-3.
 - Bank pre-v4 canonical (MapLibre-clamped) renders of all three
   offenders into `data/ring-cap-evidence/`:
-  `elivagar corpus render data/tilegen/denmark-locations-da6995f.pmtiles
+  `brokkr pmtiles-corpus render --file
+  data/tilegen/denmark-locations-da6995f.pmtiles
   -z 9 -x 285 -y 148 -o data/ring-cap-evidence/pre-z9-285-148.svg`
   (same for 9/286/147, and z10/546/260 from
   `data/ocean-tiles.pmtiles`).
@@ -242,10 +243,10 @@ world-only offender).
 - `elivagar verify <archive>` - exit 0.
 - Two-tile corpus preflight (`corpus check` exits 2 on the v4 contract
   by design, so the evidence instrument is the non-writing bless):
-  `elivagar corpus bless <archive> --corpus corpus/denmark` WITHOUT
-  `--rotate` - exit 1, and the appended leaf diff names EXACTLY
+  `brokkr pmtiles-corpus bless --file <archive> --corpus corpus/denmark`
+  WITHOUT `--rotate` - exit 1, and the appended leaf diff names EXACTLY
   z9/285/148 and z9/286/147. Any third tile is a stop:
-  `elivagar regress <archive> --against
+  `brokkr regress --file <archive> --against
   data/tilegen/denmark-locations-da6995f.pmtiles --overlay
   data/ring-cap-evidence/overlays` and attribute before any bless.
 - Post-change bench, same command as brick 0:
@@ -263,8 +264,8 @@ world-only offender).
   integer cut edges under nonzero fill).
 
 **Brick 8 - rotation commit.**
-`elivagar corpus bless <archive> --corpus corpus/denmark --rotate`
-from the clean landing-commit build, PLUS: append z9/285/148 and
+`brokkr pmtiles-corpus bless --file <archive> --corpus corpus/denmark
+--rotate` from the clean landing-commit build, PLUS: append z9/285/148 and
 z9/286/147 to `corpus/denmark/manifest.toml` (the hard-tiles ledger is
 append-only and every fixed visual bug drops its tile in) so bless
 re-renders them into the committed SVG corpus; update
