@@ -109,6 +109,17 @@ counter_group!(WaitCounters {
 // pipeline_decoded_recv/send waits they split phase12's serial actors into
 // busy vs blocked: the falsification kit for the ordered-drain-removal
 // hypothesis (a serial actor whose busy fraction is low is not the choke).
+// Ring-cap partition accounting (src/geometry/pyramid.rs). Emission runs on
+// many workers and on three entry paths - the ocean extract pass, ocean-build,
+// and OSM ways/relations - so the tallies live in one process-global pair of
+// atomics rather than per-path locals. Observability only: the gate is
+// ring-cap-census.mjs at zero over the cap, plus the hard error the partition
+// raises if a shape stays over the cap in an indivisible rect.
+counter_group!(RingCapCounters {
+    partitions => "ring_cap_partitions",
+    pieces => "ring_cap_pieces",
+});
+
 counter_group!(BusyCounters {
     phase12_node_blocks => "phase12_node_blocks_ns",
     phase12_plan_build => "phase12_plan_build_ns",
@@ -126,11 +137,18 @@ pub static WAIT: WaitCounters = WaitCounters::new();
 /// decided by which counter it feeds.
 pub static BUSY: BusyCounters = BusyCounters::new();
 
-/// Flush the accumulated stall and busy totals to the sidecar. Call once at
-/// end of run; a no-op per counter when nothing accumulated.
+/// Process-global ring-cap partition tallies; same lifecycle as [`WAIT`].
+/// `partitions` counts normalized shapes that exceeded
+/// [`crate::mvt::MAX_FEATURE_RINGS`] and were partitioned, `pieces` the total
+/// pieces those shapes produced.
+pub static RING_CAP: RingCapCounters = RingCapCounters::new();
+
+/// Flush the accumulated stall, busy and ring-cap totals to the sidecar. Call
+/// once at end of run; a no-op per counter when nothing accumulated.
 pub fn emit_wait_counters() {
     WAIT.emit();
     BUSY.emit();
+    RING_CAP.emit();
 }
 
 /// RAII guard timing one blocking interval. On drop it adds the elapsed

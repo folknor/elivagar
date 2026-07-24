@@ -90,8 +90,9 @@ single classified polygon - only geometric partition can fix it.
   rotation demonstrated exactly this). `corpus bless` WITHOUT
   `--rotate` crosses the contract, computes the leaf diff without
   writing, and exits 1 with the changed tiles appended to the refusal
-  (`src/corpus.rs`, the `rotation requires --rotate` path) - that is
-  the pre-rotation two-tile evidence instrument.
+  (brokkr's corpus gate, the `rotation requires --rotate` path; the
+  guard moved there with the 2026-07-24 redesign) - that is the
+  pre-rotation two-tile evidence instrument.
 - **Policy version**: `OCEAN_POLICY_VERSION = 3` (`src/ocean.rs`) with
   the v2/v3 history in its doc comment; both the artifact key and the
   ocean chunk-resume key carry it.
@@ -181,8 +182,12 @@ rotation is its own commit (the v3 precedent, `2ab6f83` then
 `a40c077`).
 
 **Brick 0 - pre-change evidence, banked before anything changes.**
-The tree is clean at `da6995f` and the v3 artifact is live; both stop
-being reproducible mid-landing, so this comes first:
+The v3 artifact is live and the pre-landing tree is clean. (The survey
+above is anchored at `da6995f`; the corpus-redesign landings since -
+`0129ef3`, `b4f4390` - are output-neutral with green corpus checks, so
+the survey stands and the bench baseline anchors at whatever clean
+pre-landing HEAD brick 0 runs from.) Both stop being reproducible
+mid-landing, so this comes first:
 
 - Fresh baseline (the stored 8.8s row is anchored at `bc71cf1`, which
   is stale): `brokkr tilegen --bench 3 --dataset denmark --variant

@@ -31,6 +31,24 @@ use std::hash::{Hash, Hasher};
 
 mod merge;
 
+/// The most rings one CLASSIFIED POLYGON may carry - MapLibre's
+/// classifyRings clamps `EARCUT_MAX_RINGS = 500` per polygon (an outer plus
+/// its following opposite-wound holes), NOT per feature, and silently drops
+/// all but the 500 largest rings of any polygon over it. Rings lost that way
+/// are invisible to every other consumer and to the earcut oracle, which only
+/// ever sees the retained ones.
+///
+/// Concatenating already-safe polygons into one multi-geometry feature is
+/// therefore harmless: each outer starts a new polygon with its own budget.
+/// The cap binds at emission, where a single normalized shape (one outer plus
+/// N holes) becomes one classified polygon - see the rect-bisection partition
+/// in `src/geometry/pyramid.rs`.
+///
+/// The mirror instrument is `scripts/validate/ring-cap-census.mjs`, which
+/// groups rings with the same verbatim classifyRings and gates at 0 polygons
+/// over this number.
+pub const MAX_FEATURE_RINGS: usize = 500;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------

@@ -15,7 +15,13 @@
 //     before its outer attaches to the WRONG polygon; we count holes whose
 //     bbox is not contained in their assigned outer's bbox as misattached).
 //
-// Usage: node earcut-oracle.mjs <file.pmtiles> [layer] [deviation-threshold] [--unique]
+// Usage: node earcut-oracle.mjs <file.pmtiles> [layer|all] [deviation-threshold] [--unique]
+//
+// `all` runs the same per-polygon tessellation over every layer that carries
+// polygon features and prints one table per layer, each block formatted
+// exactly as the single-layer run's - so the ocean block of an `all` scan is
+// line-identical to `... ocean`. Only layer selection widens; the math is
+// untouched.
 import { readFileSync } from "node:fs";
 import { PMTiles, tileIdToZxy } from "pmtiles";
 import { VectorTile } from "@mapbox/vector-tile";
@@ -28,9 +34,10 @@ const unique = args.includes("--unique");
 const positional = args.filter(arg => arg !== "--unique");
 const [path, layerName = "ocean", thresholdArg = "0.01"] = positional;
 if (!path) {
-  console.error("usage: node earcut-oracle.mjs <file.pmtiles> [layer] [threshold]");
+  console.error("usage: node earcut-oracle.mjs <file.pmtiles> [layer|all] [threshold]");
   process.exit(2);
 }
+const allLayers = layerName === "all";
 const THRESHOLD = Number(thresholdArg);
 const EARCUT_MAX_RINGS = 500;
 
@@ -116,10 +123,25 @@ function bboxOf(ring) {
   return { minX, minY, maxX, maxY };
 }
 
-const perZoom = new Map();
+// layer name -> zoom -> stat. A single-layer run fills exactly one entry.
+const perLayer = new Map();
 const offenders = [];
 let checked = 0;
 const seenPayloads = new Set();
+
+function zoomStat(name, z) {
+  let perZoom = perLayer.get(name);
+  if (!perZoom) {
+    perZoom = new Map();
+    perLayer.set(name, perZoom);
+  }
+  let zs = perZoom.get(z);
+  if (!zs) {
+    zs = { features: 0, polys: 0, over: 0, worst: 0, worstAt: "", misattached: 0 };
+    perZoom.set(z, zs);
+  }
+  return zs;
+}
 
 for await (const t of allTiles()) {
   const payloadKey = `${t.offset}:${t.length}`;
@@ -131,62 +153,71 @@ for await (const t of allTiles()) {
   try { data = gunzipSync(raw); } catch { data = raw; }
   let vt;
   try { vt = new VectorTile(new PbfReader(data)); } catch { continue; }
-  const layer = vt.layers[layerName];
-  if (!layer) continue;
+  const names = allLayers ? Object.keys(vt.layers) : [layerName];
+  let sawLayer = false;
 
-  let zs = perZoom.get(z);
-  if (!zs) {
-    zs = { features: 0, polys: 0, over: 0, worst: 0, worstAt: "", misattached: 0 };
-    perZoom.set(z, zs);
-  }
+  for (const name of names) {
+    const layer = vt.layers[name];
+    if (!layer) continue;
+    sawLayer = true;
 
-  for (let i = 0; i < layer.length; i++) {
-    const feat = layer.feature(i);
-    if (feat.type !== 3) continue;
-    zs.features++;
-    const rings = feat.loadGeometry();
-    const polys = classifyRings(rings, EARCUT_MAX_RINGS);
-    for (const poly of polys) {
-      zs.polys++;
-      // Structural check: every hole bbox should sit inside its outer's bbox.
-      if (poly.length > 1) {
-        const ob = bboxOf(poly[0]);
-        for (let h = 1; h < poly.length; h++) {
-          const hb = bboxOf(poly[h]);
-          if (hb.minX < ob.minX || hb.minY < ob.minY || hb.maxX > ob.maxX || hb.maxY > ob.maxY) {
-            zs.misattached++;
+    for (let i = 0; i < layer.length; i++) {
+      const feat = layer.feature(i);
+      if (feat.type !== 3) continue;
+      const zs = zoomStat(name, z);
+      zs.features++;
+      const rings = feat.loadGeometry();
+      const polys = classifyRings(rings, EARCUT_MAX_RINGS);
+      for (const poly of polys) {
+        zs.polys++;
+        // Structural check: every hole bbox should sit inside its outer's bbox.
+        if (poly.length > 1) {
+          const ob = bboxOf(poly[0]);
+          for (let h = 1; h < poly.length; h++) {
+            const hb = bboxOf(poly[h]);
+            if (hb.minX < ob.minX || hb.minY < ob.minY || hb.maxX > ob.maxX || hb.maxY > ob.maxY) {
+              zs.misattached++;
+            }
           }
         }
-      }
-      const flat = flatten(poly.map(ring => ring.map(p => [p.x, p.y])));
-      const tris = earcut(flat.vertices, flat.holes, flat.dimensions);
-      const dev = deviation(flat.vertices, flat.holes, flat.dimensions, tris);
-      if (dev > zs.worst) { zs.worst = dev; zs.worstAt = `z${z}/${x}/${y} feat ${i}`; }
-      if (dev > THRESHOLD) {
-        zs.over++;
-        offenders.push({ z, x, y, i, dev });
+        const flat = flatten(poly.map(ring => ring.map(p => [p.x, p.y])));
+        const tris = earcut(flat.vertices, flat.holes, flat.dimensions);
+        const dev = deviation(flat.vertices, flat.holes, flat.dimensions, tris);
+        if (dev > zs.worst) { zs.worst = dev; zs.worstAt = `z${z}/${x}/${y} feat ${i}`; }
+        if (dev > THRESHOLD) {
+          zs.over++;
+          offenders.push({ layer: name, z, x, y, i, dev });
+        }
       }
     }
   }
-  checked++;
+  if (sawLayer) checked++;
 }
 
-console.log(`${path}  layer=${layerName}  threshold=${THRESHOLD}  (faithful maplibre classifyRings, maxRings=${EARCUT_MAX_RINGS})`);
-console.log(`${unique ? "unique payloads" : "tiles"} scanned: ${checked}`);
-console.log("zoom  features     polys  over_thresh  misattached  worst_deviation  worst_at");
-for (const z of [...perZoom.keys()].sort((a, b) => a - b)) {
-  const s = perZoom.get(z);
-  console.log(
-    String(z).padStart(4), String(s.features).padStart(9), String(s.polys).padStart(9),
-    String(s.over).padStart(11), String(s.misattached).padStart(11),
-    s.worst.toExponential(3).padStart(16), " ", s.worstAt,
-  );
+const blocks = perLayer.size ? [...perLayer.keys()].sort() : [layerName];
+let firstBlock = true;
+for (const name of blocks) {
+  if (!firstBlock) console.log("");
+  firstBlock = false;
+  console.log(`${path}  layer=${name}  threshold=${THRESHOLD}  (faithful maplibre classifyRings, maxRings=${EARCUT_MAX_RINGS})`);
+  console.log(`${unique ? "unique payloads" : "tiles"} scanned: ${checked}`);
+  console.log("zoom  features     polys  over_thresh  misattached  worst_deviation  worst_at");
+  const perZoom = perLayer.get(name) ?? new Map();
+  for (const z of [...perZoom.keys()].sort((a, b) => a - b)) {
+    const s = perZoom.get(z);
+    console.log(
+      String(z).padStart(4), String(s.features).padStart(9), String(s.polys).padStart(9),
+      String(s.over).padStart(11), String(s.misattached).padStart(11),
+      s.worst.toExponential(3).padStart(16), " ", s.worstAt,
+    );
+  }
 }
 offenders.sort((a, b) => b.dev - a.dev);
 if (offenders.length) {
   console.log(`\ntop offenders (${Math.min(15, offenders.length)} of ${offenders.length}):`);
   for (const o of offenders.slice(0, 15)) {
-    console.log(`  z${o.z}/${o.x}/${o.y} feat ${o.i}  deviation=${o.dev.toExponential(3)}`);
+    const where = allLayers ? `${o.layer} ` : "";
+    console.log(`  ${where}z${o.z}/${o.x}/${o.y} feat ${o.i}  deviation=${o.dev.toExponential(3)}`);
   }
 } else {
   console.log("\nNo polygon exceeded the deviation threshold.");

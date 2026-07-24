@@ -156,16 +156,18 @@ Both modes carry internal self-consistency (recomputing rollups and root
 from the committed rows) so a hand-edited or merge-damaged baseline
 refuses before any archive is read.
 
-The canonical hash (`streaming_tile_hash`, shared with regress) covers
-tile addressing, layer names, versions and extents, feature ids,
-attributes bit-exactly, and geometry; it absorbs gzip bytes,
-layer/feature/attribute ordering, key/value-table permutation, and
-multi-geometry component ordering. Unknown fields error at all four MVT
-message levels, and repeated packed tag/geometry fields concatenate -
-each direction pinned by mutation tests that assert the streaming hash
-and the detail decoder remain one equivalence relation. Archive
-metadata, header bounds, and directory layout are outside the digest;
-the provenance contract and `elivagar verify` own those surfaces.
+The canonical hash (`streaming_tile_hash`, brokkr source since the
+redesign, shared between the gate and regress so both hold one
+definition of "the same tile") covers tile addressing, layer names,
+versions and extents, feature ids, attributes bit-exactly, and geometry;
+it absorbs gzip bytes, layer/feature/attribute ordering, key/value-table
+permutation, and multi-geometry component ordering. Unknown fields error
+at all four MVT message levels, and repeated packed tag/geometry fields
+concatenate - each direction pinned by mutation tests in brokkr's suite
+that assert the streaming hash and the detail decode path remain one
+equivalence relation. Archive metadata, header bounds, and directory
+layout are outside the digest; the provenance contract and
+`elivagar verify` own those surfaces.
 
 ## The SVG corpus
 

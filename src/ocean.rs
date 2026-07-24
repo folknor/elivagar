@@ -44,7 +44,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// rendered as seam wedges on every cell edge and half-peninsula spikes
 /// where one side of a split landform fell under min-area (the corpus
 /// z2-x2-y1 finding, 2026-07-19).
-pub const OCEAN_POLICY_VERSION: u32 = 3;
+///
+/// v4: polygons over the MapLibre 500-ring clamp are partitioned by rect
+/// bisection; previously their smallest islands were invisible to
+/// MapLibre-semantics consumers.
+pub const OCEAN_POLICY_VERSION: u32 = 4;
 
 /// Identity of the shapefile inputs behind computed ocean sort chunks.
 ///

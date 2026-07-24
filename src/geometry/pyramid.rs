@@ -1,10 +1,13 @@
+use crate::debug::RING_CAP;
 use crate::geometry::int_ocean::{
     Contour, IntEmitScratch, IntPoint, IntRect, Shape, Shapes, TILE_BUFFER_I32, TILE_EXTENT_I32,
-    contour_area_is_below, copy_shape_into, emit_full_tile, encode_tile_shape, intersect_rect_into,
-    normalize_into, point_in_contour, rescale_shape_pinned_into, shape_bbox, signed_area_2x,
-    simplify_shape_dp, simplify_shape_vw, vw_area_threshold,
+    buffered_tile_rect, contour_area_is_below, copy_shape_into, emit_full_tile, encode_tile_shape,
+    intersect_rect_into, normalize_into, point_in_contour, rescale_shape_pinned_into, shape_bbox,
+    signed_area_2x, simplify_shape_dp, simplify_shape_vw, vw_area_threshold,
 };
+use crate::mvt::MAX_FEATURE_RINGS;
 use rustc_hash::FxHashSet;
+use std::sync::atomic::Ordering;
 
 // The ocean producer's output from this engine is cached world-wide in the
 // durable ocean artifact (`ocean-build`, keyed by OCEAN_POLICY_VERSION in
@@ -417,18 +420,139 @@ fn emit_cell(
 
         let mut normalized = scratch.take_shapes();
         normalize_into(&mut scratch.int, shape_z, min_area, &mut normalized);
-        for tile_shape in &normalized {
-            encode_tile_shape(
-                tile_shape,
-                cell.tx,
-                cell.ty,
-                &mut scratch.int,
-                &mut |tx, ty, geom| {
-                    sink(cell.z, tx, ty, geom, PyramidEmitKind::Fragment);
-                },
+        // Each normalized shape encodes as one polygon geometry, which is one
+        // classified polygon in MapLibre - so the ring cap binds here and
+        // nowhere downstream. Shapes at or under the cap (all but a handful
+        // worldwide) take the existing path untouched.
+        if normalized.iter().any(|s| s.len() > MAX_FEATURE_RINGS) {
+            let mut capped = scratch.take_shapes();
+            enforce_ring_cap(
+                scratch,
+                &mut normalized,
+                buffered_tile_rect(cell.tx, cell.ty),
+                &mut capped,
             );
+            for tile_shape in &capped {
+                encode_tile_shape(
+                    tile_shape,
+                    cell.tx,
+                    cell.ty,
+                    &mut scratch.int,
+                    &mut |tx, ty, geom| {
+                        sink(cell.z, tx, ty, geom, PyramidEmitKind::Fragment);
+                    },
+                );
+            }
+            scratch.return_shapes(capped);
+        } else {
+            for tile_shape in &normalized {
+                encode_tile_shape(
+                    tile_shape,
+                    cell.tx,
+                    cell.ty,
+                    &mut scratch.int,
+                    &mut |tx, ty, geom| {
+                        sink(cell.z, tx, ty, geom, PyramidEmitKind::Fragment);
+                    },
+                );
+            }
         }
         scratch.return_shapes(normalized);
+    }
+}
+
+/// Move every shape of `normalized` into `out`, partitioning the ones over
+/// [`MAX_FEATURE_RINGS`] so no emitted shape exceeds the cap. `rect` is the
+/// shapes' clip rect in the same global zoom-z coordinates they are held in.
+/// Returns true when at least one shape was partitioned.
+fn enforce_ring_cap(
+    scratch: &mut PyramidScratch,
+    normalized: &mut Shapes,
+    rect: IntRect,
+    out: &mut Shapes,
+) -> bool {
+    let mut partitioned = false;
+    for shape in normalized.drain(..) {
+        if shape.len() > MAX_FEATURE_RINGS {
+            partitioned = true;
+            let before = out.len();
+            partition_shape_to_ring_cap(scratch, shape, rect, out);
+            RING_CAP.partitions.fetch_add(1, Ordering::Relaxed);
+            RING_CAP.pieces.fetch_add(
+                u64::try_from(out.len() - before).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        } else {
+            out.push(shape);
+        }
+    }
+    partitioned
+}
+
+/// Split one over-cap shape into pieces that each carry at most
+/// [`MAX_FEATURE_RINGS`] contours, by recursive bisection of its clip rect.
+///
+/// A shape here is one outer plus N holes, which MapLibre groups into a
+/// single classified polygon and then clamps to the 500 largest rings - so a
+/// 510-hole ocean tile silently loses its smallest islands in every
+/// MapLibre-semantics consumer. Only geometric partition fixes that: no
+/// reordering or re-nesting keeps all the rings in one polygon.
+///
+/// The cut halves are `[min, mid]` and `[mid, max]` on the longer axis (ties
+/// split x), both CLOSED at the shared integer coordinate `mid`, so the two
+/// sides carry bit-identical cut vertices and abut seamlessly under nonzero
+/// fill. Clipping runs at `min_area = 0`: island survival was already decided
+/// by `normalize_into` upstream, and re-deciding it here would drop geometry
+/// the partition is supposed to preserve. Pieces land in `out` in
+/// depth-first, low-half-first order, which keeps two runs byte-identical.
+fn partition_shape_to_ring_cap(
+    scratch: &mut PyramidScratch,
+    shape: Shape,
+    rect: IntRect,
+    out: &mut Shapes,
+) {
+    // Unreachable: more than MAX_FEATURE_RINGS disjoint positive-area
+    // contours cannot inhabit a rect with no room to split. The error path
+    // exists because "unreachable" is an argument, not a proof, and emitting
+    // an over-cap shape anyway is precisely the silent-drop outcome this
+    // partition exists to end.
+    let (low, high) = split_rect(rect).expect(
+        "a shape over the MapLibre ring cap cannot inhabit an indivisible rect; \
+         emitting it would silently drop its smallest rings in MapLibre",
+    );
+    for half in [low, high] {
+        let mut pieces = scratch.take_shapes();
+        intersect_rect_into(&mut scratch.int, &shape, half, 0, &mut pieces);
+        for piece in pieces.drain(..) {
+            if piece.len() > MAX_FEATURE_RINGS {
+                partition_shape_to_ring_cap(scratch, piece, half, out);
+            } else {
+                out.push(piece);
+            }
+        }
+        scratch.return_shapes(pieces);
+    }
+    scratch.int.recycle_owned_shape(shape);
+}
+
+/// Halve a rect on its longer axis (tie: x), sharing the cut coordinate.
+/// None when the chosen axis has no room left to cut - which, the axis being
+/// the longer one, means neither axis does.
+fn split_rect(rect: IntRect) -> Option<(IntRect, IntRect)> {
+    let width = i64::from(rect.max_x) - i64::from(rect.min_x);
+    let height = i64::from(rect.max_y) - i64::from(rect.min_y);
+    if width >= height {
+        let mid = rect.min_x + i32::try_from(width / 2).expect("rect half-width fits i32");
+        (mid > rect.min_x).then_some((
+            IntRect { max_x: mid, ..rect },
+            IntRect { min_x: mid, ..rect },
+        ))
+    } else {
+        let mid = rect.min_y + i32::try_from(height / 2).expect("rect half-height fits i32");
+        (mid > rect.min_y).then_some((
+            IntRect { max_y: mid, ..rect },
+            IntRect { min_y: mid, ..rect },
+        ))
     }
 }
 
@@ -1644,6 +1768,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One tile-sized outer with `holes` square holes on a grid, normalized
+    /// exactly as emission would hand it to the ring cap. Confined to tile
+    /// (0, 0) at the test zoom per the single-tile test convention.
+    fn holed_tile_shape(holes: usize) -> Shape {
+        let outer = [(0, 0), (4096, 0), (4096, 4096), (0, 4096)];
+        let mut rings: Vec<Vec<(i32, i32)>> = Vec::with_capacity(holes);
+        for k in 0..holes {
+            let col = i32::try_from(k % 25).expect("column fits i32");
+            let row = i32::try_from(k / 25).expect("row fits i32");
+            let x = 100 + col * 160;
+            let y = 100 + row * 160;
+            rings.push(vec![(x, y), (x, y + 40), (x + 40, y + 40), (x + 40, y)]);
+        }
+        let refs: Vec<&[(i32, i32)]> = rings.iter().map(Vec::as_slice).collect();
+        let raw = shape(&outer, &refs);
+
+        let mut int = IntEmitScratch::new();
+        let mut normalized = Vec::new();
+        normalize_into(&mut int, raw, 0, &mut normalized);
+        assert_eq!(normalized.len(), 1, "fixture must normalize to one shape");
+        assert_eq!(
+            normalized[0].len(),
+            holes + 1,
+            "fixture must keep every hole"
+        );
+        normalized.remove(0)
+    }
+
+    fn cap_pieces(input: Shape, rect: IntRect) -> (Shapes, bool) {
+        let mut scratch = PyramidScratch::new();
+        let mut normalized: Shapes = vec![input];
+        let mut out = Vec::new();
+        let partitioned = enforce_ring_cap(&mut scratch, &mut normalized, rect, &mut out);
+        (out, partitioned)
+    }
+
+    #[test]
+    fn ring_cap_partition_bounds_every_piece() {
+        let original = holed_tile_shape(600);
+        let (pieces, partitioned) = cap_pieces(original.clone(), buffered_tile_rect(0, 0));
+        assert!(partitioned, "601-contour shape must partition");
+        assert!(pieces.len() >= 2, "partition must produce several pieces");
+        for piece in &pieces {
+            assert!(
+                piece.len() <= MAX_FEATURE_RINGS,
+                "piece carries {} contours, over the {MAX_FEATURE_RINGS} cap",
+                piece.len()
+            );
+        }
+    }
+
+    #[test]
+    fn ring_cap_partition_preserves_coverage() {
+        // The referee is the i_overlay dev-dependency, not the in-tree engine
+        // doing the partition: a fix that DELETED holes instead of splitting
+        // the shape would clear the ring census just as well, and only an
+        // independent XOR can tell the two apart.
+        let original = holed_tile_shape(600);
+        let (pieces, _) = cap_pieces(original.clone(), buffered_tile_rect(0, 0));
+        let whole: Shapes = vec![original];
+        assert_eq!(
+            xor_shapes_area(&pieces, &whole),
+            0,
+            "partition changed the covered area"
+        );
+    }
+
+    #[test]
+    fn ring_cap_leaves_a_shape_at_the_cap_alone() {
+        let at_cap = holed_tile_shape(MAX_FEATURE_RINGS - 1);
+        assert_eq!(at_cap.len(), MAX_FEATURE_RINGS);
+        let (pieces, partitioned) = cap_pieces(at_cap.clone(), buffered_tile_rect(0, 0));
+        assert!(!partitioned, "a shape exactly at the cap must not split");
+        assert_eq!(pieces, vec![at_cap], "shape must pass through verbatim");
+    }
+
+    #[test]
+    fn ring_cap_partition_is_deterministic() {
+        let original = holed_tile_shape(600);
+        let (first, _) = cap_pieces(original.clone(), buffered_tile_rect(0, 0));
+        let (second, _) = cap_pieces(original, buffered_tile_rect(0, 0));
+        assert_eq!(first, second, "piece stream differs between runs");
     }
 
     #[test]

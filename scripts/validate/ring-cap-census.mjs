@@ -10,7 +10,12 @@
 // Built for the low-zoom ocean union landing (OCEAN_POLICY_VERSION v3), which
 // consolidates thousands of per-cell features into few many-holed shapes.
 //
-// Usage: node ring-cap-census.mjs <file.pmtiles> [layer] [--unique]
+// Usage: node ring-cap-census.mjs <file.pmtiles> [layer|all] [--unique]
+//
+// `all` scans every layer that carries polygon features and prints one table
+// per layer, each block formatted exactly as the single-layer run's - so the
+// ocean block of an `all` scan is line-identical to `... ocean`. The
+// per-polygon math is shared; `all` only widens which layers reach it.
 import { readFileSync } from "node:fs";
 import { PMTiles, tileIdToZxy } from "pmtiles";
 import { VectorTile } from "@mapbox/vector-tile";
@@ -22,9 +27,10 @@ const unique = args.includes("--unique");
 const positional = args.filter(arg => arg !== "--unique");
 const [path, layerName = "ocean"] = positional;
 if (!path) {
-  console.error("usage: node ring-cap-census.mjs <file.pmtiles> [layer] [--unique]");
+  console.error("usage: node ring-cap-census.mjs <file.pmtiles> [layer|all] [--unique]");
   process.exit(2);
 }
+const allLayers = layerName === "all";
 const CAP = 500;
 
 class BufferSource {
@@ -89,10 +95,25 @@ function groupRingCounts(rings) {
   return counts;
 }
 
-const perZoom = new Map();
+// layer name -> zoom -> stat. A single-layer run fills exactly one entry.
+const perLayer = new Map();
 const offenders = [];
 let checked = 0;
 const seenPayloads = new Set();
+
+function zoomStat(name, z) {
+  let perZoom = perLayer.get(name);
+  if (!perZoom) {
+    perZoom = new Map();
+    perLayer.set(name, perZoom);
+  }
+  let stat = perZoom.get(z);
+  if (!stat) {
+    stat = { polygons: 0, maxRings: 0, maxAt: "", over: 0 };
+    perZoom.set(z, stat);
+  }
+  return stat;
+}
 
 for await (const t of allTiles()) {
   const payloadKey = `${t.offset}:${t.length}`;
@@ -108,41 +129,54 @@ for await (const t of allTiles()) {
   }
   checked++;
   const vt = new VectorTile(new PbfReader(data));
-  const layer = vt.layers[layerName];
-  if (!layer) continue;
-  let stat = perZoom.get(z);
-  if (!stat) {
-    stat = { polygons: 0, maxRings: 0, maxAt: "", over: 0 };
-    perZoom.set(z, stat);
-  }
-  for (let i = 0; i < layer.length; i++) {
-    const feature = layer.feature(i);
-    if (feature.type !== 3) continue;
-    for (const rings of groupRingCounts(feature.loadGeometry())) {
-      stat.polygons++;
-      if (rings > stat.maxRings) {
-        stat.maxRings = rings;
-        stat.maxAt = `z${z}/${x}/${y} feat ${i}`;
-      }
-      if (rings > CAP) {
-        stat.over++;
-        offenders.push(`z${z}/${x}/${y} feat ${i}: ${rings} rings`);
+  const names = allLayers ? Object.keys(vt.layers) : [layerName];
+  for (const name of names) {
+    const layer = vt.layers[name];
+    if (!layer) continue;
+    for (let i = 0; i < layer.length; i++) {
+      const feature = layer.feature(i);
+      if (feature.type !== 3) continue;
+      const stat = zoomStat(name, z);
+      for (const rings of groupRingCounts(feature.loadGeometry())) {
+        stat.polygons++;
+        if (rings > stat.maxRings) {
+          stat.maxRings = rings;
+          stat.maxAt = `z${z}/${x}/${y} feat ${i}`;
+        }
+        if (rings > CAP) {
+          stat.over++;
+          offenders.push(
+            allLayers
+              ? `${name} z${z}/${x}/${y} feat ${i}: ${rings} rings`
+              : `z${z}/${x}/${y} feat ${i}: ${rings} rings`,
+          );
+        }
       }
     }
   }
 }
 
-console.log(`${path}  layer=${layerName}  cap=${CAP}  tiles=${checked}`);
-console.log("zoom  polygons  max_rings  over_cap  max_at");
-for (const z of [...perZoom.keys()].sort((a, b) => a - b)) {
-  const s = perZoom.get(z);
-  console.log(
-    String(z).padStart(4),
-    String(s.polygons).padStart(9),
-    String(s.maxRings).padStart(10),
-    String(s.over).padStart(9),
-    ` ${s.maxAt}`,
-  );
+let firstBlock = true;
+for (const name of [...perLayer.keys()].sort()) {
+  const perZoom = perLayer.get(name);
+  if (!firstBlock) console.log("");
+  firstBlock = false;
+  console.log(`${path}  layer=${name}  cap=${CAP}  tiles=${checked}`);
+  console.log("zoom  polygons  max_rings  over_cap  max_at");
+  for (const z of [...perZoom.keys()].sort((a, b) => a - b)) {
+    const s = perZoom.get(z);
+    console.log(
+      String(z).padStart(4),
+      String(s.polygons).padStart(9),
+      String(s.maxRings).padStart(10),
+      String(s.over).padStart(9),
+      ` ${s.maxAt}`,
+    );
+  }
+}
+if (!perLayer.size) {
+  console.log(`${path}  layer=${layerName}  cap=${CAP}  tiles=${checked}`);
+  console.log("zoom  polygons  max_rings  over_cap  max_at");
 }
 if (offenders.length) {
   console.log(`\n${offenders.length} polygons over the ${CAP}-ring MapLibre clamp:`);

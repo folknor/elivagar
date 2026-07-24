@@ -1091,7 +1091,6 @@ pub(crate) fn tile_origin(t: u32) -> i32 {
     i32::try_from(t).expect("tile coordinate fits i32") * TILE_EXTENT_I32
 }
 
-#[allow(dead_code)]
 pub(crate) fn buffered_tile_rect(tx: u32, ty: u32) -> IntRect {
     IntRect {
         min_x: tile_origin(tx) - TILE_BUFFER_I32,
