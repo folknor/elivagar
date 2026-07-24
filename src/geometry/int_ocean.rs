@@ -606,6 +606,10 @@ pub(crate) fn intersect_rect_into(
     clean_shapes_in_place(scratch, out, min_area);
 }
 
+/// Shape-vs-shape Intersect. Production clipping is rect-vs-shape
+/// (`intersect_rect_into` and friends); this general form survives only for
+/// the coverage arithmetic in the simplifier property tests below.
+#[cfg(test)]
 pub(crate) fn intersect_shapes_into(
     scratch: &mut IntEmitScratch,
     subject: &Shape,

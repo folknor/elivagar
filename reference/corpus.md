@@ -261,10 +261,20 @@ clean-room OpenLayers review; not restated anywhere else.
 
 ## brokkr and the corpus
 
-The corpus workflow is entirely elivagar-side: brokkr wraps none of the
-corpus subcommands, and the gate is invoked as the raw elivagar binary.
-The corpus machinery enforces its own guards, so any future brokkr
-wrapper is convenience, never safety.
+The corpus machinery enforces its own guards, so any brokkr wrapper is
+convenience, never safety. The wrapper surface was settled 2026-07-24
+and is landing in the brokkr repository: a `brokkr pmtiles-corpus`
+namespace mirroring the corpus subcommands (check, bless, render,
+render-manifest, rings, mutate; bare `corpus` collides with piners'
+parity-corpus runner in brokkr's flat command space), an explicit
+two-archive `brokkr regress` with a required comparand, no registry and
+no brokkr-side contract gate, and `brokkr ocean-build` driven by the
+`[host.tilegen.default].ocean` block. brokkr resolves archive paths
+(`--dataset`/`--commit`/`--file`, the pmtiles-inspect resolver) and the
+corpus directory (`corpus/<dataset>`, anchored at the git root), and
+passes flags, value sets, and exit codes through verbatim - elivagar
+remains the only validator. Until a given brokkr build carries the
+namespace, the gate is invoked as the raw elivagar binary.
 
 ## History
 

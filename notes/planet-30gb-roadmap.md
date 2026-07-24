@@ -157,11 +157,29 @@ elivagar-side rotation is complete, but until the brokkr repository
 lands its half, two hazards stand: `brokkr bless` still exists and
 would RECREATE the deleted `datasets.<D>.blessed` table on invocation,
 and `brokkr regress --against <path>` bypasses the now-failing
-resolver. The task: remove `brokkr bless` first, remove or repoint the
-regress resolver, optionally add `brokkr corpus` wrappers as
-ergonomics, and handle the removed `blessed` config field under
-`deny_unknown_fields` - keep a deprecated ignored field or sequence the
-schema change after every checkout's toml is clean.
+resolver. Design settled 2026-07-24, spec handed to the brokkr side;
+the ruling is corpus-only (both tiers), no archive blessing, and every
+elivagar invocation in the dev flow gets a brokkr spelling. Decisions
+of record: the wrapper namespace is `brokkr pmtiles-corpus` (bare
+`corpus` collides with piners' parity-corpus runner in brokkr's flat
+command space - the pmtiles-inspect precedent); `--corpus` defaults
+to `corpus/<dataset>` anchored at build_root, while archives keep
+resolving off project_root; `brokkr regress` becomes an explicit
+two-archive wrapper with a required comparand, no registry, and
+brokkr's provenance comparability gate plus its provenance parser
+DELETED (contract refusal lives only in the corpus gate; a static
+help-text pointer to pmtiles-inspect replaces the gate), with
+pre-exec refusals never exiting 1, since 1 is the regress verdict
+code; passthrough value sets (`--mode`, `--op`) stay strings so
+elivagar remains the only validator, and exit codes pass through
+unchanged; `brokkr ocean-build` derives shapefile specs and output
+path from the `[host.tilegen.default].ocean` block by role partition,
+no override flags, no `--dataset`; wrappers build via cargo_build
+with no stale-binary fast path; the `blessed` schema field is removed
+outright under deny_unknown_fields (plantasjen's brokkr.toml verified
+clean 2026-07-24). When brokkr lands: update AGENTS.md's raw-binary
+spelling, the reference/corpus.md brokkr section, and close this
+item.
 
 **Bit-identity gates** use `cmp -s` over complete deterministic
 archives, never `brokkr compare-tiles` (samples 200 tiles/zoom,

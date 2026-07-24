@@ -357,31 +357,6 @@ Ring winding for one tile: per-ring vertex count, signed area, and direction
 (CW outer, CCW hole) for every polygon feature across all layers. Prints
 first/last 3 vertices for large rings, all vertices for rings of 6 or fewer.
 
-## `elivagar ocean-coverage <FILE> --baseline <REF> [OPTIONS]`
-
-| flag | default |
-|---|---|
-| `--baseline <PATH>` | required |
-| `--zmin <Z>` | 1 |
-| `--zmax <Z>` | 6 |
-| `--threshold-2x <N>` | 512 |
-| `--layer <NAME>` | `ocean` |
-
-Measures per-tile one-sided ocean coverage loss against a verbatim same-source
-baseline.
-
-**Currently unfeedable.** Its baseline was built with `--no-ocean-simplify`,
-which no longer exists, and there is no other way to produce a verbatim
-same-source comparand. The subcommand remains only because an archive built
-before the flag's removal still works as `--baseline`.
-
-It was never a gate in any case. At low zoom any correct simplifier removes
-large sub-pixel coastline detail versus a verbatim baseline, so this
-over-reports and cannot separate legitimate generalization from a coverage
-defect - a confirmed false negative on the 2026-07-12 ocean VW landing, and the
-reason `reference/performance.md` and AGENTS.md both record it as triage only.
-The authoritative ocean gates are the earcut oracle and the human visual check.
-
 ## `elivagar corpus check|bless <ARCHIVE> --corpus <DIR>`
 
 **The standing output gate.** The corpus digest checks the semantic MVT content
@@ -477,7 +452,13 @@ value states the coverage it claims rather than leaving it to the flag's name.
 `--no-ocean-simplify` skipped the ocean VW simplifier to emit verbatim polygons
 for an `ocean-coverage` baseline. It was a production-binary flag whose only
 purpose was producing deliberately non-production tiles for a diagnostic that
-had already been demoted from gate to triage. `provenance.rs` keeps the
+had already been demoted from gate to triage. The `ocean-coverage` subcommand
+followed it out on 2026-07-24: with no way left to produce a verbatim
+baseline it was unfeedable, and its triage role is covered baseline-free by
+`scripts/validate/zoom-overlay.mjs`, `svg-roi.mjs`, and `regress --overlay`
+(a confirmed false negative on the 2026-07-12 VW landing is why it could
+never be a gate; the authoritative ocean gates remain the earcut oracle and
+the human visual check). `provenance.rs` keeps the
 `runtime_simplification` field, invariably true on archives built after the
 removal and possibly false on older ones - dropping the field would make those
 archives incomparable to these, which is the opposite of what the block is for.

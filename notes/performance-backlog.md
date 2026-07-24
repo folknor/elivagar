@@ -1,15 +1,28 @@
 # Perf-hunt backlog (prioritized)
 
-Consolidated backlog distilled from independent analyses, now ordered by
+Consolidated backlog distilled from independent analyses, ordered by
 evidence from the 2026-07-06 profiling campaign at commit `95d6d52`
 (plantasjen): denmark hotpath `13c024bb` + alloc `081975b3`, norway hotpath
 `4e62f519` + bench `38dcd3e8`, germany hotpath `cc14c34a` + bench `6fc97675`.
-Clean baselines and gate-reading rules live in `reference/performance.md`.
+
+Status 2026-07-24: reconciled against the July campaigns. P0-P3 are all
+landed and kept, and the H5 ocean artifact plus the H1 phase12 rebuild
+have moved every headline number below since. The profile section is the
+2026-07-06 campaign's record - the don't-redo trail - not a current
+reading. Current baselines and gate-reading rules live in
+`reference/performance.md`; the live optimization queue is
+`notes/planet-30gb-roadmap.md` (Sequencing). This file remains the item
+ledger: stable IDs, verdicts, and what stays parked.
 
 Item numbers are stable IDs from the original capture order, NOT ranks -
 cross-references between items use them. Priority is the tier structure.
 
-## What the profiles say
+## What the profiles said (2026-07-06, superseded)
+
+All readings at `95d6d52`, before P1-P3 and H5 landed. Known-superseded
+highlights: the ocean phase is ~0.2s under the H5 artifact (was 11-16s),
+the serial merge reader no longer exists (item 14), and phase12 was
+rebuilt again by the H1 ordered-drain removal.
 
 - `intersect_rect_into` is the top geometry sink on every dataset: 157 / 721 /
   243 thread-s (DK/NO/DE), and 67% of denmark's tracked allocation (48.4 GB,
@@ -237,40 +250,19 @@ directly. See git history for the campaign.
 
 ---
 
-## P3 - partitioned sort + fully-parallel assemble
+## P3 - DONE (item 14, partitioned sort + parallel assemble, kept)
 
-### Item 14: partition by tile-id range at write time
-
-The merge reader is 97-98% of the assemble phase on every dataset measured
-(23.2s NO, 30.1s DE, 4.1s DK) - one thread doing a `BinaryHeap` pop/push + a
-fresh `Box<[u8]>` per record (sort.rs:502) while the rayon encode stage idles
-behind it. Germany pushes 154M records through it; NA ~512M; planet far more.
-This is the only structurally serial O(total-records) loop in the pipeline -
-the planet-critical wall even though it is only 12-14% of extract wall today.
-
-Redesign: partition by tile-id range at WRITE time instead of merging at read
-time. The sort key's high bits are the Hilbert tile id (spatially contiguous
-ranges). Give the pipeline P partitions (e.g. 256 tile-id ranges calibrated
-from z6/z7 boundaries); every producer routes each record into a
-per-partition buffer and flushes per-partition chunk files. Assemble becomes:
-for each partition in order, load-or-merge it (small enough to sort in RAM as
-one arena: keys sorted as (u64 key, offset, len) over a payload blob - the
-`PayloadRecord` machinery already exists), encode its tiles with rayon, hand
-ordered output to the writer. Partitions prefetch/sort/encode ahead while
-earlier ones are written. PMTiles needs Hilbert order; partition order gives
-it for free.
-
-Risks: skew - one dense partition (Tokyo, NYC) becomes the straggler;
-mitigate with more/smaller partitions or recursive splitting of hot ones.
-`--skip-to` checkpoint semantics change (rewrite the chunk naming/layout, do
-not preserve). Peak RSS needs a per-partition budget; fall back to a
-per-partition k-way merge when a partition exceeds budget. Sequenced AFTER
-the P2 rewrite so producers already write arenas (per the pipeline perf
-report), then re-baseline NA - both NA numbers are pre-rewrite and stale.
-
-Subsumed by P2+P3 landing together: **item 17** (chunk sorting/writing off
-the drain thread, and the unify-producers-on-`PayloadRecord` note) - worth
-doing standalone only if P2/P3 slip badly.
+Landed as designed: sort partitions by Hilbert tile-id range at write time
+(z7-calibrated boundaries, `PARTITION_SPLIT_Z`), and assemble runs parallel
+per-partition readers feeding rayon encode under a byte-budgeted claim
+window (defaults promoted: 8 workers, 2 GiB park budget). The serial k-way
+merge reader this item targeted no longer exists; per-partition merge cost
+lands in `assemble_reader_ns`. The split-depth verdict (z7 kept: germany
+assemble -31%, NA +1.6% accepted as straggler insurance) and the lz4 chunk
+pricing live in the roadmap's H4. The skew risk called out here
+materialized as predicted; its remaining half is H8b's recursive splitting
+of hot partitions (germany-relevant, still open), with H2d's injected
+stats as the natural boundary picker. Item 17 was subsumed, as predicted.
 
 ---
 
@@ -301,16 +293,22 @@ perf - the z0-z7 pass unions its source pieces before descent
 features; union cost measured at 69 ms denmark band / 1.03 s world. The
 z8-z14 pass still emits per-piece features, so the sort-volume angle at
 high zoom - the bulk of the 59% norway share - is unchanged and this
-item's remaining scope is z8-z14 only.
+item's remaining scope is z8-z14 only. 2026-07-24: the re-price gate
+(after P1/P3) is satisfied, and H5 demotes this further - an
+artifact-active run emits ocean sort records only for the bbox boundary
+band, so the 59% share applies to artifact-absent runs and to
+`ocean-build` itself. Not scheduled.
 
-### Item 23: durable/cached ocean tile source
+### Item 23: durable/cached ocean tile source - LANDED as H5 (2026-07-12)
 
-Ocean is static but regenerated each run. Precompute a DURABLE ocean tile
-stream keyed by shapefile identity, zoom range, and simplification policy;
-at generation time merge it as just another ordered tile-layer input (in the
-item-14 world). For repeated runs this ERASES the ocean phase (11-16s per run
-today) rather than tuning it. Risks: cache invalidation, geometry parity,
-storage. Composes with item 19 (compositor produces it; this caches it).
+Landed as the world-ocean artifact (`elivagar ocean-build`, one shot per
+shapefile release): the ocean phase is deleted from every artifact-active
+run (NA 19.5s -> 0.2s). The risks named here became the design: cache
+invalidation is the artifact key (shapefile hashes + OCEAN_POLICY_VERSION,
+re-validated every run - the 07-15 stale-artifact incident is why the
+version half exists), and geometry parity was human-adjudicated benign
+with the corpus contract recording the artifact key. Full caveats and
+incident history: roadmap H5.
 
 ### Item 11: memoize the canonical full-tile record
 
@@ -322,8 +320,8 @@ change.
 
 ## Parked (no evidence pressure, or blocked on the above)
 
-- **Item 6 (per-row bitset for boundary tiles)**: the descent deletes the
-  boundary-tile set concept entirely; moot if P1 lands.
+- **Item 6 (per-row bitset for boundary tiles)**: CLOSED, moot - the P1
+  descent deleted the boundary-tile set concept entirely.
 - **Item 7 (build_graph_view multi-rule extraction)**: only pays off if a
   future design extracts multiple overlay rules per tile; no such design
   exists.
@@ -334,34 +332,37 @@ change.
   stands (Linux-only project, acceptable).
 - **Item 13 (hoist zoom-independent OSM attr encoding)**: measured 1.0-2.1s
   thread-time - noise. Drive-by only.
-- **Item 18 (parallelize relation prepare)**: `prepare_relation` is 0.1/4.0s
-  serial (DK/NO) - real but small. P2 landed WITHOUT restructuring relation
-  preparation - the member-way prepass gates way resolution, not relation
-  parsing, and `prepare_relation` still runs unchanged at end-of-read - so
-  this item was not subsumed and remains open as stated. Revisit only if NA
-  re-baseline shows it grown.
+- **Item 18 (parallelize relation prepare)**: DONE - landed after this
+  note was written, as the H1 campaign's streamed relation tail (norway
+  tail 31.7s -> 15.1s; roadmap H7 tier 1).
 - **Item 20 (tile-owned polygon output)** and **item 21 (OSM polygon feature
   planner)**: the radical siblings of items 14 and 10 respectively. Both
   delete the feature-owned sort seam / per-match emission more aggressively.
-  Re-price after P1+P3 land - if the reader and the clip costs are gone,
-  their remaining payoff may not justify their risk (hard ordering bugs,
-  bounded memory for dense tiles, shard skew).
-- **Item 24 (delay multi-zoom fanout to post-partition)**: blocked on
-  items 14/20; distinct payoff (topology-aware line simplification with tile
-  context) is a quality feature as much as perf. Revisit post-P3.
+  The re-price gate (after P1+P3) is now satisfied, and the answer is to
+  stay parked: the reader and the bulk clip costs are gone, and neither
+  item shows in the roadmap's current frontier (phase12 way-path/relation
+  CPU, H8b). Revisit only if planet profiles reopen the question.
+- **Item 24 (delay multi-zoom fanout to post-partition)**: item 14 landed,
+  item 20 stays parked; the distinct payoff (topology-aware line
+  simplification with tile context) is a quality feature as much as perf.
+  Still parked; revisit against planet profiles.
 - **Item 25 (pinned line DP cascade)**: line-layer analogue of the polygon
   cascade; no line layer shows up in the top profiles (emit_line_feature
   3.9-40s thread-time, wide spread but dominated by phase12 items). Parked.
-- **Item 26 (PMTiles writer sharding + faster dedup fingerprint)**: gated on
-  item 14; `write_to`/`add_tile` are 0.1-3.4s today.
+- **Item 26 (PMTiles writer sharding + faster dedup fingerprint)**: half
+  landed - the in-place writer (`bc71cf1`) made finalize rename-only and
+  deleted the serial tail; central offset assignment with worker pwrite
+  remains only if the writer-drain tail returns (roadmap H8c). The dedup
+  half is now the H3 pricing item (the 1M cap's output-byte cost at
+  planet), not a perf item.
 
 ---
 
 ## Non-targets (explicit, per report noted)
 
 - Sort phase itself (0.02-0.6s at every scale measured) - the cost was never
-  the sort, it is the reader (item 14, still open) and the producers (item 16,
-  landed in P2).
+  the sort, it was the reader (item 14, landed in P3) and the producers
+  (item 16, landed in P2); both are gone.
 - Micro-optimizing `simplify_shape_dp` / `rescale_shape` internals - the win
   is calling them on fragments (P1), not making them faster.
 - Tuning `SPLIT_Z` / `SPLIT_MIN_VERTICES` / chunk sizes - knob-turning on a
@@ -376,8 +377,8 @@ change.
   none are structural.
 - Do not touch seam-reconciliation or dedup machinery for perf; both are
   cheap in every profile (dedup reused 15.5M tiles on norway for free).
-- RSS knobs: clean-bench RSS is 2.8/4.1/10.3 GB (DK/NO/DE) - comfortable. If
-  planet budgeting gets tight, mimalloc periodic purge or
-  `OCEAN_CHUNK_SIZE_LIMIT` are memory knobs, not throughput items. Never read
-  RSS from hotpath/alloc runs (instrumentation-dominated; see
+- RSS knobs: clean-bench RSS is 2.8/4.1/10.3 GB (DK/NO/DE) - comfortable,
+  and the planet ledger (roadmap H3) now owns the budget question. mimalloc
+  is gone (lost the 2026-07-15 A/B outright), and its purge knob with it.
+  Never read RSS from hotpath/alloc runs (instrumentation-dominated; see
   reference/performance.md).

@@ -74,7 +74,6 @@ pub(crate) mod multipolygon;
 pub(crate) mod mvt;
 pub mod node_index;
 pub(crate) mod ocean;
-pub mod ocean_coverage;
 mod pipeline;
 pub mod pmtiles_reader;
 pub mod pmtiles_writer;

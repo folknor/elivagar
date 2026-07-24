@@ -30,14 +30,18 @@ Specifications are saved to the ./notes folder.
    clipping, or the MVT/PMTiles container (zero errors is the bar);
    targeted tile inspection (`elivagar svg` / `elivagar diag` /
    `brokkr compare-tiles`) for named regression tiles when the change aims
-   at a specific visual defect; `elivagar corpus check
-   data/tilegen/denmark-<commit>.pmtiles --corpus corpus/denmark` on a fresh
+   at a specific visual defect; `brokkr pmtiles-corpus check --dataset
+   denmark` (raw spelling until the brokkr alignment lands: `elivagar
+   corpus check data/tilegen/denmark-<commit>.pmtiles --corpus
+   corpus/denmark`) on a fresh
    `brokkr tilegen --dataset denmark --variant locations` build for output-
    neutral changes (exit 0 is digest equality over every tile; exit 2 is a
    contract refusal, not a verdict); intended output changes adjudicate the
    named leaves and land with `corpus bless --rotate` in the same commit;
    explicit-tolerance geometry landings gate on `elivagar regress <current>
-   --against <prior> --tol N --max-moved M`, with the tolerance, move budget,
+   --against <prior> --tol N --max-moved M` (wrapped as the explicit
+   two-archive `brokkr regress` once the brokkr alignment lands), with the
+   tolerance, move budget,
    and displacement-percentile criteria stated in the spec;
    the `brokkr tilegen --bench` invocation for
    anything claiming or risking a performance effect (the win, its

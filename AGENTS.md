@@ -53,10 +53,14 @@ brokkr verify pmtiles [--dataset D] [--tiles VARIANT] [--geometry-stats]
 # THE standing output gate: fresh denmark locations build + corpus digest
 # check against the committed corpus/denmark/ baseline:
 #   brokkr tilegen --dataset denmark --variant locations
+#   brokkr pmtiles-corpus check --dataset denmark
+# The pmtiles-corpus namespace is landing in the brokkr repo (design
+# settled 2026-07-24; decisions of record in the roadmap note). Until
+# your brokkr build carries it, the raw spelling is
 #   elivagar corpus check data/tilegen/denmark-<commit>.pmtiles \
 #       --corpus corpus/denmark
-# Raw-binary spelling until the brokkr corpus wrapper lands; brokkr bless /
-# brokkr regress are removed from the workflow (see the corpus sections below).
+# brokkr bless and regress-vs-blessed are gone from the workflow
+# (see the corpus sections below).
 
 # Archive inspection (wrap the elivagar subcommands; named pmtiles-inspect
 # because brokkr inspect is pbfhogg's PBF inspector)
@@ -246,21 +250,13 @@ be stored). Example: `brokkr tilegen --bench --force --dataset denmark`.
 
 ## Scripts
 
-Build/bench/verify tooling is in `brokkr`. One helper shell script lives in
-`scripts/` for a gate brokkr does not wrap.
-
-**Shell (`scripts/`, run from repo root):**
-- `ocean-coverage.sh` - **BROKEN as of 2026-07-14, pending a decision to fix or
-  delete.** It drives the ocean coverage discriminator by invoking the
-  `elivagar` binary directly, and its step 2 builds the verbatim baseline with
-  `--ocean`/`--ocean-simplified`/`--no-ocean-simplify`. All three spellings
-  were removed with the ocean CLI rework: the first two have a new syntax, but
-  `--no-ocean-simplify` is gone outright, so the baseline it caches cannot be
-  produced at all and the script cannot be repaired by rewriting flags. It
-  drove a diagnostic that was already demoted from gate to triage (one
-  confirmed false negative; see the `ocean-coverage` subcommand caveat), so the
-  live question is whether that diagnostic is worth keeping a verbatim-emit
-  path in the production binary for.
+Build/bench/verify tooling is in `brokkr`; the scripts that matter are the
+Node validation oracles below. (`scripts/ocean-coverage.sh` and the
+`ocean-coverage` subcommand were deleted 2026-07-24: the verbatim baseline
+they needed required `--no-ocean-simplify`, removed 2026-07-14, and the
+diagnostic they drove - demoted from gate to triage after a confirmed
+false negative - is covered baseline-free by `zoom-overlay.mjs`,
+`svg-roi.mjs`, and tier-3 `regress --overlay`.)
 
 **Node (`scripts/validate/`, pnpm; run from that directory):**
 - `earcut-oracle.mjs <file.pmtiles> [layer] [threshold]` - **the MapLibre tessellation-fidelity gate.** Decodes every tile with @mapbox/vector-tile, groups rings with maplibre-gl's verbatim self-calibrating `classifyRings` (maxRings=500), tessellates each polygon with earcut, and reports per-zoom `earcut.deviation` plus misattached-hole counts (hole bbox outside its assigned outer). Pass = 0 over threshold, 0 misattached, on every polygon layer. This is the oracle that caught the R23 ClosePath cursor bug after every internal validator passed for three months - run it on any change that touches geometry or MVT encoding.
@@ -297,11 +293,13 @@ ocean coverage measure did exactly this, reporting a working low-zoom ocean fix
 as FAILED because any correct simplifier loses large sub-pixel coastline detail
 versus a verbatim baseline. That case is why this rule exists; it was caught
 only by the human visual check, so the visual check and earcut - not aggregate
-area - are the standing ocean gates. `ocean-coverage` is triage, never a gate.
+area - are the standing ocean gates. (The `ocean-coverage` diagnostic
+itself was deleted 2026-07-24, unfeedable after the `--no-ocean-simplify`
+removal; the lesson outlives it.)
 
 ## Architecture
 
-Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `inspect`, `verify`, `svg`, `diag`, `regress`, `corpus`, `ocean-coverage`).
+Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CLI uses clap derive with subcommands (`run`, `ocean-build`, `inspect`, `verify`, `svg`, `diag`, `regress`, `corpus`).
 
 ### Modules
 
@@ -326,7 +324,6 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)`. CL
 - `pmtiles_writer.rs` - PMTiles v3 writer with Hilbert tile IDs
 - `inspect.rs` - PMTiles v3 archive inspector (header + metadata reader)
 - `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG)
-- `ocean_coverage.rs` - same-source one-sided ocean coverage diff (the `ocean-coverage` subcommand); decodes both archives' ocean polygons and integrates lost area per tile. Diagnostic, not a gate.
 - `node_index.rs` - node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
 - `way_index.rs` - flat mmap'd way geometry index
 
@@ -439,9 +436,17 @@ the landing commit, adjudicated on the corpus git diff. A landing with an
 explicit geometry tolerance gates on `elivagar regress <new> --against
 <prev> --tol N --max-moved M` (the move budget is mandatory - it defaults
 to 0 and `--tol` alone accepts nothing). Routine checks are denmark-only.
-`brokkr bless` and `brokkr regress` are removed from this workflow; their
-brokkr-side removal is still pending in the brokkr repository (tracked in
-the roadmap note).
+The brokkr alignment (design settled 2026-07-24; decisions of record in
+the roadmap note) is landing in the brokkr repository: `brokkr bless`
+and the blessed registry are deleted, `brokkr regress` becomes an
+explicit two-archive wrapper with a required comparand, the corpus
+subcommands gain a `brokkr pmtiles-corpus` namespace (standing-gate
+spelling: `brokkr pmtiles-corpus check --dataset denmark`), and
+`brokkr ocean-build` builds the ocean artifact from the
+`[host.tilegen.default].ocean` block. The wrappers only resolve paths
+and record invocations; guards, verdicts, and exit codes stay
+elivagar's. Until your brokkr build carries them, use the raw
+spellings above.
 
 ### `elivagar regress <CURRENT> --against <BASELINE>` - the two-archive semantic diff
 
@@ -476,28 +481,6 @@ pmtiles-inspect`) before reading a verdict.
 ### `elivagar diag <FILE> -z <Z> -x <X> -y <Y>`
 
 Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, finds polygon features across all layers, and prints per-ring vertex count, signed area, and winding direction (CW = outer, CCW = hole). Prints first/last 3 vertices for large rings, full vertices for small ones (≤6).
-
-### `elivagar ocean-coverage <FILE> --baseline <REF> [--zmin Z] [--zmax Z] [--threshold-2x N] [--layer L]`
-
-Diagnostic, NOT a landing gate, and currently UNFEEDABLE: its baseline was
-built with `--no-ocean-simplify`, removed 2026-07-14, and there is no other way
-to produce a verbatim same-source comparand. Only an archive built before that
-removal still works as `--baseline`. Measures per-tile one-sided ocean coverage
-loss of FILE against that baseline REF.
-For each z in `[zmin, zmax]` it clips both archives to the tile extent, computes
-`area(ref) - area(ref INTERSECT file)` in 2x-pixel^2 units, prints every tile
-over `--threshold-2x` plus a per-zoom max/p99/worst summary, and exits nonzero
-if any tile exceeds the threshold. Defaults: zmin 1, zmax 6, threshold-2x 512,
-layer `ocean`.
-
-Known limitation: at low zoom ANY correct simplifier removes large sub-pixel
-coastline detail versus a verbatim baseline, so this over-reports and cannot
-separate legitimate generalization from a real coverage defect (a confirmed
-false negative on the 2026-07-12 ocean VW landing). Use it as a
-discriminator - compare two builds' losses to price a regression - never as
-a pass/fail gate. The
-authoritative ocean gates remain the earcut oracle and the human visual check.
-Driven by `scripts/ocean-coverage.sh` (brokkr has no wrapper).
 
 ## Key conventions
 

@@ -49,8 +49,6 @@ enum Command {
     Regress(RegressArgs),
     /// Create or check a semantic corpus digest (the standing output gate).
     Corpus(CorpusArgs),
-    /// Compare ocean coverage against a verbatim same-source baseline.
-    OceanCoverage(OceanCoverageArgs),
 }
 
 /// Arguments for the `diag` subcommand.
@@ -374,21 +372,6 @@ enum CorpusMutationArg {
     Regzip,
 }
 
-#[derive(Parser)]
-struct OceanCoverageArgs {
-    file: PathBuf,
-    #[arg(long)]
-    baseline: PathBuf,
-    #[arg(long, default_value_t = 1)]
-    zmin: u8,
-    #[arg(long, default_value_t = 6)]
-    zmax: u8,
-    #[arg(long, default_value_t = 512)]
-    threshold_2x: i128,
-    #[arg(long, default_value = "ocean")]
-    layer: String,
-}
-
 #[derive(Clone, ValueEnum)]
 enum SkipToArg {
     Ocean,
@@ -661,22 +644,6 @@ fn main() {
             run_regress(&args);
         }
         Command::Corpus(args) => run_corpus(&args),
-        Command::OceanCoverage(args) => {
-            let cfg = elivagar::ocean_coverage::CoverageConfig {
-                zmin: args.zmin,
-                zmax: args.zmax,
-                threshold_2x: args.threshold_2x,
-                layer: args.layer,
-            };
-            match elivagar::ocean_coverage::coverage(&args.file, &args.baseline, &cfg) {
-                Ok(true) => {}
-                Ok(false) => std::process::exit(1),
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
     }
 }
 
