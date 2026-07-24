@@ -707,3 +707,69 @@ Readings at the landing, all on plantasjen:
 
 The corpus rotation (`bless --rotate` + `render-manifest`) runs against the
 clean rebuild of the landing commit - bless refuses dirty builds.
+
+## Corpus redesign recalibration (2026-07-24, gate native in brokkr)
+
+The corpus redesign moved the gate machinery into brokkr (elivagar
+`0129ef3`, corpus and regress subcommands removed; brokkr links the crate
+and owns the hash, fold, gating policy, render core, mutate, and verdicts).
+Full acceptance readings on plantasjen, all against the UNCHANGED committed
+`corpus/denmark/` baseline - the a40c077 rotation was never re-blessed, so
+the committed leaves and SVGs served as the parity oracle for the ported
+code:
+
+- **Digest parity, existing archive**: native check on
+  `denmark-locations-3344eaa.pmtiles` (built by pre-redesign elivagar)
+  exit 0, 1,296,998 tiles / 166,347 unique matching the committed digest
+  line, zero corpus diff.
+- **End-to-end at the redesign commit**: fresh
+  `brokkr tilegen --dataset denmark --variant locations` at `0129ef3`
+  (10.6 s), then native check: exit 0, same counts. New producer, new
+  judge, old baseline - all three agree.
+- **Calibrands** (mutants of the 0129ef3 archive, tile 14/8764/5132):
+  drop-tile FIRED exit 1 naming `removed 14 8764 5132`; nudge-geometry
+  FIRED exit 1 naming the changed tile with old and new hash;
+  layer-version FIRED exit 1 likewise; regzip CLEARED exit 0 through both
+  tiers (digest and SVG staleness).
+- **Ring-grouping differential oracle**: `brokkr pmtiles-corpus rings` on
+  the 0129ef3 archive byte-equal (`cmp`) to
+  `scripts/validate/ring-grouping-oracle.mjs` over all 1.3M tiles.
+- **Render-port fidelity save, recorded as the gate save it was**: the
+  first native check run exited 3 with two manifest SVGs stale (z12, z14)
+  under a passing digest. Cause: the ported render core emitted features
+  in wire order - the missing `compare_detail_features` canonical sort
+  (plus attr/component canonicalization the old decoder did internally).
+  The committed SVGs were the correct side; the fix went into brokkr's
+  render port and staleness cleared with zero corpus changes. The
+  subordinate-staleness pipeline ordering held: the digest verdict was
+  never masked.
+
+Same-day follow-up readings after brokkr's regress/compare-tiles port
+went native (brokkr `c1a49b1`-era):
+
+- **Native regress, known-clean pair**: `brokkr regress` on the
+  `0129ef3` archive against `3344eaa` - exit 0, 1,296,998 identical
+  tiles, zero diffs in every class, all 166,348 blob pairs resolved in
+  the raw pass (19 ms). Counters now report in-band; the FIFO emission
+  was dropped deliberately (brokkr is the drain process).
+- **dump_overlays off-by-one, verified pre-existing**: the port found
+  the old overlay dumper iterating `start..=end` over spans that are
+  half-open (`PairSpan::tiles = end - start`, coalescing on
+  `last.end == start`), rendering one unchanged tile past every
+  differing range and burning an `--overlay-max` slot on it. The bug
+  was in the shed elivagar code, not introduced by the port; the port
+  fixes it. Attribution-only surface, no verdict ever affected.
+- **Native compare-tiles**: full per-zoom/per-layer census on the same
+  pair, identical counts both sides; the `cmds` column became `verts`
+  (it decodes through `tile_detail` now, tolerant mode).
+- **Bless guard**: bless-without-`--rotate` on the digest-equal fresh
+  archive refused exit 1 (`rotation requires --rotate`), zero corpus
+  writes.
+- **Example retired**: `examples/compare_tiles.rs` deleted from
+  elivagar - its only caller was the shell-out wrapper this port
+  replaced.
+
+The streaming hash definition is frozen: it is the meaning of every
+committed leaf, so any semantic change to it is a corpus-rotation plus
+recalibration event, never a quiet edit. Recalibration triggers and the
+two-leg drift mechanism live in `reference/corpus.md`.
