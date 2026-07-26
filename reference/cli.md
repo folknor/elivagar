@@ -401,6 +401,7 @@ was tunable from any shell and recorded nowhere.
 |---|---|
 | `ELIVAGAR_ASSEMBLE_WORKERS` | assemble worker cap, default 8. Measured on NA locations: 4 workers left the writer idle 68% of assemble; 8 cut assemble 186.4 to 160.7s; 12 was WORSE at 176.1s and +3 GB RSS - encode CPU saturates near 8 |
 | `ELIVAGAR_ASSEMBLE_PARK_BUDGET` | bytes of encoded-but-unwritten tiles workers may run ahead of the writer, default 2 GiB. The RAM ceiling on assemble, and the term the planet ledger's 6-9 GB assemble estimate is derived from |
+| `ELIVAGAR_ASSEMBLE_SPLIT_TARGET` | piece size in record bytes for hot-partition splitting, default 64 MiB; a partition over twice this splits into contiguous tile-range pieces read by independent workers (H8b - one dense z14-block partition otherwise puts hundreds of encoded MB behind one ordered slot). Output is byte-identical split or unsplit; set a tiny value to force splits on a small extract for that gate |
 | `ELIVAGAR_REL_BLOCKS_CAP` | relation-block buffer cap in bytes. Past it the tail re-reads relation blobs instead of holding them; set it to 1 to force the spill path on a small extract |
 | `ELIVAGAR_LAYER_STATS=1` | per-layer per-zoom sort-stats firehose (~800 counters). Emitted at end of run, so it never affects timing. The per-layer totals are always emitted |
 | `BROKKR_MARKER_FIFO` | set by brokkr. Phase markers and counters go here; unset means every counter in `src/debug.rs` is a silent no-op |

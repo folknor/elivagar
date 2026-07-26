@@ -260,9 +260,11 @@ merge reader this item targeted no longer exists; per-partition merge cost
 lands in `assemble_reader_ns`. The split-depth verdict (z7 kept: germany
 assemble -31%, NA +1.6% accepted as straggler insurance) and the lz4 chunk
 pricing live in the roadmap's H4. The skew risk called out here
-materialized as predicted; its remaining half is H8b's recursive splitting
-of hot partitions (germany-relevant, still open), with H2d's injected
-stats as the natural boundary picker. Item 17 was subsumed, as predicted.
+materialized as predicted; its remaining half - H8b's splitting of hot
+partitions - LANDED 2026-07-26 with boundaries picked code-side from a
+byte-quantile pre-scan (H2d's injected stats demoted to a cheaper-source
+idea; see roadmap H8b and reference/performance.md). Item 17 was
+subsumed, as predicted.
 
 ---
 

@@ -872,3 +872,52 @@ Readings at the landing (`b6b6844`), all on plantasjen:
   the output-identical pre-landing build that the ring-count measurements
   above were taken from), but a spec that pins an archive across a landing
   has to account for that retention window.
+
+## H8b hot-partition splitting (2026-07-26, landed on 69e829b)
+
+Assemble splits any sort partition whose source record bytes exceed twice
+`ELIVAGAR_ASSEMBLE_SPLIT_TARGET` (default 64 MiB) into contiguous tile-range
+pieces, boundaries at byte quantiles from a header-only pre-scan of the hot
+partition's sources, each piece an independent worker job and ordered-writer
+slot. Counters: `assemble_split_partitions`, `assemble_split_pieces`.
+
+Motivating evidence (germany locations bench `3f042746`, commit `bc71cf1`,
+07-15): `assemble_partition_encoded_max` 296.6 MB - ONE z14-block partition
+(the Berlin z7 prefix; the oversize-tile table clusters at z10 x530-551
+y340-354) carried 10% of the whole 2.99 GB archive behind a single ordered
+slot and one serial merge reader (`assemble_reader_ns` max 3.63s). The
+writer waited 12.0s on `assemble_partition_batch` (82% of the 14.6s
+assemble phase, 14.5 avg cores) while `assemble_claim_window` wait was
+7.7ms and parked HWM 1.25 GB of the 2 GiB budget: workers were never
+blocked, they ran out of other partitions while the straggler ground
+through one reader. Splitting attacks exactly that residue.
+
+Calibration at the landing (denmark locations, plantasjen, dirty-tree
+gate runs on `69e829b`):
+
+- **Bit-identity gate PASSED**: `ELIVAGAR_ASSEMBLE_SPLIT_TARGET=10^15`
+  (splits impossible, counters read 0/0) vs `=10^6` (37 partitions split
+  into 624 pieces) produced byte-identical archives - `git hash-object`
+  `b56b45bb535f5c21e8806e6d61679856e7429b8e` on both. Pieces are extra
+  order slots draining in the same global Hilbert order, so dedup and
+  directory bytes cannot move by construction; the hash pair is the
+  demonstration.
+- Unit gates: piece streams concatenate to the whole-partition stream
+  (keys AND payloads) for uncompressed and lz4 chunks, across
+  multi-section and single-partition chunk files, with a hot tile band
+  forcing uneven quantile cuts; single-tile-range partitions and zero
+  targets refuse to split.
+- The default-target denmark run splits nothing (0/0 counters at 64 MiB;
+  denmark's fattest partition is well under 128 MiB), so the standing
+  corpus gate exercises the unsplit path and the forced-target pair
+  above is the split path's gate.
+
+Germany pricing (the measured win this landing exists for) is PENDING a
+quiet host: the 07-26 attempt coincided with heavy cross-project load
+(available memory halved, every pure-CPU hotpath function uniformly ~1.9x
+slower on an unrelated re-baseline), which is exactly the condition the
+Discipline section says produces unreadable numbers. Compare against
+`3f042746` (54.1s wall, assemble 14.6s, writer batch-wait 12.0s,
+`assemble_partition_encoded_max` 296.6 MB) with the same spelling:
+`brokkr tilegen --bench 1 --dataset germany --variant locations`, then
+sidecar `--stalls` and the split counters.

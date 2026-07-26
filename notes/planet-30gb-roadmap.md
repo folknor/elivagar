@@ -468,7 +468,19 @@ kept as don't-redo records (measured detail in
   16,000 / 8,000) are upstream's generic tuning against our bimodal
   distribution, and the i32/i64 arithmetic admits vectorization
   without changing results. Both cheap to price (one norway hotpath
-  run per variant).
+  run per variant). Threshold pricing ATTEMPTED 2026-07-26,
+  measurement voided by host contention (cross-project load halved
+  available memory mid-session; an unrelated re-baseline came out
+  uniformly ~1.9x slower per function). The one salvageable
+  observation: list-heavy (16k/16k/16k) and tree-heavy (1k/16k/2k)
+  arms landed within 1.6% of each other on norway hotpath wall,
+  consistent with the call distribution (normalize_into P50 890ns -
+  nearly every call is far below every threshold; only the P95+ tail
+  routes differently). Verdict needs one clean back-to-back
+  baseline-vs-variant pair on a quiet host; until then upstream values
+  stand. Baseline for that pair: `cb9f55a4` (norway locations hotpath,
+  69e829b, 32.7s - itself possibly cold-cache-high). Vectorization
+  half untouched.
 
 ### H7: The relation stack
 
@@ -486,10 +498,20 @@ pathological features.
   ocean to ~0.2s; there is nothing left to hide.
 - (b) Straggler mitigation: the NA half is DONE (z7 partitions + byte
   window + the artifact; NA assemble 91.5s -> 86.1s, no straggler
-  campaign remains there). The GERMANY half is live and unchanged:
-  assemble averages 12.3 cores vs norway's 20.0; **recursive splitting
-  of hot partitions is still untried** and H2d's injected stats would
-  pick the boundaries. Do not read the 12.3 as an NA number.
+  campaign remains there). The GERMANY half LANDED 2026-07-26:
+  hot-partition splitting - any partition over 2x
+  `ELIVAGAR_ASSEMBLE_SPLIT_TARGET` (default 64 MiB of record bytes,
+  known free from section-offset diffs) splits into contiguous
+  tile-range pieces, boundaries at byte quantiles from a header-only
+  pre-scan, each piece its own worker job and ordered-writer slot. The
+  boundaries H2d would inject are thus picked code-side from measured
+  bytes; H2d remains only a cheaper-source idea. Evidence and gates in
+  reference/performance.md (H8b section): germany's Berlin z14-block
+  partition was 297 MB encoded behind one slot with the writer starved
+  12s while the claim window never bound; the denmark bit-identity gate
+  (splits forced vs suppressed, identical archive hash) passed at the
+  landing. The germany wall win is UNPRICED until the host is quiet -
+  the same contention that voided the 07-26 E6 reading.
 - (c) Workers pwrite tile payloads at final offsets: the in-place
   writer layout landed the single-write property (finalize is
   rename-only); central offset assignment with worker pwrite remains
@@ -535,9 +557,10 @@ planet PBF (user-gated pbfhogg altw run, with H2's NA re-enrichment
 reading riding the same decision), the disk audit against the real
 artifact size, and a green `corpus check` at the attempt commit.
 
-Optimization work that remains, none of it blocking: H8b recursive
-partition splitting (germany), reader/encode overlap in assemble
-workers, H2c/d injection candidates, the paused E-surface, and the
+Optimization work that remains, none of it blocking: the germany
+pricing run for the landed H8b splitter (quiet host required),
+reader/encode overlap in assemble workers, H2c/d injection candidates,
+the paused E-surface (E6 thresholds await one clean A/B pair), and the
 ocean needle detector if a geometry-level ocean gate is ever wanted.
 
 ## Open questions the first planet measurements must answer

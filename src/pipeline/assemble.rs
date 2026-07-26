@@ -46,9 +46,13 @@ pub(super) enum PartitionItem {
 
 /// Partition scheduling is the union of ordinary sort sources and durable
 /// ocean-only ranges. The latter deliberately avoids creating an empty merge
-/// heap for copy-only work.
+/// heap for copy-only work. Hot sort partitions are replaced by consecutive
+/// `SortPiece` entries (contiguous tile-id sub-ranges of one partition), so
+/// the ordered writer sees them as ordinary extra order slots and drains
+/// tiles in the same global Hilbert order as an unsplit run.
 enum UnionPartition<'a> {
     Sort(&'a sort::SortPartition),
+    SortPiece(sort::SortPartitionPiece),
     ArtifactOnly { start: u64, end: u64 },
 }
 const _: () = assert!(std::mem::size_of::<EncodedTile>() == 32);
@@ -578,6 +582,48 @@ fn phase_assemble_partitions(
     use std::sync::mpsc;
 
     let union = partition_union(partitions, ocean);
+    // H8b: split hot partitions into tile-range pieces. The z7 partition
+    // scheme bounds MOST partitions well, but one dense z14-block prefix
+    // can put hundreds of encoded MB behind a single ordered slot and one
+    // serial merge reader (germany's Berlin partition: 297 MB encoded, 10%
+    // of the archive, 3.6s of serial read; the writer starved 12s on
+    // ordered batches while the claim window never bound). Pieces make the
+    // straggler's read AND its ordered drain incremental. The threshold is
+    // 2x the piece target so a split always yields at least two real
+    // pieces; the target is overridable for A/Bs and for forcing splits on
+    // small extracts (the bit-identity gate builds denmark split and
+    // unsplit and compares archives with cmp).
+    let split_target = std::env::var("ELIVAGAR_ASSEMBLE_SPLIT_TARGET")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(64 * 1024 * 1024);
+    let mut split_partitions = 0usize;
+    let mut split_pieces = 0usize;
+    let mut split_union = Vec::with_capacity(union.len());
+    for entry in union {
+        match entry {
+            UnionPartition::Sort(partition)
+                if partition.record_bytes() > split_target.saturating_mul(2) =>
+            {
+                match partition
+                    .plan_pieces(config.compress_sort_chunks, split_target)
+                    .map_err(PipelineError::from)?
+                {
+                    Some(pieces) => {
+                        split_partitions += 1;
+                        split_pieces += pieces.len();
+                        split_union.extend(pieces.into_iter().map(UnionPartition::SortPiece));
+                    }
+                    None => split_union.push(UnionPartition::Sort(partition)),
+                }
+            }
+            entry => split_union.push(entry),
+        }
+    }
+    let union = split_union;
+    crate::debug::emit_counter_usize("assemble_split_partitions", split_partitions);
+    crate::debug::emit_counter_usize("assemble_split_pieces", split_pieces);
     let partition_count = union.len();
     if partition_count == 0 {
         return Ok(AssembleCore {
@@ -715,20 +761,45 @@ fn phase_assemble_partitions(
                     if stop_ref.load(Ordering::Relaxed) {
                         break;
                     }
-                    let result = match union_ref[order] {
-                        UnionPartition::Sort(partition) => read_encode_partition(
-                            order,
-                            partition,
-                            compression,
-                            compression_level,
-                            tile_format,
-                            tile_compression,
-                            &seam_layers,
-                            seam_metrics,
-                            assemble_budget,
-                            artifact_ctx,
-                            &tx,
-                        ),
+                    let result = match &union_ref[order] {
+                        UnionPartition::Sort(partition) => {
+                            sort::SortPartitionReader::open(partition, compression)
+                                .map_err(PipelineError::from)
+                                .and_then(|reader| {
+                                    read_encode_partition(
+                                        order,
+                                        reader,
+                                        sort::partition_tile_range(partition.index),
+                                        compression_level,
+                                        tile_format,
+                                        tile_compression,
+                                        &seam_layers,
+                                        seam_metrics,
+                                        assemble_budget,
+                                        artifact_ctx,
+                                        &tx,
+                                    )
+                                })
+                        }
+                        UnionPartition::SortPiece(piece) => {
+                            sort::SortPartitionReader::open_piece(piece, compression)
+                                .map_err(PipelineError::from)
+                                .and_then(|reader| {
+                                    read_encode_partition(
+                                        order,
+                                        reader,
+                                        (piece.start_tile, piece.end_tile),
+                                        compression_level,
+                                        tile_format,
+                                        tile_compression,
+                                        &seam_layers,
+                                        seam_metrics,
+                                        assemble_budget,
+                                        artifact_ctx,
+                                        &tx,
+                                    )
+                                })
+                        }
                         UnionPartition::ArtifactOnly { start, end } => artifact_ctx
                             .ok_or_else(|| {
                                 PipelineError(
@@ -738,8 +809,8 @@ fn phase_assemble_partitions(
                             .and_then(|artifact| {
                                 let items = artifact_run_copy_items(
                                     artifact.ocean,
-                                    start,
-                                    end,
+                                    *start,
+                                    *end,
                                     artifact.band_empty,
                                 )?;
                                 send_partition_batch(
@@ -949,8 +1020,8 @@ fn phase_assemble_partitions(
 #[allow(clippy::too_many_arguments)]
 fn read_encode_partition(
     order: usize,
-    partition: &sort::SortPartition,
-    compression: sort::ChunkCompression,
+    mut reader: sort::SortPartitionReader,
+    tile_range: (u64, u64),
     compression_level: u32,
     tile_format: TilePayloadFormat,
     tile_compression: TileCompression,
@@ -962,7 +1033,6 @@ fn read_encode_partition(
 ) -> Result<(), PipelineError> {
     const BATCH_SIZE: usize = 4096;
 
-    let mut reader = sort::SortPartitionReader::open(partition, compression)?;
     let mut batch_features_read: u64 = 0;
     let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
     let mut current = PendingTile {
@@ -973,8 +1043,11 @@ fn read_encode_partition(
     let mut batch_bytes: usize = 0;
     let mut batch_index = 0usize;
     let mut read_started = std::time::Instant::now();
-    let (partition_start, partition_end) = sort::partition_tile_range(partition.index);
-    let mut artifact_cursor = partition_start;
+    // For a whole partition this is its tile range; for a piece, the piece's
+    // sub-range - artifact gap filling covers exactly this span, so pieces
+    // of one partition tile-partition its artifact coverage too.
+    let (range_start, partition_end) = tile_range;
+    let mut artifact_cursor = range_start;
     let encode_ctx = PartitionEncodeCtx {
         compression_level,
         tile_format,

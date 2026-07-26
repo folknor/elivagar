@@ -1248,30 +1248,40 @@ impl SpillCoalescer {
 // ChunkReader - reads records sequentially from a single chunk file
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct MultiChunkSection {
     partition: usize,
     offset: u64,
     count: u32,
+    /// On-disk bytes from this section's offset to the next section (or file
+    /// end). Exact record bytes for uncompressed chunks; compressed frame
+    /// bytes otherwise - either way a size signal for hot-partition
+    /// splitting, never an addressing fact.
+    byte_extent: u64,
 }
 
 #[derive(Clone, Debug)]
 struct SortPartitionSource {
     path: PathBuf,
     section: Option<MultiChunkSection>,
+    /// Size signal mirroring `MultiChunkSection::byte_extent`; for whole-file
+    /// sources the file's record bytes (uncompressed) or compressed bytes.
+    byte_extent: u64,
 }
 
 impl SortPartitionSource {
-    fn whole(path: PathBuf) -> Self {
+    fn whole(path: PathBuf, byte_extent: u64) -> Self {
         Self {
             path,
             section: None,
+            byte_extent,
         }
     }
 
     fn section(path: PathBuf, section: MultiChunkSection) -> Self {
         Self {
             path,
+            byte_extent: section.byte_extent,
             section: Some(section),
         }
     }
@@ -1341,7 +1351,19 @@ fn read_multi_chunk_sections(
             partition,
             offset,
             count,
+            byte_extent: 0,
         });
+    }
+    // Sections are written back to back in table order, so each one's byte
+    // extent is the gap to the next offset (file end for the last). The
+    // extent is a size signal for hot-partition splitting; reading records
+    // still relies only on offset + count.
+    let file_len = file.metadata()?.len();
+    for i in 0..sections.len() {
+        let next_offset = sections
+            .get(i + 1)
+            .map_or(file_len, |section| section.offset);
+        sections[i].byte_extent = next_offset.saturating_sub(sections[i].offset);
     }
     Ok(sections)
 }
@@ -1433,6 +1455,50 @@ impl ChunkReader {
         self.bytes_read += 12 + u64::from(data_len);
         Ok(Some((key, data)))
     }
+
+    /// Read the next record's header and discard its payload without
+    /// allocating. Serves the hot-partition piece pre-scan and the
+    /// compressed-source piece skip. Deliberately does NOT feed
+    /// `bytes_read`: SORT_MERGE_BYTES accounts merged records, and a
+    /// skipped or scanned record is not merged.
+    fn next_header_discard_payload(&mut self) -> io::Result<Option<(SortKey, u32)>> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        let mut buf8 = [0u8; 8];
+        self.reader.read_exact(&mut buf8)?;
+        let key = u64::from_le_bytes(buf8);
+        let mut buf4 = [0u8; 4];
+        self.reader.read_exact(&mut buf4)?;
+        let data_len = u32::from_le_bytes(buf4);
+        let copied = io::copy(
+            &mut Read::by_ref(&mut self.reader).take(u64::from(data_len)),
+            &mut io::sink(),
+        )?;
+        if copied != u64::from(data_len) {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "sort chunk record truncated during payload skip",
+            ));
+        }
+        self.remaining -= 1;
+        Ok(Some((key, data_len)))
+    }
+
+    /// Decode and discard `n` records. Used to enter a compressed section
+    /// mid-stream for a partition piece; frames cannot be seeked into, so
+    /// the records before the piece boundary are decompressed and dropped.
+    fn skip_records(&mut self, n: u64) -> io::Result<()> {
+        for _ in 0..n {
+            if self.next_header_discard_payload()?.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "partition piece skip ran past its section's record count",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1478,12 +1544,11 @@ struct PartitionMergeReader {
 }
 
 impl PartitionMergeReader {
-    fn new(sources: &[SortPartitionSource], compression: ChunkCompression) -> io::Result<Self> {
-        let mut chunk_readers = Vec::with_capacity(sources.len());
-        let mut heap = BinaryHeap::with_capacity(sources.len());
-
-        for (idx, source) in sources.iter().enumerate() {
-            let mut cr = ChunkReader::open_source(source, compression)?;
+    /// Prime the merge heap from already-open (and possibly skipped-into)
+    /// chunk readers.
+    fn from_chunk_readers(mut chunk_readers: Vec<ChunkReader>) -> io::Result<Self> {
+        let mut heap = BinaryHeap::with_capacity(chunk_readers.len());
+        for (idx, cr) in chunk_readers.iter_mut().enumerate() {
             if let Some((key, data)) = cr.read_record()? {
                 heap.push(HeapEntry {
                     key,
@@ -1491,7 +1556,6 @@ impl PartitionMergeReader {
                     chunk_idx: idx,
                 });
             }
-            chunk_readers.push(cr);
         }
 
         SORT_MERGE_MAX_FANIN.fetch_max(
@@ -1505,11 +1569,19 @@ impl PartitionMergeReader {
         })
     }
 
+    fn new(sources: &[SortPartitionSource], compression: ChunkCompression) -> io::Result<Self> {
+        let mut chunk_readers = Vec::with_capacity(sources.len());
+        for source in sources {
+            chunk_readers.push(ChunkReader::open_source(source, compression)?);
+        }
+        Self::from_chunk_readers(chunk_readers)
+    }
+
     fn new_whole_paths(chunk_paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
+        // Legacy mode never partitions, so nothing consumes the extent.
         let sources: Vec<SortPartitionSource> = chunk_paths
             .iter()
-            .cloned()
-            .map(SortPartitionSource::whole)
+            .map(|path| SortPartitionSource::whole(path.clone(), 0))
             .collect();
         Self::new(&sources, compression)
     }
@@ -1545,6 +1617,240 @@ pub struct SortPartition {
     sources: Vec<SortPartitionSource>,
 }
 
+/// One contiguous tile-id sub-range of a single partition, scheduled as an
+/// independent assemble work item. Produced by `SortPartition::plan_pieces`
+/// for partitions whose serial per-partition merge would otherwise define
+/// the assemble tail: one dense z14-block partition can hold hundreds of
+/// encoded MB behind a single ordered writer slot (germany's Berlin z7
+/// prefix measured 297 MB encoded, 10% of the archive). Piece boundaries
+/// are whole-tile, and pieces of one partition occupy consecutive order
+/// slots, so the writer consumes tiles in the same global Hilbert order as
+/// an unsplit run and the archive bytes are identical.
+pub struct SortPartitionPiece {
+    pub partition_index: usize,
+    /// Tile-id range `[start_tile, end_tile)` this piece covers.
+    pub start_tile: u64,
+    pub end_tile: u64,
+    sources: Vec<PieceSource>,
+}
+
+struct PieceSource {
+    source: SortPartitionSource,
+    /// Records to decode and discard before the piece's first record.
+    /// Nonzero only for compressed sources, where a frame cannot be entered
+    /// mid-stream; uncompressed sources instead carry a synthetic section
+    /// whose offset points directly at the piece's first record.
+    skip_records: u64,
+    /// Records this piece reads from the source after the skip.
+    take_records: u32,
+}
+
+/// Per-source cumulative totals at bucket starts, built by the piece
+/// pre-scan. `records[b]` / `bytes[b]` are the totals BEFORE the first
+/// record of bucket `b`; index `bucket_count` holds the section totals.
+struct SourceScan {
+    records: Vec<u64>,
+    bytes: Vec<u64>,
+}
+
+fn scan_source_buckets(
+    source: &SortPartitionSource,
+    compression: ChunkCompression,
+    range_start: u64,
+    shift: u32,
+    bucket_count: usize,
+) -> io::Result<SourceScan> {
+    let mut records = vec![0u64; bucket_count + 1];
+    let mut bytes = vec![0u64; bucket_count + 1];
+    let mut reader = ChunkReader::open_source(source, compression)?;
+    let mut record_total = 0u64;
+    let mut byte_total = 0u64;
+    let mut filled = 0usize;
+    while let Some((key, data_len)) = reader.next_header_discard_payload()? {
+        let tile_id = tile_id_from_key(key);
+        let bucket = usize::try_from((tile_id.saturating_sub(range_start)) >> shift)
+            .map_err(|_| io::Error::other("piece scan bucket does not fit usize"))?;
+        if bucket >= bucket_count {
+            return Err(io::Error::other(format!(
+                "piece scan found tile id {tile_id} outside its partition range in {}",
+                source.path.display()
+            )));
+        }
+        // Records are key-sorted, so buckets are non-decreasing; fill the
+        // cumulative arrays for every bucket that starts at this record.
+        while filled <= bucket {
+            records[filled] = record_total;
+            bytes[filled] = byte_total;
+            filled += 1;
+        }
+        record_total += 1;
+        byte_total += 12 + u64::from(data_len);
+    }
+    while filled <= bucket_count {
+        records[filled] = record_total;
+        bytes[filled] = byte_total;
+        filled += 1;
+    }
+    Ok(SourceScan { records, bytes })
+}
+
+/// Choose piece cut points as bucket indices: byte quantiles snapped to
+/// bucket edges, first cut at 0 and last at `bucket_bytes.len()`. A bucket
+/// is never split, so the fattest achievable piece is bounded below by the
+/// fattest bucket; at z14-block granularity a bucket is 4 tiles. Returns
+/// `None` when there is nothing to cut (no bytes, or every quantile lands
+/// on the same edge).
+fn choose_bucket_cuts(
+    bucket_bytes: &[u64],
+    target_bytes: u64,
+    max_pieces: u64,
+) -> Option<Vec<usize>> {
+    let bucket_count = bucket_bytes.len();
+    let total: u64 = bucket_bytes.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let pieces_wanted = total.div_ceil(target_bytes).clamp(2, max_pieces);
+    let mut cuts = vec![0usize];
+    let mut acc = 0u64;
+    let mut next_quantile = 1u64;
+    for (bucket, &bytes) in bucket_bytes.iter().enumerate() {
+        acc += bytes;
+        while next_quantile < pieces_wanted
+            && acc.saturating_mul(pieces_wanted) >= total.saturating_mul(next_quantile)
+        {
+            if bucket + 1 < bucket_count {
+                cuts.push(bucket + 1);
+            }
+            next_quantile += 1;
+        }
+    }
+    cuts.dedup();
+    cuts.push(bucket_count);
+    if cuts.len() < 3 { None } else { Some(cuts) }
+}
+
+impl SortPartition {
+    /// Total on-disk source bytes behind this partition: exact record bytes
+    /// for uncompressed chunks, compressed frame bytes otherwise. The
+    /// hot-partition split decision keys on this, so compressed runs split
+    /// less eagerly by roughly their compression ratio - acceptable for a
+    /// size signal.
+    pub fn record_bytes(&self) -> u64 {
+        self.sources.iter().map(|s| s.byte_extent).sum()
+    }
+
+    /// Plan a split of this partition into contiguous tile-id pieces of
+    /// roughly `target_bytes` of (decompressed) record bytes each.
+    ///
+    /// Pre-scans every source once (headers decoded, payloads discarded) to
+    /// build a per-bucket byte histogram at whole-tile granularity, then
+    /// cuts at byte quantiles - so a dense city core lands alone in its own
+    /// piece instead of hiding inside an equal-width cut. Returns `None`
+    /// when the partition cannot split (single-tile range) or the histogram
+    /// yields fewer than two pieces. The scan is the price of admission:
+    /// one header-walk of the partition's sources, paid only by partitions
+    /// already over the split threshold.
+    pub fn plan_pieces(
+        &self,
+        compression: ChunkCompression,
+        target_bytes: u64,
+    ) -> io::Result<Option<Vec<SortPartitionPiece>>> {
+        const MAX_PIECES: u64 = 32;
+        const MAX_BUCKETS: u64 = 4096;
+        let (range_start, range_end) = partition_tile_range(self.index);
+        let width = range_end - range_start;
+        if width < 2 || target_bytes == 0 {
+            return Ok(None);
+        }
+        let mut shift = 0u32;
+        while (width >> shift) > MAX_BUCKETS {
+            shift += 1;
+        }
+        let bucket_count = usize::try_from((width + (1 << shift) - 1) >> shift)
+            .map_err(|_| io::Error::other("piece bucket count does not fit usize"))?;
+
+        let scans = std::thread::scope(|scope| -> io::Result<Vec<SourceScan>> {
+            let handles: Vec<_> = self
+                .sources
+                .iter()
+                .map(|source| {
+                    scope.spawn(move || {
+                        scan_source_buckets(source, compression, range_start, shift, bucket_count)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("piece scan thread panicked"))
+                .collect()
+        })?;
+
+        let mut bucket_bytes = vec![0u64; bucket_count];
+        for scan in &scans {
+            for (bucket, bytes) in bucket_bytes.iter_mut().enumerate() {
+                *bytes += scan.bytes[bucket + 1] - scan.bytes[bucket];
+            }
+        }
+        let Some(cuts) = choose_bucket_cuts(&bucket_bytes, target_bytes, MAX_PIECES) else {
+            return Ok(None);
+        };
+
+        let mut pieces = Vec::with_capacity(cuts.len() - 1);
+        for pair in cuts.windows(2) {
+            let (cut_start, cut_end) = (pair[0], pair[1]);
+            let start_tile = range_start + ((cut_start as u64) << shift);
+            let end_tile = range_end.min(range_start + ((cut_end as u64) << shift));
+            let mut sources = Vec::new();
+            for (source, scan) in self.sources.iter().zip(&scans) {
+                let first = scan.records[cut_start];
+                let last = scan.records[cut_end];
+                if last == first {
+                    continue;
+                }
+                let take_records = u32::try_from(last - first)
+                    .map_err(|_| io::Error::other("piece record count exceeds u32"))?;
+                if compression == ChunkCompression::None {
+                    // Records are fixed-layout on disk, so the piece enters
+                    // its source at an exact byte offset: section data (or
+                    // byte 4 of a whole chunk file, past the record-count
+                    // prefix) plus the scanned bytes before the cut.
+                    let data_base = source.section.as_ref().map_or(4, |s| s.offset);
+                    let byte_start = scan.bytes[cut_start];
+                    let byte_extent = scan.bytes[cut_end] - byte_start;
+                    sources.push(PieceSource {
+                        source: SortPartitionSource {
+                            path: source.path.clone(),
+                            byte_extent,
+                            section: Some(MultiChunkSection {
+                                partition: self.index,
+                                offset: data_base + byte_start,
+                                count: take_records,
+                                byte_extent,
+                            }),
+                        },
+                        skip_records: 0,
+                        take_records,
+                    });
+                } else {
+                    sources.push(PieceSource {
+                        source: source.clone(),
+                        skip_records: first,
+                        take_records,
+                    });
+                }
+            }
+            pieces.push(SortPartitionPiece {
+                partition_index: self.index,
+                start_tile,
+                end_tile,
+                sources,
+            });
+        }
+        Ok(Some(pieces))
+    }
+}
+
 /// A reader for one partition's chunk files.
 pub struct SortPartitionReader {
     inner: PartitionMergeReader,
@@ -1554,6 +1860,28 @@ impl SortPartitionReader {
     pub fn open(partition: &SortPartition, compression: ChunkCompression) -> io::Result<Self> {
         Ok(Self {
             inner: PartitionMergeReader::new(&partition.sources, compression)?,
+        })
+    }
+
+    pub fn open_piece(
+        piece: &SortPartitionPiece,
+        compression: ChunkCompression,
+    ) -> io::Result<Self> {
+        let mut chunk_readers = Vec::with_capacity(piece.sources.len());
+        for piece_source in &piece.sources {
+            let mut cr = ChunkReader::open_source(&piece_source.source, compression)?;
+            if piece_source.skip_records > 0 {
+                cr.skip_records(piece_source.skip_records)?;
+            }
+            // For uncompressed sources the synthetic section already carries
+            // the piece count; for compressed sources the reader entered at
+            // the frame start, so the section's full count must be narrowed
+            // to the piece's share.
+            cr.remaining = piece_source.take_records;
+            chunk_readers.push(cr);
+        }
+        Ok(Self {
+            inner: PartitionMergeReader::from_chunk_readers(chunk_readers)?,
         })
     }
 
@@ -1634,7 +1962,12 @@ impl SortReader {
             match parse_chunk_filename(path).map(|(_, kind)| kind) {
                 Some(ChunkFileKind::Partition(partition)) => {
                     saw_partitioned = true;
-                    partitions[partition].push(SortPartitionSource::whole(path.clone()));
+                    // Record bytes for uncompressed files (len minus the
+                    // 4-byte count prefix), compressed bytes otherwise -
+                    // the same size-signal contract as section extents.
+                    let byte_extent = fs::metadata(path)?.len().saturating_sub(4);
+                    partitions[partition]
+                        .push(SortPartitionSource::whole(path.clone(), byte_extent));
                 }
                 Some(ChunkFileKind::Multi) => {
                     saw_partitioned = true;
@@ -2677,5 +3010,162 @@ mod tests {
             .err()
             .expect("corrupt adopted chunk should fail");
         assert_eq!(corrupt_err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    /// Records spread across one z14-block partition with a deliberately hot
+    /// tile band, plus neighbor-partition records so chunks carry multiple
+    /// sections. A leading flush of target-partition-only records forces one
+    /// single-partition chunk FILE as well, so pieces must also enter a
+    /// whole-file source (behind the record-count prefix, or mid-frame for
+    /// compressed chunks).
+    fn push_piece_fixture(writer: &mut SortWriter, partition: usize) {
+        let base = partition_start_tile_id(partition);
+        let neighbor_base = partition_start_tile_id(partition + 1);
+        for i in 0..50u64 {
+            let tile_id = base + i * 16 + 3;
+            let mut data = vec![0u8; 24];
+            data[..8].copy_from_slice(&tile_id.to_le_bytes());
+            data[8] = 0xEE;
+            writer
+                .push(SortRecord {
+                    key: make_sort_key(tile_id, 6, 1),
+                    data: data.into_boxed_slice(),
+                })
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        for i in 0..2048u64 {
+            let tile_id = base + i * 8;
+            // A hot band: tiles 1000..1100 carry fat payloads so quantile
+            // cuts must land unevenly in tile space.
+            let payload_len = if (1000..1100).contains(&i) {
+                512
+            } else {
+                8 + usize::try_from(i % 37).unwrap()
+            };
+            let mut data = vec![0u8; payload_len];
+            data[..8].copy_from_slice(&tile_id.to_le_bytes());
+            #[allow(clippy::cast_possible_truncation)]
+            let layer = (i % 5) as u8;
+            writer
+                .push(SortRecord {
+                    key: make_sort_key(tile_id, layer, 0),
+                    data: data.into_boxed_slice(),
+                })
+                .unwrap();
+            if i % 3 == 0 {
+                writer
+                    .push(SortRecord {
+                        key: make_sort_key(neighbor_base + (i % 16), 0, 0),
+                        data: Box::from(i.to_le_bytes().as_slice()),
+                    })
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn partition_pieces_concatenate_to_whole_partition() {
+        for compression in [ChunkCompression::None, ChunkCompression::Lz4] {
+            let dir = tempfile::tempdir().unwrap();
+            // Small chunk budget so the fixture lands in several chunk
+            // files, exercising multi-section sources and the k-way merge
+            // inside every piece.
+            let mut writer = SortWriter::new(dir.path(), 16 * 1024, compression).unwrap();
+            let partition = PARTITION_BASES[14] + 5;
+            push_piece_fixture(&mut writer, partition);
+            writer.flush().unwrap();
+            let mut reader = writer.finish().unwrap();
+            let partitions = reader.take_partitions().expect("partitioned mode");
+            let target = partitions
+                .iter()
+                .find(|p| p.index == partition)
+                .expect("fixture partition present");
+
+            let mut whole = Vec::new();
+            let mut whole_bytes = 0u64;
+            let mut whole_reader = SortPartitionReader::open(target, compression).unwrap();
+            while let Some(rec) = whole_reader.next().unwrap() {
+                whole_bytes += 12 + rec.data.len() as u64;
+                whole.push((rec.key, rec.data));
+            }
+            if compression == ChunkCompression::None {
+                assert_eq!(
+                    target.record_bytes(),
+                    whole_bytes,
+                    "uncompressed extents are exact record bytes"
+                );
+            }
+
+            let pieces = target
+                .plan_pieces(compression, 8 * 1024)
+                .unwrap()
+                .expect("fixture is large enough to split");
+            assert!(pieces.len() >= 2, "got {} pieces", pieces.len());
+            let (range_start, range_end) = partition_tile_range(partition);
+            assert_eq!(pieces.first().unwrap().start_tile, range_start);
+            assert_eq!(pieces.last().unwrap().end_tile, range_end);
+
+            let mut concat = Vec::new();
+            let mut prev_end = range_start;
+            for piece in &pieces {
+                assert_eq!(
+                    piece.start_tile, prev_end,
+                    "pieces must tile the partition range"
+                );
+                prev_end = piece.end_tile;
+                let mut piece_reader = SortPartitionReader::open_piece(piece, compression).unwrap();
+                while let Some(rec) = piece_reader.next().unwrap() {
+                    let tile_id = tile_id_from_key(rec.key);
+                    assert!(
+                        tile_id >= piece.start_tile && tile_id < piece.end_tile,
+                        "record tile {tile_id} escaped piece [{}, {})",
+                        piece.start_tile,
+                        piece.end_tile
+                    );
+                    concat.push((rec.key, rec.data));
+                }
+            }
+            assert_eq!(
+                concat.len(),
+                whole.len(),
+                "piece union drops or duplicates records"
+            );
+            for (got, want) in concat.iter().zip(&whole) {
+                assert_eq!(got.0, want.0);
+                assert_eq!(got.1, want.1);
+            }
+        }
+    }
+
+    #[test]
+    fn plan_pieces_refuses_unsplittable_ranges() {
+        // z7-block partitions cover exactly one tile; there is no legal cut.
+        let single_tile = SortPartition {
+            index: PARTITION_BASES[7],
+            sources: Vec::new(),
+        };
+        assert!(
+            single_tile
+                .plan_pieces(ChunkCompression::None, 1)
+                .unwrap()
+                .is_none()
+        );
+        // Zero target is a config error; refuse rather than divide by zero.
+        let z14 = SortPartition {
+            index: PARTITION_BASES[14],
+            sources: Vec::new(),
+        };
+        assert!(
+            z14.plan_pieces(ChunkCompression::None, 0)
+                .unwrap()
+                .is_none()
+        );
+        // A splittable range with no records has no bytes to cut.
+        assert!(
+            z14.plan_pieces(ChunkCompression::None, 1)
+                .unwrap()
+                .is_none()
+        );
     }
 }
