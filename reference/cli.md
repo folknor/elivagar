@@ -222,6 +222,20 @@ stale-artifact incident (the VW landing shipped without a bump; DP-era
 coastline spikes served world-wide for three days with all gates green) is
 the motivating case.
 
+Retention: when the output path already holds an artifact, `ocean-build`
+keeps the outgoing generation as `<stem>-v<policy_version>-<build_date>.pmtiles`
+next to it (version from the artifact's own metadata, `unknown` if
+unreadable; date from its mtime), one generation deep - the previous
+retained copy is removed, but only names matching that exact scheme are
+ever deleted, so manually kept copies survive. The keep is a hard link
+made before the build starts: the active path is never empty, a failed
+rebuild changes nothing, and the extra ~1 GB materializes only when the
+finalize rename swaps the inode out. The retained generation is the
+comparand for the archive-bracketing idiom (`brokkr svg -o` the same tile
+from each generation, diff one ROI with `scripts/validate/svg-roi.mjs`) -
+without it, every policy bump destroys the only artifact of the version
+it replaces.
+
 ## `elivagar inspect <FILE>`
 
 Header, tile statistics, section layout, provenance, and metadata (layer list

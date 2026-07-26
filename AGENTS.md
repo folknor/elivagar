@@ -49,7 +49,15 @@ brokkr planetiler [--bench [N]] [--dataset D] [--variant V]
 brokkr tilemaker [--bench [N]] [--dataset D] [--variant V]
 
 # Verification
-brokkr verify pmtiles [--dataset D] [--tiles VARIANT] [--geometry-stats]
+brokkr verify pmtiles [--dataset D] [--variant V] [--commit H | --file P]
+                      [--geometry-stats] [--unique-payloads]
+# Same archive resolver as pmtiles-inspect/diag/svg/regress: --commit picks
+# which archive to open, never which toolchain to build. --file is the escape
+# hatch for archives that are not dataset output, i.e. the world ocean
+# artifact. --unique-payloads verifies each distinct compressed payload once
+# while still accounting for every addressed tile - the only tractable way to
+# verify the run-heavy artifact, which addresses ~23x more tiles than it
+# stores payloads.
 # THE standing output gate: fresh denmark locations build + corpus digest
 # check against the committed corpus/denmark/ baseline:
 #   brokkr tilegen --dataset denmark --variant locations

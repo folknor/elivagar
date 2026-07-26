@@ -1161,6 +1161,101 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     Ok(())
 }
 
+/// UTC calendar date as `YYYYMMDD` for a file timestamp, used to name
+/// retained artifact generations. Days-to-civil conversion per Howard
+/// Hinnant's algorithm; pre-epoch timestamps clamp to the epoch.
+fn yyyymmdd_utc(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}{month:02}{day:02}")
+}
+
+/// Does `name` match the retained-generation naming scheme
+/// `<prefix><version>-<yyyymmdd>.pmtiles`, where `<prefix>` is
+/// `<stem>-v` and `<version>` is a policy version number (or `unknown`
+/// for an artifact whose key was unreadable)? The one-generation-deep
+/// cleanup deletes ONLY names this accepts, so the match is strict:
+/// manually kept copies under any other naming survive every rebuild.
+fn is_retained_artifact_name(name: &str, prefix: &str) -> bool {
+    let Some(rest) = name.strip_prefix(prefix) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix(".pmtiles") else {
+        return false;
+    };
+    let Some((version, date)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    let version_ok = !version.is_empty()
+        && (version == "unknown" || version.bytes().all(|b| b.is_ascii_digit()));
+    version_ok && date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Keep the outgoing ocean artifact one generation deep before a rebuild
+/// replaces it. `ocean-build` writes the artifact in place, so without this
+/// every policy bump destroys the only comparand for the version it
+/// replaces - and the retained generation is exactly what the
+/// archive-bracketing idiom (dump the same tile from each generation, diff
+/// the same ROI with `scripts/validate/svg-roi.mjs`) needs to answer "did
+/// this rebuild change ocean bytes, and where".
+///
+/// The outgoing file is hard-linked, not renamed: the active artifact path
+/// is never empty, a failed rebuild leaves everything as it was, and the
+/// link costs no disk until the writer's finalize rename swaps the inode
+/// out. Retained name: `<stem>-v<policy_version>-<build_date>.pmtiles`,
+/// policy version read from the artifact's own metadata (`unknown` if
+/// unreadable - a damaged artifact is still worth keeping), date from its
+/// mtime. Older retained generations are removed first; anything outside
+/// the naming scheme is never touched.
+fn retain_outgoing_ocean_artifact(output_path: &Path) -> std::io::Result<()> {
+    if !output_path.exists() {
+        return Ok(());
+    }
+    let version = crate::ocean::OceanTiles::declared_key(output_path).map_or_else(
+        |_| "unknown".to_string(),
+        |key| key.policy_version.to_string(),
+    );
+    let date = yyyymmdd_utc(std::fs::metadata(output_path)?.modified()?);
+    let stem = output_path.file_stem().map_or_else(
+        || "ocean-tiles".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    let dir = output_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let retained_prefix = format!("{stem}-v");
+    let retained_name = format!("{stem}-v{version}-{date}.pmtiles");
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name != retained_name && is_retained_artifact_name(name, &retained_prefix) {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    let retained_path = dir.join(&retained_name);
+    if retained_path.exists() {
+        std::fs::remove_file(&retained_path)?;
+    }
+    std::fs::hard_link(output_path, &retained_path)?;
+    eprintln!(
+        "Retained outgoing ocean artifact: {}",
+        retained_path.display()
+    );
+    Ok(())
+}
+
 /// Build the durable world-ocean artifact without opening an OSM PBF. It uses
 /// the normal ocean, external-sort, and partitioned assembly path so artifact
 /// bytes obey the same encoding and compression rules as runtime ocean tiles.
@@ -1182,6 +1277,7 @@ pub fn ocean_build(
         14,
         compression_level,
     )?;
+    retain_outgoing_ocean_artifact(output_path)?;
     drop(std::fs::remove_dir_all(tmp_dir));
     let chunks_dir = tmp_dir.join(SORT_CHUNKS_DIR);
     let mut writer = sort::SortWriter::new(

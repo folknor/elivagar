@@ -3731,6 +3731,107 @@ fn load_checkpoint_missing_file() {
 }
 
 // ---------------------------------------------------------------------------
+// Ocean artifact retention tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn yyyymmdd_utc_known_dates() {
+    use std::time::{Duration, UNIX_EPOCH};
+    assert_eq!(yyyymmdd_utc(UNIX_EPOCH), "19700101");
+    assert_eq!(
+        yyyymmdd_utc(UNIX_EPOCH + Duration::from_secs(1_785_024_000)),
+        "20260726"
+    );
+    // Leap day.
+    assert_eq!(
+        yyyymmdd_utc(UNIX_EPOCH + Duration::from_secs(951_782_400)),
+        "20000229"
+    );
+}
+
+#[test]
+fn retained_artifact_name_matcher_is_strict() {
+    let p = "ocean-tiles-v";
+    assert!(is_retained_artifact_name(
+        "ocean-tiles-v4-20260724.pmtiles",
+        p
+    ));
+    assert!(is_retained_artifact_name(
+        "ocean-tiles-vunknown-20260724.pmtiles",
+        p
+    ));
+    // Manually kept copies and near-misses survive the cleanup.
+    assert!(!is_retained_artifact_name(
+        "ocean-tiles-dp-20260712.pmtiles",
+        p
+    ));
+    assert!(!is_retained_artifact_name("ocean-tiles.pmtiles", p));
+    assert!(!is_retained_artifact_name("ocean-tiles-verify.pmtiles", p));
+    assert!(!is_retained_artifact_name(
+        "ocean-tiles-v4-2026072.pmtiles",
+        p
+    ));
+    assert!(!is_retained_artifact_name("ocean-tiles-v4-20260724.txt", p));
+    assert!(!is_retained_artifact_name(
+        "ocean-tiles-v-20260724.pmtiles",
+        p
+    ));
+}
+
+#[test]
+fn ocean_artifact_retention_keeps_one_generation() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let output = dir.path().join("ocean-tiles.pmtiles");
+    std::fs::write(&output, b"outgoing artifact").expect("write artifact");
+    let old_retained = dir.path().join("ocean-tiles-v3-20260101.pmtiles");
+    std::fs::write(&old_retained, b"previous generation").expect("write retained");
+    let manual_keep = dir.path().join("ocean-tiles-dp-20260712.pmtiles");
+    std::fs::write(&manual_keep, b"manual keep").expect("write manual keep");
+
+    retain_outgoing_ocean_artifact(&output).expect("retention");
+
+    assert!(output.exists(), "active artifact must survive retention");
+    assert!(!old_retained.exists(), "older retained generation dropped");
+    assert!(manual_keep.exists(), "names outside the scheme untouched");
+    let retained: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .filter(|n| is_retained_artifact_name(n, "ocean-tiles-v"))
+        .collect();
+    assert_eq!(retained.len(), 1, "one generation deep: {retained:?}");
+    // The fixture bytes are not a readable archive, so the key is
+    // unreadable and the retained name carries the `unknown` version.
+    assert!(
+        retained[0].starts_with("ocean-tiles-vunknown-"),
+        "unreadable key retains as vunknown: {}",
+        retained[0]
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join(&retained[0])).expect("read retained"),
+        b"outgoing artifact"
+    );
+
+    // Idempotent within one day: a second retention of the same outgoing
+    // artifact replaces the retained link instead of accumulating copies.
+    retain_outgoing_ocean_artifact(&output).expect("second retention");
+    let count = std::fs::read_dir(dir.path())
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .filter(|n| is_retained_artifact_name(n, "ocean-tiles-v"))
+        .count();
+    assert_eq!(count, 1, "re-retention must not accumulate generations");
+}
+
+#[test]
+fn ocean_artifact_retention_noop_without_artifact() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let output = dir.path().join("ocean-tiles.pmtiles");
+    retain_outgoing_ocean_artifact(&output).expect("retention on absent artifact");
+    let entries = std::fs::read_dir(dir.path()).expect("read dir").count();
+    assert_eq!(entries, 0, "nothing created when no artifact exists");
+}
+
+// ---------------------------------------------------------------------------
 // Shared-edge reconciliation tests
 // ---------------------------------------------------------------------------
 

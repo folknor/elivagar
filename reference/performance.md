@@ -265,9 +265,12 @@ and OOM-killed mid-decode (two 2.8 GB archives while pbfhogg builds competed
 for RAM) and was judged redundant for a dormant-path landing: the injected
 arm is unreachable on every existing input, so branch-level neutrality is
 dataset-independent and denmark carries it. The spec's `verify pmtiles` gate
-is unrunnable as written - brokkr's verify resolves only brokkr.toml-pinned
-pmtiles entries and this project pins none - and is subsumed here by the
-full-decode zero-diff regress against a verified-lineage reference.
+was unrunnable as written at the time - brokkr's verify resolved only
+brokkr.toml-pinned pmtiles entries and this project pins none - and is
+subsumed here by the full-decode zero-diff regress against a
+verified-lineage reference. That resolution gap is closed as of 2026-07-25:
+`verify pmtiles` now takes the standard dataset/variant/commit/file
+resolver, so the gate is expressible for later landings.
 
 The injected-prepass activation (2026-07-11, Brick 3 + Brick 4 in effect):
 the pbfhogg producer (their `29e4eabd`) re-enriched denmark, germany, and
@@ -816,14 +819,42 @@ Readings at the landing (`b6b6844`), all on plantasjen:
 - **Corpus preflight**: bless-without-`--rotate` on the fresh archive
   refused exit 1 naming `config.ocean.artifact_key.policy_version` and
   exactly two changed leaves, z9/285/148 and z9/286/147. No third tile.
-- **Visual evidence** (`data/ring-cap-evidence/`, canonical clamped renders -
-  plain `elivagar svg` cannot show this defect, and OpenLayers keeps every
-  ring): rings drawn per tile pre -> post, z9/285/148 516 -> 521,
-  z9/286/147 519 -> 621, z10/546/260 (artifact) 501 -> 723. The post counts
-  fall slightly short of unclamped originals (526, 621, 726) because a hole
-  straddling the cut line is absorbed into the pieces' outer boundaries as a
-  notch on each side - ring count drops, covered area does not, which is
-  what the XOR test pins.
+- **The renderer's clamp, measured not assumed** (`data/ring-cap-evidence/`,
+  canonical renders - plain `elivagar svg` cannot show this defect, and
+  OpenLayers keeps every ring). Rings in the ARCHIVE versus rings the
+  pre-landing render draws: z9/285/148 526 vs 516, z9/286/147 621 vs 519.
+  Each shortfall is exactly that tile's offending polygon's excess over the
+  cap (510-500 = 10, 602-500 = 102), which is what establishes that the
+  canonical renderer ports the clamp rather than merely differing. Post
+  landing the two agree (521/521, 621/621) and z10/546/260 goes 501 -> 723
+  drawn. Post ring totals sit slightly under the unclamped originals (526,
+  621, 726) because a hole straddling the cut is absorbed into the pieces'
+  outer boundaries as a notch on each side - ring count drops, covered area
+  does not, which is what the XOR test pins.
+- **Human visual gate, CLOSED** (2026-07-24, the standing ocean gate per
+  AGENTS.md "Oracle discipline"): two islands visible in the post renders
+  and absent from the pre renders, adjudicated by the human on the canonical
+  SVGs, and the post archive confirmed clean in MapLibre itself. This is the
+  reading no aggregate measure supplies - and MapLibre is the consumer whose
+  semantics define the defect, so it is the one that closes it.
+- **The cut line is not a seam, adjudicated on the same renders.** The
+  partition's cut shows in every post render as a faint vertical hairline at
+  local x = 2048 (a square buffered tile rect ties on the longer axis, so
+  the first cut is vertical through the middle). It is a rasterization
+  artifact, not a gap: `scripts/validate/cut-seam-probe.mjs` sweeps the cut
+  line and finds it covered by exactly TWO paths along its whole
+  partition-produced extent - 3894 units at z9/285/148, 2387 at z9/286/147,
+  4268 at z10/546/260 - meaning both pieces put their boundary on the same
+  integer coordinate and meet edge-to-edge. The only singly-covered residue
+  (5 and 35 units) is coastline that lies on the midline in the PRE renders
+  too. The hairline is the SVG renderer antialiasing two abutting fills
+  independently, and is SVG-only: MapLibre shows no seam at either z9 tile
+  (human inspection of `denmark-locations-8a3b86c.pmtiles`, 2026-07-24),
+  which is what its fill bucket predicts - it triangulates and draws
+  interior edges without per-polygon AA. Live
+  consequence to remember: the cut is a genuine polygon boundary, so any
+  style stroking the ocean layer (`fill-outline-color`, or a line layer over
+  it) would draw it. Shortbread's ocean is a plain fill.
 - **`elivagar verify`**: PASS on both the archive (1,296,998 tiles, 26
   layers) and the artifact (9,177,102 tiles, `--unique-payloads`).
 - **Counters**: `ring_cap_partitions` / `ring_cap_pieces` read ZERO in the
@@ -834,3 +865,10 @@ Readings at the landing (`b6b6844`), all on plantasjen:
   in the same run come through the same `counter_group!` macro and the same
   end-of-run flush, which is what rules out the wiring fault.) The spec's
   expectation of "partitions 2" holds only for an artifact-absent run.
+- **Comparand lost during the landing**: brokkr's archive retention pruned
+  `data/tilegen/denmark-locations-da6995f.pmtiles` - the archive the spec
+  pinned as the regress comparand - when the fifth build landed. No verdict
+  depended on it (the preflight reads the corpus baseline, and `b4f4390` is
+  the output-identical pre-landing build that the ring-count measurements
+  above were taken from), but a spec that pins an archive across a landing
+  has to account for that retention window.

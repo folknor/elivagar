@@ -349,6 +349,28 @@ section. Adjudication tooling from the landing:
 `scripts/validate/zoom-overlay.mjs` (tile fill under the same
 archive's higher-zoom outline) and `ring-cap-census.mjs`.
 
+**CLOSED 2026-07-26: ocean-build now retains the outgoing artifact one
+generation deep.** The gap: `ocean-build` wrote `data/ocean-tiles.pmtiles`
+in place, so every policy bump destroyed the only comparand for the
+version it replaced - after the v4 ring-cap rebuild (2026-07-24) no v3
+artifact existed anywhere on disk, and the one kept copy,
+`ocean-tiles-dp-20260712.pmtiles`, is two simplifier generations back.
+That comparand is the instrument the 07-15 stale-artifact hunt ran on
+(dump the same tile from each archive, scan the same ROI with
+`svg-roi.mjs`, diff the edges). Resolution: before a rebuild starts,
+the existing artifact is hard-linked to
+`<stem>-v<policy_version>-<build_date>.pmtiles` (one generation deep;
+only names matching that scheme are cleaned up, so manual keeps
+survive). Hard link, not rename: the active path is never empty and a
+failed rebuild changes nothing. Full contract in `reference/cli.md`
+(ocean-build section). NOTE the fix takes effect on the NEXT rebuild -
+the v4 artifact currently on disk still has no v3 comparand; that
+generation is simply lost. The sibling extract-side retention class
+(brokkr's archive pruning ate the ring-cap spec's pinned regress
+comparand `denmark-locations-da6995f.pmtiles` mid-landing) is brokkr's
+to fix and remains open there; a spec that pins an archive across a
+landing still has to account for that window.
+
 **OPEN, UNGATED: the cross-piece ocean seam, now z8-z14 only.** The
 07-19 union removed the class from z0-z7 outright (merged pieces have
 no shared boundaries to disagree on). The full-resolution pass still
