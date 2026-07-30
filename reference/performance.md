@@ -912,12 +912,24 @@ gate runs on `69e829b`):
   corpus gate exercises the unsplit path and the forced-target pair
   above is the split path's gate.
 
-Germany pricing (the measured win this landing exists for) is PENDING a
-quiet host: the 07-26 attempt coincided with heavy cross-project load
-(available memory halved, every pure-CPU hotpath function uniformly ~1.9x
-slower on an unrelated re-baseline), which is exactly the condition the
-Discipline section says produces unreadable numbers. Compare against
-`3f042746` (54.1s wall, assemble 14.6s, writer batch-wait 12.0s,
-`assemble_partition_encoded_max` 296.6 MB) with the same spelling:
-`brokkr tilegen --bench 1 --dataset germany --variant locations`, then
-sidecar `--stalls` and the split counters.
+Germany structural reading at the landing (`2ff3389b`, commit `38ab368`,
+bench 1, CONTENDED host - read wall from this row as weather, not
+verdict): splits fired on 27 partitions into 197 pieces, and every
+straggler signal moved as designed - `assemble_partition_encoded_max`
+296.6 MB -> 23.6 MB (12.6x), max reader time per order slot 3.63s ->
+0.32s, `assemble_parked_bytes_hwm` 1.25 GB -> 123 MB (a real RAM-ledger
+improvement: workers no longer park a gigabyte behind a straggler).
+Total reader thread-time 34.6s -> 37.4s is the +8% piece overhead
+(pre-scan, re-open, per-piece heap) the quiet-host run must net against
+the tail win. The assemble phase read 22.0 GB from disk vs 10.3 GB
+pre-landing: the contended host (half the RAM taken by cross-project
+load) could not hold the 14.7 GB of sort chunks in page cache, so the
+phase-duration comparison (14.6s -> 16.0s) is void alongside wall.
+
+The wall verdict (the measured win this landing exists for) is PENDING a
+quiet host. Compare against `3f042746` (54.1s wall, assemble 14.6s,
+writer batch-wait 12.0s, `assemble_partition_encoded_max` 296.6 MB) with
+the same spelling: `brokkr tilegen --bench 1 --dataset germany --variant
+locations`, then sidecar `--stalls` and the split counters. Check the
+results row's memory field first - the 07-26 rows carry ~10 GB against
+the baseline's 21.4 GB, which is the tell.
