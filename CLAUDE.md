@@ -10,13 +10,14 @@
 
 ### Listing files
 
-`ls` is the default and works everywhere except one place.
+`ls` works everywhere. On bygg (the current host, since 2026-07-30)
+`data/` is a plain directory on the root NVMe, not a symlink.
 
-`data/` is a symlink to the big NVMe mount (see `brokkr env`), and the
-claude code harness refuses to traverse it, so `ls data/...` returns a
-permission denial. That denial is because of the symlink.
-
-To ls files in data/, use `print` instead.
+Historical note for other hosts: on plantasjen `data/` was a symlink to
+a separate NVMe mount, and the claude code harness refuses to traverse
+symlinks, so `ls data/...` returned a permission denial there - `print`
+was the workaround. Only relevant if working on a host where `data/` is
+a symlink again.
 
 ### Communication rules
 

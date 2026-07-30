@@ -117,6 +117,112 @@ file = "north-america-seq4710-locations.osm.pbf"
 xxhash = "8122bcc83873ef95349e6a3522827fd9"
 seq = 4710
 
+[bygg]
+data = "data"
+scratch = "data/tilegen_tmp"
+target = "target"
+
+# Single WD_BLACK SN850X 4TB NVMe holds root, data, scratch and target.
+[bygg.drives]
+source = "nvme"
+data = "nvme"
+scratch = "nvme"
+target = "nvme"
+
+# Contract rsync'd from plantasjen 2026-07-30: same shapefile releases and the
+# same ocean-tiles.pmtiles artifact generation.
+[bygg.tilegen.default]
+ocean = [
+    "z0-z7:simplified-water-polygons-split-3857/simplified_water_polygons.shp",
+    "z8-z14:water-polygons-split-3857/water_polygons.shp",
+    "ocean-tiles.pmtiles",
+]
+
+[bygg.datasets.denmark]
+origin = "Geofabrik"
+download_date = "2026-02-20"
+
+[bygg.datasets.denmark.pbf.raw]
+file = "denmark-20260220-seq4704.osm.pbf"
+xxhash = "b16340741bcdf2d5ec94ddc5b2ab8d04"
+seq = 4704
+
+[bygg.datasets.denmark.pbf.indexed]
+file = "denmark-20260220-seq4704-with-indexdata.osm.pbf"
+xxhash = "55760485369644887ae34df411b8034e"
+seq = 4704
+
+[bygg.datasets.denmark.pbf.locations]
+file = "denmark-20260220-seq4704-locations-prepass.osm.pbf"
+xxhash = "58c47f32d3a55b04a56813565efc78ac"
+seq = 4704
+
+[bygg.datasets.norway]
+origin = "Geofabrik"
+download_date = "2026-02-25"
+
+[bygg.datasets.norway.pbf.raw]
+file = "norway-20260225-seq4709.osm.pbf"
+xxhash = "8f1e29b1f89fc0d323afeac0da1e7794"
+seq = 4709
+
+[bygg.datasets.norway.pbf.indexed]
+file = "norway-20260225-seq4709-with-indexdata.osm.pbf"
+xxhash = "114169ea198b41c9249b6b54ee1ec4e9"
+seq = 4709
+
+[bygg.datasets.norway.pbf.locations]
+file = "norway-20260225-seq4709-locations-prepass.osm.pbf"
+xxhash = "f5923dcfb30d43db3e2faf0d414be758"
+seq = 4709
+
+[bygg.datasets.germany]
+origin = "Geofabrik"
+download_date = "2026-02-24"
+
+[bygg.datasets.germany.pbf.raw]
+file = "germany-20260224-seq4704.osm.pbf"
+xxhash = "9e63140da7898b66bd0ee19a48d5a86f"
+seq = 4704
+
+[bygg.datasets.germany.pbf.indexed]
+file = "germany-20260224-seq4704-with-indexdata.osm.pbf"
+xxhash = "a5499f39be2fb1ceebef35dd0e3627fb"
+seq = 4704
+
+[bygg.datasets.germany.pbf.locations]
+file = "germany-20260224-seq4704-locations-prepass.osm.pbf"
+xxhash = "b464aa0bd3118f89606a3982d37f2195"
+seq = 4704
+
+[bygg.datasets.japan]
+origin = "Geofabrik"
+download_date = "2026-02-25"
+
+[bygg.datasets.japan.pbf.raw]
+file = "japan-20260225-seq4706.osm.pbf"
+xxhash = "f80ccecbe3e1a4fbc468cbf3a12494d0"
+seq = 4706
+
+[bygg.datasets.north-america]
+origin = "Geofabrik"
+download_date = "2026-02-20"
+
+[bygg.datasets.north-america.pbf.raw]
+file = "north-america-latest.osm.pbf"
+xxhash = "6b10f3052e8926a11802b1d2c2e58c64"
+seq = 4710
+
+[bygg.datasets.north-america.pbf.indexed]
+file = "north-america-seq4710-with-indexdata.osm.pbf"
+xxhash = "851e6804bcdd713df0bec7510396bf7a"
+seq = 4710
+
+[bygg.datasets.north-america.pbf.locations]
+file = "north-america-seq4710-locations.osm.pbf"
+xxhash = "8122bcc83873ef95349e6a3522827fd9"
+seq = 4710
+
 [dm6]
 data = "data"
 scratch = "data/tilegen_tmp"
