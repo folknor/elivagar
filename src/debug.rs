@@ -84,6 +84,7 @@ counter_group!(WaitCounters {
     assemble_reader_backpressure => "assemble_reader_backpressure_wait_ns",
     assemble_writer_backpressure => "assemble_writer_backpressure_wait_ns",
     assemble_encode_input => "assemble_encode_input_wait_ns",
+    assemble_encode_backpressure => "assemble_encode_backpressure_wait_ns",
     assemble_write_input => "assemble_write_input_wait_ns",
     assemble_reader_join => "assemble_reader_join_wait_ns",
     assemble_writer_join => "assemble_writer_join_wait_ns",

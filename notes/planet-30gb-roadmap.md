@@ -52,9 +52,9 @@ Germany 77.8s (07-08 suite) -> 53.8s. Denmark 14.4s -> 8.8s.
 Current frontier: phase12 is the biggest phase at NA (154.7s vs
 assemble's 86.1s), and its cost is way-path/relation CPU plus the
 ordered-consumer residue - the paused H6 engine surface and H2c/d are
-the known levers. Assemble's remaining ideas are H8b's recursive
-splitting of hot partitions (germany-relevant) and reader/encode
-overlap inside a worker (a reader blocks during its rayon encode).
+the known levers. Assemble's two remaining ideas both landed since:
+H8b's splitting of hot partitions (2026-07-26) and reader/encode
+overlap inside a worker (2026-07-30); both await pricing (H8b section).
 
 ## The record target
 
@@ -512,6 +512,19 @@ pathological features.
   (splits forced vs suppressed, identical archive hash) passed at the
   landing. The germany wall win is UNPRICED until the host is quiet -
   the same contention that voided the 07-26 E6 reading.
+  Reader/encode overlap inside a worker LANDED 2026-07-30 (bygg): each
+  partition worker stays the serial merge reader while a scoped encoder
+  thread runs the rayon encode + artifact splice + writer send, fed by a
+  sync_channel(1) of raw batches - the reader pulls batch N+1 while
+  batch N encodes instead of idling through it. RAM bound: one extra
+  raw batch (assemble_budget, 32 MB default) in flight per worker. The
+  artifact cursor moved to the encoder thread where batches stay
+  sequential; batch order is channel FIFO + the writer's batch_index
+  parking, so drain order is unchanged and the denmark corpus check
+  passed unchanged at the landing. New stall counter:
+  assemble_encode_backpressure_wait_ns (reader blocked on a busy
+  encoder). Wall win UNPRICED - and all stored baselines are
+  plantasjen's, so pricing on bygg needs its own baseline leg first.
 - (c) Workers pwrite tile payloads at final offsets: the in-place
   writer layout landed the single-write property (finalize is
   rename-only); central offset assignment with worker pwrite remains
@@ -558,8 +571,9 @@ reading riding the same decision), the disk audit against the real
 artifact size, and a green `corpus check` at the attempt commit.
 
 Optimization work that remains, none of it blocking: the germany
-pricing run for the landed H8b splitter (quiet host required),
-reader/encode overlap in assemble workers, H2c/d injection candidates,
+pricing run for the landed H8b splitter (bygg qualifies as the quiet
+host), pricing the landed reader/encode overlap (same runs), H2c/d
+injection candidates,
 the paused E-surface (E6 thresholds await one clean A/B pair), and the
 ocean needle detector if a geometry-level ocean gate is ever wanted.
 

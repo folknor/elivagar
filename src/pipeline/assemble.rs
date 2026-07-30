@@ -1017,7 +1017,13 @@ fn phase_assemble_partitions(
     })
 }
 
+/// One raw batch handed from a partition's merge reader to its encoder
+/// thread: the batch metadata, the pending tiles, and for the final batch
+/// the partition's end tile (artifact gap filling runs to it).
+type RawPartitionBatch = (PartitionBatchMeta, Vec<PendingTile>, Option<u64>);
+
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn read_encode_partition(
     order: usize,
     mut reader: sort::SortPartitionReader,
@@ -1033,102 +1039,136 @@ fn read_encode_partition(
 ) -> Result<(), PipelineError> {
     const BATCH_SIZE: usize = 4096;
 
-    let mut batch_features_read: u64 = 0;
-    let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
-    let mut current = PendingTile {
-        tile_id: u64::MAX,
-        features: Vec::new(),
-    };
-    let mut current_tile_bytes: usize = 0;
-    let mut batch_bytes: usize = 0;
-    let mut batch_index = 0usize;
-    let mut read_started = std::time::Instant::now();
     // For a whole partition this is its tile range; for a piece, the piece's
     // sub-range - artifact gap filling covers exactly this span, so pieces
     // of one partition tile-partition its artifact coverage too.
     let (range_start, partition_end) = tile_range;
-    let mut artifact_cursor = range_start;
-    let encode_ctx = PartitionEncodeCtx {
-        compression_level,
-        tile_format,
-        tile_compression,
-        seam_reconcile_layers,
-        seam_metrics,
-    };
 
-    loop {
-        let record = reader.next()?;
-        let Some(r) = record else {
-            if current.tile_id != u64::MAX {
-                batch_bytes += 32 + current_tile_bytes;
-                batch.push(current);
+    // Read/encode overlap (H8): the worker thread stays the serial merge
+    // reader; a scoped encoder thread runs the rayon encode + artifact splice
+    // + send. sync_channel(1) lets the reader pull batch N+1 while batch N
+    // encodes - previously the reader sat idle through every encode. RAM
+    // bound: one extra raw batch (assemble_budget, 32 MB default) in flight
+    // per worker. Batch order within the partition is preserved by channel
+    // FIFO; the artifact cursor lives on the encoder thread where batches
+    // stay sequential. Error cascade: an encoder error drops batch_rx, the
+    // reader's send fails and it stops; a reader error drops batch_tx and
+    // the encoder drains out - either error surfaces after the join.
+    std::thread::scope(|scope| -> Result<(), PipelineError> {
+        let (batch_tx, batch_rx) = std::sync::mpsc::sync_channel::<RawPartitionBatch>(1);
+        let writer_tx = tx.clone();
+        let encoder = scope.spawn(move || -> Result<(), PipelineError> {
+            let encode_ctx = PartitionEncodeCtx {
+                compression_level,
+                tile_format,
+                tile_compression,
+                seam_reconcile_layers,
+                seam_metrics,
+            };
+            let mut artifact_cursor = range_start;
+            while let Ok((meta, batch, final_end)) = batch_rx.recv() {
+                encode_and_send_partition_batch(
+                    &writer_tx,
+                    &encode_ctx,
+                    &meta,
+                    &batch,
+                    artifact,
+                    &mut artifact_cursor,
+                    final_end,
+                )?;
             }
-            let mut reader_ns = 0;
-            add_reader_elapsed(&mut reader_ns, read_started);
-            encode_and_send_partition_batch(
-                tx,
-                &encode_ctx,
-                &PartitionBatchMeta {
-                    order,
-                    batch_index,
-                    is_last: true,
-                    features_read: batch_features_read,
-                    max_batch_bytes: if batch.is_empty() { 0 } else { batch_bytes },
-                    reader_ns,
-                },
-                &batch,
-                artifact,
-                &mut artifact_cursor,
-                Some(partition_end),
-            )?;
-            break;
-        };
-        batch_features_read += 1;
+            Ok(())
+        });
 
-        let tile_id = sort::tile_id_from_key(r.key);
-        let layer_idx = sort::layer_from_key(r.key);
-        if tile_id != current.tile_id {
-            if current.tile_id != u64::MAX {
-                batch_bytes += 32 + current_tile_bytes;
-                batch.push(current);
-                if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
-                    let mut reader_ns = 0;
-                    add_reader_elapsed(&mut reader_ns, read_started);
-                    encode_and_send_partition_batch(
-                        tx,
-                        &encode_ctx,
-                        &PartitionBatchMeta {
-                            order,
-                            batch_index,
-                            is_last: false,
-                            features_read: batch_features_read,
-                            max_batch_bytes: batch_bytes,
-                            reader_ns,
-                        },
-                        &batch,
-                        artifact,
-                        &mut artifact_cursor,
-                        None,
-                    )?;
-                    batch_index += 1;
-                    batch_features_read = 0;
-                    batch = Vec::with_capacity(BATCH_SIZE);
-                    batch_bytes = 0;
-                    read_started = std::time::Instant::now();
-                }
-            }
-            current = PendingTile {
-                tile_id,
+        let read_result: Result<(), PipelineError> = (|| {
+            let mut batch_features_read: u64 = 0;
+            let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
+            let mut current = PendingTile {
+                tile_id: u64::MAX,
                 features: Vec::new(),
             };
-            current_tile_bytes = 0;
-        }
-        let data_len = r.data.len();
-        current.features.push((layer_idx, r.data));
-        current_tile_bytes += 32 + data_len;
-    }
+            let mut current_tile_bytes: usize = 0;
+            let mut batch_bytes: usize = 0;
+            let mut batch_index = 0usize;
+            let mut read_started = std::time::Instant::now();
 
-    Ok(())
+            loop {
+                let record = reader.next()?;
+                let Some(r) = record else {
+                    if current.tile_id != u64::MAX {
+                        batch_bytes += 32 + current_tile_bytes;
+                        batch.push(current);
+                    }
+                    let mut reader_ns = 0;
+                    add_reader_elapsed(&mut reader_ns, read_started);
+                    let meta = PartitionBatchMeta {
+                        order,
+                        batch_index,
+                        is_last: true,
+                        features_read: batch_features_read,
+                        max_batch_bytes: if batch.is_empty() { 0 } else { batch_bytes },
+                        reader_ns,
+                    };
+                    let send_result = {
+                        let _wait = wait_span(&WAIT.assemble_encode_backpressure);
+                        batch_tx.send((meta, batch, Some(partition_end)))
+                    };
+                    drop(send_result); // encoder may have exited on error
+                    break;
+                };
+                batch_features_read += 1;
+
+                let tile_id = sort::tile_id_from_key(r.key);
+                let layer_idx = sort::layer_from_key(r.key);
+                if tile_id != current.tile_id {
+                    if current.tile_id != u64::MAX {
+                        batch_bytes += 32 + current_tile_bytes;
+                        batch.push(current);
+                        if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
+                            let mut reader_ns = 0;
+                            add_reader_elapsed(&mut reader_ns, read_started);
+                            let meta = PartitionBatchMeta {
+                                order,
+                                batch_index,
+                                is_last: false,
+                                features_read: batch_features_read,
+                                max_batch_bytes: batch_bytes,
+                                reader_ns,
+                            };
+                            let send_result = {
+                                let _wait = wait_span(&WAIT.assemble_encode_backpressure);
+                                batch_tx.send((meta, batch, None))
+                            };
+                            if send_result.is_err() {
+                                // Encoder exited on error; its error surfaces
+                                // at the join below.
+                                return Ok(());
+                            }
+                            batch_index += 1;
+                            batch_features_read = 0;
+                            batch = Vec::with_capacity(BATCH_SIZE);
+                            batch_bytes = 0;
+                            read_started = std::time::Instant::now();
+                        }
+                    }
+                    current = PendingTile {
+                        tile_id,
+                        features: Vec::new(),
+                    };
+                    current_tile_bytes = 0;
+                }
+                let data_len = r.data.len();
+                current.features.push((layer_idx, r.data));
+                current_tile_bytes += 32 + data_len;
+            }
+            Ok(())
+        })();
+
+        drop(batch_tx);
+        let encode_result = encoder.join().expect("assemble partition encoder panicked");
+        read_result?;
+        encode_result
+    })
 }
 
 /// Write the `elivagar` provenance member describing the contract this
