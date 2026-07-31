@@ -195,6 +195,21 @@ file = "germany-20260224-seq4704-locations-prepass.osm.pbf"
 xxhash = "b464aa0bd3118f89606a3982d37f2195"
 seq = 4704
 
+# Fat-blob proxy for the planet way-admission regime, built 2026-07-31 by
+#   pbfhogg repack --elements-per-blob 66000 --compression zstd:1
+# from germany locations-prepass. 1055 way blobs at 4.36 MB compressed each,
+# against planet's 4.8 MB - close enough to reproduce the way_budget
+# admission collapse (H3 fat-blob item) at germany wall times instead of
+# 10-minute planet runs. NOTE repack does NOT preserve the injected
+# WayMembers-v1 / SharedNodePins-v1 metadata and says so; this variant is
+# LocationsOnWays only, so it runs the RUNTIME prepass and is NOT comparable
+# to the prepass-carrying locations variant. It is an instrument for sweeping
+# way_budget against itself, not a dataset for baselines.
+[bygg.datasets.germany.pbf.locations-fat]
+file = "germany-20260224-seq4704-locations-prepass-fat.osm.pbf"
+xxhash = "98ec8cfda0b6a684b0f1094b3cd21784"
+seq = 4704
+
 [bygg.datasets.japan]
 origin = "Geofabrik"
 download_date = "2026-02-25"
@@ -222,6 +237,28 @@ seq = 4710
 file = "north-america-seq4710-locations.osm.pbf"
 xxhash = "8122bcc83873ef95349e6a3522827fd9"
 seq = 4710
+
+# The planet input for the H9 ladder. Enriched on bygg 2026-07-31 from
+# pbfhogg's planet-20260223-with-indexdata.osm.pbf (the seq-4912 snapshot
+# registered in pbfhogg's own brokkr.toml) via
+#   pbfhogg add-locations-to-ways --index-type external --inject-prepass
+#     --compression zstd:1
+# Header carries LocationsOnWays plus pbfhogg.WayMembers-v1 and
+# pbfhogg.SharedNodePins-v1, so elivagar reads the injected relation plan and
+# exact shared-node pins instead of running the runtime prepass. There is a
+# pre-existing planet-20260223-altw.osm.pbf next to it in pbfhogg/data with
+# NEITHER injected feature - it is the plain-altw arm and is NOT this file.
+# Only the locations variant is registered: tilegen consumes no other, and the
+# raw and indexed planet PBFs stay in pbfhogg/data where they are produced.
+# The file here is a hard link to that same inode, not a copy.
+[bygg.datasets.planet]
+origin = "planet.openstreetmap.org"
+download_date = "2026-03-07"
+
+[bygg.datasets.planet.pbf.locations]
+file = "planet-20260223-locations-prepass.osm.pbf"
+xxhash = "2cc18188274482abe0a6f58b9d44c78f"
+seq = 4912
 
 [dm6]
 data = "data"

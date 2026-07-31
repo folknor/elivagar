@@ -36,25 +36,141 @@ disaster recovery, and the committed corpus baseline the serve path verifies
 against. The two tracks share instruments (H2d/H8's per-tile-range index,
 H3's ledger) and should not diverge on them.
 
-## Where we stand (plantasjen, 2026-07-15, writer-layout commit)
+## Where we stand (bygg, 2026-07-31)
 
-Stored baselines, locations variants (the production input shape; full
-sidecar detail in `reference/performance.md`): denmark 8.8s best-of-3,
-germany 53.8s, north-america 251.0s with assemble 86.1s and the
-post-worker finalize tail at 2.3s. The NA phase12 baseline is 154.7s at
-18.5 cores / 5.14 GB peak anon / 11.3K majflt (hash-overlap commit; the
-writer-layout run's 164.3s on untouched phase12 code is bench-1
-variance). NA peak whole-run RSS 5.76 GB.
+**The host moved.** Every baseline below plantasjen's line is a
+different machine and the two are NOT comparable run-to-run; bygg is
+~1.9x on the same commit. bygg: Ryzen 9 9950X3D2, 16c/32t, 30.5 GiB
+RAM, single WD_BLACK SN850X 4TB NVMe holding root, data, scratch and
+target.
 
-The march: NA 462.6s (March) -> 361.6s (07-09) -> 251.0s (07-15).
-Germany 77.8s (07-08 suite) -> 53.8s. Denmark 14.4s -> 8.8s.
+bygg, commit `4a1958d`, locations variants, `--bench 1` unless noted:
 
-Current frontier: phase12 is the biggest phase at NA (154.7s vs
-assemble's 86.1s), and its cost is way-path/relation CPU plus the
-ordered-consumer residue - the paused H6 engine surface and H2c/d are
-the known levers. Assemble's two remaining ideas both landed since:
-H8b's splitting of hot partitions (2026-07-26) and reader/encode
-overlap inside a worker (2026-07-30); both await pricing (H8b section).
+| dataset | bygg | plantasjen | run |
+|---------|------|-----------|-----|
+| denmark  | 6.9s (plain run) | 8.8s best-of-3 | - |
+| germany  | 26.7s | 53.4s | `c76eb594` |
+| north-america | 130.1s | 251.0s | `d96003d3` |
+| **planet** | **571.7s** | never ran | `a5b3df34` |
+
+NA on bygg by phase: phase12 76.9s at 23.9 avg cores, ocean 8.5s,
+assemble 44.2s at 20.5 cores; peak anon 5.2 GB phase12 / 6.1 GB
+assemble.
+
+Two corrections to older text that this leg forced. **Ocean is 8.5s at
+NA, not the 0.2s the go/no-go quotes** - that figure predates the v3
+union and the v4 ring-cap artifact, and the boundary band now costs
+single-threaded seconds at extract bbox. At world bounds it really is
+0 (planet measured `ocean_ms=0`), so the planet projection is unharmed,
+but "the artifact deletes the phase" is now true only at world bounds.
+And **`prepass_join` costs 6.55s at NA on bygg**, the H2 re-enrichment
+item's price on this host.
+
+Current frontier, post-planet: phase12 is still the biggest phase
+everywhere (61% of planet wall even after the way-budget landing), and
+after that fix its cost is genuinely way-path/relation CPU - the paused
+H6 engine surface and H2c/d are the known levers. Assemble is 38% of
+planet wall at 18.3 avg cores. H8b's hot-partition splitter fires at
+planet (`assemble_split_partitions=385`, `assemble_split_pieces=2043`)
+and both it and the reader/encode overlap remain unpriced as isolated
+changes, though both were active in every number above.
+
+## PLANET RAN, 2026-07-31, bygg: 1062.5s, then 571.7s
+
+Two full planet builds the same afternoon. The second differs from the
+first by ONE config value - `way_budget = "6G"` in
+`[bygg.tilegen.default]`, emitting `--way-budget 6G` - and it is the
+headline of the day:
+
+| run | way budget | wall | phase12 | phase12 cores | peak RSS |
+|-----|-----------|------|---------|---------------|----------|
+| `e27ca35a` | 768M (old default) | 1062.5s | 836.3s | 7.2  | 12.70 GB |
+| `a5b3df34` | 6G (config)        | **571.7s** | **351.3s** | **23.1** | 12.69 GB |
+| (forced)   | 8G (NEW default)   | 577.7s | - | - | - |
+
+The third run carries no config at all - it is the raised
+`DEFAULT_WAY_BUDGET_LOCATIONS` landing below, confirming the win is now
+the out-of-the-box behaviour. It is within 1% of the 6G config run,
+which is also the only variance sample we have at planet scale.
+
+**-46.2% wall, 1.86x, for a config value and ~1.1 GB of peak anon**
+(6.18 -> 7.33 GB in phase12; peak RSS is flat because the mmap'd way
+index dominates). Diagnosis, mechanism and the reason the default was
+wrong are in H3's fat-blob item below. `way_budget` at 6G is NOT the
+optimum - `way_budget` is still the top elivagar stall at 190.2s /
+33.3% of the new wall, so more is available; the sweep belongs on a
+fat-blob EXTRACT, not on 10-minute planet runs.
+
+The detail below describes the FIRST run (`e27ca35a`) and its counters,
+which is the fully-instrumented, verified one. Where the second run
+differs it is noted.
+
+First full planet build. Run `e27ca35a`, commit `4a1958d`, `--bench 1`,
+input `planet-20260223-locations-prepass.osm.pbf` (90.5 GB enriched,
+xxh3 `2cc18188...`), host bygg (Ryzen 9 9950X3D2, 16c/32t, **30.5 GiB
+RAM**), output 58.7 GiB / 63.06 GB PMTiles.
+
+**Wall 1,062,500 ms = 17m42s**, against this document's predicted band
+of 1050-1400s. The optimistic end of the band was right.
+
+| phase | wall | share | avg cores | peak anon |
+|-------|------|-------|-----------|-----------|
+| phase12  | 836.3s | 78.7% | 7.2  | 6.18 GB |
+| ocean    | 0.0s   | -     | -    | -       |
+| sort     | 1.4s   | 0.1%  | 1.0  | 5.48 GB |
+| assemble | 224.0s | 21.1% | 17.9 | 7.75 GB |
+
+**Peak RSS 12.70 GB on a 30.5 GiB host.** The RAM go/no-go is now
+measured, not extrapolated: predicted "under ~10 GB", observed 7.75 GB
+peak anon with the rest being the mmap'd way index. Headroom is large.
+
+Output: 269,815,541 tiles addressed, 52,182,158 unique (80.7%
+deduplicated - the roadmap's 60-70M unique estimate was high),
+56,922,829 directory entries, 2,518,077,036 features, 26 layers,
+z0-z14.
+
+Ledger items that fired exactly as designed: `ocean_ms=0` and
+`ocean_features=0` (at world bounds the boundary band is empty by
+construction, so the H5 artifact serves the whole planet);
+`relation_blocks_spilled=1` at `relation_blocks_bytes=1.91 GB` (the 1 GB
+cap and its BlobFilter re-read path, first exercise at planet);
+`max_rel_inflight_bytes=200 MB` (the monster-relation watch item, still
+bounded, was 90 MB at NA); `missing_way_node_refs=0`,
+`missing_relation_way_refs=0`; `ring_cap_partitions=30` /
+`ring_cap_pieces=530` (OCEAN_POLICY_VERSION v4 partitioning at planet);
+`way_pins_marked=2,163,374,442` and `way_members_marked=37,214,953` from
+the injected prepass, with `relation_plan_needed_ways=0` confirming the
+runtime prepass never ran.
+
+**H3's open dedup-cap pricing item now has its number**: the 1M cap
+skipped **51,182,158** inserts - i.e. all but 1M of the 52.2M unique
+payloads - while still reusing 217,633,383 tiles and saving 13.18 GB.
+Price the cap against that before an H10 record claim.
+
+Sort: 290 chunks, `sort_merge_max_fanin=290`, 281.5 GB merged,
+251.3 GB of sort records. Scratch was uncompressed (H4's lz4 planet
+configuration was NOT used on this run - so H4's open "does the lz4
+trade invert at planet" question is still open, and this run is its
+uncompressed control).
+
+Oversize: 1 severe, 44 warn, max tile 1.08 MB at z14/13722/7013.
+
+### Where 571.7s sits against the target (NOT a claim, see H10)
+
+planetiler's published table, resource-classed: **2h38m = 9480s on
+16 cpu / 32 GB**. This build is 16 cores / 30.5 GiB at **571.7s**, i.e.
+**16.6x** in the same resource class. planetiler's best ABSOLUTE number
+is 19 min = 1140s on 192 cores / 720 GB, which 571.7s also beats by 2x
+on ~1/12th the cores and ~1/24th the RAM.
+
+Do not publish that as-is. It is the ENRICHED framing (H10), and the
+preprocessing is not in the number: the altw enrichment alone was
+~603s at planet in pbfhogg's own measurements, so the raw framing is
+roughly 571.7 + 603 + the cat/index pass, call it ~20 min end to end -
+still ~7.9x the resource-classed reference, and that is the honest
+apples-to-apples figure. Two further disclosures H10 requires and this
+section cannot skip: the profile differs (Shortbread vs OpenMapTiles,
+26 layers), and the planet snapshots differ (ours seq 4912, 2026-02-23).
 
 ## The record target
 
@@ -110,10 +226,24 @@ NA ways (1.1B vs 209M), unique tiles 3-4x NA at 60-70M.
 
 **What actually gates a planet attempt now, in order:**
 
-1. The enriched planet PBF does not exist yet - a pbfhogg altw run,
-   user-gated. H2's pending NA re-enrichment reading should ride the
-   same decision.
-2. The H9 step-3 disk audit against the real artifact size.
+1. RESOLVED 2026-07-31: the enriched planet PBF exists on bygg.
+   `planet-20260223-locations-prepass.osm.pbf`, 90.5 GB, seq 4912,
+   registered as `[bygg.datasets.planet.pbf.locations]`. Built by
+   `pbfhogg add-locations-to-ways --index-type external --inject-prepass
+   --compression zstd:1` from pbfhogg's seq-4912 indexed planet; header
+   carries `pbfhogg.WayMembers-v1` + `pbfhogg.SharedNodePins-v1`, element
+   counts identical to the plain-altw file, `0 missing locations`. The
+   90 GB input assumption above was a good guess. NOTE the older
+   `planet-20260223-altw.osm.pbf` in pbfhogg/data carries NEITHER injected
+   feature - it is the plain arm, and pointing a run at it silently buys
+   back the runtime prepass. H2's NA re-enrichment reading is still
+   pending and no longer rides this decision; NA locations is confirmed
+   prepass-free by its header.
+2. RESOLVED 2026-07-31 for bygg: the H9 step-3 disk audit. 2.3T free on
+   the single root NVMe against input 90 GB (landed) + scratch ~100-130 GB
+   with lz4 + output ~60-70 GB. The old 607 GB figure was plantasjen's
+   and no longer binds. altw's ~224 GB external temp was transient and
+   has already been paid.
 3. RESOLVED by the corpus gate (spec C): the committed `corpus/denmark/`
    baseline is in git and gateable at any commit. A planet run wants a green
    `corpus check` at the attempt commit before it starts. Planet-scale corpus
@@ -251,6 +381,93 @@ max_rel_inflight 90 MB (the monster-relation signal to watch).
 
 Open pricing item: at planet the 1M dedup cap costs output bytes
 (missed dedup), not RAM - price before H10 record runs.
+
+**OPEN, UNPRICED 2026-07-31: the planet input's way blobs are ~7.5x
+fatter than any extract's, and the way stage holds blobs in flight.**
+Every extract in brokkr.toml packs 8,000 ways per blob (NA locations:
+208.9M ways / 26,113 way blobs, 640 KB compressed each). The enriched
+planet packs ~66,500 ways per blob (1.166B ways / 17,529 way blobs,
+~4.8 MB compressed each) - and so did its input, so this is upstream
+packing from planet.openstreetmap.org, not something altw chose. It
+matters because P2's way-phase ownership rewrite sends the whole
+`PrimitiveBlock` into the rayon task, with the in-flight ceiling scaling
+on `config.threads`: in-flight way bytes are (blob size x concurrency),
+and blob size is exactly the input-dependent term the RAM bullet above
+calls "input-independent". Decoded, not compressed, so the real
+multiplier is larger than 7.5x. Nothing here is known to break - 30
+workers x a few tens of MB is survivable inside the ~10 GB prediction -
+but the prediction was calibrated on 640 KB blobs and has never seen
+this shape.
+
+**ANSWERED 2026-07-31 by the full planet run, and it is not a RAM
+problem - it is a THROUGHPUT problem, and the biggest one on the
+board.** `max_way_inflight_bytes` came in at 183 MB, so the fat blobs
+never threatened the ledger. But `way_budget` blocked for **674.4s of
+the 1062.5s wall (63.5%)**, with `way_block_send` at 674.5s - the two
+within 0.01%, so the way-budget gate IS what holds the reader.
+
+The mechanism is a mis-calibrated admission estimate, not a real memory
+bound (`src/pipeline/phase12.rs`, the in-flight condvar): admission
+charges `decompressed_size * WAY_OUTPUT_MULTIPLIER` (10x) against
+`DEFAULT_WAY_BUDGET_LOCATIONS` (768 MB), while the HWM counter records
+the raw figure (`guard.1 / WAY_OUTPUT_MULTIPLIER`) - which is why 183 MB
+raw and a saturated budget are consistent rather than contradictory. A
+640 KB extract blob costs ~35 MB of budget, so ~20 admit concurrently
+and NA runs at 23.9 avg cores. A 4.8 MB planet blob costs several
+hundred MB, so 2-3 admit and planet runs at **7.2 avg cores of 32**.
+The 10x multiplier and the 768 MB default were both calibrated on
+8,000-element blobs (the code comment cites a germany-at-256M reading);
+planet packs ~66,500.
+
+This also retires the "phase12 stocks are input-independent" phrasing
+in the RAM bullet: the stock is bounded, but the ADMISSION RATE is a
+function of upstream blob packing, which is an input property.
+
+The fix is a config value, not code: `way_budget` in
+`[<host>.tilegen.default]` emits `--way-budget`. **Measured the same
+day: `way_budget = "6G"` took planet from 1062.5s to 571.7s (-46.2%),
+phase12 836.3s -> 351.3s, avg cores 7.2 -> 23.1, for ~1.1 GB of extra
+peak anon and no change in peak RSS.** Run `a5b3df34`.
+
+**LANDED: `DEFAULT_WAY_BUDGET_LOCATIONS` 768M -> 8G.** Swept on a
+fat-blob germany proxy rather than on planet, because a planet arm is a
+10-minute run and this needed four of them. Build the proxy with
+`pbfhogg repack --elements-per-blob 66000` (registered as germany's
+`locations-fat` variant): 4.36 MB blobs against planet's 4.8 MB, and it
+reproduces the regime honestly - `way_budget` blocks 66.9% of wall on
+the proxy vs 63.5% on planet at the old default. Note repack drops the
+injected prepass metadata and warns; the proxy is for sweeping a knob
+against itself, never for cross-input baselines.
+
+| way_budget | fat germany | normal germany |
+|-----------|-------------|----------------|
+| 768M | 39.30s | 26.7s |
+| 2G   | 29.50s | -      |
+| 6G   | **25.70s** | -  |
+| 16G  | 25.70s | 27.5s  |
+
+Flat past ~6G, and neutral on ordinary blobs. `max_inflight`
+(= `config.threads`) explains the plateau exactly: at 6G the byte budget
+admits ~24 blocks, at 16G the COUNT ceiling caps at 32, and 24 of 32
+already saturates.
+
+That reframes what the byte budget is for. Since admission stops at
+`max_inflight` blocks regardless, real in-flight memory is bounded by
+(count x block size) whatever the budget says - so 768M was guarding a
+case the count ceiling already covered, while throttling fat input to
+2-3 blocks. 8G sits just past the knee and leaves the count ceiling as
+the operative bound. Gates: `brokkr check` 669 passed, denmark corpus
+check pass, planet output bit-identical to the pre-change archive.
+
+Still open, and now the cheap experiment: charging
+`decompressed_size x 10` makes admission concurrency inversely
+proportional to blob size, so a bigger default is a workaround, not a
+cure - an input packing at 500k elements/blob would re-break it. A rule
+admitting on target CONCURRENCY with bytes as the safety net would be
+packing-invariant. The proxy makes that testable in 25s per arm.
+The backstop if it does bind: `pbfhogg repack --elements-per-blob 8000`
+re-encodes to extract density (that is what repack was built for), at
+the cost of a second 90 GB file.
 
 History note: the 07-14 planet-RAM NO-GO (NA phase12 at 23.3 GB / 1.9M
 majflt) was scratch-capacity retention from the i_overlay port - THE
@@ -565,10 +782,37 @@ context, profile differences (OpenMapTiles vs Shortbread) disclosed.
 
 ## Sequencing
 
-What gates a planet attempt is the go/no-go list above: the enriched
-planet PBF (user-gated pbfhogg altw run, with H2's NA re-enrichment
-reading riding the same decision), the disk audit against the real
-artifact size, and a green `corpus check` at the attempt commit.
+The go/no-go list above is now down to one gate: a green `corpus check`
+at the attempt commit. The enriched planet PBF and the disk audit both
+closed on bygg 2026-07-31. **bygg is a different machine and every plantasjen number needs
+restating.** First bygg baseline, NA locations `--bench 1`, run
+`d96003d3` at `4a1958d`: **130.1s** against plantasjen's stored 251.0s,
+so bygg is ~1.9x. Per phase: phase12 76.9s at 23.9 avg cores, ocean
+8.5s, assemble 44.2s at 20.5 cores. Peak anon 5.2 GB phase12 /
+6.1 GB assemble. Denmark locations plain run 6.9s (was 8.8s best-of-3).
+NOTE ocean is 8.5s here, not the 0.2s the go/no-go quotes - that figure
+predates the v3 union and the v4 ring-cap artifact, and the boundary
+band now costs single-threaded seconds at NA bbox. At world bounds the
+band is empty by construction, so this does not touch the planet
+projection, but the "artifact deletes the phase" line is now only true
+at world bounds.
+
+**Planet phase12 costs 2.3x more per GB than NA on the same host, at a
+third of the cores.** Measured 2026-07-31, run `15fb2a6f`, phase12 only:
+832s / 90.5 GB = **9.19 s/GB at 7.2 avg cores**, against NA's 76.9s /
+19.06 GB = **4.03 s/GB at 23.9 avg cores**. Same binary, same commit,
+same host, same locations shape - so this is neither host nor scale, and
+the fat-blob decode hypothesis (H3) is the standing explanation. Peak
+anon was 6.4 GB vs NA's 5.2 GB, near-flat, which confirms H3's bounded
+stocks at planet scale for the first time.
+
+METHOD WARNING, learned the hard way on that run: `--stop` kills the
+child before elivagar's end-of-run counter flush, and BOTH the HWM
+counters and the entire `*_wait_ns` stall set are flushed there. A
+`--stop` run yields valid `/proc` series (wall, RSS, anon, cores, IO)
+and pbfhogg's own periodically-flushed `pipeline_*` counters, and
+NOTHING of elivagar's. An empty elivagar stall profile from a `--stop`
+run is an artifact, not a finding - it was briefly misread as one here.
 
 Optimization work that remains, none of it blocking: the germany
 pricing run for the landed H8b splitter (bygg qualifies as the quiet

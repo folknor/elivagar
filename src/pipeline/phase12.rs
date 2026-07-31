@@ -140,11 +140,32 @@ pub(super) const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 pub(super) const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
 /// Default way in-flight budget for locations-on-ways mode. The budget is
 /// compared against estimated cost (raw bytes x WAY_OUTPUT_MULTIPLIER), so
-/// 768M means ~77MB of raw block+plan bytes in flight. Measured on germany
+/// 8G means ~820MB of raw block+plan bytes in flight. Measured on germany
 /// locations at 256M: way_budget wait 31.9s (45% of wall) with the feed
 /// starved at ~25MB raw - the byte budget, not the count ceiling, was the
 /// binding constraint once plan building moved into the tasks.
-pub(super) const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 768 * 1024 * 1024; // 768 MB
+///
+/// Raised 768M -> 8G on 2026-07-31 after the first planet runs. The 768M
+/// value was calibrated against 8,000-element blobs (every Geofabrik extract),
+/// where a block costs ~35MB of budget and ~20 admit concurrently.
+/// planet.openstreetmap.org packs ~66,500 elements per blob, so one block
+/// costs several hundred MB and only 2-3 admitted: planet phase12 ran at 7.2
+/// of 32 cores with way_budget blocking 63.5% of wall. At 6G the same build
+/// ran phase12 at 23.1 cores and total wall fell 1062.5s -> 571.7s, output
+/// bit-identical (cmp over both 58.7 GiB archives). Blob packing is an
+/// upstream property this pipeline does not control, so the default must not
+/// assume it.
+///
+/// 8G is chosen to sit just past the knee: admission ALSO stops at
+/// `max_inflight` blocks (= threads), so concurrency saturates there and real
+/// in-flight memory is bounded by (max_inflight x block size) no matter how
+/// large this is - the byte budget's remaining job is guarding pathologically
+/// fat blocks, not rate-limiting normal ones. Swept on a fat-blob germany
+/// proxy (`pbfhogg repack --elements-per-blob 66000`, 4.36MB blobs vs planet's
+/// 4.8MB): 768M 39.3s, 2G 29.5s, 6G 25.7s, 16G 25.7s - flat past ~6G because
+/// the count ceiling takes over. Neutral on ordinary blobs: germany locations
+/// 26.7s at 768M vs 27.5s at 16G, inside bench-1 noise.
+pub(super) const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 8 * 1024 * 1024 * 1024; // 8 GB
 /// Reject unsorted flat-index path above this input size unless explicitly overridden.
 pub(super) const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
 /// Relation blocks buffer at most this many decompressed bytes in RAM; past

@@ -174,7 +174,7 @@ itself named explicitly and hashed into provenance.
 | flag | default | meaning |
 |---|---|---|
 | `--sort-budget <SIZE>` | 1G | per-chunk sort buffer. Min 64M. Lower cuts phase12 RSS, costs merge chunks |
-| `--way-budget <SIZE>` | 128M, or 256M under `--locations-on-ways` | in-flight way processing. Min 1M |
+| `--way-budget <SIZE>` | 128M, or 8G under `--locations-on-ways` | in-flight way processing. Min 1M. Charged as decompressed block size x10, and capped independently at `threads` blocks in flight, so real memory is bounded by that count regardless of this value. Raise it only if the input packs fat blobs; see the constant's comment in `src/pipeline/phase12.rs` |
 | `--assemble-budget <SIZE>` | 32M | tile assembly batch. Min 1M |
 
 Sizes accept `256M`, `1G`, or raw bytes.
