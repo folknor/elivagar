@@ -9,11 +9,9 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 - Don't use gremlins! Em-dash, en-dash, strange quotes, whatever - they're all verboten.
 - Don't remind the user of the rules. They wrote them, so they know them.
 - The user can exempt you from any rule at any time.
-- ./notes/* is transient. Do not reference it from code comments. Code comments should contain the full context - it will outlive the notes.
 - ./docs/ is the published VitePress site and is durable. Its pages are written for outside readers, so they say less than the internal documents and must never contradict them. See the docs site section below.
 - ./reference/* is durable and lives on. Code comments may reference these. The site includes these files verbatim rather than restating them, so reference/* stays the single source of truth.
 - ./research/* holds full vendored source for related projects, readable from any agent sandbox. Two are our own dependencies, not competitors: `research/pbfhogg/` (Rust, our PBF reader and the injection/preprocessing counterpart) and `research/iOverlay/` plus `research/i_float/`, `research/i_shape/`, `research/i_tree/`, `research/i_key_sort/` (the reference sources the in-tree polygon topology engine used for Simplify/Intersect was ported from; i_overlay itself is now only a dev-dependency, the differential oracle that gates that engine). Consult these directly when a task involves changing what pbfhogg injects into the PBF, or modifying the in-tree polygon topology engine. (The competitor sources - planetiler, tilemaker, tippecanoe, stedsplakat - live here too.)
-- In general ./docs/ and ./notes/ documents, try to refrain from referencing direct line numbers in the rust source. You can use line numbers, but they drift fast.
 - When asked to write a plan or a specification, read `reference/technical-implementation-spec.md` first; it defines what such a document must contain.
 
 ### Bash rules
@@ -554,3 +552,37 @@ hotpath feature flags) - the three modes go one at a time.
 
 - `data/tilegen_tmp/` - temporary sort chunks (inside gitignored `data/`)
 - Ocean shapefile not included - pass via `--ocean` flag
+
+## Document folders
+
+The standing layout, across every project. Three live folders plus one retired,
+split by durability first, subject second.
+
+| Folder | Contents | Rule |
+|---|---|---|
+| `reference/` | Durable in-repo reference for anyone working on or with the code - how the thing is built and why: `architecture.md`, `technical-implementation-spec.md`, `performance.md` (the durable record of measured numbers over time), invariants, protocol contracts | Citable from source as a source of truth. What it says must be true. |
+| `docs/` | Durable in-repo documentation of how the thing is used - guides, CLI reference, the consumer-facing API surface. Sometimes exposed as a hand-edited VitePress gh-pages site | Same must-be-true rule. |
+| `notes/` | Transient - work items (`todo.md`), future plans, hypotheticals, bug reports, research, analysis. Things that will die | No truth guarantee. Nothing durable cites it. |
+| `plans/` | Retired | Plan documents are transient: they go in `notes/`. |
+
+`reference/` and `docs/` are both durable and both binding. The difference is
+subject, not audience: `reference/` covers how the thing is built and why - what
+you need in order to change it safely - while `docs/` covers how it is used. A
+developer or library consumer reads both. Where a project publishes a site,
+`docs/` is what gets published; the folder means the same thing either way.
+`notes/` is neither durable nor binding, which is the whole point of keeping it
+separate: a document that may be wrong must not sit where a document that must
+be right is expected.
+
+The dependency direction is therefore one-way. `notes/` may cite `docs/` and
+`reference/`; nothing durable may cite `notes/` - not a code comment, not
+`docs/`, not `reference/`. A code comment must carry its full context, because
+it outlives the note.
+
+**Root-level convention files are exempt.** `AGENTS.md`, `CLAUDE.md`,
+`README.md`, `LICENSE`, `CHANGELOG.md` and their kin are found by tooling and by
+convention at the repository root, and stay there. These folders govern
+documents we chose where to put, not files whose location is dictated.
+
+In `notes/`, `docs/` and `reference/` alike, avoid citing source line numbers -
+they drift fast.
