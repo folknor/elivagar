@@ -3,7 +3,7 @@ name = "elivagar"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 description = "Shortbread vector tile generator - reads OSM PBF files and produces PMTiles v3 archives"
 repository = "https://github.com/folknor/elivagar"
 readme = "README.md"
@@ -11,11 +11,20 @@ keywords = ["openstreetmap", "vector-tiles", "pmtiles", "shortbread", "tiles"]
 categories = ["command-line-utilities", "science::geo"]
 # Development state that is committed but has no business in a published
 # crate: the corpus baseline and its SVG renders, transient notes, the
-# benchmark database, and the Node validation harness.
+# benchmark database, the Node validation harness, and the agent-harness
+# instructions - the last of those describe brokkr invocations against
+# datasets and hosts a crates.io reader does not have.
+#
+# reference/ IS shipped: it is durable by convention and, with no docs site
+# yet, it is the only long-form CLI and corpus documentation a reader gets.
+#
+# docs/ is deliberately NOT excluded: it currently holds only the two README
+# logos, which must ship for the crates.io README to render. If a VitePress
+# site lands there, exclude its subpaths individually - the fonts alone dwarf
+# everything else in this list.
 exclude = [
     "corpus/",
     "notes/",
-    "docs/",
     "research/",
     "overnight-logs/",
     "scripts/",
@@ -23,6 +32,9 @@ exclude = [
     "brokkr.toml",
     "overnight.sh",
     "tile_weights.tsv.gz",
+    ".review.toml",
+    "CLAUDE.md",
+    "AGENTS.md",
 ]
 
 [[bin]]

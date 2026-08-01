@@ -9,10 +9,12 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 - Don't use gremlins! Em-dash, en-dash, strange quotes, whatever - they're all verboten.
 - Don't remind the user of the rules. They wrote them, so they know them.
 - The user can exempt you from any rule at any time.
-- ./docs/* and ./notes/* are transient. Do not reference them from code comments. Code comments should contain the full context - it will outlive the docs.
+- ./docs/ prose and ./notes/* are transient. Do not reference them from code comments. Code comments should contain the full context - it will outlive the docs.
+- ./docs/public/ is the exception and is durable: it holds published assets, currently the two README logos, and a VitePress site may land in ./docs/ later. Transient means the writing, not the directory.
 - ./reference/* is durable and lives on. Code comments may reference these.
 - ./research/* holds full vendored source for related projects, readable from any agent sandbox. Two are our own dependencies, not competitors: `research/pbfhogg/` (Rust, our PBF reader and the injection/preprocessing counterpart) and `research/iOverlay/` plus `research/i_float/`, `research/i_shape/`, `research/i_tree/`, `research/i_key_sort/` (the reference sources the in-tree polygon topology engine used for Simplify/Intersect was ported from; i_overlay itself is now only a dev-dependency, the differential oracle that gates that engine). Consult these directly when a task involves changing what pbfhogg injects into the PBF, or modifying the in-tree polygon topology engine. (The competitor sources - planetiler, tilemaker, tippecanoe, stedsplakat - live here too.)
 - In general ./docs/ and ./notes/ documents, try to refrain from referencing direct line numbers in the rust source. You can use line numbers, but they drift fast.
+- ./docs/ is NOT excluded from the published crate, because the README's logos live in ./docs/public/ and must ship for the crates.io page to render. If a site lands in ./docs/, exclude its subpaths individually in Cargo.toml rather than the whole directory.
 - When asked to write a plan or a specification, read `reference/technical-implementation-spec.md` first; it defines what such a document must contain.
 
 ### Bash rules

@@ -1,8 +1,27 @@
-# Elivagar
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/elivagar-logo-text-dark.svg">
+    <img src="docs/public/elivagar-logo-text.svg" width="300" alt="Elivagar">
+  </picture>
+  <br>
+  <em>Shortbread vector tile generator</em>
+</p>
 
-Shortbread vector tile generator. Reads OSM PBF files and produces
+<p align="center">
+  <a href="https://crates.io/crates/elivagar"><img src="https://img.shields.io/crates/v/elivagar" alt="crates.io"></a>
+  <a href="https://docs.rs/elivagar"><img src="https://img.shields.io/docsrs/elivagar" alt="docs.rs"></a>
+  <img src="https://img.shields.io/badge/rust-1.97+-orange?logo=rust" alt="MSRV 1.97">
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
+</p>
+
+Reads OSM PBF files and produces
 [PMTiles v3](https://github.com/protomaps/PMTiles) archives with the
 [Shortbread](https://shortbread-tiles.org/) schema (26 layers).
+
+**The full planet renders to a 58.7 GiB archive in 9m32s on a 16-core
+desktop with 30.5 GiB of RAM - bounded memory, no big iron.**
+
+Developed on Linux, untested elsewhere.
 
 Built with LLMs. See [LLM.md](LLM.md).
 
@@ -341,6 +360,39 @@ To refresh from upstream Mapbox `mvt-fixtures`:
 The scratch clone directory (for example `.cache/`) is optional maintenance
 workspace and should remain untracked.
 
+## Acknowledgements
+
+- [Shortbread](https://shortbread-tiles.org/) by Geofabrik is the tile schema
+  elivagar implements; `reference/` carries the spec this tree is written
+  against.
+- [PMTiles](https://github.com/protomaps/PMTiles) by Protomaps is the output
+  container. The v3 writer here is hand-rolled, but the spec is theirs.
+- [pbfhogg](https://github.com/folknor/pbfhogg) is the PBF reader, and the
+  preprocessing counterpart that produces the locations-on-ways input the
+  production pipeline runs on.
+- The in-tree polygon topology engine is a port of
+  [i_overlay](https://github.com/iShape-Rust/iOverlay) by Nail Sharipov.
+  i_overlay itself remains a dev-dependency, serving as the differential
+  oracle that gates the port.
+- Coastline data comes from
+  [osmdata.openstreetmap.de](https://osmdata.openstreetmap.de/), whose
+  water-polygon shapefiles feed the ocean layer.
+- [Planetiler](https://github.com/onthegomap/planetiler),
+  [tilemaker](https://github.com/systemed/tilemaker) and
+  [tippecanoe](https://github.com/felt/tippecanoe) are the reference
+  implementations. Their issue trackers, in particular, saved this project
+  from rediscovering several problems the hard way.
+- MapLibre's `classifyRings` and earcut are what "correct" is measured
+  against - the standing tessellation gate decodes tiles exactly the way
+  [maplibre-gl-js](https://github.com/maplibre/maplibre-gl-js) does.
+- Benchmarking, gating and provenance tooling is
+  [brokkr](https://github.com/folknor/brokkr).
+
 ## License
 
-Apache-2.0
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
