@@ -65,6 +65,49 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
   discarded. There is no "clean tree" to protect from it; it belongs in the
   commit.
 
+## Docs site
+
+VitePress, in `docs/`, deployed to GitHub Pages by
+`.github/workflows/deploy.yml` on every push to main. Sourced from the
+`gh-template` remote, configured as a local-path git remote.
+
+```
+pnpm install --frozen-lockfile
+pnpm dev        # localhost:5173
+pnpm build      # writes docs/.vitepress/dist
+pnpm preview
+```
+
+**Template updates are pulled per path, never merged.** `git checkout
+template/master -- <path>` picks up a theme or layout fix. Do NOT `git merge
+template/master`, which is what the template's own README tells you to do: it
+carries a `raw/` directory holding a fully vendored copy of the mise repo plus
+four projects' logos and generated images, and merging unrelated histories
+writes all of it into this repo permanently even if the next commit deletes
+it. pbfhogg took that hit; we did not.
+
+**Two pnpm projects, deliberately.** The root workspace owns the docs site and
+declares `packages: ['.']` only. `scripts/validate/` keeps its own lockfile
+because the oracles are calibrated against specific versions of maplibre-gl
+and `@mapbox/vector-tile` - a shared lockfile would let a VitePress bump
+re-resolve the exact packages the earcut gate measures against, silently
+invalidating the calibration the oracle discipline in AGENTS.md requires.
+Install the oracles from their own directory.
+
+**The reference docs are included, not copied.** `docs/reference/*.md` are
+four-line stubs carrying `<!--@include: ../../reference/<name>.md-->`, so
+`reference/` stays the single source of truth and the site cannot drift from
+it. Add a reference document by adding a stub plus a sidebar entry in
+`docs/.vitepress/config.ts`; edit content in `reference/` only.
+
+Guide pages under `docs/guide/` ARE hand-written for outside readers. They may
+compress or omit internal detail, but must never contradict `reference/` or
+AGENTS.md.
+
+Run `pnpm build` after touching anything under `docs/`, and
+`cargo package --list` after touching what ships - only `docs/public/*.svg`
+may appear there.
+
 ## Orchestration loop
 
 If and when the users asks for the orchestration loop, run `orchestrate` before proceeding.

@@ -20,7 +20,16 @@
   GitHub, not on crates.io.
 - [x] Set `rust-version = "1.97"`. The tree uses no nightly features; the
   README's old nightly requirement was stale.
-- [ ] Publish `elivagar` to crates.io.
+- [x] Publish `elivagar` to crates.io. 0.1.0 published 2026-08-01, tagged
+  v0.1.0, GitHub release created.
+- [x] VitePress docs site in `docs/`, deployed to GitHub Pages. Sourced from
+  gh-template per path rather than by history merge, because the template
+  carries a vendored mise repo in `raw/`. Reference pages include
+  `reference/*.md` verbatim so there is one source of truth.
+- [ ] Enable GitHub Pages for the repo with source set to GitHub Actions.
+  The deploy workflow will not publish until that is switched on.
+- [ ] Add a `favicon.svg`. The site currently points its icon link at
+  `elivagar-logo.svg`, which works but is not sized for a favicon.
 
 ## Known limitations to document at release
 

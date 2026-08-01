@@ -18,10 +18,10 @@ categories = ["command-line-utilities", "science::geo"]
 # reference/ IS shipped: it is durable by convention and, with no docs site
 # yet, it is the only long-form CLI and corpus documentation a reader gets.
 #
-# docs/ is deliberately NOT excluded: it currently holds only the two README
-# logos, which must ship for the crates.io README to render. If a VitePress
-# site lands there, exclude its subpaths individually - the fonts alone dwarf
-# everything else in this list.
+# docs/ holds the VitePress site AND the two README logos. The site is
+# excluded subpath by subpath rather than wholesale, because the logos have to
+# ship for the crates.io README to render - docs/public/*.svg stays in, the
+# fonts and page sources do not.
 exclude = [
     "corpus/",
     "notes/",
@@ -35,6 +35,15 @@ exclude = [
     ".review.toml",
     "CLAUDE.md",
     "AGENTS.md",
+    "docs/.vitepress/",
+    "docs/public/fonts/",
+    "docs/public/icons/",
+    "docs/guide/",
+    "docs/reference/",
+    "docs/index.md",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
 ]
 
 [[bin]]

@@ -1,0 +1,15 @@
+# The docs site is the only Node project this workspace owns.
+#
+# scripts/validate is deliberately NOT a member. Those are the correctness
+# oracles - the earcut tessellation gate decodes tiles with maplibre-gl's own
+# classifyRings, so it is calibrated against specific versions of maplibre-gl
+# and @mapbox/vector-tile. Sharing a lockfile with the docs site would let a
+# VitePress dependency bump re-resolve the packages the gate measures against,
+# which silently invalidates the calibration. It keeps its own lockfile and is
+# installed from its own directory.
+packages:
+  - '.'
+
+onlyBuiltDependencies:
+  - core-js-pure
+  - esbuild

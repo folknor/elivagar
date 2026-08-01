@@ -18,6 +18,8 @@ Reads OSM PBF files and produces
 [PMTiles v3](https://github.com/protomaps/PMTiles) archives with the
 [Shortbread](https://shortbread-tiles.org/) schema (26 layers).
 
+Documentation: **[folknor.github.io/elivagar](https://folknor.github.io/elivagar/)**
+
 **The full planet renders to a 58.7 GiB archive in 9m32s on a 16-core
 desktop, peaking at 12.7 GB of RAM.**
 
@@ -345,6 +347,21 @@ cargo build --release
 ```
 
 Add `--features mlt` for MLT output (see above).
+
+### Docs site
+
+The site in `docs/` is VitePress, deployed to GitHub Pages on push to main.
+
+```
+pnpm install --frozen-lockfile
+pnpm dev
+pnpm build
+```
+
+The Node validation oracles in `scripts/validate/` are a separate pnpm project
+with their own lockfile, installed from that directory. They are calibrated
+against specific versions of maplibre-gl and `@mapbox/vector-tile`, so they
+deliberately do not share dependency resolution with the docs site.
 
 ## Test fixture refresh
 
