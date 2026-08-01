@@ -1758,7 +1758,13 @@ fn harvest_way_cap_events(acc: &mut WayAcc) {
 
 /// Process a raw way into a task-local arena.
 #[hotpath::measure]
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+// cognitive_complexity is visible only without the hotpath feature, whose
+// measure macro re-wraps the body.
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity
+)]
 pub(super) fn process_planned_way_into(
     way: &Way<'_>,
     plan: &WayPlan,

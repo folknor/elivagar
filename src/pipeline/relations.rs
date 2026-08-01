@@ -169,7 +169,9 @@ pub(super) struct RelationTail {
 /// PBF re-read without holding more than one block plus each worker's single
 /// in-flight prepared relation.
 #[hotpath::measure]
-#[allow(clippy::too_many_arguments)]
+// too_many_lines is visible only without the hotpath feature, whose measure
+// macro re-wraps the body.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn process_relation_blocks(
     relation_blocks: impl Iterator<Item = pbfhogg::PrimitiveBlock> + Send,
     way_index: &WayIndex,

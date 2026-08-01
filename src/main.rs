@@ -830,6 +830,19 @@ fn run(args: RunArgs) {
         }
     };
 
+    // Refuse an MLT run up front rather than at the first encoded batch, which
+    // is minutes of phase12 and sort later. The flag value stays accepted by
+    // clap in every build so the error names the missing feature instead of
+    // reading as an unknown value.
+    #[cfg(not(feature = "mlt"))]
+    if matches!(args.tile_format, TileFormatArg::Mlt) {
+        eprintln!(
+            "error: --tile-format mlt requires a build with the `mlt` cargo feature \
+             (cargo build --release --features mlt)"
+        );
+        std::process::exit(2);
+    }
+
     let config = elivagar::TilegenConfig {
         pbf_path: args.input,
         output_path: args.output,

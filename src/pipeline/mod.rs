@@ -1340,7 +1340,7 @@ pub fn ocean_build(
 use crate::geometry::Point;
 #[cfg(test)]
 use crate::geometry::merc_bbox;
-#[cfg(test)]
+#[cfg(all(test, feature = "mlt"))]
 use crate::mlt;
 #[cfg(test)]
 use crate::multipolygon::{MemberWay, WayRole};
@@ -1350,9 +1350,11 @@ use crate::mvt::GeomType;
 use crate::sort::SortRecord;
 #[cfg(test)]
 use assemble::{
-    AssemblyScratch, LAYER_COUNT, PendingTile, SeamMetrics, encode_tile_batch,
-    encode_tile_batch_mvt, phase_assemble, prepare_non_empty_layers,
+    PendingTile, SeamMetrics, encode_tile_batch, encode_tile_batch_mvt, phase_assemble,
 };
+// Used only by the MLT/MVT layer-model parity test.
+#[cfg(all(test, feature = "mlt"))]
+use assemble::{AssemblyScratch, LAYER_COUNT, prepare_non_empty_layers};
 #[cfg(test)]
 use emit::{
     LineEmitScratch, MultipolygonEmitScratch, PointEmitScratch, PolygonEmitScratch,

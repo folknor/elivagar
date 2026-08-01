@@ -237,10 +237,17 @@ impl LayerBuilder {
         self.features.is_empty()
     }
 
+    // The read side of LayerBuilder (name/features/key/value) has exactly one
+    // consumer, the MLT encoder's tile model, so it is dead code in a default
+    // build. Kept compiled rather than cfg'd out: these are trivial accessors
+    // on a type the MVT path owns, and gating them would spread the mlt
+    // feature into mvt for no benefit.
+    #[cfg_attr(not(feature = "mlt"), allow(dead_code))]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
+    #[cfg_attr(not(feature = "mlt"), allow(dead_code))]
     pub(crate) fn features(&self) -> &[Feature] {
         &self.features
     }
@@ -249,10 +256,12 @@ impl LayerBuilder {
         &mut self.features
     }
 
+    #[cfg_attr(not(feature = "mlt"), allow(dead_code))]
     pub(crate) fn key(&self, idx: u16) -> Option<&str> {
         self.keys.get(idx as usize).map(String::as_str)
     }
 
+    #[cfg_attr(not(feature = "mlt"), allow(dead_code))]
     pub(crate) fn value(&self, idx: u16) -> Option<&Value> {
         self.values.get(idx as usize)
     }
@@ -309,6 +318,7 @@ impl LayerBuilder {
     /// Reclaim feature buffers and clear interning state, keeping allocated capacity.
     /// Used by assembly `thread_local!` to reuse `LayerBuilder` across tiles - the
     /// HashMap bucket arrays survive, avoiding re-allocation on the next tile.
+    #[cfg_attr(not(feature = "mlt"), allow(dead_code))]
     pub fn prepare_for_reuse(
         &mut self,
         geom_pool: &mut Vec<Vec<u32>>,

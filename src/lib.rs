@@ -68,6 +68,7 @@ extern crate alloc;
 pub(crate) mod debug;
 pub(crate) mod geometry;
 pub mod inspect;
+#[cfg(feature = "mlt")]
 pub(crate) mod mlt;
 pub(crate) mod multipolygon;
 pub(crate) mod mvt;

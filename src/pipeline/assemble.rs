@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::debug::{WAIT, emit_counter_u64, emit_counter_usize, wait_span};
 use crate::geometry;
+#[cfg(feature = "mlt")]
 use crate::mlt;
 use crate::mvt::{self, GeomType, LayerBuilder};
 use crate::pmtiles_writer::{
@@ -168,6 +169,11 @@ pub(super) struct RunProvenance {
 }
 
 #[allow(clippy::too_many_lines)]
+// Both are moved into the phase body's closures under the hotpath feature,
+// where the measure macro's wrapping consumes them; without it clippy sees
+// only the borrow. Taking them by reference would push the clone to every
+// caller instead.
+#[allow(clippy::needless_pass_by_value)]
 #[hotpath::measure]
 pub(super) fn phase_assemble_with_ocean(
     sort_reader: &mut sort::SortReader,
@@ -1801,7 +1807,16 @@ pub(super) fn encode_tile_batch(
             seam_reconcile_layers,
             seam_metrics,
         )),
+        #[cfg(feature = "mlt")]
         TilePayloadFormat::Mlt => encode_tile_batch_mlt(batch),
+        // Unreachable in practice: the CLI refuses --tile-format mlt without
+        // the feature. A library caller can still construct the config, so
+        // this fails loudly rather than silently writing MVT under an MLT
+        // tile contract.
+        #[cfg(not(feature = "mlt"))]
+        TilePayloadFormat::Mlt => Err(PipelineError(
+            "tile format mlt requires a build with the `mlt` cargo feature".to_string(),
+        )),
     }
 }
 
@@ -1936,6 +1951,10 @@ pub(super) fn encode_tile_batch_mvt(
 }
 
 /// Build non-empty per-layer builders for one tile.
+///
+/// MLT-only: the MVT encoder inlines this work in its rayon closure. Gated
+/// with the encoder so a default build carries no dead assembly path.
+#[cfg(feature = "mlt")]
 pub(super) fn prepare_non_empty_layers<'a>(
     s: &'a mut AssemblyScratch,
     tile: &PendingTile,
@@ -1972,7 +1991,9 @@ pub(super) fn prepare_non_empty_layers<'a>(
         .collect()
 }
 
-/// Encode an MLT batch (currently scaffolded, returns not-implemented error with tile context).
+/// Encode a batch of tiles as MLT via `mlt_core`. Uncompressed payloads: the
+/// MLT tile contract carries `TileDataCompression::None`.
+#[cfg(feature = "mlt")]
 #[hotpath::measure]
 pub(super) fn encode_tile_batch_mlt(
     batch: &[PendingTile],

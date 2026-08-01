@@ -1,31 +1,47 @@
 # elivagar TODO
 
-## Active priorities
-
-1. [ ] Scale validation: run Europe full pipeline (locations-on-ways, defaults including boundaries:8).
-   Capture phase splits + seam metrics + deferred-vertex counts.
-2. [ ] Scale validation: run planet full pipeline when hardware is available.
-
-## Baselines
-
-Pre-2026-07 baselines removed: the integer-clipping rewrite (ledger
-R21-R24, specs/) changed the perf profile wholesale. Current
-hash-anchored numbers live in CLAUDE.md and .brokkr/results.db; the
-ocean phase is being re-optimized in specs/ocean-perf-structural.md.
-Scale-validation runs (Europe/planet, Active priorities above) must
-re-establish per-dataset baselines when run.
-
-## Planet scale milestones
-
-- [ ] Step 5: Europe full pipeline (~28 GB, needs >=64 GB RAM)
-- [ ] Step 6: Planet full pipeline (~75 GB, needs >=64 GB RAM)
-
-## Release prep
+## Release prep (0.1.0)
 
 - [x] Switch `pbfhogg` dependency from path to crates.io version.
   Its provenance version is derived from Cargo.lock at build time
   (`build.rs` `locked_version`), so no hardcoded version to keep in sync.
-- [ ] Publish `elivagar` to crates.io
+- [x] Scale validation: planet full pipeline. Ran 2026-07-31 on bygg
+  (16c/32t, 30.5 GiB RAM): 571.7s wall, 12.7 GB peak RSS, 58.7 GiB output,
+  269.8M tiles addressed / 52.2M unique. Details in
+  `notes/planet-30gb-roadmap.md`. Europe was dropped as a separate step -
+  planet subsumes it and nothing needs the intermediate rung.
+- [x] Gate the MLT encoder behind the non-default `mlt` cargo feature.
+  Never validated against a client, no per-tile compression, no standing
+  gate covers it; `mlt-core` is pre-1.0. Default builds are MVT-only and
+  `--tile-format mlt` refuses with the feature named.
+- [x] Exclude development state from the published package (`corpus/`,
+  `notes/`, `docs/`, `scripts/`, `.brokkr/` and friends). Note this makes
+  the README's relative links to `notes/` and `scripts/` resolve only on
+  GitHub, not on crates.io.
+- [x] Set `rust-version = "1.97"`. The tree uses no nightly features; the
+  README's old nightly requirement was stale.
+- [ ] Publish `elivagar` to crates.io.
+
+## Known limitations to document at release
+
+- **Oversized tiles.** The planet run produced 1 severe and 44 warn
+  oversize tiles, max 1.08 MB at z14/13722/7013. No feature dropping
+  exists yet (see below).
+- **Cross-piece ocean seam, z8-z14.** The full-resolution ocean pass
+  descends per source piece with `pins: None`, so a boundary shared
+  between two pieces can be simplified differently on each side. Bounded
+  sub-pixel by the fixed per-zoom tolerances and unobserved in practice;
+  no standing gate would catch it. Roadmap H5 has the detector candidate.
+- **1M dedup cap.** At planet the cap skipped 51.2M of 52.2M unique
+  payload inserts. Costs output bytes, not RAM, and still saved 13.18 GB.
+  Unpriced - roadmap H3 wants that number before any record claim.
+
+## Scale validation
+
+Planet is done (above). Re-establish per-dataset baselines after any
+structural landing; current numbers live in `reference/performance.md`
+and `.brokkr/results.db`. Note that every stored baseline below the bygg
+line is plantasjen's and the two hosts are not comparable (bygg is ~1.9x).
 
 ## Tile output optimizations
 
@@ -33,7 +49,7 @@ re-establish per-dataset baselines when run.
   they fit a size budget. Needed for dense urban areas at planet scale. Tippecanoe (#378)
   hit an infinite loop bug here - need a guaranteed convergence invariant (also #340, #45).
   Low-zoom dropping must be profile-aware to avoid overaggressive removal (tippecanoe #201).
-  Prerequisite: tile size diagnostics (see below) to identify which tiles need dropping.
+  Prerequisite: tile size diagnostics to identify which tiles need dropping.
 - [ ] Building merge at z13: Planetiler optionally unions adjacent buildings to reduce tile
   size in dense urban areas. Their benchmarks show ~37% planet runtime increase (expensive).
   JTS polygon union also hits robustness bugs on real data (Planetiler #700). Cheaper
@@ -49,10 +65,9 @@ re-establish per-dataset baselines when run.
   old Mercator-space DP pipeline, which no longer exists. The integer
   engine simplifies every feature per zoom with rotation-invariant DP
   from a SHARED base quantization grid with pin-aware shared-vertex
-  preservation (specs/emit-polygon-integer-port.md), which changes seam
-  incidence wholesale. The seam-reconcile machinery
-  (`--seam-reconcile-layers`, assemble reconcile_boundary_seams) is
-  still wired and functional.
+  preservation, which changes seam incidence wholesale. The
+  seam-reconcile machinery (`--seam-reconcile-layers`, assemble
+  reconcile_boundary_seams) is still wired and functional.
   - [ ] Re-evaluate seam incidence visually on the post-rewrite output
     (admin borders at z4-z8, landuse boundaries) BEFORE any further
     reconciliation work. If seams are gone or negligible, delete the
@@ -82,7 +97,6 @@ re-establish per-dataset baselines when run.
   - Tilemaker and Tippecanoe have no Wikidata integration.
   - Requires wire format changes: extend beyond current 3 name keys (`name`, `name_en`,
     `name_de`) to support configurable language set.
-  - Not a current priority - worth doing before planet-scale release for label coverage.
 - [ ] Natural Earth low-zoom layers: use Natural Earth vector data (1:10m/1:50m/1:110m) for
   z0-5 features like country boundaries, lakes, and land polygons instead of simplifying
   full-resolution OSM geometry. Currently elivagar uses the water-polygons-split-3857
@@ -101,6 +115,29 @@ re-establish per-dataset baselines when run.
   - Neither Planetiler's nor Tilemaker's Shortbread profiles use NE - differentiation.
   - CLI: `--natural-earth dir/` with auto-detection, `--no-natural-earth` to disable.
 
+## MLT (behind the `mlt` feature)
+
+The encoder is real - `src/mlt.rs` calls upstream `mlt-core`, and committed
+geometry fixtures round-trip through `mlt_core::parse_layers` covering
+point/line/polygon and multi-geometries. What is missing is everything that
+would make it default-on:
+
+- [ ] End-to-end client compatibility validation in nidhogg/MapLibre, and
+  rollout guidance. This is the gate on flipping the feature to default.
+- [ ] Per-tile compression for the MLT path. It currently writes
+  `TileDataCompression::None` and has never been through the gzip/brotli
+  contract the MVT path uses.
+- [ ] Bring MLT output under a standing gate. The corpus baseline, earcut
+  oracle and `verify` are all MVT-only today.
+- [ ] Price MLT against MVT on assemble CPU and output size (roadmap's open
+  question on the record's CPU budget).
+- [ ] MLT feature-order controls: `--no-mlt-feature-sort` equivalent
+  semantics, and evaluate default behavior for compression/size.
+- [ ] MLT polygon tessellation mode: `--pretessellate` equivalent for
+  polygon-only layers, benchmark render/size tradeoffs.
+- [ ] MLT compression/encoding tuning flags (e.g. shared dictionary mode),
+  with benchmark-guided defaults.
+
 ## Future architecture
 
 - [ ] OGC TileMatrixSet v2 / non-Mercator tiling schemes. Nidhogg's API surface
@@ -112,19 +149,3 @@ re-establish per-dataset baselines when run.
     Deepest: Mercator projection math and Hilbert tile IDs (very hard to abstract).
   - Watch-list item. Trigger: PMTiles v4 with CRS support, or MapLibre non-Mercator
     rendering, or a concrete nidhogg consumer need.
-- [x] MLT (MapLibre Tile) output format baseline integration.
-  Implemented:
-  - `elivagar run --tile-format mvt|mlt` CLI selection and pipeline wiring.
-  - Real upstream `mlt-core` encoder integration in `src/mlt.rs` (not a local stub).
-  - PMTiles tile contract made format-aware (`tile_payload_format`, `tile_compression`) with
-    metadata + inspect fallback reporting for legacy archives.
-  - Committed MLT geometry fixtures + roundtrip decode tests (`mlt_core::parse_layers` +
-    decode path) covering point/line/polygon and multi-geometries.
-  Remaining follow-ups:
-  - [ ] Add MLT feature-order controls and evaluate default behavior:
-    `--no-mlt-feature-sort` equivalent semantics and compression/size impact.
-  - [ ] Add MLT polygon tessellation mode:
-    `--pretessellate` equivalent for polygon-only layers and benchmark render/size tradeoffs.
-  - [ ] Add MLT compression/encoding tuning flags (e.g. shared dictionary mode),
-    with benchmark-guided defaults.
-  - [ ] End-to-end client compatibility validation in nidhogg/MapLibre and rollout guidance.

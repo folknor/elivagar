@@ -1,12 +1,17 @@
 use super::*;
 use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
+// Only the MLT parity test imports these by name; the other gzip-decoding
+// tests spell out flate2::read::GzDecoder / std::io::Read at the call site.
+#[cfg(feature = "mlt")]
 use flate2::read::GzDecoder;
 use pbfhogg::block_builder;
 use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 use smallvec::smallvec;
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{Read, Write};
+#[cfg(feature = "mlt")]
+use std::io::Read;
+use std::io::Write;
 
 fn way_block_for_members(ids: &[i64]) -> pbfhogg::PrimitiveBlock {
     let dir = tempfile::tempdir().expect("create tempdir");
@@ -674,6 +679,8 @@ fn tile_features_ordered_by_paint_rank() {
     assert_eq!(grouped.features.len(), observed.len());
 }
 
+/// Fixture for the MLT/MVT layer-model parity test.
+#[cfg(feature = "mlt")]
 fn parity_pending_tile(tile_id: u64) -> PendingTile {
     let point_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("city")), 0)];
     let line_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("street")), 0)];
@@ -1424,6 +1431,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
     assert_eq!(counts.get(&right), Some(&1));
 }
 
+#[cfg(feature = "mlt")]
 #[test]
 fn encode_tile_batch_mlt_empty_batch_is_empty() {
     match encode_tile_batch(
@@ -1453,6 +1461,7 @@ fn encode_tile_batch_mvt_empty_batch_is_empty() {
     assert!(encoded.is_empty());
 }
 
+#[cfg(feature = "mlt")]
 #[test]
 fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
     let tile = PendingTile {
@@ -1472,6 +1481,7 @@ fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
     }
 }
 
+#[cfg(feature = "mlt")]
 #[test]
 fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     let tile_id = pmtiles_writer::xy_to_tile_id(4, 8, 9);
@@ -1729,61 +1739,68 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
     assert_eq!(mvt_json["tile_compression"], "gzip");
 
     // MLT contract: uncompressed payload, unknown tile type in PMTiles header + explicit metadata.
-    let mlt_chunks_dir = dir.path().join("chunks_mlt");
-    let mlt_output = dir.path().join("phase_assemble_contract_mlt.pmtiles");
-    let mlt_tmp = dir.path().join("tmp_mlt");
-    std::fs::create_dir_all(&mlt_tmp).expect("create mlt tmp dir");
-    let mut mlt_sort_reader = one_tile_sort_reader(&mlt_chunks_dir);
-    let mlt_config = TilegenConfig {
-        pbf_path: dir.path().join("contract-mlt.osm.pbf"),
-        output_path: mlt_output.clone(),
-        tmp_dir: mlt_tmp,
-        min_zoom: 0,
-        max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
-        skip_to: None,
-        in_memory: true,
-        compression_level: 6,
-        force_sorted: false,
-        allow_unsafe_flat_index: false,
-        threads: 1,
-        way_inflight_budget: 0,
-        assemble_batch_budget: 0,
-        sort_chunk_size: 0,
-        locations_on_ways: false,
-        tile_format: TilePayloadFormat::Mlt,
-        tile_compression: TileCompression::Gzip,
-        compress_sort_chunks: sort::ChunkCompression::None,
-        seam_reconcile_layers: {
-            let mut m = [0u8; shortbread::Layer::count()];
-            m[shortbread::Layer::Boundaries as usize] = 8;
-            m
-        },
-        fanout_caps: [0; shortbread::Layer::count()],
-        polygon_simplify_factor: 1.0,
-    };
-    let _ = phase_assemble(&mut mlt_sort_reader, &mlt_config).expect("mlt assemble should succeed");
-    let mut mlt_reader =
-        crate::pmtiles_reader::PmtilesReader::open(&mlt_output).expect("open mlt pmtiles");
-    let mlt_metadata = mlt_reader.read_metadata().expect("read mlt metadata");
-    let mlt_json: serde_json::Value =
-        serde_json::from_str(&mlt_metadata).expect("parse mlt metadata");
-    assert_eq!(
-        mlt_reader.tile_type(),
-        0,
-        "mlt header tile_type should remain unknown"
-    );
-    assert_eq!(
-        mlt_reader.tile_compression(),
-        1,
-        "mlt header tile_compression should be none"
-    );
-    assert_eq!(mlt_json["tile_payload_format"], "mlt");
-    assert_eq!(mlt_json["tile_compression"], "none");
+    // Gated with the encoder: without the mlt feature phase_assemble refuses
+    // the format rather than writing tiles. The MVT half above is the part
+    // that must hold in a default build.
+    #[cfg(feature = "mlt")]
+    {
+        let mlt_chunks_dir = dir.path().join("chunks_mlt");
+        let mlt_output = dir.path().join("phase_assemble_contract_mlt.pmtiles");
+        let mlt_tmp = dir.path().join("tmp_mlt");
+        std::fs::create_dir_all(&mlt_tmp).expect("create mlt tmp dir");
+        let mut mlt_sort_reader = one_tile_sort_reader(&mlt_chunks_dir);
+        let mlt_config = TilegenConfig {
+            pbf_path: dir.path().join("contract-mlt.osm.pbf"),
+            output_path: mlt_output.clone(),
+            tmp_dir: mlt_tmp,
+            min_zoom: 0,
+            max_zoom: 14,
+            ocean_shapefile: None,
+            ocean_simplified_shapefile: None,
+            ocean_tiles: None,
+            ocean_artifact_key: None,
+            ocean_only_metadata: false,
+            skip_to: None,
+            in_memory: true,
+            compression_level: 6,
+            force_sorted: false,
+            allow_unsafe_flat_index: false,
+            threads: 1,
+            way_inflight_budget: 0,
+            assemble_batch_budget: 0,
+            sort_chunk_size: 0,
+            locations_on_ways: false,
+            tile_format: TilePayloadFormat::Mlt,
+            tile_compression: TileCompression::Gzip,
+            compress_sort_chunks: sort::ChunkCompression::None,
+            seam_reconcile_layers: {
+                let mut m = [0u8; shortbread::Layer::count()];
+                m[shortbread::Layer::Boundaries as usize] = 8;
+                m
+            },
+            fanout_caps: [0; shortbread::Layer::count()],
+            polygon_simplify_factor: 1.0,
+        };
+        let _ =
+            phase_assemble(&mut mlt_sort_reader, &mlt_config).expect("mlt assemble should succeed");
+        let mut mlt_reader =
+            crate::pmtiles_reader::PmtilesReader::open(&mlt_output).expect("open mlt pmtiles");
+        let mlt_metadata = mlt_reader.read_metadata().expect("read mlt metadata");
+        let mlt_json: serde_json::Value =
+            serde_json::from_str(&mlt_metadata).expect("parse mlt metadata");
+        assert_eq!(
+            mlt_reader.tile_type(),
+            0,
+            "mlt header tile_type should remain unknown"
+        );
+        assert_eq!(
+            mlt_reader.tile_compression(),
+            1,
+            "mlt header tile_compression should be none"
+        );
+        assert_eq!(mlt_json["tile_payload_format"], "mlt");
+        assert_eq!(mlt_json["tile_compression"], "none");
+    }
 }
 
 // -----------------------------------------------------------------------

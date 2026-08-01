@@ -2,12 +2,28 @@
 name = "elivagar"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
 license = "Apache-2.0"
 description = "Shortbread vector tile generator - reads OSM PBF files and produces PMTiles v3 archives"
 repository = "https://github.com/folknor/elivagar"
 readme = "README.md"
 keywords = ["openstreetmap", "vector-tiles", "pmtiles", "shortbread", "tiles"]
 categories = ["command-line-utilities", "science::geo"]
+# Development state that is committed but has no business in a published
+# crate: the corpus baseline and its SVG renders, transient notes, the
+# benchmark database, and the Node validation harness.
+exclude = [
+    "corpus/",
+    "notes/",
+    "docs/",
+    "research/",
+    "overnight-logs/",
+    "scripts/",
+    ".brokkr/",
+    "brokkr.toml",
+    "overnight.sh",
+    "tile_weights.tsv.gz",
+]
 
 [[bin]]
 name = "elivagar"
@@ -29,14 +45,14 @@ brotli = "8.0.4"
 lz4_flex = "0.14"
 snap = "1"
 smallvec = "1.15.2"
-hotpath = "0.21.1"
+hotpath = "0.22.0"
 rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-mlt-core = "0.12.3"
+mlt-core = { version = "0.12.3", optional = true }
 geo-types = "0.7.19"
 libc = "0.2"
 
@@ -95,6 +111,14 @@ disallowed_types = "deny"
 # The system allocator is the allocator (see the note in main.rs; mimalloc
 # and jemalloc lost the measured A/B at 98824b4 and were removed).
 default = []
+# MLT (MapLibre Tile) output. Off by default: the encoder is real and
+# round-trips through mlt-core in tests, but no client has ever consumed its
+# output, the path carries no per-tile compression, and no standing gate
+# covers it (the corpus baseline, earcut oracle and verify are all MVT).
+# Shipping it on by default would put an unvalidated wire format behind a
+# stable-looking flag. mlt-core is pre-1.0 and moves; keeping the dep optional
+# also keeps it out of the default build graph.
+mlt = ["dep:mlt-core"]
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 # linux-io-uring = ["dep:io-uring", "dep:libc"]
