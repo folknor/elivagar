@@ -19,7 +19,7 @@ Reads OSM PBF files and produces
 [Shortbread](https://shortbread-tiles.org/) schema (26 layers).
 
 **The full planet renders to a 58.7 GiB archive in 9m32s on a 16-core
-desktop with 30.5 GiB of RAM - bounded memory, no big iron.**
+desktop, peaking at 12.7 GB of RAM.**
 
 Developed on Linux, untested elsewhere.
 
@@ -214,7 +214,8 @@ Full analysis: [`notes/tile-comparison-2026-02-24.md`](notes/tile-comparison-202
 
 ### Planet
 
-A full planet build, 2026-07-31, on a 16-core desktop with 30.5 GiB of RAM:
+A full planet build, 2026-07-31, on a 16-core desktop. The host had
+30.5 GiB of RAM available; the run used 12.7 GB of it:
 
 | | |
 |---|---|
