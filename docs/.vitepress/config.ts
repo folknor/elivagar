@@ -19,7 +19,14 @@ export default defineConfig({
   ],
 
   themeConfig: {
-    logo: '/elivagar-logo.svg',
+    // Wordmark in the header, so the nav title text is suppressed - otherwise
+    // it reads "elivagar" twice. The hero on the home page uses the icon-only
+    // pair instead, since hero.name already supplies the wordmark there.
+    logo: {
+      light: '/elivagar-logo-text.svg',
+      dark: '/elivagar-logo-text-dark.svg',
+    },
+    siteTitle: false,
 
     nav: [
       { text: 'Guide', link: '/guide/' },

@@ -6,7 +6,8 @@ hero:
   text: "Shortbread vector tiles at planet scale"
   tagline: "Reads OSM PBF, writes PMTiles v3. The full planet in 9m32s on a 16-core desktop, peaking at 12.7 GB of RAM."
   image:
-    src: /elivagar-logo.svg
+    light: /elivagar-logo.svg
+    dark: /elivagar-logo-dark.svg
     alt: Elivagar logo
   actions:
     - theme: brand
