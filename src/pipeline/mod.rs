@@ -148,18 +148,25 @@ pub struct TilegenConfig {
     /// Thread budget. Controls the rayon global pool size and pbfhogg decode pool.
     /// Default: `std::thread::available_parallelism()` (logical CPUs).
     pub threads: usize,
-    /// Byte budget for in-flight way processing.
+    /// Raw-byte budget for in-flight way processing.
     /// 0 = mode-aware default:
     /// - 128 MB (standard node-store path)
-    /// - 256 MB (`locations_on_ways` mode)
+    /// - 4 GB (`locations_on_ways` mode)
     ///
-    /// Controls memory during the PBF way phase. Lower values reduce peak RSS
-    /// at the cost of less parallelism.
+    /// Safety net against individually huge blocks; the count ceiling
+    /// (threads) is the primary admission control.
     pub way_inflight_budget: usize,
     /// Byte budget for assemble tile batches (0 = default 32 MB).
     /// Controls memory during tile assembly. Dense urban tiles at z14 can
     /// make fixed-count batches very large.
     pub assemble_batch_budget: usize,
+    /// Entry cap for the PMTiles payload dedup map (0 = default 1M).
+    /// Tile content is identical under any cap; past it, duplicate payloads
+    /// are stored instead of referenced, costing archive bytes. The map costs
+    /// ~56 bytes/entry of RAM. Not part of the provenance comparability
+    /// contract for the same reason budgets are not: it cannot change what a
+    /// consumer decodes from any tile.
+    pub dedup_cap: usize,
     /// Byte budget per sort chunk (0 = default 1 GB).
     /// Records buffer in memory up to this limit, then flush as a sorted
     /// chunk file to disk. Lower values reduce peak RSS during PBF processing
@@ -1318,6 +1325,7 @@ pub fn ocean_build(
         threads,
         way_inflight_budget: 0,
         assemble_batch_budget: 0,
+        dedup_cap: 0,
         sort_chunk_size: DEFAULT_SORT_CHUNK_SIZE,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,

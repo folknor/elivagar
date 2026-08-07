@@ -175,6 +175,7 @@ itself named explicitly and hashed into provenance.
 |---|---|---|
 | `--sort-budget <SIZE>` | 1G | per-chunk sort buffer. Min 64M. Lower cuts phase12 RSS, costs merge chunks |
 | `--way-budget <SIZE>` | 128M, or 4G under `--locations-on-ways` | in-flight way processing, in raw bytes (decompressed block size plus measured plan bytes). Min 1M. The count ceiling (`threads` blocks in flight) is the primary admission control; this budget is a safety net against individually huge blocks and never binds on normal input, whatever the blob packing. See the constant's comment in `src/pipeline/phase12.rs` |
+| `--dedup-cap <N>` | 1000000 | entry cap for the PMTiles payload dedup map. Tile content is identical under any cap; past it duplicate payloads are stored instead of referenced, costing archive bytes, and the map costs ~56 bytes/entry of RAM. Deliberately outside the provenance contract, like the budgets: it cannot change what a consumer decodes |
 | `--assemble-budget <SIZE>` | 32M | tile assembly batch. Min 1M |
 
 Sizes accept `256M`, `1G`, or raw bytes.

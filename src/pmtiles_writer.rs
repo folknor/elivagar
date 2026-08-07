@@ -796,9 +796,11 @@ impl PmtilesWriter {
         }
     }
 
-    /// Override the dedup map capacity (test-only).
-    #[cfg(test)]
-    fn set_dedup_cap(&mut self, cap: usize) {
+    /// Override the dedup map capacity. Caps the payload dedup map's entry
+    /// count; tile content is identical under any cap - what changes is how
+    /// many duplicate payload copies the archive stores, and the map's RAM
+    /// (~56 bytes/entry).
+    pub fn set_dedup_cap(&mut self, cap: usize) {
         self.dedup_cap = cap;
     }
 

@@ -204,6 +204,9 @@ pub(super) fn phase_assemble_with_ocean(
     } else {
         PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir, &config.output_path)?
     };
+    if config.dedup_cap > 0 {
+        pmtiles.set_dedup_cap(config.dedup_cap);
+    }
     match config.tile_format {
         TilePayloadFormat::Mvt => {
             let compression = match config.tile_compression {

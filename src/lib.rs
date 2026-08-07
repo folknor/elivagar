@@ -29,6 +29,7 @@
 //!     threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
 //!     way_inflight_budget: 0,
 //!     assemble_batch_budget: 0,
+//!     dedup_cap: 0,
 //!     sort_chunk_size: 0,
 //!     locations_on_ways: false,
 //!     tile_format: elivagar::TilePayloadFormat::Mvt,

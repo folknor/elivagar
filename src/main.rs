@@ -135,6 +135,13 @@ struct RunArgs {
     #[arg(long, value_parser = parse_byte_size_min_1m)]
     assemble_budget: Option<usize>,
 
+    /// Entry cap for the PMTiles payload dedup map. Default 1000000.
+    /// Tile content is identical under any cap; past it duplicate payloads
+    /// are stored instead of referenced (archive bytes), and the map costs
+    /// ~56 bytes per entry of RAM.
+    #[arg(long)]
+    dedup_cap: Option<usize>,
+
     /// PBF has node coordinates embedded in ways.
     #[arg(long)]
     locations_on_ways: bool,
@@ -863,6 +870,7 @@ fn run(args: RunArgs) {
         threads,
         way_inflight_budget: args.way_budget.unwrap_or(0),
         assemble_batch_budget: args.assemble_budget.unwrap_or(0),
+        dedup_cap: args.dedup_cap.unwrap_or(0),
         sort_chunk_size: args.sort_budget.unwrap_or(0),
         locations_on_ways: args.locations_on_ways,
         tile_format: match args.tile_format {
