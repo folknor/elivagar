@@ -92,48 +92,17 @@ changes in elivagar (generation), nidhogg (serving), and the frontend renderer.
 
 ## WebMercator coupling points in elivagar
 
-12 coupling points identified, concentrated in geometry.rs, ocean.rs, pmtiles_writer.rs:
-
-### Very Hard to abstract
-
-- **Mercator projection math** (geometry.rs:128-196): WGS84-to-Mercator formulas,
-  2^18-entry LUT, EARTH_CIRCUMFERENCE constant, +/-85.05 degree clamping.
-  Would need complete rewrite per projection.
-
-- **Hilbert curve tile IDs** (pmtiles_writer.rs:944-1037): `n = 2^z` square grid,
-  cumulative offset `(4^z - 1) / 3`. Fundamentally assumes square grids.
-
-### Hard to abstract
-
-- **Tile coordinate conversion** (geometry.rs:214-218, 634-647): Tile size = 1/2^z
-  Mercator units. ClipRect::for_tile() builds clip rects from this assumption.
-
-- **Simplification tolerance** (geometry.rs:25,43,58,225-228): `SIMPLIFY_PIXELS /
-  (256.0 * 2^z)` in Mercator units. Tied to 256px tiles on a 2^z grid.
-
-- **Ocean shapefile** (ocean.rs:2-3, 104-105, 157, 220-222): Assumes EPSG:3857 format
-  (`water-polygons-split-3857`), direct `from_epsg3857()` calls, z8 splitting on
-  Mercator grid.
-
-- **Land mask** (geometry.rs:1491-1595): z14 = 2^14 x 2^14 bitset, ancestor lookup
-  via bit-shift. Completely hardcoded to z14 WebMercator resolution.
-
-- **DDA rasterization** (ocean.rs:602-683): Integer grid floor(p * 2^z). Specific to
-  XYZ WebMercator grid enumeration.
-
-### Medium difficulty
-
-- **Tile grid iteration in ocean** (ocean.rs:408-442): 2^z grid enumeration.
-- **Zoom range constraints** (pipeline.rs:370-374): Max zoom = 14.
-- **Tile extent / pixel constants** (geometry.rs:20,28,32): 4096 extent, 256px tiles,
-  8px buffer. These are MVT spec, not projection-specific, but simplification math
-  depends on them.
-- **Subpixel checks** (geometry.rs:42-96): 256x256px, 4096 extent thresholds.
-
-### Easy
-
-- **PMTiles bounds & center** (pipeline.rs:2862-2863): Hardcoded [-180, 180] x
-  [-85.05, 85.05]. Could be computed from projection bounds.
+STALE as of 2026-08-07: the March coupling-point inventory (12 points
+across geometry.rs, ocean.rs, pmtiles_writer.rs) described code that no
+longer exists - the integer-engine rewrite deleted the LandMask, the DDA
+rasterization, and the S-H clipping path it audited, and the ocean phase
+was rebuilt twice since. The structural conclusions survive: the Mercator
+projection math, the square-grid Hilbert addressing in the PMTiles
+writer, and the per-zoom quantization space (`OSM_POLYGON_MAX_Z` pixel
+grid) remain deeply load-bearing, and early quantization has, if
+anything, coupled the geometry engine to the z14 grid more tightly than
+in March. Re-inventory against the current tree before any design work;
+the deleted inventory is in this file's git history.
 
 ## External blockers
 

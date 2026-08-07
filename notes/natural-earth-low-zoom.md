@@ -1,6 +1,15 @@
 # Natural Earth Low-Zoom Layers
 
-Investigated 2026-03-06.
+Investigated 2026-03-06. Status 2026-08-07: unimplemented, still a
+plausible quality feature (`brokkr download-natural-earth` already exists
+for the data half). The research half below is sound. The implementation
+design is STALE on three points and needs a rewrite at spec time: the
+proposed `data/` auto-detection is banned (explicit-or-not-set, see
+reference/cli.md); the ocean phase it uses as a template was rebuilt
+twice since (integer pyramid descent, then the H5 artifact); and the
+"heavy DP simplification at z0-5" cost framing predates the descent,
+which changed the low-zoom cost model - re-measure before pricing the
+benefit.
 
 ## Problem
 

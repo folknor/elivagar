@@ -646,8 +646,8 @@ re-grouping helps - emission bisects an over-cap shape's clip rect
 until every piece fits, halves closed at the shared integer cut
 coordinate. Census now reads 0 over cap on the world artifact and on
 denmark, every polygon layer. Calibration record:
-reference/performance.md, ring-cap partition section; spec
-notes/ring-cap-partition-spec.md.
+reference/performance.md, ring-cap partition section; the spec note was
+deleted after the landing and lives in git history.
 
 ### H6: Way-path churn and the engine surface
 

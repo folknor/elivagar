@@ -103,8 +103,9 @@ Specifications are saved to the ./notes folder.
 10. **The standing references.** Every spec MUST cite, by path: this document
     (`reference/technical-implementation-spec.md`) as the contract it is
     written against, AND the document the spec was spawned from (the item's
-    source naming the problem - e.g. the owning `notes/*.md` writeup such
-    as `notes/rendering-postmortem.md`), if it exists.
+    source naming the problem - e.g. the owning `notes/*.md` writeup, or a
+    durable record such as `reference/rendering-postmortem.md`), if it
+    exists.
     The measurement record is `reference/performance.md` plus
     `.brokkr/results.db`: a spec that claims a performance effect, or whose
     changes touch a measured path, states the pre-change baseline (host +

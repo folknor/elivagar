@@ -1,5 +1,10 @@
 # Within-layer feature ordering: how planetiler, tilemaker, and tippecanoe do it
 
+Status 2026-08-07: the survey served its purpose - elivagar's paint-order
+key landed (`src/shortbread/paint_order.rs`, part of the chunk-independent
+total record order). Kept as don't-redo research on the vendored
+competitor sources; nothing here is a work item.
+
 Survey of the three vendored competitor tile generators, focused on the
 questions behind elivagar's upcoming paint-order key: what they sort by,
 where in the code, whether the order is physical or attribute-based, how they

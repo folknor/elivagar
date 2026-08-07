@@ -790,8 +790,9 @@ normalized shape's buffered tile rect - longer axis, ties to x, halves closed
 at the shared integer cut coordinate - and recurses until every piece fits
 under the cap. Clipping runs at min-area 0 (island survival was decided by
 `normalize_into` upstream); a piece still over the cap in an indivisible rect
-is a hard error, not an emission. Spec: `notes/ring-cap-partition-spec.md`,
-critiqued pre-code by codex-xhigh (14 findings).
+is a hard error, not an emission. Spec: ring-cap-partition-spec, critiqued
+pre-code by codex-xhigh (14 findings); the spec note was deleted after the
+landing per convention and lives in git history.
 
 Readings at the landing (`b6b6844`), all on plantasjen:
 

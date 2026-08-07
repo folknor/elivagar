@@ -36,8 +36,11 @@ the full Shortbread schema (26 layers, z0-z14).
   bisection, because MapLibre's `classifyRings` clamps each classified
   polygon at 500 rings and silently drops the rest. Halves share their
   integer cut coordinate, so pieces abut exactly under nonzero fill.
-- Shared-edge seam reconciliation for boundary layers at low zoom
-  (`--seam-reconcile-layers`, default `boundaries:8`).
+- Shared-edge seam reconciliation for polygon layers at low zoom
+  (`--seam-reconcile-layers`). The default, `boundaries:8`, is inert:
+  the boundaries layer emits lines and reconciliation processes only
+  polygon features, so the machinery activates only when pointed at a
+  polygon layer.
 - Per-layer fanout caps (`--fanout-cap`) as the policy backstop for
   pathological features.
 

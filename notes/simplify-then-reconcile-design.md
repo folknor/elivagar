@@ -1,7 +1,17 @@
 # Design: Simplify-Then-Reconcile Seam Fix
 
-**Status:** Design doc (not yet implemented)
-**Prerequisite reading:** `notes/tile-seam-fix-2026-03-06.md`, TODO.md Phase 3A findings
+**Status:** Design doc, not implemented. RE-VERIFIED 2026-08-07: the
+critical finding below still holds in the current tree - the default
+`--seam-reconcile-layers boundaries` is a no-op end to end
+(`reconcile_boundary_seams` skips non-polygon features, the deferral
+hook exists only in the polygon emission paths, and the boundaries
+layer emits only lines). Pending a decision: either implement a
+line-reconcile path / retarget the flag at polygon layers, or delete
+the flag and the dead machinery. The design options below predate the
+P1 pyramid descent and pinned-DP machinery and need re-grounding
+either way. (The prerequisite reading it once named,
+tile-seam-fix-2026-03-06 and TODO.md, no longer exist outside git
+history.)
 
 ## Problem
 

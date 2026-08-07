@@ -1,6 +1,10 @@
 # Wikidata Multilingual Name Enrichment
 
-Investigated 2026-03-06.
+Investigated 2026-03-06. Status 2026-08-07: unimplemented, still a
+plausible future feature; the Planetiler-mechanics research below remains
+sound. If picked up, the fetch phase belongs in pbfhogg enrichment
+territory (the injected-prepass pattern), not necessarily in elivagar -
+decide at spec time.
 
 ## Problem
 

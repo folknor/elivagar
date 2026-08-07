@@ -183,7 +183,7 @@ Sizes accept `256M`, `1G`, or raw bytes.
 
 | flag | meaning |
 |---|---|
-| `--seam-reconcile-layers <SPEC>` | polygon layers getting shared-edge seam reconciliation at low zoom. `layer` or `layer:maxzoom` (default maxzoom 8), comma-separated. Default `boundaries` |
+| `--seam-reconcile-layers <SPEC>` | polygon layers getting shared-edge seam reconciliation at low zoom. `layer` or `layer:maxzoom` (default maxzoom 8), comma-separated. Default `boundaries` - which is INERT: boundaries emits lines and both the deferral hook and `reconcile_boundary_seams` process polygon features only, so the default defers nothing and reconciles nothing (verified 2026-08-07). Point it at a polygon layer to activate it |
 | `--fanout-cap-default <N>` | default fanout cap for all polygon layers. 0 or omitted = uncapped |
 | `--fanout-cap <layer=N,...>` | per-layer fanout caps; takes precedence over the default. Features whose bbox tile count exceeds the cap are skipped at that zoom |
 | `--polygon-simplify-factor <F>` | simplification multiplier for polygon layers. Default 1.0 (same as lines). Higher simplifies harder, cutting sort volume; fills tolerate this better than stroked lines do |
