@@ -5,7 +5,7 @@
     ],
     "cargo_lock_xxh3_128": "8d075aa9c890d93a33d8343f260e111b",
     "elivagar": {
-      "commit": "a9de34bc5a892bb976002e4f7596b88e8277972a",
+      "commit": "88de4c563133046df74fea247fdb8391f50a25ca",
       "dirty": false
     },
     "pbfhogg_reader": {
@@ -54,7 +54,7 @@
   },
   "schema": 1,
   "style": {
-    "path": "corpus/style.toml",
+    "path": "style.toml",
     "xxh3_128": "ba8b46f98c9c5ba55e9cee0be9bd2f02"
   }
 }
