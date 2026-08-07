@@ -252,10 +252,6 @@ impl LayerBuilder {
         &self.features
     }
 
-    pub(crate) fn features_mut(&mut self) -> &mut [Feature] {
-        &mut self.features
-    }
-
     #[cfg_attr(not(feature = "mlt"), allow(dead_code))]
     pub(crate) fn key(&self, idx: u16) -> Option<&str> {
         self.keys.get(idx as usize).map(String::as_str)
@@ -480,6 +476,11 @@ pub fn encode_linestring(buf: &mut Vec<u32>, coords: &[(i32, i32)]) {
     }
 }
 
+// Production polygon encoding goes through `encode_polygon_ranges`; this
+// slice-of-rings form survives for the decoder round-trip tests in
+// geometry_tests after its last production caller (the seam-reconcile
+// re-encode) was deleted.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn encode_polygon(buf: &mut Vec<u32>, rings: &[&[(i32, i32)]]) {
     buf.clear();
     let mut cx: i32 = 0;

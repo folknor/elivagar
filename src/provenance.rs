@@ -303,11 +303,6 @@ fn layer_map(values: &[u32], zero_is_default: bool) -> Value {
 }
 
 fn config_json(config: &TilegenConfig, ocean: &OceanContract) -> Value {
-    let seam: Vec<u32> = config
-        .seam_reconcile_layers
-        .iter()
-        .map(|&v| u32::from(v))
-        .collect();
     json!({
         "profile": "shortbread",
         "min_zoom": config.min_zoom,
@@ -322,7 +317,6 @@ fn config_json(config: &TilegenConfig, ocean: &OceanContract) -> Value {
             "base_compression_level": config.compression_level,
             "compression_policy": "zoom-v1",
         },
-        "seam_reconcile_layers": layer_map(&seam, true),
         "fanout_caps": layer_map(&config.fanout_caps, true),
         "polygon_simplify_factor": config.polygon_simplify_factor,
         "ocean": ocean.to_json(),
@@ -334,7 +328,7 @@ fn config_json(config: &TilegenConfig, ocean: &OceanContract) -> Value {
 /// This is the subset a `--skip-to` run may NOT change, because the chunks on
 /// disk were produced under it and cannot be reinterpreted: zoom range decides
 /// which zooms have records at all, fanout caps drop features per zoom, and the
-/// simplify factor and seam-reconcile zooms decide which vertices survive.
+/// simplify factor decides which vertices survive.
 /// Resuming with any of these altered silently mixes two configs into one
 /// archive and then records only the second.
 ///
@@ -346,17 +340,11 @@ fn config_json(config: &TilegenConfig, ocean: &OceanContract) -> Value {
 /// Compared as JSON rather than as a struct so the float factor needs no
 /// float-equality dance, and so a mismatch can name the field that differs.
 pub fn producer_config(config: &TilegenConfig) -> Value {
-    let seam: Vec<u32> = config
-        .seam_reconcile_layers
-        .iter()
-        .map(|&v| u32::from(v))
-        .collect();
     json!({
         "min_zoom": config.min_zoom,
         "max_zoom": config.max_zoom,
         "fanout_caps": layer_map(&config.fanout_caps, true),
         "polygon_simplify_factor": config.polygon_simplify_factor,
-        "seam_reconcile_layers": layer_map(&seam, true),
     })
 }
 

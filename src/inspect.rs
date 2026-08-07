@@ -189,8 +189,8 @@ fn read_metadata_state(reader: &mut PmtilesReader, metadata_length: u64) -> Meta
 /// fanout cap would display identically, and a reader who has been told these
 /// lines are the contract would conclude a geometry diff between them means
 /// something about the code. The contract is cheap to print in full because
-/// `layer_map` omits zeros, so the seam and fanout maps are a line each at
-/// most. `build`, `effective` and `execution` follow as diagnostics, which
+/// `layer_map` omits zeros, so the fanout map is a line at most.
+/// `build`, `effective` and `execution` follow as diagnostics, which
 /// explain a diff once the contract matches and must never be equality-gated.
 ///
 /// Every path that cannot produce a contract says which one it is. An archive
@@ -326,11 +326,6 @@ fn print_contract(
             json_str(tile.get("compression_policy")),
         )?;
     }
-    writeln!(
-        out,
-        "                seam: {}",
-        layer_map_display(config.get("seam_reconcile_layers"))
-    )?;
     writeln!(
         out,
         "                fanout: {}",
@@ -937,7 +932,6 @@ mod tests {
                 "base_compression_level": 6,
                 "compression_policy": "zoom-v1"
             },
-            "seam_reconcile_layers": { "boundaries": 8 },
             "fanout_caps": {},
             "polygon_simplify_factor": 1.0,
             "ocean": {
@@ -987,7 +981,6 @@ mod tests {
             out.contains("tile: mvt gzip, base level 6, policy zoom-v1"),
             "{out}"
         );
-        assert!(out.contains("seam: boundaries=8"), "{out}");
         assert!(out.contains("fanout: none"), "{out}");
         assert!(
             out.contains("Ocean:      artifact, low zoom simplified, simplifier on"),

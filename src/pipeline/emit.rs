@@ -17,8 +17,6 @@ use crate::wire_format::{
 };
 use rustc_hash::FxHashMap;
 
-use super::stats::DeferralStats;
-
 // ---------------------------------------------------------------------------
 // Antimeridian helpers (shared by phase12 and relations)
 // ---------------------------------------------------------------------------
@@ -409,8 +407,8 @@ fn polygon_min_area(z: u8, layer: Layer) -> u64 {
     }
 }
 
-fn polygon_dp_tol(z: u8, seam_max_zoom: u8, tol_scale: f64) -> i64 {
-    if z <= seam_max_zoom || z >= OSM_POLYGON_MAX_Z {
+fn polygon_dp_tol(z: u8, tol_scale: f64) -> i64 {
+    if z >= OSM_POLYGON_MAX_Z {
         0
     } else {
         #[allow(clippy::cast_possible_truncation)]
@@ -739,18 +737,9 @@ pub(super) fn emit_polygon_feature(
     z_hi: u8,
     records: &mut impl FeatureRecordSink,
     scratch: &mut PolygonEmitScratch,
-    seam_max_zoom: u8,
-    deferral_stats: Option<&DeferralStats>,
     fanout_cap: u32,
     tol_scale: f64,
 ) -> u64 {
-    let seam_max_zoom =
-        if seam_max_zoom > 0 && deferral_stats.is_some_and(|d| d.is_disabled(m.layer as u8)) {
-            0
-        } else {
-            seam_max_zoom
-        };
-
     scratch.cap_events.clear();
     if merc.len() < 4 {
         return 0;
@@ -794,18 +783,10 @@ pub(super) fn emit_polygon_feature(
     ) else {
         return 0;
     };
-    for z in z_start..=z_bottom {
-        if seam_max_zoom > 0
-            && z <= seam_max_zoom
-            && let Some(ds) = deferral_stats
-        {
-            ds.record(m.layer as u8, merc.len() as u64);
-        }
-    }
 
     clear_attrs_cache(&mut scratch.attrs_by_zoom);
     let pins = (!scratch.base_pins.is_empty()).then_some(&scratch.base_pins);
-    let dp_tol = |z| polygon_dp_tol(z, seam_max_zoom, tol_scale);
+    let dp_tol = |z| polygon_dp_tol(z, tol_scale);
     let min_area = |z| polygon_min_area(z, m.layer);
     let params = PyramidParams {
         maxz: OSM_POLYGON_MAX_Z,
@@ -859,17 +840,9 @@ pub(super) fn emit_multipolygon_feature(
     records: &mut impl FeatureRecordSink,
     emit_scratch: &mut MultipolygonEmitScratch,
     _simp_scratch: &mut geometry::SimplifyMultiScratch,
-    seam_max_zoom: u8,
-    deferral_stats: Option<&DeferralStats>,
     fanout_cap: u32,
     tol_scale: f64,
 ) -> u64 {
-    let seam_max_zoom =
-        if seam_max_zoom > 0 && deferral_stats.is_some_and(|d| d.is_disabled(m.layer as u8)) {
-            0
-        } else {
-            seam_max_zoom
-        };
     emit_scratch.cap_events.clear();
     if let Some(keys) = preserve_vertex_keys.filter(|k| !k.is_empty()) {
         quantize_polygon_pinned_into(
@@ -912,19 +885,10 @@ pub(super) fn emit_multipolygon_feature(
     ) else {
         return 0;
     };
-    for z in z_start..=z_bottom {
-        if seam_max_zoom > 0
-            && z <= seam_max_zoom
-            && let Some(ds) = deferral_stats
-        {
-            let verts = outer.len() as u64 + inners.iter().map(|r| r.len() as u64).sum::<u64>();
-            ds.record(m.layer as u8, verts);
-        }
-    }
 
     clear_attrs_cache(&mut emit_scratch.attrs_by_zoom);
     let pins = (!emit_scratch.base_pins.is_empty()).then_some(&emit_scratch.base_pins);
-    let dp_tol = |z| polygon_dp_tol(z, seam_max_zoom, tol_scale);
+    let dp_tol = |z| polygon_dp_tol(z, tol_scale);
     let min_area = |z| polygon_min_area(z, m.layer);
     let params = PyramidParams {
         maxz: OSM_POLYGON_MAX_Z,
@@ -1071,8 +1035,6 @@ mod landing2_tests {
             14,
             &mut records,
             &mut scratch,
-            0,
-            None,
             0,
             1.0,
         );

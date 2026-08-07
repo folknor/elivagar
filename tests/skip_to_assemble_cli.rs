@@ -24,8 +24,6 @@ use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 /// version is what a resume checks first, so a test asserting resume
 /// behaviour must state which format it is asserting about.
 fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
-    let mut seam = [0u8; elivagar::shortbread::Layer::count()];
-    seam[elivagar::shortbread::Layer::Boundaries as usize] = 8;
     let config = elivagar::TilegenConfig {
         pbf_path: std::path::PathBuf::from("unused.osm.pbf"),
         output_path: std::path::PathBuf::from("unused.pmtiles"),
@@ -51,7 +49,6 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         tile_format: elivagar::TilePayloadFormat::Mvt,
         tile_compression: elivagar::TileCompression::Gzip,
         compress_sort_chunks: elivagar::sort::ChunkCompression::None,
-        seam_reconcile_layers: seam,
         fanout_caps: [0; elivagar::shortbread::Layer::count()],
         polygon_simplify_factor: 1.0,
     };

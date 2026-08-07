@@ -3,9 +3,9 @@
     "cargo_features": [
       "default"
     ],
-    "cargo_lock_xxh3_128": "b1cf81a67dccd15069f9f96e76918e58",
+    "cargo_lock_xxh3_128": "8d075aa9c890d93a33d8343f260e111b",
     "elivagar": {
-      "commit": "b6b6844bd8bbf0f7906d616a67956f2a6128d1b9",
+      "commit": "a9de34bc5a892bb976002e4f7596b88e8277972a",
       "dirty": false
     },
     "pbfhogg_reader": {
@@ -33,9 +33,6 @@
     },
     "polygon_simplify_factor": 1.0,
     "profile": "shortbread",
-    "seam_reconcile_layers": {
-      "boundaries": 8
-    },
     "tile": {
       "base_compression_level": 6,
       "compression": "gzip",

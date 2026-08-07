@@ -1,8 +1,7 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use smallvec::SmallVec;
 
-use crate::shortbread;
 use crate::sort;
 
 pub(super) const TILE_OVERSIZE_WARN_BYTES: u64 = 500 * 1024;
@@ -119,7 +118,6 @@ pub(super) struct Phase12Stats {
     pub(super) way_pins_marked: u64,
     pub(super) relation_blocks_drop_rss_kb: Option<u64>,
     pub(super) missing_refs: MissingRefStats,
-    pub(super) deferral_stats: std::sync::Arc<DeferralStats>,
     pub(super) sort_records: u64,
     pub(super) sort_record_bytes: u64,
     pub(super) layer_records: [u64; 32],
@@ -127,57 +125,6 @@ pub(super) struct Phase12Stats {
     pub(super) layer_zoom_records: Box<[u64; 32 * 15]>,
     pub(super) layer_zoom_bytes: Box<[u64; 32 * 15]>,
     pub(super) fanout_stats: FanoutStats,
-}
-
-/// Tracks deferred (unsimplified) vertex counts per layer during PBF processing.
-/// When a layer exceeds the vertex budget, deferral is auto-disabled for that layer.
-pub(super) struct DeferralStats {
-    /// Total deferred vertices per layer (atomically updated from rayon threads).
-    pub(super) vertices: [AtomicU64; shortbread::Layer::count()],
-    /// Per-layer disable flag - set when vertex budget is exceeded.
-    pub(super) disabled: [AtomicBool; shortbread::Layer::count()],
-}
-
-/// Max deferred vertices per layer before auto-disabling deferral.
-/// ~50M vertices ≈ 400 MB of sort record data. Prevents catastrophic
-/// phase12 regressions on geometry-heavy layers (e.g. water_polygons on Norway).
-pub(super) const DEFERRAL_VERTEX_BUDGET: u64 = 50_000_000;
-
-impl DeferralStats {
-    pub(super) fn new() -> Self {
-        Self {
-            vertices: std::array::from_fn(|_| AtomicU64::new(0)),
-            disabled: std::array::from_fn(|_| AtomicBool::new(false)),
-        }
-    }
-
-    /// Record deferred vertices for a layer. Called from rayon threads.
-    pub(super) fn record(&self, layer: u8, vertex_count: u64) {
-        self.vertices[layer as usize].fetch_add(vertex_count, Ordering::Relaxed);
-    }
-
-    /// Check all layers against the budget and disable any that exceed it.
-    /// Called periodically from the serial callback thread.
-    pub(super) fn check_budgets(&self, seam_reconcile_layers: &[u8]) {
-        for (i, max_z) in seam_reconcile_layers.iter().enumerate() {
-            if *max_z > 0
-                && !self.disabled[i].load(Ordering::Relaxed)
-                && self.vertices[i].load(Ordering::Relaxed) > DEFERRAL_VERTEX_BUDGET
-            {
-                self.disabled[i].store(true, Ordering::Relaxed);
-                eprintln!(
-                    "  WARNING: seam deferral auto-disabled for layer {} (>{} deferred vertices)",
-                    shortbread::Layer::ALL[i].name(),
-                    DEFERRAL_VERTEX_BUDGET,
-                );
-            }
-        }
-    }
-
-    /// Check if deferral is disabled for a layer.
-    pub(super) fn is_disabled(&self, layer: u8) -> bool {
-        self.disabled[layer as usize].load(Ordering::Relaxed)
-    }
 }
 
 // ---------------------------------------------------------------------------

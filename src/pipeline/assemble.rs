@@ -1,10 +1,9 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 use crate::debug::{WAIT, emit_counter_u64, emit_counter_usize, wait_span};
-use crate::geometry;
 #[cfg(feature = "mlt")]
 use crate::mlt;
-use crate::mvt::{self, GeomType, LayerBuilder};
+use crate::mvt::{self, LayerBuilder};
 use crate::pmtiles_writer::{
     self, PmtilesConfig, PmtilesWriter, TileDataCompression, TileDataFormat,
 };
@@ -92,12 +91,10 @@ struct PartitionBatchMeta {
     reader_ns: u64,
 }
 
-struct PartitionEncodeCtx<'a> {
+struct PartitionEncodeCtx {
     compression_level: u32,
     tile_format: TilePayloadFormat,
     tile_compression: TileCompression,
-    seam_reconcile_layers: &'a [u8],
-    seam_metrics: &'a SeamMetrics,
 }
 
 #[derive(Clone, Copy)]
@@ -241,49 +238,64 @@ pub(super) fn phase_assemble_with_ocean(
     let (read_tx, read_rx) = sync_channel::<Vec<PendingTile>>(1);
     let (encode_tx, encode_rx) = sync_channel::<Vec<EncodedTile>>(1);
 
-    let seam_metrics = SeamMetrics::new();
-    let scope_result: Result<AssembleCore, PipelineError> =
-        if let Some(partitions) = sort_reader.take_partitions() {
-            phase_assemble_partitions(
-                &partitions,
-                pmtiles,
-                config,
-                &seam_metrics,
-                ocean_tiles.as_deref(),
-            )
-        } else {
-            std::thread::scope(|s| {
-                // --- Reader thread: k-way merge → PendingTile batches ---
-                let reader = s.spawn(move || -> Result<(u64, usize, u64), PipelineError> {
-                    // Single wall-clock span for the whole thread, not per-record: this
-                    // loop calls sort_reader.next() up to ~512M times at NA scale, and
-                    // the k-way merge's read_record() is exactly this thread's serial
-                    // bottleneck (perf-hunt item 14) - per-call #[hotpath::measure]
-                    // would add two clock reads per call, the same overhead problem
-                    // node_index.rs's get_from_group_cached explicitly avoids at a
-                    // similar call count. One Instant::now() pair gives this thread's
-                    // total wall time, comparable against phase_assemble's total to
-                    // see how much of assemble is this serial reader.
-                    let reader_started = std::time::Instant::now();
-                    let mut features_read: u64 = 0;
-                    let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
-                    let mut current = PendingTile {
-                        tile_id: u64::MAX,
-                        features: Vec::new(),
-                    };
-                    // Incremental byte tracking for assemble batch HWM.
-                    let mut current_tile_bytes: usize = 0;
-                    let mut batch_bytes: usize = 0;
-                    let mut max_batch_bytes: usize = 0;
+    let scope_result: Result<AssembleCore, PipelineError> = if let Some(partitions) =
+        sort_reader.take_partitions()
+    {
+        phase_assemble_partitions(&partitions, pmtiles, config, ocean_tiles.as_deref())
+    } else {
+        std::thread::scope(|s| {
+            // --- Reader thread: k-way merge → PendingTile batches ---
+            let reader = s.spawn(move || -> Result<(u64, usize, u64), PipelineError> {
+                // Single wall-clock span for the whole thread, not per-record: this
+                // loop calls sort_reader.next() up to ~512M times at NA scale, and
+                // the k-way merge's read_record() is exactly this thread's serial
+                // bottleneck (perf-hunt item 14) - per-call #[hotpath::measure]
+                // would add two clock reads per call, the same overhead problem
+                // node_index.rs's get_from_group_cached explicitly avoids at a
+                // similar call count. One Instant::now() pair gives this thread's
+                // total wall time, comparable against phase_assemble's total to
+                // see how much of assemble is this serial reader.
+                let reader_started = std::time::Instant::now();
+                let mut features_read: u64 = 0;
+                let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
+                let mut current = PendingTile {
+                    tile_id: u64::MAX,
+                    features: Vec::new(),
+                };
+                // Incremental byte tracking for assemble batch HWM.
+                let mut current_tile_bytes: usize = 0;
+                let mut batch_bytes: usize = 0;
+                let mut max_batch_bytes: usize = 0;
 
-                    loop {
-                        let record = sort_reader.next()?;
-                        let Some(r) = record else {
-                            if current.tile_id != u64::MAX {
-                                batch_bytes += 32 + current_tile_bytes;
-                                batch.push(current);
+                loop {
+                    let record = sort_reader.next()?;
+                    let Some(r) = record else {
+                        if current.tile_id != u64::MAX {
+                            batch_bytes += 32 + current_tile_bytes;
+                            batch.push(current);
+                        }
+                        if !batch.is_empty() {
+                            if batch_bytes > max_batch_bytes {
+                                max_batch_bytes = batch_bytes;
                             }
-                            if !batch.is_empty() {
+                            let send_result = {
+                                let _wait = wait_span(&WAIT.assemble_reader_backpressure);
+                                read_tx.send(batch)
+                            };
+                            drop(send_result); // ignore: encoder may have exited
+                        }
+                        break;
+                    };
+                    features_read += 1;
+
+                    let tile_id = sort::tile_id_from_key(r.key);
+                    let layer_idx = sort::layer_from_key(r.key);
+
+                    if tile_id != current.tile_id {
+                        if current.tile_id != u64::MAX {
+                            batch_bytes += 32 + current_tile_bytes;
+                            batch.push(current);
+                            if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
                                 if batch_bytes > max_batch_bytes {
                                     max_batch_bytes = batch_bytes;
                                 }
@@ -291,52 +303,31 @@ pub(super) fn phase_assemble_with_ocean(
                                     let _wait = wait_span(&WAIT.assemble_reader_backpressure);
                                     read_tx.send(batch)
                                 };
-                                drop(send_result); // ignore: encoder may have exited
-                            }
-                            break;
-                        };
-                        features_read += 1;
-
-                        let tile_id = sort::tile_id_from_key(r.key);
-                        let layer_idx = sort::layer_from_key(r.key);
-
-                        if tile_id != current.tile_id {
-                            if current.tile_id != u64::MAX {
-                                batch_bytes += 32 + current_tile_bytes;
-                                batch.push(current);
-                                if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
-                                    if batch_bytes > max_batch_bytes {
-                                        max_batch_bytes = batch_bytes;
-                                    }
-                                    let send_result = {
-                                        let _wait = wait_span(&WAIT.assemble_reader_backpressure);
-                                        read_tx.send(batch)
-                                    };
-                                    if send_result.is_err() {
-                                        break;
-                                    }
-                                    batch = Vec::with_capacity(BATCH_SIZE);
-                                    batch_bytes = 0;
+                                if send_result.is_err() {
+                                    break;
                                 }
+                                batch = Vec::with_capacity(BATCH_SIZE);
+                                batch_bytes = 0;
                             }
-                            current = PendingTile {
-                                tile_id,
-                                features: Vec::new(),
-                            };
-                            current_tile_bytes = 0;
                         }
-                        let data_len = r.data.len();
-                        current.features.push((layer_idx, r.data));
-                        current_tile_bytes += 32 + data_len;
+                        current = PendingTile {
+                            tile_id,
+                            features: Vec::new(),
+                        };
+                        current_tile_bytes = 0;
                     }
-                    #[allow(clippy::cast_possible_truncation)]
-                    let reader_ns = reader_started.elapsed().as_nanos() as u64;
-                    Ok((features_read, max_batch_bytes, reader_ns))
-                });
+                    let data_len = r.data.len();
+                    current.features.push((layer_idx, r.data));
+                    current_tile_bytes += 32 + data_len;
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                let reader_ns = reader_started.elapsed().as_nanos() as u64;
+                Ok((features_read, max_batch_bytes, reader_ns))
+            });
 
-                // --- Writer thread: encoded tiles → PMTiles ---
-                // move takes ownership of pmtiles; returned via join handle for write_to().
-                let writer = s.spawn(
+            // --- Writer thread: encoded tiles → PMTiles ---
+            // move takes ownership of pmtiles; returned via join handle for write_to().
+            let writer = s.spawn(
                 move || -> (
                     u64,
                     PmtilesWriter,
@@ -388,67 +379,61 @@ pub(super) fn phase_assemble_with_ocean(
                 },
             );
 
-                // --- Main thread: receive batches, encode with rayon, forward to writer ---
-                let compression_level = config.compression_level;
-                let tile_format = config.tile_format;
-                let tile_compression = config.tile_compression;
-                loop {
-                    let batch = {
-                        let _wait = wait_span(&WAIT.assemble_encode_input);
-                        match read_rx.recv() {
-                            Ok(batch) => batch,
-                            Err(_) => break,
-                        }
-                    };
-                    let encoded = encode_tile_batch(
-                        &batch,
-                        compression_level,
-                        tile_format,
-                        tile_compression,
-                        &config.seam_reconcile_layers,
-                        &seam_metrics,
-                    )?;
-                    let send_result = {
-                        let _wait = wait_span(&WAIT.assemble_writer_backpressure);
-                        encode_tx.send(encoded)
-                    };
-                    if send_result.is_err() {
-                        break;
+            // --- Main thread: receive batches, encode with rayon, forward to writer ---
+            let compression_level = config.compression_level;
+            let tile_format = config.tile_format;
+            let tile_compression = config.tile_compression;
+            loop {
+                let batch = {
+                    let _wait = wait_span(&WAIT.assemble_encode_input);
+                    match read_rx.recv() {
+                        Ok(batch) => batch,
+                        Err(_) => break,
                     }
-                }
-                drop(encode_tx);
-
-                let (features_read, max_batch_bytes, reader_ns) = {
-                    let _wait = wait_span(&WAIT.assemble_reader_join);
-                    reader.join().expect("reader panicked")
-                }?;
-                let (
-                    tiles_written,
-                    pmtiles,
-                    tiles_per_zoom,
-                    unique_per_zoom,
-                    bytes_per_zoom,
-                    size_diag,
-                ) = {
-                    let _wait = wait_span(&WAIT.assemble_writer_join);
-                    writer.join().expect("writer panicked")
                 };
-                Ok(AssembleCore {
-                    features_read,
-                    tiles_written,
-                    pmtiles,
-                    tiles_per_zoom,
-                    unique_per_zoom,
-                    bytes_per_zoom,
-                    max_batch_bytes,
-                    size_diag,
-                    reader_ns,
-                    reader_total_ns: None,
-                    partition_workers: None,
-                    partition_count: None,
-                })
+                let encoded =
+                    encode_tile_batch(&batch, compression_level, tile_format, tile_compression)?;
+                let send_result = {
+                    let _wait = wait_span(&WAIT.assemble_writer_backpressure);
+                    encode_tx.send(encoded)
+                };
+                if send_result.is_err() {
+                    break;
+                }
+            }
+            drop(encode_tx);
+
+            let (features_read, max_batch_bytes, reader_ns) = {
+                let _wait = wait_span(&WAIT.assemble_reader_join);
+                reader.join().expect("reader panicked")
+            }?;
+            let (
+                tiles_written,
+                pmtiles,
+                tiles_per_zoom,
+                unique_per_zoom,
+                bytes_per_zoom,
+                size_diag,
+            ) = {
+                let _wait = wait_span(&WAIT.assemble_writer_join);
+                writer.join().expect("writer panicked")
+            };
+            Ok(AssembleCore {
+                features_read,
+                tiles_written,
+                pmtiles,
+                tiles_per_zoom,
+                unique_per_zoom,
+                bytes_per_zoom,
+                max_batch_bytes,
+                size_diag,
+                reader_ns,
+                reader_total_ns: None,
+                partition_workers: None,
+                partition_count: None,
             })
-        };
+        })
+    };
 
     let AssembleCore {
         features_read,
@@ -535,39 +520,6 @@ pub(super) fn phase_assemble_with_ocean(
         }
     }
 
-    // Shared-edge reconciliation metrics.
-    let seam_touched = seam_metrics.tiles_touched.load(Ordering::Relaxed);
-    if seam_touched > 0 {
-        let seam_layer_descs: Vec<String> = config
-            .seam_reconcile_layers
-            .iter()
-            .enumerate()
-            .filter(|(_, max_z)| **max_z > 0)
-            .map(|(i, max_z)| format!("{}:z{}", shortbread::Layer::ALL[i].name(), max_z))
-            .collect();
-        let seam_rings = seam_metrics.rings_decoded.load(Ordering::Relaxed);
-        let seam_chains = seam_metrics.chains_detected.load(Ordering::Relaxed);
-        let seam_reconciled = seam_metrics.chains_reconciled.load(Ordering::Relaxed);
-        let seam_skipped = seam_metrics.chains_skipped.load(Ordering::Relaxed);
-        let seam_us = seam_metrics.reconcile_us.load(Ordering::Relaxed);
-        eprintln!(
-            "  Seam reconciliation ({}): {} tiles, {} rings, {} chains ({} reconciled, {} skipped), {:.1} ms",
-            seam_layer_descs.join("+"),
-            seam_touched,
-            seam_rings,
-            seam_chains,
-            seam_reconciled,
-            seam_skipped,
-            seam_us as f64 / 1000.0,
-        );
-        emit_counter_u64("seam_tiles_touched", seam_touched);
-        emit_counter_u64("seam_rings_decoded", seam_rings);
-        emit_counter_u64("seam_chains_detected", seam_chains);
-        emit_counter_u64("seam_chains_reconciled", seam_reconciled);
-        emit_counter_u64("seam_chains_skipped", seam_skipped);
-        emit_counter_u64("seam_reconcile_us", seam_us);
-    }
-
     Ok((
         features_read,
         tiles_written,
@@ -583,7 +535,6 @@ fn phase_assemble_partitions(
     partitions: &[sort::SortPartition],
     mut pmtiles: PmtilesWriter,
     config: &TilegenConfig,
-    seam_metrics: &SeamMetrics,
     ocean: Option<&crate::ocean::OceanTiles>,
 ) -> Result<AssembleCore, PipelineError> {
     use std::collections::BTreeMap;
@@ -708,7 +659,6 @@ fn phase_assemble_partitions(
     let compression_level = config.compression_level;
     let tile_format = config.tile_format;
     let tile_compression = config.tile_compression;
-    let seam_reconcile_layers = config.seam_reconcile_layers;
     let assemble_budget = if config.assemble_batch_budget > 0 {
         config.assemble_batch_budget
     } else {
@@ -741,7 +691,6 @@ fn phase_assemble_partitions(
             let union_ref = &union;
             let next_job_ref = &next_job;
             let stop_ref = &stop;
-            let seam_layers = seam_reconcile_layers;
             s.spawn(move || {
                 loop {
                     if stop_ref.load(Ordering::Relaxed) {
@@ -782,8 +731,6 @@ fn phase_assemble_partitions(
                                         compression_level,
                                         tile_format,
                                         tile_compression,
-                                        &seam_layers,
-                                        seam_metrics,
                                         assemble_budget,
                                         artifact_ctx,
                                         &tx,
@@ -801,8 +748,6 @@ fn phase_assemble_partitions(
                                         compression_level,
                                         tile_format,
                                         tile_compression,
-                                        &seam_layers,
-                                        seam_metrics,
                                         assemble_budget,
                                         artifact_ctx,
                                         &tx,
@@ -1040,8 +985,6 @@ fn read_encode_partition(
     compression_level: u32,
     tile_format: TilePayloadFormat,
     tile_compression: TileCompression,
-    seam_reconcile_layers: &[u8],
-    seam_metrics: &SeamMetrics,
     assemble_budget: usize,
     artifact: Option<ArtifactPartitionCtx<'_>>,
     tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
@@ -1071,8 +1014,6 @@ fn read_encode_partition(
                 compression_level,
                 tile_format,
                 tile_compression,
-                seam_reconcile_layers,
-                seam_metrics,
             };
             let mut artifact_cursor = range_start;
             while let Ok((meta, batch, final_end)) = batch_rx.recv() {
@@ -1483,7 +1424,7 @@ fn compression_level_for_zoom(z: u8, compression_level: u32) -> u32 {
 
 fn encode_and_send_partition_batch(
     tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
-    ctx: &PartitionEncodeCtx<'_>,
+    ctx: &PartitionEncodeCtx,
     meta: &PartitionBatchMeta,
     pending_tiles: &[PendingTile],
     artifact: Option<ArtifactPartitionCtx<'_>>,
@@ -1498,8 +1439,6 @@ fn encode_and_send_partition_batch(
             ctx.compression_level,
             ctx.tile_format,
             ctx.tile_compression,
-            ctx.seam_reconcile_layers,
-            ctx.seam_metrics,
         )?
     };
     let mut items = Vec::with_capacity(encoded_tiles.len());
@@ -1630,32 +1569,6 @@ pub(super) struct AssemblyScratch {
     pub(super) gz_buf: Vec<u8>,
     pub(super) mvt_buf: Vec<u8>,
     pub(super) layers: [Option<LayerBuilder>; LAYER_COUNT],
-    pub(super) seam_rings: Vec<Vec<(i32, i32)>>,
-    pub(super) seam_provenance: Vec<(usize, usize)>,
-    pub(super) seam_encode_buf: Vec<u32>,
-}
-
-/// Metrics for shared-edge reconciliation in the assemble phase.
-pub(super) struct SeamMetrics {
-    pub(super) tiles_touched: AtomicU64,
-    pub(super) rings_decoded: AtomicU64,
-    pub(super) chains_detected: AtomicU64,
-    pub(super) chains_reconciled: AtomicU64,
-    pub(super) chains_skipped: AtomicU64,
-    pub(super) reconcile_us: AtomicU64,
-}
-
-impl SeamMetrics {
-    pub(super) fn new() -> Self {
-        Self {
-            tiles_touched: AtomicU64::new(0),
-            rings_decoded: AtomicU64::new(0),
-            chains_detected: AtomicU64::new(0),
-            chains_reconciled: AtomicU64::new(0),
-            chains_skipped: AtomicU64::new(0),
-            reconcile_us: AtomicU64::new(0),
-        }
-    }
 }
 
 impl AssemblyScratch {
@@ -1678,117 +1591,8 @@ impl AssemblyScratch {
             gz_buf: Vec::new(),
             mvt_buf: Vec::new(),
             layers: [const { None }; LAYER_COUNT],
-            seam_rings: Vec::new(),
-            seam_provenance: Vec::new(),
-            seam_encode_buf: Vec::new(),
         }
     }
-}
-
-/// Shared-edge reconciliation for boundary polygon features in a single tile.
-///
-/// Decodes polygon MVT commands → tile-coord rings, detects shared chains,
-/// copies canonical vertex sequences to matching rings, simplifies non-shared
-/// segments with tile-coordinate DP, and re-encodes back to MVT commands.
-#[allow(clippy::cast_possible_truncation)]
-pub(super) fn reconcile_boundary_seams(
-    lb: &mut LayerBuilder,
-    seam_rings: &mut Vec<Vec<(i32, i32)>>,
-    seam_provenance: &mut Vec<(usize, usize)>,
-    encode_buf: &mut Vec<u32>,
-    metrics: &SeamMetrics,
-) {
-    let start = std::time::Instant::now();
-
-    // Collect all polygon rings from features in this layer.
-    seam_rings.clear();
-    seam_provenance.clear();
-
-    let features = lb.features_mut();
-    let mut polygon_feature_indices: Vec<usize> = Vec::new();
-
-    for (fi, feat) in features.iter().enumerate() {
-        if feat.geom_type != GeomType::Polygon {
-            continue;
-        }
-        let decoded = geometry::decode_mvt_polygon(&feat.geometry);
-        let valid_count = decoded
-            .iter()
-            .filter(|r| r.len() >= 4 && r.first() == r.last())
-            .count();
-        if valid_count == 0 {
-            continue;
-        }
-        let ring_start = seam_rings.len();
-        for ring in decoded {
-            if ring.len() >= 4 && ring.first() == ring.last() {
-                seam_rings.push(ring);
-            }
-        }
-        let ring_count = seam_rings.len() - ring_start;
-        polygon_feature_indices.push(fi);
-        seam_provenance.push((fi, ring_count));
-    }
-
-    if seam_rings.is_empty() {
-        let elapsed_us = start.elapsed().as_micros() as u64;
-        metrics
-            .reconcile_us
-            .fetch_add(elapsed_us, Ordering::Relaxed);
-        return;
-    }
-
-    metrics.tiles_touched.fetch_add(1, Ordering::Relaxed);
-    metrics
-        .rings_decoded
-        .fetch_add(seam_rings.len() as u64, Ordering::Relaxed);
-
-    // Detect shared chains (needs >= 2 rings to find any).
-    let chains = if seam_rings.len() >= 2 {
-        geometry::detect_shared_chains(seam_rings)
-    } else {
-        Vec::new()
-    };
-    metrics
-        .chains_detected
-        .fetch_add(chains.len() as u64, Ordering::Relaxed);
-
-    // Canonicalize: copy first incident's vertices to second incident's ring.
-    if !chains.is_empty() {
-        let canon_result = geometry::canonicalize_shared_chains(seam_rings, &chains);
-        metrics
-            .chains_reconciled
-            .fetch_add(canon_result.reconciled as u64, Ordering::Relaxed);
-        metrics
-            .chains_skipped
-            .fetch_add(canon_result.skipped as u64, Ordering::Relaxed);
-    }
-
-    // Tile-coordinate DP on all rings, pinning shared-chain vertices.
-    // Runs even when no chains were found - these rings skipped PBF-phase DP
-    // and need tile-coord simplification regardless.
-    for (ring_idx, ring) in seam_rings.iter_mut().enumerate() {
-        let pinned = geometry::build_pinned_mask(ring.len(), ring_idx, &chains);
-        let simplified =
-            geometry::simplify_ring_tile_coords(ring, &pinned, geometry::TILE_SIMPLIFY_TOLERANCE);
-        *ring = simplified;
-    }
-
-    // Re-encode each feature's rings back to MVT commands.
-    let mut ring_cursor: usize = 0;
-    for &(fi, ring_count) in seam_provenance.iter() {
-        let feature_rings = &seam_rings[ring_cursor..ring_cursor + ring_count];
-        ring_cursor += ring_count;
-        let ring_refs: Vec<&[(i32, i32)]> = feature_rings.iter().map(Vec::as_slice).collect();
-        mvt::encode_polygon(encode_buf, &ring_refs);
-        features[fi].geometry.clear();
-        features[fi].geometry.extend_from_slice(encode_buf);
-    }
-
-    let elapsed_us = start.elapsed().as_micros() as u64;
-    metrics
-        .reconcile_us
-        .fetch_add(elapsed_us, Ordering::Relaxed);
 }
 
 /// Encode + compress a batch of tiles in parallel using rayon.
@@ -1799,16 +1603,12 @@ pub(super) fn encode_tile_batch(
     compression_level: u32,
     tile_format: TilePayloadFormat,
     tile_compression: TileCompression,
-    seam_reconcile_layers: &[u8],
-    seam_metrics: &SeamMetrics,
 ) -> Result<Vec<EncodedTile>, PipelineError> {
     match tile_format {
         TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(
             batch,
             compression_level,
             tile_compression,
-            seam_reconcile_layers,
-            seam_metrics,
         )),
         #[cfg(feature = "mlt")]
         TilePayloadFormat::Mlt => encode_tile_batch_mlt(batch),
@@ -1833,8 +1633,6 @@ pub(super) fn encode_tile_batch_mvt(
     batch: &[PendingTile],
     compression_level: u32,
     tile_compression: TileCompression,
-    seam_reconcile_layers: &[u8],
-    seam_metrics: &SeamMetrics,
 ) -> Vec<EncodedTile> {
     use rayon::prelude::*;
 
@@ -1857,25 +1655,6 @@ pub(super) fn encode_tile_batch_mvt(
                 }
 
                 let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-
-                // Shared-edge reconciliation for polygon layers at low zoom.
-                // Must run BEFORE merge_same_attr_geometries (which destroys per-ring identity).
-                {
-                    for (li, &max_z) in seam_reconcile_layers.iter().enumerate() {
-                        if max_z > 0
-                            && z <= max_z
-                            && let Some(lb) = s.layers[li].as_mut()
-                        {
-                            reconcile_boundary_seams(
-                                lb,
-                                &mut s.seam_rings,
-                                &mut s.seam_provenance,
-                                &mut s.seam_encode_buf,
-                                seam_metrics,
-                            );
-                        }
-                    }
-                }
 
                 for (li, layer) in s.layers.iter_mut().enumerate() {
                     if li == shortbread::Layer::Ocean as usize {

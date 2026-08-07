@@ -20,8 +20,7 @@ use super::emit::{
 };
 use super::relations::process_relation_blocks;
 use super::stats::{
-    DeferralStats, FanoutStats, MissingRefStatsAtomic, Phase12Stats,
-    record_fanout_from_payload_records,
+    FanoutStats, MissingRefStatsAtomic, Phase12Stats, record_fanout_from_payload_records,
 };
 use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb};
 
@@ -306,7 +305,6 @@ pub(super) fn phase_read_and_process(
     let mut node_store_stats: Option<(u64, usize)> = None;
     let mut fanout_stats = FanoutStats::new();
     let missing_ref_stats = std::sync::Arc::new(MissingRefStatsAtomic::default());
-    let deferral_stats = std::sync::Arc::new(DeferralStats::new());
     // Track data extent for ocean shapefile filtering
     let mut min_lat_e7: i32 = i32::MAX;
     let mut max_lat_e7: i32 = i32::MIN;
@@ -533,10 +531,8 @@ pub(super) fn phase_read_and_process(
                     let way_members_marked_clone = std::sync::Arc::clone(&way_members_marked);
                     let way_pins_marked_clone = std::sync::Arc::clone(&way_pins_marked);
                     let missing_ref_stats_clone = std::sync::Arc::clone(&missing_ref_stats);
-                    let deferral_stats_clone = std::sync::Arc::clone(&deferral_stats);
                     let mz = min_z;
                     let xz = max_z;
-                    let srl = config.seam_reconcile_layers;
                     let fcs = config.fanout_caps;
                     let psf = config.polygon_simplify_factor;
                     let way_chunk_size = sort_chunk_budget;
@@ -586,7 +582,6 @@ pub(super) fn phase_read_and_process(
                         // avoids Arc::clone per spawn.
                         let nr_ref: Option<&NodeStoreReader> = nr_clone.as_deref();
                         let mr_ref = &*missing_ref_stats_clone;
-                        let ds_ref = &*deferral_stats_clone;
                         let member_source_ref = &member_source;
                         let boundary_way_meta_ref = &*boundary_way_meta;
                         let spill_ref = &*worker_spill;
@@ -692,8 +687,8 @@ pub(super) fn phase_read_and_process(
                                             "way plan misaligned with block ways"
                                         );
                                         let pins_marked = process_planned_way_into(
-                                            &way, &plan, nr_ref, mz, xz, &srl, ds_ref, mr_ref,
-                                            &fcs, psf, pin_source, boundary_way_meta_ref, &mut acc,
+                                            &way, &plan, nr_ref, mz, xz, mr_ref, &fcs, psf,
+                                            pin_source, boundary_way_meta_ref, &mut acc,
                                         );
                                         way_pins_marked_ref
                                             .fetch_add(pins_marked, Ordering::Relaxed);
@@ -715,7 +710,6 @@ pub(super) fn phase_read_and_process(
                                     // block is where the de-churn win lives; reuse
                                     // across blocks bought nothing measurable.
                                     acc.flush(spill_ref);
-                                    ds_ref.check_budgets(&srl);
                                     {
                                         // Blocked here means the drain thread is the
                                         // choke - tasks queue behind its result channel
@@ -738,8 +732,6 @@ pub(super) fn phase_read_and_process(
                     // Runs concurrently with worker - main thread is free to forward blocks.
                     let mut wi = way_index.take().expect("way_index already taken");
                     let mut sw = sort_writer.take().expect("sort_writer already taken");
-                    let ds_drain = std::sync::Arc::clone(&deferral_stats);
-                    let srl_drain = config.seam_reconcile_layers;
                     drain_handle = Some(std::thread::spawn(move || {
                         // sw arrives with the shared chunk counter already
                         // attached (phase12 setup) - its own flushes and every
@@ -749,7 +741,6 @@ pub(super) fn phase_read_and_process(
                         while let Ok(results) = rrx.recv() {
                             let _busy = wait_span(&BUSY.phase12_drain);
                             count += drain_way_task_result(results, &mut wi, &mut sw, &mut fanout);
-                            ds_drain.check_budgets(&srl_drain);
                         }
                         // The shared chunk counter stays attached: the spill
                         // coalescer keeps allocating from the same Arc through
@@ -912,8 +903,6 @@ pub(super) fn phase_read_and_process(
         &missing_ref_stats,
         min_z,
         max_z,
-        &config.seam_reconcile_layers,
-        &deferral_stats,
         sort_writer
             .as_mut()
             .expect("sort_writer not returned from drain"),
@@ -925,7 +914,6 @@ pub(super) fn phase_read_and_process(
     rel_count += relation_tail.rel_count;
     features_emitted += relation_tail.features;
     let max_rel_inflight_bytes = relation_tail.max_inflight_bytes;
-    deferral_stats.check_budgets(&config.seam_reconcile_layers);
     drop(relation_tail_busy);
     // Way-phase and relation-tail records all flowed through the coalescer;
     // write its residual, adopt every coalesced chunk, and resync the chunk
@@ -1036,7 +1024,6 @@ pub(super) fn phase_read_and_process(
         way_pins_marked: way_pins_marked.load(Ordering::Relaxed),
         relation_blocks_drop_rss_kb,
         missing_refs: missing_ref_snapshot,
-        deferral_stats,
         sort_records: sw.total_records(),
         sort_record_bytes: sw.total_record_bytes(),
         layer_records: *sw.layer_records(),
@@ -1759,8 +1746,6 @@ pub(super) fn process_planned_way_into(
     node_reader: Option<&NodeStoreReader>,
     min_zoom: u8,
     max_zoom: u8,
-    seam_reconcile_layers: &[u8],
-    deferral_stats: &DeferralStats,
     missing_ref_stats: &MissingRefStatsAtomic,
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
@@ -1951,7 +1936,6 @@ pub(super) fn process_planned_way_into(
                     }
                 }
                 GeomExpect::Polygon => {
-                    let sr = seam_reconcile_layers[m.layer as usize];
                     let fc = fanout_caps.get(m.layer as usize).copied().unwrap_or(0);
                     for shift in antimeridian_shifts_for_bbox(&merc_bbox_val) {
                         if shift == 0.0 {
@@ -1964,8 +1948,6 @@ pub(super) fn process_planned_way_into(
                                 z_hi,
                                 &mut acc.sink,
                                 &mut acc.polygon_emit,
-                                sr,
-                                Some(deferral_stats),
                                 fc,
                                 polygon_simplify_factor,
                             );
@@ -1986,8 +1968,6 @@ pub(super) fn process_planned_way_into(
                                 z_hi,
                                 &mut acc.sink,
                                 &mut acc.polygon_emit,
-                                sr,
-                                Some(deferral_stats),
                                 fc,
                                 polygon_simplify_factor,
                             );

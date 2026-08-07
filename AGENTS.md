@@ -403,8 +403,8 @@ artifact is rejected on its own. The production shape:
 ```
 
 Everything else - budgets (`--sort-budget`, `--way-budget`,
-`--assemble-budget`), formats (`--tile-format`, `--tile-compression`,
-`--compress-sort-chunks`), geometry (`--fanout-cap`, `--seam-reconcile-layers`,
+`--assemble-budget`, `--dedup-cap`), formats (`--tile-format`,
+`--tile-compression`, `--compress-sort-chunks`), geometry (`--fanout-cap`,
 `--polygon-simplify-factor`), `--skip-to`, `--locations-on-ways`, `--threads` -
 is in `reference/cli.md`.
 

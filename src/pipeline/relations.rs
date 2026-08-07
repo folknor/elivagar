@@ -13,9 +13,7 @@ use super::emit::{
     emit_multipolygon_feature, emit_point_or_centroid, enrich_polygon_matches,
     relation_shared_vertex_keys, unwrap_antimeridian_path,
 };
-use super::stats::{
-    DeferralStats, FanoutStats, MissingRefStatsAtomic, record_fanout_from_payload_records,
-};
+use super::stats::{FanoutStats, MissingRefStatsAtomic, record_fanout_from_payload_records};
 
 /// A relation with geometry resolved from way_index, ready for parallel processing.
 /// Matches are resolved eagerly in `prepare_relation` while PBF borrows are alive,
@@ -178,8 +176,6 @@ pub(super) fn process_relation_blocks(
     missing_ref_stats: &MissingRefStatsAtomic,
     min_zoom: u8,
     max_zoom: u8,
-    seam_reconcile_layers: &[u8],
-    deferral_stats: &DeferralStats,
     sort_writer: &mut SortWriter,
     spill: &sort::SpillCoalescer,
     fanout_stats: &mut FanoutStats,
@@ -229,8 +225,6 @@ pub(super) fn process_relation_blocks(
                 rel,
                 min_zoom,
                 max_zoom,
-                seam_reconcile_layers,
-                deferral_stats,
                 &mut acc.sink,
                 &mut acc.point_emit,
                 &mut acc.multipolygon_emit,
@@ -348,8 +342,6 @@ pub(super) fn process_prepared_relation_into(
     rel: PreparedRelation,
     min_zoom: u8,
     max_zoom: u8,
-    seam_reconcile_layers: &[u8],
-    deferral_stats: &DeferralStats,
     sink: &mut RecordSink,
     point_emit: &mut PointEmitScratch,
     multipolygon_emit: &mut MultipolygonEmitScratch,
@@ -393,7 +385,6 @@ pub(super) fn process_prepared_relation_into(
                         let _ = unwrap_antimeridian_path(inner, true);
                     }
                     let bbox = merc_bbox(&outer_unwrapped);
-                    let sr = seam_reconcile_layers[m.layer as usize];
                     let fc = fanout_caps.get(m.layer as usize).copied().unwrap_or(0);
                     for shift in antimeridian_shifts_for_bbox(&bbox) {
                         if shift == 0.0 {
@@ -408,8 +399,6 @@ pub(super) fn process_prepared_relation_into(
                                 sink,
                                 multipolygon_emit,
                                 simp_scratch,
-                                sr,
-                                Some(deferral_stats),
                                 fc,
                                 polygon_simplify_factor,
                             );
@@ -443,8 +432,6 @@ pub(super) fn process_prepared_relation_into(
                                 sink,
                                 multipolygon_emit,
                                 simp_scratch,
-                                sr,
-                                Some(deferral_stats),
                                 fc,
                                 polygon_simplify_factor,
                             );

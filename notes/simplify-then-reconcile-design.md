@@ -23,13 +23,12 @@
    exact shared segments at denmark z7/67/40, archive
    `denmark-locations-2c28a8e`.
 
-RECOMMENDATION: delete the seam-reconcile machinery and the flag
-(`reconcile_boundary_seams`, the deferral hooks and stats, the
-`seam_reconcile_layers` config/CLI surface). Note the flag is part of
-the provenance config contract, so removal changes the contract and
-needs a corpus rotation (`bless --rotate`) in the landing commit even
-though the digest is unchanged. Not executed yet - it is a real
-landing, not a drive-by.
+EXECUTED 2026-08-07, same day: the seam-reconcile machinery is gone -
+`reconcile_boundary_seams`, SeamMetrics, `geometry/seams.rs`, the
+deferral hooks and DeferralStats, and the `seam_reconcile_layers`
+config/CLI/provenance surface. The contract change forced the corpus
+rotation recorded in the landing commit (digest unchanged). This note
+survives only as the adjudication record.
 
 ## Problem
 

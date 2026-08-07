@@ -114,7 +114,6 @@ the contract comparison is defined over named fields, not the whole object.
         "base_compression_level": 6,
         "compression_policy": "zoom-v1"
       },
-      "seam_reconcile_layers": { "boundaries": 8 },
       "fanout_caps": {},
       "polygon_simplify_factor": 1.0,
       "ocean": {
@@ -202,8 +201,8 @@ validates the first two.
 one archive and stamp it with provenance describing only the second.
 
 **Producer config.** The subset of settings that decide what phase12 writes
-into chunks - zoom range, fanout caps, `polygon_simplify_factor`,
-`seam_reconcile_layers`. Chunks cannot be reinterpreted under different values,
+into chunks - zoom range, fanout caps, `polygon_simplify_factor`.
+Chunks cannot be reinterpreted under different values,
 so a mismatch is a hard error naming the field. It deliberately excludes the
 assemble-side settings (tile format, tile compression, compression level,
 memory budgets), which are applied after the chunks are read and may

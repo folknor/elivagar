@@ -26,7 +26,6 @@ use crate::debug::{
     WAIT, emit_alloc_boundary, emit_counter, emit_counter_u64, emit_counter_usize, emit_marker,
     emit_wait_counters, wait_span,
 };
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use stats::Phase12Stats;
@@ -184,10 +183,6 @@ pub struct TilegenConfig {
     /// Compression algorithm for sort chunk files. Reduces disk I/O at the
     /// cost of CPU. Useful at planet scale where sort data exceeds available RAM.
     pub compress_sort_chunks: sort::ChunkCompression,
-    /// Per-layer max zoom for shared-edge seam reconciliation.
-    /// 0 = disabled, 1-14 = max zoom at which to defer simplification.
-    /// Indexed by Layer enum discriminant. Default: Boundaries=8, rest=0.
-    pub seam_reconcile_layers: [u8; shortbread::Layer::count()],
     /// Per-layer fanout caps: maximum bbox tiles a polygon feature may touch
     /// at any zoom. When exceeded, the feature is skipped at that zoom.
     /// 0 = uncapped (default). Only applies to polygon-geometry emit functions.
@@ -1050,18 +1045,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             emit_counter_u64(&format!("{prefix}_zoom"), u64::from(zoom));
             emit_counter_u64(&format!("{prefix}_bbox_tiles"), bbox_tiles);
         }
-        for (i, max_z) in config.seam_reconcile_layers.iter().enumerate() {
-            if *max_z > 0 {
-                let verts = s.deferral_stats.vertices[i].load(Ordering::Relaxed);
-                if verts > 0 {
-                    let name = shortbread::Layer::ALL[i].name();
-                    emit_counter_u64(&format!("seam_deferred_vertices_{name}"), verts);
-                    if s.deferral_stats.disabled[i].load(Ordering::Relaxed) {
-                        emit_counter(&format!("seam_deferral_disabled_{name}"), 1);
-                    }
-                }
-            }
-        }
     }
     if let Some(kb) = phase12_rss {
         emit_counter_u64("phase12_rss_kb", kb);
@@ -1331,7 +1314,6 @@ pub fn ocean_build(
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        seam_reconcile_layers: [0; shortbread::Layer::count()],
         fanout_caps: [0; shortbread::Layer::count()],
         polygon_simplify_factor: 1.0,
     };
@@ -1353,13 +1335,9 @@ use crate::mlt;
 #[cfg(test)]
 use crate::multipolygon::{MemberWay, WayRole};
 #[cfg(test)]
-use crate::mvt::GeomType;
-#[cfg(test)]
 use crate::sort::SortRecord;
 #[cfg(test)]
-use assemble::{
-    PendingTile, SeamMetrics, encode_tile_batch, encode_tile_batch_mvt, phase_assemble,
-};
+use assemble::{PendingTile, encode_tile_batch, phase_assemble};
 // Used only by the MLT/MVT layer-model parity test.
 #[cfg(all(test, feature = "mlt"))]
 use assemble::{AssemblyScratch, LAYER_COUNT, prepare_non_empty_layers};
@@ -1378,9 +1356,9 @@ use phase12::{
 };
 #[cfg(test)]
 use stats::{
-    DEFERRAL_VERTEX_BUDGET, DeferralStats, MissingRefStats, MissingRefStatsAtomic, OversizeTile,
-    TILE_OVERSIZE_SEVERE_BYTES, TILE_OVERSIZE_TOP_N, TILE_OVERSIZE_WARN_BYTES, TileSizeDiagnostics,
-    insert_top_oversized, record_tile_size_diagnostics,
+    MissingRefStats, MissingRefStatsAtomic, OversizeTile, TILE_OVERSIZE_SEVERE_BYTES,
+    TILE_OVERSIZE_TOP_N, TILE_OVERSIZE_WARN_BYTES, TileSizeDiagnostics, insert_top_oversized,
+    record_tile_size_diagnostics,
 };
 
 #[cfg(test)]

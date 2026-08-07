@@ -184,7 +184,6 @@ Sizes accept `256M`, `1G`, or raw bytes.
 
 | flag | meaning |
 |---|---|
-| `--seam-reconcile-layers <SPEC>` | polygon layers getting shared-edge seam reconciliation at low zoom. `layer` or `layer:maxzoom` (default maxzoom 8), comma-separated. Default `boundaries` - which is INERT: boundaries emits lines and both the deferral hook and `reconcile_boundary_seams` process polygon features only, so the default defers nothing and reconciles nothing (verified 2026-08-07). Point it at a polygon layer to activate it |
 | `--fanout-cap-default <N>` | default fanout cap for all polygon layers. 0 or omitted = uncapped |
 | `--fanout-cap <layer=N,...>` | per-layer fanout caps; takes precedence over the default. Features whose bbox tile count exceeds the cap are skipped at that zoom |
 | `--polygon-simplify-factor <F>` | simplification multiplier for polygon layers. Default 1.0 (same as lines). Higher simplifies harder, cutting sort volume; fills tolerate this better than stroked lines do |
@@ -256,7 +255,6 @@ The `elivagar` metadata member (`reference/metadata.md`, schema at
                 features: sorted, locations-on-ways
     Config:     shortbread, z0-z14, polygon simplify x1
                 tile: mvt gzip, base level 6, policy zoom-v1
-                seam: boundaries=8
                 fanout: none
     Ocean:      artifact, low zoom simplified, simplifier on
                 key: shp c10be1c7843c simplified b3417e31c287 level 6 policy 1
@@ -269,8 +267,7 @@ of both is printed - not a selection. That matters: two archives differing only
 in `polygon_simplify_factor` or one fanout cap would otherwise display
 identically, and a reader told these lines are the contract would conclude a
 geometry diff between them says something about the code. It is cheap to print
-in full because the seam and fanout maps omit defaults, so they are a line each
-at most.
+in full because the fanout map omits defaults, so it is a line at most.
 
 `Build`, `Effective` and `Resumed` (only on a `--skip-to` run) are diagnostic.
 They explain a diff once the contract matches and must never be
