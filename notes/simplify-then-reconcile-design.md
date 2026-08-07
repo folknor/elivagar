@@ -1,17 +1,35 @@
 # Design: Simplify-Then-Reconcile Seam Fix
 
-**Status:** Design doc, not implemented. RE-VERIFIED 2026-08-07: the
-critical finding below still holds in the current tree - the default
-`--seam-reconcile-layers boundaries` is a no-op end to end
-(`reconcile_boundary_seams` skips non-polygon features, the deferral
-hook exists only in the polygon emission paths, and the boundaries
-layer emits only lines). Pending a decision: either implement a
-line-reconcile path / retarget the flag at polygon layers, or delete
-the flag and the dead machinery. The design options below predate the
-P1 pyramid descent and pinned-DP machinery and need re-grounding
-either way. (The prerequisite reading it once named,
-tile-seam-fix-2026-03-06 and TODO.md, no longer exist outside git
-history.)
+**Status:** Design doc, not implemented, and ADJUDICATED OBSOLETE
+2026-08-07. Two findings, both verified against the current tree:
+
+1. The critical no-op finding below still holds: the default
+   `--seam-reconcile-layers boundaries` does nothing end to end
+   (`reconcile_boundary_seams` skips non-polygon features, the deferral
+   hook exists only in the polygon emission paths, and the boundaries
+   layer emits only lines).
+2. The problem this design attacks was closed upstream after it was
+   written: the shared-node pin machinery (pbfhogg's injected
+   SharedNodePins-v1, or the block-local/exact fallbacks, feeding
+   `preserve_vertex_mask` into pin-aware DP) pins every vertex shared
+   between ways through simplification at every zoom, for all polygon
+   layers. A boundary genuinely shared in OSM therefore cannot diverge
+   between its two features - the seam class this document's
+   reconciliation targets is prevented at emission, not repaired at
+   assemble. Output evidence: `scripts/validate/seam-probe.mjs`
+   (written for this adjudication, advisory per the oracle discipline)
+   finds bit-identical shared segments between rings in low-zoom land
+   tiles - pinned chains surviving to the wire verbatim - e.g. 62
+   exact shared segments at denmark z7/67/40, archive
+   `denmark-locations-2c28a8e`.
+
+RECOMMENDATION: delete the seam-reconcile machinery and the flag
+(`reconcile_boundary_seams`, the deferral hooks and stats, the
+`seam_reconcile_layers` config/CLI surface). Note the flag is part of
+the provenance config contract, so removal changes the contract and
+needs a corpus rotation (`bless --rotate`) in the landing commit even
+though the digest is unchanged. Not executed yet - it is a real
+landing, not a drive-by.
 
 ## Problem
 
