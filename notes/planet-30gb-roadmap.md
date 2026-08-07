@@ -379,8 +379,19 @@ planet relations), dedup cap skipped 17.0M inserts while still reusing
 way_index 6.45M member ways / 1.37 GB data + 103 MB index,
 max_rel_inflight 90 MB (the monster-relation signal to watch).
 
-Open pricing item: at planet the 1M dedup cap costs output bytes
-(missed dedup), not RAM - price before H10 record runs.
+PRICED 2026-08-07: the 1M dedup cap costs 777 MB of archive at planet
+(1.2%) and saves ~4.9 GB of RAM. A/B on bygg via the new `--dedup-cap`
+flag (brokkr passthrough same day): uncapped-at-60M arm `4994452d`
+against capped control `ac2cf674` - output 62.28 vs 63.06 GB, unique
+stored payloads 42.1M vs 52.2M (10M more tiles deduplicate, 227.7M
+reused), directory entries 50.6M vs 56.9M, wall 596.2 vs 587.2s
+(noise), peak RSS 17.25 vs 12.33 GB. The RSS delta is ~2x the map's
+own 2.36 GB byte estimate - hash growth and per-entry overhead beyond
+the 56 B/entry figure - so budget the real number, not the estimate.
+Verdict: the default stays 1M; an H10 record run may choose
+`dedup_cap = 60000000` for the smaller archive since 17.3 GB still
+fits the 30 GB ledger comfortably, and must disclose the setting
+either way (it is in cli_args).
 
 **OPEN, UNPRICED 2026-07-31: the planet input's way blobs are ~7.5x
 fatter than any extract's, and the way stage holds blobs in flight.**
@@ -854,9 +865,9 @@ ocean needle detector if a geometry-level ocean gate is ever wanted.
 
 - Actual enriched-planet PBF size and its blob-type byte split (pbfhogg
   can answer from an existing planet artifact without elivagar running).
-- Planet unique-tile count and PMTiles directory entry volume - the
-  streaming directory is bounded, but the 1M dedup cap's cost in
-  output bytes needs pricing before a record run (H3).
+- ANSWERED 2026-08-07: the 1M dedup cap costs 777 MB of archive (1.2%)
+  and saves ~4.9 GB RAM at planet; verdict and the record-run guidance
+  in H3.
 - ANSWERED 2026-08-07: the lz4 trade does not invert at planet on
   bygg's NVMe - uncompressed wins by 12.7% wall and 3.7x assemble RSS
   (H4).
