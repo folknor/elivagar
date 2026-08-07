@@ -484,15 +484,29 @@ retention theory first and the fix restored 5.6 GB anon with output
 byte-identical. Full forensics in this file's git history and the fix
 commit message (`98824b4`).
 
-### H4: Sort scratch I/O - PRICED, verdicts standing
+### H4: Sort scratch I/O - PRICED, planet answer in: uncompressed wins
 
-- **LZ4 chunks are the planet-run configuration**; extract-scale
-  default stays uncompressed until a record run cares. Priced at NA:
-  +2.0% wall (compression CPU), phase12 physical writes 60.1 ->
-  26.3 GB, assemble reads 79.3 -> 30.8 GB, scratch on disk ~2.6x
-  smaller. At planet, where ~370 GB of merge reads overflow the page
-  cache, the trade should invert in lz4's favor - untested, the one
-  open H4 term in the go/no-go wall band.
+- **ANSWERED 2026-08-07 on bygg: the lz4 trade does NOT invert at
+  planet - uncompressed is the planet configuration.** A/B at the
+  admission-rework commit: uncompressed control 587.2s (`ac2cf674`) vs
+  lz4 662.0s (`bf2fdfe2`), +12.7% wall. Assemble carried the loss,
+  224.5s -> 284.1s (+26%), phase12 +4% (compression on writes). The
+  I/O prediction itself was right - physical assemble reads fell
+  421 GB -> 170 GB - but on a single fast NVMe the decompress CPU in
+  the merge readers costs more than the reads save. And a red flag
+  beyond wall: assemble peak RSS read 24.5 GB under lz4 against
+  6.7 GB uncompressed - the compressed-section read path holds far
+  more resident than the streamed uncompressed path, which on its own
+  disqualifies lz4 for the 30 GB ledger until understood. The read
+  path itself streams (256 KB BufReader + FrameDecoder per
+  ChunkReader; verified in src/sort.rs at this reading), so the
+  suspect is per-open decoder/BufReader buffers times the merge
+  fan-in (290 chunks at planet) times 8 workers, amplified by glibc
+  retention across 117K partition opens - the sibling pattern's
+  shape, unexamined further because lz4 is off.
+  plantasjen NA pricing (+2.0% wall, 2.6x less scratch I/O) stands as
+  history; spinning-disk or page-cache-starved hosts would need a
+  fresh A/B.
 - The compressed chunk format is per-section frames inside the
   multi-section chunk file (seek+stream-decode per partition section);
   per-compression magics make a `--skip-to` resume with a flipped flag
@@ -836,7 +850,8 @@ ocean needle detector if a geometry-level ocean gate is ever wanted.
 - Planet unique-tile count and PMTiles directory entry volume - the
   streaming directory is bounded, but the 1M dedup cap's cost in
   output bytes needs pricing before a record run (H3).
-- Whether the lz4 CPU-vs-I/O trade inverts as predicted when merge
-  reads overflow the page cache (H4).
+- ANSWERED 2026-08-07: the lz4 trade does not invert at planet on
+  bygg's NVMe - uncompressed wins by 12.7% wall and 3.7x assemble RSS
+  (H4).
 - Whether tile serving requirements (gzip vs brotli, MVT vs MLT) change
   the assemble CPU budget the record is computed against.

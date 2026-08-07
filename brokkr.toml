@@ -132,12 +132,13 @@ target = "nvme"
 # Contract rsync'd from plantasjen 2026-07-30: same shapefile releases and the
 # same ocean-tiles.pmtiles artifact generation.
 [bygg.tilegen.default]
-# H4: lz4 sort chunks are the planet-run configuration (priced at NA on
-# plantasjen: +2% wall, ~2.6x less scratch I/O). Whether the trade inverts
-# at planet, where ~370 GB of merge reads overflow the page cache, is the
-# open question this setting exists to answer - and if it wins at planet
-# while costing ~2% at extract scale, that cost rides every bygg run.
-compress_sort_chunks = "lz4"
+# Sort chunks stay uncompressed on bygg, decided by measurement 2026-08-07:
+# the H4 lz4 arm at planet (run bf2fdfe2) lost to the uncompressed control
+# (ac2cf674) 662.0s vs 587.2s wall, assemble 284.1s vs 224.5s, and its
+# assemble peak RSS read 24.5 GB against 6.7 GB uncompressed - even though
+# physical assemble reads fell 421 GB to 170 GB. On a single fast NVMe the
+# decompress CPU and the read path's memory behavior cost more than the
+# I/O saves. Do not re-add without a fresh planet A/B.
 ocean = [
     "z0-z7:simplified-water-polygons-split-3857/simplified_water_polygons.shp",
     "z8-z14:water-polygons-split-3857/water_polygons.shp",
