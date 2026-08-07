@@ -136,36 +136,32 @@ fn fill_mask_from_pin_bitmap(bitmap: &[u8], mask: &mut [bool]) {
 pub(super) const LON_E7_FULL_CIRCLE: i64 = 3_600_000_000;
 /// Default memory budget per sort chunk (1 GB).
 pub(super) const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
-/// Default way in-flight budget for the standard node-store path.
+/// Default way in-flight budget for the standard node-store path. Raw bytes
+/// (see the locations constant below for the semantics).
 pub(super) const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
-/// Default way in-flight budget for locations-on-ways mode. The budget is
-/// compared against estimated cost (raw bytes x WAY_OUTPUT_MULTIPLIER), so
-/// 8G means ~820MB of raw block+plan bytes in flight. Measured on germany
-/// locations at 256M: way_budget wait 31.9s (45% of wall) with the feed
-/// starved at ~25MB raw - the byte budget, not the count ceiling, was the
-/// binding constraint once plan building moved into the tasks.
+/// Default way in-flight budget for locations-on-ways mode, in RAW bytes:
+/// decompressed block size plus, once a task has built its plans, the plans'
+/// measured bytes. The primary admission control is the count ceiling
+/// (`max_inflight` = threads); this budget is a safety net against
+/// pathologically fat blocks only, and on any input seen so far it never
+/// binds.
 ///
-/// Raised 768M -> 8G on 2026-07-31 after the first planet runs. The 768M
-/// value was calibrated against 8,000-element blobs (every Geofabrik extract),
-/// where a block costs ~35MB of budget and ~20 admit concurrently.
-/// planet.openstreetmap.org packs ~66,500 elements per blob, so one block
-/// costs several hundred MB and only 2-3 admitted: planet phase12 ran at 7.2
-/// of 32 cores with way_budget blocking 63.5% of wall. At 6G the same build
-/// ran phase12 at 23.1 cores and total wall fell 1062.5s -> 571.7s, output
-/// bit-identical (cmp over both 58.7 GiB archives). Blob packing is an
-/// upstream property this pipeline does not control, so the default must not
-/// assume it.
-///
-/// 8G is chosen to sit just past the knee: admission ALSO stops at
-/// `max_inflight` blocks (= threads), so concurrency saturates there and real
-/// in-flight memory is bounded by (max_inflight x block size) no matter how
-/// large this is - the byte budget's remaining job is guarding pathologically
-/// fat blocks, not rate-limiting normal ones. Swept on a fat-blob germany
-/// proxy (`pbfhogg repack --elements-per-blob 66000`, 4.36MB blobs vs planet's
-/// 4.8MB): 768M 39.3s, 2G 29.5s, 6G 25.7s, 16G 25.7s - flat past ~6G because
-/// the count ceiling takes over. Neutral on ordinary blobs: germany locations
-/// 26.7s at 768M vs 27.5s at 16G, inside bench-1 noise.
-pub(super) const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 8 * 1024 * 1024 * 1024; // 8 GB
+/// History: admission used to charge decompressed_size x 10
+/// (WAY_OUTPUT_MULTIPLIER) against the budget, which made admission
+/// concurrency inversely proportional to upstream blob packing - an input
+/// property this pipeline does not control. Extract blobs (8,000 elements,
+/// every Geofabrik file) cost ~35MB of budget so ~20 admitted; planet blobs
+/// (~66,500 elements, ~4.8MB compressed) cost several hundred MB so 2-3
+/// admitted, and planet phase12 ran at 7.2 of 32 cores with way_budget
+/// blocking 63.5% of wall. Raising the default (768M -> 8G, 2026-07-31)
+/// took planet 1062.5s -> 571.7s but was a workaround: a 500k-element blob
+/// would have re-broken it. The 2026-08-07 rework removed the multiplier so
+/// the count ceiling rules on any packing; the budget survives only to bound
+/// real memory when blocks are individually huge. Real in-flight memory is
+/// (count x raw block+plan bytes): planet-shaped 30MB blocks x 32 threads is
+/// ~1GB against this 4G net, while a hypothetical 500k-element blob (~270MB
+/// raw) is bounded at ~15 in flight.
+pub(super) const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 4 * 1024 * 1024 * 1024; // 4 GB
 /// Reject unsorted flat-index path above this input size unless explicitly overridden.
 pub(super) const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
 /// Relation blocks buffer at most this many decompressed bytes in RAM; past
@@ -567,9 +563,9 @@ pub(super) fn phase_read_and_process(
                         relation_plan_superset_ways = plan.superset_ways_count;
                     }
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
-                    // in the pool simultaneously. Byte-budgeted in-flight control
-                    // limits total estimated memory, with a count ceiling as safety net.
-                    const WAY_OUTPUT_MULTIPLIER: usize = 10;
+                    // in the pool simultaneously. The count ceiling (threads) is the
+                    // primary admission control; the raw-byte budget is a safety net
+                    // against individually huge blocks (see the constants above).
                     // --way-budget is the only way to set this. An
                     // ELIVAGAR_WAY_BUDGET env override used to outrank the
                     // flag, so a run passing --way-budget 256M could use 768M
@@ -628,8 +624,8 @@ pub(super) fn phase_read_and_process(
                                 // decompressed size alone; the task adds the plans'
                                 // measured bytes once built (bounded overshoot: at
                                 // most max_inflight blocks' plan bytes escape the
-                                // wait below).
-                                let block_cost = way_block.block.decompressed_size() * WAY_OUTPUT_MULTIPLIER;
+                                // wait below). Both are raw bytes.
+                                let block_cost = way_block.block.decompressed_size();
                                 // Wait for capacity: count limit and byte budget.
                                 // Always allow at least one task - a single block that
                                 // exceeds the byte budget must not deadlock the condvar
@@ -645,11 +641,7 @@ pub(super) fn phase_read_and_process(
                                         .expect("condvar wait");
                                     guard.0 += 1;
                                     guard.1 += block_cost;
-                                    // Update HWM with current in-flight bytes (raw, not multiplied).
-                                    way_hwm_clone.fetch_max(
-                                        guard.1 / WAY_OUTPUT_MULTIPLIER,
-                                        Ordering::Relaxed,
-                                    );
+                                    way_hwm_clone.fetch_max(guard.1, Ordering::Relaxed);
                                 }
                                 let tx = rtx.clone();
                                 let way_hwm_task = std::sync::Arc::clone(&way_hwm_clone);
@@ -674,8 +666,7 @@ pub(super) fn phase_read_and_process(
                                     way_counter_ref
                                         .fetch_add(plans.len() as u64, Ordering::Relaxed);
                                     way_members_marked_ref.fetch_add(marked, Ordering::Relaxed);
-                                    let plan_cost =
-                                        estimate_way_plans_bytes(&plans) * WAY_OUTPUT_MULTIPLIER;
+                                    let plan_cost = estimate_way_plans_bytes(&plans);
                                     {
                                         // Account the plans' real bytes without waiting:
                                         // blocking a rayon task on the budget condvar can
@@ -684,10 +675,7 @@ pub(super) fn phase_read_and_process(
                                         let mut guard =
                                             inflight_ref.lock().expect("inflight lock");
                                         guard.1 += plan_cost;
-                                        way_hwm_task.fetch_max(
-                                            guard.1 / WAY_OUTPUT_MULTIPLIER,
-                                            Ordering::Relaxed,
-                                        );
+                                        way_hwm_task.fetch_max(guard.1, Ordering::Relaxed);
                                     }
                                     let mut acc = WayAcc::new();
                                     let mut plans = plans.into_iter();

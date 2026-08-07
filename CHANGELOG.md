@@ -76,6 +76,10 @@ the full Shortbread schema (26 layers, z0-z14).
 - Bounded memory throughout: sort chunk budget, capped relation-block
   buffer with a verified spill path, mmap'd way index, and a dedup map
   capped at 1M entries.
+- Packing-invariant way-block admission: concurrency is bounded by the
+  thread count, with a raw-byte budget (`--way-budget`) as a safety net
+  against individually huge blocks - upstream blob packing (8,000-element
+  extracts vs planet's ~66,500) cannot throttle phase12.
 
 ### Tooling
 

@@ -125,8 +125,9 @@ struct RunArgs {
     #[arg(long, value_parser = parse_byte_size_min_64m)]
     sort_budget: Option<usize>,
 
-    /// In-flight way processing budget (e.g. 128M or 256M). Minimum 1M.
-    /// Default when omitted: 128M (standard) or 256M (`--locations-on-ways`).
+    /// In-flight way processing budget in raw block+plan bytes. Minimum 1M.
+    /// Safety net only; the count ceiling (threads) is the primary control.
+    /// Default when omitted: 128M (standard) or 4G (`--locations-on-ways`).
     #[arg(long, value_parser = parse_byte_size_min_1m)]
     way_budget: Option<usize>,
 

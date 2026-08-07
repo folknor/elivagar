@@ -459,15 +459,23 @@ case the count ceiling already covered, while throttling fat input to
 the operative bound. Gates: `brokkr check` 669 passed, denmark corpus
 check pass, planet output bit-identical to the pre-change archive.
 
-Still open, and now the cheap experiment: charging
-`decompressed_size x 10` makes admission concurrency inversely
-proportional to blob size, so a bigger default is a workaround, not a
-cure - an input packing at 500k elements/blob would re-break it. A rule
-admitting on target CONCURRENCY with bytes as the safety net would be
-packing-invariant. The proxy makes that testable in 25s per arm.
-The backstop if it does bind: `pbfhogg repack --elements-per-blob 8000`
-re-encodes to extract density (that is what repack was built for), at
-the cost of a second 90 GB file.
+LANDED 2026-08-07: packing-invariant admission. The `x10` multiplier
+is gone - admission charges RAW bytes (decompressed block size, plus
+each task's measured plan bytes once built) and the count ceiling
+(threads) is the primary control, with the byte budget surviving only
+as a safety net against individually huge blocks.
+`DEFAULT_WAY_BUDGET_LOCATIONS` is now 4G raw (the 8G/x10 scheme's
+~820MB raw equivalent was itself a workaround; 4G never binds on any
+seen input - fat-germany `max_way_inflight_bytes` reads 649MB - while
+still bounding a hypothetical 500k-element blob at ~15 in flight).
+Priced on bygg same-day: fat proxy 27.6/28.1s new vs 27.7s old-rule at
+HEAD, normal germany 27.9s vs 26.7-27.5s stored - parity both shapes,
+denmark corpus check pass, `brokkr check` green. The
+`max_way_inflight_bytes` HWM now records the charged raw figure
+directly (no /10), so readings before this date are same-scale but
+estimated differently. The repack backstop
+(`pbfhogg repack --elements-per-blob 8000`) stays noted but should
+never be needed now.
 
 History note: the 07-14 planet-RAM NO-GO (NA phase12 at 23.3 GB / 1.9M
 majflt) was scratch-capacity retention from the i_overlay port - THE
