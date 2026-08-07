@@ -132,11 +132,6 @@ target = "nvme"
 # Contract rsync'd from plantasjen 2026-07-30: same shapefile releases and the
 # same ocean-tiles.pmtiles artifact generation.
 [bygg.tilegen.default]
-# H3 pricing arm, temporary: uncapped dedup (60M > planet's 52.2M unique
-# payloads) to price what the default 1M cap costs in archive bytes.
-# Comparand: run ac2cf674 (587.2s, 63.06 GB output, dedup saved 13.18 GB
-# at the 1M cap). Remove after the planet run.
-dedup_cap = 60000000
 # Sort chunks stay uncompressed on bygg, decided by measurement 2026-08-07:
 # the H4 lz4 arm at planet (run bf2fdfe2) lost to the uncompressed control
 # (ac2cf674) 662.0s vs 587.2s wall, assemble 284.1s vs 224.5s, and its
