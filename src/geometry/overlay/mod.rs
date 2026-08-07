@@ -168,6 +168,22 @@ mod tests {
     }
 
     #[test]
+    fn overlay_into_clears_dirty_output_for_empty_input() {
+        // Mirrors the regression test upstream added with its 8.0.0 fix: the
+        // early return on an empty post-split segment list must not leave
+        // stale shapes in a dirty caller buffer. Production callers recycle
+        // the buffer first, so only this test reaches the drain.
+        let mut engine = BoolOverlay::new();
+        let mut out: Shapes = vec![vec![vec![
+            IntPoint::new(0, 0),
+            IntPoint::new(10, 0),
+            IntPoint::new(0, 10),
+        ]]];
+        engine.overlay_nested(BoolRule::Subject, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
     fn differential_oracle_mixed_subject_and_intersect() {
         let mut rng = Lcg::new(0x8f9d_a421_3b70_cafe);
         for case in 0..2_000_u32 {

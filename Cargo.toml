@@ -66,7 +66,7 @@ brotli = "8.0.4"
 lz4_flex = "0.14"
 snap = "1"
 smallvec = "1.15.2"
-hotpath = "0.22.0"
+hotpath = "0.23.1"
 rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }
 serde_json = "1"
@@ -78,7 +78,7 @@ geo-types = "0.7.19"
 libc = "0.2"
 
 [dev-dependencies]
-i_overlay = "7.0"
+i_overlay = "8.0"
 serde_yaml = "0.9"
 pmtiles = { version = "0.23", default-features = false, features = ["write"] }
 tempfile = "3.27"

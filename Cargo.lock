@@ -451,8 +451,8 @@ dependencies = [
  "clap",
  "flate2",
  "geo-types",
- "hotpath 0.22.0",
- "i_overlay 7.0.3",
+ "hotpath 0.23.1",
+ "i_overlay 8.0.0",
  "libc",
  "lz4_flex",
  "memmap2",
@@ -801,16 +801,16 @@ dependencies = [
 
 [[package]]
 name = "hotpath"
-version = "0.22.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66750a77f4f6b408a148be5102ef1f3ba7172def7ee92b1cfc75d9f7a3870453"
+checksum = "be80823867e0c9820c9237c38b21f9f4aa1ebb0db1f98ff25ac0b1d2c088a470"
 dependencies = [
  "arc-swap",
  "cfg-if",
  "crossbeam-channel",
  "futures-util",
  "hdrhistogram",
- "hotpath-macros 0.22.0",
+ "hotpath-macros 0.23.1",
  "hotpath-meta",
  "libc",
  "pin-project-lite",
@@ -831,9 +831,9 @@ checksum = "191f6e3b11c1f817e5c3737158812bc8d3a383e9d9d89526703ea6dc1e9fe647"
 
 [[package]]
 name = "hotpath-macros"
-version = "0.22.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afe0e1900d2dbe2e2df8e9522b97ebd7a5598ba18478f57e247957022dffedbe"
+checksum = "61d1fb3ee80ae7b4743d29487665766ce5a1442e959521790e86317f89dcd5a3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -842,15 +842,15 @@ dependencies = [
 
 [[package]]
 name = "hotpath-macros-meta"
-version = "0.22.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21f2f70b29b6f42311acd2fb0b2f91a34d9a573c76fb8a7f51970670a1673a49"
+checksum = "feede71fa226b0b5d523e58e7b0a1462935c0b8a00584a6669f45d564086209d"
 
 [[package]]
 name = "hotpath-meta"
-version = "0.22.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b771f77b2f409086bb40ff029f850ce99d17118d4e207df0f28cb32bd7568c7"
+checksum = "424fe0a13105d3731f65237785f5b95c3e4b8bfae4a039d932f56192cd74afc0"
 dependencies = [
  "hotpath-macros-meta",
 ]
@@ -872,9 +872,9 @@ dependencies = [
 
 [[package]]
 name = "i_float"
-version = "3.0.0"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "519b2780a1187eeed09145e5d168863c87f0d704abe84084206ebd897f99c6dc"
+checksum = "97c128b7edf06aa28e02763854c84ce5dd91d31ae3e533e24e9b5201a8bc4cd4"
 dependencies = [
  "libm",
 ]
@@ -905,13 +905,13 @@ dependencies = [
 
 [[package]]
 name = "i_overlay"
-version = "7.0.3"
+version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f81c420ea4051810d3efb8d4ec5198ff3e018a236ba43173dd768830e02fa2df"
+checksum = "391901c4c5db3968bd11af0d0166c575a6c2f554f3b40d1bfe12df043c3607ca"
 dependencies = [
- "i_float 3.0.0",
+ "i_float 4.0.0",
  "i_key_sort 0.11.0",
- "i_shape 3.0.0",
+ "i_shape 4.0.0",
  "i_tree 0.19.0",
 ]
 
@@ -926,11 +926,11 @@ dependencies = [
 
 [[package]]
 name = "i_shape"
-version = "3.0.0"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90b2ee7bae072887c579a2f2fd2a7fa1c29cceecfae1998ef940061c5570afff"
+checksum = "67ec1fc3ad980a24e4761b763bf5bfbf58c1d88be1bffb14654d369d7f420258"
 dependencies = [
- "i_float 3.0.0",
+ "i_float 4.0.0",
 ]
 
 [[package]]
