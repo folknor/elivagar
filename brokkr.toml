@@ -132,6 +132,12 @@ target = "nvme"
 # Contract rsync'd from plantasjen 2026-07-30: same shapefile releases and the
 # same ocean-tiles.pmtiles artifact generation.
 [bygg.tilegen.default]
+# H4: lz4 sort chunks are the planet-run configuration (priced at NA on
+# plantasjen: +2% wall, ~2.6x less scratch I/O). Whether the trade inverts
+# at planet, where ~370 GB of merge reads overflow the page cache, is the
+# open question this setting exists to answer - and if it wins at planet
+# while costing ~2% at extract scale, that cost rides every bygg run.
+compress_sort_chunks = "lz4"
 ocean = [
     "z0-z7:simplified-water-polygons-split-3857/simplified_water_polygons.shp",
     "z8-z14:water-polygons-split-3857/water_polygons.shp",
