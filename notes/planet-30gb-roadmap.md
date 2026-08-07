@@ -749,8 +749,15 @@ pathological features.
   partition was 297 MB encoded behind one slot with the writer starved
   12s while the claim window never bound; the denmark bit-identity gate
   (splits forced vs suppressed, identical archive hash) passed at the
-  landing. The germany wall win is UNPRICED until the host is quiet -
-  the same contention that voided the 07-26 E6 reading.
+  landing. PRICED 2026-08-07 on bygg (quiet): germany locations
+  bench-1 A/B, splitter active `6518faea` vs suppressed via
+  ELIVAGAR_ASSEMBLE_SPLIT_TARGET `43aa1f09`, back to back - 26.8s
+  wall BOTH arms, assemble 6.8s vs 6.6s, parity. The 12s
+  writer-starve the splitter was built against is no longer visible
+  at germany scale, plausibly because the reader/encode overlap
+  below also attacks that tail; the splitter stays as planet
+  straggler insurance (385 partitions split there) at measured zero
+  extract cost.
   Reader/encode overlap inside a worker LANDED 2026-07-30 (bygg): each
   partition worker stays the serial merge reader while a scoped encoder
   thread runs the rayon encode + artifact splice + writer send, fed by a
@@ -836,10 +843,10 @@ and pbfhogg's own periodically-flushed `pipeline_*` counters, and
 NOTHING of elivagar's. An empty elivagar stall profile from a `--stop`
 run is an artifact, not a finding - it was briefly misread as one here.
 
-Optimization work that remains, none of it blocking: the germany
-pricing run for the landed H8b splitter (bygg qualifies as the quiet
-host), pricing the landed reader/encode overlap (same runs), H2c/d
-injection candidates,
+Optimization work that remains, none of it blocking: pricing the
+landed reader/encode overlap (no suppression knob exists, so it needs
+a revert-build A/B if ever wanted; the H8b pricing pair of 2026-08-07
+could not isolate it), H2c/d injection candidates,
 the paused E-surface (E6 thresholds await one clean A/B pair), and the
 ocean needle detector if a geometry-level ocean gate is ever wanted.
 
