@@ -150,8 +150,7 @@ impl LayerBuilder {
                 self.features[first].id = None;
                 // Reclaim secondary features' Vecs into pools (mem::take leaves
                 // zero-capacity Vecs so retain can identify dead features).
-                for k in (i + 1)..j {
-                    let idx = scratch.indices[k];
+                for &idx in &scratch.indices[(i + 1)..j] {
                     geom_pool.push(std::mem::take(&mut self.features[idx].geometry));
                     tags_pool.push(std::mem::take(&mut self.features[idx].tags));
                 }

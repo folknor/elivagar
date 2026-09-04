@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+Dependency refresh, verified output-neutral: fresh denmark locations
+build passes the committed corpus digest unchanged.
+
+- Bumped brotli 8 to 9, hotpath 0.23 to 0.25, mlt-core 0.12.7,
+  pmtiles 0.24 (dev), and rust-version to 1.98.
+- Fixed the one lint the new toolchain surfaced (`needless_range_loop`
+  in the MVT merge pool-reclaim loop); no behavior change.
+
 ## 0.1.0
 
 Initial release. Reads an OSM PBF and writes a PMTiles v3 archive carrying

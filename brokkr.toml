@@ -3,6 +3,19 @@ project = "elivagar"
 # Env variables that match these are captured by brokkr during runs and stored in the database.
 capture_env = ["ELIVAGAR*", "MALLOC*"]
 
+# Replaces brokkr's legacy fallback (one --all-features sweep) with the
+# default-features build, and fans the test binaries out concurrently
+# (prebuilt binaries executed directly, budget = tests in flight, defaulting
+# to the L3 cache domain - the right default for a compute-bound suite).
+# Until 2026-09-02 the suite ran libtest's serial default, so this is its
+# first parallelism; the per-test watchdog is kept. A crate-thin workspace
+# caps the win at the binary count - read the `claims N-M` line and the two
+# fan-out summary lines to see what it actually bought, and remember the
+# first run weights by test count and is always the slow one.
+[[check]]
+name = "default"
+parallel = {}
+
 # ---------------------------------------------------------------------------
 # Per-machine configuration
 # ---------------------------------------------------------------------------
