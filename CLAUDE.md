@@ -2,22 +2,12 @@
 
 ## More rules
 
-### More Bash rules
-- Never use sed, find, awk, or complex bash commands
-- Never chain commands with &&
-- Never chain commands with ;
-- Never pipe commands with |
-
 ### Listing files
 
-`ls` works everywhere. On bygg (the current host, since 2026-07-30)
-`data/` is a plain directory on the root NVMe, not a symlink.
-
-Historical note for other hosts: on plantasjen `data/` was a symlink to
-a separate NVMe mount, and the claude code harness refuses to traverse
-symlinks, so `ls data/...` returned a permission denial there - `print`
-was the workaround. Only relevant if working on a host where `data/` is
-a symlink again.
+`data/` may be a plain directory or a symlink to a separate drive,
+depending on the host. The claude code harness refuses to traverse
+symlinks, so on a host where `data/` is a symlink, `ls data/...` returns
+a permission denial - use `print` as the workaround there.
 
 ### Communication rules
 
@@ -25,14 +15,17 @@ a symlink again.
 
 ### Memory rules
 
-Do not use your Memory functionality. Do not read, write, or update memories. Do not suggest saving things to memory. Durable context belongs in CLAUDE.md or the relevant docs.
+Do not use your Memory functionality. Durable context belongs in CLAUDE.md or the relevant docs.
 
 ### Bash rules
 
 - Never use `sed`, `find`, `awk`, `head`, `tail`, or complex bash commands.
 - Never `find /`.
-- Never run `git` with `-C <path>`
-- One Bash() invocation === one command
+- One Bash() invocation === one command.
+- Never chain commands with `&&`.
+- Never chain commands with `;`.
+- Never chain/pipe commands with `|`. Exception: piping into `review` is allowed.
+- Never capture stdout into env vars (`UUID=$(...)`).
 - Keep `git commit -m` messages free of zsh metacharacters - braces `{}`, brackets `[]`, parens `()`, angle brackets `<>`, `#`. They trip the permission matcher and block the commit. Spell lists out (`syntax, vm, data and runner`, not `{syntax,vm,data,runner}`), write `5.1 per bar` not `5.1/bar`, name attributes in prose not `#[attr]`.
 
 ### git commit rules
@@ -60,6 +53,32 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
   staged into the accompanying commit, never questioned as a mess and never
   discarded. There is no "clean tree" to protect from it; it belongs in the
   commit.
+
+### Subagents
+
+- Always get permission from the user before launching subagents.
+- Do NOT use git worktree isolation for parallel agents. Worktrees create merge conflicts that silently drop agent work. Instead, launch agents in the same tree with strict file ownership - zero overlap.
+
+Agent coordination rules:
+- Each agent gets exclusive ownership of specific files. No two agents touch the same file.
+- Agents must read their target file FIRST. Do not replace existing code with placeholders or stub it out.
+- Agents must NOT run `brokkr` or `cargo`. The orchestrator validates between agents.
+
+Audit protocol:
+- Do not trust agent claims of completion. Verify existence + wiring + behavior.
+- Use the 3-pass audit structure: domain-specific verification, then cross-cutting reconciliation (is the new code actually wired into its callers?), then editorial normalization.
+- Any discrepancies doc should contain only current gaps, not historical records. Remove resolved items entirely.
+
+Subagent prompt rules:
+- Scope the investigation, not the report. Caps like "under 1500 chars" or "max 15 findings" throw away signal you asked them to surface.
+- Invite lateral findings up front. If they notice a bug, optimization, smell, or anything surprising while doing the scoped work, they should flag it, even when it's outside the immediate task.
+- Name the question, not the method. Don't prescribe tools ("use `git diff`", "use `Read`"), don't prescribe steps ("read in full, not just hunks"), don't enumerate files when the scope already implies them. Prescribing the method wastes tokens and signals distrust.
+- Don't restate rules the agent already inherits. Subagents load the same CLAUDE.md / AGENTS.md as the main session, so the bash rules, no-cargo, no-worktrees, gremlins, etc. are already in scope. Re-listing them is noise.
+- Do pass anything learned in *this* conversation that the agent can't see: the user's framing, prior decisions, what's already been ruled out, the specific claim being audited.
+
+### Codex agents
+
+Never tell a codex agent to read CLAUDE.md (it is Claude-specific and contradicts their job), and never tell them to read AGENTS.md (codex loads it automatically). Put any rule they need directly in the prompt.
 
 ## Docs site
 
@@ -103,46 +122,3 @@ AGENTS.md.
 Run `pnpm build` after touching anything under `docs/`, and
 `cargo package --list` after touching what ships - only `docs/public/*.svg`
 may appear there.
-
-## Orchestration loop
-
-If and when the users asks for the orchestration loop, run `orchestrate` before proceeding.
-
-Competitor reference sources remain available for research: `research/planetiler/` (Java), `research/tilemaker/` (C++), `research/tippecanoe/` (C++), `research/stedsplakat/` (TypeScript/JSTS Overpass→SVG poster renderer).
-
-- `review` fans a prompt out to fresh AI sessions, one per archetype; config is `.review.toml`, and the prompt arrives on stdin (the one sanctioned pipe). `review --help` for the full surface, `--dry-run` to see the assembled prompt without sending.
-- `echo '<prompt>' | review bare --profile deep` - codex gpt-5.6-sol at xhigh, no persona, no goal. Spec critique before code exists.
-- `echo '<prompt>' | review goal --profile build` - codex gpt-5.6-terra at medium, /goal-driven, workspace-write.
-- A role is an archetype plus a profile and needs both: the archetype is the persona, the profile is the tier (model, effort, sandbox). Both are named for what they are, not the job they do, since any archetype takes any profile. Without `--profile build` there is no workspace-write sandbox and the agent cannot edit a file. Profiles are per host, so check `.review.toml` has a block for this one.
-- Never resume a run; relaunch fresh. `--session` exists and this workflow does not use it.
-
-## Subagents
-
-**Always get permission from the user before launching subagents - ASK FIRST,
-EVERY TIME.** This is not satisfied by the user approving the underlying task.
-"Yes, fix the bug" authorizes the work, NOT the fan-out: spawning Agent/Task
-subagents (Explore, general-purpose, fork, anything) is a separate decision the
-user makes explicitly. Before any `Agent`/`Task` launch, stop and ask in chat -
-name what you want to spawn and why - then wait for a yes. Doing the
-investigation yourself with Read/Grep/Bash needs no permission; only delegating
-to subagents does. The sole exception is the orchestrate spec-loop, which the
-user invokes by name and which carries its own standing authorization.
-
-**Do NOT use git worktree isolation for parallel agents.** Worktrees create merge conflicts that silently drop agent work. Instead, launch agents in the same tree with strict file ownership - zero overlap.
-
-Agent coordination rules:
-- Each agent gets exclusive ownership of specific files. No two agents touch the same file.
-- Agents must read their target file FIRST. Do not replace existing code with placeholders or stub it out.
-- Agents must NOT run `brokkr` or `cargo`. The orchestrator validates between agents.
-
-Audit protocol:
-- Do not trust agent claims of completion. Verify existence + wiring + behavior.
-- Use the 3-pass audit structure: domain-specific verification, then cross-cutting reconciliation (does the new instruction actually dispatch? is the new builtin actually installed?), then editorial normalization.
-- Any discrepancies doc should contain only current gaps, not historical records. Remove resolved items entirely.
-
-Subagent prompt rules:
-- Scope the investigation, not the report. Caps like "under 1500 chars" or "max 15 findings" throw away signal you asked them to surface.
-- Invite lateral findings up front. If they notice a bug, optimization, smell, or anything surprising while doing the scoped work, they should flag it, even when it's outside the immediate task.
-- Name the question, not the method. Don't prescribe tools ("use `git diff`", "use `Read`"), don't prescribe steps ("read in full, not just hunks"), don't enumerate files when the scope already implies them ("piners-syntax crate only" + the agent's own `ls` / `git diff --name-only` is enough). Prescribing the method wastes tokens and signals distrust.
-- Don't restate rules the agent already inherits. Subagents load the same CLAUDE.md / AGENTS.md as the main session, so the bash rules, no-cargo, no-worktrees, gremlins, etc. are already in scope. Re-listing them is noise.
-- Do pass anything learned in *this* conversation that the agent can't see: the user's framing, prior decisions, what's already been ruled out, the specific claim being audited.

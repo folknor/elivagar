@@ -11,12 +11,13 @@ Shortbread vector tile generator. Reads OSM PBF files and produces PMTiles v3 ar
 - The user can exempt you from any rule at any time.
 - ./docs/ is the published VitePress site and is durable. Its pages are written for outside readers, so they say less than the internal documents and must never contradict them. See the docs site section below.
 - ./reference/* is durable and lives on. Code comments may reference these. The site includes these files verbatim rather than restating them, so reference/* stays the single source of truth.
-- ./research/* holds full vendored source for related projects, readable from any agent sandbox. Two are our own dependencies, not competitors: `research/pbfhogg/` (Rust, our PBF reader and the injection/preprocessing counterpart) and `research/iOverlay/` plus `research/i_float/`, `research/i_shape/`, `research/i_tree/`, `research/i_key_sort/` (the reference sources the in-tree polygon topology engine used for Simplify/Intersect was ported from; i_overlay itself is now only a dev-dependency, the differential oracle that gates that engine). Consult these directly when a task involves changing what pbfhogg injects into the PBF, or modifying the in-tree polygon topology engine. (The competitor sources - planetiler, tilemaker, tippecanoe, stedsplakat - live here too.)
+- ./research/* holds full vendored source for related projects, readable from any agent sandbox. Two are our own dependencies, not competitors: `research/pbfhogg/` (Rust, our PBF reader and the injection/preprocessing counterpart) and `research/iOverlay/` plus `research/i_float/`, `research/i_shape/`, `research/i_tree/`, `research/i_key_sort/` (the reference sources the in-tree polygon topology engine used for Simplify/Intersect was ported from; i_overlay itself is now only a dev-dependency, the differential oracle that gates that engine). Consult these directly when a task involves changing what pbfhogg injects into the PBF, or modifying the in-tree polygon topology engine. (The competitor sources, available for research, live here too: `research/planetiler/` (Java), `research/tilemaker/` (C++), `research/tippecanoe/` (C++), `research/stedsplakat/` (TypeScript/JSTS Overpass-to-SVG poster renderer).)
 - When asked to write a plan or a specification, read `reference/technical-implementation-spec.md` first; it defines what such a document must contain.
 
 ### Bash rules
-- Never read or write from /tmp. All data lives in the project.
-- Never run raw cargo, curl, pkill. Use `brokkr`.
+
+- Never read or write from `/tmp`. All data lives in the project.
+- Never run raw `cargo`, `curl`, `pkill`. Use `brokkr`.
 
 ## Brokkr tool
 
@@ -24,12 +25,12 @@ Invoked as `brokkr` from the project root (reads `./brokkr.toml` for project det
 
 - `brokkr check [-- args]` - run clippy + tests. Supports `--features` and `--no-default-features`
 - `brokkr env` - show environment info and dataset status with computed XXH128 hashes (copy into the `xxhash` field in `brokkr.toml`)
-- `brokkr results [UUID]` - look up specific result by UUID prefix (shows full detail + hotpath report)
-- `brokkr results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--mode M] [--grep STR] [--top N]` - query/compare benchmark results from SQLite. `--mode` filters by measurement mode (`bench`/`hotpath`/`alloc`); `--grep` substring-matches against both the subprocess `cli_args` and the recorded `brokkr_args` (use it to find runs by flag/axis). Use `--top 0` to show all hotpath functions. Use `--compare-last --mode hotpath` to diff two most recent hotpath runs.
-- `brokkr results <UUID> --timeline [--stat FIELD] [--fields F1,F2] [--every N] [--phase P] [--where EXPR]` - query sidecar /proc samples (JSONL, stats, downsampled, per-phase, filtered)
-- `brokkr results <UUID> --markers --durations` - phase duration table from markers
-- `brokkr results --compare-timeline <A> <B>` - phase-aligned sidecar comparison
-- `brokkr results dirty --timeline --stat anon` - inspect last failed/dirty run
+- `brokkr results` - table of recent results. `brokkr results [UUID]` - look up specific result by UUID prefix (shows full detail + hotpath report)
+- `brokkr results [--commit X] [--compare A B] [--command CMD] [--mode M] [--grep STR] [--grep-v STR] [--dataset D] [--meta K=V] [--env K=V] [--top N]` - query/compare benchmark results from SQLite. `--mode` filters by measurement mode (`bench`/`hotpath`/`alloc`); `--grep` substring-matches against both the subprocess `cli_args` and the recorded `brokkr_args` (use it to find runs by flag/axis); `--grep-v` excludes. Use `--top 0` to show all hotpath functions. Use `--compare A B --mode hotpath` to diff two hotpath runs.
+- `brokkr sidecar <UUID> --samples [--fields F1,F2] [--every N] [--phase P] [--range A..B] [--where EXPR]` - query sidecar /proc samples (JSONL, downsampled, per-phase, filtered); `--stat FIELD` for stats on one field
+- `brokkr sidecar <UUID> --durations` - phase duration table from markers
+- `brokkr sidecar --compare <A> <B>` - phase-aligned sidecar comparison
+- `brokkr sidecar dirty` - inspect last failed/dirty run
 - `brokkr clean` - remove tilegen_tmp and scratch files
 - `brokkr history [--command CMD] [--project P] [--failed] [--since DATE] [--slow MS] [-n N] [--all]` - query global command history (stored in `$XDG_DATA_HOME/brokkr/history.db`). Every brokkr invocation is recorded with timing, exit status, project, and git context. Works from any directory.
 
@@ -213,25 +214,25 @@ All measurement commands share: `--force` (run with dirty git tree, results not 
 ```toml
 project = "elivagar"
 
-[plantasjen]
+[<host>]
 data = "data"
 scratch = "data/scratch"
 
 # The tilegen contract. Everything `brokkr tilegen` passes to elivagar comes
 # from here; there are no override flags. Paths are relative to `data`.
-[plantasjen.tilegen.default]
+[<host>.tilegen.default]
 ocean = [
     "z0-z7:simplified-water-polygons-split-3857/simplified_water_polygons.shp",
     "z8-z14:water-polygons-split-3857/water_polygons.shp",
     "ocean-tiles.pmtiles",
 ]
 
-[plantasjen.datasets.denmark]
+[<host>.datasets.denmark]
 origin = "Geofabrik"
 download_date = "2026-02-20"
 bbox = "8.0,54.5,13.0,58.0"
 
-[plantasjen.datasets.denmark.pbf.raw]
+[<host>.datasets.denmark.pbf.raw]
 file = "denmark-raw.osm.pbf"
 xxhash = "aa5bb865..."
 seq = 4704
