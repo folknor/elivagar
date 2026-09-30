@@ -171,7 +171,8 @@ impl LayerBuilder {
     /// After `merge_same_attr_geometries`, each line feature may contain multiple
     /// sub-linestrings (MoveTo/LineTo sequences). This pass joins segments that
     /// share endpoints through degree-2 nodes (not junctions), reducing feature
-    /// complexity and improving gzip compression.
+    /// complexity and improving gzip compression. It never joins through a
+    /// point on the buffered tile boundary: see [`on_clip_boundary`].
     pub fn merge_connected_lines(&mut self, scratch: &mut LineMergeScratch) {
         for feature in &mut self.features {
             if feature.geom_type != GeomType::LineString {
@@ -181,14 +182,25 @@ impl LayerBuilder {
             if scratch.segments.len() < 2 {
                 continue;
             }
-            merge_line_segments(
-                &mut scratch.segments,
-                &mut scratch.merged,
-                &mut scratch.visited,
-                &mut scratch.starts,
-                &mut scratch.chain,
-            );
-            encode_line_segments(&scratch.merged, &mut scratch.encode_buf);
+            #[cfg(debug_assertions)]
+            let input = scratch.segments.clone();
+            merge_line_segments(&mut scratch.segments, &mut scratch.merge);
+            encode_line_segments(&scratch.merge.merged, &mut scratch.encode_buf);
+            #[cfg(debug_assertions)]
+            {
+                let mut decoded = Vec::new();
+                decode_line_segments(&scratch.encode_buf, &mut decoded);
+                if let Err(violation) = check_merge(
+                    &input,
+                    &scratch.segments,
+                    &scratch.merge.merged,
+                    &decoded,
+                    &scratch.merge.witness,
+                    &scratch.merge.chain_ends,
+                ) {
+                    panic!("line merge invariant violated: {violation}");
+                }
+            }
             std::mem::swap(&mut feature.geometry, &mut scratch.encode_buf);
         }
     }
@@ -202,6 +214,40 @@ impl LayerBuilder {
 /// from blowing up tile size. When exceeded, the current segment is finished
 /// (no mid-segment truncation) and a new chain starts.
 const MAX_LINE_VERTICES: usize = 6000;
+
+/// The line clip buffer in extent units. Every line layer is clipped with
+/// `BUFFER_FRACTION` of the tile, which must be a whole number of units for
+/// clip intersections to land exactly on the boundary after quantization.
+#[allow(clippy::cast_possible_truncation, clippy::float_cmp)]
+const BUFFER_UNITS: i32 = {
+    let units = crate::geometry::EXTENT * crate::geometry::BUFFER_FRACTION;
+    assert!(
+        units == (units as i32) as f64,
+        "line clip buffer must be whole extent units"
+    );
+    units as i32
+};
+#[allow(clippy::cast_possible_truncation)]
+const CLIP_BOUNDARY_LO: i32 = -BUFFER_UNITS;
+#[allow(clippy::cast_possible_truncation)]
+const CLIP_BOUNDARY_HI: i32 = crate::geometry::EXTENT as i32 + BUFFER_UNITS;
+
+/// True for a point on the buffered tile boundary.
+///
+/// The line clipper ends a piece exactly where it leaves the buffered tile,
+/// so two different lines that leave through the same quantized point share
+/// an endpoint there without being connected in the source. Joining them
+/// fabricates an out-and-back (norway z13/4319/2421: two distinct boundary
+/// ways, reversed and spliced at (1565,4224)). The position is a conservative
+/// proxy for "created by clipping": an authored endpoint that lands on the
+/// boundary also stops joining, which splits a sub-line but loses no
+/// coverage.
+fn on_clip_boundary(point: (i32, i32)) -> bool {
+    point.0 == CLIP_BOUNDARY_LO
+        || point.0 == CLIP_BOUNDARY_HI
+        || point.1 == CLIP_BOUNDARY_LO
+        || point.1 == CLIP_BOUNDARY_HI
+}
 
 /// Decode MVT line geometry commands into absolute-coordinate segments.
 fn decode_line_segments(commands: &[u32], segments: &mut Vec<Vec<(i32, i32)>>) {
@@ -301,26 +347,44 @@ struct SegEnd {
     is_back: bool,
 }
 
+/// Working buffers and output of [`merge_line_segments`].
+///
+/// `witness` records, for every output chain in order, the retained segments
+/// it concatenates as `(segment index, traversed reversed)`; `chain_ends[k]`
+/// is the exclusive end of chain `k` in `witness`. It is what lets the
+/// invariant checker see which joins the merger made, rather than inferring
+/// them from output shape, which cannot tell a join from a coincidence.
+#[derive(Default)]
+pub(crate) struct LineMergeBuffers {
+    pub(super) merged: Vec<Vec<(i32, i32)>>,
+    pub(super) witness: Vec<(usize, bool)>,
+    pub(super) chain_ends: Vec<usize>,
+    visited: Vec<bool>,
+    starts: Vec<(i32, i32, usize, bool)>,
+    chain: Vec<(i32, i32)>,
+}
+
 /// Merge connected line segments through degree-2 nodes.
 ///
-/// Pass 1: build chains starting from degree != 2 endpoints (dead ends, junctions).
+/// `segments` is deduplicated in place and afterwards holds the retained
+/// segments the witness indexes into.
+///
+/// Pass 1: build chains starting from degree != 2 endpoints (dead ends,
+/// junctions) and from every endpoint on the clip boundary, whatever its
+/// degree - a chain may start or end there but never continue through it.
 /// Pass 2: collect remaining unvisited segments as pure cycles.
 /// Traversal order is deterministic (sorted start points and candidate indices).
-fn merge_line_segments(
-    segments: &mut Vec<Vec<(i32, i32)>>,
-    merged: &mut Vec<Vec<(i32, i32)>>,
-    visited: &mut Vec<bool>,
-    starts: &mut Vec<(i32, i32, usize, bool)>,
-    chain: &mut Vec<(i32, i32)>,
-) {
-    merged.clear();
-    if segments.len() < 2 {
-        std::mem::swap(segments, merged);
-        return;
-    }
+fn merge_line_segments(segments: &mut Vec<Vec<(i32, i32)>>, buf: &mut LineMergeBuffers) {
+    buf.merged.clear();
+    buf.witness.clear();
+    buf.chain_ends.clear();
     dedup_parallel_segments(segments);
     if segments.len() < 2 {
-        std::mem::swap(segments, merged);
+        for (i, segment) in segments.iter().enumerate() {
+            buf.merged.push(segment.clone());
+            buf.witness.push((i, false));
+            buf.chain_ends.push(buf.witness.len());
+        }
         return;
     }
 
@@ -339,42 +403,45 @@ fn merge_line_segments(
         });
     }
 
-    visited.clear();
-    visited.resize(segments.len(), false);
+    buf.visited.clear();
+    buf.visited.resize(segments.len(), false);
 
-    // Pass 1: chains starting from degree != 2 endpoints.
+    // Pass 1: chains starting from degree != 2 endpoints and from clip
+    // boundary endpoints. A boundary endpoint of degree 2 must be a start
+    // too: otherwise a chain passing it could only be picked up in pass 2,
+    // which would lose the valid interior joins on either side of it.
     // Sort starts for deterministic output.
-    starts.clear();
+    buf.starts.clear();
     for (&point, ends) in &endpoints {
-        if ends.len() != 2 {
+        if ends.len() != 2 || on_clip_boundary(point) {
             for &se in ends {
-                starts.push((point.0, point.1, se.seg_idx, se.is_back));
+                buf.starts.push((point.0, point.1, se.seg_idx, se.is_back));
             }
         }
     }
-    starts.sort_by(|a, b| {
+    buf.starts.sort_by(|a, b| {
         a.0.cmp(&b.0)
             .then(a.1.cmp(&b.1))
             .then(a.2.cmp(&b.2))
             .then(a.3.cmp(&b.3))
     });
 
-    for &(_, _, seg_idx, is_back) in starts.iter() {
-        if visited[seg_idx] {
+    let starts = std::mem::take(&mut buf.starts);
+    for &(_, _, seg_idx, is_back) in &starts {
+        if buf.visited[seg_idx] {
             continue;
         }
-        build_chain(
-            segments, &endpoints, visited, chain, seg_idx, is_back, merged,
-        );
+        build_chain(segments, &endpoints, buf, seg_idx, is_back);
     }
+    buf.starts = starts;
 
     // Pass 2: pure cycles (all unvisited segments).
     // Process in segment-index order for determinism.
     for i in 0..segments.len() {
-        if visited[i] {
+        if buf.visited[i] {
             continue;
         }
-        build_chain(segments, &endpoints, visited, chain, i, false, merged);
+        build_chain(segments, &endpoints, buf, i, false);
     }
 }
 
@@ -396,18 +463,20 @@ fn dedup_parallel_segments(segments: &mut Vec<Vec<(i32, i32)>>) {
 }
 
 /// Build one chain starting from `seg_idx` entered at `entering_back`.
-/// Walks through degree-2 nodes, respecting the vertex cap.
-/// Emits one or more chains into `out`.
+/// Walks through degree-2 nodes, respecting the vertex cap and never
+/// continuing through a clip boundary point. Emits the chain into
+/// `buf.merged` and its constituents into the witness.
 fn build_chain(
     segments: &[Vec<(i32, i32)>],
     endpoints: &FxHashMap<(i32, i32), Vec<SegEnd>>,
-    visited: &mut [bool],
-    chain: &mut Vec<(i32, i32)>,
+    buf: &mut LineMergeBuffers,
     start_seg: usize,
     entering_back: bool,
-    out: &mut Vec<Vec<(i32, i32)>>,
 ) {
+    let chain = &mut buf.chain;
+    let visited = &mut buf.visited;
     chain.clear();
+    let chain_start = buf.witness.len();
     let mut current_seg = start_seg;
     let mut entering_back = entering_back;
 
@@ -425,6 +494,7 @@ fn build_chain(
         }
 
         visited[current_seg] = true;
+        buf.witness.push((current_seg, entering_back));
 
         // Append segment points (possibly reversed).
         if entering_back {
@@ -445,6 +515,12 @@ fn build_chain(
         } else {
             seg[seg.len() - 1]
         };
+
+        // A clip boundary point ends the chain whatever its degree: a line
+        // meeting another there was cut by the clipper, not connected.
+        if on_clip_boundary(exit_point) {
+            break;
+        }
 
         // Look for next segment at exit point.
         let Some(ends) = endpoints.get(&exit_point) else {
@@ -484,8 +560,142 @@ fn build_chain(
     }
 
     if chain.len() >= 2 {
-        out.push(std::mem::take(chain));
+        buf.merged.push(std::mem::take(chain));
+        buf.chain_ends.push(buf.witness.len());
+    } else {
+        buf.witness.truncate(chain_start);
     }
+}
+
+/// Unordered adjacent-coordinate pairs of `lines`, with multiplicity,
+/// zero-length pairs ignored.
+#[cfg(any(test, debug_assertions))]
+fn edge_multiset(lines: &[Vec<(i32, i32)>]) -> std::collections::BTreeMap<[(i32, i32); 2], usize> {
+    let mut edges = std::collections::BTreeMap::new();
+    for line in lines {
+        for pair in line.windows(2) {
+            if pair[0] == pair[1] {
+                continue;
+            }
+            let edge = if pair[0] <= pair[1] {
+                [pair[0], pair[1]]
+            } else {
+                [pair[1], pair[0]]
+            };
+            *edges.entry(edge).or_insert(0) += 1;
+        }
+    }
+    edges
+}
+
+/// Reference whole-sub-line dedup, deliberately independent of
+/// `dedup_parallel_segments`: a line and its reverse are one line.
+#[cfg(any(test, debug_assertions))]
+fn reference_dedup(input: &[Vec<(i32, i32)>]) -> Vec<Vec<(i32, i32)>> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for line in input {
+        let reversed: Vec<(i32, i32)> = line.iter().rev().copied().collect();
+        let canonical = line.clone().min(reversed);
+        if seen.insert(canonical) {
+            out.push(line.clone());
+        }
+    }
+    out
+}
+
+/// Checks what one [`merge_line_segments`] call did, from its witness:
+///
+/// - consumption: the chains together use every retained segment exactly
+///   once, and the retained set equals an independent dedup of the input;
+/// - reconstruction: each chain equals its constituents concatenated in the
+///   recorded orientation;
+/// - forbidden continuation: no join between consecutive constituents lies
+///   on the clip boundary;
+/// - conservation: the decoded output carries exactly the edges of the
+///   deduplicated input.
+///
+/// Violations are described, not asserted, so tests can prove each check
+/// fires on the transformation it guards against.
+#[cfg(any(test, debug_assertions))]
+fn check_merge(
+    input: &[Vec<(i32, i32)>],
+    retained: &[Vec<(i32, i32)>],
+    merged: &[Vec<(i32, i32)>],
+    decoded: &[Vec<(i32, i32)>],
+    witness: &[(usize, bool)],
+    chain_ends: &[usize],
+) -> Result<(), String> {
+    let expected = reference_dedup(input);
+    let canonical = |line: &[(i32, i32)]| {
+        let reversed: Vec<(i32, i32)> = line.iter().rev().copied().collect();
+        line.to_vec().min(reversed)
+    };
+    let mut expected_lines: Vec<_> = expected.iter().map(|l| canonical(l)).collect();
+    let mut consumed: Vec<_> = witness
+        .iter()
+        .map(|&(idx, _)| {
+            retained
+                .get(idx)
+                .map(|l| canonical(l))
+                .ok_or_else(|| format!("witness names segment {idx} of {}", retained.len()))
+        })
+        .collect::<Result<_, _>>()?;
+    expected_lines.sort();
+    consumed.sort();
+    if consumed != expected_lines {
+        return Err(format!(
+            "chains consume {} segments, independent dedup keeps {}",
+            consumed.len(),
+            expected_lines.len()
+        ));
+    }
+
+    if chain_ends.len() != merged.len() {
+        return Err(format!(
+            "{} witness chains for {} output lines",
+            chain_ends.len(),
+            merged.len()
+        ));
+    }
+    let mut begin = 0;
+    for (k, &end) in chain_ends.iter().enumerate() {
+        let parts = &witness[begin..end];
+        let mut rebuilt: Vec<(i32, i32)> = Vec::new();
+        for (n, &(idx, reversed)) in parts.iter().enumerate() {
+            let seg = &retained[idx];
+            let oriented: Vec<(i32, i32)> = if reversed {
+                seg.iter().rev().copied().collect()
+            } else {
+                seg.clone()
+            };
+            if n > 0 {
+                let junction = oriented[0];
+                if rebuilt.last() != Some(&junction) {
+                    return Err(format!(
+                        "chain {k} joins disconnected segments at {junction:?}"
+                    ));
+                }
+                if on_clip_boundary(junction) {
+                    return Err(format!(
+                        "chain {k} continues through clip boundary point {junction:?}"
+                    ));
+                }
+                rebuilt.extend_from_slice(&oriented[1..]);
+            } else {
+                rebuilt = oriented;
+            }
+        }
+        if rebuilt != merged[k] {
+            return Err(format!("chain {k} does not match its constituents"));
+        }
+        begin = end;
+    }
+
+    if edge_multiset(decoded) != edge_multiset(&expected) {
+        return Err("output edges differ from the deduplicated input".to_string());
+    }
+    Ok(())
 }
 
 #[allow(clippy::cast_possible_wrap)]
@@ -506,3 +716,35 @@ pub(super) fn test_append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i3
 pub(super) fn test_decode_line_segments(commands: &[u32], segments: &mut Vec<Vec<(i32, i32)>>) {
     decode_line_segments(commands, segments);
 }
+
+/// One merger run on raw segments: (retained, merged, witness, chain ends).
+#[cfg(test)]
+pub(super) type TestMergeRun = (
+    Vec<Vec<(i32, i32)>>,
+    Vec<Vec<(i32, i32)>>,
+    Vec<(usize, bool)>,
+    Vec<usize>,
+);
+
+#[cfg(test)]
+pub(super) fn test_merge(input: &[Vec<(i32, i32)>]) -> TestMergeRun {
+    let mut segments = input.to_vec();
+    let mut buf = LineMergeBuffers::default();
+    merge_line_segments(&mut segments, &mut buf);
+    (segments, buf.merged, buf.witness, buf.chain_ends)
+}
+
+/// Runs the invariant checker; `merged` doubles as the decoded output.
+#[cfg(test)]
+pub(super) fn test_check_merge(
+    input: &[Vec<(i32, i32)>],
+    retained: &[Vec<(i32, i32)>],
+    merged: &[Vec<(i32, i32)>],
+    witness: &[(usize, bool)],
+    chain_ends: &[usize],
+) -> Result<(), String> {
+    check_merge(input, retained, merged, merged, witness, chain_ends)
+}
+
+#[cfg(test)]
+pub(super) const TEST_CLIP_BOUNDARY: (i32, i32) = (CLIP_BOUNDARY_LO, CLIP_BOUNDARY_HI);

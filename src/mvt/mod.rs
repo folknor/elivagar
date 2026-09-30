@@ -186,10 +186,7 @@ impl MergeScratch {
 /// Reusable scratch buffers for line merging.
 pub struct LineMergeScratch {
     pub(super) segments: Vec<Vec<(i32, i32)>>,
-    pub(super) merged: Vec<Vec<(i32, i32)>>,
-    pub(super) visited: Vec<bool>,
-    pub(super) starts: Vec<(i32, i32, usize, bool)>,
-    pub(super) chain: Vec<(i32, i32)>,
+    pub(super) merge: merge::LineMergeBuffers,
     pub(super) encode_buf: Vec<u32>,
 }
 
@@ -197,10 +194,7 @@ impl LineMergeScratch {
     pub fn new() -> Self {
         Self {
             segments: Vec::new(),
-            merged: Vec::new(),
-            visited: Vec::new(),
-            starts: Vec::new(),
-            chain: Vec::new(),
+            merge: merge::LineMergeBuffers::default(),
             encode_buf: Vec::new(),
         }
     }

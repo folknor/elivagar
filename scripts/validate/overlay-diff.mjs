@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Summarizes what changed in a `brokkr regress --overlay` SVG.
 //
-// Usage: node overlay-diff.mjs [--rings] <overlay.svg...>
+// Usage: node overlay-diff.mjs [--rings] <overlay.svg | overlay-dir>...
 //
 // Each overlay carries every structural_moved feature twice, current
 // (pink, #e91e63) then comparand (blue, #2196f3). For each pair this
@@ -13,20 +13,27 @@
 // means it can, and the tile needs a visual look. --rings adds per-ring
 // vertex counts and areas. No dependencies.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 const CURRENT = '#e91e63';
 const COMPARAND = '#2196f3';
 const EXTENT = 4096;
 
+/// Sub-paths of an SVG path. Each is an array of [x, y] points carrying a
+/// `closed` flag: polygon rings end in Z, line sub-paths do not, and only a
+/// closed ring has an edge from its last point back to its first.
 function parseRings(d) {
   const rings = [];
   let ring = null;
   for (const token of d.match(/[MLZ]|-?\d+(?:\.\d+)?/g) ?? []) {
     if (token === 'M') {
       ring = [];
+      ring.closed = false;
       rings.push(ring);
-    } else if (token === 'L' || token === 'Z') {
+    } else if (token === 'Z') {
+      if (ring) ring.closed = true;
+    } else if (token === 'L') {
       continue;
     } else {
       const last = ring[ring.length - 1];
@@ -71,7 +78,8 @@ function onlyIn(a, b) {
 function edgeCounts(rings) {
   const counts = new Map();
   for (const ring of rings) {
-    for (let i = 0; i < ring.length; i++) {
+    const edges = ring.closed ? ring.length : ring.length - 1;
+    for (let i = 0; i < edges; i++) {
       const a = ring[i];
       const b = ring[(i + 1) % ring.length];
       const [p, q] = a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]) ? [a, b] : [b, a];
@@ -115,7 +123,9 @@ function touchesVisible([x0, y0, x1, y1]) {
   return true;
 }
 
+let differingEdges = 0;
 function reportEdges(label, edges) {
+  differingEdges += edges.length;
   const visible = edges.filter(touchesVisible).length;
   const points = edges.flatMap(([x0, y0, x1, y1]) => [
     [x0, y0],
@@ -129,12 +139,27 @@ function reportEdges(label, edges) {
 
 const args = process.argv.slice(2);
 const perRing = args.includes('--rings');
+// A directory argument stands for every overlay SVG in it.
+const files = args
+  .filter((a) => a !== '--rings')
+  .flatMap((a) =>
+    statSync(a).isDirectory()
+      ? readdirSync(a)
+          .filter((name) => name.endsWith('.svg'))
+          .sort()
+          .map((name) => join(a, name))
+      : [a],
+  );
 let touching = 0;
-for (const file of args.filter((a) => a !== '--rings')) {
+for (const file of files) {
   const svg = readFileSync(file, 'utf8');
-  const paths = [...svg.matchAll(/<path data-class="structural_moved" d="([^"]*)" fill="([^"]*)"/g)];
-  const current = paths.filter((m) => m[2] === CURRENT).map((m) => parseRings(m[1]));
-  const comparand = paths.filter((m) => m[2] === COMPARAND).map((m) => parseRings(m[1]));
+  // Polygons carry the side colour in fill; lines are fill="none" and carry
+  // it in stroke.
+  const paths = [
+    ...svg.matchAll(/<path data-class="structural_moved" d="([^"]*)" fill="([^"]*)"(?: stroke="([^"]*)")?/g),
+  ].map((m) => ({ d: m[1], colour: m[2] === 'none' ? m[3] : m[2] }));
+  const current = paths.filter((p) => p.colour === CURRENT).map((p) => parseRings(p.d));
+  const comparand = paths.filter((p) => p.colour === COMPARAND).map((p) => parseRings(p.d));
   console.log(`${file}: ${current.length} current, ${comparand.length} comparand`);
   const pairs = Math.max(current.length, comparand.length);
   for (let i = 0; i < pairs; i++) {
@@ -153,4 +178,5 @@ for (const file of args.filter((a) => a !== '--rings')) {
     touching += reportEdges('comparand', edgesOnlyIn(cmpEdges, curEdges));
   }
 }
+console.log(`TOTAL edges present on one side only: ${differingEdges}`);
 console.log(`TOTAL changed edges touching the visible square: ${touching}`);

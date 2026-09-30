@@ -1,6 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
-use super::merge::{test_append_geometry, test_decode_line_segments};
+use super::merge::{
+    TEST_CLIP_BOUNDARY, test_append_geometry, test_check_merge, test_decode_line_segments,
+    test_merge,
+};
 use super::*;
 use protohoggr::{Cursor, WIRE_LEN};
 
@@ -1454,4 +1457,177 @@ fn line_merge_keeps_distinct_coincident_lines() {
         flat.contains(&(5, 5)) && flat.contains(&(5, -5)),
         "both arcs retained"
     );
+}
+
+// --- Clip boundary joins and the merge invariant checker ------------------
+
+fn lines(raw: &[&[(i32, i32)]]) -> Vec<Vec<(i32, i32)>> {
+    raw.iter().map(|line| line.to_vec()).collect()
+}
+
+/// Runs the real merger on raw pieces and asserts the invariant checker
+/// accepts what it did. Returns the merged chains.
+fn merge_checked(input: &[Vec<(i32, i32)>]) -> Vec<Vec<(i32, i32)>> {
+    let (retained, merged, witness, chain_ends) = test_merge(input);
+    if let Err(violation) = test_check_merge(input, &retained, &merged, &witness, &chain_ends) {
+        panic!("merger output fails its own checker: {violation}");
+    }
+    merged
+}
+
+#[test]
+fn clip_boundary_matches_the_line_clip_contract() {
+    // 4096 extent, 8/256 buffer: the clipper leaves the tile at -128 / 4224.
+    assert_eq!(TEST_CLIP_BOUNDARY, (-128, 4224));
+}
+
+/// Norway z13/4319/2421, boundaries: two distinct admin-4 ways, decoded from
+/// the pre-assembly sort records. Neither retraces; both leave the tile
+/// through the same quantized point (1565,4224).
+fn norway_z13_pair() -> Vec<Vec<(i32, i32)>> {
+    lines(&[
+        &[
+            (1565, 4224),
+            (1652, 4051),
+            (2304, 3749),
+            (2423, 3777),
+            (2506, 3941),
+            (2793, 4224),
+        ],
+        &[
+            (1565, 4224),
+            (1652, 4051),
+            (2336, 3745),
+            (2423, 3777),
+            (2506, 3941),
+            (2787, 4224),
+        ],
+    ])
+}
+
+/// Norway z12/2159/1211: the same two ways, meeting at (3275,-128).
+fn norway_z12_pair() -> Vec<Vec<(i32, i32)>> {
+    lines(&[
+        &[(3275, -128), (3301, -77), (3551, 170)],
+        &[(3275, -128), (3301, -77), (3625, 248)],
+    ])
+}
+
+#[test]
+fn norway_pairs_stay_separate_through_the_clip_boundary() {
+    for input in [norway_z13_pair(), norway_z12_pair()] {
+        let merged = merge_checked(&input);
+        assert_eq!(
+            merged.len(),
+            2,
+            "two clipped pieces must not be spliced: {merged:?}"
+        );
+        assert!(merged.iter().all(|line| !is_palindrome(line)));
+        let mut got = merged.clone();
+        let mut want = input.clone();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "pieces pass through unchanged");
+    }
+}
+
+#[test]
+fn checker_fires_on_the_boundary_splice_the_old_merger_made() {
+    // What the merger did before the fix: enter piece 0 reversed from its far
+    // end, arrive at (1565,4224), continue into piece 1. Every edge is
+    // conserved, so only the forbidden-continuation check can see it.
+    let input = norway_z13_pair();
+    let mut spliced: Vec<(i32, i32)> = input[0].iter().rev().copied().collect();
+    spliced.extend_from_slice(&input[1][1..]);
+    let witness = [(0, true), (1, false)];
+    let violation = test_check_merge(&input, &input, &[spliced], &witness, &[2])
+        .expect_err("a join through the clip boundary must be rejected");
+    assert!(violation.contains("clip boundary"), "{violation}");
+}
+
+#[test]
+fn checker_fires_on_the_pre_88f40af_duplicate_pair_merge() {
+    // The historical merger kept duplicate pieces and walked them into an
+    // out-and-back. Pass-1 route: J=(0,0) is a junction, E=(10,0) degree 2.
+    let input = lines(&[&[(0, 0), (10, 0)], &[(0, 0), (10, 0)], &[(0, 0), (0, 10)]]);
+    let palindrome = vec![(0, 0), (10, 0), (0, 0)];
+    let old = [palindrome.clone(), vec![(0, 0), (0, 10)]];
+    let violation = test_check_merge(
+        &input,
+        &input,
+        &old,
+        &[(0, false), (1, true), (2, false)],
+        &[2, 3],
+    )
+    .expect_err("the fabricated spike must be rejected");
+    assert!(violation.contains("consume"), "{violation}");
+
+    // Pass-2 route: an isolated duplicate pair, both endpoints degree 2.
+    let input = lines(&[&[(0, 0), (10, 0)], &[(0, 0), (10, 0)]]);
+    test_check_merge(
+        &input,
+        &input,
+        &[palindrome],
+        &[(0, false), (1, true)],
+        &[2],
+    )
+    .expect_err("the pass-2 fabricated spike must be rejected");
+}
+
+#[test]
+fn checker_conservation_fires_on_a_dropped_edge() {
+    // Reconstruction and consumption can both be satisfied by a witness that
+    // lies about its output; conservation reads the decoded lines instead.
+    let input = lines(&[&[(0, 0), (10, 0)], &[(10, 0), (20, 0)]]);
+    let (retained, merged, witness, chain_ends) = test_merge(&input);
+    test_check_merge(&input, &retained, &merged, &witness, &chain_ends)
+        .expect("real merge is valid");
+    let truncated = vec![vec![(0, 0), (10, 0)]];
+    let result = test_check_merge(&input, &retained, &truncated, &witness, &chain_ends);
+    assert!(result.is_err(), "a lost edge must be rejected");
+}
+
+#[test]
+fn interior_touch_of_the_clip_boundary_is_not_a_splice() {
+    // L1 touches the boundary at an interior vertex P while L2 ends there:
+    // a coordinate coincidence, not a join. Nothing merges and nothing fires.
+    let p = (2000, 4224);
+    let input = lines(&[&[(1900, 4100), p, (2100, 4100)], &[p, (2000, 4000)]]);
+    let merged = merge_checked(&input);
+    assert_eq!(merged.len(), 2, "{merged:?}");
+}
+
+#[test]
+fn interior_join_between_boundary_pieces_survives() {
+    // B->A and B->C with A and C on the boundary: B is an ordinary degree-2
+    // interior join and must still merge, into one chain from A to C.
+    let a = (-128, 500);
+    let b = (300, 520);
+    let c = (4224, 600);
+    let input = lines(&[&[b, a], &[b, c]]);
+    let merged = merge_checked(&input);
+    assert_eq!(merged.len(), 1, "{merged:?}");
+    assert_eq!(merged[0], vec![a, b, c]);
+}
+
+#[test]
+fn boundary_endpoint_of_degree_two_still_starts_a_chain() {
+    // A chain A-B-C whose end C is shared with a second chain C-D-E, C on
+    // the boundary: both chains must come out whole, split only at C.
+    let c = (4224, 800);
+    let input = lines(&[
+        &[(100, 100), (200, 200)],
+        &[(200, 200), c],
+        &[c, (300, 900)],
+        &[(300, 900), (100, 1000)],
+    ]);
+    let merged = merge_checked(&input);
+    assert_eq!(merged.len(), 2, "{merged:?}");
+    // Chain orientation follows the sorted start points; compare undirected.
+    let has = |want: &[(i32, i32)]| {
+        let reversed: Vec<(i32, i32)> = want.iter().rev().copied().collect();
+        merged.iter().any(|line| line == want || *line == reversed)
+    };
+    assert!(has(&[(100, 100), (200, 200), c]), "{merged:?}");
+    assert!(has(&[c, (300, 900), (100, 1000)]), "{merged:?}");
 }

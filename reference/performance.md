@@ -958,16 +958,90 @@ Readings, all on bygg:
   hashes, zoom range, compression level, policy version - validates the
   same either way, and an artifact carries no build provenance block of its
   own, so this line is the record connecting it to the landing.
-- **Boundary-line oracle FAILS on both sides, identically**: palindromes
-  and spurs at z7..z13 plus one spur per zoom at z0..z6, the same counts
-  and the same named offenders before and after. Boundaries are lines and
-  never reach the polygon engine; this is a standing failure at `88219f6`,
-  not a finding of this landing, and it is open.
+- **Boundary-line oracle reads the same on both sides**: palindromes and
+  spurs at z7..z13 plus one spur per zoom at z0..z6, identical counts and
+  offenders before and after. Boundaries are lines and never reach the
+  polygon engine. Those counts were investigated separately; see "Line
+  merger clip-boundary joins" below.
 - **Human visual gate, CLOSED** (2026-09-30): the rotated corpus renders -
   z9/282/150 and z14/9262/4771 added to the hard-tiles manifest for this,
   plus the re-rendered z5/17/9, z9/285/148 and z9/286/147 - adjudicated by
   the human and approved. The canonical renders draw the buffer, which is
   why those three changed at all; the change sits outside the tile frame.
+
+## Line merger clip-boundary joins, and the boundary oracle recalibrated (2026-09-30)
+
+The boundary-line oracle had never exited 0. At its 2026-07-12 calibration
+(`88f40af`, norway) it read 0 palindromes and 0 duplicates and six spurs
+that were accepted as real geometry; the script exits 1 on any count.
+Denmark read 300 palindromes and 660 spurs at `f9d3618`, and norway at
+the same commit reproduced its calibration exactly, so nothing had
+regressed. What the counts contained, taken apart offender by offender
+(`line-probe.mjs`, the pre-assembly sort records, and the new `--census`
+retrace-extent histogram):
+
+- **A real producer defect, the only one**: the assemble-time line merger
+  joined lines at any shared integer endpoint, including one made by the
+  clipper. Two different ways leaving a tile through the same quantized
+  boundary point were reversed and spliced into an out-and-back. Three of
+  norway's six "real-geometry" spurs were this - z13/4319/2421 (982
+  units), z12/2159/1210 and z12/2159/1211 - from two admin-4 ways that
+  touch the buffer edge at (1565,4224) and (3275,-128). The merger's
+  duplicate guards compare whole sequences and did not see it.
+- **Quantization-degenerate real geometry**, the rest: islet rings
+  narrower than one extent unit whose two sides round onto the same
+  points (every denmark palindrome I probed, 3 to 24 units long), 1-unit
+  rounding jogs inside long lines (most spurs, including norway's other
+  three), and needle-thin spits that share a single quantized vertex at
+  their neck. Stroked, each draws the geometry it came from.
+
+The fix, sparred with codex over three rounds (the first proposal -
+deleting retrace apexes after quantization - was wrong: it deletes real
+coverage and pinned shared vertices, and the merger can rebuild a
+half-emitted palindrome):
+
+- `merge_connected_lines` never continues a chain through a point on the
+  buffered tile boundary. Those endpoints stay in the graph as chain
+  starts and ends, including at degree two. The boundary is derived from
+  `EXTENT` and `BUFFER_FRACTION`, with a compile-time check that the
+  buffer is a whole number of units. Position is a conservative proxy:
+  an authored endpoint that lands on the boundary also stops joining,
+  which splits a sub-line but never loses coverage.
+- The merger records a witness - which retained segments each output
+  chain concatenates, in which orientation - and in debug builds a
+  checker verifies consumption against an independent dedup,
+  reconstruction, forbidden continuation and edge conservation, reading
+  the decoded output. Conservation alone cannot see the norway defect,
+  since a splice keeps every edge; forbidden continuation alone cannot see
+  the pre-`88f40af` duplicate-pair spike. Each check is proven to fire on
+  the transformation it guards: the norway splice, the historical
+  duplicate pair on both merger passes, and a dropped edge. Passing
+  controls cover a line touching the boundary at an interior vertex next
+  to a piece ending there, and interior joins between boundary-ended
+  pieces.
+- No emitter change: the degenerate geometry is left as it is.
+
+Readings, bygg, locations variant, fix against the build just before it:
+
+- **Norway**: 222 of 13.9M tiles change, 252 features, every displacement
+  0. The three spliced spurs are gone; the oracle reads 0 palindromes and
+  3 spurs, all 1-unit jogs.
+- **Denmark**: 88 tiles change, 118 features, every displacement 0.
+  Boundary oracle counts unchanged - denmark's boundaries layer had no
+  splices; the changes are in streets, street labels, ferries, pier and
+  water lines, cliff lines in `land`, and a few boundary features, since
+  every line layer shares the merger.
+- **Coverage**: `overlay-diff.mjs` over every changed feature pair on both
+  datasets - 118 and 252 - finds 0 edges present on only one side. Every
+  change is a pure split. The tool's line path was calibrated first: a
+  moved vertex fires, a pure split reads 0.
+
+The oracle's exit status is now driven by the two duplicate categories
+only, which read 0 on correct output of both datasets; palindrome and
+spur are advisory counts (`--strict` restores the old behaviour). This
+gives up an archive-level spike gate on purpose: as an output shape it
+could not separate a fabricated out-and-back from degenerate real
+geometry, and the merger defects it existed for are now gated in code.
 
 ## H8b hot-partition splitting (2026-07-26, landed on 69e829b)
 

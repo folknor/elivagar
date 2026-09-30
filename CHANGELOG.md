@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- The line merger no longer joins lines through a point on the buffered
+  tile boundary. Two lines leaving a tile through the same quantized
+  point were spliced into an out-and-back spike (three on norway's admin
+  boundaries, the largest nearly a quarter of a tile). Affected lines are
+  now split there instead; no line coverage changes. A witness-based
+  invariant checker verifies every merge in debug builds.
+- The boundary-line oracle gates on duplicate sub-lines only; palindrome
+  and spur counts are advisory, with a retrace-extent census. They cannot
+  tell degenerate real geometry from a fabricated spike.
+
 Polygon engine brought up to i_overlay 9.0.0. This changes output: the
 ocean artifact key moves to `OCEAN_POLICY_VERSION` v5, so the world
 ocean artifact must be rebuilt with `ocean-build`.
