@@ -3,9 +3,9 @@
     "cargo_features": [
       "default"
     ],
-    "cargo_lock_xxh3_128": "8d075aa9c890d93a33d8343f260e111b",
+    "cargo_lock_xxh3_128": "e78522d0951c70ed8e54fcfa887369fc",
     "elivagar": {
-      "commit": "88de4c563133046df74fea247fdb8391f50a25ca",
+      "commit": "e07ad78416470006c082fb06bcdc32bcba405ab1",
       "dirty": false
     },
     "pbfhogg_reader": {
@@ -23,7 +23,7 @@
         "full_shx_xxh128": "c65e7ee5a2027b4e488f741119218a71",
         "max_zoom": 14,
         "min_zoom": 0,
-        "policy_version": 4,
+        "policy_version": 5,
         "simplified_shp_xxh128": "b3417e31c2873dcfd106aa2e7d5e3b2a",
         "simplified_shx_xxh128": "55c4a5d3476116d7b800122a074ba70b"
       },

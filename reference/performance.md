@@ -963,9 +963,11 @@ Readings, all on bygg:
   and the same named offenders before and after. Boundaries are lines and
   never reach the polygon engine; this is a standing failure at `88219f6`,
   not a finding of this landing, and it is open.
-- **Human visual gate: OPEN.** The buffer-only location argues the change
-  is invisible in a rendered tile, but that is an argument, not the
-  standing ocean gate.
+- **Human visual gate, CLOSED** (2026-09-30): the rotated corpus renders -
+  z9/282/150 and z14/9262/4771 added to the hard-tiles manifest for this,
+  plus the re-rendered z5/17/9, z9/285/148 and z9/286/147 - adjudicated by
+  the human and approved. The canonical renders draw the buffer, which is
+  why those three changed at all; the change sits outside the tile frame.
 
 ## H8b hot-partition splitting (2026-07-26, landed on 69e829b)
 

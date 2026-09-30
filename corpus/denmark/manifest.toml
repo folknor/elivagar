@@ -61,3 +61,15 @@ x = 286
 y = 147
 layers = ["ocean"]
 note = "602-ring polygon, MapLibre clamp"
+[[tile]]
+z = 9
+x = 282
+y = 150
+layers = ["ocean"]
+note = "fragment border split, buffer holes absorbed, 500 to 498 rings"
+[[tile]]
+z = 14
+x = 9262
+y = 4771
+layers = ["ocean"]
+note = "fragment border split, single island ring at the right buffer"

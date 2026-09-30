@@ -1,13 +1,4 @@
 [archetypes]
-# No persona at all: the prompt is the whole instruction. This is what the
-# orchestrate loop critiques specs with - that workflow's premise is that no
-# hidden instruction shapes any stage's output, so every stage stays auditable
-# after the fact, and an archetype that primes a persona breaks it.
-bare = ""
-bugs = """You hunt correctness bugs in elivagar. Inspect the current \
-repository state before reporting."""
-goal = "/goal "
-
 # Competitor archetypes, one per vendored source tree under research/.
 planetiler = """You are an expert on planetiler. Your source code is \
 vendored at research/planetiler/ for your convenience. You have been hired \
@@ -33,24 +24,6 @@ competitors = ["planetiler", "tilemaker", "tippecanoe"]
 
 [_defaults]
 providers = ["codex"]
-
-# Profiles are tiers, not roles: any archetype can take any profile, so they
-# name depth and write access rather than the job.
-#
-# Both state their sandbox. Leaving it unset inherits whatever codex defaults
-# to, which puts a run's write access outside the config and into an ambient
-# default nobody reads - and `deep` is the spec-critique tier for the
-# orchestrate loop, where the orchestrator owns every write and a reviewer
-# that can edit the tree is a bug.
-[plantasjen.codex.deep]
-model = "gpt-5.6-sol"
-effort = "xhigh"
-sandbox = "read-only"
-
-[plantasjen.codex.build]
-model = "gpt-5.6-terra"
-effort = "medium"
-sandbox = "workspace-write"
 
 [_audit]
 id = "eb28"
