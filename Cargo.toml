@@ -66,19 +66,18 @@ brotli = "9.0.0"
 lz4_flex = "0.14"
 snap = "1"
 smallvec = "1.15.2"
-hotpath = "0.25.0"
+hotpath = "0.27.0"
 rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-toml = "1.1.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-mlt-core = { version = "0.12.7", optional = true }
-geo-types = "0.7.19"
+mlt-core = { version = "0.16.0", optional = true }
+geo-types = { version = "0.7.19", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
-i_overlay = "8.0"
+i_overlay = "9.0.0"
 serde_yaml = "0.9"
 pmtiles = { version = "0.24.0", default-features = false, features = ["write"] }
 tempfile = "3.27"
@@ -139,7 +138,7 @@ default = []
 # Shipping it on by default would put an unvalidated wire format behind a
 # stable-looking flag. mlt-core is pre-1.0 and moves; keeping the dep optional
 # also keeps it out of the default build graph.
-mlt = ["dep:mlt-core"]
+mlt = ["dep:mlt-core", "dep:geo-types"]
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 # linux-io-uring = ["dep:io-uring", "dep:libc"]

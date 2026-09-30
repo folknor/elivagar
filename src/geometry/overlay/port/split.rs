@@ -291,11 +291,15 @@ pub(super) struct SnapRadius {
 
 impl SnapRadius {
     pub(super) fn increment(&mut self) {
-        self.current = 60.min(self.current + self.step);
+        self.current = self.current.saturating_add(self.step);
     }
 
-    pub(super) fn radius(&self) -> i64 {
-        1i64 << self.current as u32
+    /// Squared-distance threshold for snapping to an existing endpoint. The
+    /// exponent caps at 2 * (32 - 4) = 56, limiting the linear radius to
+    /// 2^28 for the i32 engine.
+    pub(super) fn radius_squared(&self) -> i64 {
+        let exponent = self.current.min(56) as u32;
+        1i64 << exponent
     }
 }
 
@@ -323,7 +327,7 @@ impl SplitSolver {
             need_to_fix = false;
             self.marks.clear();
 
-            let radius = snap_radius.radius();
+            let radius_squared = snap_radius.radius_squared();
 
             for (i, si) in segments.iter().enumerate() {
                 let xsi = &si.x_segment;
@@ -338,7 +342,7 @@ impl SplitSolver {
                         continue;
                     }
 
-                    let is_round = Self::cross(i, j, xsi, xsj, &mut self.marks, radius);
+                    let is_round = Self::cross(i, j, xsi, xsj, &mut self.marks, radius_squared);
                     need_to_fix = need_to_fix || is_round;
                 }
             }
@@ -422,7 +426,7 @@ impl SplitSolver {
             need_to_fix = false;
             self.marks.clear();
 
-            let radius = snap_radius.radius();
+            let radius_squared = snap_radius.radius_squared();
 
             for (i, si) in segments.iter().enumerate() {
                 let time = si.x_segment.a.x;
@@ -434,8 +438,14 @@ impl SplitSolver {
                         (sj.id, i, &sj.x_segment, &si.x_segment)
                     };
 
-                    let is_round =
-                        Self::cross(this_index, scan_index, this, scan, &mut self.marks, radius);
+                    let is_round = Self::cross(
+                        this_index,
+                        scan_index,
+                        this,
+                        scan,
+                        &mut self.marks,
+                        radius_squared,
+                    );
 
                     need_to_fix = is_round || need_to_fix;
                 }
@@ -890,7 +900,7 @@ impl SplitSolver {
             }
 
             let mut buffer = core::mem::replace(&mut self.fragment_buffer, FragmentBuffer::empty());
-            need_to_fix = self.process(snap_radius.radius(), &mut buffer, solver);
+            need_to_fix = self.process(snap_radius.radius_squared(), &mut buffer, solver);
 
             #[cfg(debug_assertions)]
             debug_assert!(buffer.is_on_border_sorted());
@@ -903,7 +913,9 @@ impl SplitSolver {
                     j += 1;
                 }
 
-                let index = buffer.layout.index(x);
+                // Segments ending at the border are stored in the left group.
+                // on_border contains only borders with a positive group index.
+                let index = buffer.layout.index(x) - 1;
                 if let Some(fragments) = buffer.groups.get(index) {
                     self.on_border_split(x, fragments, &mut buffer.on_border[j0..j]);
                 }
@@ -927,19 +939,28 @@ impl SplitSolver {
     }
 
     #[inline]
-    fn process(&mut self, radius: i64, buffer: &mut FragmentBuffer, _solver: &Solver) -> bool {
+    fn process(
+        &mut self,
+        radius_squared: i64,
+        buffer: &mut FragmentBuffer,
+        _solver: &Solver,
+    ) -> bool {
         let mut is_any_round = false;
         for group in buffer.groups.iter_mut().take(buffer.active_groups) {
             if group.is_empty() {
                 continue;
             }
-            let any_round = Self::bin_split(radius, group, &mut self.marks);
+            let any_round = Self::bin_split(radius_squared, group, &mut self.marks);
             is_any_round = is_any_round || any_round;
         }
         is_any_round
     }
 
-    fn bin_split(radius: i64, fragments: &mut [Fragment], marks: &mut Vec<LineMark>) -> bool {
+    fn bin_split(
+        radius_squared: i64,
+        fragments: &mut [Fragment],
+        marks: &mut Vec<LineMark>,
+    ) -> bool {
         if fragments.len() < 2 {
             return false;
         }
@@ -960,9 +981,9 @@ impl SplitSolver {
                 // MARK: the intersection, ensuring the right order for deterministic results
 
                 let is_round = if fi.x_segment < fj.x_segment {
-                    Self::cross_fragments(fi, fj, radius, marks)
+                    Self::cross_fragments(fi, fj, radius_squared, marks)
                 } else {
-                    Self::cross_fragments(fj, fi, radius, marks)
+                    Self::cross_fragments(fj, fi, radius_squared, marks)
                 };
 
                 any_round = any_round || is_round;
@@ -1011,93 +1032,278 @@ impl SplitSolver {
     fn cross_fragments(
         fi: &Fragment,
         fj: &Fragment,
-        radius: i64,
+        radius_squared: i64,
         marks: &mut Vec<LineMark>,
     ) -> bool {
-        let cross = if let Some(cross) = CrossSolver::cross(&fi.x_segment, &fj.x_segment, radius) {
-            cross
-        } else {
-            return false;
-        };
+        // Fragments only select candidate pairs; marks belong to the complete
+        // segments, and repeated marks from different columns are deduplicated
+        // in apply(). Filtering a crossing or a collinear overlap by the
+        // fragment rects drops it whenever the rounded point, or the overlap
+        // start, lands in a neighbouring column (i_overlay 8.1.1).
+        Self::cross(
+            fi.index,
+            fj.index,
+            &fi.x_segment,
+            &fj.x_segment,
+            marks,
+            radius_squared,
+        )
+    }
+}
 
-        let r = crate::geometry::overlay::port::point::i_from_wide(radius);
+#[cfg(test)]
+mod upstream_split_regressions {
+    //! Ported from i_overlay 8.1.1 (split/solver_fragment.rs and
+    //! split/snap_radius.rs tests): the fragment border and fragment filter
+    //! fixes, run through every split strategy of this engine.
 
-        match cross.cross_type {
-            CrossType::Overlay => {
-                let mask = CrossSolver::collinear(&fi.x_segment, &fj.x_segment);
-                if mask == 0 {
-                    return false;
-                }
+    use super::*;
 
-                if !(fi.rect.contains_with_radius(fi.x_segment.a, r)
-                    || fj.rect.contains_with_radius(fi.x_segment.a, r))
-                {
-                    return false;
-                }
+    type Split = Vec<(XSegment, ShapeCountBoolean)>;
 
-                if mask.is_target_a() {
-                    marks.push(LineMark {
-                        index: fj.index,
-                        point: fi.x_segment.a,
-                    });
-                }
+    fn seg(ax: i32, ay: i32, bx: i32, by: i32, subj: i32) -> Segment<ShapeCountBoolean> {
+        Segment {
+            x_segment: XSegment {
+                a: IntPoint::new(ax, ay),
+                b: IntPoint::new(bx, by),
+            },
+            count: ShapeCountBoolean { subj, clip: 0 },
+        }
+    }
 
-                if mask.is_target_b() {
-                    marks.push(LineMark {
-                        index: fj.index,
-                        point: fi.x_segment.b,
-                    });
-                }
+    fn sort_by_ab(segments: &mut [Segment<ShapeCountBoolean>]) {
+        segments.sort_by(|l, r| {
+            l.x_segment
+                .a
+                .cmp(&r.x_segment.a)
+                .then(l.x_segment.b.cmp(&r.x_segment.b))
+        });
+    }
 
-                if mask.is_other_a() {
-                    marks.push(LineMark {
-                        index: fi.index,
-                        point: fj.x_segment.a,
-                    });
-                }
+    fn canonical(segments: &[Segment<ShapeCountBoolean>]) -> Split {
+        let mut sorted = segments.to_vec();
+        sort_by_ab(&mut sorted);
+        sorted.iter().map(|s| (s.x_segment, s.count)).collect()
+    }
 
-                if mask.is_other_b() {
-                    marks.push(LineMark {
-                        index: fi.index,
-                        point: fj.x_segment.b,
-                    });
-                }
-            }
-            _ => {
-                if !fi.rect.contains_with_radius(cross.point, r)
-                    || !fj.rect.contains_with_radius(cross.point, r)
-                {
-                    return false;
-                }
+    fn run_split(input: &[Segment<ShapeCountBoolean>], solver: &Solver) -> Split {
+        let mut actual = input.to_vec();
+        SplitSolver::new().split_segments(&mut actual, solver);
+        canonical(&actual)
+    }
 
-                match cross.cross_type {
-                    CrossType::Pure => {
-                        marks.push(LineMark {
-                            index: fi.index,
-                            point: cross.point,
-                        });
-                        marks.push(LineMark {
-                            index: fj.index,
-                            point: cross.point,
-                        });
-                    }
-                    CrossType::TargetEnd => {
-                        marks.push(LineMark {
-                            index: fj.index,
-                            point: cross.point,
-                        });
-                    }
-                    CrossType::OtherEnd => {
-                        marks.push(LineMark {
-                            index: fi.index,
-                            point: cross.point,
-                        });
-                    }
-                    _ => {}
+    fn solver_name(solver: &Solver) -> &'static str {
+        match solver.strategy {
+            crate::geometry::overlay::port::Strategy::List => "list",
+            crate::geometry::overlay::port::Strategy::Tree => "tree",
+            crate::geometry::overlay::port::Strategy::Frag => "frag",
+            crate::geometry::overlay::port::Strategy::Auto => "auto",
+        }
+    }
+
+    #[test]
+    fn collinear_overlap_starts_in_a_later_column() {
+        for (start, end, far_end) in [(80, 100, 150), (180, 300, 400)] {
+            for slope in [-1, 0, 1] {
+                let on_line = |x0: i32, x1: i32, subj| seg(x0, slope * x0, x1, slope * x1, subj);
+                let padding = [
+                    seg(0, 1000, far_end, 1000, 1),
+                    seg(0, 2000, far_end, 2000, 1),
+                ];
+                let mut input = vec![on_line(0, end, 1), on_line(start, far_end, 1)];
+                input.extend(padding);
+                sort_by_ab(&mut input);
+                let layout = GridLayout::new(input.iter().map(|s| s.x_segment), input.len())
+                    .expect("layout");
+                assert!(layout.index(start) > layout.index(0));
+
+                let mut expected = vec![
+                    on_line(0, start, 1),
+                    on_line(start, end, 2),
+                    on_line(end, far_end, 1),
+                ];
+                expected.extend(padding);
+                let expected = canonical(&expected);
+                for solver in [Solver::LIST, Solver::TREE, Solver::FRAG] {
+                    assert_eq!(
+                        run_split(&input, &solver),
+                        expected,
+                        "{}, slope={slope}, start={start}",
+                        solver_name(&solver)
+                    );
                 }
             }
         }
+    }
 
-        cross.is_round
+    #[test]
+    fn fragments_can_report_a_crossing_outside_their_column() {
+        let edges = [
+            XSegment {
+                a: IntPoint::new(0, 0),
+                b: IntPoint::new(100, 1),
+            },
+            XSegment {
+                a: IntPoint::new(0, 1),
+                b: IntPoint::new(100, 0),
+            },
+        ];
+        let layout = GridLayout::new(edges.iter().copied(), 4).expect("layout");
+        assert_eq!(layout.pos(1), 32);
+        let mut buffer = FragmentBuffer::new(layout);
+        for (index, edge) in edges.into_iter().enumerate() {
+            buffer.add_segment(index, edge);
+        }
+        let mut marks = Vec::new();
+        // The first column's enclosures overlap, but the rounded crossing at
+        // (50, 1) lies in a later column. Marks belong to the full segments.
+        assert!(SplitSolver::bin_split(1, &mut buffer.groups[0], &mut marks));
+        assert_eq!(marks.len(), 2);
+        assert_eq!(marks[0].index, 0);
+        assert_eq!(marks[1].index, 1);
+        for mark in marks {
+            assert_eq!(mark.point, IntPoint::new(50, 1));
+        }
+    }
+
+    /// Runs the whole splitter so the border's neighbouring-group selection
+    /// is exercised, not just on_border_split with a preselected group.
+    fn assert_border_split(edges: &[[i32; 4]], expected_verticals: &[[i32; 4]]) {
+        // Keeps the x range at [0, 8]: with 4..15 edges the column width is
+        // 4. These isolated edges do not touch the geometry under test.
+        let padding = [[0, 100, 8, 100], [0, 102, 8, 102]];
+        for dx in [-11, 0, 7] {
+            let to_segment = |&[ax, ay, bx, by]: &[i32; 4]| seg(ax + dx, ay, bx + dx, by, 1);
+            let mut input: Vec<_> = edges.iter().chain(&padding).map(to_segment).collect();
+            // GridLayout::new reads min_x off the first segment, so it wants
+            // the a-sorted order split_segments establishes before layout.
+            sort_by_ab(&mut input);
+            let layout =
+                GridLayout::new(input.iter().map(|s| s.x_segment), input.len()).expect("layout");
+            assert_eq!(layout.pos(1), dx + 4);
+            assert_eq!(layout.pos(2), dx + 8);
+
+            let expected: Vec<_> = edges
+                .iter()
+                .filter(|e| e[0] != e[2])
+                .chain(expected_verticals)
+                .chain(&padding)
+                .map(to_segment)
+                .collect();
+            let expected = canonical(&expected);
+
+            for solver in [Solver::LIST, Solver::TREE, Solver::FRAG] {
+                assert_eq!(
+                    run_split(&input, &solver),
+                    expected,
+                    "{}, dx={dx}",
+                    solver_name(&solver)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn border_horizontal_endpoint_from_left() {
+        // Both the first internal border and the rightmost border, where the
+        // right group holds only the vertical segment.
+        for x in [4, 8] {
+            assert_border_split(&[[x, 0, x, 6], [0, 3, x, 3]], &[[x, 0, x, 3], [x, 3, x, 6]]);
+        }
+    }
+
+    #[test]
+    fn border_sloped_endpoints_at_same_point() {
+        // Rising and falling edges create duplicate marks at (4, 3).
+        assert_border_split(
+            &[[4, 0, 4, 6], [0, 0, 4, 3], [0, 6, 4, 3]],
+            &[[4, 0, 4, 3], [4, 3, 4, 6]],
+        );
+    }
+
+    #[test]
+    fn border_multiple_points_and_verticals() {
+        assert_border_split(
+            &[
+                [4, 0, 4, 3],
+                [4, 5, 4, 8],
+                [0, 1, 4, 1],
+                [0, 2, 4, 2],
+                [0, 6, 4, 6],
+                [0, 7, 4, 7],
+            ],
+            &[
+                [4, 0, 4, 1],
+                [4, 1, 4, 2],
+                [4, 2, 4, 3],
+                [4, 5, 4, 6],
+                [4, 6, 4, 7],
+                [4, 7, 4, 8],
+            ],
+        );
+    }
+
+    #[test]
+    fn border_multiple_columns() {
+        assert_border_split(
+            &[[4, 0, 4, 6], [8, 0, 8, 6], [0, 1, 4, 1], [6, 3, 8, 3]],
+            &[[4, 0, 4, 1], [4, 1, 4, 6], [8, 0, 8, 3], [8, 3, 8, 6]],
+        );
+    }
+
+    #[test]
+    fn border_shared_ends_and_outside_points_do_not_split() {
+        assert_border_split(
+            &[
+                [4, 0, 4, 6],
+                [0, -1, 4, -1],
+                [0, 0, 4, 0],
+                [0, 6, 4, 6],
+                [0, 7, 4, 7],
+            ],
+            &[[4, 0, 4, 6]],
+        );
+    }
+
+    #[test]
+    fn border_endpoint_from_right() {
+        // This contact is handled inside the right group by bin_split.
+        assert_border_split(&[[4, 0, 4, 6], [4, 3, 8, 3]], &[[4, 0, 4, 3], [4, 3, 4, 6]]);
+    }
+
+    #[test]
+    fn border_first_column_has_no_left_neighbor() {
+        assert_border_split(&[[0, 0, 0, 6], [0, 3, 8, 3]], &[[0, 0, 0, 3], [0, 3, 0, 6]]);
+    }
+
+    #[test]
+    fn squared_radius_preserves_initial_progression() {
+        let mut snap = SnapRadius {
+            current: 0,
+            step: 1,
+        };
+        for expected in [1, 2, 4, 8] {
+            assert_eq!(snap.radius_squared(), expected);
+            snap.increment();
+        }
+    }
+
+    #[test]
+    fn squared_radius_saturates_at_the_i32_limit() {
+        let limit = 1i64 << 56;
+        let mut snap = SnapRadius {
+            current: 55,
+            step: 1,
+        };
+        assert_eq!(snap.radius_squared(), limit / 2);
+        snap.increment();
+        assert_eq!(snap.radius_squared(), limit);
+        snap.increment();
+        assert_eq!(snap.radius_squared(), limit);
+        snap.step = usize::MAX;
+        snap.increment();
+        assert_eq!(snap.radius_squared(), limit);
+        snap.increment();
+        assert_eq!(snap.radius_squared(), limit);
     }
 }

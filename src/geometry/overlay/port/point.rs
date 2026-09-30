@@ -220,15 +220,6 @@ pub(crate) struct IntRect {
 
 impl IntRect {
     #[inline(always)]
-    pub fn contains_with_radius(&self, point: IntPoint, radius: i32) -> bool {
-        let min_x = self.min_x - radius;
-        let max_x = self.max_x + radius;
-        let min_y = self.min_y - radius;
-        let max_y = self.max_y + radius;
-        min_x <= point.x && point.x <= max_x && min_y <= point.y && point.y <= max_y
-    }
-
-    #[inline(always)]
     pub fn is_intersect_border_include(&self, other: &Self) -> bool {
         let x = self.min_x <= other.max_x && self.max_x >= other.min_x;
         let y = self.min_y <= other.max_y && self.max_y >= other.min_y;

@@ -79,8 +79,8 @@ two passes, with the full shapefile serving both, so the low-zoom behavior
 below is identical under either spelling.
 
 The low-zoom (z0-z7) pass unions its source pieces before pyramid descent
-(`OCEAN_POLICY_VERSION` v3; the current version is v4, which adds the
-ring-cap partition below). The osmdata shapefiles arrive pre-split into
+(introduced at `OCEAN_POLICY_VERSION` v3; the ring-cap partition below
+came at v4). The osmdata shapefiles arrive pre-split into
 grid cells comparable to low-zoom tile sizes; descending each cell
 independently simplified shared coastlines into disagreeing shapes (seam
 wedges on every cell edge) and applied the per-zoom min-area drop per cell

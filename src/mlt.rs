@@ -602,7 +602,9 @@ mod tests {
 
         let parsed = parse_decoded_layers(&encoded).expect("encoded mlt should parse");
         assert_eq!(parsed.len(), 1);
-        let l01 = parsed[0].as_layer01().expect("expected tag01 layer");
+        let mlt_core::Layer::Tag01(l01) = &parsed[0] else {
+            panic!("expected tag01 layer");
+        };
         assert_eq!(l01.name(), "test");
         assert_eq!(l01.extent().get(), 4096);
     }
@@ -1039,7 +1041,9 @@ mod tests {
             let encoded = encode_tile(&[&layer]).expect("mlt encode should succeed");
             let parsed = parse_decoded_layers(&encoded).expect("mlt parse should succeed");
             assert_eq!(parsed.len(), 1, "case {}", case.id);
-            let l01 = parsed[0].as_layer01().expect("expected tag01 layer");
+            let mlt_core::Layer::Tag01(l01) = &parsed[0] else {
+                panic!("expected tag01 layer, case {}", case.id);
+            };
 
             let expected: BTreeMap<&str, (&str, usize)> = case
                 .expected

@@ -874,6 +874,99 @@ Readings at the landing (`b6b6844`), all on plantasjen:
   above were taken from), but a spec that pins an archive across a landing
   has to account for that retention window.
 
+## i_overlay 9.0.0 fixes ported (2026-09-30, OCEAN_POLICY_VERSION v5, denmark locations)
+
+The dev-dependency oracle moved from i_overlay 8.1.0 to 9.0.0 in a
+dependency refresh, and the differential oracle tests failed: upstream had
+fixed four defects the in-tree engine still carried. Ported: the fragment
+splitter's border lookup (upstream issue 87 - segments ending on a column
+border live in the LEFT group, the engine looked in the right one), the
+removal of the fragment-rect filter on crossings and collinear overlaps
+(it dropped any whose rounded point or overlap start fell in a neighbouring
+column), the snap-radius exponent cap (56 for i32, saturating), and
+collinear output cleanup deferred until after hole binding (upstream issue
+91). Both engine entry points now replace their output buffer instead of
+appending, since the binder scans all of it, and the binder's unresolved
+parent is a sentinel in release builds too.
+
+Readings, all on bygg:
+
+- **Issue 91 tests, both directions**: with pre-bind simplification
+  restored for one throwaway build, the ported repros FIRE - index out of
+  bounds indexing `parent_for_child` with `ContourIndex::EMPTY` (the panic
+  the issue reported on planet OSM buildings, and a release-build panic too,
+  since EMPTY is out of range whatever the fill value), and the hole
+  `(-4,3),(-4,4),(-3,2)` bound to the triangle `(-1,0),(-4,1),(-3,0)`
+  instead of its 13-vertex container. Both original differential oracle
+  tests fail the same way. With the fix they CLEAR.
+- **Corpus**: `check` refuses exit 2 on
+  `config.ocean.artifact_key.policy_version`, as it must.
+- **Regress, pre versus post** (artifact-active, each build against its own
+  policy's world artifact): 14 of 1,296,998 tiles differ, all `ocean`, all
+  structural, no attribute or feature-count change. Every changed vertex
+  sits at x 4146..4224 of a 4096 extent - inside the right-hand tile
+  buffer, which fill renderers clip away.
+- **Attribution, by computed-ocean A/B**: artifact-served tiles cannot
+  answer a code toggle, so every arm ran with the artifact line dropped from
+  the tilegen block. All four fixes versus all but the border fix: the same
+  14 tiles, identical per-zoom structural counts and displacement
+  percentiles. All but the border fix versus the pre-change code: 0 diffs,
+  every one of 1,296,995 tiles raw byte-equal. So the border fix is the
+  whole output change on denmark and the other three are exactly neutral
+  there.
+- **Mechanism, and how far it is established**: the border lookup is proven
+  by how segments are stored - one ending on a column border lives in the
+  left group, and the old code searched the right one. Why it lands on the
+  right clip edge is conditional: the grid takes `min_x` from the first
+  sorted segment and `max_x` from all of them, not from the clip rect, so it
+  holds only when a failing call's envelope is the buffered rect,
+  [-128, 4224] in tile coordinates. For that envelope it is exact: the span
+  4352 is 17 x 256, and every column power a fragment-sized input can pick
+  (1 to 5) divides it, so the right edge is always a border entry, while the
+  left edge is group 0, which never is. Fragmentation needs over 16,000
+  segments, which is why only the largest ocean pieces reach it.
+- **The two outliers**: z9/282/150 dropping from exactly 500 rings to 498 is
+  two holes touching the right buffer edge that the corrected split absorbs
+  into the outer as notches; it never crosses MapLibre's clamp, which acts
+  only above 500. The z10 displacement max of 367 is regress's
+  nearest-vertex metric, from (4224,3653) to the nearest opposite-side
+  vertex (4207,3287) - vertex sampling, not a 367-unit coastline move.
+- **Earcut oracle**: 0 over threshold, 0 misattached, every polygon layer,
+  post. Pre ocean also 0/0 - earcut does not see this defect.
+- **Ring-cap census**: 0 over cap on every polygon layer.
+- **`elivagar verify`**: PASS on the pre archive; the defect produces no
+  self-intersection that verify reports.
+- **World artifact, v5**: `verify --unique-payloads` PASS (9,177,102
+  tiles), earcut 0/0 and ring-cap 0 over cap on 9,175,064 unique payloads.
+  Regress against the preserved v4 artifact: 26 of 212,393,397 addressed
+  tiles differ, all `ocean`, all structural, z1 through z14. Denmark only
+  reads a subset of artifact payloads, so this is the world-scale check.
+- **No changed edge reaches a visible tile**: `scripts/validate/overlay-diff.mjs`
+  compares the edge multisets of each overlay pair and tests every differing
+  edge against the visible square [0, 4096]^2 (Liang-Barsky). Calibrated on
+  a synthetic pair - an edge moved inside the square counts 4, a buffer-only
+  move counts 0. Across all 26 world tiles and all 14 denmark tiles: 0
+  changed edges touch the visible square; every one lies at x 4146..4225.
+  That is stronger than vertex position, since an outside vertex can still
+  move an edge that crosses into the tile. It covers fill renderers that
+  clip at the tile: a wide stroke, a translated layer or a consumer that
+  draws the buffer could still show it, and it says nothing about
+  rasterization being bit-identical.
+- **Artifact provenance**: the v5 world artifact was built from the working
+  tree before the landing commit, with production code identical to what
+  landed (only tests and documents changed afterwards). Its key - shapefile
+  hashes, zoom range, compression level, policy version - validates the
+  same either way, and an artifact carries no build provenance block of its
+  own, so this line is the record connecting it to the landing.
+- **Boundary-line oracle FAILS on both sides, identically**: palindromes
+  and spurs at z7..z13 plus one spur per zoom at z0..z6, the same counts
+  and the same named offenders before and after. Boundaries are lines and
+  never reach the polygon engine; this is a standing failure at `88219f6`,
+  not a finding of this landing, and it is open.
+- **Human visual gate: OPEN.** The buffer-only location argues the change
+  is invisible in a rendered tile, but that is an argument, not the
+  standing ocean gate.
+
 ## H8b hot-partition splitting (2026-07-26, landed on 69e829b)
 
 Assemble splits any sort partition whose source record bytes exceed twice

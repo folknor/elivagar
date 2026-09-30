@@ -17,6 +17,15 @@ enum ContourFillDirection {
 }
 
 impl Overlay {
+    /// Replaces `out`, as `overlay_into_nested` does: it is recycled on entry.
+    /// `false` means the contour needs no rebuilding and `out` is empty;
+    /// `true` means `out` holds the result (possibly nothing, if it collapsed).
+    ///
+    /// Models upstream `Overlay::simplify_contour`, whose perfect-contour
+    /// fast path applies no `min_output_area` filter. Upstream's newer
+    /// `simplify_source` takes that path only at a zero threshold; every
+    /// production caller filters by area after this call, so the difference
+    /// never reaches output.
     #[inline]
     pub fn simplify_contour_into(
         &mut self,
@@ -37,6 +46,7 @@ impl Overlay {
         fill_rule: FillRule,
         out: &mut IntShapes,
     ) -> bool {
+        self.recycle_shapes(out);
         self.clear();
 
         let is_perfect = self.find_intersections(contour);

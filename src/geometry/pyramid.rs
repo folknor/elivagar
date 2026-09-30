@@ -1916,10 +1916,10 @@ mod tests {
         };
         let mut overlay = Overlay::new_custom(0, options, Default::default());
         for shape in a {
-            overlay.add_shape(&to_oracle_shape(shape), ShapeType::Subject);
+            overlay.add_source(&to_oracle_shape(shape), ShapeType::Subject);
         }
         for shape in b {
-            overlay.add_shape(&to_oracle_shape(shape), ShapeType::Clip);
+            overlay.add_source(&to_oracle_shape(shape), ShapeType::Clip);
         }
         let result = overlay.overlay(OverlayRule::Xor, FillRule::NonZero);
         result

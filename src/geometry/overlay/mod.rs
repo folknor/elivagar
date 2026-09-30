@@ -1,4 +1,10 @@
-//! Integer polygon overlay engine extracted from i_overlay 7.0.2.
+//! Integer polygon overlay engine extracted from i_overlay.
+//!
+//! Only the Subject and Intersect rules at NonZero fill on i32 coordinates
+//! are retained, and for those the result is held point-for-point equal to
+//! the dev-dependency i_overlay by the differential oracle tests below. That
+//! equivalence covers the retained operations and the options these tests
+//! drive, not upstream's wider API.
 //!
 //! Portions of this module are derived from i_overlay and its helper crates,
 //! copyright Nail Sharipov and licensed under MIT OR Apache-2.0. The pristine
@@ -358,6 +364,324 @@ mod tests {
         assert_eq!(actual_out, expected);
     }
 
+    // Upstream issue 91 inputs (i_overlay tests/issue_91_tests.rs). Both
+    // union to two base shapes; the padding squares push the output outer
+    // count across the hole binder's 32-shape list/tree threshold.
+    const PANIC_INPUT: &[&[(i32, i32)]] = &[
+        &[(4079, 3454), (4090, 3462), (4083, 3471), (4073, 3464)],
+        &[(4078, 3464), (4084, 3463), (4081, 3460)],
+        &[(4072, 3463), (4080, 3471), (4061, 3471)],
+    ];
+
+    const OWNER_INPUT: &[&[(i32, i32)]] = &[
+        &[(-4, 3), (-7, 6), (-4, 6)],
+        &[(-4, 2), (-1, 5), (-4, 5)],
+        &[(-3, 2), (-10, 5), (-6, 5)],
+        &[(-3, 0), (-4, 1), (-1, 0)],
+        &[(-3, 2), (-3, 5), (-2, 5)],
+        &[(-4, 2), (-4, 4), (0, 4)],
+        &[(-2, 1), (-5, 1), (-2, 4)],
+    ];
+
+    const OWNER_HOLE: &[(i32, i32)] = &[(-4, 3), (-4, 4), (-3, 2)];
+    const OWNER_OUTER: &[(i32, i32)] = &[
+        (-6, 5),
+        (-10, 5),
+        (-4, 2),
+        (-5, 1),
+        (-2, 1),
+        (-2, 3),
+        (0, 4),
+        (-2, 4),
+        (-3, 3),
+        (-3, 5),
+        (-4, 5),
+        (-4, 6),
+        (-7, 6),
+    ];
+
+    fn contour(points: &[(i32, i32)]) -> Contour {
+        points.iter().map(|&(x, y)| IntPoint::new(x, y)).collect()
+    }
+
+    fn padded(input: &[&[(i32, i32)]], squares: i32) -> Shape {
+        let mut shape: Shape = input.iter().map(|points| contour(points)).collect();
+        for i in 0..squares {
+            let x = 100 + 40 * i;
+            shape.push(rect(x, 100, x + 10, 110));
+        }
+        shape
+    }
+
+    /// Orientation- and start-free form of a ring, for ownership checks.
+    fn canonical(ring: &[IntPoint]) -> Contour {
+        let mut ring = ring.to_vec();
+        let start = ring
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, p)| **p)
+            .map(|(i, _)| i)
+            .expect("non-empty ring");
+        ring.rotate_left(start);
+        if ring[1] > ring[ring.len() - 1] {
+            ring[1..].reverse();
+        }
+        ring
+    }
+
+    fn assert_hole_owner(shapes: &Shapes, hole: &[(i32, i32)], outer: &[(i32, i32)]) {
+        let hole = canonical(&contour(hole));
+        let owners: Vec<&Shape> = shapes
+            .iter()
+            .filter(|shape| shape.iter().skip(1).any(|ring| canonical(ring) == hole))
+            .collect();
+        assert_eq!(owners.len(), 1, "expected exactly one owner: {shapes:?}");
+        assert_eq!(
+            canonical(&owners[0][0]),
+            canonical(&contour(outer)),
+            "hole attached to the wrong shape: {shapes:?}"
+        );
+        let hole_count: usize = shapes.iter().map(|shape| shape.len() - 1).sum();
+        assert_eq!(hole_count, 1);
+    }
+
+    fn subject_union(engine: &mut BoolOverlay, shape: &Shape, out: &mut Shapes) {
+        engine.clear();
+        engine.add_shape(shape, ShapeType::Subject);
+        engine.overlay_nested(BoolRule::Subject, out);
+    }
+
+    #[test]
+    fn issue_91_touching_shapes_bind_hole_across_tree_threshold() {
+        let mut engine = BoolOverlay::new();
+        let mut out = Shapes::new();
+        for squares in [0, 29, 30, 31] {
+            let shape = padded(PANIC_INPUT, squares);
+            // Recycle as production callers do, so this test isolates hole
+            // binding from the output-replacement contract.
+            engine.recycle(&mut out);
+            subject_union(&mut engine, &shape, &mut out);
+            let outers = usize::try_from(squares).expect("small count") + 2;
+            assert_eq!(out.len(), outers, "squares={squares}");
+            assert_hole_owner(&out, PANIC_INPUT[1], PANIC_INPUT[0]);
+            let expected = oracle_overlay(&shape, None, OracleRule::Subject, OracleSolver::AUTO);
+            assert_eq!(out, expected, "squares={squares}");
+        }
+    }
+
+    #[test]
+    fn issue_91_hole_stays_with_containing_shape() {
+        let mut engine = BoolOverlay::new();
+        let mut out = Shapes::new();
+        for squares in [0, 29, 30, 31] {
+            let shape = padded(OWNER_INPUT, squares);
+            engine.recycle(&mut out);
+            subject_union(&mut engine, &shape, &mut out);
+            let outers = usize::try_from(squares).expect("small count") + 2;
+            assert_eq!(out.len(), outers, "squares={squares}");
+            assert_hole_owner(&out, OWNER_HOLE, OWNER_OUTER);
+            let expected = oracle_overlay(&shape, None, OracleRule::Subject, OracleSolver::AUTO);
+            assert_eq!(out, expected, "squares={squares}");
+        }
+    }
+
+    #[test]
+    fn differential_oracle_min_output_area() {
+        // Holes are filtered independently of their outer: a 100x100 square
+        // with a 2x2 hole (area 4) keeps the hole at thresholds 3 and 4 and
+        // drops it at 5, while the outer survives all three.
+        let square_with_hole = vec![rect(0, 0, 100, 100), {
+            let mut hole = rect(40, 40, 42, 42);
+            hole.reverse();
+            hole
+        }];
+        let clip = rect(-5, -5, 60, 60);
+        for min_area in [3, 4, 5] {
+            assert_same_with_area(&square_with_hole, None, min_area);
+            assert_same_with_area(&square_with_hole, Some(&clip), min_area);
+        }
+
+        let mut rng = Lcg::new(0x0a2e_a5ee_d000_0091);
+        let mut engine = BoolOverlay::new();
+        let mut out = Shapes::new();
+        for case in 0..400_u32 {
+            let rings = 1 + rng.usize(6);
+            let shape = generated_shape(&mut rng, rings, 48);
+            let clip = generated_rect(&mut rng);
+            for clip in [None, Some(&clip)] {
+                // Take real contour areas from an unfiltered run, so the sweep
+                // hits each threshold just below, exactly at, and just above a
+                // contour that is actually emitted - odd doubled areas
+                // included, where the halving truncates.
+                engine.min_output_area = 0;
+                run_engine(&mut engine, &shape, clip, &mut out);
+                let areas: Vec<u64> = out
+                    .iter()
+                    .flatten()
+                    .map(Vec::as_slice)
+                    .map(ring_area)
+                    .step_by(3)
+                    .take(3)
+                    .collect();
+                for area in areas {
+                    for min_area in [area.saturating_sub(1).max(1), area, area + 1] {
+                        engine.min_output_area = min_area;
+                        run_engine(&mut engine, &shape, clip, &mut out);
+                        let expected = oracle_overlay_with_area(&shape, clip, min_area);
+                        assert_eq!(out, expected, "case {case}, min_area {min_area}");
+                    }
+                }
+            }
+        }
+    }
+
+    fn ring_area(ring: &[IntPoint]) -> u64 {
+        let mut double_area = 0i64;
+        let mut p0 = ring[ring.len() - 1];
+        for &p1 in ring {
+            double_area += i64::from(p0.x) * i64::from(p1.y) - i64::from(p0.y) * i64::from(p1.x);
+            p0 = p1;
+        }
+        double_area.unsigned_abs() >> 1
+    }
+
+    fn run_engine(
+        engine: &mut BoolOverlay,
+        shape: &Shape,
+        clip: Option<&Contour>,
+        out: &mut Shapes,
+    ) {
+        engine.clear();
+        engine.add_shape(shape, ShapeType::Subject);
+        if let Some(clip) = clip {
+            engine.add_contour(clip, ShapeType::Clip);
+            engine.overlay_nested(BoolRule::Intersect, out);
+        } else {
+            engine.overlay_nested(BoolRule::Subject, out);
+        }
+    }
+
+    fn assert_same_with_area(shape: &Shape, clip: Option<&Contour>, min_area: u64) {
+        let mut engine = BoolOverlay::new();
+        engine.min_output_area = min_area;
+        let mut out = Shapes::new();
+        run_engine(&mut engine, shape, clip, &mut out);
+        assert_eq!(out, oracle_overlay_with_area(shape, clip, min_area));
+    }
+
+    fn oracle_overlay_with_area(shape: &Shape, clip: Option<&Contour>, min_area: u64) -> Shapes {
+        let options = OracleOptions {
+            min_output_area: min_area,
+            ..oracle_options()
+        };
+        let mut overlay = OracleOverlay::new_custom(0, options, OracleSolver::AUTO);
+        overlay.add_source(&to_oracle_shape(shape), OracleShapeType::Subject);
+        let rule = if let Some(clip) = clip {
+            overlay.add_contour(&to_oracle_contour(clip), OracleShapeType::Clip);
+            OracleRule::Intersect
+        } else {
+            OracleRule::Subject
+        };
+        from_oracle_shapes(overlay.overlay(rule, OracleFillRule::NonZero))
+    }
+
+    #[test]
+    fn production_area_filter_catches_the_perfect_contour_fast_path() {
+        // The single-contour fast path applies no area filter (upstream
+        // simplify_contour does not either); normalize_into must filter
+        // afterwards for both windings. A 4x4 square has area 16.
+        let ccw = rect(0, 0, 4, 4);
+        let mut cw = ccw.clone();
+        cw.reverse();
+        for ring in [ccw, cw] {
+            for (min_area, survives) in [(15, true), (16, true), (17, false)] {
+                let out = crate::geometry::int_ocean::normalize(vec![ring.clone()], min_area);
+                assert_eq!(!out.is_empty(), survives, "min_area {min_area}: {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn engine_output_replaces_a_dirty_buffer() {
+        // Every entry point must replace `out`, never append to it: hole
+        // binding scans all of `out`, so a stale shape could steal a hole.
+        let dirty = || -> Shapes {
+            let mut shapes = padded(PANIC_INPUT, 31)
+                .into_iter()
+                .map(|ring| vec![ring])
+                .collect::<Shapes>();
+            shapes.push(vec![rect(4000, 3400, 4200, 3500)]);
+            shapes
+        };
+        let mut engine = BoolOverlay::new();
+
+        let panic_case = padded(PANIC_INPUT, 30);
+        let mut clean = Shapes::new();
+        subject_union(&mut engine, &panic_case, &mut clean);
+        let mut out = dirty();
+        subject_union(&mut engine, &panic_case, &mut out);
+        assert_eq!(out, clean, "nonempty overlay");
+
+        let mut out = dirty();
+        engine.clear();
+        engine.overlay_nested(BoolRule::Subject, &mut out);
+        assert!(out.is_empty(), "empty overlay: {out:?}");
+
+        let ccw = rect(0, 0, 10, 10);
+        let mut out = dirty();
+        assert!(!engine.simplify_contour_into(&ccw, &mut out));
+        assert!(out.is_empty(), "perfect simplify: {out:?}");
+
+        let mut cw = ccw.clone();
+        cw.reverse();
+        let mut out = dirty();
+        assert!(engine.simplify_contour_into(&cw, &mut out));
+        let mut clean = Shapes::new();
+        assert!(engine.simplify_contour_into(&cw, &mut clean));
+        assert_eq!(out, clean, "reversed simplify");
+
+        let flat = contour(&[(0, 0), (5, 0), (10, 0), (5, 0)]);
+        let mut out = dirty();
+        let rebuilt = engine.simplify_contour_into(&flat, &mut out);
+        let mut clean = Shapes::new();
+        assert_eq!(engine.simplify_contour_into(&flat, &mut clean), rebuilt);
+        assert_eq!(out, clean, "collapsing simplify");
+        assert!(out.is_empty(), "collapsing simplify: {out:?}");
+    }
+
+    #[test]
+    fn differential_oracle_reuse_across_binder_threshold() {
+        // One engine and one output buffer through a sequence that alternates
+        // hole binding on both sides of the 32-outer threshold, empty output,
+        // collapse, and plain holes, each checked against the oracle.
+        let mut engine = BoolOverlay::new();
+        let mut out = Shapes::new();
+        let flat: Shape = vec![contour(&[(0, 0), (5, 0), (10, 0), (5, 0)])];
+        let square_with_hole = vec![rect(0, 0, 100, 100), {
+            let mut hole = rect(40, 40, 60, 60);
+            hole.reverse();
+            hole
+        }];
+        let sequence = [
+            padded(PANIC_INPUT, 31),
+            Shape::new(),
+            padded(OWNER_INPUT, 0),
+            flat.clone(),
+            padded(OWNER_INPUT, 31),
+            square_with_hole,
+            padded(PANIC_INPUT, 29),
+            flat,
+            padded(PANIC_INPUT, 30),
+        ];
+        for round in 0..3 {
+            for (step, shape) in sequence.iter().enumerate() {
+                subject_union(&mut engine, shape, &mut out);
+                let expected = oracle_overlay(shape, None, OracleRule::Subject, OracleSolver::AUTO);
+                assert_eq!(out, expected, "round {round}, step {step}");
+            }
+        }
+    }
+
     fn oracle_overlay(
         shape: &Shape,
         clip: Option<&Contour>,
@@ -365,7 +689,7 @@ mod tests {
         solver: OracleSolver,
     ) -> Shapes {
         let mut overlay = OracleOverlay::new_custom(0, oracle_options(), solver);
-        overlay.add_shape(&to_oracle_shape(shape), OracleShapeType::Subject);
+        overlay.add_source(&to_oracle_shape(shape), OracleShapeType::Subject);
         if let Some(clip) = clip {
             overlay.add_contour(&to_oracle_contour(clip), OracleShapeType::Clip);
         }

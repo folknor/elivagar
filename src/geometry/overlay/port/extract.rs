@@ -550,11 +550,14 @@ pub(crate) struct BinderScratch {
 impl BinderScratch {
     #[inline]
     fn prepare(&mut self, children_count: usize, shape_count: usize) {
+        // Sentinel, not a shape index: a hole whose parent was never resolved
+        // must fail loudly on its first use instead of silently binding to
+        // shape 0. Required hole binding always writes a hole's parent before
+        // any later anchor can read it; upstream issue 91 was exactly an
+        // ordering tie that broke this, and binding on unsimplified contours
+        // is what restores it.
         self.parent_for_child.clear();
-        #[cfg(debug_assertions)]
         self.parent_for_child.resize(children_count, usize::MAX);
-        #[cfg(not(debug_assertions))]
-        self.parent_for_child.resize(children_count, 0);
 
         self.children_count_for_parent.clear();
         self.children_count_for_parent.resize(shape_count, 0);
@@ -692,7 +695,8 @@ impl JoinHoles for Vec<IntShape> {
         scratch: &mut BinderScratch,
     ) {
         if self.is_empty() || holes.is_empty() {
-            holes.clear();
+            // Holes without any outer stay in `holes` for the caller to
+            // recycle into its contour pool.
             anchors.clear();
             return;
         }
@@ -1034,6 +1038,53 @@ impl BooleanExtractionBuffer {
         let shape = self.take_shape_with_contour(reversed);
         out.push(shape);
     }
+
+    /// Returns holes that extraction found no outer for to the contour pool.
+    fn recycle_unbound_holes(&mut self) {
+        while let Some(hole) = self.holes.pop() {
+            self.recycle_contour(hole);
+        }
+    }
+
+    /// Collinear cleanup of freshly bound shapes, with i_shape's `Simplify`
+    /// semantics for `IntShapes`: a shape whose outer collapses below three
+    /// points is dropped together with all its holes, a collapsed hole is
+    /// dropped on its own, and every survivor keeps its relative order. Dead
+    /// shapes and holes are swapped down to the tail and recycled into the
+    /// pools, never dropped.
+    fn simplify_bound_shapes(&mut self, shapes: &mut IntShapes) {
+        let mut write = 0;
+        for read in 0..shapes.len() {
+            if self.simplify_bound_shape(&mut shapes[read]) {
+                shapes.swap(write, read);
+                write += 1;
+            }
+        }
+        self.recycle_shapes_from(shapes, write);
+    }
+
+    /// Returns whether the shape survives cleanup. A shape whose contours are
+    /// all already simple comes back untouched, as in i_shape.
+    fn simplify_bound_shape(&mut self, shape: &mut IntShape) -> bool {
+        let Some(outer) = shape.first_mut() else {
+            return true;
+        };
+        outer.simplify_contour(&mut self.simplifier);
+        if outer.len() < 3 {
+            return false;
+        }
+
+        let mut write = 1;
+        for read in 1..shape.len() {
+            shape[read].simplify_contour(&mut self.simplifier);
+            if shape[read].len() >= 3 {
+                shape.swap(write, read);
+                write += 1;
+            }
+        }
+        self.recycle_contours_from(shape, write);
+        true
+    }
 }
 
 fn take_vec_with_capacity<T>(pool: &mut Vec<Vec<T>>, needed: usize) -> Vec<T> {
@@ -1076,7 +1127,6 @@ impl OverlayGraph<'_> {
         buffer.points.reserve_capacity(buffer.visited.len());
 
         let mut link_index = 0;
-        let mut anchors_already_sorted = true;
         while link_index < buffer.visited.len() {
             if buffer.visited.is_visited(link_index) {
                 link_index += 1;
@@ -1113,13 +1163,7 @@ impl OverlayGraph<'_> {
                 &mut buffer.visited,
                 &mut buffer.points,
             );
-            let (is_valid, is_modified) = buffer.points.validate(
-                self.options.min_output_area,
-                self.options.preserve_output_collinear,
-                &mut buffer.simplifier,
-            );
-
-            if !is_valid {
+            if !buffer.points.validate(self.options.min_output_area) {
                 link_index += 1;
                 continue;
             }
@@ -1128,15 +1172,7 @@ impl OverlayGraph<'_> {
 
             if is_hole {
                 let left_bottom = if clockwise { contour[1] } else { contour[0] };
-                let mut v_segment = contour.left_bottom_segment_from(left_bottom);
-
-                if is_modified {
-                    let most_left = contour.left_bottom_segment();
-                    if most_left != v_segment {
-                        v_segment = most_left;
-                        anchors_already_sorted = false;
-                    }
-                };
+                let v_segment = contour.left_bottom_segment_from(left_bottom);
 
                 debug_assert!(v_segment == contour.left_bottom_segment());
                 let id_data = ContourIndex::new_hole(buffer.holes.len());
@@ -1149,16 +1185,23 @@ impl OverlayGraph<'_> {
             }
         }
 
-        if !anchors_already_sorted {
-            buffer.anchors.sort_unstable_by_key(|s0| s0.v_segment.a);
-        }
-
         out.join_sorted_holes(
             &mut buffer.holes,
             &mut buffer.anchors,
             clockwise,
             &mut buffer.binder,
         );
+        buffer.recycle_unbound_holes();
+
+        // Collinear cleanup runs only after every hole is bound (i_overlay
+        // 8.1.2, upstream issue 91). Simplifying first can drop a vertex where
+        // two result shapes touch, leaving one shape's edge starting on the
+        // other's line; the binder cannot order that tie and either panics or
+        // attaches a hole to the wrong shape. The graph contours never contain
+        // such a T-junction, so binding on them is safe.
+        if !self.options.preserve_output_collinear {
+            buffer.simplify_bound_shapes(out);
+        }
     }
 
     pub(crate) fn find_contour(
@@ -1240,41 +1283,27 @@ impl StartPathData {
 }
 
 pub(crate) trait GraphContour {
-    fn validate(
-        &mut self,
-        min_output_area: u64,
-        preserve_output_collinear: bool,
-        simplifier: &mut ContourSimplifier,
-    ) -> (bool, bool);
+    fn validate(&self, min_output_area: u64) -> bool;
     fn push_node_and_get_other(&mut self, link: &OverlayLink, node_id: usize) -> usize;
 }
 
 impl GraphContour for IntContour {
+    /// Judges the raw graph contour, before collinear cleanup. Removing a
+    /// collinear vertex preserves the shoelace area, so the threshold verdict
+    /// of a contour that survives cleanup is unchanged.
     #[inline]
-    fn validate(
-        &mut self,
-        min_output_area: u64,
-        preserve_output_collinear: bool,
-        simplifier: &mut ContourSimplifier,
-    ) -> (bool, bool) {
-        let is_modified = if !preserve_output_collinear {
-            self.simplify_contour(simplifier)
-        } else {
-            false
-        };
-
+    fn validate(&self, min_output_area: u64) -> bool {
         if self.len() < 3 {
-            return (false, is_modified);
+            return false;
         }
 
         if min_output_area == 0u64 {
-            return (true, is_modified);
+            return true;
         }
         let area = self.unsafe_area();
         let abs_area = area.unsigned_abs() >> 1;
-        let is_valid = abs_area >= min_output_area;
 
-        (is_valid, is_modified)
+        abs_area >= min_output_area
     }
 
     #[inline]
@@ -1568,6 +1597,181 @@ mod util_log_tests {
             let a = test[0].log2_sqrt();
             let b = test[1];
             assert_eq!(a, b);
+        }
+    }
+}
+
+#[cfg(test)]
+mod deferred_cleanup_tests {
+    //! The post-binding collinear cleanup against i_shape's own `Simplify`
+    //! for `IntShapes`. Graph extraction removes most degeneracies before
+    //! cleanup ever sees a shape, so the differential oracle alone would
+    //! leave the collapse branches untested; these drive them directly.
+
+    use crate::geometry::overlay::port::extract::{BooleanExtractionBuffer, IntShapes};
+    use crate::geometry::overlay::port::point::IntPoint;
+    use i_overlay::i_float::int::point::IntPoint as OraclePoint;
+    use i_overlay::i_shape::int::simple::Simplify as OracleSimplify;
+
+    type OracleShapes = Vec<Vec<Vec<OraclePoint>>>;
+
+    fn shapes(raw: &[&[&[(i32, i32)]]]) -> IntShapes {
+        raw.iter()
+            .map(|shape| {
+                shape
+                    .iter()
+                    .map(|ring| ring.iter().map(|&(x, y)| IntPoint::new(x, y)).collect())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn to_oracle(shapes: &IntShapes) -> OracleShapes {
+        shapes
+            .iter()
+            .map(|shape| {
+                shape
+                    .iter()
+                    .map(|ring| ring.iter().map(|p| OraclePoint::new(p.x, p.y)).collect())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn from_oracle(shapes: OracleShapes) -> IntShapes {
+        shapes
+            .into_iter()
+            .map(|shape| {
+                shape
+                    .into_iter()
+                    .map(|ring| ring.into_iter().map(|p| IntPoint::new(p.x, p.y)).collect())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn assert_matches_i_shape(buffer: &mut BooleanExtractionBuffer, input: &IntShapes) {
+        let mut expected = to_oracle(input);
+        expected.simplify_contour();
+        let expected = from_oracle(expected);
+
+        // Build the input out of pooled shells and contours, so every case
+        // reacquires what earlier cases' cleanup recycled, then hand the
+        // survivors back: the pool round trip is what production does.
+        let mut actual = IntShapes::new();
+        for shape in input {
+            let mut pooled = buffer.take_shape(shape.len());
+            for (ring, source) in pooled.iter_mut().zip(shape) {
+                ring.extend_from_slice(source);
+            }
+            actual.push(pooled);
+        }
+        buffer.simplify_bound_shapes(&mut actual);
+        assert_eq!(actual, expected, "input: {input:?}");
+        buffer.recycle_shapes(&mut actual);
+    }
+
+    const SQUARE: &[(i32, i32)] = &[(0, 0), (10, 0), (10, 10), (0, 10)];
+    // Collinear midpoint on the first edge: cleanup moves the start vertex.
+    const SQUARE_WITH_MIDPOINT: &[(i32, i32)] = &[(5, 0), (10, 0), (10, 10), (0, 10), (0, 0)];
+    const HOLE: &[(i32, i32)] = &[(2, 2), (2, 4), (4, 4), (4, 2)];
+    const HOLE_WITH_DUPLICATE: &[(i32, i32)] = &[(6, 6), (6, 8), (6, 8), (8, 8), (8, 6)];
+    // Degenerate: every vertex lies on one line, so cleanup collapses it.
+    const FLAT: &[(i32, i32)] = &[(0, 0), (5, 0), (10, 0), (5, 0)];
+
+    #[test]
+    fn collapse_branches_match_i_shape() {
+        let mut buffer = BooleanExtractionBuffer::default();
+        let cases = [
+            // Already simple: untouched.
+            shapes(&[&[SQUARE, HOLE]]),
+            // Nonsimple outer whose cleanup changes the starting vertex.
+            shapes(&[&[SQUARE_WITH_MIDPOINT, HOLE]]),
+            // Collapsed outer drops the whole shape, live holes included.
+            shapes(&[&[FLAT, HOLE, HOLE_WITH_DUPLICATE], &[SQUARE]]),
+            // Collapsed holes between survivors.
+            shapes(&[&[SQUARE, FLAT, HOLE, FLAT, HOLE_WITH_DUPLICATE, FLAT]]),
+            // Consecutive dead shapes around survivors, order preserved.
+            shapes(&[
+                &[FLAT],
+                &[SQUARE_WITH_MIDPOINT],
+                &[FLAT, HOLE],
+                &[FLAT],
+                &[SQUARE, HOLE_WITH_DUPLICATE],
+                &[FLAT],
+            ]),
+            // Everything dies.
+            shapes(&[&[FLAT], &[FLAT, HOLE]]),
+            shapes(&[]),
+        ];
+        // One warm buffer across every case: assert_matches_i_shape builds
+        // each input from the pools, so contours and shells recycled by one
+        // case's cleanup are reacquired, dirty capacity and all, by the next.
+        for case in &cases {
+            assert_matches_i_shape(&mut buffer, case);
+        }
+    }
+
+    #[test]
+    fn random_shapes_match_i_shape() {
+        let mut rng = Lcg(0x5eed_91c0_ffee_0001);
+        let mut buffer = BooleanExtractionBuffer::default();
+        for _case in 0..5_000 {
+            let shape_count = rng.below(6);
+            let mut input = IntShapes::new();
+            for _ in 0..shape_count {
+                let ring_count = 1 + rng.below(4);
+                let mut shape = Vec::new();
+                for _ in 0..ring_count {
+                    shape.push(random_ring(&mut rng));
+                }
+                input.push(shape);
+            }
+            assert_matches_i_shape(&mut buffer, &input);
+        }
+    }
+
+    /// A small-grid ring laced with the degeneracies cleanup exists for:
+    /// repeated points, collinear midpoints and straight backtracks. Many
+    /// rings collapse entirely, which is the point.
+    fn random_ring(rng: &mut Lcg) -> Vec<IntPoint> {
+        let len = 3 + rng.below(7);
+        let mut ring: Vec<IntPoint> = Vec::with_capacity(len * 2);
+        for _ in 0..len {
+            let p = IntPoint::new(rng.coord(), rng.coord());
+            match (rng.below(5), ring.last().copied()) {
+                (0, Some(last)) => ring.push(last),
+                (1, Some(last)) if (last.x + p.x) % 2 == 0 && (last.y + p.y) % 2 == 0 => {
+                    ring.push(IntPoint::new((last.x + p.x) / 2, (last.y + p.y) / 2));
+                    ring.push(p);
+                }
+                (2, Some(last)) => {
+                    ring.push(p);
+                    ring.push(last);
+                }
+                _ => ring.push(p),
+            }
+        }
+        ring
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (self.0 >> 32) as u32
+        }
+
+        fn below(&mut self, upper: usize) -> usize {
+            usize::try_from(self.next()).expect("u32 fits usize") % upper.max(1)
+        }
+
+        fn coord(&mut self) -> i32 {
+            i32::try_from(self.next() % 7).expect("small coordinate fits i32")
         }
     }
 }

@@ -48,7 +48,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// v4: polygons over the MapLibre 500-ring clamp are partitioned by rect
 /// bisection; previously their smallest islands were invisible to
 /// MapLibre-semantics consumers.
-pub const OCEAN_POLICY_VERSION: u32 = 4;
+///
+/// v5: the polygon engine picks up upstream i_overlay's 8.1.1 through 9.0.0
+/// fixes. The fragment splitter no longer drops crossings and collinear
+/// overlaps that round into a neighbouring column, and splits vertical
+/// segments on column borders against the correct group. Collinear output
+/// cleanup now runs after hole binding, so a hole can no longer be bound to
+/// the wrong shape where two result shapes touch.
+pub const OCEAN_POLICY_VERSION: u32 = 5;
 
 /// Identity of the shapefile inputs behind computed ocean sort chunks.
 ///

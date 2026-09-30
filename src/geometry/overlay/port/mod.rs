@@ -208,6 +208,12 @@ impl Overlay {
         out
     }
 
+    /// Replaces `out` with the result; it never appends. Whatever the caller
+    /// hands over is recycled into the pools first. This is load-bearing, not
+    /// tidiness: hole binding scans every shape in `out`, so a stale shape
+    /// left there could win a hole, shift the binder's list/tree threshold,
+    /// and reintroduce the simplified-geometry tie that binding on raw graph
+    /// contours exists to avoid.
     #[inline]
     pub fn overlay_into_nested(
         &mut self,
@@ -215,16 +221,10 @@ impl Overlay {
         fill_rule: FillRule,
         out: &mut IntShapes,
     ) {
+        self.recycle_shapes(out);
         self.split_solver
             .split_segments(&mut self.segments, &self.solver);
         if self.segments.is_empty() {
-            // Empty input must yield empty output even when the caller hands
-            // over a dirty buffer. Production callers recycle `out` before
-            // calling, so this drains nothing there; without it a dirty
-            // buffer would keep its stale shapes (upstream fixed the same
-            // latent bug in i_overlay 8.0.0). Recycle rather than clear so a
-            // drained shape returns to the pool instead of being dropped.
-            self.recycle_shapes(out);
             return;
         }
         let mut buffer = self.boolean_buffer.take().unwrap_or_default();

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+Polygon engine brought up to i_overlay 9.0.0. This changes output: the
+ocean artifact key moves to `OCEAN_POLICY_VERSION` v5, so the world
+ocean artifact must be rebuilt with `ocean-build`.
+
+- Fixed the fragment splitter's column-border lookup (upstream issue
+  87). Vertical edges on a column border - in practice the right edge
+  of every tile clip on the largest ocean pieces - were not split where
+  other edges ended on them. Denmark: 14 ocean tiles change, all inside
+  the right-hand tile buffer.
+- The fragment splitter no longer drops crossings and collinear overlaps
+  whose rounded point or overlap start falls in a neighbouring column.
+- Collinear output cleanup now runs after hole binding (upstream issue
+  91). Cleaning first could leave two touching result shapes in a tie
+  the binder cannot order, which panicked or attached a hole to the
+  wrong shape.
+- Snap-radius growth is capped at the i32 engine's limit and saturates.
+- Bumped i_overlay (dev, the differential oracle) 8 to 9, hotpath 0.25
+  to 0.27, mlt-core to 0.16. Dropped the unused `toml` dependency and
+  moved `geo-types` behind the `mlt` feature, its only user.
+
 Dependency refresh, verified output-neutral: fresh denmark locations
 build passes the committed corpus digest unchanged.
 
