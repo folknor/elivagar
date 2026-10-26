@@ -189,18 +189,42 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    #[test]
-    fn differential_oracle_mixed_subject_and_intersect() {
+    // One 2,000-case stream, checked in quarters so each test stays inside
+    // the per-test time cap in a debug build. Every quarter replays the
+    // stream from the seed and only asserts its own range, so the cases are
+    // exactly those of a single sequential run.
+    fn differential_oracle_mixed_cases(range: std::ops::Range<u32>) {
         let mut rng = Lcg::new(0x8f9d_a421_3b70_cafe);
-        for case in 0..2_000_u32 {
+        for case in 0..range.end {
             let max_points = if case % 31 == 0 { 200 } else { 64 };
             let rings = 1 + rng.usize(6);
             let shape = generated_shape(&mut rng, rings, max_points);
-            assert_same_subject(&shape);
-
             let rect = generated_rect(&mut rng);
-            assert_same_intersect(&shape, &rect);
+            if range.contains(&case) {
+                assert_same_subject(&shape);
+                assert_same_intersect(&shape, &rect);
+            }
         }
+    }
+
+    #[test]
+    fn differential_oracle_mixed_subject_and_intersect_q1() {
+        differential_oracle_mixed_cases(0..500);
+    }
+
+    #[test]
+    fn differential_oracle_mixed_subject_and_intersect_q2() {
+        differential_oracle_mixed_cases(500..1_000);
+    }
+
+    #[test]
+    fn differential_oracle_mixed_subject_and_intersect_q3() {
+        differential_oracle_mixed_cases(1_000..1_500);
+    }
+
+    #[test]
+    fn differential_oracle_mixed_subject_and_intersect_q4() {
+        differential_oracle_mixed_cases(1_500..2_000);
     }
 
     #[test]

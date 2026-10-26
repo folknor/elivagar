@@ -511,7 +511,9 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
                     geom_bytes = fc.read_len_delimited().ok();
                 }
                 _ => {
-                    drop(fc.skip_field(fw));
+                    if fc.skip_field(fw).is_err() {
+                        break;
+                    }
                 }
             }
         }
@@ -1080,7 +1082,9 @@ fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
                     geom_bytes = fc.read_len_delimited().ok();
                 }
                 _ => {
-                    drop(fc.skip_field(fw));
+                    if fc.skip_field(fw).is_err() {
+                        break;
+                    }
                 }
             }
         }

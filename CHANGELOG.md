@@ -11,6 +11,10 @@
 - The boundary-line oracle gates on duplicate sub-lines only; palindrome
   and spur counts are advisory, with a retrace-extent census. They cannot
   tell degenerate real geometry from a fabricated spike.
+- Bumped protohoggr 0.4 to 0.5, hotpath 0.27 to 0.29, mlt-core 0.16 to
+  0.22 and pmtiles 0.24 to 0.25 (dev). The MLT encoder now asks for
+  mlt-core's default consumer profile explicitly, since 0.21 replaced
+  the default encoder config with per-consumer profiles.
 
 Polygon engine brought up to i_overlay 9.0.0. This changes output: the
 ocean artifact key moves to `OCEAN_POLICY_VERSION` v5, so the world

@@ -225,7 +225,7 @@ fn bench_pmtiles_rs(tiles: &[TestTile], runs: usize) -> (u128, u64) {
 
         let file = File::create(out_path).expect("create output");
         let mut writer = pmtiles::PmTilesWriter::new(pmtiles::TileType::Mvt)
-            .tile_compression(pmtiles::Compression::Gzip)
+            .precompressed(pmtiles::Compression::Gzip)
             .internal_compression(pmtiles::Compression::Gzip)
             .min_zoom(0)
             .max_zoom(14)
@@ -236,8 +236,8 @@ fn bench_pmtiles_rs(tiles: &[TestTile], runs: usize) -> (u128, u64) {
         for tile in tiles {
             let coord = pmtiles::TileCoord::new(tile.z, tile.x, tile.y).expect("tile coord");
             writer
-                .add_raw_tile(coord, &tile.data)
-                .expect("pmtiles-rs add_raw_tile");
+                .add_tile(coord, &tile.data)
+                .expect("pmtiles-rs add_tile");
         }
         writer.finalize().expect("pmtiles-rs finalize");
 

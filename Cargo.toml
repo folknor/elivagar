@@ -58,7 +58,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # recorded in every archive's provenance block, so a bump here flows into
 # provenance with no other edit needed.
 pbfhogg = "0.5"
-protohoggr = "0.4.0"
+protohoggr = "0.5.0"
 rayon = "1.5"
 memmap2 = "0.9.11"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
@@ -66,20 +66,20 @@ brotli = "9.0.0"
 lz4_flex = "0.14"
 snap = "1"
 smallvec = "1.15.2"
-hotpath = "0.27.0"
+hotpath = "0.29.2"
 rustc-hash = "2"
 clap = { version = "4.6", features = ["derive"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-mlt-core = { version = "0.16.0", optional = true }
+mlt-core = { version = "0.22.0", optional = true }
 geo-types = { version = "0.7.19", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
 i_overlay = "9.0.0"
 serde_yaml = "0.9"
-pmtiles = { version = "0.24.0", default-features = false, features = ["write"] }
+pmtiles = { version = "0.25.0", default-features = false, features = ["write"] }
 tempfile = "3.27"
 
 [lints.clippy]

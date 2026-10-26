@@ -16,6 +16,13 @@ capture_env = ["ELIVAGAR*", "MALLOC*"]
 name = "default"
 parallel = {}
 
+# `brokkr test` defaults to release; `brokkr check` runs the dev profile.
+# Matching them keeps a single-test timing honest against the 20s per-test
+# cap check enforces - a release run hid a 30s debug test at 5s.
+[test]
+debug = true
+default_package = "elivagar"
+
 # ---------------------------------------------------------------------------
 # Per-machine configuration
 # ---------------------------------------------------------------------------
@@ -342,5 +349,4 @@ download_date = "2026-02-20"
 
 [dm6.datasets.north-america.pbf.raw]
 file = "north-america-20260220-seq4705.osm.pbf"
-xxhash = "TODO"
 seq = 4705

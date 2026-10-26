@@ -554,11 +554,27 @@ fn diag_ocean_rings(path: &Path, z: u8, x: u32, y: u32) -> std::io::Result<()> {
             if let Ok(layer_data) = tc.read_len_delimited() {
                 diag_layer(layer_data);
             }
-        } else {
-            drop(tc.skip_field(wire_type));
+        } else if tc.skip_field(wire_type).is_err() {
+            break;
         }
     }
     Ok(())
+}
+
+/// The geometry type field of one MVT feature, 0 when absent.
+fn diag_geom_type(fdata: &[u8]) -> u64 {
+    use protohoggr::{Cursor, WIRE_VARINT};
+
+    let mut fc = Cursor::new(fdata);
+    let mut gt: u64 = 0;
+    while let Ok(Some((ff, fw))) = fc.read_tag() {
+        if ff == 3 && fw == WIRE_VARINT {
+            gt = fc.read_varint().unwrap_or(0);
+        } else if fc.skip_field(fw).is_err() {
+            break;
+        }
+    }
+    gt
 }
 
 #[allow(clippy::too_many_lines)]
@@ -583,27 +599,18 @@ fn diag_layer(data: &[u8]) {
                 }
             }
             _ => {
-                drop(lc.skip_field(wire_type));
+                if lc.skip_field(wire_type).is_err() {
+                    break;
+                }
             }
         }
     }
 
     // Count polygon features
-    let mut poly_count = 0;
-    for fdata in &feature_ranges {
-        let mut fc = Cursor::new(fdata);
-        let mut gt: u64 = 0;
-        while let Ok(Some((ff, fw))) = fc.read_tag() {
-            if ff == 3 && fw == WIRE_VARINT {
-                gt = fc.read_varint().unwrap_or(0);
-            } else {
-                drop(fc.skip_field(fw));
-            }
-        }
-        if gt == 3 {
-            poly_count += 1;
-        }
-    }
+    let poly_count = feature_ranges
+        .iter()
+        .filter(|fdata| diag_geom_type(fdata) == 3)
+        .count();
 
     println!(
         "  Layer '{name}': {n} features ({poly_count} polygons)",
@@ -635,7 +642,9 @@ fn diag_layer(data: &[u8]) {
                     }
                 }
                 _ => {
-                    drop(fc.skip_field(fw));
+                    if fc.skip_field(fw).is_err() {
+                        break;
+                    }
                 }
             }
         }

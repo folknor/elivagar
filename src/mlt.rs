@@ -3,7 +3,7 @@ use crate::mvt::{Feature, GeomType, LayerBuilder, Value};
 use geo_types::{
     Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
 };
-use mlt_core::encoder::EncoderConfig;
+use mlt_core::encoder::{EncoderConfig, Profile};
 use mlt_core::{PropKind, PropValue as MltPropValue, TileLayer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +91,7 @@ pub(crate) fn encode_tile(layers: &[&LayerBuilder]) -> Result<Vec<u8>, MltEncode
 
 fn encode_layer(layer: &LayerBuilder) -> Result<Vec<u8>, MltEncodeError> {
     build_mlt_tile_layer(layer)?
-        .encode(EncoderConfig::default())
+        .encode(EncoderConfig::from_profile(Profile::default()))
         .map_err(|e| MltEncodeError::Encode(e.to_string()))
 }
 
@@ -152,7 +152,7 @@ fn mlt_prop_kind(column_type: MltColumnType) -> PropKind {
 fn value_to_mlt_prop(value: &Value, column_type: MltColumnType) -> MltPropValue {
     match column_type {
         MltColumnType::String => MltPropValue::Str(match value {
-            Value::String(x) => Some(x.clone()),
+            Value::String(x) => Some(x.as_str().into()),
             _ => None,
         }),
         MltColumnType::Float => MltPropValue::F32(match value {
@@ -179,7 +179,7 @@ fn value_to_mlt_prop(value: &Value, column_type: MltColumnType) -> MltPropValue 
             Value::Bool(x) => Some(*x),
             _ => None,
         }),
-        MltColumnType::Mixed => MltPropValue::Str(Some(value_to_string(value))),
+        MltColumnType::Mixed => MltPropValue::Str(Some(value_to_string(value).into())),
     }
 }
 
