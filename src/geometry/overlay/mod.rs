@@ -93,10 +93,6 @@ impl BoolOverlay {
         self.inner.recycle_shapes_from(shapes, start);
     }
 
-    pub(crate) fn recycle_shape(&mut self, shape: &mut Shape) {
-        self.inner.recycle_shape(shape);
-    }
-
     pub(crate) fn recycle_contours_from(&mut self, shape: &mut Shape, start: usize) {
         self.inner.recycle_contours_from(shape, start);
     }

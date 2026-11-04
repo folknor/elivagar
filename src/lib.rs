@@ -82,6 +82,8 @@ pub mod provenance;
 pub mod shortbread;
 pub mod sort;
 pub mod svg;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tile_detail;
 pub mod verify;
 pub(crate) mod way_index;

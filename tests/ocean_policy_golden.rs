@@ -13,8 +13,11 @@ struct OceanGolden {
 // The digest covers the decompressed tile payloads in tile-id order (not the
 // archive file, whose metadata varies by build). It is kept beside the policy
 // version so a reviewed ocean output change updates the pair in one place.
+// The 50 m fixture is smaller than a buffered tile at every built zoom (0-14),
+// so it never emits a full fill. Changing the reserved full-fill ID therefore
+// leaves this digest unchanged.
 const OCEAN_GOLDEN: OceanGolden = OceanGolden {
-    policy_version: 7,
+    policy_version: 8,
     archive_xxh3_128: "8170f01181cbd2b70241c8a7cb41cb90",
 };
 

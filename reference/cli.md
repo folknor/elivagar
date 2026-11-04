@@ -218,11 +218,19 @@ including header detection) avoid the node store and this guard entirely.
 |---|---|---|
 | `--sort-budget <SIZE>` | 1G | per-chunk sort buffer. Min 64M. Lower cuts phase12 RSS, costs merge chunks |
 | `--way-budget <SIZE>` | 128M, or 4G under `--locations-on-ways` | in-flight way processing, in raw bytes (decompressed block size plus measured plan bytes). Min 1M. The count ceiling (`threads.max(8)` blocks in flight) is the primary admission control; this budget is a safety net against individually huge blocks and never binds on normal input, whatever the blob packing. See the constant's comment in `src/pipeline/phase12.rs` |
-| `--dedup-cap <N>` | 1000000 | entry cap for the PMTiles payload dedup map. Tile content is identical under any cap; past it duplicate payloads are stored instead of referenced, costing archive bytes, and the map costs ~56 bytes/entry of RAM. Deliberately outside the provenance contract, like the budgets: it cannot change what a consumer decodes |
+| `--dedup-cap <N>` | 1000000 when omitted; 0 is rejected | positive entry cap for the PMTiles payload dedup map. Tile content is identical under any cap; past it duplicate payloads are stored instead of referenced, costing archive bytes, and the map costs ~56 bytes/entry of RAM. Deliberately outside the provenance contract, like the budgets: it cannot change what a consumer decodes |
 | `--assemble-budget <SIZE>` | 32M | tile assembly batch. Min 1M |
 
 Sizes accept `256M`, `1G`, or raw bytes. Values whose scaled size overflows
 the platform byte-size integer are rejected.
+
+Omitting a byte budget uses its documented default. An explicit value must
+meet the listed minimum, so zero is rejected. Fanout caps use a separate rule:
+zero or omission means uncapped. A zero dedup cap is rejected; omit the flag to
+use the default. The standalone `PmtilesWriter::set_dedup_cap(0)` API prevents
+new dedup map entries. Existing entries remain eligible for lookups, so set
+zero before writing to disable tile-to-tile deduplication from the start. Run
+entries still share one payload across their tile range.
 
 ### Geometry
 
@@ -282,7 +290,11 @@ artifact-active corpus baseline. Policy v7 additionally orders rect-clip
 endpoints by the clipped axis before rounding the displacement from the
 smaller coordinate, so opposite traversals of shared edges no longer leave
 one-unit fill gaps. This also requires an artifact rebuild and an adjudicated
-corpus rotation. Artifact builds hash the opened shapefile and index buffers
+corpus rotation. Policy v8 reserves `u64::MAX` for full-tile fill feature IDs,
+keeping them distinct from zero-based source-piece fragment IDs while
+preserving identical full-fill payloads for deduplication. Rebuild the artifact
+and adjudicate the new output before rotating the artifact-active corpus.
+Artifact builds hash the opened shapefile and index buffers
 used by each pass, so replacing an input path during the build cannot attach
 another file's hash to the geometry.
 

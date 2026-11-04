@@ -214,6 +214,9 @@ pub struct TilegenConfig {
     /// dispatch and result drain also run on separate OS threads.
     /// Default: `std::thread::available_parallelism()` (logical CPUs).
     pub threads: usize,
+    // Keep these public budget fields raw until their consumers can migrate
+    // together: phase12 reads sort_chunk_size and way_inflight_budget as usize,
+    // while assemble reads assemble_batch_budget as usize.
     /// Raw-byte budget for in-flight way processing.
     /// 0 = mode-aware default:
     /// - 128 MB (standard node-store path)
@@ -232,6 +235,9 @@ pub struct TilegenConfig {
     /// ~56 bytes/entry of RAM. Not part of the provenance comparability
     /// contract for the same reason budgets are not: it cannot change what a
     /// consumer decodes from any tile.
+    /// This integer representation stays compatible with existing library
+    /// callers; the CLI rejects explicit zero because the writer API uses zero
+    /// to disable individual tile payload deduplication.
     pub dedup_cap: usize,
     /// Byte budget per sort chunk (0 = default 1 GB).
     /// Records buffer in memory up to this limit, then flush as a sorted
@@ -250,6 +256,8 @@ pub struct TilegenConfig {
     /// Compression algorithm for sort chunk files. Reduces disk I/O at the
     /// cost of CPU. Useful at planet scale where sort data exceeds available RAM.
     pub compress_sort_chunks: sort::ChunkCompression,
+    // phase12 passes raw u32 fanout caps through emit and relations. FanoutCap
+    // needs those field consumers and signatures to migrate together.
     /// Per-layer fanout caps: maximum bbox tiles a polygon feature may touch
     /// at any zoom. When exceeded, the feature is skipped at that zoom.
     /// 0 = uncapped (default). Only applies to polygon-geometry emit functions.

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+Design-hunt fixes, ninth wave. The ocean artifact key moves to
+`OCEAN_POLICY_VERSION` v8, so the world ocean artifact must be rebuilt
+with `ocean-build`; ocean geometry is unchanged.
+
+- Ocean full-tile fills carry one reserved feature id instead of 0,
+  which the first fragment of an overlapping source piece also used;
+  identical fills still deduplicate across pieces.
+- `--dedup-cap 0` is refused instead of silently meaning the default;
+  the default cap is a named public constant.
+- The node store is one `NodeStore` type over its two backends, with
+  typed node ids and coordinates; the old names remain as aliases.
+- Dead code removed: the parked multi-zoom float simplifier, the float
+  Sutherland-Hodgman polygon clip, unused geometry and debug helpers,
+  and MVT value variants the pipeline never produces.
+- New tests: a seeded polygon property suite, sort chunk record round
+  trips through every codec, and ocean band ownership checked against
+  assembly's actual copy ranges.
+
 Design-hunt fixes, eighth wave. This changes output.
 
 - Feature ids in layers fed by more than one OSM element type

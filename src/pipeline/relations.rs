@@ -114,7 +114,6 @@ pub(super) struct RelAcc {
     pub(super) count: u64,
     pub(super) point_emit: PointEmitScratch,
     pub(super) multipolygon_emit: MultipolygonEmitScratch,
-    pub(super) simp_scratch: geometry::simplify::SimplifyMultiScratch,
     pub(super) fanout: FanoutStats,
 }
 
@@ -126,7 +125,6 @@ impl RelAcc {
             count: 0,
             point_emit: PointEmitScratch::new(),
             multipolygon_emit: MultipolygonEmitScratch::new(),
-            simp_scratch: geometry::simplify::SimplifyMultiScratch::new(),
             fanout: FanoutStats::new(),
         }
     }
@@ -241,7 +239,6 @@ pub(super) fn process_relation_blocks(
                 &mut acc.sink,
                 &mut acc.point_emit,
                 &mut acc.multipolygon_emit,
-                &mut acc.simp_scratch,
                 fanout_caps,
                 polygon_simplify_factor,
                 &mut acc.fanout,
@@ -264,7 +261,6 @@ pub(super) fn process_relation_blocks(
             // reuse (the e2284ec de-churn win) lives WITHIN a single op and is
             // untouched by this.
             acc.multipolygon_emit = MultipolygonEmitScratch::new();
-            acc.simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
             inflight_bytes.fetch_sub(rel_bytes, Ordering::Relaxed);
             acc.bytes = acc.sink.bytes();
             if acc.bytes >= flush_threshold {
@@ -288,7 +284,6 @@ pub(super) fn process_relation_blocks(
         .map(|mut acc| {
             acc.flush(spill);
             acc.multipolygon_emit = MultipolygonEmitScratch::new();
-            acc.simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
             acc.point_emit = PointEmitScratch::new();
             acc.sink.payload = Vec::new();
             acc.sink.records = Vec::new();
@@ -344,7 +339,7 @@ pub(super) fn process_relation_blocks(
 
 /// Process a prepared relation's geometry into an external buffer (CPU-bound).
 /// Called from rayon worker threads via `RelAcc` fold. Reuses the caller's
-/// `sink` and `simp_scratch` to avoid per-relation allocation.
+/// sink and emission scratch to avoid per-relation allocation.
 #[hotpath::measure]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
@@ -355,7 +350,6 @@ pub(super) fn process_prepared_relation_into(
     sink: &mut RecordSink,
     point_emit: &mut PointEmitScratch,
     multipolygon_emit: &mut MultipolygonEmitScratch,
-    simp_scratch: &mut geometry::simplify::SimplifyMultiScratch,
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
     fanout: &mut FanoutStats,
@@ -401,7 +395,6 @@ pub(super) fn process_prepared_relation_into(
                     inners: &inners,
                     pins: &shared_vertex_keys,
                     polygon: multipolygon_emit,
-                    simplify: simp_scratch,
                     fanout,
                 },
                 m,

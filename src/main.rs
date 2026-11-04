@@ -136,11 +136,12 @@ struct RunArgs {
     #[arg(long, value_parser = parse_byte_size_min_1m)]
     assemble_budget: Option<usize>,
 
-    /// Entry cap for the PMTiles payload dedup map. Default 1000000.
+    /// Entry cap for the PMTiles payload dedup map. Default 1000000 when omitted.
+    /// Explicit zero is rejected; omit this flag to use the default.
     /// Tile content is identical under any cap; past it duplicate payloads
     /// are stored instead of referenced (archive bytes), and the map costs
     /// ~56 bytes per entry of RAM.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_dedup_cap)]
     dedup_cap: Option<usize>,
 
     /// Assert the PBF header declares embedded way coordinates.
@@ -304,6 +305,16 @@ fn parse_byte_size(s: &str) -> Option<usize> {
     } else {
         s.parse::<usize>().ok()
     }
+}
+
+fn parse_dedup_cap(s: &str) -> Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|_| format!("invalid dedup cap '{s}', expected a positive integer"))?;
+    if value == 0 {
+        return Err("dedup cap must be greater than zero; omit the flag to use the default".into());
+    }
+    Ok(value)
 }
 
 fn parse_tile_zoom(s: &str) -> Result<u8, String> {
@@ -862,7 +873,9 @@ fn run(args: RunArgs) {
         threads,
         way_inflight_budget: args.way_budget.unwrap_or(0),
         assemble_batch_budget: args.assemble_budget.unwrap_or(0),
-        dedup_cap: args.dedup_cap.unwrap_or(0),
+        dedup_cap: args
+            .dedup_cap
+            .unwrap_or(elivagar::pmtiles_writer::DEFAULT_DEDUP_CAP),
         sort_chunk_size: args.sort_budget.unwrap_or(0),
         locations_on_ways: args.locations_on_ways,
         tile_format: match args.tile_format {

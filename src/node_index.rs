@@ -1,7 +1,5 @@
-// Node coordinate storage has two backends. NodeIndex is a direct-addressed
-// flat mmap that supports arbitrary insertion order. SortedNodeStore is a
-// compact hierarchy for ascending node IDs. NodeStore and NodeStoreReader
-// dispatch to the selected backend.
+// Node coordinate storage has two private backends. The public NodeStore and
+// NodeStoreReader wrappers dispatch to the selected backend.
 //
 // The flat mmap backend currently sets no madvise hints.
 
@@ -47,6 +45,34 @@ impl From<NodeId> for i64 {
     }
 }
 
+/// A node coordinate in signed degrees scaled by 10^7, ordered latitude first.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LatLonE7 {
+    pub lat: i32,
+    pub lon: i32,
+}
+
+impl LatLonE7 {
+    pub const fn new(lat: i32, lon: i32) -> Self {
+        Self { lat, lon }
+    }
+}
+
+impl From<(i32, i32)> for LatLonE7 {
+    fn from((lat, lon): (i32, i32)) -> Self {
+        Self::new(lat, lon)
+    }
+}
+
+impl From<LatLonE7> for (i32, i32) {
+    fn from(coord: LatLonE7) -> Self {
+        (coord.lat, coord.lon)
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<LatLonE7>() == 8);
+
 const ENTRY_SIZE: u64 = 8; // 4 bytes lat_e7 + 4 bytes lon_e7
 const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
 const MAX_FLAT_INDEX_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 GB safety cap
@@ -58,18 +84,19 @@ const MAX_FLAT_INDEX_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 GB safety cap
 #[allow(clippy::cast_possible_wrap)]
 const COORD_XOR: i32 = 0x5555_5555_u32 as i32;
 
-pub struct NodeIndex {
+struct FlatNodeIndexInner {
     file: File,
     mmap: MmapMut,
     file_len: u64,
     max_file_size: Option<u64>,
+    node_count: u64,
 }
 
-impl NodeIndex {
+impl FlatNodeIndexInner {
     /// Create a new writable node index file at `path`.
     ///
     /// The flat mmap backend sets no madvise hints.
-    pub fn create(path: &Path) -> io::Result<Self> {
+    fn create(path: &Path) -> io::Result<Self> {
         Self::create_internal(path, Some(MAX_FLAT_INDEX_SIZE))
     }
 
@@ -77,7 +104,7 @@ impl NodeIndex {
     ///
     /// This is intentionally unsafe and should only be used when callers
     /// explicitly opt in to bypass guardrails.
-    pub fn create_unbounded(path: &Path) -> io::Result<Self> {
+    fn create_unbounded(path: &Path) -> io::Result<Self> {
         Self::create_internal(path, None)
     }
 
@@ -94,24 +121,20 @@ impl NodeIndex {
 
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
-        Ok(NodeIndex {
+        Ok(FlatNodeIndexInner {
             file,
             mmap,
             file_len,
             max_file_size,
+            node_count: 0,
         })
     }
 
     /// Write coordinates for a node. Grows the file if needed.
     /// Negative node IDs are invalid and rejected, matching `SortedNodeStore`.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
-        self.put_id(NodeId::new(node_id), lat_e7, lon_e7);
-    }
-
     /// Write coordinates using a typed node identifier.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    pub fn put_id(&mut self, node_id: NodeId, lat_e7: i32, lon_e7: i32) {
+    fn put_id(&mut self, node_id: NodeId, coord: LatLonE7) {
         assert!(
             node_id.as_i64() >= 0,
             "NodeIndex: node IDs must be non-negative, got {}",
@@ -165,22 +188,14 @@ impl NodeIndex {
         }
 
         let off = offset as usize;
-        self.mmap[off..off + 4].copy_from_slice(&(lat_e7 ^ COORD_XOR).to_le_bytes());
-        self.mmap[off + 4..off + 8].copy_from_slice(&(lon_e7 ^ COORD_XOR).to_le_bytes());
+        self.mmap[off..off + 4].copy_from_slice(&(coord.lat ^ COORD_XOR).to_le_bytes());
+        self.mmap[off + 4..off + 8].copy_from_slice(&(coord.lon ^ COORD_XOR).to_le_bytes());
+        self.node_count += 1;
     }
 
     /// Read coordinates for a node. Returns None if entry is unset (all zeros).
-    #[allow(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        clippy::unwrap_used
-    )]
-    pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
-        self.get_id(NodeId::new(node_id))
-    }
-
     /// Read coordinates using a typed node identifier.
-    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
+    fn get_id(&self, node_id: NodeId) -> Option<LatLonE7> {
         get_from_mmap(&self.mmap, self.file_len, node_id)
     }
 
@@ -189,10 +204,15 @@ impl NodeIndex {
     ///
     /// The returned `NodeIndexReader` wraps a read-only `Mmap` which is `Sync`,
     /// allowing safe concurrent reads from rayon worker threads.
-    pub fn into_reader(self) -> io::Result<NodeIndexReader> {
+    fn into_reader(self) -> io::Result<FlatNodeIndexReaderInner> {
         let file_len = self.file_len;
+        let node_count = self.node_count;
         let mmap = self.mmap.make_read_only()?;
-        Ok(NodeIndexReader { mmap, file_len })
+        Ok(FlatNodeIndexReaderInner {
+            mmap,
+            file_len,
+            node_count,
+        })
     }
 }
 
@@ -202,7 +222,7 @@ impl NodeIndex {
     clippy::cast_possible_truncation,
     clippy::unwrap_used
 )]
-fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: NodeId) -> Option<(i32, i32)> {
+fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: NodeId) -> Option<LatLonE7> {
     let offset = node_id.as_nonnegative_u64()?.checked_mul(ENTRY_SIZE)?;
     let needed = offset.checked_add(ENTRY_SIZE)?;
 
@@ -218,7 +238,7 @@ fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: NodeId) -> Option<(i32, i3
     if lat_raw == 0 && lon_raw == 0 {
         None
     } else {
-        Some((lat_raw ^ COORD_XOR, lon_raw ^ COORD_XOR))
+        Some(LatLonE7::new(lat_raw ^ COORD_XOR, lon_raw ^ COORD_XOR))
     }
 }
 
@@ -226,19 +246,15 @@ fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: NodeId) -> Option<(i32, i3
 /// (`Mmap` is `Sync + Send`).
 ///
 /// Created from `NodeIndex::into_reader()` after all nodes have been written.
-pub struct NodeIndexReader {
+struct FlatNodeIndexReaderInner {
     mmap: Mmap,
     file_len: u64,
+    node_count: u64,
 }
 
-impl NodeIndexReader {
-    /// Read coordinates for a node. Returns None if entry is unset (all zeros).
-    pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
-        self.get_id(NodeId::new(node_id))
-    }
-
+impl FlatNodeIndexReaderInner {
     /// Read coordinates using a typed node identifier.
-    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
+    fn get_id(&self, node_id: NodeId) -> Option<LatLonE7> {
         get_from_mmap(&self.mmap, self.file_len, node_id)
     }
 }
@@ -294,7 +310,7 @@ fn count_set_bits(mask: &[u8; BITMASK_BYTES]) -> u16 {
 // ---------------------------------------------------------------------------
 
 mod codec {
-    use super::NODES_PER_CHUNK;
+    use super::{LatLonE7, NODES_PER_CHUNK};
 
     /// Pack `values` at `bit_width` bits each, appending to `dest`.
     /// Output size: ceiling of values.len() * bit_width / 8 bytes.
@@ -379,30 +395,27 @@ mod codec {
     #[hotpath::measure]
     #[allow(clippy::cast_possible_truncation)]
     pub(super) fn compress_coords_into(
-        lats: &[i32],
-        lons: &[i32],
+        coords: &[LatLonE7],
         lat_offsets: &mut Vec<u32>,
         lon_offsets: &mut Vec<u32>,
         dest: &mut Vec<u8>,
     ) {
-        let n = lats.len();
-
         // Compute min values and offsets
-        let lat_min = lats.iter().copied().min().unwrap_or(0);
-        let lon_min = lons.iter().copied().min().unwrap_or(0);
+        let lat_min = coords.iter().map(|coord| coord.lat).min().unwrap_or(0);
+        let lon_min = coords.iter().map(|coord| coord.lon).min().unwrap_or(0);
 
         // Offsets are unsigned and can span the full i32 coordinate range.
         // Use modular arithmetic for the intermediate signed representation.
         #[allow(clippy::cast_sign_loss)]
-        let lat_max_offset = lats
+        let lat_max_offset = coords
             .iter()
-            .map(|&v| v.wrapping_sub(lat_min) as u32)
+            .map(|coord| coord.lat.wrapping_sub(lat_min) as u32)
             .max()
             .unwrap_or(0);
         #[allow(clippy::cast_sign_loss)]
-        let lon_max_offset = lons
+        let lon_max_offset = coords
             .iter()
-            .map(|&v| v.wrapping_sub(lon_min) as u32)
+            .map(|coord| coord.lon.wrapping_sub(lon_min) as u32)
             .max()
             .unwrap_or(0);
 
@@ -419,9 +432,9 @@ mod codec {
         lat_offsets.clear();
         lon_offsets.clear();
         #[allow(clippy::cast_sign_loss)]
-        for i in 0..n {
-            lat_offsets.push(lats[i].wrapping_sub(lat_min) as u32);
-            lon_offsets.push(lons[i].wrapping_sub(lon_min) as u32);
+        for coord in coords {
+            lat_offsets.push(coord.lat.wrapping_sub(lat_min) as u32);
+            lon_offsets.push(coord.lon.wrapping_sub(lon_min) as u32);
         }
 
         bitpack_values_into(lat_offsets, lat_bits, dest);
@@ -445,7 +458,7 @@ mod codec {
         n: usize,
         compressed: bool,
         packed: &[u8],
-        out: &mut [(i32, i32)],
+        out: &mut [LatLonE7],
     ) {
         if !compressed {
             // Raw (i32, i32) pairs - no FOR encoding
@@ -453,7 +466,7 @@ mod codec {
                 let off = i * 8;
                 let lat = i32::from_le_bytes(packed[off..off + 4].try_into().unwrap());
                 let lon = i32::from_le_bytes(packed[off + 4..off + 8].try_into().unwrap());
-                out[i] = (lat, lon);
+                out[i] = LatLonE7::new(lat, lon);
             }
             return;
         }
@@ -479,7 +492,7 @@ mod codec {
         for i in 0..n {
             #[allow(clippy::cast_possible_wrap)]
             {
-                out[i] = (
+                out[i] = LatLonE7::new(
                     lat_min.wrapping_add(lat_buf[i] as i32),
                     lon_min.wrapping_add(lon_buf[i] as i32),
                 );
@@ -569,7 +582,7 @@ struct CacheEntry {
     group_id: usize,
     chunk_idx: usize,
     node_mask: [u8; BITMASK_BYTES],
-    coords: [(i32, i32); NODES_PER_CHUNK],
+    coords: [LatLonE7; NODES_PER_CHUNK],
     count: u16, // 0 = empty
 }
 
@@ -580,7 +593,7 @@ impl CacheEntry {
             group_id: usize::MAX,
             chunk_idx: usize::MAX,
             node_mask: [0u8; BITMASK_BYTES],
-            coords: [(0, 0); NODES_PER_CHUNK],
+            coords: [LatLonE7::new(0, 0); NODES_PER_CHUNK],
             count: 0,
         }
     }
@@ -640,7 +653,7 @@ fn get_from_group_cached(
     group_id: usize,
     chunk_id: u8,
     node_in_chunk: u8,
-) -> Option<(i32, i32)> {
+) -> Option<LatLonE7> {
     if !test_bit(&group.chunk_mask, chunk_id) {
         return None;
     }
@@ -699,13 +712,13 @@ fn get_from_group_cached(
 
 /// Look up a single node from a chunk in a blob (no cache, for builder/test path).
 #[inline]
-fn get_from_blob_chunk(data: &[u8], chunk_idx: usize, node_in_chunk: u8) -> Option<(i32, i32)> {
+fn get_from_blob_chunk(data: &[u8], chunk_idx: usize, node_in_chunk: u8) -> Option<LatLonE7> {
     let chunk = find_chunk_in_blob(data, chunk_idx);
     if !test_bit(chunk.node_mask, node_in_chunk) {
         return None;
     }
     let node_idx = count_bits_before(chunk.node_mask, node_in_chunk);
-    let mut coords = [(0i32, 0i32); NODES_PER_CHUNK];
+    let mut coords = [LatLonE7::new(0, 0); NODES_PER_CHUNK];
     let count = count_set_bits(chunk.node_mask);
     decompress_chunk(count as usize, chunk.compressed, chunk.packed, &mut coords);
     Some(coords[node_idx])
@@ -713,7 +726,7 @@ fn get_from_blob_chunk(data: &[u8], chunk_idx: usize, node_in_chunk: u8) -> Opti
 
 /// Look up a node within a finalized Group (no cache, for builder/test path).
 #[inline]
-fn get_from_group(group: &Group, chunk_id: u8, node_in_chunk: u8) -> Option<(i32, i32)> {
+fn get_from_group(group: &Group, chunk_id: u8, node_in_chunk: u8) -> Option<LatLonE7> {
     if !test_bit(&group.chunk_mask, chunk_id) {
         return None;
     }
@@ -731,7 +744,7 @@ fn get_from_group(group: &Group, chunk_id: u8, node_in_chunk: u8) -> Option<(i32
 /// Coordinates within each chunk are FOR-compressed using exact-size
 /// bitpacking (no padding to block boundaries). Decompression uses a
 /// thread-local cache to amortize cost across consecutive lookups.
-pub struct SortedNodeStore {
+struct SortedNodeStoreInner {
     /// Completed groups, indexed by group_id. None = no nodes in that group.
     groups: Vec<Option<Box<Group>>>,
 
@@ -740,36 +753,32 @@ pub struct SortedNodeStore {
     current_chunk_mask: [u8; BITMASK_BYTES],
     current_group_data: Vec<u8>, // flat blob being built for current group
     compress_buf: Vec<u8>,       // scratch buffer for compression, reused
-    scratch_lats: Vec<i32>,      // scratch buffer for flush_chunk, reused
-    scratch_lons: Vec<i32>,      // scratch buffer for flush_chunk, reused
     scratch_lat_offsets: Vec<u32>, // scratch buffer for compress_coords_into, reused
     scratch_lon_offsets: Vec<u32>, // scratch buffer for compress_coords_into, reused
 
     // Builder state for the chunk being accumulated.
     current_chunk_id: u8,
     current_node_mask: [u8; BITMASK_BYTES],
-    current_coords: Vec<(i32, i32)>,
+    current_coords: Vec<LatLonE7>,
 
     last_node_id: Option<NodeId>,
     node_count: u64,
 }
 
-impl Default for SortedNodeStore {
+impl Default for SortedNodeStoreInner {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SortedNodeStore {
-    pub fn new() -> Self {
-        SortedNodeStore {
+impl SortedNodeStoreInner {
+    fn new() -> Self {
+        SortedNodeStoreInner {
             groups: Vec::new(),
             current_group_id: 0,
             current_chunk_mask: [0u8; BITMASK_BYTES],
             current_group_data: Vec::new(),
             compress_buf: Vec::new(),
-            scratch_lats: Vec::with_capacity(NODES_PER_CHUNK),
-            scratch_lons: Vec::with_capacity(NODES_PER_CHUNK),
             scratch_lat_offsets: Vec::with_capacity(NODES_PER_CHUNK),
             scratch_lon_offsets: Vec::with_capacity(NODES_PER_CHUNK),
             current_chunk_id: 0,
@@ -780,11 +789,10 @@ impl SortedNodeStore {
         }
     }
 
-    /// Store coordinates for a node. Node IDs MUST be strictly increasing.
+    /// Store typed coordinates. Node IDs MUST be strictly increasing.
     #[hotpath::measure]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
-        let node_id = NodeId::new(node_id);
+    fn put_id(&mut self, node_id: NodeId, coord: LatLonE7) {
         let id = node_id
             .as_nonnegative_u64()
             .expect("SortedNodeStore: node IDs must be non-negative");
@@ -831,17 +839,12 @@ impl SortedNodeStore {
         }
 
         set_bit(&mut self.current_node_mask, node_in_chunk);
-        self.current_coords.push((lat_e7, lon_e7));
+        self.current_coords.push(coord);
     }
 
-    /// Store coordinates using a typed node identifier.
-    pub fn put_id(&mut self, node_id: NodeId, lat_e7: i32, lon_e7: i32) {
-        self.put(node_id.as_i64(), lat_e7, lon_e7);
-    }
-
-    // scratch_lats, scratch_lons, scratch_lat_offsets, scratch_lon_offsets are hoisted
-    // onto the struct to avoid alloc/dealloc per call (~205K calls on Denmark).
-    // Hoisting gave -5.3% build time, -6.8% way-like lookup time (9e014d1).
+    // Offset scratch buffers are hoisted onto the struct to avoid alloc/dealloc
+    // per chunk (~205K calls on Denmark). Hoisting gave -5.3% build time,
+    // -6.8% way-like lookup time (9e014d1).
     #[hotpath::measure]
     fn flush_chunk(&mut self) {
         if self.current_coords.is_empty() {
@@ -852,18 +855,10 @@ impl SortedNodeStore {
         let n = self.current_coords.len();
         let raw_size = n * 8; // 4 bytes lat + 4 bytes lon
 
-        self.scratch_lats.clear();
-        self.scratch_lons.clear();
-        for &(lat, lon) in &self.current_coords {
-            self.scratch_lats.push(lat);
-            self.scratch_lons.push(lon);
-        }
-
         // Compress into scratch buffer
         self.compress_buf.clear();
         compress_coords_into(
-            &self.scratch_lats,
-            &self.scratch_lons,
+            &self.current_coords,
             &mut self.scratch_lat_offsets,
             &mut self.scratch_lon_offsets,
             &mut self.compress_buf,
@@ -881,11 +876,11 @@ impl SortedNodeStore {
         } else {
             let fl = encode_flags_and_len(false, raw_size);
             self.current_group_data.extend_from_slice(&fl.to_le_bytes());
-            for &(lat, lon) in &self.current_coords {
+            for coord in &self.current_coords {
                 self.current_group_data
-                    .extend_from_slice(&lat.to_le_bytes());
+                    .extend_from_slice(&coord.lat.to_le_bytes());
                 self.current_group_data
-                    .extend_from_slice(&lon.to_le_bytes());
+                    .extend_from_slice(&coord.lon.to_le_bytes());
             }
         }
 
@@ -912,7 +907,7 @@ impl SortedNodeStore {
 
     /// Convert to a read-only reader. Consumes the store.
     #[allow(clippy::cast_possible_truncation, clippy::unwrap_used)]
-    pub fn into_reader(mut self) -> SortedNodeStoreReader {
+    fn into_reader(mut self) -> SortedNodeStoreReaderInner {
         self.flush_chunk();
         self.flush_group();
 
@@ -932,7 +927,7 @@ impl SortedNodeStore {
         // Allocation addresses can be reused after an earlier reader drops.
         static NEXT_READER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let cache_id = NEXT_READER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        SortedNodeStoreReader {
+        SortedNodeStoreReaderInner {
             groups: self.groups,
             node_count,
             group_count,
@@ -941,14 +936,9 @@ impl SortedNodeStore {
     }
 
     /// Read coordinates (used by tests; not performance-critical).
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
-        self.get_id(NodeId::new(node_id))
-    }
-
     /// Read coordinates using a typed node identifier.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
+    fn get_id(&self, node_id: NodeId) -> Option<LatLonE7> {
         let id = node_id.as_nonnegative_u64()?;
         let group_id = id / NODES_PER_GROUP;
         let chunk_id = ((id % NODES_PER_GROUP) / NODES_PER_CHUNK as u64) as u8;
@@ -978,41 +968,31 @@ impl SortedNodeStore {
     }
 
     /// Number of nodes stored.
-    pub fn node_count(&self) -> u64 {
+    fn node_count(&self) -> u64 {
         self.node_count
     }
 }
 
 /// Read-only sorted node coordinate store. Safe for concurrent reads
 /// from rayon threads (all interior data is immutable).
-pub struct SortedNodeStoreReader {
+struct SortedNodeStoreReaderInner {
     groups: Vec<Option<Box<Group>>>,
     node_count: u64,
     group_count: usize,
     cache_id: u64,
 }
 
-impl SortedNodeStoreReader {
-    pub fn node_count(&self) -> u64 {
+impl SortedNodeStoreReaderInner {
+    fn node_count(&self) -> u64 {
         self.node_count
     }
-    pub fn group_count(&self) -> usize {
+    fn group_count(&self) -> usize {
         self.group_count
-    }
-
-    /// Look up coordinates for a node. O(1) via bitmask popcount.
-    /// Uses a thread-local decompression cache for amortized lookups.
-    ///
-    /// No #[hotpath::measure] - same reason as get_from_group_cached. At ~48M
-    /// calls on Denmark, the instrumentation overhead (>50%) dwarfs actual cost.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
-        self.get_id(NodeId::new(node_id))
     }
 
     /// Look up coordinates using a typed node identifier.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
+    fn get_id(&self, node_id: NodeId) -> Option<LatLonE7> {
         let id = node_id.as_nonnegative_u64()?;
         let group_id = (id / NODES_PER_GROUP) as usize;
         let chunk_id = ((id % NODES_PER_GROUP) / NODES_PER_CHUNK as u64) as u8;
@@ -1024,70 +1004,230 @@ impl SortedNodeStoreReader {
 }
 
 // ---------------------------------------------------------------------------
-// NodeStore / NodeStoreReader - enum dispatch
+// Unified NodeStore / NodeStoreReader API
 // ---------------------------------------------------------------------------
 
-// Keep the concrete backend stores and readers alongside the dispatch types.
-// phase12 constructs a concrete backend and carries the enum reader into its
-// parallel lookup phase. Collapsing these public names requires moving that
-// selection and reader boundary in phase12, which is outside this module's
-// owned files. The current API has six public types for two backends and their
-// write/read transitions: NodeIndex, NodeIndexReader, SortedNodeStore,
-// SortedNodeStoreReader, NodeStore, and NodeStoreReader.
-
-/// Unified node store for the write phase.
 #[allow(clippy::large_enum_variant)]
-pub enum NodeStore {
-    Flat(NodeIndex),
-    Sorted(SortedNodeStore),
+enum NodeStoreBackend {
+    Flat(FlatNodeIndexInner),
+    Sorted(SortedNodeStoreInner),
+}
+
+/// Unified node store for the write phase. Backend types stay private.
+pub struct NodeStore {
+    backend: NodeStoreBackend,
 }
 
 impl NodeStore {
+    /// Create a store for node IDs in strictly ascending order.
+    pub fn new_sorted() -> Self {
+        Self {
+            backend: NodeStoreBackend::Sorted(SortedNodeStoreInner::new()),
+        }
+    }
+
+    /// Create a direct-addressed flat store with its 16 GB safety cap.
+    pub fn create_flat(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            backend: NodeStoreBackend::Flat(FlatNodeIndexInner::create(path)?),
+        })
+    }
+
+    /// Compatibility constructor for the flat node-index API.
+    pub fn create(path: &Path) -> io::Result<Self> {
+        Self::create_flat(path)
+    }
+
+    /// Create a direct-addressed flat store without a size safety cap.
+    ///
+    /// This is intentionally unsafe and should only be used when callers
+    /// explicitly opt in to bypass guardrails.
+    pub fn create_flat_unbounded(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            backend: NodeStoreBackend::Flat(FlatNodeIndexInner::create_unbounded(path)?),
+        })
+    }
+
+    /// Compatibility constructor for the unbounded flat node-index API.
+    pub fn create_unbounded(path: &Path) -> io::Result<Self> {
+        Self::create_flat_unbounded(path)
+    }
+
+    /// Legacy tuple-coordinate writer.
     pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
         self.put_id(NodeId::new(node_id), lat_e7, lon_e7);
     }
 
+    /// Store coordinates using a typed node identifier.
     pub fn put_id(&mut self, node_id: NodeId, lat_e7: i32, lon_e7: i32) {
-        match self {
-            NodeStore::Flat(idx) => idx.put_id(node_id, lat_e7, lon_e7),
-            NodeStore::Sorted(store) => store.put_id(node_id, lat_e7, lon_e7),
+        self.put_coord_id(node_id, LatLonE7::new(lat_e7, lon_e7));
+    }
+
+    /// Store a typed coordinate using a typed node identifier.
+    #[inline]
+    pub fn put_coord_id(&mut self, node_id: NodeId, coord: LatLonE7) {
+        match &mut self.backend {
+            NodeStoreBackend::Flat(idx) => idx.put_id(node_id, coord),
+            NodeStoreBackend::Sorted(store) => store.put_id(node_id, coord),
         }
     }
 
-    pub fn into_reader(self) -> io::Result<NodeStoreReader> {
-        match self {
-            NodeStore::Flat(idx) => Ok(NodeStoreReader::Flat(idx.into_reader()?)),
-            NodeStore::Sorted(store) => Ok(NodeStoreReader::Sorted(store.into_reader())),
-        }
-    }
-}
-
-/// Unified read-only node store for the parallel processing phase.
-pub enum NodeStoreReader {
-    Flat(NodeIndexReader),
-    Sorted(SortedNodeStoreReader),
-}
-
-impl NodeStoreReader {
+    /// Legacy tuple-coordinate lookup while the store is being built.
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
         self.get_id(NodeId::new(node_id))
     }
 
+    /// Look up coordinates using a typed node identifier.
     pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
-        match self {
-            NodeStoreReader::Flat(reader) => reader.get_id(node_id),
-            NodeStoreReader::Sorted(reader) => reader.get_id(node_id),
+        self.get_coord_id(node_id).map(Into::into)
+    }
+
+    /// Look up a typed coordinate using a typed node identifier.
+    pub fn get_coord_id(&self, node_id: NodeId) -> Option<LatLonE7> {
+        match &self.backend {
+            NodeStoreBackend::Flat(idx) => idx.get_id(node_id),
+            NodeStoreBackend::Sorted(store) => store.get_id(node_id),
         }
     }
 
-    /// Return (node_count, group_count) for sorted store, None for flat.
+    /// Convert to a read-only store after all nodes have been written.
+    pub fn into_reader(self) -> io::Result<NodeStoreReader> {
+        let backend = match self.backend {
+            NodeStoreBackend::Flat(idx) => NodeStoreReaderBackend::Flat(idx.into_reader()?),
+            NodeStoreBackend::Sorted(store) => NodeStoreReaderBackend::Sorted(store.into_reader()),
+        };
+        Ok(NodeStoreReader { backend })
+    }
+}
+
+/// Statistics available from either node-store backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NodeStoreStats {
+    /// Successful puts. Valid OSM input uses each node ID once.
+    pub node_count: u64,
+    /// Sorted backend groups; the flat backend has no group hierarchy.
+    pub group_count: Option<usize>,
+}
+
+enum NodeStoreReaderBackend {
+    Flat(FlatNodeIndexReaderInner),
+    Sorted(SortedNodeStoreReaderInner),
+}
+
+/// Unified read-only node store for parallel lookup.
+///
+/// The backend enum is matched directly on each lookup. This preserves static
+/// dispatch without a per-lookup trait-object call.
+pub struct NodeStoreReader {
+    backend: NodeStoreReaderBackend,
+}
+
+impl NodeStoreReader {
+    /// Legacy tuple-coordinate lookup.
+    #[inline]
+    pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
+        self.get_id(NodeId::new(node_id))
+    }
+
+    /// Look up coordinates using a typed node identifier.
+    #[inline]
+    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
+        self.get_coord_id(node_id).map(Into::into)
+    }
+
+    /// Look up a typed coordinate using a typed node identifier.
+    #[inline]
+    pub fn get_coord_id(&self, node_id: NodeId) -> Option<LatLonE7> {
+        match &self.backend {
+            NodeStoreReaderBackend::Flat(reader) => reader.get_id(node_id),
+            NodeStoreReaderBackend::Sorted(reader) => reader.get_id(node_id),
+        }
+    }
+
+    pub fn node_count(&self) -> u64 {
+        self.stats().node_count
+    }
+
+    pub fn group_count(&self) -> usize {
+        self.stats().group_count.unwrap_or(0)
+    }
+
+    /// Compatibility statistics for callers that only report sorted stores.
     pub fn sorted_stats(&self) -> Option<(u64, usize)> {
-        match self {
-            NodeStoreReader::Flat(_) => None,
-            NodeStoreReader::Sorted(r) => Some((r.node_count(), r.group_count())),
+        let stats = self.stats();
+        stats.group_count.map(|groups| (stats.node_count, groups))
+    }
+
+    /// Return node counts for both backends and group count when available.
+    pub fn stats(&self) -> NodeStoreStats {
+        match &self.backend {
+            NodeStoreReaderBackend::Flat(reader) => NodeStoreStats {
+                node_count: reader.node_count,
+                group_count: None,
+            },
+            NodeStoreReaderBackend::Sorted(reader) => NodeStoreStats {
+                node_count: reader.node_count(),
+                group_count: Some(reader.group_count()),
+            },
         }
     }
 }
+
+/// Compatibility facade for callers that explicitly build a sorted store.
+///
+/// Phase12 uses the unified NodeStore, which keeps this backend choice private.
+pub struct SortedNodeStore {
+    inner: SortedNodeStoreInner,
+}
+
+impl Default for SortedNodeStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SortedNodeStore {
+    pub fn new() -> Self {
+        Self {
+            inner: SortedNodeStoreInner::new(),
+        }
+    }
+
+    #[inline]
+    pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
+        self.put_id(NodeId::new(node_id), lat_e7, lon_e7);
+    }
+
+    #[inline]
+    pub fn put_id(&mut self, node_id: NodeId, lat_e7: i32, lon_e7: i32) {
+        self.inner.put_id(node_id, LatLonE7::new(lat_e7, lon_e7));
+    }
+
+    #[inline]
+    pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
+        self.get_id(NodeId::new(node_id))
+    }
+
+    #[inline]
+    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
+        self.inner.get_id(node_id).map(Into::into)
+    }
+
+    pub fn node_count(&self) -> u64 {
+        self.inner.node_count()
+    }
+
+    pub fn into_reader(self) -> SortedNodeStoreReader {
+        NodeStoreReader {
+            backend: NodeStoreReaderBackend::Sorted(self.inner.into_reader()),
+        }
+    }
+}
+
+/// Compatibility names now resolve to the unified writer and reader.
+pub type NodeIndex = NodeStore;
+pub type NodeIndexReader = NodeStoreReader;
+pub type SortedNodeStoreReader = NodeStoreReader;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1225,31 +1365,26 @@ mod tests {
                 lons[0] = i32::MAX;
                 lons[n - 1] = i32::MIN;
             }
+            let coords = lats
+                .iter()
+                .copied()
+                .zip(lons.iter().copied())
+                .map(LatLonE7::from)
+                .collect::<Vec<_>>();
 
             let mut lat_offsets = Vec::with_capacity(n);
             let mut lon_offsets = Vec::with_capacity(n);
             let mut packed = Vec::new();
-            compress_coords_into(
-                &lats,
-                &lons,
-                &mut lat_offsets,
-                &mut lon_offsets,
-                &mut packed,
-            );
+            compress_coords_into(&coords, &mut lat_offsets, &mut lon_offsets, &mut packed);
 
             if n >= 2 {
                 assert_eq!(packed[8], 32, "latitude width at chunk length {n}");
                 assert_eq!(packed[9], 32, "longitude width at chunk length {n}");
             }
 
-            let mut decoded = vec![(0_i32, 0_i32); n];
+            let mut decoded = vec![LatLonE7::default(); n];
             decompress_chunk(n, true, &packed, &mut decoded);
-            let expected = lats
-                .iter()
-                .copied()
-                .zip(lons.iter().copied())
-                .collect::<Vec<_>>();
-            assert_eq!(decoded, expected, "round trip at chunk length {n}");
+            assert_eq!(decoded, coords, "round trip at chunk length {n}");
         }
     }
 
@@ -1444,10 +1579,13 @@ mod tests {
 
     #[test]
     fn node_store_sorted_variant() {
-        let mut store = NodeStore::Sorted(SortedNodeStore::new());
-        store.put(100, 555_000_000, 133_000_000);
+        let mut store = NodeStore::new_sorted();
+        store.put_coord_id(NodeId::new(100), LatLonE7::new(555_000_000, 133_000_000));
         let reader = store.into_reader().unwrap();
-        assert_eq!(reader.get(100), Some((555_000_000, 133_000_000)));
+        assert_eq!(
+            reader.get_coord_id(NodeId::new(100)),
+            Some(LatLonE7::new(555_000_000, 133_000_000))
+        );
         assert_eq!(reader.get(999), None);
     }
 
@@ -1455,7 +1593,7 @@ mod tests {
     fn node_store_flat_variant() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_test.bin");
-        let mut store = NodeStore::Flat(NodeIndex::create(&path).unwrap());
+        let mut store = NodeStore::create_flat(&path).unwrap();
         store.put(100, 555_000_000, 133_000_000);
         let reader = store.into_reader().unwrap();
         assert_eq!(reader.get(100), Some((555_000_000, 133_000_000)));

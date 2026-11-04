@@ -6,7 +6,7 @@ use crate::geometry::{
     self,
     projection::{MercBbox, Point},
 };
-use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
+use crate::node_index::{LatLonE7, NodeId, NodeStore, NodeStoreReader};
 use crate::shortbread::{self, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter};
 use crate::way_index::WayIndexWriter;
@@ -304,7 +304,7 @@ pub(super) fn phase_read_and_process(
             } else {
                 eprintln!("  PBF declares Sort.Type_then_ID - using compact node store");
             }
-            Some(NodeStore::Sorted(SortedNodeStore::new()))
+            Some(NodeStore::new_sorted())
         }
         NodeStoreMode::Flat { unsafe_override } => {
             if unsafe_override {
@@ -313,11 +313,11 @@ pub(super) fn phase_read_and_process(
                 );
             }
             eprintln!("  PBF not sorted - using flat mmap node index");
-            Some(NodeStore::Flat(if unsafe_override {
-                NodeIndex::create_unbounded(&idx_dir.join("nodes.idx"))?
+            Some(if unsafe_override {
+                NodeStore::create_flat_unbounded(&idx_dir.join("nodes.idx"))?
             } else {
-                NodeIndex::create(&idx_dir.join("nodes.idx"))?
-            }))
+                NodeStore::create_flat(&idx_dir.join("nodes.idx"))?
+            })
         }
     };
     // Option so we can move to drain thread during way phase and get back after.
@@ -509,7 +509,10 @@ pub(super) fn phase_read_and_process(
                             ns.into_reader()
                                 .expect("failed to convert node store to reader"),
                         );
-                        node_store_stats = r.sorted_stats();
+                        let store_stats = r.stats();
+                        node_store_stats = store_stats
+                            .group_count
+                            .map(|group_count| (store_stats.node_count, group_count));
                         Some(r)
                     };
                     if locations_on_ways {
@@ -689,7 +692,7 @@ pub(super) fn phase_read_and_process(
                                             continue;
                                         };
                                         debug_assert_eq!(
-                                            plan.way_id,
+                                            plan.way_id.as_i64(),
                                             way.id(),
                                             "way plan misaligned with block ways"
                                         );
@@ -1375,7 +1378,7 @@ fn run_node_worker(
             let lat_e7 = $node.decimicro_lat();
             let lon_e7 = $node.decimicro_lon();
             if let Some(ns) = node_store.as_mut() {
-                ns.put($node.id(), lat_e7, lon_e7);
+                ns.put_coord_id(NodeId::new($node.id()), LatLonE7::new(lat_e7, lon_e7));
             }
 
             extent.include(lat_e7, lon_e7);
@@ -1435,7 +1438,7 @@ fn run_node_worker(
 }
 
 pub(super) struct WayPlan {
-    pub(super) way_id: i64,
+    pub(super) way_id: WayId,
     pub(super) node_refs: Vec<i64>,
     pub(super) preserve_node_refs: Vec<i64>,
     /// Whether this way is a member of a shortbread-matched multipolygon/
@@ -1444,6 +1447,21 @@ pub(super) struct WayPlan {
     /// the `process_planned_way_into` call site - one place computes
     /// membership.
     pub(super) is_member: bool,
+}
+
+/// A way identifier inside phase12. The way-index boundary still accepts i64.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct WayId(i64);
+
+impl WayId {
+    const fn new(raw: i64) -> Self {
+        Self(raw)
+    }
+
+    const fn as_i64(self) -> i64 {
+        self.0
+    }
 }
 
 fn estimate_way_plans_bytes(plans: &[WayPlan]) -> usize {
@@ -1490,7 +1508,7 @@ pub(super) fn build_way_plans(
             way_pos += 1;
             marked += u64::from(is_member);
             Some(WayPlan {
-                way_id,
+                way_id: WayId::new(way_id),
                 node_refs: way.refs().collect(),
                 preserve_node_refs: Vec::new(),
                 // Membership resolved once, at plan build, from the relation
@@ -1665,7 +1683,7 @@ pub(super) struct WayTaskResult {
     pub(super) count: u64,
     pub(super) sink: RecordSink,
     pub(super) fanout: FanoutStats,
-    pub(super) way_puts: Vec<(i64, Vec<(i32, i32)>)>,
+    pub(super) way_puts: Vec<(WayId, Vec<(i32, i32)>)>,
     pub(super) location_extent: CoordinateExtent,
 }
 
@@ -1674,7 +1692,7 @@ pub(super) struct WayAcc {
     pub(super) bytes: usize,
     pub(super) count: u64,
     pub(super) fanout: FanoutStats,
-    pub(super) way_puts: Vec<(i64, Vec<(i32, i32)>)>,
+    pub(super) way_puts: Vec<(WayId, Vec<(i32, i32)>)>,
     pub(super) location_extent: CoordinateExtent,
     pub(super) merc: Vec<Point>,
     pub(super) point_emit: PointEmitScratch,
@@ -1732,7 +1750,7 @@ pub(super) fn drain_way_task_result(
 ) -> u64 {
     location_extent.merge(result.location_extent);
     for (way_id, coords_e7) in result.way_puts {
-        way_index.put(way_id, &coords_e7);
+        way_index.put(way_id.as_i64(), &coords_e7);
     }
     sort_writer.merge_tally(&result.sink.tally);
     fanout.merge(&result.fanout);
@@ -1770,8 +1788,9 @@ pub(super) fn process_planned_way_into(
     boundary_way_meta: &BoundaryWayMeta,
     acc: &mut WayAcc,
 ) -> u64 {
+    let way_id = plan.way_id.as_i64();
     let tags_ref: Vec<(&str, &str)> = way.tags().collect();
-    if tags_ref.is_empty() && !plan.is_member && !boundary_way_meta.contains_key(&plan.way_id) {
+    if tags_ref.is_empty() && !plan.is_member && !boundary_way_meta.contains_key(&way_id) {
         return 0;
     }
     let tag_helper = Tags(&tags_ref);
@@ -1779,7 +1798,7 @@ pub(super) fn process_planned_way_into(
     // both-geom pre-filter is only worth computing for non-members, where it
     // gates the early return. Computing it for members would run two
     // `match_element` passes whose result is never inspected.
-    if !plan.is_member && !boundary_way_meta.contains_key(&plan.way_id) {
+    if !plan.is_member && !boundary_way_meta.contains_key(&way_id) {
         let possible_feature = !shortbread::match_element(&tag_helper, OsmGeomType::ClosedWay)
             .is_empty()
             || !shortbread::match_element(&tag_helper, OsmGeomType::OpenWay).is_empty();
@@ -1794,8 +1813,8 @@ pub(super) fn process_planned_way_into(
         let mut resolved: Vec<(i32, i32)> = Vec::with_capacity(plan.node_refs.len());
         let mut resolved_refs: Vec<i64> = Vec::with_capacity(plan.node_refs.len());
         for &id in &plan.node_refs {
-            if let Some(coord) = nr.get(id) {
-                resolved.push(coord);
+            if let Some(coord) = nr.get_coord_id(NodeId::new(id)) {
+                resolved.push(coord.into());
                 resolved_refs.push(id);
             } else {
                 missing_refs += 1;
@@ -1827,14 +1846,14 @@ pub(super) fn process_planned_way_into(
         OsmGeomType::OpenWay
     };
     let mut matches = shortbread::match_element(&tag_helper, geom_type);
-    resolve_boundary_match(&tag_helper, plan.way_id, boundary_way_meta, &mut matches);
+    resolve_boundary_match(&tag_helper, way_id, boundary_way_meta, &mut matches);
 
     if matches.is_empty() {
         return 0;
     }
 
     #[allow(clippy::cast_sign_loss)]
-    let osm_id = plan.way_id as u64;
+    let osm_id = way_id as u64;
     let before = acc.sink.records.len();
     let mut preserve_vertex_mask: Vec<bool> = vec![false; coords_e7.len()];
     match pins {

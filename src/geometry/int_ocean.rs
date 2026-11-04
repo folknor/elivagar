@@ -224,11 +224,6 @@ impl IntEmitScratch {
         self.overlay.recycle_from(shapes, start);
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn recycle_shape(&mut self, shape: &mut Shape) {
-        self.overlay.recycle_shape(shape);
-    }
-
     fn recycle_contours_from(&mut self, shape: &mut Shape, start: usize) {
         self.overlay.recycle_contours_from(shape, start);
     }
@@ -805,14 +800,6 @@ pub(crate) fn intersect_shapes_into(
     scratch.overlay.add_shape(clip, ShapeType::Clip);
     scratch.overlay.overlay_nested(BoolRule::Intersect, out);
     clean_shapes_in_place(scratch, out, 0);
-}
-
-#[allow(dead_code)]
-pub(crate) fn point_in_shape(x: i32, y: i32, shape: &Shape) -> bool {
-    if shape.is_empty() {
-        return false;
-    }
-    point_in_contour(x, y, &shape[0]) && !shape[1..].iter().any(|hole| point_in_contour(x, y, hole))
 }
 
 fn fill_rect_contour(out: &mut Contour, rect: IntRect) {
@@ -1803,7 +1790,10 @@ mod tests {
             0,
         );
         assert!(!out.is_empty());
-        assert!(!point_in_shape(5, 2, &out[0]));
+        assert!(out.iter().all(|shape| {
+            !point_in_contour(5, 2, &shape[0])
+                || shape[1..].iter().any(|hole| point_in_contour(5, 2, hole))
+        }));
     }
 
     #[test]
@@ -1821,18 +1811,6 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_winding(&out[0]);
-    }
-
-    #[test]
-    fn point_in_shape_inside_outer_inside_hole_on_boundary_determinism() {
-        let shape = vec![
-            vec![p(0, 0), p(10, 0), p(10, 10), p(0, 10)],
-            vec![p(3, 3), p(3, 7), p(7, 7), p(7, 3)],
-        ];
-        assert!(point_in_shape(1, 1, &shape));
-        assert!(!point_in_shape(5, 5, &shape));
-        assert!(point_in_shape(0, 5, &shape));
-        assert!(!point_in_shape(3, 5, &shape));
     }
 
     #[test]

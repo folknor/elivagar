@@ -74,7 +74,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// now cut at the same integer point instead of leaving a one-unit fill gap.
 /// Existing artifacts must be rebuilt, then the artifact-active corpus
 /// contract must be rotated with the newly adjudicated output.
-pub const OCEAN_POLICY_VERSION: u32 = 7;
+///
+/// v8: full-tile fills use a reserved canonical ID, distinct from source piece
+/// IDs. Canonical zero IDs could alias piece 0 fragments when slightly
+/// overlapping source cells contribute to the same tile. Existing artifacts
+/// must be rebuilt before use.
+pub const OCEAN_POLICY_VERSION: u32 = 8;
+
+// Piece IDs are zero-based Vec indices, so they cannot reach u64::MAX.
+// Keeping full fills identical across pieces preserves payload deduplication
+// and long PMTiles runs in the world artifact.
+const FULL_FILL_FEATURE_ID: u64 = u64::MAX;
 
 /// A canonical XXH3-128 digest: exactly 32 lowercase hexadecimal characters
 /// whenever it is serialized or displayed.
@@ -1910,7 +1920,7 @@ fn ocean_sink<'a>(
         let range = append_feature_data_with_attrs(
             &mut acc.payload,
             if kind == PyramidEmitKind::FullFill {
-                0
+                FULL_FILL_FEATURE_ID
             } else {
                 feature_id
             },
@@ -1953,6 +1963,7 @@ fn emit_ocean_piece(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::geometry::int_ocean::IntPoint;
     use crate::geometry::projection::Point;
     use crate::sort::SortWriter;
     use std::fs;
@@ -1965,7 +1976,88 @@ mod tests {
     }
 
     #[test]
-    fn full_fill_uses_canonical_zero_id_and_fragment_keeps_piece_id() {
+    fn overlapping_piece_zero_fragment_and_full_fill_have_distinct_ids() {
+        let cell = PyramidCell {
+            z: 8,
+            tx: 100,
+            ty: 100,
+        };
+        let rect = buffered_cell_rect_base(8, cell);
+        let rectangle = |rect: IntRect| {
+            vec![vec![
+                IntPoint::new(rect.min_x, rect.min_y),
+                IntPoint::new(rect.max_x, rect.min_y),
+                IntPoint::new(rect.max_x, rect.max_y),
+                IntPoint::new(rect.min_x, rect.max_y),
+            ]]
+        };
+        // Piece zero crosses the tile edge, while piece one overlaps it by
+        // only a narrow strip and covers the complete buffered tile.
+        let piece_zero = rectangle(IntRect {
+            min_x: rect.min_x - 3_000,
+            min_y: rect.min_y + 1_000,
+            max_x: rect.min_x + 240,
+            max_y: rect.min_y + 1_040,
+        });
+        let piece_one = rectangle(IntRect {
+            min_x: rect.min_x - 2_048,
+            min_y: rect.min_y - 2_048,
+            max_x: rect.max_x + 2_048,
+            max_y: rect.max_y + 2_048,
+        });
+        let params = ocean_params(8, 8, None);
+        let mut attrs = Vec::new();
+        encode_attrs_bytes(&mut attrs, &[], 8);
+        let tile_id = pmtiles_writer::xy_to_tile_id(cell.z, cell.tx, cell.ty);
+
+        let mut fragment_acc = OceanAcc::new();
+        let mut fragment_kinds = Vec::new();
+        let mut fragment_sink = ocean_sink(0, Layer::Ocean as u8, &attrs, &mut fragment_acc);
+        let mut scratch = PyramidScratch::new();
+        emit_shape_pyramid(
+            &piece_zero,
+            &params,
+            &mut scratch,
+            &mut |z, tx, ty, geom, kind| {
+                if (z, tx, ty) == (cell.z, cell.tx, cell.ty) {
+                    fragment_kinds.push(kind);
+                }
+                fragment_sink(z, tx, ty, geom, kind);
+            },
+        );
+        drop(fragment_sink);
+
+        let mut fill_acc = OceanAcc::new();
+        let mut fill_kinds = Vec::new();
+        let mut fill_sink = ocean_sink(1, Layer::Ocean as u8, &attrs, &mut fill_acc);
+        let mut scratch = PyramidScratch::new();
+        emit_shape_pyramid(
+            &piece_one,
+            &params,
+            &mut scratch,
+            &mut |z, tx, ty, geom, kind| {
+                if (z, tx, ty) == (cell.z, cell.tx, cell.ty) {
+                    fill_kinds.push(kind);
+                }
+                fill_sink(z, tx, ty, geom, kind);
+            },
+        );
+        drop(fill_sink);
+
+        assert!(fragment_kinds.contains(&PyramidEmitKind::Fragment));
+        assert!(fill_kinds.contains(&PyramidEmitKind::FullFill));
+        let id_for_tile = |acc: &OceanAcc| {
+            acc.records.iter().find_map(|(key, offset, len)| {
+                (sort::tile_id_from_key(*key) == tile_id)
+                    .then(|| record_osm_id(&acc.payload[*offset..*offset + *len]))
+            })
+        };
+        assert_eq!(id_for_tile(&fragment_acc), Some(0));
+        assert_eq!(id_for_tile(&fill_acc), Some(FULL_FILL_FEATURE_ID));
+    }
+
+    #[test]
+    fn full_fill_uses_canonical_id_and_fragment_keeps_piece_id() {
         let mut acc = OceanAcc::new();
         let attrs = Vec::new();
         let mut sink = ocean_sink(77, Layer::Ocean as u8, &attrs, &mut acc);
@@ -1975,25 +2067,34 @@ mod tests {
         let (_, first_start, first_len) = acc.records[0];
         assert_eq!(
             record_osm_id(&acc.payload[first_start..first_start + first_len]),
-            0
+            FULL_FILL_FEATURE_ID
         );
         let (_, second_start, second_len) = acc.records[1];
         assert_eq!(
             record_osm_id(&acc.payload[second_start..second_start + second_len]),
             77
         );
+        let mut sink = ocean_sink(88, Layer::Ocean as u8, &attrs, &mut acc);
+        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::FullFill);
+        drop(sink);
+        let (_, third_start, third_len) = acc.records[2];
+        assert_eq!(
+            &acc.payload[first_start..first_start + first_len],
+            &acc.payload[third_start..third_start + third_len],
+            "full fills from different pieces retain identical payloads"
+        );
     }
 
     #[test]
-    fn full_fill_round_trips_as_explicit_some_zero_id() {
+    fn piece_zero_fragment_round_trips_as_explicit_some_zero_id() {
         let mut acc = OceanAcc::new();
         // The decode side expects the encoded attrs-table form, exactly as
         // process_ocean_shapefile builds it - a bare empty Vec parses as a
         // truncated record and add_feature_to_layer would emit nothing.
         let mut attrs = Vec::new();
         encode_attrs_bytes(&mut attrs, &[], 14);
-        let mut sink = ocean_sink(77, Layer::Ocean as u8, &attrs, &mut acc);
-        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::FullFill);
+        let mut sink = ocean_sink(0, Layer::Ocean as u8, &attrs, &mut acc);
+        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::Fragment);
         drop(sink);
         let (_, start, len) = acc.records[0];
         let data = &acc.payload[start..start + len];

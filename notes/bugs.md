@@ -81,19 +81,19 @@ Reported by the pipeline, run-contract, ocean and coordinate-spaces hunts.
 
 ## BUG-012 - `0` means three different things across the budget knobs; `--dedup-cap 0` silently gives the default
 
-- `sort_chunk_size`, `way_inflight_budget`, `assemble_batch_budget`,
-  `dedup_cap` in `TilegenConfig`: 0 means "use the default".
-- `fanout_caps`: 0 means "uncapped" (and `provenance::layer_map(..,
-  zero_is_default)` is a third site deciding that).
-- `PmtilesWriter::set_dedup_cap`: 0 means "dedup disabled" (writer tests rely
-  on it).
-
-So `elivagar run --dedup-cap 0` gives the 1M default, not "off", and the help
-text does not say 0 is swallowed. Proposed types: `ByteBudget(NonZeroUsize)`,
-`EntryCap`, `enum FanoutCap { Uncapped, Tiles(NonZeroU32) }`,
+The CLI now rejects `--dedup-cap 0` and resolves an omitted cap to the
+writer's `DEFAULT_DEDUP_CAP`, so the user-facing ambiguity is gone. The
+library sentinel remains: `TilegenConfig` budgets (`sort_chunk_size`,
+`way_inflight_budget`, `assemble_batch_budget`, `dedup_cap`) still read 0 as
+"use the default", fanout caps read 0 as "uncapped", and
+`PmtilesWriter::set_dedup_cap(0)` stops new dedup entries. Proposed types:
+`ByteBudget(NonZeroUsize)`, an entry cap,
+`enum FanoutCap { Uncapped, Tiles(NonZeroU32) }`,
 `enum DedupPolicy { Off, Cap(NonZeroUsize) }`, with `Option` meaning default
-and resolution done once (see the budgets entry in
-`notes/consolidations.md`).
+and resolution done once. The consumers in `pipeline/phase12.rs` (including
+the locations-mode way-budget defaults), `pipeline/emit.rs` and
+`pipeline/relations.rs` must move together with the field types, and the
+change is a public `TilegenConfig` break brokkr must follow.
 
 Reported by the storage hunt; the pipeline and run-contract hunts flag the
 same sentinel.
@@ -169,16 +169,6 @@ point-on-surface label layer gets one label point per outer, where
 Planetiler's Shortbread profile emits one aggregate point for the whole
 relation. Decide against `tests/fixtures/shortbread.yml` which the spec
 wants; changing it moves label points and counts.
-
-Reported by the wave-8 centroid fixer.
-
-## BUG-063 - Ocean full-tile fills and piece 0 can share feature id 0
-
-`ocean.rs` gives full-tile fills id 0 while fragments use their zero-based
-piece index, so piece 0 also has id 0. Whether both can land in one tile was
-not established. If ids must be unique within a tile, full fills and
-fragments need disjoint ids, which is an ocean output change
-(`OCEAN_POLICY_VERSION`).
 
 Reported by the wave-8 centroid fixer.
 

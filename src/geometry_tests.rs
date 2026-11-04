@@ -1,13 +1,13 @@
 use super::{
-    clip::{ClipRect, clip_linestring, clip_polygon},
-    polygon::{area_sq_meters, is_ccw, is_cw, point_in_polygon, reverse_ring, signed_area},
+    clip::{ClipRect, clip_linestring},
+    polygon::{area_sq_meters, point_in_polygon, signed_area},
     projection::{
         MAX_LATITUDE, MercBbox, Point, merc_to_tile_px, merc_y_to_lat, project, project_bbox,
         project_e7,
     },
     simplify::{
-        SimplifyMultiScratch, for_each_zoom_simplified_multi, merc_bbox_is_subpixel, simplify,
-        simplify_into, simplify_into_with_required, simplify_tolerance,
+        merc_bbox_is_subpixel, simplify, simplify_into, simplify_into_with_required,
+        simplify_tolerance,
     },
     surface::{point_on_surface, point_on_surface_with_holes},
     tiles::{BUFFER_FRACTION, EXTENT, tiles_for_bbox},
@@ -261,85 +261,7 @@ fn test_clip_line_multiple_crossings() {
     assert_eq!(clipped.len(), 1, "should produce one contiguous sub-line");
 }
 
-// --- Polygon clipping tests ---
-
-#[test]
-fn test_clip_polygon_fully_inside() {
-    let rect = ClipRect::new(0.0, 0.0, 1.0, 1.0);
-    let ring = vec![
-        Point::new(0.2, 0.2),
-        Point::new(0.8, 0.2),
-        Point::new(0.8, 0.8),
-        Point::new(0.2, 0.8),
-    ];
-    let clipped = clip_polygon(&ring, &rect);
-    assert_eq!(clipped.len(), 4, "fully inside polygon unchanged");
-}
-
-#[test]
-fn test_clip_polygon_partially_outside() {
-    let rect = ClipRect::new(0.0, 0.0, 1.0, 1.0);
-    // A square that extends beyond the right edge
-    let ring = vec![
-        Point::new(0.5, 0.2),
-        Point::new(1.5, 0.2),
-        Point::new(1.5, 0.8),
-        Point::new(0.5, 0.8),
-    ];
-    let clipped = clip_polygon(&ring, &rect);
-    // Should be clipped to right edge at x=1.0
-    assert!(
-        !clipped.is_empty(),
-        "partially overlapping polygon should produce output"
-    );
-    for p in &clipped {
-        assert!(p.x >= -EPSILON, "x={} should be >= 0", p.x);
-        assert!(p.x <= 1.0 + EPSILON, "x={} should be <= 1", p.x);
-        assert!(p.y >= -EPSILON, "y={} should be >= 0", p.y);
-        assert!(p.y <= 1.0 + EPSILON, "y={} should be <= 1", p.y);
-    }
-}
-
-#[test]
-fn test_clip_polygon_fully_outside() {
-    let rect = ClipRect::new(0.0, 0.0, 1.0, 1.0);
-    let ring = vec![
-        Point::new(2.0, 2.0),
-        Point::new(3.0, 2.0),
-        Point::new(3.0, 3.0),
-        Point::new(2.0, 3.0),
-    ];
-    let clipped = clip_polygon(&ring, &rect);
-    assert!(clipped.is_empty(), "fully outside polygon should be empty");
-}
-
-// --- Ring orientation tests ---
-
-#[test]
-fn test_ccw_ring() {
-    // Counter-clockwise square
-    let ring = vec![
-        Point::new(0.0, 0.0),
-        Point::new(1.0, 0.0),
-        Point::new(1.0, 1.0),
-        Point::new(0.0, 1.0),
-    ];
-    assert!(is_ccw(&ring), "CCW ring should be detected as CCW");
-    assert!(!is_cw(&ring), "CCW ring should not be detected as CW");
-}
-
-#[test]
-fn test_cw_ring() {
-    // Clockwise square (reversed)
-    let ring = vec![
-        Point::new(0.0, 1.0),
-        Point::new(1.0, 1.0),
-        Point::new(1.0, 0.0),
-        Point::new(0.0, 0.0),
-    ];
-    assert!(is_cw(&ring), "CW ring should be detected as CW");
-    assert!(!is_ccw(&ring), "CW ring should not be detected as CCW");
-}
+// --- Ring area tests ---
 
 #[test]
 fn test_signed_area_unit_square() {
@@ -355,18 +277,6 @@ fn test_signed_area_unit_square() {
         approx_eq(area, 1.0),
         "unit square area: {area}, expected 1.0"
     );
-}
-
-#[test]
-fn test_reverse_ring() {
-    let mut ring = vec![
-        Point::new(0.0, 0.0),
-        Point::new(1.0, 0.0),
-        Point::new(1.0, 1.0),
-    ];
-    assert!(is_ccw(&ring));
-    reverse_ring(&mut ring);
-    assert!(is_cw(&ring));
 }
 
 // --- Tile intersection tests ---
@@ -677,201 +587,6 @@ fn test_merc_bbox_subpixel_large_feature() {
     for z in 0..=14 {
         assert!(!merc_bbox_is_subpixel(&large, z));
     }
-}
-
-// ---------------------------------------------------------------------------
-// for_each_zoom_simplified_multi tests
-// ---------------------------------------------------------------------------
-
-/// Helper: make a square polygon ring centered at (cx, cy) with half-width hw.
-fn square_ring(cx: f64, cy: f64, hw: f64) -> Vec<Point> {
-    vec![
-        Point::new(cx - hw, cy - hw),
-        Point::new(cx + hw, cy - hw),
-        Point::new(cx + hw, cy + hw),
-        Point::new(cx - hw, cy + hw),
-        Point::new(cx - hw, cy - hw),
-    ]
-}
-
-#[test]
-fn multi_simplify_no_inners_all_zooms() {
-    // Large outer ring at z14 only - no simplification needed.
-    let outer = square_ring(0.5, 0.5, 0.1);
-    let inners: Vec<Vec<Point>> = vec![];
-    let mut scratch = SimplifyMultiScratch::new();
-    let mut results: Vec<(u8, usize, usize)> = Vec::new();
-    for_each_zoom_simplified_multi(
-        &outer,
-        &inners,
-        14,
-        14,
-        &mut scratch,
-        |_| 1.0,
-        |z, o, i| {
-            results.push((z, o.len(), i.len()));
-        },
-    );
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0], (14, 5, 0)); // 5-point square, 0 inners
-}
-
-#[test]
-fn multi_simplify_callback_per_zoom() {
-    // Outer large enough to survive multiple zoom levels.
-    let outer = square_ring(0.5, 0.5, 0.1);
-    let inners: Vec<Vec<Point>> = vec![];
-    let mut scratch = SimplifyMultiScratch::new();
-    let mut zooms: Vec<u8> = Vec::new();
-    for_each_zoom_simplified_multi(
-        &outer,
-        &inners,
-        10,
-        14,
-        &mut scratch,
-        |_| 1.0,
-        |z, _o, _i| {
-            zooms.push(z);
-        },
-    );
-    // Should iterate z14, z13, z12, z11, z10 (high to low)
-    assert_eq!(zooms, vec![14, 13, 12, 11, 10]);
-}
-
-#[test]
-fn multi_simplify_inner_count_non_increasing() {
-    // Inner count should never increase as zoom decreases (inners can only be
-    // dropped, never added). Use a detailed inner with collinear points that
-    // will simplify away at low zoom.
-    let outer = square_ring(0.5, 0.5, 0.2);
-    // Inner: elongated sliver with many collinear-ish points.
-    let inner = vec![
-        Point::new(0.49, 0.50),
-        Point::new(0.495, 0.500_001),
-        Point::new(0.50, 0.500_002),
-        Point::new(0.505, 0.500_001),
-        Point::new(0.51, 0.50),
-        Point::new(0.505, 0.499_999),
-        Point::new(0.50, 0.499_998),
-        Point::new(0.495, 0.499_999),
-        Point::new(0.49, 0.50),
-    ];
-    let inners = vec![inner];
-    let mut scratch = SimplifyMultiScratch::new();
-    let mut inner_counts: Vec<(u8, usize)> = Vec::new();
-    for_each_zoom_simplified_multi(
-        &outer,
-        &inners,
-        4,
-        14,
-        &mut scratch,
-        |_| 1.0,
-        |z, _o, i| {
-            inner_counts.push((z, i.len()));
-        },
-    );
-    // At z14, inner should be present
-    assert_eq!(inner_counts[0], (14, 1));
-    // Inner count should be monotonically non-increasing
-    for w in inner_counts.windows(2) {
-        assert!(
-            w[0].1 >= w[1].1,
-            "inner count increased from z{} ({}) to z{} ({})",
-            w[0].0,
-            w[0].1,
-            w[1].0,
-            w[1].1
-        );
-    }
-}
-
-#[test]
-fn multi_simplify_subpixel_outer_stops_early() {
-    // Outer is tiny - should become subpixel and stop iterating before z0.
-    let outer = square_ring(0.5, 0.5, 0.00001); // ~1 meter
-    let inners: Vec<Vec<Point>> = vec![];
-    let mut scratch = SimplifyMultiScratch::new();
-    let mut zoom_count = 0;
-    for_each_zoom_simplified_multi(
-        &outer,
-        &inners,
-        0,
-        14,
-        &mut scratch,
-        |_| 1.0,
-        |_z, _o, _i| {
-            zoom_count += 1;
-        },
-    );
-    // Should NOT reach all 15 zooms - subpixel check should bail out early
-    assert!(
-        zoom_count < 15,
-        "subpixel outer should stop early, got {zoom_count} zooms"
-    );
-}
-
-#[test]
-fn multi_simplify_z14_preserves_all_inners() {
-    // At z14 (no simplification), all inners should be present unchanged.
-    let outer = square_ring(0.5, 0.5, 0.3);
-    let inner1 = square_ring(0.3, 0.5, 0.05);
-    let inner2 = square_ring(0.7, 0.5, 0.02);
-    let inners = vec![inner1.clone(), inner2.clone()];
-    let mut scratch = SimplifyMultiScratch::new();
-    let mut z14_data: Option<(Vec<Point>, Vec<Vec<Point>>)> = None;
-    for_each_zoom_simplified_multi(
-        &outer,
-        &inners,
-        14,
-        14,
-        &mut scratch,
-        |_| 1.0,
-        |_z, o, i| {
-            z14_data = Some((o.to_vec(), i.to_vec()));
-        },
-    );
-    let (out_outer, out_inners) = z14_data.expect("should have z14 callback");
-    assert_eq!(
-        out_outer.len(),
-        outer.len(),
-        "outer should be unchanged at z14"
-    );
-    assert_eq!(out_inners.len(), 2, "both inners should be present at z14");
-    assert_eq!(out_inners[0].len(), inner1.len(), "inner1 unchanged at z14");
-    assert_eq!(out_inners[1].len(), inner2.len(), "inner2 unchanged at z14");
-}
-
-#[test]
-fn multi_simplify_outer_vertex_count_non_increasing() {
-    // Outer vertex count should never increase as zoom decreases.
-    let outer = square_ring(0.5, 0.5, 0.1);
-    let inners: Vec<Vec<Point>> = vec![];
-    let mut scratch = SimplifyMultiScratch::new();
-    let mut vertex_counts: Vec<(u8, usize)> = Vec::new();
-    for_each_zoom_simplified_multi(
-        &outer,
-        &inners,
-        4,
-        14,
-        &mut scratch,
-        |_| 1.0,
-        |z, o, _i| {
-            vertex_counts.push((z, o.len()));
-        },
-    );
-    // Vertex count should be monotonically non-increasing
-    for w in vertex_counts.windows(2) {
-        assert!(
-            w[0].1 >= w[1].1,
-            "vertex count increased from z{} ({}) to z{} ({})",
-            w[0].0,
-            w[0].1,
-            w[1].0,
-            w[1].1
-        );
-    }
-    // At z14, should have original 5 vertices (no simplification at z14)
-    assert_eq!(vertex_counts[0], (14, 5));
 }
 
 // ---------------------------------------------------------------------------

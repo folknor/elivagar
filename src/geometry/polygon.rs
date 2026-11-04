@@ -48,26 +48,6 @@ pub fn signed_area(ring: &[Point]) -> f64 {
     sum * 0.5
 }
 
-/// Returns `true` if the ring is wound counter-clockwise.
-#[cfg(test)]
-#[inline]
-pub fn is_ccw(ring: &[Point]) -> bool {
-    signed_area(ring) > 0.0
-}
-
-/// Returns `true` if the ring is wound clockwise.
-#[cfg(test)]
-#[inline]
-pub fn is_cw(ring: &[Point]) -> bool {
-    signed_area(ring) < 0.0
-}
-
-/// Reverse a ring's winding order in place.
-#[cfg(test)]
-pub fn reverse_ring(ring: &mut [Point]) {
-    ring.reverse();
-}
-
 /// Area of a ring in square meters using per-edge latitude correction.
 ///
 /// The ring is in Mercator [0,1] space. Mercator is conformal, so local scale
@@ -136,9 +116,6 @@ pub fn ring_is_simple(ring: &[(i32, i32)]) -> bool {
         let a2 = ring[i + 1];
         // Check against non-adjacent edges
         for j in (i + 2)..n {
-            if j + 1 == ring.len() && i == 0 {
-                continue; // last edge wraps to first - they share a vertex
-            }
             let b1 = ring[j];
             let b2 = ring[(j + 1) % ring.len()];
             if segments_cross(a1, a2, b1, b2) {

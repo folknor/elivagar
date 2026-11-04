@@ -1387,7 +1387,6 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
     let bbox = merc_bbox(&outer);
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     for shift in antimeridian_shifts_for_bbox(&bbox) {
         if shift == 0.0 {
             let _ = emit_multipolygon_feature(
@@ -1400,7 +1399,6 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 1,
                 &mut records,
                 &mut emit_scratch,
-                &mut simp_scratch,
                 0,
                 1.0,
             );
@@ -1422,7 +1420,6 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 1,
                 &mut records,
                 &mut emit_scratch,
-                &mut simp_scratch,
                 0,
                 1.0,
             );
@@ -2298,7 +2295,6 @@ fn dispatch_namespaces_mixed_source_ids_on_the_wire() {
     let mut line = LineEmitScratch::new();
     let mut polygon = PolygonEmitScratch::new();
     let mut area = MultipolygonEmitScratch::new();
-    let mut simplify = geometry::simplify::SimplifyMultiScratch::new();
     let mut fanout = stats::FanoutStats::new();
     let mut ids = Vec::new();
     for source in 0..3 {
@@ -2316,7 +2312,6 @@ fn dispatch_namespaces_mixed_source_ids_on_the_wire() {
                 inners: &[],
                 pins: &pins,
                 polygon: &mut area,
-                simplify: &mut simplify,
                 fanout: &mut fanout,
             },
         };
@@ -2882,8 +2877,6 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     let mut records_pinned = Vec::new();
     let mut emit_plain = MultipolygonEmitScratch::new();
     let mut emit_pinned = MultipolygonEmitScratch::new();
-    let mut simp_plain = geometry::simplify::SimplifyMultiScratch::new();
-    let mut simp_pinned = geometry::simplify::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
         990,
@@ -2895,7 +2888,6 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         13,
         &mut records_plain,
         &mut emit_plain,
-        &mut simp_plain,
         0,
         1.0,
     );
@@ -2909,7 +2901,6 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         13,
         &mut records_pinned,
         &mut emit_pinned,
-        &mut simp_pinned,
         0,
         1.0,
     );
@@ -2983,8 +2974,6 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
     let mut records_pinned = Vec::new();
     let mut emit_plain = MultipolygonEmitScratch::new();
     let mut emit_pinned = MultipolygonEmitScratch::new();
-    let mut simp_plain = geometry::simplify::SimplifyMultiScratch::new();
-    let mut simp_pinned = geometry::simplify::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
         991,
@@ -2996,7 +2985,6 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         13,
         &mut records_plain,
         &mut emit_plain,
-        &mut simp_plain,
         0,
         1.0,
     );
@@ -3010,7 +2998,6 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         13,
         &mut records_pinned,
         &mut emit_pinned,
-        &mut simp_pinned,
         0,
         1.0,
     );
@@ -3064,7 +3051,6 @@ fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
 
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
         9902,
         &outer_a,
@@ -3075,7 +3061,6 @@ fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
         0,
         &mut records,
         &mut emit_scratch,
-        &mut simp_scratch,
         0,
         1.0,
     );
@@ -3089,7 +3074,6 @@ fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
         0,
         &mut records,
         &mut emit_scratch,
-        &mut simp_scratch,
         0,
         1.0,
     );
@@ -3160,7 +3144,6 @@ fn landing_b_historical_infinity_classes_emit_nothing() {
 
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
         9904,
         &zero_area_outer,
@@ -3171,7 +3154,6 @@ fn landing_b_historical_infinity_classes_emit_nothing() {
         0,
         &mut records,
         &mut emit_scratch,
-        &mut simp_scratch,
         0,
         1.0,
     );
@@ -3185,7 +3167,6 @@ fn landing_b_historical_infinity_classes_emit_nothing() {
         0,
         &mut records,
         &mut emit_scratch,
-        &mut simp_scratch,
         0,
         1.0,
     );
@@ -3296,7 +3277,6 @@ fn emit_multipolygon_empty_outer() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
 
     let count = emit_multipolygon_feature(
         401,
@@ -3308,7 +3288,6 @@ fn emit_multipolygon_empty_outer() {
         0,
         &mut records,
         &mut emit_scratch,
-        &mut simp_scratch,
         0,
         1.0,
     );
@@ -3337,7 +3316,6 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
 
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     let count = emit_multipolygon_feature(
         402,
         &outer,
@@ -3348,7 +3326,6 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
         0,
         &mut records,
         &mut emit_scratch,
-        &mut simp_scratch,
         0,
         1.0,
     );
@@ -3397,7 +3374,6 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
 
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     let count = emit_multipolygon_feature(
         403,
         &outer,
@@ -3408,7 +3384,6 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
         2,
         &mut records,
         &mut emit_scratch,
-        &mut simp_scratch,
         0,
         1.0,
     );
@@ -3452,8 +3427,6 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
     let mut with_bad_holes = Vec::new();
     let mut emit_a = MultipolygonEmitScratch::new();
     let mut emit_b = MultipolygonEmitScratch::new();
-    let mut simp_a = geometry::simplify::SimplifyMultiScratch::new();
-    let mut simp_b = geometry::simplify::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
         404,
         &outer,
@@ -3464,7 +3437,6 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         0,
         &mut outer_only,
         &mut emit_a,
-        &mut simp_a,
         0,
         1.0,
     );
@@ -3478,7 +3450,6 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         0,
         &mut with_bad_holes,
         &mut emit_b,
-        &mut simp_b,
         0,
         1.0,
     );
@@ -3546,8 +3517,6 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
     let mut z14_records = Vec::new();
     let mut emit_13 = MultipolygonEmitScratch::new();
     let mut emit_14 = MultipolygonEmitScratch::new();
-    let mut simp_13 = geometry::simplify::SimplifyMultiScratch::new();
-    let mut simp_14 = geometry::simplify::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
         405,
         &outer,
@@ -3558,7 +3527,6 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         13,
         &mut z13_records,
         &mut emit_13,
-        &mut simp_13,
         0,
         1.0,
     );
@@ -3572,7 +3540,6 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         14,
         &mut z14_records,
         &mut emit_14,
-        &mut simp_14,
         0,
         1.0,
     );
@@ -3619,8 +3586,6 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
     let mut z14_records = Vec::new();
     let mut emit_13 = MultipolygonEmitScratch::new();
     let mut emit_14 = MultipolygonEmitScratch::new();
-    let mut simp_13 = geometry::simplify::SimplifyMultiScratch::new();
-    let mut simp_14 = geometry::simplify::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
         4051,
@@ -3632,7 +3597,6 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
         13,
         &mut z13_records,
         &mut emit_13,
-        &mut simp_13,
         0,
         1.0,
     );
@@ -3646,7 +3610,6 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
         14,
         &mut z14_records,
         &mut emit_14,
-        &mut simp_14,
         0,
         1.0,
     );
@@ -3671,7 +3634,6 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
     ];
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     let count = emit_multipolygon_feature(
         406,
         &outer,
@@ -3682,7 +3644,6 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
         2,
         &mut records,
         &mut emit_scratch,
-        &mut simp_scratch,
         0,
         1.0,
     );

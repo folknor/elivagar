@@ -337,7 +337,7 @@ pub(crate) fn append_feature_data_with_attrs(
     start..buf.len()
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn encode_feature_data(
     osm_id: u64,
     geom_type: GeomType,

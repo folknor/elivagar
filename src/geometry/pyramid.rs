@@ -159,7 +159,6 @@ pub(crate) fn split_for_parallel(
                 &mut scratch.int,
                 &frag,
                 buffered_cell_rect_base(params.maxz, child),
-                0,
                 &mut child_frag,
             );
             if child_frag.is_empty() {
@@ -273,7 +272,6 @@ fn root_bisect(
             &mut scratch.int,
             &frag,
             buffered_range_rect_base(params.maxz, params.z_top, half),
-            0,
             &mut half_frag,
         );
         root_bisect(half, half_frag, params, scratch, out);
@@ -329,7 +327,6 @@ fn descend(
             &mut scratch.int,
             &frag,
             buffered_cell_rect_base(params.maxz, child),
-            0,
             &mut child_frag,
         );
         descend(child, child_frag, params, scratch, sink);
@@ -616,7 +613,6 @@ fn intersect_shapes_with_rect(
     scratch: &mut IntEmitScratch,
     shapes: &Shapes,
     rect: IntRect,
-    _min_area: u64,
     out: &mut Shapes,
 ) {
     scratch.recycle_shapes(out);
@@ -1227,7 +1223,10 @@ mod tests {
     use crate::geometry::int_ocean::{
         buffered_tile_rect, emit_full_tile, intersect_rect, normalize, rescale_shape,
     };
+    use crate::geometry::projection::Point;
+    use crate::mvt::MAX_FEATURE_RINGS;
     use crate::mvt::decode::decode_mvt_polygon;
+    use crate::test_support::next_random;
     use i_overlay::core::fill_rule::FillRule;
     use i_overlay::core::overlay::{IntOverlayOptions, Overlay, ShapeType};
     use i_overlay::core::overlay_rule::OverlayRule;
@@ -1374,6 +1373,176 @@ mod tests {
             pins: None,
             tile_filter: None,
             simplifier: Simplifier::DouglasPeucker,
+        }
+    }
+
+    fn property_below(state: &mut u64, upper: u32) -> u32 {
+        u32::try_from(next_random(state) % u64::from(upper)).expect("bounded random value fits u32")
+    }
+
+    fn property_ring(points: &[(u32, u32)], reverse: bool) -> Vec<Point> {
+        let mut ring: Vec<_> = points
+            .iter()
+            .map(|&(x, y)| Point {
+                x: (4096.0 + f64::from(x)) / 16_384.0,
+                y: (4096.0 + f64::from(y)) / 16_384.0,
+            })
+            .collect();
+        if reverse {
+            ring.reverse();
+        }
+        ring
+    }
+
+    fn random_quantized_polygon(state: &mut u64, hole_count: usize) -> Shape {
+        const GRID_SIDE: u32 = 24;
+        let min_x = 300 + property_below(state, 160);
+        let min_y = 300 + property_below(state, 160);
+        let max_x = 3796 - property_below(state, 160);
+        let max_y = 3796 - property_below(state, 160);
+        let cut = 80 + property_below(state, 100);
+        let outer = property_ring(
+            &[
+                (min_x + cut, min_y),
+                (max_x - cut, min_y),
+                (max_x, min_y + cut),
+                (max_x, max_y - cut),
+                (max_x - cut, max_y),
+                (min_x + cut, max_y),
+                (min_x, max_y - cut),
+                (min_x, min_y + cut),
+            ],
+            next_random(state) & 1 != 0,
+        );
+
+        let safe_min_x = min_x + 2 * cut;
+        let safe_min_y = min_y + 2 * cut;
+        let safe_max_x = max_x - 2 * cut;
+        let safe_max_y = max_y - 2 * cut;
+        let slot_width = (safe_max_x - safe_min_x) / GRID_SIDE;
+        let slot_height = (safe_max_y - safe_min_y) / GRID_SIDE;
+        let mut slots: Vec<u32> = (0..GRID_SIDE * GRID_SIDE).collect();
+        for index in (1..slots.len()).rev() {
+            let range = u64::try_from(index).expect("slot index fits u64") + 1;
+            let swap = usize::try_from(next_random(state) % range).expect("slot index fits usize");
+            slots.swap(index, swap);
+        }
+
+        let mut holes = Vec::with_capacity(hole_count);
+        for slot in slots.into_iter().take(hole_count) {
+            let slot_x = slot % GRID_SIDE;
+            let slot_y = slot / GRID_SIDE;
+            let x0 = safe_min_x
+                + slot_x * slot_width
+                + slot_width / 4
+                + property_below(state, (slot_width / 8).max(1));
+            let y0 = safe_min_y
+                + slot_y * slot_height
+                + slot_height / 4
+                + property_below(state, (slot_height / 8).max(1));
+            let width = slot_width / 3 + property_below(state, (slot_width / 8).max(1));
+            let height = slot_height / 3 + property_below(state, (slot_height / 8).max(1));
+            holes.push(property_ring(
+                &[
+                    (x0, y0),
+                    (x0 + width, y0),
+                    (x0 + width, y0 + height),
+                    (x0, y0 + height),
+                ],
+                next_random(state) & 1 != 0,
+            ));
+        }
+
+        crate::geometry::int_ocean::quantize_polygon(&outer, &holes, 2)
+    }
+
+    fn decoded_contour(ring: &[(i32, i32)]) -> Vec<IntPoint> {
+        ring.iter().map(|&(x, y)| p(x, y)).collect()
+    }
+
+    #[test]
+    fn seeded_quantized_pyramids_decode_with_polygon_ring_invariants() {
+        fn zero_tolerance(_: u8) -> i64 {
+            0
+        }
+        fn zero_min_area(_: u8) -> u64 {
+            0
+        }
+
+        let dp_tol: &(dyn Fn(u8) -> i64 + Sync) = &zero_tolerance;
+        let min_area: &(dyn Fn(u8) -> u64 + Sync) = &zero_min_area;
+        let params = PyramidParams {
+            maxz: 2,
+            z_top: 2,
+            z_bottom: 2,
+            dp_tol,
+            min_area,
+            pins: None,
+            tile_filter: None,
+            simplifier: Simplifier::DouglasPeucker,
+        };
+        let mut seed = 0xbb67_ae85_84ca_a73b;
+
+        for case in 0..20 {
+            let hole_count = if case == 19 {
+                501
+            } else {
+                usize::try_from(property_below(&mut seed, 25)).expect("hole count fits usize")
+            };
+            let shape_base = random_quantized_polygon(&mut seed, hole_count);
+            assert!(!shape_base.is_empty(), "case {case} quantizes to a polygon");
+            assert!(
+                signed_area_2x(&shape_base[0]) > 0,
+                "case {case} puts a positive outer in slot zero"
+            );
+            for hole in &shape_base[1..] {
+                assert!(signed_area_2x(hole) < 0, "case {case} hole winding");
+                assert!(
+                    hole.iter()
+                        .all(|point| point_in_contour(point.x, point.y, &shape_base[0])),
+                    "case {case} quantized hole remains inside its outer"
+                );
+            }
+
+            let mut scratch = PyramidScratch::new();
+            let mut emitted = Vec::new();
+            emit_shape_pyramid(
+                &shape_base,
+                &params,
+                &mut scratch,
+                &mut |_, _, _, geom, _| emitted.push(geom.to_vec()),
+            );
+            assert!(!emitted.is_empty(), "case {case} emits polygon geometry");
+            if case == 19 {
+                assert!(emitted.len() > 1, "over-cap input is partitioned");
+            }
+
+            for geometry in emitted {
+                let rings = decode_mvt_polygon(&geometry);
+                assert!(!rings.is_empty(), "case {case} decodes polygon rings");
+                assert!(
+                    rings.len() <= MAX_FEATURE_RINGS,
+                    "case {case} emitted {} rings, over the {MAX_FEATURE_RINGS} cap",
+                    rings.len()
+                );
+                let outer = decoded_contour(&rings[0]);
+                assert!(
+                    signed_area_2x(&outer) > 0,
+                    "case {case} has a positive outer in decoded slot zero"
+                );
+                for hole in &rings[1..] {
+                    let hole = decoded_contour(hole);
+                    assert!(
+                        signed_area_2x(&hole) < 0,
+                        "case {case} decoded hole winding"
+                    );
+                    assert!(
+                        hole.iter()
+                            .all(|point| point_in_contour(point.x, point.y, &outer)),
+                        "case {case} decoded hole remains inside its outer"
+                    );
+                }
+            }
         }
     }
 
@@ -1858,13 +2027,7 @@ mod tests {
         for subject in [&subject, &comb] {
             for rect in rects {
                 let mut fast = Vec::new();
-                intersect_shapes_with_rect(
-                    &mut scratch,
-                    &vec![subject.clone()],
-                    rect,
-                    0,
-                    &mut fast,
-                );
+                intersect_shapes_with_rect(&mut scratch, &vec![subject.clone()], rect, &mut fast);
                 let exact = intersect_rect(subject, rect, 0);
                 // The fast path's snap-rounded crossings can differ from
                 // i_overlay's noding by up to one unit ALONG the cut line,

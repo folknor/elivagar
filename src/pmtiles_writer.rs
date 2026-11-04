@@ -130,11 +130,11 @@ impl TileDataCompression {
     }
 }
 
-/// Maximum number of entries in the dedup map before we stop inserting.
-/// At planet scale, unlimited dedup grows to ~7 GB. Capping at 1M entries
-/// keeps the map under ~60 MB while still deduplicating the ocean fill tiles
-/// (which are added early and remain cached).
-const MAX_DEDUP_ENTRIES: usize = 1_000_000;
+/// Default payload dedup map entry cap used by a new writer. At planet scale,
+/// unlimited dedup grows to ~7 GB. Capping at 1M entries keeps the map under
+/// ~60 MB while still deduplicating the ocean fill tiles (which are added
+/// early and remain cached).
+pub const DEFAULT_DEDUP_CAP: usize = 1_000_000;
 
 /// Fixed salt for the secondary fingerprint hasher. Domain-separates the two
 /// SipHash passes so they produce different outputs for the same input.
@@ -710,7 +710,7 @@ impl PmtilesWriter {
             num_addressed: 0,
             current_run: None,
             dir_store: DirectorySpill::Memory(MemoryDirSpill::new()),
-            dedup: DedupIndex::new(MAX_DEDUP_ENTRIES),
+            dedup: DedupIndex::new(DEFAULT_DEDUP_CAP),
             unique_count: 0,
             dedup_stats: DedupStats::default(),
             last_tile_id: None,
@@ -761,7 +761,7 @@ impl PmtilesWriter {
             num_addressed: 0,
             current_run: None,
             dir_store,
-            dedup: DedupIndex::new(MAX_DEDUP_ENTRIES),
+            dedup: DedupIndex::new(DEFAULT_DEDUP_CAP),
             unique_count: 0,
             dedup_stats: DedupStats::default(),
             last_tile_id: None,
@@ -1031,7 +1031,10 @@ impl PmtilesWriter {
     /// Override the dedup map capacity. Caps the payload dedup map's entry
     /// count; tile content is identical under any cap - what changes is how
     /// many duplicate payload copies the archive stores, and the map's RAM
-    /// (~56 bytes/entry).
+    /// (~56 bytes/entry). A cap of zero prevents new map entries. Existing
+    /// entries remain eligible for lookups, so set zero before adding tiles to
+    /// disable tile-to-tile deduplication from the start. Run entries still
+    /// share one payload across their addressed tile range.
     pub fn set_dedup_cap(&mut self, cap: usize) {
         self.dedup.cap = cap;
     }

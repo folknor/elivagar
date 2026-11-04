@@ -158,12 +158,6 @@ impl Overlay {
         self.boolean_buffer = Some(buffer);
     }
 
-    pub fn recycle_shape(&mut self, shape: &mut IntShape) {
-        let mut buffer = self.boolean_buffer.take().unwrap_or_default();
-        buffer.recycle_shape(shape);
-        self.boolean_buffer = Some(buffer);
-    }
-
     pub fn recycle_contours_from(&mut self, shape: &mut IntShape, start: usize) {
         let mut buffer = self.boolean_buffer.take().unwrap_or_default();
         buffer.recycle_contours_from(shape, start);

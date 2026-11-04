@@ -5,7 +5,7 @@ use super::merge::{
     test_merge,
 };
 use super::*;
-use protohoggr::{Cursor, WIRE_LEN};
+use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedFixtureFeature {

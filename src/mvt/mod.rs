@@ -23,8 +23,8 @@
 // adversarial input. Tradeoff: weaker collision resistance, irrelevant for tile
 // encoding.
 use protohoggr::{
-    WIRE_32BIT, WIRE_64BIT, WIRE_VARINT, encode_bytes_field_always, encode_packed_uint32,
-    encode_tag, encode_varint, encode_varint_field_always, zigzag_encode_64,
+    WIRE_64BIT, encode_bytes_field_always, encode_packed_uint32, encode_tag,
+    encode_varint_field_always,
 };
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
@@ -63,14 +63,10 @@ pub enum GeomType {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum Value {
     String(String),
-    Float(f32),
     Double(f64),
     Int(i64),
-    UInt(u64),
-    SInt(i64),
     Bool(bool),
 }
 
@@ -83,11 +79,8 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::String(a), Value::String(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
             (Value::Double(a), Value::Double(b)) => a.to_bits() == b.to_bits(),
             (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::UInt(a), Value::UInt(b)) => a == b,
-            (Value::SInt(a), Value::SInt(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             _ => false,
         }
@@ -101,10 +94,8 @@ impl Hash for Value {
         std::mem::discriminant(self).hash(state);
         match self {
             Value::String(s) => s.hash(state),
-            Value::Float(f) => f.to_bits().hash(state),
             Value::Double(f) => f.to_bits().hash(state),
-            Value::Int(i) | Value::SInt(i) => i.hash(state),
-            Value::UInt(u) => u.hash(state),
+            Value::Int(i) => i.hash(state),
             Value::Bool(b) => b.hash(state),
         }
     }
@@ -113,16 +104,13 @@ impl Hash for Value {
 /// Sort key for Value: groups by type discriminant, then by canonical value.
 /// Clusters same-type values together in the protobuf value table so gzip
 /// sees longer runs of similar byte patterns.
+/// Active type ranks stay unchanged when unsupported variants are removed.
 fn value_sort_key(v: &Value) -> (u8, u64, &str) {
     match v {
         Value::String(s) => (0, 0, s.as_str()),
-        Value::Float(f) => (1, f.to_bits() as u64, ""),
         Value::Double(d) => (2, d.to_bits(), ""),
         #[allow(clippy::cast_sign_loss)]
         Value::Int(i) => (3, *i as u64, ""),
-        Value::UInt(u) => (4, *u, ""),
-        #[allow(clippy::cast_sign_loss)]
-        Value::SInt(i) => (5, *i as u64, ""),
         Value::Bool(b) => (6, u64::from(*b), ""),
     }
 }
@@ -558,21 +546,12 @@ fn encode_polygon_ring(buf: &mut Vec<u32>, ring: &[(i32, i32)], cx: &mut i32, cy
 fn encode_value(buf: &mut Vec<u8>, val: &Value) {
     match val {
         Value::String(s) => encode_bytes_field_always(buf, 1, s.as_bytes()),
-        Value::Float(f) => {
-            encode_tag(buf, 2, WIRE_32BIT);
-            buf.extend_from_slice(&f.to_le_bytes());
-        }
         Value::Double(d) => {
             encode_tag(buf, 3, WIRE_64BIT);
             buf.extend_from_slice(&d.to_le_bytes());
         }
         #[allow(clippy::cast_sign_loss)]
         Value::Int(i) => encode_varint_field_always(buf, 4, *i as u64),
-        Value::UInt(u) => encode_varint_field_always(buf, 5, *u),
-        Value::SInt(i) => {
-            encode_tag(buf, 6, WIRE_VARINT);
-            encode_varint(buf, zigzag_encode_64(*i));
-        }
         Value::Bool(b) => encode_varint_field_always(buf, 7, u64::from(*b)),
     }
 }

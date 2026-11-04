@@ -321,6 +321,8 @@ pub(super) fn phase_assemble_with_ocean(
     } else {
         PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir, &config.output_path)?
     };
+    // TilegenConfig keeps zero as the library API's default sentinel. The CLI
+    // rejects explicit zero and resolves omission to the concrete writer cap.
     if config.dedup_cap > 0 {
         pmtiles.set_dedup_cap(config.dedup_cap);
     }
@@ -1128,8 +1130,15 @@ fn artifact_copy_ranges(
     ocean: &crate::ocean::OceanTiles,
     z: u8,
 ) -> Result<Vec<(u64, u64)>, PipelineError> {
+    artifact_copy_ranges_for_grid(ocean.grid_for_zoom(z), z)
+}
+
+fn artifact_copy_ranges_for_grid(
+    grid: Option<&crate::ocean::OceanPassGrid>,
+    z: u8,
+) -> Result<Vec<(u64, u64)>, PipelineError> {
     let side = 1_u32 << z;
-    let Some(grid) = ocean.grid_for_zoom(z) else {
+    let Some(grid) = grid else {
         let (start, end) = zoom_tile_id_range(z);
         return Ok(vec![(start, end)]);
     };
@@ -1833,6 +1842,66 @@ fn get_or_create_layer(layers: &mut [Option<LayerBuilder>], idx: usize) -> &mut 
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn producer_band_and_artifact_ranges_partition_every_planned_tile() {
+        use crate::geometry::projection::MercBbox;
+        use crate::ocean::{OceanPassGrid, ocean_band_tile};
+
+        for bounds in [
+            MercBbox {
+                min_x: 0.31,
+                min_y: 0.28,
+                max_x: 0.62,
+                max_y: 0.71,
+            },
+            MercBbox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 1.0,
+                max_y: 1.0,
+            },
+            MercBbox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 0.62,
+                max_y: 0.71,
+            },
+            MercBbox {
+                min_x: 0.31,
+                min_y: 0.28,
+                max_x: 1.0,
+                max_y: 1.0,
+            },
+        ] {
+            let grids = [
+                OceanPassGrid::for_bounds(&bounds, 7),
+                OceanPassGrid::for_bounds(&bounds, 14),
+            ];
+            for z in 0..=9 {
+                let grid = &grids[usize::from(z > 7)];
+                let ranges = artifact_copy_ranges_for_grid(Some(grid), z)
+                    .expect("build artifact Hilbert ranges");
+                assert!(ranges.windows(2).all(|pair| pair[0].1 < pair[1].0));
+                let side = 1_u32 << z;
+                for ty in 0..side {
+                    for tx in 0..side {
+                        let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                        let index = ranges.partition_point(|range| range.1 <= tile_id);
+                        let artifact_owns = ranges
+                            .get(index)
+                            .is_some_and(|&(start, end)| start <= tile_id && tile_id < end);
+                        let producer_owns = ocean_band_tile(z, tx, ty, grid);
+                        assert_eq!(
+                            u8::from(producer_owns) + u8::from(artifact_owns),
+                            1,
+                            "tile z{z}/{tx}/{ty} in {bounds:?} must have one ocean owner"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn shared_preparation_preserves_ocean_and_line_zoom_policy() {

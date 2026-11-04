@@ -17,7 +17,7 @@
         "geometry": [9, 20, 20],
         "tags": [
           {"key": "name", "type": "string", "value": "beta"},
-          {"key": "rank", "type": "float", "value": "1.5"},
+          {"key": "rank", "type": "double", "value": "1.5"},
           {"key": "open", "type": "bool", "value": "true"}
         ]
       }
@@ -36,9 +36,9 @@
         "geom_type": "point",
         "geometry": [9, 30, 30],
         "tags": [
-          {"key": "u", "type": "uint", "value": "7"},
+          {"key": "u", "type": "int", "value": "7"},
           {"key": "i", "type": "int", "value": "-3"},
-          {"key": "si", "type": "sint", "value": "-5"},
+          {"key": "si", "type": "int", "value": "-5"},
           {"key": "d", "type": "double", "value": "12.25"},
           {"key": "ok", "type": "bool", "value": "false"}
         ]
@@ -48,9 +48,9 @@
         "geom_type": "point",
         "geometry": [9, 40, 40],
         "tags": [
-          {"key": "u", "type": "uint", "value": "9"},
+          {"key": "u", "type": "int", "value": "9"},
           {"key": "i", "type": "int", "value": "-8"},
-          {"key": "si", "type": "sint", "value": "-13"},
+          {"key": "si", "type": "int", "value": "-13"},
           {"key": "d", "type": "double", "value": "7.5"},
           {"key": "ok", "type": "bool", "value": "true"}
         ]

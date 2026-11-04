@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Emit a named phase marker to the sidecar profiler, if active.
@@ -222,64 +220,6 @@ pub fn emit_alloc_boundary(boundary: &str) {
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub fn emit_alloc_boundary(_boundary: &str) {}
-
-/// Ask glibc to return free chunks above the trim threshold to the OS.
-/// Returns 1 if memory was released, 0 otherwise.
-///
-/// On non-glibc or non-Linux this is a no-op returning 0.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub fn malloc_trim() -> i32 {
-    // SAFETY: malloc_trim is a glibc function safe to call from any thread.
-    unsafe { libc::malloc_trim(0) }
-}
-
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub fn malloc_trim() -> i32 {
-    0
-}
-
-/// Lower glibc's `M_MMAP_THRESHOLD` so allocations at least `bytes` route
-/// through mmap-backed chunks that are released to the OS when freed.
-///
-/// Call once early in the run; the setting is process-global. On non-glibc
-/// or non-Linux this is a no-op returning 0.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub fn set_mmap_threshold(bytes: i32) -> i32 {
-    // SAFETY: mallopt is a glibc function safe to call before allocations grow
-    // past the desired threshold.
-    unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, bytes) }
-}
-
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub fn set_mmap_threshold(_bytes: i32) -> i32 {
-    0
-}
-
-/// Read cumulative minor and major page faults from `/proc/self/stat`.
-/// Returns `(0, 0)` on failure or non-Linux.
-#[cfg(target_os = "linux")]
-pub fn read_page_faults() -> (u64, u64) {
-    let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
-        return (0, 0);
-    };
-    // Fields are space-separated. Field 10 is minflt, field 12 is majflt.
-    let mut fields = stat.split_whitespace();
-    let minflt = fields
-        .nth(9)
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    // Skip field 11, cminflt, to get field 12.
-    let majflt = fields
-        .nth(1)
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    (minflt, majflt)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn read_page_faults() -> (u64, u64) {
-    (0, 0)
-}
 
 /// Shared FIFO write logic for markers and counters.
 fn write_fifo(f: impl FnOnce(&std::fs::File, u128)) {

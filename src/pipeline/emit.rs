@@ -522,7 +522,6 @@ pub(super) enum FeatureGeometry<'a> {
         inners: &'a [Vec<Point>],
         pins: &'a FxHashSet<(i64, i64)>,
         polygon: &'a mut MultipolygonEmitScratch,
-        simplify: &'a mut geometry::simplify::SimplifyMultiScratch,
         fanout: &'a mut super::stats::FanoutStats,
     },
 }
@@ -708,7 +707,6 @@ pub(super) fn emit_match(
                     FeatureGeometry::Area {
                         pins,
                         polygon,
-                        simplify,
                         fanout,
                         ..
                     } => {
@@ -722,7 +720,6 @@ pub(super) fn emit_match(
                             z_hi,
                             &mut records,
                             polygon,
-                            simplify,
                             cap,
                             ctx.polygon_simplify_factor,
                         );
@@ -1058,7 +1055,6 @@ pub(super) fn emit_multipolygon_feature(
     z_hi: u8,
     records: &mut impl FeatureRecordSink,
     emit_scratch: &mut MultipolygonEmitScratch,
-    _simp_scratch: &mut geometry::simplify::SimplifyMultiScratch,
     fanout_cap: u32,
     tol_scale: f64,
 ) -> u64 {
@@ -1245,7 +1241,6 @@ mod landing2_tests {
         let outer = square(0.500_10, 0.500_11);
         let keys = FxHashSet::default();
         let mut polygon = MultipolygonEmitScratch::new();
-        let mut simplify = geometry::simplify::SimplifyMultiScratch::new();
         let mut point = PointEmitScratch::new();
         let mut fanout = super::super::stats::FanoutStats::new();
         let mut records = Vec::new();
@@ -1272,7 +1267,6 @@ mod landing2_tests {
                         inners: &[],
                         pins: &keys,
                         polygon: &mut polygon,
-                        simplify: &mut simplify,
                         fanout: &mut fanout,
                     },
                     &m,

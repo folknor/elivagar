@@ -679,3 +679,77 @@ impl ChunkReader {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::next_random;
+
+    #[test]
+    fn sort_chunk_record_layout_round_trips_full_width_keys_and_payloads() {
+        let mut seed = 0x6a09_e667_f3bc_c909;
+        let mut records = Vec::with_capacity(512);
+        for index in 0..512 {
+            let key = match index {
+                0 => 0,
+                1 => u64::MAX,
+                2 => 1_u64 << 63,
+                3 => 1,
+                _ => next_random(&mut seed),
+            };
+            let length = match index {
+                0 => 0,
+                1 => 1,
+                2 => 255,
+                3 => 256,
+                _ => usize::try_from(next_random(&mut seed) % 4097)
+                    .expect("bounded payload length fits usize"),
+            };
+            let data: Vec<u8> = (0..length)
+                .map(|_| {
+                    u8::try_from(next_random(&mut seed) & u64::from(u8::MAX))
+                        .expect("masked random byte fits u8")
+                })
+                .collect();
+            records.push(SortRecord {
+                key,
+                data: data.into_boxed_slice(),
+            });
+        }
+        records[4].data = (0..=u8::MAX).collect::<Vec<_>>().into_boxed_slice();
+
+        let dir = tempfile::tempdir().expect("create sort chunk test directory");
+        for (case, compression) in [
+            ChunkCompression::None,
+            ChunkCompression::Lz4,
+            ChunkCompression::Snappy,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = dir.path().join(format!("records-{case}.bin"));
+            write_records(records.as_slice(), None, &path, compression)
+                .expect("write sort chunk records");
+
+            let mut reader = ChunkReader::open(&path, compression).expect("open sort chunk");
+            assert_eq!(
+                reader.remaining,
+                u32::try_from(records.len()).expect("test record count fits u32")
+            );
+            for expected in &records {
+                let (key, data) = reader
+                    .read_record()
+                    .expect("read sort chunk record")
+                    .expect("record remains");
+                assert_eq!(key, expected.key);
+                assert_eq!(data.as_ref(), expected.data.as_ref());
+            }
+            assert!(
+                reader
+                    .read_record()
+                    .expect("read past last sort chunk record")
+                    .is_none()
+            );
+        }
+    }
+}

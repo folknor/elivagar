@@ -362,9 +362,9 @@ fn config_json(config: &TilegenConfig, ocean: &OceanContract) -> Value {
 /// archive and then records only the second.
 ///
 /// Deliberately excludes the assemble-side settings - tile format, tile
-/// compression, compression level, every memory budget. Those are applied after
-/// the chunks are read, so a resumed run may legitimately change them, and
-/// including them would reject safe resumes.
+/// compression, compression level, every memory budget, and the dedup cap.
+/// Those are applied after the chunks are read, so a resumed run may
+/// legitimately change them, and including them would reject safe resumes.
 ///
 /// Compared as JSON rather than as a struct so the float factor needs no
 /// float-equality dance, and so a mismatch can name the field that differs.

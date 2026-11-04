@@ -482,30 +482,6 @@ parsing.
 
 Reported by the storage hunt.
 
-## STR-020 - Delete the dead float polygon machinery and other dead code
-
-- `for_each_zoom_simplified_multi` and `SimplifyMultiScratch` have no
-  production caller, but the scratch is threaded through relations.rs and
-  emit.rs (`_simp_scratch`, including the unused parameter on
-  `emit_multipolygon_feature`) and about 15 pipeline tests construct it; the
-  doc keeps it "holding the path open for re-enabling".
-- `clip_polygon_into` / `clip_polygon` (float S-H) have no production caller.
-- `is_ccw`, `is_cw`, `reverse_ring` (test-only), `point_in_shape`,
-  `recycle_shape`, `tile_range_for_rect`, `tile_count_for_rect`,
-  `rect_intersection`, `intersect_shapes_with_rect`'s unused `_min_area`.
-- `ring_is_simple`'s `j + 1 == ring.len() && i == 0` guard can never be true.
-- `debug.rs` carries `#![allow(dead_code)]` over the module, hiding
-  `malloc_trim`, `set_mmap_threshold`, `read_page_faults` with no callers.
-- `mvt::Value` has seven variants; the pipeline produces four. `Float`,
-  `UInt`, `SInt` sit under `allow(dead_code)` and MLT carries a seven-way
-  `MltColumnType`, a type-bit mask and a `Mixed` column exercised only by
-  hand-built tests.
-- `wire_format::encode_feature_data` / `encode_feature_data_with_attrs` /
-  `append_feature_data_with_attrs` - one of three entry points is
-  `allow(dead_code)` and test-only.
-
-Reported by the polygon-engine, coordinate-spaces, storage and encoding hunts.
-
 ---
 
 # Profile and layers
@@ -655,18 +631,17 @@ Reported by the storage hunt.
 
 ## STR-029 - Typestate and naming for the node and way indexes
 
-The way index writer/reader typestate, the private FOR codec module and a
-`NodeId` newtype with typed `put_id`/`get_id` landed. Remaining: the node
-store still exposes six public types for two backends (`NodeIndex`,
-`NodeIndexReader`, `SortedNodeStore`, `SortedNodeStoreReader`, `NodeStore`,
-`NodeStoreReader`); consolidating them, or a `NodeLookup` trait, needs the
-phase12 construction and parallel-lookup boundary to move, and phase12's
-callers should move to the typed `NodeId` methods with it. Coordinates: node
-store `put(node_id, lat_e7, lon_e7)` / `get -> Option<(i32, i32)>`,
-`WayIndex::put(way_id, &[(i32, i32)])`, `decode_way`, `project_e7(lat, lon)`
-and phase12's extent locals agree on (lat, lon) order by convention only;
-proposed `LatLonE7 { lat, lon }` (repr C, 8 bytes, owner of the delta codec)
-and `WayId(i64)` (`WayIndex::get` accepts a node id today).
+The node side landed: phase12 builds through unified `NodeStore` /
+`NodeStoreReader` wrappers over private backends, uses typed `NodeId`
+lookups, and the store and FOR codec carry a `LatLonE7`. Remaining, the way
+side: `WayIndexWriter::put` still takes an `i64` and `(i32, i32)` tuples,
+`decode_way` returns tuples, and relation lookup passes raw way ids (so
+`WayIndex::get` still accepts any `i64`, a node id included); phase12 converts
+its local `WayId` and `LatLonE7` at that boundary. Threading `WayId` and
+`LatLonE7` through `way_index.rs` and `relations.rs` makes the (lat, lon)
+order and the id kind type-checked end to end. The old node-store names
+survive as aliases for `examples/bench_node_store.rs` and can go when it
+moves.
 
 Reported by the storage hunt.
 
@@ -808,11 +783,11 @@ Reported by every hunt.
 
 ## STR-036 - Missing tests the hunters named as most valuable
 
-- A property suite running random shapes through quantize, pyramid and decode,
-  checking outer positive, holes inside outers, at most 500 rings, and no
-  hole-oriented ring in slot 0 (polygon-engine hunt).
-- A full-range round-trip property test for the sort chunk record layout
-  (storage hunt).
-- A test building the ocean producer filter and the consumer copy/splice from
-  one plan and checking every tile is owned by exactly one side - "the test
-  this subsystem most lacks" (ocean hunt).
+The polygon property suite, the sort chunk record round trips and the
+producer-side band ownership check (exhaustive through z9 in `ocean.rs`)
+landed. Remaining: the consumer half of the ocean ownership test - drive
+`pipeline/assemble.rs`'s precomputed per-zoom Hilbert interior ranges, run
+copies and splice from the same pass grids and check every tile is served by
+exactly one side (ocean hunt). The polygon property suite also runs at a
+single zoom (z2), so it does not yet exercise multi-zoom rescaling; extend it
+across a zoom span.

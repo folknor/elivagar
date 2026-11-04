@@ -10,11 +10,8 @@ use mlt_core::{PropKind, PropValue as MltPropValue, TileLayer};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MltColumnType {
     String,
-    Float,
     Double,
     Int,
-    UInt,
-    SInt,
     Bool,
     Mixed,
 }
@@ -23,9 +20,6 @@ pub(crate) enum MltColumnType {
 pub(crate) struct MltColumnModel {
     pub key: String,
     pub column_type: MltColumnType,
-    pub value_count: usize,
-    /// Number of distinct value types observed for this key across layer features.
-    pub observed_type_count: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -145,10 +139,8 @@ fn build_mlt_tile_layer(layer: &LayerBuilder) -> Result<TileLayer, MltEncodeErro
 fn mlt_prop_kind(column_type: MltColumnType) -> PropKind {
     match column_type {
         MltColumnType::String | MltColumnType::Mixed => PropKind::Str,
-        MltColumnType::Float => PropKind::F32,
         MltColumnType::Double => PropKind::F64,
-        MltColumnType::Int | MltColumnType::SInt => PropKind::I64,
-        MltColumnType::UInt => PropKind::U64,
+        MltColumnType::Int => PropKind::I64,
         MltColumnType::Bool => PropKind::Bool,
     }
 }
@@ -159,10 +151,6 @@ fn value_to_mlt_prop(value: &Value, column_type: MltColumnType) -> MltPropValue 
             Value::String(x) => Some(x.as_str().into()),
             _ => None,
         }),
-        MltColumnType::Float => MltPropValue::F32(match value {
-            Value::Float(x) => Some(*x),
-            _ => None,
-        }),
         MltColumnType::Double => MltPropValue::F64(match value {
             Value::Double(x) => Some(*x),
             _ => None,
@@ -171,19 +159,19 @@ fn value_to_mlt_prop(value: &Value, column_type: MltColumnType) -> MltPropValue 
             Value::Int(x) => Some(*x),
             _ => None,
         }),
-        MltColumnType::UInt => MltPropValue::U64(match value {
-            Value::UInt(x) => Some(*x),
-            _ => None,
-        }),
-        MltColumnType::SInt => MltPropValue::I64(match value {
-            Value::SInt(x) => Some(*x),
-            _ => None,
-        }),
         MltColumnType::Bool => MltPropValue::Bool(match value {
             Value::Bool(x) => Some(*x),
             _ => None,
         }),
-        MltColumnType::Mixed => MltPropValue::Str(Some(value_to_string(value).into())),
+        MltColumnType::Mixed => {
+            let text = match value {
+                Value::String(x) => x.clone(),
+                Value::Double(x) => x.to_string(),
+                Value::Int(x) => x.to_string(),
+                Value::Bool(x) => x.to_string(),
+            };
+            MltPropValue::Str(Some(text.into()))
+        }
     }
 }
 
@@ -198,18 +186,6 @@ fn feature_value_for_key<'a>(
         }
     }
     None
-}
-
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Float(v) => v.to_string(),
-        Value::Double(v) => v.to_string(),
-        Value::Int(v) => v.to_string(),
-        Value::UInt(v) => v.to_string(),
-        Value::SInt(v) => v.to_string(),
-        Value::Bool(v) => v.to_string(),
-    }
 }
 
 fn decode_feature_geometry(feature: &Feature) -> Result<Geometry<i32>, String> {
@@ -442,7 +418,6 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
         total_features += feature_count;
 
         let mut columns: Vec<MltColumnModel> = Vec::new();
-        let mut type_masks: Vec<u8> = Vec::new();
         let mut geometry_mix = MltGeometryMix::default();
         for feature in layer.features() {
             match feature.geom_type {
@@ -458,24 +433,15 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
                     continue;
                 };
                 let value_ty = value_type(value);
-                let value_ty_bit = value_type_bit(value_ty);
-                if let Some(idx) = columns.iter().position(|c| c.key == key) {
-                    let existing = &mut columns[idx];
-                    existing.value_count += 1;
-                    type_masks[idx] |= value_ty_bit;
-                    existing.observed_type_count = u8::try_from(type_masks[idx].count_ones())
-                        .expect("type cardinality should fit in u8");
-                    if existing.observed_type_count > 1 {
-                        existing.column_type = MltColumnType::Mixed;
+                if let Some(column) = columns.iter_mut().find(|c| c.key == key) {
+                    if column.column_type != value_ty {
+                        column.column_type = MltColumnType::Mixed;
                     }
                 } else {
                     columns.push(MltColumnModel {
                         key: key.to_string(),
                         column_type: value_ty,
-                        value_count: 1,
-                        observed_type_count: 1,
                     });
-                    type_masks.push(value_ty_bit);
                 }
             }
         }
@@ -499,25 +465,9 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
 fn value_type(value: &Value) -> MltColumnType {
     match value {
         Value::String(_) => MltColumnType::String,
-        Value::Float(_) => MltColumnType::Float,
         Value::Double(_) => MltColumnType::Double,
         Value::Int(_) => MltColumnType::Int,
-        Value::UInt(_) => MltColumnType::UInt,
-        Value::SInt(_) => MltColumnType::SInt,
         Value::Bool(_) => MltColumnType::Bool,
-    }
-}
-
-fn value_type_bit(value_type: MltColumnType) -> u8 {
-    match value_type {
-        MltColumnType::String => 1 << 0,
-        MltColumnType::Float => 1 << 1,
-        MltColumnType::Double => 1 << 2,
-        MltColumnType::Int => 1 << 3,
-        MltColumnType::UInt => 1 << 4,
-        MltColumnType::SInt => 1 << 5,
-        MltColumnType::Bool => 1 << 6,
-        MltColumnType::Mixed => 0,
     }
 }
 
@@ -592,52 +542,6 @@ mod tests {
         let model = build_tile_model(&[&layer]);
         assert_eq!(model.layers[0].columns.len(), 1);
         assert_eq!(model.layers[0].columns[0].key, "key_65536");
-        assert_eq!(model.layers[0].columns[0].value_count, 1);
-    }
-
-    #[test]
-    fn build_tile_model_detects_mixed_property_types() {
-        let mut layer = LayerBuilder::new("places");
-        let kind_key = layer.intern_key("kind");
-        let pop_key = layer.intern_key("population");
-        let city_val = layer.intern_value(Value::String("city".to_string()));
-        let town_val = layer.intern_value(Value::String("town".to_string()));
-        let pop_int = layer.intern_value(Value::Int(1200));
-        let pop_float = layer.intern_value(Value::Float(1200.5));
-
-        layer.add_feature(Feature {
-            id: Some(1),
-            geom_type: GeomType::Point,
-            geometry: point_geom(),
-            tags: vec![(kind_key, city_val), (pop_key, pop_int)],
-        });
-        layer.add_feature(Feature {
-            id: Some(2),
-            geom_type: GeomType::Point,
-            geometry: point_geom(),
-            tags: vec![(kind_key, town_val), (pop_key, pop_float)],
-        });
-
-        let model = build_tile_model(&[&layer]);
-        assert_eq!(model.layer_count, 1);
-        assert_eq!(model.feature_count, 2);
-        assert_eq!(model.layers[0].name, "places");
-        assert_eq!(model.layers[0].feature_count, 2);
-        assert_eq!(model.layers[0].geometry_mix.points, 2);
-        assert_eq!(model.layers[0].geometry_mix.lines, 0);
-        assert_eq!(model.layers[0].geometry_mix.polygons, 0);
-        assert_eq!(model.layers[0].columns.len(), 2);
-        assert_eq!(model.layers[0].columns[0].key, "kind");
-        assert_eq!(
-            model.layers[0].columns[0].column_type,
-            MltColumnType::String
-        );
-        assert_eq!(model.layers[0].columns[0].value_count, 2);
-        assert_eq!(model.layers[0].columns[0].observed_type_count, 1);
-        assert_eq!(model.layers[0].columns[1].key, "population");
-        assert_eq!(model.layers[0].columns[1].column_type, MltColumnType::Mixed);
-        assert_eq!(model.layers[0].columns[1].value_count, 2);
-        assert_eq!(model.layers[0].columns[1].observed_type_count, 2);
     }
 
     #[test]
@@ -670,7 +574,7 @@ mod tests {
         let key_name = layer.intern_key("name");
         let key_level = layer.intern_key("level");
         let v_name = layer.intern_value(Value::String("main".to_string()));
-        let v_level = layer.intern_value(Value::UInt(5));
+        let v_level = layer.intern_value(Value::Int(5));
 
         layer.add_feature(Feature {
             id: Some(1),
@@ -698,42 +602,26 @@ mod tests {
         assert_eq!(lm.geometry_mix.polygons, 1);
         assert_eq!(lm.columns[0].key, "level");
         assert_eq!(lm.columns[1].key, "name");
-        assert_eq!(lm.columns[0].value_count, 1);
-        assert_eq!(lm.columns[1].value_count, 1);
     }
 
     #[test]
-    fn build_tile_model_maps_all_value_types() {
+    fn build_tile_model_maps_pipeline_value_types() {
         let mut layer = LayerBuilder::new("types");
         let ks = layer.intern_key("s");
-        let kf = layer.intern_key("f");
         let kd = layer.intern_key("d");
         let ki = layer.intern_key("i");
-        let ku = layer.intern_key("u");
-        let ksi = layer.intern_key("si");
         let kb = layer.intern_key("b");
 
         let vs = layer.intern_value(Value::String("a".to_string()));
-        let vf = layer.intern_value(Value::Float(1.5));
         let vd = layer.intern_value(Value::Double(2.5));
         let vi = layer.intern_value(Value::Int(-3));
-        let vu = layer.intern_value(Value::UInt(4));
-        let vsi = layer.intern_value(Value::SInt(-5));
         let vb = layer.intern_value(Value::Bool(true));
 
         layer.add_feature(Feature {
             id: Some(1),
             geom_type: GeomType::Point,
             geometry: point_geom(),
-            tags: vec![
-                (ks, vs),
-                (kf, vf),
-                (kd, vd),
-                (ki, vi),
-                (ku, vu),
-                (ksi, vsi),
-                (kb, vb),
-            ],
+            tags: vec![(ks, vs), (kd, vd), (ki, vi), (kb, vb)],
         });
 
         let model = build_tile_model(&[&layer]);
@@ -741,10 +629,6 @@ mod tests {
         assert_eq!(
             cols.iter().find(|c| c.key == "s").map(|c| c.column_type),
             Some(MltColumnType::String)
-        );
-        assert_eq!(
-            cols.iter().find(|c| c.key == "f").map(|c| c.column_type),
-            Some(MltColumnType::Float)
         );
         assert_eq!(
             cols.iter().find(|c| c.key == "d").map(|c| c.column_type),
@@ -755,61 +639,9 @@ mod tests {
             Some(MltColumnType::Int)
         );
         assert_eq!(
-            cols.iter().find(|c| c.key == "u").map(|c| c.column_type),
-            Some(MltColumnType::UInt)
-        );
-        assert_eq!(
-            cols.iter().find(|c| c.key == "si").map(|c| c.column_type),
-            Some(MltColumnType::SInt)
-        );
-        assert_eq!(
             cols.iter().find(|c| c.key == "b").map(|c| c.column_type),
             Some(MltColumnType::Bool)
         );
-    }
-
-    #[test]
-    fn build_tile_model_tracks_true_mixed_type_cardinality() {
-        let mut layer = LayerBuilder::new("cardinality");
-        let key = layer.intern_key("mixed_key");
-        let v_str = layer.intern_value(Value::String("a".to_string()));
-        let v_float = layer.intern_value(Value::Float(1.5));
-        let v_bool = layer.intern_value(Value::Bool(true));
-        let v_int = layer.intern_value(Value::Int(7));
-
-        layer.add_feature(Feature {
-            id: Some(1),
-            geom_type: GeomType::Point,
-            geometry: point_geom(),
-            tags: vec![(key, v_str)],
-        });
-        layer.add_feature(Feature {
-            id: Some(2),
-            geom_type: GeomType::Point,
-            geometry: point_geom(),
-            tags: vec![(key, v_float)],
-        });
-        layer.add_feature(Feature {
-            id: Some(3),
-            geom_type: GeomType::Point,
-            geometry: point_geom(),
-            tags: vec![(key, v_bool)],
-        });
-        layer.add_feature(Feature {
-            id: Some(4),
-            geom_type: GeomType::Point,
-            geometry: point_geom(),
-            tags: vec![(key, v_int)],
-        });
-
-        let model = build_tile_model(&[&layer]);
-        let col = model.layers[0]
-            .columns
-            .iter()
-            .find(|c| c.key == "mixed_key")
-            .expect("mixed_key column should exist");
-        assert_eq!(col.column_type, MltColumnType::Mixed);
-        assert_eq!(col.observed_type_count, 4);
     }
 
     #[derive(Debug, Deserialize)]
@@ -878,13 +710,8 @@ mod tests {
     fn mvt_value_to_json(value: &Value) -> JsonValue {
         match value {
             Value::String(v) => JsonValue::String(v.clone()),
-            Value::Float(v) => {
-                Number::from_f64(f64::from(*v)).map_or(JsonValue::Null, JsonValue::Number)
-            }
             Value::Double(v) => Number::from_f64(*v).map_or(JsonValue::Null, JsonValue::Number),
             Value::Int(v) => JsonValue::Number((*v).into()),
-            Value::UInt(v) => JsonValue::Number((*v).into()),
-            Value::SInt(v) => JsonValue::Number((*v).into()),
             Value::Bool(v) => JsonValue::Bool(*v),
         }
     }
@@ -921,9 +748,9 @@ mod tests {
         let v_kind_road = layer.intern_value(Value::String("road".to_string()));
         let v_kind_land = layer.intern_value(Value::String("landuse".to_string()));
         let v_name_oslo = layer.intern_value(Value::String("Oslo".to_string()));
-        let v_pop = layer.intern_value(Value::UInt(700_000));
+        let v_pop = layer.intern_value(Value::Int(700_000));
         let v_ratio = layer.intern_value(Value::Double(1.25));
-        let v_rank = layer.intern_value(Value::SInt(-2));
+        let v_rank = layer.intern_value(Value::Int(-2));
         let v_visible = layer.intern_value(Value::Bool(true));
 
         layer.add_feature(Feature {
@@ -1021,11 +848,6 @@ mod tests {
     fn decode_fixture_value(tag: &PropertyTagFixture) -> Value {
         match tag.value_type.as_str() {
             "string" => Value::String(tag.value.clone()),
-            "float" => Value::Float(
-                tag.value
-                    .parse::<f32>()
-                    .expect("fixture float must parse as f32"),
-            ),
             "double" => Value::Double(
                 tag.value
                     .parse::<f64>()
@@ -1035,16 +857,6 @@ mod tests {
                 tag.value
                     .parse::<i64>()
                     .expect("fixture int must parse as i64"),
-            ),
-            "uint" => Value::UInt(
-                tag.value
-                    .parse::<u64>()
-                    .expect("fixture uint must parse as u64"),
-            ),
-            "sint" => Value::SInt(
-                tag.value
-                    .parse::<i64>()
-                    .expect("fixture sint must parse as i64"),
             ),
             "bool" => Value::Bool(
                 tag.value
@@ -1120,6 +932,12 @@ mod tests {
             }
 
             let mut seen = 0usize;
+            assert_eq!(
+                decoded.len(),
+                expected.len(),
+                "case {} property count",
+                case.id
+            );
             for (name, (got_kind, got_non_null)) in &decoded {
                 if let Some((want_kind, want_non_null)) = expected.get(name.as_str()) {
                     assert_eq!(
@@ -1137,7 +955,7 @@ mod tests {
             }
             assert_eq!(
                 seen,
-                case.expected.len(),
+                expected.len(),
                 "case {} did not observe all expected properties",
                 case.id
             );
@@ -1154,7 +972,7 @@ mod tests {
         for i in 0..64u32 {
             let v_kind = layer.intern_value(Value::String("poi".to_string()));
             let v_name = layer.intern_value(Value::String(format!("name_{i}")));
-            let v_rank = layer.intern_value(Value::UInt(u64::from(i % 10)));
+            let v_rank = layer.intern_value(Value::Int(i64::from(i % 10)));
             layer.add_feature(Feature {
                 id: Some(u64::from(i) + 1),
                 geom_type: GeomType::Point,
