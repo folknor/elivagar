@@ -51,9 +51,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, BufReader, BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
+use crate::pmtiles_reader::{RawDirEntry, encode_directory};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use protohoggr::encode_varint;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -282,21 +282,14 @@ fn dedup_hashes(data: &[u8]) -> (u64, u64) {
 // Internal types
 // ---------------------------------------------------------------------------
 
-/// A directory entry ready for serialization.
-struct DirEntry {
-    tile_id: u64,
-    offset: u64,
-    length: u32,
-    run_length: u32,
-}
-const _: () = assert!(std::mem::size_of::<DirEntry>() == 24);
+const _: () = assert!(std::mem::size_of::<RawDirEntry>() == 24);
 
 /// Storage for directory entries: in-memory or streamed to a temp file.
 /// Streaming avoids accumulating all ~200M+ directory entries in RAM at
 /// planet scale. Entries are built incrementally with run-length encoding
 /// in push_dir_entry(), so the on-disk format is already compacted.
 enum DirStore {
-    Memory(Vec<DirEntry>),
+    Memory(Vec<RawDirEntry>),
     Streaming {
         writer: BufWriter<File>,
         path: PathBuf,
@@ -355,7 +348,7 @@ pub struct PmtilesWriter {
     /// Total number of tiles addressed (including deduped references).
     num_addressed: u64,
     /// Current run being built (flushed when a new non-extending tile arrives).
-    current_run: Option<DirEntry>,
+    current_run: Option<RawDirEntry>,
     /// Directory entries (in-memory or streamed to disk).
     dir_store: DirStore,
     /// Shared payload equality index for individual tiles and tile runs.
@@ -515,11 +508,11 @@ impl PmtilesWriter {
     /// Returns `true` if unique, `false` if deduplicated.
     ///
     /// # Errors
-    /// Returns `io::Error` if the tile ID is not increasing, the payload is
-    /// too large, or a streaming file write fails.
+    /// Returns `io::Error` if the coordinates are invalid, the tile ID is not
+    /// increasing, the payload is too large, or a streaming file write fails.
     #[hotpath::measure]
     pub fn add_tile(&mut self, z: u8, x: u32, y: u32, data: &[u8]) -> io::Result<bool> {
-        let tile_id = xy_to_tile_id(z, x, y);
+        let tile_id = try_xy_to_tile_id(z, x, y)?;
         self.check_tile_order(tile_id)?;
         let (key, duplicate_offset) = self.dedup.lookup(data, &mut self.dedup_stats)?;
 
@@ -785,7 +778,7 @@ impl PmtilesWriter {
         }
         // Flush old run if any, then start new one
         self.flush_run()?;
-        self.current_run = Some(DirEntry {
+        self.current_run = Some(RawDirEntry {
             tile_id,
             offset,
             length,
@@ -813,7 +806,7 @@ impl PmtilesWriter {
         }
         self.num_addressed += u64::from(run_length);
         self.flush_run()?;
-        self.current_run = Some(DirEntry {
+        self.current_run = Some(RawDirEntry {
             tile_id,
             offset,
             length,
@@ -826,7 +819,7 @@ impl PmtilesWriter {
     /// from the streaming temp file if necessary).
     #[cfg(test)]
     #[hotpath::measure]
-    fn collect_dir_entries(&mut self) -> io::Result<Vec<DirEntry>> {
+    fn collect_dir_entries(&mut self) -> io::Result<Vec<RawDirEntry>> {
         self.flush_run()?;
         match &mut self.dir_store {
             DirStore::Memory(entries) => Ok(std::mem::take(entries)),
@@ -896,7 +889,7 @@ impl PmtilesWriter {
                 #[allow(clippy::cast_possible_truncation)]
                 let num = entries.len() as u64;
                 if entries.len() <= MAX_ROOT_ENTRIES {
-                    let root = gzip_compress(&encode_directory(&entries))?;
+                    let root = gzip_compress(&encode_directory(&entries)?)?;
                     if root.len() <= MAX_ROOT_BYTES {
                         return Ok((root, Vec::new(), num));
                     }
@@ -926,7 +919,7 @@ impl PmtilesWriter {
                     let file = File::open(&path)?;
                     let mut reader = BufReader::with_capacity(1 << 16, file);
                     let entries = read_dir_entries(&mut reader, count)?;
-                    let root = gzip_compress(&encode_directory(&entries))?;
+                    let root = gzip_compress(&encode_directory(&entries)?)?;
                     if root.len() <= MAX_ROOT_BYTES {
                         return Ok((root, Vec::new(), count as u64));
                     }
@@ -1033,7 +1026,7 @@ fn build_leaf_directories_streaming(
     let mut reader = BufReader::with_capacity(1 << 16, file);
 
     let mut leaf_blob: Vec<u8> = Vec::new();
-    let mut root_entries: Vec<DirEntry> = Vec::new();
+    let mut root_entries: Vec<RawDirEntry> = Vec::new();
     let mut remaining = count;
 
     while remaining > 0 {
@@ -1042,7 +1035,7 @@ fn build_leaf_directories_streaming(
         remaining -= chunk_size;
 
         let first_tile_id = chunk[0].tile_id;
-        let leaf_raw = encode_directory(&chunk);
+        let leaf_raw = encode_directory(&chunk)?;
         let compressed = gzip_compress(&leaf_raw)?;
 
         #[allow(clippy::cast_possible_truncation)]
@@ -1050,7 +1043,7 @@ fn build_leaf_directories_streaming(
         let leaf_offset = leaf_blob.len() as u64;
         leaf_blob.extend_from_slice(&compressed);
 
-        root_entries.push(DirEntry {
+        root_entries.push(RawDirEntry {
             tile_id: first_tile_id,
             offset: leaf_offset,
             length: leaf_len,
@@ -1058,7 +1051,7 @@ fn build_leaf_directories_streaming(
         });
     }
 
-    let root_raw = encode_directory(&root_entries);
+    let root_raw = encode_directory(&root_entries)?;
     let root_compressed = gzip_compress(&root_raw)?;
     Ok((root_compressed, leaf_blob))
 }
@@ -1067,11 +1060,11 @@ fn build_leaf_directories_streaming(
 /// Returns (root_compressed, all_leaves_compressed).
 #[hotpath::measure]
 fn build_leaf_directories(
-    entries: &[DirEntry],
+    entries: &[RawDirEntry],
     leaf_size: usize,
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
     let mut leaf_blob: Vec<u8> = Vec::new();
-    let mut root_entries: Vec<DirEntry> = Vec::new();
+    let mut root_entries: Vec<RawDirEntry> = Vec::new();
 
     for chunk in entries.chunks(leaf_size) {
         let first_tile_id = match chunk.first() {
@@ -1079,7 +1072,7 @@ fn build_leaf_directories(
             None => continue,
         };
 
-        let leaf_raw = encode_directory(chunk);
+        let leaf_raw = encode_directory(chunk)?;
         let compressed = gzip_compress(&leaf_raw)?;
 
         #[allow(clippy::cast_possible_truncation)]
@@ -1088,7 +1081,7 @@ fn build_leaf_directories(
         leaf_blob.extend_from_slice(&compressed);
 
         // run_length=0 marks a leaf directory pointer
-        root_entries.push(DirEntry {
+        root_entries.push(RawDirEntry {
             tile_id: first_tile_id,
             offset: leaf_offset,
             length: leaf_len,
@@ -1096,69 +1089,10 @@ fn build_leaf_directories(
         });
     }
 
-    let root_raw = encode_directory(&root_entries);
+    let root_raw = encode_directory(&root_entries)?;
     let root_compressed = gzip_compress(&root_raw)?;
 
     Ok((root_compressed, leaf_blob))
-}
-
-// ---------------------------------------------------------------------------
-// Directory encoding (columnar varint format)
-// ---------------------------------------------------------------------------
-
-/// Encode directory entries in PMTiles v3 columnar format.
-#[hotpath::measure]
-fn encode_directory(entries: &[DirEntry]) -> Vec<u8> {
-    let mut buf = Vec::new();
-
-    #[allow(clippy::cast_possible_truncation)]
-    let count = entries.len() as u64;
-    encode_varint(&mut buf, count);
-
-    // Column 1: delta-encoded tile IDs
-    encode_tile_id_column(&mut buf, entries);
-
-    // Column 2: run lengths
-    for e in entries {
-        encode_varint(&mut buf, u64::from(e.run_length));
-    }
-
-    // Column 3: lengths
-    for e in entries {
-        encode_varint(&mut buf, u64::from(e.length));
-    }
-
-    // Column 4: offsets (0 = contiguous with previous, else offset + 1)
-    encode_offset_column(&mut buf, entries);
-
-    buf
-}
-
-/// Encode delta-encoded tile ID column.
-fn encode_tile_id_column(buf: &mut Vec<u8>, entries: &[DirEntry]) {
-    let mut prev_tile_id: u64 = 0;
-    for e in entries {
-        let delta = e.tile_id.saturating_sub(prev_tile_id);
-        encode_varint(buf, delta);
-        prev_tile_id = e.tile_id;
-    }
-}
-
-/// Encode offset column with contiguity optimization.
-fn encode_offset_column(buf: &mut Vec<u8>, entries: &[DirEntry]) {
-    for (i, e) in entries.iter().enumerate() {
-        if i > 0 {
-            let prev = &entries[i - 1];
-            let expected = prev.offset + u64::from(prev.length);
-            if e.offset == expected {
-                encode_varint(buf, 0);
-            } else {
-                encode_varint(buf, e.offset + 1);
-            }
-        } else {
-            encode_varint(buf, e.offset + 1);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,12 +1190,12 @@ fn escape_json_string(s: &str) -> String {
 
 /// Read `count` directory entries from a reader, 24 bytes at a time.
 /// Eliminates the double-buffer from the old `read_to_end` + parse approach.
-fn read_dir_entries<R: io::Read>(reader: &mut R, count: usize) -> io::Result<Vec<DirEntry>> {
+fn read_dir_entries<R: io::Read>(reader: &mut R, count: usize) -> io::Result<Vec<RawDirEntry>> {
     let mut entries = Vec::with_capacity(count);
     let mut buf = [0u8; 24];
     for _ in 0..count {
         reader.read_exact(&mut buf)?;
-        entries.push(DirEntry {
+        entries.push(RawDirEntry {
             tile_id: u64::from_le_bytes([
                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
             ]),
@@ -1294,17 +1228,44 @@ fn f64_to_e7(val: f64) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Convert (z, x, y) to PMTiles Hilbert tile ID.
+///
+/// Panics when the coordinates cannot be represented as a PMTiles tile ID.
+/// Use [`try_xy_to_tile_id`] when coordinates are not already validated.
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
 pub fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
-    if z == 0 {
-        return 0;
+    match try_xy_to_tile_id(z, x, y) {
+        Ok(tile_id) => tile_id,
+        Err(error) => panic!("{error}"),
     }
-    let n = 1u64 << z;
+}
+
+/// Convert validated tile coordinates to a PMTiles Hilbert tile ID.
+///
+/// PMTiles tile IDs fit in `u64` for zoom levels through 31. Coordinates must
+/// satisfy `x < 2^z` and `y < 2^z`.
+pub fn try_xy_to_tile_id(z: u8, x: u32, y: u32) -> io::Result<u64> {
+    if z > 31 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PMTiles tile zoom must be at most 31",
+        ));
+    }
+    let grid_size = 1_u32 << z;
+    if x >= grid_size || y >= grid_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PMTiles tile coordinates are outside the zoom grid",
+        ));
+    }
+    if z == 0 {
+        return Ok(0);
+    }
+    let n = u64::from(grid_size);
     // Cumulative tiles for zoom levels 0..z-1: (4^z - 1) / 3
     let base = (n * n - 1) / 3;
-    let d = hilbert_xy2d(n as u32, x, y);
-    base + d
+    let d = hilbert_xy2d(grid_size, x, y);
+    base.checked_add(d)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "PMTiles tile ID exceeds u64"))
 }
 
 /// Convert PMTiles Hilbert tile ID back to (z, x, y).

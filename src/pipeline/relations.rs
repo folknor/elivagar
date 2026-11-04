@@ -5,9 +5,10 @@ use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::shortbread::LayerMatch;
 use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
 use crate::sort::{self, SortWriter};
-use crate::way_index::WayIndex;
+use crate::way_index::WayIndexReader;
 use pbfhogg::MemberId;
 
+use super::PipelineError;
 use super::emit::{
     MultipolygonEmitScratch, PointEmitScratch, RecordSink, antimeridian_shifts_for_bbox,
     emit_multipolygon_feature, emit_point_or_centroid, enrich_polygon_matches,
@@ -35,14 +36,16 @@ fn estimate_prepared_rel_bytes(r: &PreparedRelation) -> usize {
 
 /// Resolve relation geometry from way_index (serial I/O). Returns None if
 /// the relation is not a multipolygon/boundary or has no resolvable member ways.
+/// Way-index read failures are returned so corrupt data is not counted as a
+/// missing relation reference.
 /// Tag matching runs here while PBF borrows are alive, eliminating the need to
 /// clone all relation tags to owned Strings.
 #[hotpath::measure]
 pub(super) fn prepare_relation(
     rel: &pbfhogg::Relation<'_>,
-    way_index: &WayIndex,
+    way_index: &WayIndexReader,
     missing_ref_stats: &MissingRefStatsAtomic,
-) -> Option<PreparedRelation> {
+) -> Result<Option<PreparedRelation>, PipelineError> {
     // Fast reject without tag allocation: most relations are not multipolygon/boundary.
     let mut rel_type = "";
     for (k, v) in rel.tags() {
@@ -52,7 +55,7 @@ pub(super) fn prepare_relation(
         }
     }
     if rel_type != "multipolygon" && rel_type != "boundary" {
-        return None;
+        return Ok(None);
     }
     let tags: SmallVec<[(&str, &str); 16]> = rel.tags().collect();
     let tag_helper = Tags(&tags);
@@ -61,7 +64,7 @@ pub(super) fn prepare_relation(
     // into Cow::Owned, avoiding cloning ALL tags to String.
     let matches = shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon);
     if matches.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let mut member_ways: Vec<MemberWay> = Vec::new();
@@ -71,7 +74,13 @@ pub(super) fn prepare_relation(
         match member.id {
             MemberId::Way(way_id) => {
                 let role = WayRole::from_str(member.role().unwrap_or(""));
-                if let Some(coords_e7) = way_index.get(way_id) {
+                let coords_e7 = way_index.get(way_id).map_err(|error| {
+                    PipelineError(format!(
+                        "failed to read member way {way_id} for relation {}: {error}",
+                        rel.id()
+                    ))
+                })?;
+                if let Some(coords_e7) = coords_e7 {
                     let merc: Vec<Point> = coords_e7
                         .iter()
                         .map(|&(lat, lon)| geometry::project_e7(lat, lon))
@@ -99,15 +108,15 @@ pub(super) fn prepare_relation(
     }
 
     if member_ways.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     #[allow(clippy::cast_sign_loss)]
-    Some(PreparedRelation {
+    Ok(Some(PreparedRelation {
         osm_id: rel.id() as u64,
         matches,
         member_ways,
-    })
+    }))
 }
 
 /// Per-worker accumulator for streaming relation outputs. Modeled on
@@ -169,10 +178,16 @@ pub(super) struct RelationTail {
 #[hotpath::measure]
 // too_many_lines is visible only without the hotpath feature, whose measure
 // macro re-wraps the body.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// Panics: a poisoned lock or a failed sort push is unrecoverable; the Result
+// carries only relation-preparation errors.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::unwrap_in_result
+)]
 pub(super) fn process_relation_blocks(
     relation_blocks: impl Iterator<Item = pbfhogg::PrimitiveBlock> + Send,
-    way_index: &WayIndex,
+    way_index: &WayIndexReader,
     missing_ref_stats: &MissingRefStatsAtomic,
     min_zoom: u8,
     max_zoom: u8,
@@ -181,7 +196,7 @@ pub(super) fn process_relation_blocks(
     fanout_stats: &mut FanoutStats,
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
-) -> RelationTail {
+) -> Result<RelationTail, PipelineError> {
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -196,6 +211,7 @@ pub(super) fn process_relation_blocks(
     let rel_count = AtomicU64::new(0);
     let inflight_bytes = AtomicUsize::new(0);
     let max_inflight_bytes = AtomicUsize::new(0);
+    let preparation_error = std::sync::Mutex::new(None::<PipelineError>);
 
     let result = relation_blocks
         .flat_map(|block| {
@@ -209,7 +225,19 @@ pub(super) fn process_relation_blocks(
                         return None;
                     };
                     rel_count.fetch_add(1, Ordering::Relaxed);
-                    let prepared = prepare_relation(&rel, way_index, missing_ref_stats)?;
+                    let prepared = match prepare_relation(&rel, way_index, missing_ref_stats) {
+                        Ok(Some(prepared)) => prepared,
+                        Ok(None) => return None,
+                        Err(error) => {
+                            let mut slot = preparation_error
+                                .lock()
+                                .expect("relation preparation error lock");
+                            if slot.is_none() {
+                                *slot = Some(error);
+                            }
+                            return None;
+                        }
+                    };
                     let bytes = estimate_prepared_rel_bytes(&prepared);
                     let now_inflight = inflight_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
                     max_inflight_bytes.fetch_max(now_inflight, Ordering::Relaxed);
@@ -307,6 +335,13 @@ pub(super) fn process_relation_blocks(
             a
         });
 
+    if let Some(error) = preparation_error
+        .into_inner()
+        .expect("relation preparation error lock poisoned")
+    {
+        return Err(error);
+    }
+
     fanout_stats.merge(&result.fanout);
     sort_writer.merge_tally(&result.sink.tally);
     let mut count = result.count;
@@ -325,11 +360,11 @@ pub(super) fn process_relation_blocks(
             })
             .expect("sort push failed");
     }
-    RelationTail {
+    Ok(RelationTail {
         rel_count: rel_count.into_inner(),
         features: count,
         max_inflight_bytes: max_inflight_bytes.into_inner(),
-    }
+    })
 }
 
 /// Process a prepared relation's geometry into an external buffer (CPU-bound).
@@ -349,7 +384,7 @@ pub(super) fn process_prepared_relation_into(
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
 ) {
-    let multi = multipolygon::assemble(&rel.member_ways);
+    let multi = multipolygon::assemble_wrapped(&rel.member_ways);
     let shared_vertex_keys = relation_shared_vertex_keys(&rel.member_ways);
 
     if multi.polygons.is_empty() {
@@ -375,14 +410,17 @@ pub(super) fn process_prepared_relation_into(
         match m.geom_expect {
             GeomExpect::Polygon => {
                 for (outer, inners) in &multi.polygons {
-                    if outer.len() < 4 {
+                    // Assembled rings omit the closing duplicate, so three
+                    // coordinates are enough for a triangle. Keep the list
+                    // open when unwrapping to preserve its final vertex.
+                    if outer.len() < 3 {
                         continue;
                     }
                     let mut outer_unwrapped = outer.clone();
                     let mut inners_unwrapped = inners.clone();
-                    let _ = unwrap_antimeridian_path(&mut outer_unwrapped, true);
+                    let _ = unwrap_antimeridian_path(&mut outer_unwrapped, false);
                     for inner in &mut inners_unwrapped {
-                        let _ = unwrap_antimeridian_path(inner, true);
+                        let _ = unwrap_antimeridian_path(inner, false);
                     }
                     let bbox = merc_bbox(&outer_unwrapped);
                     let fc = fanout_caps.get(m.layer as usize).copied().unwrap_or(0);
@@ -441,14 +479,14 @@ pub(super) fn process_prepared_relation_into(
             }
             GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
                 for (outer, inners) in &multi.polygons {
-                    if outer.len() < 4 {
+                    if outer.len() < 3 {
                         continue;
                     }
                     let mut outer_unwrapped = outer.clone();
                     let mut inners_unwrapped = inners.clone();
-                    let _ = unwrap_antimeridian_path(&mut outer_unwrapped, true);
+                    let _ = unwrap_antimeridian_path(&mut outer_unwrapped, false);
                     for inner in &mut inners_unwrapped {
-                        let _ = unwrap_antimeridian_path(inner, true);
+                        let _ = unwrap_antimeridian_path(inner, false);
                     }
                     let bbox = merc_bbox(&outer_unwrapped);
                     emit_point_or_centroid(

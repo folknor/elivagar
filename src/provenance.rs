@@ -285,19 +285,22 @@ fn tile_compression_name(compression: TileCompression) -> &'static str {
     }
 }
 
-/// Per-layer values keyed by layer name, omitting zeros.
+/// Fanout caps keyed by layer name, omitting unsupported layers and zeros.
 ///
 /// Layer arrays are indexed by `Layer` discriminant; emitting names rather
 /// than positions keeps the metadata readable and survives a reordering of
 /// the enum, which a positional array would silently misattribute.
-fn layer_map(values: &[u32], zero_is_default: bool) -> Value {
+fn fanout_cap_map(values: &[u32]) -> Value {
     let mut map = serde_json::Map::new();
     for layer in Layer::ALL {
+        if !layer.supports_fanout_cap() {
+            continue;
+        }
         let idx = layer as usize;
         let Some(&value) = values.get(idx) else {
             continue;
         };
-        if zero_is_default && value == 0 {
+        if value == 0 {
             continue;
         }
         map.insert(layer.name().to_string(), json!(value));
@@ -320,7 +323,7 @@ fn config_json(config: &TilegenConfig, ocean: &OceanContract) -> Value {
             "base_compression_level": config.compression_level,
             "compression_policy": "zoom-v1",
         },
-        "fanout_caps": layer_map(&config.fanout_caps, true),
+        "fanout_caps": fanout_cap_map(&config.fanout_caps),
         "polygon_simplify_factor": config.polygon_simplify_factor,
         "ocean": ocean.to_json(),
     })
@@ -346,7 +349,7 @@ pub fn producer_config(config: &TilegenConfig) -> Value {
     json!({
         "min_zoom": config.min_zoom,
         "max_zoom": config.max_zoom,
-        "fanout_caps": layer_map(&config.fanout_caps, true),
+        "fanout_caps": fanout_cap_map(&config.fanout_caps),
         "polygon_simplify_factor": config.polygon_simplify_factor,
     })
 }
@@ -535,13 +538,19 @@ mod tests {
     }
 
     #[test]
-    fn layer_map_omits_defaults_and_keys_by_name() {
+    fn fanout_cap_map_omits_defaults_and_unsupported_layers() {
         let mut caps = [0_u32; Layer::count()];
-        caps[Layer::Boundaries as usize] = 4096;
-        let value = layer_map(&caps, true);
+        caps[Layer::Buildings as usize] = 4096;
+        caps[Layer::Ocean as usize] = 2048;
+        let value = fanout_cap_map(&caps);
         let obj = value.as_object().expect("layer map must be an object");
-        assert_eq!(obj.len(), 1, "zero-valued layers must be omitted");
-        assert_eq!(value[Layer::Boundaries.name()], 4096);
+        assert_eq!(
+            obj.len(),
+            1,
+            "zero-valued and unsupported layers must be omitted"
+        );
+        assert_eq!(value[Layer::Buildings.name()], 4096);
+        assert!(value.get(Layer::Ocean.name()).is_none());
     }
 
     #[test]

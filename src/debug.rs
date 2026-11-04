@@ -62,9 +62,12 @@ macro_rules! counter_group {
             const fn new() -> Self {
                 Self { $($field: AtomicU64::new(0),)* }
             }
-            fn emit(&self) {
+            fn reset(&self) {
+                $(self.$field.store(0, Ordering::Relaxed);)*
+            }
+            fn drain(&self) {
                 $(
-                    let ns = self.$field.load(Ordering::Relaxed);
+                    let ns = self.$field.swap(0, Ordering::Relaxed);
                     if ns > 0 {
                         emit_counter_u64($name, ns);
                     }
@@ -128,8 +131,7 @@ counter_group!(BusyCounters {
     phase12_relation_tail => "phase12_relation_tail_ns",
 });
 
-/// Process-global stall accumulators. There is one tilegen run per process, so
-/// static zero-init is correct and nothing resets between runs.
+/// Process-global stall accumulators, drained by `emit_wait_counters`.
 pub static WAIT: WaitCounters = WaitCounters::new();
 
 /// Process-global serial-actor busy-time accumulators; same lifecycle as
@@ -138,18 +140,26 @@ pub static WAIT: WaitCounters = WaitCounters::new();
 /// decided by which counter it feeds.
 pub static BUSY: BusyCounters = BusyCounters::new();
 
-/// Process-global ring-cap partition tallies; same lifecycle as [`WAIT`].
+/// Process-global ring-cap partition tallies; drained with [`WAIT`].
 /// `partitions` counts normalized shapes that exceeded
 /// [`crate::mvt::MAX_FEATURE_RINGS`] and were partitioned, `pieces` the total
 /// pieces those shapes produced.
 pub static RING_CAP: RingCapCounters = RingCapCounters::new();
 
-/// Flush the accumulated stall, busy and ring-cap totals to the sidecar. Call
-/// once at end of run; a no-op per counter when nothing accumulated.
+/// Discard totals left by a previous failed run before starting the next one.
+/// Pipeline runs must be sequential because these accumulators are shared.
+pub(crate) fn reset_run_counters() {
+    WAIT.reset();
+    BUSY.reset();
+    RING_CAP.reset();
+}
+
+/// Drain accumulated stall, busy and ring-cap totals to the sidecar. Call once
+/// at end of run; a no-op per counter when nothing accumulated.
 pub fn emit_wait_counters() {
-    WAIT.emit();
-    BUSY.emit();
-    RING_CAP.emit();
+    WAIT.drain();
+    BUSY.drain();
+    RING_CAP.drain();
 }
 
 /// RAII guard timing one blocking interval. On drop it adds the elapsed

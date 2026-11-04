@@ -8,7 +8,7 @@ use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
 use crate::pmtiles_writer;
 use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter};
-use crate::way_index::WayIndex;
+use crate::way_index::WayIndexWriter;
 use crate::wire_format::encode_attrs_bytes;
 use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, MemberId, PrimitiveBlock, Way};
 
@@ -161,8 +161,6 @@ pub(super) const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
 /// ~1GB against this 4G net, while a hypothetical 500k-element blob (~270MB
 /// raw) is bounded at ~15 in flight.
 pub(super) const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 4 * 1024 * 1024 * 1024; // 4 GB
-/// Reject unsorted flat-index path above this input size unless explicitly overridden.
-pub(super) const MAX_FLAT_PBF_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
 /// Relation blocks buffer at most this many decompressed bytes in RAM; past
 /// the cap the tail re-reads relation blobs from the PBF instead (planet-scale
 /// inputs hold several GB of relation blocks - an input-scaled stock the
@@ -179,12 +177,12 @@ pub(super) enum NodeStoreMode {
 pub(super) fn unsorted_flat_guard_error(pbf_size: u64) -> PipelineError {
     PipelineError(format!(
         "PBF file is {:.1} GB but does not declare Sort.Type_then_ID.\n\
-         The flat node index would create a ~96 GB sparse file, causing severe\n\
-         performance degradation on machines with <128 GB RAM. Options:\n\
+         The flat node index uses node IDs as direct file offsets and may need\n\
+         many gigabytes even for a small extract. Choose an explicit option:\n\
          1. Use --force-sorted if the PBF is actually sorted (most Geofabrik extracts are)\n\
          2. Sort the PBF first with: pbfhogg sort input.pbf -o sorted.pbf\n\
          3. Alternative sorter: osmium sort input.pbf -o sorted.pbf\n\
-         4. Use a sorted PBF from Geofabrik or planet.openstreetmap.org",
+         4. For expert debugging, use --allow-unsafe-flat-index (may require very large sparse storage)",
         pbf_size as f64 / (1024.0 * 1024.0 * 1024.0),
     ))
 }
@@ -202,7 +200,7 @@ pub(super) fn select_node_store_mode(
     if header_sorted || force_sorted {
         return Ok(NodeStoreMode::Sorted);
     }
-    if pbf_size > MAX_FLAT_PBF_SIZE && !allow_unsafe_flat_index {
+    if !allow_unsafe_flat_index {
         return Err(unsorted_flat_guard_error(pbf_size));
     }
     Ok(NodeStoreMode::Flat {
@@ -285,7 +283,7 @@ pub(super) fn phase_read_and_process(
         NodeStoreMode::Flat { unsafe_override } => {
             if unsafe_override {
                 eprintln!(
-                    "  WARNING: unsafe flat index override enabled; bypassing unsorted-size and flat-index-size safety guardrails"
+                    "  WARNING: unsafe flat index override enabled; bypassing the unsorted-input and flat-index-size safety guardrails"
                 );
             }
             eprintln!("  PBF not sorted - using flat mmap node index");
@@ -297,7 +295,7 @@ pub(super) fn phase_read_and_process(
         }
     };
     // Option so we can move to drain thread during way phase and get back after.
-    let mut way_index: Option<WayIndex> = Some(WayIndex::create(idx_dir)?);
+    let mut way_index: Option<WayIndexWriter> = Some(WayIndexWriter::create(idx_dir)?);
 
     let mut node_count: u64 = 0;
     let mut rel_count: u64 = 0;
@@ -344,7 +342,7 @@ pub(super) fn phase_read_and_process(
     let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
     let mut drain_handle: Option<
-        std::thread::JoinHandle<(WayIndex, SortWriter, u64, FanoutStats)>,
+        std::thread::JoinHandle<(WayIndexWriter, SortWriter, u64, FanoutStats)>,
     > = None;
 
     // Buffer relation blocks - processed after all PBF blocks are consumed so that
@@ -864,9 +862,11 @@ pub(super) fn phase_read_and_process(
     }
 
     // Finalize way index after all way blocks are processed.
-    if let Some(ref mut wi) = way_index {
-        wi.finish_writing().expect("failed to finalize way index");
-    }
+    let way_index = way_index
+        .take()
+        .expect("way_index not returned from drain")
+        .finish_writing()
+        .expect("failed to finalize way index");
     let way_count = way_counter.load(Ordering::Relaxed);
     eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
     eprintln!("  Way index finalized, processing relations...");
@@ -897,9 +897,7 @@ pub(super) fn phase_read_and_process(
     let relation_tail_busy = wait_span(&BUSY.phase12_relation_tail);
     let relation_tail = process_relation_blocks(
         rel_blocks_source,
-        way_index
-            .as_ref()
-            .expect("way_index not returned from drain"),
+        &way_index,
         &missing_ref_stats,
         min_z,
         max_z,
@@ -910,7 +908,7 @@ pub(super) fn phase_read_and_process(
         &mut fanout_stats,
         &config.fanout_caps,
         config.polygon_simplify_factor,
-    );
+    )?;
     rel_count += relation_tail.rel_count;
     features_emitted += relation_tail.features;
     let max_rel_inflight_bytes = relation_tail.max_inflight_bytes;
@@ -1697,7 +1695,7 @@ impl WayAcc {
 #[hotpath::measure]
 pub(super) fn drain_way_task_result(
     result: WayTaskResult,
-    way_index: &mut WayIndex,
+    way_index: &mut WayIndexWriter,
     sort_writer: &mut SortWriter,
     fanout: &mut FanoutStats,
 ) -> u64 {

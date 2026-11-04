@@ -924,17 +924,3 @@ Reported by every hunt.
   constants have one owner (coordinate-spaces hunt).
 - A golden ocean digest pinned with `OCEAN_POLICY_VERSION` (ocean and encoding
   hunts).
-
-## STR-037 - No reference document names the coordinate spaces
-
-Nothing in `reference/` names the thirteen spaces the coordinate-spaces hunt
-catalogued (e7 degrees, float degrees, EPSG:3857 metres, normalized Mercator
-wrapped and unwrapped, base pixels, zoom pixels, tile-local units, tile
-address, Hilbert id, sort key, partition id, vertex-identity hash spaces,
-tolerance and area units) or the conversions between them; each is described
-only by comments at its use sites. Proposed: a short
-`reference/coordinates.md` holding that table, the buffer-population policy
-(only features reaching the tile proper populate a neighbour's buffer) and the
-rounding rule, giving future comments something durable to cite.
-
-Reported by the coordinate-spaces hunt.

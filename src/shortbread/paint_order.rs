@@ -1,6 +1,80 @@
 //! Deliberate within-layer paint ordering for layers where opaque features
 //! commonly overlap. Smaller ranks are emitted first and therefore painted below.
 
+/// A rank recovered by the verifier. The field is private so only this module
+/// can create a rank value.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PaintRank(u8);
+
+impl PaintRank {
+    /// Return the numeric rank used by producer-side sort records.
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+}
+
+/// The paint attributes decoded from one feature and its layer key table.
+#[derive(Clone, Copy)]
+pub struct RankAttributes<'a> {
+    /// The feature's `kind` string.
+    pub kind: &'a str,
+    /// Whether the feature is a link road.
+    pub link: bool,
+    /// Whether the feature is a tunnel.
+    pub tunnel: bool,
+    /// Whether the feature is a bridge.
+    pub bridge: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RankError {
+    /// The land feature has a kind not recognized by the land matcher.
+    UnknownLandKind,
+    /// The street feature has a kind not recognized by the street matcher.
+    UnknownStreetKind,
+}
+
+#[derive(Clone, Copy)]
+enum OrderedLayer {
+    Land,
+    Streets,
+}
+
+fn ordered_layer(layer: &str) -> Option<OrderedLayer> {
+    match layer {
+        "land" => Some(OrderedLayer::Land),
+        "streets" | "street_polygons" => Some(OrderedLayer::Streets),
+        _ => None,
+    }
+}
+
+/// Whether a layer has a deliberate within-layer paint order.
+pub fn has_paint_order(layer: &str) -> bool {
+    ordered_layer(layer).is_some()
+}
+
+/// Recover the same rank used by the producer from the decoded layer and
+/// feature attributes. Missing boolean attributes are false. Below their zoom
+/// floor they are absent for the whole layer, leaving class order unchanged.
+pub fn rank_for(layer: &str, attrs: &RankAttributes<'_>) -> Result<Option<PaintRank>, RankError> {
+    let rank = match ordered_layer(layer) {
+        Some(OrderedLayer::Land) => {
+            if !is_known_land_kind(attrs.kind) {
+                return Err(RankError::UnknownLandKind);
+            }
+            land_paint_rank(attrs.kind)
+        }
+        Some(OrderedLayer::Streets) => {
+            if !is_known_street_kind(attrs.kind) {
+                return Err(RankError::UnknownStreetKind);
+            }
+            street_paint_rank(attrs.kind, attrs.link, attrs.tunnel, attrs.bridge)
+        }
+        None => return Ok(None),
+    };
+    Ok(Some(PaintRank(rank)))
+}
+
 /// Whether `kind` is one of the values the land matcher can emit.
 pub fn is_known_land_kind(kind: &str) -> bool {
     matches!(

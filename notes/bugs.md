@@ -99,47 +99,6 @@ only the plan sees. `resolve_ocean_inputs` moves into the library as
 
 Reported by the pipeline, run-contract, ocean and coordinate-spaces hunts.
 
-## BUG-003 - Sort-chunk compression is a property of the chunks, but resume takes it from the current invocation
-
-`compress_sort_chunks` is in neither `provenance::producer_config` nor the
-checkpoint; `producer_config`'s doc classes everything it omits as
-"assemble-side", but chunk encoding is a property of bytes on disk. A
-`--skip-to sort|assemble` with a different `--compress-sort-chunks` passes the
-current config to `SortReader::from_dir` / `SortWriter::resume`.
-
-- Multi-partition chunk files carry a per-compression magic
-  (`ELVGSRT1`/`ELVGSRL1`/`ELVGSRS1`), so those fail at open - with a late,
-  opaque I/O error rather than a checkpoint refusal.
-- Single-partition files (`chunk_NNNN_z7pNNNNN.bin`, from
-  `write_chunk_records_presorted` / `write_payload_chunk_records_presorted`)
-  and whole files carry no header at all - a u32 count then records, possibly
-  inside an lz4/snappy frame. A resume whose chunks are all single-partition
-  is a garbage read (storage hunt).
-- A `--skip-to ocean` with a different value writes ocean chunks in a second
-  codec next to PBF chunks in the first; the magic check then fails at
-  sort-open after the whole ocean phase has run (run-contract hunt).
-
-Proposed: record chunk format in a typed checkpoint / chunk-store manifest,
-or make every chunk self-describing so the reader detects the codec and the
-flag becomes writer-only. See also the resume-compatibility entry in
-`notes/consolidations.md`.
-
-Reported by the pipeline, run-contract and storage hunts.
-
-## BUG-004 - A missing `sort_chunks.count` is a warning, so a crashed ocean phase resumes as complete
-
-`load_sort_chunk_count` prints "cannot verify chunk integrity" and continues.
-That file is the only evidence that the ocean phase finished before a
-`--skip-to sort|assemble`, and the checkpoint is written before the ocean
-phase starts, so an ocean phase that crashed midway leaves a valid-looking
-checkpoint. A resume then assembles a partial ocean and stamps a full contract
-on it. The count belongs inside the versioned checkpoint as a
-phase-completion record. The warning is also stderr-only, which brokkr does
-not read under `--bench`.
-
-Reported by the run-contract hunt (the pipeline hunt flags the same stderr-only
-warning).
-
 ## BUG-005 - Computed-ocean archives' contracts do not identify the shapefiles
 
 `OceanContract` carries `mode`, `low_zoom_source`, `runtime_simplification`
@@ -207,23 +166,6 @@ coordinate hunt suggests rewording the comment to not hard-code a figure
 rather than "fixing" it.
 
 Reported by the pipeline and coordinate-spaces hunts.
-
-## BUG-011 - `--fanout-cap` accepts layers it can never affect, and that changes the contract
-
-`main.rs` fills `fanout_caps` for every `Layer`, and `provenance` records every
-non-zero entry in both the comparability contract and `producer_config`. The
-only consumer is `pipeline/emit.rs::polygon_z_bottom_after_caps` on the OSM
-polygon path. Ocean, line and point layers never read it. So
-`--fanout-cap ocean=2048` or `--fanout-cap streets=10` changes no tile but
-yields a different contract (`corpus check` refuses with exit 2) and a
-different `producer_config` (resume refuses). The test
-`producer_config_covers_chunk_affecting_settings` uses
-`fanout_caps[Layer::Ocean]` as its example of a chunk-affecting setting.
-
-Proposed: the layer table marks which layers are fanout-cappable; the CLI
-rejects others and provenance records only those.
-
-Reported by the storage and layer-identity hunts.
 
 ## BUG-012 - `0` means three different things across the budget knobs; `--dedup-cap 0` silently gives the default
 
@@ -349,82 +291,9 @@ Reported by the ocean and layer-identity hunts.
 
 # Geometry
 
-## BUG-023 - The fanout cap counts tiles differently from the descent that emits them
-
-`emit.rs::tile_count_for_base_rect` plus its own `base_tile_index` is a
-verbatim copy of `pyramid::tile_range_for_base_rect` + `base_tile_index`,
-used to decide `z_bottom`. Neither accounts for the 128-unit tile buffer: a
-shape whose bbox ends within the buffer past a tile edge is emitted into the
-neighbour by the buffered descent but not counted by the cap, so the cap
-undercounts. Owner proposed: one `PyramidCell::cover(rect, span)` in
-pyramid.rs used by emit.rs (see the tile-cover entry in
-`notes/consolidations.md`).
-
-Reported by the polygon-engine hunt; the coordinate-spaces hunt flags the same
-copy.
-
-## BUG-026 - The unsorted flat node index panics on modern node ids
-
-Two independent guards answer "is the flat index acceptable for this input":
-`phase12::select_node_store_mode` refuses PBFs over 1 GB
-(`MAX_FLAT_PBF_SIZE`), and `NodeIndex::put` panics past 16 GB of index
-(`MAX_FLAT_INDEX_SIZE`, node id 2^31). Current OSM node ids are past 12
-billion, so any unsorted extract under 1 GB containing a recent node passes
-the first and panics in the second, mid-phase12. The first guard's message
-talks about a "~96 GB sparse file" while the second caps at 16 GB. A third
-site, `NodeIndex::create` vs `create_unbounded`, keys on the unsafe flag. The
-hunter's single honest rule: unsorted input requires
-`--allow-unsafe-flat-index` or `--force-sorted` - or delete the flat path.
-
-Also in node_index: `NodeIndex::put` silently ignores negative node ids while
-`SortedNodeStore::put` panics on them via the monotonicity assert (its first
-`last_node_id` is -1) - one input, two policies.
-
-Reported by the storage hunt.
-
-## BUG-027 - `WayIndex::get` before `finish_writing` returns `None`, counted as a missing reference
-
-`WayIndex` holds both phases in one struct with `Option` writers and mmaps;
-`put` panics after finish and `get` before finish silently returns `None`,
-which becomes a `missing_relation_way_refs` statistic rather than a
-programming error. `decode_way` / `read_varint` truncation paths likewise
-return partial geometry on corrupt bytes with no error channel. See the
-typestate entry in `notes/structural.md`.
-
-Reported by the storage hunt.
-
-## BUG-028 - Compressed chunk writers double peak memory
-
-`write_chunk_records_presorted` and `write_payload_chunk_records_presorted`
-pre-serialize the whole chunk into a second buffer before compressing; with
-`--compress-sort-chunks`, peak memory for a 1 GB chunk is about 2 GB and the
-budget does not account for it.
-
-Reported by the storage hunt.
-
 ---
 
 # Shortbread profile and layers
-
-## BUG-029 - Matchers that return early on key presence drop valid matches
-
-`transport.rs::public_transport_match` returns `None` as soon as a key is
-present with a non-listed value: `amenity=shelter + highway=bus_stop`,
-`aeroway=gate + railway=halt` and `amenity=<anything> + railway=station` all
-yield nothing. Shortbread's `include_when` (in `tests/fixtures/shortbread.yml`)
-is an OR over specific values, so these should match; shelter-plus-stop on
-one node is a real tagging pattern. The same early-return shape exists in
-`streets.rs::street_match` (`highway=<unknown> + railway=rail` gives no
-street), `street_polygon_match` (`area:aeroway=<other> + highway=pedestrian`)
-and `land.rs::sites_kind` (harmless today since amenity is last).
-`land_match` and `water_polygon_match` deliberately fall through instead
-(tests B7). So "does an unlisted value on key A block key B?" is answered per
-matcher, and the spec YAML has no multi-key cases for these layers.
-
-Proposed owner: one table-walk helper with the upstream semantics (first
-matching (key, value) row wins).
-
-Reported by the Shortbread hunt.
 
 ## BUG-032 - Relation geometry dispatch silently drops non-polygon matches
 
@@ -451,38 +320,6 @@ Reported by the layer-identity hunt.
 ---
 
 # Encoding and the sort record
-
-## BUG-034 - MVT and MLT post-process tiles differently
-
-`assemble.rs::encode_tile_batch_mvt` runs `merge_same_attr_geometries` on
-every layer except Ocean (spelled `li == Layer::Ocean as usize`) and
-`merge_connected_lines` on every layer at `z < 14`.
-`prepare_non_empty_layers` (MLT) merges every layer including Ocean and never
-runs `merge_connected_lines`. So MLT archives have merged ocean features and
-no line merging at all - the boundary-line duplicate/palindrome defects the
-merger and its clip-boundary rule exist to prevent are handled differently per
-format, and the boundary-line oracle's guarantees are MVT-only. Nothing tests
-the two paths against each other. The ocean exclusion has no recorded
-rationale (it dates to commit 7fdeb0a, "Cleanup March 8"); the `z < 14` gate
-is a bare literal.
-
-Proposed owner: one format-independent tile post-processing stage (merge
-eligibility, line-merge zoom range per layer, from the layer table) that both
-encoders consume. The MVT closure also duplicates the MLT helper's body.
-
-Reported by the encoding and layer-identity hunts.
-
-## BUG-037 - MVT interning saturates at u16::MAX and mis-tags features
-
-`intern_key`, `intern_value`, `intern_string_value` in `mvt/mod.rs` compute
-`len().min(u16::MAX)`; past 65,536 distinct entries in one layer of one tile,
-every further distinct value aliases index 65535 - silently wrong attributes.
-Confirmed 2026-11-04; a comment at the interning site now documents the alias.
-The fix (`u32` indices, or an error; `(KeyIdx, ValIdx)` newtypes for the tag
-pairs) must move the tag pools in `mvt/merge.rs` and `pipeline/assemble.rs`,
-the decoder pool in `wire_format.rs` and the MLT callers in `mlt.rs` together.
-
-Reported by the encoding hunt.
 
 ## BUG-038 - Per-tile `AssemblyScratch::new()` defeats the documented pooling
 
@@ -513,29 +350,6 @@ Reported by the encoding hunt.
 
 # Archive surface and inspection tools
 
-## BUG-045 - `verify` without `--unique-payloads` re-decodes identical bytes per addressed tile
-
-In non-unique mode it caches only the geometry outcome per run;
-`decode_mvt_layers`, `validate_ocean_rings` and the stats collector are
-recomputed for every addressed tile in a run. On ocean-heavy archives (runs of
-hundreds of thousands of full-tile fills) that dominates. Cache the whole
-per-(blob, class) outcome. (Performance.) The payload is also
-protobuf-parsed four times per tile.
-
-Reported by the archive-surface hunt.
-
-## BUG-048 - `xy_to_tile_id` accepts invalid tile coordinates
-
-`svg` and `diag` now range-check z, x and y before calling it, but the public
-`pmtiles_writer::xy_to_tile_id` itself is unchecked: it overflows
-`1u64 << z` for `z >= 64`, truncates `n as u32` at z = 32, and out-of-range
-x/y produce a valid-looking but wrong id (the high bits are reflected away in
-`hilbert_xy2d`). Any other caller still gets a wrong tile instead of a
-refusal. Natural home: the checked `TileId::from_zxy` of the tile-id
-consolidation in `notes/consolidations.md`.
-
-Reported by the coordinate-spaces hunt.
-
 ## BUG-050 - PMTiles header bounds and center are always the world
 
 `assemble.rs` writes `(-180, -85.05, 180, 85.05)` and center `(0, 0, 2)` for
@@ -557,16 +371,10 @@ Reported by the coordinate-spaces and archive-surface hunts.
 Facts the hunters found stated wrongly. Per the documentation rule, reword so
 the drifting specific is not hard-coded rather than updating it.
 
-- AGENTS.md cites `specs/` ("see specs/"); no such directory exists.
-- AGENTS.md's module list says `geometry.rs` uses Sutherland-Hodgman for OSM
-  layers; the float S-H polygon clip has no production caller.
-- AGENTS.md lists `marker_span` among the `src/debug.rs` emitters; it does not
-  exist.
 - `pyramid.rs` and `clip_shape_rect_fast` comments say the fallback is "the
   full i_overlay boolean"; it is the in-tree port.
-- `geometry_tests.rs` carries a "simplify-then-reconcile hypothesis" benchmark
-  citing `notes/simplify-then-reconcile-design.md` - durable code citing
-  notes/ for a retired design.
+- `AssemblyScratch`'s header still claims thread-local persistence, while its
+  constructor documents deliberate per-tile allocation (see BUG-038).
 - `node_index.rs` header cites "See CLAUDE.md" for madvise history and
   `flush_group` cites mimalloc fragmentation; mimalloc is gone and CLAUDE.md
   is not a durable citation target.
@@ -590,17 +398,6 @@ layer-identity hunts.
 
 # Found during the 2026-11-04 fix waves
 
-## BUG-052 - Relation assembly may drop triangular shells, and tests containment on wrapped coordinates
-
-`pipeline/relations.rs` has two `outer.len() < 4` guards. Whether they drop
-valid triangular outers depends on whether the length counts the closing
-duplicate vertex - unverified. Separately, antimeridian paths are unwrapped
-after `multipolygon::assemble`, so ring containment (now by containment depth
-and the smallest containing outer) is decided on wrapped coordinates, which is
-wrong for a relation spanning the antimeridian.
-
-Reported by the wave-1 multipolygon fixer.
-
 ## BUG-053 - A regular run hashes the ocean shapefiles before reading them
 
 The artifact builder now keys on hashes of the bytes it actually read. The
@@ -611,11 +408,40 @@ checkpoint and provenance record.
 
 Reported by the wave-1 ocean fixer.
 
-## BUG-054 - The public `gzip_decompress` helper is unbounded
+## BUG-055 - Shortbread profile disagrees with `tests/fixtures/shortbread.yml` in four places
 
-The PMTiles reader's own methods now decompress through a bounded helper, but
-the public `pmtiles_reader::gzip_decompress` (reached from assemble) still
-inflates without an output limit. Harmless on our own payloads; a hazard for
-any caller handed untrusted bytes.
+- Sites: the spec says `sports_center`, the code matches `sports_centre`.
+- Public transport: kind coalescing can select a value from an unrelated tag.
+- Polygon labels: the spec names `aeroway`, but the code shares the
+  `area:aeroway` polygon classifier.
+- Streets: the spec gives `narrow_gauge` the service-based z8; the code
+  applies it only to `rail`.
 
-Reported by the wave-1 reader fixer.
+Each needs reading against upstream Shortbread before deciding which side is
+wrong; some may be deliberate. Can change output.
+
+Reported by the wave-2 matcher fixer.
+
+## BUG-056 - The marker FIFO path is cached for the life of the process
+
+`debug.rs` caches the first `BROKKR_MARKER_FIFO` file descriptor in a
+process-wide `OnceLock`. A library caller running `elivagar::run` twice with a
+different FIFO path writes the second run's markers and counters into the
+first FIFO. Same shape as the process-global counters, which are now reset
+per run.
+
+Reported by the wave-2 telemetry fixer.
+
+## BUG-057 - Rect-clip intersections depend on edge direction
+
+The fast rect clipper in `geometry/pyramid.rs` (`crossing_point` /
+`clip_ring_half_plane_multi`) computes the integer crossing of an edge with a
+clip line from the edge's start vertex, so the same edge traversed in reverse
+can round to a different integer point: clipping `(0,10)-(2,9)` at `x = 1`
+gives different results each way. Two rings sharing an edge in opposite
+directions (a polygon and its neighbour, or a hole and an adjacent outer) can
+then disagree on the cut point. Fixing it moves ocean output: needs an
+`OCEAN_POLICY_VERSION` bump, a world artifact rebuild, and the geometry
+oracles.
+
+Reported by the wave-2 reviewer.

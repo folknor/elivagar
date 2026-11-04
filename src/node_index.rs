@@ -78,14 +78,19 @@ impl NodeIndex {
     }
 
     /// Write coordinates for a node. Grows the file if needed.
-    /// Negative node IDs are silently ignored (invalid in OSM data).
+    /// Negative node IDs are invalid and rejected, matching `SortedNodeStore`.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
-        if node_id < 0 {
-            return;
-        }
-        let offset = node_id as u64 * ENTRY_SIZE;
-        let needed = offset + ENTRY_SIZE;
+        assert!(
+            node_id >= 0,
+            "NodeIndex: node IDs must be non-negative, got {node_id}"
+        );
+        let offset = (node_id as u64)
+            .checked_mul(ENTRY_SIZE)
+            .expect("flat node index offset overflow");
+        let needed = offset
+            .checked_add(ENTRY_SIZE)
+            .expect("flat node index file size overflow");
 
         if let Some(max_file_size) = self.max_file_size
             && needed > max_file_size
@@ -102,10 +107,18 @@ impl NodeIndex {
 
         if needed > self.file_len {
             // Grow in 1 GB increments until large enough.
-            let mut new_len = self.file_len;
-            while new_len < needed {
-                new_len += GROW_INCREMENT;
+            let missing = needed - self.file_len;
+            let mut increments = missing / GROW_INCREMENT;
+            if !missing.is_multiple_of(GROW_INCREMENT) {
+                increments += 1;
             }
+            let growth = increments
+                .checked_mul(GROW_INCREMENT)
+                .expect("flat node index growth overflow");
+            let new_len = self
+                .file_len
+                .checked_add(growth)
+                .expect("flat node index file size overflow");
             // Panic: unrecoverable I/O - disk full or mmap failure means the run is dead.
             self.file
                 .set_len(new_len)
@@ -153,8 +166,8 @@ fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: i64) -> Option<(i32, i32)>
     if node_id < 0 {
         return None;
     }
-    let offset = node_id as u64 * ENTRY_SIZE;
-    let needed = offset + ENTRY_SIZE;
+    let offset = (node_id as u64).checked_mul(ENTRY_SIZE)?;
+    let needed = offset.checked_add(ENTRY_SIZE)?;
 
     if needed > file_len {
         return None;
@@ -838,12 +851,10 @@ impl SortedNodeStore {
 
         // An ELIVAGAR_NODE_STATS scan used to live here: it walked every group
         // blob to report chunk counts, compression ratio and blob bytes.
-        // Deleted 2026-07-15, and none of its three problems were about the
-        // env var. It profiled SortedNodeStore, which only the raw path builds
-        // - the record path is locations-on-ways, where the enriched PBF
-        // deletes the node store entirely. It printed to stderr, which brokkr
-        // discards under --bench, so its output was unreachable on the runs it
-        // charged. And it charged them inside phase12_ms. The always-on
+        // Deleted 2026-07-15. It profiled SortedNodeStore, which only the raw
+        // path builds - the record path is locations-on-ways, where the enriched PBF
+        // deletes the node store entirely. The scan also charged raw-path runs
+        // inside phase12_ms. The always-on
         // node_store_nodes / node_store_groups counters carry the ledger need
         // and go to the sidecar, where measurements actually live.
 

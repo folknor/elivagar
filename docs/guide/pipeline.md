@@ -12,8 +12,10 @@ Node coordinates come from one of three places. If the PBF declares
 locations-on-ways, coordinates are already embedded in the ways and no node
 index exists at all - this is the production shape. If the PBF is sorted by
 type then ID, nodes go into a compact in-RAM store with FOR compression.
-Otherwise there is a flat memory-mapped fallback, behind size guardrails,
-because that path is dangerous at scale.
+Without the sorted header flag, `--force-sorted` selects that compact store
+and checks monotonic node IDs. Otherwise the flat memory-mapped fallback
+requires `--allow-unsafe-flat-index` at every input size, because even small
+extracts can have large, sparse node IDs.
 
 This is the largest phase at every input size, and at planet scale it is about
 60% of wall time.
@@ -57,17 +59,25 @@ elivagar run input.osm.pbf -o out.pmtiles --skip-to assemble
 reuses PBF and ocean chunks, `--skip-to assemble` jumps straight to tile
 assembly.
 
-A resume validates the checkpoint's input identity, producer config and ocean
-source against the current run and refuses a mismatch, so `--skip-to` cannot
-silently blend two contracts into one archive. Earlier checkpoint versions
-recorded computed ocean as a bare string naming no source, which meant chunks
+A resume validates the v7 checkpoint's input identity, producer config, ocean
+source, and sort chunk codec against the current run and refuses a mismatch,
+so `--skip-to` cannot silently blend two contracts into one archive. Before v6,
+checkpoints recorded computed ocean as a bare string naming no source, so chunks
 built from one shapefile could be reused by a resume naming another while the
 archive's metadata described the second. Both arms now carry their producer's
 identity.
 
+The `--compress-sort-chunks` setting must match the run that wrote the chunks.
+Resuming at `sort` or `assemble` also requires a valid chunk-count completion
+record from the completed ocean pass and final chunk flush. If it is missing
+or invalid, resume at `ocean` or run a full tilegen. Checkpoints from v6 and
+earlier require a full tilegen. See the [CLI reference](../reference/cli) for
+the complete resume contract.
+
 ## Memory
 
-Every stock is bounded by construction rather than by input size:
+Working queues have explicit bounds. Indices remain proportional to the input
+and use the storage shown below:
 
 | Stock | Bound |
 |---|---|

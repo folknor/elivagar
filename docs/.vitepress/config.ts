@@ -67,6 +67,7 @@ export default defineConfig({
             { text: 'CLI', link: '/reference/cli' },
             { text: 'Corpus Gate', link: '/reference/corpus' },
             { text: 'Archive Metadata', link: '/reference/metadata' },
+            { text: 'Coordinate Spaces', link: '/reference/coordinates' },
             { text: 'Performance Record', link: '/reference/performance' },
           ],
         },

@@ -103,6 +103,14 @@ pub struct ZoomGeomStats {
     pub full_tile_features: u64,
 }
 
+struct CachedTileOutcome {
+    layer_names: Vec<String>,
+    structure_errors: Vec<String>,
+    geometry_error: Option<String>,
+    ocean_errors: Vec<String>,
+    geometry_stats: Option<ZoomGeomStats>,
+}
+
 #[derive(Default)]
 pub struct GeometryStats {
     pub per_zoom: std::collections::BTreeMap<u8, ZoomGeomStats>,
@@ -401,10 +409,10 @@ pub fn verify_opts_unique(
             }
         };
 
-        // Geometry validation of the shared blob depends only on its class.
-        // Default traversal replays that outcome for every addressed tile;
-        // unique mode selects one representative of each validation group.
-        let mut geometry_outcomes: FxHashMap<ValidationClass, Option<String>> =
+        // Cache the complete outcome per class within this run. Keeping the
+        // cache run-local avoids retaining layer strings and ring statistics
+        // for every distinct payload in a large archive.
+        let mut payload_outcomes: FxHashMap<ValidationClass, CachedTileOutcome> =
             FxHashMap::default();
         let validation_tiles: Box<dyn Iterator<Item = (u64, u8, u32, u32, ValidationClass)>> =
             if unique_payloads {
@@ -419,36 +427,29 @@ pub fn verify_opts_unique(
             if tile_errors.len() >= MAX_TILE_ERRORS {
                 break;
             }
-            // Decode MVT structure.
-            match pmtiles_reader::decode_mvt_layers(&decompressed) {
-                Ok(layers) => {
-                    if layers.is_empty() {
-                        tile_errors.push(format!("z{z}/{x}/{y}: no MVT layers"));
-                    }
-                    for layer in &layers {
-                        if layer.name.is_empty() {
-                            tile_errors.push(format!("z{z}/{x}/{y}: empty layer name"));
-                        }
-                        layers_observed.insert(layer.name.clone());
-                    }
-                }
-                Err(e) => {
-                    tile_errors.push(format!("z{z}/{x}/{y}: MVT decode failed: {e}"));
-                }
-            }
-            if tile_errors.len() < MAX_TILE_ERRORS {
-                let outcome = geometry_outcomes
+            let uncached_outcome =
+                unique_payloads.then(|| build_tile_outcome(&decompressed, class, geometry_stats));
+            let outcome: &CachedTileOutcome = if let Some(outcome) = uncached_outcome.as_ref() {
+                outcome
+            } else {
+                payload_outcomes
                     .entry(class)
-                    .or_insert_with(|| validate_mvt_geometry(&decompressed, class).err());
-                if let Some(msg) = outcome {
-                    tile_errors.push(format!("z{z}/{x}/{y}: {msg}"));
-                }
+                    .or_insert_with(|| build_tile_outcome(&decompressed, class, geometry_stats))
+            };
+
+            layers_observed.extend(outcome.layer_names.iter().cloned());
+            for problem in &outcome.structure_errors {
+                tile_errors.push(format!("z{z}/{x}/{y}: {problem}"));
+            }
+            if tile_errors.len() < MAX_TILE_ERRORS
+                && let Some(msg) = &outcome.geometry_error
+            {
+                tile_errors.push(format!("z{z}/{x}/{y}: {msg}"));
             }
 
             // Ocean polygon ring validity: check for self-intersections.
             if tile_errors.len() < MAX_TILE_ERRORS {
-                let ocean_problems = validate_ocean_rings(&decompressed);
-                for problem in ocean_problems {
+                for problem in &outcome.ocean_errors {
                     tile_errors.push(format!("z{z}/{x}/{y}: {problem}"));
                     if tile_errors.len() >= MAX_TILE_ERRORS {
                         break;
@@ -456,8 +457,8 @@ pub fn verify_opts_unique(
                 }
             }
 
-            if let Some(stats) = stats.as_mut() {
-                collect_ocean_geometry_stats(&decompressed, z, stats);
+            if let (Some(stats), Some(delta)) = (stats.as_mut(), outcome.geometry_stats.as_ref()) {
+                add_zoom_stats(stats.per_zoom.entry(z).or_default(), delta);
             }
 
             tiles_checked += 1;
@@ -478,6 +479,58 @@ pub fn verify_opts_unique(
         passed,
         geometry_stats: stats,
     })
+}
+
+fn build_tile_outcome(
+    data: &[u8],
+    class: ValidationClass,
+    collect_stats: bool,
+) -> CachedTileOutcome {
+    let mut layer_names = Vec::new();
+    let mut structure_errors = Vec::new();
+    match pmtiles_reader::decode_mvt_layers(data) {
+        Ok(layers) => {
+            if layers.is_empty() {
+                structure_errors.push("no MVT layers".to_string());
+            }
+            for layer in layers {
+                if layer.name.is_empty() {
+                    structure_errors.push("empty layer name".to_string());
+                }
+                layer_names.push(layer.name);
+            }
+        }
+        Err(error) => structure_errors.push(format!("MVT decode failed: {error}")),
+    }
+
+    let geometry_error = validate_mvt_geometry(data, class).err();
+    let ocean_errors = validate_ocean_rings(data);
+    let geometry_stats = if collect_stats {
+        let mut collected = GeometryStats::default();
+        collect_ocean_geometry_stats(data, class.z, &mut collected);
+        collected.per_zoom.remove(&class.z)
+    } else {
+        None
+    };
+
+    CachedTileOutcome {
+        layer_names,
+        structure_errors,
+        geometry_error,
+        ocean_errors,
+        geometry_stats,
+    }
+}
+
+fn add_zoom_stats(target: &mut ZoomGeomStats, delta: &ZoomGeomStats) {
+    target.features += delta.features;
+    target.rings += delta.rings;
+    target.encoded_bytes += delta.encoded_bytes;
+    target.consecutive_dups += delta.consecutive_dups;
+    target.full_tile_features += delta.full_tile_features;
+    target
+        .ring_vertex_counts
+        .extend_from_slice(&delta.ring_vertex_counts);
 }
 
 /// Decode the ocean layer of one tile and accumulate geometry statistics.
@@ -672,7 +725,7 @@ fn validate_mvt_layer_geometry(layer: &[u8], class: ValidationClass) -> Result<(
         validate_mvt_feature_geometry(feature, class)
             .map_err(|e| format!("[{layer_name}] feat {feat_idx}: {e}"))?;
     }
-    validate_paint_order(layer_name, &features, &keys, &values, class.z)
+    validate_paint_order(layer_name, &features, &keys, &values)
         .map_err(|e| format!("[{layer_name}] {e}"))?;
     Ok(())
 }
@@ -729,10 +782,8 @@ fn validate_paint_order<'a>(
     features: &[&'a [u8]],
     keys: &[&'a str],
     values: &[&'a [u8]],
-    z: u8,
 ) -> Result<(), String> {
-    let target = matches!(layer, "land" | "streets" | "street_polygons");
-    if !target {
+    if !paint_order::has_paint_order(layer) {
         return Ok(());
     }
     let mut previous = None;
@@ -742,28 +793,31 @@ fn validate_paint_order<'a>(
         let kind = attrs
             .kind
             .ok_or_else(|| format!("feat {feature_idx}: missing kind attribute"))?;
-        let rank = match layer {
-            "land" => {
-                if !paint_order::is_known_land_kind(kind) {
-                    return Err(format!("feat {feature_idx}: unknown land kind {kind:?}"));
-                }
-                paint_order::land_paint_rank(kind)
+        let rank = match paint_order::rank_for(
+            layer,
+            &paint_order::RankAttributes {
+                kind,
+                link: attrs.link,
+                tunnel: attrs.tunnel,
+                bridge: attrs.bridge,
+            },
+        ) {
+            Ok(Some(rank)) => rank,
+            Ok(None) => unreachable!("paint order policy changed during validation"),
+            Err(paint_order::RankError::UnknownLandKind) => {
+                return Err(format!("feat {feature_idx}: unknown land kind {kind:?}"));
             }
-            "streets" if z < 11 => paint_order::street_class_rank(kind)
-                .ok_or_else(|| format!("feat {feature_idx}: unknown street kind {kind:?}"))?,
-            "streets" | "street_polygons" => {
-                if !paint_order::is_known_street_kind(kind) {
-                    return Err(format!("feat {feature_idx}: unknown street kind {kind:?}"));
-                }
-                paint_order::street_paint_rank(kind, attrs.link, attrs.tunnel, attrs.bridge)
+            Err(paint_order::RankError::UnknownStreetKind) => {
+                return Err(format!("feat {feature_idx}: unknown street kind {kind:?}"));
             }
-            _ => unreachable!(),
         };
         if let Some(previous) = previous
             && rank < previous
         {
             return Err(format!(
-                "feat {feature_idx}: paint rank {rank} follows {previous}"
+                "feat {feature_idx}: paint rank {} follows {}",
+                rank.value(),
+                previous.value()
             ));
         }
         previous = Some(rank);
@@ -1566,6 +1620,34 @@ mod tests {
         let err = validate_mvt_geometry(&tile, ValidationClass::for_tile(11, 1))
             .expect_err("forest before residential must fail paint order validation");
         assert!(err.contains("paint rank 0 follows 5"));
+    }
+
+    #[test]
+    fn order_check_uses_street_details_without_every_boolean_key() {
+        for name in ["streets", "street_polygons"] {
+            for bridge_first in [false, true] {
+                let mut layer = LayerBuilder::new(name);
+                let kind_key = layer.intern_key("kind");
+                let kind = layer.intern_string_value("service");
+                let bridge_key = layer.intern_key("bridge");
+                let yes = layer.intern_value(Value::Bool(true));
+                for bridge in [bridge_first, !bridge_first] {
+                    let mut tags = vec![(kind_key, kind)];
+                    if bridge {
+                        tags.push((bridge_key, yes));
+                    }
+                    layer.add_feature(Feature {
+                        id: None,
+                        geom_type: GeomType::Point,
+                        geometry: vec![9, 0, 0],
+                        tags,
+                    });
+                }
+                let tile = encode_tile(&[&layer]);
+                let result = validate_mvt_geometry(&tile, ValidationClass::for_tile(14, 1));
+                assert_eq!(result.is_err(), bridge_first, "{name}: {result:?}");
+            }
+        }
     }
 
     #[test]

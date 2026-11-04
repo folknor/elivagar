@@ -70,8 +70,8 @@ invocation - which is the failure this flag exists to prevent.
 
 The two shapefiles are the OSM standard datasets from
 osmdata.openstreetmap.de - same coastlines, same projection (EPSG:3857),
-differing in vertex density. At z0-z7 the whole world is at most 256x128
-pixels, so full-resolution coastline vertices are overwhelmingly sub-pixel:
+differing in vertex density. At low zooms, full-resolution coastline vertices
+are overwhelmingly sub-pixel:
 the split exists to avoid paying for detail that cannot be seen. It is an
 optimization, not a correctness requirement, and `z0-z14:<full>` alone is a
 legal and slower way to say the same thing - internally it still runs as
@@ -107,9 +107,9 @@ Emission now bisects such a shape's clip rect until every piece fits under the
 cap; the halves share their integer cut coordinate, so the pieces abut exactly
 under nonzero fill. The sidecar carries `ring_cap_partitions` and
 `ring_cap_pieces`; the gate is `scripts/validate/ring-cap-census.mjs` at zero
-over the cap. Note that an artifact-active extract reads its interior tiles
-from the artifact, so those two counters read zero there even when the archive
-carries partitioned geometry - the partition ran during `ocean-build`.
+over the cap. An artifact-active extract reads its interior tiles from the
+artifact, so these counters cover only its boundary-band computation.
+Partitioning already performed during `ocean-build` is not counted again.
 
 **The `.pmtiles` artifact is a cache over the shapefiles, not a substitute for
 them**, and is rejected on its own. Two things force this. An extract still
@@ -148,19 +148,30 @@ Example, the production shape:
 | `--compress-sort-chunks <lz4\|snappy>` | compress sort chunks: less disk I/O, more CPU. Wanted at planet scale, where scratch exceeds RAM |
 | `-j`, `--threads <N>` | rayon pool and pbfhogg decode pool. Default: logical CPUs |
 
-A resume validates the checkpoint's input identity, producer config, and ocean
-source against the current run and refuses a mismatch, so `--skip-to` cannot
-silently blend two contracts into one archive.
+A resume validates the checkpoint's input identity, producer config, ocean
+source, and sort chunk codec against the current run and refuses a mismatch,
+so `--skip-to` cannot silently blend two contracts into one archive. The
+checkpoint format is v7. The `--compress-sort-chunks` setting must match the
+run that wrote the chunks, including leaving compression unset on both runs.
+Checkpoints from v6 and earlier are refused; re-run a full tilegen.
 
-The ocean half of that is checkpoint v6 (2026-07-14). v5 recorded computed
-ocean as the bare string `computed`, naming no source, so chunks built from one
+Resuming at `sort` or `assemble` also requires a valid chunk-count completion
+record (`sort_chunks.count`), written after the ocean phase and final chunk
+flush. A missing, unreadable, or invalid record refuses the resume because
+the chunk set may be partial. Resume at `ocean` or run a full tilegen to
+regenerate it. Resuming at `ocean` clears any previous completion record
+before changing the chunk set, so a failed ocean pass cannot look complete.
+
+The ocean source identity was added in checkpoint v6 (2026-07-14). v5 recorded
+computed ocean as the bare string `computed`, naming no source, so chunks built from one
 shapefile could be reused by a resume naming another while the archive's
 metadata described the second - the artifact arm had carried its key since it
 was introduced and the computed arm simply had not. Both arms now carry their
-producer's identity: shapefile content hashes plus the zoom span, and
-deliberately *not* the compression level, which is assemble-side and may
-legitimately differ across a resume. v5 and earlier checkpoints are refused;
-re-run a full tilegen.
+producer's identity: shapefile content hashes plus the zoom span.
+Computed-ocean identity excludes the compression level, which is assemble-side
+and may differ across a resume. An artifact-backed resume must still match the
+artifact's compression level and key. Tile compression is independent of the
+sort chunk codec, which must match as described above.
 
 ### Node and way handling
 
@@ -173,6 +184,14 @@ re-run a full tilegen.
 `--locations-on-ways` reads a PBF header, not the filesystem, and is the one
 piece of detection that survives: it is a property of the input file, which is
 itself named explicitly and hashed into provenance.
+
+When a node store is needed, input without the `Sort.Type_then_ID` header
+flag is refused at every file size unless `--force-sorted` or
+`--allow-unsafe-flat-index` is explicit. `--force-sorted` selects the compact
+store and checks monotonic node IDs; `--allow-unsafe-flat-index` selects the
+flat index and bypasses its size guardrails. A small PBF can still contain
+large, sparse node IDs. Inline way coordinates (`--locations-on-ways`,
+including header detection) avoid the node store and this guard entirely.
 
 ### Memory budgets
 
@@ -190,9 +209,18 @@ the platform byte-size integer are rejected.
 
 | flag | meaning |
 |---|---|
-| `--fanout-cap-default <N>` | default fanout cap for all polygon layers. 0 or omitted = uncapped |
-| `--fanout-cap <layer=N,...>` | per-layer fanout caps; takes precedence over the default. Features whose bbox tile count exceeds the cap are skipped at that zoom |
+| `--fanout-cap-default <N>` | default fanout cap for OSM polygon layers that support caps. 0 or omitted = uncapped |
+| `--fanout-cap <layer=N,...>` | per-layer fanout caps; takes precedence over the default. Features whose buffered bbox tile count exceeds the cap are skipped at that zoom. Layers that do not support caps are rejected |
 | `--polygon-simplify-factor <F>` | simplification multiplier for polygon layers. Default 1.0 (same as lines). Higher simplifies harder, cutting sort volume; fills tolerate this better than stroked lines do |
+
+Per-layer fanout caps are supported by `water_polygons`, `dam_polygons`,
+`pier_polygons`, `land`, `sites`, `buildings`, `street_polygons`, and
+`bridges`. The default applies to these layers only. For `land`, the cap
+affects polygon features; line features in the same layer are unaffected.
+The tile count includes the 128-unit MVT buffer (8 rendered pixels) on each
+tile edge. It is a conservative upper bound from the bounding box, including
+possible boundary-only contacts, rather than a count of nonempty clipped
+polygons. Ocean does not support caps and is unaffected by the default.
 
 ## `elivagar ocean-build --ocean <SPEC> -o <OUTPUT>`
 

@@ -136,7 +136,7 @@ the contract comparison is defined over named fields, not the whole object.
       "elivagar":       { "commit": "ec5bd11...", "dirty": true },
       "pbfhogg_reader": { "version": "0.5.0" },
       "cargo_lock_xxh3_128": "f850fa82608190a904500b37810e3def",
-      "cargo_features": ["default", "mimalloc-alloc"]
+      "cargo_features": ["default"]
     },
 
     "execution": { "resumed_from": null }
@@ -167,8 +167,8 @@ artifact-absent one is a contract mismatch, not a regression.
 
 `config.ocean.low_zoom_source` is independent of `runtime_simplification`.
 Source selection (a separate simplified shapefile serving z0-7) and runtime
-simplification (`--no-ocean-simplify`) are different things; a single boolean
-conflates them.
+simplification are different things; a single boolean conflates them.
+Runtime simplification is always enabled; the flag that disabled it was removed.
 
 `effective.shared_node_pins` is the largest of the three effective paths in
 blast radius. Pin scope changes which vertices survive simplification, so
@@ -195,40 +195,56 @@ commit/dirty pair, and there are none.
 ## Checkpoint provenance
 
 `--skip-to` reuses sort chunks from a previous run, and nothing in a later
-invocation reveals what produced them. The v5 checkpoint (JSON) records the
-input hash, the producer config, and the effective paths, and a resume
-validates the first two.
+invocation reveals what produced them. The v7 checkpoint (JSON) records the
+input hash, producer config, ocean source identity, effective paths, and sort
+chunk codec. A resume validates all except the effective paths, which it
+inherits.
 
 **Input hash.** A mismatch is a hard error: resuming would mix two inputs into
 one archive and stamp it with provenance describing only the second.
 
 **Producer config.** The subset of settings that decide what phase12 writes
-into chunks - zoom range, fanout caps, `polygon_simplify_factor`.
+into chunks - zoom range, fanout caps on supported OSM polygon layers,
+`polygon_simplify_factor`. Unsupported layers' caps are ignored by the library
+and omitted from the contract; the CLI rejects them.
 Chunks cannot be reinterpreted under different values,
 so a mismatch is a hard error naming the field. It deliberately excludes the
 assemble-side settings (tile format, tile compression, compression level,
 memory budgets), which are applied after the chunks are read and may
-legitimately change on a resume; including them would reject safe resumes.
+legitimately change on a resume. An artifact-backed run still has to satisfy
+the named artifact's tile format, compression and compression-level contract.
 
 **Effective paths.** A matching resume inherits them rather than re-deriving,
 because re-derivation would describe what *this* invocation would have done,
 not what produced the chunks on disk.
 
-v4 and earlier are rejected; re-run a full tilegen. v4 also used a
+**Ocean source.** Computed ocean and artifact-backed ocean both carry their
+source identity. A mismatch is a hard error. v6 added computed ocean source
+hashes and zoom spans; v5 stored only the word `computed` for that arm.
+
+**Sort chunk codec.** v7 records the chunk storage codec separately from
+producer config. The `--compress-sort-chunks` setting must match, including
+uncompressed chunks. It is a decoding requirement, independent of tile
+compression applied later during assembly.
+
+Resuming at `sort` or `assemble` also requires the separate chunk-count
+completion record, written after the ocean pass and final chunk flush. A
+missing, unreadable, or invalid record refuses the resume. Resuming at `ocean`
+clears the previous record before modifying chunks and writes a fresh one
+only after completion.
+
+v6 and earlier are rejected; re-run a full tilegen. v4 and earlier used a
 whitespace-positional encoding where each added field shifted an index and a
-miscount was a silent misparse - which is why v5 is JSON.
+miscount was a silent misparse; JSON began at v5.
 
 ## Where the input hash is taken
 
 Identifying the input means reading all of it, so placement is a performance
-decision, not a detail. A full run hashes **after phase12**, when the PBF is
-warm in page cache from the read that just finished. A resume hashes up front
-because it must validate before proceeding, and can afford to because phase12
-never runs and so never reads the file again.
-
-Hashing before phase12 on a full run would put a cold serial pass in front of
-the reader and, at planet scale, cost a second whole-file read plus the page
-cache it evicts.
+decision, not a detail. A full run starts a background hash before phase12
+and joins it after phase12, overlapping the hash with the PBF reader. Waiting
+until phase12 ends to begin hashing would reread file pages that may already
+have been evicted at large input sizes. A resume hashes up front because it
+must validate before proceeding and skips the phase12 read entirely.
 
 ## Freshness, and why absent beats stale
 
@@ -238,17 +254,11 @@ is therefore either established or emitted as `unknown`, and nothing is
 guessed. Where the input cannot be hashed, the entire block is omitted rather
 than written partially.
 
-`build.rs` is where this is hardest. Cargo reruns a build script only when a
-declared input changes, but relinks the crate whenever a path dependency's
-sources change - so without care, editing pbfhogg would rebuild elivagar while
-the script kept reporting the previous commit and dirty state. The
-`rerun-if-changed` declarations cover both what git records (HEAD, and the ref
-it points into) and what git does not (uncommitted edits, via the source trees
-themselves).
-
-**This mechanism is not verified.** Confirming it means editing pbfhogg to
-observe whether the script reruns. Treat a `build` block as strong evidence,
-not proof, until it is.
+`build.rs` declares the source tree, manifest, lockfile, HEAD and the current
+branch ref as inputs. Registry dependency identities come from the lockfile.
+The script retains tracking support for path dependencies, but none are
+currently configured. Its rerun declarations are intended to keep build
+provenance fresh; they are not independent proof of the code that ran.
 
 `dirty` uses brokkr's definition, not git's: `*.md` and `.brokkr/results.db`
 are ignored. A dirty `results.db` is this repo's expected state and markdown

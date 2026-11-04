@@ -11,7 +11,7 @@ use std::path::Path;
 use memmap2::{Mmap, MmapOptions};
 
 use flate2::read::GzDecoder;
-use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
+use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT, encode_varint};
 
 // ---------------------------------------------------------------------------
 // Binary helpers
@@ -38,10 +38,42 @@ pub fn read_i32_le(buf: &[u8], off: usize) -> i32 {
 // Gzip helper
 // ---------------------------------------------------------------------------
 
+// A DEFLATE length/distance pair emits at most 258 bytes and consumes at
+// least two bits, giving a conservative maximum of 1032 output bytes per
+// compressed input byte. Gzip framing only makes the ratio smaller.
+const GZIP_MAX_EXPANSION_PER_INPUT_BYTE: usize = 1032;
+
+/// Decompress one gzip member within the maximum expansion permitted by DEFLATE.
 pub fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
-    let mut decoder = GzDecoder::new(data);
+    gzip_decompress_section(data, "gzip payload")
+}
+
+/// Decompress one gzip member, refusing output larger than `max_output`.
+///
+/// `gzip_decompress` uses the maximum expansion bound of the DEFLATE format.
+/// Call this when the caller knows a smaller domain-specific output limit.
+pub fn gzip_decompress_bounded(data: &[u8], max_output: usize) -> io::Result<Vec<u8>> {
+    gzip_decompress_limited(data, max_output, "gzip payload")
+}
+
+fn gzip_decompress_limited(data: &[u8], max_output: usize, label: &str) -> io::Result<Vec<u8>> {
+    let decoder = GzDecoder::new(data);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out)?;
+    // Read one byte beyond the limit so oversized output is distinguishable
+    // from output that ends exactly at the limit.
+    let probe_limit = u64::try_from(max_output)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "gzip output limit too large"))?
+        .saturating_add(1);
+    decoder
+        .take(probe_limit)
+        .read_to_end(&mut out)
+        .map_err(|e| io::Error::new(e.kind(), format!("{label}: {e}")))?;
+    if out.len() > max_output {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("decompressed {label} exceeds output limit"),
+        ));
+    }
     Ok(out)
 }
 
@@ -85,29 +117,10 @@ fn read_section(file: &mut File, offset: u64, length: u64, label: &str) -> io::R
 }
 
 fn gzip_decompress_section(data: &[u8], label: &str) -> io::Result<Vec<u8>> {
-    // RFC 1951: a length/distance pair emits at most 258 bytes and consumes
-    // at least two bits (one Huffman bit per symbol). Literals and stored
-    // blocks expand less, so 258 * 8 / 2 = 1032 bytes per input byte bounds
-    // every valid gzip member. Unlike a fixed decompressed-size cap, this
-    // admits large writer leaves and metadata larger than the compressed file.
-    // Saturation only limits the bound to the representable address space.
-    let max_output = data.len().saturating_mul(1032);
-    let probe_limit = u64::try_from(max_output)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let decoder = GzDecoder::new(data);
-    let mut output = Vec::new();
-    decoder
-        .take(probe_limit)
-        .read_to_end(&mut output)
-        .map_err(|e| io::Error::new(e.kind(), format!("{label}: {e}")))?;
-    if output.len() > max_output {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("decompressed {label} exceeds gzip expansion bound"),
-        ));
-    }
-    Ok(output)
+    // Bound output by the DEFLATE maximum expansion ratio. This avoids a
+    // dataset-size policy while allowing large directory leaves and metadata.
+    let max_output = data.len().saturating_mul(GZIP_MAX_EXPANSION_PER_INPUT_BYTE);
+    gzip_decompress_limited(data, max_output, label)
 }
 
 fn unsupported_internal_compression(compression: u8) -> io::Error {
@@ -134,6 +147,8 @@ pub struct TileEntry {
     pub length: u32,
 }
 
+/// One PMTiles v3 directory entry. A zero `run_length` denotes a leaf pointer;
+/// nonzero values are tile runs. The reader and writer share this record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RawDirEntry {
     pub tile_id: u64,
@@ -495,6 +510,69 @@ impl PmtilesReader {
 // Directory decoding
 // ---------------------------------------------------------------------------
 
+/// Encode directory entries in PMTiles v3 columnar varint format.
+///
+/// Columns are tile ID deltas, run lengths, lengths, then offsets. Offset
+/// zero means contiguous with the previous payload; other values store
+/// `offset + 1` so the first entry can represent offset zero.
+#[hotpath::measure]
+pub(crate) fn encode_directory(entries: &[RawDirEntry]) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+
+    let count = u64::try_from(entries.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many directory entries"))?;
+    encode_varint(&mut buf, count);
+
+    let mut prev_tile_id = 0_u64;
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 && entry.tile_id <= prev_tile_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory tile IDs must be strictly increasing",
+            ));
+        }
+        encode_varint(&mut buf, entry.tile_id - prev_tile_id);
+        prev_tile_id = entry.tile_id;
+    }
+
+    for entry in entries {
+        encode_varint(&mut buf, u64::from(entry.run_length));
+    }
+
+    for entry in entries {
+        encode_varint(&mut buf, u64::from(entry.length));
+    }
+
+    // Zero is reserved for contiguity, so an explicit offset stores offset+1.
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            let previous = &entries[index - 1];
+            let contiguous_offset = previous.offset.checked_add(u64::from(previous.length));
+            if contiguous_offset == Some(entry.offset) {
+                encode_varint(&mut buf, 0);
+            } else {
+                let encoded_offset = entry.offset.checked_add(1).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "directory offset cannot be represented",
+                    )
+                })?;
+                encode_varint(&mut buf, encoded_offset);
+            }
+        } else {
+            let encoded_offset = entry.offset.checked_add(1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "directory offset cannot be represented",
+                )
+            })?;
+            encode_varint(&mut buf, encoded_offset);
+        }
+    }
+
+    Ok(buf)
+}
+
 /// Sorted runs must not overlap and their ends must not overflow, or
 /// `find_entry`'s predecessor-only probe would silently miss covered tiles.
 /// A malformed archive becomes a container error instead.
@@ -553,6 +631,12 @@ pub fn decode_directory(data: &[u8]) -> io::Result<Vec<RawDirEntry>> {
         let delta = c
             .read_varint()
             .map_err(|e| io::Error::other(format!("tile_id delta: {e}")))?;
+        if !tile_ids.is_empty() && delta == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "tile_id delta must be positive after first entry",
+            ));
+        }
         prev = prev
             .checked_add(delta)
             .ok_or_else(|| io::Error::other("tile_id delta: cumulative overflow"))?;
@@ -561,19 +645,21 @@ pub fn decode_directory(data: &[u8]) -> io::Result<Vec<RawDirEntry>> {
 
     let mut run_lengths = Vec::with_capacity(count);
     for _ in 0..count {
-        #[allow(clippy::cast_possible_truncation)]
-        let v = c
+        let value = c
             .read_varint()
-            .map_err(|e| io::Error::other(format!("run_length: {e}")))? as u32;
+            .map_err(|e| io::Error::other(format!("run_length: {e}")))?;
+        let v = u32::try_from(value)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "run_length exceeds u32"))?;
         run_lengths.push(v);
     }
 
     let mut lengths = Vec::with_capacity(count);
     for _ in 0..count {
-        #[allow(clippy::cast_possible_truncation)]
-        let v = c
+        let value = c
             .read_varint()
-            .map_err(|e| io::Error::other(format!("length: {e}")))? as u32;
+            .map_err(|e| io::Error::other(format!("length: {e}")))?;
+        let v = u32::try_from(value)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "length exceeds u32"))?;
         lengths.push(v);
     }
 
@@ -688,8 +774,37 @@ fn decode_mvt_layer(data: &[u8]) -> MvtLayer {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{RawDirEntry, decode_directory, find_entry};
+    use super::{
+        RawDirEntry, decode_directory, find_entry, gzip_decompress, gzip_decompress_bounded,
+    };
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use protohoggr::encode_varint;
+    use std::io::Write;
+
+    #[test]
+    fn gzip_decompression_enforces_output_limit() {
+        let payload = b"bounded gzip payload";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(payload).expect("write gzip payload");
+        let compressed = encoder.finish().expect("finish gzip payload");
+
+        assert_eq!(
+            gzip_decompress(&compressed)
+                .expect("bounded default")
+                .as_slice(),
+            payload
+        );
+        assert_eq!(
+            gzip_decompress_bounded(&compressed, payload.len())
+                .expect("exact limit")
+                .as_slice(),
+            payload
+        );
+        let error = gzip_decompress_bounded(&compressed, payload.len() - 1)
+            .expect_err("output above the requested limit must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     fn encode_directory_raw(
         tile_deltas: &[u64],

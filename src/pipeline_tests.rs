@@ -720,15 +720,14 @@ fn flat_index_guard_sorted_large_allowed() {
 }
 
 #[test]
-fn flat_index_guard_unsorted_small_allowed() {
-    let mode = select_node_store_mode(false, false, false, 512 * 1024 * 1024, false)
-        .expect("small unsorted input should be allowed");
-    assert_eq!(
-        mode,
-        NodeStoreMode::Flat {
-            unsafe_override: false
-        }
-    );
+fn flat_index_guard_unsorted_small_requires_explicit_override() {
+    let err = select_node_store_mode(false, false, false, 512 * 1024 * 1024, false)
+        .expect_err("even small unsorted input requires an explicit override");
+    assert!(err.to_string().contains("--allow-unsafe-flat-index"));
+
+    let mode = select_node_store_mode(false, false, true, 512 * 1024 * 1024, false)
+        .expect("force-sorted selects the compact store without the header flag");
+    assert_eq!(mode, NodeStoreMode::Sorted);
 }
 
 #[test]
@@ -3337,6 +3336,29 @@ fn checkpoint_roundtrip() {
     assert_eq!(provenance, checkpoint_provenance());
 }
 
+#[test]
+fn checkpoint_preserves_sort_chunk_compression() {
+    let bounds = geometry::MercBbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 1.0,
+        max_y: 1.0,
+    };
+    for compression in [
+        sort::ChunkCompression::None,
+        sort::ChunkCompression::Lz4,
+        sort::ChunkCompression::Snappy,
+    ] {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut provenance = checkpoint_provenance();
+        provenance.sort_chunk_compression = compression;
+        save_checkpoint(dir.path(), &bounds, 1, &computed_ocean(), &provenance)
+            .expect("save checkpoint");
+        let (_, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
+        assert_eq!(loaded.sort_chunk_compression, compression);
+    }
+}
+
 /// A computed-ocean mode with a synthetic source key.
 ///
 /// Built by hand rather than through `OceanSourceKey::from_inputs`, which
@@ -3365,6 +3387,7 @@ fn checkpoint_provenance() -> crate::pipeline::CheckpointProvenance {
             way_members: "injected_v1",
             shared_node_pins: "injected_v1",
         },
+        sort_chunk_compression: sort::ChunkCompression::None,
     }
 }
 
@@ -3461,7 +3484,7 @@ fn producer_config_covers_chunk_affecting_settings() {
     );
 
     let mut capped = minimal_config();
-    capped.fanout_caps[Layer::Ocean as usize] = 2048;
+    capped.fanout_caps[Layer::Buildings as usize] = 2048;
     assert_ne!(
         crate::provenance::producer_config(&base),
         crate::provenance::producer_config(&capped)
@@ -3520,6 +3543,7 @@ fn checkpoint_preserves_effective_paths() {
             input_xxh3_128: "aa5bb8650000000000000000deadbeef".to_string(),
             producer_config: crate::provenance::producer_config(&minimal_config()),
             effective: raw_paths,
+            sort_chunk_compression: sort::ChunkCompression::None,
         },
     )
     .expect("save checkpoint");
@@ -3614,17 +3638,32 @@ fn computed_ocean_source_key_roundtrips_without_a_simplified_pass() {
 #[test]
 fn sort_chunk_count_roundtrip() {
     let dir = tempfile::tempdir().expect("create tempdir");
-    save_sort_chunk_count(dir.path(), Some(17)).unwrap();
-    let loaded = load_sort_chunk_count(dir.path());
-    assert_eq!(loaded, Some(17));
+    save_sort_chunk_count(dir.path(), 17).unwrap();
+    let loaded = load_sort_chunk_count(dir.path()).unwrap();
+    assert_eq!(loaded, 17);
 }
 
 #[test]
-fn sort_chunk_count_none_no_file() {
+fn missing_sort_chunk_count_refuses_resume() {
     let dir = tempfile::tempdir().expect("create tempdir");
-    save_sort_chunk_count(dir.path(), None).unwrap();
-    let loaded = load_sort_chunk_count(dir.path());
-    assert_eq!(loaded, None);
+    let error = load_sort_chunk_count(dir.path()).unwrap_err();
+    assert!(error.to_string().contains("may not have completed"));
+}
+
+#[test]
+fn malformed_sort_chunk_count_refuses_resume() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    std::fs::write(dir.path().join(SORT_CHECKPOINT_FILE), "not-a-count").unwrap();
+    let error = load_sort_chunk_count(dir.path()).unwrap_err();
+    assert!(error.to_string().contains("is invalid"));
+}
+
+#[test]
+fn restarting_ocean_clears_previous_sort_completion_record() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    save_sort_chunk_count(dir.path(), 17).unwrap();
+    clear_sort_chunk_count(dir.path()).unwrap();
+    assert!(load_sort_chunk_count(dir.path()).is_err());
 }
 
 #[test]

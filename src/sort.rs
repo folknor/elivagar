@@ -120,6 +120,100 @@ pub enum ChunkCompression {
     Snappy,
 }
 
+/// Maximum additional serialization memory per active compressed chunk write.
+const COMPRESSED_CHUNK_BUFFER_SIZE: usize = 1 << 20;
+
+/// Coalesces the small record fields into bounded writes before they reach a
+/// frame encoder. Large payloads pass through directly after the pending bytes
+/// are flushed, so memory does not grow with the chunk size.
+struct ChunkSerializationBuffer<'a> {
+    writer: &'a mut dyn Write,
+    buffer: Vec<u8>,
+}
+
+impl<'a> ChunkSerializationBuffer<'a> {
+    fn with_buffer(writer: &'a mut dyn Write, mut buffer: Vec<u8>) -> Self {
+        buffer.clear();
+        Self { writer, buffer }
+    }
+
+    fn flush_buffer(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            self.writer.write_all(&self.buffer)?;
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+
+    fn into_buffer(mut self) -> io::Result<Vec<u8>> {
+        self.flush_buffer()?;
+        Ok(self.buffer)
+    }
+}
+
+impl Write for ChunkSerializationBuffer<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        if bytes.len() >= COMPRESSED_CHUNK_BUFFER_SIZE {
+            self.flush_buffer()?;
+            self.writer.write_all(bytes)?;
+            return Ok(bytes.len());
+        }
+        if self.buffer.len() + bytes.len() > COMPRESSED_CHUNK_BUFFER_SIZE {
+            self.flush_buffer()?;
+        }
+        self.buffer.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_buffer()?;
+        self.writer.flush()
+    }
+}
+
+fn write_compressed_frame<W: Write>(
+    writer: &mut W,
+    compression: ChunkCompression,
+    scratch: &mut Vec<u8>,
+    serialize: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> io::Result<()> {
+    match compression {
+        ChunkCompression::None => unreachable!(),
+        ChunkCompression::Lz4 => {
+            let mut encoder = FrameEncoder::new(writer);
+            let mut buffered =
+                ChunkSerializationBuffer::with_buffer(&mut encoder, std::mem::take(scratch));
+            serialize(&mut buffered)?;
+            *scratch = buffered.into_buffer()?;
+            encoder.finish().map_err(io::Error::other)?;
+        }
+        ChunkCompression::Snappy => {
+            let mut encoder = snap::write::FrameEncoder::new(writer);
+            let mut buffered =
+                ChunkSerializationBuffer::with_buffer(&mut encoder, std::mem::take(scratch));
+            serialize(&mut buffered)?;
+            *scratch = buffered.into_buffer()?;
+            encoder.flush()?;
+        }
+    }
+    Ok(())
+}
+
+fn write_compressed_chunk(
+    path: &Path,
+    compression: ChunkCompression,
+    serialize: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> io::Result<()> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::with_capacity(1 << 20, file);
+    let mut scratch = Vec::with_capacity(COMPRESSED_CHUNK_BUFFER_SIZE);
+    write_compressed_frame(&mut writer, compression, &mut scratch, serialize)?;
+    writer.flush()
+}
+
 // ---------------------------------------------------------------------------
 // Chunk I/O abstraction - compressed reads
 // ---------------------------------------------------------------------------
@@ -757,35 +851,16 @@ fn write_chunk_records_presorted(
     let count = records.len() as u32;
 
     if compression != ChunkCompression::None {
-        // Pre-serialize all records into a contiguous buffer, then compress
-        // in bulk. Avoids millions of small write_all calls through the
-        // frame encoder, which caused a ~25s regression on Germany with lz4.
-        let serialized_size =
-            4 + records.len() * 12 + records.iter().map(|r| r.data.len()).sum::<usize>();
-        let mut serialized = Vec::with_capacity(serialized_size);
-        serialized.extend_from_slice(&count.to_le_bytes());
-        for record in records {
-            serialized.extend_from_slice(&record.key.to_le_bytes());
-            let data_len = record.data.len() as u32;
-            serialized.extend_from_slice(&data_len.to_le_bytes());
-            serialized.extend_from_slice(&record.data);
-        }
-
-        let file = File::create(path)?;
-        let buf = BufWriter::with_capacity(1 << 20, file);
-        match compression {
-            ChunkCompression::None => unreachable!(),
-            ChunkCompression::Lz4 => {
-                let mut encoder = FrameEncoder::new(buf);
-                encoder.write_all(&serialized)?;
-                encoder.finish().map_err(io::Error::other)?;
+        write_compressed_chunk(path, compression, |writer| {
+            writer.write_all(&count.to_le_bytes())?;
+            for record in records {
+                writer.write_all(&record.key.to_le_bytes())?;
+                let data_len = record.data.len() as u32;
+                writer.write_all(&data_len.to_le_bytes())?;
+                writer.write_all(&record.data)?;
             }
-            ChunkCompression::Snappy => {
-                let mut encoder = snap::write::FrameEncoder::new(buf);
-                encoder.write_all(&serialized)?;
-                encoder.flush()?;
-            }
-        }
+            Ok(())
+        })?;
     } else {
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(1 << 20, file);
@@ -937,7 +1012,7 @@ fn write_multi_chunk_compressed(
     ranges: &[PartitionRange],
     path: &Path,
     compression: ChunkCompression,
-    mut serialize_section: impl FnMut(&mut Vec<u8>, &PartitionRange),
+    mut serialize_section: impl FnMut(&mut dyn Write, &PartitionRange) -> io::Result<()>,
 ) -> io::Result<()> {
     let _wait = wait_span(&WAIT.sort_chunk_write);
     debug_assert!(compression != ChunkCompression::None);
@@ -949,24 +1024,12 @@ fn write_multi_chunk_compressed(
     writer.write_all(&vec![0u8; ranges.len() * 16])?;
 
     let mut sections = Vec::with_capacity(ranges.len());
-    let mut scratch = Vec::new();
+    let mut scratch = Vec::with_capacity(COMPRESSED_CHUNK_BUFFER_SIZE);
     for range in ranges {
         let offset = writer.stream_position()?;
-        scratch.clear();
-        serialize_section(&mut scratch, range);
-        match compression {
-            ChunkCompression::None => unreachable!(),
-            ChunkCompression::Lz4 => {
-                let mut encoder = FrameEncoder::new(&mut writer);
-                encoder.write_all(&scratch)?;
-                encoder.finish().map_err(io::Error::other)?;
-            }
-            ChunkCompression::Snappy => {
-                let mut encoder = snap::write::FrameEncoder::new(&mut writer);
-                encoder.write_all(&scratch)?;
-                encoder.flush()?;
-            }
-        }
+        write_compressed_frame(&mut writer, compression, &mut scratch, |out| {
+            serialize_section(out, range)
+        })?;
         sections.push((range.partition, range.end - range.start, offset));
     }
 
@@ -997,11 +1060,13 @@ fn write_partitioned_sort_chunk(
         } else {
             write_multi_chunk_compressed(&ranges, &path, compression, |out, range| {
                 for record in &records[range.start..range.end] {
-                    out.extend_from_slice(&record.key.to_le_bytes());
+                    out.write_all(&record.key.to_le_bytes())?;
                     #[allow(clippy::cast_possible_truncation)]
-                    out.extend_from_slice(&(record.data.len() as u32).to_le_bytes());
-                    out.extend_from_slice(&record.data);
+                    let data_len = record.data.len() as u32;
+                    out.write_all(&data_len.to_le_bytes())?;
+                    out.write_all(&record.data)?;
                 }
+                Ok(())
             })?;
         }
         Ok(path)
@@ -1027,11 +1092,13 @@ fn write_partitioned_payload_chunk(
         } else {
             write_multi_chunk_compressed(&ranges, &path, compression, |out, range| {
                 for &(key, offset, len) in &records[range.start..range.end] {
-                    out.extend_from_slice(&key.to_le_bytes());
+                    out.write_all(&key.to_le_bytes())?;
                     #[allow(clippy::cast_possible_truncation)]
-                    out.extend_from_slice(&(len as u32).to_le_bytes());
-                    out.extend_from_slice(&payload[offset..offset + len]);
+                    let data_len = len as u32;
+                    out.write_all(&data_len.to_le_bytes())?;
+                    out.write_all(&payload[offset..offset + len])?;
                 }
+                Ok(())
             })?;
         }
         Ok(path)
@@ -1065,31 +1132,16 @@ fn write_payload_chunk_records_presorted(
     let count = records.len() as u32;
 
     if compression != ChunkCompression::None {
-        let serialized_size = 4 + records.len() * 12 + records.iter().map(|r| r.2).sum::<usize>();
-        let mut serialized = Vec::with_capacity(serialized_size);
-        serialized.extend_from_slice(&count.to_le_bytes());
-        for &(key, offset, len) in records {
-            serialized.extend_from_slice(&key.to_le_bytes());
-            let data_len = len as u32;
-            serialized.extend_from_slice(&data_len.to_le_bytes());
-            serialized.extend_from_slice(&payload[offset..offset + len]);
-        }
-
-        let file = File::create(path)?;
-        let buf = BufWriter::with_capacity(1 << 20, file);
-        match compression {
-            ChunkCompression::None => unreachable!(),
-            ChunkCompression::Lz4 => {
-                let mut encoder = FrameEncoder::new(buf);
-                encoder.write_all(&serialized)?;
-                encoder.finish().map_err(io::Error::other)?;
+        write_compressed_chunk(path, compression, |writer| {
+            writer.write_all(&count.to_le_bytes())?;
+            for &(key, offset, len) in records {
+                writer.write_all(&key.to_le_bytes())?;
+                let data_len = len as u32;
+                writer.write_all(&data_len.to_le_bytes())?;
+                writer.write_all(&payload[offset..offset + len])?;
             }
-            ChunkCompression::Snappy => {
-                let mut encoder = snap::write::FrameEncoder::new(buf);
-                encoder.write_all(&serialized)?;
-                encoder.flush()?;
-            }
-        }
+            Ok(())
+        })?;
     } else {
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(1 << 20, file);
@@ -2394,6 +2446,61 @@ mod tests {
     #[test]
     fn snappy_writer_coalesces_partition_sections_into_one_file() {
         compressed_multi_round_trip(ChunkCompression::Snappy);
+    }
+
+    fn compressed_single_chunk_round_trip(compression: ChunkCompression) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("single.bin");
+        let first_key = make_sort_key(1, 0, 0);
+        let second_key = make_sort_key(1, 0, 1);
+        let small = vec![0x31; 128];
+        let large = vec![0x72; COMPRESSED_CHUNK_BUFFER_SIZE + 32];
+        let mut records = vec![
+            SortRecord {
+                key: second_key,
+                data: large.clone().into_boxed_slice(),
+            },
+            SortRecord {
+                key: first_key,
+                data: small.clone().into_boxed_slice(),
+            },
+        ];
+
+        write_sorted_chunk(&mut records, &path, compression).unwrap();
+        let paths = vec![path];
+        let mut reader = SortReader::new(&paths, compression).unwrap();
+        let decoded: Vec<_> = std::iter::from_fn(|| reader.next().unwrap())
+            .map(|record| (record.key, record.data.into_vec()))
+            .collect();
+        assert_eq!(
+            decoded,
+            vec![(first_key, small.clone()), (second_key, large.clone())]
+        );
+
+        let payload_path = dir.path().join("payload.bin");
+        let payload = [large.as_slice(), small.as_slice()].concat();
+        let mut payload_records = vec![
+            (second_key, 0, large.len()),
+            (first_key, large.len(), small.len()),
+        ];
+        write_sorted_payload_chunk(&mut payload_records, &payload, &payload_path, compression)
+            .unwrap();
+        let payload_paths = vec![payload_path];
+        let mut reader = SortReader::new(&payload_paths, compression).unwrap();
+        let decoded: Vec<_> = std::iter::from_fn(|| reader.next().unwrap())
+            .map(|record| (record.key, record.data.into_vec()))
+            .collect();
+        assert_eq!(decoded, vec![(first_key, small), (second_key, large)]);
+    }
+
+    #[test]
+    fn lz4_single_chunk_writers_stream_large_payloads() {
+        compressed_single_chunk_round_trip(ChunkCompression::Lz4);
+    }
+
+    #[test]
+    fn snappy_single_chunk_writers_stream_large_payloads() {
+        compressed_single_chunk_round_trip(ChunkCompression::Snappy);
     }
 
     #[test]

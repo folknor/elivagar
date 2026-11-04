@@ -144,27 +144,20 @@ pub(super) fn match_sites(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) 
 }
 
 fn sites_kind(tags: &Tags<'_>) -> Option<&'static str> {
-    if tags.has_value("military", "danger_area") {
-        return Some("danger_area");
-    }
-    if tags.has_value("leisure", "sports_centre") {
-        return Some("sports_centre");
-    }
-    if tags.has_value("landuse", "construction") {
-        return Some("construction");
-    }
-    if let Some(v) = tags.get("amenity") {
-        return match v {
-            "bicycle_parking" => Some("bicycle_parking"),
-            "college" => Some("college"),
-            "hospital" => Some("hospital"),
-            "parking" => Some("parking"),
-            "prison" => Some("prison"),
-            "university" => Some("university"),
-            _ => None,
-        };
-    }
-    None
+    transport::first_tag_match(
+        tags,
+        &[
+            ("military", "danger_area", "danger_area"),
+            ("leisure", "sports_centre", "sports_centre"),
+            ("landuse", "construction", "construction"),
+            ("amenity", "bicycle_parking", "bicycle_parking"),
+            ("amenity", "college", "college"),
+            ("amenity", "hospital", "hospital"),
+            ("amenity", "parking", "parking"),
+            ("amenity", "prison", "prison"),
+            ("amenity", "university", "university"),
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------

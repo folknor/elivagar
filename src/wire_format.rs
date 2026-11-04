@@ -359,7 +359,7 @@ pub(crate) fn add_feature_to_layer(
     layer: &mut LayerBuilder,
     data: &[u8],
     geom_pool: &mut Vec<Vec<u32>>,
-    tags_pool: &mut Vec<Vec<(u16, u16)>>,
+    tags_pool: &mut Vec<Vec<(u32, u32)>>,
 ) {
     if data.len() < 13 {
         return;

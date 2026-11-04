@@ -1,4 +1,5 @@
 use super::*;
+use protohoggr::encode_varint;
 
 fn read_u64_le(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
@@ -23,6 +24,18 @@ fn add_monotonic_unique_tiles(writer: &mut PmtilesWriter, z: u8, count: usize) {
 fn test_hilbert_z0() {
     assert_eq!(xy_to_tile_id(0, 0, 0), 0);
     assert_eq!(tile_id_to_zxy(0), (0, 0, 0));
+}
+
+#[test]
+fn checked_hilbert_conversion_rejects_invalid_coordinates() {
+    assert!(try_xy_to_tile_id(31, (1_u32 << 31) - 1, (1_u32 << 31) - 1).is_ok());
+
+    for (z, x, y) in [(32, 0, 0), (64, 0, 0), (1, 2, 0), (1, 0, 2)] {
+        let error = try_xy_to_tile_id(z, x, y).expect_err("invalid coordinates must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    assert!(std::panic::catch_unwind(|| xy_to_tile_id(1, 2, 0)).is_err());
 }
 
 #[test]
@@ -138,13 +151,13 @@ fn test_varint_known_encoding() {
 fn test_directory_encode_decode() {
     use protohoggr::Cursor;
     let entries = vec![
-        DirEntry {
+        RawDirEntry {
             tile_id: 5,
             offset: 0,
             length: 100,
             run_length: 3,
         },
-        DirEntry {
+        RawDirEntry {
             tile_id: 10,
             offset: 100,
             length: 50,
@@ -152,7 +165,7 @@ fn test_directory_encode_decode() {
         },
     ];
 
-    let encoded = encode_directory(&entries);
+    let encoded = encode_directory(&entries).expect("encode directory");
     let mut c = Cursor::new(&encoded);
 
     let count = c.read_varint().unwrap();
@@ -187,13 +200,13 @@ fn test_directory_encode_decode() {
 fn test_directory_non_contiguous_offset() {
     use protohoggr::Cursor;
     let entries = vec![
-        DirEntry {
+        RawDirEntry {
             tile_id: 1,
             offset: 0,
             length: 100,
             run_length: 1,
         },
-        DirEntry {
+        RawDirEntry {
             tile_id: 5,
             offset: 500,
             length: 50,
@@ -201,7 +214,7 @@ fn test_directory_non_contiguous_offset() {
         },
     ];
 
-    let encoded = encode_directory(&entries);
+    let encoded = encode_directory(&entries).expect("encode directory");
     let mut c = Cursor::new(&encoded);
 
     // Skip count, tile_ids, run_lengths, lengths
@@ -217,6 +230,55 @@ fn test_directory_non_contiguous_offset() {
     let o1 = c.read_varint().unwrap();
     assert_eq!(o0, 1); // offset 0 + 1
     assert_eq!(o1, 501); // offset 500 + 1 (not contiguous)
+}
+
+#[test]
+fn directory_codec_roundtrip_property() {
+    let mut state = 0xD1B5_4A32_D192_ED03_u64;
+
+    for case in 0_usize..128 {
+        let count = case % 48;
+        let mut entries: Vec<RawDirEntry> = Vec::with_capacity(count);
+        let mut tile_id = 0_u64;
+        let mut offset;
+
+        for index in 0..count {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            if index == 0 {
+                tile_id = state % 5;
+                offset = state % 100;
+            } else {
+                tile_id += state % 11 + 1;
+                let previous = entries.last().expect("previous entry exists");
+                let end = previous.offset + u64::from(previous.length);
+                offset = if state & 1 == 0 {
+                    end
+                } else {
+                    end + (state % 53) + 1
+                };
+            }
+
+            let value = u32::try_from(state >> 32).expect("shifted random value fits u32");
+            let length = value;
+            let run_length = if state & 4 == 0 { 0 } else { value };
+            entries.push(RawDirEntry {
+                tile_id,
+                offset,
+                length,
+                run_length,
+            });
+        }
+
+        let encoded = encode_directory(&entries).expect("encode generated directory");
+        let decoded =
+            crate::pmtiles_reader::decode_directory(&encoded).expect("decode generated directory");
+        assert_eq!(
+            decoded, entries,
+            "directory roundtrip failed in case {case}"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -635,6 +697,24 @@ fn add_tile_rejects_non_increasing_ids_without_mutating_writer() {
     let entries = writer.collect_dir_entries().expect("directory entries");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].run_length, 2);
+}
+
+#[test]
+fn add_tile_rejects_invalid_coordinates_without_mutating_writer() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 2,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+    let mut writer = PmtilesWriter::new(config);
+
+    let error = writer
+        .add_tile(2, 4, 0, b"invalid x")
+        .expect_err("x outside the zoom grid must be refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(writer.tile_count(), 0);
+    assert_eq!(writer.unique_tile_count(), 0);
 }
 
 #[test]

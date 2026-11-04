@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+Design-hunt fixes, second wave. Changes OSM output; ocean is unchanged.
+
+- Shortbread matchers no longer give up when one key carries an unlisted
+  value: `amenity=shelter` with `highway=bus_stop`, a railway station
+  with any amenity, and similar multi-key objects now match, in
+  `public_transport`, `streets`, `street_labels` and the street polygon
+  layers.
+- Relation rings no longer lose their last vertex during antimeridian
+  unwrapping, members are unwrapped before assembly, and triangular
+  relation outers are kept.
+- `--fanout-cap` counts tiles with the tile buffer, so it no longer
+  undercounts, and is accepted only for the OSM polygon layers it can
+  affect.
+- Unsorted PBF input requires `--allow-unsafe-flat-index` (or
+  `--force-sorted`) instead of panicking mid-run on modern node ids.
+- Resume refuses a changed `--compress-sort-chunks` (checkpoint v7) and
+  a missing or invalid chunk-count record, which previously let a
+  crashed ocean phase resume as complete. Compressed chunk writers no
+  longer stage a whole chunk in memory.
+- MLT archives get the same tile post-processing as MVT, including line
+  merging. MVT attribute interning is `u32`, so tiles with more than
+  65,535 distinct keys or values no longer alias attributes.
+- `verify` caches each payload's whole outcome and checks paint order
+  through the profile's own rank recovery. Statistics reset per run
+  for library callers that run more than once in a process.
+- The PMTiles directory has one codec shared by reader and writer, with
+  a round-trip property test.
+- New `reference/coordinates.md` describes the coordinate spaces and
+  conversions.
+
 Correctness fixes from the 2026-10-28 design hunt, first wave. This
 changes output: the ocean artifact key moves to `OCEAN_POLICY_VERSION`
 v6, so the world ocean artifact must be rebuilt with `ocean-build`.

@@ -159,14 +159,16 @@ struct RunArgs {
     #[arg(long, value_enum)]
     compress_sort_chunks: Option<SortChunkCompressionArg>,
 
-    /// Default fanout cap for all polygon layers. 0 or omitted = uncapped.
+    /// Default fanout cap for supported OSM polygon layers.
+    /// 0 or omitted = uncapped.
     /// Per-layer overrides via --fanout-cap take precedence.
     #[arg(long)]
     fanout_cap_default: Option<u32>,
 
-    /// Per-layer fanout caps: max bbox tiles a polygon feature may touch.
+    /// Per-layer fanout caps for OSM polygons: conservative bbox tile count
+    /// including the 128-unit buffer on each tile edge.
     /// Comma-separated, format: layer=N. Features exceeding the cap are skipped
-    /// at that zoom. Example: water_polygons=2048,boundaries=4096
+    /// at that zoom. Example: water_polygons=2048,buildings=4096
     #[arg(long, value_delimiter = ',')]
     fanout_cap: Vec<String>,
 
@@ -917,7 +919,12 @@ fn run(args: RunArgs) {
         },
         fanout_caps: {
             let default_cap = args.fanout_cap_default.unwrap_or(0);
-            let mut caps = [default_cap; elivagar::shortbread::Layer::count()];
+            let mut caps = [0; elivagar::shortbread::Layer::count()];
+            for layer in elivagar::shortbread::Layer::ALL {
+                if layer.supports_fanout_cap() {
+                    caps[layer as usize] = default_cap;
+                }
+            }
             for spec in &args.fanout_cap {
                 let trimmed = spec.trim();
                 let (name, cap_str) = match trimmed.split_once('=') {
@@ -935,7 +942,13 @@ fn run(args: RunArgs) {
                     std::process::exit(1);
                 });
                 match elivagar::shortbread::Layer::from_name(name) {
-                    Some(layer) => caps[layer as usize] = cap_val,
+                    Some(layer) if layer.supports_fanout_cap() => {
+                        caps[layer as usize] = cap_val;
+                    }
+                    Some(_) => {
+                        eprintln!("Error: layer '{name}' does not support --fanout-cap");
+                        std::process::exit(1);
+                    }
                     None => {
                         eprintln!("Error: unknown layer name for --fanout-cap: '{name}'");
                         std::process::exit(1);

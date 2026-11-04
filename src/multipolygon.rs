@@ -56,27 +56,72 @@ pub struct MultiPolygon {
 ///
 /// Ways are joined end-to-end by matching endpoints, then classified into
 /// outer/inner rings and paired together.
-#[hotpath::measure]
+#[cfg(test)]
 pub fn assemble(members: &[MemberWay]) -> MultiPolygon {
+    assemble_impl(members, false)
+}
+
+/// Assemble geographic member ways, unwrapping complete rings before testing
+/// containment. Joining in the original coordinates preserves shared endpoints.
+pub(crate) fn assemble_wrapped(members: &[MemberWay]) -> MultiPolygon {
+    assemble_impl(members, true)
+}
+
+fn assemble_impl(members: &[MemberWay], wrapped: bool) -> MultiPolygon {
     let (outer_ways, inner_ways, unclassified_ways) = separate_by_role(members);
 
     let (mut outer_rings, _) = join_ways(&outer_ways);
     let (mut inner_rings, _) = join_ways(&inner_ways);
+    if wrapped {
+        for ring in outer_rings.iter_mut().chain(inner_rings.iter_mut()) {
+            unwrap_ring(ring);
+        }
+    }
 
-    classify_unclassified(&unclassified_ways, &mut outer_rings, &mut inner_rings);
+    classify_unclassified(
+        &unclassified_ways,
+        &mut outer_rings,
+        &mut inner_rings,
+        wrapped,
+    );
 
     ensure_outer_orientation(&mut outer_rings);
     ensure_inner_orientation(&mut inner_rings);
     sort_rings_deterministic(&mut outer_rings);
     sort_rings_deterministic(&mut inner_rings);
 
-    let mut polygons = pair_rings(outer_rings, inner_rings);
+    let mut polygons = pair_rings(outer_rings, inner_rings, wrapped);
     for (_, inners) in &mut polygons {
         sort_rings_deterministic(inners);
     }
     polygons.sort_by_key(|(outer, _)| ring_sort_key(outer));
     let polygons = polygons.into_boxed_slice();
     MultiPolygon { polygons }
+}
+
+fn unwrap_ring(ring: &mut [Point]) {
+    for i in 1..ring.len() {
+        let previous = ring[i - 1].x;
+        while ring[i].x - previous > 0.5 {
+            ring[i].x -= 1.0;
+        }
+        while previous - ring[i].x > 0.5 {
+            ring[i].x += 1.0;
+        }
+    }
+}
+
+/// A hole and its shell can start in different world copies. Choose a copy
+/// relative to each candidate shell, rather than to an unrelated first member.
+fn containment_shift(outer: &[Point], inner: &[Point], wrapped: bool) -> Option<f64> {
+    let shift = if wrapped {
+        let outer_bbox = geometry::merc_bbox(outer);
+        let inner_bbox = geometry::merc_bbox(inner);
+        ((outer_bbox.min_x + outer_bbox.max_x - inner_bbox.min_x - inner_bbox.max_x) * 0.5).round()
+    } else {
+        0.0
+    };
+    ring_contains_ring(outer, inner, shift).then_some(shift)
 }
 
 /// Separate member ways into outer, inner, and unclassified groups.
@@ -109,8 +154,14 @@ fn classify_unclassified(
     unclassified_ways: &[&[Point]],
     outer_rings: &mut Vec<Vec<Point>>,
     inner_rings: &mut Vec<Vec<Point>>,
+    wrapped: bool,
 ) {
-    let (unc_rings, _) = join_ways(unclassified_ways);
+    let (mut unc_rings, _) = join_ways(unclassified_ways);
+    if wrapped {
+        for ring in &mut unc_rings {
+            unwrap_ring(ring);
+        }
+    }
     let depths: Vec<usize> = unc_rings
         .iter()
         .enumerate()
@@ -118,12 +169,12 @@ fn classify_unclassified(
             let explicit_depth = outer_rings
                 .iter()
                 .chain(inner_rings.iter())
-                .filter(|outer| ring_contains_ring(outer, ring))
+                .filter(|outer| containment_shift(outer, ring, wrapped).is_some())
                 .count();
             let inferred_depth = unc_rings
                 .iter()
                 .enumerate()
-                .filter(|(j, outer)| i != *j && ring_contains_ring(outer, ring))
+                .filter(|(j, outer)| i != *j && containment_shift(outer, ring, wrapped).is_some())
                 .count();
             explicit_depth + inferred_depth
         })
@@ -142,12 +193,15 @@ fn classify_unclassified(
 /// OSM rings one such point suffices; scanning every inner vertex against the
 /// entire outer would be quadratic in ring size. Repairing intersecting or
 /// coincident contours belongs to topology normalization.
-fn ring_contains_ring(outer: &[Point], inner: &[Point]) -> bool {
+fn ring_contains_ring(outer: &[Point], inner: &[Point], shift: f64) -> bool {
     if outer.len() < 3 || inner.len() < 3 {
         return false;
     }
     for (a, b) in inner.iter().zip(inner.iter().cycle().skip(1)) {
-        for point in [*a, Point::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)] {
+        for point in [
+            Point::new(a.x + shift, a.y),
+            Point::new((a.x + b.x) * 0.5 + shift, (a.y + b.y) * 0.5),
+        ] {
             let boundary = outer
                 .iter()
                 .zip(outer.iter().cycle().skip(1))
@@ -192,6 +246,7 @@ fn ensure_inner_orientation(rings: &mut [Vec<Point>]) {
 fn pair_rings(
     outer_rings: Vec<Vec<Point>>,
     inner_rings: Vec<Vec<Point>>,
+    wrapped: bool,
 ) -> Vec<(Vec<Point>, Vec<Vec<Point>>)> {
     if outer_rings.is_empty() {
         return Vec::new();
@@ -208,13 +263,20 @@ fn pair_rings(
         // For nested shells, the smallest containing shell is the immediate
         // parent. Restrict candidates to the original outers so orphan
         // promotion cannot make pairing depend on inner-ring iteration order.
-        let target_idx = polygons[..outer_count]
+        let target = polygons[..outer_count]
             .iter()
             .enumerate()
-            .filter(|(_, poly)| ring_contains_ring(&poly.0, &inner))
-            .min_by(|(_, a), (_, b)| signed_area(&a.0).abs().total_cmp(&signed_area(&b.0).abs()))
-            .map(|(i, _)| i);
-        if let Some(idx) = target_idx {
+            .filter_map(|(i, poly)| {
+                containment_shift(&poly.0, &inner, wrapped)
+                    .map(|shift| (i, shift, signed_area(&poly.0).abs()))
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+        if let Some((idx, shift, _)) = target {
+            if wrapped {
+                for point in &mut inner {
+                    point.x += shift;
+                }
+            }
             polygons[idx].1.push(inner);
         } else {
             // Orphan inner ring: promote to an oriented outer shell.
@@ -592,6 +654,70 @@ mod tests {
     // All regression geometry fits inside the z0 tile.
     fn square(lo: f64, hi: f64) -> Vec<Point> {
         vec![pt(lo, lo), pt(hi, lo), pt(hi, hi), pt(lo, hi), pt(lo, lo)]
+    }
+
+    fn wrapped_rectangle(lo: f64, hi: f64, y0: f64, y1: f64) -> Vec<Point> {
+        vec![
+            pt(lo.rem_euclid(1.0), y0),
+            pt(hi.rem_euclid(1.0), y0),
+            pt(hi.rem_euclid(1.0), y1),
+            pt(lo.rem_euclid(1.0), y1),
+            pt(lo.rem_euclid(1.0), y0),
+        ]
+    }
+
+    #[test]
+    fn wrapped_assembly_pairs_holes_relative_to_each_shell() {
+        for role in ["inner", ""] {
+            for (lo, hi, hole_lo, hole_hi) in [(0.59, 0.61, 0.601, 0.609), (0.98, 1.02, 0.99, 1.01)]
+            {
+                for reverse in [false, true] {
+                    let mut hole = wrapped_rectangle(hole_lo, hole_hi, 0.45, 0.55);
+                    if reverse {
+                        hole.reverse();
+                    }
+                    let mp = assemble_wrapped(&[
+                        make_member("outer", wrapped_rectangle(0.1, 0.12, 0.1, 0.12)),
+                        make_member("outer", wrapped_rectangle(lo, hi, 0.4, 0.6)),
+                        make_member(role, hole),
+                    ]);
+                    assert_eq!(mp.polygons.len(), 2);
+                    assert_eq!(
+                        mp.polygons
+                            .iter()
+                            .map(|(_, holes)| holes.len())
+                            .sum::<usize>(),
+                        1
+                    );
+                    for (shell, holes) in &mp.polygons {
+                        assert!(
+                            holes
+                                .iter()
+                                .all(|hole| ring_contains_ring(shell, hole, 0.0))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_assembly_joins_members_before_unwrapping() {
+        let mp = assemble_wrapped(&[
+            make_member("outer", vec![pt(0.1, 0.4), pt(0.4, 0.4), pt(0.7, 0.4)]),
+            make_member(
+                "outer",
+                vec![
+                    pt(0.7, 0.4),
+                    pt(0.7, 0.6),
+                    pt(0.4, 0.6),
+                    pt(0.1, 0.6),
+                    pt(0.1, 0.4),
+                ],
+            ),
+        ]);
+        assert_eq!(mp.polygons.len(), 1);
+        assert_eq!(mp.polygons[0].0.len(), 6);
     }
 
     #[test]

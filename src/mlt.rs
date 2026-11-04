@@ -541,6 +541,33 @@ mod tests {
     }
 
     #[test]
+    fn property_lookup_preserves_indices_above_u16() {
+        let mut layer = LayerBuilder::new("wide");
+        let mut key = 0;
+        let mut value = 0;
+        for i in 0..65_537_u32 {
+            key = layer.intern_key(&format!("key_{i}"));
+            value = layer.intern_value(Value::Int(i64::from(i)));
+        }
+        assert_eq!((key, value), (65_536, 65_536));
+        let feature = Feature {
+            id: None,
+            geom_type: GeomType::Point,
+            geometry: point_geom(),
+            tags: vec![(key, value)],
+        };
+        assert_eq!(
+            feature_value_for_key(&layer, &feature, "key_65536"),
+            Some(&Value::Int(65_536)),
+        );
+        layer.add_feature(feature);
+        let model = build_tile_model(&[&layer]);
+        assert_eq!(model.layers[0].columns.len(), 1);
+        assert_eq!(model.layers[0].columns[0].key, "key_65536");
+        assert_eq!(model.layers[0].columns[0].value_count, 1);
+    }
+
+    #[test]
     fn build_tile_model_detects_mixed_property_types() {
         let mut layer = LayerBuilder::new("places");
         let kind_key = layer.intern_key("kind");

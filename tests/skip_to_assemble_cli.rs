@@ -10,16 +10,16 @@ use pbfhogg::MemberId;
 use pbfhogg::block_builder::{self, BlockBuilder, MemberData, Metadata};
 use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 
-/// A v6 checkpoint that a default-flag `--skip-to assemble` run will accept.
+/// A v7 checkpoint that a default-flag `--skip-to assemble` run will accept.
 ///
 /// The producer config must equal what the CLI resolves, so it is built from
 /// a `TilegenConfig` carrying the documented CLI defaults - zooms 0-14,
-/// `--seam-reconcile-layers boundaries` (default max zoom 8), no fanout caps,
+/// uncompressed sort chunks, no fanout caps,
 /// `--polygon-simplify-factor 1.0` - and run through the same
 /// `producer_config` the pipeline uses, rather than hand-encoded JSON that
 /// would drift out of agreement silently.
 ///
-/// The version is the one hand-encoded field. Bumping CHECKPOINT_VERSION
+/// The version and chunk codec are stated explicitly. Bumping CHECKPOINT_VERSION
 /// without updating it fails this test loudly, which is the intent: the
 /// version is what a resume checks first, so a test asserting resume
 /// behaviour must state which format it is asserting about.
@@ -53,12 +53,13 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         polygon_simplify_factor: 1.0,
     };
     serde_json::json!({
-        "version": 6,
+        "version": 7,
         "bounds": [0.0, 0.0, 1.0, 1.0],
         "chunks": 1,
         "ocean": "none",
         "input_xxh3_128": pbf_hash,
         "producer_config": elivagar::provenance::producer_config(&config),
+        "sort_chunk_compression": "none",
         "effective": {
             "coordinate_source": "node_store",
             "way_members": "relation_scan",
@@ -71,6 +72,7 @@ fn write_tiny_pbf(path: &Path) {
     let file = std::fs::File::create(path).expect("create pbf");
     let mut writer = PbfWriter::new(file, PbfCompression::default());
     let header = block_builder::HeaderBuilder::new()
+        .sorted()
         .bbox(10.0, 59.0, 10.1, 59.1)
         .build()
         .expect("build pbf header");
@@ -105,6 +107,7 @@ fn write_missing_ref_pbf(path: &Path) {
     let file = std::fs::File::create(path).expect("create pbf");
     let mut writer = PbfWriter::new(file, PbfCompression::default());
     let header = block_builder::HeaderBuilder::new()
+        .sorted()
         .bbox(10.0, 59.0, 10.1, 59.1)
         .build()
         .expect("build pbf header");

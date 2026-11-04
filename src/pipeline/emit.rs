@@ -2,10 +2,12 @@ use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use crate::geometry::int_ocean::{
-    IntRect, OSM_DP_TOL_PX, Shape, TILE_EXTENT_I32, quantize_polygon_into,
+    IntRect, OSM_DP_TOL_PX, Shape, TILE_BUFFER_I32, quantize_polygon_into,
     quantize_polygon_pinned_into, shape_bbox,
 };
-use crate::geometry::pyramid::{PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid};
+use crate::geometry::pyramid::{
+    PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid, tile_cover,
+};
 use crate::geometry::{self, BUFFER_FRACTION, ClipRect, MercBbox, Point, merc_bbox};
 use crate::multipolygon::MemberWay;
 use crate::mvt::{self, GeomType};
@@ -106,6 +108,16 @@ pub(super) fn relation_shared_vertex_keys(member_ways: &[MemberWay]) -> FxHashSe
         .into_iter()
         .filter_map(|(k, c)| (c >= 2).then_some(k))
         .collect()
+}
+
+fn relation_vertex_is_pinned(keys: &FxHashSet<(i64, i64)>, point: &Point) -> bool {
+    let key = merc_point_key(point);
+    // Ring unwrapping and seam emission can translate the geometry by whole
+    // worlds. The source member keys still use the original wrapped copy.
+    let wrapped_x = key.0.rem_euclid(1_000_000_000_000);
+    keys.contains(&key)
+        || keys.contains(&(wrapped_x, key.1))
+        || (wrapped_x == 0 && keys.contains(&(1_000_000_000_000, key.1)))
 }
 
 // ---------------------------------------------------------------------------
@@ -446,23 +458,8 @@ fn polygon_z_start(merc: &[Point], z_lo: u8, z_hi: u8) -> Option<u8> {
 }
 
 fn tile_count_for_base_rect(rect: IntRect, maxz: u8, z: u8) -> u64 {
-    let max_tile = (1_u32 << z) - 1;
-    let tile_size = i64::from(TILE_EXTENT_I32) << u32::from(maxz - z);
-    let tx_min = base_tile_index(rect.min_x, tile_size, max_tile);
-    let tx_max = base_tile_index(rect.max_x, tile_size, max_tile);
-    let ty_min = base_tile_index(rect.min_y, tile_size, max_tile);
-    let ty_max = base_tile_index(rect.max_y, tile_size, max_tile);
+    let (tx_min, tx_max, ty_min, ty_max) = tile_cover(rect, maxz, z, TILE_BUFFER_I32);
     u64::from(tx_max - tx_min + 1) * u64::from(ty_max - ty_min + 1)
-}
-
-fn base_tile_index(q: i32, tile_size: i64, max_tile: u32) -> u32 {
-    if q <= 0 {
-        0
-    } else {
-        u32::try_from(i64::from(q).div_euclid(tile_size))
-            .expect("tile index fits u32")
-            .min(max_tile)
-    }
 }
 
 fn polygon_z_bottom_after_caps(
@@ -849,7 +846,7 @@ pub(super) fn emit_multipolygon_feature(
             outer,
             inners,
             OSM_POLYGON_MAX_Z,
-            |p| keys.contains(&merc_point_key(p)),
+            |p| relation_vertex_is_pinned(keys, p),
             &mut emit_scratch.shape_base,
             &mut emit_scratch.flags_base,
         );
@@ -935,6 +932,38 @@ mod landing2_tests {
     use crate::mvt;
     use smallvec::smallvec;
     use std::borrow::Cow;
+
+    #[test]
+    fn relation_pins_survive_world_translation() {
+        let mut keys = FxHashSet::default();
+        keys.insert(merc_point_key(&Point::new(0.25, 0.5)));
+        keys.insert(merc_point_key(&Point::new(1.0, 0.5)));
+        for x in [-0.75, 0.25, 1.25] {
+            assert!(relation_vertex_is_pinned(&keys, &Point::new(x, 0.5)));
+        }
+        assert!(relation_vertex_is_pinned(&keys, &Point::new(0.0, 0.5)));
+        assert!(!relation_vertex_is_pinned(&keys, &Point::new(0.5, 0.5)));
+    }
+
+    #[test]
+    fn fanout_count_includes_buffer_neighbours() {
+        // The bbox fits entirely inside one tile, but all four buffered
+        // cells at this corner can receive its polygon.
+        let rect = IntRect {
+            min_x: 4100,
+            min_y: 4100,
+            max_x: 4200,
+            max_y: 4200,
+        };
+        assert_eq!(tile_count_for_base_rect(rect, 2, 2), 4);
+        let rect_base = IntRect {
+            min_x: rect.min_x << 12,
+            min_y: rect.min_y << 12,
+            max_x: rect.max_x << 12,
+            max_y: rect.max_y << 12,
+        };
+        assert_eq!(tile_count_for_base_rect(rect_base, 14, 2), 4);
+    }
 
     fn pt(x: f64, y: f64) -> Point {
         Point { x, y }

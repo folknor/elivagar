@@ -321,9 +321,9 @@ fn hash_bytes(bytes: &[u8]) -> u128 {
 //
 // process_ocean_shapefile runs up to twice per pipeline (simplified z0-7 plus
 // full-resolution z8+), so its input-side counts accumulate into these
-// process-global atomics and are flushed once at OCEAN_END by
-// emit_ocean_counters. OceanAcc records its output at each spill flush because
-// the phase12 sort snapshot predates the ocean pass. The output counters use
+// process-global atomics and are drained at OCEAN_END by emit_ocean_counters.
+// OceanAcc records its output at each spill flush because the phase12 sort
+// snapshot predates the ocean pass. The output counters use
 // payload bytes only, matching the other sort_layer_*_bytes counters; its
 // accumulator byte budget also includes PayloadRecord storage and is not a
 // comparable measure. The input side records how many shapefile shapes were
@@ -604,40 +604,57 @@ fn selected_pass_grid(grids: &[OceanPassGrid], z: u8) -> Option<&OceanPassGrid> 
     }
 }
 
-/// Flush accumulated ocean input counters to the sidecar. Called once at
-/// OCEAN_END; a no-op when no shapefile was processed.
+/// Discard ocean totals left by a previous failed sequential pipeline run.
+pub(crate) fn reset_ocean_counters() {
+    for counter in [
+        &OCEAN_STATS.shapes,
+        &OCEAN_STATS.shapes_hit,
+        &OCEAN_STATS.pieces,
+        &OCEAN_STATS.shapefile_bytes,
+        &OCEAN_STATS.records,
+        &OCEAN_STATS.payload_bytes,
+    ]
+    .into_iter()
+    .chain(OCEAN_STATS.zoom_records.iter())
+    .chain(OCEAN_STATS.zoom_payload_bytes.iter())
+    {
+        counter.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Drain accumulated ocean input counters to the sidecar. Called once at
+/// OCEAN_END; emits nothing when no shapefile records were processed.
 pub(crate) fn emit_ocean_counters() {
     use crate::debug::emit_counter_u64;
-    let shapes = OCEAN_STATS.shapes.load(Ordering::Relaxed);
+    let shapes = OCEAN_STATS.shapes.swap(0, Ordering::Relaxed);
+    let shapes_hit = OCEAN_STATS.shapes_hit.swap(0, Ordering::Relaxed);
+    let pieces = OCEAN_STATS.pieces.swap(0, Ordering::Relaxed);
+    let shapefile_bytes = OCEAN_STATS.shapefile_bytes.swap(0, Ordering::Relaxed);
+    let records = OCEAN_STATS.records.swap(0, Ordering::Relaxed);
+    let payload_bytes = OCEAN_STATS.payload_bytes.swap(0, Ordering::Relaxed);
+    let zoom_records: [u64; 15] =
+        std::array::from_fn(|z| OCEAN_STATS.zoom_records[z].swap(0, Ordering::Relaxed));
+    let zoom_payload_bytes: [u64; 15] =
+        std::array::from_fn(|z| OCEAN_STATS.zoom_payload_bytes[z].swap(0, Ordering::Relaxed));
     if shapes == 0 {
         return;
     }
     emit_counter_u64("ocean_shapes", shapes);
-    emit_counter_u64(
-        "ocean_shapes_hit",
-        OCEAN_STATS.shapes_hit.load(Ordering::Relaxed),
-    );
-    emit_counter_u64("ocean_pieces", OCEAN_STATS.pieces.load(Ordering::Relaxed));
-    emit_counter_u64(
-        "ocean_shapefile_bytes",
-        OCEAN_STATS.shapefile_bytes.load(Ordering::Relaxed),
-    );
+    emit_counter_u64("ocean_shapes_hit", shapes_hit);
+    emit_counter_u64("ocean_pieces", pieces);
+    emit_counter_u64("ocean_shapefile_bytes", shapefile_bytes);
 
-    let records = OCEAN_STATS.records.load(Ordering::Relaxed);
     if records == 0 {
         return;
     }
     emit_counter_u64("sort_layer_ocean_records", records);
-    emit_counter_u64(
-        "sort_layer_ocean_bytes",
-        OCEAN_STATS.payload_bytes.load(Ordering::Relaxed),
-    );
+    emit_counter_u64("sort_layer_ocean_bytes", payload_bytes);
     if !ocean_layer_stats_enabled() {
         return;
     }
     for z in 0..15 {
-        let records = OCEAN_STATS.zoom_records[z].load(Ordering::Relaxed);
-        let bytes = OCEAN_STATS.zoom_payload_bytes[z].load(Ordering::Relaxed);
+        let records = zoom_records[z];
+        let bytes = zoom_payload_bytes[z];
         if records > 0 {
             emit_counter_u64(&format!("sort_layer_ocean_z{z}_records"), records);
         }

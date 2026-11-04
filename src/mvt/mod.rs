@@ -130,7 +130,7 @@ pub struct Feature {
     pub id: Option<u64>,
     pub geom_type: GeomType,
     pub geometry: Vec<u32>,
-    pub tags: Vec<(u16, u16)>,
+    pub tags: Vec<(u32, u32)>,
 }
 const _: () = assert!(std::mem::size_of::<Feature>() == 72);
 
@@ -142,13 +142,13 @@ pub struct EncodeScratch {
     packed: Vec<u8>,
     tag_vals: Vec<u32>,
     /// Sorted key permutation: sorted_keys[new_idx] = old_idx.
-    sorted_keys: Vec<u16>,
+    sorted_keys: Vec<u32>,
     /// Inverse key map: key_remap[old_idx] = new_idx.
-    key_remap: Vec<u16>,
+    key_remap: Vec<u32>,
     /// Sorted value permutation: sorted_vals[new_idx] = old_idx.
-    sorted_vals: Vec<u16>,
+    sorted_vals: Vec<u32>,
     /// Inverse value map: val_remap[old_idx] = new_idx.
-    val_remap: Vec<u16>,
+    val_remap: Vec<u32>,
 }
 
 impl EncodeScratch {
@@ -204,10 +204,10 @@ pub struct LayerBuilder {
     name: String,
     pub(super) features: Vec<Feature>,
     keys: Vec<String>,
-    key_map: FxHashMap<String, u16>,
+    key_map: FxHashMap<String, u32>,
     values: Vec<Value>,
-    value_map: FxHashMap<Value, u16>,
-    string_value_map: FxHashMap<String, u16>,
+    value_map: FxHashMap<Value, u32>,
+    string_value_map: FxHashMap<String, u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,37 +247,30 @@ impl LayerBuilder {
     }
 
     #[cfg_attr(not(feature = "mlt"), allow(dead_code))]
-    pub(crate) fn key(&self, idx: u16) -> Option<&str> {
+    pub(crate) fn key(&self, idx: u32) -> Option<&str> {
         self.keys.get(idx as usize).map(String::as_str)
     }
 
     #[cfg_attr(not(feature = "mlt"), allow(dead_code))]
-    pub(crate) fn value(&self, idx: u16) -> Option<&Value> {
+    pub(crate) fn value(&self, idx: u32) -> Option<&Value> {
         self.values.get(idx as usize)
     }
 
-    // These u16 indexes flow into Feature.tags and the sorted remap buffers
-    // below, while MLT reads them through key() and value(). A u32/newtype
-    // conversion also has to widen the tag pools in src/mvt/merge.rs and
-    // src/pipeline/assemble.rs, the decoder pool in src/wire_format.rs, and
-    // the MLT callers in src/mlt.rs. Changing only these interners would leave
-    // the same limit in those consumers or break their pool interfaces. The
-    // current clamps allow slots 0 through 65535, then alias every later
-    // distinct entry to slot 65535.
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn intern_key(&mut self, key: &str) -> u16 {
+    // MVT tag indices are uint32 on the wire. Keep the intern tables, tags
+    // and canonical remaps at that width, and reject an unrepresentable index
+    // before inserting it rather than aliasing an existing entry.
+    pub fn intern_key(&mut self, key: &str) -> u32 {
         if let Some(&idx) = self.key_map.get(key) {
             return idx;
         }
-        let idx = self.keys.len().min(u16::MAX as usize) as u16;
+        let idx = u32::try_from(self.keys.len()).expect("MVT key index exceeds uint32");
         let owned = key.to_string();
         self.key_map.insert(owned.clone(), idx);
         self.keys.push(owned);
         idx
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn intern_value(&mut self, val: Value) -> u16 {
+    pub fn intern_value(&mut self, val: Value) -> u32 {
         // Route string values through the borrowed-str path to keep
         // string_value_map and value_map consistent.
         if let Value::String(ref s) = val {
@@ -286,23 +279,22 @@ impl LayerBuilder {
         if let Some(&idx) = self.value_map.get(&val) {
             return idx;
         }
-        let idx = self.values.len().min(u16::MAX as usize) as u16;
+        let idx = u32::try_from(self.values.len()).expect("MVT value index exceeds uint32");
         self.value_map.insert(val.clone(), idx);
         self.values.push(val);
         idx
     }
 
     /// Intern a string value by borrowed `&str`, avoiding allocation on cache hit.
-    /// Same pattern as `intern_key`: `HashMap<String, u16>` supports `get(&str)`
+    /// Same pattern as `intern_key`: `HashMap<String, u32>` supports `get(&str)`
     /// because `String: Borrow<str>`.
     // Two owned Strings needed on miss: HashMap key + Value enum. Can't avoid
     // without redesigning the interning data structure.
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn intern_string_value(&mut self, s: &str) -> u16 {
+    pub fn intern_string_value(&mut self, s: &str) -> u32 {
         if let Some(&idx) = self.string_value_map.get(s) {
             return idx;
         }
-        let idx = self.values.len().min(u16::MAX as usize) as u16;
+        let idx = u32::try_from(self.values.len()).expect("MVT value index exceeds uint32");
         let owned = s.to_string();
         self.values.push(Value::String(owned.clone()));
         self.string_value_map.insert(owned, idx);
@@ -320,7 +312,7 @@ impl LayerBuilder {
     pub fn prepare_for_reuse(
         &mut self,
         geom_pool: &mut Vec<Vec<u32>>,
-        tags_pool: &mut Vec<Vec<(u16, u16)>>,
+        tags_pool: &mut Vec<Vec<(u32, u32)>>,
     ) {
         for f in self.features.drain(..) {
             geom_pool.push(f.geometry);
@@ -333,31 +325,37 @@ impl LayerBuilder {
         self.string_value_map.clear();
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     fn encode(&self, buf: &mut Vec<u8>, s: &mut EncodeScratch) {
         s.layer_buf.clear();
 
         // Build sorted key permutation (alphabetical) and inverse remap.
         s.sorted_keys.clear();
-        s.sorted_keys.extend(0..self.keys.len() as u16);
+        s.sorted_keys.extend(
+            (0..self.keys.len()).map(|i| u32::try_from(i).expect("MVT key index exceeds uint32")),
+        );
         s.sorted_keys
             .sort_by(|&a, &b| self.keys[a as usize].cmp(&self.keys[b as usize]));
         s.key_remap.clear();
         s.key_remap.resize(self.keys.len(), 0);
         for (new_idx, &old_idx) in s.sorted_keys.iter().enumerate() {
-            s.key_remap[old_idx as usize] = new_idx as u16;
+            s.key_remap[old_idx as usize] =
+                u32::try_from(new_idx).expect("MVT canonical index exceeds uint32");
         }
 
         // Build sorted value permutation (by type then canonical value) and inverse remap.
         s.sorted_vals.clear();
-        s.sorted_vals.extend(0..self.values.len() as u16);
+        s.sorted_vals.extend(
+            (0..self.values.len())
+                .map(|i| u32::try_from(i).expect("MVT value index exceeds uint32")),
+        );
         s.sorted_vals.sort_by(|&a, &b| {
             value_sort_key(&self.values[a as usize]).cmp(&value_sort_key(&self.values[b as usize]))
         });
         s.val_remap.clear();
         s.val_remap.resize(self.values.len(), 0);
         for (new_idx, &old_idx) in s.sorted_vals.iter().enumerate() {
-            s.val_remap[old_idx as usize] = new_idx as u16;
+            s.val_remap[old_idx as usize] =
+                u32::try_from(new_idx).expect("MVT canonical index exceeds uint32");
         }
 
         // field 1: name
@@ -371,12 +369,11 @@ impl LayerBuilder {
             }
             if !f.tags.is_empty() {
                 s.tag_vals.clear();
-                s.tag_vals.extend(f.tags.iter().flat_map(|&(k, v)| {
-                    [
-                        u32::from(s.key_remap[k as usize]),
-                        u32::from(s.val_remap[v as usize]),
-                    ]
-                }));
+                s.tag_vals.extend(
+                    f.tags
+                        .iter()
+                        .flat_map(|&(k, v)| [s.key_remap[k as usize], s.val_remap[v as usize]]),
+                );
                 encode_packed_uint32(&mut s.feat_buf, &mut s.packed, 2, &s.tag_vals);
             }
             encode_varint_field_always(&mut s.feat_buf, 3, f.geom_type as u64);
@@ -617,12 +614,12 @@ impl LayerBuilder {
     }
 
     /// Resolve a key index to its string.
-    pub fn test_key(&self, idx: u16) -> &str {
+    pub fn test_key(&self, idx: u32) -> &str {
         &self.keys[idx as usize]
     }
 
     /// Resolve a value index to its `Value`.
-    pub fn test_value(&self, idx: u16) -> &Value {
+    pub fn test_value(&self, idx: u32) -> &Value {
         &self.values[idx as usize]
     }
 }

@@ -25,139 +25,111 @@ mod water;
 // Data types
 // ---------------------------------------------------------------------------
 
-/// MVT layer in the Shortbread schema.
-/// `#[repr(u8)]` so `layer as u8` is a zero-cost index into layer arrays.
-/// No `from_index()` needed - layer indices are only used as array offsets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Layer {
-    WaterPolygons = 0,
-    WaterPolygonsLabels = 1,
-    WaterLines = 2,
-    WaterLinesLabels = 3,
-    DamLines = 4,
-    DamPolygons = 5,
-    PierLines = 6,
-    PierPolygons = 7,
-    Boundaries = 8,
-    BoundaryLabels = 9,
-    PlaceLabels = 10,
-    Land = 11,
-    Sites = 12,
-    Buildings = 13,
-    Addresses = 14,
-    Streets = 15,
-    StreetPolygons = 16,
-    StreetLabels = 17,
-    StreetLabelsPoints = 18,
-    StreetsPolygonsLabels = 19,
-    Bridges = 20,
-    Aerialways = 21,
-    Ferries = 22,
-    PublicTransport = 23,
-    Pois = 24,
-    Ocean = 25,
+// This list is in archived MVT tile order. The explicit order is checked
+// against the layer ID because the ID also controls the wire sort key.
+macro_rules! define_layers {
+    (
+        $(
+            $variant:ident = $id:literal,
+            $name:literal,
+            tile_order = $tile_order:literal,
+            min_zoom = $min_zoom:literal,
+            fanout_cap = $fanout_cap:literal;
+        )*
+    ) => {
+        const LAYER_COUNT: usize = [$(stringify!($variant)),*].len();
+
+        /// MVT layer in the Shortbread schema.
+        /// `#[repr(u8)]` makes the wire ID a zero-cost index into layer arrays.
+        /// Tile order is explicit in this list and must match each wire ID.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(u8)]
+        pub enum Layer {
+            $($variant = $id,)*
+        }
+
+        impl Layer {
+            /// All layers in archived MVT tile order.
+            pub const ALL: [Layer; LAYER_COUNT] = [$(Self::$variant),*];
+
+            /// MVT tile order. This currently matches the wire ID.
+            pub const fn tile_order(self) -> u8 {
+                match self {
+                    $(Self::$variant => $tile_order,)*
+                }
+            }
+
+            /// Minimum zoom floor for features in this layer.
+            pub const fn min_zoom(self) -> u8 {
+                match self {
+                    $(Self::$variant => $min_zoom,)*
+                }
+            }
+
+            /// Whether OSM polygon emission consults this layer's fanout cap.
+            pub const fn supports_fanout_cap(self) -> bool {
+                match self {
+                    $(Self::$variant => $fanout_cap,)*
+                }
+            }
+
+            /// MVT layer name string.
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)*
+                }
+            }
+
+            /// Parse an MVT layer name into a Layer variant.
+            pub fn from_name(name: &str) -> Option<Self> {
+                match name {
+                    $($name => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }
+
+            /// Total number of layers.
+            pub const fn count() -> usize {
+                LAYER_COUNT
+            }
+        }
+
+        const _: () = {
+            $(
+                assert!($id == $tile_order);
+                assert!(Layer::ALL[$tile_order] as u8 == $id);
+            )*
+        };
+    };
 }
 
-impl Layer {
-    /// All layers in enum order.
-    pub const ALL: [Layer; 26] = [
-        Self::WaterPolygons,
-        Self::WaterPolygonsLabels,
-        Self::WaterLines,
-        Self::WaterLinesLabels,
-        Self::DamLines,
-        Self::DamPolygons,
-        Self::PierLines,
-        Self::PierPolygons,
-        Self::Boundaries,
-        Self::BoundaryLabels,
-        Self::PlaceLabels,
-        Self::Land,
-        Self::Sites,
-        Self::Buildings,
-        Self::Addresses,
-        Self::Streets,
-        Self::StreetPolygons,
-        Self::StreetLabels,
-        Self::StreetLabelsPoints,
-        Self::StreetsPolygonsLabels,
-        Self::Bridges,
-        Self::Aerialways,
-        Self::Ferries,
-        Self::PublicTransport,
-        Self::Pois,
-        Self::Ocean,
-    ];
-
-    /// MVT layer name string.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::WaterPolygons => "water_polygons",
-            Self::WaterPolygonsLabels => "water_polygons_labels",
-            Self::WaterLines => "water_lines",
-            Self::WaterLinesLabels => "water_lines_labels",
-            Self::DamLines => "dam_lines",
-            Self::DamPolygons => "dam_polygons",
-            Self::PierLines => "pier_lines",
-            Self::PierPolygons => "pier_polygons",
-            Self::Boundaries => "boundaries",
-            Self::BoundaryLabels => "boundary_labels",
-            Self::PlaceLabels => "place_labels",
-            Self::Land => "land",
-            Self::Sites => "sites",
-            Self::Buildings => "buildings",
-            Self::Addresses => "addresses",
-            Self::Streets => "streets",
-            Self::StreetPolygons => "street_polygons",
-            Self::StreetLabels => "street_labels",
-            Self::StreetLabelsPoints => "street_labels_points",
-            Self::StreetsPolygonsLabels => "streets_polygons_labels",
-            Self::Bridges => "bridges",
-            Self::Aerialways => "aerialways",
-            Self::Ferries => "ferries",
-            Self::PublicTransport => "public_transport",
-            Self::Pois => "pois",
-            Self::Ocean => "ocean",
-        }
-    }
-
-    /// Minimum zoom level at which this layer appears in tiles.
-    pub fn min_zoom(self) -> u8 {
-        match self {
-            Self::Boundaries => 0,
-            Self::Ocean => 0,
-            Self::BoundaryLabels => 2,
-            Self::WaterPolygons | Self::WaterPolygonsLabels | Self::PlaceLabels => 4,
-            Self::Streets => 5,
-            Self::Land => 7,
-            Self::WaterLines | Self::WaterLinesLabels => 9,
-            Self::StreetLabels | Self::Ferries => 10,
-            Self::StreetPolygons | Self::PublicTransport => 11,
-            Self::DamLines
-            | Self::DamPolygons
-            | Self::PierLines
-            | Self::PierPolygons
-            | Self::StreetLabelsPoints
-            | Self::Bridges
-            | Self::Aerialways => 12,
-            Self::Sites
-            | Self::Buildings
-            | Self::Addresses
-            | Self::StreetsPolygonsLabels
-            | Self::Pois => 14,
-        }
-    }
-
-    /// Parse a layer name string (e.g. "water_polygons") into a Layer variant.
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|l| l.name() == name)
-    }
-
-    /// Total number of layers.
-    pub const fn count() -> usize {
-        Self::ALL.len()
-    }
+define_layers! {
+    WaterPolygons = 0, "water_polygons", tile_order = 0, min_zoom = 4, fanout_cap = true;
+    WaterPolygonsLabels = 1, "water_polygons_labels", tile_order = 1, min_zoom = 4, fanout_cap = false;
+    WaterLines = 2, "water_lines", tile_order = 2, min_zoom = 9, fanout_cap = false;
+    WaterLinesLabels = 3, "water_lines_labels", tile_order = 3, min_zoom = 9, fanout_cap = false;
+    DamLines = 4, "dam_lines", tile_order = 4, min_zoom = 12, fanout_cap = false;
+    DamPolygons = 5, "dam_polygons", tile_order = 5, min_zoom = 12, fanout_cap = true;
+    PierLines = 6, "pier_lines", tile_order = 6, min_zoom = 12, fanout_cap = false;
+    PierPolygons = 7, "pier_polygons", tile_order = 7, min_zoom = 12, fanout_cap = true;
+    Boundaries = 8, "boundaries", tile_order = 8, min_zoom = 0, fanout_cap = false;
+    BoundaryLabels = 9, "boundary_labels", tile_order = 9, min_zoom = 2, fanout_cap = false;
+    PlaceLabels = 10, "place_labels", tile_order = 10, min_zoom = 4, fanout_cap = false;
+    Land = 11, "land", tile_order = 11, min_zoom = 7, fanout_cap = true;
+    Sites = 12, "sites", tile_order = 12, min_zoom = 14, fanout_cap = true;
+    Buildings = 13, "buildings", tile_order = 13, min_zoom = 14, fanout_cap = true;
+    Addresses = 14, "addresses", tile_order = 14, min_zoom = 14, fanout_cap = false;
+    Streets = 15, "streets", tile_order = 15, min_zoom = 5, fanout_cap = false;
+    StreetPolygons = 16, "street_polygons", tile_order = 16, min_zoom = 11, fanout_cap = true;
+    StreetLabels = 17, "street_labels", tile_order = 17, min_zoom = 10, fanout_cap = false;
+    StreetLabelsPoints = 18, "street_labels_points", tile_order = 18, min_zoom = 12, fanout_cap = false;
+    StreetsPolygonsLabels = 19, "streets_polygons_labels", tile_order = 19, min_zoom = 14, fanout_cap = false;
+    Bridges = 20, "bridges", tile_order = 20, min_zoom = 12, fanout_cap = true;
+    Aerialways = 21, "aerialways", tile_order = 21, min_zoom = 12, fanout_cap = false;
+    Ferries = 22, "ferries", tile_order = 22, min_zoom = 10, fanout_cap = false;
+    PublicTransport = 23, "public_transport", tile_order = 23, min_zoom = 11, fanout_cap = false;
+    Pois = 24, "pois", tile_order = 24, min_zoom = 14, fanout_cap = false;
+    Ocean = 25, "ocean", tile_order = 25, min_zoom = 0, fanout_cap = false;
 }
 
 /// What geometry the MVT feature should carry.
@@ -246,6 +218,16 @@ pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> SmallVec<[Layer
         OsmGeomType::OpenWay => match_open_way(tags, &mut out),
         OsmGeomType::ClosedWay => match_closed_way(tags, &mut out),
         OsmGeomType::MultiPolygon => match_multipolygon(tags, &mut out),
+    }
+    #[cfg(test)]
+    for matched in &out {
+        assert!(
+            matched.min_zoom >= matched.layer.min_zoom(),
+            "{} emitted at z{} below its layer floor z{}",
+            matched.layer.name(),
+            matched.min_zoom,
+            matched.layer.min_zoom(),
+        );
     }
     out
 }

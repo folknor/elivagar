@@ -1564,7 +1564,7 @@ pub(super) struct AssemblyScratch {
     pub(super) merge_scratch: mvt::MergeScratch,
     pub(super) line_merge_scratch: mvt::LineMergeScratch,
     pub(super) geom_pool: Vec<Vec<u32>>,
-    pub(super) tags_pool: Vec<Vec<(u16, u16)>>,
+    pub(super) tags_pool: Vec<Vec<(u32, u32)>>,
     pub(super) compression_levels: [Option<flate2::Compression>; 11],
     pub(super) gz_buf: Vec<u8>,
     pub(super) mvt_buf: Vec<u8>,
@@ -1643,46 +1643,14 @@ pub(super) fn encode_tile_batch_mvt(
                 let mut scratch = AssemblyScratch::new();
                 let s = &mut scratch;
 
-                for &(layer_idx, ref data) in &tile.features {
-                    if (layer_idx as usize) < s.layers.len() {
-                        add_feature_to_layer(
-                            get_or_create_layer(&mut s.layers, layer_idx as usize),
-                            data,
-                            &mut s.geom_pool,
-                            &mut s.tags_pool,
-                        );
-                    }
-                }
-
                 let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-
-                for (li, layer) in s.layers.iter_mut().enumerate() {
-                    if li == shortbread::Layer::Ocean as usize {
-                        continue;
-                    }
-                    if let Some(lb) = layer.as_mut() {
-                        lb.merge_same_attr_geometries(
-                            &mut s.merge_scratch,
-                            &mut s.geom_pool,
-                            &mut s.tags_pool,
-                        );
-                    }
-                }
-
-                if z < 14 {
-                    for layer in &mut s.layers {
-                        if let Some(lb) = layer.as_mut() {
-                            lb.merge_connected_lines(&mut s.line_merge_scratch);
-                        }
-                    }
-                }
-
-                // Max 26 elements (one per Shortbread layer) - with_capacity not needed.
+                prepare_tile_layers(s, tile);
+                // Borrow only the layer field so encoding can use its own buffers.
                 let non_empty: Vec<&LayerBuilder> = s
                     .layers
                     .iter()
-                    .filter_map(|l| l.as_ref())
-                    .filter(|l| !l.is_empty())
+                    .filter_map(|layer| layer.as_ref())
+                    .filter(|layer| !layer.is_empty())
                     .collect();
                 if non_empty.is_empty() {
                     return None;
@@ -1732,15 +1700,9 @@ pub(super) fn encode_tile_batch_mvt(
         .collect()
 }
 
-/// Build non-empty per-layer builders for one tile.
-///
-/// MLT-only: the MVT encoder inlines this work in its rayon closure. Gated
-/// with the encoder so a default build carries no dead assembly path.
-#[cfg(feature = "mlt")]
-pub(super) fn prepare_non_empty_layers<'a>(
-    s: &'a mut AssemblyScratch,
-    tile: &PendingTile,
-) -> Vec<&'a LayerBuilder> {
+/// Both encoders consume this stage so format selection cannot change the
+/// geometry merge policy.
+fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) {
     // Reset persisted layers from previous tile (reclaim features + clear interning).
     for slot in &mut s.layers {
         if let Some(lb) = slot.as_mut() {
@@ -1759,12 +1721,39 @@ pub(super) fn prepare_non_empty_layers<'a>(
         }
     }
 
-    for layer in &mut s.layers {
+    for (li, layer) in s.layers.iter_mut().enumerate() {
+        // Preserve the existing MVT ocean feature layout: it is also stored
+        // in the durable world artifact. Removing this exclusion changes
+        // those bytes and requires an OCEAN_POLICY_VERSION bump in ocean.rs
+        // and an artifact rebuild. This is a compatibility constraint, not
+        // a topology requirement: the merger concatenates complete polygons,
+        // and MapLibre's 500-ring cap applies per polygon, not per feature.
+        if li == shortbread::Layer::Ocean as usize {
+            continue;
+        }
         if let Some(lb) = layer.as_mut() {
             lb.merge_same_attr_geometries(&mut s.merge_scratch, &mut s.geom_pool, &mut s.tags_pool);
         }
     }
 
+    // Full-resolution z14 lines retain the existing MVT policy. Below z14,
+    // join through degree-2 endpoints with the same clip-boundary protection
+    // in both formats; the merger itself selects line geometries.
+    let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+    if z < 14 {
+        for lb in s.layers.iter_mut().flatten() {
+            lb.merge_connected_lines(&mut s.line_merge_scratch);
+        }
+    }
+}
+
+/// Build non-empty per-layer builders for the MLT encoder and model tests.
+#[cfg(any(feature = "mlt", test))]
+pub(super) fn prepare_non_empty_layers<'a>(
+    s: &'a mut AssemblyScratch,
+    tile: &PendingTile,
+) -> Vec<&'a LayerBuilder> {
+    prepare_tile_layers(s, tile);
     // Max 26 elements (one per Shortbread layer) - with_capacity not needed.
     s.layers
         .iter()
@@ -1828,6 +1817,66 @@ fn get_or_create_layer(layers: &mut [Option<LayerBuilder>], idx: usize) -> &mut 
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn shared_preparation_preserves_ocean_and_line_zoom_policy() {
+        for z in [13, 14] {
+            let mut tile = PendingTile {
+                tile_id: pmtiles_writer::xy_to_tile_id(z, 0, 0),
+                features: Vec::new(),
+            };
+            for coords in [[(100, 100), (200, 100)], [(200, 100), (300, 100)]] {
+                let mut geometry = Vec::new();
+                mvt::encode_linestring(&mut geometry, &coords);
+                tile.features.push((
+                    Layer::Boundaries as u8,
+                    crate::wire_format::encode_feature_data_with_attrs(
+                        1,
+                        mvt::GeomType::LineString,
+                        &geometry,
+                        &[0],
+                    ),
+                ));
+            }
+            let mut polygon = Vec::new();
+            mvt::encode_polygon(
+                &mut polygon,
+                &[&[(100, 100), (200, 100), (200, 200), (100, 100)]],
+            );
+            for _ in 0..2 {
+                tile.features.push((
+                    Layer::Ocean as u8,
+                    crate::wire_format::encode_feature_data_with_attrs(
+                        2,
+                        mvt::GeomType::Polygon,
+                        &polygon,
+                        &[0],
+                    ),
+                ));
+            }
+            let mut scratch = AssemblyScratch::new();
+            let layers = prepare_non_empty_layers(&mut scratch, &tile);
+            assert_eq!(layers.len(), 2);
+            let boundaries = scratch.layers[Layer::Boundaries as usize].as_ref().unwrap();
+            assert_eq!(boundaries.features.len(), 1);
+            let mut expected = Vec::new();
+            if z < 14 {
+                mvt::encode_linestring(&mut expected, &[(100, 100), (200, 100), (300, 100)]);
+            } else {
+                // Two unjoined sub-lines remain in one same-attribute feature.
+                expected = vec![9, 200, 200, 10, 200, 0, 9, 0, 0, 10, 200, 0];
+            }
+            assert_eq!(boundaries.features[0].geometry, expected);
+            let ocean = scratch.layers[Layer::Ocean as usize].as_ref().unwrap();
+            assert_eq!(ocean.features.len(), 2);
+            assert!(
+                ocean
+                    .features
+                    .iter()
+                    .all(|feature| feature.geometry == polygon)
+            );
+        }
+    }
 
     #[test]
     fn ocean_layer_field_skips_non_length_delimited_tile_fields() {

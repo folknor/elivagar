@@ -141,8 +141,9 @@ pub struct TilegenConfig {
     /// declare `Sort.Type_then_ID`. Useful for PBFs that are sorted in practice
     /// but lack the header flag. Aborts with an error if nodes aren't monotonic.
     pub force_sorted: bool,
-    /// Allow unsafe flat node-index operation by bypassing unsorted-size and
-    /// flat-index-size safety guardrails. Intended only for expert debugging.
+    /// Allow the flat node index when the PBF lacks `Sort.Type_then_ID` and
+    /// `force_sorted` is false, regardless of input size, and bypass flat-index
+    /// size guardrails. Unneeded with inline way coordinates. Expert debugging only.
     pub allow_unsafe_flat_index: bool,
     /// Thread budget. Controls the rayon global pool size and pbfhogg decode pool.
     /// Default: `std::thread::available_parallelism()` (logical CPUs).
@@ -197,10 +198,10 @@ pub struct TilegenConfig {
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
-/// v6 is JSON and records everything a resume must verify: the input hash, the
-/// producer config the chunks were built under, and the effective paths.
+/// v7 is JSON and records everything a resume must verify: the input hash, the
+/// producer config, effective paths, and the sort chunk storage codec.
 ///
-/// v6 closed the last hole in that list. v5 recorded computed ocean as the bare
+/// v6 added computed-ocean source identity. v5 recorded computed ocean as the bare
 /// string "computed", naming no source, so chunks built from one shapefile
 /// could be reused by a resume naming another while the archive's metadata
 /// described the second - the artifact arm had carried its key since it was
@@ -212,7 +213,7 @@ const CHECKPOINT_FILE: &str = "checkpoint.txt";
 /// range. v4 added the input hash and effective paths but kept the
 /// whitespace-positional encoding, where every new field shifts an index and a
 /// miscount is a silent misparse. Neither is accepted; re-run a full tilegen.
-const CHECKPOINT_VERSION: u32 = 6;
+const CHECKPOINT_VERSION: u32 = 7;
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
@@ -237,6 +238,9 @@ pub(crate) struct CheckpointProvenance {
     /// `provenance::producer_config` of the run that wrote the chunks.
     pub(crate) producer_config: serde_json::Value,
     pub(crate) effective: crate::provenance::Effective,
+    /// Codec used for the serialized sort chunks. This is storage format,
+    /// not producer provenance, but readers must match it to decode the files.
+    pub(crate) sort_chunk_compression: sort::ChunkCompression,
 }
 
 fn save_checkpoint(
@@ -255,6 +259,11 @@ fn save_checkpoint(
                 .map_err(|e| PipelineError(format!("ocean key is not valid JSON: {e}")))?,
         }),
     };
+    let sort_chunk_compression = match provenance.sort_chunk_compression {
+        sort::ChunkCompression::None => "none",
+        sort::ChunkCompression::Lz4 => "lz4",
+        sort::ChunkCompression::Snappy => "snappy",
+    };
     let content = serde_json::json!({
         "version": CHECKPOINT_VERSION,
         "bounds": [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y],
@@ -262,6 +271,7 @@ fn save_checkpoint(
         "ocean": ocean,
         "input_xxh3_128": provenance.input_xxh3_128,
         "producer_config": provenance.producer_config,
+        "sort_chunk_compression": sort_chunk_compression,
         "effective": {
             "coordinate_source": provenance.effective.coordinate_source,
             "way_members": provenance.effective.way_members,
@@ -272,23 +282,49 @@ fn save_checkpoint(
     Ok(())
 }
 
-/// Save total chunk count so --skip-to sort can validate against stale leftovers.
-fn save_sort_chunk_count(
-    tmp_dir: &std::path::Path,
-    count: Option<usize>,
-) -> Result<(), PipelineError> {
-    if let Some(n) = count {
-        std::fs::write(tmp_dir.join(SORT_CHECKPOINT_FILE), n.to_string())?;
-    }
+/// Save the completed sort chunk count so a resume can reject stale leftovers.
+fn save_sort_chunk_count(tmp_dir: &std::path::Path, count: usize) -> Result<(), PipelineError> {
+    std::fs::write(tmp_dir.join(SORT_CHECKPOINT_FILE), count.to_string())?;
     Ok(())
 }
 
-fn load_sort_chunk_count(tmp_dir: &std::path::Path) -> Option<usize> {
-    match std::fs::read_to_string(tmp_dir.join(SORT_CHECKPOINT_FILE)) {
-        Ok(content) => content.trim().parse().ok(),
-        Err(_) => {
-            eprintln!("  Warning: no sort checkpoint found - cannot verify chunk integrity");
-            None
+/// A skip-to-sort/assemble resume requires proof that the ocean pass finished.
+/// The count file is written only after that pass; absence or corruption means
+/// the chunk set may be partial and must not be assembled.
+fn load_sort_chunk_count(tmp_dir: &std::path::Path) -> Result<usize, PipelineError> {
+    let path = tmp_dir.join(SORT_CHECKPOINT_FILE);
+    let content = std::fs::read_to_string(&path).map_err(|error| {
+        emit_counter("resume_refusal_missing_sort_chunk_count", 1);
+        PipelineError(format!(
+            "sort chunk completion record {} is missing or unreadable ({error}); the ocean phase may not have completed, so \
+             --skip-to sort or assemble is unsafe; rerun from --skip-to ocean or do a full tilegen",
+            path.display()
+        ))
+    })?;
+    content.trim().parse().map_err(|error| {
+        emit_counter("resume_refusal_invalid_sort_chunk_count", 1);
+        PipelineError(format!(
+            "sort chunk completion record {} is invalid ({error}); \
+             --skip-to sort or assemble is unsafe; rerun from --skip-to ocean or do a full tilegen",
+            path.display()
+        ))
+    })
+}
+
+/// Invalidate a previous completion record before --skip-to ocean modifies
+/// the chunk set. A failed ocean pass must leave no record that makes its
+/// partial output appear complete.
+fn clear_sort_chunk_count(tmp_dir: &std::path::Path) -> Result<(), PipelineError> {
+    let path = tmp_dir.join(SORT_CHECKPOINT_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            emit_counter("resume_refusal_sort_chunk_count_clear", 1);
+            Err(PipelineError(format!(
+                "could not clear prior sort chunk completion record {} before resuming ocean: {error}",
+                path.display()
+            )))
         }
     }
 }
@@ -298,12 +334,14 @@ fn load_checkpoint(
 ) -> Result<(MercBbox, usize, OceanMode, CheckpointProvenance), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let content = std::fs::read_to_string(&path).map_err(|e| {
+        emit_counter("resume_refusal_missing_checkpoint", 1);
         PipelineError(format!(
             "no checkpoint in {}: {e} (run a full tilegen first)",
             tmp_dir.display()
         ))
     })?;
     let stale = || {
+        emit_counter("resume_refusal_stale_checkpoint", 1);
         PipelineError(format!(
             "checkpoint in {} predates v{CHECKPOINT_VERSION} or is malformed; \
              re-run a full tilegen to regenerate it",
@@ -363,6 +401,15 @@ fn load_checkpoint(
             .ok_or_else(stale)?
             .to_string(),
         producer_config: doc.get("producer_config").cloned().ok_or_else(stale)?,
+        sort_chunk_compression: match doc
+            .get("sort_chunk_compression")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("none") => sort::ChunkCompression::None,
+            Some("lz4") => sort::ChunkCompression::Lz4,
+            Some("snappy") => sort::ChunkCompression::Snappy,
+            _ => return Err(stale()),
+        },
         effective: crate::provenance::Effective {
             coordinate_source: path_name("coordinate_source", ["inline", "node_store"])?,
             way_members: path_name("way_members", ["injected_v1", "relation_scan"])?,
@@ -534,6 +581,8 @@ fn layer_stats_enabled() -> bool {
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[hotpath::measure]
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
+    crate::debug::reset_run_counters();
+    crate::ocean::reset_ocean_counters();
     if config.max_zoom > 14 {
         return Err(PipelineError(format!(
             "max_zoom {} exceeds maximum supported zoom level 14",
@@ -565,6 +614,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // from page cache and the "read it back out of cache" assumption fails at
     // exactly the scale where the read costs most.
     let mut input_identity: Option<(String, u64)> = None;
+    let mut resumed_sort_chunks = None;
     // Only a full run computes the effective paths; a resume inherits them
     // from the checkpoint written by the run that built the chunks.
     let mut resumed_effective = None;
@@ -574,6 +624,15 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         let (_, _, checkpoint_ocean_mode, checkpoint) = load_checkpoint(&config.tmp_dir)?;
         if checkpoint_ocean_mode != ocean_mode {
             return Err(PipelineError("checkpoint ocean mode differs from this run; --skip-to ocean, sort, and assemble cannot resume".to_string()));
+        }
+        if checkpoint.sort_chunk_compression != config.compress_sort_chunks {
+            emit_counter("resume_refusal_sort_compression", 1);
+            return Err(PipelineError(format!(
+                "checkpoint sort chunks use {:?} compression but this run requests {:?}; \
+                 --compress-sort-chunks must match the setting that wrote the chunks, so \
+                 --skip-to cannot resume; re-run a full tilegen",
+                checkpoint.sort_chunk_compression, config.compress_sort_chunks
+            )));
         }
         if checkpoint.input_xxh3_128 != identity.0 {
             return Err(PipelineError(format!(
@@ -597,6 +656,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                  --skip-to cannot reinterpret them - re-run a full tilegen",
                 diffs.join("; "),
             )));
+        }
+        if matches!(skip, Some(SkipTo::Sort | SkipTo::Assemble)) {
+            resumed_sort_chunks = Some(load_sort_chunk_count(&config.tmp_dir)?);
         }
         resumed_effective = Some(checkpoint.effective);
         input_identity = Some(identity);
@@ -685,6 +747,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                         .as_ref()
                         .map(|s| s.effective)
                         .expect("phase12 stats are set immediately above"),
+                    sort_chunk_compression: config.compress_sort_chunks,
                 },
             )?;
             input_identity = Some(identity);
@@ -698,6 +761,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 ));
             }
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
+            clear_sort_chunk_count(&config.tmp_dir)?;
             sort::SortWriter::resume(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
                 sort_chunk_size,
@@ -811,19 +875,22 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     emit_marker("SORT_START");
     emit_allocator_boundary("sort_start");
     // Flush any trailing buffer so chunk_count() reflects all chunks on disk,
-    // then save the count for --skip-to sort validation.
+    // then save the completion count for later resumes.
     if let Some(ref mut sw) = sort_writer {
         let _wait = wait_span(&WAIT.sort_flush);
         sw.flush()?;
     }
     let sort_chunks = sort_writer.as_ref().map(sort::SortWriter::chunk_count);
-    save_sort_chunk_count(&config.tmp_dir, sort_chunks)?;
+    if let Some(count) = sort_chunks {
+        save_sort_chunk_count(&config.tmp_dir, count)?;
+    }
+    let expected_sort_chunks = sort_chunks.or(resumed_sort_chunks);
     let (mut sort_reader, phase3_elapsed, sort_rss) = if skip == Some(SkipTo::Assemble) {
         let sr = {
             let _wait = wait_span(&WAIT.sort_open);
             sort::SortReader::from_dir(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
-                load_sort_chunk_count(&config.tmp_dir),
+                expected_sort_chunks,
                 config.compress_sort_chunks,
             )?
         };
@@ -838,7 +905,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             let _wait = wait_span(&WAIT.sort_open);
             sort::SortReader::from_dir(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
-                load_sort_chunk_count(&config.tmp_dir),
+                expected_sort_chunks,
                 config.compress_sort_chunks,
             )?
         };

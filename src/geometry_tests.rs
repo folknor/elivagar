@@ -895,14 +895,6 @@ fn clip_rect_for_tile_extends_by_buffer() {
     assert!((clip.max_y - (0.5 + buf)).abs() < eps);
 }
 
-// The shared-chain detection, canonicalization and tile-coordinate
-// simplification test suites were deleted with geometry/seams.rs
-// (2026-08-07): the assemble-side seam-reconcile machinery they exercised
-// was retired after the shared-node pin adjudication - see
-// notes/simplify-then-reconcile-design.md. The pinning-semantics tests at
-// the bottom of this file survive; they document the mechanism that
-// replaced it.
-
 // ---------------------------------------------------------------------------
 // MVT polygon decoder tests
 // ---------------------------------------------------------------------------
@@ -975,18 +967,17 @@ fn decode_mvt_polygon_two_outer_rings() {
 }
 
 // ---------------------------------------------------------------------------
-// Synthetic benchmark: simplify-then-reconcile hypothesis validation
+// Shared-edge simplification regression cases
 // ---------------------------------------------------------------------------
 //
-// Validates the core claim from notes/simplify-then-reconcile-design.md:
-// Two polygons sharing an edge, when simplified with shared-segment endpoints
-// pinned, produce identical vertices along the shared boundary.
+// The first case checks endpoint pinning on adjacent polygon rings. The second
+// checks that an isolated shared coordinate sequence simplifies identically
+// in forward and reverse order.
 
 /// Build two adjacent polygon rings sharing a wiggly edge, simplify each
-/// independently (standard DP), then simplify with shared-edge endpoints
-/// pinned. The unpinned case should diverge; the pinned case should agree.
+/// independently, then check that required shared-edge endpoints stay pinned.
 #[test]
-fn shared_edge_pinning_produces_identical_simplification() {
+fn shared_edge_pinning_preserves_endpoints() {
     // Shared edge: a wiggly vertical boundary with 20 intermediate vertices
     // between (0.5, 0.3) and (0.5, 0.7). The wiggle is small enough that DP
     // at z6 tolerance removes some vertices, but large enough that DP at z10
@@ -1065,11 +1056,8 @@ fn shared_edge_pinning_produces_identical_simplification() {
         .copied()
         .collect();
 
-    // With endpoints pinned, DP still processes shared vertices in different
-    // sub-problem contexts (the non-shared parts of each ring affect recursion).
-    // Endpoint pinning alone is necessary but not sufficient - see below.
-    // The full fix (design doc Option D) requires isolating the shared segment
-    // and simplifying it independently from both rings.
+    // This fixture checks endpoint preservation only. It does not assert that
+    // the simplified shared-edge interiors match.
 
     // Verify endpoints are preserved (pinning works).
     assert!(
@@ -1099,9 +1087,8 @@ fn shared_edge_pinning_produces_identical_simplification() {
     );
 }
 
-/// When the shared segment is extracted and simplified in isolation (same
-/// point sequence, same tolerance), both polygons get identical results.
-/// This validates the "segment isolation" approach from the design doc.
+/// Simplifying the same isolated coordinate sequence in either direction
+/// produces matching output after reversing one result.
 #[test]
 fn isolated_shared_segment_simplification_is_identical() {
     // Build a shared edge: a mostly-straight vertical line with sub-tolerance

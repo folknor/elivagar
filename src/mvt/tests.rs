@@ -1047,7 +1047,7 @@ fn test_merge_reclaims_to_pools() {
 
     let mut scratch = MergeScratch::new();
     let mut gp: Vec<Vec<u32>> = Vec::new();
-    let mut tp: Vec<Vec<(u16, u16)>> = Vec::new();
+    let mut tp: Vec<Vec<(u32, u32)>> = Vec::new();
     layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
 
     // Secondary features' vecs are reclaimed into the pools, and the merged
@@ -1630,4 +1630,50 @@ fn boundary_endpoint_of_degree_two_still_starts_a_chain() {
     };
     assert!(has(&[(100, 100), (200, 200), c]), "{merged:?}");
     assert!(has(&[c, (300, 900), (100, 1000)]), "{merged:?}");
+}
+
+#[test]
+fn intern_tables_and_encoded_remaps_cross_u16_boundary() {
+    for count in [65_536_u32, 65_537] {
+        let mut layer = LayerBuilder::new("wide");
+        // Reverse insertion makes canonical indices differ from intern indices.
+        for i in (0..count).rev() {
+            let text = format!("entry_{i:05}");
+            let key = layer.intern_key(&text);
+            let value = layer.intern_string_value(&text);
+            assert_eq!(key, count - 1 - i);
+            assert_eq!(value, key);
+        }
+        for i in [0, 65_535, count - 1] {
+            let text = format!("entry_{i:05}");
+            let key = layer.intern_key(&text);
+            // Exercise the owned string entry point against the borrowed map.
+            let value = layer.intern_value(Value::String(text));
+            layer.add_feature(Feature {
+                id: Some(u64::from(i)),
+                geom_type: GeomType::Point,
+                geometry: vec![command(1, 1), 0, 0],
+                tags: vec![(key, value)],
+            });
+        }
+        let parsed = parse_fixture_tile(&encode_tile(&[&layer])).unwrap();
+        let decoded = &parsed.layers[0];
+        assert_eq!(decoded.keys.len(), count as usize);
+        assert_eq!(decoded.string_values.len(), count as usize);
+        for feature in &decoded.features {
+            let i = u32::try_from(feature.feature_id.unwrap()).unwrap();
+            assert_eq!(feature.feature_tags, vec![i, i]);
+            let expected = format!("entry_{i:05}");
+            assert_eq!(decoded.keys[i as usize], expected);
+            assert_eq!(decoded.string_values[i as usize], expected);
+        }
+    }
+
+    let mut numeric = LayerBuilder::new("numeric");
+    for i in 0..65_537_u32 {
+        let value = Value::Int(i64::from(i));
+        assert_eq!(numeric.intern_value(value.clone()), i);
+        assert_eq!(numeric.test_value(i), &value);
+    }
+    assert_eq!(numeric.intern_value(Value::Int(65_536)), 65_536);
 }

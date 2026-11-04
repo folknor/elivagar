@@ -194,8 +194,7 @@ fn root_fragments(
         scratch.return_shapes(normalized);
         return Vec::new();
     };
-    let (tx_min, tx_max, ty_min, ty_max) =
-        tile_range_for_base_rect(bbox, params.maxz, params.z_top);
+    let (tx_min, tx_max, ty_min, ty_max) = tile_cover(bbox, params.maxz, params.z_top, 0);
     let mut roots = Vec::new();
     root_bisect(
         RootRange {
@@ -971,39 +970,38 @@ fn shapes_bbox(shapes: &Shapes) -> Option<IntRect> {
     out
 }
 
-fn tile_range_for_base_rect(rect: IntRect, maxz: u8, z: u8) -> (u32, u32, u32, u32) {
+/// Inclusive world-clamped bbox cover in base coordinates. `margin` is in
+/// zoom-space units: zero preserves root selection; TILE_BUFFER_I32 bounds
+/// buffered descendant emission. Boundary-only contacts may be included, so
+/// this is a conservative fanout bound, not a count of nonempty polygons.
+pub(crate) fn tile_cover(rect: IntRect, maxz: u8, z: u8, margin: i32) -> (u32, u32, u32, u32) {
+    assert!(z <= maxz && margin >= 0);
     let max_tile = (1_u32 << z) - 1;
     let tile_size = cell_tile_size_base(maxz, z);
+    let margin = i64::from(margin) << u32::from(maxz - z);
+    let index = |q: i64| {
+        u32::try_from(q.div_euclid(tile_size).clamp(0, i64::from(max_tile)))
+            .expect("clamped tile index fits u32")
+    };
     (
-        base_tile_index(rect.min_x, tile_size, max_tile),
-        base_tile_index(rect.max_x, tile_size, max_tile),
-        base_tile_index(rect.min_y, tile_size, max_tile),
-        base_tile_index(rect.max_y, tile_size, max_tile),
+        index(i64::from(rect.min_x) - margin),
+        index(i64::from(rect.max_x) + margin),
+        index(i64::from(rect.min_y) - margin),
+        index(i64::from(rect.max_y) + margin),
     )
 }
 
-fn base_tile_index(q: i32, tile_size: i64, max_tile: u32) -> u32 {
-    if q <= 0 {
-        0
-    } else {
-        let idx = i64::from(q).div_euclid(tile_size);
-        u32::try_from(idx)
-            .expect("tile index fits u32")
-            .min(max_tile)
-    }
-}
-
-fn buffered_cell_rect_base(maxz: u8, cell: PyramidCell) -> IntRect {
-    let tile_size = cell_tile_size_base(maxz, cell.z);
-    let buffer = i64::from(TILE_BUFFER_I32) << u32::from(maxz - cell.z);
-    let tx = i64::from(cell.tx);
-    let ty = i64::from(cell.ty);
-    IntRect {
-        min_x: i32::try_from(tx * tile_size - buffer).expect("cell min x fits i32"),
-        min_y: i32::try_from(ty * tile_size - buffer).expect("cell min y fits i32"),
-        max_x: i32::try_from((tx + 1) * tile_size + buffer).expect("cell max x fits i32"),
-        max_y: i32::try_from((ty + 1) * tile_size + buffer).expect("cell max y fits i32"),
-    }
+pub(crate) fn buffered_cell_rect_base(maxz: u8, cell: PyramidCell) -> IntRect {
+    buffered_range_rect_base(
+        maxz,
+        cell.z,
+        RootRange {
+            tx0: cell.tx,
+            tx1: cell.tx,
+            ty0: cell.ty,
+            ty1: cell.ty,
+        },
+    )
 }
 
 fn cell_tile_size_base(maxz: u8, z: u8) -> i64 {
@@ -1223,6 +1221,47 @@ mod tests {
     use i_overlay::i_float::int::point::IntPoint as OraclePoint;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn buffered_cover_bounds_intersecting_cells_and_preserves_roots() {
+        // Each bbox fits within a single z2 tile. Check both sides of its
+        // edges, world clamping, and an exact buffer boundary.
+        for (lo, hi) in [
+            (4100, 4200),
+            (3980, 4000),
+            (4224, 4300),
+            (-20, 20),
+            (16370, 16400),
+        ] {
+            let rect = IntRect {
+                min_x: lo,
+                min_y: lo,
+                max_x: hi,
+                max_y: hi,
+            };
+            let (x0, x1, y0, y1) = tile_cover(rect, 2, 2, TILE_BUFFER_I32);
+            for ty in 0..4 {
+                for tx in 0..4 {
+                    let cell = buffered_cell_rect_base(2, PyramidCell { z: 2, tx, ty });
+                    if rect.min_x < cell.max_x
+                        && rect.max_x > cell.min_x
+                        && rect.min_y < cell.max_y
+                        && rect.max_y > cell.min_y
+                    {
+                        assert!(tx >= x0 && tx <= x1 && ty >= y0 && ty <= y1);
+                    }
+                }
+            }
+        }
+        let rect = IntRect {
+            min_x: 4100,
+            min_y: 4100,
+            max_x: 4200,
+            max_y: 4200,
+        };
+        assert_eq!(tile_cover(rect, 2, 2, 0), (1, 1, 1, 1));
+        assert_eq!(tile_cover(rect, 2, 2, TILE_BUFFER_I32), (0, 1, 0, 1));
+    }
+
     // The in-tree engine's IntPoint and the dev-dep i_overlay XOR oracle's
     // IntPoint are now distinct types; convert at the boundary.
     fn to_oracle_shape(shape: &Shape) -> Vec<Vec<OraclePoint>> {
@@ -1292,9 +1331,7 @@ mod tests {
                 let Some(bb) = shape_bbox(shape) else {
                     continue;
                 };
-                let max_tile = (1_u32 << z) - 1;
-                let (tx_min, tx_max, ty_min, ty_max) =
-                    crate::geometry::int_ocean::tile_range_for_rect(bb, max_tile);
+                let (tx_min, tx_max, ty_min, ty_max) = tile_cover(bb, z, z, 0);
                 for ty in ty_min..=ty_max {
                     for tx in tx_min..=tx_max {
                         let clipped = intersect_rect(shape, buffered_tile_rect(tx, ty), 0);

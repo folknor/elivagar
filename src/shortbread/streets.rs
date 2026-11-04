@@ -8,59 +8,48 @@ use smallvec::{SmallVec, smallvec};
 // Streets (line)
 // ---------------------------------------------------------------------------
 
-/// Returns (kind_raw, min_zoom, is_railway) for a highway/aeroway/railway.
-fn street_match<'a>(tags: &'a Tags<'a>) -> Option<(&'a str, u8, bool)> {
-    if let Some(v) = tags.get("highway") {
-        return highway_zoom(v).map(|z| (v, z, false));
+/// Returns (kind_raw, min_zoom, is_railway) for the first listed match.
+fn street_match(tags: &Tags<'_>) -> Option<(&'static str, u8, bool)> {
+    let (kind, mut zoom, rail) = transport::first_tag_match(
+        tags,
+        &[
+            ("highway", "motorway", ("motorway", 5, false)),
+            ("highway", "trunk", ("trunk", 6, false)),
+            ("highway", "motorway_link", ("motorway_link", 9, false)),
+            ("highway", "trunk_link", ("trunk_link", 9, false)),
+            ("highway", "primary", ("primary", 8, false)),
+            ("highway", "primary_link", ("primary_link", 8, false)),
+            ("highway", "secondary", ("secondary", 9, false)),
+            ("highway", "secondary_link", ("secondary_link", 9, false)),
+            ("highway", "tertiary", ("tertiary", 10, false)),
+            ("highway", "tertiary_link", ("tertiary_link", 10, false)),
+            ("highway", "unclassified", ("unclassified", 12, false)),
+            ("highway", "residential", ("residential", 12, false)),
+            ("highway", "busway", ("busway", 12, false)),
+            ("highway", "bus_guideway", ("bus_guideway", 12, false)),
+            ("highway", "living_street", ("living_street", 13, false)),
+            ("highway", "service", ("service", 13, false)),
+            ("highway", "pedestrian", ("pedestrian", 13, false)),
+            ("highway", "track", ("track", 13, false)),
+            ("highway", "footway", ("footway", 13, false)),
+            ("highway", "steps", ("steps", 13, false)),
+            ("highway", "path", ("path", 13, false)),
+            ("highway", "cycleway", ("cycleway", 13, false)),
+            ("aeroway", "runway", ("runway", 11, false)),
+            ("aeroway", "taxiway", ("taxiway", 13, false)),
+            ("railway", "rail", ("rail", 10, true)),
+            ("railway", "narrow_gauge", ("narrow_gauge", 10, true)),
+            ("railway", "light_rail", ("light_rail", 10, true)),
+            ("railway", "subway", ("subway", 10, true)),
+            ("railway", "tram", ("tram", 10, true)),
+            ("railway", "funicular", ("funicular", 10, true)),
+            ("railway", "monorail", ("monorail", 10, true)),
+        ],
+    )?;
+    if rail && kind == "rail" && tags.has("service") {
+        zoom = 8;
     }
-    if let Some(v) = tags.get("aeroway") {
-        return aeroway_zoom(v).map(|z| (v, z, false));
-    }
-    if let Some(v) = tags.get("railway") {
-        return railway_zoom(tags, v).map(|z| (v, z, true));
-    }
-    None
-}
-
-fn highway_zoom(v: &str) -> Option<u8> {
-    match v {
-        "motorway" => Some(5),
-        "trunk" => Some(6),
-        "motorway_link" => Some(9),
-        "trunk_link" => Some(9),
-        "primary" | "primary_link" => Some(8),
-        "secondary" | "secondary_link" => Some(9),
-        "tertiary" | "tertiary_link" => Some(10),
-        "unclassified" => Some(12),
-        "residential" => Some(12),
-        "busway" | "bus_guideway" => Some(12),
-        "living_street" | "service" | "pedestrian" | "track" | "footway" | "steps" | "path"
-        | "cycleway" => Some(13),
-        _ => None,
-    }
-}
-
-fn aeroway_zoom(v: &str) -> Option<u8> {
-    match v {
-        "runway" => Some(11),
-        "taxiway" => Some(13),
-        _ => None,
-    }
-}
-
-fn railway_zoom(tags: &Tags<'_>, v: &str) -> Option<u8> {
-    match v {
-        "rail" => {
-            if tags.has("service") {
-                Some(8)
-            } else {
-                Some(10)
-            }
-        }
-        "narrow_gauge" => Some(10),
-        "light_rail" | "subway" | "tram" | "funicular" | "monorail" => Some(10),
-        _ => None,
-    }
+    Some((kind, zoom, rail))
 }
 
 pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
@@ -160,21 +149,15 @@ pub(super) fn match_street_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
 }
 
 fn street_polygon_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
-    if let Some(v) = tags.get("area:aeroway") {
-        return match v {
-            "runway" => Some(("runway", 11)),
-            "taxiway" => Some(("taxiway", 13)),
-            _ => None,
-        };
-    }
-    if let Some(v) = tags.get("highway") {
-        return match v {
-            "pedestrian" => Some(("pedestrian", 14)),
-            "service" => Some(("service", 14)),
-            _ => None,
-        };
-    }
-    None
+    transport::first_tag_match(
+        tags,
+        &[
+            ("area:aeroway", "runway", ("runway", 11)),
+            ("area:aeroway", "taxiway", ("taxiway", 13)),
+            ("highway", "pedestrian", ("pedestrian", 14)),
+            ("highway", "service", ("service", 14)),
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -221,37 +204,43 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
     });
 }
 
-fn street_label_kind_and_zoom<'a>(tags: &Tags<'a>) -> Option<(&'a str, u8)> {
-    if let Some(v) = tags.get("highway") {
-        return street_label_zoom_highway(v).map(|zoom| (v, zoom));
-    }
-    if let Some(v) = tags.get("aeroway")
-        && let Some(zoom) = aeroway_zoom(v)
-    {
-        return Some((v, zoom));
-    }
-    if let Some(v) = tags.get("railway") {
-        let zoom = match v {
-            "rail" | "narrow_gauge" | "light_rail" | "subway" | "tram" | "funicular"
-            | "monorail" => Some(10),
-            _ => None,
-        };
-        return zoom.map(|zoom| (v, zoom));
-    }
-    None
-}
-
-fn street_label_zoom_highway(v: &str) -> Option<u8> {
-    match v {
-        "motorway" => Some(10),
-        "trunk" | "primary" => Some(12),
-        "secondary" | "tertiary" | "motorway_link" | "trunk_link" | "primary_link"
-        | "secondary_link" => Some(13),
-        "tertiary_link" | "unclassified" | "residential" | "busway" | "bus_guideway"
-        | "living_street" | "service" | "pedestrian" | "track" | "footway" | "steps" | "path"
-        | "cycleway" => Some(14),
-        _ => None,
-    }
+fn street_label_kind_and_zoom(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
+    transport::first_tag_match(
+        tags,
+        &[
+            ("highway", "motorway", ("motorway", 10)),
+            ("highway", "trunk", ("trunk", 12)),
+            ("highway", "primary", ("primary", 12)),
+            ("highway", "secondary", ("secondary", 13)),
+            ("highway", "tertiary", ("tertiary", 13)),
+            ("highway", "motorway_link", ("motorway_link", 13)),
+            ("highway", "trunk_link", ("trunk_link", 13)),
+            ("highway", "primary_link", ("primary_link", 13)),
+            ("highway", "secondary_link", ("secondary_link", 13)),
+            ("highway", "tertiary_link", ("tertiary_link", 14)),
+            ("highway", "unclassified", ("unclassified", 14)),
+            ("highway", "residential", ("residential", 14)),
+            ("highway", "busway", ("busway", 14)),
+            ("highway", "bus_guideway", ("bus_guideway", 14)),
+            ("highway", "living_street", ("living_street", 14)),
+            ("highway", "service", ("service", 14)),
+            ("highway", "pedestrian", ("pedestrian", 14)),
+            ("highway", "track", ("track", 14)),
+            ("highway", "footway", ("footway", 14)),
+            ("highway", "steps", ("steps", 14)),
+            ("highway", "path", ("path", 14)),
+            ("highway", "cycleway", ("cycleway", 14)),
+            ("aeroway", "runway", ("runway", 11)),
+            ("aeroway", "taxiway", ("taxiway", 13)),
+            ("railway", "rail", ("rail", 10)),
+            ("railway", "narrow_gauge", ("narrow_gauge", 10)),
+            ("railway", "light_rail", ("light_rail", 10)),
+            ("railway", "subway", ("subway", 10)),
+            ("railway", "tram", ("tram", 10)),
+            ("railway", "funicular", ("funicular", 10)),
+            ("railway", "monorail", ("monorail", 10)),
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------

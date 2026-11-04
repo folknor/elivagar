@@ -1383,3 +1383,263 @@ fn test_land_line_cliff_conflict_with_waterway_keeps_both_matches() {
         .expect("water line should have kind");
     assert_eq!(water_kind.1, AttrValue::Str(Cow::Borrowed("stream")));
 }
+
+type PriorityCase<'a> = (&'a [(&'a str, &'a str)], OsmGeomType, Layer, &'a str, u8);
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn test_specific_tag_rows_fall_through_and_keep_priority() {
+    // Each case runs in both tag storage orders. The classifier's row order,
+    // rather than the first present key or stored tag, determines the result.
+    let cases: &[PriorityCase<'_>] = &[
+        (
+            &[("amenity", "shelter"), ("highway", "bus_stop")],
+            OsmGeomType::Node,
+            Layer::PublicTransport,
+            "bus_stop",
+            14,
+        ),
+        (
+            &[("aeroway", "gate"), ("railway", "halt")],
+            OsmGeomType::Node,
+            Layer::PublicTransport,
+            "halt",
+            13,
+        ),
+        (
+            &[("amenity", "shelter"), ("railway", "station")],
+            OsmGeomType::Node,
+            Layer::PublicTransport,
+            "station",
+            13,
+        ),
+        (
+            &[("aerialway", "unknown"), ("aeroway", "helipad")],
+            OsmGeomType::ClosedWay,
+            Layer::PublicTransport,
+            "helipad",
+            13,
+        ),
+        (
+            &[("aeroway", "helipad"), ("amenity", "bus_station")],
+            OsmGeomType::Node,
+            Layer::PublicTransport,
+            "helipad",
+            13,
+        ),
+        (
+            &[("aerialway", "station"), ("aeroway", "aerodrome")],
+            OsmGeomType::Node,
+            Layer::PublicTransport,
+            "aerialway_station",
+            13,
+        ),
+        (
+            &[("highway", "bus_stop"), ("railway", "station")],
+            OsmGeomType::Node,
+            Layer::PublicTransport,
+            "station",
+            13,
+        ),
+        (
+            &[("highway", "unknown"), ("railway", "rail")],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "rail",
+            10,
+        ),
+        (
+            &[
+                ("highway", "unknown"),
+                ("railway", "rail"),
+                ("service", "siding"),
+            ],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "rail",
+            8,
+        ),
+        (
+            &[("aeroway", "gate"), ("railway", "tram")],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "tram",
+            10,
+        ),
+        (
+            &[("highway", "unknown"), ("aeroway", "runway")],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "runway",
+            11,
+        ),
+        (
+            &[("highway", "primary"), ("aeroway", "runway")],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "primary",
+            8,
+        ),
+        (
+            &[("aeroway", "runway"), ("railway", "rail")],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "runway",
+            11,
+        ),
+        (
+            &[("area:aeroway", "other"), ("highway", "pedestrian")],
+            OsmGeomType::ClosedWay,
+            Layer::StreetPolygons,
+            "pedestrian",
+            14,
+        ),
+        (
+            &[("area:aeroway", "taxiway"), ("highway", "service")],
+            OsmGeomType::ClosedWay,
+            Layer::StreetPolygons,
+            "taxiway",
+            13,
+        ),
+        (
+            &[
+                ("area:aeroway", "other"),
+                ("highway", "pedestrian"),
+                ("name", "Square"),
+            ],
+            OsmGeomType::ClosedWay,
+            Layer::StreetsPolygonsLabels,
+            "pedestrian",
+            14,
+        ),
+        (
+            &[
+                ("highway", "unknown"),
+                ("railway", "rail"),
+                ("name", "Rail"),
+            ],
+            OsmGeomType::OpenWay,
+            Layer::StreetLabels,
+            "rail",
+            10,
+        ),
+        (
+            &[
+                ("highway", "unknown"),
+                ("aeroway", "runway"),
+                ("name", "Runway"),
+            ],
+            OsmGeomType::OpenWay,
+            Layer::StreetLabels,
+            "runway",
+            11,
+        ),
+        (
+            &[("aeroway", "gate"), ("railway", "tram"), ("name", "Tram")],
+            OsmGeomType::OpenWay,
+            Layer::StreetLabels,
+            "tram",
+            10,
+        ),
+        (
+            &[
+                ("aeroway", "taxiway"),
+                ("railway", "rail"),
+                ("name", "Taxiway"),
+            ],
+            OsmGeomType::OpenWay,
+            Layer::StreetLabels,
+            "taxiway",
+            13,
+        ),
+        (
+            &[
+                ("highway", "primary"),
+                ("aeroway", "runway"),
+                ("name", "Road"),
+            ],
+            OsmGeomType::OpenWay,
+            Layer::StreetLabels,
+            "primary",
+            12,
+        ),
+        (
+            &[
+                ("military", "other"),
+                ("leisure", "other"),
+                ("landuse", "other"),
+                ("amenity", "hospital"),
+            ],
+            OsmGeomType::ClosedWay,
+            Layer::Sites,
+            "hospital",
+            14,
+        ),
+        (
+            &[("military", "danger_area"), ("amenity", "hospital")],
+            OsmGeomType::ClosedWay,
+            Layer::Sites,
+            "danger_area",
+            14,
+        ),
+    ];
+    for &(pairs, geom, layer, kind, zoom) in cases {
+        for reverse in [false, true] {
+            let mut pairs = pairs.to_vec();
+            if reverse {
+                pairs.reverse();
+            }
+            let tags = Tags(&pairs);
+            let matches = match_element(&tags, geom);
+            let hits: Vec<_> = matches.iter().filter(|m| m.layer == layer).collect();
+            assert_eq!(hits.len(), 1, "{pairs:?}: {layer:?}");
+            assert_eq!(hits[0].min_zoom, zoom, "{pairs:?}");
+            assert_eq!(
+                hits[0]
+                    .attrs
+                    .iter()
+                    .find(|(key, _, _)| *key == "kind")
+                    .unwrap()
+                    .1,
+                AttrValue::Str(Cow::Borrowed(kind)),
+                "{pairs:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn test_unlisted_values_do_not_create_layer_matches() {
+    let tags = Tags(&[
+        ("aerialway", "unknown"),
+        ("aeroway", "unknown"),
+        ("area:aeroway", "unknown"),
+        ("amenity", "unknown"),
+        ("highway", "unknown"),
+        ("railway", "unknown"),
+        ("military", "unknown"),
+        ("leisure", "unknown"),
+        ("landuse", "unknown"),
+        ("name", "Unknown"),
+    ]);
+    for geom in [
+        OsmGeomType::Node,
+        OsmGeomType::OpenWay,
+        OsmGeomType::ClosedWay,
+    ] {
+        let matches = match_element(&tags, geom);
+        for layer in [
+            Layer::PublicTransport,
+            Layer::Streets,
+            Layer::StreetLabels,
+            Layer::StreetPolygons,
+            Layer::StreetsPolygonsLabels,
+            Layer::Sites,
+        ] {
+            assert!(
+                matches.iter().all(|m| m.layer != layer),
+                "{geom:?}: {layer:?}"
+            );
+        }
+    }
+}

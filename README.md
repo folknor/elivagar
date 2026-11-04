@@ -53,9 +53,8 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--tile-format mvt\|mlt` | Tile payload format (default: `mvt`). `mlt` requires a build with the `mlt` cargo feature; see [MLT output](#mlt-output) |
 | `--tile-compression gzip\|brotli` | Tile compression algorithm (default: `gzip`, MVT only) |
 | `--compress-sort-chunks lz4\|snappy` | Compress sort chunk files (off by default). Reduces disk I/O at the cost of CPU |
-| `--fanout-cap-default N` | Default fanout cap for all polygon layers (0 = uncapped) |
-| `--fanout-cap layer=N,...` | Per-layer fanout caps (e.g. `water_polygons=4096`). Features whose bbox tile count exceeds the cap are skipped at that zoom. Comma-separated |
-| `--seam-reconcile-layers layer:maxzoom,...` | Layers for shared-edge seam reconciliation (default: `boundaries:8`). Format: `layer` or `layer:maxzoom` |
+| `--fanout-cap-default N` | Default fanout cap for supported OSM polygon layers (0 = uncapped); ocean is unaffected |
+| `--fanout-cap layer=N,...` | Per-layer fanout caps (e.g. `water_polygons=4096`). Features whose bbox tile count, including the 128-unit buffer, exceeds the cap are skipped at that zoom. Conservative upper bound; unsupported layers are rejected. Comma-separated |
 | `--polygon-simplify-factor F` | Simplification multiplier for polygon layers (default: 1.0, same as lines). Higher simplifies harder, cutting sort volume; fills tolerate this better than stroked lines do |
 | `-j N` / `--threads N` | Thread count (default: logical CPUs) |
 
@@ -77,7 +76,6 @@ Provenance records what the archive was built from and under which contract:
                 features: sorted, locations-on-ways
     Config:     shortbread, z0-z14, polygon simplify x1
                 tile: mvt gzip, base level 6, policy zoom-v1
-                seam: boundaries=8
                 fanout: none
     Ocean:      artifact, low zoom simplified, simplifier on
                 key: shp c10be1c7843c simplified b3417e31c287 level 6 policy 1
@@ -162,7 +160,8 @@ an archive with no ocean.
 1. **PBF read** -- single-pass read building node/way indices and emitting sort records.
    If the PBF declares `Sort.Type_then_ID` (all major producers do), nodes are stored in a
    compact in-RAM index with FOR compression (~420 MB for Denmark, 75% of raw for large
-   extracts). Unsorted PBFs fall back to a flat mmap file.
+   extracts). Without that header flag, use `--force-sorted` for actually sorted
+   input or explicitly opt into the flat mmap index with `--allow-unsafe-flat-index`.
 2. **Ocean** -- ocean processing from the `--ocean` inputs. With an artifact, this
    computes only the boundary band near the extract bbox edge and assemble merges
    the artifact for the interior
@@ -172,14 +171,21 @@ an archive with no ocean.
 `--skip-to ocean` reuses PBF chunks from a previous full run.
 `--skip-to sort` reuses all chunks (PBF + ocean).
 `--skip-to assemble` reuses all chunks and jumps straight to tile assembly.
+Resumes require checkpoint v7 and the same `--compress-sort-chunks` setting
+that wrote the chunks. Resuming at `sort` or `assemble` also requires a valid
+chunk-count completion record. See [the CLI reference](reference/cli.md) for
+the full resume contract and supported fanout-cap layers.
 
 ### Flat index safety guardrails
 
-When input does not declare `Sort.Type_then_ID`, elivagar falls back to the flat mmap node index.
-That path can be dangerous at large scale, so guardrails are enabled by default:
+When a node store is needed and input does not declare `Sort.Type_then_ID`,
+elivagar requires an explicit choice at every input size:
 
-1. Unsorted inputs larger than `1 GB` fail fast before heavy work starts.
-2. Flat index growth is hard-capped at `16 GB`.
+1. `--force-sorted` selects the compact store and checks monotonic node IDs.
+2. `--allow-unsafe-flat-index` selects the flat mmap index and bypasses its
+   `16 GB` growth guardrail. Small inputs can still contain large, sparse IDs.
+
+Inline way coordinates avoid the node store and these guards entirely.
 
 Recommended remediation:
 

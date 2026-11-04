@@ -82,7 +82,7 @@ impl LayerBuilder {
         &mut self,
         scratch: &mut MergeScratch,
         geom_pool: &mut Vec<Vec<u32>>,
-        tags_pool: &mut Vec<Vec<(u16, u16)>>,
+        tags_pool: &mut Vec<Vec<(u32, u32)>>,
     ) {
         // Build sorted index of non-Point features.
         scratch.indices.clear();

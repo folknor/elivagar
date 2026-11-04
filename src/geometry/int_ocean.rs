@@ -161,7 +161,7 @@ pub(crate) fn quantize_polygon_into(
     out.truncate(used);
 }
 
-/// `quantize_polygon_pinned` writing into reused Shape + flags buffers.
+/// Quantize a polygon with pin flags into reused Shape + flags buffers.
 /// Same recycling contract as `quantize_polygon_into`.
 pub(crate) fn quantize_polygon_pinned_into<F>(
     outer: &[Point],
@@ -258,7 +258,7 @@ where
 }
 
 /// Test-only reference: production rescaling goes through
-/// `rescale_shape_pinned` (the pyramid always carries pin flags).
+/// `rescale_shape_pinned_into` (the pyramid always carries pin flags).
 #[cfg(test)]
 pub(crate) fn rescale_shape(shape: &Shape, s: u8) -> Shape {
     if s == 0 {
@@ -1072,55 +1072,12 @@ pub(crate) fn shape_bbox(shape: &Shape) -> Option<IntRect> {
     })
 }
 
-#[allow(dead_code)]
-pub(crate) fn tile_range_for_rect(rect: IntRect, max_tile: u32) -> (u32, u32, u32, u32) {
-    (
-        tile_index(rect.min_x, max_tile),
-        tile_index(rect.max_x, max_tile),
-        tile_index(rect.min_y, max_tile),
-        tile_index(rect.max_y, max_tile),
-    )
-}
-
-#[allow(dead_code)]
-fn tile_index(q: i32, max_tile: u32) -> u32 {
-    if q <= 0 {
-        0
-    } else {
-        #[allow(clippy::cast_sign_loss)]
-        let idx = (q / TILE_EXTENT_I32) as u32;
-        idx.min(max_tile)
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn tile_count_for_rect(rect: IntRect, max_tile: u32) -> u64 {
-    let (tx_min, tx_max, ty_min, ty_max) = tile_range_for_rect(rect, max_tile);
-    u64::from(tx_max - tx_min + 1) * u64::from(ty_max - ty_min + 1)
-}
-
 pub(crate) fn tile_origin(t: u32) -> i32 {
     i32::try_from(t).expect("tile coordinate fits i32") * TILE_EXTENT_I32
 }
 
 pub(crate) fn buffered_tile_rect(tx: u32, ty: u32) -> IntRect {
-    IntRect {
-        min_x: tile_origin(tx) - TILE_BUFFER_I32,
-        min_y: tile_origin(ty) - TILE_BUFFER_I32,
-        max_x: tile_origin(tx + 1) + TILE_BUFFER_I32,
-        max_y: tile_origin(ty + 1) + TILE_BUFFER_I32,
-    }
-}
-
-#[allow(dead_code)]
-fn rect_intersection(a: IntRect, b: IntRect) -> Option<IntRect> {
-    let rect = IntRect {
-        min_x: a.min_x.max(b.min_x),
-        min_y: a.min_y.max(b.min_y),
-        max_x: a.max_x.min(b.max_x),
-        max_y: a.max_y.min(b.max_y),
-    };
-    (rect.min_x < rect.max_x && rect.min_y < rect.max_y).then_some(rect)
+    super::pyramid::buffered_cell_rect_base(0, super::pyramid::PyramidCell { z: 0, tx, ty })
 }
 
 pub(crate) fn encode_tile_shape(

@@ -270,13 +270,15 @@ pub fn validate_layer_filter(layer_filter: Option<&[&str]>) -> io::Result<()> {
 fn layer_paint_order(name: &str) -> usize {
     match Layer::from_name(name) {
         Some(Layer::Ocean) => 0,
-        Some(layer) => layer as usize + 1,
+        Some(layer) => usize::from(layer.tile_order()) + 1,
         None => Layer::count() + 1,
     }
 }
 
 fn layer_color(name: &str) -> &'static str {
-    Layer::from_name(name).map_or(UNKNOWN_LAYER_COLOR, |layer| LAYER_COLORS[layer as usize])
+    Layer::from_name(name).map_or(UNKNOWN_LAYER_COLOR, |layer| {
+        LAYER_COLORS[usize::from(layer.tile_order())]
+    })
 }
 
 fn build_path_d_offset(coords: &[(f64, f64)], close: bool, ox: f64, oy: f64) -> String {

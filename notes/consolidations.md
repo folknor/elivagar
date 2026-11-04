@@ -282,24 +282,22 @@ Reported by the polygon-engine, encoding, ocean and coordinate-spaces hunts.
 
 ## CON-010 - Which tiles does a base-space rect touch, and what is a cell's buffered rect?
 
-- `pyramid.rs`: `tile_range_for_base_rect`, `base_tile_index`,
-  `cell_tile_size_base`, `buffered_cell_rect_base`, `buffered_range_rect_base`.
-- `emit.rs`: `tile_count_for_base_rect` + its own `base_tile_index`, a
-  verbatim copy used for the fanout cap (the undercount it causes is in
-  `notes/bugs.md`).
+`pyramid.rs` now owns one `tile_cover(rect, max_zoom, z, margin)` (margin 0
+for root selection, the 128-unit buffer for the fanout cap) and
+`buffered_cell_rect_base`; emit.rs and the dead int_ocean copies are moved
+onto it. Remaining copies:
+
 - `ocean.rs`: `pass_owns_root_range` (inline index closure, "deliberately
-  follows pyramid::root_fragments"), `ocean_band_tile` (inline buffered rect,
-  clamped to the world).
-- `int_ocean.rs`: `tile_range_for_rect`, `tile_index`, `tile_count_for_rect`,
-  `rect_intersection`, all `#[allow(dead_code)]`, zoom-space only, used only by
-  pyramid's test reference `collect_direct`.
+  follows pyramid::root_fragments") should call
+  `tile_cover(bbox, pass.max_zoom, z_top, 0)`; `ocean_band_tile` (inline
+  buffered rect, clamped to the world) should call `buffered_cell_rect_base`,
+  keeping its world clipping and ownership checks.
 - Float `tiles::clamp_tile` / `for_each_tile_in_bbox` / `is_single_tile` for
   lines and points.
 
-Owner proposed: a `Grid` value (or `PyramidCell::cover(rect, span)`) with
-`tiles_touching(rect, z)`, `cell_rect`, `buffered_cell_rect`, used by emit.rs
-and by ocean's band test (which should call the pyramid's own root
-selection). Delete the dead int_ocean copies.
+Moving the ocean pair is output-neutral only if the snap method matches (ocean
+snaps the raw float bbox, the pyramid the normalized quantized shape) - check
+that before deciding whether it needs an `OCEAN_POLICY_VERSION` bump.
 
 Reported by the polygon-engine and coordinate-spaces hunts.
 
@@ -583,33 +581,6 @@ layer names or which producer it serves; ocean-policy constants move beside
 Reported by the pipeline, Shortbread, layer-identity, coordinate-spaces and
 polygon-engine hunts.
 
-## CON-022 - What is a layer's zoom floor?
-
-- `Layer::min_zoom()` - hand-written; only consumer is
-  `pmtiles_writer::build_metadata` (TileJSON `vector_layers` minzoom).
-- Each matcher's literal `min_zoom` (about 40), `boundaries::boundary_min_zoom`,
-  `emit.rs::enrich_polygon_matches` (boundary_labels z2/z3/z4 by area
-  thresholds 2M/700k/100k km2 with an admin-2 special case, re-reading
-  `admin_level` out of the attr vector by string key with `.unwrap_or(0)`),
-  `boundaries.rs` default 5 for boundary_labels with a comment that overrides
-  happen "later in tilegen", and `water_*_labels` hard-coding 14/12.
-- The per-attribute min zoom (third tuple slot) is a third concept.
-
-The hunts disagree on whether these already disagree. The Shortbread hunt
-reports `Layer::min_zoom()` says `water_polygons_labels` = 4 and
-`water_lines_labels` = 9 while the matchers emit 14 and 12/14 - valid only as
-a lower bound. The layer-identity hunt spot-checked and reports agreement
-(land 7, streets 5, place_labels 4, boundary_labels 2 via the override,
-water_polygons 4, water_lines 9, public_transport 11). Both readings stand.
-Neither side is checked: nothing asserts `Layer::min_zoom()` is a lower bound
-of what matchers emit, and the spec harness skips boundary_labels' min zoom.
-
-Owner proposed: the profile, with the floor derived as the min over the
-layer's kind table, and `boundary_label_min_zoom(level, area_km2)` as a
-profile function emit calls with the area it measured.
-
-Reported by the Shortbread and layer-identity hunts.
-
 ## CON-023 - What is a boundary, and what does a boundary line match look like?
 
 Admin levels:
@@ -738,22 +709,12 @@ Reported by the encoding, Shortbread and layer-identity hunts.
 
 ## CON-028 - Which layers have a paint order, and how is rank recovered?
 
-Producers: land.rs (`land_paint_rank`, including `"cliff"`) and streets.rs
-(`street_paint_rank` for streets and street_polygons); every other matcher
-passes `paint_rank: 0`. `verify::validate_paint_order` re-decides the set by
-name (`matches!(layer, "land" | "streets" | "street_polygons")`) and
-re-decides how rank is derived at low zoom (`"streets" if z < 11 =>
-street_class_rank`). That 11 exists only because `link`/`tunnel`/`bridge`
-carry attr min zoom 11 in streets.rs (written three times there); move one
-and verify false-fires or weakens. Verify re-deriving rank from the same
-function is a deliberate re-check and not itself the finding; verify choosing
-its own layer list and zoom threshold is.
-
-Owner proposed: a layer-spec `paint_order: Option<fn>` that verify iterates,
-rank recovery applied to the attributes actually present at z (or
-`shortbread::paint_order::rank_for(layer, z, attrs)`), and a named
-`STREET_DETAIL_ZOOM` if a constant survives. `PaintRank` as a newtype only
-paint_order can mint.
+Verify no longer chooses its own layer set or zoom threshold: layer selection
+and rank recovery live in `shortbread/paint_order.rs` (with a private-field
+`PaintRank`), and rank is recovered from the attributes present in the tile.
+Residue on the producer side: the attribute min zoom 11 for `link`, `tunnel`
+and `bridge` is written three times in `streets.rs`; one named constant
+would stop the three drifting apart.
 
 Reported by the Shortbread, layer-identity and archive-surface hunts.
 
@@ -791,18 +752,6 @@ matcher produces it - it exists so fanout caps and sort keys can index it, so
 "Shortbread layer" and "output layer" are the same type. Owner proposed:
 `Layer::Ocean.name()` everywhere; in a layer table, Ocean is the one row with
 no `classify`.
-
-Reported by the layer-identity and Shortbread hunts.
-
-## CON-032 - What does the `Layer` enum's discriminant decide?
-
-The discriminant alone decides the wire id in the sort key, order inside a
-tile, MVT layer order, `vector_layers` order, and the stats index. `ALL`,
-`name()`, `min_zoom()` and the `#[repr(u8)]` discriminants are four parallel
-listings, so a reordered `ALL` would silently shift array indices used by
-`fanout_caps` and the provenance contract. Owner proposed: one declarative
-source (macro or the layer table) generating the enum, `ALL`, `name`,
-`from_name`, with tile order as an explicit field.
 
 Reported by the layer-identity and Shortbread hunts.
 
@@ -902,24 +851,5 @@ Reported by the storage hunt.
 The reader defects are in `notes/bugs.md`. Owner proposed: a typed `Header`
 plus `TileContract`, with `reader.tile_decoder() -> Result<Decompressor,
 Unsupported>` deciding once.
-
-Reported by the archive-surface hunt.
-
-## CON-039 - What is the PMTiles directory format?
-
-`encode_directory` (writer, private) and `decode_directory` (reader, public)
-are two halves of one format with no shared definition of the column order or
-the `offset + 1` / `0 = contiguous` convention. `DirEntry` and `RawDirEntry`
-are the same struct defined twice; `run_length == 0` meaning "leaf pointer"
-is a sentinel in both. Writer tests hand-decode with a Cursor and reader tests
-hand-encode (`encode_directory_raw`), so the pair is tested symmetrically only
-through full archives. Header offsets likewise are spelled independently in
-`build_header`/`write_header_counts`/`write_header_bounds`, in
-`PmtilesReader::open` plus about 15 accessors, again in `ArchiveView::open`,
-in inspect (with a private `read_i32_le`), in inspect tests
-(`set_header_u64(path, 32, 0)`) and in writer tests (own `read_u64_le`).
-Owner proposed: one `archive` module with `Header` encode/decode,
-`DirEntry::{Run, Leaf}`, `directory` encode/decode with a
-`decode(encode(x)) == x` property test (see `notes/structural.md`).
 
 Reported by the archive-surface hunt.
