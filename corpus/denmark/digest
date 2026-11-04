@@ -1,6 +1,6 @@
 elivagar-corpus-digest v1
 mode leaves
-root 798684f4423c4f7258d40fc26fb97aee
+root aab9a214bf8b7cdd4d89226b3f11cbfa
 tiles 1326394 entries 230485 unique 169795
 zoom 0 tiles 1 hash 0175aaa820dbc103c920d27583881db1
 zoom 1 tiles 2 hash 48e76ef7bccef6e03d8d89a8af97a4a4
@@ -9,11 +9,11 @@ zoom 3 tiles 2 hash c8948f087ce830e8e2ae12d65431811e
 zoom 4 tiles 5 hash 94b4c5b6059db10aa15575806149828a
 zoom 5 tiles 11 hash d772a8e624be0ceb39c21f13f0ba76b2
 zoom 6 tiles 30 hash 364298cc5ccbe9951ce44e42df784a4c
-zoom 7 tiles 101 hash 05d86180789d0aed618685a4b07fe549
+zoom 7 tiles 101 hash 3f4f0117a2fd05c4097dfd6d116894b3
 zoom 8 tiles 367 hash 96d5378c386c281a1685f9fe73ed2f60
-zoom 9 tiles 1238 hash fefb73c5298011d5efb5375893120d30
-zoom 10 tiles 4474 hash 7baf0d4e2d29af1701617c1b572a18dd
-zoom 11 tiles 16922 hash 2c4910cb908414b1b496f95fe86f2b46
-zoom 12 tiles 64725 hash 2c1b162c6c461134abb2517b904c7b80
-zoom 13 tiles 251750 hash 35757cf27632a8a03da1e123f22292a6
-zoom 14 tiles 986764 hash 29cf121754afa5d0855ddd6b2d888ce1
+zoom 9 tiles 1238 hash dd62eba26b4d336c7d1404a41dd01bd0
+zoom 10 tiles 4474 hash 988dc56aeb393b77eca9b7676acfc4f3
+zoom 11 tiles 16922 hash 17da7fd21796ddbee02fe8f69dab93a4
+zoom 12 tiles 64725 hash 6234bdd6bf84f63f9f278f286ee931d9
+zoom 13 tiles 251750 hash c9ba592a999e054e71693c8918840599
+zoom 14 tiles 986764 hash 7a902cb5f29d410bb803f5e353e90ec3
