@@ -623,17 +623,6 @@ fresh `FxHashSet` per feature per tile on the z0-13 line path;
 
 Reported by the encoding hunt.
 
-## STR-026 - Feature id namespacing
-
-The sort record carries a bare `u64` that becomes the MVT feature id. Nodes,
-ways, relations and synthetic ocean ids share the space with nothing saying
-which. The encoding hunt did not trace emission to check whether ids are
-pre-namespaced: if they are, the rule is an implicit convention at each emit
-site; if not, ids collide across element types. Proposed: a `FeatureId`
-(enum or tagged newtype) minted at emission.
-
-Reported by the encoding hunt.
-
 ---
 
 # Storage, sort and resources
@@ -735,22 +724,6 @@ concern); `read_u64_le`, `read_i32_le`, `gzip_decompress` stop being `pub`
 `BlobRef`.
 
 Reported by the archive-surface and coordinate-spaces hunts.
-
-## STR-032 - Build archive metadata as a typed document
-
-`PmtilesWriter::add_metadata_member(impl Into<String>)` takes raw
-`"key":value` fragments that `build_metadata` concatenates with `format!`; the
-justification ("avoid a runtime dependency for ~20 lines") is stale since
-`serde_json` is already a runtime dependency. Duplicate top-level keys are
-undetectable (serde keeps the last), a hazard the doc acknowledges for durable
-ocean artifacts and relies on discipline to avoid. `ocean_only_metadata` is a
-mode flag changing `vector_layers`, which is a property of the layer set.
-`set_metadata_verbatim(String)` silently overrides every other setter through
-an `Option`. Proposed: the writer takes an opaque metadata document built by a
-`metadata.rs` owning the TileJSON fields, `ocean_artifact` and `elivagar` as
-typed fields of one struct serialized once.
-
-Reported by the archive-surface hunt.
 
 ## STR-034 - `verify.rs` is four tools in one file
 

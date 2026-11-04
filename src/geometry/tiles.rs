@@ -1,15 +1,20 @@
 use super::projection::{MercBbox, Point};
 
-/// MVT tile extent (pixels per tile axis).
-pub const EXTENT: f64 = 4096.0;
+/// Integer tile grid shared by geometry, encoders and decoder defaults.
+pub(crate) mod grid {
+    pub const EXTENT_LOG2: u32 = 12;
+    pub const EXTENT: i32 = 1 << EXTENT_LOG2;
+    pub const BUFFER_UNITS: i32 = 128;
+}
+
+/// Tile extent as a float for Mercator and line clipping arithmetic.
+pub const EXTENT: f64 = grid::EXTENT as f64;
 
 /// Buffer fraction of tile size for clipping (8 rendered pixels).
-/// One tile is 256 by 256 rendered pixels; 8/256 of the tile width.
-pub(crate) const BUFFER_FRACTION: f64 = 8.0 / 256.0;
+pub(crate) const BUFFER_FRACTION: f64 = grid::BUFFER_UNITS as f64 / EXTENT;
 
-/// One tile pixel in extent units: 4096 / 256 = 16.
-#[allow(clippy::cast_possible_truncation)]
-pub(super) const PX: i64 = (EXTENT as i64) / 256;
+/// One rendered pixel in extent units.
+pub(super) const PX: i64 = grid::EXTENT as i64 / 256;
 
 /// Find all tiles at a given zoom level that intersect the given Mercator bbox.
 ///
@@ -130,7 +135,7 @@ pub(crate) fn merc_bbox(points: &[Point]) -> MercBbox {
 fn float_and_integer_tile_buffers_agree() {
     assert_eq!(
         (EXTENT * BUFFER_FRACTION).to_bits(),
-        f64::from(super::int_ocean::TILE_BUFFER_I32).to_bits(),
-        "float and integer tile buffers must agree until they have one owner",
+        f64::from(grid::BUFFER_UNITS).to_bits(),
+        "derived float buffer must preserve the integer clip boundary",
     );
 }

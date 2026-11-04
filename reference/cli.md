@@ -161,15 +161,17 @@ this value. Relation prepass, way dispatch and result drain use separate OS
 threads, so these counts do not divide a single process-wide allowance.
 
 A resume validates the checkpoint's input identity, producer config, ocean
-source, and sort chunk codec against the current run and refuses a mismatch,
-so `--skip-to` cannot silently blend two contracts into one archive. The
-checkpoint format is v8. Inline way coordinates contribute to the data extent
-in locations-on-ways mode, including ways without tags. The `--compress-sort-chunks` setting must match the
-run that wrote the chunks, including leaving compression unset on both runs.
+source and low-zoom selection, and sort chunk codec against the current run
+and refuses a mismatch, so `--skip-to` cannot silently blend two contracts into
+one archive. The checkpoint format is v9, with a tagged ocean contract carrying mode,
+low-zoom source, and source identity. Inline way coordinates contribute to the
+data extent in locations-on-ways mode, including ways without tags. The
+`--compress-sort-chunks` setting must match the run that wrote the chunks,
+including leaving compression unset on both runs.
 Resume also refuses obsolete chunk filenames and incompatible partition
 layouts, including chunks written with a different partition split zoom.
 Regenerate those chunks with a full run; they are not converted on resume.
-Checkpoints from v7 and earlier are refused; re-run a full tilegen.
+Checkpoints from v8 and earlier are refused; re-run a full tilegen.
 
 Resuming at `sort` or `assemble` also requires a valid chunk-count completion
 record (`sort_chunks.count`), written after the ocean phase and final chunk

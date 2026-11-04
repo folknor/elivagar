@@ -118,7 +118,7 @@ pub fn decode_detail_tile(data: &[u8], strictness: Strictness) -> Result<DetailT
 
 fn decode_detail_layer(data: &[u8], strictness: Strictness) -> Result<DetailLayer, String> {
     let mut name: Arc<str> = Arc::from("");
-    let mut extent = 4096u32;
+    let mut extent = crate::geometry::tiles::grid::EXTENT.unsigned_abs();
     let mut version = 1u32;
     let mut keys = Vec::new();
     let mut values = Vec::new();

@@ -19,7 +19,7 @@ use crate::mvt::{self, GeomType};
 use crate::pmtiles_writer;
 #[cfg(test)]
 use crate::shortbread::AttrValue;
-use crate::shortbread::{GeomExpect, Layer, LayerMatch, PolygonPointStrategy};
+use crate::shortbread::{GeomExpect, Layer, LayerMatch, OsmGeomType, PolygonPointStrategy};
 pub(crate) use crate::sort::RecordTally;
 use crate::sort::{self, SortRecord};
 use crate::wire_format::{
@@ -279,6 +279,75 @@ pub(super) trait FeatureRecordSink {
     );
 }
 
+#[derive(Clone, Copy)]
+struct FeatureId(u64);
+
+#[derive(Clone, Copy)]
+enum FeatureSource {
+    Node,
+    Way,
+    Relation,
+}
+
+impl FeatureId {
+    // Leave room for every type code below JavaScript's Number.MAX_SAFE_INTEGER.
+    const MAX_OSM_ID: u64 = ((1_u64 << 53) - 1 - 3) / 10;
+
+    fn for_osm_feature(layer: Layer, source: FeatureSource, osm_id: u64) -> Self {
+        // Node, way, and relation ids reach this dispatch as their raw numeric
+        // IDs, so mixed-source layers need an explicit type tag.
+        let source_types = [
+            layer.accepts(OsmGeomType::Node),
+            layer.accepts(OsmGeomType::OpenWay) || layer.accepts(OsmGeomType::ClosedWay),
+            layer.accepts(OsmGeomType::MultiPolygon),
+        ];
+        if source_types
+            .into_iter()
+            .filter(|accepted| *accepted)
+            .count()
+            < 2
+        {
+            return Self(osm_id);
+        }
+
+        // Match Planetiler's decimal type codes while keeping ids exact in
+        // MapLibre's JavaScript Number feature-state keys. Ocean features are
+        // emitted separately and keep their existing ids.
+        assert!(
+            osm_id <= Self::MAX_OSM_ID,
+            "OSM id {osm_id} exceeds the JavaScript-safe namespaced feature id limit {}",
+            Self::MAX_OSM_ID,
+        );
+        let type_code: u64 = match source {
+            FeatureSource::Node => 1,
+            FeatureSource::Way => 2,
+            FeatureSource::Relation => 3,
+        };
+        Self(osm_id * 10 + type_code)
+    }
+}
+
+/// The feature helpers keep the raw OSM id for diagnostics. This sink assigns
+/// the layer-scoped, source-typed id when the feature enters the sort stream.
+struct NamespacedFeatureSink<'a, T> {
+    inner: &'a mut T,
+    feature_id: FeatureId,
+}
+
+impl<T: FeatureRecordSink> FeatureRecordSink for NamespacedFeatureSink<'_, T> {
+    fn push_feature(
+        &mut self,
+        key: sort::SortKey,
+        _osm_id: u64,
+        geom_type: GeomType,
+        geom_buf: &[u32],
+        attrs_buf: &[u8],
+    ) {
+        self.inner
+            .push_feature(key, self.feature_id.0, geom_type, geom_buf, attrs_buf);
+    }
+}
+
 impl FeatureRecordSink for Vec<SortRecord> {
     fn push_feature(
         &mut self,
@@ -431,24 +500,6 @@ fn clear_attrs_cache(cache: &mut [Option<Vec<u8>>; 15]) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-pub(super) fn centroid_of(points: &[Point]) -> Point {
-    if points.is_empty() {
-        return Point { x: 0.0, y: 0.0 };
-    }
-    let mut sx = 0.0;
-    let mut sy = 0.0;
-    for p in points {
-        sx += p.x;
-        sy += p.y;
-    }
-    #[allow(clippy::cast_precision_loss)]
-    let n = points.len() as f64;
-    Point {
-        x: sx / n,
-        y: sy / n,
-    }
-}
-
 /// Per-invocation emission policy. Layer indices must have a configured cap slot.
 pub(super) struct EmitCtx<'a> {
     pub(super) min_zoom: u8,
@@ -498,6 +549,16 @@ pub(super) fn emit_match(
     if z_lo > z_hi {
         return 0;
     }
+    let source = match &geometry {
+        FeatureGeometry::Node(_) => FeatureSource::Node,
+        FeatureGeometry::Way { .. } => FeatureSource::Way,
+        FeatureGeometry::Area { .. } => FeatureSource::Relation,
+    };
+    let feature_id = FeatureId::for_osm_feature(m.layer, source, osm_id);
+    let mut records = NamespacedFeatureSink {
+        inner: records,
+        feature_id,
+    };
     match m.geom_expect {
         GeomExpect::Point | GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
             match geometry {
@@ -519,7 +580,7 @@ pub(super) fn emit_match(
                                 GeomType::Point,
                                 &point.geom_buf,
                                 &point.attrs_buf,
-                                records,
+                                &mut records,
                             );
                             count += 1;
                         });
@@ -534,7 +595,7 @@ pub(super) fn emit_match(
                     m,
                     z_lo,
                     z_hi,
-                    records,
+                    &mut records,
                     point,
                 ),
                 FeatureGeometry::Area { outer, inners, .. } => {
@@ -552,7 +613,7 @@ pub(super) fn emit_match(
                         m,
                         z_lo,
                         z_hi,
-                        records,
+                        &mut records,
                         point,
                     )
                 }
@@ -617,7 +678,16 @@ pub(super) fn emit_match(
                         ..
                     } => {
                         if m.geom_expect == GeomExpect::Line {
-                            emit_line_feature(osm_id, coords, pins, m, z_lo, z_hi, records, line)
+                            emit_line_feature(
+                                osm_id,
+                                coords,
+                                pins,
+                                m,
+                                z_lo,
+                                z_hi,
+                                &mut records,
+                                line,
+                            )
                         } else {
                             let count = emit_polygon_feature(
                                 osm_id,
@@ -626,7 +696,7 @@ pub(super) fn emit_match(
                                 m,
                                 z_lo,
                                 z_hi,
-                                records,
+                                &mut records,
                                 polygon,
                                 cap,
                                 ctx.polygon_simplify_factor,
@@ -650,7 +720,7 @@ pub(super) fn emit_match(
                             m,
                             z_lo,
                             z_hi,
-                            records,
+                            &mut records,
                             polygon,
                             simplify,
                             cap,
@@ -696,14 +766,16 @@ pub(super) fn emit_point_or_centroid(
             Some(PolygonPointStrategy::Centroid) => false,
             None => m.geom_expect == GeomExpect::PolygonPointOnSurface,
         };
-    let pt = if use_surface {
+    let pt = if m.geom_expect == GeomExpect::Point {
+        coords.first().copied()
+    } else if use_surface {
         if let Some(holes) = inners {
             geometry::surface::point_on_surface_with_holes(coords, holes)
         } else {
             geometry::surface::point_on_surface(coords)
         }
     } else {
-        Some(centroid_of(coords))
+        geometry::surface::polygon_centroid(coords, inners.unwrap_or(&[]))
     };
     let Some(mut p) = pt else { return 0 };
     p.x = wrap_unit_x(p.x);
@@ -1086,6 +1158,52 @@ mod landing2_tests {
     use crate::mvt;
     use smallvec::smallvec;
     use std::borrow::Cow;
+
+    #[test]
+    fn mixed_source_ids_stay_distinct_as_javascript_numbers() {
+        let mut numbers = Vec::new();
+        for osm_id in [
+            0,
+            42,
+            13_000_000_000,
+            13_000_000_001,
+            FeatureId::MAX_OSM_ID - 1,
+            FeatureId::MAX_OSM_ID,
+        ] {
+            for source in [
+                FeatureSource::Node,
+                FeatureSource::Way,
+                FeatureSource::Relation,
+            ] {
+                let id = FeatureId::for_osm_feature(Layer::Pois, source, osm_id).0;
+                // Parsing as f64 models the consumer's JavaScript Number.
+                let decimal = id.to_string();
+                let number = decimal.parse::<f64>().expect("numeric feature id");
+                assert_eq!(format!("{number:.0}"), decimal);
+                assert!(!numbers.contains(&number), "consumer feature id collision");
+                numbers.push(number);
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_source_ids_reject_raw_ids_above_the_safe_bound() {
+        assert_eq!(FeatureId::MAX_OSM_ID, 900_719_925_474_098);
+        for osm_id in [FeatureId::MAX_OSM_ID + 1, u64::MAX] {
+            for source in [
+                FeatureSource::Node,
+                FeatureSource::Way,
+                FeatureSource::Relation,
+            ] {
+                assert!(
+                    std::panic::catch_unwind(|| {
+                        FeatureId::for_osm_feature(Layer::Pois, source, osm_id)
+                    })
+                    .is_err()
+                );
+            }
+        }
+    }
 
     #[test]
     fn dispatch_clamps_node_zooms_and_preserves_world_edge() {

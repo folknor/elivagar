@@ -15,6 +15,7 @@ use crate::geometry::pyramid::{
     buffered_cell_rect_base, emit_shape_pyramid, emit_shape_pyramid_cell, split_for_parallel,
     tile_cover,
 };
+use crate::geometry::tiles::grid::EXTENT_LOG2;
 use crate::geometry::{
     self,
     projection::{MercBbox, Point},
@@ -518,7 +519,7 @@ pub struct OceanPassGrid {
 
 impl OceanPassGrid {
     pub fn for_bounds(data_bounds: &MercBbox, max_zoom: u8) -> Self {
-        let scale = 1_i64 << (u32::from(max_zoom) + 12);
+        let scale = 1_i64 << (u32::from(max_zoom) + EXTENT_LOG2);
         Self {
             max_zoom,
             inner_rect: IntRect {
@@ -561,7 +562,7 @@ pub fn ocean_band_tile(z: u8, tx: u32, ty: u32, pass: &OceanPassGrid) -> bool {
     let buffered = buffered_cell_rect_base(pass.max_zoom, PyramidCell { z, tx, ty });
     // Keep the former world clamp and pass-world clipping around the shared
     // unbounded buffer so antimeridian and edge ownership stay unchanged.
-    let world_limit = i32::try_from(1_i64 << (u32::from(pass.max_zoom) + 12))
+    let world_limit = i32::try_from(1_i64 << (u32::from(pass.max_zoom) + EXTENT_LOG2))
         .expect("ocean world coordinate fits i32");
     let clamp_to_world = |value: i32| value.clamp(0, world_limit);
     let buffered = IntRect {
@@ -593,7 +594,7 @@ fn pass_owns_root_range(
     // rounding is monotone, so this remains conservative. Keep its existing
     // snap and pass the rect to tile_cover to preserve the previous ocean
     // root-range result while sharing the pyramid's index arithmetic.
-    let scale = 1_i64 << (u32::from(pass.max_zoom) + 12);
+    let scale = 1_i64 << (u32::from(pass.max_zoom) + EXTENT_LOG2);
     let snap = |value: f64| -> i32 {
         #[allow(clippy::cast_possible_truncation)]
         let value = (value * scale as f64).round() as i64;
@@ -1285,21 +1286,13 @@ fn process_ocean_shapefile_inner(
     // scale that could be 10-30 GB. The previous approach (par_iter().collect()
     // into Vec<Vec<SortRecord>> + serial push) was fine for regional extracts but
     // would blow memory and serialize sort+flush at planet scale.
-    use std::sync::atomic::AtomicUsize;
-
     let ocean_layer = Layer::Ocean as u8;
     let mut empty_attrs_bytes = Vec::new();
     encode_attrs_bytes(&mut empty_attrs_bytes, &[], max_zoom);
 
     // Ocean chunks share the current partitioned filename grammar and chunk
     // ID sequence with PBF chunks, so resume scans find the complete set.
-    let chunk_id = std::sync::Arc::new(AtomicUsize::new(sort_writer.chunk_count()));
-    let spill = sort::SpillCoalescer::new(
-        sort_writer.tmp_dir().to_path_buf(),
-        std::sync::Arc::clone(&chunk_id),
-        sort_writer.chunk_size_bytes(),
-        sort_writer.compression(),
-    );
+    let spill = sort::SpillCoalescer::new(sort_writer.chunk_sink(), sort_writer.chunk_size_bytes());
     let chunk_size = sort_writer.chunk_size_bytes().min(OCEAN_CHUNK_SIZE_LIMIT);
 
     let tile_filter = |z, tx, ty| pass_grid.is_none_or(|grid| ocean_band_tile(z, tx, ty, grid));
@@ -1847,7 +1840,7 @@ fn rect_contains(outer: IntRect, inner: IntRect) -> bool {
 }
 
 fn data_bounds_rect(data_bounds: &MercBbox, max_zoom: u8) -> IntRect {
-    let scale = 1_i64 << (u32::from(max_zoom) + 12);
+    let scale = 1_i64 << (u32::from(max_zoom) + EXTENT_LOG2);
     IntRect {
         min_x: merc_floor(data_bounds.min_x, scale),
         min_y: merc_floor(data_bounds.min_y, scale),
@@ -2327,7 +2320,9 @@ mod tests {
                 center: (0.0, 0.0, 2),
             });
             writer.set_ocean_only_metadata();
-            writer.add_metadata_member(format!("\"ocean_artifact\":{}", key.json()));
+            writer
+                .set_ocean_artifact_metadata(key.clone())
+                .expect("set artifact metadata");
             // Admission reads directory ranges and metadata, not tile payloads.
             writer
                 .add_run(start, length, &[0])

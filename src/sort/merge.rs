@@ -779,18 +779,13 @@ mod tests {
             records.push((key, off, 8));
         }
 
-        let chunk_id = AtomicUsize::new(0);
-        let paths = write_partitioned_payload_chunks(
-            &mut records,
-            &payload,
-            dir.path(),
-            &chunk_id,
-            ChunkCompression::None,
-        )
-        .unwrap();
+        let sink = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None)
+            .unwrap()
+            .chunk_sink();
+        let paths = write_partitioned_payload_chunks(&mut records, &payload, &sink).unwrap();
 
         assert_eq!(paths.len(), 1);
-        assert_eq!(chunk_id.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(sink.chunk_count(), 1);
         assert_eq!(chunk_kind_for_id(dir.path(), 0), Some(ChunkFileKind::Multi));
         let reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None).unwrap();
         assert_eq!(collect_keys(reader, ChunkCompression::None), vec![k0, k1]);
@@ -920,15 +915,10 @@ mod tests {
             records.push((key, off, 8));
         }
 
-        let chunk_id = AtomicUsize::new(0);
-        let paths = write_partitioned_payload_chunks(
-            &mut records,
-            &payload,
-            dir.path(),
-            &chunk_id,
-            ChunkCompression::Lz4,
-        )
-        .unwrap();
+        let sink = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::Lz4)
+            .unwrap()
+            .chunk_sink();
+        let paths = write_partitioned_payload_chunks(&mut records, &payload, &sink).unwrap();
 
         assert_eq!(paths.len(), 1);
         assert_eq!(chunk_kind_for_id(dir.path(), 0), Some(ChunkFileKind::Multi));
@@ -1368,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn adopt_chunk_files_updates_count_and_merges_records() {
+    fn adopt_sink_written_chunks_merges_records() {
         let dir = tempfile::tempdir().expect("create tempdir");
 
         // Main writer with one in-memory batch.
@@ -1386,35 +1376,28 @@ mod tests {
             })
             .unwrap();
 
-        // External chunk A.
-        let ext_a = chunk_path(dir.path(), 0, 0);
-        let mut recs_a = vec![
-            SortRecord {
-                key: 10,
-                data: Box::from(10u64.to_le_bytes().as_slice()),
-            },
-            SortRecord {
-                key: 30,
-                data: Box::from(30u64.to_le_bytes().as_slice()),
-            },
-        ];
-        write_sorted_chunk(&mut recs_a, &ext_a, ChunkCompression::None).unwrap();
+        // Concurrent producers use a clone of the store-owned sink. Each
+        // producer writes its payload chunk and hands the path to the manifest.
+        let sink = writer.chunk_sink();
+        let mut payload_a = Vec::new();
+        let mut records_a = Vec::new();
+        for key in [10u64, 30] {
+            let offset = payload_a.len();
+            payload_a.extend_from_slice(&key.to_le_bytes());
+            records_a.push((key, offset, 8));
+        }
+        let mut paths =
+            write_partitioned_payload_chunks(&mut records_a, &payload_a, &sink).unwrap();
 
-        // External chunk B.
-        let ext_b = chunk_path(dir.path(), 1, 0);
-        let mut recs_b = vec![
-            SortRecord {
-                key: 5,
-                data: Box::from(5u64.to_le_bytes().as_slice()),
-            },
-            SortRecord {
-                key: 50,
-                data: Box::from(50u64.to_le_bytes().as_slice()),
-            },
-        ];
-        write_sorted_chunk(&mut recs_b, &ext_b, ChunkCompression::None).unwrap();
-
-        writer.adopt_chunk_files(vec![ext_a, ext_b]);
+        let mut payload_b = Vec::new();
+        let mut records_b = Vec::new();
+        for key in [5u64, 50] {
+            let offset = payload_b.len();
+            payload_b.extend_from_slice(&key.to_le_bytes());
+            records_b.push((key, offset, 8));
+        }
+        paths.extend(write_partitioned_payload_chunks(&mut records_b, &payload_b, &sink).unwrap());
+        writer.adopt_chunk_files(paths);
         assert_eq!(
             writer.chunk_count(),
             2,
@@ -1428,28 +1411,18 @@ mod tests {
     }
 
     #[test]
-    fn shared_chunk_counter_avoids_collision() {
-        // Models the way phase: a producer thread allocates chunk numbers from a
-        // shared counter and hands files to the drain writer via adopt, while the
-        // writer's own flushes must draw from the SAME counter so no two chunks
-        // claim the same chunk_NNNN.bin. Regression guard for the drain-vs-task
-        // chunk-id collision.
+    fn chunk_sink_avoids_collisions_between_producers_and_writer() {
+        // Models phase12: producers and the drain writer share the chunk
+        // store's sink, so no two writes claim the same chunk id.
         let dir = tempfile::tempdir().expect("create tempdir");
         // chunk_size 1 forces a flush on every push.
         let mut writer = SortWriter::new(dir.path(), 1, ChunkCompression::None).unwrap();
-        let counter = Arc::new(AtomicUsize::new(writer.chunk_count()));
-        writer.attach_chunk_counter(Arc::clone(&counter));
-
-        // "Task" allocates chunk 0 and writes it, then hands it over.
-        let task_no = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(task_no, 0);
-        let task_path = chunk_path(dir.path(), task_no, 0);
-        let mut task_recs = vec![SortRecord {
-            key: 10,
-            data: Box::from(10u64.to_le_bytes().as_slice()),
-        }];
-        write_sorted_chunk(&mut task_recs, &task_path, ChunkCompression::None).unwrap();
-        writer.adopt_chunk_files(vec![task_path]);
+        let sink = writer.chunk_sink();
+        let payload = 10u64.to_le_bytes();
+        let mut task_records = vec![(10, 0, payload.len())];
+        let task_paths =
+            write_partitioned_payload_chunks(&mut task_records, &payload, &sink).unwrap();
+        writer.adopt_chunk_files(task_paths);
 
         // The writer's own flushes must skip 0 (taken by the task) and use 1, 2.
         writer
@@ -1465,7 +1438,6 @@ mod tests {
             })
             .unwrap();
 
-        writer.detach_chunk_counter();
         assert_eq!(writer.chunk_count(), 3, "3 distinct chunks allocated");
         for i in 0..3 {
             assert!(

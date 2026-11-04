@@ -9,7 +9,7 @@ use crate::pmtiles_reader::{PmtilesReader, find_entry};
 use crate::pmtiles_writer::xy_to_tile_id;
 use crate::shortbread::Layer;
 
-const EXTENT: f64 = 4096.0;
+use crate::geometry::tiles::EXTENT;
 
 const LAYER_COLORS: [&str; Layer::count()] = [
     "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7",
@@ -331,9 +331,20 @@ fn decode_mvt_geometry(data: &[u8]) -> io::Result<Vec<SvgLayer>> {
 fn decode_layer(data: &[u8]) -> io::Result<SvgLayer> {
     let mut name = String::new();
     let mut feature_blobs: Vec<&[u8]> = Vec::new();
+    let mut extent = EXTENT;
     let mut cursor = Cursor::new(data);
     while let Ok(Some((field, wire_type))) = cursor.read_tag() {
-        if wire_type == WIRE_LEN {
+        if field == 5 && wire_type == WIRE_VARINT {
+            let value = cursor
+                .read_varint()
+                .map_err(|e| io::Error::other(format!("layer extent: {e}")))?;
+            if value == 0 || value > u64::from(u32::MAX) {
+                return Err(io::Error::other("invalid layer extent"));
+            }
+            extent = f64::from(
+                u32::try_from(value).map_err(|_| io::Error::other("invalid layer extent"))?,
+            );
+        } else if wire_type == WIRE_LEN {
             if let Ok(sub) = cursor.read_len_delimited() {
                 match field {
                     1 => name = String::from_utf8_lossy(sub).to_string(),
@@ -348,7 +359,16 @@ fn decode_layer(data: &[u8]) -> io::Result<SvgLayer> {
 
     let mut features = Vec::with_capacity(feature_blobs.len());
     for blob in feature_blobs {
-        features.push(decode_feature(blob)?);
+        let mut feature = decode_feature(blob)?;
+        // Normalize foreign layer coordinates into the SVG canvas grid.
+        let scale = EXTENT / extent;
+        for path in &mut feature.paths {
+            for (x, y) in path {
+                *x *= scale;
+                *y *= scale;
+            }
+        }
+        features.push(feature);
     }
 
     Ok(SvgLayer { name, features })

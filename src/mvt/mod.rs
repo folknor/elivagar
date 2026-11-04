@@ -397,7 +397,11 @@ impl LayerBuilder {
         }
 
         // field 5: extent = 4096
-        encode_varint_field_always(&mut s.layer_buf, 5, 4096);
+        encode_varint_field_always(
+            &mut s.layer_buf,
+            5,
+            u64::try_from(crate::geometry::tiles::grid::EXTENT).expect("tile extent is positive"),
+        );
         // field 15: version = 2
         encode_varint_field_always(&mut s.layer_buf, 15, 2);
 

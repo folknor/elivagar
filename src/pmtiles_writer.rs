@@ -581,8 +581,10 @@ pub struct PmtilesWriter {
     tile_data_compression: TileDataCompression,
     source_pbf_filename: Option<String>,
     osmosis_replication_timestamp: Option<i64>,
-    metadata_extensions: Vec<String>,
-    ocean_only_metadata: bool,
+    metadata_extensions: MetadataExtensions,
+    /// The declared tile layer set is metadata about the archive's contents,
+    /// not a separate writer mode.
+    metadata_layers: Vec<crate::shortbread::Layer>,
     /// Exact metadata supplied by an archive-preserving rewrite.  This is
     /// intentionally narrow: normal production writes always compose metadata.
     metadata_verbatim: Option<String>,
@@ -640,29 +642,50 @@ impl PmtilesWriter {
         self.tile_data_compression = tile_data_compression;
     }
 
-    /// Add a trusted JSON member to archive metadata. The caller owns the
-    /// schema; this keeps PMTiles metadata extensible without changing the
-    /// ordinary Shortbread contract.
-    ///
-    /// Members accumulate in call order. Several independent schemas share
-    /// this hook - `ocean_artifact` and `elivagar` at minimum - and each must
-    /// stay a distinct top-level key: `ocean::OceanArtifactKey::from_json`
-    /// reads `ocean_artifact` at the top level, so a mechanism that let one
-    /// member displace another would silently invalidate every durable ocean
-    /// artifact already built.
-    pub fn add_metadata_member(&mut self, json_member: impl Into<String>) {
-        self.metadata_extensions.push(json_member.into());
+    /// Add the durable ocean artifact identity to archive metadata.
+    pub(crate) fn set_ocean_artifact_metadata(
+        &mut self,
+        key: crate::ocean::OceanArtifactKey,
+    ) -> io::Result<()> {
+        if self.metadata_extensions.ocean_artifact.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "archive metadata already has ocean_artifact",
+            ));
+        }
+        self.metadata_extensions.ocean_artifact = Some(key);
+        Ok(())
     }
 
-    /// Write an ocean-only vector layer declaration for the durable artifact.
+    /// Add the value produced by `provenance::build` to archive metadata.
+    /// Provenance owns this member's schema; the writer only composes it.
+    pub(crate) fn set_elivagar_metadata(&mut self, value: serde_json::Value) -> io::Result<()> {
+        if !value.is_object() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "elivagar metadata must be an object",
+            ));
+        }
+        if self.metadata_extensions.elivagar.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "archive metadata already has elivagar",
+            ));
+        }
+        self.metadata_extensions.elivagar = Some(value);
+        Ok(())
+    }
+
+    /// Set the declared tile layer set to the ocean layer.
     pub fn set_ocean_only_metadata(&mut self) {
-        self.ocean_only_metadata = true;
+        self.metadata_layers = vec![crate::shortbread::Layer::Ocean];
     }
 
     /// Preserve an existing metadata document during an archive rewrite.
     ///
     /// The corpus mutation instrument uses this so its output remains under
-    /// exactly the source archive's provenance contract.
+    /// exactly the source archive's provenance contract. This selects the
+    /// verbatim document and ignores the writer's structured metadata fields.
     pub fn set_metadata_verbatim(&mut self, json: String) {
         self.metadata_verbatim = Some(json);
     }
@@ -677,8 +700,8 @@ impl PmtilesWriter {
             tile_data_compression: TileDataCompression::Gzip,
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
-            metadata_extensions: Vec::new(),
-            ocean_only_metadata: false,
+            metadata_extensions: MetadataExtensions::default(),
+            metadata_layers: crate::shortbread::Layer::ALL.to_vec(),
             metadata_verbatim: None,
             blob: TileBlob {
                 sink: BlobSink::memory(),
@@ -725,8 +748,8 @@ impl PmtilesWriter {
             tile_data_compression: TileDataCompression::Gzip,
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
-            metadata_extensions: Vec::new(),
-            ocean_only_metadata: false,
+            metadata_extensions: MetadataExtensions::default(),
+            metadata_layers: crate::shortbread::Layer::ALL.to_vec(),
             metadata_verbatim: None,
             blob: TileBlob {
                 sink: BlobSink::File {
@@ -866,7 +889,9 @@ impl PmtilesWriter {
         crate::debug::emit_counter_u64("pmtiles_dir_entries", num_entries);
         crate::debug::emit_counter_usize("pmtiles_root_dir_bytes", root_bytes.len());
         crate::debug::emit_counter_usize("pmtiles_leaf_dirs_bytes", leaf_bytes.len());
-        let metadata_json = self.metadata_verbatim.clone().unwrap_or_else(|| {
+        let metadata_json = if let Some(metadata) = &self.metadata_verbatim {
+            metadata.as_bytes().to_vec()
+        } else {
             build_metadata(
                 &self.config,
                 self.tile_data_format,
@@ -874,10 +899,10 @@ impl PmtilesWriter {
                 self.source_pbf_filename.as_deref(),
                 self.osmosis_replication_timestamp,
                 &self.metadata_extensions,
-                self.ocean_only_metadata,
-            )
-        });
-        let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
+                &self.metadata_layers,
+            )?
+        };
+        let metadata_compressed = gzip_compress(&metadata_json)?;
 
         // Best-effort cleanup of the streaming directory spill.
         self.dir_store.cleanup();
@@ -1212,79 +1237,101 @@ fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
 // Metadata JSON
 // ---------------------------------------------------------------------------
 
-/// Build PMTiles metadata JSON. Hand-rolled rather than serde_json to avoid
-/// a runtime dependency for ~20 lines of fixed-schema formatting.
-/// Validated by test_metadata_json which round-trips through serde_json.
+#[derive(Default)]
+struct MetadataExtensions {
+    ocean_artifact: Option<crate::ocean::OceanArtifactKey>,
+    elivagar: Option<serde_json::Value>,
+}
+
+/// The archive's JSON schema and serialization live together here. Field
+/// declaration order preserves the existing wire order, and the two optional
+/// extension keys are distinct fields, so the composed document cannot emit
+/// either key twice.
+mod metadata {
+    use super::{MetadataExtensions, PmtilesConfig, TileDataCompression, TileDataFormat};
+    use serde::Serialize;
+    use std::io;
+
+    #[derive(Serialize)]
+    struct MetadataDocument<'a> {
+        name: &'static str,
+        format: &'static str,
+        tile_payload_format: &'static str,
+        tile_compression: &'static str,
+        #[serde(rename = "type")]
+        layer_type: &'static str,
+        minzoom: u8,
+        maxzoom: u8,
+        vector_layers: Vec<VectorLayer>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_pbf: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        osmosis_replication_timestamp: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ocean_artifact: Option<&'a crate::ocean::OceanArtifactKey>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elivagar: Option<&'a serde_json::Value>,
+    }
+
+    #[derive(Serialize)]
+    struct VectorLayer {
+        id: &'static str,
+        minzoom: u8,
+        maxzoom: u8,
+    }
+
+    pub(super) fn build(
+        config: &PmtilesConfig,
+        tile_data_format: TileDataFormat,
+        tile_data_compression: TileDataCompression,
+        source_pbf_filename: Option<&str>,
+        osmosis_replication_timestamp: Option<i64>,
+        extensions: &MetadataExtensions,
+        layers: &[crate::shortbread::Layer],
+    ) -> io::Result<Vec<u8>> {
+        let document = MetadataDocument {
+            name: "Shortbread",
+            format: tile_data_format.metadata_format(),
+            tile_payload_format: tile_data_format.metadata_payload(),
+            tile_compression: tile_data_compression.metadata_value(),
+            layer_type: "baselayer",
+            minzoom: config.min_zoom,
+            maxzoom: config.max_zoom,
+            vector_layers: layers
+                .iter()
+                .map(|layer| VectorLayer {
+                    id: layer.name(),
+                    minzoom: layer.min_zoom(),
+                    maxzoom: config.max_zoom,
+                })
+                .collect(),
+            source_pbf: source_pbf_filename,
+            osmosis_replication_timestamp,
+            ocean_artifact: extensions.ocean_artifact.as_ref(),
+            elivagar: extensions.elivagar.as_ref(),
+        };
+        serde_json::to_vec(&document).map_err(io::Error::other)
+    }
+}
+
 fn build_metadata(
     config: &PmtilesConfig,
     tile_data_format: TileDataFormat,
     tile_data_compression: TileDataCompression,
     source_pbf_filename: Option<&str>,
     osmosis_replication_timestamp: Option<i64>,
-    metadata_extensions: &[String],
-    ocean_only_metadata: bool,
-) -> String {
-    use crate::shortbread::Layer;
-
-    let mut layer_arr = String::from("[");
-    let metadata_layers: Vec<Layer> = if ocean_only_metadata {
-        vec![Layer::Ocean]
-    } else {
-        Layer::ALL.to_vec()
-    };
-    for (i, layer) in metadata_layers.into_iter().enumerate() {
-        if i > 0 {
-            layer_arr.push(',');
-        }
-        let name = layer.name();
-        let min_z = layer.min_zoom();
-        let max_z = config.max_zoom;
-        // format! is fine here - 26-iteration loop, called once per run. Cold path.
-        layer_arr.push_str(&format!(
-            r#"{{"id":"{name}","minzoom":{min_z},"maxzoom":{max_z}}}"#,
-        ));
-    }
-    layer_arr.push(']');
-
-    let mut json = format!(
-        r#"{{"name":"Shortbread","format":"{}","tile_payload_format":"{}","tile_compression":"{}","type":"baselayer","minzoom":{},"maxzoom":{},"vector_layers":{layer_arr}"#,
-        tile_data_format.metadata_format(),
-        tile_data_format.metadata_payload(),
-        tile_data_compression.metadata_value(),
-        config.min_zoom,
-        config.max_zoom,
-    );
-    if let Some(filename) = source_pbf_filename {
-        json.push_str(r#","source_pbf":"#);
-        json.push('"');
-        json.push_str(&escape_json_string(filename));
-        json.push('"');
-    }
-    if let Some(ts) = osmosis_replication_timestamp {
-        json.push_str(&format!(r#","osmosis_replication_timestamp":{ts}"#));
-    }
-    for extension in metadata_extensions {
-        json.push(',');
-        json.push_str(extension);
-    }
-    json.push('}');
-    json
-}
-
-fn escape_json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c <= '\u{1F}' => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
+    metadata_extensions: &MetadataExtensions,
+    metadata_layers: &[crate::shortbread::Layer],
+) -> io::Result<Vec<u8>> {
+    metadata::build(
+        config,
+        tile_data_format,
+        tile_data_compression,
+        source_pbf_filename,
+        osmosis_replication_timestamp,
+        metadata_extensions,
+        metadata_layers,
+    )
 }
 
 // ---------------------------------------------------------------------------

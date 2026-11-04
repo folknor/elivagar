@@ -96,29 +96,6 @@ embedded in `ContractConfig` so it is a subset by construction.
 
 Reported by the pipeline, run-contract, ocean and storage hunts.
 
-## CON-005 - How do ocean mode and effective-path facts get their names?
-
-- `OceanMode::{None, Computed, Band}` is rendered `"none"/{"computed"}/{"band"}`
-  in the checkpoint and `"none"/"shapefile"/"artifact"` in provenance via a
-  `match` in `run()` passed as `&'static str` through `RunProvenance`;
-  `write_provenance` then compares `mode == "none"`. `low_zoom_source` is a
-  third `&'static str` (`"none"/"simplified"/"full"`) whose `none` must agree
-  with mode `none`, enforced by nothing.
-- phase12 mints `"inline"/"node_store"`, `"injected_v1"/"relation_scan"`,
-  `"injected_v1"/"block_local"`; `load_checkpoint` keeps its own allow-list
-  (`path_name(..., ["inline", "node_store"])`) to intern back. `PinSource` and
-  `NodeStoreMode` already exist as enums in phase12.
-- `RunProvenance::resumed_from: Option<&'static str>` is `SkipTo` mapped to
-  strings in `run()`.
-
-Owner proposed: enums with serde renames shared by checkpoint and provenance
-(`CoordinateSource`, `MembershipSource`, `PinScope`, `Option<SkipTo>`), and
-`enum OceanContract { None, Shapefile { low_zoom }, Artifact { low_zoom, key } }`
-so invalid pairings are unconstructible. `OceanMode` is also `pub` from
-`lib.rs` though nothing outside the crate uses it.
-
-Reported by the pipeline, run-contract, ocean and archive-surface hunts.
-
 ---
 
 # Ocean
@@ -158,41 +135,6 @@ Reported by the pipeline, run-contract and ocean hunts.
 ---
 
 # Geometry and coordinates
-
-## CON-009 - What is the tile extent and the buffer?
-
-Two answers (4096 units, 128 units of buffer), ten or more sources:
-`geometry/mod.rs` (`EXTENT: f64`, `BUFFER_FRACTION = 8/256`, `PX`),
-`int_ocean.rs` (`TILE_EXTENT_I32`, `TILE_BUFFER_I32`, plus `+ 12` as log2 in
-three quantizers), `ocean.rs` (literal `4096 << shift`, `128 << shift`,
-`1 << (max_zoom + 12)` in `ocean_band_tile`, `pass_owns_root_range`,
-`OceanPassGrid::for_bounds`, `data_bounds_rect`), `mvt/merge.rs`
-(`BUFFER_UNITS` from the float pair with a const-assert it is whole, not that
-it equals 128), `mvt/mod.rs` and `mlt.rs` (literal 4096 in the layer extent),
-`verify::MVT_EXTENT`, `svg::EXTENT`, `tile_detail` default. The int and float
-buffers agree only because 4096 * 8/256 = 128; a geometry test pins
-`BUFFER_FRACTION`'s value (the pairwise-agreement pattern).
-
-Consequence chain: lines clip with the float buffer, polygons with the
-integer one, and the line merger's `CLIP_BOUNDARY_LO/HI` assumes the line
-clipper's rounded output lands exactly on +-128 / 4224 - a cross-module
-contract asserted by one test
-(`clip_boundary_matches_the_line_clip_contract`) and the const assert. The
-code comment calls position "a conservative proxy" for "created by clipping".
-Ocean's literal 128 in `ocean_band_tile` must equal the pyramid's buffered
-clip or band/artifact ownership is wrong - artifact seams no gate is
-calibrated for. `svg` and `verify` assume 4096 without reading the layer's
-extent field (right for elivagar output, wrong for foreign MVT).
-
-Owner proposed: one integer tile-grid module (`EXTENT_LOG2 = 12`,
-`EXTENT`, `BUFFER_UNITS = 128`, derived `BUFFER_FRACTION`) everything derives
-from, including the MVT/MLT extent fields and decoder defaults. The encoding
-hunt adds that the clipper should mark clip-created endpoints in typed
-geometry rather than the merger inferring them from position. The brotli
-`CompressorWriter::new(&mut buf, 4096, ...)` buffer size is a grep hazard next
-to all the extents; name it.
-
-Reported by the polygon-engine, encoding, ocean and coordinate-spaces hunts.
 
 ## CON-012 - Where does a Mercator coordinate land in tile pixels?
 
@@ -447,17 +389,6 @@ returns kind and zoom without building attrs. Typed label payloads
 
 Reported by the encoding, Shortbread and layer-identity hunts.
 
-## CON-030 - What is a POI, for the address layer?
-
-Decided once (`pois_match`) and reused by addresses through
-`would_match_poi`. The Shortbread hunt judges this acceptable as long as it
-stays one call, but notes the address layer's "POI" has silently become "POI
-layer membership": if POIs gain a zoom or geometry restriction, addresses
-follow without anyone deciding that. A one-line comment in `land.rs`
-acknowledges the coupling.
-
-Reported by the Shortbread hunt.
-
 ---
 
 # Storage, sort and resources
@@ -504,32 +435,6 @@ concurrently), the drain thread's writer, and the 2x pre-serialization on
 compressed writes. Real peak sort-side memory is a small multiple of the flag,
 stated nowhere. Owner proposed: one budget shared through the chunk store,
 buffers drawing from it.
-
-Reported by the storage hunt.
-
-## CON-035 - Per-layer, per-zoom record tally
-
-`RecordTally` now lives in `sort` and `SortWriter` holds one, so the
-classification is written once. Remaining: the tally, `Phase12Stats` and
-`FanoutStats` (stats.rs, including a 5,760-entry histogram) all keep the
-`32 * 15` layout - `Layer::count()` (26) rounded up, so a 33rd layer would
-silently fall out of stats - and phase12 copies the writer arrays directly.
-Narrowing to a typed `PerLayerZoom<T>` sized by `Layer::count()` has to move
-the three structures and the phase12 hand-off together.
-
-Reported by the storage, layer-identity and pipeline hunts.
-
-## CON-036 - How are chunk ids allocated?
-
-The chunk-number allocator is an `Arc<AtomicUsize>` created in phase12,
-attached to `SortWriter` (`attach_chunk_counter`), passed separately to
-`SpillCoalescer::new`, used by `write_partitioned_payload_chunks` callers,
-reconciled on `detach_chunk_counter`. Its doc warns the counter "MUST be
-initialized to the current `chunk_count()` by the caller" - an invariant
-enforced by prose. The count is reconstructed from three sources
-(`chunk_count`, the atomic, adopted path lists) and resume validates it
-against a directory scan. Owner proposed: the chunk store (manifest owner)
-allocates; writers and coalescers get a cloneable `ChunkSink`.
 
 Reported by the storage hunt.
 

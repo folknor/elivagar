@@ -73,6 +73,10 @@ impl LayerBuilder {
     /// feature counts in the encoded tile without losing any visual
     /// information. Point features are skipped (not merged).
     ///
+    /// Merged features drop their MVT id; singletons keep theirs. Feature ids
+    /// therefore depend on tile-local merging and are not a stable consumer
+    /// contract, including for MapLibre feature-state keys.
+    ///
     /// Uses sort + scan instead of HashMap to avoid per-feature tag cloning.
     /// Sort indices by (geom_type, tags), scan for consecutive runs, merge
     /// each run in-place via scratch buffer + swap. Tombstones secondaries
@@ -215,22 +219,10 @@ impl LayerBuilder {
 /// (no mid-segment truncation) and a new chain starts.
 const MAX_LINE_VERTICES: usize = 6000;
 
-/// The line clip buffer in extent units. Every line layer is clipped with
-/// `BUFFER_FRACTION` of the tile, which must be a whole number of units for
-/// clip intersections to land exactly on the boundary after quantization.
-#[allow(clippy::cast_possible_truncation, clippy::float_cmp)]
-const BUFFER_UNITS: i32 = {
-    let units = crate::geometry::tiles::EXTENT * crate::geometry::tiles::BUFFER_FRACTION;
-    assert!(
-        units == (units as i32) as f64,
-        "line clip buffer must be whole extent units"
-    );
-    units as i32
-};
-#[allow(clippy::cast_possible_truncation)]
-const CLIP_BOUNDARY_LO: i32 = -BUFFER_UNITS;
-#[allow(clippy::cast_possible_truncation)]
-const CLIP_BOUNDARY_HI: i32 = crate::geometry::tiles::EXTENT as i32 + BUFFER_UNITS;
+// Use the same integer boundary that defines the float line clip buffer.
+const CLIP_BOUNDARY_LO: i32 = -crate::geometry::tiles::grid::BUFFER_UNITS;
+const CLIP_BOUNDARY_HI: i32 =
+    crate::geometry::tiles::grid::EXTENT + crate::geometry::tiles::grid::BUFFER_UNITS;
 
 /// True for a point on the buffered tile boundary.
 ///

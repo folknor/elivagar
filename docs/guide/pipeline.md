@@ -20,6 +20,16 @@ extracts can have large, sparse node IDs.
 This is the largest phase at every input size, and at planet scale it is about
 60% of wall time.
 
+Layers accepting multiple OSM element types use `osm_id * 10 + type_code`
+for feature ids, following Planetiler: node = 1, way = 2, relation = 3.
+Raw ids above 900,719,925,474,098 fail emission in these layers, keeping
+their encoded ids exact in MapLibre's JavaScript numbers. Single-source
+layers keep raw ids, and ocean ids retain their existing scheme. Tile-local
+merging removes ids from merged features, so ids do not guarantee persistent
+feature-state identity across tiles, zooms, or rebuilds. See
+[Feature ids](../reference/metadata#feature-ids-and-polygon-label-points)
+for the layer list and complete contract.
+
 ## ocean - coastline emission
 
 Ocean geometry from the `--ocean` inputs, covered in
@@ -59,21 +69,23 @@ elivagar run input.osm.pbf -o out.pmtiles --skip-to assemble
 reuses PBF and ocean chunks, `--skip-to assemble` jumps straight to tile
 assembly.
 
-A resume validates the v8 checkpoint's input identity, producer config, ocean
-source, and sort chunk codec against the current run and refuses a mismatch,
-so `--skip-to` cannot silently blend two contracts into one archive. Before v6,
-checkpoints recorded computed ocean as a bare string naming no source, so chunks
+A resume validates the v9 checkpoint's input identity, producer config, ocean
+source and low-zoom selection, and sort chunk codec against the current run
+and refuses a mismatch, so `--skip-to` cannot silently blend two contracts into
+one archive. Before v6, checkpoints recorded computed ocean as a bare string
+naming no source, so chunks
 built from one shapefile could be reused by a resume naming another while the
 archive's metadata described the second. Both arms now carry their producer's
-identity. The v8 extent includes inline coordinates from every way in
-locations mode, since untagged nodes may be absent. This buffered extent also
+identity. v9 uses a tagged ocean contract that also records the low-zoom
+source. The extent, expanded in v8, includes inline coordinates from every way
+in locations mode, since untagged nodes may be absent. This buffered extent also
 sets the archive header's WGS84 bounds and center; ocean artifacts retain
 world bounds.
 
 The `--compress-sort-chunks` setting must match the run that wrote the chunks.
 Resuming at `sort` or `assemble` also requires a valid chunk-count completion
 record from the completed ocean pass and final chunk flush. If it is missing
-or invalid, resume at `ocean` or run a full tilegen. Checkpoints from v7 and
+or invalid, resume at `ocean` or run a full tilegen. Checkpoints from v8 and
 earlier require a full tilegen. See the [CLI reference](../reference/cli) for
 the complete resume contract.
 

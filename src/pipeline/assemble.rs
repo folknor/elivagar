@@ -40,6 +40,9 @@ fn sort_layer_error(tile: &PendingTile, error: UnknownSortLayerId) -> PipelineEr
 
 const _: () = assert!(std::mem::size_of::<PendingTile>() == 32);
 
+/// Brotli's I/O buffer size, independent of the tile coordinate grid.
+const BROTLI_BUFFER_BYTES: usize = 4096;
+
 /// A payload encoded under the run's tile contract, ready for PMTiles.
 /// Keep the contract on the run rather than every tile: a writer handles one
 /// contract, and the 32-byte batch item size is asserted below. Repeating the
@@ -216,13 +219,9 @@ pub(super) struct RunProvenance {
     /// a resumed run. `None` only when neither is available.
     pub(super) effective: Option<crate::provenance::Effective>,
     /// The phase a resumed run started at; `None` for a full run.
-    pub(super) resumed_from: Option<&'static str>,
-    /// Invalidation key of the durable ocean artifact, when one is in play.
-    pub(super) ocean_artifact_key: Option<crate::ocean::OceanArtifactKey>,
-    /// Source identity of a computed-ocean run.
-    pub(super) ocean_source_key: Option<crate::ocean::OceanSourceKey>,
-    /// The resolved ocean mode: `none`, `shapefile`, or `artifact`.
-    pub(super) ocean_mode: &'static str,
+    pub(super) resumed_from: Option<super::SkipTo>,
+    /// The resolved ocean producer, carrying its source identity.
+    pub(super) ocean_mode: super::OceanMode,
 }
 
 impl Default for RunProvenance {
@@ -231,9 +230,7 @@ impl Default for RunProvenance {
             input_identity: None,
             effective: None,
             resumed_from: None,
-            ocean_artifact_key: None,
-            ocean_source_key: None,
-            ocean_mode: "none",
+            ocean_mode: super::OceanMode::None,
         }
     }
 }
@@ -293,7 +290,9 @@ pub(super) fn phase_assemble_with_ocean(
     PipelineError,
 > {
     let pbf_name = if config.ocean_only_metadata {
-        if run.ocean_mode != "artifact" || config.ocean_artifact_key.is_none() {
+        if !matches!(&run.ocean_mode, super::OceanMode::Band { .. })
+            || config.ocean_artifact_key.is_none()
+        {
             return Err(PipelineError(
                 "ocean artifact assembly requires an explicit artifact identity".to_string(),
             ));
@@ -328,7 +327,7 @@ pub(super) fn phase_assemble_with_ocean(
     let (tile_format, tile_compression) = configured_tile_contract(config);
     pmtiles.set_tile_contract(tile_format, tile_compression);
     if let Some(key) = &config.ocean_artifact_key {
-        pmtiles.add_metadata_member(format!("\"ocean_artifact\":{}", key.json()));
+        pmtiles.set_ocean_artifact_metadata(key.clone())?;
     }
     if config.ocean_only_metadata {
         pmtiles.set_ocean_only_metadata();
@@ -1027,35 +1026,19 @@ fn write_provenance(
         replication_timestamp,
         features,
     };
-    let mode = run.ocean_mode;
-    let low_zoom_source = if mode == "none" {
-        "none"
-    } else if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
-        // Mirrors ocean_pass_max_zooms: a simplified shapefile only serves
-        // z0-7, and only when the run actually reaches those zooms.
-        "simplified"
-    } else {
-        "full"
-    };
     let ocean = crate::provenance::OceanContract {
-        mode,
+        kind: run
+            .ocean_mode
+            .contract_kind(super::resolved_low_zoom_source(config, &run.ocean_mode))?,
         // Invariably true since --no-ocean-simplify was removed. The field
         // stays because it is part of the comparability contract and archives
         // built before that removal can carry false: dropping it would make
         // those archives incomparable to these, which is the opposite of what
         // the block is for.
         runtime_simplification: true,
-        low_zoom_source,
-        // The artifact builder supplies its own key via config; a run that
-        // consumes an artifact gets it from the resolved ocean mode instead.
-        artifact_key: config
-            .ocean_artifact_key
-            .clone()
-            .or_else(|| run.ocean_artifact_key.clone()),
-        source_key: run.ocean_source_key.clone(),
     };
     let value = crate::provenance::build(&input, config, &ocean, run.effective, run.resumed_from);
-    pmtiles.add_metadata_member(crate::provenance::metadata_member(&value));
+    pmtiles.set_elivagar_metadata(value)?;
     Ok(())
 }
 
@@ -1677,8 +1660,12 @@ pub(super) fn encode_tile_batch_mvt(
                     TileCompression::Brotli => {
                         #[allow(clippy::cast_possible_truncation)]
                         let quality = level as u32;
-                        let mut encoder =
-                            brotli::CompressorWriter::new(&mut compress_buf, 4096, quality, 22);
+                        let mut encoder = brotli::CompressorWriter::new(
+                            &mut compress_buf,
+                            BROTLI_BUFFER_BYTES,
+                            quality,
+                            22,
+                        );
                         std::io::Write::write_all(&mut encoder, &s.mvt_buf)
                             .expect("brotli compress failed");
                         drop(encoder);

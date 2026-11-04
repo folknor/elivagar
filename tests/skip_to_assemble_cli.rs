@@ -10,7 +10,7 @@ use pbfhogg::MemberId;
 use pbfhogg::block_builder::{self, BlockBuilder, MemberData, Metadata};
 use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 
-/// A v8 checkpoint that a default-flag `--skip-to assemble` run will accept.
+/// A v9 checkpoint that a default-flag `--skip-to assemble` run will accept.
 ///
 /// The producer config must equal what the CLI resolves, so it is built from
 /// a `TilegenConfig` carrying the documented CLI defaults - zooms 0-14,
@@ -53,10 +53,10 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         polygon_simplify_factor: 1.0,
     };
     serde_json::json!({
-        "version": 8,
+        "version": 9,
         "bounds": [0.0, 0.0, 1.0, 1.0],
         "chunks": 1,
-        "ocean": "none",
+        "ocean": {"mode": "none"},
         "input_xxh3_128": pbf_hash,
         "producer_config": elivagar::provenance::producer_config(&config),
         "sort_chunk_compression": "none",

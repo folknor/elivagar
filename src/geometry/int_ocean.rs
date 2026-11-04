@@ -181,8 +181,9 @@ pub(crate) struct IntRect {
 pub(crate) const OCEAN_DP_TOL_PX: i64 = 16;
 pub(crate) const OCEAN_VW_AREA_2X: i128 = 256;
 pub(crate) const OSM_DP_TOL_PX: i64 = 16;
-pub(crate) const TILE_EXTENT_I32: i32 = 4096;
-pub(crate) const TILE_BUFFER_I32: i32 = 128;
+// Keep the existing names for pyramid and assemble callers; tiles owns the grid.
+use super::tiles::grid::EXTENT_LOG2;
+pub(crate) use super::tiles::grid::{BUFFER_UNITS as TILE_BUFFER_I32, EXTENT as TILE_EXTENT_I32};
 
 pub(crate) struct IntEmitScratch {
     pub tile_points: Vec<(i32, i32)>,
@@ -356,7 +357,7 @@ fn quantize_ring_at(
     }
     let ring = &mut out[*used];
     ring.clear();
-    let scale = 1_i64 << (u32::from(maxz) + 12);
+    let scale = 1_i64 << (u32::from(maxz) + EXTENT_LOG2);
     for p in points {
         push_nonduplicate(
             ring,
@@ -396,7 +397,7 @@ where
     ring.clear();
     flags.clear();
     let mut paired = PinnedRingMut::new(ring, flags);
-    let scale = 1_i64 << (u32::from(maxz) + 12);
+    let scale = 1_i64 << (u32::from(maxz) + EXTENT_LOG2);
     for p in points {
         paired.push_nonduplicate(
             IntPoint::new(quantize_coord(p.x, scale), quantize_coord(p.y, scale)),
@@ -823,7 +824,7 @@ fn fill_rect_contour(out: &mut Contour, rect: IntRect) {
 }
 
 fn quantize_ring(points: &[Point], maxz: u8, outer: bool) -> Option<Contour> {
-    let scale = 1_i64 << (u32::from(maxz) + 12);
+    let scale = 1_i64 << (u32::from(maxz) + EXTENT_LOG2);
     let mut ring = Vec::with_capacity(points.len());
     for p in points {
         push_nonduplicate(

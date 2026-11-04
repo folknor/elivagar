@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use smallvec::SmallVec;
 
-use crate::sort;
+use crate::sort::{self, PerLayerZoom};
 
 pub(super) const TILE_OVERSIZE_WARN_BYTES: u64 = 500 * 1024;
 pub(super) const TILE_OVERSIZE_SEVERE_BYTES: u64 = 1024 * 1024;
@@ -120,10 +120,10 @@ pub(super) struct Phase12Stats {
     pub(super) missing_refs: MissingRefStats,
     pub(super) sort_records: u64,
     pub(super) sort_record_bytes: u64,
-    pub(super) layer_records: [u64; 32],
-    pub(super) layer_bytes: [u64; 32],
-    pub(super) layer_zoom_records: Box<[u64; 32 * 15]>,
-    pub(super) layer_zoom_bytes: Box<[u64; 32 * 15]>,
+    pub(super) layer_records: [u64; crate::shortbread::Layer::count()],
+    pub(super) layer_bytes: [u64; crate::shortbread::Layer::count()],
+    pub(super) layer_zoom_records: PerLayerZoom<u64>,
+    pub(super) layer_zoom_bytes: PerLayerZoom<u64>,
     pub(super) fanout_stats: FanoutStats,
 }
 
@@ -136,21 +136,20 @@ pub(super) struct Phase12Stats {
 pub(super) const FANOUT_HIST_BUCKETS: usize = 12;
 
 /// Per-(layer, zoom) tiles-touched distribution. Accumulated sequentially
-/// (drain thread for ways, reduce for relations). Fully heap-allocated to
-/// avoid stack overflow on rayon threads (~2 MB default stack).
+/// (drain thread for ways, reduce for relations).
 pub(super) struct FanoutStats {
-    /// Max tiles touched by any single feature. Index: layer * 15 + zoom.
-    pub(super) max_tiles: Box<[u32; 32 * 15]>,
-    /// Total features that emitted at least one record. Index: layer * 15 + zoom.
-    pub(super) feature_count: Box<[u64; 32 * 15]>,
-    /// Sum of tiles touched (for mean). Index: layer * 15 + zoom.
-    pub(super) sum_tiles: Box<[u64; 32 * 15]>,
-    /// Log2 histogram. Index: (layer * 15 + zoom) * FANOUT_HIST_BUCKETS + bucket.
-    pub(super) hist: Box<[u32; 32 * 15 * FANOUT_HIST_BUCKETS]>,
-    /// Features capped (skipped at this zoom due to fanout cap). Index: layer * 15 + zoom.
-    pub(super) capped_features: Box<[u64; 32 * 15]>,
-    /// Estimated tiles saved by capping (sum of bbox tile counts). Index: layer * 15 + zoom.
-    pub(super) capped_tiles: Box<[u64; 32 * 15]>,
+    /// Max tiles touched by any single feature.
+    pub(super) max_tiles: PerLayerZoom<u32>,
+    /// Total features that emitted at least one record.
+    pub(super) feature_count: PerLayerZoom<u64>,
+    /// Sum of tiles touched (for mean).
+    pub(super) sum_tiles: PerLayerZoom<u64>,
+    /// Log2 histogram for each layer and zoom.
+    pub(super) hist: PerLayerZoom<[u32; FANOUT_HIST_BUCKETS]>,
+    /// Features capped (skipped at this zoom due to fanout cap).
+    pub(super) capped_features: PerLayerZoom<u64>,
+    /// Estimated tiles saved by capping (sum of bbox tile counts).
+    pub(super) capped_tiles: PerLayerZoom<u64>,
     /// Top capped features by bbox tile count: (osm_id, layer, zoom, bbox_tiles).
     pub(super) top_capped: Vec<(u64, u8, u8, u64)>,
 }
@@ -158,12 +157,12 @@ pub(super) struct FanoutStats {
 impl FanoutStats {
     pub(super) fn new() -> Self {
         Self {
-            max_tiles: Box::new([0; 32 * 15]),
-            feature_count: Box::new([0; 32 * 15]),
-            sum_tiles: Box::new([0; 32 * 15]),
-            hist: Box::new([0; 32 * 15 * FANOUT_HIST_BUCKETS]),
-            capped_features: Box::new([0; 32 * 15]),
-            capped_tiles: Box::new([0; 32 * 15]),
+            max_tiles: PerLayerZoom::default(),
+            feature_count: PerLayerZoom::default(),
+            sum_tiles: PerLayerZoom::default(),
+            hist: PerLayerZoom::from_fn(|| [0; FANOUT_HIST_BUCKETS]),
+            capped_features: PerLayerZoom::default(),
+            capped_tiles: PerLayerZoom::default(),
             top_capped: Vec::new(),
         }
     }
@@ -171,10 +170,12 @@ impl FanoutStats {
     /// Record that a single feature touched `tiles` tiles at (layer, zoom).
     #[allow(clippy::cast_possible_truncation)]
     pub(super) fn record(&mut self, layer: usize, zoom: usize, tiles: u32) {
-        if layer >= 32 || zoom >= 15 || tiles == 0 {
+        let Some(idx) = PerLayerZoom::<u32>::flat_index(layer, zoom) else {
+            return;
+        };
+        if tiles == 0 {
             return;
         }
-        let idx = layer * 15 + zoom;
         if tiles > self.max_tiles[idx] {
             self.max_tiles[idx] = tiles;
         }
@@ -188,16 +189,15 @@ impl FanoutStats {
             let b = (u32::BITS - (tiles - 1).leading_zeros()) as usize;
             b.min(FANOUT_HIST_BUCKETS - 1)
         };
-        self.hist[idx * FANOUT_HIST_BUCKETS + bucket] += 1;
+        self.hist[idx][bucket] += 1;
     }
 
     /// Record that a feature was capped (skipped) at (layer, zoom) with bbox tile count.
     #[allow(clippy::cast_possible_truncation)]
     pub(super) fn record_cap(&mut self, layer: usize, zoom: usize, bbox_tiles: u64, osm_id: u64) {
-        if layer >= 32 || zoom >= 15 {
+        let Some(idx) = PerLayerZoom::<u64>::flat_index(layer, zoom) else {
             return;
-        }
-        let idx = layer * 15 + zoom;
+        };
         self.capped_features[idx] += 1;
         self.capped_tiles[idx] += bbox_tiles;
         // Track top 10 capped features by bbox tile count.
@@ -213,17 +213,35 @@ impl FanoutStats {
 
     /// Merge another FanoutStats into self.
     pub(super) fn merge(&mut self, other: &Self) {
-        for i in 0..(32 * 15) {
-            if other.max_tiles[i] > self.max_tiles[i] {
-                self.max_tiles[i] = other.max_tiles[i];
+        for (left, right) in self.max_tiles.iter_mut().zip(other.max_tiles.iter()) {
+            if *right > *left {
+                *left = *right;
             }
-            self.feature_count[i] += other.feature_count[i];
-            self.sum_tiles[i] += other.sum_tiles[i];
-            self.capped_features[i] += other.capped_features[i];
-            self.capped_tiles[i] += other.capped_tiles[i];
         }
-        for i in 0..(32 * 15 * FANOUT_HIST_BUCKETS) {
-            self.hist[i] += other.hist[i];
+        for (left, right) in self
+            .feature_count
+            .iter_mut()
+            .zip(other.feature_count.iter())
+        {
+            *left += *right;
+        }
+        for (left, right) in self.sum_tiles.iter_mut().zip(other.sum_tiles.iter()) {
+            *left += *right;
+        }
+        for (left, right) in self
+            .capped_features
+            .iter_mut()
+            .zip(other.capped_features.iter())
+        {
+            *left += *right;
+        }
+        for (left, right) in self.capped_tiles.iter_mut().zip(other.capped_tiles.iter()) {
+            *left += *right;
+        }
+        for (left, right) in self.hist.iter_mut().zip(other.hist.iter()) {
+            for (left_bucket, right_bucket) in left.iter_mut().zip(right.iter()) {
+                *left_bucket += *right_bucket;
+            }
         }
         // Merge top capped: combine, sort, truncate.
         self.top_capped.extend_from_slice(&other.top_capped);
@@ -236,7 +254,9 @@ impl FanoutStats {
     /// Returns the upper bound of the bucket containing the percentile,
     /// capped at max_tiles to avoid reporting a percentile above the actual max.
     pub(super) fn percentile(&self, layer: usize, zoom: usize, p: f64) -> u32 {
-        let idx = layer * 15 + zoom;
+        let Some(idx) = PerLayerZoom::<u32>::flat_index(layer, zoom) else {
+            return 0;
+        };
         let total = self.feature_count[idx];
         if total == 0 {
             return 0;
@@ -244,10 +264,9 @@ impl FanoutStats {
         let max = self.max_tiles[idx];
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target = (total as f64 * p).ceil() as u64;
-        let base = idx * FANOUT_HIST_BUCKETS;
         let mut cumulative: u64 = 0;
-        for b in 0..FANOUT_HIST_BUCKETS {
-            cumulative += u64::from(self.hist[base + b]);
+        for (b, &n) in self.hist[idx].iter().enumerate().take(FANOUT_HIST_BUCKETS) {
+            cumulative += u64::from(n);
             if cumulative >= target {
                 let upper = match b {
                     0 => 1,
@@ -263,7 +282,9 @@ impl FanoutStats {
 
     /// Count features with tiles_touched >= threshold for a given (layer, zoom).
     pub(super) fn features_above(&self, layer: usize, zoom: usize, threshold: u32) -> u64 {
-        let idx = layer * 15 + zoom;
+        let Some(idx) = PerLayerZoom::<u64>::flat_index(layer, zoom) else {
+            return 0;
+        };
         if self.feature_count[idx] == 0 {
             return 0;
         }
@@ -277,12 +298,12 @@ impl FanoutStats {
             // where the lower bound >= threshold.
             (u32::BITS - (threshold - 1).leading_zeros()) as usize
         };
-        let base = idx * FANOUT_HIST_BUCKETS;
-        let mut count: u64 = 0;
-        for b in start_bucket.min(FANOUT_HIST_BUCKETS)..FANOUT_HIST_BUCKETS {
-            count += u64::from(self.hist[base + b]);
-        }
-        count
+        self.hist[idx]
+            .iter()
+            .take(FANOUT_HIST_BUCKETS)
+            .skip(start_bucket)
+            .map(|&n| u64::from(n))
+            .sum()
     }
 }
 
@@ -300,11 +321,11 @@ pub(super) fn record_fanout_from_payload_records(
         let layer = sort::layer_from_key(key) as usize;
         let tile_id = sort::tile_id_from_key(key);
         let zoom = sort::zoom_from_tile_id(tile_id) as usize;
-        if layer >= 32 || zoom >= 15 {
+        let Some(layer_zoom) = PerLayerZoom::<u32>::flat_index(layer, zoom) else {
             continue;
-        }
+        };
         #[allow(clippy::cast_possible_truncation)]
-        let layer_zoom = (layer * 15 + zoom) as u16;
+        let layer_zoom = layer_zoom as u16;
         if let Some(entry) = counts.iter_mut().find(|e| e.0 == layer_zoom) {
             entry.1 += 1;
         } else {
@@ -312,8 +333,8 @@ pub(super) fn record_fanout_from_payload_records(
         }
     }
     for &(key, tiles) in &counts {
-        let layer = key as usize / 15;
-        let zoom = key as usize % 15;
+        let layer = key as usize / sort::ZOOM_LEVEL_COUNT;
+        let zoom = key as usize % sort::ZOOM_LEVEL_COUNT;
         stats.record(layer, zoom, tiles);
     }
 }

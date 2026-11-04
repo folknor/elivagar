@@ -97,7 +97,8 @@ where
 // ---------------------------------------------------------------------------
 
 /// Which pipeline phase to skip to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkipTo {
     /// Skip PBF read, reuse PBF chunks, re-run ocean + sort + assemble.
     Ocean,
@@ -117,6 +118,32 @@ pub enum OceanMode {
     None,
     Computed { key: crate::ocean::OceanSourceKey },
     Band { key: crate::ocean::OceanArtifactKey },
+}
+
+impl OceanMode {
+    fn contract_kind(
+        &self,
+        low_zoom_source: Option<crate::provenance::ActiveLowZoomSource>,
+    ) -> Result<crate::provenance::OceanContractKind, PipelineError> {
+        match (self, low_zoom_source) {
+            (Self::None, None) => Ok(crate::provenance::OceanContractKind::None),
+            (Self::Computed { key }, Some(low_zoom_source)) => {
+                Ok(crate::provenance::OceanContractKind::Shapefile {
+                    low_zoom_source,
+                    source_key: key.to_json(),
+                })
+            }
+            (Self::Band { key }, Some(low_zoom_source)) => {
+                Ok(crate::provenance::OceanContractKind::Artifact {
+                    low_zoom_source,
+                    artifact_key: key.to_json(),
+                })
+            }
+            _ => Err(PipelineError(
+                "ocean mode and low-zoom source disagree".to_string(),
+            )),
+        }
+    }
 }
 
 /// Tile payload encoding format stored in PMTiles tile data.
@@ -237,6 +264,10 @@ pub struct TilegenConfig {
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
+/// v9 records ocean mode, low-zoom source, and source identity through the
+/// serde-tagged contract shared with provenance. v8 used a separate computed
+/// or band tag and did not record the low-zoom source explicitly.
+///
 /// v8 includes inline way coordinates in the checkpoint extent for
 /// locations-on-ways inputs, whose producer may omit untagged node elements.
 /// Earlier checkpoints may understate their extent.
@@ -256,7 +287,7 @@ const CHECKPOINT_FILE: &str = "checkpoint.txt";
 /// range. v4 added the input hash and effective paths but kept the
 /// whitespace-positional encoding, where every new field shifts an index and a
 /// miscount is a silent misparse. Neither is accepted; re-run a full tilegen.
-const CHECKPOINT_VERSION: u32 = 8;
+const CHECKPOINT_VERSION: u32 = 9;
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
@@ -291,14 +322,18 @@ fn save_checkpoint(
     bounds: &MercBbox,
     chunk_count: usize,
     ocean_mode: &OceanMode,
+    low_zoom_source: Option<crate::provenance::ActiveLowZoomSource>,
     provenance: &CheckpointProvenance,
 ) -> Result<(), PipelineError> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
-    let ocean = match ocean_mode {
-        OceanMode::None => serde_json::json!("none"),
-        OceanMode::Computed { key } => serde_json::json!({ "computed": key.to_json() }),
-        OceanMode::Band { key } => serde_json::json!({ "band": key.to_json() }),
-    };
+    let ocean = ocean_mode.contract_kind(low_zoom_source)?;
+    let ocean = serde_json::to_value(ocean).map_err(|error| {
+        PipelineError(format!(
+            "could not serialize checkpoint ocean contract: {error}"
+        ))
+    })?;
+    let effective = serde_json::to_value(provenance.effective)
+        .map_err(|error| PipelineError(format!("could not serialize effective paths: {error}")))?;
     let sort_chunk_compression = match provenance.sort_chunk_compression {
         sort::ChunkCompression::None => "none",
         sort::ChunkCompression::Lz4 => "lz4",
@@ -312,14 +347,26 @@ fn save_checkpoint(
         "input_xxh3_128": provenance.input_xxh3_128,
         "producer_config": provenance.producer_config,
         "sort_chunk_compression": sort_chunk_compression,
-        "effective": {
-            "coordinate_source": provenance.effective.coordinate_source,
-            "way_members": provenance.effective.way_members,
-            "shared_node_pins": provenance.effective.shared_node_pins,
-        },
+        "effective": effective,
     });
     std::fs::write(path, content.to_string())?; // io::Error message is sufficient context.
     Ok(())
+}
+
+fn resolved_low_zoom_source(
+    config: &TilegenConfig,
+    ocean_mode: &OceanMode,
+) -> Option<crate::provenance::ActiveLowZoomSource> {
+    match ocean_mode {
+        OceanMode::None => None,
+        OceanMode::Computed { .. } | OceanMode::Band { .. } => Some(
+            if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
+                crate::provenance::ActiveLowZoomSource::Simplified
+            } else {
+                crate::provenance::ActiveLowZoomSource::Full
+            },
+        ),
+    }
 }
 
 /// Save the completed sort chunk count so a resume can reject stale leftovers.
@@ -371,7 +418,16 @@ fn clear_sort_chunk_count(tmp_dir: &std::path::Path) -> Result<(), PipelineError
 
 fn load_checkpoint(
     tmp_dir: &std::path::Path,
-) -> Result<(MercBbox, usize, OceanMode, CheckpointProvenance), PipelineError> {
+) -> Result<
+    (
+        MercBbox,
+        usize,
+        OceanMode,
+        Option<crate::provenance::ActiveLowZoomSource>,
+        CheckpointProvenance,
+    ),
+    PipelineError,
+> {
     let path = tmp_dir.join(CHECKPOINT_FILE);
     let content = std::fs::read_to_string(&path).map_err(|e| {
         emit_counter("resume_refusal_missing_checkpoint", 1);
@@ -411,29 +467,28 @@ fn load_checkpoint(
             .ok_or_else(stale)?,
     )
     .map_err(|_| stale())?;
-    let ocean_mode = match &doc["ocean"] {
-        serde_json::Value::String(s) if s == "none" => OceanMode::None,
-        serde_json::Value::Object(o) if o.contains_key("computed") => OceanMode::Computed {
-            key: crate::ocean::OceanSourceKey::from_json(&o["computed"])?,
-        },
-        serde_json::Value::Object(o) if o.contains_key("band") => OceanMode::Band {
-            key: crate::ocean::OceanArtifactKey::from_json(&o["band"])?,
-        },
-        _ => return Err(PipelineError("invalid checkpoint ocean mode".to_string())),
-    };
-    // Interned back to the same 'static identifiers phase12 emits, so a
-    // resumed value is indistinguishable from a freshly computed one.
-    let path_name = |field: &str, allowed: [&'static str; 2]| {
-        let found = doc["effective"].get(field).and_then(|v| v.as_str());
-        allowed
-            .into_iter()
-            .find(|a| Some(*a) == found)
-            .ok_or_else(|| {
-                PipelineError(format!(
-                    "invalid checkpoint effective.{field}: {}",
-                    found.unwrap_or("(missing)")
-                ))
-            })
+    let checkpoint_ocean: crate::provenance::OceanContractKind =
+        serde_json::from_value(doc["ocean"].clone()).map_err(|_| stale())?;
+    let (ocean_mode, low_zoom_source) = match checkpoint_ocean {
+        crate::provenance::OceanContractKind::None => (OceanMode::None, None),
+        crate::provenance::OceanContractKind::Shapefile {
+            low_zoom_source,
+            source_key,
+        } => (
+            OceanMode::Computed {
+                key: crate::ocean::OceanSourceKey::from_json(&source_key)?,
+            },
+            Some(low_zoom_source),
+        ),
+        crate::provenance::OceanContractKind::Artifact {
+            low_zoom_source,
+            artifact_key,
+        } => (
+            OceanMode::Band {
+                key: crate::ocean::OceanArtifactKey::from_json(&artifact_key)?,
+            },
+            Some(low_zoom_source),
+        ),
     };
     let provenance = CheckpointProvenance {
         input_xxh3_128: doc["input_xxh3_128"]
@@ -451,13 +506,11 @@ fn load_checkpoint(
             Some("snappy") => sort::ChunkCompression::Snappy,
             _ => return Err(stale()),
         },
-        effective: crate::provenance::Effective {
-            coordinate_source: path_name("coordinate_source", ["inline", "node_store"])?,
-            way_members: path_name("way_members", ["injected_v1", "relation_scan"])?,
-            shared_node_pins: path_name("shared_node_pins", ["injected_v1", "block_local"])?,
-        },
+        effective: serde_json::from_value(doc["effective"].clone()).map_err(|error| {
+            PipelineError(format!("invalid checkpoint effective paths: {error}"))
+        })?,
     };
-    Ok((bounds, chunks, ocean_mode, provenance))
+    Ok((bounds, chunks, ocean_mode, low_zoom_source, provenance))
 }
 
 /// Effective encoding, resolved from the public config without changing its API.
@@ -810,9 +863,15 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         }
         let identity = crate::provenance::hash_file(&config.pbf_path)
             .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?;
-        let (_, _, checkpoint_ocean_mode, checkpoint) = load_checkpoint(&config.tmp_dir)?;
+        let (_, _, checkpoint_ocean_mode, checkpoint_low_zoom_source, checkpoint) =
+            load_checkpoint(&config.tmp_dir)?;
         if checkpoint_ocean_mode != ocean_mode {
             return Err(PipelineError("checkpoint ocean mode differs from this run; --skip-to ocean, sort, and assemble cannot resume".to_string()));
+        }
+        if checkpoint_low_zoom_source != resolved_low_zoom_source(config, &ocean_mode) {
+            return Err(PipelineError(
+                "checkpoint low-zoom source differs from this run; resume is unsafe".to_string(),
+            ));
         }
         if checkpoint.sort_chunk_compression != config.compress_sort_chunks {
             emit_counter("resume_refusal_sort_compression", 1);
@@ -921,11 +980,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     .join()
                     .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?
             };
+            let low_zoom_source = resolved_low_zoom_source(config, &ocean_mode);
             save_checkpoint(
                 &config.tmp_dir,
                 &bounds_out,
                 sw.chunk_count(),
                 &ocean_mode,
+                low_zoom_source,
                 &CheckpointProvenance {
                     input_xxh3_128: identity.xxh3_128,
                     producer_config: crate::provenance::producer_config(config),
@@ -940,7 +1001,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             sw
         } else {
             // --skip-to ocean: load checkpoint, resume from PBF chunks
-            let (_, pbf_chunks, checkpoint_ocean_mode, _) = load_checkpoint(&config.tmp_dir)?;
+            let (_, pbf_chunks, checkpoint_ocean_mode, _, _) = load_checkpoint(&config.tmp_dir)?;
             if checkpoint_ocean_mode != ocean_mode {
                 return Err(PipelineError(
                     "checkpoint ocean mode differs from this run; resume is unsafe".to_string(),
@@ -957,7 +1018,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         };
 
         // Load data_bounds (needed for ocean, always available from checkpoint or just computed)
-        let (data_bounds, _, _, _) = load_checkpoint(&config.tmp_dir)?;
+        let (data_bounds, _, _, _, _) = load_checkpoint(&config.tmp_dir)?;
 
         active_ocean_artifact = if let (OceanMode::Band { key }, Some(path)) =
             (&ocean_mode, config.ocean_tiles.as_deref())
@@ -1123,7 +1184,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     emit_allocator_boundary("sort_end");
 
     // Loaded on every path, including a direct resume at assembly.
-    let (data_bounds, _, _, _) = load_checkpoint(&config.tmp_dir)?;
+    let (data_bounds, _, _, _, _) = load_checkpoint(&config.tmp_dir)?;
     if active_ocean_artifact.is_none()
         && let (OceanMode::Band { key }, Some(path)) = (&ocean_mode, config.ocean_tiles.as_deref())
     {
@@ -1166,27 +1227,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 .as_ref()
                 .map(|s| s.effective)
                 .or(resumed_effective),
-            resumed_from: skip.map(|s| match s {
-                SkipTo::Ocean => "ocean",
-                SkipTo::Sort => "sort",
-                SkipTo::Assemble => "assemble",
-            }),
-            ocean_artifact_key: match &ocean_mode {
-                OceanMode::Band { key } => Some(key.clone()),
-                OceanMode::None | OceanMode::Computed { .. } => None,
-            },
-            ocean_source_key: match &ocean_mode {
-                OceanMode::Computed { key } => Some(key.clone()),
-                OceanMode::None | OceanMode::Band { .. } => None,
-            },
-            // The resolved mode, not a guess from which paths are set: ocean
-            // runs only when the full shapefile is present, so a
-            // simplified-only config produces no ocean at all.
-            ocean_mode: match &ocean_mode {
-                OceanMode::None => "none",
-                OceanMode::Computed { .. } => "shapefile",
-                OceanMode::Band { .. } => "artifact",
-            },
+            resumed_from: skip,
+            ocean_mode: ocean_mode.clone(),
         },
     )?;
     // Drop the reader so every chunk reader flushes its byte tally before we
@@ -1631,7 +1673,7 @@ pub fn ocean_build(
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
-        ocean_artifact_key: Some(key),
+        ocean_artifact_key: Some(key.clone()),
         ocean_only_metadata: true,
         skip_to: None,
         in_memory: false,
@@ -1663,9 +1705,7 @@ pub fn ocean_build(
             input_identity: None,
             effective: None,
             resumed_from: None,
-            ocean_artifact_key: config.ocean_artifact_key.clone(),
-            ocean_source_key: None,
-            ocean_mode: "artifact",
+            ocean_mode: OceanMode::Band { key },
         },
     )?;
     Ok(())

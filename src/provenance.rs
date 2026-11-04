@@ -28,7 +28,7 @@
 //! it would invalidate every artifact already built.
 
 use crate::TilegenConfig;
-use crate::ocean::{OceanArtifactKey, OceanSourceKey, Xxh128};
+use crate::ocean::Xxh128;
 use crate::shortbread::Layer;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -123,6 +123,58 @@ impl PbfFeatures {
     }
 }
 
+/// Stable provenance names for the paths selected from PBF header facts.
+/// These same enums encode and decode checkpoint values, so their serde
+/// renames are part of both wire formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CoordinateSource {
+    #[serde(rename = "inline")]
+    Inline,
+    #[serde(rename = "node_store")]
+    NodeStore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MembershipSource {
+    #[serde(rename = "injected_v1")]
+    InjectedV1,
+    #[serde(rename = "relation_scan")]
+    RelationScan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PinScope {
+    #[serde(rename = "injected_v1")]
+    InjectedV1,
+    #[serde(rename = "block_local")]
+    BlockLocal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ActiveLowZoomSource {
+    #[serde(rename = "simplified")]
+    Simplified,
+    #[serde(rename = "full")]
+    Full,
+}
+
+/// The serde representation shared by checkpoint and provenance. The
+/// checkpoint also records this identity so a resume cannot reuse chunks from
+/// a different ocean source.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OceanContractKind {
+    None,
+    Shapefile {
+        low_zoom_source: ActiveLowZoomSource,
+        source_key: Value,
+    },
+    Artifact {
+        low_zoom_source: ActiveLowZoomSource,
+        artifact_key: Value,
+    },
+}
+
 /// Content digest and byte length of the input PBF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputIdentity {
@@ -169,36 +221,27 @@ impl Input {
 /// artifact-absent one is therefore a contract mismatch, not a regression.
 #[derive(Debug, Clone)]
 pub struct OceanContract {
-    /// `none`, `shapefile`, or `artifact`.
-    pub mode: &'static str,
-    /// Whether the ocean VW simplifier ran. Always true on archives built
-    /// after `--no-ocean-simplify` was removed; false on older archives that
-    /// used it to build a verbatim coverage baseline.
+    /// Resolved producer mode with its source identity and low-zoom selection.
+    pub kind: OceanContractKind,
+    /// Whether the runtime pyramid simplifier ran.
     pub runtime_simplification: bool,
-    /// `simplified` when a separate low-zoom shapefile serves z0-7, `full`
-    /// when the full-resolution shapefile serves every zoom, `none` when
-    /// ocean is disabled. Distinct from `runtime_simplification`: source
-    /// selection and runtime simplification are independent, and a single
-    /// boolean conflates them.
-    pub low_zoom_source: &'static str,
-    /// The durable artifact's invalidation key, when the artifact is active.
-    pub artifact_key: Option<OceanArtifactKey>,
-    /// Source identity for computed ocean. Absent in artifact and no-ocean
-    /// modes so their established contract shapes remain unchanged.
-    pub source_key: Option<OceanSourceKey>,
 }
 
 impl OceanContract {
     fn to_json(&self) -> Value {
-        let mut value = json!({
-            "mode": self.mode,
-            "runtime_simplification": self.runtime_simplification,
-            "low_zoom_source": self.low_zoom_source,
-            "artifact_key": self.artifact_key.as_ref().map(OceanArtifactKey::to_json),
-        });
-        if let Some(source_key) = &self.source_key {
-            value["source_key"] = source_key.to_json();
+        let is_none = matches!(&self.kind, OceanContractKind::None);
+        let has_artifact_key = matches!(&self.kind, OceanContractKind::Artifact { .. });
+        let mut value =
+            serde_json::to_value(&self.kind).expect("ocean contract is JSON serializable");
+        // Preserve the established provenance nulls and omission rules. The
+        // checkpoint uses the tagged kind directly without these diagnostics.
+        if is_none {
+            value["low_zoom_source"] = json!("none");
         }
+        if !has_artifact_key {
+            value["artifact_key"] = Value::Null;
+        }
+        value["runtime_simplification"] = json!(self.runtime_simplification);
         value
     }
 }
@@ -211,28 +254,19 @@ impl OceanContract {
 /// regression gate exists to make. Change the path-selection logic and a
 /// contract-gated consumer would refuse the diff precisely when it matters.
 /// They are what explains a diff once the contract matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Effective {
-    /// `inline` when way elements carried coordinates, `node_store` when a
-    /// node coordinate index was built.
-    pub coordinate_source: &'static str,
-    /// `injected_v1` when WayMembers-v1 supplied relation membership,
-    /// `relation_scan` when it was recovered by scanning relations.
-    pub way_members: &'static str,
-    /// `injected_v1` when SharedNodePins-v1 supplied globally injected pins,
-    /// `block_local` when shared nodes were detected per block. Pin scope
-    /// changes which vertices survive simplification, so the two produce
-    /// materially different geometry from the same OSM data.
-    pub shared_node_pins: &'static str,
+    /// Inline way coordinates or a node-store lookup.
+    pub coordinate_source: CoordinateSource,
+    /// Injected membership or the relation-scan fallback.
+    pub way_members: MembershipSource,
+    /// Injected shared-node pins or the block-local fallback.
+    pub shared_node_pins: PinScope,
 }
 
 impl Effective {
     fn to_json(self) -> Value {
-        json!({
-            "coordinate_source": self.coordinate_source,
-            "way_members": self.way_members,
-            "shared_node_pins": self.shared_node_pins,
-        })
+        serde_json::to_value(self).expect("effective paths are JSON serializable")
     }
 }
 
@@ -369,14 +403,14 @@ pub fn producer_config_diff(checkpoint: &Value, current: &Value) -> Vec<String> 
 /// produced the tiles. They are not guessed from current config, which would
 /// describe what this invocation *would* have done instead.
 ///
-/// `resumed_from` names the phase a resumed run started at, and is absent for
+/// `resumed_from` names the phase a resumed run started at, and is null for
 /// a full run.
 pub fn build(
     input: &Input,
     config: &TilegenConfig,
     ocean: &OceanContract,
     effective: Option<Effective>,
-    resumed_from: Option<&str>,
+    resumed_from: Option<crate::pipeline::SkipTo>,
 ) -> Value {
     let mut value = json!({
         "schema": SCHEMA_VERSION,
@@ -391,12 +425,6 @@ pub fn build(
         obj.insert("effective".to_string(), effective.to_json());
     }
     value
-}
-
-/// Render a value as a `"elivagar":{...}` object member for
-/// `PmtilesWriter::add_metadata_member`.
-pub fn metadata_member(value: &Value) -> String {
-    format!("\"elivagar\":{value}")
 }
 
 /// XXH3-128 of a file, lowercase hex, with its byte length.
@@ -475,19 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn metadata_member_is_a_json_object_member() {
-        let value = json!({"schema": SCHEMA_VERSION});
-        let member = metadata_member(&value);
-        // Must splice into an existing object, so it is a `"key":value` pair
-        // with no wrapping braces of its own.
-        assert!(member.starts_with("\"elivagar\":{"));
-        let wrapped = format!("{{{member}}}");
-        let parsed: Value =
-            serde_json::from_str(&wrapped).expect("member must splice into a valid object");
-        assert_eq!(parsed["elivagar"]["schema"], SCHEMA_VERSION);
-    }
-
-    #[test]
     fn input_records_hash_and_observed_features() {
         let value = input().to_json();
         assert_eq!(value["xxh3_128"], "58c47f32d3a55b04a56813565efc78ac");
@@ -520,6 +535,58 @@ mod tests {
     }
 
     #[test]
+    fn typed_paths_and_resume_keep_their_wire_names() {
+        for (effective, expected) in [
+            (
+                Effective {
+                    coordinate_source: CoordinateSource::Inline,
+                    way_members: MembershipSource::InjectedV1,
+                    shared_node_pins: PinScope::InjectedV1,
+                },
+                r#"{"coordinate_source":"inline","shared_node_pins":"injected_v1","way_members":"injected_v1"}"#,
+            ),
+            (
+                Effective {
+                    coordinate_source: CoordinateSource::NodeStore,
+                    way_members: MembershipSource::RelationScan,
+                    shared_node_pins: PinScope::BlockLocal,
+                },
+                r#"{"coordinate_source":"node_store","shared_node_pins":"block_local","way_members":"relation_scan"}"#,
+            ),
+        ] {
+            let value = effective.to_json();
+            assert_eq!(value.to_string(), expected);
+            assert_eq!(
+                serde_json::from_value::<Effective>(value).expect("typed paths"),
+                effective,
+            );
+        }
+        for (phase, expected) in [
+            (None, "null"),
+            (Some(crate::pipeline::SkipTo::Ocean), "\"ocean\""),
+            (Some(crate::pipeline::SkipTo::Sort), "\"sort\""),
+            (Some(crate::pipeline::SkipTo::Assemble), "\"assemble\""),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&phase).expect("resume phase"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn no_ocean_contract_keeps_null_key_and_omits_source_key() {
+        let ocean = OceanContract {
+            kind: OceanContractKind::None,
+            runtime_simplification: true,
+        };
+        assert_eq!(
+            ocean.to_json().to_string(),
+            r#"{"artifact_key":null,"low_zoom_source":"none","mode":"none","runtime_simplification":true}"#,
+        );
+    }
+
+    #[test]
     fn artifact_contract_keeps_the_flat_json_shape() {
         // Keep the established wire schema local: corpus/ is excluded from
         // the published crate, whose unit tests must still compile.
@@ -538,14 +605,14 @@ mod tests {
                 "policy_version": crate::ocean::OCEAN_POLICY_VERSION,
             },
         });
-        let mut key =
-            OceanArtifactKey::from_json(&expected["artifact_key"]).expect("valid artifact key");
+        let mut key = crate::ocean::OceanArtifactKey::from_json(&expected["artifact_key"])
+            .expect("valid artifact key");
         let ocean = OceanContract {
-            mode: "artifact",
+            kind: OceanContractKind::Artifact {
+                low_zoom_source: ActiveLowZoomSource::Simplified,
+                artifact_key: key.to_json(),
+            },
             runtime_simplification: true,
-            low_zoom_source: "simplified",
-            artifact_key: Some(key.clone()),
-            source_key: None,
         };
         assert_eq!(
             serde_json::to_string(&ocean.to_json()).expect("serialized ocean contract"),
@@ -557,7 +624,10 @@ mod tests {
         expected["artifact_key"]["simplified_shp_xxh128"] = Value::Null;
         expected["artifact_key"]["simplified_shx_xxh128"] = Value::Null;
         let ocean = OceanContract {
-            artifact_key: Some(key),
+            kind: OceanContractKind::Artifact {
+                low_zoom_source: ActiveLowZoomSource::Simplified,
+                artifact_key: key.to_json(),
+            },
             ..ocean
         };
         assert_eq!(

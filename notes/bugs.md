@@ -157,35 +157,28 @@ settled, the two must agree.
 
 Reported by the encoding hunt.
 
-## BUG-039 - Merged features lose their MVT id; singletons keep theirs
-
-`merge_same_attr_geometries` sets `id = None` on merged features but keeps
-ids on singletons, so ids in one layer are present or absent depending on
-whether a same-attr sibling happened to be in the tile. Probably intended per
-the hunter, but it means feature ids are not a stable consumer contract
-(MapLibre feature-state keys on them).
-
-Reported by the encoding hunt.
-
----
-
-# Archive surface and inspection tools
-
 ---
 
 # Found during the 2026-11-04 fix waves
 
-## BUG-061 - Polygon centroids ignore inner rings
+## BUG-062 - A multipolygon gets one label point per component
 
-The emitter's centroid path (`centroid_of` in `pipeline/emit.rs`), used for
-`water_polygons_labels` and for convex address polygons, averages the outer
-ring's vertices - closing duplicate included, so the first vertex is
-double-weighted - rather than computing an area centroid, and ignores inner
-rings. For a
-polygon with large holes (a lake with an island, a courtyard building) the
-label point can land inside a hole. Whether the Shortbread spec's centroid is
-the area centroid of the whole polygon needs checking against
-`tests/fixtures/shortbread.yml` before changing it; it can move label points.
+`pipeline/relations.rs` calls emission once per assembled polygon
+component, so a multipolygon relation matched by a centroid or
+point-on-surface label layer gets one label point per outer, where
+Planetiler's Shortbread profile emits one aggregate point for the whole
+relation. Decide against `tests/fixtures/shortbread.yml` which the spec
+wants; changing it moves label points and counts.
 
-Reported by the wave-7 layer-geometry fixer.
+Reported by the wave-8 centroid fixer.
+
+## BUG-063 - Ocean full-tile fills and piece 0 can share feature id 0
+
+`ocean.rs` gives full-tile fills id 0 while fragments use their zero-based
+piece index, so piece 0 also has id 0. Whether both can land in one tile was
+not established. If ids must be unique within a tile, full fills and
+fragments need disjoint ids, which is an ocean output change
+(`OCEAN_POLICY_VERSION`).
+
+Reported by the wave-8 centroid fixer.
 

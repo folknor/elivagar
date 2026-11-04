@@ -339,26 +339,15 @@ pub(super) fn phase_read_and_process(
     // ways, extracts RawWay data and processes via rayon. Main thread sends blocks
     // and drains results - no per-way work on the main thread during the way phase.
     let mut block_tx: Option<std::sync::mpsc::SyncSender<WayBlock>> = None;
-    // Shared chunk-number allocator + spill coalescer, live for the whole
-    // phase: the node worker, way tasks, drain writer, and relation tail all
-    // produce chunks into the same directory concurrently. The counter is
-    // attached to sort_writer here and detached (resyncing chunk_count) after
-    // the relation tail adopts the coalescer's paths.
-    let shared_chunk_id = std::sync::Arc::new(AtomicUsize::new(
-        sort_writer
-            .as_ref()
-            .expect("sort_writer taken before phase12 read")
-            .chunk_count(),
-    ));
-    sort_writer
+    // The sort writer owns chunk allocation. Its cloneable sink is shared by
+    // the drain writer and spill coalescer for concurrent, collision-free writes.
+    let chunk_sink = sort_writer
         .as_mut()
         .expect("sort_writer taken before phase12 read")
-        .attach_chunk_counter(std::sync::Arc::clone(&shared_chunk_id));
+        .chunk_sink();
     let spill = std::sync::Arc::new(crate::sort::SpillCoalescer::new(
-        config.tmp_dir.join(SORT_CHUNKS_DIR),
-        std::sync::Arc::clone(&shared_chunk_id),
+        chunk_sink,
         sort_chunk_budget,
-        config.compress_sort_chunks,
     ));
     let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
@@ -751,9 +740,8 @@ pub(super) fn phase_read_and_process(
                     let mut wi = way_index.take().expect("way_index already taken");
                     let mut sw = sort_writer.take().expect("sort_writer already taken");
                     drain_handle = Some(std::thread::spawn(move || {
-                        // sw arrives with the shared chunk counter already
-                        // attached (phase12 setup) - its own flushes and every
-                        // concurrent producer allocate from the same Arc.
+                        // sw and the spill coalescer share the sink created by
+                        // the sort writer during phase12 setup.
                         let mut count: u64 = 0;
                         let mut fanout = FanoutStats::new();
                         let mut location_extent = CoordinateExtent::default();
@@ -767,10 +755,8 @@ pub(super) fn phase_read_and_process(
                                 &mut location_extent,
                             );
                         }
-                        // The shared chunk counter stays attached: the spill
-                        // coalescer keeps allocating from the same Arc through
-                        // the relation tail. Detached (and chunk_count resynced)
-                        // after the tail adopts the coalescer's paths.
+                        // The spill coalescer keeps its clone of the sort
+                        // writer's sink through the relation tail.
                         (wi, sw, count, fanout, location_extent)
                     }));
 
@@ -942,14 +928,13 @@ pub(super) fn phase_read_and_process(
     let max_rel_inflight_bytes = relation_tail.max_inflight_bytes;
     drop(relation_tail_busy);
     // Way-phase and relation-tail records all flowed through the coalescer;
-    // write its residual, adopt every coalesced chunk, and resync the chunk
-    // counter now that the last concurrent producer is done.
+    // write its residual and adopt every coalesced chunk now that the last
+    // concurrent producer is done.
     {
         let sw = sort_writer
             .as_mut()
             .expect("sort_writer not returned from drain");
         sw.adopt_chunk_files(spill.finish());
-        sw.detach_chunk_counter();
     }
 
     let rss_before_relation_drop = current_rss_kb();
@@ -1029,18 +1014,18 @@ pub(super) fn phase_read_and_process(
     let stats = Phase12Stats {
         effective: crate::provenance::Effective {
             coordinate_source: if locations_on_ways {
-                "inline"
+                crate::provenance::CoordinateSource::Inline
             } else {
-                "node_store"
+                crate::provenance::CoordinateSource::NodeStore
             },
             way_members: if injected.members {
-                "injected_v1"
+                crate::provenance::MembershipSource::InjectedV1
             } else {
-                "relation_scan"
+                crate::provenance::MembershipSource::RelationScan
             },
             shared_node_pins: match pin_source {
-                PinSource::Injected => "injected_v1",
-                PinSource::BlockLocal => "block_local",
+                PinSource::Injected => crate::provenance::PinScope::InjectedV1,
+                PinSource::BlockLocal => crate::provenance::PinScope::BlockLocal,
             },
         },
         node_count,
@@ -1062,8 +1047,8 @@ pub(super) fn phase_read_and_process(
         sort_record_bytes: sw.total_record_bytes(),
         layer_records: *sw.layer_records(),
         layer_bytes: *sw.layer_bytes(),
-        layer_zoom_records: Box::new(*sw.layer_zoom_records()),
-        layer_zoom_bytes: Box::new(*sw.layer_zoom_bytes()),
+        layer_zoom_records: sw.layer_zoom_records().clone(),
+        layer_zoom_bytes: sw.layer_zoom_bytes().clone(),
         fanout_stats,
     };
     Ok((sw, data_bounds, stats))

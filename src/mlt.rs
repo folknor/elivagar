@@ -104,8 +104,11 @@ fn build_mlt_tile_layer(layer: &LayerBuilder) -> Result<TileLayer, MltEncodeErro
         .first()
         .map(|lm| lm.columns.as_slice())
         .unwrap_or(&[]);
-    let mut builder = mlt_core::TileLayer::builder(layer.name(), 4096)
-        .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
+    let mut builder = mlt_core::TileLayer::builder(
+        layer.name(),
+        crate::geometry::tiles::grid::EXTENT.unsigned_abs(),
+    )
+    .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
     let mut property_keys = Vec::with_capacity(columns.len());
 
     for col in columns {

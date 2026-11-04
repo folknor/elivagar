@@ -199,6 +199,8 @@ pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
 /// Check if the element qualifies as a POI (excludes from address layer).
 /// Uses specific value matching (via `pois::would_match_poi`) rather than bare
 /// key presence, so that e.g. `office=company` does not suppress addresses.
+/// Changes to the shared POI tag matcher also change address exclusions.
+/// POI zoom and geometry restrictions live in separate dispatch paths.
 fn is_poi_element(tags: &Tags<'_>) -> bool {
     crate::pois::would_match_poi(tags)
 }

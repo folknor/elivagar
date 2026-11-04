@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+Design-hunt fixes, eighth wave. This changes output.
+
+- Feature ids in layers fed by more than one OSM element type
+  (addresses, POIs, public transport, land and others) are encoded as
+  `osm_id * 10 + type` (node 1, way 2, relation 3), the Planetiler
+  convention, so a node, a way and a relation with the same number no
+  longer share an id. Ids stay within JavaScript's exact integer range;
+  single-source layers keep raw ids.
+- Centroid label points (`water_polygons_labels`, convex addresses) use
+  the area centroid with holes subtracted instead of a vertex average.
+- Archive metadata is built as one typed document; duplicate top-level
+  keys are an error.
+- Checkpoint v9: ocean mode and effective-path facts are typed enums
+  shared by checkpoint and provenance; provenance bytes are unchanged.
+
 Design-hunt fixes, seventh wave. This changes output.
 
 - In locations-on-ways mode the data extent now covers the inline

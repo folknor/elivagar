@@ -1,5 +1,36 @@
 use super::*;
 
+/// Cloneable handle for writing chunks into a sort writer's chunk store.
+///
+/// The store creates this sink at its current next chunk id. Producers can
+/// share clones without constructing or initializing an allocator themselves.
+#[derive(Clone)]
+pub struct ChunkSink {
+    tmp_dir: PathBuf,
+    next_chunk_id: Arc<AtomicUsize>,
+    compression: ChunkCompression,
+}
+
+impl ChunkSink {
+    fn new(tmp_dir: PathBuf, next_chunk_id: usize, compression: ChunkCompression) -> Self {
+        Self {
+            tmp_dir,
+            next_chunk_id: Arc::new(AtomicUsize::new(next_chunk_id)),
+            compression,
+        }
+    }
+
+    fn allocate_chunk_id(&self) -> usize {
+        self.next_chunk_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn chunk_count(&self) -> usize {
+        self.next_chunk_id
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SortWriter
 // ---------------------------------------------------------------------------
@@ -13,15 +44,9 @@ pub struct SortWriter {
     buffer_bytes: usize,
     chunk_size_bytes: usize,
     chunk_paths: Vec<PathBuf>,
-    chunk_count: usize,
     compression: ChunkCompression,
     tally: RecordTally,
-    /// Shared chunk-number allocator, active only while a concurrent producer
-    /// (the way-phase drain) writes chunks into the same directory from other
-    /// threads. When set, `flush_chunk` draws chunk numbers from this atomic so
-    /// they never collide with the numbers those producers allocate; `chunk_count`
-    /// is resynced from it on detach. `None` restores the plain self-counted path.
-    chunk_counter: Option<Arc<AtomicUsize>>,
+    chunk_sink: ChunkSink,
 }
 
 impl SortWriter {
@@ -33,16 +58,16 @@ impl SortWriter {
         compression: ChunkCompression,
     ) -> io::Result<Self> {
         fs::create_dir_all(tmp_dir)?;
+        let tmp_dir = tmp_dir.to_path_buf();
         Ok(SortWriter {
-            tmp_dir: tmp_dir.to_path_buf(),
+            tmp_dir: tmp_dir.clone(),
             buffer: Vec::new(),
             buffer_bytes: 0,
             chunk_size_bytes,
             chunk_paths: Vec::new(),
-            chunk_count: 0,
             compression,
             tally: RecordTally::new(),
-            chunk_counter: None,
+            chunk_sink: ChunkSink::new(tmp_dir, 0, compression),
         })
     }
 
@@ -86,16 +111,15 @@ impl SortWriter {
             buffer_bytes: 0,
             chunk_size_bytes,
             chunk_paths,
-            chunk_count: start_chunk,
             compression,
             tally: RecordTally::new(),
-            chunk_counter: None,
+            chunk_sink: ChunkSink::new(tmp_dir.to_path_buf(), start_chunk, compression),
         })
     }
 
-    /// Number of chunk files written so far (including adopted ones from resume).
+    /// Number of chunk ids allocated so far, including retained ids from resume.
     pub fn chunk_count(&self) -> usize {
-        self.chunk_count
+        self.chunk_sink.chunk_count()
     }
 
     /// Total sort records pushed (across all chunks + current buffer).
@@ -109,22 +133,22 @@ impl SortWriter {
     }
 
     /// Per-layer record counts (indexed by layer id, 0..26).
-    pub fn layer_records(&self) -> &[u64; 32] {
+    pub fn layer_records(&self) -> &[u64; crate::shortbread::Layer::count()] {
         &self.tally.layer_records
     }
 
     /// Per-layer payload bytes (indexed by layer id, 0..26).
-    pub fn layer_bytes(&self) -> &[u64; 32] {
+    pub fn layer_bytes(&self) -> &[u64; crate::shortbread::Layer::count()] {
         &self.tally.layer_bytes
     }
 
-    /// Per-layer-per-zoom record counts. Index: `layer * 15 + zoom`.
-    pub fn layer_zoom_records(&self) -> &[u64; 32 * 15] {
+    /// Per-layer-per-zoom record counts, indexed by layer then zoom.
+    pub(crate) fn layer_zoom_records(&self) -> &PerLayerZoom<u64> {
         &self.tally.layer_zoom_records
     }
 
-    /// Per-layer-per-zoom payload bytes. Index: `layer * 15 + zoom`.
-    pub fn layer_zoom_bytes(&self) -> &[u64; 32 * 15] {
+    /// Per-layer-per-zoom payload bytes, indexed by layer then zoom.
+    pub(crate) fn layer_zoom_bytes(&self) -> &PerLayerZoom<u64> {
         &self.tally.layer_zoom_bytes
     }
 
@@ -154,22 +178,9 @@ impl SortWriter {
         Ok(())
     }
 
-    /// Install a shared chunk-number allocator for the window during which
-    /// other threads write chunk files into this writer's directory concurrently
-    /// (the way-phase tasks). Both this writer's `flush_chunk` and those producers
-    /// must `fetch_add` the same atomic so no two chunks claim the same number.
-    /// The counter MUST be initialized to the current `chunk_count()` by the caller.
-    pub(crate) fn attach_chunk_counter(&mut self, counter: Arc<AtomicUsize>) {
-        self.chunk_counter = Some(counter);
-    }
-
-    /// Remove the shared allocator and resync `chunk_count` from its final value,
-    /// so subsequent phases (ocean, relations) and `from_dir` see the true total.
-    /// Call only once every concurrent producer has stopped allocating.
-    pub(crate) fn detach_chunk_counter(&mut self) {
-        if let Some(counter) = self.chunk_counter.take() {
-            self.chunk_count = counter.load(std::sync::atomic::Ordering::Relaxed);
-        }
+    /// Clone the store-owned sink for concurrent or direct chunk producers.
+    pub fn chunk_sink(&self) -> ChunkSink {
+        self.chunk_sink.clone()
     }
 
     pub(crate) fn merge_tally(&mut self, tally: &RecordTally) {
@@ -207,11 +218,10 @@ impl SortWriter {
         self.compression
     }
 
-    /// Adopt externally-written chunk files (e.g., from parallel ocean processing).
-    /// Files must be in standard chunk format (sorted records). The chunk_count is
-    /// updated so that subsequent flushes and `from_dir` scans remain consistent.
+    /// Adopt chunk files written through this writer's `ChunkSink`.
+    /// The sink already owns their ids, so adopting only adds them to the
+    /// manifest and does not separately reconstruct the chunk count.
     pub fn adopt_chunk_files(&mut self, paths: Vec<PathBuf>) {
-        self.chunk_count += paths.len();
         self.chunk_paths.extend(paths);
     }
 
@@ -221,16 +231,10 @@ impl SortWriter {
             return Ok(());
         }
         sort_records_total(&mut self.buffer);
-        let chunk_no = match &self.chunk_counter {
-            Some(counter) => counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            None => self.chunk_count,
-        };
+        let chunk_no = self.chunk_sink.allocate_chunk_id();
         let path =
             write_partitioned_sort_chunk(&self.buffer, &self.tmp_dir, chunk_no, self.compression)?;
 
-        if self.chunk_counter.is_none() {
-            self.chunk_count += 1;
-        }
         self.chunk_paths.push(path);
         self.buffer.clear();
         self.buffer_bytes = 0;
@@ -249,8 +253,8 @@ impl SortWriter {
 ///   [u8; data_len] data
 /// ```
 ///
-/// Used by `SortWriter::flush_chunk` and by parallel ocean processing
-/// (each rayon worker flushes its own chunk files directly).
+/// Writes to an explicit path. Store-managed producers should use `ChunkSink`
+/// so chunk ids come from the owning sort writer.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_truncation)]
 pub fn write_sorted_chunk(
@@ -280,22 +284,21 @@ pub fn write_sorted_payload_chunk(
 
 /// Write arena-backed records as partition-pure sorted chunk files.
 ///
-/// The caller provides the shared chunk id allocator used by direct producers.
-/// Returned paths are suitable for `SortWriter::adopt_chunk_files`.
+/// The chunk store provides a shared sink to direct producers. Returned paths
+/// are suitable for `SortWriter::adopt_chunk_files` on that store.
 #[hotpath::measure]
 pub fn write_partitioned_payload_chunks(
     records: &mut [PayloadRecord],
     payload: &[u8],
-    tmp_dir: &Path,
-    chunk_id: &AtomicUsize,
-    compression: ChunkCompression,
+    sink: &ChunkSink,
 ) -> io::Result<Vec<PathBuf>> {
     if records.is_empty() {
         return Ok(Vec::new());
     }
     sort_payload_records_total(records, payload);
-    let id = chunk_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = write_partitioned_payload_chunk(records, payload, tmp_dir, id, compression)?;
+    let id = sink.allocate_chunk_id();
+    let path =
+        write_partitioned_payload_chunk(records, payload, &sink.tmp_dir, id, sink.compression)?;
     Ok(vec![path])
 }
 
@@ -332,25 +335,16 @@ impl CoalesceBuf {
 pub struct SpillCoalescer {
     buf: std::sync::Mutex<CoalesceBuf>,
     budget: usize,
-    tmp_dir: PathBuf,
-    chunk_id: Arc<AtomicUsize>,
-    compression: ChunkCompression,
+    sink: ChunkSink,
     paths: std::sync::Mutex<Vec<PathBuf>>,
 }
 
 impl SpillCoalescer {
-    pub fn new(
-        tmp_dir: PathBuf,
-        chunk_id: Arc<AtomicUsize>,
-        budget: usize,
-        compression: ChunkCompression,
-    ) -> Self {
+    pub fn new(sink: ChunkSink, budget: usize) -> Self {
         Self {
             buf: std::sync::Mutex::new(CoalesceBuf::default()),
             budget,
-            tmp_dir,
-            chunk_id,
-            compression,
+            sink,
             paths: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -360,7 +354,7 @@ impl SpillCoalescer {
     /// swapped out and written as a sorted chunk OUTSIDE the lock, so other
     /// producers only ever wait for memcpys, never disk writes. Two producers
     /// tripping the budget concurrently both write (each a full-ish buffer);
-    /// the shared chunk-id allocator keeps the files distinct.
+    /// the shared store-owned sink keeps the files distinct.
     pub fn append(&self, records: &[PayloadRecord], payload: &[u8]) {
         if records.is_empty() {
             return;
@@ -391,14 +385,8 @@ impl SpillCoalescer {
         }
         // Panic: called from rayon workers and phase tails - disk I/O failure
         // is unrecoverable here, same policy as the producer sinks had.
-        let paths = write_partitioned_payload_chunks(
-            &mut buf.records,
-            &buf.payload,
-            &self.tmp_dir,
-            &self.chunk_id,
-            self.compression,
-        )
-        .expect("coalesced chunk write failed");
+        let paths = write_partitioned_payload_chunks(&mut buf.records, &buf.payload, &self.sink)
+            .expect("coalesced chunk write failed");
         self.paths
             .lock()
             .expect("spill coalescer paths lock")

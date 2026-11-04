@@ -1,6 +1,88 @@
 use super::polygon::point_in_polygon;
 use super::projection::Point;
 
+/// Return the unsigned area and centroid of a ring. Open and closed rings are
+/// both accepted; a repeated closing vertex is not counted as an extra point.
+#[allow(clippy::float_cmp)] // Exact closure and zero area, as in is_convex.
+fn ring_area_centroid(ring: &[Point]) -> Option<(f64, Point)> {
+    let ring = if ring.len() > 1
+        && ring
+            .first()
+            .zip(ring.last())
+            .is_some_and(|(a, b)| a.x == b.x && a.y == b.y)
+    {
+        &ring[..ring.len() - 1]
+    } else {
+        ring
+    };
+    if ring.len() < 3 || ring.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+        return None;
+    }
+
+    // Work relative to the first vertex to keep the shoelace sums stable for
+    // rings far from the origin.
+    let origin = ring[0];
+    let mut twice_area = 0.0;
+    let mut weighted_x = 0.0;
+    let mut weighted_y = 0.0;
+    for i in 0..ring.len() {
+        let a = ring[i];
+        let b = ring[(i + 1) % ring.len()];
+        let ax = a.x - origin.x;
+        let ay = a.y - origin.y;
+        let bx = b.x - origin.x;
+        let by = b.y - origin.y;
+        let cross = ax * by - bx * ay;
+        twice_area += cross;
+        weighted_x += (ax + bx) * cross;
+        weighted_y += (ay + by) * cross;
+    }
+    if !twice_area.is_finite()
+        || twice_area == 0.0
+        || !weighted_x.is_finite()
+        || !weighted_y.is_finite()
+    {
+        return None;
+    }
+
+    let centroid = Point::new(
+        origin.x + weighted_x / (3.0 * twice_area),
+        origin.y + weighted_y / (3.0 * twice_area),
+    );
+    if !centroid.x.is_finite() || !centroid.y.is_finite() {
+        return None;
+    }
+    Some((twice_area.abs() * 0.5, centroid))
+}
+
+/// Compute the planar area centroid of a polygon, subtracting the area of its
+/// inner rings. Ring winding and closure convention do not affect the result.
+/// Like other centroids, this point can still fall outside the polygon.
+pub(crate) fn polygon_centroid(outer: &[Point], inners: &[Vec<Point>]) -> Option<Point> {
+    let (outer_area, outer_centroid) = ring_area_centroid(outer)?;
+    let mut area = outer_area;
+    let mut weighted_x = outer_centroid.x * outer_area;
+    let mut weighted_y = outer_centroid.y * outer_area;
+
+    for inner in inners {
+        let Some((hole_area, hole_centroid)) = ring_area_centroid(inner) else {
+            if inner.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+                return None;
+            }
+            continue;
+        };
+        area -= hole_area;
+        weighted_x -= hole_centroid.x * hole_area;
+        weighted_y -= hole_centroid.y * hole_area;
+    }
+
+    if !area.is_finite() || area <= 0.0 || !weighted_x.is_finite() || !weighted_y.is_finite() {
+        return None;
+    }
+    let centroid = Point::new(weighted_x / area, weighted_y / area);
+    (centroid.x.is_finite() && centroid.y.is_finite()).then_some(centroid)
+}
+
 /// Whether a polygon is convex and winds once. Accept either ring closure
 /// convention and ignore zero-length edges and collinear triples. Holes must
 /// be ruled out by the caller before using this for centroid placement.

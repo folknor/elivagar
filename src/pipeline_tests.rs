@@ -1693,7 +1693,7 @@ fn ocean_artifact_assembly_has_world_bounds_and_no_run_provenance() {
         },
         None,
         assemble::RunProvenance {
-            ocean_mode: "artifact",
+            ocean_mode: OceanMode::Band { key: key.clone() },
             ..Default::default()
         },
     )
@@ -2207,7 +2207,7 @@ fn addresses_use_centroid_only_for_convex_polygons_without_holes() {
         let expected = if use_surface {
             geometry::surface::point_on_surface_with_holes(ring, &holes).expect("surface point")
         } else {
-            emit::centroid_of(ring)
+            Point::new(0.5, 0.5)
         };
         assert_eq!(
             points,
@@ -2224,6 +2224,130 @@ fn addresses_use_centroid_only_for_convex_polygons_without_holes() {
                 .any(|hole| geometry::polygon::point_in_polygon(&point, hole))
         );
     }
+}
+
+#[test]
+fn water_label_centroid_subtracts_holes_and_ignores_vertex_density() {
+    let outer = vec![
+        Point::new(0.125, 0.125),
+        Point::new(0.5, 0.125), // Extra collinear vertex must not weight the label.
+        Point::new(0.875, 0.125),
+        Point::new(0.875, 0.875),
+        Point::new(0.125, 0.875),
+        Point::new(0.125, 0.125),
+    ];
+    let hole = vec![
+        Point::new(0.5, 0.375),
+        Point::new(0.75, 0.375),
+        Point::new(0.75, 0.625),
+        Point::new(0.5, 0.625),
+        Point::new(0.5, 0.375),
+    ];
+    let m = test_layer_match(Layer::WaterPolygonsLabels, GeomExpect::PolygonCentroid);
+    // Outer area = 9/16 at x=1/2; hole area = 1/16 at x=5/8.
+    // Net centroid x = 31/64, y = 1/2, exactly representable on the z0 grid.
+    for (ring, hole) in [
+        (outer.clone(), hole.clone()),
+        (
+            outer.into_iter().rev().skip(1).collect(),
+            hole.into_iter().rev().collect(),
+        ),
+    ] {
+        let mut records = Vec::new();
+        let mut scratch = PointEmitScratch::new();
+        let count = emit_point_or_centroid(
+            42,
+            &ring,
+            Some(&[hole]),
+            &merc_bbox(&ring),
+            &m,
+            0,
+            0,
+            &mut records,
+            &mut scratch,
+        );
+        assert_eq!(count, 1);
+        let layer = decode_to_layer(&records[0].data);
+        assert_eq!(
+            decode_commands_to_abs_coords(&layer.test_feature(0).geometry),
+            vec![(1984, 2048)],
+        );
+    }
+}
+
+#[test]
+fn dispatch_namespaces_mixed_source_ids_on_the_wire() {
+    let outer = vec![
+        Point::new(0.25, 0.25),
+        Point::new(0.75, 0.25),
+        Point::new(0.75, 0.75),
+        Point::new(0.25, 0.75),
+        Point::new(0.25, 0.25),
+    ];
+    let point = Point::new(0.5, 0.5);
+    let m = test_layer_match(Layer::Pois, GeomExpect::PolygonPointOnSurface);
+    let caps = [0; Layer::count()];
+    let ctx = emit::EmitCtx {
+        min_zoom: 0,
+        max_zoom: 0,
+        fanout_caps: &caps,
+        polygon_simplify_factor: 1.0,
+    };
+    let pins = rustc_hash::FxHashSet::default();
+    let mut point_scratch = PointEmitScratch::new();
+    let mut line = LineEmitScratch::new();
+    let mut polygon = PolygonEmitScratch::new();
+    let mut area = MultipolygonEmitScratch::new();
+    let mut simplify = geometry::simplify::SimplifyMultiScratch::new();
+    let mut fanout = stats::FanoutStats::new();
+    let mut ids = Vec::new();
+    for source in 0..3 {
+        let geometry = match source {
+            0 => emit::FeatureGeometry::Node(&point),
+            1 => emit::FeatureGeometry::Way {
+                coords: &outer,
+                pins: &[],
+                line: &mut line,
+                polygon: &mut polygon,
+                fanout: &mut fanout,
+            },
+            _ => emit::FeatureGeometry::Area {
+                outer: &outer,
+                inners: &[],
+                pins: &pins,
+                polygon: &mut area,
+                simplify: &mut simplify,
+                fanout: &mut fanout,
+            },
+        };
+        let mut records = Vec::new();
+        assert_eq!(
+            emit::emit_match(42, geometry, &m, &ctx, &mut records, &mut point_scratch),
+            1,
+        );
+        let layer = decode_to_layer(&records[0].data);
+        ids.push(layer.test_feature(0).id);
+    }
+    assert_eq!(ids, vec![Some(421), Some(422), Some(423)]);
+
+    // Single-source ids keep all their original bits.
+    let m = test_layer_match(Layer::PlaceLabels, GeomExpect::Point);
+    let mut records = Vec::new();
+    assert_eq!(
+        emit::emit_match(
+            u64::MAX,
+            emit::FeatureGeometry::Node(&point),
+            &m,
+            &ctx,
+            &mut records,
+            &mut point_scratch,
+        ),
+        1,
+    );
+    assert_eq!(
+        decode_to_layer(&records[0].data).test_feature(0).id,
+        Some(u64::MAX),
+    );
 }
 
 #[test]
@@ -3594,10 +3718,11 @@ fn checkpoint_roundtrip() {
         &bounds,
         42,
         &computed_ocean(),
+        Some(crate::provenance::ActiveLowZoomSource::Simplified),
         &checkpoint_provenance(),
     )
     .unwrap();
-    let (loaded_bounds, loaded_chunks, ocean_mode, provenance) =
+    let (loaded_bounds, loaded_chunks, ocean_mode, low_zoom_source, provenance) =
         load_checkpoint(dir.path()).unwrap();
     assert!((loaded_bounds.min_x - 0.1).abs() < 1e-10);
     assert!((loaded_bounds.min_y - 0.2).abs() < 1e-10);
@@ -3605,6 +3730,10 @@ fn checkpoint_roundtrip() {
     assert!((loaded_bounds.max_y - 0.9).abs() < 1e-10);
     assert_eq!(loaded_chunks, 42);
     assert_eq!(ocean_mode, computed_ocean());
+    assert_eq!(
+        low_zoom_source,
+        Some(crate::provenance::ActiveLowZoomSource::Simplified),
+    );
     assert_eq!(provenance, checkpoint_provenance());
 }
 
@@ -3624,9 +3753,16 @@ fn checkpoint_preserves_sort_chunk_compression() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let mut provenance = checkpoint_provenance();
         provenance.sort_chunk_compression = compression;
-        save_checkpoint(dir.path(), &bounds, 1, &computed_ocean(), &provenance)
-            .expect("save checkpoint");
-        let (_, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
+        save_checkpoint(
+            dir.path(),
+            &bounds,
+            1,
+            &computed_ocean(),
+            Some(crate::provenance::ActiveLowZoomSource::Simplified),
+            &provenance,
+        )
+        .expect("save checkpoint");
+        let (_, _, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
         assert_eq!(loaded.sort_chunk_compression, compression);
     }
 }
@@ -3657,9 +3793,9 @@ fn checkpoint_provenance() -> crate::pipeline::CheckpointProvenance {
             .expect("valid XXH3-128"),
         producer_config: serde_json::json!({"min_zoom": 0, "max_zoom": 14}),
         effective: crate::provenance::Effective {
-            coordinate_source: "inline",
-            way_members: "injected_v1",
-            shared_node_pins: "injected_v1",
+            coordinate_source: crate::provenance::CoordinateSource::Inline,
+            way_members: crate::provenance::MembershipSource::InjectedV1,
+            shared_node_pins: crate::provenance::PinScope::InjectedV1,
         },
         sort_chunk_compression: sort::ChunkCompression::None,
     }
@@ -3781,10 +3917,11 @@ fn checkpoint_records_the_input_it_was_built_from() {
         &bounds,
         1,
         &computed_ocean(),
+        Some(crate::provenance::ActiveLowZoomSource::Simplified),
         &checkpoint_provenance(),
     )
     .expect("save checkpoint");
-    let (_, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
+    let (_, _, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
     assert_eq!(
         loaded.input_xxh3_128.to_string(),
         "58c47f32d3a55b04a56813565efc78ac"
@@ -3797,8 +3934,8 @@ fn checkpoint_records_the_input_it_was_built_from() {
     );
 }
 
-/// The effective paths survive a checkpoint round-trip as the same 'static
-/// identifiers phase12 emits, so a resumed archive describes what actually
+/// The effective paths survive a checkpoint round-trip as the same typed
+/// values phase12 emits, so a resumed archive describes what actually
 /// built its chunks.
 #[test]
 fn checkpoint_preserves_effective_paths() {
@@ -3810,15 +3947,16 @@ fn checkpoint_preserves_effective_paths() {
         max_y: 1.0,
     };
     let raw_paths = crate::provenance::Effective {
-        coordinate_source: "node_store",
-        way_members: "relation_scan",
-        shared_node_pins: "block_local",
+        coordinate_source: crate::provenance::CoordinateSource::NodeStore,
+        way_members: crate::provenance::MembershipSource::RelationScan,
+        shared_node_pins: crate::provenance::PinScope::BlockLocal,
     };
     save_checkpoint(
         dir.path(),
         &bounds,
         1,
         &computed_ocean(),
+        Some(crate::provenance::ActiveLowZoomSource::Simplified),
         &crate::pipeline::CheckpointProvenance {
             input_xxh3_128: "aa5bb8650000000000000000deadbeef"
                 .parse()
@@ -3829,7 +3967,7 @@ fn checkpoint_preserves_effective_paths() {
         },
     )
     .expect("save checkpoint");
-    let (_, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
+    let (_, _, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
     assert_eq!(loaded.effective, raw_paths);
 }
 
@@ -3855,12 +3993,20 @@ fn checkpoint_preserves_all_ocean_modes() {
     };
     for mode in [OceanMode::None, computed_ocean(), OceanMode::Band { key }] {
         let dir = tempfile::tempdir().expect("create tempdir");
-        save_checkpoint(dir.path(), &bounds, 1, &mode, &checkpoint_provenance())
-            .expect("save checkpoint");
-        assert_eq!(
-            load_checkpoint(dir.path()).expect("load checkpoint").2,
-            mode
-        );
+        let low_zoom_source = resolved_low_zoom_source(&minimal_config(), &mode);
+        save_checkpoint(
+            dir.path(),
+            &bounds,
+            1,
+            &mode,
+            low_zoom_source,
+            &checkpoint_provenance(),
+        )
+        .expect("save checkpoint");
+        let (_, _, loaded_mode, loaded_low_zoom_source, _) =
+            load_checkpoint(dir.path()).expect("load checkpoint");
+        assert_eq!(loaded_mode, mode);
+        assert_eq!(loaded_low_zoom_source, low_zoom_source);
     }
 }
 

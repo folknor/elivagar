@@ -361,10 +361,11 @@ fn test_metadata_json() {
         TileDataCompression::Gzip,
         None,
         None,
-        &[],
-        false,
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        &MetadataExtensions::default(),
+        &crate::shortbread::Layer::ALL,
+    )
+    .expect("serialize metadata");
+    let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert_eq!(parsed["name"], "Shortbread");
     assert_eq!(parsed["format"], "pbf");
     assert_eq!(parsed["tile_payload_format"], "mvt");
@@ -392,10 +393,11 @@ fn test_metadata_json_with_source_provenance() {
         TileDataCompression::Gzip,
         Some("denmark-latest.osm.pbf"),
         Some(1_708_000_000),
-        &[],
-        false,
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        &MetadataExtensions::default(),
+        &crate::shortbread::Layer::ALL,
+    )
+    .expect("serialize metadata");
+    let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert_eq!(parsed["source_pbf"], "denmark-latest.osm.pbf");
     assert_eq!(parsed["osmosis_replication_timestamp"], 1_708_000_000);
 }
@@ -415,12 +417,13 @@ fn test_metadata_json_escapes_source_pbf_special_chars() {
         TileDataCompression::Gzip,
         Some(source),
         None,
-        &[],
-        false,
-    );
+        &MetadataExtensions::default(),
+        &crate::shortbread::Layer::ALL,
+    )
+    .expect("serialize metadata");
 
     // Escaped JSON should parse and roundtrip to the exact original filename.
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert_eq!(parsed["source_pbf"], source);
 }
 
@@ -438,13 +441,84 @@ fn test_metadata_json_mlt_contract() {
         TileDataCompression::None,
         None,
         None,
-        &[],
-        false,
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        &MetadataExtensions::default(),
+        &crate::shortbread::Layer::ALL,
+    )
+    .expect("serialize metadata");
+    let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert_eq!(parsed["format"], "mlt");
     assert_eq!(parsed["tile_payload_format"], "mlt");
     assert_eq!(parsed["tile_compression"], "none");
+}
+
+#[test]
+fn metadata_serialization_keeps_the_existing_field_order() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let json = build_metadata(
+        &config,
+        TileDataFormat::Mvt,
+        TileDataCompression::Gzip,
+        Some("denmark-latest.osm.pbf"),
+        Some(1_708_000_000),
+        &MetadataExtensions::default(),
+        &crate::shortbread::Layer::ALL,
+    )
+    .expect("serialize metadata");
+    let json = std::str::from_utf8(&json).unwrap();
+
+    assert!(json.starts_with(
+        r#"{"name":"Shortbread","format":"pbf","tile_payload_format":"mvt","tile_compression":"gzip","type":"baselayer","minzoom":0,"maxzoom":14,"vector_layers":[{"id":"water_polygons","minzoom":4,"maxzoom":14}"#
+    ));
+    let source_position = json
+        .find(r#","source_pbf":"denmark-latest.osm.pbf""#)
+        .unwrap();
+    let timestamp_position = json
+        .find(r#","osmosis_replication_timestamp":1708000000"#)
+        .unwrap();
+    assert!(source_position < timestamp_position);
+}
+
+#[test]
+fn metadata_setter_rejects_duplicates_and_non_objects() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 2),
+    };
+    let mut writer = PmtilesWriter::new(config);
+
+    writer
+        .set_elivagar_metadata(serde_json::json!({"schema": 1}))
+        .expect("add first member");
+    assert!(
+        writer
+            .set_elivagar_metadata(serde_json::json!({"schema": 2}))
+            .is_err()
+    );
+    assert!(
+        writer
+            .set_elivagar_metadata(serde_json::Value::Null)
+            .is_err()
+    );
+
+    let json = build_metadata(
+        &writer.config,
+        writer.tile_data_format,
+        writer.tile_data_compression,
+        None,
+        None,
+        &writer.metadata_extensions,
+        &writer.metadata_layers,
+    )
+    .expect("serialize metadata");
+    let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(parsed["elivagar"]["schema"], 1);
 }
 
 // -----------------------------------------------------------------------

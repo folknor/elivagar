@@ -16,7 +16,7 @@ use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
 /// Maximum number of tile-level errors before aborting traversal.
 const MAX_TILE_ERRORS: usize = 100;
-const MVT_EXTENT: i64 = 4096;
+const MVT_EXTENT: i64 = crate::geometry::tiles::grid::EXTENT as i64;
 const MVT_COORD_ABS_LIMIT: i64 = MVT_EXTENT * 32; // 131072
 const MVT_DELTA_LIMIT: i64 = MVT_EXTENT * 16; // 65536
 const MVT_DELTA_LIMIT_SEAM: i64 = MVT_EXTENT * 4; // 16384
@@ -25,6 +25,7 @@ const MVT_DELTA_LIMIT_SEAM: i64 = MVT_EXTENT * 4; // 16384
 struct ValidationClass {
     z: u8,
     seam: bool,
+    extent: i64,
 }
 
 impl ValidationClass {
@@ -33,6 +34,7 @@ impl ValidationClass {
         Self {
             z,
             seam: x == 0 || x == max_x,
+            extent: MVT_EXTENT,
         }
     }
 }
@@ -538,10 +540,22 @@ fn collect_ocean_geometry_stats(data: &[u8], z: u8, stats: &mut GeometryStats) {
 #[allow(clippy::cast_possible_truncation)]
 fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats) {
     let mut name = String::new();
+    let mut extent = MVT_EXTENT;
     let mut feature_blobs: Vec<&[u8]> = Vec::new();
     let mut cursor = Cursor::new(layer_data);
     while let Ok(Some((field, wire_type))) = cursor.read_tag() {
-        if wire_type == WIRE_LEN {
+        if field == 5 && wire_type == WIRE_VARINT {
+            let Ok(value) = cursor.read_varint() else {
+                return;
+            };
+            let Ok(value) = u32::try_from(value) else {
+                return;
+            };
+            if value == 0 {
+                return;
+            }
+            extent = i64::from(value);
+        } else if wire_type == WIRE_LEN {
             if let Ok(sub) = cursor.read_len_delimited() {
                 match field {
                     1 => name = String::from_utf8_lossy(sub).to_string(),
@@ -608,7 +622,7 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
                 }
             }
         }
-        if rings.len() == 1 && is_full_tile_rect(&rings[0]) {
+        if rings.len() == 1 && is_full_tile_rect_with_extent(&rings[0], extent) {
             zs.full_tile_features += 1;
         }
     }
@@ -616,7 +630,12 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
 
 /// A closed 4-corner rectangle ring covering the full [0, 4096] extent
 /// (i.e. a buffered full-tile ocean fill).
+#[cfg(test)]
 fn is_full_tile_rect(ring: &[(i32, i32)]) -> bool {
+    is_full_tile_rect_with_extent(ring, MVT_EXTENT)
+}
+
+fn is_full_tile_rect_with_extent(ring: &[(i32, i32)], ext: i64) -> bool {
     let n = if ring.first() == ring.last() && ring.len() > 1 {
         ring.len() - 1
     } else {
@@ -641,9 +660,7 @@ fn is_full_tile_rect(ring: &[(i32, i32)]) -> bool {
         (min_x, max_y),
     ];
     let all_corners = ring[..n].iter().all(|v| corners.contains(v));
-    #[allow(clippy::cast_possible_truncation)]
-    let ext = crate::geometry::tiles::EXTENT as i32;
-    all_corners && min_x <= 0 && min_y <= 0 && max_x >= ext && max_y >= ext
+    all_corners && min_x <= 0 && min_y <= 0 && i64::from(max_x) >= ext && i64::from(max_y) >= ext
 }
 
 fn validate_mvt_geometry(data: &[u8], class: ValidationClass) -> Result<(), String> {
@@ -663,7 +680,7 @@ fn validate_mvt_geometry(data: &[u8], class: ValidationClass) -> Result<(), Stri
     Ok(())
 }
 
-fn validate_mvt_layer_geometry(layer: &[u8], class: ValidationClass) -> Result<(), String> {
+fn validate_mvt_layer_geometry(layer: &[u8], mut class: ValidationClass) -> Result<(), String> {
     let mut layer_cursor = Cursor::new(layer);
     let mut layer_name = None;
     let mut features = Vec::new();
@@ -702,6 +719,17 @@ fn validate_mvt_layer_geometry(layer: &[u8], class: ValidationClass) -> Result<(
                     .read_len_delimited()
                     .map_err(|e| format!("layer value decode failed: {e}"))?;
                 values.push(bytes);
+            }
+            (5, WIRE_VARINT) => {
+                let value = layer_cursor
+                    .read_varint()
+                    .map_err(|e| format!("layer extent decode failed: {e}"))?;
+                class.extent = i64::from(
+                    u32::try_from(value).map_err(|_| "layer extent exceeds u32".to_string())?,
+                );
+                if class.extent == 0 {
+                    return Err("layer extent is zero".to_string());
+                }
             }
             _ => layer_cursor
                 .skip_field(wire_type)
@@ -969,6 +997,7 @@ fn consume_geometry_point(
     cx: &mut i64,
     cy: &mut i64,
     delta_limit: i64,
+    coord_limit: i64,
 ) -> Result<(), String> {
     if *i + 1 >= commands.len() {
         return Err("too few points in geometry".to_string());
@@ -983,9 +1012,9 @@ fn consume_geometry_point(
     }
     *cx += dx;
     *cy += dy;
-    if cx.abs() > MVT_COORD_ABS_LIMIT || cy.abs() > MVT_COORD_ABS_LIMIT {
+    if cx.abs() > coord_limit || cy.abs() > coord_limit {
         return Err(format!(
-            "geometry coordinate ({cx},{cy}) exceeds absolute limit {MVT_COORD_ABS_LIMIT}"
+            "geometry coordinate ({cx},{cy}) exceeds absolute limit {coord_limit}"
         ));
     }
     Ok(())
@@ -1002,10 +1031,12 @@ fn validate_geometry_commands(
         return Err("feature has empty geometry command stream".to_string());
     }
     let delta_limit = if class.seam {
-        MVT_DELTA_LIMIT_SEAM
+        MVT_DELTA_LIMIT_SEAM / MVT_EXTENT * class.extent
     } else {
-        MVT_DELTA_LIMIT
+        MVT_DELTA_LIMIT / MVT_EXTENT * class.extent
     };
+
+    let coord_limit = MVT_COORD_ABS_LIMIT / MVT_EXTENT * class.extent;
 
     // Maximum valid count: vtzero uses raw_byte_len / 2 (each varint is ≥1 byte,
     // each point needs 2 varints). This is a generous upper bound that avoids
@@ -1074,7 +1105,14 @@ fn validate_geometry_commands(
                     _ => {}
                 }
                 for _ in 0..count {
-                    consume_geometry_point(commands, &mut i, &mut cx, &mut cy, delta_limit)?;
+                    consume_geometry_point(
+                        commands,
+                        &mut i,
+                        &mut cx,
+                        &mut cy,
+                        delta_limit,
+                        coord_limit,
+                    )?;
                     if geom_type == 3 {
                         ring_points = 1;
                     }
@@ -1116,7 +1154,14 @@ fn validate_geometry_commands(
                     _ => {}
                 }
                 for _ in 0..count {
-                    consume_geometry_point(commands, &mut i, &mut cx, &mut cy, delta_limit)?;
+                    consume_geometry_point(
+                        commands,
+                        &mut i,
+                        &mut cx,
+                        &mut cy,
+                        delta_limit,
+                        coord_limit,
+                    )?;
                     if geom_type == 3 {
                         ring_points += 1;
                     }

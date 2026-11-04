@@ -1,7 +1,9 @@
 # PMTiles archive metadata: the `elivagar` provenance block
 
-Every archive elivagar writes carries a record of the contract it was built
-under, as a top-level `elivagar` member of the PMTiles metadata JSON.
+Ordinary extract archives carry their run contract as a top-level `elivagar`
+member of the PMTiles metadata JSON. The world-ocean artifact instead carries
+its source and policy identity in the separate `ocean_artifact` member; it has
+no input PBF or run provenance.
 
 Read it with `scripts/dump-pmtiles-metadata.py <archive> --key elivagar`.
 `elivagar inspect` renders the input/config contract and the available build,
@@ -210,13 +212,51 @@ commit/dirty pair, and there are none.
 `execution.resumed_from` names the phase a `--skip-to` run began at, or is
 `null` for a full run.
 
+## Feature ids and polygon label points
+
+OSM feature ids are scoped by layer. Layers accepting more than one OSM
+source type use Planetiler's convention: `id = osm_id * 10 + type_code`,
+with node = 1, way = 2, relation = 3. Open and closed ways are one source
+type. Decode these ids with `floor(id / 10)` for the OSM id and `id % 10`
+for the type code. Single-source layers keep raw ids. Synthetic ocean ids
+retain their separate existing scheme.
+
+The mixed-source layers are `water_polygons`, `water_polygons_labels`,
+`dam_polygons`, `pier_polygons`, `boundary_labels`, `land`, `sites`,
+`buildings`, `addresses`, `street_polygons`, `streets_polygons_labels`,
+`bridges`, `public_transport`, and `pois`. Every OSM feature in these layers
+changes its numeric id.
+
+The raw OSM id limit for mixed-source layers is 900,719,925,474,098,
+`floor((Number.MAX_SAFE_INTEGER - 3) / 10)`. This shared bound keeps every
+type code within JavaScript's exact integer range, at most `2^53 - 1`;
+the largest encoded id is 9,007,199,254,740,983. Exceeding the raw limit
+panics during emission and fails the run; ids are never rounded, truncated,
+or saturated. Single-source raw ids are unchanged and are exact in
+JavaScript only through `2^53 - 1`.
+
+Tile-local merging removes ids from merged features while singletons retain
+them. The namespaced singleton ids are exact MapLibre feature-state keys,
+but merging can change with tile, zoom, or rebuild, so these ids do not
+provide persistent identity for merged output.
+
+`water_polygons_labels` uses a planar area centroid in normalized Mercator,
+subtracting holes. `addresses` uses that centroid only for convex polygons
+without holes and otherwise uses point-on-surface. Other polygon point layers
+keep point-on-surface placement. Area centroids can lie outside a polygon or
+inside a hole. Each assembled multipolygon component is emitted separately,
+so a relation with several outer rings can produce several label points.
+
 ## Checkpoint provenance
 
 `--skip-to` reuses sort chunks from a previous run, and nothing in a later
-invocation reveals what produced them. The v8 checkpoint (JSON) records the
-input hash, producer config, ocean source identity, effective paths, and sort
-chunk codec. A resume validates all except the effective paths, which it
-inherits.
+invocation reveals what produced them. The v9 checkpoint (JSON) records the
+input hash, producer config, ocean source identity and low-zoom selection,
+effective paths, and sort chunk codec. A resume validates all except the
+effective paths, which it inherits. The checkpoint and archive provenance use
+the same path enums and tagged ocean mode internally; archive provenance keeps
+its existing field names, explicit null artifact key for non-artifact modes,
+and omission of `source_key` outside computed-ocean mode.
 
 **Input hash.** A mismatch is a hard error: resuming would mix two inputs into
 one archive and stamp it with provenance describing only the second.
@@ -237,8 +277,9 @@ because re-derivation would describe what *this* invocation would have done,
 not what produced the chunks on disk.
 
 **Ocean source.** Computed ocean and artifact-backed ocean both carry their
-source identity. A mismatch is a hard error. v6 added computed ocean source
-hashes and zoom spans; v5 stored only the word `computed` for that arm.
+source identity. v9 records the mode and low-zoom source explicitly in a tagged
+object and validates both on resume. A mismatch is a hard error. v6 added
+computed ocean source hashes and zoom spans; v5 stored only the word `computed` for that arm.
 
 **Sort chunk codec.** v7 records the chunk storage codec separately from
 producer config. The `--compress-sort-chunks` setting must match, including
@@ -261,9 +302,9 @@ or a single latitude; empty input falls back to world bounds.
 Header coordinates are rounded to E7; inspect decodes them
 by dividing the signed integers by 10,000,000.
 
-v7 and earlier are rejected; re-run a full tilegen. v4 and earlier used a
+v8 and earlier are rejected; re-run a full tilegen. v4 and earlier used a
 whitespace-positional encoding where each added field shifted an index and a
-miscount was a silent misparse; JSON began at v5.
+miscount was a silent misparse; v7 introduced the current JSON encoding.
 
 ## Where the input hash is taken
 
