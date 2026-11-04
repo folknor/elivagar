@@ -46,7 +46,7 @@ z2/2/1 ocean feat id=539 hole decoded at (440,1045) in our decoder but
 wrong-reference hypothesis exactly.
 
 Why it survived three months - the durable lesson: our own decoders
-(diag, svg, verify, mvt_decode) mirrored the SAME wrong convention, so
+(diag, svg, verify, mvt/decode) mirrored the SAME wrong convention, so
 every internal round-trip was self-consistent; R12's @mapbox "proof of
 innocence" faithfully re-encoded an already-displaced decode; a March
 merge.rs "cursor-reset fix" codified the bug rather than fixing it;
@@ -56,7 +56,7 @@ round-trip. Only an independent oracle (earcut's own `classifyRings`)
 catches it.
 
 Fix (active in the tree): encoder `mvt/mod.rs`, decoders
-`geometry/mvt_decode.rs` + `svg.rs` + `main.rs` diag, merge
+`mvt/decode.rs` + `svg.rs` + `main.rs` diag, merge
 `mvt/merge.rs`, tests all moved to spec semantics; `mvt/tests.rs` now
 enforces "ClosePath does not move the cursor."
 

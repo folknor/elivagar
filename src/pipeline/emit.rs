@@ -8,7 +8,12 @@ use crate::geometry::int_ocean::{
 use crate::geometry::pyramid::{
     PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid, tile_cover,
 };
-use crate::geometry::{self, BUFFER_FRACTION, ClipRect, MercBbox, Point, merc_bbox};
+use crate::geometry::{
+    self,
+    clip::{self, ClipRect},
+    projection::{MercBbox, Point},
+    tiles::{BUFFER_FRACTION, merc_bbox},
+};
 use crate::multipolygon::MemberWay;
 use crate::mvt::{self, GeomType};
 use crate::pmtiles_writer;
@@ -391,7 +396,7 @@ fn polygon_min_area(z: u8, layer: Layer) -> u64 {
     if z >= OSM_POLYGON_MAX_Z || layer == Layer::StreetPolygons || layer == Layer::Bridges {
         0
     } else {
-        geometry::MIN_POLY_AREA as u64
+        geometry::polygon::MIN_POLY_AREA as u64
     }
 }
 
@@ -430,7 +435,8 @@ fn fill_base_pins(shape: &Shape, flags: &[Vec<bool>], out: &mut FxHashSet<(i32, 
 }
 
 fn polygon_z_start(merc: &[Point], z_lo: u8, z_hi: u8) -> Option<u8> {
-    (z_lo..=z_hi).find(|&z| z == OSM_POLYGON_MAX_Z || !geometry::merc_bbox_is_subpixel(merc, z))
+    (z_lo..=z_hi)
+        .find(|&z| z == OSM_POLYGON_MAX_Z || !geometry::simplify::merc_bbox_is_subpixel(merc, z))
 }
 
 fn tile_count_for_base_rect(rect: IntRect, maxz: u8, z: u8) -> u64 {
@@ -528,7 +534,7 @@ pub(super) enum FeatureGeometry<'a> {
         inners: &'a [Vec<Point>],
         pins: &'a FxHashSet<(i64, i64)>,
         polygon: &'a mut MultipolygonEmitScratch,
-        simplify: &'a mut geometry::SimplifyMultiScratch,
+        simplify: &'a mut geometry::simplify::SimplifyMultiScratch,
         fanout: &'a mut super::stats::FanoutStats,
     },
 }
@@ -565,8 +571,8 @@ pub(super) fn emit_match(
                     let mut count = 0;
                     for z in z_lo..=z_hi {
                         encode_attrs_bytes(&mut point.attrs_buf, &m.attrs, z);
-                        geometry::for_each_tile_in_bbox(&bbox, z, |tx, ty| {
-                            let (px, py) = geometry::merc_to_tile_px(p, tx, ty, z);
+                        geometry::tiles::for_each_tile_in_bbox(&bbox, z, |tx, ty| {
+                            let (px, py) = geometry::projection::merc_to_tile_px(p, tx, ty, z);
                             mvt::encode_point(&mut point.geom_buf, px, py);
                             push_sort_record(
                                 pmtiles_writer::xy_to_tile_id(z, tx, ty),
@@ -745,9 +751,9 @@ pub(super) fn emit_point_or_centroid(
     }
     let pt = if m.geom_expect == GeomExpect::PolygonPointOnSurface {
         if let Some(holes) = inners {
-            geometry::point_on_surface_with_holes(coords, holes)
+            geometry::surface::point_on_surface_with_holes(coords, holes)
         } else {
-            geometry::point_on_surface(coords)
+            geometry::surface::point_on_surface(coords)
         }
     } else {
         Some(centroid_of(coords))
@@ -764,9 +770,9 @@ pub(super) fn emit_point_or_centroid(
     let mut count: u64 = 0;
     for z in z_lo..=z_hi {
         encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
-        geometry::for_each_tile_in_bbox(&cbbox, z, |tx, ty| {
+        geometry::tiles::for_each_tile_in_bbox(&cbbox, z, |tx, ty| {
             let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-            let (px, py) = geometry::merc_to_tile_px(&p, tx, ty, z);
+            let (px, py) = geometry::projection::merc_to_tile_px(&p, tx, ty, z);
             mvt::encode_point(&mut scratch.geom_buf, px, py);
             push_sort_record(
                 tile_id,
@@ -814,18 +820,18 @@ pub(super) fn emit_line_feature(
         // Recompute bbox from simplified coords - at low zooms DP may reduce the
         // geometry to far fewer tiles than the original bbox suggests.
         let simp_bbox = merc_bbox(simplified);
-        let single_tile = geometry::is_single_tile(&simp_bbox, z);
+        let single_tile = geometry::tiles::is_single_tile(&simp_bbox, z);
 
         // Skip min-size filtering at max zoom and for boundaries/streets
         let skip_size_filter = z >= 14 || m.layer == Layer::Boundaries || m.layer == Layer::Streets;
-        geometry::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
+        geometry::tiles::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
             if single_tile {
                 // Fast path: bbox fits in one tile - clipping is a no-op.
                 if simplified.len() < 2 {
                     return;
                 }
-                geometry::to_tile_coords_into(&mut scratch.tc_buf, simplified, tx, ty, z);
-                if !skip_size_filter && geometry::line_is_subpixel(&scratch.tc_buf) {
+                geometry::tiles::to_tile_coords_into(&mut scratch.tc_buf, simplified, tx, ty, z);
+                if !skip_size_filter && geometry::simplify::line_is_subpixel(&scratch.tc_buf) {
                     return;
                 }
                 mvt::encode_linestring(&mut scratch.geom_buf, &scratch.tc_buf);
@@ -846,12 +852,12 @@ pub(super) fn emit_line_feature(
                 count += 1;
             } else {
                 let clip = ClipRect::for_tile(tx, ty, z, BUFFER_FRACTION);
-                geometry::for_each_clipped_segment(simplified, &clip, |segment| {
+                clip::for_each_clipped_segment(simplified, &clip, |segment| {
                     if segment.len() < 2 {
                         return;
                     }
-                    geometry::to_tile_coords_into(&mut scratch.tc_buf, segment, tx, ty, z);
-                    if !skip_size_filter && geometry::line_is_subpixel(&scratch.tc_buf) {
+                    geometry::tiles::to_tile_coords_into(&mut scratch.tc_buf, segment, tx, ty, z);
+                    if !skip_size_filter && geometry::simplify::line_is_subpixel(&scratch.tc_buf) {
                         return;
                     }
                     mvt::encode_linestring(&mut scratch.geom_buf, &scratch.tc_buf);
@@ -880,12 +886,12 @@ pub(super) fn emit_line_feature(
     let skip_bbox_check = m.layer == Layer::Boundaries || m.layer == Layer::Streets;
     if has_pins {
         for z in (z_lo..=z_hi).rev() {
-            if z < 14 && !skip_bbox_check && geometry::merc_bbox_is_subpixel(merc, z) {
+            if z < 14 && !skip_bbox_check && geometry::simplify::merc_bbox_is_subpixel(merc, z) {
                 break;
             }
             if z < 14 {
-                let tol = geometry::simplify_tolerance(z);
-                let _ = geometry::simplify_into_with_required(
+                let tol = geometry::simplify::simplify_tolerance(z);
+                let _ = geometry::simplify::simplify_into_with_required(
                     merc,
                     tol,
                     &scratch.pinned_idxs,
@@ -901,7 +907,7 @@ pub(super) fn emit_line_feature(
             }
         }
     } else {
-        geometry::for_each_zoom_simplified(
+        geometry::simplify::for_each_zoom_simplified(
             merc,
             z_lo,
             z_hi,
@@ -1029,7 +1035,7 @@ pub(super) fn emit_multipolygon_feature(
     z_hi: u8,
     records: &mut impl FeatureRecordSink,
     emit_scratch: &mut MultipolygonEmitScratch,
-    _simp_scratch: &mut geometry::SimplifyMultiScratch,
+    _simp_scratch: &mut geometry::simplify::SimplifyMultiScratch,
     fanout_cap: u32,
     tol_scale: f64,
 ) -> u64 {
@@ -1166,7 +1172,7 @@ mod landing2_tests {
         let outer = square(0.500_10, 0.500_11);
         let keys = FxHashSet::default();
         let mut polygon = MultipolygonEmitScratch::new();
-        let mut simplify = geometry::SimplifyMultiScratch::new();
+        let mut simplify = geometry::simplify::SimplifyMultiScratch::new();
         let mut point = PointEmitScratch::new();
         let mut fanout = super::super::stats::FanoutStats::new();
         let mut records = Vec::new();
@@ -1256,7 +1262,7 @@ mod landing2_tests {
     fn brute_force_zoom_set(merc: &[Point], z_lo: u8, z_hi: u8) -> Vec<u8> {
         let mut out = Vec::new();
         for z in (z_lo..=z_hi).rev() {
-            if z < OSM_POLYGON_MAX_Z && geometry::merc_bbox_is_subpixel(merc, z) {
+            if z < OSM_POLYGON_MAX_Z && geometry::simplify::merc_bbox_is_subpixel(merc, z) {
                 break;
             }
             out.push(z);

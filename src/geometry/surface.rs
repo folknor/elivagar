@@ -1,4 +1,4 @@
-use super::point_in_polygon;
+use super::polygon::point_in_polygon;
 use super::projection::Point;
 
 /// Find a point guaranteed to be inside the polygon, suitable for label placement.

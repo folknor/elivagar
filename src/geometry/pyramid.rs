@@ -1228,10 +1228,10 @@ fn direction_flips(ring: &Contour, axis: Axis) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::decode_mvt_polygon;
     use crate::geometry::int_ocean::{
         buffered_tile_rect, emit_full_tile, intersect_rect, normalize, rescale_shape,
     };
+    use crate::mvt::decode::decode_mvt_polygon;
     use i_overlay::core::fill_rule::FillRule;
     use i_overlay::core::overlay::{IntOverlayOptions, Overlay, ShapeType};
     use i_overlay::core::overlay_rule::OverlayRule;

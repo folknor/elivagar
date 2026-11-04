@@ -289,7 +289,7 @@ fn group_rings_to_polygons(rings: Vec<LineString<i32>>) -> Vec<Polygon<i32>> {
     let mut exterior_orientation = None;
 
     for ring in rings {
-        let Some(orientation) = geometry::ring_role(ring_signed_area(&ring)) else {
+        let Some(orientation) = geometry::polygon::ring_role(ring_signed_area(&ring)) else {
             continue;
         };
         if exterior.is_none() {

@@ -1,5 +1,5 @@
-use crate::geometry::Point;
 use crate::geometry::overlay::{BoolOverlay, BoolRule, ShapeType};
+use crate::geometry::projection::Point;
 use crate::mvt;
 
 pub(crate) use crate::geometry::overlay::IntPoint;

@@ -1371,7 +1371,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
     let bbox = merc_bbox(&outer);
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     for shift in antimeridian_shifts_for_bbox(&bbox) {
         if shift == 0.0 {
             let _ = emit_multipolygon_feature(
@@ -1861,7 +1861,7 @@ fn contains_point_near(points: &[(i32, i32)], expected: (i32, i32)) -> bool {
 
 fn record_polygon_rings(rec: &SortRecord) -> Vec<Vec<(i32, i32)>> {
     let lb = decode_to_layer(&rec.data);
-    geometry::decode_mvt_polygon(&lb.test_feature(0).geometry)
+    crate::mvt::decode::decode_mvt_polygon(&lb.test_feature(0).geometry)
 }
 
 fn assert_no_backtrack_in_records(records: &[SortRecord]) {
@@ -1885,7 +1885,10 @@ fn assert_simple_record_rings(records: &[SortRecord]) {
     );
     for rec in records {
         for ring in record_polygon_rings(rec) {
-            assert!(geometry::ring_is_simple(&ring), "non-simple ring {ring:?}");
+            assert!(
+                geometry::polygon::ring_is_simple(&ring),
+                "non-simple ring {ring:?}"
+            );
         }
     }
 }
@@ -2133,7 +2136,7 @@ fn emit_line_preserve_mask_keeps_required_vertices() {
     let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
     let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
     let mut target_tc = Vec::new();
-    geometry::to_tile_coords_into(&mut target_tc, &[Point { x: 0.5, y: 0.10002 }], 0, 0, 0);
+    geometry::tiles::to_tile_coords_into(&mut target_tc, &[Point { x: 0.5, y: 0.10002 }], 0, 0, 0);
     let expected = target_tc[0];
     assert!(
         pinned_pts.contains(&expected),
@@ -2436,7 +2439,7 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
     let (tile_id, _) = decode_key(&records_pinned[0]);
     let (z, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
     let mut target_tc = Vec::new();
-    geometry::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
+    geometry::tiles::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
     let expected = target_tc[0];
     let plain_lb = decode_to_layer(&records_plain[0].data);
     let pinned_lb = decode_to_layer(&records_pinned[0].data);
@@ -2494,8 +2497,8 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     let mut records_pinned = Vec::new();
     let mut emit_plain = MultipolygonEmitScratch::new();
     let mut emit_pinned = MultipolygonEmitScratch::new();
-    let mut simp_plain = geometry::SimplifyMultiScratch::new();
-    let mut simp_pinned = geometry::SimplifyMultiScratch::new();
+    let mut simp_plain = geometry::simplify::SimplifyMultiScratch::new();
+    let mut simp_pinned = geometry::simplify::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
         990,
@@ -2531,7 +2534,7 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     let (tile_id, _) = decode_key(&records_pinned[0]);
     let (z, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
     let mut target_tc = Vec::new();
-    geometry::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
+    geometry::tiles::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
     let expected = target_tc[0];
     let plain_lb = decode_to_layer(&records_plain[0].data);
     let pinned_lb = decode_to_layer(&records_pinned[0].data);
@@ -2595,8 +2598,8 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
     let mut records_pinned = Vec::new();
     let mut emit_plain = MultipolygonEmitScratch::new();
     let mut emit_pinned = MultipolygonEmitScratch::new();
-    let mut simp_plain = geometry::SimplifyMultiScratch::new();
-    let mut simp_pinned = geometry::SimplifyMultiScratch::new();
+    let mut simp_plain = geometry::simplify::SimplifyMultiScratch::new();
+    let mut simp_pinned = geometry::simplify::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
         991,
@@ -2632,7 +2635,7 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
     let (tile_id, _) = decode_key(&records_pinned[0]);
     let (z, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
     let mut target_tc = Vec::new();
-    geometry::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
+    geometry::tiles::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
     let expected = target_tc[0];
     let plain_lb = decode_to_layer(&records_plain[0].data);
     let pinned_lb = decode_to_layer(&records_pinned[0].data);
@@ -2676,7 +2679,7 @@ fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
 
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
         9902,
         &outer_a,
@@ -2772,7 +2775,7 @@ fn landing_b_historical_infinity_classes_emit_nothing() {
 
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
         9904,
         &zero_area_outer,
@@ -2908,7 +2911,7 @@ fn emit_multipolygon_empty_outer() {
     let m = test_layer_match(Layer::Buildings, GeomExpect::Polygon);
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
 
     let count = emit_multipolygon_feature(
         401,
@@ -2949,7 +2952,7 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
 
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     let count = emit_multipolygon_feature(
         402,
         &outer,
@@ -3009,7 +3012,7 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
 
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     let count = emit_multipolygon_feature(
         403,
         &outer,
@@ -3064,8 +3067,8 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
     let mut with_bad_holes = Vec::new();
     let mut emit_a = MultipolygonEmitScratch::new();
     let mut emit_b = MultipolygonEmitScratch::new();
-    let mut simp_a = geometry::SimplifyMultiScratch::new();
-    let mut simp_b = geometry::SimplifyMultiScratch::new();
+    let mut simp_a = geometry::simplify::SimplifyMultiScratch::new();
+    let mut simp_b = geometry::simplify::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
         404,
         &outer,
@@ -3158,8 +3161,8 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
     let mut z14_records = Vec::new();
     let mut emit_13 = MultipolygonEmitScratch::new();
     let mut emit_14 = MultipolygonEmitScratch::new();
-    let mut simp_13 = geometry::SimplifyMultiScratch::new();
-    let mut simp_14 = geometry::SimplifyMultiScratch::new();
+    let mut simp_13 = geometry::simplify::SimplifyMultiScratch::new();
+    let mut simp_14 = geometry::simplify::SimplifyMultiScratch::new();
     emit_multipolygon_feature(
         405,
         &outer,
@@ -3231,8 +3234,8 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
     let mut z14_records = Vec::new();
     let mut emit_13 = MultipolygonEmitScratch::new();
     let mut emit_14 = MultipolygonEmitScratch::new();
-    let mut simp_13 = geometry::SimplifyMultiScratch::new();
-    let mut simp_14 = geometry::SimplifyMultiScratch::new();
+    let mut simp_13 = geometry::simplify::SimplifyMultiScratch::new();
+    let mut simp_14 = geometry::simplify::SimplifyMultiScratch::new();
 
     emit_multipolygon_feature(
         4051,
@@ -3265,9 +3268,9 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
 
     for rec in z13_records.iter().chain(&z14_records) {
         let lb = decode_to_layer(&rec.data);
-        let rings = geometry::decode_mvt_polygon(&lb.test_feature(0).geometry);
+        let rings = crate::mvt::decode::decode_mvt_polygon(&lb.test_feature(0).geometry);
         for ring in rings {
-            assert!(geometry::ring_is_simple(&ring));
+            assert!(geometry::polygon::ring_is_simple(&ring));
         }
     }
 }
@@ -3283,7 +3286,7 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
     ];
     let mut records = Vec::new();
     let mut emit_scratch = MultipolygonEmitScratch::new();
-    let mut simp_scratch = geometry::SimplifyMultiScratch::new();
+    let mut simp_scratch = geometry::simplify::SimplifyMultiScratch::new();
     let count = emit_multipolygon_feature(
         406,
         &outer,
@@ -3319,7 +3322,7 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
 #[test]
 fn checkpoint_roundtrip() {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let bounds = geometry::MercBbox {
+    let bounds = geometry::projection::MercBbox {
         min_x: 0.1,
         min_y: 0.2,
         max_x: 0.8,
@@ -3346,7 +3349,7 @@ fn checkpoint_roundtrip() {
 
 #[test]
 fn checkpoint_preserves_sort_chunk_compression() {
-    let bounds = geometry::MercBbox {
+    let bounds = geometry::projection::MercBbox {
         min_x: 0.0,
         min_y: 0.0,
         max_x: 1.0,
@@ -3506,7 +3509,7 @@ fn producer_config_covers_chunk_affecting_settings() {
 #[test]
 fn checkpoint_records_the_input_it_was_built_from() {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let bounds = geometry::MercBbox {
+    let bounds = geometry::projection::MercBbox {
         min_x: 0.0,
         min_y: 0.0,
         max_x: 1.0,
@@ -3539,7 +3542,7 @@ fn checkpoint_records_the_input_it_was_built_from() {
 #[test]
 fn checkpoint_preserves_effective_paths() {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let bounds = geometry::MercBbox {
+    let bounds = geometry::projection::MercBbox {
         min_x: 0.0,
         min_y: 0.0,
         max_x: 1.0,
@@ -3583,7 +3586,7 @@ fn checkpoint_preserves_all_ocean_modes() {
         },
         compression_level: 6,
     };
-    let bounds = geometry::MercBbox {
+    let bounds = geometry::projection::MercBbox {
         min_x: 0.0,
         min_y: 0.0,
         max_x: 1.0,

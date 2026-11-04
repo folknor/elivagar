@@ -479,17 +479,6 @@ closure-typed policy.
 
 Reported by the polygon-engine hunt.
 
-## STR-018 - Drop the `geometry` glob re-exports
-
-`geometry/mod.rs` re-exports everything with `pub use x::*` "so callers don't
-change", and itself hosts constants, sub-pixel tests, float shoelace,
-Mercator area, point-in-polygon and the integer self-intersection test. The
-globs are why `geometry::EXTENT`, `geometry::MIN_POLY_AREA` and friends are
-reached from everywhere without an owner. `mvt_decode.rs` does not belong in
-geometry at all. Pre-1.0: make callers name the module.
-
-Reported by the polygon-engine hunt.
-
 ## STR-019 - Assemble OSM multipolygons in integer space
 
 `multipolygon.rs` receives member ways already projected to f64 Mercator

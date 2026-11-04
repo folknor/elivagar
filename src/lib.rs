@@ -83,7 +83,7 @@ pub mod verify;
 pub(crate) mod way_index;
 pub(crate) mod wire_format;
 
-pub use geometry::{RingOrientation, ring_is_simple, ring_role};
+pub use geometry::polygon::{RingOrientation, ring_is_simple, ring_role};
 pub use pipeline::TileCompression;
 pub use pipeline::TilePayloadFormat;
 pub use pipeline::{OceanMode, PipelineError, SkipTo, TilegenConfig, ocean_build, run};

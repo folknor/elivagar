@@ -29,6 +29,7 @@ use protohoggr::{
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
+pub(crate) mod decode;
 mod merge;
 
 /// The most rings one CLASSIFIED POLYGON may carry - MapLibre's
@@ -477,7 +478,7 @@ pub fn encode_linestring(buf: &mut Vec<u32>, coords: &[(i32, i32)]) {
 
 // Production polygon encoding goes through `encode_polygon_ranges`; this
 // slice-of-rings form survives for the decoder round-trip tests in
-// geometry_tests after its last production caller (the seam-reconcile
+// mvt::decode after its last production caller (the seam-reconcile
 // re-encode) was deleted.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn encode_polygon(buf: &mut Vec<u32>, rings: &[&[(i32, i32)]]) {

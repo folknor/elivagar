@@ -15,7 +15,7 @@ mod stats;
 
 #[cfg(test)]
 use crate::geometry;
-use crate::geometry::MercBbox;
+use crate::geometry::projection::MercBbox;
 use crate::pmtiles_writer;
 use crate::shortbread;
 use crate::sort;
@@ -1624,9 +1624,9 @@ pub fn ocean_build(
 
 // Re-export submodule items so `use super::*` in pipeline_tests.rs works.
 #[cfg(test)]
-use crate::geometry::Point;
+use crate::geometry::projection::Point;
 #[cfg(test)]
-use crate::geometry::merc_bbox;
+use crate::geometry::tiles::merc_bbox;
 #[cfg(all(test, feature = "mlt"))]
 use crate::mlt;
 #[cfg(test)]

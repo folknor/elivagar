@@ -589,7 +589,7 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
         let Ok(commands) = decode_packed_varints(gb) else {
             continue;
         };
-        let Ok(rings) = crate::geometry::mvt_decode::try_decode_mvt_polygon(&commands) else {
+        let Ok(rings) = crate::mvt::decode::try_decode_mvt_polygon(&commands) else {
             continue;
         };
         if rings.is_empty() {
@@ -642,7 +642,7 @@ fn is_full_tile_rect(ring: &[(i32, i32)]) -> bool {
     ];
     let all_corners = ring[..n].iter().all(|v| corners.contains(v));
     #[allow(clippy::cast_possible_truncation)]
-    let ext = crate::geometry::EXTENT as i32;
+    let ext = crate::geometry::tiles::EXTENT as i32;
     all_corners && min_x <= 0 && min_y <= 0 && max_x >= ext && max_y >= ext
 }
 
@@ -1232,7 +1232,7 @@ fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
         let Ok(commands) = decode_packed_varints(gb) else {
             continue;
         };
-        let rings = match crate::geometry::mvt_decode::try_decode_mvt_polygon(&commands) {
+        let rings = match crate::mvt::decode::try_decode_mvt_polygon(&commands) {
             Ok(rings) => rings,
             Err(error) => {
                 problems.push(format!("ocean feat {fi} polygon decode failed: {error}"));
@@ -1240,7 +1240,7 @@ fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
             }
         };
         for (ri, ring) in rings.iter().enumerate() {
-            if ring.len() >= 4 && !crate::geometry::ring_is_simple(ring) {
+            if ring.len() >= 4 && !crate::geometry::polygon::ring_is_simple(ring) {
                 problems.push(format!(
                     "ocean feat {fi} ring {ri} is self-intersecting ({} verts)",
                     ring.len()
@@ -1416,7 +1416,7 @@ mod tests {
             zz(1),
             zz(0),
         ];
-        let err = crate::geometry::mvt_decode::try_decode_mvt_polygon(&commands)
+        let err = crate::mvt::decode::try_decode_mvt_polygon(&commands)
             .expect_err("coordinate addition overflow should fail");
         assert!(err.contains("coordinate overflows i32"));
     }

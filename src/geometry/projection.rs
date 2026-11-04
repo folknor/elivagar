@@ -1,7 +1,7 @@
 use std::f64::consts::PI;
 use std::sync::OnceLock;
 
-use super::EXTENT;
+use super::tiles::EXTENT;
 
 /// Earth's equatorial circumference in meters.
 pub(super) const EARTH_CIRCUMFERENCE: f64 = 40_075_016.686;

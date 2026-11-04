@@ -15,7 +15,10 @@ use crate::geometry::pyramid::{
     buffered_cell_rect_base, emit_shape_pyramid, emit_shape_pyramid_cell, split_for_parallel,
     tile_cover,
 };
-use crate::geometry::{self, MercBbox, Point};
+use crate::geometry::{
+    self,
+    projection::{MercBbox, Point},
+};
 use crate::mvt::GeomType;
 use crate::pmtiles_reader::{ArchiveView, RawDirEntry};
 use crate::pmtiles_writer;
@@ -1519,8 +1522,8 @@ fn parse_ocean_record(
         ));
     }
 
-    let merc_min = geometry::from_epsg3857(xmin, ymax);
-    let merc_max = geometry::from_epsg3857(xmax, ymin);
+    let merc_min = geometry::projection::from_epsg3857(xmin, ymax);
+    let merc_max = geometry::projection::from_epsg3857(xmax, ymin);
 
     if merc_max.x < ctx.data_bounds.min_x
         || merc_min.x > ctx.data_bounds.max_x
@@ -1666,7 +1669,7 @@ fn push_shape_record_pieces(
         // and negative contours attach to the latest outer. The low-zoom
         // contour-soup union relies on each piece keeping its own holes and
         // having a disjoint interior, as documented at union_pieces.
-        let is_outer = w == 0 || geometry::signed_area(&ring) >= 0.0;
+        let is_outer = w == 0 || geometry::polygon::signed_area(&ring) >= 0.0;
 
         if is_outer {
             if let Some(outer) = current_outer.take() {
@@ -1775,7 +1778,7 @@ fn read_ring_points(
                     "polygon point coordinate is non-finite",
                 ));
             }
-            ring.push(geometry::from_epsg3857(x, y));
+            ring.push(geometry::projection::from_epsg3857(x, y));
         }
         points_read += points_this_read;
     }
@@ -1945,7 +1948,7 @@ fn emit_ocean_piece(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::geometry::Point;
+    use crate::geometry::projection::Point;
     use crate::sort::SortWriter;
     use std::fs;
     use std::path::Path;
@@ -2635,7 +2638,7 @@ mod tests {
 
     #[test]
     fn pip_inside_square() {
-        assert!(geometry::point_in_polygon(
+        assert!(geometry::polygon::point_in_polygon(
             &Point::new(0.5, 0.5),
             &unit_square()
         ));
@@ -2643,7 +2646,7 @@ mod tests {
 
     #[test]
     fn pip_outside_square() {
-        assert!(!geometry::point_in_polygon(
+        assert!(!geometry::polygon::point_in_polygon(
             &Point::new(2.0, 0.5),
             &unit_square()
         ));
@@ -2653,7 +2656,7 @@ mod tests {
     fn pip_on_edge() {
         // Edge behavior is implementation-defined for ray-casting;
         // just verify it does not panic.
-        let _ = geometry::point_in_polygon(&Point::new(0.5, 0.0), &unit_square());
+        let _ = geometry::polygon::point_in_polygon(&Point::new(0.5, 0.0), &unit_square());
     }
 
     #[test]
@@ -2663,7 +2666,10 @@ mod tests {
             Point { x: 4.0, y: 0.0 },
             Point { x: 2.0, y: 3.0 },
         ];
-        assert!(geometry::point_in_polygon(&Point::new(2.0, 1.0), &tri));
+        assert!(geometry::polygon::point_in_polygon(
+            &Point::new(2.0, 1.0),
+            &tri
+        ));
     }
 
     #[test]
@@ -2673,18 +2679,24 @@ mod tests {
             Point { x: 4.0, y: 0.0 },
             Point { x: 2.0, y: 3.0 },
         ];
-        assert!(!geometry::point_in_polygon(&Point::new(0.0, 3.0), &tri));
+        assert!(!geometry::polygon::point_in_polygon(
+            &Point::new(0.0, 3.0),
+            &tri
+        ));
     }
 
     #[test]
     fn pip_degenerate() {
         // Fewer than 3 points should return false
-        assert!(!geometry::point_in_polygon(&Point::new(0.0, 0.0), &[]));
-        assert!(!geometry::point_in_polygon(
+        assert!(!geometry::polygon::point_in_polygon(
+            &Point::new(0.0, 0.0),
+            &[]
+        ));
+        assert!(!geometry::polygon::point_in_polygon(
             &Point::new(0.0, 0.0),
             &[Point { x: 0.0, y: 0.0 }]
         ));
-        assert!(!geometry::point_in_polygon(
+        assert!(!geometry::polygon::point_in_polygon(
             &Point::new(0.0, 0.0),
             &[Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 1.0 }],
         ));
@@ -2712,11 +2724,20 @@ mod tests {
         ];
 
         // Inside the body of the L
-        assert!(geometry::point_in_polygon(&Point::new(0.5, 0.5), &l_shape));
-        assert!(geometry::point_in_polygon(&Point::new(0.5, 2.0), &l_shape));
+        assert!(geometry::polygon::point_in_polygon(
+            &Point::new(0.5, 0.5),
+            &l_shape
+        ));
+        assert!(geometry::polygon::point_in_polygon(
+            &Point::new(0.5, 2.0),
+            &l_shape
+        ));
 
         // Inside the concavity (the cut-out region) - should be false
-        assert!(!geometry::point_in_polygon(&Point::new(1.5, 2.0), &l_shape));
+        assert!(!geometry::polygon::point_in_polygon(
+            &Point::new(1.5, 2.0),
+            &l_shape
+        ));
     }
 
     #[test]

@@ -1,5 +1,15 @@
-use super::EXTENT;
 use super::projection::{MercBbox, Point};
+
+/// MVT tile extent (pixels per tile axis).
+pub const EXTENT: f64 = 4096.0;
+
+/// Buffer fraction of tile size for clipping (8 rendered pixels).
+/// One tile is 256 by 256 rendered pixels; 8/256 of the tile width.
+pub(crate) const BUFFER_FRACTION: f64 = 8.0 / 256.0;
+
+/// One tile pixel in extent units: 4096 / 256 = 16.
+#[allow(clippy::cast_possible_truncation)]
+pub(super) const PX: i64 = (EXTENT as i64) / 256;
 
 /// Find all tiles at a given zoom level that intersect the given Mercator bbox.
 ///
@@ -113,4 +123,14 @@ pub(crate) fn merc_bbox(points: &[Point]) -> MercBbox {
         max_x,
         max_y,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn float_and_integer_tile_buffers_agree() {
+    assert_eq!(
+        (EXTENT * BUFFER_FRACTION).to_bits(),
+        f64::from(super::int_ocean::TILE_BUFFER_I32).to_bits(),
+        "float and integer tile buffers must agree until they have one owner",
+    );
 }

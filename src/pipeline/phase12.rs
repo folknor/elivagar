@@ -2,7 +2,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::debug::{BUSY, WAIT, wait_span};
-use crate::geometry::{self, MercBbox, Point};
+use crate::geometry::{
+    self,
+    projection::{MercBbox, Point},
+};
 use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
 use crate::shortbread::{self, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter};
@@ -954,8 +957,8 @@ pub(super) fn phase_read_and_process(
         } else {
             max_lon_e7
         };
-        let sw = geometry::project_e7(min_lat_e7, west_lon_e7);
-        let ne = geometry::project_e7(max_lat_e7, east_lon_e7);
+        let sw = geometry::projection::project_e7(min_lat_e7, west_lon_e7);
+        let ne = geometry::projection::project_e7(max_lat_e7, east_lon_e7);
         // Add ~1 degree buffer (in Mercator space, roughly 1/360 ≈ 0.003)
         let buf = 0.01;
         MercBbox {
@@ -1052,7 +1055,7 @@ pub(super) fn process_node(
         return 0;
     }
 
-    let p = geometry::project_e7(lat_e7, lon_e7);
+    let p = geometry::projection::project_e7(lat_e7, lon_e7);
     let ctx = EmitCtx {
         min_zoom,
         max_zoom,
@@ -1821,7 +1824,7 @@ pub(super) fn process_planned_way_into(
     acc.merc.extend(
         coords_e7
             .iter()
-            .map(|&(lat, lon)| geometry::project_e7(lat, lon)),
+            .map(|&(lat, lon)| geometry::projection::project_e7(lat, lon)),
     );
     let _ = unwrap_antimeridian_path(&mut acc.merc, is_closed);
 
@@ -1829,7 +1832,7 @@ pub(super) fn process_planned_way_into(
         let merc = acc.merc.as_slice();
 
         if is_closed {
-            let area_m2 = geometry::area_sq_meters(merc);
+            let area_m2 = geometry::polygon::area_sq_meters(merc);
             enrich_polygon_matches(&mut matches, area_m2);
         }
 

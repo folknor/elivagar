@@ -1,5 +1,74 @@
-use super::SIMPLIFY_PIXELS;
 use super::projection::Point;
+
+/// Simplification tolerance in rendered pixels (one tile = 256 by 256 px).
+/// 1.0 removes vertices within 1 pixel of the simplified line.
+/// Industry standard is 1.0; Tilemaker uses about 0.58 for comparison.
+const SIMPLIFY_PIXELS: f64 = 1.0;
+
+/// Minimum line length squared in tile extent units (1 pixel = 16 extent units).
+/// A line whose bounding box diagonal² is below this is sub-pixel and invisible.
+pub const MIN_LINE_EXTENT_SQ: i64 = super::tiles::PX * super::tiles::PX;
+
+/// Check if a geometry's Mercator bounding box diagonal is sub-pixel at the
+/// given zoom level. One pixel = 1 / (256 × 2^z) Mercator units. Used as a
+/// pre-simplification early exit: if the entire geometry is sub-pixel, DP is
+/// pointless and all coarser zooms can be skipped too.
+pub(crate) fn merc_bbox_is_subpixel(points: &[Point], zoom: u8) -> bool {
+    if points.len() < 2 {
+        return true;
+    }
+    let (mut min_x, mut min_y) = (points[0].x, points[0].y);
+    let (mut max_x, mut max_y) = (min_x, min_y);
+    for p in &points[1..] {
+        if p.x < min_x {
+            min_x = p.x;
+        }
+        if p.x > max_x {
+            max_x = p.x;
+        }
+        if p.y < min_y {
+            min_y = p.y;
+        }
+        if p.y > max_y {
+            max_y = p.y;
+        }
+    }
+    let pixel = 1.0 / (256.0 * f64::from(1u32 << zoom));
+    let dx = max_x - min_x;
+    let dy = max_y - min_y;
+    dx * dx + dy * dy < pixel * pixel
+}
+
+/// Check if a linestring's bounding box diagonal is shorter than 1 pixel.
+/// Returns true if the feature is too small and should be dropped.
+pub fn line_is_subpixel(coords: &[(i32, i32)]) -> bool {
+    if coords.len() < 2 {
+        return true;
+    }
+    let (mut min_x, mut min_y) = coords[0];
+    let (mut max_x, mut max_y) = (min_x, min_y);
+    for &(x, y) in &coords[1..] {
+        if x < min_x {
+            min_x = x;
+        }
+        if x > max_x {
+            max_x = x;
+        }
+        if y < min_y {
+            min_y = y;
+        }
+        if y > max_y {
+            max_y = y;
+        }
+    }
+    let dx = i64::from(max_x) - i64::from(min_x);
+    let dy = i64::from(max_y) - i64::from(min_y);
+    // Reject long axes before squaring so full-range i32 inputs cannot overflow.
+    if dx >= super::tiles::PX || dy >= super::tiles::PX {
+        return false;
+    }
+    dx * dx + dy * dy < MIN_LINE_EXTENT_SQ
+}
 
 /// Compute the simplification tolerance for a given zoom level.
 /// Returns the tolerance in Mercator [0,1] units corresponding to
@@ -357,7 +426,7 @@ pub fn for_each_zoom_simplified<F, S>(
                 // Skips DP entirely - O(1) vs O(n²).
                 // Skipped for connectivity-critical layers (streets, boundaries) where
                 // short connecting ways must survive to maintain road network topology.
-                if !skip_bbox_check && super::merc_bbox_is_subpixel(cascade, z) {
+                if !skip_bbox_check && merc_bbox_is_subpixel(cascade, z) {
                     break;
                 }
                 // Option E: if cascade already has ≤ min_points vertices, DP can't
@@ -471,7 +540,7 @@ pub fn for_each_zoom_simplified_multi<F, S>(
             0.0
         };
         if tol > 0.0 {
-            if super::merc_bbox_is_subpixel(cascade_outer, z) {
+            if merc_bbox_is_subpixel(cascade_outer, z) {
                 break;
             }
             let tol_sq = tol * tol;
@@ -502,6 +571,34 @@ pub fn for_each_zoom_simplified_multi<F, S>(
             break;
         }
         callback(z, cascade_outer, cascade_inners);
+    }
+}
+
+#[cfg(test)]
+mod subpixel_tests {
+    use super::line_is_subpixel;
+
+    #[test]
+    fn full_coordinate_range_is_visible() {
+        for coords in [
+            [(i32::MIN, 0), (i32::MAX, 0)],
+            [(0, i32::MIN), (0, i32::MAX)],
+            [(i32::MIN, i32::MIN), (i32::MAX, i32::MAX)],
+        ] {
+            assert!(!line_is_subpixel(&coords));
+        }
+    }
+
+    #[test]
+    fn diagonal_controls_subpixel_threshold() {
+        assert!(line_is_subpixel(&[(0, 0), (15, 0)]));
+        assert!(!line_is_subpixel(&[(0, 0), (16, 0)]));
+        assert!(line_is_subpixel(&[(0, 0), (11, 11)]));
+        assert!(!line_is_subpixel(&[(0, 0), (12, 12)]));
+        assert!(line_is_subpixel(&[
+            (i32::MIN, i32::MIN),
+            (i32::MIN + 1, i32::MIN + 1),
+        ]));
     }
 }
 

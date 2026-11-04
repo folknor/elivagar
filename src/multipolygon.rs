@@ -8,7 +8,11 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::geometry::{self, Point, RingOrientation, signed_area};
+use crate::geometry::{
+    self,
+    polygon::{self, RingOrientation},
+    projection::Point,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -115,8 +119,8 @@ fn unwrap_ring(ring: &mut [Point]) {
 /// relative to each candidate shell, rather than to an unrelated first member.
 fn containment_shift(outer: &[Point], inner: &[Point], wrapped: bool) -> Option<f64> {
     let shift = if wrapped {
-        let outer_bbox = geometry::merc_bbox(outer);
-        let inner_bbox = geometry::merc_bbox(inner);
+        let outer_bbox = geometry::tiles::merc_bbox(outer);
+        let inner_bbox = geometry::tiles::merc_bbox(inner);
         ((outer_bbox.min_x + outer_bbox.max_x - inner_bbox.min_x - inner_bbox.max_x) * 0.5).round()
     } else {
         0.0
@@ -218,7 +222,7 @@ fn ring_contains_ring(outer: &[Point], inner: &[Point], shift: f64) -> bool {
             if boundary {
                 continue;
             }
-            return geometry::point_in_polygon(&point, outer);
+            return geometry::polygon::point_in_polygon(&point, outer);
         }
     }
     false
@@ -227,7 +231,7 @@ fn ring_contains_ring(outer: &[Point], inner: &[Point], shift: f64) -> bool {
 /// Ensure all outer rings have positive signed_area (CW on screen).
 fn ensure_outer_orientation(rings: &mut [Vec<Point>]) {
     for ring in rings.iter_mut() {
-        if geometry::ring_role(signed_area(ring)) == Some(RingOrientation::Negative) {
+        if polygon::ring_role(polygon::signed_area(ring)) == Some(RingOrientation::Negative) {
             ring.reverse();
         }
     }
@@ -236,7 +240,7 @@ fn ensure_outer_orientation(rings: &mut [Vec<Point>]) {
 /// Ensure all inner rings have negative signed_area (CCW on screen).
 fn ensure_inner_orientation(rings: &mut [Vec<Point>]) {
     for ring in rings.iter_mut() {
-        if geometry::ring_role(signed_area(ring)) == Some(RingOrientation::Positive) {
+        if polygon::ring_role(polygon::signed_area(ring)) == Some(RingOrientation::Positive) {
             ring.reverse();
         }
     }
@@ -268,7 +272,7 @@ fn pair_rings(
             .enumerate()
             .filter_map(|(i, poly)| {
                 containment_shift(&poly.0, &inner, wrapped)
-                    .map(|shift| (i, shift, signed_area(&poly.0).abs()))
+                    .map(|shift| (i, shift, polygon::signed_area(&poly.0).abs()))
             })
             .min_by(|a, b| a.2.total_cmp(&b.2));
         if let Some((idx, shift, _)) = target {
@@ -771,7 +775,10 @@ mod tests {
         ]);
         assert_eq!(mp.polygons.len(), 2);
         assert!(mp.polygons.iter().all(|(_, holes)| holes.len() == 1));
-        assert!(signed_area(&mp.polygons[1].1[0]).abs() < signed_area(&mp.polygons[0].1[0]).abs());
+        assert!(
+            polygon::signed_area(&mp.polygons[1].1[0]).abs()
+                < polygon::signed_area(&mp.polygons[0].1[0]).abs()
+        );
     }
 
     #[test]
@@ -824,7 +831,7 @@ mod tests {
         assert!(
             mp.polygons
                 .iter()
-                .all(|(shell, _)| signed_area(shell) > 0.0)
+                .all(|(shell, _)| polygon::signed_area(shell) > 0.0)
         );
     }
 
@@ -833,26 +840,26 @@ mod tests {
     #[test]
     fn test_point_in_polygon_inside() {
         let ring = vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(0.0, 1.0)];
-        assert!(geometry::point_in_polygon(&pt(0.5, 0.5), &ring));
+        assert!(geometry::polygon::point_in_polygon(&pt(0.5, 0.5), &ring));
     }
 
     #[test]
     fn test_point_in_polygon_outside() {
         let ring = vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(0.0, 1.0)];
-        assert!(!geometry::point_in_polygon(&pt(2.0, 2.0), &ring));
+        assert!(!geometry::polygon::point_in_polygon(&pt(2.0, 2.0), &ring));
     }
 
     #[test]
     fn test_point_in_polygon_degenerate() {
         let ring = vec![pt(0.0, 0.0), pt(1.0, 0.0)];
-        assert!(!geometry::point_in_polygon(&pt(0.5, 0.0), &ring));
+        assert!(!geometry::polygon::point_in_polygon(&pt(0.5, 0.0), &ring));
     }
 
     #[test]
     fn test_point_in_polygon_triangle() {
         let ring = vec![pt(0.0, 0.0), pt(2.0, 0.0), pt(1.0, 2.0)];
-        assert!(geometry::point_in_polygon(&pt(1.0, 0.5), &ring));
-        assert!(!geometry::point_in_polygon(&pt(0.0, 2.0), &ring));
+        assert!(geometry::polygon::point_in_polygon(&pt(1.0, 0.5), &ring));
+        assert!(!geometry::polygon::point_in_polygon(&pt(0.0, 2.0), &ring));
     }
 
     // --- Single outer ring from 3 ways joining end-to-end ---
@@ -1057,7 +1064,7 @@ mod tests {
 
         let mp = assemble(&members);
         assert_eq!(mp.polygons.len(), 1);
-        let area = signed_area(&mp.polygons[0].0);
+        let area = polygon::signed_area(&mp.polygons[0].0);
         assert!(
             area > 0.0,
             "outer ring should have positive signed_area, got {area}",
@@ -1093,7 +1100,7 @@ mod tests {
 
         let mp = assemble(&members);
         assert_eq!(mp.polygons.len(), 1);
-        let inner_area = signed_area(&mp.polygons[0].1[0]);
+        let inner_area = polygon::signed_area(&mp.polygons[0].1[0]);
         assert!(
             inner_area < 0.0,
             "inner ring should have negative signed_area, got {inner_area}",

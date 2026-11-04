@@ -646,7 +646,7 @@ fn decode_detail_polygons(
     let mut grouped: Vec<Vec<DetailRing>> = Vec::new();
     let mut exterior_orientation = None;
     for ring in rings {
-        let Some(orientation) = geometry::ring_role(signed_area(&ring)) else {
+        let Some(orientation) = geometry::polygon::ring_role(signed_area(&ring)) else {
             continue;
         };
         let role = match exterior_orientation {

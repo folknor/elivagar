@@ -1,4 +1,17 @@
-use super::*;
+use super::{
+    clip::{ClipRect, clip_linestring, clip_polygon},
+    polygon::{area_sq_meters, is_ccw, is_cw, point_in_polygon, reverse_ring, signed_area},
+    projection::{
+        MAX_LATITUDE, MercBbox, Point, merc_to_tile_px, merc_y_to_lat, project, project_bbox,
+        project_e7,
+    },
+    simplify::{
+        SimplifyMultiScratch, for_each_zoom_simplified_multi, merc_bbox_is_subpixel, simplify,
+        simplify_into, simplify_into_with_required, simplify_tolerance,
+    },
+    surface::{point_on_surface, point_on_surface_with_holes},
+    tiles::{BUFFER_FRACTION, EXTENT, tiles_for_bbox},
+};
 
 const EPSILON: f64 = 1e-6;
 
@@ -893,77 +906,6 @@ fn clip_rect_for_tile_extends_by_buffer() {
     assert!((clip.min_y - (-buf)).abs() < eps);
     assert!((clip.max_x - (0.5 + buf)).abs() < eps);
     assert!((clip.max_y - (0.5 + buf)).abs() < eps);
-}
-
-// ---------------------------------------------------------------------------
-// MVT polygon decoder tests
-// ---------------------------------------------------------------------------
-
-/// Round-trip: encode a single ring polygon and decode it back.
-#[test]
-fn decode_mvt_polygon_single_ring_round_trip() {
-    let ring = vec![(100, 200), (300, 200), (300, 400), (100, 400), (100, 200)];
-    let mut buf = Vec::new();
-    crate::mvt::encode_polygon(&mut buf, &[&ring]);
-    let decoded = super::decode_mvt_polygon(&buf);
-    assert_eq!(decoded.len(), 1);
-    assert_eq!(decoded[0], ring);
-}
-
-/// Round-trip: multi-ring polygon (outer + inner hole).
-#[test]
-fn decode_mvt_polygon_multi_ring_round_trip() {
-    let outer = vec![(0, 0), (4096, 0), (4096, 4096), (0, 4096), (0, 0)];
-    let inner = vec![
-        (1000, 1000),
-        (1000, 3000),
-        (3000, 3000),
-        (3000, 1000),
-        (1000, 1000),
-    ];
-    let mut buf = Vec::new();
-    crate::mvt::encode_polygon(&mut buf, &[&outer, &inner]);
-    let decoded = super::decode_mvt_polygon(&buf);
-    assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0], outer);
-    assert_eq!(decoded[1], inner);
-}
-
-/// Empty command buffer produces no rings.
-#[test]
-fn decode_mvt_polygon_empty() {
-    let decoded = super::decode_mvt_polygon(&[]);
-    assert!(decoded.is_empty());
-}
-
-/// Round-trip with negative coordinates (buffer region outside tile).
-#[test]
-fn decode_mvt_polygon_negative_coords() {
-    let ring = vec![
-        (-128, -128),
-        (4224, -128),
-        (4224, 4224),
-        (-128, 4224),
-        (-128, -128),
-    ];
-    let mut buf = Vec::new();
-    crate::mvt::encode_polygon(&mut buf, &[&ring]);
-    let decoded = super::decode_mvt_polygon(&buf);
-    assert_eq!(decoded.len(), 1);
-    assert_eq!(decoded[0], ring);
-}
-
-/// Round-trip: two separate polygons encoded sequentially (as multipolygon).
-#[test]
-fn decode_mvt_polygon_two_outer_rings() {
-    let ring_a = vec![(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)];
-    let ring_b = vec![(200, 200), (300, 200), (300, 300), (200, 300), (200, 200)];
-    let mut buf = Vec::new();
-    crate::mvt::encode_polygon(&mut buf, &[&ring_a, &ring_b]);
-    let decoded = super::decode_mvt_polygon(&buf);
-    assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0], ring_a);
-    assert_eq!(decoded[1], ring_b);
 }
 
 // ---------------------------------------------------------------------------

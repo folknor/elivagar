@@ -220,7 +220,7 @@ const MAX_LINE_VERTICES: usize = 6000;
 /// clip intersections to land exactly on the boundary after quantization.
 #[allow(clippy::cast_possible_truncation, clippy::float_cmp)]
 const BUFFER_UNITS: i32 = {
-    let units = crate::geometry::EXTENT * crate::geometry::BUFFER_FRACTION;
+    let units = crate::geometry::tiles::EXTENT * crate::geometry::tiles::BUFFER_FRACTION;
     assert!(
         units == (units as i32) as f64,
         "line clip buffer must be whole extent units"
@@ -230,7 +230,7 @@ const BUFFER_UNITS: i32 = {
 #[allow(clippy::cast_possible_truncation)]
 const CLIP_BOUNDARY_LO: i32 = -BUFFER_UNITS;
 #[allow(clippy::cast_possible_truncation)]
-const CLIP_BOUNDARY_HI: i32 = crate::geometry::EXTENT as i32 + BUFFER_UNITS;
+const CLIP_BOUNDARY_HI: i32 = crate::geometry::tiles::EXTENT as i32 + BUFFER_UNITS;
 
 /// True for a point on the buffered tile boundary.
 ///
