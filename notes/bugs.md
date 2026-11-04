@@ -195,14 +195,6 @@ sentence in `reference/cli.md`.
 
 Reported by the pipeline and run-contract hunts.
 
-## BUG-009 - `parse_byte_size` overflows on large values
-
-`v * 1024 * 1024 * 1024` on a user-supplied `usize` panics in debug and wraps
-in release; `--sort-budget 99999999999G` wraps to a small number that then
-passes or fails the `>= 64M` check arbitrarily. Use `checked_mul`.
-
-Reported by the pipeline hunt.
-
 ## BUG-010 - Data bounds come from node extent only; the buffer comment disagrees with the constant
 
 In locations mode, if the producer stripped untagged nodes, extent tracking
@@ -318,29 +310,6 @@ in a run-scoped handle.
 
 Reported by the ocean and storage hunts.
 
-## BUG-017 - Malformed shapefile records are skipped silently
-
-`process_ocean_shapefile` skips shx records with negative offsets silently,
-and records with bad part indices or short reads with an `eprintln!`, then
-continues. Under `--bench` stderr is not read, so a corrupted shapefile
-produces a silently thinner ocean whose key still validates (the hash is of
-the same corrupt bytes). For a durable world artifact this should be an error
-or at least a counter.
-
-Also in the reader: ring role is `w == 0 || signed_area >= 0.0`, inner rings
-before any outer are dropped, and a hole attaches to the most recent outer
-rather than its container. Correct for the OSMCD split data per the hunter,
-but unstated; `union_pieces`' disjoint-interior invariant depends on it.
-
-Reported by the ocean hunt.
-
-## BUG-018 - `ocean_build` hashes the shapefiles, then reads them again
-
-A file replaced between the hash and the geometry read yields an artifact
-whose key names bytes it was not built from. Hash while reading, or after.
-
-Reported by the ocean hunt.
-
 ## BUG-019 - Retained artifact names collide on same-day same-policy rebuilds
 
 `retain_outgoing_ocean_artifact` names the retained file by policy version and
@@ -380,24 +349,6 @@ Reported by the ocean and layer-identity hunts.
 
 # Geometry
 
-## BUG-022 - `rescale_shape_pinned_into` can leave a hole-oriented ring in the outer slot
-
-It orients by ORIGINAL index (`i == 0`) and zeroes `used` only if `out[0]` is
-short. If ring 0 dies under rescale and ring 1 survives, ring 1 lands in slot
-0 oriented as a hole and the shape is kept. Every downstream consumer
-re-orients by slot index (`encode_tile_shape` uses `i == 0`), so the emitted
-geometry is a free-standing hole promoted to an outer. The test-only
-`rescale_shape` has the same shape. Worth a targeted test: a base shape whose
-outer collapses under rescale while a hole survives.
-
-Related, latent: `simplify_shape_dp` orients by original index (`read == 0`),
-`simplify_shape_vw` handles ring 0 separately, and `clean_shape_in_place`
-orients by WRITE index (`write == 0`) - so if the outer is dropped for area,
-the first surviving hole is re-oriented as an outer. Two slot-0 policies in
-one file; `clean_shape_in_place` only runs on overlay output today.
-
-Reported by the polygon-engine hunt.
-
 ## BUG-023 - The fanout cap counts tiles differently from the descent that emits them
 
 `emit.rs::tile_count_for_base_rect` plus its own `base_tile_index` is a
@@ -411,38 +362,6 @@ pyramid.rs used by emit.rs (see the tile-cover entry in
 
 Reported by the polygon-engine hunt; the coordinate-spaces hunt flags the same
 copy.
-
-## BUG-024 - Multipolygon inner-ring pairing tests the vertex most likely to be on the boundary
-
-`multipolygon::assemble` runs `sort_rings_deterministic` (rotating each ring
-to start at its lexicographically smallest, i.e. leftmost, vertex) BEFORE
-`pair_rings`, which then tests only `inner[0]` for containment. An inner ring
-touching its outer at a shared node (valid OSM, common) often has that node as
-its leftmost vertex; point-in-polygon on the boundary is undefined, so the
-inner can fail to match and get "promoted to outer (shell)", filling the hole.
-
-Also: the first containing outer in bbox-sorted order wins, so with nesting
-(island in lake in island) an inner can attach to the large outer rather than
-the innermost; and unclassified-role rings are classified by winding
-(`classify_unclassified`), which is effectively random because OSM way
-direction is arbitrary. Should be containment depth. The storage hunt's
-structural answer is integer ring assembly on the topology engine (see
-`notes/structural.md`).
-
-Reported by the storage hunt.
-
-## BUG-025 - way_index delta decode is not the inverse of encode
-
-`encode_way` writes deltas with `wrapping_sub`; `decode_way` rebuilds them
-with `saturating_add`. Two consecutive nodes either side of the antimeridian
-(-179.9 and +179.9 in E7) have a true delta of about 3.6e9, which wraps on
-encode and saturates on decode, so the decoded longitude comes back as
-i32::MAX (214.7 degrees). Every relation member way goes through this path
-(`relations.rs::prepare_relation`). The fix is `wrapping_add`; the hunter's
-structural point is that none of the three codecs (way delta varint, node FOR
-bitpacking, chunk record layout) has a full-range round-trip property test.
-
-Reported by the storage hunt.
 
 ## BUG-026 - The unsorted flat node index panics on modern node ids
 
@@ -507,24 +426,6 @@ matching (key, value) row wins).
 
 Reported by the Shortbread hunt.
 
-## BUG-030 - Street label zoom and kind check keys in different orders
-
-`street_label_zoom` checks highway, railway, aeroway; `street_label_kind_raw`
-checks highway, aeroway, railway. With `aeroway=runway + railway=rail` on one
-way, the zoom comes from railway (10) and the kind from aeroway ("runway").
-Owner proposed: one classifier returning `(StreetKind, link, source key)` read
-by both (see the kind-vocabulary entry in `notes/consolidations.md`).
-
-Reported by the Shortbread hunt.
-
-## BUG-031 - `UNKNOWN_STREET_CLASS = 12` collides with `unclassified`'s rank
-
-An unknown kind sorts as unclassified. The verifier refuses unknown kinds so
-the archive cannot carry one, but the sentinel is a real rank value, not an
-out-of-band marker. `Option<u8>` or an exhaustive enum removes it.
-
-Reported by the Shortbread hunt.
-
 ## BUG-032 - Relation geometry dispatch silently drops non-polygon matches
 
 The relation path (`process_prepared_relation_into`) ends its
@@ -571,32 +472,15 @@ encoders consume. The MVT closure also duplicates the MLT helper's body.
 
 Reported by the encoding and layer-identity hunts.
 
-## BUG-035 - `encode_attrs_bytes` writes more attributes than its count byte says
-
-The count is `min(filtered, 255)` but the loop writes every filtered
-attribute, so over 255 attrs the record carries trailing bytes the decoder
-ignores. Latent (no Shortbread feature has 255 attrs); the cap tests pass only
-because they check decoded count. The same function also spells the attribute
-zoom filter twice (`zoom >= az` to count, `zoom < attr_zoom -> continue` to
-write).
-
-Reported by the encoding hunt.
-
-## BUG-036 - String truncation in the sort record can split a UTF-8 sequence
-
-After which the decoder's `from_utf8(..).unwrap_or("")` turns the whole value
-into an empty string. Latent (OSM caps values at 255 chars), silent.
-
-Reported by the encoding hunt.
-
 ## BUG-037 - MVT interning saturates at u16::MAX and mis-tags features
 
-`intern_key`, `intern_value`, `intern_string_value` compute
-`len().min(u16::MAX)`; on the 65,536th distinct value in one layer of one
-tile, every further distinct value gets index 65535, a real and different
-value - silently wrong attributes. Use `u32` (MVT tags are uint32) or return
-an error; `(u16, u16)` tag pairs should be `(KeyIdx, ValIdx)` newtypes since
-the encoder remaps each through a different table by tuple position.
+`intern_key`, `intern_value`, `intern_string_value` in `mvt/mod.rs` compute
+`len().min(u16::MAX)`; past 65,536 distinct entries in one layer of one tile,
+every further distinct value aliases index 65535 - silently wrong attributes.
+Confirmed 2026-11-04; a comment at the interning site now documents the alias.
+The fix (`u32` indices, or an error; `(KeyIdx, ValIdx)` newtypes for the tag
+pairs) must move the tag pools in `mvt/merge.rs` and `pipeline/assemble.rs`,
+the decoder pool in `wire_format.rs` and the MLT callers in `mlt.rs` together.
 
 Reported by the encoding hunt.
 
@@ -629,72 +513,6 @@ Reported by the encoding hunt.
 
 # Archive surface and inspection tools
 
-## BUG-040 - Out-of-order tiles silently corrupt the directory in release builds
-
-`push_dir_entry` only `debug_assert!`s Hilbert order, and its comment claims
-out-of-order input "would degrade run-length compression but not produce an
-invalid archive - PMTiles readers binary-search the directory regardless".
-`encode_tile_id_column` uses `saturating_sub`, so an out-of-order id encodes
-delta 0 and decodes as the previous entry's id - the directory addresses the
-wrong tile or a duplicate id. `add_run` has no order check at all. Should be a
-hard error (one compare per tile).
-
-Reported by the archive-surface hunt.
-
-## BUG-041 - `PmtilesReader` decides tile and directory compression wrongly and allocates unbounded
-
-- `read_tile` always `gzip_decompress`es regardless of the header, so `svg`
-  and `diag` on a brotli-MVT archive fail with a gzip error rather than
-  "unsupported tile compression".
-- It treats any `internal_compression != 2` as none, so brotli- or
-  zstd-compressed directories decode as raw varints (garbage or a confusing
-  varint error), while `ArchiveView::open` rejects anything but 1 or 2.
-- `read_metadata` uses `from_utf8_lossy` (invalid UTF-8 becomes U+FFFD and the
-  contract parses as something it is not) while `ArchiveView::metadata` is
-  strict.
-- `read_directory` / `read_metadata` / `read_tile` allocate
-  `vec![0; length]` from untrusted header values with no bound; inspect caps
-  metadata at 10 MB but not directories, svg/diag cap nothing.
-
-The hunter proposes deleting `PmtilesReader` in favour of the mmap view (see
-`notes/structural.md`), which moots most of this. The inspect module header's
-claim that it reads "optional gzip-compressed metadata" is related drift.
-
-Reported by the archive-surface hunt.
-
-## BUG-042 - `elivagar verify` does not enforce the MVT command grammar it cites
-
-`expect_moveto` is written but never read for LineTo, so a line starting with
-LineTo passes; and a linestring's first MoveTo may have count > 1 (the check
-is gated on `!expect_moveto`), contrary to spec 4.3.4.3, which the error
-message itself cites. `verify` is also silently MVT-gzip-only: it cannot
-verify any MLT or brotli archive the writer produces.
-
-Reported by the archive-surface hunt.
-
-## BUG-043 - `tile_detail` is more permissive than verify in Strict mode
-
-The gate's decoder accepts streams verify rejects: zero repeat count,
-ClosePath on lines silently ignored, LineTo count with fewer than 2 points,
-polygon ring without ClosePath. It accepts `geom_type` other than 1/2/3 by
-returning no components, treats a feature with no geometry field as valid,
-and resolves repeated `id`/`type` fields last-wins silently. For a strict gate
-these are "foreign structure". `tile_detail` - the decoder the standing gate
-depends on - also has no tests in this crate.
-
-Reported by the archive-surface hunt.
-
-## BUG-044 - The lenient MVT polygon decoder can panic `verify` on a corrupt tile
-
-`geometry::decode_mvt_polygon` uses unchecked `i32 +=` on deltas (debug panic,
-release wrap on hostile input), silently skips unknown commands and returns
-partial rings on truncation. Its doc says it is for "trusted in-pipeline
-data", yet `verify` - whose job is to distrust - feeds archive bytes into it
-via the ocean ring check. `tile_detail` uses `checked_add`. See the decoder
-entry in `notes/consolidations.md`.
-
-Reported by the polygon-engine and archive-surface hunts.
-
 ## BUG-045 - `verify` without `--unique-payloads` re-decodes identical bytes per addressed tile
 
 In non-unique mode it caches only the geometry outcome per run;
@@ -706,47 +524,17 @@ protobuf-parsed four times per tile.
 
 Reported by the archive-surface hunt.
 
-## BUG-046 - `inspect` misreports the section layout and parses JSON by substring
+## BUG-048 - `xy_to_tile_id` accepts invalid tile coordinates
 
-The section layout prints the header at the root directory's offset (127,
-not 0), and lists sections in a fixed order (root, metadata, leaf, data) that
-no longer matches the writer (data precedes metadata and leaves).
-Separately, `extract_json_string(j, "\"tile_payload_format\":\"")`,
-`extract_number` and `print_metadata_json`'s `"id":"` scanner reimplement JSON
-parsing by `find` in a module that also `serde_json::from_str`s the same
-document; they break on whitespace after a colon (any non-elivagar or
-pretty-printed metadata).
-
-Reported by the archive-surface hunt.
-
-## BUG-047 - `producer_config_diff` dedups by prefix
-
-It dedups by `starts_with(key)`, so a key that prefixes another (`min_zoom`
-vs a hypothetical `min_zoom_ocean`) would suppress the second diff line.
-
-Reported by the archive-surface hunt.
-
-## BUG-048 - `svg` and `diag` accept invalid tile coordinates
-
-`main.rs` declares `z: u8, x: u32, y: u32` with no range parser.
-`xy_to_tile_id` overflows `1u64 << z` for `z >= 64` and truncates `n as u32`
-at z = 32; out-of-range x/y produce a valid-looking but wrong tile id (the
-high bits are reflected away in `hilbert_xy2d`), so the command renders an
-empty or wrong tile instead of refusing.
+`svg` and `diag` now range-check z, x and y before calling it, but the public
+`pmtiles_writer::xy_to_tile_id` itself is unchecked: it overflows
+`1u64 << z` for `z >= 64`, truncates `n as u32` at z = 32, and out-of-range
+x/y produce a valid-looking but wrong id (the high bits are reflected away in
+`hilbert_xy2d`). Any other caller still gets a wrong tile instead of a
+refusal. Natural home: the checked `TileId::from_zxy` of the tile-id
+consolidation in `notes/consolidations.md`.
 
 Reported by the coordinate-spaces hunt.
-
-## BUG-049 - `svg` colours and paint order are per-render, and `-l` is unvalidated
-
-A layer's colour is `LAYER_COLORS[first-appearance index]`, so the same layer
-gets different colours in different tiles or grids - working against the
-"compare the same ROI across archives" svg-roi idiom. There are 22 colours for
-26 layers. Paint order is first-appearance order, and because ocean is last
-in each tile it paints over land at opacity 0.8. The `-l` filter never
-validates layer names; a typo renders nothing with no error. Key colour and
-order by `Layer`.
-
-Reported by the archive-surface and layer-identity hunts.
 
 ## BUG-050 - PMTiles header bounds and center are always the world
 
@@ -790,11 +578,6 @@ the drifting specific is not hard-coded rather than updating it.
   69" and `LayerBuilder::reclaim_features` (it is `prepare_for_reuse`).
   `KEY_NAMES` marks `way_area` and `height` test-only, but `way_area` is
   emitted by `enrich_polygon_matches` and `height` by land.rs buildings.
-- `reference/corpus.md` lists "seam" among the contract fields; `config_json`
-  has no seam member.
-- `provenance::Effective`'s doc says the member is omitted only for
-  `--skip-to` without a checkpoint; inspect's tests say "effective is absent
-  on an ocean-artifact build".
 - The `OceanInputs`, `LOW_ZOOM_UNION_MAX_ZOOM` and `ocean_pass_max_zooms`
   comments describe the pre-v3 pass structure (see BUG-002's account).
 - `parse_ele_meters` converts via `rounded.to_string().parse::<i64>()`,
@@ -802,3 +585,37 @@ the drifting specific is not hard-coded rather than updating it.
 
 Reported across the polygon-engine, storage, encoding, run-contract, ocean and
 layer-identity hunts.
+
+---
+
+# Found during the 2026-11-04 fix waves
+
+## BUG-052 - Relation assembly may drop triangular shells, and tests containment on wrapped coordinates
+
+`pipeline/relations.rs` has two `outer.len() < 4` guards. Whether they drop
+valid triangular outers depends on whether the length counts the closing
+duplicate vertex - unverified. Separately, antimeridian paths are unwrapped
+after `multipolygon::assemble`, so ring containment (now by containment depth
+and the smallest containing outer) is decided on wrapped coordinates, which is
+wrong for a relation spanning the antimeridian.
+
+Reported by the wave-1 multipolygon fixer.
+
+## BUG-053 - A regular run hashes the ocean shapefiles before reading them
+
+The artifact builder now keys on hashes of the bytes it actually read. The
+regular `run` path still computes `OceanSourceKey` before phase12 and reads the
+shapefiles later without comparing, so a shapefile replaced in between yields
+computed chunks, or an artifact boundary band, that differ from the key the
+checkpoint and provenance record.
+
+Reported by the wave-1 ocean fixer.
+
+## BUG-054 - The public `gzip_decompress` helper is unbounded
+
+The PMTiles reader's own methods now decompress through a bounded helper, but
+the public `pmtiles_reader::gzip_decompress` (reached from assemble) still
+inflates without an output limit. Harmless on our own payloads; a hazard for
+any caller handed untrusted bytes.
+
+Reported by the wave-1 reader fixer.

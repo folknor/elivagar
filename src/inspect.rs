@@ -63,12 +63,15 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
 
     let metadata_state = read_metadata_state(&mut reader, metadata_length);
     let metadata_json = metadata_state.json().map(ToOwned::to_owned);
-    let metadata_payload_format = metadata_json
+    let metadata_value = metadata_json
         .as_deref()
-        .and_then(|j| extract_json_string(j, "\"tile_payload_format\":\""));
-    let metadata_tile_compression = metadata_json
-        .as_deref()
-        .and_then(|j| extract_json_string(j, "\"tile_compression\":\""));
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+    let metadata_payload_format = metadata_value
+        .as_ref()
+        .and_then(|doc| extract_json_string(doc, "tile_payload_format"));
+    let metadata_tile_compression = metadata_value
+        .as_ref()
+        .and_then(|doc| extract_json_string(doc, "tile_compression"));
     let (
         payload_format_display,
         payload_compression_display,
@@ -126,13 +129,13 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
         data_length,
     )?;
 
-    print_provenance(out, &metadata_state)?;
+    print_provenance(out, &metadata_state, metadata_value.as_ref())?;
 
     if let Some(json) = metadata_json {
         writeln!(out)?;
         writeln!(out, "  Metadata:")?;
-        // Try to pretty-print if it's valid JSON-like, otherwise raw.
-        print_metadata_json(out, &json)?;
+        // Preserve short metadata verbatim and summarize long layer lists.
+        print_metadata_json(out, &json, metadata_value.as_ref())?;
     }
 
     Ok(())
@@ -204,83 +207,85 @@ fn read_metadata_state(reader: &mut PmtilesReader, metadata_length: u64) -> Meta
 /// back and refusing a mismatch before content is walked - lives in the gate,
 /// which now decodes elivagar in-process from brokkr rather than in this
 /// binary. See reference/metadata.md.
-fn print_provenance(out: &mut dyn Write, state: &MetadataState) -> io::Result<()> {
+fn print_provenance(
+    out: &mut dyn Write,
+    state: &MetadataState,
+    metadata: Option<&serde_json::Value>,
+) -> io::Result<()> {
     writeln!(out)?;
-    let json = match state {
-        MetadataState::Json(json) => json,
+    let contract_state = match state {
+        MetadataState::Json(_) => metadata.map_or(
+            crate::provenance::ContractState::Invalid,
+            crate::provenance::extract_contract_from_value,
+        ),
         MetadataState::Absent => {
-            return writeln!(
-                out,
-                "  Provenance:  unavailable - archive stores no metadata"
-            );
+            crate::provenance::ContractState::Unavailable("archive stores no metadata".to_string())
         }
-        MetadataState::TooLarge(len) => {
-            return writeln!(
-                out,
-                "  Provenance:  unavailable - metadata is {}, over the {} read limit",
-                format_bytes(*len),
-                format_bytes(MAX_METADATA_READ),
-            );
-        }
-        MetadataState::Unreadable => {
-            return writeln!(
-                out,
-                "  Provenance:  unavailable - metadata could not be read or decompressed"
-            );
-        }
+        MetadataState::TooLarge(len) => crate::provenance::ContractState::Unavailable(format!(
+            "metadata is {}, over the {} read limit",
+            format_bytes(*len),
+            format_bytes(MAX_METADATA_READ),
+        )),
+        MetadataState::Unreadable => crate::provenance::ContractState::Unavailable(
+            "metadata could not be read or decompressed".to_string(),
+        ),
     };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(json) else {
-        return writeln!(out, "  Provenance:  invalid - metadata is not JSON");
-    };
-    let Some(p) = doc.get("elivagar") else {
-        return writeln!(
+
+    match contract_state {
+        crate::provenance::ContractState::Unavailable(reason) => {
+            writeln!(out, "  Provenance:  unavailable - {reason}")
+        }
+        crate::provenance::ContractState::Absent => writeln!(
             out,
             "  Provenance:  absent - archive predates the elivagar metadata block"
-        );
-    };
-
-    // A schema bump means an existing field changed meaning, so a block this
-    // build does not know cannot be summarised with this build's meanings -
-    // that would report confident nonsense. Adding members does not bump, so
-    // an equal schema with unknown members is fine and is ignored silently.
-    match p.get("schema").and_then(serde_json::Value::as_u64) {
-        Some(v) if v == u64::from(crate::provenance::SCHEMA_VERSION) => {
-            writeln!(out, "  Provenance:  schema {v}")?;
+        ),
+        crate::provenance::ContractState::Invalid => {
+            let reason = if metadata.is_none() {
+                "metadata is not JSON"
+            } else {
+                "elivagar block is not an object"
+            };
+            writeln!(out, "  Provenance:  invalid - {reason}")
         }
-        Some(v) => {
-            return writeln!(
-                out,
-                "  Provenance:  schema {v} - this build understands {}; not interpreted",
-                crate::provenance::SCHEMA_VERSION,
-            );
+        crate::provenance::ContractState::UnknownSchema(schema) => writeln!(
+            out,
+            "  Provenance:  schema {schema} - this build understands {}; not interpreted",
+            crate::provenance::SCHEMA_VERSION,
+        ),
+        crate::provenance::ContractState::Incomplete(missing) => {
+            if missing == "schema" {
+                writeln!(
+                    out,
+                    "  Provenance:  INCOMPLETE - block is missing schema version"
+                )
+            } else {
+                writeln!(
+                    out,
+                    "  Provenance:  schema {}",
+                    crate::provenance::SCHEMA_VERSION
+                )?;
+                writeln!(
+                    out,
+                    "    Contract:   INCOMPLETE - block is missing {missing}"
+                )
+            }
         }
-        None => {
-            return writeln!(
+        crate::provenance::ContractState::Contract(contract) => {
+            writeln!(
                 out,
-                "  Provenance:  invalid - block declares no schema version"
-            );
+                "  Provenance:  schema {}",
+                crate::provenance::SCHEMA_VERSION
+            )?;
+            print_contract(out, &contract.input, &contract.config)?;
+            // The shared provenance decoder owns the comparability-state
+            // rules. Remaining fields are diagnostics, so render them without
+            // making their presence part of contract completeness.
+            if let Some(p) = metadata.and_then(|doc| doc.get("elivagar")) {
+                print_diagnostics(out, p)?;
+            }
+            Ok(())
         }
     }
-
-    // input and config are the contract. Either missing means the block cannot
-    // establish comparability at all, which is a fact worth stating rather
-    // than a group to skip.
-    let (Some(input), Some(config)) = (p.get("input"), p.get("config")) else {
-        writeln!(
-            out,
-            "    Contract:   INCOMPLETE - block is missing {}",
-            match (p.get("input"), p.get("config")) {
-                (None, None) => "input and config",
-                (None, _) => "input",
-                _ => "config",
-            }
-        )?;
-        return Ok(());
-    };
-
-    print_contract(out, input, config)?;
-    print_diagnostics(out, p)?;
-    Ok(())
 }
 
 /// The comparability contract: `input` plus every field of `config`.
@@ -365,9 +370,9 @@ fn print_contract(
 }
 
 /// `build`, `effective` and `execution`: what explains a diff once the
-/// contract matches. Each is optional and absence is not an error - effective
-/// is absent on an ocean-artifact build, resumed_from on any full run - so
-/// unlike the contract, a missing group here is silence by design.
+/// contract matches. These are diagnostics, so a missing group is omitted
+/// without making the comparability contract incomplete. `resumed_from` is
+/// absent on a full run.
 fn print_diagnostics(out: &mut dyn Write, p: &serde_json::Value) -> io::Result<()> {
     if let Some(build) = p.get("build") {
         let elivagar = repo_display(build.get("elivagar"));
@@ -500,10 +505,11 @@ fn abbreviate_hash(hash: &str) -> String {
 
 /// Print metadata JSON in a readable format: extract vector_layers names and
 /// zoom ranges.
-fn print_metadata_json(out: &mut dyn Write, json: &str) -> io::Result<()> {
-    // Print top-level key=value pairs (simple string/number values).
-    // This is a minimal approach - we look for "key":"value" or "key":number patterns.
-
+fn print_metadata_json(
+    out: &mut dyn Write,
+    json: &str,
+    metadata: Option<&serde_json::Value>,
+) -> io::Result<()> {
     // Print the raw JSON indented if it's short, otherwise summarize.
     if json.len() < 500 {
         for line in json.lines() {
@@ -512,73 +518,51 @@ fn print_metadata_json(out: &mut dyn Write, json: &str) -> io::Result<()> {
         return Ok(());
     }
 
-    // For longer metadata, extract key info.
-    // Look for vector_layers array and print layer names.
-    if let Some(start) = json.find("\"vector_layers\"") {
-        // Find the array
-        if let Some(arr_start) = json[start..].find('[') {
-            let arr_begin = start + arr_start;
-            // Count layers by counting "id" occurrences
-            let layers_section = &json[arr_begin..];
-            let layer_count = layers_section.matches("\"id\"").count();
-            writeln!(out, "    Layers: {layer_count}")?;
-
-            // Extract each layer id
-            let mut pos = 0;
-            let bytes = layers_section.as_bytes();
-            while pos < bytes.len() {
-                if let Some(id_pos) = layers_section[pos..].find("\"id\":\"") {
-                    let name_start = pos + id_pos + 6;
-                    if let Some(name_end) = layers_section[name_start..].find('"') {
-                        let name = &layers_section[name_start..name_start + name_end];
-                        // Try to find minzoom for this layer.
-                        // Clamp to a char boundary to avoid panics on non-ASCII metadata.
-                        let chunk_end = layers_section.ceil_char_boundary(
-                            (name_start + name_end + 200).min(layers_section.len()),
-                        );
-                        let chunk = &layers_section[name_start..chunk_end];
-                        let minzoom = extract_number(chunk, "\"minzoom\":");
-                        let maxzoom = extract_number(chunk, "\"maxzoom\":");
-                        match (minzoom, maxzoom) {
-                            (Some(mn), Some(mx)) => {
-                                writeln!(out, "      {name:<24} z{mn}..{mx}")?;
-                            }
-                            _ => writeln!(out, "      {name}")?,
-                        }
-                        pos = name_start + name_end + 1;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-        }
-    } else {
-        // No vector_layers - just print raw.
+    let Some(layers) = metadata
+        .and_then(|doc| doc.get("vector_layers"))
+        .and_then(serde_json::Value::as_array)
+    else {
         for line in json.lines() {
             writeln!(out, "    {line}")?;
+        }
+        return Ok(());
+    };
+
+    let layers = layers
+        .iter()
+        .filter(|layer| {
+            layer
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        })
+        .collect::<Vec<_>>();
+    writeln!(out, "    Layers: {}", layers.len())?;
+    for layer in layers {
+        let Some(name) = layer.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let minzoom = extract_number(layer.get("minzoom"));
+        let maxzoom = extract_number(layer.get("maxzoom"));
+        match (minzoom, maxzoom) {
+            (Some(mn), Some(mx)) => writeln!(out, "      {name:<24} z{mn}..{mx}")?,
+            _ => writeln!(out, "      {name}")?,
         }
     }
     Ok(())
 }
 
-/// Extract a number value after a JSON key like `"minzoom":`.
-fn extract_number(s: &str, key: &str) -> Option<u8> {
-    let pos = s.find(key)?;
-    let after = &s[pos + key.len()..];
-    let after = after.trim_start();
-    let end = after
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(after.len());
-    after[..end].parse().ok()
+/// Read a JSON string member when it is actually a string.
+fn extract_json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
 }
 
-fn extract_json_string(s: &str, key: &str) -> Option<String> {
-    let pos = s.find(key)?;
-    let start = pos + key.len();
-    let end = s[start..].find('"')?;
-    Some(s[start..start + end].to_string())
+/// Read an unsigned JSON zoom value that fits in the metadata's zoom range.
+fn extract_number(value: Option<&serde_json::Value>) -> Option<u8> {
+    u8::try_from(value?.as_u64()?).ok()
 }
 
 fn infer_payload_format_from_header(tile_type: u8) -> &'static str {
@@ -605,13 +589,19 @@ fn print_section_layout(
     writeln!(out, "  Section layout:")?;
     writeln!(
         out,
-        "    Header:      {:>13}  offset {root_dir_offset:>13}",
+        "    Header:      {:>13}  offset {:>13}",
         format_bytes(127),
+        0,
     )?;
     writeln!(
         out,
         "    Root dir:    {:>13}  offset {root_dir_offset:>13}",
         format_bytes(root_dir_length),
+    )?;
+    writeln!(
+        out,
+        "    Tile data:   {:>13}  offset {data_offset:>13}",
+        format_bytes(data_length),
     )?;
     writeln!(
         out,
@@ -625,11 +615,6 @@ fn print_section_layout(
             format_bytes(leaf_dirs_length),
         )?;
     }
-    writeln!(
-        out,
-        "    Tile data:   {:>13}  offset {data_offset:>13}",
-        format_bytes(data_length),
-    )?;
     Ok(())
 }
 
@@ -897,7 +882,13 @@ mod tests {
 
     fn provenance_of(json: &str) -> String {
         let mut out = Vec::new();
-        super::print_provenance(&mut out, &super::MetadataState::Json(json.to_string())).unwrap();
+        let metadata = serde_json::from_str::<serde_json::Value>(json).ok();
+        super::print_provenance(
+            &mut out,
+            &super::MetadataState::Json(json.to_string()),
+            metadata.as_ref(),
+        )
+        .unwrap();
         String::from_utf8(out).unwrap()
     }
 
@@ -1017,7 +1008,13 @@ mod tests {
     fn provenance_names_every_unavailable_reason() {
         let of = |state: &super::MetadataState| {
             let mut out = Vec::new();
-            super::print_provenance(&mut out, state).unwrap();
+            let metadata = match state {
+                super::MetadataState::Json(json) => {
+                    serde_json::from_str::<serde_json::Value>(json).ok()
+                }
+                _ => None,
+            };
+            super::print_provenance(&mut out, state, metadata.as_ref()).unwrap();
             String::from_utf8(out).unwrap()
         };
         assert!(
@@ -1047,7 +1044,10 @@ mod tests {
         assert!(!out.contains("Input:"), "{out}");
 
         let out = provenance_output(r#"{"input":{},"config":{}}"#);
-        assert!(out.contains("invalid - block declares no schema"), "{out}");
+        assert!(
+            out.contains("INCOMPLETE - block is missing schema version"),
+            "{out}"
+        );
     }
 
     /// input and config ARE the contract, so a block missing either cannot
@@ -1056,7 +1056,7 @@ mod tests {
     fn provenance_reports_an_incomplete_contract() {
         let out = provenance_output(r#"{"schema":1}"#);
         assert!(out.contains("INCOMPLETE"), "{out}");
-        assert!(out.contains("input and config"), "{out}");
+        assert!(out.contains("missing input"), "{out}");
 
         let out = provenance_output(r#"{"schema":1,"input":{}}"#);
         assert!(out.contains("INCOMPLETE"), "{out}");
@@ -1065,8 +1065,8 @@ mod tests {
 
     #[test]
     fn provenance_omits_absent_diagnostic_groups() {
-        // effective is absent on an ocean-artifact build and resumed_from on
-        // any full run. Both are diagnostics, so neither is an error.
+        // Missing Build and other diagnostic groups do not make the
+        // input/config contract incomplete. A full run has no resumed_from.
         let out = provenance_output(
             r#"{"schema":1,"input":{},"config":{},"execution":{"resumed_from":null}}"#,
         );
@@ -1113,15 +1113,16 @@ mod tests {
     #[test]
     fn extract_json_string_returns_expected_value() {
         let json = r#"{"tile_payload_format":"mlt","tile_compression":"none"}"#;
+        let doc = serde_json::from_str::<serde_json::Value>(json).unwrap();
         assert_eq!(
-            extract_json_string(json, "\"tile_payload_format\":\"").as_deref(),
+            extract_json_string(&doc, "tile_payload_format").as_deref(),
             Some("mlt")
         );
         assert_eq!(
-            extract_json_string(json, "\"tile_compression\":\"").as_deref(),
+            extract_json_string(&doc, "tile_compression").as_deref(),
             Some("none")
         );
-        assert_eq!(extract_json_string(json, "\"missing\":\"").as_deref(), None);
+        assert_eq!(extract_json_string(&doc, "missing").as_deref(), None);
     }
 
     #[test]

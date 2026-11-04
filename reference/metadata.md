@@ -4,8 +4,10 @@ Every archive elivagar writes carries a record of the contract it was built
 under, as a top-level `elivagar` member of the PMTiles metadata JSON.
 
 Read it with `scripts/dump-pmtiles-metadata.py <archive> --key elivagar`.
-`elivagar inspect` renders only the fields it knows about (layer list, zoom
-range) and will not show this block.
+`elivagar inspect` renders the input/config contract and the available build,
+effective-path and resume diagnostics. It uses the provenance extractor to
+distinguish absent, invalid, incomplete and unsupported-schema blocks, and
+reports metadata read failures separately.
 
 ## Why it exists
 

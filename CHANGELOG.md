@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+Correctness fixes from the 2026-10-28 design hunt, first wave. This
+changes output: the ocean artifact key moves to `OCEAN_POLICY_VERSION`
+v6, so the world ocean artifact must be rebuilt with `ocean-build`.
+
+- The polygon engine no longer promotes a hole into the outer slot when
+  the outer collapses under rescale, simplification or cleanup; the
+  shape is dropped instead of emitting a filled hole.
+- Multipolygon assembly pairs each inner ring with the smallest outer
+  that contains it, tests containment on a vertex off the outer's
+  boundary, and classifies role-less rings by containment depth rather
+  than winding. Inner rings touching their outer at a shared node no
+  longer fill the hole.
+- Street labels take kind and zoom from one key order, so a way tagged
+  with both aeroway and railway gets the aeroway zoom.
+- Relation member ways crossing the antimeridian decode correctly; the
+  way index delta decoder saturated instead of wrapping.
+- Sort records cap attributes at the count they declare and truncate
+  long strings on a UTF-8 boundary instead of emptying them.
+- The PMTiles writer refuses out-of-order or duplicate tile ids instead
+  of silently corrupting the directory.
+- The PMTiles reader decompresses tiles by the header's compression,
+  reads metadata as strict UTF-8, and bounds every read by the file.
+- Malformed ocean shapefile records are an error rather than skipped;
+  `ocean-build` keys the artifact on the bytes it actually read.
+- `verify` enforces the MVT command grammar and checks ocean rings with
+  an overflow-safe decoder. The corpus gate's Strict decoder rejects
+  malformed command streams, duplicate fields and missing geometry.
+- `inspect` shows the real section layout, parses metadata as JSON, and
+  reports the contract exactly as the corpus gate reads it; a provenance
+  block without a build member is a complete contract.
+- `svg` and `diag` refuse out-of-range tile coordinates; `svg` colours
+  and orders layers by identity and rejects unknown `-l` names.
+  Oversized byte-size arguments are refused instead of wrapping.
 - The line merger no longer joins lines through a point on the buffered
   tile boundary. Two lines leaving a tile through the same quantized
   point were spliced into an out-and-back spike (three on norway's admin

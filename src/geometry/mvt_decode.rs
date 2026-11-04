@@ -2,8 +2,8 @@
 //!
 //! The canonical-tile decoder that used to live here belonged to the regress
 //! engine's legacy differential oracle and was deleted with it;
-//! decode_mvt_polygon has live consumers in verify, assemble, and the
-//! geometry tests.
+//! decode_mvt_polygon remains the lenient helper for tests, while archive
+//! verification uses its checked counterpart.
 
 /// Decode MVT polygon geometry commands back to closed rings in tile coordinates.
 ///
@@ -15,6 +15,7 @@
 /// On truncated input, may return partially decoded rings. Unknown command IDs
 /// are silently skipped without consuming parameters (safe for well-formed
 /// streams; may desync on malformed data).
+#[cfg(test)]
 pub fn decode_mvt_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
     let mut rings: Vec<Vec<(i32, i32)>> = Vec::new();
     let mut cx: i32 = 0;
@@ -76,6 +77,127 @@ pub fn decode_mvt_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
         }
     }
     rings
+}
+
+/// Decode and validate a polygon command stream without panicking or wrapping
+/// coordinates. Each ring must follow MoveTo(1), LineTo(n > 1), ClosePath(1).
+// tile_detail also decodes byte streams under a strict/tolerant policy, while
+// verify applies additional coordinate limits. This helper checks the polygon
+// grammar and i32 arithmetic without those callers' extra policies.
+pub(crate) fn try_decode_mvt_polygon(commands: &[u32]) -> Result<Vec<Vec<(i32, i32)>>, String> {
+    let mut rings: Vec<Vec<(i32, i32)>> = Vec::new();
+    let mut current_ring: Option<Vec<(i32, i32)>> = None;
+    let mut cx = 0i32;
+    let mut cy = 0i32;
+    let mut i = 0;
+    let mut ring_phase = 0u8; // 0 = MoveTo, 1 = LineTo, 2 = ClosePath
+
+    if commands.is_empty() {
+        return Err("empty polygon geometry command stream".to_string());
+    }
+
+    while i < commands.len() {
+        let cmd = commands[i];
+        let cmd_id = cmd & 0x7;
+        let cmd_count = cmd >> 3;
+        i += 1;
+
+        if cmd_count == 0 {
+            return Err("polygon command with zero repeat count".to_string());
+        }
+
+        match cmd_id {
+            1 => {
+                if cmd_count != 1 {
+                    return Err("polygon ring MoveTo count must be 1".to_string());
+                }
+                if current_ring.is_some() {
+                    return Err("polygon ring missing ClosePath before MoveTo".to_string());
+                }
+                ensure_parameters(commands, i, cmd_count)?;
+                let (x, y) = decode_point(commands, &mut i, &mut cx, &mut cy)?;
+                current_ring = Some(vec![(x, y)]);
+                ring_phase = 1;
+            }
+            2 => {
+                if cmd_count <= 1 {
+                    return Err("polygon ring LineTo count must be greater than 1".to_string());
+                }
+                if ring_phase != 1 {
+                    return Err("polygon LineTo must follow MoveTo".to_string());
+                }
+                let Some(ring) = current_ring.as_mut() else {
+                    return Err("polygon LineTo without a preceding MoveTo".to_string());
+                };
+                ensure_parameters(commands, i, cmd_count)?;
+                for _ in 0..cmd_count {
+                    ring.push(decode_point(commands, &mut i, &mut cx, &mut cy)?);
+                }
+                ring_phase = 2;
+            }
+            7 => {
+                // ClosePath - close the current ring. Per MVT spec 4.3.3.3
+                // the cursor is NOT changed (stays at the last LineTo vertex).
+                if cmd_count != 1 {
+                    return Err("polygon ClosePath count must be 1".to_string());
+                }
+                if ring_phase != 2 {
+                    return Err("polygon ClosePath must follow LineTo".to_string());
+                }
+                let Some(mut ring) = current_ring.take() else {
+                    return Err("polygon ClosePath without an open ring".to_string());
+                };
+                if ring.len() < 3 {
+                    return Err("polygon ring has fewer than 3 points".to_string());
+                }
+                let first = ring[0];
+                ring.push(first);
+                rings.push(ring);
+                ring_phase = 0;
+            }
+            _ => return Err(format!("unknown polygon geometry command id {cmd_id}")),
+        }
+    }
+
+    match ring_phase {
+        1 => return Err("polygon ring missing LineTo".to_string()),
+        2 => return Err("polygon ring missing ClosePath".to_string()),
+        _ => {}
+    }
+    Ok(rings)
+}
+
+fn ensure_parameters(commands: &[u32], start: usize, count: u32) -> Result<(), String> {
+    let count =
+        usize::try_from(count).map_err(|_| "polygon command count exceeds usize".to_string())?;
+    let parameter_count = count
+        .checked_mul(2)
+        .ok_or_else(|| "polygon parameter count overflows usize".to_string())?;
+    let end = start
+        .checked_add(parameter_count)
+        .ok_or_else(|| "polygon command end overflows usize".to_string())?;
+    if end > commands.len() {
+        return Err("truncated polygon command parameters".to_string());
+    }
+    Ok(())
+}
+
+fn decode_point(
+    commands: &[u32],
+    i: &mut usize,
+    cx: &mut i32,
+    cy: &mut i32,
+) -> Result<(i32, i32), String> {
+    let dx = unzigzag(commands[*i]);
+    let dy = unzigzag(commands[*i + 1]);
+    *i += 2;
+    *cx = (*cx)
+        .checked_add(dx)
+        .ok_or_else(|| "MVT polygon x coordinate overflows i32".to_string())?;
+    *cy = (*cy)
+        .checked_add(dy)
+        .ok_or_else(|| "MVT polygon y coordinate overflows i32".to_string())?;
+    Ok((*cx, *cy))
 }
 
 /// Zigzag-decode a u32 back to i32.

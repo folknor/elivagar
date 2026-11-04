@@ -40,12 +40,14 @@ use std::path::Path;
 /// object.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The archive contract consumed by the corpus gate. Build provenance is kept
-/// for diagnosis and corpus-rotation review, never comparison gating.
+/// The archive contract consumed by the corpus gate. `input` and `config`
+/// establish comparability. Build provenance is optional and diagnostic; it
+/// is never part of equality gating.
 #[derive(Debug, Clone)]
 pub struct ContractDoc {
     pub input: Value,
     pub config: Value,
+    /// Diagnostic build provenance, or `Value::Null` when absent.
     pub build: Value,
 }
 
@@ -64,6 +66,10 @@ pub fn extract_contract(metadata_json: &str) -> ContractState {
         Ok(value) => value,
         Err(_) => return ContractState::Invalid,
     };
+    extract_contract_from_value(&metadata)
+}
+
+pub(crate) fn extract_contract_from_value(metadata: &Value) -> ContractState {
     let Some(elivagar) = metadata.get("elivagar") else {
         return ContractState::Absent;
     };
@@ -82,13 +88,10 @@ pub fn extract_contract(metadata_json: &str) -> ContractState {
     let Some(config) = object.get("config") else {
         return ContractState::Incomplete("config");
     };
-    let Some(build) = object.get("build") else {
-        return ContractState::Incomplete("build");
-    };
     ContractState::Contract(ContractDoc {
         input: input.clone(),
         config: config.clone(),
-        build: build.clone(),
+        build: object.get("build").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -351,12 +354,13 @@ pub fn producer_config(config: &TilegenConfig) -> Value {
 /// Name the producer-config fields that differ, for a resume error.
 pub fn producer_config_diff(checkpoint: &Value, current: &Value) -> Vec<String> {
     let mut diffs = Vec::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     let empty = serde_json::Map::new();
     let a = checkpoint.as_object().unwrap_or(&empty);
     let b = current.as_object().unwrap_or(&empty);
     for key in a.keys().chain(b.keys()) {
         let (was, now) = (a.get(key), b.get(key));
-        if was != now && !diffs.iter().any(|d: &String| d.starts_with(key.as_str())) {
+        if was != now && seen.insert(key.as_str()) {
             diffs.push(format!(
                 "{key} (chunks: {}, this run: {})",
                 was.unwrap_or(&Value::Null),
@@ -369,11 +373,9 @@ pub fn producer_config_diff(checkpoint: &Value, current: &Value) -> Vec<String> 
 
 /// Build the `elivagar` metadata value.
 ///
-/// `effective` is `None` when the run did not itself execute the PBF phase
-/// (`--skip-to`) and the checkpoint could not supply what the original run
-/// chose. The member is then omitted rather than guessed: re-deriving it from
-/// the current config would describe what this invocation *would* have done,
-/// not what produced the tiles on disk.
+/// `effective` is omitted when the caller cannot supply the path choices that
+/// produced the tiles. They are not guessed from current config, which would
+/// describe what this invocation *would* have done instead.
 ///
 /// `resumed_from` names the phase a resumed run started at, and is absent for
 /// a full run.
@@ -640,5 +642,11 @@ mod tests {
             extract_contract(&contract_metadata()),
             ContractState::Contract(_)
         ));
+        let ContractState::Contract(contract) =
+            extract_contract(r#"{"elivagar": {"schema": 1, "input": {}, "config": {}}}"#)
+        else {
+            panic!("missing diagnostic build must not make the contract incomplete");
+        };
+        assert_eq!(contract.build, Value::Null);
     }
 }

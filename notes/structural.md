@@ -912,15 +912,13 @@ Reported by every hunt.
 - A property suite running random shapes through quantize, pyramid and decode,
   checking outer positive, holes inside outers, at most 500 rings, and no
   hole-oriented ring in slot 0 (polygon-engine hunt).
-- Full-range round-trip property tests for the way delta varint, node FOR
-  bitpacking and chunk record layout (storage hunt).
+- Full-range round-trip property tests for the node FOR bitpacking and chunk
+  record layout (storage hunt).
 - A test building the ocean producer filter and the consumer copy/splice from
   one plan and checking every tile is owned by exactly one side - "the test
   this subsystem most lacks" (ocean hunt).
 - A semantic comparison of MVT and MLT output for the same tile (encoding
   hunt).
-- In-crate tests for `tile_detail`: Strict/Tolerant, ClosePath cursor
-  handling, ring grouping, value decoding (archive-surface hunt).
 - `decode(encode(x)) == x` for the PMTiles directory (archive-surface hunt).
 - An assertion that `EXTENT * BUFFER_FRACTION == TILE_BUFFER_I32` until the
   constants have one owner (coordinate-spaces hunt).

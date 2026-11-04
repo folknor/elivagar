@@ -51,29 +51,6 @@ is its own struct (see `notes/structural.md`), `config_json` becomes
 
 Reported by the run-contract and archive-surface hunts.
 
-## CON-002 - Is a provenance block a complete contract?
-
-- `provenance::extract_contract` (brokkr's entry point) requires `schema == 1`,
-  `input`, `config` AND `build`, reporting `Incomplete("build")` if build is
-  missing.
-- `inspect::print_provenance` hand-walks the same JSON, requires `schema`,
-  `input`, `config`, and treats `build` as optional ("absence is not an
-  error"). Its "not JSON" / "absent" / "schema N not interpreted" /
-  "INCOMPLETE" ladder is a second copy of `ContractState`'s variants with its
-  own wording, and the two also differ on what counts as invalid.
-
-Already disagree: an archive with input+config but no build prints a full
-contract in `elivagar inspect` and is refused as `Incomplete("build")` by
-`brokkr pmtiles-corpus check`. AGENTS.md says build is diagnostic and must
-never be equality-gated; extract_contract does not gate its value but does
-gate its presence. Also `ContractState::Unavailable(String)` is never
-constructed in this crate.
-
-Owner proposed: `provenance` with a typed decode; inspect calls
-`extract_contract` and renders the `ContractState`.
-
-Reported by the run-contract and archive-surface hunts.
-
 ## CON-003 - What must a resume match?
 
 Five carriers, each covering a different subset:
@@ -928,21 +905,6 @@ Unsupported>` deciding once.
 
 Reported by the archive-surface hunt.
 
-## CON-038 - Which payloads are equal (dedup)?
-
-`add_tile` and `add_run` each compute two SipHash fingerprints, probe the
-bucket, push and maintain `DedupStats`, and already differ: `add_tile` counts
-`reject_len_mismatch`/`reject_fp_mismatch`, `add_run` counts neither;
-`add_tile` is `#[hotpath::measure]`, `add_run` is not; `add_run` has no run
-ordering check. The test helper `compute_dedup_hashes` is a third copy of the
-hash. `add_run` checks `data.len() > u32::MAX` and then also `u32::try_from`;
-`add_tile` casts with `as` after the check. Owner proposed: a
-`DedupIndex { lookup_or_insert(&mut self, data) -> (BlobRef, bool) }`. The
-hunter also notes `DefaultHasher` output is release-dependent (fine
-in-memory) and one xxh3-128 would halve hashing on the assemble hot path.
-
-Reported by the archive-surface hunt.
-
 ## CON-039 - What is the PMTiles directory format?
 
 `encode_directory` (writer, private) and `decode_directory` (reader, public)
@@ -959,20 +921,5 @@ in inspect (with a private `read_i32_le`), in inspect tests
 Owner proposed: one `archive` module with `Header` encode/decode,
 `DirEntry::{Run, Leaf}`, `directory` encode/decode with a
 `decode(encode(x)) == x` property test (see `notes/structural.md`).
-
-Reported by the archive-surface hunt.
-
-## CON-040 - Is this tile a seam tile (in verify)?
-
-`verify.rs` computes `x == 0 || x == (1 << z) - 1` at the unique-payload
-grouping key, again before the geometry-outcome cache lookup, and again inside
-`validate_geometry_commands` to pick the delta limit. Cache correctness
-(outcome keyed by `(z, seam)`) depends on all three agreeing and on the
-paint-order check depending only on `z`; an x- or y-dependent check added to
-`validate_mvt_geometry` would make the cache replay the wrong outcome. The
-seam definition (antimeridian columns) is also presumably owned by the
-geometry engine's buffer logic. Owner proposed: a
-`ValidationClass { z, seam }` computed once and passed in, so the validator
-cannot see `x`.
 
 Reported by the archive-surface hunt.

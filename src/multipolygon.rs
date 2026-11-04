@@ -103,26 +103,71 @@ fn separate_by_role(members: &[MemberWay]) -> RingGroups<'_> {
     (outers, inners, unclassified)
 }
 
-/// Classify unclassified rings by signed area and add them to the
-/// appropriate output list.
+/// Infer missing roles from containment depth, independent of way direction.
+/// Explicit roles remain authoritative, but their rings contribute to depth.
 fn classify_unclassified(
     unclassified_ways: &[&[Point]],
     outer_rings: &mut Vec<Vec<Point>>,
     inner_rings: &mut Vec<Vec<Point>>,
 ) {
     let (unc_rings, _) = join_ways(unclassified_ways);
-    for ring in unc_rings {
-        if ring.len() < 3 {
-            continue;
-        }
-        let area = signed_area(&ring);
-        if area > 0.0 {
-            // Positive signed_area = CCW in math = CW on screen -> outer
+    let depths: Vec<usize> = unc_rings
+        .iter()
+        .enumerate()
+        .map(|(i, ring)| {
+            let explicit_depth = outer_rings
+                .iter()
+                .chain(inner_rings.iter())
+                .filter(|outer| ring_contains_ring(outer, ring))
+                .count();
+            let inferred_depth = unc_rings
+                .iter()
+                .enumerate()
+                .filter(|(j, outer)| i != *j && ring_contains_ring(outer, ring))
+                .count();
+            explicit_depth + inferred_depth
+        })
+        .collect();
+    for (ring, depth) in unc_rings.into_iter().zip(depths) {
+        if depth % 2 == 0 {
             outer_rings.push(ring);
         } else {
             inner_rings.push(ring);
         }
     }
+}
+
+/// Boundary points provide no containment evidence. Find a vertex or edge
+/// midpoint off the shell, then use it to decide containment. For noncrossing
+/// OSM rings one such point suffices; scanning every inner vertex against the
+/// entire outer would be quadratic in ring size. Repairing intersecting or
+/// coincident contours belongs to topology normalization.
+fn ring_contains_ring(outer: &[Point], inner: &[Point]) -> bool {
+    if outer.len() < 3 || inner.len() < 3 {
+        return false;
+    }
+    for (a, b) in inner.iter().zip(inner.iter().cycle().skip(1)) {
+        for point in [*a, Point::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)] {
+            let boundary = outer
+                .iter()
+                .zip(outer.iter().cycle().skip(1))
+                .any(|(c, d)| {
+                    let left = (point.x - c.x) * (d.y - c.y);
+                    let right = (point.y - c.y) * (d.x - c.x);
+                    let tolerance = 8.0 * f64::EPSILON * (left.abs() + right.abs());
+                    (left - right).abs() <= tolerance
+                        && point.x >= c.x.min(d.x)
+                        && point.x <= c.x.max(d.x)
+                        && point.y >= c.y.min(d.y)
+                        && point.y <= c.y.max(d.y)
+                });
+            if boundary {
+                continue;
+            }
+            return geometry::point_in_polygon(&point, outer);
+        }
+    }
+    false
 }
 
 /// Ensure all outer rings have positive signed_area (CW on screen).
@@ -155,26 +200,26 @@ fn pair_rings(
     let mut polygons: Vec<(Vec<Point>, Vec<Vec<Point>>)> =
         outer_rings.into_iter().map(|r| (r, Vec::new())).collect();
 
-    for inner in inner_rings {
+    let outer_count = polygons.len();
+    for mut inner in inner_rings {
         if inner.is_empty() {
             continue;
         }
-        // Tests only inner[0] for containment. Correct for valid OSM geometry
-        // (all inner ring vertices are inside the correct outer). For malformed
-        // data where the inner isn't inside any outer, promote it to an outer
-        // ring (shell) - matches Planetiler's behavior.
-        let test_pt = &inner[0];
-        let mut target_idx: Option<usize> = None;
-        for (i, poly) in polygons.iter().enumerate() {
-            if geometry::point_in_polygon(test_pt, &poly.0) {
-                target_idx = Some(i);
-                break;
-            }
-        }
+        // For nested shells, the smallest containing shell is the immediate
+        // parent. Restrict candidates to the original outers so orphan
+        // promotion cannot make pairing depend on inner-ring iteration order.
+        let target_idx = polygons[..outer_count]
+            .iter()
+            .enumerate()
+            .filter(|(_, poly)| ring_contains_ring(&poly.0, &inner))
+            .min_by(|(_, a), (_, b)| signed_area(&a.0).abs().total_cmp(&signed_area(&b.0).abs()))
+            .map(|(i, _)| i);
         if let Some(idx) = target_idx {
             polygons[idx].1.push(inner);
         } else {
-            // Orphan inner ring: promote to outer (shell).
+            // Orphan inner ring: promote to an oriented outer shell.
+            inner.reverse();
+            normalize_ring_start(&mut inner);
             polygons.push((inner, Vec::new()));
         }
     }
@@ -544,6 +589,119 @@ mod tests {
         ring.iter().map(quantize).collect()
     }
 
+    // All regression geometry fits inside the z0 tile.
+    fn square(lo: f64, hi: f64) -> Vec<Point> {
+        vec![pt(lo, lo), pt(hi, lo), pt(hi, hi), pt(lo, hi), pt(lo, lo)]
+    }
+
+    #[test]
+    fn touching_hole_survives_ring_rotation_and_reversal() {
+        for reverse in [false, true] {
+            // The rightmost boundary is outside under the ray-casting rule.
+            let mut hole = vec![pt(0.875, 0.5), pt(0.625, 0.625), pt(0.625, 0.375)];
+            if reverse {
+                hole.reverse();
+            }
+            for rotation in 0..hole.len() {
+                let mut rotated = hole.clone();
+                rotated.rotate_left(rotation);
+                rotated.push(rotated[0]);
+                let mp = assemble(&[
+                    make_member("outer", square(0.125, 0.875)),
+                    make_member("inner", rotated),
+                ]);
+                assert_eq!(mp.polygons.len(), 1);
+                assert_eq!(mp.polygons[0].1.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn hole_with_all_vertices_on_shell_uses_edge_interiors() {
+        let mp = assemble(&[
+            make_member("outer", square(0.125, 0.875)),
+            make_member(
+                "inner",
+                vec![
+                    pt(0.125, 0.5),
+                    pt(0.5, 0.125),
+                    pt(0.875, 0.5),
+                    pt(0.5, 0.875),
+                    pt(0.125, 0.5),
+                ],
+            ),
+        ]);
+        assert_eq!(mp.polygons.len(), 1);
+        assert_eq!(mp.polygons[0].1.len(), 1);
+    }
+
+    #[test]
+    fn nested_hole_pairs_with_smallest_shell() {
+        let mp = assemble(&[
+            make_member("outer", square(0.0625, 0.9375)),
+            make_member("inner", square(0.125, 0.875)),
+            make_member("outer", square(0.25, 0.75)),
+            make_member("inner", square(0.375, 0.625)),
+        ]);
+        assert_eq!(mp.polygons.len(), 2);
+        assert!(mp.polygons.iter().all(|(_, holes)| holes.len() == 1));
+        assert!(signed_area(&mp.polygons[1].1[0]).abs() < signed_area(&mp.polygons[0].1[0]).abs());
+    }
+
+    #[test]
+    fn missing_roles_ignore_direction_and_member_order() {
+        for mask in 0..16 {
+            let mut members = Vec::new();
+            for (i, (lo, hi)) in [
+                (0.0625, 0.9375),
+                (0.125, 0.875),
+                (0.25, 0.75),
+                (0.375, 0.625),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut ring = square(lo, hi);
+                if mask & (1 << i) != 0 {
+                    ring.reverse();
+                }
+                members.push(make_member("", ring));
+            }
+            if mask % 2 == 0 {
+                members.reverse();
+            }
+            let mp = assemble(&members);
+            assert_eq!(mp.polygons.len(), 2);
+            assert!(mp.polygons.iter().all(|(_, holes)| holes.len() == 1));
+        }
+    }
+
+    #[test]
+    fn missing_role_depth_includes_explicit_rings() {
+        let mp = assemble(&[
+            make_member("outer", square(0.0625, 0.9375)),
+            make_member("", square(0.125, 0.875)),
+            make_member("outer", square(0.25, 0.75)),
+            make_member("", square(0.375, 0.625)),
+        ]);
+        assert_eq!(mp.polygons.len(), 2);
+        assert!(mp.polygons.iter().all(|(_, holes)| holes.len() == 1));
+    }
+
+    #[test]
+    fn promoted_orphan_has_shell_orientation() {
+        let mp = assemble(&[
+            make_member("outer", square(0.0625, 0.25)),
+            make_member("inner", square(0.5, 0.75)),
+        ]);
+        assert_eq!(mp.polygons.len(), 2);
+        assert!(
+            mp.polygons
+                .iter()
+                .all(|(shell, _)| signed_area(shell) > 0.0)
+        );
+    }
+
     // --- point_in_polygon ---
 
     #[test]
@@ -677,12 +835,11 @@ mod tests {
         }
     }
 
-    // --- Unclassified roles resolved by area ---
+    // --- Unclassified roles resolved by containment ---
 
     #[test]
-    fn test_unclassified_resolved_by_area() {
-        // Large CCW ring (positive signed_area -> outer)
-        // In standard math: (0,0)->(10,0)->(10,10)->(0,10) is CCW -> positive area
+    fn test_unclassified_resolved_by_containment() {
+        // The top-level ring is a shell, regardless of winding.
         let members = vec![
             make_member(
                 "",
@@ -694,8 +851,7 @@ mod tests {
                     pt(0.0, 0.0),
                 ],
             ),
-            // Small CW ring (negative signed_area -> inner)
-            // (3,3)->(3,7)->(7,7)->(7,3) is CW -> negative area
+            // One containing ring makes this a hole.
             make_member(
                 "",
                 vec![

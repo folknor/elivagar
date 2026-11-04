@@ -235,22 +235,32 @@ fn kind_value_to_id(s: &str) -> Option<u8> {
     KIND_VALUES.iter().position(|&v| v == s).map(|i| i as u8)
 }
 
+/// Append a string with the wire format's u16 byte length, truncating only at
+/// a UTF-8 character boundary when the value is too long.
+fn append_wire_string(buf: &mut Vec<u8>, s: &str) {
+    let mut len = s.len().min(u16::MAX as usize);
+    while !s.is_char_boundary(len) {
+        len -= 1;
+    }
+    let wire_len = u16::try_from(len).expect("string length was capped to u16");
+    buf.extend_from_slice(&wire_len.to_le_bytes());
+    buf.extend_from_slice(&s.as_bytes()[..len]);
+}
+
 /// Pre-encode the attribute portion for a given zoom level into `buf`.
 /// The buffer is cleared and filled with bytes that can be appended to
 /// the geometry portion via `encode_feature_data_with_attrs`.
-#[allow(clippy::cast_possible_truncation)]
 #[hotpath::measure]
 pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], zoom: u8) {
     buf.clear();
-    let filtered_count = attrs
-        .iter()
-        .filter(|(_, _, az)| zoom >= *az)
-        .count()
-        .min(u8::MAX as usize);
-    buf.push(filtered_count as u8);
+    buf.push(0);
+    let mut encoded_count = 0_u8;
     for (key, val, attr_zoom) in attrs {
         if zoom < *attr_zoom {
             continue;
+        }
+        if encoded_count == u8::MAX {
+            break;
         }
         let kid = key_to_id(key);
         buf.push(kid);
@@ -263,17 +273,11 @@ pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], 
                         buf.push(vid);
                     } else {
                         buf.push(0);
-                        let sb = s.as_bytes();
-                        let slen = sb.len().min(u16::MAX as usize);
-                        buf.extend_from_slice(&(slen as u16).to_le_bytes());
-                        buf.extend_from_slice(&sb[..slen]);
+                        append_wire_string(buf, s);
                     }
                 } else {
                     buf.push(0);
-                    let sb = s.as_bytes();
-                    let slen = sb.len().min(u16::MAX as usize);
-                    buf.extend_from_slice(&(slen as u16).to_le_bytes());
-                    buf.extend_from_slice(&sb[..slen]);
+                    append_wire_string(buf, s);
                 }
             }
             AttrValue::Int(i) => {
@@ -289,7 +293,9 @@ pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], 
                 buf.extend_from_slice(&f.to_le_bytes());
             }
         }
+        encoded_count += 1;
     }
+    buf[0] = encoded_count;
 }
 
 /// Encode feature data with pre-encoded attribute bytes (P3 optimization).
@@ -871,6 +877,11 @@ mod tests {
             })
             .collect();
 
+        let mut attrs_bytes = Vec::new();
+        encode_attrs_bytes(&mut attrs_bytes, &attrs, 14);
+        assert_eq!(attrs_bytes[0], u8::MAX);
+        assert_eq!(attrs_bytes.len(), 1 + usize::from(u8::MAX) * 3);
+
         let encoded = encode_feature_data(77, GeomType::Point, &geom_cmds, &attrs, 14);
         let mut layer = LayerBuilder::new("test");
         let mut gp = Vec::new();
@@ -930,5 +941,26 @@ mod tests {
             .count();
         assert_eq!(kind_count, 220);
         assert_eq!(name_count, 35);
+    }
+
+    #[test]
+    fn overlong_raw_string_truncates_at_a_utf8_boundary() {
+        let expected = "x".repeat(u16::MAX as usize - 2);
+        let value = format!("{expected}\u{20ac}");
+        let attrs = vec![("name", AttrValue::Str(Cow::Owned(value)), 0)];
+        let geom_cmds: Vec<u32> = vec![9, 10, 20];
+
+        let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
+        let mut layer = LayerBuilder::new("test");
+        let mut gp = Vec::new();
+        let mut tp = Vec::new();
+        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+
+        let (_, value_idx) = layer.test_feature(0).tags[0];
+        assert_eq!(
+            *layer.test_value(value_idx),
+            Value::String(expected),
+            "the truncated value should retain its valid UTF-8 prefix"
+        );
     }
 }

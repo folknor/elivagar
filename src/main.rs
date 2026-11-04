@@ -53,7 +53,7 @@ struct DiagArgs {
     /// PMTiles file to read.
     file: PathBuf,
     /// Zoom level.
-    #[arg(short, long)]
+    #[arg(short, long, value_parser = parse_tile_zoom)]
     z: u8,
     /// Tile X coordinate.
     #[arg(short, long)]
@@ -231,7 +231,7 @@ struct SvgArgs {
     file: PathBuf,
 
     /// Zoom level.
-    #[arg(short, long)]
+    #[arg(short, long, value_parser = parse_tile_zoom)]
     z: u8,
 
     /// Tile X coordinate (top-left).
@@ -291,12 +291,25 @@ fn parse_byte_size(s: &str) -> Option<usize> {
         n.trim()
             .parse::<usize>()
             .ok()
-            .map(|v| v * 1024 * 1024 * 1024)
+            .and_then(|v| v.checked_mul(1024 * 1024 * 1024))
     } else if let Some(n) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
-        n.trim().parse::<usize>().ok().map(|v| v * 1024 * 1024)
+        n.trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|v| v.checked_mul(1024 * 1024))
     } else {
         s.parse::<usize>().ok()
     }
+}
+
+fn parse_tile_zoom(s: &str) -> Result<u8, String> {
+    let z = s
+        .parse::<u8>()
+        .map_err(|_| format!("invalid tile zoom '{s}', expected 0 through 31"))?;
+    if z > 31 {
+        return Err(format!("invalid tile zoom '{s}', expected 0 through 31"));
+    }
+    Ok(z)
 }
 
 fn parse_byte_size_min_64m(s: &str) -> Result<usize, String> {
@@ -483,13 +496,27 @@ fn main() {
             }
         }
         Command::Svg(args) => {
+            if let Err(e) = elivagar::svg::validate_tile_grid_coordinates(
+                args.z,
+                args.x,
+                args.y,
+                args.width,
+                args.height,
+            ) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+            let layer_filter: Option<Vec<&str>> =
+                args.layers.as_deref().map(|s| s.split(',').collect());
+            if let Err(e) = elivagar::svg::validate_layer_filter(layer_filter.as_deref()) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
             let result = if let Some(ref path) = args.output {
                 let mut file = std::fs::File::create(path).unwrap_or_else(|e| {
                     eprintln!("Error creating {}: {e}", path.display());
                     std::process::exit(1);
                 });
-                let layer_filter: Option<Vec<&str>> =
-                    args.layers.as_deref().map(|s| s.split(',').collect());
                 elivagar::svg::render_tile_grid_svg(
                     &args.file,
                     args.z,
@@ -503,8 +530,6 @@ fn main() {
             } else {
                 let stdout = std::io::stdout();
                 let mut out = stdout.lock();
-                let layer_filter: Option<Vec<&str>> =
-                    args.layers.as_deref().map(|s| s.split(',').collect());
                 elivagar::svg::render_tile_grid_svg(
                     &args.file,
                     args.z,
@@ -535,6 +560,7 @@ fn diag_ocean_rings(path: &Path, z: u8, x: u32, y: u32) -> std::io::Result<()> {
     use elivagar::pmtiles_writer::xy_to_tile_id;
     use protohoggr::{Cursor, WIRE_LEN};
 
+    elivagar::svg::validate_tile_grid_coordinates(z, x, y, 1, 1)?;
     let mut reader = PmtilesReader::open(path)?;
     let runs = reader.read_all_runs()?;
     let tile_id = xy_to_tile_id(z, x, y);
@@ -1055,6 +1081,33 @@ mod tests {
         assert_eq!(parse_byte_size(""), None);
         assert_eq!(parse_byte_size("M"), None);
         assert_eq!(parse_byte_size("G"), None);
+    }
+
+    #[test]
+    fn test_parse_byte_size_rejects_scaled_overflow() {
+        let mebibyte = 1024usize * 1024;
+        let gibibyte = mebibyte * 1024;
+        let max_m = usize::MAX / mebibyte;
+        let max_g = usize::MAX / gibibyte;
+
+        assert_eq!(
+            parse_byte_size(&format!("{max_m}M")),
+            Some(max_m * mebibyte)
+        );
+        assert_eq!(parse_byte_size(&format!("{}M", max_m + 1)), None);
+        assert_eq!(
+            parse_byte_size(&format!("{max_g}G")),
+            Some(max_g * gibibyte)
+        );
+        assert_eq!(parse_byte_size(&format!("{}G", max_g + 1)), None);
+    }
+
+    #[test]
+    fn tile_zoom_parser_rejects_unsupported_zoom() {
+        assert_eq!(parse_tile_zoom("0").unwrap(), 0);
+        assert_eq!(parse_tile_zoom("31").unwrap(), 31);
+        assert!(parse_tile_zoom("32").is_err());
+        assert!(parse_tile_zoom("256").is_err());
     }
 
     #[test]

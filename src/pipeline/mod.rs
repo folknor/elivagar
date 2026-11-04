@@ -1208,6 +1208,9 @@ fn is_retained_artifact_name(name: &str, prefix: &str) -> bool {
 /// unreadable - a damaged artifact is still worth keeping), date from its
 /// mtime. Older retained generations are removed first; anything outside
 /// the naming scheme is never touched.
+// The exact name is also promised in reference/cli.md. Adding an input hash
+// would distinguish same-day rebuilds, but needs that contract updated in
+// the same change by its owner.
 fn retain_outgoing_ocean_artifact(output_path: &Path) -> std::io::Result<()> {
     if !output_path.exists() {
         return Ok(());
@@ -1249,6 +1252,7 @@ fn retain_outgoing_ocean_artifact(output_path: &Path) -> std::io::Result<()> {
 /// Build the durable world-ocean artifact without opening an OSM PBF. It uses
 /// the normal ocean, external-sort, and partitioned assembly path so artifact
 /// bytes obey the same encoding and compression rules as runtime ocean tiles.
+#[allow(clippy::too_many_lines)]
 pub fn ocean_build(
     full_shapefile: &Path,
     simplified_shapefile: Option<&Path>,
@@ -1257,16 +1261,14 @@ pub fn ocean_build(
     compression_level: u32,
     threads: usize,
 ) -> Result<(), PipelineError> {
-    let simplified_shx = simplified_shapefile.map(|path| path.with_extension("shx"));
-    let key = crate::ocean::OceanArtifactKey::from_inputs(
-        full_shapefile,
-        &full_shapefile.with_extension("shx"),
-        simplified_shapefile,
-        simplified_shx.as_deref(),
-        0,
-        14,
-        compression_level,
-    )?;
+    // Fail on missing inputs before retaining the active artifact. The key
+    // itself is assembled from the buffers consumed by the passes below.
+    drop(std::fs::File::open(full_shapefile)?);
+    drop(std::fs::File::open(full_shapefile.with_extension("shx"))?);
+    if let Some(path) = simplified_shapefile {
+        drop(std::fs::File::open(path)?);
+        drop(std::fs::File::open(path.with_extension("shx"))?);
+    }
     retain_outgoing_ocean_artifact(output_path)?;
     drop(std::fs::remove_dir_all(tmp_dir));
     let chunks_dir = tmp_dir.join(SORT_CHUNKS_DIR);
@@ -1285,8 +1287,30 @@ pub fn ocean_build(
     // the low-zoom piece union fires, sourced from the simplified shapefile
     // when given (production) and from the full shapefile otherwise.
     let low_source = simplified_shapefile.unwrap_or(full_shapefile);
-    crate::ocean::process_ocean_shapefile(low_source, &world, 0, 7, &mut writer, None)?;
-    crate::ocean::process_ocean_shapefile(full_shapefile, &world, 8, 14, &mut writer, None)?;
+    let (_, low_hashes) =
+        crate::ocean::process_ocean_shapefile_with_hashes(low_source, &world, 0, 7, &mut writer)?;
+    let (_, full_hashes) = crate::ocean::process_ocean_shapefile_with_hashes(
+        full_shapefile,
+        &world,
+        8,
+        14,
+        &mut writer,
+    )?;
+    if simplified_shapefile.is_none() && low_hashes != full_hashes {
+        return Err(PipelineError(
+            "full ocean shapefile changed between low and high zoom passes".to_string(),
+        ));
+    }
+    let key = crate::ocean::OceanArtifactKey {
+        full_shp_xxh128: full_hashes.shp_xxh128,
+        full_shx_xxh128: full_hashes.shx_xxh128,
+        simplified_shp_xxh128: simplified_shapefile.map(|_| low_hashes.shp_xxh128),
+        simplified_shx_xxh128: simplified_shapefile.map(|_| low_hashes.shx_xxh128),
+        min_zoom: 0,
+        max_zoom: 14,
+        compression_level,
+        policy_version: crate::ocean::OCEAN_POLICY_VERSION,
+    };
     writer.flush()?;
     let mut reader = writer.finish()?;
     let config = TilegenConfig {

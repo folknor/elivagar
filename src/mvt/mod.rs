@@ -256,6 +256,14 @@ impl LayerBuilder {
         self.values.get(idx as usize)
     }
 
+    // These u16 indexes flow into Feature.tags and the sorted remap buffers
+    // below, while MLT reads them through key() and value(). A u32/newtype
+    // conversion also has to widen the tag pools in src/mvt/merge.rs and
+    // src/pipeline/assemble.rs, the decoder pool in src/wire_format.rs, and
+    // the MLT callers in src/mlt.rs. Changing only these interners would leave
+    // the same limit in those consumers or break their pool interfaces. The
+    // current clamps allow slots 0 through 65535, then alias every later
+    // distinct entry to slot 65535.
     #[allow(clippy::cast_possible_truncation)]
     pub fn intern_key(&mut self, key: &str) -> u16 {
         if let Some(&idx) = self.key_map.get(key) {

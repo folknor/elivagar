@@ -52,6 +52,71 @@ pub fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
 /// Header size for PMTiles v3.
 pub const HEADER_SIZE: usize = 127;
 
+// Sections are bounded by the actual archive, not a dataset-size policy.
+// finalize_directories in the writer doubles leaf fanout until the root fits:
+// a leaf can contain the entire entry set, not merely the initial 4096 entries.
+fn read_section(file: &mut File, offset: u64, length: u64, label: &str) -> io::Result<Vec<u8>> {
+    let end = offset.checked_add(length).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label} range overflow"),
+        )
+    })?;
+    if end > file.metadata()?.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("{label} outside archive"),
+        ));
+    }
+    let size = usize::try_from(length).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label} length does not fit address space"),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|e| io::Error::other(format!("cannot allocate {label} buffer: {e}")))?;
+    bytes.resize(size, 0);
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn gzip_decompress_section(data: &[u8], label: &str) -> io::Result<Vec<u8>> {
+    // RFC 1951: a length/distance pair emits at most 258 bytes and consumes
+    // at least two bits (one Huffman bit per symbol). Literals and stored
+    // blocks expand less, so 258 * 8 / 2 = 1032 bytes per input byte bounds
+    // every valid gzip member. Unlike a fixed decompressed-size cap, this
+    // admits large writer leaves and metadata larger than the compressed file.
+    // Saturation only limits the bound to the representable address space.
+    let max_output = data.len().saturating_mul(1032);
+    let probe_limit = u64::try_from(max_output)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let decoder = GzDecoder::new(data);
+    let mut output = Vec::new();
+    decoder
+        .take(probe_limit)
+        .read_to_end(&mut output)
+        .map_err(|e| io::Error::new(e.kind(), format!("{label}: {e}")))?;
+    if output.len() > max_output {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("decompressed {label} exceeds gzip expansion bound"),
+        ));
+    }
+    Ok(output)
+}
+
+fn unsupported_internal_compression(compression: u8) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("unsupported PMTiles internal compression: {compression}"),
+    )
+}
+
 pub struct PmtilesReader {
     file: File,
     header: [u8; HEADER_SIZE],
@@ -173,10 +238,10 @@ impl ArchiveView {
 
     fn directory(&self, offset: u64, length: u64) -> io::Result<Vec<RawDirEntry>> {
         let raw = self.slice(offset, length, "directory")?;
-        if self.internal_compression == 2 {
-            decode_directory(&gzip_decompress(raw)?)
-        } else {
-            decode_directory(raw)
+        match self.internal_compression {
+            1 => decode_directory(raw),
+            2 => decode_directory(&gzip_decompress_section(raw, "directory")?),
+            compression => Err(unsupported_internal_compression(compression)),
         }
     }
 
@@ -216,15 +281,12 @@ impl ArchiveView {
     }
 
     pub fn metadata(&self) -> io::Result<String> {
-        let compressed = self.slice(
-            read_u64_le(&self.header, 24),
-            read_u64_le(&self.header, 32),
-            "metadata",
-        )?;
-        let raw = if self.internal_compression == 2 {
-            gzip_decompress(compressed)?
-        } else {
-            compressed.to_vec()
+        let length = read_u64_le(&self.header, 32);
+        let compressed = self.slice(read_u64_le(&self.header, 24), length, "metadata")?;
+        let raw = match self.internal_compression {
+            1 => compressed.to_vec(),
+            2 => gzip_decompress_section(compressed, "metadata")?,
+            compression => return Err(unsupported_internal_compression(compression)),
         };
         String::from_utf8(raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
@@ -329,19 +391,19 @@ impl PmtilesReader {
 
     /// Read and decompress the metadata section as a UTF-8 string.
     pub fn read_metadata(&mut self) -> io::Result<String> {
+        if self.internal_compression != 1 && self.internal_compression != 2 {
+            return Err(unsupported_internal_compression(self.internal_compression));
+        }
         let offset = self.metadata_offset();
         let length = self.metadata_length();
-        self.file.seek(SeekFrom::Start(offset))?;
-        #[allow(clippy::cast_possible_truncation)]
-        let mut compressed = vec![0u8; length as usize];
-        self.file.read_exact(&mut compressed)?;
+        let compressed = read_section(&mut self.file, offset, length, "metadata")?;
 
-        if self.internal_compression == 2 {
-            let buf = gzip_decompress(&compressed)?;
-            Ok(String::from_utf8_lossy(&buf).to_string())
-        } else {
-            Ok(String::from_utf8_lossy(&compressed).to_string())
-        }
+        let raw = match self.internal_compression {
+            1 => compressed,
+            2 => gzip_decompress_section(&compressed, "metadata")?,
+            compression => return Err(unsupported_internal_compression(compression)),
+        };
+        String::from_utf8(raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Read all tile runs by traversing root and leaf directories.
@@ -377,38 +439,55 @@ impl PmtilesReader {
 
     /// Read and decode a single directory section.
     pub fn read_directory(&mut self, offset: u64, length: u64) -> io::Result<Vec<RawDirEntry>> {
-        self.file.seek(SeekFrom::Start(offset))?;
-        #[allow(clippy::cast_possible_truncation)]
-        let mut compressed = vec![0u8; length as usize];
-        self.file.read_exact(&mut compressed)?;
-
-        let raw = if self.internal_compression == 2 {
-            gzip_decompress(&compressed)?
-        } else {
-            compressed
+        if self.internal_compression != 1 && self.internal_compression != 2 {
+            return Err(unsupported_internal_compression(self.internal_compression));
+        }
+        let compressed = read_section(&mut self.file, offset, length, "directory")?;
+        let raw = match self.internal_compression {
+            1 => compressed,
+            2 => gzip_decompress_section(&compressed, "directory")?,
+            compression => return Err(unsupported_internal_compression(compression)),
         };
 
         decode_directory(&raw)
     }
 
-    /// Read and decompress a single tile's payload.
+    /// Read one tile payload, applying the compression declared in the header.
     pub fn read_tile(&mut self, entry: &TileEntry) -> io::Result<Vec<u8>> {
-        let abs_offset = self.data_offset + entry.offset;
-        self.file.seek(SeekFrom::Start(abs_offset))?;
-        #[allow(clippy::cast_possible_truncation)]
-        let mut compressed = vec![0u8; entry.length as usize];
-        self.file.read_exact(&mut compressed)?;
-        gzip_decompress(&compressed)
+        let compression = self.tile_compression();
+        if compression != 1 && compression != 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("unsupported tile compression: {compression}"),
+            ));
+        }
+        let abs_offset = self.data_offset.checked_add(entry.offset).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "tile data offset overflow")
+        })?;
+        let compressed = read_section(
+            &mut self.file,
+            abs_offset,
+            u64::from(entry.length),
+            "tile payload",
+        )?;
+        if compression == 1 {
+            Ok(compressed)
+        } else {
+            gzip_decompress_section(&compressed, "tile payload")
+        }
     }
 
-    /// Read raw compressed tile bytes without decompressing.
+    /// Read raw tile bytes without decompressing.
     pub fn read_tile_raw(&mut self, entry: &TileEntry) -> io::Result<Vec<u8>> {
-        let abs_offset = self.data_offset + entry.offset;
-        self.file.seek(SeekFrom::Start(abs_offset))?;
-        #[allow(clippy::cast_possible_truncation)]
-        let mut buf = vec![0u8; entry.length as usize];
-        self.file.read_exact(&mut buf)?;
-        Ok(buf)
+        let abs_offset = self.data_offset.checked_add(entry.offset).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "tile data offset overflow")
+        })?;
+        read_section(
+            &mut self.file,
+            abs_offset,
+            u64::from(entry.length),
+            "tile payload",
+        )
     }
 }
 
@@ -454,10 +533,19 @@ pub fn find_entry(runs: &[RawDirEntry], tile_id: u64) -> Option<TileEntry> {
 pub fn decode_directory(data: &[u8]) -> io::Result<Vec<RawDirEntry>> {
     let mut c = Cursor::new(data);
 
-    #[allow(clippy::cast_possible_truncation)]
     let count = c
         .read_varint()
-        .map_err(|e| io::Error::other(format!("directory count: {e}")))? as usize;
+        .map_err(|e| io::Error::other(format!("directory count: {e}")))?;
+    let count = usize::try_from(count)
+        .map_err(|_| io::Error::other("directory count does not fit address space"))?;
+    // Each entry needs four varints of at least one byte each, after the
+    // count varint. Run lengths address many tiles without adding entries.
+    if count > c.remaining() / 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "directory entry count exceeds encoded data length",
+        ));
+    }
 
     let mut tile_ids = Vec::with_capacity(count);
     let mut prev: u64 = 0;

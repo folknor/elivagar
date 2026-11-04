@@ -78,6 +78,11 @@ legal and slower way to say the same thing - internally it still runs as
 two passes, with the full shapefile serving both, so the low-zoom behavior
 below is identical under either spelling.
 
+Invalid index entries and truncated shapefile records fail the run. Selected
+polygon geometry must have finite coordinates and closed rings with at least
+four points including closure; malformed geometry fails rather than being
+silently skipped. Null shape records are ignored.
+
 The low-zoom (z0-z7) pass unions its source pieces before pyramid descent
 (introduced at `OCEAN_POLICY_VERSION` v3; the ring-cap partition below
 came at v4). The osmdata shapefiles arrive pre-split into
@@ -178,7 +183,8 @@ itself named explicitly and hashed into provenance.
 | `--dedup-cap <N>` | 1000000 | entry cap for the PMTiles payload dedup map. Tile content is identical under any cap; past it duplicate payloads are stored instead of referenced, costing archive bytes, and the map costs ~56 bytes/entry of RAM. Deliberately outside the provenance contract, like the budgets: it cannot change what a consumer decodes |
 | `--assemble-budget <SIZE>` | 32M | tile assembly batch. Min 1M |
 
-Sizes accept `256M`, `1G`, or raw bytes.
+Sizes accept `256M`, `1G`, or raw bytes. Values whose scaled size overflows
+the platform byte-size integer are rejected.
 
 ### Geometry
 
@@ -221,6 +227,13 @@ loudly instead of silently serving pre-change geometry - the 2026-07-15
 stale-artifact incident (the VW landing shipped without a bump; DP-era
 coastline spikes served world-wide for three days with all gates green) is
 the motivating case.
+
+Policy v6 discards a polygon if its original outer ring collapses during
+rescaling, simplification or cleanup, so a surviving hole cannot become a
+shell. Older artifacts must be rebuilt, followed by rotation of the
+artifact-active corpus baseline. Artifact builds hash the opened shapefile
+and index buffers used by each pass, so replacing an input path during the
+build cannot attach another file's hash to the geometry.
 
 Retention: when the output path already holds an artifact, `ocean-build`
 keeps the outgoing generation as `<stem>-v<policy_version>-<build_date>.pmtiles`
@@ -365,6 +378,13 @@ subcommand).
 
 Render tiles as SVG. Single tile or an NxM grid.
 
+Zooms must be in the PMTiles range 0 through 31. X and Y must be within the
+zoom's tile matrix, and the whole requested grid must fit inside it. Grid
+width and height must both be nonzero. The `--layers` names must match
+Shortbread layer names exactly. Each layer has a fixed color across tiles,
+and SVG groups use a fixed layer order with ocean painted first so it stays
+below the other layers.
+
 | flag | default | meaning |
 |---|---|---|
 | `-z`, `-x`, `-y` | | tile coordinates (top-left of the grid) |
@@ -382,6 +402,7 @@ height exceeds 1.
 Ring winding for one tile: per-ring vertex count, signed area, and direction
 (CW outer, CCW hole) for every polygon feature across all layers. Prints
 first/last 3 vertices for large rings, all vertices for rings of 6 or fewer.
+Zooms must be 0 through 31, and X and Y must fit that zoom's tile matrix.
 
 ## Environment variables
 

@@ -55,7 +55,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// segments on column borders against the correct group. Collinear output
 /// cleanup now runs after hole binding, so a hole can no longer be bound to
 /// the wrong shape where two result shapes touch.
-pub const OCEAN_POLICY_VERSION: u32 = 5;
+///
+/// v6: rescaling, DP simplification and shape cleanup discard the whole
+/// polygon when its original outer dies, rather than promoting a surviving
+/// hole. Ocean uses this shared engine, including cleanup after overlay;
+/// pre-split source cells and low-zoom union do not prove these paths
+/// unreachable. Existing v5 artifacts must be rebuilt before use, followed
+/// by rotation of the artifact-active corpus contract.
+pub const OCEAN_POLICY_VERSION: u32 = 6;
 
 /// Identity of the shapefile inputs behind computed ocean sort chunks.
 ///
@@ -300,6 +307,12 @@ fn hash_file(path: &std::path::Path) -> std::io::Result<u128> {
         hasher.update(&buf[..read]);
     }
     Ok(hasher.digest128())
+}
+
+fn hash_bytes(bytes: &[u8]) -> u128 {
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    hasher.update(bytes);
+    hasher.digest128()
 }
 
 // ---------------------------------------------------------------------------
@@ -690,8 +703,15 @@ struct ParsedOceanRecord {
     shapes_hit: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OceanShapefileHashes {
+    pub(crate) shp_xxh128: u128,
+    pub(crate) shx_xxh128: u128,
+}
+
 #[derive(Clone, Copy)]
 struct ShxRecord {
+    index: usize,
     offset: usize,
     content_len: usize,
 }
@@ -795,9 +815,58 @@ pub(crate) fn process_ocean_shapefile(
     sort_writer: &mut SortWriter,
     pass_grid: Option<&OceanPassGrid>,
 ) -> Result<u64, std::io::Error> {
+    process_ocean_shapefile_inner(
+        path,
+        data_bounds,
+        min_zoom,
+        max_zoom,
+        sort_writer,
+        pass_grid,
+        false,
+    )
+    .map(|(count, _)| count)
+}
+
+/// Process a shapefile and return hashes of the source buffers used.
+pub(crate) fn process_ocean_shapefile_with_hashes(
+    path: &std::path::Path,
+    data_bounds: &MercBbox,
+    min_zoom: u8,
+    max_zoom: u8,
+    sort_writer: &mut SortWriter,
+) -> Result<(u64, OceanShapefileHashes), std::io::Error> {
+    let (count, hashes) = process_ocean_shapefile_inner(
+        path,
+        data_bounds,
+        min_zoom,
+        max_zoom,
+        sort_writer,
+        None,
+        true,
+    )?;
+    let hashes = hashes.ok_or_else(|| {
+        std::io::Error::other("ocean shapefile processing did not capture source hashes")
+    })?;
+    Ok((count, hashes))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::unwrap_in_result
+)]
+fn process_ocean_shapefile_inner(
+    path: &std::path::Path,
+    data_bounds: &MercBbox,
+    min_zoom: u8,
+    max_zoom: u8,
+    sort_writer: &mut SortWriter,
+    pass_grid: Option<&OceanPassGrid>,
+    capture_hashes: bool,
+) -> Result<(u64, Option<OceanShapefileHashes>), std::io::Error> {
     if pass_grid.is_some_and(|grid| grid.band_is_empty(min_zoom, max_zoom)) {
         eprintln!("  Ocean band is empty; skipping shapefile geometry");
-        return Ok(0);
+        return Ok((0, None));
     }
     eprintln!("  Opening {}", path.display());
 
@@ -816,7 +885,19 @@ pub(crate) fn process_ocean_shapefile(
         ));
     }
 
-    let shape_count = (shx_data.len() - 100) / 8;
+    let index_bytes = shx_data.len() - 100;
+    if index_bytes % 8 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "invalid .shx file {}: {} trailing bytes after complete index records",
+                shx_path.display(),
+                index_bytes % 8
+            ),
+        ));
+    }
+
+    let shape_count = index_bytes / 8;
     let mut records: Vec<ShxRecord> = Vec::with_capacity(shape_count);
     for i in 0..shape_count {
         let base = 100 + i * 8;
@@ -833,13 +914,43 @@ pub(crate) fn process_ocean_shapefile(
             shx_data[base + 7],
         ]);
         if offset_words < 0 || content_words < 0 {
-            continue;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid .shx record {} in {}: negative offset or content length",
+                    i + 1,
+                    shx_path.display()
+                ),
+            ));
         }
-        #[allow(clippy::cast_sign_loss)]
-        let offset = (offset_words as usize) * 2;
-        #[allow(clippy::cast_sign_loss)]
-        let content_len = (content_words as usize) * 2;
+        let offset = usize::try_from(offset_words)
+            .ok()
+            .and_then(|words| words.checked_mul(2))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid .shx record {} in {}: offset overflow",
+                        i + 1,
+                        shx_path.display()
+                    ),
+                )
+            })?;
+        let content_len = usize::try_from(content_words)
+            .ok()
+            .and_then(|words| words.checked_mul(2))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid .shx record {} in {}: content length overflow",
+                        i + 1,
+                        shx_path.display()
+                    ),
+                )
+            })?;
         records.push(ShxRecord {
+            index: i + 1,
             offset,
             content_len,
         });
@@ -849,6 +960,12 @@ pub(crate) fn process_ocean_shapefile(
     // --- Mmap the .shp file ---
     let shp_file = std::fs::File::open(path)?;
     let shp_mmap = unsafe { memmap2::Mmap::map(&shp_file) }?;
+    // Keep the artifact key tied to the exact mapped bytes and index buffer
+    // this call parses, even if either input path is replaced after opening.
+    let hashes = capture_hashes.then(|| OceanShapefileHashes {
+        shp_xxh128: hash_bytes(&shp_mmap),
+        shx_xxh128: hash_bytes(&shx_data),
+    });
     #[cfg(unix)]
     shp_mmap.advise(memmap2::Advice::Random)?;
     eprintln!(
@@ -866,6 +983,7 @@ pub(crate) fn process_ocean_shapefile(
     use rayon::prelude::*;
 
     let parse_ctx = OceanRecordParseCtx {
+        path,
         shp_mmap: &shp_mmap,
         shp_file: &shp_file,
         data_bounds,
@@ -874,12 +992,13 @@ pub(crate) fn process_ocean_shapefile(
         pass_grid,
         min_zoom,
     };
-    let parsed_records: Vec<ParsedOceanRecord> = records
+    let parsed_records: Result<Vec<ParsedOceanRecord>, std::io::Error> = records
         .par_iter()
         .map_init(IntEmitScratch::new, |scratch, &record| {
             parse_ocean_record(record, &parse_ctx, scratch)
         })
         .collect();
+    let parsed_records = parsed_records?;
     #[cfg(unix)]
     unsafe {
         shp_mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed)?;
@@ -1080,10 +1199,11 @@ pub(crate) fn process_ocean_shapefile(
     let count = result.count;
 
     eprintln!("  {poly_count} polygons, {count} features");
-    Ok(count)
+    Ok((count, hashes))
 }
 
 struct OceanRecordParseCtx<'a> {
+    path: &'a std::path::Path,
     shp_mmap: &'a memmap2::Mmap,
     shp_file: &'a std::fs::File,
     data_bounds: &'a MercBbox,
@@ -1093,19 +1213,93 @@ struct OceanRecordParseCtx<'a> {
     min_zoom: u8,
 }
 
+// Fixed-width field readers. Callers have already bounds-checked the slice;
+// these are plain functions so the expect does not sit in a Result function.
+fn field_bytes<const N: usize>(buf: &[u8], off: usize) -> [u8; N] {
+    buf[off..off + N].try_into().expect("slice length equals N")
+}
+
+fn be_u32_at(buf: &[u8], off: usize) -> u32 {
+    u32::from_be_bytes(field_bytes(buf, off))
+}
+
+fn le_i32_at(buf: &[u8], off: usize) -> i32 {
+    i32::from_le_bytes(field_bytes(buf, off))
+}
+
+fn le_f64_at(buf: &[u8], off: usize) -> f64 {
+    f64::from_le_bytes(field_bytes(buf, off))
+}
+
+fn u64_from_usize(v: usize) -> u64 {
+    u64::try_from(v).expect("shapefile offset fits u64")
+}
+
+#[allow(clippy::too_many_lines)]
 fn parse_ocean_record(
     record: ShxRecord,
     ctx: &OceanRecordParseCtx<'_>,
     scratch: &mut IntEmitScratch,
-) -> ParsedOceanRecord {
+) -> Result<ParsedOceanRecord, std::io::Error> {
     let mut out = ParsedOceanRecord {
         pieces: Vec::new(),
         shapes_hit: 0,
     };
 
-    let rec = record.offset + 8;
-    if record.content_len < 44 || rec + 44 > ctx.shp_mmap.len() {
-        return out;
+    let header_end = record.offset.checked_add(8).ok_or_else(|| {
+        invalid_shapefile_record(ctx.path, record, "record header offset overflow")
+    })?;
+    let content_end = header_end
+        .checked_add(record.content_len)
+        .ok_or_else(|| invalid_shapefile_record(ctx.path, record, "content range overflow"))?;
+    if record.offset < 100 || content_end > ctx.shp_mmap.len() {
+        return Err(invalid_shapefile_record(
+            ctx.path,
+            record,
+            "record content extends past the .shp file",
+        ));
+    }
+
+    let declared_content_words = be_u32_at(&ctx.shp_mmap[..header_end], record.offset + 4);
+    let declared_content_len = usize::try_from(declared_content_words)
+        .ok()
+        .and_then(|words| words.checked_mul(2))
+        .ok_or_else(|| {
+            invalid_shapefile_record(ctx.path, record, "record content length overflow")
+        })?;
+    if declared_content_len != record.content_len {
+        return Err(invalid_shapefile_record(
+            ctx.path,
+            record,
+            "record length differs from the .shx index",
+        ));
+    }
+    if record.content_len < 4 {
+        return Err(invalid_shapefile_record(
+            ctx.path,
+            record,
+            "record is shorter than its shape type",
+        ));
+    }
+
+    let rec = header_end;
+    let shape_type = le_i32_at(&ctx.shp_mmap[..rec + 4], rec);
+    if shape_type == 0 {
+        return Ok(out);
+    }
+    if !matches!(shape_type, 5 | 15 | 25) {
+        return Err(invalid_shapefile_record(
+            ctx.path,
+            record,
+            "shape type is not Polygon, PolygonZ or PolygonM",
+        ));
+    }
+    if record.content_len < 44 {
+        return Err(invalid_shapefile_record(
+            ctx.path,
+            record,
+            "polygon record is shorter than its fixed header",
+        ));
     }
 
     let header = {
@@ -1115,10 +1309,22 @@ fn parse_ocean_record(
         header
     };
 
-    let xmin = f64::from_le_bytes(header[4..12].try_into().expect("shapefile field read"));
-    let ymin = f64::from_le_bytes(header[12..20].try_into().expect("shapefile field read"));
-    let xmax = f64::from_le_bytes(header[20..28].try_into().expect("shapefile field read"));
-    let ymax = f64::from_le_bytes(header[28..36].try_into().expect("shapefile field read"));
+    let xmin = le_f64_at(&header, 4);
+    let ymin = le_f64_at(&header, 12);
+    let xmax = le_f64_at(&header, 20);
+    let ymax = le_f64_at(&header, 28);
+    if ![xmin, ymin, xmax, ymax]
+        .iter()
+        .all(|value| value.is_finite())
+        || xmin > xmax
+        || ymin > ymax
+    {
+        return Err(invalid_shapefile_record(
+            ctx.path,
+            record,
+            "polygon bounds are non-finite or inverted",
+        ));
+    }
 
     let merc_min = geometry::from_epsg3857(xmin, ymax);
     let merc_max = geometry::from_epsg3857(xmax, ymin);
@@ -1128,7 +1334,7 @@ fn parse_ocean_record(
         || merc_max.y < ctx.data_bounds.min_y
         || merc_min.y > ctx.data_bounds.max_y
     {
-        return out;
+        return Ok(out);
     }
 
     if let Some(pass) = ctx.pass_grid
@@ -1141,7 +1347,7 @@ fn parse_ocean_record(
             ctx.min_zoom,
         )
     {
-        return out;
+        return Ok(out);
     }
 
     out.shapes_hit = 1;
@@ -1150,6 +1356,7 @@ fn parse_ocean_record(
         record,
         rec,
         shp_len: ctx.shp_mmap.len(),
+        path: ctx.path,
         shp_file: ctx.shp_file,
         header: &header,
     };
@@ -1159,60 +1366,100 @@ fn parse_ocean_record(
         &mut out.pieces,
         ctx.max_zoom,
         ctx.data_rect,
-    );
+    )?;
 
-    out
+    Ok(out)
+}
+
+fn invalid_shapefile_record(
+    path: &std::path::Path,
+    record: ShxRecord,
+    reason: &str,
+) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "invalid shapefile record {} at offset {} in {}: {reason}",
+            record.index,
+            record.offset,
+            path.display()
+        ),
+    )
 }
 
 struct ShapeRecordSource<'a> {
     record: ShxRecord,
     rec: usize,
     shp_len: usize,
+    path: &'a std::path::Path,
     shp_file: &'a std::fs::File,
     header: &'a [u8; 44],
 }
 
+#[allow(clippy::too_many_lines)]
 fn push_shape_record_pieces(
     source: &ShapeRecordSource<'_>,
     scratch: &mut IntEmitScratch,
     pieces: &mut Vec<Shape>,
     max_zoom: u8,
     data_rect: IntRect,
-) {
-    let offset = source.record.offset;
-    let num_parts_i32 = i32::from_le_bytes(
-        source.header[36..40]
-            .try_into()
-            .expect("shapefile field read"),
-    );
-    let num_points_i32 = i32::from_le_bytes(
-        source.header[40..44]
-            .try_into()
-            .expect("shapefile field read"),
-    );
+) -> Result<(), std::io::Error> {
+    let num_parts_i32 = le_i32_at(source.header, 36);
+    let num_points_i32 = le_i32_at(source.header, 40);
     if num_parts_i32 < 0 || num_points_i32 < 0 {
-        eprintln!("  Warning: negative part/point count at offset {offset}, skipping record");
-        return;
+        return Err(invalid_shapefile_record(
+            source.path,
+            source.record,
+            "negative part or point count",
+        ));
     }
-    #[allow(clippy::cast_sign_loss)]
-    let num_parts = num_parts_i32 as usize;
-    #[allow(clippy::cast_sign_loss)]
-    let num_points = num_points_i32 as usize;
+    let num_parts = usize::try_from(num_parts_i32)
+        .map_err(|_| invalid_shapefile_record(source.path, source.record, "part count overflow"))?;
+    let num_points = usize::try_from(num_points_i32).map_err(|_| {
+        invalid_shapefile_record(source.path, source.record, "point count overflow")
+    })?;
 
-    let parts_start = 44;
-    let points_start = parts_start + num_parts * 4;
-    let record_end = points_start + num_points * 16;
-    if record_end > source.record.content_len || source.rec + record_end > source.shp_len {
-        eprintln!("  Warning: shape record at offset {offset} extends past end of file, skipping");
-        return;
+    let parts_start = 44usize;
+    let parts_bytes = num_parts.checked_mul(4).ok_or_else(|| {
+        invalid_shapefile_record(source.path, source.record, "part index range overflow")
+    })?;
+    let points_start = parts_start.checked_add(parts_bytes).ok_or_else(|| {
+        invalid_shapefile_record(source.path, source.record, "point range offset overflow")
+    })?;
+    let points_bytes = num_points.checked_mul(16).ok_or_else(|| {
+        invalid_shapefile_record(source.path, source.record, "point range overflow")
+    })?;
+    let record_end = points_start.checked_add(points_bytes).ok_or_else(|| {
+        invalid_shapefile_record(source.path, source.record, "record content range overflow")
+    })?;
+    let absolute_end = source.rec.checked_add(record_end).ok_or_else(|| {
+        invalid_shapefile_record(source.path, source.record, "record file range overflow")
+    })?;
+    if record_end > source.record.content_len || absolute_end > source.shp_len {
+        return Err(invalid_shapefile_record(
+            source.path,
+            source.record,
+            "part and point arrays extend past the record",
+        ));
+    }
+    if num_parts == 0 || num_points == 0 {
+        return Err(invalid_shapefile_record(
+            source.path,
+            source.record,
+            "polygon record has no parts or points",
+        ));
     }
 
-    let Some(mut ring_starts) = read_ring_starts(source, num_parts) else {
-        return;
-    };
-    if ring_starts.iter().any(|&v| v > num_points) {
-        eprintln!("  Warning: invalid part index at offset {offset}, skipping record");
-        return;
+    let mut ring_starts = read_ring_starts(source, num_parts)?;
+    if ring_starts.first() != Some(&0)
+        || ring_starts.last().is_some_and(|&last| last >= num_points)
+        || ring_starts.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(invalid_shapefile_record(
+            source.path,
+            source.record,
+            "part indices are not strictly increasing from zero within the point array",
+        ));
     }
     ring_starts.push(num_points);
 
@@ -1220,9 +1467,12 @@ fn push_shape_record_pieces(
     let mut current_inners: Vec<Vec<Point>> = Vec::new();
 
     for (w, window) in ring_starts.windows(2).enumerate() {
-        let Some(ring) = read_ring_points(source, points_start, window[0], window[1]) else {
-            return;
-        };
+        let ring = read_ring_points(source, points_start, window[0], window[1])?;
+        // Ring interpretation follows the split-water input convention: the
+        // first contour is outer, later nonnegative contours start outers,
+        // and negative contours attach to the latest outer. The low-zoom
+        // contour-soup union relies on each piece keeping its own holes and
+        // having a disjoint interior, as documented at union_pieces.
         let is_outer = w == 0 || geometry::signed_area(&ring) >= 0.0;
 
         if is_outer {
@@ -1252,37 +1502,37 @@ fn push_shape_record_pieces(
             data_rect,
         );
     }
+    Ok(())
 }
 
-fn read_ring_starts(source: &ShapeRecordSource<'_>, num_parts: usize) -> Option<Vec<usize>> {
+fn read_ring_starts(
+    source: &ShapeRecordSource<'_>,
+    num_parts: usize,
+) -> Result<Vec<usize>, std::io::Error> {
     let mut parts = vec![0_u8; num_parts * 4];
     if !parts.is_empty() {
-        let read_offset = u64::try_from(source.rec + 44).expect("shapefile offset fits u64");
+        let read_offset = u64_from_usize(source.rec + 44);
         if let Err(err) = source.shp_file.read_exact_at(&mut parts, read_offset) {
-            eprintln!(
-                "  Warning: failed to read shape parts at offset {}: {err}",
-                source.record.offset
-            );
-            return None;
+            return Err(std::io::Error::new(
+                err.kind(),
+                format!(
+                    "invalid shapefile record {} at offset {} in {}: failed to read part indices: {err}",
+                    source.record.index,
+                    source.record.offset,
+                    source.path.display()
+                ),
+            ));
         }
     }
-    Some(
-        (0..num_parts)
-            .map(|j| {
-                let b = j * 4;
-                let v =
-                    i32::from_le_bytes(parts[b..b + 4].try_into().expect("shapefile field read"));
-                if v < 0 {
-                    usize::MAX
-                } else {
-                    #[allow(clippy::cast_sign_loss)]
-                    {
-                        v as usize
-                    }
-                }
+    (0..num_parts)
+        .map(|j| {
+            let b = j * 4;
+            let v = le_i32_at(&parts, b);
+            usize::try_from(v).map_err(|_| {
+                invalid_shapefile_record(source.path, source.record, "negative part index")
             })
-            .collect(),
-    )
+        })
+        .collect()
 }
 
 fn read_ring_points(
@@ -1290,8 +1540,15 @@ fn read_ring_points(
     points_start: usize,
     start: usize,
     end: usize,
-) -> Option<Vec<Point>> {
+) -> Result<Vec<Point>, std::io::Error> {
     let point_count = end - start;
+    if point_count < 4 {
+        return Err(invalid_shapefile_record(
+            source.path,
+            source.record,
+            "polygon ring has fewer than four points including closure",
+        ));
+    }
     let mut ring = Vec::with_capacity(point_count);
     let mut buf = vec![0_u8; RING_READ_BUFFER_BYTES];
     let mut points_read = 0usize;
@@ -1299,28 +1556,51 @@ fn read_ring_points(
     while points_read < point_count {
         let points_this_read = ((point_count - points_read) * 16).min(buf.len()) / 16;
         let byte_len = points_this_read * 16;
-        let read_offset = u64::try_from(source.rec + points_start + (start + points_read) * 16)
-            .expect("shapefile offset fits u64");
+        let read_offset = u64_from_usize(source.rec + points_start + (start + points_read) * 16);
         if let Err(err) = source
             .shp_file
             .read_exact_at(&mut buf[..byte_len], read_offset)
         {
-            eprintln!(
-                "  Warning: failed to read shape points at offset {}: {err}",
-                source.record.offset
-            );
-            return None;
+            return Err(std::io::Error::new(
+                err.kind(),
+                format!(
+                    "invalid shapefile record {} at offset {} in {}: failed to read point coordinates: {err}",
+                    source.record.index,
+                    source.record.offset,
+                    source.path.display()
+                ),
+            ));
         }
         for idx in 0..points_this_read {
             let b = idx * 16;
-            let x = f64::from_le_bytes(buf[b..b + 8].try_into().expect("shapefile field read"));
-            let y =
-                f64::from_le_bytes(buf[b + 8..b + 16].try_into().expect("shapefile field read"));
+            let x = le_f64_at(&buf, b);
+            let y = le_f64_at(&buf, b + 8);
+            if !x.is_finite() || !y.is_finite() {
+                return Err(invalid_shapefile_record(
+                    source.path,
+                    source.record,
+                    "polygon point coordinate is non-finite",
+                ));
+            }
             ring.push(geometry::from_epsg3857(x, y));
         }
         points_read += points_this_read;
     }
-    Some(ring)
+    // Shapefile closure repeats the endpoint exactly; it is not a proximity
+    // check like the later geometry simplification tolerances.
+    #[allow(clippy::float_cmp)]
+    let closed = ring
+        .first()
+        .zip(ring.last())
+        .is_some_and(|(first, last)| first.x == last.x && first.y == last.y);
+    if !closed {
+        return Err(invalid_shapefile_record(
+            source.path,
+            source.record,
+            "polygon ring is not closed",
+        ));
+    }
+    Ok(ring)
 }
 
 fn push_quantized_pieces(
@@ -2266,7 +2546,7 @@ mod tests {
     }
 
     #[test]
-    fn process_ocean_shapefile_skips_truncated_shp_record() {
+    fn process_ocean_shapefile_rejects_truncated_shp_record() {
         let dir = tempfile::tempdir().unwrap();
         let shp_path = dir.path().join("ocean_truncated_shp.shp");
         write_test_polygon_shapefile(&shp_path);
@@ -2283,8 +2563,112 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let emitted =
-            process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None).unwrap();
-        assert_eq!(emitted, 0, "truncated record should be skipped");
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
+            .expect_err("truncated record should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("extends past the .shp file"));
+    }
+
+    #[test]
+    fn process_ocean_shapefile_rejects_negative_shx_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let shp_path = dir.path().join("ocean_negative_offset.shp");
+        write_test_polygon_shapefile(&shp_path);
+        let mut shx = fs::read(shp_path.with_extension("shx")).unwrap();
+        write_u32_be(&mut shx, 100, u32::MAX);
+        fs::write(shp_path.with_extension("shx"), shx).unwrap();
+
+        let mut sort_writer =
+            SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+        let bounds = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
+            .expect_err("negative .shx offset should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("negative offset"));
+    }
+
+    #[test]
+    fn process_ocean_shapefile_rejects_bad_part_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let shp_path = dir.path().join("ocean_bad_part_index.shp");
+        write_test_polygon_shapefile(&shp_path);
+        let mut shp = fs::read(&shp_path).unwrap();
+        write_u32_le(&mut shp, 100 + 8 + 44, 6);
+        fs::write(&shp_path, shp).unwrap();
+
+        let mut sort_writer =
+            SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+        let bounds = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+        let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
+            .expect_err("out-of-range part index should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("part indices"));
+    }
+
+    #[test]
+    fn process_ocean_shapefile_hashes_the_bytes_it_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let shp_path = dir.path().join("ocean_hash_input.shp");
+        write_test_polygon_shapefile(&shp_path);
+
+        let mut sort_writer =
+            SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+        let bounds = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+        let (_, hashes) =
+            process_ocean_shapefile_with_hashes(&shp_path, &bounds, 0, 0, &mut sort_writer)
+                .unwrap();
+
+        assert_eq!(hashes.shp_xxh128, hash_file(&shp_path).unwrap());
+        assert_eq!(
+            hashes.shx_xxh128,
+            hash_file(&shp_path.with_extension("shx")).unwrap()
+        );
+    }
+
+    #[test]
+    fn process_ocean_shapefile_rejects_malformed_polygon_geometry() {
+        for defect in ["type", "bounds", "coordinate", "short_ring", "closure"] {
+            let dir = tempfile::tempdir().unwrap();
+            let shp_path = dir.path().join("malformed.shp");
+            write_test_polygon_shapefile(&shp_path);
+            let mut shp = fs::read(&shp_path).unwrap();
+            let rec = 108;
+            let points = rec + 48;
+            match defect {
+                "type" => write_u32_le(&mut shp, rec, 3),
+                "bounds" => write_f64_le(&mut shp, rec + 4, f64::NAN),
+                "coordinate" => write_f64_le(&mut shp, points + 16, f64::INFINITY),
+                "short_ring" => write_u32_le(&mut shp, rec + 40, 3),
+                "closure" => write_f64_le(&mut shp, points + 4 * 16, 0.0),
+                _ => unreachable!(),
+            }
+            fs::write(&shp_path, shp).unwrap();
+            let mut sort_writer =
+                SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
+            let bounds = MercBbox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 1.0,
+                max_y: 1.0,
+            };
+            let err = process_ocean_shapefile(&shp_path, &bounds, 0, 0, &mut sort_writer, None)
+                .expect_err(defect);
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{defect}");
+        }
     }
 }

@@ -1,8 +1,6 @@
 //! Deliberate within-layer paint ordering for layers where opaque features
 //! commonly overlap. Smaller ranks are emitted first and therefore painted below.
 
-pub const UNKNOWN_STREET_CLASS: u8 = 12;
-
 /// Whether `kind` is one of the values the land matcher can emit.
 pub fn is_known_land_kind(kind: &str) -> bool {
     matches!(
@@ -55,35 +53,7 @@ pub fn is_known_land_kind(kind: &str) -> bool {
 
 /// Whether `kind` is one of the values emitted by the streets matchers.
 pub fn is_known_street_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "track"
-            | "footway"
-            | "steps"
-            | "path"
-            | "cycleway"
-            | "pedestrian"
-            | "living_street"
-            | "service"
-            | "busway"
-            | "bus_guideway"
-            | "taxiway"
-            | "runway"
-            | "unclassified"
-            | "residential"
-            | "tertiary"
-            | "secondary"
-            | "primary"
-            | "trunk"
-            | "motorway"
-            | "funicular"
-            | "monorail"
-            | "tram"
-            | "light_rail"
-            | "subway"
-            | "narrow_gauge"
-            | "rail"
-    )
+    street_class_rank(kind).is_some()
 }
 
 pub fn land_paint_rank(kind: &str) -> u8 {
@@ -108,35 +78,35 @@ pub fn land_paint_rank(kind: &str) -> u8 {
     }
 }
 
-pub fn street_class_rank(kind: &str) -> u8 {
+pub fn street_class_rank(kind: &str) -> Option<u8> {
     match kind {
-        "track" => 0,
-        "footway" => 1,
-        "steps" => 2,
-        "path" => 3,
-        "cycleway" => 4,
-        "pedestrian" => 5,
-        "living_street" => 6,
-        "service" => 7,
-        "busway" => 8,
-        "bus_guideway" => 9,
-        "taxiway" => 10,
-        "runway" => 11,
-        "unclassified" => 12,
-        "residential" => 13,
-        "tertiary" => 14,
-        "secondary" => 15,
-        "primary" => 16,
-        "trunk" => 17,
-        "motorway" => 18,
-        "funicular" => 19,
-        "monorail" => 20,
-        "tram" => 21,
-        "light_rail" => 22,
-        "subway" => 23,
-        "narrow_gauge" => 24,
-        "rail" => 25,
-        _ => UNKNOWN_STREET_CLASS,
+        "track" => Some(0),
+        "footway" => Some(1),
+        "steps" => Some(2),
+        "path" => Some(3),
+        "cycleway" => Some(4),
+        "pedestrian" => Some(5),
+        "living_street" => Some(6),
+        "service" => Some(7),
+        "busway" => Some(8),
+        "bus_guideway" => Some(9),
+        "taxiway" => Some(10),
+        "runway" => Some(11),
+        "unclassified" => Some(12),
+        "residential" => Some(13),
+        "tertiary" => Some(14),
+        "secondary" => Some(15),
+        "primary" => Some(16),
+        "trunk" => Some(17),
+        "motorway" => Some(18),
+        "funicular" => Some(19),
+        "monorail" => Some(20),
+        "tram" => Some(21),
+        "light_rail" => Some(22),
+        "subway" => Some(23),
+        "narrow_gauge" => Some(24),
+        "rail" => Some(25),
+        _ => None,
     }
 }
 
@@ -148,7 +118,9 @@ pub fn street_paint_rank(kind: &str, link: bool, tunnel: bool, bridge: bool) -> 
     } else {
         1
     };
-    street_class_rank(kind) * 6 + elev * 2 + u8::from(!link)
+    street_class_rank(kind).expect("street paint rank requires a known kind") * 6
+        + elev * 2
+        + u8::from(!link)
 }
 
 #[cfg(test)]
@@ -234,7 +206,7 @@ mod tests {
             ("rail", 25),
         ] {
             assert!(is_known_street_kind(kind));
-            assert_eq!(street_class_rank(kind), rank);
+            assert_eq!(street_class_rank(kind), Some(rank));
         }
     }
 

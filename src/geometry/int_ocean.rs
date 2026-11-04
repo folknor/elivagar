@@ -278,6 +278,9 @@ pub(crate) fn rescale_shape(shape: &Shape, s: u8) -> Shape {
         if ring_is_valid(&ring) {
             orient_ring(&mut ring, i == 0);
             out.push(ring);
+        } else if i == 0 {
+            // Holes cannot survive independently of their original outer.
+            return Vec::new();
         }
     }
     if out.first().is_some_and(|outer| outer.len() >= 3) {
@@ -334,6 +337,9 @@ pub(crate) fn rescale_shape_pinned_into(
         if ring_is_valid(ring) {
             orient_ring_pinned(ring, flags_ring, i == 0);
             used += 1;
+        } else if i == 0 {
+            // Do not compact a surviving hole into the outer slot.
+            break;
         }
     }
     if !out.first().is_some_and(|outer| outer.len() >= 3) {
@@ -363,8 +369,7 @@ pub(crate) fn simplify_shape_dp(
 
     // In place: each surviving contour is rewritten inside its own
     // allocation and compacted forward; dead contours return to the ring
-    // pool. Orientation follows the ORIGINAL ring index (index 0 is the
-    // outer), matching the previous drain-and-rebuild semantics exactly.
+    // pool. The original outer must survive before any hole is retained.
     let mut write = 0usize;
     for read in 0..shape.len() {
         let pin_ring = pins.and_then(|p| p.get(read)).map(Vec::as_slice);
@@ -372,6 +377,9 @@ pub(crate) fn simplify_shape_dp(
         {
             shape.swap(write, read);
             write += 1;
+        } else if read == 0 {
+            scratch.recycle_contours_from(shape, 0);
+            return;
         }
     }
     scratch.recycle_contours_from(shape, write);
@@ -972,11 +980,15 @@ fn clean_shape_in_place(scratch: &mut IntEmitScratch, shape: &mut Shape, min_are
     for read in 0..shape.len() {
         clean_contour_in_place(&mut shape[read]);
         if ring_is_valid(&shape[read]) && true_area(&shape[read]) >= u128::from(min_area) {
-            orient_ring(&mut shape[read], write == 0);
+            orient_ring(&mut shape[read], read == 0);
             if write != read {
                 shape.swap(write, read);
             }
             write += 1;
+        } else if read == 0 {
+            // Overlay output still obeys the outer-then-holes contract.
+            scratch.recycle_contours_from(shape, 0);
+            return;
         }
     }
     scratch.recycle_contours_from(shape, write);
@@ -1302,6 +1314,57 @@ mod tests {
         let shape = vec![vec![p(0, 0), p(1, 0), p(8, 8), p(0, 8)]];
         let scaled = rescale_shape(&shape, 4);
         assert_eq!(scaled[0], vec![p(0, 0), p(1, 1), p(0, 1)]);
+    }
+
+    #[test]
+    fn rescale_drops_holes_when_original_outer_collapses() {
+        // A contract fixture: the second ring must never become an outer,
+        // regardless of whether the input holes were properly contained.
+        let shape = vec![
+            vec![p(0, 0), p(1, 0), p(1, 1), p(0, 1)],
+            vec![p(4, 4), p(4, 12), p(12, 12), p(12, 4)],
+        ];
+        assert!(rescale_shape(&shape, 2).is_empty());
+        let flags = vec![vec![false; 4], vec![true; 4]];
+        let mut scratch = IntEmitScratch::new();
+        let mut out = scratch.take_shape(shape.len());
+        let mut out_flags = Vec::new();
+        rescale_shape_pinned_into(&mut scratch, &shape, 2, &flags, &mut out, &mut out_flags);
+        assert!(out.is_empty());
+        assert!(out_flags.is_empty());
+    }
+
+    #[test]
+    fn simplifiers_drop_pinned_holes_when_original_outer_collapses() {
+        // Both rings are valid and the hole is contained. Only its vertices
+        // are pinned, so an aggressive DP can destroy the enclosing outer.
+        let shape = vec![
+            vec![p(0, 0), p(100, 0), p(100, 100), p(0, 100)],
+            vec![p(20, 20), p(20, 80), p(80, 80), p(80, 20)],
+        ];
+        let flags = vec![vec![false; 4], vec![true; 4]];
+        let mut scratch = IntEmitScratch::new();
+        let mut dp = shape.clone();
+        simplify_shape_dp(&mut scratch, &mut dp, 1000, Some(&flags));
+        assert!(dp.is_empty());
+
+        // VW has a three-vertex floor, so use a degenerate original outer
+        // to exercise its existing whole-shape rejection policy.
+        let mut vw = shape;
+        vw[0] = vec![p(0, 0), p(1, 0), p(2, 0)];
+        simplify_shape_vw(&mut scratch, &mut vw, 16, Some(&flags));
+        assert!(vw.is_empty());
+    }
+
+    #[test]
+    fn clean_shape_does_not_promote_holes_after_outer_area_rejection() {
+        // A malformed overlay result still must not promote its hole.
+        let mut shape = vec![
+            vec![p(0, 0), p(1, 0), p(1, 1), p(0, 1)],
+            vec![p(4, 4), p(4, 12), p(12, 12), p(12, 4)],
+        ];
+        clean_shape_in_place(&mut IntEmitScratch::new(), &mut shape, 2);
+        assert!(shape.is_empty());
     }
 
     #[test]

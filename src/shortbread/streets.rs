@@ -186,12 +186,8 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
     if !has_name(tags) && !has_ref {
         return;
     }
-    let min_zoom = match street_label_zoom(tags) {
-        Some(z) => z,
-        None => return,
-    };
-    let kind = match street_label_kind_raw(tags) {
-        Some(k) => k, // street_labels keeps raw kind (including _link suffix)
+    let (kind, min_zoom) = match street_label_kind_and_zoom(tags) {
+        Some(class) => class,
         None => return,
     };
     let mut attrs = smallvec![attr_dyn("kind", kind)];
@@ -225,42 +221,22 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
     });
 }
 
-fn street_label_kind_raw<'a>(tags: &Tags<'a>) -> Option<&'a str> {
-    if let Some(v) = tags.get("highway")
-        && highway_zoom(v).is_some()
-    {
-        return Some(v);
+fn street_label_kind_and_zoom<'a>(tags: &Tags<'a>) -> Option<(&'a str, u8)> {
+    if let Some(v) = tags.get("highway") {
+        return street_label_zoom_highway(v).map(|zoom| (v, zoom));
     }
     if let Some(v) = tags.get("aeroway")
-        && aeroway_zoom(v).is_some()
+        && let Some(zoom) = aeroway_zoom(v)
     {
-        return Some(v);
-    }
-    if let Some(v) = tags.get("railway")
-        && railway_zoom(tags, v).is_some()
-    {
-        return Some(v);
-    }
-    None
-}
-
-fn street_label_zoom(tags: &Tags<'_>) -> Option<u8> {
-    if let Some(v) = tags.get("highway") {
-        return street_label_zoom_highway(v);
+        return Some((v, zoom));
     }
     if let Some(v) = tags.get("railway") {
-        return match v {
+        let zoom = match v {
             "rail" | "narrow_gauge" | "light_rail" | "subway" | "tram" | "funicular"
             | "monorail" => Some(10),
             _ => None,
         };
-    }
-    if let Some(v) = tags.get("aeroway") {
-        return match v {
-            "runway" => Some(11),
-            "taxiway" => Some(13),
-            _ => None,
-        };
+        return zoom.map(|zoom| (v, zoom));
     }
     None
 }

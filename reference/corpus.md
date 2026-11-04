@@ -118,15 +118,20 @@ loud, never silent.
 ## The contract
 
 `contract.json` is written at bless time from the archive's provenance
-block: the input identity (PBF xxh128, variant features), the full config
-contract (profile, zooms, tile format/compression, seam/fanout/simplify,
-ocean artifact key including OCEAN_POLICY_VERSION), the build block, and
-- when the corpus has a manifest - the style file path and hash. `check`
-compares contract before content and refuses a mismatch with the field
-named. Input NAMES and the build block are diagnostic only, never gated:
-renaming a PBF warns, a differing build commit is recorded not refused.
-This mirrors the provenance rule that `Input` plus `Config` is the
-comparability contract while `Build`/`Effective`/`Resumed` are
+block: the input identity (PBF xxh128 and variant features), the full config
+contract (profile, zooms, tile format and compression policy, fanout,
+simplification, and ocean artifact key including OCEAN_POLICY_VERSION), and
+the input name plus the build block when present for diagnosis. When the
+corpus has a manifest, the style file path and hash are also recorded.
+`check` compares the input identity, config, and style hash before content and
+refuses a mismatch with the field named. The input name and build block are
+recorded but never equality-gated: renaming a PBF warns, a differing build
+commit is recorded not refused. Elivagar's provenance extractor accepts a
+missing build block as a complete input/config contract. Brokkr's separate
+corpus contract reader still requires that member, so archives omitting it
+are currently refused by the gate. Bless still rejects an archive explicitly
+marked as built from a dirty tree. This mirrors the provenance rule that
+`Input` plus `Config` is the comparability contract while `Build` is
 diagnostic.
 
 The strictness is a feature: an output-neutral config-schema change

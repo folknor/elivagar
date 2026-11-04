@@ -21,6 +21,22 @@ const MVT_COORD_ABS_LIMIT: i64 = MVT_EXTENT * 32; // 131072
 const MVT_DELTA_LIMIT: i64 = MVT_EXTENT * 16; // 65536
 const MVT_DELTA_LIMIT_SEAM: i64 = MVT_EXTENT * 4; // 16384
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ValidationClass {
+    z: u8,
+    seam: bool,
+}
+
+impl ValidationClass {
+    fn for_tile(z: u8, x: u32) -> Self {
+        let max_x = (1_u32 << z).saturating_sub(1);
+        Self {
+            z,
+            seam: x == 0 || x == max_x,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -236,8 +252,7 @@ pub fn verify_opts(path: &Path, geometry_stats: bool) -> Result<VerifyReport, Ve
 }
 
 /// Verify with optional unique-payload traversal. The unique mode validates a
-/// blob once per `(offset, length, zoom, seam)` while retaining addressed-tile
-/// accounting.
+/// blob once per zoom and seam class while retaining addressed-tile accounting.
 #[allow(clippy::too_many_lines)]
 pub fn verify_opts_unique(
     path: &Path,
@@ -322,7 +337,7 @@ pub fn verify_opts_unique(
     let mut tile_errors: Vec<String> = Vec::new();
     let mut layers_observed: BTreeSet<String> = BTreeSet::new();
     let mut stats: Option<GeometryStats> = geometry_stats.then(GeometryStats::default);
-    let mut seen_payloads: FxHashSet<(u64, u32, u8, bool)> = FxHashSet::default();
+    let mut seen_payloads: FxHashSet<(u64, u32, ValidationClass)> = FxHashSet::default();
     let mut unique_blobs: FxHashSet<(u64, u32)> = FxHashSet::default();
     let mut addressed_per_zoom = [0_u64; 15];
 
@@ -340,10 +355,12 @@ pub fn verify_opts_unique(
             if let Some(addressed) = addressed_per_zoom.get_mut(z as usize) {
                 *addressed += 1;
             }
-            let seam = x == 0 || x == (1_u32 << z).saturating_sub(1);
-            if unique_payloads && seen_payloads.insert((run.offset, run.length, z, seam)) {
-                unique_blobs.insert((run.offset, run.length));
-                unique_tiles.push((tile_id, z, x, y));
+            if unique_payloads {
+                let class = ValidationClass::for_tile(z, x);
+                if seen_payloads.insert((run.offset, run.length, class)) {
+                    unique_blobs.insert((run.offset, run.length));
+                    unique_tiles.push((tile_id, z, x, y, class));
+                }
             }
         }
         if unique_payloads && unique_tiles.is_empty() {
@@ -362,7 +379,11 @@ pub fn verify_opts_unique(
             Err(e) => {
                 let error_tiles: Box<dyn Iterator<Item = (u64, u8, u32, u32)>> = if unique_payloads
                 {
-                    Box::new(unique_tiles.iter().copied())
+                    Box::new(
+                        unique_tiles
+                            .iter()
+                            .map(|&(tile_id, z, x, y, _class)| (tile_id, z, x, y)),
+                    )
                 } else {
                     Box::new((run.tile_id..run_end).map(|tile_id| {
                         let (z, x, y) = tile_id_to_zxy(tile_id);
@@ -380,19 +401,21 @@ pub fn verify_opts_unique(
             }
         };
 
-        // Geometry validation of the shared blob depends only on (z, seam).
+        // Geometry validation of the shared blob depends only on its class.
         // Default traversal replays that outcome for every addressed tile;
         // unique mode selects one representative of each validation group.
-        let mut geometry_outcomes: FxHashMap<(u8, bool), Option<String>> = FxHashMap::default();
-        let validation_tiles: Box<dyn Iterator<Item = (u64, u8, u32, u32)>> = if unique_payloads {
-            Box::new(unique_tiles.into_iter())
-        } else {
-            Box::new((run.tile_id..run_end).map(|tile_id| {
-                let (z, x, y) = tile_id_to_zxy(tile_id);
-                (tile_id, z, x, y)
-            }))
-        };
-        for (_tile_id, z, x, y) in validation_tiles {
+        let mut geometry_outcomes: FxHashMap<ValidationClass, Option<String>> =
+            FxHashMap::default();
+        let validation_tiles: Box<dyn Iterator<Item = (u64, u8, u32, u32, ValidationClass)>> =
+            if unique_payloads {
+                Box::new(unique_tiles.into_iter())
+            } else {
+                Box::new((run.tile_id..run_end).map(|tile_id| {
+                    let (z, x, y) = tile_id_to_zxy(tile_id);
+                    (tile_id, z, x, y, ValidationClass::for_tile(z, x))
+                }))
+            };
+        for (_tile_id, z, x, y, class) in validation_tiles {
             if tile_errors.len() >= MAX_TILE_ERRORS {
                 break;
             }
@@ -413,11 +436,10 @@ pub fn verify_opts_unique(
                     tile_errors.push(format!("z{z}/{x}/{y}: MVT decode failed: {e}"));
                 }
             }
-            let seam = x == 0 || x == (1u32 << z).saturating_sub(1);
             if tile_errors.len() < MAX_TILE_ERRORS {
                 let outcome = geometry_outcomes
-                    .entry((z, seam))
-                    .or_insert_with(|| validate_mvt_geometry(&decompressed, z, x).err());
+                    .entry(class)
+                    .or_insert_with(|| validate_mvt_geometry(&decompressed, class).err());
                 if let Some(msg) = outcome {
                     tile_errors.push(format!("z{z}/{x}/{y}: {msg}"));
                 }
@@ -526,7 +548,9 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
         let Ok(commands) = decode_packed_varints(gb) else {
             continue;
         };
-        let rings = crate::geometry::decode_mvt_polygon(&commands);
+        let Ok(rings) = crate::geometry::mvt_decode::try_decode_mvt_polygon(&commands) else {
+            continue;
+        };
         if rings.is_empty() {
             continue;
         }
@@ -581,14 +605,14 @@ fn is_full_tile_rect(ring: &[(i32, i32)]) -> bool {
     all_corners && min_x <= 0 && min_y <= 0 && max_x >= ext && max_y >= ext
 }
 
-fn validate_mvt_geometry(data: &[u8], z: u8, x: u32) -> Result<(), String> {
+fn validate_mvt_geometry(data: &[u8], class: ValidationClass) -> Result<(), String> {
     let mut tile_cursor = Cursor::new(data);
     while let Ok(Some((field, wire_type))) = tile_cursor.read_tag() {
         if field == 3 && wire_type == WIRE_LEN {
             let layer = tile_cursor
                 .read_len_delimited()
                 .map_err(|e| format!("layer decode failed: {e}"))?;
-            validate_mvt_layer_geometry(layer, z, x)?;
+            validate_mvt_layer_geometry(layer, class)?;
         } else {
             tile_cursor
                 .skip_field(wire_type)
@@ -598,7 +622,7 @@ fn validate_mvt_geometry(data: &[u8], z: u8, x: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_mvt_layer_geometry(layer: &[u8], z: u8, x: u32) -> Result<(), String> {
+fn validate_mvt_layer_geometry(layer: &[u8], class: ValidationClass) -> Result<(), String> {
     let mut layer_cursor = Cursor::new(layer);
     let mut layer_name = None;
     let mut features = Vec::new();
@@ -645,10 +669,10 @@ fn validate_mvt_layer_geometry(layer: &[u8], z: u8, x: u32) -> Result<(), String
     }
     let layer_name = layer_name.unwrap_or("");
     for (feat_idx, feature) in features.iter().enumerate() {
-        validate_mvt_feature_geometry(feature, z, x)
+        validate_mvt_feature_geometry(feature, class)
             .map_err(|e| format!("[{layer_name}] feat {feat_idx}: {e}"))?;
     }
-    validate_paint_order(layer_name, &features, &keys, &values, z)
+    validate_paint_order(layer_name, &features, &keys, &values, class.z)
         .map_err(|e| format!("[{layer_name}] {e}"))?;
     Ok(())
 }
@@ -725,12 +749,8 @@ fn validate_paint_order<'a>(
                 }
                 paint_order::land_paint_rank(kind)
             }
-            "streets" if z < 11 => {
-                if !paint_order::is_known_street_kind(kind) {
-                    return Err(format!("feat {feature_idx}: unknown street kind {kind:?}"));
-                }
-                paint_order::street_class_rank(kind)
-            }
+            "streets" if z < 11 => paint_order::street_class_rank(kind)
+                .ok_or_else(|| format!("feat {feature_idx}: unknown street kind {kind:?}"))?,
             "streets" | "street_polygons" => {
                 if !paint_order::is_known_street_kind(kind) {
                     return Err(format!("feat {feature_idx}: unknown street kind {kind:?}"));
@@ -827,7 +847,7 @@ fn decode_feature_attrs<'a>(
     Ok(attrs)
 }
 
-fn validate_mvt_feature_geometry(feature: &[u8], z: u8, x: u32) -> Result<(), String> {
+fn validate_mvt_feature_geometry(feature: &[u8], class: ValidationClass) -> Result<(), String> {
     let mut geom_type: u64 = 0;
     let mut geom_bytes: Option<&[u8]> = None;
     let mut feature_cursor = Cursor::new(feature);
@@ -865,7 +885,7 @@ fn validate_mvt_feature_geometry(feature: &[u8], z: u8, x: u32) -> Result<(), St
     };
     let raw_byte_len = geom_bytes.len();
     let commands = decode_packed_varints(geom_bytes)?;
-    validate_geometry_commands(&commands, geom_type, z, x, raw_byte_len)
+    validate_geometry_commands(&commands, geom_type, class, raw_byte_len)
 }
 
 fn decode_packed_varints(data: &[u8]) -> Result<Vec<u32>, String> {
@@ -929,21 +949,17 @@ fn consume_geometry_point(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_geometry_commands(
     commands: &[u32],
     geom_type: u64,
-    z: u8,
-    x: u32,
+    class: ValidationClass,
     raw_byte_len: usize,
 ) -> Result<(), String> {
     if commands.is_empty() {
         return Err("feature has empty geometry command stream".to_string());
     }
-    let seam_tile = {
-        let max_x = (1u32 << z).saturating_sub(1);
-        x == 0 || x == max_x
-    };
-    let delta_limit = if seam_tile {
+    let delta_limit = if class.seam {
         MVT_DELTA_LIMIT_SEAM
     } else {
         MVT_DELTA_LIMIT
@@ -958,7 +974,9 @@ fn validate_geometry_commands(
     let mut cx: i64 = 0;
     let mut cy: i64 = 0;
     let mut ring_points = 0usize;
-    let mut expect_moveto = true; // first command must be MoveTo
+    let mut expect_linestring_moveto = true;
+    let mut polygon_phase = 0u8; // 0 = MoveTo, 1 = LineTo, 2 = ClosePath
+    let mut point_moveto_seen = false;
     while i < commands.len() {
         let op = commands[i];
         i += 1;
@@ -973,14 +991,46 @@ fn validate_geometry_commands(
                 if count > max_count {
                     return Err(format!("MoveTo count too large ({count} > {max_count})"));
                 }
-                if geom_type == 3 && count != 1 {
-                    return Err("polygon ring MoveTo count must be 1 (spec 4.3.4.4)".to_string());
+                match geom_type {
+                    1 => {
+                        if point_moveto_seen {
+                            return Err(
+                                "point geometry must use a single MoveTo command (spec 4.3.4.2)"
+                                    .to_string(),
+                            );
+                        }
+                        point_moveto_seen = true;
+                    }
+                    2 => {
+                        if count != 1 {
+                            return Err(
+                                "linestring MoveTo count must be 1 (spec 4.3.4.3)".to_string()
+                            );
+                        }
+                        if !expect_linestring_moveto {
+                            return Err(
+                                "linestring MoveTo must follow a LineTo (spec 4.3.4.3)".to_string()
+                            );
+                        }
+                        expect_linestring_moveto = false;
+                    }
+                    3 => {
+                        if count != 1 {
+                            return Err(
+                                "polygon ring MoveTo count must be 1 (spec 4.3.4.4)".to_string()
+                            );
+                        }
+                        if polygon_phase != 0 {
+                            return Err(if polygon_phase == 1 {
+                                "polygon ring missing LineTo".to_string()
+                            } else {
+                                "polygon ring missing ClosePath".to_string()
+                            });
+                        }
+                        polygon_phase = 1;
+                    }
+                    _ => {}
                 }
-                if geom_type == 2 && count != 1 && !expect_moveto {
-                    // Multi-linestring: subsequent MoveTo must also be 1
-                    return Err("linestring MoveTo count must be 1 (spec 4.3.4.3)".to_string());
-                }
-                expect_moveto = false;
                 for _ in 0..count {
                     consume_geometry_point(commands, &mut i, &mut cx, &mut cy, delta_limit)?;
                     if geom_type == 3 {
@@ -992,6 +1042,36 @@ fn validate_geometry_commands(
                 // LineTo
                 if count > max_count {
                     return Err(format!("LineTo count too large ({count} > {max_count})"));
+                }
+                match geom_type {
+                    1 => {
+                        return Err(
+                            "LineTo is invalid for point geometry (spec 4.3.4.2)".to_string()
+                        );
+                    }
+                    2 => {
+                        if expect_linestring_moveto {
+                            return Err(
+                                "linestring LineTo must follow MoveTo (spec 4.3.4.3)".to_string()
+                            );
+                        }
+                        expect_linestring_moveto = true;
+                    }
+                    3 => {
+                        if polygon_phase != 1 {
+                            return Err(
+                                "polygon LineTo must follow MoveTo (spec 4.3.4.4)".to_string()
+                            );
+                        }
+                        if count <= 1 {
+                            return Err(
+                                "polygon ring LineTo count must be greater than 1 (spec 4.3.4.4)"
+                                    .to_string(),
+                            );
+                        }
+                        polygon_phase = 2;
+                    }
+                    _ => {}
                 }
                 for _ in 0..count {
                     consume_geometry_point(commands, &mut i, &mut cx, &mut cy, delta_limit)?;
@@ -1010,17 +1090,28 @@ fn validate_geometry_commands(
                 }
                 if ring_points < 3 {
                     return Err(format!(
-                        "polygon ring has too few points ({ring_points}, need ≥3)"
+                        "polygon ring has too few points ({ring_points}, need >=3)"
                     ));
                 }
+                if polygon_phase != 2 {
+                    return Err("polygon ClosePath must follow LineTo (spec 4.3.4.4)".to_string());
+                }
                 ring_points = 0;
+                polygon_phase = 0;
             }
             _ => return Err(format!("unknown geometry command id {id}")),
         }
     }
 
-    if geom_type == 3 && ring_points != 0 {
-        return Err("polygon ring missing ClosePath".to_string());
+    if geom_type == 2 && !expect_linestring_moveto {
+        return Err("linestring MoveTo missing LineTo (spec 4.3.4.3)".to_string());
+    }
+    if geom_type == 3 {
+        match polygon_phase {
+            1 => return Err("polygon ring missing LineTo".to_string()),
+            2 => return Err("polygon ring missing ClosePath".to_string()),
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -1099,7 +1190,13 @@ fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
         let Ok(commands) = decode_packed_varints(gb) else {
             continue;
         };
-        let rings = crate::geometry::decode_mvt_polygon(&commands);
+        let rings = match crate::geometry::mvt_decode::try_decode_mvt_polygon(&commands) {
+            Ok(rings) => rings,
+            Err(error) => {
+                problems.push(format!("ocean feat {fi} polygon decode failed: {error}"));
+                continue;
+            }
+        };
         for (ri, ring) in rings.iter().enumerate() {
             if ring.len() >= 4 && !crate::geometry::ring_is_simple(ring) {
                 problems.push(format!(
@@ -1215,22 +1312,77 @@ mod tests {
 
     #[test]
     fn geometry_rejects_unknown_command_id() {
-        let err = validate_geometry_commands(&[cmd(4, 1)], 2, 10, 1, 1000)
-            .expect_err("unknown command id should fail");
+        let err =
+            validate_geometry_commands(&[cmd(4, 1)], 2, ValidationClass::for_tile(10, 1), 1000)
+                .expect_err("unknown command id should fail");
         assert!(err.contains("unknown geometry command id 4"));
     }
 
     #[test]
     fn geometry_rejects_zero_repeat_count() {
-        let err = validate_geometry_commands(&[cmd(1, 0)], 2, 10, 1, 1000)
-            .expect_err("zero repeat count should fail");
+        let err =
+            validate_geometry_commands(&[cmd(1, 0)], 2, ValidationClass::for_tile(10, 1), 1000)
+                .expect_err("zero repeat count should fail");
         assert!(err.contains("zero repeat count"));
+    }
+
+    #[test]
+    fn geometry_rejects_linestring_line_to_before_move_to() {
+        let commands = vec![cmd(2, 1), zz(1), zz(0)];
+        let err = validate_geometry_commands(&commands, 2, ValidationClass::for_tile(10, 1), 1000)
+            .expect_err("LineTo without MoveTo should fail");
+        assert!(err.contains("LineTo must follow MoveTo"));
+    }
+
+    #[test]
+    fn geometry_rejects_linestring_moveto_count_not_one() {
+        let commands = vec![cmd(1, 2), zz(0), zz(0), zz(1), zz(1)];
+        let err = validate_geometry_commands(&commands, 2, ValidationClass::for_tile(10, 1), 1000)
+            .expect_err("linestring MoveTo count other than one should fail");
+        assert!(err.contains("MoveTo count must be 1"));
+    }
+
+    #[test]
+    fn geometry_accepts_repeated_linestring_command_sequences() {
+        let commands = vec![
+            cmd(1, 1),
+            zz(0),
+            zz(0),
+            cmd(2, 1),
+            zz(1),
+            zz(0),
+            cmd(1, 1),
+            zz(1),
+            zz(1),
+            cmd(2, 1),
+            zz(0),
+            zz(1),
+        ];
+        validate_geometry_commands(&commands, 2, ValidationClass::for_tile(10, 1), 1000)
+            .expect("multilinestring command sequences should pass");
+    }
+
+    #[test]
+    fn checked_polygon_decoder_rejects_coordinate_overflow() {
+        let commands = vec![
+            cmd(1, 1),
+            u32::MAX - 1,
+            zz(0),
+            cmd(2, 2),
+            zz(1),
+            zz(0),
+            zz(1),
+            zz(0),
+        ];
+        let err = crate::geometry::mvt_decode::try_decode_mvt_polygon(&commands)
+            .expect_err("coordinate addition overflow should fail");
+        assert!(err.contains("coordinate overflows i32"));
     }
 
     #[test]
     fn geometry_rejects_polygon_moveto_count_not_one() {
         let commands = vec![cmd(1, 2), zz(0), zz(0), zz(1), zz(1)];
-        let err = validate_geometry_commands(&commands, 3, 10, 1, 1000)
+        let err = validate_geometry_commands(&commands, 3, ValidationClass::for_tile(10, 1), 1000)
             .expect_err("polygon MoveTo count != 1 should fail");
         assert!(err.contains("MoveTo count must be 1"));
     }
@@ -1238,7 +1390,7 @@ mod tests {
     #[test]
     fn geometry_rejects_closepath_in_non_polygon() {
         let commands = vec![cmd(1, 1), zz(0), zz(0), cmd(7, 1)];
-        let err = validate_geometry_commands(&commands, 2, 10, 1, 1000)
+        let err = validate_geometry_commands(&commands, 2, ValidationClass::for_tile(10, 1), 1000)
             .expect_err("ClosePath in non-polygon should fail");
         assert!(err.contains("ClosePath in non-polygon"));
     }
@@ -1246,7 +1398,7 @@ mod tests {
     #[test]
     fn geometry_rejects_polygon_closepath_without_enough_points() {
         let commands = vec![cmd(1, 1), zz(0), zz(0), cmd(7, 1)];
-        let err = validate_geometry_commands(&commands, 3, 10, 1, 1000)
+        let err = validate_geometry_commands(&commands, 3, ValidationClass::for_tile(10, 1), 1000)
             .expect_err("polygon ClosePath without enough points should fail");
         assert!(err.contains("too few points"));
     }
@@ -1263,7 +1415,7 @@ mod tests {
             zz(0),
             zz(1),
         ];
-        let err = validate_geometry_commands(&commands, 3, 10, 1, 1000)
+        let err = validate_geometry_commands(&commands, 3, ValidationClass::for_tile(10, 1), 1000)
             .expect_err("polygon without ClosePath should fail");
         assert!(err.contains("missing ClosePath"));
     }
@@ -1284,7 +1436,7 @@ mod tests {
             zz(65_536),
             zz(0),
         ];
-        let err = validate_geometry_commands(&commands, 2, 10, 1, 1000)
+        let err = validate_geometry_commands(&commands, 2, ValidationClass::for_tile(10, 1), 1000)
             .expect_err("absolute coordinate limit should fail");
         assert!(err.contains("exceeds absolute limit"));
     }
@@ -1295,11 +1447,11 @@ mod tests {
         let commands = vec![cmd(1, 1), zz(0), zz(0), cmd(2, 1), zz(20_000), zz(0)];
 
         // Non-seam tile passes.
-        validate_geometry_commands(&commands, 2, 4, 1, 1000)
+        validate_geometry_commands(&commands, 2, ValidationClass::for_tile(4, 1), 1000)
             .expect("non-seam tile should allow 20k delta");
 
         // Seam tile fails.
-        let err = validate_geometry_commands(&commands, 2, 4, 0, 1000)
+        let err = validate_geometry_commands(&commands, 2, ValidationClass::for_tile(4, 0), 1000)
             .expect_err("seam tile should reject 20k delta");
         assert!(err.contains("suspicious geometry delta"));
         assert!(err.contains(&MVT_DELTA_LIMIT_SEAM.to_string()));
@@ -1411,7 +1563,7 @@ mod tests {
     #[test]
     fn order_check_flags_out_of_order_land_kinds() {
         let tile = land_tile(&["forest", "residential"]);
-        let err = validate_mvt_geometry(&tile, 11, 1)
+        let err = validate_mvt_geometry(&tile, ValidationClass::for_tile(11, 1))
             .expect_err("forest before residential must fail paint order validation");
         assert!(err.contains("paint rank 0 follows 5"));
     }
@@ -1428,7 +1580,8 @@ mod tests {
             tags: vec![(key, value)],
         });
         let tile = encode_tile(&[&layer]);
-        let err = validate_mvt_geometry(&tile, 11, 1).expect_err("mistyped kind must fail closed");
+        let err = validate_mvt_geometry(&tile, ValidationClass::for_tile(11, 1))
+            .expect_err("mistyped kind must fail closed");
         assert!(err.contains("kind attribute is not a string"));
     }
 }

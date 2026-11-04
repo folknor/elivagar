@@ -606,6 +606,113 @@ fn add_run_records_one_blob_and_all_addressed_tiles() {
 }
 
 #[test]
+fn add_tile_rejects_non_increasing_ids_without_mutating_writer() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 2,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+    let mut writer = PmtilesWriter::new(config);
+    writer.add_tile(1, 0, 0, b"shared").expect("first tile");
+
+    let error = writer
+        .add_tile(1, 0, 0, b"duplicate")
+        .expect_err("a duplicate tile ID must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let error = writer
+        .add_tile(0, 0, 0, b"out of order")
+        .expect_err("a lower tile ID must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(writer.tile_count(), 1);
+    assert_eq!(writer.unique_tile_count(), 1);
+
+    assert!(
+        !writer
+            .add_tile(1, 0, 1, b"shared")
+            .expect("next tile after rejected input")
+    );
+    let entries = writer.collect_dir_entries().expect("directory entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].run_length, 2);
+}
+
+#[test]
+fn add_run_rejects_overlapping_ids_without_mutating_writer() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 2,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+    let mut writer = PmtilesWriter::new(config);
+    let base = xy_to_tile_id(1, 0, 0);
+    writer.add_run(base, 2, b"shared").expect("first run");
+
+    let error = writer
+        .add_run(base + 1, 1, b"overlap")
+        .expect_err("a run overlapping the previous run must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(writer.tile_count(), 2);
+    assert_eq!(writer.unique_tile_count(), 1);
+
+    assert!(
+        !writer
+            .add_run(base + 2, 1, b"shared")
+            .expect("next run after rejected input")
+    );
+    let entries = writer.collect_dir_entries().expect("directory entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].run_length, 3);
+}
+
+#[test]
+fn add_run_rejects_tile_id_overflow_without_mutating_writer() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 2,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+    let mut writer = PmtilesWriter::new(config);
+
+    for run_length in [1, 2] {
+        let error = writer
+            .add_run(u64::MAX, run_length, b"overflow")
+            .expect_err("the exclusive tile ID run end must not overflow");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+    assert_eq!(writer.tile_count(), 0);
+    assert_eq!(writer.unique_tile_count(), 0);
+}
+
+#[test]
+fn add_run_counts_dedup_candidate_rejections() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 2,
+        bounds: (-180.0, -85.0, 180.0, 85.0),
+        center: (0.0, 0.0, 0),
+    };
+    let mut writer = PmtilesWriter::new(config);
+    let data = gzip_compress(b"run fingerprint").expect("gzip payload");
+    let (hash, fingerprint) = PmtilesWriter::compute_dedup_hashes(&data);
+    let length = u32::try_from(data.len()).expect("compressed payload length fits");
+    writer.inject_dedup_entry(hash, 0, length + 1, fingerprint);
+    writer.inject_dedup_entry(hash, 0, length, fingerprint ^ 1);
+
+    assert!(
+        writer
+            .add_run(xy_to_tile_id(1, 0, 0), 2, &data)
+            .expect("add run")
+    );
+    assert_eq!(writer.dedup_stats.candidates, 1);
+    assert_eq!(writer.dedup_stats.reject_len_mismatch, 1);
+    assert_eq!(writer.dedup_stats.reject_fp_mismatch, 1);
+    assert_eq!(writer.dedup_stats.tiles_reused, 1);
+}
+
+#[test]
 fn add_run_matches_expanded_add_tile_below_dedup_cap() {
     let run_config = PmtilesConfig {
         min_zoom: 0,
@@ -702,7 +809,7 @@ fn test_dedup_cap_overflow() {
     writer.add_tile(1, 0, 1, &data_c).unwrap(); // skipped (cap=2)
 
     assert_eq!(writer.dedup_stats.insert_skipped_cap, 1);
-    assert_eq!(writer.dedup_count, 2);
+    assert_eq!(writer.dedup.entry_count(), 2);
 
     // Copy of tile A → should still dedup (it's in the map).
     let dup_a = writer.add_tile(1, 1, 1, &data_a).unwrap();

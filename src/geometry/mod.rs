@@ -15,6 +15,7 @@ pub mod tiles;
 
 // Re-export everything at the geometry:: level so callers don't change.
 pub use clip::*;
+#[cfg(test)]
 pub use mvt_decode::*;
 pub use projection::*;
 pub use simplify::*;

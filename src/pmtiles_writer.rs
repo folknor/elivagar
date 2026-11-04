@@ -38,7 +38,7 @@
 //! };
 //! let mut writer = PmtilesWriter::new(config);
 //!
-//! // Tiles must be added in Hilbert order.
+//! // Tile IDs must be strictly increasing in Hilbert order.
 //! let gzipped_mvt = vec![0u8; 100]; // pre-compressed MVT data
 //! writer.add_tile(0, 0, 0, &gzipped_mvt).expect("add tile");
 //!
@@ -175,6 +175,109 @@ pub struct DedupStats {
     pub hash_bucket_collisions: u64,
 }
 
+impl DedupStats {
+    fn record_reuse(&mut self, length: u32, tile_count: u64) {
+        self.tiles_reused += tile_count;
+        self.bytes_saved += u64::from(length) * tile_count;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DedupKey {
+    hash: u64,
+    length: u32,
+    fingerprint: u64,
+}
+
+/// One payload equality index shared by individual tiles and tile runs.
+struct DedupIndex {
+    buckets: FxHashMap<u64, Vec<(u64, u32, u64)>>,
+    entries: usize,
+    cap: usize,
+}
+
+impl DedupIndex {
+    fn new(cap: usize) -> Self {
+        Self {
+            buckets: FxHashMap::default(),
+            entries: 0,
+            cap,
+        }
+    }
+
+    fn lookup(&self, data: &[u8], stats: &mut DedupStats) -> io::Result<(DedupKey, Option<u64>)> {
+        let length = u32::try_from(data.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "tile data exceeds 4 GB"))?;
+        let (hash, fingerprint) = dedup_hashes(data);
+        let key = DedupKey {
+            hash,
+            length,
+            fingerprint,
+        };
+
+        if let Some(candidates) = self.buckets.get(&hash) {
+            stats.candidates += 1;
+            for &(offset, candidate_length, candidate_fingerprint) in candidates {
+                if candidate_length != length {
+                    stats.reject_len_mismatch += 1;
+                } else if candidate_fingerprint != fingerprint {
+                    stats.reject_fp_mismatch += 1;
+                } else {
+                    return Ok((key, Some(offset)));
+                }
+            }
+        }
+
+        Ok((key, None))
+    }
+
+    fn insert(&mut self, key: DedupKey, offset: u64, stats: &mut DedupStats) {
+        if self.entries < self.cap {
+            let bucket = self.buckets.entry(key.hash).or_default();
+            if !bucket.is_empty() {
+                stats.hash_bucket_collisions += 1;
+            }
+            bucket.push((offset, key.length, key.fingerprint));
+            self.entries += 1;
+        } else {
+            stats.insert_skipped_cap += 1;
+        }
+    }
+
+    fn entry_count(&self) -> usize {
+        self.entries
+    }
+
+    fn bucket_count(&self) -> usize {
+        self.buckets.len()
+    }
+
+    fn release(&mut self) {
+        self.buckets = FxHashMap::default();
+        self.entries = 0;
+    }
+
+    #[cfg(test)]
+    fn inject(&mut self, hash: u64, offset: u64, length: u32, fingerprint: u64) {
+        self.buckets
+            .entry(hash)
+            .or_default()
+            .push((offset, length, fingerprint));
+        self.entries += 1;
+    }
+}
+
+fn dedup_hashes(data: &[u8]) -> (u64, u64) {
+    let mut primary = DefaultHasher::new();
+    data.hash(&mut primary);
+
+    let mut fingerprint = DefaultHasher::new();
+    DEDUP_FP2_SALT.hash(&mut fingerprint);
+    data.hash(&mut fingerprint);
+
+    (primary.finish(), fingerprint.finish())
+}
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -225,7 +328,8 @@ enum TileBlob {
 
 /// Accumulates tiles and writes a PMTiles v3 archive.
 ///
-/// Tiles must be added in Hilbert order via [`add_tile()`](Self::add_tile).
+/// Tile IDs must increase strictly in Hilbert order across calls to
+/// [`add_tile()`](Self::add_tile) and [`add_run()`](Self::add_run).
 /// Duplicate tile contents are automatically deduplicated using dual SipHash
 /// fingerprints plus compressed length matching.
 ///
@@ -254,17 +358,14 @@ pub struct PmtilesWriter {
     current_run: Option<DirEntry>,
     /// Directory entries (in-memory or streamed to disk).
     dir_store: DirStore,
-    /// Primary hash → Vec<(offset, length, fingerprint2)> for dedup.
-    /// Bucketed so primary-hash collisions don't silently evict entries.
-    dedup: FxHashMap<u64, Vec<(u64, u32, u64)>>,
-    /// Total entries across all dedup buckets.
-    dedup_count: usize,
-    /// Maximum dedup entries (defaults to MAX_DEDUP_ENTRIES).
-    dedup_cap: usize,
+    /// Shared payload equality index for individual tiles and tile runs.
+    dedup: DedupIndex,
     /// Number of unique tile contents (after dedup).
     unique_count: u64,
     /// Dedup behavior counters.
     dedup_stats: DedupStats,
+    /// Last tile ID accepted, including the end of an accepted run.
+    last_tile_id: Option<u64>,
 }
 
 impl PmtilesWriter {
@@ -347,11 +448,10 @@ impl PmtilesWriter {
             num_addressed: 0,
             current_run: None,
             dir_store: DirStore::Memory(Vec::new()),
-            dedup: FxHashMap::default(),
-            dedup_count: 0,
-            dedup_cap: MAX_DEDUP_ENTRIES,
+            dedup: DedupIndex::new(MAX_DEDUP_ENTRIES),
             unique_count: 0,
             dedup_stats: DedupStats::default(),
+            last_tile_id: None,
         }
     }
 
@@ -403,71 +503,39 @@ impl PmtilesWriter {
                 path: dir_path,
                 count: 0,
             },
-            dedup: FxHashMap::default(),
-            dedup_count: 0,
-            dedup_cap: MAX_DEDUP_ENTRIES,
+            dedup: DedupIndex::new(MAX_DEDUP_ENTRIES),
             unique_count: 0,
             dedup_stats: DedupStats::default(),
+            last_tile_id: None,
         })
     }
 
     /// Add a tile. `data` must already be gzip-compressed.
-    /// Tiles MUST be added in Hilbert order (tile_id monotonically non-decreasing).
+    /// Tile IDs MUST be strictly increasing in Hilbert order.
     /// Returns `true` if unique, `false` if deduplicated.
     ///
     /// # Errors
-    /// Returns `io::Error` if writing to the tile blob file fails (streaming mode).
-    #[allow(clippy::cast_possible_truncation)]
+    /// Returns `io::Error` if the tile ID is not increasing, the payload is
+    /// too large, or a streaming file write fails.
     #[hotpath::measure]
     pub fn add_tile(&mut self, z: u8, x: u32, y: u32, data: &[u8]) -> io::Result<bool> {
-        if data.len() > u32::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "tile data exceeds 4 GB",
-            ));
-        }
         let tile_id = xy_to_tile_id(z, x, y);
+        self.check_tile_order(tile_id)?;
+        let (key, duplicate_offset) = self.dedup.lookup(data, &mut self.dedup_stats)?;
 
-        // Dual-fingerprint dedup: two salted SipHash passes plus length check.
-        // Dramatically reduces false-dedup risk compared to single hash + length.
-        let mut h1 = DefaultHasher::new();
-        data.hash(&mut h1);
-        let hash1 = h1.finish();
-
-        let mut h2 = DefaultHasher::new();
-        DEDUP_FP2_SALT.hash(&mut h2);
-        data.hash(&mut h2);
-        let hash2 = h2.finish();
-
-        let data_len = data.len() as u32;
-
-        if let Some(candidates) = self.dedup.get(&hash1) {
-            self.dedup_stats.candidates += 1;
-            let mut matched = false;
-            for &(dup_offset, dup_length, dup_fp2) in candidates {
-                if dup_length == data_len {
-                    if dup_fp2 == hash2 {
-                        // All three match: primary hash, length, secondary fingerprint.
-                        self.dedup_stats.tiles_reused += 1;
-                        self.dedup_stats.bytes_saved += u64::from(dup_length);
-                        self.push_dir_entry(tile_id, dup_offset, dup_length)?;
-                        matched = true;
-                        break;
-                    }
-                    self.dedup_stats.reject_fp_mismatch += 1;
-                } else {
-                    self.dedup_stats.reject_len_mismatch += 1;
-                }
-            }
-            if matched {
-                return Ok(false);
-            }
+        if let Some(offset) = duplicate_offset {
+            self.dedup_stats.record_reuse(key.length, 1);
+            self.push_dir_entry(tile_id, offset, key.length)?;
+            self.last_tile_id = Some(tile_id);
+            return Ok(false);
         }
 
         let offset;
         match &mut self.blob {
             TileBlob::Memory(vec) => {
-                offset = vec.len() as u64;
+                offset = u64::try_from(vec.len()).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "tile blob offset exceeds u64")
+                })?;
                 vec.extend_from_slice(data);
             }
             TileBlob::File {
@@ -477,27 +545,25 @@ impl PmtilesWriter {
             } => {
                 offset = *file_offset;
                 writer.write_all(data)?;
-                *file_offset += data.len() as u64;
+                *file_offset += u64::from(key.length);
             }
         }
 
-        if self.dedup_count < self.dedup_cap {
-            let bucket = self.dedup.entry(hash1).or_default();
-            if !bucket.is_empty() {
-                self.dedup_stats.hash_bucket_collisions += 1;
-            }
-            bucket.push((offset, data_len, hash2));
-            self.dedup_count += 1;
-        } else {
-            self.dedup_stats.insert_skipped_cap += 1;
-        }
-        self.push_dir_entry(tile_id, offset, data_len)?;
+        self.dedup.insert(key, offset, &mut self.dedup_stats);
+        self.push_dir_entry(tile_id, offset, key.length)?;
         self.unique_count += 1;
+        self.last_tile_id = Some(tile_id);
         Ok(true)
     }
 
     /// Add a consecutive run sharing one compressed payload. This deliberately
     /// preserves intra-run sharing even after the global dedup insertion cap.
+    /// Tile IDs in this run and all previous calls must be strictly increasing.
+    ///
+    /// # Errors
+    /// Returns `io::Error` for a zero or overflowing run, a non-increasing tile
+    /// ID, a payload that is too large, or a streaming write failure.
+    #[hotpath::measure]
     pub fn add_run(&mut self, tile_id: u64, run_length: u32, data: &[u8]) -> io::Result<bool> {
         if run_length == 0 {
             return Err(io::Error::new(
@@ -505,64 +571,57 @@ impl PmtilesWriter {
                 "PMTiles run length must be non-zero",
             ));
         }
-        if data.len() > u32::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "tile data exceeds 4 GB",
-            ));
-        }
-        let data_len = u32::try_from(data.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "tile data exceeds 4 GB"))?;
-        let mut h1 = DefaultHasher::new();
-        data.hash(&mut h1);
-        let hash1 = h1.finish();
-        let mut h2 = DefaultHasher::new();
-        DEDUP_FP2_SALT.hash(&mut h2);
-        data.hash(&mut h2);
-        let hash2 = h2.finish();
-        let existing = self.dedup.get(&hash1).and_then(|candidates| {
-            self.dedup_stats.candidates += 1;
-            candidates.iter().find_map(|&(offset, length, fp)| {
-                (length == data_len && fp == hash2).then_some((offset, length))
-            })
-        });
-        let (offset, stored) = if let Some(found) = existing {
-            self.dedup_stats.tiles_reused += u64::from(run_length);
-            self.dedup_stats.bytes_saved += u64::from(data_len) * u64::from(run_length);
-            (found.0, false)
+        let run_end = tile_id.checked_add(u64::from(run_length)).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "PMTiles tile ID run overflows")
+        })?;
+        self.check_tile_order(tile_id)?;
+        let (key, duplicate_offset) = self.dedup.lookup(data, &mut self.dedup_stats)?;
+
+        let (offset, stored) = if let Some(offset) = duplicate_offset {
+            self.dedup_stats
+                .record_reuse(key.length, u64::from(run_length));
+            (offset, false)
         } else {
             let offset = match &mut self.blob {
                 TileBlob::Memory(blob) => {
-                    let offset = blob.len() as u64;
+                    let offset = u64::try_from(blob.len()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "tile blob offset exceeds u64")
+                    })?;
                     blob.extend_from_slice(data);
                     offset
                 }
                 TileBlob::File { writer, offset, .. } => {
                     let current = *offset;
                     writer.write_all(data)?;
-                    *offset += u64::from(data_len);
+                    *offset += u64::from(key.length);
                     current
                 }
             };
-            if self.dedup_count < self.dedup_cap {
-                let bucket = self.dedup.entry(hash1).or_default();
-                if !bucket.is_empty() {
-                    self.dedup_stats.hash_bucket_collisions += 1;
-                }
-                bucket.push((offset, data_len, hash2));
-                self.dedup_count += 1;
-            } else {
-                self.dedup_stats.insert_skipped_cap += 1;
-            }
+            self.dedup.insert(key, offset, &mut self.dedup_stats);
             self.unique_count += 1;
             (offset, true)
         };
-        self.push_dir_run(tile_id, run_length, offset, data_len)?;
+        self.push_dir_run(tile_id, run_length, offset, key.length)?;
+        self.last_tile_id = Some(run_end - 1);
         if stored && run_length > 1 {
-            self.dedup_stats.tiles_reused += u64::from(run_length - 1);
-            self.dedup_stats.bytes_saved += u64::from(data_len) * u64::from(run_length - 1);
+            self.dedup_stats
+                .record_reuse(key.length, u64::from(run_length - 1));
         }
         Ok(stored)
+    }
+
+    fn check_tile_order(&self, tile_id: u64) -> io::Result<()> {
+        if let Some(previous) = self.last_tile_id
+            && tile_id <= previous
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "PMTiles tile IDs must be strictly increasing: got {tile_id} after {previous}"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Complete the PMTiles archive at `path`.
@@ -584,14 +643,14 @@ impl PmtilesWriter {
         // taken before it is dropped. The byte figure is an estimate: bucket
         // entries are 24-byte (u64, u32, u64) tuples plus per-bucket Vec
         // headers and the map's own table, dominated by the entry payload.
-        crate::debug::emit_counter_usize("pmtiles_dedup_entries", self.dedup_count);
-        let dedup_bytes_est = self.dedup_count * std::mem::size_of::<(u64, u32, u64)>()
-            + self.dedup.len()
+        crate::debug::emit_counter_usize("pmtiles_dedup_entries", self.dedup.entry_count());
+        let dedup_bytes_est = self.dedup.entry_count() * std::mem::size_of::<(u64, u32, u64)>()
+            + self.dedup.bucket_count()
                 * (std::mem::size_of::<u64>() + std::mem::size_of::<Vec<(u64, u32, u64)>>());
         crate::debug::emit_counter_usize("pmtiles_dedup_bytes_est", dedup_bytes_est);
 
         // Free dedup map - no longer needed after all tiles are added.
-        drop(std::mem::take(&mut self.dedup));
+        self.dedup.release();
 
         // Build directories: streaming mode reads entries from temp file in
         // LEAF_SIZE chunks (O(1) memory), in-memory mode collects all entries.
@@ -714,24 +773,15 @@ impl PmtilesWriter {
 
     /// Record a directory entry, extending the current run if possible.
     fn push_dir_entry(&mut self, tile_id: u64, offset: u64, length: u32) -> io::Result<()> {
-        if let Some(ref run) = self.current_run {
-            // debug_assert only: ordering is guaranteed by the external merge sort
-            // (sort key starts with tile_id). Out-of-order tiles would degrade run-length
-            // compression but not produce an invalid archive - PMTiles readers binary-search
-            // the directory regardless.
-            debug_assert!(
-                tile_id >= run.tile_id,
-                "PMTiles tiles must be added in Hilbert order: got {tile_id} after {}",
-                run.tile_id,
-            );
-        }
         self.num_addressed += 1;
-        if let Some(ref run) = self.current_run {
-            let next_id = run.tile_id + u64::from(run.run_length);
-            if tile_id == next_id && offset == run.offset && length == run.length {
-                self.current_run.as_mut().expect("just checked").run_length += 1;
-                return Ok(());
-            }
+        if let Some(run) = self.current_run.as_mut()
+            && run.tile_id.checked_add(u64::from(run.run_length)) == Some(tile_id)
+            && offset == run.offset
+            && length == run.length
+            && let Some(merged_length) = run.run_length.checked_add(1)
+        {
+            run.run_length = merged_length;
+            return Ok(());
         }
         // Flush old run if any, then start new one
         self.flush_run()?;
@@ -751,18 +801,17 @@ impl PmtilesWriter {
         offset: u64,
         length: u32,
     ) -> io::Result<()> {
-        self.num_addressed += u64::from(run_length);
         if let Some(run) = &mut self.current_run
-            && tile_id == run.tile_id + u64::from(run.run_length)
+            && run.tile_id.checked_add(u64::from(run.run_length)) == Some(tile_id)
             && offset == run.offset
             && length == run.length
+            && let Some(merged_length) = run.run_length.checked_add(run_length)
         {
-            run.run_length = run
-                .run_length
-                .checked_add(run_length)
-                .ok_or_else(|| io::Error::other("PMTiles run length overflow"))?;
+            self.num_addressed += u64::from(run_length);
+            run.run_length = merged_length;
             return Ok(());
         }
+        self.num_addressed += u64::from(run_length);
         self.flush_run()?;
         self.current_run = Some(DirEntry {
             tile_id,
@@ -801,34 +850,21 @@ impl PmtilesWriter {
     /// many duplicate payload copies the archive stores, and the map's RAM
     /// (~56 bytes/entry).
     pub fn set_dedup_cap(&mut self, cap: usize) {
-        self.dedup_cap = cap;
+        self.dedup.cap = cap;
     }
 
     /// Inject a dedup entry with specific hash/fingerprint values (test-only).
     /// Used to test fingerprint rejection without needing real hash collisions.
     #[cfg(test)]
     fn inject_dedup_entry(&mut self, hash1: u64, offset: u64, length: u32, fp2: u64) {
-        self.dedup
-            .entry(hash1)
-            .or_default()
-            .push((offset, length, fp2));
-        self.dedup_count += 1;
+        self.dedup.inject(hash1, offset, length, fp2);
     }
 
     /// Compute the primary hash and secondary fingerprint for the given data (test-only).
     /// Returns (hash1, hash2).
     #[cfg(test)]
     fn compute_dedup_hashes(data: &[u8]) -> (u64, u64) {
-        let mut h1 = DefaultHasher::new();
-        data.hash(&mut h1);
-        let hash1 = h1.finish();
-
-        let mut h2 = DefaultHasher::new();
-        DEDUP_FP2_SALT.hash(&mut h2);
-        data.hash(&mut h2);
-        let hash2 = h2.finish();
-
-        (hash1, hash2)
+        dedup_hashes(data)
     }
 
     /// Build root and leaf directory bytes from the dir store.

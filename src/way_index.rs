@@ -98,8 +98,8 @@ fn decode_way(data: &[u8], offset: usize) -> Vec<(i32, i32)> {
         }
         let dlat = zigzag_decode(read_varint(data, &mut pos));
         let dlon = zigzag_decode(read_varint(data, &mut pos));
-        prev_lat = prev_lat.saturating_add(dlat);
-        prev_lon = prev_lon.saturating_add(dlon);
+        prev_lat = prev_lat.wrapping_add(dlat);
+        prev_lon = prev_lon.wrapping_add(dlon);
         coords.push((prev_lat, prev_lon));
     }
     coords
@@ -594,6 +594,37 @@ mod tests {
         idx.put(1, &coords);
         idx.finish_writing().unwrap();
         assert_eq!(idx.get(1).unwrap(), coords);
+    }
+
+    #[test]
+    fn way_delta_varint_roundtrips_full_i32_range() {
+        let mut coords = vec![
+            (0, -1_799_000_000),
+            (0, 1_799_000_000),
+            (i32::MAX, i32::MIN),
+            (i32::MIN, i32::MAX),
+            (i32::MIN, i32::MIN),
+            (i32::MAX, i32::MAX),
+        ];
+
+        // Generate deterministic values across the full bit range without a test dependency.
+        let mut state = 0x9E37_79B9_u32;
+        for _ in 0..4096 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let lat = i32::from_le_bytes(state.to_le_bytes());
+
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let lon = i32::from_le_bytes(state.to_le_bytes());
+            coords.push((lat, lon));
+        }
+
+        let mut encoded = Vec::new();
+        encode_way(&mut encoded, &coords);
+        assert_eq!(decode_way(&encoded, 0), coords);
     }
 
     #[test]
