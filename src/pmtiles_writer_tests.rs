@@ -5,6 +5,44 @@ fn read_u64_le(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
 }
 
+#[test]
+fn header_coordinates_round_to_nearest_e7() {
+    let config = PmtilesConfig {
+        min_zoom: 0,
+        max_zoom: 14,
+        bounds: (-12.34567896, -55.12345676, 12.34567896, 55.12345676),
+        center: (-0.00000006, 0.00000006, 2),
+    };
+    let mut header = [0; 127];
+    write_header_bounds(&mut header, &config);
+    for (offset, expected) in [
+        (102, -123_456_790),
+        (106, -551_234_568),
+        (110, 123_456_790),
+        (114, 551_234_568),
+        (119, -1),
+        (123, 1),
+    ] {
+        let stored = i32::from_le_bytes(header[offset..offset + 4].try_into().unwrap());
+        assert_eq!(stored, expected);
+        // Inspect reads signed E7 coordinates with this inverse conversion.
+        assert!(
+            (f64::from(stored) / 1e7
+                - match offset {
+                    102 => config.bounds.0,
+                    106 => config.bounds.1,
+                    110 => config.bounds.2,
+                    114 => config.bounds.3,
+                    119 => config.center.0,
+                    _ => config.center.1,
+                })
+            .abs()
+                <= 0.5e-7
+        );
+    }
+    assert_eq!(header[118], 2);
+}
+
 fn add_monotonic_unique_tiles(writer: &mut PmtilesWriter, z: u8, count: usize) {
     let base = xy_to_tile_id(z, 0, 0);
     for i in 0..count {

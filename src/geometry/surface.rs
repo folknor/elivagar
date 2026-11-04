@@ -1,6 +1,70 @@
 use super::polygon::point_in_polygon;
 use super::projection::Point;
 
+/// Whether a polygon is convex and winds once. Accept either ring closure
+/// convention and ignore zero-length edges and collinear triples. Holes must
+/// be ruled out by the caller before using this for centroid placement.
+#[allow(clippy::float_cmp)] // Exact closure and turn signs; no tolerance-based geometry changes.
+pub(crate) fn is_convex(ring: &[Point]) -> bool {
+    let ring = if ring.len() > 1
+        && ring
+            .first()
+            .zip(ring.last())
+            .is_some_and(|(a, b)| a.x == b.x && a.y == b.y)
+    {
+        &ring[..ring.len() - 1]
+    } else {
+        ring
+    };
+    if ring.len() < 3 || ring.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+        return false;
+    }
+    let mut turn = 0.0_f64;
+    let mut first = [0.0_f64; 2];
+    let mut previous = [0.0_f64; 2];
+    let mut flips = [0_u32; 2];
+    let mut edges = ring
+        .iter()
+        .zip(ring.iter().cycle().skip(1))
+        .map(|(a, b)| [b.x - a.x, b.y - a.y])
+        .filter(|edge| *edge != [0.0, 0.0]);
+    let Some(first_edge) = edges.next() else {
+        return false;
+    };
+    let mut previous_edge = first_edge;
+    for edge in edges.chain(std::iter::once(first_edge)) {
+        let cross = previous_edge[0] * edge[1] - previous_edge[1] * edge[0];
+        previous_edge = edge;
+        if !cross.is_finite() {
+            return false;
+        }
+        if cross != 0.0 {
+            if turn != 0.0 && turn != cross.signum() {
+                return false;
+            }
+            turn = cross.signum();
+        }
+        for (axis, delta) in edge.into_iter().enumerate() {
+            if delta == 0.0 {
+                continue;
+            }
+            let sign = delta.signum();
+            if first[axis] == 0.0 {
+                first[axis] = sign;
+            } else if previous[axis] != sign {
+                flips[axis] += 1;
+            }
+            previous[axis] = sign;
+        }
+    }
+    for (axis_flips, (previous, first)) in flips.iter_mut().zip(previous.into_iter().zip(first)) {
+        if previous != first {
+            *axis_flips += 1;
+        }
+    }
+    turn != 0.0 && flips == [2, 2]
+}
+
 /// Find a point guaranteed to be inside the polygon, suitable for label placement.
 ///
 /// Scans horizontal lines through the polygon bbox, finds the longest interior
@@ -212,4 +276,57 @@ fn collect_intersections(ring: &[Point], scan_y: f64) -> Vec<f64> {
         }
     }
     xs
+}
+
+#[cfg(test)]
+mod convexity_tests {
+    use super::*;
+
+    #[test]
+    fn convexity_ignores_closure_and_winding_but_rejects_multiple_laps() {
+        let square = [
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+        assert!(is_convex(&square));
+        let mut closed = square.to_vec();
+        closed.push(square[0]);
+        assert!(is_convex(&closed));
+        closed.reverse();
+        assert!(is_convex(&closed));
+        let twice: Vec<_> = square.into_iter().cycle().take(8).collect();
+        assert!(!is_convex(&twice));
+        assert!(!is_convex(&[
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(2.0, 0.0)
+        ]));
+    }
+
+    #[test]
+    fn duplicate_vertices_cannot_hide_turns() {
+        let convex = [
+            Point::new(0.0, 0.0),
+            Point::new(3.0, 0.0),
+            Point::new(3.0, 3.0),
+            Point::new(0.0, 3.0),
+        ];
+        let repeated: Vec<_> = convex
+            .into_iter()
+            .flat_map(|point| [point, point])
+            .collect();
+        assert!(is_convex(&repeated));
+
+        let concave = [
+            Point::new(0.0, 0.0),
+            Point::new(3.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(2.0, 1.0),
+            Point::new(1.0, 3.0),
+            Point::new(0.0, 3.0),
+        ];
+        assert!(!is_convex(&concave));
+    }
 }

@@ -290,7 +290,7 @@ pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<
             layer: Layer::StreetsPolygonsLabels,
             min_zoom: 14,
             max_zoom: 14,
-            geom_expect: GeomExpect::PolygonPointOnSurface,
+            geom_expect: Layer::StreetsPolygonsLabels.polygon_point_geom_expect(),
             paint_rank: 0,
             attrs,
         });

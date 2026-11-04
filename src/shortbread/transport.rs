@@ -69,11 +69,12 @@ pub(super) fn match_public_transport_point(tags: &Tags<'_>, out: &mut SmallVec<[
     match_public_transport(tags, GeomExpect::Point, out);
 }
 
-pub(super) fn match_public_transport_centroid(
-    tags: &Tags<'_>,
-    out: &mut SmallVec<[LayerMatch; 4]>,
-) {
-    match_public_transport(tags, GeomExpect::PolygonPointOnSurface, out);
+pub(super) fn match_public_transport_polygon(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+    match_public_transport(
+        tags,
+        Layer::PublicTransport.polygon_point_geom_expect(),
+        out,
+    );
 }
 
 fn match_public_transport(

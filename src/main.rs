@@ -127,7 +127,7 @@ struct RunArgs {
     sort_budget: Option<usize>,
 
     /// In-flight way processing budget in raw block+plan bytes. Minimum 1M.
-    /// Safety net only; the count ceiling (threads) is the primary control.
+    /// Safety net only; the count ceiling (max(threads, 8)) is the primary control.
     /// Default when omitted: 128M (standard) or 4G (`--locations-on-ways`).
     #[arg(long, value_parser = parse_byte_size_min_1m)]
     way_budget: Option<usize>,
@@ -143,7 +143,8 @@ struct RunArgs {
     #[arg(long)]
     dedup_cap: Option<usize>,
 
-    /// PBF has node coordinates embedded in ways.
+    /// Assert the PBF header declares embedded way coordinates.
+    /// Header detection is automatic.
     #[arg(long)]
     locations_on_ways: bool,
 

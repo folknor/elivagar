@@ -288,32 +288,6 @@ Owner proposed: `ExtentUnits`, `Area`, `Area2x` newtypes and one
 
 Reported by the polygon-engine and coordinate-spaces hunts.
 
-## CON-016 - Which ring is an outer?
-
-`geometry::ring_role` (no orientation for zero area, classifyRings semantics)
-now serves `tile_detail`, `mlt`, `multipolygon.rs` and `diag`; the duplicate
-`diag_ring_is_simple` is gone. Remaining sites:
-
-- `ocean.rs` shapefile reader: `w == 0 || signed_area >= 0.0` - adopting the
-  helper needs an explicit decision for a zero-area contour, including a
-  zero-area first contour, while keeping the first-contour-is-outer
-  convention the OSMCD split data relies on.
-- In-engine: `orient_ring` by slot, `clip_shape_rect_fast` re-orients by
-  hand, `append_translated_ring` re-orients by slot.
-- `main.rs` diag prints "CW = outer" by its own sign; `geometry::signed_area`
-  says "positive = counter-clockwise"; `encode_tile_shape` calls the outer
-  `clockwise`; the overlay is configured `ContourDirection::CounterClockwise`.
-  Same convention (positive shoelace in y-down renders clockwise), named
-  three ways.
-
-Shoelace itself is still implemented in several places (`geometry::signed_area`
-f64, `int_ocean::signed_area_2x` i128, `signed_area_tile_2x`, the overlay
-test's `ring_area`, inline in `vw_refresh` and `is_convex_ring`). Better
-still, the engine emits roles in typed geometry so consumers never re-derive
-them (see `notes/structural.md`).
-
-Reported by the polygon-engine, encoding, storage and archive-surface hunts.
-
 ## CON-017 - How is an MVT command stream decoded?
 
 Production decoders: `geometry::mvt_decode::decode_mvt_polygon` (lenient,
@@ -371,21 +345,6 @@ was exact as an E7 pair before projection. Owner proposed: carry the E7 pair
 
 Reported by the coordinate-spaces, storage and polygon-engine hunts.
 
-## CON-019 - Does a feature get a copy across the antimeridian, and which tiles carry it in the buffer?
-
-`antimeridian_shifts_for_bbox` is shared, but the shift-and-re-emit loop is
-open-coded four times (`phase12.rs` twice, `relations.rs` twice), each
-allocating the shifted `Vec<Point>` and using the unbuffered bbox
-(`min_x < 0 || max_x > 1`), so a feature ending just inside x = 1 contributes
-nothing to the buffer of tile x = 0. The same "buffer carries only features
-that reach the tile proper" policy is applied by `for_each_tile_in_bbox` and
-by the pyramid's root selection. They agree today; the policy is written
-nowhere. Owner proposed: one `emit_wrapped(feature, emitter)` helper (or the
-shared `emit_match`, next entry) and one documented sentence about buffer
-population in `reference/`.
-
-Reported by the coordinate-spaces and pipeline hunts.
-
 ---
 
 # Emission dispatch and per-layer policy
@@ -425,25 +384,6 @@ layer names or which producer it serves; ocean-policy constants move beside
 
 Reported by the pipeline, Shortbread, layer-identity, coordinate-spaces and
 polygon-engine hunts.
-
-## CON-025 - Which OSM geometries does each layer accept?
-
-`match_closed_way` and `match_multipolygon` are two hand-kept lists that must
-agree on every polygon and point layer; ClosedWay also repeats the whole
-`match_open_way` list. They agree today; nothing checks it, and the spec only
-exercises ClosedWay. Separately, `GeomExpect` lives on each `LayerMatch`, so
-"is `land` a polygon layer" has no answer (land also emits `cliff` lines;
-three label layers are point layers fed from polygons); the oracles discover
-polygon layers from data because the crate cannot say. `PolygonCentroid` vs
-`PolygonPointOnSurface` is chosen per call site (`water_polygons_labels` and
-`addresses` use Centroid, everything else PointOnSurface) and the spec harness
-accepts either; the comments do not say whether that is deliberate.
-
-Owner proposed: each layer spec declares `accepts: &[OsmGeomType]` and its
-allowed output geometry kinds; dispatch iterates the table; the centroid
-choice becomes a layer property or is collapsed.
-
-Reported by the Shortbread and layer-identity hunts.
 
 ## CON-026 - What kind values exist per layer, and at what zoom?
 
@@ -569,15 +509,13 @@ Reported by the storage hunt.
 
 ## CON-035 - Per-layer, per-zoom record tally
 
-`SortWriter::push` (sort.rs) and `RecordTally::record` (emit.rs) make the
-identical classification (layer from key, `if layer < 32`, zoom from tile id,
-`if zoom < 15`, index `layer * 15 + zoom`), and `SortWriter::merge_tally`
-re-implements `RecordTally::merge`. `push_untracked` exists purely to stop
-the two copies double-counting. `FanoutStats` in stats.rs is a third parallel
-`32 * 15` structure. The `32` is `Layer::count()` (26) rounded up, so a 33rd
-layer silently falls out of stats. Owner proposed: `SortWriter` holds a
-`RecordTally` (or the tally leaves the writer), on a typed
-`PerLayerZoom<T>`; `RecordTally` belongs in `sort`, not `pipeline::emit`.
+`RecordTally` now lives in `sort` and `SortWriter` holds one, so the
+classification is written once. Remaining: the tally, `Phase12Stats` and
+`FanoutStats` (stats.rs, including a 5,760-entry histogram) all keep the
+`32 * 15` layout - `Layer::count()` (26) rounded up, so a 33rd layer would
+silently fall out of stats - and phase12 copies the writer arrays directly.
+Narrowing to a typed `PerLayerZoom<T>` sized by `Layer::count()` has to move
+the three structures and the phase12 hand-off together.
 
 Reported by the storage, layer-identity and pipeline hunts.
 
@@ -597,4 +535,22 @@ Reported by the storage hunt.
 
 ---
 
-# Archive surface
+# Geometry, continued
+
+## CON-041 - Ring orientation and shoelace area inside the engine
+
+`geometry::ring_role` now decides orientation for `tile_detail`, `mlt`,
+`multipolygon.rs`, `diag` and the ocean shapefile reader. Still deciding it
+by hand inside the polygon engine: `orient_ring` by slot,
+`clip_shape_rect_fast` re-orienting, and `append_translated_ring` re-orienting
+by slot. Shoelace area is still implemented separately in
+`geometry::signed_area` (f64), `int_ocean::signed_area_2x` (i128),
+`signed_area_tile_2x`, the overlay test's `ring_area`, and inline in
+`vw_refresh` and `is_convex_ring`. The convention is also named three ways:
+`geometry::signed_area` says positive is counter-clockwise,
+`encode_tile_shape` calls the outer clockwise, and the overlay is configured
+`ContourDirection::CounterClockwise` (the same convention, since positive
+shoelace in y-down renders clockwise). Better still, the engine emits roles in
+typed geometry so consumers never re-derive them (see `notes/structural.md`).
+
+Residue of an earlier entry, narrowed 2026-11-04 after `ring_role` landed.

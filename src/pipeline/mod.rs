@@ -179,7 +179,12 @@ pub struct TilegenConfig {
     /// `force_sorted` is false, regardless of input size, and bypass flat-index
     /// size guardrails. Unneeded with inline way coordinates. Expert debugging only.
     pub allow_unsafe_flat_index: bool,
-    /// Thread budget. Controls the rayon global pool size and pbfhogg decode pool.
+    /// Worker sizing input, not a process-wide thread cap. The CLI sizes Rayon
+    /// separately; library callers own their Rayon pool. Phase12 uses
+    /// max(threads / 3, 1) decode workers and (threads / 4).clamp(2, 6) node
+    /// workers in locations mode; way admission allows threads.max(8) blocks.
+    /// Assembly derives partition workers from threads. Relation prepass, way
+    /// dispatch and result drain also run on separate OS threads.
     /// Default: `std::thread::available_parallelism()` (logical CPUs).
     pub threads: usize,
     /// Raw-byte budget for in-flight way processing.
@@ -188,7 +193,7 @@ pub struct TilegenConfig {
     /// - 4 GB (`locations_on_ways` mode)
     ///
     /// Safety net against individually huge blocks; the count ceiling
-    /// (threads) is the primary admission control.
+    /// (`threads.max(8)`) is the primary admission control.
     pub way_inflight_budget: usize,
     /// Byte budget for assemble tile batches (0 = default 32 MB).
     /// Controls memory during tile assembly. Dense urban tiles at z14 can
@@ -208,8 +213,8 @@ pub struct TilegenConfig {
     pub sort_chunk_size: usize,
     /// Use pre-resolved node coordinates from way elements instead of building
     /// a node store. Requires a PBF produced by `pbfhogg add-locations-to-ways`.
-    /// Auto-detected from the PBF header's `LocationsOnWays` optional feature
-    /// when not set explicitly.
+    /// Always detected from the PBF header's `LocationsOnWays` optional
+    /// feature. When true, this field asserts that the header declares it.
     pub locations_on_ways: bool,
     /// Tile payload format (`mvt` default, `mlt` planned).
     pub tile_format: TilePayloadFormat,
@@ -232,6 +237,10 @@ pub struct TilegenConfig {
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
+/// v8 includes inline way coordinates in the checkpoint extent for
+/// locations-on-ways inputs, whose producer may omit untagged node elements.
+/// Earlier checkpoints may understate their extent.
+///
 /// v7 is JSON and records everything a resume must verify: the input hash, the
 /// producer config, effective paths, and the sort chunk storage codec.
 ///
@@ -247,7 +256,7 @@ const CHECKPOINT_FILE: &str = "checkpoint.txt";
 /// range. v4 added the input hash and effective paths but kept the
 /// whitespace-positional encoding, where every new field shifts an index and a
 /// miscount is a silent misparse. Neither is accepted; re-run a full tilegen.
-const CHECKPOINT_VERSION: u32 = 7;
+const CHECKPOINT_VERSION: u32 = 8;
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
@@ -732,6 +741,20 @@ fn layer_stats_enabled() -> bool {
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[hotpath::measure]
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
+    crate::debug::reset_run_counters();
+    crate::ocean::reset_ocean_counters();
+    sort::reset_sort_counters();
+    if config
+        .pbf_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_none()
+    {
+        return Err(PipelineError(
+            "input PBF path must have a UTF-8 filename so archive provenance can identify it"
+                .to_string(),
+        ));
+    }
     if config.tile_format == TilePayloadFormat::Mlt
         && config.tile_compression == TileCompression::Brotli
     {
@@ -742,9 +765,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if config.tile_format == TilePayloadFormat::Mvt {
         validate_compression_level(config.compression_level)?;
     }
-    crate::debug::reset_run_counters();
-    crate::ocean::reset_ocean_counters();
-    sort::reset_sort_counters();
     if config.max_zoom > 14 {
         return Err(PipelineError(format!(
             "max_zoom {} exceeds maximum supported zoom level 14",
@@ -781,6 +801,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // from the checkpoint written by the run that built the chunks.
     let mut resumed_effective = None;
     if skip.is_some() {
+        // Phase12 checks this on full runs; a resume must honor the same
+        // explicit header assertion before reusing any chunks.
+        if config.locations_on_ways {
+            let reader = pbfhogg::ElementReader::from_path(&config.pbf_path)
+                .map_err(|error| PipelineError(format!("failed to open PBF: {error}")))?;
+            phase12::resolve_locations_on_ways(true, reader.header().has_locations_on_ways())?;
+        }
         let identity = crate::provenance::hash_file(&config.pbf_path)
             .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?;
         let (_, _, checkpoint_ocean_mode, checkpoint) = load_checkpoint(&config.tmp_dir)?;
@@ -1095,18 +1122,26 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     emit_marker("SORT_END");
     emit_allocator_boundary("sort_end");
 
+    // Loaded on every path, including a direct resume at assembly.
+    let (data_bounds, _, _, _) = load_checkpoint(&config.tmp_dir)?;
     if active_ocean_artifact.is_none()
         && let (OceanMode::Band { key }, Some(path)) = (&ocean_mode, config.ocean_tiles.as_deref())
     {
-        let (bounds, _, _, _) = load_checkpoint(&config.tmp_dir)?;
         let pass_max_zooms = ocean_pass_max_zooms(config);
         active_ocean_artifact = Some(std::sync::Arc::new(crate::ocean::OceanTiles::open(
             path,
             key,
-            &bounds,
+            &data_bounds,
             &pass_max_zooms,
         )?));
     }
+
+    let input_identity = input_identity.ok_or_else(|| {
+        PipelineError(
+            "input PBF identity is unavailable; refusing to write an archive without provenance"
+                .to_string(),
+        )
+    })?;
 
     // --- Phase 4: Tile assembly + PMTiles write ---
     emit_marker("ASSEMBLE_START");
@@ -1123,9 +1158,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     ) = assemble::phase_assemble_with_ocean(
         &mut sort_reader,
         config,
+        &data_bounds,
         active_ocean_artifact,
         assemble::RunProvenance {
-            input_identity,
+            input_identity: Some(input_identity),
             effective: phase12_stats
                 .as_ref()
                 .map(|s| s.effective)
@@ -1614,7 +1650,24 @@ pub fn ocean_build(
         fanout_caps: [0; shortbread::Layer::count()],
         polygon_simplify_factor: 1.0,
     };
-    let _ = assemble::phase_assemble(&mut reader, &config)?;
+    // The durable artifact has no input PBF. Its top-level ocean_artifact key
+    // identifies its shapefile sources and policy without changing the wire
+    // metadata consumed by brokkr and OceanTiles::open. Assembly counts the
+    // expected absence of run-shaped provenance without opening a PBF.
+    let _ = assemble::phase_assemble_with_ocean(
+        &mut reader,
+        &config,
+        &world,
+        None,
+        assemble::RunProvenance {
+            input_identity: None,
+            effective: None,
+            resumed_from: None,
+            ocean_artifact_key: config.ocean_artifact_key.clone(),
+            ocean_source_key: None,
+            ocean_mode: "artifact",
+        },
+    )?;
     Ok(())
 }
 

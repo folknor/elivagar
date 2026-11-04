@@ -49,15 +49,16 @@ For context and not as a claim: planetiler's published table lists 2h38m on a
 ## Configuration that actually moves the number
 
 **`--way-budget`.** The one setting with a factor-of-two on it at planet
-scale, and a good illustration of why input properties matter. Admission to
-the way stage is charged as decompressed block size times a multiplier, and
-extracts pack about 8,000 ways per blob while the planet packs roughly 66,500.
+scale, and a good illustration of why input properties matter. The current
+admission charge is decompressed block bytes plus measured plan bytes.
+The earlier multiplier-based charge amplified differences in blob packing:
+extracts packed about 8,000 ways per blob while the planet packed roughly 66,500.
 At the old 768 MB default, a planet blob cost several hundred MB of budget, so
 two or three admitted concurrently and the machine ran at 7.2 of 32 cores.
 Raising it took the planet from 1062.5s to 571.7s.
 
-The default is now 8G under locations-on-ways, which sits past the knee. Note
-that admission also stops at a hard ceiling of `--threads` blocks in flight,
+The default is now 4G under locations-on-ways, which sits past the knee. Note
+that admission also stops at a hard ceiling of `max(threads, 8)` blocks in flight,
 so real memory is bounded by that count regardless of the byte budget - which
 is why raising it cost about 1.1 GB of peak anonymous memory and nothing in
 peak RSS.

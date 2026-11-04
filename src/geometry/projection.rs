@@ -91,6 +91,12 @@ pub fn project_e7(lat_e7: i32, lon_e7: i32) -> Point {
     Point::new(x, y)
 }
 
+/// Convert a Mercator [0,1] point to `(longitude, latitude)` in degrees.
+#[inline]
+pub fn unproject(point: &Point) -> (f64, f64) {
+    (point.x * 360.0 - 180.0, merc_y_to_lat(point.y))
+}
+
 /// Convert EPSG:3857 (Web Mercator meters) to Mercator [0,1] coordinates.
 #[inline]
 pub fn from_epsg3857(x: f64, y: f64) -> Point {
@@ -102,7 +108,6 @@ pub fn from_epsg3857(x: f64, y: f64) -> Point {
 }
 
 /// Inverse projection: Mercator y → latitude in degrees.
-#[cfg(test)]
 #[inline]
 pub fn merc_y_to_lat(y: f64) -> f64 {
     let lat_rad = (PI * (1.0 - 2.0 * y)).sinh().atan();

@@ -29,6 +29,56 @@ mod water;
 // Data types
 // ---------------------------------------------------------------------------
 
+/// What geometry the MVT feature should carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeomExpect {
+    Point,
+    Line,
+    Polygon,
+    PolygonCentroid,
+    PolygonPointOnSurface,
+}
+
+/// Classification of the incoming OSM element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OsmGeomType {
+    Node,
+    OpenWay,
+    ClosedWay,
+    MultiPolygon,
+}
+
+/// How a layer places a point when its source geometry is an area.
+/// `tests/fixtures/shortbread.yml` distinguishes water label centroids,
+/// address centroids only for convex polygons, and point-on-surface for the
+/// other polygon point layers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolygonPointStrategy {
+    Centroid,
+    CentroidIfConvex,
+    PointOnSurface,
+}
+
+impl PolygonPointStrategy {
+    const fn geom_expect(self) -> GeomExpect {
+        match self {
+            // The emitter reads this layer policy to distinguish unconditional
+            // centroids from the convex-only policy sharing this dispatch arm.
+            Self::Centroid | Self::CentroidIfConvex => GeomExpect::PolygonCentroid,
+            Self::PointOnSurface => GeomExpect::PolygonPointOnSurface,
+        }
+    }
+}
+
+macro_rules! geometry_matches {
+    ($geom_type:expr;) => {
+        false
+    };
+    ($geom_type:expr; $first:ident $(, $rest:ident)*) => {
+        matches!($geom_type, OsmGeomType::$first $(| OsmGeomType::$rest)*)
+    };
+}
+
 // This list is in archived MVT tile order. The explicit order is checked
 // against the layer ID because the ID also controls the wire sort key.
 macro_rules! define_layers {
@@ -38,7 +88,9 @@ macro_rules! define_layers {
             $name:literal,
             tile_order = $tile_order:literal,
             min_zoom = $min_zoom:literal,
-            fanout_cap = $fanout_cap:literal;
+            fanout_cap = $fanout_cap:literal,
+            accepts = [$($accepted_geom:ident),*],
+            polygon_point = $polygon_point:expr;
         )*
     ) => {
         const LAYER_COUNT: usize = [$(stringify!($variant)),*].len();
@@ -77,6 +129,28 @@ macro_rules! define_layers {
                 }
             }
 
+            /// Whether this layer's matcher accepts this OSM geometry kind.
+            pub const fn accepts(self, geom_type: OsmGeomType) -> bool {
+                match self {
+                    $(Self::$variant => geometry_matches!(geom_type; $($accepted_geom),*),)*
+                }
+            }
+
+            /// Area point placement policy for point features derived from polygons.
+            pub(crate) const fn polygon_point_strategy(self) -> Option<PolygonPointStrategy> {
+                match self {
+                    $(Self::$variant => $polygon_point,)*
+                }
+            }
+
+            /// Current coarse geometry expectation used by the emitter.
+            pub(crate) const fn polygon_point_geom_expect(self) -> GeomExpect {
+                match self.polygon_point_strategy() {
+                    Some(strategy) => strategy.geom_expect(),
+                    None => panic!("layer has no polygon point strategy"),
+                }
+            }
+
             /// MVT layer name string.
             pub const fn name(self) -> &'static str {
                 match self {
@@ -108,52 +182,107 @@ macro_rules! define_layers {
 }
 
 define_layers! {
-    WaterPolygons = 0, "water_polygons", tile_order = 0, min_zoom = 4, fanout_cap = true;
-    WaterPolygonsLabels = 1, "water_polygons_labels", tile_order = 1, min_zoom = 4, fanout_cap = false;
-    WaterLines = 2, "water_lines", tile_order = 2, min_zoom = 9, fanout_cap = false;
-    WaterLinesLabels = 3, "water_lines_labels", tile_order = 3, min_zoom = 9, fanout_cap = false;
-    DamLines = 4, "dam_lines", tile_order = 4, min_zoom = 12, fanout_cap = false;
-    DamPolygons = 5, "dam_polygons", tile_order = 5, min_zoom = 12, fanout_cap = true;
-    PierLines = 6, "pier_lines", tile_order = 6, min_zoom = 12, fanout_cap = false;
-    PierPolygons = 7, "pier_polygons", tile_order = 7, min_zoom = 12, fanout_cap = true;
-    Boundaries = 8, "boundaries", tile_order = 8, min_zoom = 0, fanout_cap = false;
-    BoundaryLabels = 9, "boundary_labels", tile_order = 9, min_zoom = 2, fanout_cap = false;
-    PlaceLabels = 10, "place_labels", tile_order = 10, min_zoom = 4, fanout_cap = false;
-    Land = 11, "land", tile_order = 11, min_zoom = 7, fanout_cap = true;
-    Sites = 12, "sites", tile_order = 12, min_zoom = 14, fanout_cap = true;
-    Buildings = 13, "buildings", tile_order = 13, min_zoom = 14, fanout_cap = true;
-    Addresses = 14, "addresses", tile_order = 14, min_zoom = 14, fanout_cap = false;
-    Streets = 15, "streets", tile_order = 15, min_zoom = 5, fanout_cap = false;
-    StreetPolygons = 16, "street_polygons", tile_order = 16, min_zoom = 11, fanout_cap = true;
-    StreetLabels = 17, "street_labels", tile_order = 17, min_zoom = 10, fanout_cap = false;
-    StreetLabelsPoints = 18, "street_labels_points", tile_order = 18, min_zoom = 12, fanout_cap = false;
-    StreetsPolygonsLabels = 19, "streets_polygons_labels", tile_order = 19, min_zoom = 14, fanout_cap = false;
-    Bridges = 20, "bridges", tile_order = 20, min_zoom = 12, fanout_cap = true;
-    Aerialways = 21, "aerialways", tile_order = 21, min_zoom = 12, fanout_cap = false;
-    Ferries = 22, "ferries", tile_order = 22, min_zoom = 10, fanout_cap = false;
-    PublicTransport = 23, "public_transport", tile_order = 23, min_zoom = 11, fanout_cap = false;
-    Pois = 24, "pois", tile_order = 24, min_zoom = 14, fanout_cap = false;
-    Ocean = 25, "ocean", tile_order = 25, min_zoom = 0, fanout_cap = false;
+    WaterPolygons = 0, "water_polygons",
+        tile_order = 0, min_zoom = 4, fanout_cap = true,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+    WaterPolygonsLabels = 1, "water_polygons_labels",
+        tile_order = 1, min_zoom = 4, fanout_cap = false,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::Centroid);
+    WaterLines = 2, "water_lines",
+        tile_order = 2, min_zoom = 9, fanout_cap = false,
+        accepts = [OpenWay, ClosedWay], polygon_point = None;
+    WaterLinesLabels = 3, "water_lines_labels",
+        tile_order = 3, min_zoom = 9, fanout_cap = false,
+        accepts = [OpenWay, ClosedWay], polygon_point = None;
+    DamLines = 4, "dam_lines",
+        tile_order = 4, min_zoom = 12, fanout_cap = false,
+        accepts = [OpenWay, ClosedWay], polygon_point = None;
+    DamPolygons = 5, "dam_polygons",
+        tile_order = 5, min_zoom = 12, fanout_cap = true,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+    PierLines = 6, "pier_lines",
+        tile_order = 6, min_zoom = 12, fanout_cap = false,
+        accepts = [OpenWay, ClosedWay], polygon_point = None;
+    PierPolygons = 7, "pier_polygons",
+        tile_order = 7, min_zoom = 12, fanout_cap = true,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+    Boundaries = 8, "boundaries",
+        tile_order = 8, min_zoom = 0, fanout_cap = false,
+        accepts = [OpenWay, ClosedWay], polygon_point = None;
+    BoundaryLabels = 9, "boundary_labels",
+        tile_order = 9, min_zoom = 2, fanout_cap = false,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface);
+    PlaceLabels = 10, "place_labels",
+        tile_order = 10, min_zoom = 4, fanout_cap = false,
+        accepts = [Node], polygon_point = None;
+    Land = 11, "land",
+        tile_order = 11, min_zoom = 7, fanout_cap = true,
+        accepts = [OpenWay, ClosedWay, MultiPolygon], polygon_point = None;
+    Sites = 12, "sites",
+        tile_order = 12, min_zoom = 14, fanout_cap = true,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+    Buildings = 13, "buildings",
+        tile_order = 13, min_zoom = 14, fanout_cap = true,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+    Addresses = 14, "addresses",
+        tile_order = 14, min_zoom = 14, fanout_cap = false,
+        accepts = [Node, ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::CentroidIfConvex);
+    Streets = 15, "streets",
+        tile_order = 15, min_zoom = 5, fanout_cap = false,
+        accepts = [OpenWay, ClosedWay], polygon_point = None;
+    StreetPolygons = 16, "street_polygons",
+        tile_order = 16, min_zoom = 11, fanout_cap = true,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+    StreetLabels = 17, "street_labels",
+        tile_order = 17, min_zoom = 10, fanout_cap = false,
+        accepts = [OpenWay, ClosedWay], polygon_point = None;
+    StreetLabelsPoints = 18, "street_labels_points",
+        tile_order = 18, min_zoom = 12, fanout_cap = false,
+        accepts = [Node], polygon_point = None;
+    StreetsPolygonsLabels = 19, "streets_polygons_labels",
+        tile_order = 19, min_zoom = 14, fanout_cap = false,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface);
+    Bridges = 20, "bridges",
+        tile_order = 20, min_zoom = 12, fanout_cap = true,
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+    Aerialways = 21, "aerialways",
+        tile_order = 21, min_zoom = 12, fanout_cap = false,
+        accepts = [OpenWay, ClosedWay], polygon_point = None;
+    Ferries = 22, "ferries",
+        tile_order = 22, min_zoom = 10, fanout_cap = false,
+        accepts = [OpenWay, ClosedWay], polygon_point = None;
+    PublicTransport = 23, "public_transport",
+        tile_order = 23, min_zoom = 11, fanout_cap = false,
+        accepts = [Node, ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface);
+    Pois = 24, "pois",
+        tile_order = 24, min_zoom = 14, fanout_cap = false,
+        accepts = [Node, ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface);
+    Ocean = 25, "ocean",
+        tile_order = 25, min_zoom = 0, fanout_cap = false,
+        accepts = [], polygon_point = None;
 }
 
-/// What geometry the MVT feature should carry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GeomExpect {
-    Point,
-    Line,
-    Polygon,
-    PolygonCentroid,
-    PolygonPointOnSurface,
+const fn accepted_layer_set(geom_type: OsmGeomType) -> ([Layer; LAYER_COUNT], usize) {
+    let mut accepted = [Layer::Ocean; LAYER_COUNT];
+    let mut count = 0;
+    let mut index = 0;
+    while index < LAYER_COUNT {
+        let layer = Layer::ALL[index];
+        if layer.accepts(geom_type) {
+            accepted[count] = layer;
+            count += 1;
+        }
+        index += 1;
+    }
+    (accepted, count)
 }
 
-/// Classification of the incoming OSM element.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OsmGeomType {
-    Node,
-    OpenWay,
-    ClosedWay,
-    MultiPolygon,
-}
+const NODE_LAYER_SET: ([Layer; LAYER_COUNT], usize) = accepted_layer_set(OsmGeomType::Node);
+const OPEN_WAY_LAYER_SET: ([Layer; LAYER_COUNT], usize) = accepted_layer_set(OsmGeomType::OpenWay);
+const CLOSED_WAY_LAYER_SET: ([Layer; LAYER_COUNT], usize) =
+    accepted_layer_set(OsmGeomType::ClosedWay);
+const MULTIPOLYGON_LAYER_SET: ([Layer; LAYER_COUNT], usize) =
+    accepted_layer_set(OsmGeomType::MultiPolygon);
 
 /// Tag lookup helper. Uses linear scan - with 3-15 tags per OSM element,
 /// this is faster than sorting + binary search. Binary search was tried
@@ -227,18 +356,30 @@ pub(crate) fn area_relation_matches(tags: &Tags<'_>) -> Option<SmallVec<[LayerMa
     (!matches.is_empty()).then_some(matches)
 }
 
+fn layers_for_geometry(geom_type: OsmGeomType) -> &'static [Layer] {
+    let (layers, count) = match geom_type {
+        OsmGeomType::Node => &NODE_LAYER_SET,
+        OsmGeomType::OpenWay => &OPEN_WAY_LAYER_SET,
+        OsmGeomType::ClosedWay => &CLOSED_WAY_LAYER_SET,
+        OsmGeomType::MultiPolygon => &MULTIPOLYGON_LAYER_SET,
+    };
+    &layers[..*count]
+}
+
 /// Match an OSM element against all Shortbread layers, returning every match.
 #[hotpath::measure]
 pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> SmallVec<[LayerMatch; 4]> {
     let mut out = SmallVec::new();
-    match geom_type {
-        OsmGeomType::Node => match_node(tags, &mut out),
-        OsmGeomType::OpenWay => match_open_way(tags, &mut out),
-        OsmGeomType::ClosedWay => match_closed_way(tags, &mut out),
-        OsmGeomType::MultiPolygon => match_multipolygon(tags, &mut out),
+    for &layer in layers_for_geometry(geom_type) {
+        match_layer(tags, layer, geom_type, &mut out);
     }
     #[cfg(test)]
     for matched in &out {
+        assert!(
+            matched.layer.accepts(geom_type),
+            "{} emitted for unsupported OSM geometry {geom_type:?}",
+            matched.layer.name(),
+        );
         assert!(
             matched.min_zoom >= matched.layer.min_zoom(),
             "{} emitted at z{} below its layer floor z{}",
@@ -250,73 +391,66 @@ pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> SmallVec<[Layer
     out
 }
 
-fn match_node(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    place_labels::match_place_labels(tags, out);
-    land::match_addresses_point(tags, out);
-    streets::match_street_labels_points(tags, out);
-    transport::match_public_transport_point(tags, out);
-    pois::match_pois_point(tags, out);
-}
-
-fn match_open_way(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    water::match_water_lines(tags, out);
-    water::match_water_lines_labels(tags, out);
-    water::match_dam_lines(tags, out);
-    water::match_pier_lines(tags, out);
-    boundaries::match_boundaries_line(tags, out);
-    streets::match_streets_line(tags, out);
-    streets::match_street_labels_line(tags, out);
-    transport::match_aerialways(tags, out);
-    transport::match_ferries(tags, out);
-    land::match_land_lines(tags, out);
-}
-
-fn match_closed_way(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    // Polygon layers
-    water::match_water_polygons(tags, out);
-    water::match_water_polygons_labels(tags, out);
-    water::match_dam_polygons(tags, out);
-    water::match_pier_polygons(tags, out);
-    boundaries::match_boundary_labels(tags, out);
-    land::match_land(tags, out);
-    land::match_sites(tags, out);
-    land::match_buildings(tags, out);
-    land::match_addresses_centroid(tags, out);
-    streets::match_street_polygons(tags, out);
-    streets::match_streets_polygons_labels(tags, out);
-    streets::match_bridges(tags, out);
-    // Line layers (closed ways can still be lines)
-    water::match_water_lines(tags, out);
-    water::match_water_lines_labels(tags, out);
-    water::match_dam_lines(tags, out);
-    water::match_pier_lines(tags, out);
-    boundaries::match_boundaries_line(tags, out);
-    streets::match_streets_line(tags, out);
-    streets::match_street_labels_line(tags, out);
-    transport::match_aerialways(tags, out);
-    transport::match_ferries(tags, out);
-    land::match_land_lines(tags, out);
-    // Point layers on closed ways
-    transport::match_public_transport_centroid(tags, out);
-    pois::match_pois_centroid(tags, out);
-}
-
-fn match_multipolygon(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    water::match_water_polygons(tags, out);
-    water::match_water_polygons_labels(tags, out);
-    water::match_dam_polygons(tags, out);
-    water::match_pier_polygons(tags, out);
-    boundaries::match_boundary_labels(tags, out);
-    land::match_land(tags, out);
-    land::match_sites(tags, out);
-    land::match_buildings(tags, out);
-    land::match_addresses_centroid(tags, out);
-    streets::match_street_polygons(tags, out);
-    streets::match_streets_polygons_labels(tags, out);
-    streets::match_bridges(tags, out);
-    // Point layers on multipolygons
-    transport::match_public_transport_centroid(tags, out);
-    pois::match_pois_centroid(tags, out);
+fn match_layer(
+    tags: &Tags<'_>,
+    layer: Layer,
+    geom_type: OsmGeomType,
+    out: &mut SmallVec<[LayerMatch; 4]>,
+) {
+    match layer {
+        Layer::WaterPolygons => water::match_water_polygons(tags, out),
+        Layer::WaterPolygonsLabels => water::match_water_polygons_labels(tags, out),
+        Layer::WaterLines => water::match_water_lines(tags, out),
+        Layer::WaterLinesLabels => water::match_water_lines_labels(tags, out),
+        Layer::DamLines => water::match_dam_lines(tags, out),
+        Layer::DamPolygons => water::match_dam_polygons(tags, out),
+        Layer::PierLines => water::match_pier_lines(tags, out),
+        Layer::PierPolygons => water::match_pier_polygons(tags, out),
+        Layer::Boundaries => boundaries::match_boundaries_line(tags, out),
+        Layer::BoundaryLabels => boundaries::match_boundary_labels(tags, out),
+        Layer::PlaceLabels => place_labels::match_place_labels(tags, out),
+        Layer::Land => match geom_type {
+            OsmGeomType::OpenWay => land::match_land_lines(tags, out),
+            OsmGeomType::ClosedWay => {
+                land::match_land(tags, out);
+                land::match_land_lines(tags, out);
+            }
+            OsmGeomType::MultiPolygon => land::match_land(tags, out),
+            OsmGeomType::Node => unreachable!("Land does not accept nodes"),
+        },
+        Layer::Sites => land::match_sites(tags, out),
+        Layer::Buildings => land::match_buildings(tags, out),
+        Layer::Addresses => match geom_type {
+            OsmGeomType::Node => land::match_addresses_point(tags, out),
+            OsmGeomType::ClosedWay | OsmGeomType::MultiPolygon => {
+                land::match_addresses_polygon(tags, out);
+            }
+            OsmGeomType::OpenWay => unreachable!("Addresses do not accept open ways"),
+        },
+        Layer::Streets => streets::match_streets_line(tags, out),
+        Layer::StreetPolygons => streets::match_street_polygons(tags, out),
+        Layer::StreetLabels => streets::match_street_labels_line(tags, out),
+        Layer::StreetLabelsPoints => streets::match_street_labels_points(tags, out),
+        Layer::StreetsPolygonsLabels => streets::match_streets_polygons_labels(tags, out),
+        Layer::Bridges => streets::match_bridges(tags, out),
+        Layer::Aerialways => transport::match_aerialways(tags, out),
+        Layer::Ferries => transport::match_ferries(tags, out),
+        Layer::PublicTransport => match geom_type {
+            OsmGeomType::Node => transport::match_public_transport_point(tags, out),
+            OsmGeomType::ClosedWay | OsmGeomType::MultiPolygon => {
+                transport::match_public_transport_polygon(tags, out);
+            }
+            OsmGeomType::OpenWay => unreachable!("PublicTransport does not accept open ways"),
+        },
+        Layer::Pois => match geom_type {
+            OsmGeomType::Node => pois::match_pois_point(tags, out),
+            OsmGeomType::ClosedWay | OsmGeomType::MultiPolygon => {
+                pois::match_pois_polygon(tags, out);
+            }
+            OsmGeomType::OpenWay => unreachable!("Pois do not accept open ways"),
+        },
+        Layer::Ocean => unreachable!("Ocean is not an OSM layer"),
+    }
 }
 
 // ---------------------------------------------------------------------------

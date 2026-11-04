@@ -213,7 +213,7 @@ commit/dirty pair, and there are none.
 ## Checkpoint provenance
 
 `--skip-to` reuses sort chunks from a previous run, and nothing in a later
-invocation reveals what produced them. The v7 checkpoint (JSON) records the
+invocation reveals what produced them. The v8 checkpoint (JSON) records the
 input hash, producer config, ocean source identity, effective paths, and sort
 chunk codec. A resume validates all except the effective paths, which it
 inherits.
@@ -251,7 +251,17 @@ missing, unreadable, or invalid record refuses the resume. Resuming at `ocean`
 clears the previous record before modifying chunks and writes a fresh one
 only after completion.
 
-v6 and earlier are rejected; re-run a full tilegen. v4 and earlier used a
+**Data extent.** v8 includes the inline coordinates of every way in
+locations-on-ways mode, independently of tags. This is needed because enriched
+inputs may omit untagged node elements. The checkpoint's Mercator extent
+includes the ocean overlap buffer and supplies both ocean selection and the
+extract archive's WGS84 header bounds and center. The world-ocean artifact
+keeps world bounds. Nonempty extents use this buffer even for a single point
+or a single latitude; empty input falls back to world bounds.
+Header coordinates are rounded to E7; inspect decodes them
+by dividing the signed integers by 10,000,000.
+
+v7 and earlier are rejected; re-run a full tilegen. v4 and earlier used a
 whitespace-positional encoding where each added field shifted an index and a
 miscount was a silent misparse; JSON began at v5.
 
@@ -269,8 +279,12 @@ must validate before proceeding and skips the phase12 read entirely.
 Provenance that lies is worse than provenance that is absent, because it
 invites a reader to attribute a diff to code that was never linked. Every value
 is therefore either established or emitted as `unknown`, and nothing is
-guessed. Where the input cannot be hashed, the entire block is omitted rather
-than written partially.
+guessed. An ordinary run refuses assembly when the input cannot be identified
+by filename and content hash; assembly also checks these facts defensively.
+The ocean-only artifact builder has no PBF, reads no PBF header, and omits
+run provenance deliberately. It retains the unchanged top-level
+`ocean_artifact` identity and emits `ocean_artifact_no_run_provenance=1` on the
+counter channel when measured.
 
 `build.rs` declares the source tree, manifest, lockfile, HEAD and the current
 branch ref as inputs. Registry dependency identities come from the lockfile.
@@ -292,9 +306,10 @@ A consumer comparing two archives:
 2. Report `build` differences. Never gate on them.
 3. Surface `effective` when explaining a diff that survived step 1.
 
-An archive with no `elivagar` member predates this schema or failed to identify
-its input. It cannot be gated, and a consumer should say so rather than
-assuming comparability.
+An archive with no `elivagar` member may predate this schema, be a world-ocean
+artifact, or come from an older producer that failed to identify its input.
+It cannot pass the run provenance gate, and a consumer should say so rather
+than assuming comparability.
 
 ## Known gaps
 
@@ -310,9 +325,10 @@ Recorded here so they are not rediscovered as bugs:
   archives, so establish comparability with `elivagar inspect` first.
 - `input.replication_sequence` is not recorded (the pbfhogg header API for it
   is unconfirmed). `replication_timestamp` is.
-- `data_bounds` is not recorded. It is derived from the input, and it drives
-  ocean selection, so it explains ocean-layer diffs between variants. Note it
-  is **derived**, so it is diagnostic, not contract.
+- `data_bounds` is not in the provenance comparability contract. It is derived
+  from the input, stored in the checkpoint, and written as WGS84 header bounds
+  and center. It also drives ocean selection, so it explains ocean-layer diffs
+  between variants. It is **derived** and diagnostic.
 - `pbf_generator` (the pbfhogg revision that produced an injected PBF) is not
   recorded. It could be stamped into the header by pbfhogg at write time.
 - No `tileset_digest`. Adding provenance makes archives byte-different across

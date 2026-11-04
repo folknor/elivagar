@@ -41,6 +41,10 @@
 //! elivagar::run(&config).expect("pipeline failed");
 //! ```
 //!
+//! For CLI runs, `TilegenConfig::threads` also sets the Rayon pool size. Phase12
+//! derives the pbfhogg decode worker count from it, along with other worker
+//! counts and in-flight ceilings, so it is not a process-wide thread cap.
+//!
 //! # Pipeline phases
 //!
 //! 1. **PBF read** - single-pass read building node/way indices and emitting

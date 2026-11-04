@@ -96,8 +96,10 @@ single-tile bounding box uses a fast path without clipping. The polygon
 pyramid selects its root cells from the unbuffered shape bounds. As it
 descends, it intersects parent fragments with every child's buffered
 rectangle. A descendant can therefore contain geometry in its buffer even
-when that geometry does not enter the descendant tile's proper area. Buffer
-population follows these path-specific rules.
+when that geometry does not enter the descendant tile's proper area. Only
+line tiles selected from the unbuffered simplified bbox can carry line buffer
+geometry; polygon descent can emit buffer-only descendants, while points are
+never clipped.
 
 ## Archive and sort ordering
 

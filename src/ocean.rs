@@ -1666,10 +1666,22 @@ fn push_shape_record_pieces(
         let ring = read_ring_points(source, points_start, window[0], window[1])?;
         // Ring interpretation follows the split-water input convention: the
         // first contour is outer, later nonnegative contours start outers,
-        // and negative contours attach to the latest outer. The low-zoom
-        // contour-soup union relies on each piece keeping its own holes and
-        // having a disjoint interior, as documented at union_pieces.
-        let is_outer = w == 0 || geometry::polygon::signed_area(&ring) >= 0.0;
+        // and negative contours attach to the latest outer. The checked-in
+        // full OSMCD input has four zero-area contours, one after the first;
+        // keep zero as an outer to preserve the old >= 0 grouping and ocean
+        // bytes. The low-zoom contour-soup union relies on each piece keeping
+        // its own holes and having a disjoint interior, as documented at
+        // union_pieces.
+        let is_outer = if w == 0 {
+            true
+        } else {
+            let signed_area = geometry::polygon::signed_area(&ring);
+            match geometry::polygon::ring_role(signed_area) {
+                Some(geometry::polygon::RingOrientation::Positive) => true,
+                Some(geometry::polygon::RingOrientation::Negative) => false,
+                None => signed_area == 0.0,
+            }
+        };
 
         if is_outer {
             if let Some(outer) = current_outer.take() {

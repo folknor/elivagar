@@ -61,7 +61,7 @@ pub(super) fn match_water_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<[L
             layer: Layer::WaterPolygonsLabels,
             min_zoom: label_zoom,
             max_zoom: 14,
-            geom_expect: GeomExpect::PolygonCentroid,
+            geom_expect: Layer::WaterPolygonsLabels.polygon_point_geom_expect(),
             paint_rank: 0,
             attrs,
         });

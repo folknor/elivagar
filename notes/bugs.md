@@ -79,45 +79,6 @@ only the plan sees. `resolve_ocean_inputs` moves into the library as
 
 Reported by the pipeline, run-contract, ocean and coordinate-spaces hunts.
 
-## BUG-007 - Archives can be written with no provenance block, reported only on stderr
-
-`write_provenance` omits the whole `elivagar` block when the PBF has no file
-name or no identity, printing a warning ("input PBF not identified - omitting
-provenance") to stderr only. `ocean_build` hits this on every build: it passes
-`RunProvenance::default()` and an empty `pbf_path`, so durable ocean artifacts
-carry no `elivagar` block (and assemble also attempts
-`ElementReader::from_path("")`). `RunProvenance::default().ocean_mode` is
-`""`, outside the `none|shapefile|artifact` vocabulary. brokkr reports
-`Absent` downstream, but the producer should fail the run or count it.
-
-Reported by the pipeline and run-contract hunts.
-
-## BUG-008 - `--locations-on-ways` can be forced on a PBF without locations
-
-`locations_on_ways = config.locations_on_ways || header...`. If the header
-lacks the feature, ways resolve coordinates from `way.node_locations()`,
-presumably empty, so every way is dropped silently while provenance says
-`coordinate_source: inline` and `input.features.locations_on_ways` is false.
-Either refuse the flag when the header disagrees or delete it (header
-detection covers the legitimate case). The run-contract hunt adds that the
-contract/effective split here is correct by the documented rule but worth a
-sentence in `reference/cli.md`.
-
-Reported by the pipeline and run-contract hunts.
-
-## BUG-010 - Data bounds come from node extent only; the buffer comment disagrees with the constant
-
-In locations mode, if the producer stripped untagged nodes, extent tracking
-sees only tagged nodes, so the ocean band and artifact inner rect are computed
-from a bbox smaller than the ways' real extent (the pipeline hunt did not
-check whether pbfhogg's add-locations-to-ways keeps untagged nodes). Separately,
-`phase12.rs` comments "~1 degree buffer (... roughly 1/360 = 0.003)" but
-`buf = 0.01`, about 3.6 degrees in x. Band ownership depends on this bbox. The
-coordinate hunt suggests rewording the comment to not hard-code a figure
-rather than "fixing" it.
-
-Reported by the pipeline and coordinate-spaces hunts.
-
 ## BUG-012 - `0` means three different things across the budget knobs; `--dedup-cap 0` silently gives the default
 
 - `sort_chunk_size`, `way_inflight_budget`, `assemble_batch_budget`,
@@ -136,19 +97,6 @@ and resolution done once (see the budgets entry in
 
 Reported by the storage hunt; the pipeline and run-contract hunts flag the
 same sentinel.
-
-## BUG-014 - `--threads` is not a thread budget
-
-The `TilegenConfig.threads` doc says it controls the rayon pool and pbfhogg
-decode pool. In fact rayon gets all `threads`; pbfhogg decode gets `threads/3`
-more (the comment says "rest to rayon"); node workers get
-`(threads/4).clamp(2,6)`; way worker, drain and relation-prepass are plain
-`std::thread`s; the way in-flight ceiling is `threads.max(8)`; assemble
-workers are `threads.clamp(1, 8)`; and `SortPartition::plan_pieces` spawns one
-OS thread per source with no bound (fan-in reached about 1000 on NA before
-coalescing). Real concurrency is roughly 1.5x to 2x `-j`, stated nowhere.
-
-Reported by the storage hunt.
 
 ---
 
@@ -187,17 +135,6 @@ Reported by the ocean and coordinate-spaces hunts.
 
 # Shortbread profile and layers
 
-## BUG-033 - Assembly silently drops features with an out-of-range layer id
-
-`encode_tile_batch_mvt` and `prepare_non_empty_layers` guard with
-`if (layer_idx as usize) < s.layers.len()` and drop the feature otherwise. A
-corrupt or unknown id should be a typed decode failure. The `Layer` doc
-("No `from_index()` needed - layer indices are only used as array offsets")
-is why the drop is silent; `Layer::try_from(u8)` carried through
-`PendingTile` would fix it.
-
-Reported by the layer-identity hunt.
-
 ---
 
 # Encoding and the sort record
@@ -234,28 +171,21 @@ Reported by the encoding hunt.
 
 # Archive surface and inspection tools
 
-## BUG-050 - PMTiles header bounds and center are always the world
-
-`assemble.rs` writes `(-180, -85.05, 180, 85.05)` and center `(0, 0, 2)` for
-every extract, though `data_bounds` is known; clients that fit to bounds open
-a denmark archive at the whole world. There is no production Merc-to-lon/lat
-inverse (`merc_y_to_lat` is `cfg(test)`), and `85.05` is another spelling of
-`MAX_LATITUDE` (85.051129). `f64_to_e7` truncates rather than rounds
-(`85.05 * 1e7` can become `850499999`) - harmless for display but asymmetric
-with inspect's `/ 1e7`.
-
-Reported by the coordinate-spaces and archive-surface hunts.
-
 ---
 
 # Found during the 2026-11-04 fix waves
 
-## BUG-059 - The sort record casts the geometry command count to u32 unchecked
+## BUG-061 - Polygon centroids ignore inner rings
 
-`wire_format` writes `geom_cmds.len() as u32` without an overflow check, so a
-feature with more than `u32::MAX` command words would write a wrapped count
-and a corrupt record. Latent at real feature sizes; a `try_from` with an error
-or an assertion would make it explicit.
+The emitter's centroid path (`centroid_of` in `pipeline/emit.rs`), used for
+`water_polygons_labels` and for convex address polygons, averages the outer
+ring's vertices - closing duplicate included, so the first vertex is
+double-weighted - rather than computing an area centroid, and ignores inner
+rings. For a
+polygon with large holes (a lake with an island, a courtyard building) the
+label point can land inside a hole. Whether the Shortbread spec's centroid is
+the area centroid of the whole polygon needs checking against
+`tests/fixtures/shortbread.yml` before changing it; it can move label points.
 
-Reported by the wave-4 wire-format fixer.
+Reported by the wave-7 layer-geometry fixer.
 

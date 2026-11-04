@@ -23,8 +23,8 @@ pub(crate) fn match_pois_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
     match_pois(tags, GeomExpect::Point, out);
 }
 
-pub(crate) fn match_pois_centroid(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    match_pois(tags, GeomExpect::PolygonPointOnSurface, out);
+pub(crate) fn match_pois_polygon(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+    match_pois(tags, Layer::Pois.polygon_point_geom_expect(), out);
 }
 
 /// Returns true if the tags would match a POI (used by address layer to exclude POI elements).

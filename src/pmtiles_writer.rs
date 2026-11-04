@@ -1320,10 +1320,10 @@ fn write_i32_le(buf: &mut [u8], offset: usize, val: i32) {
     buf[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
 }
 
-/// Convert a floating-point coordinate to E7 (1e-7 degree units).
+/// Round a floating-point coordinate to E7 (1e-7 degree units).
 #[allow(clippy::cast_possible_truncation)]
 fn f64_to_e7(val: f64) -> i32 {
-    (val * 1e7) as i32
+    (val * 1e7).round() as i32
 }
 
 // ---------------------------------------------------------------------------

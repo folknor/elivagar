@@ -26,6 +26,18 @@ pub(super) struct PendingTile {
     pub(super) tile_id: u64,
     pub(super) features: Vec<(u8, Box<[u8]>)>, // (layer_idx, feature_data)
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnknownSortLayerId(u8);
+
+fn sort_layer_error(tile: &PendingTile, error: UnknownSortLayerId) -> PipelineError {
+    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+    PipelineError(format!(
+        "corrupt or foreign sort record has unknown layer id {} in tile {z}/{x}/{y}",
+        error.0
+    ))
+}
+
 const _: () = assert!(std::mem::size_of::<PendingTile>() == 32);
 
 /// A payload encoded under the run's tile contract, ready for PMTiles.
@@ -153,6 +165,7 @@ fn batch_encoded_bytes(batch: &PartitionBatch) -> usize {
         .sum()
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_lines)]
 #[hotpath::measure]
 pub(super) fn phase_assemble(
@@ -169,7 +182,22 @@ pub(super) fn phase_assemble(
     ),
     PipelineError,
 > {
-    phase_assemble_with_ocean(sort_reader, config, None, RunProvenance::default())
+    let run = RunProvenance {
+        input_identity: Some(crate::provenance::hash_file(&config.pbf_path)?),
+        ..RunProvenance::default()
+    };
+    phase_assemble_with_ocean(
+        sort_reader,
+        config,
+        &crate::geometry::projection::MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        },
+        None,
+        run,
+    )
 }
 
 /// Run facts that only the orchestrator knows, for archive provenance.
@@ -178,11 +206,11 @@ pub(super) fn phase_assemble(
 /// and is `None` when that phase did not run, and the artifact key belongs to
 /// the resolved ocean mode. Re-deriving either in assemble would describe this
 /// invocation rather than the run that produced the tiles.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct RunProvenance {
     /// XXH3-128 and byte length of the input PBF, hashed once by the
     /// orchestrator rather than recomputed here. The checkpoint stores the
-    /// digest for resume validation. `None` only if the input could not be read.
+    /// digest for resume validation. `None` only for the ocean artifact builder.
     pub(super) input_identity: Option<crate::provenance::InputIdentity>,
     /// The paths phase12 actually took, or those the checkpoint recorded for
     /// a resumed run. `None` only when neither is available.
@@ -197,6 +225,49 @@ pub(super) struct RunProvenance {
     pub(super) ocean_mode: &'static str,
 }
 
+impl Default for RunProvenance {
+    fn default() -> Self {
+        Self {
+            input_identity: None,
+            effective: None,
+            resumed_from: None,
+            ocean_artifact_key: None,
+            ocean_source_key: None,
+            ocean_mode: "none",
+        }
+    }
+}
+
+/// Extract bounds include the checkpoint's ocean overlap buffer. Mercator y
+/// increases southward, so the southwest and northeast corners swap y limits.
+fn archive_config(
+    config: &TilegenConfig,
+    data_bounds: &crate::geometry::projection::MercBbox,
+) -> PmtilesConfig {
+    use crate::geometry::projection::{Point, unproject};
+
+    let (bounds, center) = if config.ocean_only_metadata {
+        ((-180.0, -85.05, 180.0, 85.05), (0.0, 0.0))
+    } else {
+        let (west, south) = unproject(&Point::new(data_bounds.min_x, data_bounds.max_y));
+        let (east, north) = unproject(&Point::new(data_bounds.max_x, data_bounds.min_y));
+        (
+            (west, south, east, north),
+            ((west + east) * 0.5, (south + north) * 0.5),
+        )
+    };
+    PmtilesConfig {
+        min_zoom: config.min_zoom,
+        max_zoom: config.max_zoom,
+        bounds,
+        center: (
+            center.0,
+            center.1,
+            2_u8.clamp(config.min_zoom, config.max_zoom),
+        ),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 // Both are moved into the phase body's closures under the hotpath feature,
 // where the measure macro's wrapping consumes them; without it clippy sees
@@ -207,6 +278,7 @@ pub(super) struct RunProvenance {
 pub(super) fn phase_assemble_with_ocean(
     sort_reader: &mut sort::SortReader,
     config: &TilegenConfig,
+    data_bounds: &crate::geometry::projection::MercBbox,
     ocean_tiles: Option<std::sync::Arc<crate::ocean::OceanTiles>>,
     run: RunProvenance,
 ) -> Result<
@@ -220,12 +292,31 @@ pub(super) fn phase_assemble_with_ocean(
     ),
     PipelineError,
 > {
-    let pmtiles_config = PmtilesConfig {
-        min_zoom: config.min_zoom,
-        max_zoom: config.max_zoom,
-        bounds: (-180.0, -85.05, 180.0, 85.05),
-        center: (0.0, 0.0, 2),
+    let pbf_name = if config.ocean_only_metadata {
+        if run.ocean_mode != "artifact" || config.ocean_artifact_key.is_none() {
+            return Err(PipelineError(
+                "ocean artifact assembly requires an explicit artifact identity".to_string(),
+            ));
+        }
+        None
+    } else {
+        let name = config
+            .pbf_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                PipelineError(
+                    "input PBF filename is unavailable for archive provenance".to_string(),
+                )
+            })?;
+        if run.input_identity.is_none() {
+            return Err(PipelineError(
+                "input PBF identity is unavailable for archive provenance".to_string(),
+            ));
+        }
+        Some(name.to_string())
     };
+    let pmtiles_config = archive_config(config, data_bounds);
     let mut pmtiles = if config.in_memory {
         PmtilesWriter::new(pmtiles_config)
     } else {
@@ -269,22 +360,16 @@ pub(super) fn phase_assemble_with_ocean(
     emit_counter_usize("assemble_partition_workers", partition_workers);
     emit_counter_usize("assemble_partitions", partition_count);
     emit_counter_u64("assemble_reader_ns", reader_ns);
-    let pbf_name = config
-        .pbf_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(str::to_string);
-    if let Some(name) = &pbf_name {
+    if let Some(name) = pbf_name {
         pmtiles.set_source_pbf_filename(name.clone());
-    } else {
-        pmtiles.set_source_pbf_filename(config.pbf_path.display().to_string());
-    }
-    let mut replication_timestamp = None;
-    let mut pbf_features = crate::provenance::PbfFeatures::default();
-    if let Ok(reader) = ElementReader::from_path(&config.pbf_path) {
+        let reader = ElementReader::from_path(&config.pbf_path).map_err(|error| {
+            PipelineError(format!(
+                "cannot read input PBF header for archive provenance: {error}"
+            ))
+        })?;
         let header = reader.header();
-        replication_timestamp = header.osmosis_replication_timestamp();
-        pbf_features = crate::provenance::PbfFeatures {
+        let replication_timestamp = header.osmosis_replication_timestamp();
+        let pbf_features = crate::provenance::PbfFeatures {
             sort_type_then_id: header.is_sorted(),
             locations_on_ways: header.has_locations_on_ways(),
             way_members_v1: header.has_way_members_v1(),
@@ -293,15 +378,19 @@ pub(super) fn phase_assemble_with_ocean(
         if let Some(ts) = replication_timestamp {
             pmtiles.set_osmosis_replication_timestamp(ts);
         }
+        write_provenance(
+            &mut pmtiles,
+            config,
+            name,
+            replication_timestamp,
+            pbf_features,
+            &run,
+        )?;
+    } else {
+        // The artifact is identified by its unchanged top-level ocean_artifact
+        // member and has no input PBF or run-shaped provenance to read/write.
+        crate::debug::emit_counter("ocean_artifact_no_run_provenance", 1);
     }
-    write_provenance(
-        &mut pmtiles,
-        config,
-        pbf_name,
-        replication_timestamp,
-        pbf_features,
-        &run,
-    );
     let unique_tiles = pmtiles.unique_tile_count();
     let dedup_stats = pmtiles.dedup_stats().clone();
     {
@@ -919,25 +1008,19 @@ fn read_encode_partition(
 /// simplified-only config yields no ocean at all. Metadata that overstates is
 /// worse than metadata that is absent.
 ///
-/// A missing input identity omits the whole block for the same reason: a
-/// partial block claiming an input it could not identify would be actively
-/// harmful, where absent is merely uninformative.
+/// Ordinary run archives require the input name and identity. The ocean
+/// artifact builder bypasses this function because it has no PBF input.
 fn write_provenance(
     pmtiles: &mut PmtilesWriter,
     config: &TilegenConfig,
-    pbf_name: Option<String>,
+    name: String,
     replication_timestamp: Option<i64>,
     features: crate::provenance::PbfFeatures,
     run: &RunProvenance,
-) {
-    let Some(name) = pbf_name else {
-        eprintln!("  warning: no PBF file name - omitting provenance metadata");
-        return;
-    };
-    let Some(identity) = run.input_identity else {
-        eprintln!("  warning: input PBF not identified - omitting provenance metadata");
-        return;
-    };
+) -> Result<(), PipelineError> {
+    let identity = run.input_identity.ok_or_else(|| {
+        PipelineError("input PBF identity is unavailable for archive provenance".to_string())
+    })?;
     let input = crate::provenance::Input {
         name,
         identity,
@@ -973,6 +1056,7 @@ fn write_provenance(
     };
     let value = crate::provenance::build(&input, config, &ocean, run.effective, run.resumed_from);
     pmtiles.add_metadata_member(crate::provenance::metadata_member(&value));
+    Ok(())
 }
 
 fn artifact_run_copy_items(
@@ -1524,7 +1608,7 @@ pub(super) fn encode_tile_batch(
 ) -> Result<Vec<EncodedTile>, PipelineError> {
     match super::TileContract::from_fields(tile_format, tile_compression, compression_level) {
         super::TileContract::Mvt { compression, level } => {
-            Ok(encode_tile_batch_mvt(batch, level, compression))
+            encode_tile_batch_mvt(batch, level, compression)
         }
         #[cfg(feature = "mlt")]
         super::TileContract::Mlt => encode_tile_batch_mlt(batch),
@@ -1549,10 +1633,10 @@ pub(super) fn encode_tile_batch_mvt(
     batch: &[PendingTile],
     compression_level: u32,
     tile_compression: TileCompression,
-) -> Vec<EncodedTile> {
+) -> Result<Vec<EncodedTile>, PipelineError> {
     use rayon::prelude::*;
 
-    batch
+    let results: Vec<Result<Option<EncodedTile>, PipelineError>> = batch
         .par_iter()
         .map(|tile| {
             {
@@ -1560,17 +1644,17 @@ pub(super) fn encode_tile_batch_mvt(
                 let s = &mut scratch;
 
                 let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-                prepare_tile_layers(s, tile);
+                prepare_tile_layers(s, tile).map_err(|error| sort_layer_error(tile, error))?;
                 // Borrow only the layer field so encoding can use its own buffers.
                 let non_empty = non_empty_layers_in_tile_order(&s.layers);
                 if non_empty.is_empty() {
-                    return None;
+                    return Ok(None);
                 }
 
                 mvt::encode_tile_into(&mut s.mvt_buf, &non_empty, &mut s.encode_scratch);
 
                 if s.mvt_buf.is_empty() {
-                    return None;
+                    return Ok(None);
                 }
 
                 // Per-zoom compression: boost low zooms, speed up high zooms.
@@ -1601,19 +1685,29 @@ pub(super) fn encode_tile_batch_mvt(
                         compress_buf
                     }
                 };
-                Some(EncodedTile {
+                Ok(Some(EncodedTile {
                     tile_id: tile.tile_id,
                     compressed,
-                })
+                }))
             }
         })
-        .flatten()
-        .collect()
+        .collect();
+
+    let mut out = Vec::with_capacity(results.len());
+    for result in results {
+        if let Some(tile) = result? {
+            out.push(tile);
+        }
+    }
+    Ok(out)
 }
 
 /// Both encoders consume this stage so format selection cannot change the
 /// geometry merge policy.
-fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) {
+fn prepare_tile_layers(
+    s: &mut AssemblyScratch,
+    tile: &PendingTile,
+) -> Result<(), UnknownSortLayerId> {
     // Reset persisted layers from previous tile (reclaim features + clear interning).
     for slot in &mut s.layers {
         if let Some(lb) = slot.as_mut() {
@@ -1622,14 +1716,16 @@ fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) {
     }
 
     for &(layer_idx, ref data) in &tile.features {
-        if (layer_idx as usize) < s.layers.len() {
-            add_feature_to_layer(
-                get_or_create_layer(&mut s.layers, layer_idx as usize),
-                data,
-                &mut s.geom_pool,
-                &mut s.tags_pool,
-            );
-        }
+        let layer = Layer::ALL
+            .get(usize::from(layer_idx))
+            .copied()
+            .ok_or(UnknownSortLayerId(layer_idx))?;
+        add_feature_to_layer(
+            get_or_create_layer(&mut s.layers, usize::from(layer as u8)),
+            data,
+            &mut s.geom_pool,
+            &mut s.tags_pool,
+        );
     }
 
     for (li, layer) in s.layers.iter_mut().enumerate() {
@@ -1656,16 +1752,25 @@ fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) {
             lb.merge_connected_lines(&mut s.line_merge_scratch);
         }
     }
+    Ok(())
 }
 
 /// Build non-empty per-layer builders for the MLT encoder and model tests.
-#[cfg(any(feature = "mlt", test))]
+#[cfg(test)]
 pub(super) fn prepare_non_empty_layers<'a>(
     s: &'a mut AssemblyScratch,
     tile: &PendingTile,
 ) -> Vec<&'a LayerBuilder> {
-    prepare_tile_layers(s, tile);
-    non_empty_layers_in_tile_order(&s.layers)
+    prepare_non_empty_layers_checked(s, tile).expect("tile contains an unknown sort layer id")
+}
+
+#[cfg(any(feature = "mlt", test))]
+fn prepare_non_empty_layers_checked<'a>(
+    s: &'a mut AssemblyScratch,
+    tile: &PendingTile,
+) -> Result<Vec<&'a LayerBuilder>, UnknownSortLayerId> {
+    prepare_tile_layers(s, tile)?;
+    Ok(non_empty_layers_in_tile_order(&s.layers))
 }
 
 fn non_empty_layers_in_tile_order(layers: &[Option<LayerBuilder>]) -> Vec<&LayerBuilder> {
@@ -1693,7 +1798,8 @@ pub(super) fn encode_tile_batch_mlt(
             {
                 let mut scratch = AssemblyScratch::new();
                 let s = &mut scratch;
-                let non_empty = prepare_non_empty_layers(s, tile);
+                let non_empty = prepare_non_empty_layers_checked(s, tile)
+                    .map_err(|error| sort_layer_error(tile, error))?;
                 if non_empty.is_empty() {
                     return Ok(None);
                 }

@@ -74,6 +74,19 @@ fn detect_injected_features(
     })
 }
 
+pub(super) fn resolve_locations_on_ways(
+    requested: bool,
+    declared: bool,
+) -> Result<bool, PipelineError> {
+    if requested && !declared {
+        return Err(PipelineError(
+            "--locations-on-ways requires the input PBF header to declare LocationsOnWays"
+                .to_string(),
+        ));
+    }
+    Ok(declared)
+}
+
 fn validate_and_take_members(
     members: Option<(&[u8], u32)>,
     actual_way_count: usize,
@@ -140,7 +153,7 @@ pub(super) const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
 /// Default way in-flight budget for locations-on-ways mode, in RAW bytes:
 /// decompressed block size plus, once a task has built its plans, the plans'
 /// measured bytes. The primary admission control is the count ceiling
-/// (`max_inflight` = threads); this budget is a safety net against
+/// (`max_inflight` = threads.max(8)); this budget is a safety net against
 /// pathologically fat blocks only, and on any input seen so far it never
 /// binds.
 ///
@@ -239,7 +252,12 @@ pub(super) fn phase_read_and_process(
         config.compress_sort_chunks,
     )?);
 
-    // Decode threads: give 1/3 of budget to pbfhogg decode, rest to rayon processing.
+    // Worker sizing, not a process-wide cap: pbfhogg decode uses
+    // max(threads / 3, 1); Rayon is sized separately by the caller (the CLI
+    // uses threads). Locations mode adds (threads / 4).clamp(2, 6) node
+    // workers, and way admission allows threads.max(8) blocks in flight.
+    // Assembly derives its partition workers from threads. Relation prepass,
+    // way dispatch and result drain each have a separate OS thread.
     let decode_threads = (config.threads / 3).max(1);
     let reader = ElementReader::from_path(&config.pbf_path)
         .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?
@@ -262,7 +280,8 @@ pub(super) fn phase_read_and_process(
     } else {
         PinSource::BlockLocal
     };
-    let locations_on_ways = config.locations_on_ways || header.has_locations_on_ways();
+    let locations_on_ways =
+        resolve_locations_on_ways(config.locations_on_ways, header.has_locations_on_ways())?;
 
     let pbf_size = std::fs::metadata(&config.pbf_path)
         .map(|m| m.len())
@@ -311,12 +330,7 @@ pub(super) fn phase_read_and_process(
     let mut fanout_stats = FanoutStats::new();
     let missing_ref_stats = std::sync::Arc::new(MissingRefStatsAtomic::default());
     // Track data extent for ocean shapefile filtering
-    let mut min_lat_e7: i32 = i32::MAX;
-    let mut max_lat_e7: i32 = i32::MIN;
-    let mut min_lon_e7: i32 = i32::MAX;
-    let mut max_lon_e7: i32 = i32::MIN;
-    let mut min_lon_shifted_e7: i64 = i64::MAX;
-    let mut max_lon_shifted_e7: i64 = i64::MIN;
+    let mut extent = CoordinateExtent::default();
 
     let min_z = config.min_zoom;
     let max_z = config.max_zoom;
@@ -348,9 +362,14 @@ pub(super) fn phase_read_and_process(
     ));
     let mut worker_handle: Option<std::thread::JoinHandle<()>> = None;
     // Drain thread owns way_index + sort_writer during way phase, returns them when done.
-    let mut drain_handle: Option<
-        std::thread::JoinHandle<(WayIndexWriter, SortWriter, u64, FanoutStats)>,
-    > = None;
+    type DrainResult = (
+        WayIndexWriter,
+        SortWriter,
+        u64,
+        FanoutStats,
+        CoordinateExtent,
+    );
+    let mut drain_handle: Option<std::thread::JoinHandle<DrainResult>> = None;
 
     // Buffer relation blocks - processed after all PBF blocks are consumed so that
     // late way blocks (common in locations-on-ways PBFs) don't hit a finalized way_index.
@@ -413,12 +432,7 @@ pub(super) fn phase_read_and_process(
                         Some(tally) => tally.merge(&st.tally),
                         None => node_tally = Some(st.tally),
                     }
-                    min_lat_e7 = min_lat_e7.min(st.min_lat_e7);
-                    max_lat_e7 = max_lat_e7.max(st.max_lat_e7);
-                    min_lon_e7 = min_lon_e7.min(st.min_lon_e7);
-                    max_lon_e7 = max_lon_e7.max(st.max_lon_e7);
-                    min_lon_shifted_e7 = min_lon_shifted_e7.min(st.min_lon_shifted_e7);
-                    max_lon_shifted_e7 = max_lon_shifted_e7.max(st.max_lon_shifted_e7);
+                    extent.merge(st.extent);
                 }
                 node_worker_joined = true;
             }
@@ -558,7 +572,7 @@ pub(super) fn phase_read_and_process(
                         relation_plan_superset_ways = plan.superset_ways_count;
                     }
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
-                    // in the pool simultaneously. The count ceiling (threads) is the
+                    // in the pool simultaneously. The max_inflight count ceiling is the
                     // primary admission control; the raw-byte budget is a safety net
                     // against individually huge blocks (see the constants above).
                     // --way-budget is the only way to set this. An
@@ -654,8 +668,12 @@ pub(super) fn phase_read_and_process(
                                             MembersForBlock::Set(&plan.needed_ways)
                                         }
                                     };
-                                    let (plans, marked) =
-                                        build_way_plans(&way_block.block, &members, pin_source);
+                                    let (plans, marked, location_extent) = build_way_plans(
+                                        &way_block.block,
+                                        &members,
+                                        pin_source,
+                                        locations_on_ways,
+                                    );
                                     drop(plan_busy);
                                     way_counter_ref
                                         .fetch_add(plans.len() as u64, Ordering::Relaxed);
@@ -672,6 +690,7 @@ pub(super) fn phase_read_and_process(
                                         way_hwm_task.fetch_max(guard.1, Ordering::Relaxed);
                                     }
                                     let mut acc = WayAcc::new();
+                                    acc.location_extent = location_extent;
                                     let mut plans = plans.into_iter();
                                     for element in way_block.block.elements() {
                                         let Element::Way(way) = element else {
@@ -737,15 +756,22 @@ pub(super) fn phase_read_and_process(
                         // concurrent producer allocate from the same Arc.
                         let mut count: u64 = 0;
                         let mut fanout = FanoutStats::new();
+                        let mut location_extent = CoordinateExtent::default();
                         while let Ok(results) = rrx.recv() {
                             let _busy = wait_span(&BUSY.phase12_drain);
-                            count += drain_way_task_result(results, &mut wi, &mut sw, &mut fanout);
+                            count += drain_way_task_result(
+                                results,
+                                &mut wi,
+                                &mut sw,
+                                &mut fanout,
+                                &mut location_extent,
+                            );
                         }
                         // The shared chunk counter stays attached: the spill
                         // coalescer keeps allocating from the same Arc through
                         // the relation tail. Detached (and chunk_count resynced)
                         // after the tail adopts the coalescer's paths.
-                        (wi, sw, count, fanout)
+                        (wi, sw, count, fanout, location_extent)
                     }));
 
                     block_tx = Some(btx);
@@ -843,11 +869,12 @@ pub(super) fn phase_read_and_process(
             h.join().expect("worker thread panicked");
         }
         if let Some(h) = drain_handle.take() {
-            let (wi, sw, count, way_fanout) = h.join().expect("drain thread panicked");
+            let (wi, sw, count, way_fanout, way_extent) = h.join().expect("drain thread panicked");
             way_index = Some(wi);
             sort_writer = Some(sw);
             features_emitted += count;
             fanout_stats.merge(&way_fanout);
+            extent.merge(way_extent);
         }
     }
 
@@ -939,8 +966,16 @@ pub(super) fn phase_read_and_process(
     eprintln!("  Nodes: {node_count}, Ways: {way_count}, Relations: {rel_count}");
     eprintln!("  Total features emitted: {features_emitted}");
 
+    let CoordinateExtent {
+        min_lat_e7,
+        max_lat_e7,
+        min_lon_e7,
+        max_lon_e7,
+        min_lon_shifted_e7,
+        max_lon_shifted_e7,
+    } = extent;
     // Compute data extent in Mercator [0,1] with generous buffer for ocean overlap
-    let data_bounds = if min_lat_e7 < max_lat_e7 {
+    let data_bounds = if min_lat_e7 <= max_lat_e7 {
         let crosses_dateline = crosses_antimeridian(
             min_lon_e7,
             max_lon_e7,
@@ -959,7 +994,7 @@ pub(super) fn phase_read_and_process(
         };
         let sw = geometry::projection::project_e7(min_lat_e7, west_lon_e7);
         let ne = geometry::projection::project_e7(max_lat_e7, east_lon_e7);
-        // Add ~1 degree buffer (in Mercator space, roughly 1/360 ≈ 0.003)
+        // Add a conservative normalized-Mercator buffer for ocean overlap.
         let buf = 0.01;
         MercBbox {
             min_x: if crosses_dateline {
@@ -976,7 +1011,7 @@ pub(super) fn phase_read_and_process(
             max_y: (sw.y + buf).min(1.0),
         }
     } else {
-        // No nodes - full world
+        // No coordinates (empty input) - full world
         MercBbox {
             min_x: 0.0,
             min_y: 0.0,
@@ -1320,12 +1355,7 @@ pub(super) struct NodeWorkerState {
     pub(super) node_count: u64,
     pub(super) features_emitted: u64,
     pub(super) tally: RecordTally,
-    pub(super) min_lat_e7: i32,
-    pub(super) max_lat_e7: i32,
-    pub(super) min_lon_e7: i32,
-    pub(super) max_lon_e7: i32,
-    pub(super) min_lon_shifted_e7: i64,
-    pub(super) max_lon_shifted_e7: i64,
+    pub(super) extent: CoordinateExtent,
 }
 
 /// Node-phase worker loop: store puts, tagged-node feature emission, and
@@ -1347,12 +1377,7 @@ fn run_node_worker(
     const NODE_SINK_FLUSH_BYTES: usize = 8 * 1024 * 1024;
     let mut node_count: u64 = 0;
     let mut features_emitted: u64 = 0;
-    let mut min_lat_e7: i32 = i32::MAX;
-    let mut max_lat_e7: i32 = i32::MIN;
-    let mut min_lon_e7: i32 = i32::MAX;
-    let mut max_lon_e7: i32 = i32::MIN;
-    let mut min_lon_shifted_e7: i64 = i64::MAX;
-    let mut max_lon_shifted_e7: i64 = i64::MIN;
+    let mut extent = CoordinateExtent::default();
     let mut node_records: Vec<SortRecord> = Vec::new();
     let mut sink = RecordSink::new();
 
@@ -1368,13 +1393,7 @@ fn run_node_worker(
                 ns.put($node.id(), lat_e7, lon_e7);
             }
 
-            min_lat_e7 = min_lat_e7.min(lat_e7);
-            max_lat_e7 = max_lat_e7.max(lat_e7);
-            min_lon_e7 = min_lon_e7.min(lon_e7);
-            max_lon_e7 = max_lon_e7.max(lon_e7);
-            let shifted_lon_e7 = lon_e7_shifted_360(lon_e7);
-            min_lon_shifted_e7 = min_lon_shifted_e7.min(shifted_lon_e7);
-            max_lon_shifted_e7 = max_lon_shifted_e7.max(shifted_lon_e7);
+            extent.include(lat_e7, lon_e7);
 
             if $node.tags().next().is_some() {
                 let tags_vec: Vec<(&str, &str)> = $node.tags().collect();
@@ -1426,12 +1445,7 @@ fn run_node_worker(
         node_count,
         features_emitted,
         tally: sink.tally,
-        min_lat_e7,
-        max_lat_e7,
-        min_lon_e7,
-        max_lon_e7,
-        min_lon_shifted_e7,
-        max_lon_shifted_e7,
+        extent,
     }
 }
 
@@ -1460,9 +1474,11 @@ pub(super) fn build_way_plans(
     block: &PrimitiveBlock,
     members: &MembersForBlock<'_>,
     pins: PinSource,
-) -> (Vec<WayPlan>, u64) {
+    locations_on_ways: bool,
+) -> (Vec<WayPlan>, u64, CoordinateExtent) {
     let mut way_pos = 0usize;
     let mut marked = 0u64;
+    let mut location_extent = CoordinateExtent::default();
     let mut plans: Vec<WayPlan> = block
         .elements()
         .filter_map(|element| {
@@ -1479,6 +1495,13 @@ pub(super) fn build_way_plans(
                 MembersForBlock::Bitmap(bitmap) => member_bit(bitmap, way_pos),
                 MembersForBlock::Set(needed_ways) => needed_ways.contains(&way_id),
             };
+            // Enriched PBFs may omit untagged node elements, so the inline way
+            // coordinates must also bound the extract independently of tags.
+            if locations_on_ways {
+                for location in way.node_locations() {
+                    location_extent.include(location.decimicro_lat(), location.decimicro_lon());
+                }
+            }
             way_pos += 1;
             marked += u64::from(is_member);
             Some(WayPlan {
@@ -1499,7 +1522,7 @@ pub(super) fn build_way_plans(
             plan.preserve_node_refs = preserve_refs_for_way(&plan.node_refs, &counts);
         }
     }
-    (plans, marked)
+    (plans, marked, location_extent)
 }
 
 pub(super) struct RelationPlan {
@@ -1609,11 +1632,56 @@ pub(super) fn crosses_antimeridian(
     shifted_span_e7 < raw_span_e7
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CoordinateExtent {
+    pub(super) min_lat_e7: i32,
+    pub(super) max_lat_e7: i32,
+    pub(super) min_lon_e7: i32,
+    pub(super) max_lon_e7: i32,
+    pub(super) min_lon_shifted_e7: i64,
+    pub(super) max_lon_shifted_e7: i64,
+}
+
+impl Default for CoordinateExtent {
+    fn default() -> Self {
+        Self {
+            min_lat_e7: i32::MAX,
+            max_lat_e7: i32::MIN,
+            min_lon_e7: i32::MAX,
+            max_lon_e7: i32::MIN,
+            min_lon_shifted_e7: i64::MAX,
+            max_lon_shifted_e7: i64::MIN,
+        }
+    }
+}
+
+impl CoordinateExtent {
+    fn include(&mut self, lat_e7: i32, lon_e7: i32) {
+        self.min_lat_e7 = self.min_lat_e7.min(lat_e7);
+        self.max_lat_e7 = self.max_lat_e7.max(lat_e7);
+        self.min_lon_e7 = self.min_lon_e7.min(lon_e7);
+        self.max_lon_e7 = self.max_lon_e7.max(lon_e7);
+        let shifted_lon_e7 = lon_e7_shifted_360(lon_e7);
+        self.min_lon_shifted_e7 = self.min_lon_shifted_e7.min(shifted_lon_e7);
+        self.max_lon_shifted_e7 = self.max_lon_shifted_e7.max(shifted_lon_e7);
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.min_lat_e7 = self.min_lat_e7.min(other.min_lat_e7);
+        self.max_lat_e7 = self.max_lat_e7.max(other.max_lat_e7);
+        self.min_lon_e7 = self.min_lon_e7.min(other.min_lon_e7);
+        self.max_lon_e7 = self.max_lon_e7.max(other.max_lon_e7);
+        self.min_lon_shifted_e7 = self.min_lon_shifted_e7.min(other.min_lon_shifted_e7);
+        self.max_lon_shifted_e7 = self.max_lon_shifted_e7.max(other.max_lon_shifted_e7);
+    }
+}
+
 pub(super) struct WayTaskResult {
     pub(super) count: u64,
     pub(super) sink: RecordSink,
     pub(super) fanout: FanoutStats,
     pub(super) way_puts: Vec<(i64, Vec<(i32, i32)>)>,
+    pub(super) location_extent: CoordinateExtent,
 }
 
 pub(super) struct WayAcc {
@@ -1622,6 +1690,7 @@ pub(super) struct WayAcc {
     pub(super) count: u64,
     pub(super) fanout: FanoutStats,
     pub(super) way_puts: Vec<(i64, Vec<(i32, i32)>)>,
+    pub(super) location_extent: CoordinateExtent,
     pub(super) merc: Vec<Point>,
     pub(super) point_emit: PointEmitScratch,
     pub(super) line_emit: LineEmitScratch,
@@ -1636,6 +1705,7 @@ impl WayAcc {
             count: 0,
             fanout: FanoutStats::new(),
             way_puts: Vec::new(),
+            location_extent: CoordinateExtent::default(),
             merc: Vec::new(),
             point_emit: PointEmitScratch::new(),
             line_emit: LineEmitScratch::new(),
@@ -1662,6 +1732,7 @@ impl WayAcc {
             sink: self.sink,
             fanout: self.fanout,
             way_puts: self.way_puts,
+            location_extent: self.location_extent,
         }
     }
 }
@@ -1672,7 +1743,9 @@ pub(super) fn drain_way_task_result(
     way_index: &mut WayIndexWriter,
     sort_writer: &mut SortWriter,
     fanout: &mut FanoutStats,
+    location_extent: &mut CoordinateExtent,
 ) -> u64 {
+    location_extent.merge(result.location_extent);
     for (way_id, coords_e7) in result.way_puts {
         way_index.put(way_id, &coords_e7);
     }
@@ -1748,12 +1821,11 @@ pub(super) fn process_planned_way_into(
         }
         (resolved, resolved_refs)
     } else {
-        (
-            way.node_locations()
-                .map(|loc| (loc.decimicro_lat(), loc.decimicro_lon()))
-                .collect(),
-            plan.node_refs.clone(),
-        )
+        let coords: Vec<(i32, i32)> = way
+            .node_locations()
+            .map(|loc| (loc.decimicro_lat(), loc.decimicro_lon()))
+            .collect();
+        (coords, plan.node_refs.clone())
     };
 
     if coords_e7.is_empty() {
@@ -1888,8 +1960,33 @@ fn resolve_boundary_match(
 #[cfg(test)]
 mod shared_node_helper_tests {
     use super::{
-        detect_injected_features, fill_mask_from_pin_bitmap, member_bit, validate_and_take_members,
+        CoordinateExtent, crosses_antimeridian, detect_injected_features,
+        fill_mask_from_pin_bitmap, member_bit, validate_and_take_members,
     };
+
+    #[test]
+    fn coordinate_extent_merges_inline_way_coordinates() {
+        let mut extent = CoordinateExtent::default();
+        extent.include(100, 1_790_000_000);
+        extent.include(-100, -1_790_000_000);
+
+        assert_eq!(extent.min_lat_e7, -100);
+        assert_eq!(extent.max_lat_e7, 100);
+        assert_eq!(extent.min_lon_e7, -1_790_000_000);
+        assert_eq!(extent.max_lon_e7, 1_790_000_000);
+        assert!(crosses_antimeridian(
+            extent.min_lon_e7,
+            extent.max_lon_e7,
+            extent.min_lon_shifted_e7,
+            extent.max_lon_shifted_e7,
+        ));
+
+        let mut other = CoordinateExtent::default();
+        other.include(50, -100_000_000);
+        extent.merge(other);
+        assert_eq!(extent.max_lat_e7, 100);
+        assert_eq!(extent.max_lon_shifted_e7, 3_500_000_000);
+    }
 
     #[test]
     fn detect_injected_features_requires_locations() {

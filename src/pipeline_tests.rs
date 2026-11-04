@@ -47,22 +47,28 @@ fn way_block_for_members(ids: &[i64]) -> pbfhogg::PrimitiveBlock {
 #[test]
 fn build_way_plans_bitmap_arm_marks_positionally() {
     let three = way_block_for_members(&[10, 11, 12]);
-    let (plans, marked) = build_way_plans(
+    let (plans, marked, extent) = build_way_plans(
         &three,
         &MembersForBlock::Bitmap(&[0x05]),
         PinSource::BlockLocal,
+        true,
     );
     assert_eq!(marked, 2);
+    assert_eq!(extent.min_lat_e7, 590_000_000);
+    assert_eq!(extent.max_lat_e7, 590_000_100);
+    assert_eq!(extent.min_lon_e7, 100_000_000);
+    assert_eq!(extent.max_lon_e7, 100_000_100);
     assert_eq!(
         plans.iter().map(|plan| plan.is_member).collect::<Vec<_>>(),
         [true, false, true]
     );
 
     let nine = way_block_for_members(&(1..=9).collect::<Vec<_>>());
-    let (plans, marked) = build_way_plans(
+    let (plans, marked, _) = build_way_plans(
         &nine,
         &MembersForBlock::Bitmap(&[0, 1]),
         PinSource::BlockLocal,
+        true,
     );
     assert_eq!(marked, 1);
     assert_eq!(
@@ -75,15 +81,17 @@ fn build_way_plans_bitmap_arm_marks_positionally() {
 fn bitmap_and_set_arms_agree() {
     let block = way_block_for_members(&[10, 11, 12]);
     let expected: rustc_hash::FxHashSet<i64> = [11].into_iter().collect();
-    let (bitmap, _) = build_way_plans(
+    let (bitmap, _, _) = build_way_plans(
         &block,
         &MembersForBlock::Bitmap(&[0x02]),
         PinSource::BlockLocal,
+        true,
     );
-    let (set, _) = build_way_plans(
+    let (set, _, _) = build_way_plans(
         &block,
         &MembersForBlock::Set(&expected),
         PinSource::BlockLocal,
+        true,
     );
     assert_eq!(
         bitmap.iter().map(|plan| plan.is_member).collect::<Vec<_>>(),
@@ -98,6 +106,14 @@ fn bitmap_and_set_arms_agree() {
             .map(|plan| &plan.preserve_node_refs)
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn locations_on_ways_flag_requires_header_feature() {
+    assert!(phase12::resolve_locations_on_ways(true, false).is_err());
+    assert!(phase12::resolve_locations_on_ways(true, true).expect("declared feature"));
+    assert!(phase12::resolve_locations_on_ways(false, true).expect("header detection"));
+    assert!(!phase12::resolve_locations_on_ways(false, false).expect("raw input"));
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -1446,6 +1462,25 @@ fn encode_tile_batch_mvt_empty_batch_is_empty() {
     assert!(encoded.is_empty());
 }
 
+#[test]
+fn tile_encoders_reject_unknown_sort_layer_ids() {
+    let formats = [
+        TilePayloadFormat::Mvt,
+        #[cfg(feature = "mlt")]
+        TilePayloadFormat::Mlt,
+    ];
+    for format in formats {
+        let tile = PendingTile {
+            tile_id: pmtiles_writer::xy_to_tile_id(3, 4, 5),
+            features: vec![(255, Box::new([]))],
+        };
+        match encode_tile_batch(&[tile], 6, format, TileCompression::Gzip) {
+            Err(error) => assert!(error.0.contains("unknown layer id 255 in tile 3/4/5")),
+            Ok(_) => panic!("{format:?} silently accepted an unknown layer id"),
+        }
+    }
+}
+
 #[cfg(feature = "mlt")]
 #[test]
 fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
@@ -1533,6 +1568,158 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     }
 }
 
+fn write_assembly_pbf(path: &std::path::Path) {
+    let file = File::create(path).expect("create assembly PBF");
+    let mut writer = PbfWriter::new(file, PbfCompression::default());
+    let header = block_builder::HeaderBuilder::new()
+        .build()
+        .expect("build PBF header");
+    writer.write_header(&header).expect("write PBF header");
+    writer.flush().expect("flush PBF");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn assembly_requires_run_identity_and_preserves_extract_header_bounds() {
+    use crate::geometry::projection::{Point, unproject};
+    let dir = tempfile::Builder::new()
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("create tempdir");
+    let mut config = TilegenConfig {
+        pbf_path: dir.path().join("input.osm.pbf"),
+        output_path: dir.path().join("bounds.pmtiles"),
+        tmp_dir: dir.path().join("scratch"),
+        ..minimal_config()
+    };
+    write_assembly_pbf(&config.pbf_path);
+    let identity = crate::provenance::hash_file(&config.pbf_path).expect("hash PBF");
+    let bounds = MercBbox {
+        min_x: 0.5,
+        min_y: 0.25,
+        max_x: 0.6,
+        max_y: 0.5,
+    };
+    let mut sort_reader = one_tile_sort_reader(&dir.path().join("chunks"));
+    let error = assemble::phase_assemble_with_ocean(
+        &mut sort_reader,
+        &config,
+        &bounds,
+        None,
+        assemble::RunProvenance::default(),
+    )
+    .expect_err("ordinary assembly needs an input identity");
+    assert!(error.0.contains("input PBF identity"));
+    let pbf_path = std::mem::take(&mut config.pbf_path);
+    let error = assemble::phase_assemble_with_ocean(
+        &mut sort_reader,
+        &config,
+        &bounds,
+        None,
+        assemble::RunProvenance {
+            input_identity: Some(identity),
+            ..Default::default()
+        },
+    )
+    .expect_err("ordinary assembly needs an input name");
+    assert!(error.0.contains("input PBF filename"));
+    config.pbf_path = pbf_path;
+    assemble::phase_assemble_with_ocean(
+        &mut sort_reader,
+        &config,
+        &bounds,
+        None,
+        assemble::RunProvenance {
+            input_identity: Some(identity),
+            ..Default::default()
+        },
+    )
+    .expect("assemble extract");
+    let bytes = std::fs::read(&config.output_path).expect("read archive");
+    let (west, south) = unproject(&Point::new(bounds.min_x, bounds.max_y));
+    let (east, north) = unproject(&Point::new(bounds.max_x, bounds.min_y));
+    for (offset, value) in [
+        (102, west),
+        (106, south),
+        (110, east),
+        (114, north),
+        (119, (west + east) * 0.5),
+        (123, (south + north) * 0.5),
+    ] {
+        let actual = i32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("E7"));
+        assert!((f64::from(actual) / 1e7 - value).abs() <= 0.5e-7);
+    }
+    assert_eq!(bytes[118], 2);
+    let mut reader = crate::pmtiles_reader::PmtilesReader::open(&config.output_path).expect("open");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&reader.read_metadata().expect("metadata")).expect("JSON");
+    assert_eq!(metadata["elivagar"]["config"]["ocean"]["mode"], "none");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn ocean_artifact_assembly_has_world_bounds_and_no_run_provenance() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("create tempdir");
+    let key = crate::ocean::OceanArtifactKey {
+        source: crate::ocean::OceanSourceKey {
+            full_shp_xxh128: crate::ocean::Xxh128::from_u128(1),
+            full_shx_xxh128: crate::ocean::Xxh128::from_u128(2),
+            simplified_shp_xxh128: None,
+            simplified_shx_xxh128: None,
+            min_zoom: 0,
+            max_zoom: 14,
+            policy_version: crate::ocean::OCEAN_POLICY_VERSION,
+        },
+        compression_level: 6,
+    };
+    let config = TilegenConfig {
+        pbf_path: std::path::PathBuf::new(),
+        output_path: dir.path().join("ocean.pmtiles"),
+        tmp_dir: dir.path().join("scratch"),
+        ocean_artifact_key: Some(key.clone()),
+        ocean_only_metadata: true,
+        ..minimal_config()
+    };
+    let mut sort_reader = one_tile_sort_reader(&dir.path().join("chunks"));
+    assemble::phase_assemble_with_ocean(
+        &mut sort_reader,
+        &config,
+        &MercBbox {
+            min_x: 0.5,
+            min_y: 0.25,
+            max_x: 0.6,
+            max_y: 0.5,
+        },
+        None,
+        assemble::RunProvenance {
+            ocean_mode: "artifact",
+            ..Default::default()
+        },
+    )
+    .expect("artifact assembly must not open an empty PBF path");
+    let bytes = std::fs::read(&config.output_path).expect("read archive");
+    for (offset, expected) in [
+        (102, -1_800_000_000),
+        (106, -850_500_000),
+        (110, 1_800_000_000),
+        (114, 850_500_000),
+        (119, 0),
+        (123, 0),
+    ] {
+        assert_eq!(
+            i32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("E7")),
+            expected
+        );
+    }
+    let mut reader = crate::pmtiles_reader::PmtilesReader::open(&config.output_path).expect("open");
+    let text = reader.read_metadata().expect("metadata");
+    assert!(text.contains(&format!("\"ocean_artifact\":{}", key.json())));
+    let metadata: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    assert!(metadata.get("elivagar").is_none());
+    assert!(metadata.get("source_pbf").is_none());
+}
+
 #[test]
 fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
     let dir = tempfile::tempdir().expect("create tempdir");
@@ -1571,6 +1758,7 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         polygon_simplify_factor: 1.0,
     };
 
+    write_assembly_pbf(&config.pbf_path);
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
         phase_assemble(&mut sort_reader, &config).expect("assemble should succeed");
 
@@ -1680,6 +1868,7 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         fanout_caps: [0; shortbread::Layer::count()],
         polygon_simplify_factor: 1.0,
     };
+    write_assembly_pbf(&mvt_config.pbf_path);
     let _ = phase_assemble(&mut mvt_sort_reader, &mvt_config).expect("mvt assemble should succeed");
     let mut mvt_reader =
         crate::pmtiles_reader::PmtilesReader::open(&mvt_output).expect("open mvt pmtiles");
@@ -1738,6 +1927,7 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
             fanout_caps: [0; shortbread::Layer::count()],
             polygon_simplify_factor: 1.0,
         };
+        write_assembly_pbf(&mlt_config.pbf_path);
         let _ =
             phase_assemble(&mut mlt_sort_reader, &mlt_config).expect("mlt assemble should succeed");
         let mut mlt_reader =
@@ -1963,6 +2153,77 @@ fn emit_point_decodes_correctly() {
     let (k0, v0) = f.tags[0];
     assert_eq!(lb.test_key(k0), "kind");
     assert_eq!(*lb.test_value(v0), mvt::Value::String("test".to_string()));
+}
+
+#[test]
+fn addresses_use_centroid_only_for_convex_polygons_without_holes() {
+    let convex = vec![
+        Point::new(0.1, 0.1),
+        Point::new(0.9, 0.1),
+        Point::new(0.9, 0.9),
+        Point::new(0.1, 0.9),
+        Point::new(0.1, 0.1),
+    ];
+    let concave = vec![
+        Point::new(0.1, 0.1),
+        Point::new(0.9, 0.1),
+        Point::new(0.9, 0.9),
+        Point::new(0.7, 0.9),
+        Point::new(0.7, 0.3),
+        Point::new(0.3, 0.3),
+        Point::new(0.3, 0.9),
+        Point::new(0.1, 0.9),
+        Point::new(0.1, 0.1),
+    ];
+    let hole = vec![
+        Point::new(0.3, 0.3),
+        Point::new(0.6, 0.3),
+        Point::new(0.6, 0.6),
+        Point::new(0.3, 0.6),
+        Point::new(0.3, 0.3),
+    ];
+    let m = test_layer_match(Layer::Addresses, GeomExpect::PolygonCentroid);
+    for (ring, holes, use_surface) in [
+        (&convex, vec![], false),
+        (&concave, vec![], true),
+        (&convex, vec![hole], true),
+    ] {
+        let mut records = Vec::new();
+        let mut scratch = PointEmitScratch::new();
+        emit_point_or_centroid(
+            42,
+            ring,
+            Some(&holes),
+            &merc_bbox(ring),
+            &m,
+            0,
+            0,
+            &mut records,
+            &mut scratch,
+        );
+        assert_eq!(records.len(), 1);
+        let layer = decode_to_layer(&records[0].data);
+        let points = decode_commands_to_abs_coords(&layer.test_feature(0).geometry);
+        let expected = if use_surface {
+            geometry::surface::point_on_surface_with_holes(ring, &holes).expect("surface point")
+        } else {
+            emit::centroid_of(ring)
+        };
+        assert_eq!(
+            points,
+            vec![geometry::projection::merc_to_tile_px(&expected, 0, 0, 0)]
+        );
+        let point = Point::new(
+            f64::from(points[0].0) / 4096.0,
+            f64::from(points[0].1) / 4096.0,
+        );
+        assert!(geometry::polygon::point_in_polygon(&point, ring));
+        assert!(
+            !holes
+                .iter()
+                .any(|hole| geometry::polygon::point_in_polygon(&point, hole))
+        );
+    }
 }
 
 #[test]

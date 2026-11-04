@@ -307,9 +307,14 @@ pub(crate) fn encode_feature_data_with_attrs(
     geom_cmds: &[u32],
     attrs_bytes: &[u8],
 ) -> Box<[u8]> {
+    checked_geometry_command_count(geom_cmds.len());
     let mut buf = Vec::with_capacity(13 + geom_cmds.len() * 4 + attrs_bytes.len());
     append_feature_data_with_attrs(&mut buf, osm_id, geom_type, geom_cmds, attrs_bytes);
     buf.into_boxed_slice()
+}
+
+fn checked_geometry_command_count(len: usize) -> u32 {
+    u32::try_from(len).expect("geometry command count exceeds the u32 wire format limit")
 }
 
 pub(crate) fn append_feature_data_with_attrs(
@@ -320,11 +325,10 @@ pub(crate) fn append_feature_data_with_attrs(
     attrs_bytes: &[u8],
 ) -> std::ops::Range<usize> {
     let start = buf.len();
+    let cmd_count = checked_geometry_command_count(geom_cmds.len());
     buf.reserve(13 + geom_cmds.len() * 4 + attrs_bytes.len());
     buf.extend_from_slice(&osm_id.to_le_bytes());
     buf.push(geom_type as u8);
-    #[allow(clippy::cast_possible_truncation)]
-    let cmd_count = geom_cmds.len() as u32;
     buf.extend_from_slice(&cmd_count.to_le_bytes());
     for &cmd in geom_cmds {
         buf.extend_from_slice(&cmd.to_le_bytes());

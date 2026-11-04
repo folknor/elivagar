@@ -180,8 +180,13 @@ at all four MVT message levels, and repeated packed tag/geometry fields
 concatenate - each direction pinned by mutation tests in brokkr's suite
 that assert the streaming hash and the detail decode path remain one
 equivalence relation. Archive metadata, header bounds, and directory
-layout are outside the digest; the provenance contract and
-`elivagar verify` own those surfaces.
+layout are outside the digest. The provenance contract checks input and
+producer config, and `elivagar verify` checks archive structure, directory
+layout and tile payloads. Neither validates geographic header bounds or
+center. Assembly derives extract bounds and center from the checkpoint's
+buffered data extent, converts them to WGS84, and the PMTiles writer rounds
+them to E7; the world-ocean artifact retains world bounds. Header regression
+checks cover those fields, and inspect displays their stored values.
 
 The detail decoder groups polygon rings using the first nonzero-area ring's
 winding as the exterior orientation and skips zero-area rings. It preserves

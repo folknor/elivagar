@@ -2,6 +2,134 @@ use super::*;
 use std::borrow::Cow;
 
 #[test]
+fn input_geometry_dispatch_uses_the_layer_acceptance_declarations() {
+    let cases: [(OsmGeomType, &[Layer]); 4] = [
+        (
+            OsmGeomType::Node,
+            &[
+                Layer::PlaceLabels,
+                Layer::Addresses,
+                Layer::StreetLabelsPoints,
+                Layer::PublicTransport,
+                Layer::Pois,
+            ],
+        ),
+        (
+            OsmGeomType::OpenWay,
+            &[
+                Layer::WaterLines,
+                Layer::WaterLinesLabels,
+                Layer::DamLines,
+                Layer::PierLines,
+                Layer::Boundaries,
+                Layer::Land,
+                Layer::Streets,
+                Layer::StreetLabels,
+                Layer::Aerialways,
+                Layer::Ferries,
+            ],
+        ),
+        (
+            OsmGeomType::ClosedWay,
+            &[
+                Layer::WaterPolygons,
+                Layer::WaterPolygonsLabels,
+                Layer::WaterLines,
+                Layer::WaterLinesLabels,
+                Layer::DamLines,
+                Layer::DamPolygons,
+                Layer::PierLines,
+                Layer::PierPolygons,
+                Layer::Boundaries,
+                Layer::BoundaryLabels,
+                Layer::Land,
+                Layer::Sites,
+                Layer::Buildings,
+                Layer::Addresses,
+                Layer::Streets,
+                Layer::StreetPolygons,
+                Layer::StreetLabels,
+                Layer::StreetsPolygonsLabels,
+                Layer::Bridges,
+                Layer::Aerialways,
+                Layer::Ferries,
+                Layer::PublicTransport,
+                Layer::Pois,
+            ],
+        ),
+        (
+            OsmGeomType::MultiPolygon,
+            &[
+                Layer::WaterPolygons,
+                Layer::WaterPolygonsLabels,
+                Layer::DamPolygons,
+                Layer::PierPolygons,
+                Layer::BoundaryLabels,
+                Layer::Land,
+                Layer::Sites,
+                Layer::Buildings,
+                Layer::Addresses,
+                Layer::StreetPolygons,
+                Layer::StreetsPolygonsLabels,
+                Layer::Bridges,
+                Layer::PublicTransport,
+                Layer::Pois,
+            ],
+        ),
+    ];
+
+    for (geom_type, expected_layers) in cases {
+        let dispatched = layers_for_geometry(geom_type);
+        assert_eq!(dispatched, expected_layers, "{geom_type:?}");
+        for layer in Layer::ALL {
+            assert_eq!(
+                layer.accepts(geom_type),
+                expected_layers.contains(&layer),
+                "{layer:?} for {geom_type:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn polygon_point_strategies_follow_shortbread_fixture_geometry() {
+    assert_eq!(
+        Layer::WaterPolygonsLabels.polygon_point_strategy(),
+        Some(PolygonPointStrategy::Centroid),
+    );
+    assert_eq!(
+        Layer::Addresses.polygon_point_strategy(),
+        Some(PolygonPointStrategy::CentroidIfConvex),
+    );
+    for layer in [
+        Layer::BoundaryLabels,
+        Layer::StreetsPolygonsLabels,
+        Layer::PublicTransport,
+        Layer::Pois,
+    ] {
+        assert_eq!(
+            layer.polygon_point_strategy(),
+            Some(PolygonPointStrategy::PointOnSurface),
+            "{layer:?}",
+        );
+    }
+    for layer in Layer::ALL {
+        if ![
+            Layer::WaterPolygonsLabels,
+            Layer::Addresses,
+            Layer::BoundaryLabels,
+            Layer::StreetsPolygonsLabels,
+            Layer::PublicTransport,
+            Layer::Pois,
+        ]
+        .contains(&layer)
+        {
+            assert_eq!(layer.polygon_point_strategy(), None, "{layer:?}");
+        }
+    }
+}
+
+#[test]
 fn test_highway_motorway_matches_streets_z5() {
     let tags = Tags(&[("highway", "motorway")]);
     let matches = match_element(&tags, OsmGeomType::OpenWay);

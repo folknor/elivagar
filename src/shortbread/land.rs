@@ -233,6 +233,6 @@ pub(super) fn match_addresses_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
     match_addresses(tags, GeomExpect::Point, out);
 }
 
-pub(super) fn match_addresses_centroid(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    match_addresses(tags, GeomExpect::PolygonCentroid, out);
+pub(super) fn match_addresses_polygon(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+    match_addresses(tags, Layer::Addresses.polygon_point_geom_expect(), out);
 }

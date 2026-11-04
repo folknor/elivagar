@@ -13,8 +13,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 
 use crate::debug::{WAIT, wait_span};
-use crate::pipeline::emit::RecordTally;
-
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
 
 // ---------------------------------------------------------------------------
@@ -69,6 +67,70 @@ pub struct SortRecord {
 const _: () = assert!(std::mem::size_of::<SortRecord>() == 24);
 
 pub type PayloadRecord = (SortKey, usize, usize);
+
+/// Sort record counts accumulated by emitters and the chunk writer.
+///
+/// These arrays retain the current 32-slot stats shape because phase12 copies
+/// them into `Phase12Stats`, while `FanoutStats` has a parallel 32 by 15
+/// layout. Narrowing the shared per-layer stats requires migrating both stats
+/// structures and the phase12 handoff together.
+#[derive(Clone)]
+pub(crate) struct RecordTally {
+    pub(crate) layer_records: [u64; 32],
+    pub(crate) layer_bytes: [u64; 32],
+    pub(crate) layer_zoom_records: Box<[u64; 32 * 15]>,
+    pub(crate) layer_zoom_bytes: Box<[u64; 32 * 15]>,
+    pub(crate) total_records: u64,
+    pub(crate) total_record_bytes: u64,
+}
+
+impl RecordTally {
+    pub(crate) fn new() -> Self {
+        Self {
+            layer_records: [0; 32],
+            layer_bytes: [0; 32],
+            layer_zoom_records: Box::new([0; 32 * 15]),
+            layer_zoom_bytes: Box::new([0; 32 * 15]),
+            total_records: 0,
+            total_record_bytes: 0,
+        }
+    }
+
+    pub(crate) fn record(&mut self, key: SortKey, data_len: usize) {
+        let layer = layer_from_key(key) as usize;
+        self.total_records += 1;
+        self.total_record_bytes += data_len as u64;
+        if layer < 32 {
+            self.layer_records[layer] += 1;
+            self.layer_bytes[layer] += data_len as u64;
+            let zoom = zoom_from_tile_id(tile_id_from_key(key)) as usize;
+            if zoom < 15 {
+                let idx = layer * 15 + zoom;
+                self.layer_zoom_records[idx] += 1;
+                self.layer_zoom_bytes[idx] += data_len as u64;
+            }
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.total_records += other.total_records;
+        self.total_record_bytes += other.total_record_bytes;
+        for i in 0..32 {
+            self.layer_records[i] += other.layer_records[i];
+            self.layer_bytes[i] += other.layer_bytes[i];
+        }
+        for i in 0..(32 * 15) {
+            self.layer_zoom_records[i] += other.layer_zoom_records[i];
+            self.layer_zoom_bytes[i] += other.layer_zoom_bytes[i];
+        }
+    }
+}
+
+impl Default for RecordTally {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 mod format;
 mod key;

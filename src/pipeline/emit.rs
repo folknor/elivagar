@@ -2,7 +2,7 @@ use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use crate::geometry::int_ocean::{
-    IntRect, OSM_DP_TOL_PX, Shape, TILE_BUFFER_I32, quantize_polygon_into,
+    IntRect, OSM_DP_TOL_PX, PinnedRings, Shape, TILE_BUFFER_I32, quantize_polygon_into,
     quantize_polygon_pinned_into, shape_bbox,
 };
 use crate::geometry::pyramid::{
@@ -19,7 +19,8 @@ use crate::mvt::{self, GeomType};
 use crate::pmtiles_writer;
 #[cfg(test)]
 use crate::shortbread::AttrValue;
-use crate::shortbread::{GeomExpect, Layer, LayerMatch};
+use crate::shortbread::{GeomExpect, Layer, LayerMatch, PolygonPointStrategy};
+pub(crate) use crate::sort::RecordTally;
 use crate::sort::{self, SortRecord};
 use crate::wire_format::{
     append_feature_data_with_attrs, encode_attrs_bytes, encode_feature_data_with_attrs,
@@ -191,7 +192,7 @@ pub(super) struct PolygonEmitScratch {
     /// Quantized base shape + pin flags, ring Vecs recycled across features
     /// (H6: one fresh Shape per feature was 5.2 GB per denmark build).
     pub(super) shape_base: Shape,
-    pub(super) flags_base: Vec<Vec<bool>>,
+    pub(super) flags_base: PinnedRings,
 }
 
 impl PolygonEmitScratch {
@@ -203,7 +204,7 @@ impl PolygonEmitScratch {
             base_pins: FxHashSet::default(),
             cap_events: Vec::new(),
             shape_base: Shape::new(),
-            flags_base: Vec::new(),
+            flags_base: PinnedRings::default(),
         }
     }
 }
@@ -216,7 +217,7 @@ pub(super) struct MultipolygonEmitScratch {
     pub(super) cap_events: Vec<(u16, u64, u64)>,
     /// See `PolygonEmitScratch::shape_base`.
     pub(super) shape_base: Shape,
-    pub(super) flags_base: Vec<Vec<bool>>,
+    pub(super) flags_base: PinnedRings,
 }
 
 impl MultipolygonEmitScratch {
@@ -227,7 +228,7 @@ impl MultipolygonEmitScratch {
             base_pins: FxHashSet::default(),
             cap_events: Vec::new(),
             shape_base: Shape::new(),
-            flags_base: Vec::new(),
+            flags_base: PinnedRings::default(),
         }
     }
 }
@@ -235,64 +236,6 @@ impl MultipolygonEmitScratch {
 // ---------------------------------------------------------------------------
 // Sort record push helper
 // ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-pub(crate) struct RecordTally {
-    pub(crate) layer_records: [u64; 32],
-    pub(crate) layer_bytes: [u64; 32],
-    pub(crate) layer_zoom_records: Box<[u64; 32 * 15]>,
-    pub(crate) layer_zoom_bytes: Box<[u64; 32 * 15]>,
-    pub(crate) total_records: u64,
-    pub(crate) total_record_bytes: u64,
-}
-
-impl RecordTally {
-    pub(super) fn new() -> Self {
-        Self {
-            layer_records: [0; 32],
-            layer_bytes: [0; 32],
-            layer_zoom_records: Box::new([0; 32 * 15]),
-            layer_zoom_bytes: Box::new([0; 32 * 15]),
-            total_records: 0,
-            total_record_bytes: 0,
-        }
-    }
-
-    pub(super) fn record(&mut self, key: sort::SortKey, data_len: usize) {
-        let layer = sort::layer_from_key(key) as usize;
-        self.total_records += 1;
-        self.total_record_bytes += data_len as u64;
-        if layer < 32 {
-            self.layer_records[layer] += 1;
-            self.layer_bytes[layer] += data_len as u64;
-            let zoom = sort::zoom_from_tile_id(sort::tile_id_from_key(key)) as usize;
-            if zoom < 15 {
-                let idx = layer * 15 + zoom;
-                self.layer_zoom_records[idx] += 1;
-                self.layer_zoom_bytes[idx] += data_len as u64;
-            }
-        }
-    }
-
-    pub(super) fn merge(&mut self, other: &Self) {
-        self.total_records += other.total_records;
-        self.total_record_bytes += other.total_record_bytes;
-        for i in 0..32 {
-            self.layer_records[i] += other.layer_records[i];
-            self.layer_bytes[i] += other.layer_bytes[i];
-        }
-        for i in 0..(32 * 15) {
-            self.layer_zoom_records[i] += other.layer_zoom_records[i];
-            self.layer_zoom_bytes[i] += other.layer_zoom_bytes[i];
-        }
-    }
-}
-
-impl Default for RecordTally {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 pub(super) struct RecordSink {
     pub(super) records: Vec<sort::PayloadRecord>,
@@ -423,15 +366,9 @@ fn fill_pin_keys_from_mask(
     }
 }
 
-fn fill_base_pins(shape: &Shape, flags: &[Vec<bool>], out: &mut FxHashSet<(i32, i32)>) {
+fn fill_base_pins(shape: &Shape, flags: &PinnedRings, out: &mut FxHashSet<(i32, i32)>) {
     out.clear();
-    for (ring, ring_flags) in shape.iter().zip(flags) {
-        for (p, &pinned) in ring.iter().zip(ring_flags) {
-            if pinned {
-                out.insert((p.x, p.y));
-            }
-        }
-    }
+    out.extend(flags.pinned_points_for(shape).map(|p| (p.x, p.y)));
 }
 
 fn polygon_z_start(merc: &[Point], z_lo: u8, z_hi: u8) -> Option<u8> {
@@ -749,7 +686,17 @@ pub(super) fn emit_point_or_centroid(
     if coords.is_empty() {
         return 0;
     }
-    let pt = if m.geom_expect == GeomExpect::PolygonPointOnSurface {
+    let use_surface = m.geom_expect != GeomExpect::Point
+        && match m.layer.polygon_point_strategy() {
+            Some(PolygonPointStrategy::CentroidIfConvex) => {
+                inners.is_some_and(|holes| !holes.is_empty())
+                    || !geometry::surface::is_convex(coords)
+            }
+            Some(PolygonPointStrategy::PointOnSurface) => true,
+            Some(PolygonPointStrategy::Centroid) => false,
+            None => m.geom_expect == GeomExpect::PolygonPointOnSurface,
+        };
+    let pt = if use_surface {
         if let Some(holes) = inners {
             geometry::surface::point_on_surface_with_holes(coords, holes)
         } else {
@@ -954,7 +901,11 @@ pub(super) fn emit_polygon_feature(
         );
     } else {
         quantize_polygon_into(merc, &[], OSM_POLYGON_MAX_Z, &mut scratch.shape_base);
-        scratch.flags_base.clear();
+        scratch
+            .flags_base
+            .fill_for_shape(&scratch.shape_base, |_, ring, flags| {
+                flags.resize(ring.len(), false);
+            });
     }
     if scratch.shape_base.is_empty() {
         return 0;
@@ -1056,7 +1007,11 @@ pub(super) fn emit_multipolygon_feature(
             OSM_POLYGON_MAX_Z,
             &mut emit_scratch.shape_base,
         );
-        emit_scratch.flags_base.clear();
+        emit_scratch
+            .flags_base
+            .fill_for_shape(&emit_scratch.shape_base, |_, ring, flags| {
+                flags.resize(ring.len(), false);
+            });
     }
     if emit_scratch.shape_base.is_empty() {
         return 0;

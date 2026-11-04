@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+Design-hunt fixes, seventh wave. This changes output.
+
+- In locations-on-ways mode the data extent now covers the inline
+  coordinates of every way, not just the nodes the PBF still carries
+  (pbfhogg drops untagged nodes by default). Denmark's extent grows,
+  so its ocean band and tile coverage grow with it; checkpoint v8.
+- PMTiles headers carry the extract's real bounds and center instead
+  of the whole world; the ocean artifact keeps world bounds.
+- Address points use the polygon centroid only for convex polygons
+  without holes and point-on-surface otherwise, as the Shortbread spec
+  declares.
+- `--locations-on-ways` asserts the PBF header feature instead of
+  overriding it, so a PBF without inline locations is refused rather
+  than producing an archive with every way dropped.
+- A run that cannot identify its input PBF refuses instead of writing
+  an archive with no provenance block.
+- An unknown layer id in a sort record is a typed error instead of a
+  silent drop; the sort record's command count is checked.
+- Pinned vertex masks are checked against their rings, so a desync
+  fails loudly instead of being padded.
+
 - MLT archives record tile compression `none` in their provenance
   contract and sidecar counters, matching their header, instead of the
   gzip default they never used; `--tile-format mlt` with

@@ -151,17 +151,25 @@ Example, the production shape:
 | `--tile-format <mvt\|mlt>` | payload format. Default `mvt` |
 | `--tile-compression <gzip\|brotli>` | MVT only. Default `gzip`; MLT ignores this default and stores uncompressed payloads. MLT with brotli is rejected by the library. |
 | `--compress-sort-chunks <lz4\|snappy>` | compress sort chunks: less disk I/O, more CPU. Wanted at planet scale, where scratch exceeds RAM |
-| `-j`, `--threads <N>` | rayon pool and pbfhogg decode pool. Default: logical CPUs |
+| `-j`, `--threads <N>` | worker sizing input for Rayon, decode, phase12 and assembly; not a process-wide cap. Default: logical CPUs |
+
+The CLI sizes Rayon from `--threads`; library callers size Rayon separately.
+Phase12 derives decode workers with `max(threads / 3, 1)` and, in locations
+mode, node workers with `(threads / 4).clamp(2, 6)`. Way admission allows
+`threads.max(8)` blocks in flight. Assembly derives partition workers from
+this value. Relation prepass, way dispatch and result drain use separate OS
+threads, so these counts do not divide a single process-wide allowance.
 
 A resume validates the checkpoint's input identity, producer config, ocean
 source, and sort chunk codec against the current run and refuses a mismatch,
 so `--skip-to` cannot silently blend two contracts into one archive. The
-checkpoint format is v7. The `--compress-sort-chunks` setting must match the
+checkpoint format is v8. Inline way coordinates contribute to the data extent
+in locations-on-ways mode, including ways without tags. The `--compress-sort-chunks` setting must match the
 run that wrote the chunks, including leaving compression unset on both runs.
 Resume also refuses obsolete chunk filenames and incompatible partition
 layouts, including chunks written with a different partition split zoom.
 Regenerate those chunks with a full run; they are not converted on resume.
-Checkpoints from v6 and earlier are refused; re-run a full tilegen.
+Checkpoints from v7 and earlier are refused; re-run a full tilegen.
 
 Resuming at `sort` or `assemble` also requires a valid chunk-count completion
 record (`sort_chunks.count`), written after the ocean phase and final chunk
@@ -185,13 +193,14 @@ sort chunk codec, which must match as described above.
 
 | flag | meaning |
 |---|---|
-| `--locations-on-ways` | PBF has node coordinates embedded in ways. Auto-detected from the PBF header; this forces it when the header does not declare it |
+| `--locations-on-ways` | Assert that the PBF header declares embedded way coordinates. Header detection enables the mode automatically; this flag cannot force it on for a raw PBF |
 | `--force-sorted` | use the compact node store without the PBF header flag. Errors if nodes are not monotonic |
 | `--allow-unsafe-flat-index` | bypass flat-index guardrails. Expert debugging only; may cause severe IO/RSS degradation |
 
-`--locations-on-ways` reads a PBF header, not the filesystem, and is the one
-piece of detection that survives: it is a property of the input file, which is
-itself named explicitly and hashed into provenance.
+Locations-on-ways mode is detected from the PBF header, not the filesystem,
+and is a property of the input file, which is itself named explicitly and
+hashed into provenance. The optional `--locations-on-ways` flag is an
+assertion: if set, the header must declare `LocationsOnWays`.
 
 When a node store is needed, input without the `Sort.Type_then_ID` header
 flag is refused at every file size unless `--force-sorted` or
@@ -206,7 +215,7 @@ including header detection) avoid the node store and this guard entirely.
 | flag | default | meaning |
 |---|---|---|
 | `--sort-budget <SIZE>` | 1G | per-chunk sort buffer. Min 64M. Lower cuts phase12 RSS, costs merge chunks |
-| `--way-budget <SIZE>` | 128M, or 4G under `--locations-on-ways` | in-flight way processing, in raw bytes (decompressed block size plus measured plan bytes). Min 1M. The count ceiling (`threads` blocks in flight) is the primary admission control; this budget is a safety net against individually huge blocks and never binds on normal input, whatever the blob packing. See the constant's comment in `src/pipeline/phase12.rs` |
+| `--way-budget <SIZE>` | 128M, or 4G under `--locations-on-ways` | in-flight way processing, in raw bytes (decompressed block size plus measured plan bytes). Min 1M. The count ceiling (`threads.max(8)` blocks in flight) is the primary admission control; this budget is a safety net against individually huge blocks and never binds on normal input, whatever the blob packing. See the constant's comment in `src/pipeline/phase12.rs` |
 | `--dedup-cap <N>` | 1000000 | entry cap for the PMTiles payload dedup map. Tile content is identical under any cap; past it duplicate payloads are stored instead of referenced, costing archive bytes, and the map costs ~56 bytes/entry of RAM. Deliberately outside the provenance contract, like the budgets: it cannot change what a consumer decodes |
 | `--assemble-budget <SIZE>` | 32M | tile assembly batch. Min 1M |
 

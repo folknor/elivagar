@@ -10,6 +10,161 @@ pub(crate) type Contour = crate::geometry::overlay::Contour;
 pub(crate) type Shape = crate::geometry::overlay::Shape;
 pub(crate) type Shapes = crate::geometry::overlay::Shapes;
 
+/// Reused per-ring pin masks. A mask is paired with a contour only through
+/// `PinnedRing`, which checks the point-for-point invariant before use.
+#[derive(Default)]
+pub(crate) struct PinnedRings {
+    rings: Vec<Vec<bool>>,
+}
+
+impl PinnedRings {
+    pub(crate) fn fill_for_shape(
+        &mut self,
+        shape: &Shape,
+        mut fill: impl FnMut(usize, &Contour, &mut Vec<bool>),
+    ) {
+        self.rings.resize_with(shape.len(), Vec::new);
+        for (idx, (points, pins)) in shape.iter().zip(&mut self.rings).enumerate() {
+            pins.clear();
+            fill(idx, points, pins);
+            PinnedRing::new(points, pins);
+        }
+        self.rings.truncate(shape.len());
+    }
+
+    pub(crate) fn validate_for(&self, shape: &Shape) {
+        assert_eq!(
+            self.rings.len(),
+            shape.len(),
+            "pinned ring count does not match shape ring count"
+        );
+        for (points, pins) in shape.iter().zip(&self.rings) {
+            PinnedRing::new(points, pins);
+        }
+    }
+
+    /// Iterate pinned coordinates only after checking every ring and mask.
+    pub(crate) fn pinned_points_for<'a>(
+        &'a self,
+        shape: &'a Shape,
+    ) -> impl Iterator<Item = &'a IntPoint> + 'a {
+        self.validate_for(shape);
+        (0..shape.len()).flat_map(move |idx| self.ring_for(shape, idx).pinned_points())
+    }
+
+    fn ring_for<'a>(&'a self, shape: &'a Shape, idx: usize) -> PinnedRing<'a> {
+        let points = &shape[idx];
+        PinnedRing::new(points, &self.rings[idx])
+    }
+
+    fn prepare(&mut self, ring_count: usize) {
+        self.rings.resize_with(ring_count, Vec::new);
+        self.rings.truncate(ring_count);
+        for pins in &mut self.rings {
+            pins.clear();
+        }
+    }
+
+    fn clear_contents(&mut self) {
+        for pins in &mut self.rings {
+            pins.clear();
+        }
+    }
+
+    fn truncate(&mut self, ring_count: usize) {
+        self.rings.truncate(ring_count);
+    }
+
+    fn ring_flags_mut(&mut self, idx: usize) -> &mut Vec<bool> {
+        &mut self.rings[idx]
+    }
+
+    fn copy_for_shape(&mut self, shape: &Shape, source: &Self) {
+        source.validate_for(shape);
+        self.prepare(shape.len());
+        for (idx, points) in shape.iter().enumerate() {
+            self.rings[idx].extend_from_slice(&source.rings[idx]);
+            PinnedRing::new(points, &self.rings[idx]);
+        }
+    }
+}
+
+/// A contour and the point-aligned pin mask that constrains its simplification.
+struct PinnedRing<'a> {
+    points: &'a Contour,
+    flags: &'a [bool],
+}
+
+impl<'a> PinnedRing<'a> {
+    fn new(points: &'a Contour, flags: &'a [bool]) -> Self {
+        assert_eq!(
+            points.len(),
+            flags.len(),
+            "pinned ring point count does not match pin flag count"
+        );
+        Self { points, flags }
+    }
+
+    fn pinned_points(self) -> impl Iterator<Item = &'a IntPoint> + 'a {
+        self.points
+            .iter()
+            .zip(self.flags)
+            .filter_map(|(point, &pinned)| pinned.then_some(point))
+    }
+
+    fn flags(&self) -> &'a [bool] {
+        self.flags
+    }
+}
+
+struct PinnedRingMut<'a> {
+    points: &'a mut Contour,
+    flags: &'a mut Vec<bool>,
+}
+
+impl<'a> PinnedRingMut<'a> {
+    fn new(points: &'a mut Contour, flags: &'a mut Vec<bool>) -> Self {
+        assert_eq!(
+            points.len(),
+            flags.len(),
+            "pinned ring point count does not match pin flag count"
+        );
+        Self { points, flags }
+    }
+
+    fn push_nonduplicate(&mut self, point: IntPoint, pinned: bool) {
+        if self.points.last().copied() == Some(point) {
+            *self
+                .flags
+                .last_mut()
+                .expect("a repeated point has a paired pin flag") |= pinned;
+        } else {
+            self.points.push(point);
+            self.flags.push(pinned);
+        }
+    }
+
+    fn remove_closing_duplicate(&mut self) {
+        if self.points.len() >= 2 && self.points.first() == self.points.last() {
+            let last = self.flags.pop().expect("closing point has a pin flag");
+            *self.flags.first_mut().expect("first point has a pin flag") |= last;
+            self.points.pop();
+        }
+    }
+
+    fn orient(&mut self, outer: bool) {
+        let area = signed_area_2x(self.points);
+        if (outer && area < 0) || (!outer && area > 0) {
+            self.points.reverse();
+            self.flags.reverse();
+        }
+    }
+
+    fn points(&self) -> &Contour {
+        self.points
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct IntRect {
     pub min_x: i32,
@@ -169,7 +324,7 @@ pub(crate) fn quantize_polygon_pinned_into<F>(
     maxz: u8,
     mut pin_test: F,
     out: &mut Shape,
-    out_flags: &mut Vec<Vec<bool>>,
+    out_flags: &mut PinnedRings,
 ) where
     F: FnMut(&Point) -> bool,
 {
@@ -183,6 +338,7 @@ pub(crate) fn quantize_polygon_pinned_into<F>(
     }
     out.truncate(used);
     out_flags.truncate(used);
+    out_flags.validate_for(out);
 }
 
 /// Quantize one ring into slot `*used` of `out`, reusing the slot's Vec.
@@ -219,7 +375,7 @@ fn quantize_ring_at(
 #[allow(clippy::too_many_arguments)]
 fn quantize_ring_pinned_at<F>(
     out: &mut Shape,
-    out_flags: &mut Vec<Vec<bool>>,
+    out_flags: &mut PinnedRings,
     used: &mut usize,
     points: &[Point],
     maxz: u8,
@@ -232,27 +388,26 @@ where
     if *used == out.len() {
         out.push(Vec::new());
     }
-    if *used == out_flags.len() {
-        out_flags.push(Vec::new());
+    if *used == out_flags.rings.len() {
+        out_flags.rings.push(Vec::new());
     }
     let ring = &mut out[*used];
-    let flags = &mut out_flags[*used];
+    let flags = &mut out_flags.rings[*used];
     ring.clear();
     flags.clear();
+    let mut paired = PinnedRingMut::new(ring, flags);
     let scale = 1_i64 << (u32::from(maxz) + 12);
     for p in points {
-        push_nonduplicate_pinned(
-            ring,
-            flags,
+        paired.push_nonduplicate(
             IntPoint::new(quantize_coord(p.x, scale), quantize_coord(p.y, scale)),
             pin_test(p),
         );
     }
-    remove_closing_duplicate_pinned(ring, flags);
-    if !ring_is_valid(ring) {
+    paired.remove_closing_duplicate();
+    if !ring_is_valid(paired.points()) {
         return false;
     }
-    orient_ring_pinned(ring, flags, outer);
+    paired.orient(outer);
     *used += 1;
     true
 }
@@ -302,40 +457,36 @@ pub(crate) fn rescale_shape_pinned_into(
     scratch: &mut IntEmitScratch,
     shape: &Shape,
     s: u8,
-    flags: &[Vec<bool>],
+    flags: &PinnedRings,
     out: &mut Shape,
-    out_flags: &mut Vec<Vec<bool>>,
+    out_flags: &mut PinnedRings,
 ) {
-    debug_assert_eq!(out.len(), shape.len());
+    assert_eq!(out.len(), shape.len(), "rescale output ring slots mismatch");
+    flags.validate_for(shape);
     if s == 0 {
         copy_shape_into(shape, out);
-        resize_flag_rings(out_flags, flags.len());
-        for (source, target) in flags.iter().zip(out_flags.iter_mut()) {
-            target.clear();
-            target.extend_from_slice(source);
-        }
+        out_flags.copy_for_shape(shape, flags);
         return;
     }
 
-    resize_flag_rings(out_flags, shape.len());
+    out_flags.prepare(shape.len());
     let mut used = 0usize;
     for (i, contour) in shape.iter().enumerate() {
-        let ring_flags = flags.get(i).map_or(&[][..], Vec::as_slice);
+        let ring_flags = flags.ring_for(shape, i);
         let ring = &mut out[used];
-        let flags_ring = &mut out_flags[used];
         ring.clear();
+        let flags_ring = out_flags.ring_flags_mut(used);
         flags_ring.clear();
+        let mut paired = PinnedRingMut::new(ring, flags_ring);
         for (idx, &p) in contour.iter().enumerate() {
-            push_nonduplicate_pinned(
-                ring,
-                flags_ring,
+            paired.push_nonduplicate(
                 IntPoint::new(shift_round(p.x, s), shift_round(p.y, s)),
-                ring_flags.get(idx).copied().unwrap_or(false),
+                ring_flags.flags()[idx],
             );
         }
-        remove_closing_duplicate_pinned(ring, flags_ring);
-        if ring_is_valid(ring) {
-            orient_ring_pinned(ring, flags_ring, i == 0);
+        paired.remove_closing_duplicate();
+        if ring_is_valid(paired.points()) {
+            paired.orient(i == 0);
             used += 1;
         } else if i == 0 {
             // Do not compact a surviving hole into the outer slot.
@@ -347,13 +498,11 @@ pub(crate) fn rescale_shape_pinned_into(
     }
     scratch.recycle_contours_from(out, used);
     out_flags.truncate(used);
-}
-
-fn resize_flag_rings(flags: &mut Vec<Vec<bool>>, len: usize) {
-    flags.resize_with(len, Vec::new);
-    for ring in flags.iter_mut() {
-        ring.clear();
-    }
+    assert_eq!(
+        out.len(),
+        out_flags.rings.len(),
+        "rescaled pinned ring count does not match shape ring count"
+    );
 }
 
 #[hotpath::measure]
@@ -361,8 +510,11 @@ pub(crate) fn simplify_shape_dp(
     scratch: &mut IntEmitScratch,
     shape: &mut Shape,
     tol: i64,
-    pins: Option<&[Vec<bool>]>,
+    mut pins: Option<&mut PinnedRings>,
 ) {
+    if let Some(pins) = pins.as_deref() {
+        pins.validate_for(shape);
+    }
     if tol <= 0 {
         return;
     }
@@ -372,19 +524,25 @@ pub(crate) fn simplify_shape_dp(
     // pool. The original outer must survive before any hole is retained.
     let mut write = 0usize;
     for read in 0..shape.len() {
-        let pin_ring = pins.and_then(|p| p.get(read)).map(Vec::as_slice);
+        let pin_ring = pins.as_deref().map(|p| p.rings[read].as_slice());
         if simplify_contour_dp_in_place(&mut shape[read], tol, pin_ring, read == 0, &mut scratch.dp)
         {
             shape.swap(write, read);
             write += 1;
         } else if read == 0 {
             scratch.recycle_contours_from(shape, 0);
+            if let Some(pins) = pins.as_deref_mut() {
+                pins.clear_contents();
+            }
             return;
         }
     }
     scratch.recycle_contours_from(shape, write);
     if !shape.first().is_some_and(|outer| outer.len() >= 3) {
         scratch.recycle_contours_from(shape, 0);
+    }
+    if let Some(pins) = &mut pins {
+        pins.clear_contents();
     }
 }
 
@@ -393,15 +551,18 @@ pub(crate) fn simplify_shape_vw(
     scratch: &mut IntEmitScratch,
     shape: &mut Shape,
     area_2x_thresh: i128,
-    pins: Option<&[Vec<bool>]>,
+    mut pins: Option<&mut PinnedRings>,
 ) {
+    if let Some(pins) = pins.as_deref() {
+        pins.validate_for(shape);
+    }
     if area_2x_thresh <= 0 {
         return;
     }
     if shape.is_empty() {
         return;
     }
-    let outer_pins = pins.and_then(|p| p.first()).map(Vec::as_slice);
+    let outer_pins = pins.as_deref().map(|p| p.rings[0].as_slice());
     if !simplify_contour_vw_in_place(
         &mut shape[0],
         area_2x_thresh,
@@ -410,11 +571,14 @@ pub(crate) fn simplify_shape_vw(
         &mut scratch.vw,
     ) {
         scratch.recycle_contours_from(shape, 0);
+        if let Some(pins) = pins.as_deref_mut() {
+            pins.clear_contents();
+        }
         return;
     }
     let mut write = 1usize;
     for read in 1..shape.len() {
-        let pin_ring = pins.and_then(|p| p.get(read)).map(Vec::as_slice);
+        let pin_ring = pins.as_deref().map(|p| p.rings[read].as_slice());
         if simplify_contour_vw_in_place(
             &mut shape[read],
             area_2x_thresh,
@@ -427,6 +591,9 @@ pub(crate) fn simplify_shape_vw(
         }
     }
     scratch.recycle_contours_from(shape, write);
+    if let Some(pins) = &mut pins {
+        pins.clear_contents();
+    }
 }
 
 fn simplify_contour_vw_in_place(
@@ -438,13 +605,17 @@ fn simplify_contour_vw_in_place(
 ) -> bool {
     vw.work.clear();
     vw.work.extend_from_slice(contour);
-    remove_closing_duplicate(&mut vw.work);
     vw.pin_flags.clear();
     if let Some(p) = pins {
+        PinnedRing::new(contour, p);
         vw.pin_flags.extend_from_slice(p);
+    } else {
+        vw.pin_flags.resize(contour.len(), false);
     }
-    vw.pin_flags.truncate(vw.work.len());
-    vw.pin_flags.resize(vw.work.len(), false);
+    {
+        let mut paired = PinnedRingMut::new(&mut vw.work, &mut vw.pin_flags);
+        paired.remove_closing_duplicate();
+    }
     let n = vw.work.len();
     if n <= 3 {
         if !ring_is_valid(&vw.work) {
@@ -691,35 +862,8 @@ fn push_nonduplicate(ring: &mut Contour, point: IntPoint) {
     }
 }
 
-fn push_nonduplicate_pinned(
-    ring: &mut Contour,
-    flags: &mut Vec<bool>,
-    point: IntPoint,
-    pinned: bool,
-) {
-    if ring.last().copied() == Some(point) {
-        if let Some(last) = flags.last_mut() {
-            *last |= pinned;
-        }
-    } else {
-        ring.push(point);
-        flags.push(pinned);
-    }
-}
-
 fn remove_closing_duplicate(ring: &mut Contour) {
     if ring.len() >= 2 && ring.first() == ring.last() {
-        ring.pop();
-    }
-}
-
-fn remove_closing_duplicate_pinned(ring: &mut Contour, flags: &mut Vec<bool>) {
-    if ring.len() >= 2 && ring.first() == ring.last() {
-        if let Some(last) = flags.pop()
-            && let Some(first) = flags.first_mut()
-        {
-            *first |= last;
-        }
         ring.pop();
     }
 }
@@ -752,14 +896,6 @@ fn orient_ring(ring: &mut Contour, outer: bool) {
     }
 }
 
-fn orient_ring_pinned(ring: &mut Contour, flags: &mut [bool], outer: bool) {
-    let area = signed_area_2x(ring);
-    if (outer && area < 0) || (!outer && area > 0) {
-        ring.reverse();
-        flags.reverse();
-    }
-}
-
 pub(crate) fn signed_area_2x(ring: &Contour) -> i128 {
     let mut area = 0_i128;
     for i in 0..ring.len() {
@@ -779,15 +915,16 @@ fn simplify_contour_dp_in_place(
 ) -> bool {
     dp.ring.clear();
     dp.ring.extend_from_slice(contour);
-    remove_closing_duplicate(&mut dp.ring);
     dp.pin_flags.clear();
     if let Some(p) = pins {
-        dp.pin_flags.extend_from_slice(p);
+        dp.pin_flags
+            .extend_from_slice(PinnedRing::new(contour, p).flags());
+    } else {
+        dp.pin_flags.resize(contour.len(), false);
     }
-    if dp.pin_flags.len() > dp.ring.len() {
-        dp.pin_flags.truncate(dp.ring.len());
-    } else if dp.pin_flags.len() < dp.ring.len() {
-        dp.pin_flags.resize(dp.ring.len(), false);
+    {
+        let mut paired = PinnedRingMut::new(&mut dp.ring, &mut dp.pin_flags);
+        paired.remove_closing_duplicate();
     }
     if dp.ring.len() <= 3 {
         if !ring_is_valid(&dp.ring) {
@@ -809,8 +946,9 @@ fn simplify_contour_dp_in_place(
 
     collect_chain_into(&dp.ring, a0, a1, &mut dp.chain_a);
     collect_chain_into(&dp.ring, a1, a0, &mut dp.chain_b);
-    collect_chain_flags_into(&dp.pin_flags, a0, a1, &mut dp.pins_a);
-    collect_chain_flags_into(&dp.pin_flags, a1, a0, &mut dp.pins_b);
+    let paired = PinnedRing::new(&dp.ring, &dp.pin_flags);
+    collect_chain_flags_into(&paired, a0, a1, &mut dp.pins_a);
+    collect_chain_flags_into(&paired, a1, a0, &mut dp.pins_b);
     dp_keep_into(&dp.chain_a, tol, &dp.pins_a, &mut dp.keep_a, &mut dp.stack);
     dp_keep_into(&dp.chain_b, tol, &dp.pins_b, &mut dp.keep_b, &mut dp.stack);
 
@@ -873,15 +1011,20 @@ fn collect_chain_into(ring: &Contour, start: usize, end: usize, chain: &mut Cont
     }
 }
 
-fn collect_chain_flags_into(flags: &[bool], start: usize, end: usize, chain: &mut Vec<bool>) {
+fn collect_chain_flags_into(
+    ring: &PinnedRing<'_>,
+    start: usize,
+    end: usize,
+    chain: &mut Vec<bool>,
+) {
     chain.clear();
     let mut idx = start;
     loop {
-        chain.push(flags.get(idx).copied().unwrap_or(false));
+        chain.push(ring.flags[idx]);
         if idx == end {
             break;
         }
-        idx = (idx + 1) % flags.len();
+        idx = (idx + 1) % ring.points.len();
     }
 }
 
@@ -892,6 +1035,7 @@ fn dp_keep_into(
     keep: &mut Vec<bool>,
     stack: &mut Vec<(usize, usize)>,
 ) {
+    assert_eq!(chain.len(), pins.len(), "DP chain pin count mismatch");
     keep.clear();
     keep.resize(chain.len(), false);
     if chain.is_empty() {
@@ -899,7 +1043,7 @@ fn dp_keep_into(
     }
     keep[0] = true;
     keep[chain.len() - 1] = true;
-    for (idx, &pinned) in pins.iter().enumerate().take(keep.len()) {
+    for (idx, &pinned) in pins.iter().enumerate() {
         if pinned {
             keep[idx] = true;
         }
@@ -1218,6 +1362,82 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "pinned ring point count does not match pin flag count")]
+    fn pinned_rings_reject_mask_desynchronization() {
+        let shape = square_shape(0, 100);
+        let pins = PinnedRings {
+            rings: vec![vec![false; 3]],
+        };
+        pins.validate_for(&shape);
+    }
+
+    #[test]
+    #[should_panic(expected = "pinned ring count does not match shape ring count")]
+    fn pinned_point_iteration_rejects_missing_ring_masks() {
+        let shape = square_shape(0, 100);
+        let pins = PinnedRings::default();
+        assert_eq!(pins.pinned_points_for(&shape).count(), 0);
+    }
+
+    #[test]
+    fn simplifiers_preserve_a_pin_on_the_closing_duplicate() {
+        let target = p(50, 1);
+        let original = vec![vec![
+            target,
+            p(100, 0),
+            p(100, 100),
+            p(0, 100),
+            p(0, 0),
+            target,
+        ]];
+        for use_vw in [false, true] {
+            let mut shape = original.clone();
+            let mut pins = PinnedRings::default();
+            pins.fill_for_shape(&shape, |_, ring, flags| {
+                flags.resize(ring.len(), false);
+                *flags.last_mut().expect("closed ring has a last vertex") = true;
+            });
+            let mut scratch = IntEmitScratch::new();
+            if use_vw {
+                simplify_shape_vw(&mut scratch, &mut shape, 256, Some(&mut pins));
+            } else {
+                simplify_shape_dp(&mut scratch, &mut shape, 16, Some(&mut pins));
+            }
+            assert!(
+                shape[0].contains(&target),
+                "closing vertex pin lost (VW={use_vw})"
+            );
+        }
+    }
+
+    #[test]
+    fn quantized_base_pins_follow_duplicate_collapse_and_ring_orientation() {
+        let outer = merc_ring(&[
+            (0.0, 0.0),
+            (0.0, 0.25),
+            (0.25, 0.25),
+            (0.25, 0.0),
+            (0.0, 0.0),
+        ]);
+        let mut shape = Shape::new();
+        let mut flags = PinnedRings::default();
+        quantize_polygon_pinned_into(
+            &outer,
+            &[],
+            0,
+            |point| point.x <= 0.0 && point.y > 0.0,
+            &mut shape,
+            &mut flags,
+        );
+        let pinned: Vec<_> = flags
+            .pinned_points_for(&shape)
+            .map(|point| (point.x, point.y))
+            .collect();
+        assert_eq!(pinned, vec![(0, 1024)]);
+        assert!(signed_area_2x(&shape[0]) > 0);
+    }
+
+    #[test]
     fn quantize_polygon_winding_enforced_for_misordered_input() {
         let outer = merc_ring(&[(0.0, 0.0), (0.0, 0.25), (0.25, 0.25), (0.25, 0.0)]);
         let hole = merc_ring(&[(0.05, 0.05), (0.20, 0.05), (0.20, 0.20), (0.05, 0.20)]);
@@ -1282,13 +1502,16 @@ mod tests {
             vec![p(4, 4), p(4, 12), p(12, 12), p(12, 4)],
         ];
         assert!(rescale_shape(&shape, 2).is_empty());
-        let flags = vec![vec![false; 4], vec![true; 4]];
+        let mut flags = PinnedRings::default();
+        flags.fill_for_shape(&shape, |idx, ring, pins| {
+            pins.resize(ring.len(), idx == 1);
+        });
         let mut scratch = IntEmitScratch::new();
         let mut out = scratch.take_shape(shape.len());
-        let mut out_flags = Vec::new();
+        let mut out_flags = PinnedRings::default();
         rescale_shape_pinned_into(&mut scratch, &shape, 2, &flags, &mut out, &mut out_flags);
         assert!(out.is_empty());
-        assert!(out_flags.is_empty());
+        assert!(out_flags.rings.is_empty());
     }
 
     #[test]
@@ -1299,17 +1522,24 @@ mod tests {
             vec![p(0, 0), p(100, 0), p(100, 100), p(0, 100)],
             vec![p(20, 20), p(20, 80), p(80, 80), p(80, 20)],
         ];
-        let flags = vec![vec![false; 4], vec![true; 4]];
+        let mut flags = PinnedRings::default();
+        flags.fill_for_shape(&shape, |idx, ring, pins| {
+            pins.resize(ring.len(), idx == 1);
+        });
         let mut scratch = IntEmitScratch::new();
         let mut dp = shape.clone();
-        simplify_shape_dp(&mut scratch, &mut dp, 1000, Some(&flags));
+        simplify_shape_dp(&mut scratch, &mut dp, 1000, Some(&mut flags));
         assert!(dp.is_empty());
 
         // VW has a three-vertex floor, so use a degenerate original outer
         // to exercise its existing whole-shape rejection policy.
         let mut vw = shape;
         vw[0] = vec![p(0, 0), p(1, 0), p(2, 0)];
-        simplify_shape_vw(&mut scratch, &mut vw, 16, Some(&flags));
+        let mut vw_flags = PinnedRings::default();
+        vw_flags.fill_for_shape(&vw, |idx, ring, pins| {
+            pins.resize(ring.len(), idx == 1);
+        });
+        simplify_shape_vw(&mut scratch, &mut vw, 16, Some(&mut vw_flags));
         assert!(vw.is_empty());
     }
 
@@ -1384,10 +1614,14 @@ mod tests {
         ];
         let mut plain = vec![ring.clone()];
         let mut pinned = vec![ring];
-        let flags = vec![vec![false, false, true, false, false, false, false]];
+        let mut flags = PinnedRings::default();
+        flags.fill_for_shape(&pinned, |_idx, ring, pins| {
+            pins.resize(ring.len(), false);
+            pins[2] = true;
+        });
         let mut scratch = IntEmitScratch::new();
         simplify_shape_vw(&mut scratch, &mut plain, 10_000, None);
-        simplify_shape_vw(&mut scratch, &mut pinned, 10_000, Some(&flags));
+        simplify_shape_vw(&mut scratch, &mut pinned, 10_000, Some(&mut flags));
         assert!(!plain[0].contains(&target));
         assert!(pinned[0].contains(&target));
     }
@@ -1633,10 +1867,14 @@ mod tests {
             p(0, 100),
         ]];
         let mut pinned = plain.clone();
-        let flags = vec![vec![false, false, true, false, false, false, false]];
+        let mut flags = PinnedRings::default();
+        flags.fill_for_shape(&pinned, |_idx, ring, pins| {
+            pins.resize(ring.len(), false);
+            pins[2] = true;
+        });
         let mut scratch = IntEmitScratch::new();
         simplify_shape_dp(&mut scratch, &mut plain, 16, None);
-        simplify_shape_dp(&mut scratch, &mut pinned, 16, Some(&flags));
+        simplify_shape_dp(&mut scratch, &mut pinned, 16, Some(&mut flags));
         assert!(!plain[0].contains(&target));
         assert!(pinned[0].contains(&target));
     }

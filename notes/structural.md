@@ -452,20 +452,6 @@ projection, line clipper, line DP and label placement - the real seam
 
 Reported by the polygon-engine and coordinate-spaces hunts.
 
-## STR-016 - Make pinned rings a type
-
-Pins have three representations: Merc keys `FxHashSet<(i64, i64)>`
-(`merc_point_key`), base-space `FxHashSet<(i32, i32)>`
-(`PyramidParams::pins`), and per-ring `Vec<Vec<bool>>` flags (`flags_base`,
-`edge_flags`, `flags_z`) that must stay index-parallel to the shape. The
-parallel invariant is maintained by hand in `push_nonduplicate_pinned`,
-`remove_closing_duplicate_pinned`, `orient_ring_pinned` (reverse both) and the
-DP/VW truncate/resize repair, which silently pads missing flags with `false` -
-hiding a desync rather than surfacing it. Proposed:
-`PinnedRing { pts, pinned: BitVec }` or interleaved `(IntPoint, bool)`.
-
-Reported by the polygon-engine hunt.
-
 ## STR-017 - Pool ownership in the polygon engine
 
 `IntEmitScratch` owns the `BoolOverlay` and exposes its pool methods;
@@ -857,5 +843,3 @@ Reported by every hunt.
 - A test building the ocean producer filter and the consumer copy/splice from
   one plan and checking every tile is owned by exactly one side - "the test
   this subsystem most lacks" (ocean hunt).
-- A semantic comparison of MVT and MLT output for the same tile (encoding
-  hunt).

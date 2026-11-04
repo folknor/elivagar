@@ -106,7 +106,7 @@ pub(super) fn match_boundary_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
             layer: Layer::BoundaryLabels,
             min_zoom: 5,
             max_zoom: 14,
-            geom_expect: GeomExpect::PolygonPointOnSurface,
+            geom_expect: Layer::BoundaryLabels.polygon_point_geom_expect(),
             paint_rank: 0,
             attrs,
         });

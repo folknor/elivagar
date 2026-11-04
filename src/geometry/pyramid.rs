@@ -1,9 +1,10 @@
 use crate::debug::RING_CAP;
 use crate::geometry::int_ocean::{
-    Contour, IntEmitScratch, IntPoint, IntRect, Shape, Shapes, TILE_BUFFER_I32, TILE_EXTENT_I32,
-    buffered_tile_rect, contour_area_is_below, copy_shape_into, emit_full_tile, encode_tile_shape,
-    intersect_rect_into, normalize_into, point_in_contour, rescale_shape_pinned_into, shape_bbox,
-    signed_area_2x, simplify_shape_dp, simplify_shape_vw, vw_area_threshold,
+    Contour, IntEmitScratch, IntPoint, IntRect, PinnedRings, Shape, Shapes, TILE_BUFFER_I32,
+    TILE_EXTENT_I32, buffered_tile_rect, contour_area_is_below, copy_shape_into, emit_full_tile,
+    encode_tile_shape, intersect_rect_into, normalize_into, point_in_contour,
+    rescale_shape_pinned_into, shape_bbox, signed_area_2x, simplify_shape_dp, simplify_shape_vw,
+    vw_area_threshold,
 };
 use crate::mvt::MAX_FEATURE_RINGS;
 use rustc_hash::FxHashSet;
@@ -45,8 +46,8 @@ pub(crate) type PyramidSink<'a> = &'a mut dyn FnMut(u8, u32, u32, &[u32], Pyrami
 pub(crate) struct PyramidScratch {
     pub int: IntEmitScratch,
     frag_pool: Vec<Shapes>,
-    edge_flags: Vec<Vec<bool>>,
-    flags_z: Vec<Vec<bool>>,
+    edge_flags: PinnedRings,
+    flags_z: PinnedRings,
 }
 
 impl PyramidScratch {
@@ -54,8 +55,8 @@ impl PyramidScratch {
         Self {
             int: IntEmitScratch::new(),
             frag_pool: Vec::new(),
-            edge_flags: Vec::new(),
-            flags_z: Vec::new(),
+            edge_flags: PinnedRings::default(),
+            flags_z: PinnedRings::default(),
         }
     }
 
@@ -366,13 +367,13 @@ fn emit_cell(
                 &mut scratch.int,
                 &mut shape_z,
                 dp_tol,
-                Some(&scratch.flags_z),
+                Some(&mut scratch.flags_z),
             ),
             Simplifier::Visvalingam => simplify_shape_vw(
                 &mut scratch.int,
                 &mut shape_z,
                 vw_area_threshold(dp_tol),
-                Some(&scratch.flags_z),
+                Some(&mut scratch.flags_z),
             ),
         }
         if shape_z.is_empty() {
@@ -1050,7 +1051,7 @@ fn is_full_buffered_cell(frag: &Shapes, maxz: u8, cell: PyramidCell) -> bool {
 fn thin_window_runs(
     shape_z: &mut Shape,
     cell: PyramidCell,
-    flags_buf: &mut Vec<Vec<bool>>,
+    flags_buf: &mut PinnedRings,
     int: &mut IntEmitScratch,
 ) {
     let left = i64::from(cell.tx) * i64::from(TILE_EXTENT_I32);
@@ -1059,9 +1060,8 @@ fn thin_window_runs(
     let bottom = (i64::from(cell.ty) + 1) * i64::from(TILE_EXTENT_I32);
     let buffer = i64::from(TILE_BUFFER_I32);
 
-    flags_buf.clear();
     let mut any_window = false;
-    for ring in shape_z.iter() {
+    flags_buf.fill_for_shape(shape_z, |_idx, ring, flags| {
         let n = ring.len();
         let in_window = |p: IntPoint| {
             near_line(i64::from(p.x), left, buffer)
@@ -1069,7 +1069,7 @@ fn thin_window_runs(
                 || near_line(i64::from(p.y), top, buffer)
                 || near_line(i64::from(p.y), bottom, buffer)
         };
-        let mut flags = vec![false; n];
+        flags.resize(n, false);
         for i in 0..n {
             if !in_window(ring[i]) {
                 continue;
@@ -1081,8 +1081,7 @@ fn thin_window_runs(
                 flags[i] = true;
             }
         }
-        flags_buf.push(flags);
-    }
+    });
     if any_window {
         simplify_shape_dp(int, shape_z, 2, Some(flags_buf));
     }
@@ -1098,17 +1097,15 @@ fn build_edge_flags(
     shape: &Shape,
     params: &PyramidParams<'_>,
     cell: PyramidCell,
-    out: &mut Vec<Vec<bool>>,
+    out: &mut PinnedRings,
 ) {
-    out.clear();
     let tile_size = cell_tile_size_base(params.maxz, cell.z);
     let buffer = i64::from(TILE_BUFFER_I32) << u32::from(params.maxz - cell.z);
     let left = i64::from(cell.tx) * tile_size;
     let right = i64::from(cell.tx + 1) * tile_size;
     let top = i64::from(cell.ty) * tile_size;
     let bottom = i64::from(cell.ty + 1) * tile_size;
-    for ring in shape {
-        let mut flags = Vec::with_capacity(ring.len());
+    out.fill_for_shape(shape, |_idx, ring, flags| {
         for p in ring {
             let junction = params.pins.is_some_and(|pins| pins.contains(&(p.x, p.y)));
             let edge_window = near_line(i64::from(p.x), left, buffer)
@@ -1130,8 +1127,7 @@ fn build_edge_flags(
                 }
             }
         }
-        out.push(flags);
-    }
+    });
 }
 
 fn near_line(v: i64, line: i64, buffer: i64) -> bool {

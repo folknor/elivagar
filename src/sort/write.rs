@@ -15,15 +15,7 @@ pub struct SortWriter {
     chunk_paths: Vec<PathBuf>,
     chunk_count: usize,
     compression: ChunkCompression,
-    total_records: u64,
-    total_record_bytes: u64,
-    /// Per-layer record counts and bytes (indexed by layer_from_key).
-    layer_records: [u64; 32],
-    layer_bytes: [u64; 32],
-    /// Per-layer-per-zoom record counts. Index: layer * 15 + zoom.
-    layer_zoom_records: Box<[u64; 32 * 15]>,
-    /// Per-layer-per-zoom payload bytes. Index: layer * 15 + zoom.
-    layer_zoom_bytes: Box<[u64; 32 * 15]>,
+    tally: RecordTally,
     /// Shared chunk-number allocator, active only while a concurrent producer
     /// (the way-phase drain) writes chunks into the same directory from other
     /// threads. When set, `flush_chunk` draws chunk numbers from this atomic so
@@ -49,12 +41,7 @@ impl SortWriter {
             chunk_paths: Vec::new(),
             chunk_count: 0,
             compression,
-            total_records: 0,
-            total_record_bytes: 0,
-            layer_records: [0; 32],
-            layer_bytes: [0; 32],
-            layer_zoom_records: Box::new([0; 32 * 15]),
-            layer_zoom_bytes: Box::new([0; 32 * 15]),
+            tally: RecordTally::new(),
             chunk_counter: None,
         })
     }
@@ -101,12 +88,7 @@ impl SortWriter {
             chunk_paths,
             chunk_count: start_chunk,
             compression,
-            total_records: 0,
-            total_record_bytes: 0,
-            layer_records: [0; 32],
-            layer_bytes: [0; 32],
-            layer_zoom_records: Box::new([0; 32 * 15]),
-            layer_zoom_bytes: Box::new([0; 32 * 15]),
+            tally: RecordTally::new(),
             chunk_counter: None,
         })
     }
@@ -118,53 +100,40 @@ impl SortWriter {
 
     /// Total sort records pushed (across all chunks + current buffer).
     pub fn total_records(&self) -> u64 {
-        self.total_records
+        self.tally.total_records
     }
 
     /// Total payload bytes pushed (sum of record.data.len()).
     pub fn total_record_bytes(&self) -> u64 {
-        self.total_record_bytes
+        self.tally.total_record_bytes
     }
 
     /// Per-layer record counts (indexed by layer id, 0..26).
     pub fn layer_records(&self) -> &[u64; 32] {
-        &self.layer_records
+        &self.tally.layer_records
     }
 
     /// Per-layer payload bytes (indexed by layer id, 0..26).
     pub fn layer_bytes(&self) -> &[u64; 32] {
-        &self.layer_bytes
+        &self.tally.layer_bytes
     }
 
     /// Per-layer-per-zoom record counts. Index: `layer * 15 + zoom`.
     pub fn layer_zoom_records(&self) -> &[u64; 32 * 15] {
-        &self.layer_zoom_records
+        &self.tally.layer_zoom_records
     }
 
     /// Per-layer-per-zoom payload bytes. Index: `layer * 15 + zoom`.
     pub fn layer_zoom_bytes(&self) -> &[u64; 32 * 15] {
-        &self.layer_zoom_bytes
+        &self.tally.layer_zoom_bytes
     }
 
     /// Add a record to the buffer. If the buffer exceeds `chunk_size_bytes`,
     /// the current buffer is sorted and flushed to a chunk file on disk.
     pub fn push(&mut self, record: SortRecord) -> io::Result<()> {
         let data_len = record.data.len();
-        let layer = layer_from_key(record.key) as usize;
         self.buffer_bytes += data_len + std::mem::size_of::<SortRecord>();
-        self.total_records += 1;
-        self.total_record_bytes += data_len as u64;
-        if layer < 32 {
-            self.layer_records[layer] += 1;
-            self.layer_bytes[layer] += data_len as u64;
-            let tile_id = tile_id_from_key(record.key);
-            let zoom = zoom_from_tile_id(tile_id) as usize;
-            if zoom < 15 {
-                let idx = layer * 15 + zoom;
-                self.layer_zoom_records[idx] += 1;
-                self.layer_zoom_bytes[idx] += data_len as u64;
-            }
-        }
+        self.tally.record(record.key, data_len);
         self.buffer.push(record);
         if self.buffer_bytes >= self.chunk_size_bytes {
             self.flush_chunk()?;
@@ -204,16 +173,7 @@ impl SortWriter {
     }
 
     pub(crate) fn merge_tally(&mut self, tally: &RecordTally) {
-        self.total_records += tally.total_records;
-        self.total_record_bytes += tally.total_record_bytes;
-        for i in 0..32 {
-            self.layer_records[i] += tally.layer_records[i];
-            self.layer_bytes[i] += tally.layer_bytes[i];
-        }
-        for i in 0..(32 * 15) {
-            self.layer_zoom_records[i] += tally.layer_zoom_records[i];
-            self.layer_zoom_bytes[i] += tally.layer_zoom_bytes[i];
-        }
+        self.tally.merge(tally);
     }
 
     /// Flush the in-memory buffer to a chunk file if non-empty.

@@ -10,7 +10,7 @@ use pbfhogg::MemberId;
 use pbfhogg::block_builder::{self, BlockBuilder, MemberData, Metadata};
 use pbfhogg::writer::{Compression as PbfCompression, PbfWriter};
 
-/// A v7 checkpoint that a default-flag `--skip-to assemble` run will accept.
+/// A v8 checkpoint that a default-flag `--skip-to assemble` run will accept.
 ///
 /// The producer config must equal what the CLI resolves, so it is built from
 /// a `TilegenConfig` carrying the documented CLI defaults - zooms 0-14,
@@ -53,7 +53,7 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         polygon_simplify_factor: 1.0,
     };
     serde_json::json!({
-        "version": 7,
+        "version": 8,
         "bounds": [0.0, 0.0, 1.0, 1.0],
         "chunks": 1,
         "ocean": "none",
@@ -258,6 +258,13 @@ fn run_elivagar_with_fifo(args: &[&str], fifo_path: &Path) -> (std::process::Out
     (output, fifo)
 }
 
+fn geographic_header(path: &Path) -> Vec<u8> {
+    let mut file = std::fs::File::open(path).expect("open archive");
+    let mut header = [0; 127];
+    file.read_exact(&mut header).expect("read header");
+    header[102..127].to_vec()
+}
+
 fn make_fifo(path: &Path) {
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("fifo path");
     // SAFETY: mkfifo reads the nul-terminated path and does not retain it.
@@ -314,6 +321,13 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
         "first run failed: {}",
         String::from_utf8_lossy(&first.stderr)
     );
+    let first_header = geographic_header(&output_path);
+    let west = i32::from_le_bytes(first_header[0..4].try_into().expect("west"));
+    let east = i32::from_le_bytes(first_header[8..12].try_into().expect("east"));
+    assert!(
+        west > -1_800_000_000 && east < 1_800_000_000,
+        "a single-node extract must not have world bounds"
+    );
     let first_err = String::from_utf8_lossy(&first.stderr);
     assert!(!first_err.contains("phase3_ms="));
     assert!(!first_err.contains("tile_bytes_total="));
@@ -345,6 +359,11 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
         "skip-to assemble failed: {}",
         String::from_utf8_lossy(&second.stderr)
     );
+    assert_eq!(
+        geographic_header(&output_path),
+        first_header,
+        "assembly resume must inherit bounds and center"
+    );
     let second_err = String::from_utf8_lossy(&second.stderr);
     assert!(second_err.contains("--- Skipping to assemble (using existing chunks) ---"));
     assert!(!second_err.contains("phase3_ms="));
@@ -355,6 +374,28 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
     assert!(counter_value(&second_fifo, "tile_bytes_total").is_some());
     assert!(counter_value(&second_fifo, "tile_max_bytes").is_some());
     assert!(counter_value(&second_fifo, "oversize_top_1_bytes").is_some());
+
+    let asserted = Command::new(env!("CARGO_BIN_EXE_elivagar"))
+        .args([
+            "run",
+            &pbf_s,
+            "--output",
+            &out_s,
+            "--tmp-dir",
+            &tmp_s,
+            "--threads",
+            "1",
+            "--skip-to",
+            "assemble",
+            "--locations-on-ways",
+        ])
+        .output()
+        .expect("run resumed header assertion");
+    assert!(
+        !asserted.status.success(),
+        "raw input must not satisfy a locations assertion on resume"
+    );
+    assert!(String::from_utf8_lossy(&asserted.stderr).contains("LocationsOnWays"));
 }
 
 #[test]

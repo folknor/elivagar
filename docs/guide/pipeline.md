@@ -59,18 +59,21 @@ elivagar run input.osm.pbf -o out.pmtiles --skip-to assemble
 reuses PBF and ocean chunks, `--skip-to assemble` jumps straight to tile
 assembly.
 
-A resume validates the v7 checkpoint's input identity, producer config, ocean
+A resume validates the v8 checkpoint's input identity, producer config, ocean
 source, and sort chunk codec against the current run and refuses a mismatch,
 so `--skip-to` cannot silently blend two contracts into one archive. Before v6,
 checkpoints recorded computed ocean as a bare string naming no source, so chunks
 built from one shapefile could be reused by a resume naming another while the
 archive's metadata described the second. Both arms now carry their producer's
-identity.
+identity. The v8 extent includes inline coordinates from every way in
+locations mode, since untagged nodes may be absent. This buffered extent also
+sets the archive header's WGS84 bounds and center; ocean artifacts retain
+world bounds.
 
 The `--compress-sort-chunks` setting must match the run that wrote the chunks.
 Resuming at `sort` or `assemble` also requires a valid chunk-count completion
 record from the completed ocean pass and final chunk flush. If it is missing
-or invalid, resume at `ocean` or run a full tilegen. Checkpoints from v6 and
+or invalid, resume at `ocean` or run a full tilegen. Checkpoints from v7 and
 earlier require a full tilegen. See the [CLI reference](../reference/cli) for
 the complete resume contract.
 
@@ -82,7 +85,7 @@ and use the storage shown below:
 | Stock | Bound |
 |---|---|
 | Sort chunk buffer | `--sort-budget`, default 1G |
-| In-flight way blocks | `--way-budget`, and a hard count ceiling of `--threads` blocks |
+| In-flight way blocks | `--way-budget`, and a hard count ceiling of `max(threads, 8)` blocks |
 | Relation blocks | capped, spills to a filtered re-read past it |
 | Way index | memory-mapped, disk-backed |
 | Encoded-but-unwritten tiles | the assemble claim window, default 2 GiB |

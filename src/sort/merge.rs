@@ -240,9 +240,11 @@ impl SortPartition {
     /// cuts at byte quantiles - so a dense city core lands alone in its own
     /// piece instead of hiding inside an equal-width cut. Returns `None`
     /// when the partition cannot split (single-tile range) or the histogram
-    /// yields fewer than two pieces. The scan is the price of admission:
-    /// one header-walk of the partition's sources, paid only by partitions
-    /// already over the split threshold.
+    /// yields fewer than two pieces. Source scans run with at most eight
+    /// workers, regardless of the number of chunk files. The scan is the
+    /// price of admission: one header-walk of the partition's sources, paid
+    /// only by partitions already over the split threshold.
+    #[allow(clippy::too_many_lines)]
     pub fn plan_pieces(
         &self,
         compression: ChunkCompression,
@@ -250,6 +252,7 @@ impl SortPartition {
     ) -> io::Result<Option<Vec<SortPartitionPiece>>> {
         const MAX_PIECES: u64 = 32;
         const MAX_BUCKETS: u64 = 4096;
+        const MAX_SOURCE_SCAN_THREADS: usize = 8;
         let (range_start, range_end) = partition_tile_range(self.index);
         let width = range_end - range_start;
         if width < 2 || target_bytes == 0 {
@@ -262,19 +265,45 @@ impl SortPartition {
         let bucket_count = usize::try_from((width + (1 << shift) - 1) >> shift)
             .map_err(|_| io::Error::other("piece bucket count does not fit usize"))?;
 
+        let next_source = AtomicUsize::new(0);
         let scans = std::thread::scope(|scope| -> io::Result<Vec<SourceScan>> {
-            let handles: Vec<_> = self
-                .sources
-                .iter()
-                .map(|source| {
-                    scope.spawn(move || {
-                        scan_source_buckets(source, compression, range_start, shift, bucket_count)
+            let worker_count = self.sources.len().min(MAX_SOURCE_SCAN_THREADS);
+            let handles: Vec<_> = (0..worker_count)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut scans = Vec::new();
+                        loop {
+                            let source_index =
+                                next_source.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(source) = self.sources.get(source_index) else {
+                                break;
+                            };
+                            scans.push((
+                                source_index,
+                                scan_source_buckets(
+                                    source,
+                                    compression,
+                                    range_start,
+                                    shift,
+                                    bucket_count,
+                                ),
+                            ));
+                        }
+                        scans
                     })
                 })
                 .collect();
-            handles
+
+            let mut scans: Vec<Option<io::Result<SourceScan>>> =
+                (0..self.sources.len()).map(|_| None).collect();
+            for handle in handles {
+                for (source_index, scan) in handle.join().expect("piece scan thread panicked") {
+                    scans[source_index] = Some(scan);
+                }
+            }
+            scans
                 .into_iter()
-                .map(|handle| handle.join().expect("piece scan thread panicked"))
+                .map(|scan| scan.expect("every piece source was scanned"))
                 .collect()
         })?;
 
