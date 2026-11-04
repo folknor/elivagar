@@ -5,7 +5,7 @@
     ],
     "cargo_lock_xxh3_128": "16969527e41a95e1772fe2f1e2261b72",
     "elivagar": {
-      "commit": "d561180a328b6dd315aafd3b76bd590a4f75c709",
+      "commit": "bc20facf46f96ec9e889712923a3e6ab43944f5b",
       "dirty": false
     },
     "pbfhogg_reader": {
