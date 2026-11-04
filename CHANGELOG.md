@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+Design-hunt fixes, tenth wave. This changes output.
+
+- A multipolygon relation gets one label point per zoom instead of one
+  per outer ring, matching the Shortbread spec and Planetiler, in
+  `boundary_labels`, `water_polygons_labels`, `addresses`,
+  `streets_polygons_labels`, `public_transport` and `pois`. Denmark's
+  boundary labels drop from one per island to one per relation.
+- The line merger and its invariant checker moved into geometry, and
+  assemble's piece planner sits beside the claim window it feeds.
+- Way ids and coordinates are typed through the way index.
+- Rendered-pixel tolerances and area thresholds derive from one
+  `RENDER_PX`, with every value and comparison unchanged.
+
 Design-hunt fixes, ninth wave. The ocean artifact key moves to
 `OCEAN_POLICY_VERSION` v8, so the world ocean artifact must be rebuilt
 with `ocean-build`; ocean geometry is unchanged.

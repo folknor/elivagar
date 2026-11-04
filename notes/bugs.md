@@ -161,14 +161,14 @@ Reported by the encoding hunt.
 
 # Found during the 2026-11-04 fix waves
 
-## BUG-062 - A multipolygon gets one label point per component
+## BUG-064 - Relation area ignores holes
 
-`pipeline/relations.rs` calls emission once per assembled polygon
-component, so a multipolygon relation matched by a centroid or
-point-on-surface label layer gets one label point per outer, where
-Planetiler's Shortbread profile emits one aggregate point for the whole
-relation. Decide against `tests/fixtures/shortbread.yml` which the spec
-wants; changing it moves label points and counts.
+`pipeline/relations.rs` computes a relation's area by summing its outer
+rings without subtracting inner rings. That area drives the
+`boundary_labels` area-based minimum zoom (the z2/z3/z4 thresholds now in
+`shortbread/boundaries.rs`), so a boundary with large enclaves or lakes can
+be promoted to a lower zoom than its true area warrants. Subtract the holes;
+it can move `boundary_labels` min zooms.
 
-Reported by the wave-8 centroid fixer.
+Reported by the wave-10 relation fixer.
 

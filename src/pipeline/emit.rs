@@ -5,6 +5,7 @@ use crate::geometry::int_ocean::{
     IntRect, OSM_DP_TOL_PX, PinnedRings, Shape, TILE_BUFFER_I32, quantize_polygon_into,
     quantize_polygon_pinned_into, shape_bbox,
 };
+use crate::geometry::polygon::{Area, ExtentUnits, MIN_POLY_AREA_AREA};
 use crate::geometry::pyramid::{
     PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid, tile_cover,
 };
@@ -404,21 +405,21 @@ pub(super) fn push_sort_record<T: FeatureRecordSink + ?Sized>(
 
 const OSM_POLYGON_MAX_Z: u8 = 14;
 
-fn polygon_min_area(z: u8, layer: Layer) -> u64 {
+fn polygon_min_area(z: u8, layer: Layer) -> Area {
     if z >= OSM_POLYGON_MAX_Z || layer == Layer::StreetPolygons || layer == Layer::Bridges {
-        0
+        Area::ZERO
     } else {
-        geometry::polygon::MIN_POLY_AREA as u64
+        MIN_POLY_AREA_AREA
     }
 }
 
-fn polygon_dp_tol(z: u8, tol_scale: f64) -> i64 {
+fn polygon_dp_tol(z: u8, tol_scale: f64) -> ExtentUnits {
     if z >= OSM_POLYGON_MAX_Z {
-        0
+        ExtentUnits::new(0)
     } else {
         #[allow(clippy::cast_possible_truncation)]
         let tol = (OSM_DP_TOL_PX as f64 * tol_scale).round() as i64;
-        tol.max(0)
+        ExtentUnits::new(tol.max(0))
     }
 }
 
@@ -524,6 +525,9 @@ pub(super) enum FeatureGeometry<'a> {
         polygon: &'a mut MultipolygonEmitScratch,
         fanout: &'a mut super::stats::FanoutStats,
     },
+    AreaLabel {
+        point: &'a Point,
+    },
 }
 
 fn harvest_cap_events(events: &mut Vec<(u16, u64, u64)>, fanout: &mut super::stats::FanoutStats) {
@@ -551,7 +555,7 @@ pub(super) fn emit_match(
     let source = match &geometry {
         FeatureGeometry::Node(_) => FeatureSource::Node,
         FeatureGeometry::Way { .. } => FeatureSource::Way,
-        FeatureGeometry::Area { .. } => FeatureSource::Relation,
+        FeatureGeometry::Area { .. } | FeatureGeometry::AreaLabel { .. } => FeatureSource::Relation,
     };
     let feature_id = FeatureId::for_osm_feature(m.layer, source, osm_id);
     let mut records = NamespacedFeatureSink {
@@ -616,11 +620,14 @@ pub(super) fn emit_match(
                         point,
                     )
                 }
+                FeatureGeometry::AreaLabel { point: p } => {
+                    emit_projected_point(osm_id, *p, m, z_lo, z_hi, &mut records, point)
+                }
             }
         }
         GeomExpect::Line | GeomExpect::Polygon => {
             let (coords, inners) = match &geometry {
-                FeatureGeometry::Node(_) => return 0,
+                FeatureGeometry::Node(_) | FeatureGeometry::AreaLabel { .. } => return 0,
                 FeatureGeometry::Way { coords, .. } => (*coords, None),
                 FeatureGeometry::Area { outer, inners, .. } => {
                     if m.geom_expect == GeomExpect::Line {
@@ -668,7 +675,7 @@ pub(super) fn emit_match(
                     (shifted.as_slice(), shifted_inners.as_deref())
                 };
                 count += match &mut geometry {
-                    FeatureGeometry::Node(_) => unreachable!(),
+                    FeatureGeometry::Node(_) | FeatureGeometry::AreaLabel { .. } => unreachable!(),
                     FeatureGeometry::Way {
                         pins,
                         line,
@@ -774,7 +781,21 @@ pub(super) fn emit_point_or_centroid(
     } else {
         geometry::surface::polygon_centroid(coords, inners.unwrap_or(&[]))
     };
-    let Some(mut p) = pt else { return 0 };
+    let Some(p) = pt else { return 0 };
+    emit_projected_point(osm_id, p, m, z_lo, z_hi, records, scratch)
+}
+
+#[hotpath::measure]
+#[allow(clippy::too_many_arguments)]
+fn emit_projected_point(
+    osm_id: u64,
+    mut p: Point,
+    m: &LayerMatch,
+    z_lo: u8,
+    z_hi: u8,
+    records: &mut impl FeatureRecordSink,
+    scratch: &mut PointEmitScratch,
+) -> u64 {
     p.x = wrap_unit_x(p.x);
 
     let cbbox = MercBbox {

@@ -4,15 +4,31 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::node_index::LatLonE7;
 use memmap2::Mmap;
 
 const OFFSET_ENTRY_SIZE: usize = 16; // 8 bytes way_id + 8 bytes data_offset
 
 struct WayEntry {
-    way_id: i64,
+    way_id: WayId,
     data_offset: u64,
 }
 const _: () = assert!(std::mem::size_of::<WayEntry>() == OFFSET_ENTRY_SIZE);
+
+/// An OSM way identifier, kept distinct from node and relation identifiers.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WayId(i64);
+
+impl WayId {
+    pub const fn new(raw: i64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn as_i64(self) -> i64 {
+        self.0
+    }
+}
 
 /// 256 MB sort budget = 16M entries per chunk.
 /// North America (210M ways) ≈ 13 chunks. Denmark fits in 1 chunk.
@@ -66,21 +82,24 @@ fn read_varint(data: &[u8], pos: &mut usize) -> io::Result<u32> {
 
 /// Encode a way's coordinates: varint coord_count + first coord raw + deltas as zigzag varints.
 #[allow(clippy::cast_possible_truncation)]
-fn encode_way(buf: &mut Vec<u8>, coords: &[(i32, i32)]) {
+fn encode_way(buf: &mut Vec<u8>, coords: &[LatLonE7]) {
     write_varint(buf, coords.len() as u32);
-    let (mut prev_lat, mut prev_lon) = coords[0];
+    let LatLonE7 {
+        lat: mut prev_lat,
+        lon: mut prev_lon,
+    } = coords[0];
     buf.extend_from_slice(&prev_lat.to_le_bytes());
     buf.extend_from_slice(&prev_lon.to_le_bytes());
-    for &(lat, lon) in &coords[1..] {
-        write_varint(buf, zigzag_encode(lat.wrapping_sub(prev_lat)));
-        write_varint(buf, zigzag_encode(lon.wrapping_sub(prev_lon)));
-        prev_lat = lat;
-        prev_lon = lon;
+    for coord in &coords[1..] {
+        write_varint(buf, zigzag_encode(coord.lat.wrapping_sub(prev_lat)));
+        write_varint(buf, zigzag_encode(coord.lon.wrapping_sub(prev_lon)));
+        prev_lat = coord.lat;
+        prev_lon = coord.lon;
     }
 }
 
 /// Decode a way's coordinates from the compressed data buffer at the given offset.
-fn decode_way(data: &[u8], offset: usize) -> io::Result<Vec<(i32, i32)>> {
+fn decode_way(data: &[u8], offset: usize) -> io::Result<Vec<LatLonE7>> {
     let mut pos = offset;
     let count = usize::try_from(read_varint(data, &mut pos)?)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "way coordinate count overflow"))?;
@@ -107,7 +126,7 @@ fn decode_way(data: &[u8], offset: usize) -> io::Result<Vec<(i32, i32)>> {
     let lat = i32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
     let lon = i32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
     pos += 8;
-    coords.push((lat, lon));
+    coords.push(LatLonE7::new(lat, lon));
 
     let mut prev_lat = lat;
     let mut prev_lon = lon;
@@ -116,7 +135,7 @@ fn decode_way(data: &[u8], offset: usize) -> io::Result<Vec<(i32, i32)>> {
         let dlon = zigzag_decode(read_varint(data, &mut pos)?);
         prev_lat = prev_lat.wrapping_add(dlat);
         prev_lon = prev_lon.wrapping_add(dlon);
-        coords.push((prev_lat, prev_lon));
+        coords.push(LatLonE7::new(prev_lat, prev_lon));
     }
     Ok(coords)
 }
@@ -124,13 +143,13 @@ fn decode_way(data: &[u8], offset: usize) -> io::Result<Vec<(i32, i32)>> {
 // --- Offset entry I/O helpers ---
 
 /// Read way_id from a sorted offsets mmap at entry index `idx`.
-fn mmap_way_id(mmap: &[u8], idx: usize) -> i64 {
+fn mmap_way_id(mmap: &[u8], idx: usize) -> WayId {
     let off = idx * OFFSET_ENTRY_SIZE;
-    i64::from_le_bytes(
+    WayId::new(i64::from_le_bytes(
         mmap[off..off + 8]
             .try_into()
             .expect("offset mmap too short"),
-    )
+    ))
 }
 
 /// Read data_offset from a sorted offsets mmap at entry index `idx`.
@@ -145,7 +164,7 @@ fn mmap_data_offset(mmap: &[u8], idx: usize) -> usize {
 }
 
 /// Binary search for `way_id` in a sorted offsets mmap with `count` entries.
-fn mmap_binary_search(mmap: &[u8], count: usize, way_id: i64) -> Option<usize> {
+fn mmap_binary_search(mmap: &[u8], count: usize, way_id: WayId) -> Option<usize> {
     let mut lo: usize = 0;
     let mut hi: usize = count;
     while lo < hi {
@@ -165,9 +184,9 @@ fn read_entries(reader: &mut BufReader<File>, count: usize) -> io::Result<Vec<Wa
     let mut buf = [0u8; OFFSET_ENTRY_SIZE];
     for _ in 0..count {
         reader.read_exact(&mut buf)?;
-        let way_id = i64::from_le_bytes([
+        let way_id = WayId::new(i64::from_le_bytes([
             buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-        ]);
+        ]));
         let data_offset = u64::from_le_bytes([
             buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
         ]);
@@ -182,7 +201,7 @@ fn read_entries(reader: &mut BufReader<File>, count: usize) -> io::Result<Vec<Wa
 /// Write WayEntry records as raw 16-byte LE pairs.
 fn write_entries(writer: &mut BufWriter<File>, entries: &[WayEntry]) -> io::Result<()> {
     for e in entries {
-        writer.write_all(&e.way_id.to_le_bytes())?;
+        writer.write_all(&e.way_id.as_i64().to_le_bytes())?;
         writer.write_all(&e.data_offset.to_le_bytes())?;
     }
     writer.flush()?;
@@ -209,16 +228,16 @@ impl OffsetChunkReader {
         })
     }
 
-    fn read_entry(&mut self) -> io::Result<Option<(i64, u64)>> {
+    fn read_entry(&mut self) -> io::Result<Option<(WayId, u64)>> {
         if self.remaining == 0 {
             return Ok(None);
         }
         let mut buf = [0u8; OFFSET_ENTRY_SIZE];
         self.reader.read_exact(&mut buf)?;
         self.remaining -= 1;
-        let way_id = i64::from_le_bytes([
+        let way_id = WayId::new(i64::from_le_bytes([
             buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-        ]);
+        ]));
         let data_offset = u64::from_le_bytes([
             buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
         ]);
@@ -228,7 +247,7 @@ impl OffsetChunkReader {
 
 /// Merge heap entry - smallest way_id wins (reverse Ord for max-heap).
 struct OffsetHeapEntry {
-    way_id: i64,
+    way_id: WayId,
     data_offset: u64,
     chunk_idx: usize,
 }
@@ -282,7 +301,7 @@ fn merge_offset_chunks(chunk_paths: &[PathBuf], sorted_path: &Path) -> io::Resul
     let mut writer = BufWriter::with_capacity(1 << 20, out_file);
 
     while let Some(entry) = heap.pop() {
-        writer.write_all(&entry.way_id.to_le_bytes())?;
+        writer.write_all(&entry.way_id.as_i64().to_le_bytes())?;
         writer.write_all(&entry.data_offset.to_le_bytes())?;
 
         let idx = entry.chunk_idx;
@@ -424,7 +443,7 @@ impl WayIndexWriter {
 
     /// Write geometry for a way. Delta-varint encodes coords and appends to data file,
     /// records (way_id, offset) in the offsets file.
-    pub fn put(&mut self, way_id: i64, coords: &[(i32, i32)]) {
+    pub fn put(&mut self, way_id: WayId, coords: &[LatLonE7]) {
         if coords.is_empty() {
             return;
         }
@@ -444,7 +463,7 @@ impl WayIndexWriter {
 
         // Write offset entry: way_id (i64 LE) + data_offset (u64 LE) = 16 bytes
         self.offsets_writer
-            .write_all(&way_id.to_le_bytes())
+            .write_all(&way_id.as_i64().to_le_bytes())
             .expect("failed to write way offset");
         self.offsets_writer
             .write_all(&data_offset.to_le_bytes())
@@ -515,7 +534,7 @@ impl WayIndexReader {
     /// Look up geometry for a way by ID. Only valid after `finish_writing()`.
     /// Returns decoded coordinates, None if way_id was never stored, or an
     /// error if the indexed data is corrupt.
-    pub fn get(&self, way_id: i64) -> io::Result<Option<Vec<(i32, i32)>>> {
+    pub fn get(&self, way_id: WayId) -> io::Result<Option<Vec<LatLonE7>>> {
         if self.way_count == 0 {
             return Ok(None);
         }
@@ -551,17 +570,21 @@ mod tests {
             .unwrap()
             .finish_writing()
             .unwrap();
-        assert!(idx.get(1).unwrap().is_none());
+        assert!(idx.get(WayId::new(1)).unwrap().is_none());
     }
 
     #[test]
     fn put_and_get() {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
-        let coords = [(10, 20), (30, 40), (50, 60)];
-        idx.put(100, &coords);
+        let coords = [
+            LatLonE7::new(10, 20),
+            LatLonE7::new(30, 40),
+            LatLonE7::new(50, 60),
+        ];
+        idx.put(WayId::new(100), &coords);
         let idx = idx.finish_writing().unwrap();
-        let result = idx.get(100).unwrap().unwrap();
+        let result = idx.get(WayId::new(100)).unwrap().unwrap();
         assert_eq!(result, coords);
     }
 
@@ -570,37 +593,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
 
-        let coords_a = [(1, 2)];
-        let coords_b = [(10, 20), (30, 40)];
-        let coords_c = [(100, 200), (300, 400), (500, 600), (700, 800)];
+        let coords_a = [LatLonE7::new(1, 2)];
+        let coords_b = [LatLonE7::new(10, 20), LatLonE7::new(30, 40)];
+        let coords_c = [
+            LatLonE7::new(100, 200),
+            LatLonE7::new(300, 400),
+            LatLonE7::new(500, 600),
+            LatLonE7::new(700, 800),
+        ];
 
-        idx.put(5, &coords_a);
-        idx.put(42, &coords_b);
-        idx.put(999, &coords_c);
+        idx.put(WayId::new(5), &coords_a);
+        idx.put(WayId::new(42), &coords_b);
+        idx.put(WayId::new(999), &coords_c);
         let idx = idx.finish_writing().unwrap();
 
-        assert_eq!(idx.get(5).unwrap().unwrap(), coords_a);
-        assert_eq!(idx.get(42).unwrap().unwrap(), coords_b);
-        assert_eq!(idx.get(999).unwrap().unwrap(), coords_c);
+        assert_eq!(idx.get(WayId::new(5)).unwrap().unwrap(), coords_a);
+        assert_eq!(idx.get(WayId::new(42)).unwrap().unwrap(), coords_b);
+        assert_eq!(idx.get(WayId::new(999)).unwrap().unwrap(), coords_c);
     }
 
     #[test]
     fn finish_produces_readable_index() {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
-        idx.put(7, &[(1, 2), (3, 4)]);
+        idx.put(WayId::new(7), &[LatLonE7::new(1, 2), LatLonE7::new(3, 4)]);
         let idx = idx.finish_writing().unwrap();
-        assert_eq!(idx.get(7).unwrap().unwrap(), [(1, 2), (3, 4)]);
+        assert_eq!(
+            idx.get(WayId::new(7)).unwrap().unwrap(),
+            [LatLonE7::new(1, 2), LatLonE7::new(3, 4)]
+        );
     }
 
     #[test]
     fn get_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
-        idx.put(1, &[(1, 2)]);
+        idx.put(WayId::new(1), &[LatLonE7::new(1, 2)]);
         let idx = idx.finish_writing().unwrap();
         // way_id 9999 was never written.
-        assert!(idx.get(9999).unwrap().is_none());
+        assert!(idx.get(WayId::new(9999)).unwrap().is_none());
     }
 
     #[test]
@@ -608,9 +639,10 @@ mod tests {
         // put() with empty coords is a no-op - no entry written.
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
-        idx.put(50, &[]);
+        let empty: [LatLonE7; 0] = [];
+        idx.put(WayId::new(50), &empty);
         let idx = idx.finish_writing().unwrap();
-        assert!(idx.get(50).unwrap().is_none());
+        assert!(idx.get(WayId::new(50)).unwrap().is_none());
     }
 
     #[test]
@@ -618,26 +650,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
         let coords = [
-            (550_000_000, 120_000_000),
-            (550_000_001, 120_000_000),   // tiny delta
-            (550_000_001, 120_000_000),   // zero delta
-            (-200_000_000, -400_000_000), // large negative jump
-            (0, 0),                       // jump to origin
+            LatLonE7::new(550_000_000, 120_000_000),
+            LatLonE7::new(550_000_001, 120_000_000), // tiny delta
+            LatLonE7::new(550_000_001, 120_000_000), // zero delta
+            LatLonE7::new(-200_000_000, -400_000_000), // large negative jump
+            LatLonE7::new(0, 0),                     // jump to origin
         ];
-        idx.put(1, &coords);
+        idx.put(WayId::new(1), &coords);
         let idx = idx.finish_writing().unwrap();
-        assert_eq!(idx.get(1).unwrap().unwrap(), coords);
+        assert_eq!(idx.get(WayId::new(1)).unwrap().unwrap(), coords);
     }
 
     #[test]
     fn way_delta_varint_roundtrips_full_i32_range() {
         let mut coords = vec![
-            (0, -1_799_000_000),
-            (0, 1_799_000_000),
-            (i32::MAX, i32::MIN),
-            (i32::MIN, i32::MAX),
-            (i32::MIN, i32::MIN),
-            (i32::MAX, i32::MAX),
+            LatLonE7::new(0, -1_799_000_000),
+            LatLonE7::new(0, 1_799_000_000),
+            LatLonE7::new(i32::MAX, i32::MIN),
+            LatLonE7::new(i32::MIN, i32::MAX),
+            LatLonE7::new(i32::MIN, i32::MIN),
+            LatLonE7::new(i32::MAX, i32::MAX),
         ];
 
         // Generate deterministic values across the full bit range without a test dependency.
@@ -652,7 +684,7 @@ mod tests {
             state ^= state >> 17;
             state ^= state << 5;
             let lon = i32::from_le_bytes(state.to_le_bytes());
-            coords.push((lat, lon));
+            coords.push(LatLonE7::new(lat, lon));
         }
 
         let mut encoded = Vec::new();
@@ -673,14 +705,23 @@ mod tests {
         // finish_writing sorts them for binary search.
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
-        idx.put(500, &[(50, 60)]);
-        idx.put(100, &[(10, 20)]);
-        idx.put(300, &[(30, 40)]);
+        idx.put(WayId::new(500), &[LatLonE7::new(50, 60)]);
+        idx.put(WayId::new(100), &[LatLonE7::new(10, 20)]);
+        idx.put(WayId::new(300), &[LatLonE7::new(30, 40)]);
         let idx = idx.finish_writing().unwrap();
 
-        assert_eq!(idx.get(100).unwrap().unwrap(), [(10, 20)]);
-        assert_eq!(idx.get(300).unwrap().unwrap(), [(30, 40)]);
-        assert_eq!(idx.get(500).unwrap().unwrap(), [(50, 60)]);
-        assert!(idx.get(200).unwrap().is_none());
+        assert_eq!(
+            idx.get(WayId::new(100)).unwrap().unwrap(),
+            [LatLonE7::new(10, 20)]
+        );
+        assert_eq!(
+            idx.get(WayId::new(300)).unwrap().unwrap(),
+            [LatLonE7::new(30, 40)]
+        );
+        assert_eq!(
+            idx.get(WayId::new(500)).unwrap().unwrap(),
+            [LatLonE7::new(50, 60)]
+        );
+        assert!(idx.get(WayId::new(200)).unwrap().is_none());
     }
 }

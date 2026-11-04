@@ -72,8 +72,179 @@ pub(super) enum PartitionItem {
 /// tiles in the same global Hilbert order as an unsplit run.
 enum UnionPartition<'a> {
     Sort(&'a sort::SortPartition),
-    SortPiece(sort::SortPartitionPiece),
+    SortPiece(SortPiece),
     ArtifactOnly { start: u64, end: u64 },
+}
+
+struct SortPiece {
+    start_tile: u64,
+    end_tile: u64,
+    sources: Vec<sort::SortSourceSlice>,
+}
+
+const MAX_PIECES: u64 = 32;
+const MAX_BUCKETS: u64 = 4096;
+const MAX_SOURCE_SCAN_THREADS: usize = 8;
+
+struct SourceScan {
+    positions: Vec<sort::SourcePosition>,
+}
+
+fn scan_source_buckets(
+    source: &sort::SourceSeek,
+    range_start: u64,
+    shift: u32,
+    bucket_count: usize,
+) -> std::io::Result<SourceScan> {
+    let mut positions = vec![sort::SourcePosition::default(); bucket_count + 1];
+    let mut cursor = source.cursor()?;
+    let mut filled = 0usize;
+    loop {
+        let record_position = cursor.position();
+        let Some((key, _data_len)) = cursor.next_header_discard_payload()? else {
+            break;
+        };
+        let tile_id = sort::tile_id_from_key(key);
+        let bucket = usize::try_from((tile_id.saturating_sub(range_start)) >> shift)
+            .map_err(|_| std::io::Error::other("piece scan bucket does not fit usize"))?;
+        if bucket >= bucket_count {
+            return Err(std::io::Error::other(format!(
+                "piece scan found tile id {tile_id} outside its partition range in {}",
+                source.path().display()
+            )));
+        }
+        // Records are key-sorted, so buckets are non-decreasing; fill each
+        // bucket start with the source position before its first record.
+        while filled <= bucket {
+            positions[filled] = record_position;
+            filled += 1;
+        }
+    }
+    let end_position = cursor.position();
+    while filled <= bucket_count {
+        positions[filled] = end_position;
+        filled += 1;
+    }
+    Ok(SourceScan { positions })
+}
+
+/// Choose piece cut points as bucket indices: byte quantiles snapped to
+/// bucket edges. A bucket is never split, so the fattest achievable piece is
+/// bounded by the fattest bucket. Returns `None` when there is nothing to cut.
+fn choose_bucket_cuts(
+    bucket_bytes: &[u64],
+    target_bytes: u64,
+    max_pieces: u64,
+) -> Option<Vec<usize>> {
+    let bucket_count = bucket_bytes.len();
+    let total: u64 = bucket_bytes.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let pieces_wanted = total.div_ceil(target_bytes).clamp(2, max_pieces);
+    let mut cuts = vec![0usize];
+    let mut acc = 0u64;
+    let mut next_quantile = 1u64;
+    for (bucket, &bytes) in bucket_bytes.iter().enumerate() {
+        acc += bytes;
+        while next_quantile < pieces_wanted
+            && acc.saturating_mul(pieces_wanted) >= total.saturating_mul(next_quantile)
+        {
+            if bucket + 1 < bucket_count {
+                cuts.push(bucket + 1);
+            }
+            next_quantile += 1;
+        }
+    }
+    cuts.dedup();
+    cuts.push(bucket_count);
+    if cuts.len() < 3 { None } else { Some(cuts) }
+}
+
+#[allow(clippy::too_many_lines)]
+fn plan_pieces(
+    partition: &sort::SortPartition,
+    compression: sort::ChunkCompression,
+    target_bytes: u64,
+) -> std::io::Result<Option<Vec<SortPiece>>> {
+    let (range_start, range_end) = sort::partition_tile_range(partition.index);
+    let width = range_end - range_start;
+    if width < 2 || target_bytes == 0 {
+        return Ok(None);
+    }
+    let mut shift = 0u32;
+    while (width >> shift) > MAX_BUCKETS {
+        shift += 1;
+    }
+    let bucket_count = usize::try_from((width + (1 << shift) - 1) >> shift)
+        .map_err(|_| std::io::Error::other("piece bucket count does not fit usize"))?;
+    let sources = partition.source_seeks(compression);
+    let next_source = std::sync::atomic::AtomicUsize::new(0);
+    let scans = std::thread::scope(|scope| -> std::io::Result<Vec<SourceScan>> {
+        let worker_count = sources.len().min(MAX_SOURCE_SCAN_THREADS);
+        let handles: Vec<_> = (0..worker_count)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut scans = Vec::new();
+                    loop {
+                        let source_index =
+                            next_source.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(source) = sources.get(source_index) else {
+                            break;
+                        };
+                        scans.push((
+                            source_index,
+                            scan_source_buckets(source, range_start, shift, bucket_count),
+                        ));
+                    }
+                    scans
+                })
+            })
+            .collect();
+
+        let mut scans: Vec<Option<std::io::Result<SourceScan>>> =
+            (0..sources.len()).map(|_| None).collect();
+        for handle in handles {
+            for (source_index, scan) in handle.join().expect("piece scan thread panicked") {
+                scans[source_index] = Some(scan);
+            }
+        }
+        scans
+            .into_iter()
+            .map(|scan| scan.expect("every piece source was scanned"))
+            .collect()
+    })?;
+
+    let mut bucket_bytes = vec![0u64; bucket_count];
+    for scan in &scans {
+        for (bucket, bytes) in bucket_bytes.iter_mut().enumerate() {
+            *bytes += scan.positions[bucket + 1].bytes - scan.positions[bucket].bytes;
+        }
+    }
+    let Some(cuts) = choose_bucket_cuts(&bucket_bytes, target_bytes, MAX_PIECES) else {
+        return Ok(None);
+    };
+
+    let mut pieces = Vec::with_capacity(cuts.len() - 1);
+    for pair in cuts.windows(2) {
+        let (cut_start, cut_end) = (pair[0], pair[1]);
+        let start_tile = range_start + ((cut_start as u64) << shift);
+        let end_tile = range_end.min(range_start + ((cut_end as u64) << shift));
+        let mut piece_sources = Vec::new();
+        for (source, scan) in sources.iter().zip(&scans) {
+            let start = scan.positions[cut_start];
+            let end = scan.positions[cut_end];
+            if let Some(source_slice) = source.slice(start, end)? {
+                piece_sources.push(source_slice);
+            }
+        }
+        pieces.push(SortPiece {
+            start_tile,
+            end_tile,
+            sources: piece_sources,
+        });
+    }
+    Ok(Some(pieces))
 }
 const _: () = assert!(std::mem::size_of::<EncodedTile>() == 32);
 
@@ -462,8 +633,7 @@ fn phase_assemble_partitions(
             UnionPartition::Sort(partition)
                 if partition.record_bytes() > split_target.saturating_mul(2) =>
             {
-                match partition
-                    .plan_pieces(config.compress_sort_chunks, split_target)
+                match plan_pieces(partition, config.compress_sort_chunks, split_target)
                     .map_err(PipelineError::from)?
                 {
                     Some(pieces) => {
@@ -621,7 +791,7 @@ fn phase_assemble_partitions(
                                 })
                         }
                         UnionPartition::SortPiece(piece) => {
-                            sort::SortPartitionReader::open_piece(piece, compression)
+                            sort::SortPartitionReader::open_slices(&piece.sources, compression)
                                 .map_err(PipelineError::from)
                                 .and_then(|reader| {
                                     read_encode_partition(
@@ -1979,6 +2149,171 @@ mod tests {
         assert_eq!(
             ocean_layer_field(&compressed).expect("extract layer"),
             raw[7..]
+        );
+    }
+
+    /// Records spread across one z14-block partition with a deliberately hot
+    /// tile band, plus neighbor-partition records so chunks carry multiple
+    /// sections. A leading flush forces a whole-file source as well.
+    fn push_piece_fixture(writer: &mut sort::SortWriter, partition: usize) {
+        let base = sort::partition_start_tile_id(partition);
+        let neighbor_base = sort::partition_start_tile_id(partition + 1);
+        for i in 0..50u64 {
+            let tile_id = base + i * 16 + 3;
+            let mut data = vec![0u8; 24];
+            data[..8].copy_from_slice(&tile_id.to_le_bytes());
+            data[8] = 0xEE;
+            writer
+                .push(sort::SortRecord {
+                    key: sort::make_sort_key(tile_id, 6, 1),
+                    data: data.into_boxed_slice(),
+                })
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        for i in 0..2048u64 {
+            let tile_id = base + i * 8;
+            let payload_len = if (1000..1100).contains(&i) {
+                512
+            } else {
+                8 + usize::try_from(i % 37).unwrap()
+            };
+            let mut data = vec![0u8; payload_len];
+            data[..8].copy_from_slice(&tile_id.to_le_bytes());
+            #[allow(clippy::cast_possible_truncation)]
+            let layer = (i % 5) as u8;
+            writer
+                .push(sort::SortRecord {
+                    key: sort::make_sort_key(tile_id, layer, 0),
+                    data: data.into_boxed_slice(),
+                })
+                .unwrap();
+            if i % 3 == 0 {
+                writer
+                    .push(sort::SortRecord {
+                        key: sort::make_sort_key(neighbor_base + (i % 16), 0, 0),
+                        data: Box::from(i.to_le_bytes().as_slice()),
+                    })
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn partition_pieces_concatenate_to_whole_partition() {
+        for compression in [sort::ChunkCompression::None, sort::ChunkCompression::Lz4] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut writer = sort::SortWriter::new(dir.path(), 16 * 1024, compression).unwrap();
+            let first_tile = pmtiles_writer::xy_to_tile_id(14, 0, 0);
+            let partition_index =
+                sort::partition_from_key(sort::make_sort_key(first_tile, 0, 0)) + 5;
+            push_piece_fixture(&mut writer, partition_index);
+            writer.flush().unwrap();
+            let mut reader = writer.finish().unwrap();
+            let partitions = reader.take_partitions();
+            let target = partitions
+                .iter()
+                .find(|candidate| candidate.index == partition_index)
+                .expect("fixture partition present");
+
+            let mut whole = Vec::new();
+            let mut whole_bytes = 0u64;
+            let mut whole_reader = sort::SortPartitionReader::open(target, compression).unwrap();
+            while let Some(record) = whole_reader.next().unwrap() {
+                whole_bytes += 12 + record.data.len() as u64;
+                whole.push((record.key, record.data));
+            }
+            if compression == sort::ChunkCompression::None {
+                assert_eq!(
+                    target.record_bytes(),
+                    whole_bytes,
+                    "uncompressed extents are exact record bytes"
+                );
+            }
+
+            let pieces = plan_pieces(target, compression, 8 * 1024)
+                .unwrap()
+                .expect("fixture is large enough to split");
+            assert!(pieces.len() >= 2, "got {} pieces", pieces.len());
+            let (range_start, range_end) = sort::partition_tile_range(partition_index);
+            assert_eq!(pieces.first().unwrap().start_tile, range_start);
+            assert_eq!(pieces.last().unwrap().end_tile, range_end);
+
+            let mut concat = Vec::new();
+            let mut prev_end = range_start;
+            for piece in &pieces {
+                assert_eq!(
+                    piece.start_tile, prev_end,
+                    "pieces must tile the partition range"
+                );
+                prev_end = piece.end_tile;
+                let mut piece_reader =
+                    sort::SortPartitionReader::open_slices(&piece.sources, compression).unwrap();
+                while let Some(record) = piece_reader.next().unwrap() {
+                    let tile_id = sort::tile_id_from_key(record.key);
+                    assert!(
+                        tile_id >= piece.start_tile && tile_id < piece.end_tile,
+                        "record tile {tile_id} escaped piece [{}, {})",
+                        piece.start_tile,
+                        piece.end_tile
+                    );
+                    concat.push((record.key, record.data));
+                }
+            }
+            assert_eq!(
+                concat.len(),
+                whole.len(),
+                "piece union drops or duplicates records"
+            );
+            for (got, want) in concat.iter().zip(&whole) {
+                assert_eq!(got.0, want.0);
+                assert_eq!(got.1, want.1);
+            }
+        }
+    }
+
+    #[test]
+    fn plan_pieces_refuses_unsplittable_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer =
+            sort::SortWriter::new(dir.path(), 1_000_000, sort::ChunkCompression::None).unwrap();
+        let z7_tile = pmtiles_writer::xy_to_tile_id(7, 0, 0);
+        let z7_key = sort::make_sort_key(z7_tile, 0, 0);
+        writer
+            .push(sort::SortRecord {
+                key: z7_key,
+                data: Box::from(z7_key.to_le_bytes().as_slice()),
+            })
+            .unwrap();
+        let z14_tile = pmtiles_writer::xy_to_tile_id(14, 0, 0);
+        let z14_key = sort::make_sort_key(z14_tile, 0, 0);
+        writer
+            .push(sort::SortRecord {
+                key: z14_key,
+                data: Box::from(z14_key.to_le_bytes().as_slice()),
+            })
+            .unwrap();
+        let mut reader = writer.finish().unwrap();
+        let partitions = reader.take_partitions();
+        let z7_partition = partitions
+            .iter()
+            .find(|partition| partition.index == sort::partition_from_key(z7_key))
+            .unwrap();
+        let z14_partition = partitions
+            .iter()
+            .find(|partition| partition.index == sort::partition_from_key(z14_key))
+            .unwrap();
+        assert!(
+            plan_pieces(z7_partition, sort::ChunkCompression::None, 1)
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(choose_bucket_cuts(&[0, 0], 1, MAX_PIECES).is_none());
+        assert!(
+            plan_pieces(z14_partition, sort::ChunkCompression::None, 0)
+                .unwrap()
+                .is_none()
         );
     }
 }

@@ -241,11 +241,21 @@ but merging can change with tile, zoom, or rebuild, so these ids do not
 provide persistent identity for merged output.
 
 `water_polygons_labels` uses a planar area centroid in normalized Mercator,
-subtracting holes. `addresses` uses that centroid only for convex polygons
-without holes and otherwise uses point-on-surface. Other polygon point layers
-keep point-on-surface placement. Area centroids can lie outside a polygon or
-inside a hole. Each assembled multipolygon component is emitted separately,
-so a relation with several outer rings can produce several label points.
+subtracting holes. `addresses` uses that centroid only for convex
+polygons without holes and otherwise uses point-on-surface. Other polygon
+point layers keep point-on-surface placement. Area centroids can lie outside
+a polygon or inside a hole.
+
+A relation emits one aggregate label point per layer per eligible zoom in
+`water_polygons_labels`, `boundary_labels`, `addresses`,
+`streets_polygons_labels`, `public_transport`, and `pois`. Its water label
+centroid combines all valid components, weighted by planar area after
+subtracting holes; components are aligned to the largest component's world
+copy before averaging across the antimeridian. Relation addresses with one
+convex component and no holes use its centroid. Other relation addresses and
+the remaining four layers use point-on-surface from the largest valid
+component. A relation without a usable label point emits none. Polygon
+geometry continues to emit each assembled component separately.
 
 ## Checkpoint provenance
 

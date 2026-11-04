@@ -59,6 +59,15 @@ fn ring_area_centroid(ring: &[Point]) -> Option<(f64, Point)> {
 /// inner rings. Ring winding and closure convention do not affect the result.
 /// Like other centroids, this point can still fall outside the polygon.
 pub(crate) fn polygon_centroid(outer: &[Point], inners: &[Vec<Point>]) -> Option<Point> {
+    polygon_area_centroid(outer, inners).map(|(_, centroid)| centroid)
+}
+
+/// Return a polygon's net planar area and centroid using the same translated
+/// ring sums, so component weights remain accurate for small polygons.
+pub(crate) fn polygon_area_centroid(
+    outer: &[Point],
+    inners: &[Vec<Point>],
+) -> Option<(f64, Point)> {
     let (outer_area, outer_centroid) = ring_area_centroid(outer)?;
     let mut area = outer_area;
     let mut weighted_x = outer_centroid.x * outer_area;
@@ -80,7 +89,7 @@ pub(crate) fn polygon_centroid(outer: &[Point], inners: &[Vec<Point>]) -> Option
         return None;
     }
     let centroid = Point::new(weighted_x / area, weighted_y / area);
-    (centroid.x.is_finite() && centroid.y.is_finite()).then_some(centroid)
+    (centroid.x.is_finite() && centroid.y.is_finite()).then_some((area, centroid))
 }
 
 /// Whether a polygon is convex and winds once. Accept either ring closure

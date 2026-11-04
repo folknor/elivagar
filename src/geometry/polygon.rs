@@ -2,11 +2,116 @@ use std::f64::consts::PI;
 
 use super::projection::Point;
 
-/// Minimum polygon area in tile extent units² (1 sq pixel).
-/// Polygon rings with |area| below this contribute nothing visible.
-pub const MIN_POLY_AREA: i64 = super::tiles::PX * super::tiles::PX; // 256
+/// Distance in the integer tile extent coordinate space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ExtentUnits(i64);
 
-/// The sign of a ring's doubled shoelace area.
+impl ExtentUnits {
+    pub(crate) const fn new(value: i64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> i64 {
+        self.0
+    }
+
+    pub(crate) const fn divided_by(self, divisor: i64) -> Self {
+        Self(self.0 / divisor)
+    }
+
+    pub(crate) const fn squared_area(self) -> Area {
+        let value = self.0 as i128;
+        Area((value * value).unsigned_abs())
+    }
+
+    /// The existing VW threshold uses the pixel-square number in doubled-area
+    /// units. This intentionally does not convert a true area into doubled area.
+    pub(crate) const fn squared_area_2x(self) -> Area2x {
+        let value = self.0 as i128;
+        Area2x(value * value)
+    }
+}
+
+/// True nonnegative area in integer tile extent units squared.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Area(u128);
+
+impl Area {
+    pub(crate) const ZERO: Self = Self(0);
+    pub(crate) const ONE: Self = Self(1);
+
+    pub(crate) const fn from_u64(value: u64) -> Self {
+        Self(value as u128)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn get(self) -> u128 {
+        self.0
+    }
+
+    pub(crate) fn as_u64(self) -> u64 {
+        u64::try_from(self.0).expect("area threshold fits u64")
+    }
+
+    /// Inclusive area threshold used by polygon survival filters.
+    pub(crate) const fn meets(self, minimum: Self) -> bool {
+        self.0 >= minimum.0
+    }
+
+    /// A zero minimum disables this optional contour-drop filter.
+    pub(crate) const fn below_nonzero_minimum(self, minimum: Self) -> bool {
+        minimum.0 != 0 && !self.meets(minimum)
+    }
+}
+
+/// Signed doubled shoelace area in integer tile extent units squared.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Area2x(i128);
+
+impl Area2x {
+    pub(crate) const ZERO: Self = Self(0);
+
+    #[cfg(test)]
+    pub(crate) const fn new(value: i128) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> i128 {
+        self.0
+    }
+
+    pub(crate) const fn meets(self, minimum: Self) -> bool {
+        self.0 >= minimum.0
+    }
+
+    pub(crate) const fn magnitude(self) -> Self {
+        if self.0 < 0 { Self(-self.0) } else { self }
+    }
+
+    /// Preserve the existing integer-area convention: odd doubled areas floor.
+    pub(crate) const fn true_area(self) -> Area {
+        Area(self.0.unsigned_abs() / 2)
+    }
+}
+
+impl From<i8> for Area2x {
+    fn from(value: i8) -> Self {
+        Self(i128::from(value))
+    }
+}
+
+/// One rendered pixel in integer tile extent units.
+pub(crate) const RENDER_PX: ExtentUnits = ExtentUnits::new(super::tiles::grid::EXTENT as i64 / 256);
+
+/// The second edge-window thinning pass is one eighth of a rendered pixel.
+pub(crate) const WINDOW_DP_TOL: ExtentUnits = RENDER_PX.divided_by(8);
+
+/// One rendered pixel squared, as a typed polygon area threshold.
+pub(crate) const MIN_POLY_AREA_AREA: Area = RENDER_PX.squared_area();
+
+/// The sign of a ring's doubled shoelace area in x/y coordinates.
+/// Positive is mathematical counter-clockwise; on y-down tile coordinates it
+/// renders clockwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RingOrientation {
     Positive,
@@ -30,9 +135,54 @@ where
     }
 }
 
+/// Return whether a ring must be reversed to take the requested shoelace role.
+/// A zero-area ring keeps its order, matching the polygon engine's old checks.
+pub(crate) fn should_reverse(area: Area2x, expected: RingOrientation) -> bool {
+    ring_role(area).is_some_and(|actual| actual != expected)
+}
+
+/// Signed doubled shoelace area for integer coordinates, shared by integer
+/// polygon processing and tile emission. The iterator avoids allocating for
+/// callers whose points use a different concrete point type.
+pub(crate) fn signed_area_2x(points: impl IntoIterator<Item = (i32, i32)>) -> Area2x {
+    let mut points = points.into_iter();
+    let Some(first) = points.next() else {
+        return Area2x::ZERO;
+    };
+    let mut previous = first;
+    let mut area = 0_i128;
+    for current in points {
+        area += i128::from(previous.0) * i128::from(current.1);
+        area -= i128::from(current.0) * i128::from(previous.1);
+        previous = current;
+    }
+    area += i128::from(previous.0) * i128::from(first.1);
+    area -= i128::from(first.0) * i128::from(previous.1);
+    Area2x(area)
+}
+
+/// Signed doubled shoelace area of the triangle formed by three integer points.
+pub(crate) fn triangle_area_2x(a: (i32, i32), b: (i32, i32), c: (i32, i32)) -> Area2x {
+    let ab_x = i128::from(b.0) - i128::from(a.0);
+    let ab_y = i128::from(b.1) - i128::from(a.1);
+    let ac_x = i128::from(c.0) - i128::from(a.0);
+    let ac_y = i128::from(c.1) - i128::from(a.1);
+    triangle_area_2x_from_deltas(ab_x, ab_y, ac_x, ac_y)
+}
+
+pub(crate) fn triangle_area_2x_from_deltas(
+    ab_x: i128,
+    ab_y: i128,
+    ac_x: i128,
+    ac_y: i128,
+) -> Area2x {
+    Area2x(ab_x * ac_y - ab_y * ac_x)
+}
+
 /// Compute the signed area of a ring using the Shoelace formula.
 ///
-/// Positive = counter-clockwise, negative = clockwise.
+/// Positive = counter-clockwise, negative = clockwise. On y-down tile
+/// coordinates, positive rings render clockwise.
 /// The ring should NOT have a duplicated closing vertex (we wrap automatically).
 pub fn signed_area(ring: &[Point]) -> f64 {
     if ring.len() < 3 {

@@ -14,7 +14,7 @@ pub const EXTENT: f64 = grid::EXTENT as f64;
 pub(crate) const BUFFER_FRACTION: f64 = grid::BUFFER_UNITS as f64 / EXTENT;
 
 /// One rendered pixel in extent units.
-pub(super) const PX: i64 = grid::EXTENT as i64 / 256;
+pub(crate) use super::polygon::RENDER_PX;
 
 /// Find all tiles at a given zoom level that intersect the given Mercator bbox.
 ///

@@ -1,4 +1,5 @@
 use crate::geometry::overlay::{BoolOverlay, BoolRule, ShapeType};
+use crate::geometry::polygon::{self, Area, Area2x, ExtentUnits, RENDER_PX, RingOrientation};
 use crate::geometry::projection::Point;
 use crate::mvt;
 
@@ -153,8 +154,12 @@ impl<'a> PinnedRingMut<'a> {
     }
 
     fn orient(&mut self, outer: bool) {
-        let area = signed_area_2x(self.points);
-        if (outer && area < 0) || (!outer && area > 0) {
+        let expected = if outer {
+            RingOrientation::Positive
+        } else {
+            RingOrientation::Negative
+        };
+        if polygon::should_reverse(signed_area_2x(self.points), expected) {
             self.points.reverse();
             self.flags.reverse();
         }
@@ -178,9 +183,12 @@ pub(crate) struct IntRect {
 // durable ocean artifact. Such a change requires bumping OCEAN_POLICY_VERSION
 // in src/ocean.rs so stale artifacts fail the key check instead of silently
 // serving the old geometry.
-pub(crate) const OCEAN_DP_TOL_PX: i64 = 16;
-pub(crate) const OCEAN_VW_AREA_2X: i128 = 256;
-pub(crate) const OSM_DP_TOL_PX: i64 = 16;
+pub(crate) const OCEAN_DP_TOL_PX: i64 = RENDER_PX.get();
+// This remains 256 in doubled-area units, which is true Area(128). The
+// independent min-area drop is Area(256). The existing code and golden fix
+// these values and their output, but no source explains the factor of two.
+pub(crate) const OCEAN_VW_AREA_2X: Area2x = RENDER_PX.squared_area_2x();
+pub(crate) const OSM_DP_TOL_PX: i64 = RENDER_PX.get();
 // Keep the existing names for pyramid and assemble callers; tiles owns the grid.
 use super::tiles::grid::EXTENT_LOG2;
 pub(crate) use super::tiles::grid::{BUFFER_UNITS as TILE_BUFFER_I32, EXTENT as TILE_EXTENT_I32};
@@ -243,15 +251,19 @@ struct VwScratch {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct VwEntry {
-    area2x: i128,
+    area2x: Area2x,
     x: i32,
     y: i32,
     generation: u32,
     idx: u32,
 }
 
-pub(crate) fn vw_area_threshold(dp_tol: i64) -> i128 {
-    if dp_tol <= 0 { 0 } else { OCEAN_VW_AREA_2X }
+pub(crate) fn vw_area_threshold(dp_tol: ExtentUnits) -> Area2x {
+    if dp_tol.get() <= 0 {
+        Area2x::ZERO
+    } else {
+        OCEAN_VW_AREA_2X
+    }
 }
 
 /// Reusable temporaries for `simplify_shape_dp`. The DP simplifier ran at
@@ -505,13 +517,13 @@ pub(crate) fn rescale_shape_pinned_into(
 pub(crate) fn simplify_shape_dp(
     scratch: &mut IntEmitScratch,
     shape: &mut Shape,
-    tol: i64,
+    tol: ExtentUnits,
     mut pins: Option<&mut PinnedRings>,
 ) {
     if let Some(pins) = pins.as_deref() {
         pins.validate_for(shape);
     }
-    if tol <= 0 {
+    if tol.get() <= 0 {
         return;
     }
 
@@ -546,13 +558,13 @@ pub(crate) fn simplify_shape_dp(
 pub(crate) fn simplify_shape_vw(
     scratch: &mut IntEmitScratch,
     shape: &mut Shape,
-    area_2x_thresh: i128,
+    area_2x_thresh: Area2x,
     mut pins: Option<&mut PinnedRings>,
 ) {
     if let Some(pins) = pins.as_deref() {
         pins.validate_for(shape);
     }
-    if area_2x_thresh <= 0 {
+    if area_2x_thresh <= Area2x::ZERO {
         return;
     }
     if shape.is_empty() {
@@ -594,7 +606,7 @@ pub(crate) fn simplify_shape_vw(
 
 fn simplify_contour_vw_in_place(
     contour: &mut Contour,
-    threshold: i128,
+    threshold: Area2x,
     pins: Option<&[bool]>,
     outer: bool,
     vw: &mut VwScratch,
@@ -645,7 +657,7 @@ fn simplify_contour_vw_in_place(
         if !vw.alive[idx] || vw.seq[idx] != entry.generation {
             continue;
         }
-        if entry.area2x >= threshold {
+        if entry.area2x.meets(threshold) {
             break;
         }
         let left = usize::try_from(vw.prev[idx]).expect("ring index fits usize");
@@ -689,9 +701,13 @@ fn vw_refresh(i: usize, vw: &mut VwScratch) {
     let a = vw.work[vw.prev[i] as usize];
     let b = vw.work[i];
     let c = vw.work[vw.next[i] as usize];
-    let cross = (i128::from(b.x - a.x) * i128::from(c.y - a.y)
-        - i128::from(b.y - a.y) * i128::from(c.x - a.x))
-    .abs();
+    let cross = polygon::triangle_area_2x_from_deltas(
+        i128::from(b.x - a.x),
+        i128::from(b.y - a.y),
+        i128::from(c.x - a.x),
+        i128::from(c.y - a.y),
+    )
+    .magnitude();
     vw.seq[i] = vw.seq[i].wrapping_add(1);
     vw.heap.push(Reverse(VwEntry {
         area2x: cross,
@@ -704,7 +720,7 @@ fn vw_refresh(i: usize, vw: &mut VwScratch) {
 
 #[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn normalize(shape: Shape, min_area: u64) -> Shapes {
+pub(crate) fn normalize(shape: Shape, min_area: Area) -> Shapes {
     let mut scratch = IntEmitScratch::new();
     let mut out = Vec::new();
     normalize_into(&mut scratch, shape, min_area, &mut out);
@@ -715,7 +731,7 @@ pub(crate) fn normalize(shape: Shape, min_area: u64) -> Shapes {
 pub(crate) fn normalize_into(
     scratch: &mut IntEmitScratch,
     mut shape: Shape,
-    min_area: u64,
+    min_area: Area,
     out: &mut Shapes,
 ) {
     scratch.overlay.recycle(out);
@@ -725,6 +741,8 @@ pub(crate) fn normalize_into(
     }
     scratch.overlay.min_output_area = min_area;
     if shape.len() == 1 {
+        // The port fast path omits its threshold filter. Both paths below
+        // re-check through Area::meets, preserving that deliberate handoff.
         if scratch.overlay.simplify_contour_into(&shape[0], out) {
             scratch.overlay.recycle_owned_shape(shape);
             clean_shapes_in_place(scratch, out, min_area);
@@ -750,7 +768,7 @@ pub(crate) fn normalize_into(
 }
 
 #[cfg(test)]
-pub(crate) fn intersect_rect(shape: &Shape, rect: IntRect, min_area: u64) -> Shapes {
+pub(crate) fn intersect_rect(shape: &Shape, rect: IntRect, min_area: Area) -> Shapes {
     let mut scratch = IntEmitScratch::new();
     let mut out = Vec::new();
     intersect_rect_into(&mut scratch, shape, rect, min_area, &mut out);
@@ -762,7 +780,7 @@ pub(crate) fn intersect_rect_into(
     scratch: &mut IntEmitScratch,
     shape: &Shape,
     rect: IntRect,
-    min_area: u64,
+    min_area: Area,
     out: &mut Shapes,
 ) {
     scratch.overlay.recycle(out);
@@ -799,7 +817,7 @@ pub(crate) fn intersect_shapes_into(
     scratch.overlay.add_shape(subject, ShapeType::Subject);
     scratch.overlay.add_shape(clip, ShapeType::Clip);
     scratch.overlay.overlay_nested(BoolRule::Intersect, out);
-    clean_shapes_in_place(scratch, out, 0);
+    clean_shapes_in_place(scratch, out, Area::ZERO);
 }
 
 fn fill_rect_contour(out: &mut Contour, rect: IntRect) {
@@ -857,7 +875,7 @@ fn remove_closing_duplicate(ring: &mut Contour) {
 }
 
 fn ring_is_valid(ring: &Contour) -> bool {
-    if ring.len() < 3 || signed_area_2x(ring) == 0 {
+    if ring.len() < 3 || polygon::ring_role(signed_area_2x(ring)).is_none() {
         return false;
     }
     // Distinct-point count saturating at 3, tracked in a fixed array: this
@@ -878,25 +896,23 @@ fn ring_is_valid(ring: &Contour) -> bool {
 }
 
 fn orient_ring(ring: &mut Contour, outer: bool) {
-    let area = signed_area_2x(ring);
-    if (outer && area < 0) || (!outer && area > 0) {
+    let expected = if outer {
+        RingOrientation::Positive
+    } else {
+        RingOrientation::Negative
+    };
+    if polygon::should_reverse(signed_area_2x(ring), expected) {
         ring.reverse();
     }
 }
 
-pub(crate) fn signed_area_2x(ring: &Contour) -> i128 {
-    let mut area = 0_i128;
-    for i in 0..ring.len() {
-        let j = (i + 1) % ring.len();
-        area += i128::from(ring[i].x) * i128::from(ring[j].y);
-        area -= i128::from(ring[j].x) * i128::from(ring[i].y);
-    }
-    area
+pub(crate) fn signed_area_2x(ring: &Contour) -> Area2x {
+    polygon::signed_area_2x(ring.iter().map(|point| (point.x, point.y)))
 }
 
 fn simplify_contour_dp_in_place(
     contour: &mut Contour,
-    tol: i64,
+    tol: ExtentUnits,
     pins: Option<&[bool]>,
     outer: bool,
     dp: &mut DpScratch,
@@ -1018,7 +1034,7 @@ fn collect_chain_flags_into(
 
 fn dp_keep_into(
     chain: &Contour,
-    tol: i64,
+    tol: ExtentUnits,
     pins: &[bool],
     keep: &mut Vec<bool>,
     stack: &mut Vec<(usize, usize)>,
@@ -1037,6 +1053,7 @@ fn dp_keep_into(
         }
     }
 
+    let tol = tol.get();
     let tol_sq = i128::from(tol) * i128::from(tol);
     stack.clear();
     stack.push((0_usize, chain.len() - 1));
@@ -1093,7 +1110,7 @@ fn farthest_from_segment(chain: &Contour, start: usize, end: usize) -> Option<(u
     best.map(|(idx, num, _, _)| (idx, num, den))
 }
 
-fn clean_shapes_in_place(scratch: &mut IntEmitScratch, shapes: &mut Shapes, min_area: u64) {
+fn clean_shapes_in_place(scratch: &mut IntEmitScratch, shapes: &mut Shapes, min_area: Area) {
     let mut write = 0usize;
     for read in 0..shapes.len() {
         clean_shape_in_place(scratch, &mut shapes[read], min_area);
@@ -1107,11 +1124,11 @@ fn clean_shapes_in_place(scratch: &mut IntEmitScratch, shapes: &mut Shapes, min_
     scratch.recycle_shapes_from(shapes, write);
 }
 
-fn clean_shape_in_place(scratch: &mut IntEmitScratch, shape: &mut Shape, min_area: u64) {
+fn clean_shape_in_place(scratch: &mut IntEmitScratch, shape: &mut Shape, min_area: Area) {
     let mut write = 0usize;
     for read in 0..shape.len() {
         clean_contour_in_place(&mut shape[read]);
-        if ring_is_valid(&shape[read]) && true_area(&shape[read]) >= u128::from(min_area) {
+        if ring_is_valid(&shape[read]) && true_area(&shape[read]).meets(min_area) {
             orient_ring(&mut shape[read], read == 0);
             if write != read {
                 shape.swap(write, read);
@@ -1141,8 +1158,8 @@ fn clean_contour_in_place(ring: &mut Contour) {
     remove_closing_duplicate(ring);
 }
 
-fn true_area(ring: &Contour) -> u128 {
-    signed_area_2x(ring).unsigned_abs() / 2
+fn true_area(ring: &Contour) -> Area {
+    signed_area_2x(ring).true_area()
 }
 
 pub(crate) fn point_in_contour(x: i32, y: i32, ring: &Contour) -> bool {
@@ -1258,6 +1275,7 @@ fn append_translated_ring(
     points: &mut Vec<(i32, i32)>,
     ranges: &mut Vec<Range<usize>>,
 ) {
+    // Tile y grows down, so positive shoelace is the rendered clockwise role.
     let start = points.len();
     points.extend(contour.iter().map(|p| (p.x - ox, p.y - oy)));
     if points[start..].first() != points[start..].last()
@@ -1265,8 +1283,12 @@ fn append_translated_ring(
     {
         points.push(first);
     }
-    let area = signed_area_tile_2x(&points[start..]);
-    if (clockwise && area < 0) || (!clockwise && area > 0) {
+    let expected = if clockwise {
+        RingOrientation::Positive
+    } else {
+        RingOrientation::Negative
+    };
+    if polygon::should_reverse(signed_area_tile_2x(&points[start..]), expected) {
         points[start..].reverse();
     }
     if points.len() >= start + 4 {
@@ -1276,14 +1298,8 @@ fn append_translated_ring(
     }
 }
 
-fn signed_area_tile_2x(ring: &[(i32, i32)]) -> i128 {
-    let mut area = 0_i128;
-    for i in 0..ring.len() {
-        let j = (i + 1) % ring.len();
-        area += i128::from(ring[i].0) * i128::from(ring[j].1);
-        area -= i128::from(ring[j].0) * i128::from(ring[i].1);
-    }
-    area
+fn signed_area_tile_2x(ring: &[(i32, i32)]) -> Area2x {
+    polygon::signed_area_2x(ring.iter().copied())
 }
 
 #[hotpath::measure]
@@ -1316,13 +1332,21 @@ pub(crate) fn emit_full_tile(
     }
 }
 
-pub(crate) fn contour_area_is_below(ring: &Contour, min_area: u64) -> bool {
-    min_area > 0 && true_area(ring) < u128::from(min_area)
+pub(crate) fn contour_area_is_below(ring: &Contour, min_area: Area) -> bool {
+    true_area(ring).below_nonzero_minimum(min_area)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tol(value: i64) -> ExtentUnits {
+        ExtentUnits::new(value)
+    }
+
+    fn area2x(value: i128) -> Area2x {
+        Area2x::new(value)
+    }
 
     fn p(x: i32, y: i32) -> IntPoint {
         IntPoint::new(x, y)
@@ -1343,9 +1367,15 @@ mod tests {
     }
 
     fn assert_winding(shape: &Shape) {
-        assert!(signed_area_2x(&shape[0]) > 0);
+        assert_eq!(
+            polygon::ring_role(signed_area_2x(&shape[0])),
+            Some(RingOrientation::Positive)
+        );
         for hole in &shape[1..] {
-            assert!(signed_area_2x(hole) < 0);
+            assert_eq!(
+                polygon::ring_role(signed_area_2x(hole)),
+                Some(RingOrientation::Negative)
+            );
         }
     }
 
@@ -1387,9 +1417,9 @@ mod tests {
             });
             let mut scratch = IntEmitScratch::new();
             if use_vw {
-                simplify_shape_vw(&mut scratch, &mut shape, 256, Some(&mut pins));
+                simplify_shape_vw(&mut scratch, &mut shape, area2x(256), Some(&mut pins));
             } else {
-                simplify_shape_dp(&mut scratch, &mut shape, 16, Some(&mut pins));
+                simplify_shape_dp(&mut scratch, &mut shape, tol(16), Some(&mut pins));
             }
             assert!(
                 shape[0].contains(&target),
@@ -1422,7 +1452,10 @@ mod tests {
             .map(|point| (point.x, point.y))
             .collect();
         assert_eq!(pinned, vec![(0, 1024)]);
-        assert!(signed_area_2x(&shape[0]) > 0);
+        assert_eq!(
+            polygon::ring_role(signed_area_2x(&shape[0])),
+            Some(RingOrientation::Positive)
+        );
     }
 
     #[test]
@@ -1516,7 +1549,7 @@ mod tests {
         });
         let mut scratch = IntEmitScratch::new();
         let mut dp = shape.clone();
-        simplify_shape_dp(&mut scratch, &mut dp, 1000, Some(&mut flags));
+        simplify_shape_dp(&mut scratch, &mut dp, tol(1000), Some(&mut flags));
         assert!(dp.is_empty());
 
         // VW has a three-vertex floor, so use a degenerate original outer
@@ -1527,7 +1560,7 @@ mod tests {
         vw_flags.fill_for_shape(&vw, |idx, ring, pins| {
             pins.resize(ring.len(), idx == 1);
         });
-        simplify_shape_vw(&mut scratch, &mut vw, 16, Some(&mut vw_flags));
+        simplify_shape_vw(&mut scratch, &mut vw, area2x(16), Some(&mut vw_flags));
         assert!(vw.is_empty());
     }
 
@@ -1538,7 +1571,7 @@ mod tests {
             vec![p(0, 0), p(1, 0), p(1, 1), p(0, 1)],
             vec![p(4, 4), p(4, 12), p(12, 12), p(12, 4)],
         ];
-        clean_shape_in_place(&mut IntEmitScratch::new(), &mut shape, 2);
+        clean_shape_in_place(&mut IntEmitScratch::new(), &mut shape, Area::from_u64(2));
         assert!(shape.is_empty());
     }
 
@@ -1550,8 +1583,8 @@ mod tests {
         rotated.extend_from_slice(&ring[..3]);
         let mut shape_b = vec![rotated];
         let mut scratch = IntEmitScratch::new();
-        simplify_shape_dp(&mut scratch, &mut shape_a, 16, None);
-        simplify_shape_dp(&mut scratch, &mut shape_b, 16, None);
+        simplify_shape_dp(&mut scratch, &mut shape_a, tol(16), None);
+        simplify_shape_dp(&mut scratch, &mut shape_b, tol(16), None);
         assert_eq!(sorted_points(&shape_a[0]), sorted_points(&shape_b[0]));
     }
 
@@ -1564,7 +1597,7 @@ mod tests {
         }
         ring.extend([p(40, 20), p(0, 20)]);
         let mut shape = vec![ring];
-        simplify_shape_dp(&mut IntEmitScratch::new(), &mut shape, 16, None);
+        simplify_shape_dp(&mut IntEmitScratch::new(), &mut shape, tol(16), None);
         assert_eq!(shape[0].len(), 4);
     }
 
@@ -1572,7 +1605,7 @@ mod tests {
     fn simplify_shape_dp_old_ring_seam_not_privileged() {
         let ring = vec![p(0, 0), p(1, 8), p(2, 0), p(40, 0), p(40, 40), p(0, 40)];
         let mut shape = vec![ring];
-        simplify_shape_dp(&mut IntEmitScratch::new(), &mut shape, 16, None);
+        simplify_shape_dp(&mut IntEmitScratch::new(), &mut shape, tol(16), None);
         assert!(!shape[0].contains(&p(1, 8)));
     }
 
@@ -1583,8 +1616,8 @@ mod tests {
         let mut b = vec![ring[3..].to_vec()];
         b[0].extend_from_slice(&ring[..3]);
         let mut scratch = IntEmitScratch::new();
-        simplify_shape_vw(&mut scratch, &mut a, 256, None);
-        simplify_shape_vw(&mut scratch, &mut b, 256, None);
+        simplify_shape_vw(&mut scratch, &mut a, area2x(256), None);
+        simplify_shape_vw(&mut scratch, &mut b, area2x(256), None);
         assert_eq!(sorted_points(&a[0]), sorted_points(&b[0]));
     }
 
@@ -1608,8 +1641,8 @@ mod tests {
             pins[2] = true;
         });
         let mut scratch = IntEmitScratch::new();
-        simplify_shape_vw(&mut scratch, &mut plain, 10_000, None);
-        simplify_shape_vw(&mut scratch, &mut pinned, 10_000, Some(&mut flags));
+        simplify_shape_vw(&mut scratch, &mut plain, area2x(10_000), None);
+        simplify_shape_vw(&mut scratch, &mut pinned, area2x(10_000), Some(&mut flags));
         assert!(!plain[0].contains(&target));
         assert!(pinned[0].contains(&target));
     }
@@ -1617,7 +1650,7 @@ mod tests {
     #[test]
     fn simplify_shape_vw_ring_floor_keeps_triangle() {
         let mut shape = vec![vec![p(0, 0), p(1, 0), p(100, 0), p(0, 100)]];
-        simplify_shape_vw(&mut IntEmitScratch::new(), &mut shape, 10_000, None);
+        simplify_shape_vw(&mut IntEmitScratch::new(), &mut shape, area2x(10_000), None);
         assert_eq!(shape[0].len(), 3);
     }
 
@@ -1627,7 +1660,7 @@ mod tests {
             vec![p(0, 0), p(1, 0), p(2, 0)],
             vec![p(10, 10), p(20, 10), p(20, 20), p(10, 20)],
         ];
-        simplify_shape_vw(&mut IntEmitScratch::new(), &mut shape, 16, None);
+        simplify_shape_vw(&mut IntEmitScratch::new(), &mut shape, area2x(16), None);
         assert!(shape.is_empty());
     }
 
@@ -1635,14 +1668,14 @@ mod tests {
     fn simplify_shape_vw_threshold_zero_is_verbatim() {
         let mut shape = vec![vec![p(5, 0), p(0, 0), p(0, 5), p(5, 5), p(5, 0)]];
         let original = shape.clone();
-        simplify_shape_vw(&mut IntEmitScratch::new(), &mut shape, 0, None);
+        simplify_shape_vw(&mut IntEmitScratch::new(), &mut shape, Area2x::ZERO, None);
         assert_eq!(shape, original);
     }
 
     /// One-sided coverage lost when `result` is used in place of `source`:
     /// `area(source) - area(source INTERSECT result)`, in 2x-pixel^2 units.
     fn one_sided_lost(source: &Contour, result: &Shape) -> i128 {
-        let src_area = signed_area_2x(source).abs();
+        let src_area = signed_area_2x(source).magnitude().get();
         if result.is_empty() {
             return src_area;
         }
@@ -1657,9 +1690,9 @@ mod tests {
                     .enumerate()
                     .map(|(i, r)| {
                         if i == 0 {
-                            signed_area_2x(r).abs()
+                            signed_area_2x(r).magnitude().get()
                         } else {
-                            -signed_area_2x(r).abs()
+                            -signed_area_2x(r).magnitude().get()
                         }
                     })
                     .sum::<i128>()
@@ -1691,7 +1724,7 @@ mod tests {
         simplify_shape_dp(
             &mut IntEmitScratch::new(),
             &mut dp_shape,
-            OCEAN_DP_TOL_PX,
+            tol(OCEAN_DP_TOL_PX),
             None,
         );
         let dp_lost = one_sided_lost(&fjord, &dp_shape);
@@ -1706,7 +1739,7 @@ mod tests {
     #[test]
     fn normalize_figure_8_input_to_two_simple_polygons() {
         let shape = vec![vec![p(0, 0), p(20, 20), p(0, 20), p(20, 0)]];
-        let shapes = normalize(shape, 0);
+        let shapes = normalize(shape, Area::ZERO);
         assert_eq!(shapes.len(), 2);
         for shape in &shapes {
             assert_winding(shape);
@@ -1723,7 +1756,7 @@ mod tests {
 
     #[test]
     fn normalize_sub_min_area_contour_dropped() {
-        let shapes = normalize(square_shape(0, 10), 256);
+        let shapes = normalize(square_shape(0, 10), Area::from_u64(256));
         assert!(shapes.is_empty());
     }
 
@@ -1747,7 +1780,7 @@ mod tests {
                 max_x: 12,
                 max_y: 10,
             },
-            0,
+            Area::ZERO,
         );
         assert_eq!(out.len(), 2);
     }
@@ -1766,7 +1799,7 @@ mod tests {
                 max_x: 10,
                 max_y: 10,
             },
-            0,
+            Area::ZERO,
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].len(), 2);
@@ -1787,7 +1820,7 @@ mod tests {
                 max_x: 10,
                 max_y: 10,
             },
-            0,
+            Area::ZERO,
         );
         assert!(!out.is_empty());
         assert!(out.iter().all(|shape| {
@@ -1807,7 +1840,7 @@ mod tests {
                 max_x: 8,
                 max_y: 8,
             },
-            0,
+            Area::ZERO,
         );
         assert_eq!(out.len(), 1);
         assert_winding(&out[0]);
@@ -1826,10 +1859,10 @@ mod tests {
         let shape = quantize_polygon(&outer, &[], 14);
         assert!(shape[0].iter().any(|p| p.x > scale));
         let shape_z = rescale_shape(&shape, 1);
-        let fixed = normalize(shape_z, 0);
+        let fixed = normalize(shape_z, Area::ZERO);
         assert!(!fixed.is_empty());
         let bbox = shape_bbox(&fixed[0]).expect("normalized shifted bbox");
-        let clipped = intersect_rect(&fixed[0], bbox, 0);
+        let clipped = intersect_rect(&fixed[0], bbox, Area::ZERO);
         assert!(!clipped.is_empty());
     }
 
@@ -1852,8 +1885,8 @@ mod tests {
             pins[2] = true;
         });
         let mut scratch = IntEmitScratch::new();
-        simplify_shape_dp(&mut scratch, &mut plain, 16, None);
-        simplify_shape_dp(&mut scratch, &mut pinned, 16, Some(&mut flags));
+        simplify_shape_dp(&mut scratch, &mut plain, tol(16), None);
+        simplify_shape_dp(&mut scratch, &mut pinned, tol(16), Some(&mut flags));
         assert!(!plain[0].contains(&target));
         assert!(pinned[0].contains(&target));
     }
@@ -1885,7 +1918,7 @@ mod landing1_tests {
         // contract is verbatim passthrough - assert the geometric identity
         // the skip relies on: intersect of a contained shape equals itself
         // up to ring rotation, so passthrough is legal.
-        let out = intersect_rect(&shape, data, 0);
+        let out = intersect_rect(&shape, data, Area::ZERO);
         assert_eq!(out.len(), 1);
         let mut got: Vec<(i32, i32)> = out[0][0].iter().map(|q| (q.x, q.y)).collect();
         let want: Vec<(i32, i32)> = ring.iter().map(|q| (q.x, q.y)).collect();

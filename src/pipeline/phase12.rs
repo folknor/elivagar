@@ -9,7 +9,7 @@ use crate::geometry::{
 use crate::node_index::{LatLonE7, NodeId, NodeStore, NodeStoreReader};
 use crate::shortbread::{self, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter};
-use crate::way_index::WayIndexWriter;
+use crate::way_index::{WayId, WayIndexWriter};
 use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, MemberId, PrimitiveBlock, Way};
 
 use super::boundary_prescan::{BoundaryWayMeta, fold_relation};
@@ -1449,21 +1449,6 @@ pub(super) struct WayPlan {
     pub(super) is_member: bool,
 }
 
-/// A way identifier inside phase12. The way-index boundary still accepts i64.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) struct WayId(i64);
-
-impl WayId {
-    const fn new(raw: i64) -> Self {
-        Self(raw)
-    }
-
-    const fn as_i64(self) -> i64 {
-        self.0
-    }
-}
-
 fn estimate_way_plans_bytes(plans: &[WayPlan]) -> usize {
     plans
         .iter()
@@ -1683,7 +1668,7 @@ pub(super) struct WayTaskResult {
     pub(super) count: u64,
     pub(super) sink: RecordSink,
     pub(super) fanout: FanoutStats,
-    pub(super) way_puts: Vec<(WayId, Vec<(i32, i32)>)>,
+    pub(super) way_puts: Vec<(WayId, Vec<LatLonE7>)>,
     pub(super) location_extent: CoordinateExtent,
 }
 
@@ -1692,7 +1677,7 @@ pub(super) struct WayAcc {
     pub(super) bytes: usize,
     pub(super) count: u64,
     pub(super) fanout: FanoutStats,
-    pub(super) way_puts: Vec<(WayId, Vec<(i32, i32)>)>,
+    pub(super) way_puts: Vec<(WayId, Vec<LatLonE7>)>,
     pub(super) location_extent: CoordinateExtent,
     pub(super) merc: Vec<Point>,
     pub(super) point_emit: PointEmitScratch,
@@ -1750,7 +1735,7 @@ pub(super) fn drain_way_task_result(
 ) -> u64 {
     location_extent.merge(result.location_extent);
     for (way_id, coords_e7) in result.way_puts {
-        way_index.put(way_id.as_i64(), &coords_e7);
+        way_index.put(way_id, &coords_e7);
     }
     sort_writer.merge_tally(&result.sink.tally);
     fanout.merge(&result.fanout);
@@ -1807,14 +1792,13 @@ pub(super) fn process_planned_way_into(
         }
     }
 
-    let (coords_e7, resolved_node_refs): (Vec<(i32, i32)>, Vec<i64>) = if let Some(nr) = node_reader
-    {
+    let (coords_e7, resolved_node_refs): (Vec<LatLonE7>, Vec<i64>) = if let Some(nr) = node_reader {
         let mut missing_refs: usize = 0;
-        let mut resolved: Vec<(i32, i32)> = Vec::with_capacity(plan.node_refs.len());
+        let mut resolved: Vec<LatLonE7> = Vec::with_capacity(plan.node_refs.len());
         let mut resolved_refs: Vec<i64> = Vec::with_capacity(plan.node_refs.len());
         for &id in &plan.node_refs {
             if let Some(coord) = nr.get_coord_id(NodeId::new(id)) {
-                resolved.push(coord.into());
+                resolved.push(coord);
                 resolved_refs.push(id);
             } else {
                 missing_refs += 1;
@@ -1825,9 +1809,9 @@ pub(super) fn process_planned_way_into(
         }
         (resolved, resolved_refs)
     } else {
-        let coords: Vec<(i32, i32)> = way
+        let coords: Vec<LatLonE7> = way
             .node_locations()
-            .map(|loc| (loc.decimicro_lat(), loc.decimicro_lon()))
+            .map(|loc| LatLonE7::new(loc.decimicro_lat(), loc.decimicro_lon()))
             .collect();
         (coords, plan.node_refs.clone())
     };
@@ -1900,7 +1884,7 @@ pub(super) fn process_planned_way_into(
     acc.merc.extend(
         coords_e7
             .iter()
-            .map(|&(lat, lon)| geometry::projection::project_e7(lat, lon)),
+            .map(|coord| geometry::projection::project_e7(coord.lat, coord.lon)),
     );
     let _ = unwrap_antimeridian_path(&mut acc.merc, is_closed);
 

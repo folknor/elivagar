@@ -17,6 +17,7 @@ use crate::geometry::overlay::port::scan::{KeyExpCollection, KeyExpList, KeyExpT
 use crate::geometry::overlay::port::segment::{BOTH_TOP, SUBJ_TOP, SegmentFill};
 use crate::geometry::overlay::port::segment::{BottomSegment, VSegment};
 use crate::geometry::overlay::port::sort::TwoKeysAndCmpSort;
+use crate::geometry::polygon::Area;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
@@ -48,6 +49,9 @@ pub(crate) trait ContourExtension {
 
 impl ContourExtension for [IntPoint] {
     /// Positive double area if counter-clockwise, negative otherwise.
+    /// Keep this i64 wrapping implementation aligned with the i_shape port and
+    /// its differential oracle; application-level Area2x conversion stays at
+    /// the filtering boundary below.
     fn unsafe_area(&self) -> i64 {
         let n = self.len();
         let mut p0 = self[n - 1];
@@ -1298,12 +1302,14 @@ impl GraphContour for IntContour {
         }
 
         if min_output_area == 0u64 {
+            // Zero disables the port-level contour filter. The normalize
+            // adapter applies its separate inclusive cleanup check afterward.
             return true;
         }
         let area = self.unsafe_area();
         let abs_area = area.unsigned_abs() >> 1;
 
-        abs_area >= min_output_area
+        Area::from_u64(abs_area).meets(Area::from_u64(min_output_area))
     }
 
     #[inline]

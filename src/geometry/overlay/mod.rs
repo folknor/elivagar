@@ -17,6 +17,7 @@
 
 mod port;
 
+use crate::geometry::polygon::Area;
 use port::FillRule;
 use port::{ContourDirection, IntOverlayOptions, Overlay, OverlayRule};
 
@@ -40,14 +41,14 @@ pub(crate) enum BoolRule {
 
 pub(crate) struct BoolOverlay {
     inner: Overlay,
-    pub(crate) min_output_area: u64,
+    pub(crate) min_output_area: Area,
 }
 
 impl BoolOverlay {
     pub(crate) fn new() -> Self {
         Self {
-            inner: Overlay::new_custom(0, overlay_options(0), Default::default()),
-            min_output_area: 0,
+            inner: Overlay::new_custom(0, overlay_options(Area::ZERO), Default::default()),
+            min_output_area: Area::ZERO,
         }
     }
 
@@ -120,10 +121,12 @@ impl BoolRule {
     }
 }
 
-fn overlay_options(min_area: u64) -> IntOverlayOptions {
+fn overlay_options(min_area: Area) -> IntOverlayOptions {
     IntOverlayOptions {
+        // The port names the positive shoelace direction counter-clockwise;
+        // y-down tile coordinates render that same role clockwise.
         output_direction: ContourDirection::CounterClockwise,
-        min_output_area: min_area,
+        min_output_area: min_area.as_u64(),
         ..Default::default()
     }
 }
@@ -533,7 +536,7 @@ mod tests {
                 // hits each threshold just below, exactly at, and just above a
                 // contour that is actually emitted - odd doubled areas
                 // included, where the halving truncates.
-                engine.min_output_area = 0;
+                engine.min_output_area = Area::ZERO;
                 run_engine(&mut engine, &shape, clip, &mut out);
                 let areas: Vec<u64> = out
                     .iter()
@@ -545,7 +548,7 @@ mod tests {
                     .collect();
                 for area in areas {
                     for min_area in [area.saturating_sub(1).max(1), area, area + 1] {
-                        engine.min_output_area = min_area;
+                        engine.min_output_area = Area::from_u64(min_area);
                         run_engine(&mut engine, &shape, clip, &mut out);
                         let expected = oracle_overlay_with_area(&shape, clip, min_area);
                         assert_eq!(out, expected, "case {case}, min_area {min_area}");
@@ -556,13 +559,9 @@ mod tests {
     }
 
     fn ring_area(ring: &[IntPoint]) -> u64 {
-        let mut double_area = 0i64;
-        let mut p0 = ring[ring.len() - 1];
-        for &p1 in ring {
-            double_area += i64::from(p0.x) * i64::from(p1.y) - i64::from(p0.y) * i64::from(p1.x);
-            p0 = p1;
-        }
-        double_area.unsigned_abs() >> 1
+        crate::geometry::polygon::signed_area_2x(ring.iter().map(|point| (point.x, point.y)))
+            .true_area()
+            .as_u64()
     }
 
     fn run_engine(
@@ -583,7 +582,7 @@ mod tests {
 
     fn assert_same_with_area(shape: &Shape, clip: Option<&Contour>, min_area: u64) {
         let mut engine = BoolOverlay::new();
-        engine.min_output_area = min_area;
+        engine.min_output_area = Area::from_u64(min_area);
         let mut out = Shapes::new();
         run_engine(&mut engine, shape, clip, &mut out);
         assert_eq!(out, oracle_overlay_with_area(shape, clip, min_area));
@@ -615,7 +614,10 @@ mod tests {
         cw.reverse();
         for ring in [ccw, cw] {
             for (min_area, survives) in [(15, true), (16, true), (17, false)] {
-                let out = crate::geometry::int_ocean::normalize(vec![ring.clone()], min_area);
+                let out = crate::geometry::int_ocean::normalize(
+                    vec![ring.clone()],
+                    Area::from_u64(min_area),
+                );
                 assert_eq!(!out.is_empty(), survives, "min_area {min_area}: {out:?}");
             }
         }

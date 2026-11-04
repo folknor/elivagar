@@ -6,6 +6,7 @@ use crate::geometry::int_ocean::{
     rescale_shape_pinned_into, shape_bbox, signed_area_2x, simplify_shape_dp, simplify_shape_vw,
     vw_area_threshold,
 };
+use crate::geometry::polygon::{self, Area, ExtentUnits, RingOrientation, WINDOW_DP_TOL};
 use crate::mvt::MAX_FEATURE_RINGS;
 use rustc_hash::FxHashSet;
 use std::sync::atomic::Ordering;
@@ -20,8 +21,8 @@ pub(crate) struct PyramidParams<'a> {
     pub maxz: u8,
     pub z_top: u8,
     pub z_bottom: u8,
-    pub dp_tol: &'a (dyn Fn(u8) -> i64 + Sync),
-    pub min_area: &'a (dyn Fn(u8) -> u64 + Sync),
+    pub dp_tol: &'a (dyn Fn(u8) -> ExtentUnits + Sync),
+    pub min_area: &'a (dyn Fn(u8) -> Area + Sync),
     pub pins: Option<&'a FxHashSet<(i32, i32)>>,
     /// Ocean supplies this ownership predicate so artifact-interior cells are
     /// pruned before geometry work. OSM leaves it unset.
@@ -184,7 +185,7 @@ fn root_fragments(
     let mut normalized = scratch.take_shapes();
     let mut root_shape = scratch.int.take_shape(shape_base.len());
     copy_shape_into(shape_base, &mut root_shape);
-    normalize_into(&mut scratch.int, root_shape, 0, &mut normalized);
+    normalize_into(&mut scratch.int, root_shape, Area::ZERO, &mut normalized);
     if normalized.is_empty() {
         scratch.return_shapes(normalized);
         return Vec::new();
@@ -380,13 +381,14 @@ fn emit_cell(
         // Brick 8 (spec 3.3 contingency, tripped by norway +34-38% coastal
         // layer bytes): the hard window pins keep full-resolution coastline
         // in every edge strip. Thin the pinned window runs with a second DP
-        // at tolerance 2 - interior vertices already carry no sub-dp_tol
+        // at WINDOW_DP_TOL - interior vertices already carry no sub-dp_tol
         // detail so they are unaffected; window runs drop to 2-unit
         // fidelity. Cross-side seam drift is now bounded by 2 zoom units
         // (sub-pixel at render) instead of zero; the seam-window test
-        // budget matches. Skipped when dp_tol <= 2 (seam-deferral layers
-        // stay verbatim).
-        if dp_tol > 2 {
+        // budget matches. This runs for VW too because dp_tol controls this
+        // supplemental pass, not the selected primary simplifier. The strict
+        // gate stays dp_tol > WINDOW_DP_TOL; seam-deferral layers stay verbatim.
+        if dp_tol > WINDOW_DP_TOL {
             thin_window_runs(
                 &mut shape_z,
                 cell,
@@ -399,7 +401,7 @@ fn emit_cell(
             }
         }
 
-        if dp_tol > 0 && is_convex_single_ring(&shape_z) {
+        if dp_tol.get() > 0 && is_convex_single_ring(&shape_z) {
             if !contour_area_is_below(&shape_z[0], min_area) {
                 encode_tile_shape(
                     &shape_z,
@@ -519,7 +521,7 @@ fn partition_shape_to_ring_cap(
     );
     for half in [low, high] {
         let mut pieces = scratch.take_shapes();
-        intersect_rect_into(&mut scratch.int, &shape, half, 0, &mut pieces);
+        intersect_rect_into(&mut scratch.int, &shape, half, Area::ZERO, &mut pieces);
         for piece in pieces.drain(..) {
             if piece.len() > MAX_FEATURE_RINGS {
                 partition_shape_to_ring_cap(scratch, piece, half, out);
@@ -645,7 +647,7 @@ fn intersect_shapes_with_rect(
         if clip_shape_rect_fast(shape, rect, out) {
             continue;
         }
-        intersect_rect_into(scratch, shape, rect, 0, &mut clipped);
+        intersect_rect_into(scratch, shape, rect, Area::ZERO, &mut clipped);
         out.append(&mut clipped);
     }
 }
@@ -688,7 +690,7 @@ fn clip_shape_rect_fast(shape: &Shape, rect: IntRect, out: &mut Shapes) -> bool 
             return true;
         }
     }
-    outers.retain(|r| r.len() >= 3 && !contour_area_is_below(r, 1));
+    outers.retain(|r| r.len() >= 3 && !contour_area_is_below(r, Area::ONE));
     if outers.is_empty() {
         return true;
     }
@@ -712,19 +714,19 @@ fn clip_shape_rect_fast(shape: &Shape, rect: IntRect, out: &mut Shapes) -> bool 
         holes.extend(
             parts
                 .into_iter()
-                .filter(|r| r.len() >= 3 && !contour_area_is_below(r, 1)),
+                .filter(|r| r.len() >= 3 && !contour_area_is_below(r, Area::ONE)),
         );
     }
 
     // Enforce role winding (reconnection preserves geometry, not
     // necessarily traversal direction).
     for o in &mut outers {
-        if signed_area_2x(o) < 0 {
+        if polygon::should_reverse(signed_area_2x(o), RingOrientation::Positive) {
             o.reverse();
         }
     }
     for h in &mut holes {
-        if signed_area_2x(h) > 0 {
+        if polygon::should_reverse(signed_area_2x(h), RingOrientation::Negative) {
             h.reverse();
         }
     }
@@ -1033,11 +1035,11 @@ fn is_full_buffered_cell(frag: &Shapes, maxz: u8, cell: PyramidCell) -> bool {
     true
 }
 
-/// Second simplification pass over a zoom-scale shape: tolerance 2, with
+/// Second simplification pass over a zoom-scale shape: tolerance WINDOW_DP_TOL, with
 /// only the ENDPOINTS of maximal in-window vertex runs pinned (window =
 /// within the 128-unit buffer of the cell's tile edge lines, in zoom
 /// coordinates). Run endpoints include the cut vertices on clip lines, so
-/// fragment bounds survive; run interiors thin to 2-unit fidelity.
+/// fragment bounds survive; run interiors thin to WINDOW_DP_TOL fidelity.
 /// This deliberately classifies the rounded coordinates, unlike the initial
 /// base-space pins in `build_edge_flags`. With a two-bit downshift, x=513
 /// rounds to 128: outside the base strip of width 512, inside this strip.
@@ -1079,7 +1081,7 @@ fn thin_window_runs(
         }
     });
     if any_window {
-        simplify_shape_dp(int, shape_z, 2, Some(flags_buf));
+        simplify_shape_dp(int, shape_z, WINDOW_DP_TOL, Some(flags_buf));
     }
 }
 
@@ -1168,8 +1170,7 @@ fn is_convex_ring(ring: &Contour) -> bool {
         let a = ring[i];
         let b = ring[(i + 1) % n];
         let c = ring[(i + 2) % n];
-        let cross = (i128::from(b.x) - i128::from(a.x)) * (i128::from(c.y) - i128::from(a.y))
-            - (i128::from(b.y) - i128::from(a.y)) * (i128::from(c.x) - i128::from(a.x));
+        let cross = polygon::triangle_area_2x((a.x, a.y), (b.x, b.y), (c.x, c.y)).get();
         if cross == 0 {
             continue;
         }
@@ -1363,13 +1364,14 @@ mod tests {
     }
 
     fn params(maxz: u8, z_top: u8, z_bottom: u8, tol: i64) -> PyramidParams<'static> {
-        let dp_tol: &'static (dyn Fn(u8) -> i64 + Sync) = Box::leak(Box::new(move |_| tol));
+        let dp_tol: &'static (dyn Fn(u8) -> ExtentUnits + Sync) =
+            Box::leak(Box::new(move |_| ExtentUnits::new(tol)));
         PyramidParams {
             maxz,
             z_top,
             z_bottom,
             dp_tol,
-            min_area: &|_| 0,
+            min_area: &|_| Area::ZERO,
             pins: None,
             tile_filter: None,
             simplifier: Simplifier::DouglasPeucker,
@@ -1462,15 +1464,15 @@ mod tests {
 
     #[test]
     fn seeded_quantized_pyramids_decode_with_polygon_ring_invariants() {
-        fn zero_tolerance(_: u8) -> i64 {
-            0
+        fn zero_tolerance(_: u8) -> ExtentUnits {
+            ExtentUnits::new(0)
         }
-        fn zero_min_area(_: u8) -> u64 {
-            0
+        fn zero_min_area(_: u8) -> Area {
+            Area::ZERO
         }
 
-        let dp_tol: &(dyn Fn(u8) -> i64 + Sync) = &zero_tolerance;
-        let min_area: &(dyn Fn(u8) -> u64 + Sync) = &zero_min_area;
+        let dp_tol: &(dyn Fn(u8) -> ExtentUnits + Sync) = &zero_tolerance;
+        let min_area: &(dyn Fn(u8) -> Area + Sync) = &zero_min_area;
         let params = PyramidParams {
             maxz: 2,
             z_top: 2,
@@ -1492,11 +1494,16 @@ mod tests {
             let shape_base = random_quantized_polygon(&mut seed, hole_count);
             assert!(!shape_base.is_empty(), "case {case} quantizes to a polygon");
             assert!(
-                signed_area_2x(&shape_base[0]) > 0,
+                polygon::ring_role(signed_area_2x(&shape_base[0]))
+                    == Some(RingOrientation::Positive),
                 "case {case} puts a positive outer in slot zero"
             );
             for hole in &shape_base[1..] {
-                assert!(signed_area_2x(hole) < 0, "case {case} hole winding");
+                assert_eq!(
+                    polygon::ring_role(signed_area_2x(hole)),
+                    Some(RingOrientation::Negative),
+                    "case {case} hole winding"
+                );
                 assert!(
                     hole.iter()
                         .all(|point| point_in_contour(point.x, point.y, &shape_base[0])),
@@ -1527,13 +1534,14 @@ mod tests {
                 );
                 let outer = decoded_contour(&rings[0]);
                 assert!(
-                    signed_area_2x(&outer) > 0,
+                    polygon::ring_role(signed_area_2x(&outer)) == Some(RingOrientation::Positive),
                     "case {case} has a positive outer in decoded slot zero"
                 );
                 for hole in &rings[1..] {
                     let hole = decoded_contour(hole);
                     assert!(
-                        signed_area_2x(&hole) < 0,
+                        polygon::ring_role(signed_area_2x(&hole))
+                            == Some(RingOrientation::Negative),
                         "case {case} decoded hole winding"
                     );
                     assert!(
@@ -1582,7 +1590,7 @@ mod tests {
                 let (tx_min, tx_max, ty_min, ty_max) = tile_cover(bb, z, z, 0);
                 for ty in ty_min..=ty_max {
                     for tx in tx_min..=tx_max {
-                        let clipped = intersect_rect(shape, buffered_tile_rect(tx, ty), 0);
+                        let clipped = intersect_rect(shape, buffered_tile_rect(tx, ty), Area::ZERO);
                         for tile_shape in clipped {
                             if is_full_zoom_tile_shape(&tile_shape, tx, ty) {
                                 emit_full_tile(
@@ -1671,7 +1679,7 @@ mod tests {
             });
 
             let mut normalized = Vec::new();
-            normalize_into(&mut scratch, quad, 0, &mut normalized);
+            normalize_into(&mut scratch, quad, Area::ZERO, &mut normalized);
             let mut normal = Vec::new();
             for shape in &normalized {
                 encode_tile_shape(shape, 0, 0, &mut scratch, &mut |_, _, geom| {
@@ -1768,12 +1776,12 @@ mod tests {
         let left_frag = intersect_rect(
             &source,
             buffered_cell_rect_base(1, PyramidCell { z: 1, tx: 0, ty: 0 }),
-            0,
+            Area::ZERO,
         );
         let right_frag = intersect_rect(
             &source,
             buffered_cell_rect_base(1, PyramidCell { z: 1, tx: 1, ty: 0 }),
-            0,
+            Area::ZERO,
         );
 
         let mut left = BTreeMap::new();
@@ -1842,12 +1850,12 @@ mod tests {
         let left_frag = intersect_rect(
             &source,
             buffered_cell_rect_base(1, PyramidCell { z: 1, tx: 0, ty: 0 }),
-            0,
+            Area::ZERO,
         );
         let right_frag = intersect_rect(
             &source,
             buffered_cell_rect_base(1, PyramidCell { z: 1, tx: 1, ty: 0 }),
-            0,
+            Area::ZERO,
         );
 
         let mut left = BTreeMap::new();
@@ -1913,8 +1921,7 @@ mod tests {
             let a = spiral[i];
             let b = spiral[(i + 1) % n];
             let c = spiral[(i + 2) % n];
-            let cross = (i128::from(b.x) - i128::from(a.x)) * (i128::from(c.y) - i128::from(a.y))
-                - (i128::from(b.y) - i128::from(a.y)) * (i128::from(c.x) - i128::from(a.x));
+            let cross = polygon::triangle_area_2x((a.x, a.y), (b.x, b.y), (c.x, c.y)).get();
             if cross == 0 {
                 continue;
             }
@@ -2028,7 +2035,7 @@ mod tests {
             for rect in rects {
                 let mut fast = Vec::new();
                 intersect_shapes_with_rect(&mut scratch, &vec![subject.clone()], rect, &mut fast);
-                let exact = intersect_rect(subject, rect, 0);
+                let exact = intersect_rect(subject, rect, Area::ZERO);
                 // The fast path's snap-rounded crossings can differ from
                 // i_overlay's noding by up to one unit ALONG the cut line,
                 // so equivalence is up to slivers hugging the rect
@@ -2067,7 +2074,7 @@ mod tests {
 
         let mut int = IntEmitScratch::new();
         let mut normalized = Vec::new();
-        normalize_into(&mut int, raw, 0, &mut normalized);
+        normalize_into(&mut int, raw, Area::ZERO, &mut normalized);
         assert_eq!(normalized.len(), 1, "fixture must normalize to one shape");
         assert_eq!(
             normalized[0].len(),
@@ -2178,9 +2185,9 @@ mod tests {
                 }
                 tile_shape.push(contour);
             }
-            for normalized in normalize(tile_shape, 0) {
+            for normalized in normalize(tile_shape, Area::ZERO) {
                 let mut clipped = Vec::new();
-                intersect_rect_into(scratch, &normalized, window, 0, &mut clipped);
+                intersect_rect_into(scratch, &normalized, window, Area::ZERO, &mut clipped);
                 out.append(&mut clipped);
             }
         }
@@ -2206,7 +2213,7 @@ mod tests {
             .flatten()
             .map(|ring| {
                 let ours: Vec<IntPoint> = ring.iter().map(|q| IntPoint::new(q.x, q.y)).collect();
-                signed_area_2x(&ours).unsigned_abs() / 2
+                signed_area_2x(&ours).true_area().get()
             })
             .sum()
     }

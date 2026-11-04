@@ -1,13 +1,14 @@
 use super::projection::Point;
+use super::tiles::{EXTENT, RENDER_PX};
 
 /// Simplification tolerance in rendered pixels (one tile = 256 by 256 px).
 /// 1.0 removes vertices within 1 pixel of the simplified line.
 /// Industry standard is 1.0; Tilemaker uses about 0.58 for comparison.
-const SIMPLIFY_PIXELS: f64 = 1.0;
+const SIMPLIFY_PIXELS: f64 = RENDER_PX.get() as f64 * 256.0 / EXTENT;
 
 /// Minimum line length squared in tile extent units (1 pixel = 16 extent units).
 /// A line whose bounding box diagonal² is below this is sub-pixel and invisible.
-pub const MIN_LINE_EXTENT_SQ: i64 = super::tiles::PX * super::tiles::PX;
+pub const MIN_LINE_EXTENT_SQ: i64 = RENDER_PX.get() * RENDER_PX.get();
 
 /// Check if a geometry's Mercator bounding box diagonal is sub-pixel at the
 /// given zoom level. One pixel = 1 / (256 × 2^z) Mercator units. Used as a
@@ -33,7 +34,7 @@ pub(crate) fn merc_bbox_is_subpixel(points: &[Point], zoom: u8) -> bool {
             max_y = p.y;
         }
     }
-    let pixel = 1.0 / (256.0 * f64::from(1u32 << zoom));
+    let pixel = RENDER_PX.get() as f64 / (EXTENT * f64::from(1u32 << zoom));
     let dx = max_x - min_x;
     let dy = max_y - min_y;
     dx * dx + dy * dy < pixel * pixel
@@ -64,7 +65,7 @@ pub fn line_is_subpixel(coords: &[(i32, i32)]) -> bool {
     let dx = i64::from(max_x) - i64::from(min_x);
     let dy = i64::from(max_y) - i64::from(min_y);
     // Reject long axes before squaring so full-range i32 inputs cannot overflow.
-    if dx >= super::tiles::PX || dy >= super::tiles::PX {
+    if dx >= RENDER_PX.get() || dy >= RENDER_PX.get() {
         return false;
     }
     dx * dx + dy * dy < MIN_LINE_EXTENT_SQ

@@ -10,6 +10,7 @@ use crate::geometry::int_ocean::{
     IntEmitScratch, IntRect, OCEAN_DP_TOL_PX, Shape, Shapes, intersect_rect_into, normalize_into,
     quantize_polygon, shape_bbox,
 };
+use crate::geometry::polygon::{Area, ExtentUnits, MIN_POLY_AREA_AREA};
 use crate::geometry::pyramid::{
     PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, Simplifier,
     buffered_cell_rect_base, emit_shape_pyramid, emit_shape_pyramid_cell, split_for_parallel,
@@ -851,7 +852,7 @@ fn union_pieces(pieces: Vec<Shape>) -> Vec<Shape> {
     }
     let mut scratch = IntEmitScratch::new();
     let mut merged: Shapes = Vec::new();
-    normalize_into(&mut scratch, soup, 0, &mut merged);
+    normalize_into(&mut scratch, soup, Area::ZERO, &mut merged);
     merged
 }
 // Cap each parallel fold accumulator's in-flight payload well below the
@@ -1835,7 +1836,7 @@ fn push_quantized_pieces(
     }
 
     let mut clipped = Vec::new();
-    intersect_rect_into(scratch, &shape, data_rect, 0, &mut clipped);
+    intersect_rect_into(scratch, &shape, data_rect, Area::ZERO, &mut clipped);
     for piece in clipped {
         pieces.push(piece);
     }
@@ -1900,12 +1901,12 @@ fn ocean_params<'a>(
     }
 }
 
-fn ocean_dp_tol(_z: u8) -> i64 {
-    OCEAN_DP_TOL_PX
+fn ocean_dp_tol(_z: u8) -> ExtentUnits {
+    ExtentUnits::new(OCEAN_DP_TOL_PX)
 }
 
-fn ocean_min_area(_z: u8) -> u64 {
-    256
+fn ocean_min_area(_z: u8) -> Area {
+    MIN_POLY_AREA_AREA
 }
 
 fn ocean_sink<'a>(
@@ -2130,11 +2131,12 @@ mod tests {
         // whose area is exactly the sum.
         let a = quantize_polygon(&merc_square(0.25, 0.25, 0.5, 0.5), &[], 7);
         let b = quantize_polygon(&merc_square(0.5, 0.25, 0.75, 0.5), &[], 7);
-        let sum = signed_area_2x(&a[0]).unsigned_abs() + signed_area_2x(&b[0]).unsigned_abs();
+        let sum =
+            signed_area_2x(&a[0]).get().unsigned_abs() + signed_area_2x(&b[0]).get().unsigned_abs();
         let merged = union_pieces(vec![a, b]);
         assert_eq!(merged.len(), 1, "adjacent cells must merge into one shape");
         assert_eq!(merged[0].len(), 1, "no holes expected");
-        assert_eq!(signed_area_2x(&merged[0][0]).unsigned_abs(), sum);
+        assert_eq!(signed_area_2x(&merged[0][0]).get().unsigned_abs(), sum);
     }
 
     #[test]
@@ -2244,11 +2246,12 @@ mod tests {
             &[],
             2,
         );
-        let sum = signed_area_2x(&a[0]).unsigned_abs() + signed_area_2x(&b[0]).unsigned_abs();
+        let sum =
+            signed_area_2x(&a[0]).get().unsigned_abs() + signed_area_2x(&b[0]).get().unsigned_abs();
         let merged = union_pieces(vec![a, b]);
         assert_eq!(merged.len(), 1, "partial-edge neighbours must merge");
         assert_eq!(merged[0].len(), 1);
-        assert_eq!(signed_area_2x(&merged[0][0]).unsigned_abs(), sum);
+        assert_eq!(signed_area_2x(&merged[0][0]).get().unsigned_abs(), sum);
     }
 
     #[test]

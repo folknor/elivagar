@@ -2273,6 +2273,97 @@ fn water_label_centroid_subtracts_holes_and_ignores_vertex_density() {
 }
 
 #[test]
+fn relation_labels_aggregate_components_once_per_layer_per_zoom() {
+    use crate::multipolygon::{MemberWay, WayRole};
+
+    let rectangle = |x0, y0, x1, y1| {
+        vec![
+            Point::new(x0, y0),
+            Point::new(x1, y0),
+            Point::new(x1, y1),
+            Point::new(x0, y1),
+            Point::new(x0, y0),
+        ]
+    };
+    let outer = rectangle(0.125, 0.125, 0.375, 0.375);
+    let hole = rectangle(0.1875, 0.1875, 0.3125, 0.3125);
+    let smaller = rectangle(0.4375, 0.1875, 0.5625, 0.3125);
+    let layers = [
+        Layer::WaterPolygonsLabels,
+        Layer::BoundaryLabels,
+        Layer::Addresses,
+        Layer::StreetsPolygonsLabels,
+        Layer::PublicTransport,
+        Layer::Pois,
+    ];
+    let matches = layers
+        .iter()
+        .map(|&layer| test_layer_match(layer, layer.polygon_point_geom_expect()))
+        .collect();
+    let relation = relations::PreparedRelation {
+        osm_id: 42,
+        matches,
+        member_ways: vec![
+            MemberWay {
+                role: WayRole::Outer,
+                coords: outer.clone(),
+            },
+            MemberWay {
+                role: WayRole::Inner,
+                coords: hole.clone(),
+            },
+            MemberWay {
+                role: WayRole::Outer,
+                coords: smaller,
+            },
+        ],
+    };
+    let mut sink = emit::RecordSink::new();
+    let mut point = PointEmitScratch::new();
+    let mut polygon = MultipolygonEmitScratch::new();
+    let mut fanout = stats::FanoutStats::new();
+    relations::process_prepared_relation_into(
+        relation,
+        4,
+        5,
+        &mut sink,
+        &mut point,
+        &mut polygon,
+        &[0; Layer::count()],
+        1.0,
+        &mut fanout,
+    );
+    assert_eq!(sink.records.len(), 12, "one point per layer per zoom");
+    let mut counts = [[0; 2]; 6];
+    for &(key, offset, len) in &sink.records {
+        let tile_id = sort::tile_id_from_key(key);
+        let (zoom, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
+        let layer_index = layers
+            .iter()
+            .position(|layer| *layer as u8 == sort::layer_from_key(key))
+            .unwrap();
+        counts[layer_index][usize::from(zoom - 4)] += 1;
+        let decoded = decode_to_layer(&sink.payload[offset..offset + len]);
+        let feature = decoded.test_feature(0);
+        assert_eq!(feature.id, Some(423));
+        let coords = decode_commands_to_abs_coords(&feature.geometry);
+        assert_eq!(coords.len(), 1);
+        let global_x = i64::from(tx) * 4096 + i64::from(coords[0].0);
+        let global_y = i64::from(ty) * 4096 + i64::from(coords[0].1);
+        if layers[layer_index] == Layer::WaterPolygonsLabels {
+            // Net areas are 3/64 and 1/64, with centers x=1/4 and x=1/2.
+            assert_eq!((global_x, global_y), (1280 << zoom, 1024 << zoom));
+        } else {
+            let scale = 4096.0 * f64::from(1u32 << zoom);
+            let point = Point::new(global_x as f64 / scale, global_y as f64 / scale);
+            assert!(geometry::polygon::point_in_polygon(&point, &outer));
+            assert!(!geometry::polygon::point_in_polygon(&point, &hole));
+        }
+    }
+    assert_eq!(counts, [[1, 1]; 6]);
+}
+
+#[test]
 fn dispatch_namespaces_mixed_source_ids_on_the_wire() {
     let outer = vec![
         Point::new(0.25, 0.25),

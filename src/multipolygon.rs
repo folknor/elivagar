@@ -13,6 +13,7 @@ use crate::geometry::{
     polygon::{self, RingOrientation},
     projection::Point,
 };
+use crate::shortbread::PolygonPointStrategy;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -101,6 +102,89 @@ fn assemble_impl(members: &[MemberWay], wrapped: bool) -> MultiPolygon {
     polygons.sort_by_key(|(outer, _)| ring_sort_key(outer));
     let polygons = polygons.into_boxed_slice();
     MultiPolygon { polygons }
+}
+
+/// Place one label for an assembled relation, treating all polygon components
+/// as one source geometry.
+pub(crate) fn relation_label_point(
+    polygons: &[Polygon],
+    strategy: PolygonPointStrategy,
+) -> Option<Point> {
+    match strategy {
+        PolygonPointStrategy::Centroid => aggregate_centroid(polygons),
+        PolygonPointStrategy::CentroidIfConvex => {
+            // A single-shell relation is a Polygon in Planetiler too. Preserve
+            // the convex shortcut for that case; multiple shells use a surface point.
+            if let [(outer, inners)] = polygons
+                && inners.is_empty()
+                && geometry::surface::is_convex(outer)
+            {
+                geometry::surface::polygon_centroid(outer, inners)
+            } else {
+                aggregate_point_on_surface(polygons)
+            }
+        }
+        PolygonPointStrategy::PointOnSurface => aggregate_point_on_surface(polygons),
+    }
+}
+
+fn aggregate_centroid(polygons: &[Polygon]) -> Option<Point> {
+    if let [polygon] = polygons {
+        return geometry::surface::polygon_centroid(&polygon.0, &polygon.1);
+    }
+    let reference_x = polygons
+        .iter()
+        .filter_map(|(outer, inners)| {
+            let (area, centroid) = geometry::surface::polygon_area_centroid(outer, inners)?;
+            Some((area, centroid.x))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, x)| x)?;
+    let mut total_area = 0.0;
+    let mut weighted_x = 0.0;
+    let mut weighted_y = 0.0;
+
+    for (outer, inners) in polygons {
+        let Some((area, centroid)) = geometry::surface::polygon_area_centroid(outer, inners) else {
+            continue;
+        };
+        // Components crossing the antimeridian can occupy adjacent world
+        // copies. Align each one to the largest component before averaging.
+        let x = centroid.x + (reference_x - centroid.x).round();
+        total_area += area;
+        weighted_x += x * area;
+        weighted_y += centroid.y * area;
+    }
+
+    if !total_area.is_finite()
+        || total_area <= 0.0
+        || !weighted_x.is_finite()
+        || !weighted_y.is_finite()
+    {
+        return None;
+    }
+    let point = Point::new(weighted_x / total_area, weighted_y / total_area);
+    (point.x.is_finite() && point.y.is_finite()).then_some(point)
+}
+
+fn aggregate_point_on_surface(polygons: &[Polygon]) -> Option<Point> {
+    let mut best: Option<(f64, Point)> = None;
+    for (outer, inners) in polygons {
+        let Some(area) = planar_area(outer, inners) else {
+            continue;
+        };
+        let Some(point) = geometry::surface::point_on_surface_with_holes(outer, inners) else {
+            continue;
+        };
+        if best.is_none_or(|(best_area, _)| area > best_area) {
+            best = Some((area, point));
+        }
+    }
+    best.map(|(_, point)| point)
+}
+
+fn planar_area(outer: &[Point], inners: &[Vec<Point>]) -> Option<f64> {
+    geometry::surface::polygon_area_centroid(outer, inners).map(|(area, _)| area)
 }
 
 fn unwrap_ring(ring: &mut [Point]) {
@@ -1165,6 +1249,81 @@ mod tests {
                 assert_eq!(ring_keys(ai), ring_keys(bi));
             }
         }
+    }
+
+    #[test]
+    fn relation_centroid_aligns_antimeridian_world_copies() {
+        let rectangle = |x0, x1| vec![pt(x0, 0.25), pt(x1, 0.25), pt(x1, 0.375), pt(x0, 0.375)];
+        let polygons = vec![
+            (rectangle(0.875, 1.0), Vec::new()),
+            (rectangle(0.0, 0.125), Vec::new()),
+        ];
+        let point = relation_label_point(&polygons, PolygonPointStrategy::Centroid).unwrap();
+        assert!(point.x.rem_euclid(1.0).abs() < 1e-12);
+        assert!((point.y - 0.3125).abs() < 1e-12);
+    }
+
+    #[test]
+    fn relation_surface_skips_degenerate_components() {
+        let valid = square(0.25, 0.375);
+        let polygons = vec![
+            (vec![pt(0.0, 0.0), pt(0.5, 0.5), pt(1.0, 1.0)], Vec::new()),
+            (valid.clone(), Vec::new()),
+        ];
+        for strategy in [
+            PolygonPointStrategy::PointOnSurface,
+            PolygonPointStrategy::CentroidIfConvex,
+        ] {
+            let point = relation_label_point(&polygons, strategy).unwrap();
+            assert!(polygon::point_in_polygon(&point, &valid));
+            assert!(relation_label_point(&polygons[..1], strategy).is_none());
+        }
+    }
+
+    #[test]
+    fn relation_labels_preserve_small_component_areas() {
+        let step = 2.0_f64.powi(-30);
+        let origin = 0.75;
+        let rectangle = |x0, y0, x1, y1| {
+            vec![
+                pt(origin + x0 * step, origin + y0 * step),
+                pt(origin + x1 * step, origin + y0 * step),
+                pt(origin + x1 * step, origin + y1 * step),
+                pt(origin + x0 * step, origin + y1 * step),
+            ]
+        };
+        let outer = rectangle(0.0, 0.0, 4.0, 4.0);
+        let hole = rectangle(1.0, 1.0, 3.0, 3.0);
+        let polygons = vec![
+            (outer.clone(), vec![hole.clone()]),
+            (rectangle(8.0, 0.0, 10.0, 2.0), Vec::new()),
+        ];
+        let centroid = relation_label_point(&polygons, PolygonPointStrategy::Centroid)
+            .expect("small components retain their positive net areas");
+        assert!((centroid.x - (origin + 3.75 * step)).abs() < step / 16.0);
+        assert!((centroid.y - (origin + 1.75 * step)).abs() < step / 16.0);
+        for strategy in [
+            PolygonPointStrategy::PointOnSurface,
+            PolygonPointStrategy::CentroidIfConvex,
+        ] {
+            let point = relation_label_point(&polygons, strategy).expect("small surface label");
+            assert!(polygon::point_in_polygon(&point, &outer));
+            assert!(!polygon::point_in_polygon(&point, &hole));
+        }
+    }
+
+    #[test]
+    fn single_component_relation_addresses_keep_convex_centroids() {
+        let outer = vec![pt(0.25, 0.25), pt(0.375, 0.25), pt(0.25, 0.375)];
+        let polygons = vec![(outer.clone(), Vec::new())];
+        let centroid = geometry::surface::polygon_centroid(&outer, &[]).expect("triangle centroid");
+        let point = relation_label_point(&polygons, PolygonPointStrategy::CentroidIfConvex)
+            .expect("single-shell address centroid");
+        assert!((point.x - centroid.x).abs() < 1e-12);
+        assert!((point.y - centroid.y).abs() < 1e-12);
+        let surface = relation_label_point(&polygons, PolygonPointStrategy::PointOnSurface)
+            .expect("triangle surface point");
+        assert!((surface.y - centroid.y).abs() > 0.001);
     }
 
     // --- Quantize ---

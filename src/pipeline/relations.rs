@@ -5,7 +5,7 @@ use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::shortbread::LayerMatch;
 use crate::shortbread::{self, Tags};
 use crate::sort::{self, SortWriter};
-use crate::way_index::WayIndexReader;
+use crate::way_index::{WayId, WayIndexReader};
 use pbfhogg::MemberId;
 
 use super::PipelineError;
@@ -59,16 +59,18 @@ pub(super) fn prepare_relation(
         match member.id {
             MemberId::Way(way_id) => {
                 let role = WayRole::from_str(member.role().unwrap_or(""));
+                let way_id = WayId::new(way_id);
                 let coords_e7 = way_index.get(way_id).map_err(|error| {
                     PipelineError(format!(
-                        "failed to read member way {way_id} for relation {}: {error}",
+                        "failed to read member way {} for relation {}: {error}",
+                        way_id.as_i64(),
                         rel.id()
                     ))
                 })?;
                 if let Some(coords_e7) = coords_e7 {
                     let merc: Vec<Point> = coords_e7
                         .iter()
-                        .map(|&(lat, lon)| geometry::projection::project_e7(lat, lon))
+                        .map(|coord| geometry::projection::project_e7(coord.lat, coord.lon))
                         .collect();
                     member_ways.push(MemberWay { role, coords: merc });
                 } else {
@@ -377,6 +379,22 @@ pub(super) fn process_prepared_relation_into(
         polygon_simplify_factor,
     };
     for m in &matches {
+        if let Some(strategy) = m.layer.polygon_point_strategy() {
+            if let Some(label_point) = multipolygon::relation_label_point(&multi.polygons, strategy)
+            {
+                emit_match(
+                    rel.osm_id,
+                    FeatureGeometry::AreaLabel {
+                        point: &label_point,
+                    },
+                    m,
+                    &ctx,
+                    sink,
+                    point_emit,
+                );
+            }
+            continue;
+        }
         for (outer, inners) in &multi.polygons {
             // Assembled rings are open: preserve the final triangle vertex.
             if outer.len() < 3 {

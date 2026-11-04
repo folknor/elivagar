@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::AtomicU64;
 
 use crate::debug::{WAIT, wait_span};
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
@@ -199,6 +199,7 @@ mod merge;
 mod write;
 
 pub use format::ChunkCompression;
+pub(crate) use format::{SortSourceSlice, SourcePosition, SourceSeek};
 use key::{
     PARTITION_SPLIT_Z, partition_next_key, record_cmp, sort_payload_records_total,
     sort_records_total,
@@ -208,7 +209,7 @@ pub use key::{
     partition_start_tile_id, partition_tile_range, priority_from_key, tile_id_from_key,
     zoom_from_tile_id,
 };
-pub use merge::{SortPartition, SortPartitionPiece, SortPartitionReader, SortReader};
+pub use merge::{SortPartition, SortPartitionReader, SortReader};
 pub use write::{
     ChunkSink, SortWriter, SpillCoalescer, write_partitioned_payload_chunks, write_sorted_chunk,
     write_sorted_payload_chunk,

@@ -172,6 +172,8 @@ impl fmt::Display for IntVector {
 pub(crate) struct Triangle;
 
 impl Triangle {
+    // Retained as the i_float port's primitive predicate. Replacing its
+    // arithmetic would change ordering decisions guarded by the oracle.
     #[inline(always)]
     pub fn area_two(p0: IntPoint, p1: IntPoint, p2: IntPoint) -> i64 {
         (p1 - p0).cross_product(p2 - p0)

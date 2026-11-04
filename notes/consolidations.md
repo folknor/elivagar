@@ -202,34 +202,6 @@ module in `notes/structural.md`).
 
 Reported by the storage, coordinate-spaces and archive-surface hunts.
 
-## CON-015 - What is one rendered pixel, and what are the area and tolerance thresholds?
-
-- Integer: `OCEAN_DP_TOL_PX = 16`, `OSM_DP_TOL_PX = 16` (named PX, in extent
-  units; neither derived from `PX`), `MIN_POLY_AREA = 256` (`PX*PX`),
-  `ocean_min_area` returning a literal `256` not tied to `MIN_POLY_AREA`,
-  `OCEAN_VW_AREA_2X = 256` (a doubled area, so a true 128).
-- Float: `simplify_tolerance` and `merc_bbox_is_subpixel` as `1/(256*2^z)` in
-  Merc units, `line_is_subpixel` (`MIN_LINE_EXTENT_SQ = PX*PX`).
-- Mixed widths: `min_area: u64` in the pyramid, `true_area -> u128`,
-  `signed_area_2x -> i128`, overlay `min_output_area: u64`.
-- `polygon_z_start` decides a polygon's first zoom with the float subpixel
-  test on the unquantized input, then survival is decided on integer area
-  after quantize and simplify - one polygon, two spaces.
-- Inclusivity: `clean_shape_in_place` keeps `area >= min`,
-  `contour_area_is_below` drops `min > 0 && area < min`, the port's extractor
-  applies its own comparison, and the single-contour fast path applies no
-  filter so `normalize_into` re-filters (a deliberate re-check of a comparison
-  written three times).
-
-Agree today. Unrecorded: whether the factor of 2 between the VW kill
-threshold (128 true units squared) and the min-area drop (256) is intended.
-
-Owner proposed: `ExtentUnits`, `Area`, `Area2x` newtypes and one
-`RENDER_PX = ExtentUnits(16)` with every tolerance derived from it and
-`area.meets(min)` as the one comparison.
-
-Reported by the polygon-engine and coordinate-spaces hunts.
-
 ## CON-017 - How is an MVT command stream decoded?
 
 Production decoders: `geometry::mvt_decode::decode_mvt_polygon` (lenient,
@@ -437,25 +409,3 @@ stated nowhere. Owner proposed: one budget shared through the chunk store,
 buffers drawing from it.
 
 Reported by the storage hunt.
-
----
-
-# Geometry, continued
-
-## CON-041 - Ring orientation and shoelace area inside the engine
-
-`geometry::ring_role` now decides orientation for `tile_detail`, `mlt`,
-`multipolygon.rs`, `diag` and the ocean shapefile reader. Still deciding it
-by hand inside the polygon engine: `orient_ring` by slot,
-`clip_shape_rect_fast` re-orienting, and `append_translated_ring` re-orienting
-by slot. Shoelace area is still implemented separately in
-`geometry::signed_area` (f64), `int_ocean::signed_area_2x` (i128),
-`signed_area_tile_2x`, the overlay test's `ring_area`, and inline in
-`vw_refresh` and `is_convex_ring`. The convention is also named three ways:
-`geometry::signed_area` says positive is counter-clockwise,
-`encode_tile_shape` calls the outer clockwise, and the overlay is configured
-`ContourDirection::CounterClockwise` (the same convention, since positive
-shoelace in y-down renders clockwise). Better still, the engine emits roles in
-typed geometry so consumers never re-derive them (see `notes/structural.md`).
-
-Residue of an earlier entry, narrowed 2026-11-04 after `ring_role` landed.

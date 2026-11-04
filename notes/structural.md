@@ -583,37 +583,9 @@ belongs with geometry emission policy or a `consumer_limits` module.
 
 Reported by the encoding hunt.
 
-## STR-025 - Move the line merger to geometry
-
-`merge.rs` holds two things: multi-geometry concatenation
-(`merge_same_attr_geometries`, a tile-model operation) and a line-graph merger
-with its witness-based invariant checker (a geometry algorithm with its own
-clip-boundary semantics). The merger belongs with line geometry beside the
-clipper whose contract it depends on, operating on typed segments and called
-by the post-processing owner; the checker moves with it. Micro-optimizations
-noted on the way: `dedup_parallel_segments` clones every segment twice into a
-fresh `FxHashSet` per feature per tile on the z0-13 line path;
-`merge_same_attr_geometries` sorts and re-compares full tag vectors (a packed
-`(KeyIdx, ValIdx)` u32 per tag makes it an integer slice compare);
-`build_tile_model` finds columns with `position` per tag.
-
-Reported by the encoding hunt.
-
 ---
 
 # Storage, sort and resources
-
-## STR-027 - Split `sort.rs` and delete the legacy chunk modes
-
-The split into `sort/{key, format, write, merge}` with one generic chunk
-serializer, and the legacy chunk-mode deletion, landed. Remaining: piece
-planning (`plan_pieces`, `scan_source_buckets`, `choose_bucket_cuts`,
-`MAX_PIECES`, `MAX_BUCKETS`, the `ELIVAGAR_ASSEMBLE_SPLIT_TARGET` target - all
-assemble scheduling policy) still lives in `sort/merge.rs` and belongs next to
-the assemble claim window it feeds, behind a small format "source cursor/seek"
-API; key algebra could move on to a coordinates module.
-
-Reported by the storage hunt.
 
 ## STR-028 - One external sorter, or none for way offsets
 
@@ -626,22 +598,6 @@ relies on), also in locations mode, so the way index could write offsets in
 arrival order and check monotonicity, making the external sort a fallback or
 replacing it with the same sorted-only rule as nodes. Otherwise reuse one
 generic sorter.
-
-Reported by the storage hunt.
-
-## STR-029 - Typestate and naming for the node and way indexes
-
-The node side landed: phase12 builds through unified `NodeStore` /
-`NodeStoreReader` wrappers over private backends, uses typed `NodeId`
-lookups, and the store and FOR codec carry a `LatLonE7`. Remaining, the way
-side: `WayIndexWriter::put` still takes an `i64` and `(i32, i32)` tuples,
-`decode_way` returns tuples, and relation lookup passes raw way ids (so
-`WayIndex::get` still accepts any `i64`, a node id included); phase12 converts
-its local `WayId` and `LatLonE7` at that boundary. Threading `WayId` and
-`LatLonE7` through `way_index.rs` and `relations.rs` makes the (lat, lon)
-order and the id kind type-checked end to end. The old node-store names
-survive as aliases for `examples/bench_node_store.rs` and can go when it
-moves.
 
 Reported by the storage hunt.
 

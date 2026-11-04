@@ -5,6 +5,7 @@
 
 pub mod clip;
 pub(crate) mod int_ocean;
+pub(crate) mod line_merge;
 pub(crate) mod overlay;
 pub mod polygon;
 pub mod projection;

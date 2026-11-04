@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::AtomicUsize;
 
 /// Cloneable handle for writing chunks into a sort writer's chunk store.
 ///

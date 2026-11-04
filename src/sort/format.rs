@@ -466,6 +466,122 @@ impl SortPartitionSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SourcePosition {
+    pub(crate) records: u64,
+    pub(crate) bytes: u64,
+}
+
+/// A lightweight handle for scanning one sort source and seeking piece ranges.
+#[derive(Clone)]
+pub(crate) struct SourceSeek {
+    source: SortPartitionSource,
+    compression: ChunkCompression,
+    partition_index: usize,
+}
+
+impl SourceSeek {
+    pub(super) fn new(
+        source: SortPartitionSource,
+        compression: ChunkCompression,
+        partition_index: usize,
+    ) -> Self {
+        Self {
+            source,
+            compression,
+            partition_index,
+        }
+    }
+
+    pub(crate) fn cursor(&self) -> io::Result<SourceCursor> {
+        Ok(SourceCursor {
+            reader: ChunkReader::open_source(&self.source, self.compression)?,
+            position: SourcePosition::default(),
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.source.path
+    }
+
+    pub(crate) fn slice(
+        &self,
+        start: SourcePosition,
+        end: SourcePosition,
+    ) -> io::Result<Option<SortSourceSlice>> {
+        let records = end
+            .records
+            .checked_sub(start.records)
+            .ok_or_else(|| io::Error::other("piece source record range is reversed"))?;
+        if records == 0 {
+            return Ok(None);
+        }
+        let take_records = u32::try_from(records)
+            .map_err(|_| io::Error::other("piece record count exceeds u32"))?;
+        let source = if self.compression == ChunkCompression::None {
+            let data_base = self
+                .source
+                .section
+                .as_ref()
+                .map_or(4, |section| section.offset);
+            let offset = data_base
+                .checked_add(start.bytes)
+                .ok_or_else(|| io::Error::other("piece source byte offset overflows u64"))?;
+            let byte_extent = end
+                .bytes
+                .checked_sub(start.bytes)
+                .ok_or_else(|| io::Error::other("piece source byte range is reversed"))?;
+            SortPartitionSource {
+                path: self.source.path.clone(),
+                byte_extent,
+                section: Some(MultiChunkSection {
+                    partition: self.partition_index,
+                    offset,
+                    count: take_records,
+                    byte_extent,
+                }),
+            }
+        } else {
+            self.source.clone()
+        };
+        Ok(Some(SortSourceSlice {
+            source,
+            skip_records: if self.compression == ChunkCompression::None {
+                0
+            } else {
+                start.records
+            },
+            take_records,
+        }))
+    }
+}
+
+pub(crate) struct SourceCursor {
+    reader: ChunkReader,
+    position: SourcePosition,
+}
+
+impl SourceCursor {
+    pub(crate) fn position(&self) -> SourcePosition {
+        self.position
+    }
+
+    pub(crate) fn next_header_discard_payload(&mut self) -> io::Result<Option<(SortKey, u32)>> {
+        let Some((key, data_len)) = self.reader.next_header_discard_payload()? else {
+            return Ok(None);
+        };
+        self.position.records += 1;
+        self.position.bytes += 12 + u64::from(data_len);
+        Ok(Some((key, data_len)))
+    }
+}
+
+pub(crate) struct SortSourceSlice {
+    pub(super) source: SortPartitionSource,
+    pub(super) skip_records: u64,
+    pub(super) take_records: u32,
+}
+
 pub(super) fn read_multi_chunk_sections(
     path: &Path,
     compression: ChunkCompression,
