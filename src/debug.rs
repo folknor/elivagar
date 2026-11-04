@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Emit a named phase marker to the sidecar profiler, if active.
 ///
-/// The marker is timestamped with monotonic microseconds since process start
-/// and written to the FIFO at `BROKKR_MARKER_FIFO`. If no sidecar is running,
-/// this is a no-op. If the FIFO buffer is full, the marker is silently dropped.
+/// The timestamp is monotonic microseconds from the first successful open of
+/// the current `BROKKR_MARKER_FIFO` path in this process. Changing the path
+/// opens a new FIFO and starts a new timestamp origin. If no sidecar is
+/// running, this is a no-op. If the FIFO buffer is full, the marker is
+/// silently dropped.
 pub fn emit_marker(name: &str) {
     use std::io::Write;
     write_fifo(|f, us| {
@@ -281,35 +283,63 @@ pub fn read_page_faults() -> (u64, u64) {
 
 /// Shared FIFO write logic for markers and counters.
 fn write_fifo(f: impl FnOnce(&std::fs::File, u128)) {
-    use std::sync::OnceLock;
+    #[cfg(unix)]
+    use std::sync::{Mutex, OnceLock};
 
-    static STATE: OnceLock<Option<(std::fs::File, std::time::Instant)>> = OnceLock::new();
+    // Keep the path with the descriptor so sequential library runs can use
+    // different sidecar FIFOs in one process.
+    #[cfg(unix)]
+    struct FifoState {
+        path: std::path::PathBuf,
+        file: std::fs::File,
+        start: std::time::Instant,
+    }
 
-    let state = STATE.get_or_init(|| {
-        let path = std::env::var("BROKKR_MARKER_FIFO").ok()?;
-        #[cfg(unix)]
-        {
+    #[cfg(unix)]
+    static STATE: OnceLock<Mutex<Option<FifoState>>> = OnceLock::new();
+
+    #[cfg(unix)]
+    {
+        let state = STATE.get_or_init(|| Mutex::new(None));
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let Some(path) = std::env::var_os("BROKKR_MARKER_FIFO") else {
+            *state = None;
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+
+        if state.as_ref().is_none_or(|cached| cached.path != path) {
             use std::os::unix::fs::OpenOptionsExt;
             #[cfg(target_os = "linux")]
             const O_NONBLOCK: i32 = 0x800;
             #[cfg(target_os = "macos")]
             const O_NONBLOCK: i32 = 0x0004;
-            let file = std::fs::OpenOptions::new()
+            let Ok(file) = std::fs::OpenOptions::new()
                 .write(true)
                 .custom_flags(O_NONBLOCK)
                 .open(&path)
-                .ok()?;
-            Some((file, std::time::Instant::now()))
+            else {
+                *state = None;
+                return;
+            };
+            *state = Some(FifoState {
+                path,
+                file,
+                start: std::time::Instant::now(),
+            });
         }
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            None
-        }
-    });
 
-    if let Some((file, start)) = state.as_ref() {
-        let us = start.elapsed().as_micros();
-        f(file, us);
+        if let Some(cached) = state.as_ref() {
+            let us = cached.start.elapsed().as_micros();
+            f(&cached.file, us);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = f;
     }
 }

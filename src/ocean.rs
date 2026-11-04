@@ -21,6 +21,7 @@ use crate::pmtiles_writer;
 use crate::shortbread::Layer;
 use crate::sort::{self, SortWriter};
 use crate::wire_format::{append_feature_data_with_attrs, encode_attrs_bytes};
+use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 use std::sync::OnceLock;
@@ -62,7 +63,139 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// pre-split source cells and low-zoom union do not prove these paths
 /// unreachable. Existing v5 artifacts must be rebuilt before use, followed
 /// by rotation of the artifact-active corpus contract.
-pub const OCEAN_POLICY_VERSION: u32 = 6;
+///
+/// v7: rect-clip crossings round displacements from the endpoint with the
+/// smaller clipped-axis coordinate. Opposite traversals of a shared edge
+/// now cut at the same integer point instead of leaving a one-unit fill gap.
+/// Existing artifacts must be rebuilt, then the artifact-active corpus
+/// contract must be rotated with the newly adjudicated output.
+pub const OCEAN_POLICY_VERSION: u32 = 7;
+
+/// A canonical XXH3-128 digest: exactly 32 lowercase hexadecimal characters
+/// whenever it is serialized or displayed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Xxh128(u128);
+
+impl Xxh128 {
+    pub const fn from_u128(value: u128) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_u128(self) -> u128 {
+        self.0
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(xxhash_rust::xxh3::xxh3_128(bytes))
+    }
+
+    /// Stream a file through the shared digest implementation and return its
+    /// byte length with the digest.
+    pub fn hash_file(path: &std::path::Path) -> std::io::Result<(Self, u64)> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+        let mut buf = vec![0_u8; 8 << 20];
+        let mut len = 0_u64;
+        loop {
+            let read = file.read(&mut buf)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buf[..read]);
+            let read = u64::try_from(read)
+                .map_err(|_| std::io::Error::other("read size does not fit a u64 byte count"))?;
+            len = len
+                .checked_add(read)
+                .ok_or_else(|| std::io::Error::other("file length exceeds the u64 byte count"))?;
+        }
+        Ok((Self(hasher.digest128()), len))
+    }
+}
+
+impl std::fmt::Display for Xxh128 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:032x}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseXxh128Error;
+
+impl std::fmt::Display for ParseXxh128Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("XXH3-128 must be 32 lowercase hexadecimal characters")
+    }
+}
+
+impl std::error::Error for ParseXxh128Error {}
+
+impl std::str::FromStr for Xxh128 {
+    type Err = ParseXxh128Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != 32
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ParseXxh128Error);
+        }
+        u128::from_str_radix(value, 16)
+            .map(Self)
+            .map_err(|_| ParseXxh128Error)
+    }
+}
+
+impl From<u128> for Xxh128 {
+    fn from(value: u128) -> Self {
+        Self::from_u128(value)
+    }
+}
+
+impl Serialize for Xxh128 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Xxh128 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// The `.shp` path and its matching `.shx` index, derived together so callers
+/// cannot accidentally hash or open a mismatched pair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShapefilePair {
+    shp: std::path::PathBuf,
+    shx: std::path::PathBuf,
+}
+
+impl ShapefilePair {
+    pub fn from_shp(shp: &std::path::Path) -> Self {
+        Self {
+            shp: shp.to_path_buf(),
+            shx: shp.with_extension("shx"),
+        }
+    }
+
+    pub fn shp(&self) -> &std::path::Path {
+        &self.shp
+    }
+
+    pub fn shx(&self) -> &std::path::Path {
+        &self.shx
+    }
+}
 
 /// Identity of the shapefile inputs behind computed ocean sort chunks.
 ///
@@ -79,240 +212,237 @@ pub const OCEAN_POLICY_VERSION: u32 = 6;
 /// mode as the bare string "computed", so chunks built from one shapefile
 /// could be reused by a resume naming another, and the archive's metadata
 /// would then describe inputs that produced none of its ocean geometry.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OceanSourceKey {
-    pub full_shp_xxh128: u128,
-    pub full_shx_xxh128: u128,
-    pub simplified_shp_xxh128: Option<u128>,
-    pub simplified_shx_xxh128: Option<u128>,
+    pub full_shp_xxh128: Xxh128,
+    pub full_shx_xxh128: Xxh128,
+    pub simplified_shp_xxh128: Option<Xxh128>,
+    pub simplified_shx_xxh128: Option<Xxh128>,
     pub min_zoom: u8,
     pub max_zoom: u8,
     pub policy_version: u32,
 }
 
+// Use a newtype deserializer rather than delegating directly to Option:
+// serde treats a missing field as None when deserialize_option is called.
+// These wire fields must be present, with explicit null for absent inputs.
+#[derive(Deserialize)]
+struct RequiredOption<T>(Option<T>);
+
+#[derive(Deserialize)]
+struct OceanSourceKeyWire {
+    full_shp_xxh128: Xxh128,
+    full_shx_xxh128: Xxh128,
+    simplified_shp_xxh128: RequiredOption<Xxh128>,
+    simplified_shx_xxh128: RequiredOption<Xxh128>,
+    min_zoom: u8,
+    max_zoom: u8,
+    policy_version: u32,
+}
+
+impl<'de> Deserialize<'de> for OceanSourceKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = OceanSourceKeyWire::deserialize(deserializer)?;
+        Ok(Self {
+            full_shp_xxh128: wire.full_shp_xxh128,
+            full_shx_xxh128: wire.full_shx_xxh128,
+            simplified_shp_xxh128: wire.simplified_shp_xxh128.0,
+            simplified_shx_xxh128: wire.simplified_shx_xxh128.0,
+            min_zoom: wire.min_zoom,
+            max_zoom: wire.max_zoom,
+            policy_version: wire.policy_version,
+        })
+    }
+}
+
 impl OceanSourceKey {
     pub fn from_inputs(
-        full_shp: &std::path::Path,
-        simplified_shp: Option<&std::path::Path>,
+        full: &ShapefilePair,
+        simplified: Option<&ShapefilePair>,
         min_zoom: u8,
         max_zoom: u8,
     ) -> std::io::Result<Self> {
-        let simplified_shx = simplified_shp.map(|p| p.with_extension("shx"));
+        let (full_shp_xxh128, _) = Xxh128::hash_file(full.shp())?;
+        let (full_shx_xxh128, _) = Xxh128::hash_file(full.shx())?;
+        let (simplified_shp_xxh128, simplified_shx_xxh128) = if let Some(pair) = simplified {
+            let (shp, _) = Xxh128::hash_file(pair.shp())?;
+            let (shx, _) = Xxh128::hash_file(pair.shx())?;
+            (Some(shp), Some(shx))
+        } else {
+            (None, None)
+        };
         Ok(Self {
-            full_shp_xxh128: hash_file(full_shp)?,
-            full_shx_xxh128: hash_file(&full_shp.with_extension("shx"))?,
-            simplified_shp_xxh128: simplified_shp.map(hash_file).transpose()?,
-            simplified_shx_xxh128: simplified_shx.as_deref().map(hash_file).transpose()?,
+            full_shp_xxh128,
+            full_shx_xxh128,
+            simplified_shp_xxh128,
+            simplified_shx_xxh128,
             min_zoom,
             max_zoom,
             policy_version: OCEAN_POLICY_VERSION,
         })
     }
 
+    pub(crate) fn from_hashes(
+        full: OceanShapefileHashes,
+        simplified: Option<OceanShapefileHashes>,
+        min_zoom: u8,
+        max_zoom: u8,
+    ) -> Self {
+        Self {
+            full_shp_xxh128: full.shp_xxh128,
+            full_shx_xxh128: full.shx_xxh128,
+            simplified_shp_xxh128: simplified.map(|hashes| hashes.shp_xxh128),
+            simplified_shx_xxh128: simplified.map(|hashes| hashes.shx_xxh128),
+            min_zoom,
+            max_zoom,
+            policy_version: OCEAN_POLICY_VERSION,
+        }
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
-        fn hash(v: u128) -> serde_json::Value {
-            serde_json::Value::String(format!("{v:032x}"))
-        }
-        fn optional(v: Option<u128>) -> serde_json::Value {
-            v.map_or(serde_json::Value::Null, hash)
-        }
-        serde_json::json!({
-            "full_shp_xxh128": hash(self.full_shp_xxh128),
-            "full_shx_xxh128": hash(self.full_shx_xxh128),
-            "simplified_shp_xxh128": optional(self.simplified_shp_xxh128),
-            "simplified_shx_xxh128": optional(self.simplified_shx_xxh128),
-            "min_zoom": self.min_zoom,
-            "max_zoom": self.max_zoom,
-            "policy_version": self.policy_version,
-        })
+        serde_json::to_value(self).expect("OceanSourceKey has an infallible JSON representation")
     }
 
     pub fn from_json(value: &serde_json::Value) -> std::io::Result<Self> {
-        let invalid =
-            || std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid ocean source key");
-        let parse = |field: &str| -> std::io::Result<u128> {
-            u128::from_str_radix(
-                value
-                    .get(field)
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(invalid)?,
-                16,
-            )
-            .map_err(|_| invalid())
-        };
-        let parse_optional = |field: &str| -> std::io::Result<Option<u128>> {
-            match value.get(field) {
-                None | Some(serde_json::Value::Null) => Ok(None),
-                Some(serde_json::Value::String(s)) => {
-                    u128::from_str_radix(s, 16).map(Some).map_err(|_| invalid())
-                }
-                Some(_) => Err(invalid()),
-            }
-        };
-        let small = |field: &str| -> std::io::Result<u32> {
-            u32::try_from(
-                value
-                    .get(field)
-                    .and_then(serde_json::Value::as_u64)
-                    .ok_or_else(invalid)?,
-            )
-            .map_err(|_| invalid())
-        };
-        Ok(Self {
-            full_shp_xxh128: parse("full_shp_xxh128")?,
-            full_shx_xxh128: parse("full_shx_xxh128")?,
-            simplified_shp_xxh128: parse_optional("simplified_shp_xxh128")?,
-            simplified_shx_xxh128: parse_optional("simplified_shx_xxh128")?,
-            min_zoom: u8::try_from(small("min_zoom")?).map_err(|_| invalid())?,
-            max_zoom: u8::try_from(small("max_zoom")?).map_err(|_| invalid())?,
-            policy_version: small("policy_version")?,
-        })
+        serde_json::from_value(value.clone())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 
 /// The durable artifact invalidation key, encoded under `ocean_artifact`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OceanArtifactKey {
-    pub full_shp_xxh128: u128,
-    pub full_shx_xxh128: u128,
-    pub simplified_shp_xxh128: Option<u128>,
-    pub simplified_shx_xxh128: Option<u128>,
-    pub min_zoom: u8,
-    pub max_zoom: u8,
+    pub source: OceanSourceKey,
     pub compression_level: u32,
-    pub policy_version: u32,
 }
 
 impl OceanArtifactKey {
     pub fn from_inputs(
-        full_shp: &std::path::Path,
-        full_shx: &std::path::Path,
-        simplified_shp: Option<&std::path::Path>,
-        simplified_shx: Option<&std::path::Path>,
+        full: &ShapefilePair,
+        simplified: Option<&ShapefilePair>,
         min_zoom: u8,
         max_zoom: u8,
         compression_level: u32,
     ) -> std::io::Result<Self> {
         Ok(Self {
-            full_shp_xxh128: hash_file(full_shp)?,
-            full_shx_xxh128: hash_file(full_shx)?,
-            simplified_shp_xxh128: simplified_shp.map(hash_file).transpose()?,
-            simplified_shx_xxh128: simplified_shx.map(hash_file).transpose()?,
-            min_zoom,
-            max_zoom,
+            source: OceanSourceKey::from_inputs(full, simplified, min_zoom, max_zoom)?,
             compression_level,
-            policy_version: OCEAN_POLICY_VERSION,
         })
     }
 
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("OceanArtifactKey has an infallible JSON representation")
+    }
+
     pub fn json(&self) -> String {
-        fn hash(v: u128) -> String {
-            format!("{v:032x}")
-        }
-        fn optional(v: Option<u128>) -> String {
-            v.map_or_else(|| "null".to_string(), |v| format!("\"{}\"", hash(v)))
-        }
-        format!(
-            r#"{{"full_shp_xxh128":"{}","full_shx_xxh128":"{}","simplified_shp_xxh128":{},"simplified_shx_xxh128":{},"min_zoom":{},"max_zoom":{},"compression_level":{},"policy_version":{}}}"#,
-            hash(self.full_shp_xxh128),
-            hash(self.full_shx_xxh128),
-            optional(self.simplified_shp_xxh128),
-            optional(self.simplified_shx_xxh128),
-            self.min_zoom,
-            self.max_zoom,
-            self.compression_level,
-            self.policy_version,
-        )
+        serde_json::to_string(self).expect("OceanArtifactKey has an infallible JSON representation")
     }
 
     pub fn from_json(value: &serde_json::Value) -> std::io::Result<Self> {
         let object = value
             .as_object()
             .ok_or_else(|| std::io::Error::other("ocean_artifact must be an object"))?;
-        let parse_hash = |name: &str| -> std::io::Result<u128> {
-            let value = object
-                .get(name)
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| std::io::Error::other(format!("ocean_artifact missing {name}")))?;
-            if value.len() != 32
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
+        for field in [
+            "full_shp_xxh128",
+            "full_shx_xxh128",
+            "simplified_shp_xxh128",
+            "simplified_shx_xxh128",
+            "min_zoom",
+            "max_zoom",
+            "compression_level",
+            "policy_version",
+        ] {
+            if !object.contains_key(field) {
                 return Err(std::io::Error::other(format!(
-                    "invalid ocean_artifact {name}"
+                    "ocean_artifact missing {field}"
                 )));
             }
-            u128::from_str_radix(value, 16)
-                .map_err(|_| std::io::Error::other(format!("invalid ocean_artifact {name}")))
-        };
-        let parse_optional_hash = |name: &str| -> std::io::Result<Option<u128>> {
-            match object.get(name) {
-                Some(serde_json::Value::Null) => Ok(None),
-                Some(value) => value
-                    .as_str()
-                    .ok_or_else(|| std::io::Error::other(format!("invalid ocean_artifact {name}")))
-                    .and_then(|s| {
-                        if s.len() != 32
-                            || !s
-                                .bytes()
-                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                        {
-                            return Err(std::io::Error::other(format!(
-                                "invalid ocean_artifact {name}"
-                            )));
-                        }
-                        u128::from_str_radix(s, 16).map(Some).map_err(|_| {
-                            std::io::Error::other(format!("invalid ocean_artifact {name}"))
-                        })
-                    }),
-                None => Err(std::io::Error::other(format!(
-                    "ocean_artifact missing {name}"
-                ))),
-            }
-        };
-        let number = |name: &str| -> std::io::Result<u64> {
-            object
-                .get(name)
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| std::io::Error::other(format!("ocean_artifact missing {name}")))
-        };
+        }
+        serde_json::from_value(value.clone())
+            .map_err(|e| std::io::Error::other(format!("invalid ocean_artifact: {e}")))
+    }
+}
+
+impl std::ops::Deref for OceanArtifactKey {
+    type Target = OceanSourceKey;
+
+    fn deref(&self) -> &Self::Target {
+        &self.source
+    }
+}
+
+impl std::ops::DerefMut for OceanArtifactKey {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.source
+    }
+}
+
+/// Flat durable wire shape. Keep this field order aligned with ocean metadata.
+#[derive(Serialize)]
+struct OceanArtifactKeyRef<'a> {
+    full_shp_xxh128: &'a Xxh128,
+    full_shx_xxh128: &'a Xxh128,
+    simplified_shp_xxh128: &'a Option<Xxh128>,
+    simplified_shx_xxh128: &'a Option<Xxh128>,
+    min_zoom: u8,
+    max_zoom: u8,
+    compression_level: u32,
+    policy_version: u32,
+}
+
+#[derive(Deserialize)]
+struct OceanArtifactKeyWire {
+    full_shp_xxh128: Xxh128,
+    full_shx_xxh128: Xxh128,
+    simplified_shp_xxh128: RequiredOption<Xxh128>,
+    simplified_shx_xxh128: RequiredOption<Xxh128>,
+    min_zoom: u8,
+    max_zoom: u8,
+    compression_level: u32,
+    policy_version: u32,
+}
+
+impl Serialize for OceanArtifactKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        OceanArtifactKeyRef {
+            full_shp_xxh128: &self.source.full_shp_xxh128,
+            full_shx_xxh128: &self.source.full_shx_xxh128,
+            simplified_shp_xxh128: &self.source.simplified_shp_xxh128,
+            simplified_shx_xxh128: &self.source.simplified_shx_xxh128,
+            min_zoom: self.source.min_zoom,
+            max_zoom: self.source.max_zoom,
+            compression_level: self.compression_level,
+            policy_version: self.source.policy_version,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OceanArtifactKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = OceanArtifactKeyWire::deserialize(deserializer)?;
         Ok(Self {
-            full_shp_xxh128: parse_hash("full_shp_xxh128")?,
-            full_shx_xxh128: parse_hash("full_shx_xxh128")?,
-            simplified_shp_xxh128: parse_optional_hash("simplified_shp_xxh128")?,
-            simplified_shx_xxh128: parse_optional_hash("simplified_shx_xxh128")?,
-            min_zoom: u8::try_from(number("min_zoom")?)
-                .map_err(|_| std::io::Error::other("invalid ocean_artifact min_zoom"))?,
-            max_zoom: u8::try_from(number("max_zoom")?)
-                .map_err(|_| std::io::Error::other("invalid ocean_artifact max_zoom"))?,
-            compression_level: u32::try_from(number("compression_level")?)
-                .map_err(|_| std::io::Error::other("invalid ocean_artifact compression_level"))?,
-            policy_version: u32::try_from(number("policy_version")?)
-                .map_err(|_| std::io::Error::other("invalid ocean_artifact policy_version"))?,
+            source: OceanSourceKey {
+                full_shp_xxh128: wire.full_shp_xxh128,
+                full_shx_xxh128: wire.full_shx_xxh128,
+                simplified_shp_xxh128: wire.simplified_shp_xxh128.0,
+                simplified_shx_xxh128: wire.simplified_shx_xxh128.0,
+                min_zoom: wire.min_zoom,
+                max_zoom: wire.max_zoom,
+                policy_version: wire.policy_version,
+            },
+            compression_level: wire.compression_level,
         })
     }
-}
-
-fn hash_file(path: &std::path::Path) -> std::io::Result<u128> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
-    let mut buf = [0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buf)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buf[..read]);
-    }
-    Ok(hasher.digest128())
-}
-
-fn hash_bytes(bytes: &[u8]) -> u128 {
-    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
-    hasher.update(bytes);
-    hasher.digest128()
 }
 
 // ---------------------------------------------------------------------------
@@ -722,8 +852,8 @@ struct ParsedOceanRecord {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct OceanShapefileHashes {
-    pub(crate) shp_xxh128: u128,
-    pub(crate) shx_xxh128: u128,
+    pub(crate) shp_xxh128: Xxh128,
+    pub(crate) shx_xxh128: Xxh128,
 }
 
 #[derive(Clone, Copy)]
@@ -888,8 +1018,9 @@ fn process_ocean_shapefile_inner(
     eprintln!("  Opening {}", path.display());
 
     // --- Read .shx index to get record offsets ---
-    let shx_path = path.with_extension("shx");
-    let shx_data = std::fs::read(&shx_path)?;
+    let files = ShapefilePair::from_shp(path);
+    let shx_path = files.shx();
+    let shx_data = std::fs::read(shx_path)?;
 
     if shx_data.len() < 100 {
         return Err(std::io::Error::new(
@@ -975,13 +1106,13 @@ fn process_ocean_shapefile_inner(
     eprintln!("  Index: {shape_count} shapes");
 
     // --- Mmap the .shp file ---
-    let shp_file = std::fs::File::open(path)?;
+    let shp_file = std::fs::File::open(files.shp())?;
     let shp_mmap = unsafe { memmap2::Mmap::map(&shp_file) }?;
     // Keep the artifact key tied to the exact mapped bytes and index buffer
     // this call parses, even if either input path is replaced after opening.
     let hashes = capture_hashes.then(|| OceanShapefileHashes {
-        shp_xxh128: hash_bytes(&shp_mmap),
-        shx_xxh128: hash_bytes(&shx_data),
+        shp_xxh128: Xxh128::from_bytes(&shp_mmap),
+        shx_xxh128: Xxh128::from_bytes(&shx_data),
     });
     #[cfg(unix)]
     shp_mmap.advise(memmap2::Advice::Random)?;
@@ -1112,8 +1243,8 @@ fn process_ocean_shapefile_inner(
     let mut empty_attrs_bytes = Vec::new();
     encode_attrs_bytes(&mut empty_attrs_bytes, &[], max_zoom);
 
-    // Ocean chunks use the same chunk_NNNN.bin naming (starting after PBF chunks)
-    // so that --skip-to sort (SortReader::from_dir sequential scan) finds them.
+    // Ocean chunks share the current partitioned filename grammar and chunk
+    // ID sequence with PBF chunks, so resume scans find the complete set.
     let chunk_id = std::sync::Arc::new(AtomicUsize::new(sort_writer.chunk_count()));
     let spill = sort::SpillCoalescer::new(
         sort_writer.tmp_dir().to_path_buf(),
@@ -2025,6 +2156,30 @@ mod tests {
     }
 
     #[test]
+    fn ocean_artifact_wire_order_and_nulls_stay_flat() {
+        let key = OceanArtifactKey {
+            source: OceanSourceKey {
+                full_shp_xxh128: Xxh128::from_u128(1),
+                full_shx_xxh128: Xxh128::from_u128(2),
+                simplified_shp_xxh128: None,
+                simplified_shx_xxh128: None,
+                min_zoom: 0,
+                max_zoom: 14,
+                policy_version: OCEAN_POLICY_VERSION,
+            },
+            compression_level: 6,
+        };
+        let expected = concat!(
+            r#"{"full_shp_xxh128":"00000000000000000000000000000001","#,
+            r#""full_shx_xxh128":"00000000000000000000000000000002","#,
+            r#""simplified_shp_xxh128":null,"simplified_shx_xxh128":null,"#,
+            r#""min_zoom":0,"max_zoom":14,"compression_level":6,"policy_version":POLICY}"#,
+        )
+        .replace("POLICY", &OCEAN_POLICY_VERSION.to_string());
+        assert_eq!(key.json(), expected);
+    }
+
+    #[test]
     fn ocean_artifact_hashes_require_32_lowercase_hex_characters() {
         let valid = serde_json::json!({
             "full_shp_xxh128": "0123456789abcdef0123456789abcdef",
@@ -2045,6 +2200,35 @@ mod tests {
             let mut value = valid.clone();
             value["full_shp_xxh128"] = serde_json::Value::String(invalid.to_string());
             assert!(OceanArtifactKey::from_json(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn ocean_keys_require_explicit_nulls_for_absent_inputs() {
+        let source = OceanSourceKey {
+            full_shp_xxh128: Xxh128::from_u128(1),
+            full_shx_xxh128: Xxh128::from_u128(2),
+            simplified_shp_xxh128: None,
+            simplified_shx_xxh128: None,
+            min_zoom: 0,
+            max_zoom: 14,
+            policy_version: OCEAN_POLICY_VERSION,
+        };
+        let artifact = OceanArtifactKey {
+            source: source.clone(),
+            compression_level: 6,
+        };
+        for field in ["simplified_shp_xxh128", "simplified_shx_xxh128"] {
+            let mut value = source.to_json();
+            OceanSourceKey::from_json(&value).expect("explicit nulls are valid");
+            value.as_object_mut().expect("object").remove(field);
+            assert!(OceanSourceKey::from_json(&value).is_err());
+
+            let mut value = artifact.to_json();
+            let _: OceanArtifactKey = serde_json::from_value(value.clone())
+                .expect("explicit nulls are valid through serde");
+            value.as_object_mut().expect("object").remove(field);
+            assert!(serde_json::from_value::<OceanArtifactKey>(value).is_err());
         }
     }
 
@@ -2461,8 +2645,12 @@ mod tests {
 
         let mut reader = sort_writer.finish().unwrap();
         let mut count = 0u64;
-        while reader.next().unwrap().is_some() {
-            count += 1;
+        for partition in reader.take_partitions() {
+            let mut pr =
+                sort::SortPartitionReader::open(&partition, sort::ChunkCompression::None).unwrap();
+            while pr.next().unwrap().is_some() {
+                count += 1;
+            }
         }
         assert_eq!(count, emitted, "emitted count should match sorted records");
     }
@@ -2510,7 +2698,13 @@ mod tests {
         assert!(emitted > 0, "expected ocean features to be emitted");
 
         let mut reader = sort_writer.finish().unwrap();
-        let rec = reader
+        let partition = reader
+            .take_partitions()
+            .into_iter()
+            .next()
+            .expect("expected at least one partition");
+        let rec = sort::SortPartitionReader::open(&partition, sort::ChunkCompression::None)
+            .unwrap()
             .next()
             .unwrap()
             .expect("expected at least one record");
@@ -2650,10 +2844,12 @@ mod tests {
             process_ocean_shapefile_with_hashes(&shp_path, &bounds, 0, 0, &mut sort_writer)
                 .unwrap();
 
-        assert_eq!(hashes.shp_xxh128, hash_file(&shp_path).unwrap());
+        assert_eq!(hashes.shp_xxh128, Xxh128::hash_file(&shp_path).unwrap().0);
         assert_eq!(
             hashes.shx_xxh128,
-            hash_file(&shp_path.with_extension("shx")).unwrap()
+            Xxh128::hash_file(&shp_path.with_extension("shx"))
+                .unwrap()
+                .0
         );
     }
 

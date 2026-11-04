@@ -120,7 +120,7 @@ loud, never silent.
 `contract.json` is written at bless time from the archive's provenance
 block: the input identity (PBF xxh128 and variant features), the full config
 contract (profile, zooms, tile format and compression policy, fanout,
-simplification, and ocean artifact key including OCEAN_POLICY_VERSION), and
+simplification, and the resolved ocean identity), and
 the input name plus the build block when present for diagnosis. When the
 corpus has a manifest, the style file path and hash are also recorded.
 `check` compares the input identity, config, and style hash before content and
@@ -133,6 +133,15 @@ are currently refused by the gate. Bless still rejects an archive explicitly
 marked as built from a dirty tree. This mirrors the provenance rule that
 `Input` plus `Config` is the comparability contract while `Build` is
 diagnostic.
+
+The ocean identity follows the resolved mode: artifact mode carries the flat
+artifact key, including `OCEAN_POLICY_VERSION`; computed mode carries the
+source key for its shapefiles and zoom span. The standing denmark baseline is
+artifact-active. Typed source-key composition preserves its flat artifact-key
+schema, including explicit nulls for absent simplified inputs. Policy v7's
+canonical clip crossings change output and invalidate older artifacts. Rebuild
+the artifact and adjudicate a fresh Denmark build before rotating the corpus;
+changing only the recorded policy version would mislabel the old baseline.
 
 The strictness is a feature: an output-neutral config-schema change
 refuses the comparison (contract.json changes while digest does not),
@@ -173,6 +182,12 @@ that assert the streaming hash and the detail decode path remain one
 equivalence relation. Archive metadata, header bounds, and directory
 layout are outside the digest; the provenance contract and
 `elivagar verify` own those surfaces.
+
+The detail decoder groups polygon rings using the first nonzero-area ring's
+winding as the exterior orientation and skips zero-area rings. It preserves
+every other ring for hashing, without the renderer's 500-ring clamp. This
+supports comparison with producers whose exterior winding differs; structural
+strictness still checks the geometry commands before grouping.
 
 ## The SVG corpus
 

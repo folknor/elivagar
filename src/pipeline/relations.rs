@@ -1,18 +1,17 @@
 use smallvec::SmallVec;
 
-use crate::geometry::{self, Point, merc_bbox};
+use crate::geometry::{self, Point};
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::shortbread::LayerMatch;
-use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
+use crate::shortbread::{self, OsmGeomType, Tags};
 use crate::sort::{self, SortWriter};
 use crate::way_index::WayIndexReader;
 use pbfhogg::MemberId;
 
 use super::PipelineError;
 use super::emit::{
-    MultipolygonEmitScratch, PointEmitScratch, RecordSink, antimeridian_shifts_for_bbox,
-    emit_multipolygon_feature, emit_point_or_centroid, enrich_polygon_matches,
-    relation_shared_vertex_keys, unwrap_antimeridian_path,
+    EmitCtx, FeatureGeometry, MultipolygonEmitScratch, PointEmitScratch, RecordSink, emit_match,
+    enrich_polygon_matches, relation_shared_vertex_keys, unwrap_antimeridian_path,
 };
 use super::stats::{FanoutStats, MissingRefStatsAtomic, record_fanout_from_payload_records};
 
@@ -259,20 +258,10 @@ pub(super) fn process_relation_blocks(
                 &mut acc.simp_scratch,
                 fanout_caps,
                 polygon_simplify_factor,
+                &mut acc.fanout,
             );
             // Track fanout for this relation's records.
             record_fanout_from_payload_records(&acc.sink.records[before..], &mut acc.fanout);
-            // Harvest cap events from multipolygon emit scratch.
-            // `emit_multipolygon_feature` only clears cap_events when it runs,
-            // so a relation that emits only points/lines would re-harvest the
-            // previous relation's events across this fold accumulator. Clear
-            // after harvesting to count each cap event exactly once.
-            for &(idx, tiles, oid) in &acc.multipolygon_emit.cap_events {
-                let layer = idx as usize / 15;
-                let zoom = idx as usize % 15;
-                acc.fanout.record_cap(layer, zoom, tiles, oid);
-            }
-            acc.multipolygon_emit.cap_events.clear();
             // Drop the geometry-scaled scratches after EVERY relation. The
             // fold accumulator lives for the whole tail (par_bridge keeps one
             // per worker), so warm scratch ratchets to the fattest relation a
@@ -383,6 +372,7 @@ pub(super) fn process_prepared_relation_into(
     simp_scratch: &mut geometry::SimplifyMultiScratch,
     fanout_caps: &[u32],
     polygon_simplify_factor: f64,
+    fanout: &mut FanoutStats,
 ) {
     let multi = multipolygon::assemble_wrapped(&rel.member_ways);
     let shared_vertex_keys = relation_shared_vertex_keys(&rel.member_ways);
@@ -400,112 +390,39 @@ pub(super) fn process_prepared_relation_into(
         .sum();
     enrich_polygon_matches(&mut matches, total_area_m2);
 
+    let ctx = EmitCtx {
+        min_zoom,
+        max_zoom,
+        fanout_caps,
+        polygon_simplify_factor,
+    };
     for m in &matches {
-        let z_lo = m.min_zoom.max(min_zoom);
-        let z_hi = m.max_zoom.min(max_zoom);
-        if z_lo > z_hi {
-            continue;
-        }
-
-        match m.geom_expect {
-            GeomExpect::Polygon => {
-                for (outer, inners) in &multi.polygons {
-                    // Assembled rings omit the closing duplicate, so three
-                    // coordinates are enough for a triangle. Keep the list
-                    // open when unwrapping to preserve its final vertex.
-                    if outer.len() < 3 {
-                        continue;
-                    }
-                    let mut outer_unwrapped = outer.clone();
-                    let mut inners_unwrapped = inners.clone();
-                    let _ = unwrap_antimeridian_path(&mut outer_unwrapped, false);
-                    for inner in &mut inners_unwrapped {
-                        let _ = unwrap_antimeridian_path(inner, false);
-                    }
-                    let bbox = merc_bbox(&outer_unwrapped);
-                    let fc = fanout_caps.get(m.layer as usize).copied().unwrap_or(0);
-                    for shift in antimeridian_shifts_for_bbox(&bbox) {
-                        if shift == 0.0 {
-                            emit_multipolygon_feature(
-                                rel.osm_id,
-                                &outer_unwrapped,
-                                &inners_unwrapped,
-                                Some(&shared_vertex_keys),
-                                m,
-                                z_lo,
-                                z_hi,
-                                sink,
-                                multipolygon_emit,
-                                simp_scratch,
-                                fc,
-                                polygon_simplify_factor,
-                            );
-                        } else {
-                            let outer_shifted: Vec<Point> = outer_unwrapped
-                                .iter()
-                                .map(|p| Point {
-                                    x: p.x + shift,
-                                    y: p.y,
-                                })
-                                .collect();
-                            let inners_shifted: Vec<Vec<Point>> = inners_unwrapped
-                                .iter()
-                                .map(|ring| {
-                                    ring.iter()
-                                        .map(|p| Point {
-                                            x: p.x + shift,
-                                            y: p.y,
-                                        })
-                                        .collect()
-                                })
-                                .collect();
-                            emit_multipolygon_feature(
-                                rel.osm_id,
-                                &outer_shifted,
-                                &inners_shifted,
-                                Some(&shared_vertex_keys),
-                                m,
-                                z_lo,
-                                z_hi,
-                                sink,
-                                multipolygon_emit,
-                                simp_scratch,
-                                fc,
-                                polygon_simplify_factor,
-                            );
-                        }
-                    }
-                }
+        for (outer, inners) in &multi.polygons {
+            // Assembled rings are open: preserve the final triangle vertex.
+            if outer.len() < 3 {
+                continue;
             }
-            GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
-                for (outer, inners) in &multi.polygons {
-                    if outer.len() < 3 {
-                        continue;
-                    }
-                    let mut outer_unwrapped = outer.clone();
-                    let mut inners_unwrapped = inners.clone();
-                    let _ = unwrap_antimeridian_path(&mut outer_unwrapped, false);
-                    for inner in &mut inners_unwrapped {
-                        let _ = unwrap_antimeridian_path(inner, false);
-                    }
-                    let bbox = merc_bbox(&outer_unwrapped);
-                    emit_point_or_centroid(
-                        rel.osm_id,
-                        &outer_unwrapped,
-                        Some(&inners_unwrapped),
-                        &bbox,
-                        m,
-                        z_lo,
-                        z_hi,
-                        sink,
-                        point_emit,
-                    );
-                }
+            let mut outer = outer.clone();
+            let mut inners = inners.clone();
+            let _ = unwrap_antimeridian_path(&mut outer, false);
+            for inner in &mut inners {
+                let _ = unwrap_antimeridian_path(inner, false);
             }
-            // Boundary lines are now emitted once per way in phase12
-            // (boundary prescan + resolve_boundary_match); relations no longer
-            // produce them, so GeomExpect::Line falls through to a no-op here.
-            _ => {}
+            emit_match(
+                rel.osm_id,
+                FeatureGeometry::Area {
+                    outer: &outer,
+                    inners: &inners,
+                    pins: &shared_vertex_keys,
+                    polygon: multipolygon_emit,
+                    simplify: simp_scratch,
+                    fanout,
+                },
+                m,
+                &ctx,
+                sink,
+                point_emit,
+            );
         }
     }
 }

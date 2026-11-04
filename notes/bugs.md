@@ -99,35 +99,6 @@ only the plan sees. `resolve_ocean_inputs` moves into the library as
 
 Reported by the pipeline, run-contract, ocean and coordinate-spaces hunts.
 
-## BUG-005 - Computed-ocean archives' contracts do not identify the shapefiles
-
-`OceanContract` carries `mode`, `low_zoom_source`, `runtime_simplification`
-and `artifact_key`. In `mode = "shapefile"` the artifact key is `None`, and
-`RunProvenance` populates `ocean_artifact_key` only for `Band`. So two
-computed-ocean archives built from different water-polygon releases, or under
-different `OCEAN_POLICY_VERSION`s, present identical contracts. The identity
-already exists as `OceanSourceKey` in `OceanMode::Computed { key }` and the
-checkpoint records it; provenance drops it. The denmark gate is safe only
-because its baseline is artifact-active; any computed-ocean corpus (raw
-variant, another dataset, an artifact-absent A/B arm) cannot tell shapefile
-releases apart.
-
-Proposed: the ocean member of the contract is `OceanMode` (or the ocean plan's
-`contract()`) serialized with its key in every non-none arm.
-
-Reported by the run-contract and ocean hunts.
-
-## BUG-006 - The artifact key is silently dropped from provenance on a JSON round-trip failure
-
-`OceanArtifactKey::json()` is a hand-formatted string. Callers that want a
-`Value` round-trip it through text: in `run()` and `write_provenance` with
-`.ok()`, in `save_checkpoint` with `map_err`. A parse failure in
-`write_provenance` would record `artifact_key: null` on an artifact-active
-archive - indistinguishable from computed - without a word. Should be
-infallible by construction (a typed key with one serde codec).
-
-Reported by the run-contract, ocean and archive-surface hunts.
-
 ## BUG-007 - Archives can be written with no provenance block, reported only on stderr
 
 `write_provenance` omits the whole `elivagar` block when the PBF has no file
@@ -241,17 +212,6 @@ pyramid-exported "root cells for bbox" function.
 
 Reported by the ocean and coordinate-spaces hunts.
 
-## BUG-016 - Process-global statistics are never reset
-
-`OCEAN_STATS` is a process-global set of atomics accumulated across passes and
-flushed by `emit_ocean_counters`; `debug.rs` statics (WAIT, BUSY, RING_CAP)
-are the same shape. "Nothing resets between runs" is a documented assumption
-that breaks when a library caller (brokkr links this crate; tests run in one
-process) calls `elivagar::run` twice. Return per-pass stats, or own telemetry
-in a run-scoped handle.
-
-Reported by the ocean and storage hunts.
-
 ## BUG-019 - Retained artifact names collide on same-day same-policy rebuilds
 
 `retain_outgoing_ocean_artifact` names the retained file by policy version and
@@ -294,17 +254,6 @@ Reported by the ocean and layer-identity hunts.
 ---
 
 # Shortbread profile and layers
-
-## BUG-032 - Relation geometry dispatch silently drops non-polygon matches
-
-The relation path (`process_prepared_relation_into`) ends its
-`match m.geom_expect` in `_ => {}`, so `GeomExpect::Point` and `Line` on a
-relation match are discarded silently, and a new `GeomExpect` variant would be
-dropped rather than fail to compile. The layer-identity hunt notes the same
-("falls through to a no-op"). See the dispatch entry in
-`notes/consolidations.md` for the proposed single `emit_match`.
-
-Reported by the pipeline and layer-identity hunts.
 
 ## BUG-033 - Assembly silently drops features with an out-of-range layer id
 
@@ -375,12 +324,6 @@ the drifting specific is not hard-coded rather than updating it.
   full i_overlay boolean"; it is the in-tree port.
 - `AssemblyScratch`'s header still claims thread-local persistence, while its
   constructor documents deliberate per-tile allocation (see BUG-038).
-- `node_index.rs` header cites "See CLAUDE.md" for madvise history and
-  `flush_group` cites mimalloc fragmentation; mimalloc is gone and CLAUDE.md
-  is not a durable citation target.
-- `debug::emit_marker`'s doc says timestamps are "monotonic microseconds since
-  process start"; they are relative to the first FIFO write (OnceLock init),
-  which happens after the resume input hash on `--skip-to` runs.
 - `wire_format` documents a `u16 geometry command count`; the code writes and
   reads `u32`. `add_feature_to_layer` references "the `as u8` encode on line
   69" and `LayerBuilder::reclaim_features` (it is `prepare_for_reuse`).
@@ -388,8 +331,8 @@ the drifting specific is not hard-coded rather than updating it.
   emitted by `enrich_polygon_matches` and `height` by land.rs buildings.
 - The `OceanInputs`, `LOW_ZOOM_UNION_MAX_ZOOM` and `ocean_pass_max_zooms`
   comments describe the pre-v3 pass structure (see BUG-002's account).
-- `parse_ele_meters` converts via `rounded.to_string().parse::<i64>()`,
-  silently dropping values beyond i64.
+- An `ocean.rs` comment still describes unpartitioned chunk filenames; the
+  sort module now refuses those names.
 
 Reported across the polygon-engine, storage, encoding, run-contract, ocean and
 layer-identity hunts.
@@ -407,41 +350,3 @@ computed chunks, or an artifact boundary band, that differ from the key the
 checkpoint and provenance record.
 
 Reported by the wave-1 ocean fixer.
-
-## BUG-055 - Shortbread profile disagrees with `tests/fixtures/shortbread.yml` in four places
-
-- Sites: the spec says `sports_center`, the code matches `sports_centre`.
-- Public transport: kind coalescing can select a value from an unrelated tag.
-- Polygon labels: the spec names `aeroway`, but the code shares the
-  `area:aeroway` polygon classifier.
-- Streets: the spec gives `narrow_gauge` the service-based z8; the code
-  applies it only to `rail`.
-
-Each needs reading against upstream Shortbread before deciding which side is
-wrong; some may be deliberate. Can change output.
-
-Reported by the wave-2 matcher fixer.
-
-## BUG-056 - The marker FIFO path is cached for the life of the process
-
-`debug.rs` caches the first `BROKKR_MARKER_FIFO` file descriptor in a
-process-wide `OnceLock`. A library caller running `elivagar::run` twice with a
-different FIFO path writes the second run's markers and counters into the
-first FIFO. Same shape as the process-global counters, which are now reset
-per run.
-
-Reported by the wave-2 telemetry fixer.
-
-## BUG-057 - Rect-clip intersections depend on edge direction
-
-The fast rect clipper in `geometry/pyramid.rs` (`crossing_point` /
-`clip_ring_half_plane_multi`) computes the integer crossing of an edge with a
-clip line from the edge's start vertex, so the same edge traversed in reverse
-can round to a different integer point: clipping `(0,10)-(2,9)` at `x = 1`
-gives different results each way. Two rings sharing an edge in opposite
-directions (a polygon and its neighbour, or a hole and an adjacent outer) can
-then disagree on the cut point. Fixing it moves ocean output: needs an
-`OCEAN_POLICY_VERSION` bump, a world artifact rebuild, and the geometry
-oracles.
-
-Reported by the wave-2 reviewer.

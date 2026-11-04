@@ -75,8 +75,14 @@ signed base coordinate to the nearest integer, with exact half values rounded
 away from zero. The tile origin is `(tx * 4096, ty * 4096)` in zoom-grid
 units; subtract it to get tile-local MVT coordinates. This rescaling rule
 does not describe every clip intersection: the pyramid's axis crossings
-round a displacement from a segment endpoint, and the topology engine has
-its own snap arithmetic, including truncation for axis-aligned segments.
+order the segment endpoints by the clipped axis, then round the displacement
+from the endpoint with the smaller coordinate to nearest, ties away from zero.
+Subtractions and rational products use i128 arithmetic before converting the
+crossing back to i32, so the calculation also covers the full i32 input range.
+The endpoint order is independent of traversal direction and the kept
+half-plane, so opposite traversals of a shared edge produce the same integer
+crossing. The topology engine has its own snap arithmetic, including
+truncation for axis-aligned segments.
 
 Floating-point projection-to-tile conversion and initial polygon quantization
 also round to nearest, with exact half values rounded away from zero.

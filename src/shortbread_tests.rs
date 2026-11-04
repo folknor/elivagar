@@ -140,6 +140,22 @@ fn test_building_parses_real_world_measurement_variants() {
 }
 
 #[test]
+fn test_shared_osm_value_parser_policies() {
+    use crate::shortbread::osm_value::{parse_count, parse_int, parse_length_m};
+
+    assert_eq!(parse_length_m("12 m"), Some(12.0));
+    assert_eq!(parse_length_m("24,5 m"), Some(24.5));
+    assert_eq!(parse_length_m("1,234 m"), Some(1234.0));
+    let feet_inches = parse_length_m("5'6\"").expect("feet and inches should parse");
+    assert!((feet_inches - 1.6764).abs() < 1e-12);
+
+    assert_eq!(parse_count("3,5; 4"), Some(3.5));
+    assert_eq!(parse_count("-1"), None);
+    assert_eq!(parse_int("1,5"), Some(15));
+    assert_eq!(parse_int("1.5"), None);
+}
+
+#[test]
 fn test_building_levels_policy_edges() {
     let zero = Tags(&[("building", "yes"), ("building:levels", "0")]);
     let zero_matches = match_element(&zero, OsmGeomType::ClosedWay);
@@ -520,8 +536,11 @@ fn test_pois_elevation_parser_format_coverage() {
     let cases = [
         ("1000m", Some(1000)),
         ("1,234 m", Some(1234)),
+        ("5'6\"", Some(2)),
         ("1000;1200", Some(1000)),
         ("-50", Some(-50)),
+        ("-9223372036854775808", Some(i64::MIN)),
+        ("9223372036854775808", None),
         ("bad-value", None),
     ];
     for (raw, expected_ele) in cases {
@@ -702,6 +721,52 @@ fn test_sites_hospital() {
         .find(|(k, _, _)| *k == "kind")
         .expect("should have kind");
     assert_eq!(kind.1, AttrValue::Str(Cow::Borrowed("hospital")));
+}
+
+#[test]
+fn test_sites_matches_osm_sports_centre_and_emits_profile_kind() {
+    let osm_spelling = Tags(&[("leisure", "sports_centre")]);
+    let matches = match_element(&osm_spelling, OsmGeomType::ClosedWay);
+    let site = matches
+        .iter()
+        .find(|m| m.layer == Layer::Sites)
+        .expect("OSM leisure=sports_centre should match Sites");
+    assert_eq!(
+        site.attrs
+            .iter()
+            .find(|(key, _, _)| *key == "kind")
+            .unwrap()
+            .1,
+        AttrValue::Str(Cow::Borrowed("sports_center")),
+    );
+
+    let fixture_spelling = Tags(&[("leisure", "sports_center")]);
+    let matches = match_element(&fixture_spelling, OsmGeomType::ClosedWay);
+    assert!(
+        matches.iter().all(|m| m.layer != Layer::Sites),
+        "sports_center is the fixture kind spelling, not the OSM tag value",
+    );
+}
+
+#[test]
+fn test_street_polygon_labels_use_aeroway_key() {
+    let aeroway = Tags(&[("aeroway", "runway"), ("name", "Runway")]);
+    let matches = match_element(&aeroway, OsmGeomType::ClosedWay);
+    assert!(
+        matches
+            .iter()
+            .any(|m| m.layer == Layer::StreetsPolygonsLabels),
+        "aeroway=runway with a name should get a polygon label",
+    );
+
+    let area_aeroway = Tags(&[("area:aeroway", "runway"), ("name", "Runway")]);
+    let matches = match_element(&area_aeroway, OsmGeomType::ClosedWay);
+    assert!(
+        matches
+            .iter()
+            .all(|m| m.layer != Layer::StreetsPolygonsLabels),
+        "area:aeroway is the polygon filter key, not the label filter key",
+    );
 }
 
 #[test]
@@ -1431,6 +1496,13 @@ fn test_specific_tag_rows_fall_through_and_keep_priority() {
             &[("aerialway", "station"), ("aeroway", "aerodrome")],
             OsmGeomType::Node,
             Layer::PublicTransport,
+            "aerodrome",
+            11,
+        ),
+        (
+            &[("aerialway", "station"), ("aeroway", "gate")],
+            OsmGeomType::Node,
+            Layer::PublicTransport,
             "aerialway_station",
             13,
         ),
@@ -1458,6 +1530,38 @@ fn test_specific_tag_rows_fall_through_and_keep_priority() {
             Layer::Streets,
             "rail",
             8,
+        ),
+        (
+            &[
+                ("highway", "unknown"),
+                ("railway", "narrow_gauge"),
+                ("service", "siding"),
+            ],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "narrow_gauge",
+            8,
+        ),
+        (
+            &[("railway", "narrow_gauge")],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "narrow_gauge",
+            10,
+        ),
+        (
+            &[("railway", "narrow_gauge"), ("service", "")],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "narrow_gauge",
+            10,
+        ),
+        (
+            &[("railway", "rail"), ("service", "")],
+            OsmGeomType::OpenWay,
+            Layer::Streets,
+            "rail",
+            10,
         ),
         (
             &[("aeroway", "gate"), ("railway", "tram")],
@@ -1510,6 +1614,13 @@ fn test_specific_tag_rows_fall_through_and_keep_priority() {
             OsmGeomType::ClosedWay,
             Layer::StreetsPolygonsLabels,
             "pedestrian",
+            14,
+        ),
+        (
+            &[("aeroway", "runway"), ("name", "Runway")],
+            OsmGeomType::ClosedWay,
+            Layer::StreetsPolygonsLabels,
+            "runway",
             14,
         ),
         (

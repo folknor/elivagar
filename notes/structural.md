@@ -217,14 +217,7 @@ channels, handles, tallies and extent so the macros become methods; an
 `phase12/{mod,router,node_worker,way_worker,plans,extent}.rs` with the
 prepass in `relations/`.
 
-`assemble.rs` holds two complete engines - `phase_assemble_with_ocean` (the
-legacy single-reader k-way path, about 300 lines) and
-`phase_assemble_partitions` - selected by whether
-`sort_reader.take_partitions()` returns `Some`, duplicating per-zoom writer
-accounting, the batch budget default, `BATCH_SIZE` and the encode context. If
-every `SortReader` the pipeline produces now has partitions, the legacy path
-is dead weight: verify, then delete it or make it a single-partition union.
-It also hosts the ocean-layer MVT splicer, provenance assembly, the zoom
+`assemble.rs` (its legacy single-reader engine is now deleted) also hosts the ocean-layer MVT splicer, provenance assembly, the zoom
 compression policy and MLT layer prep. Proposed:
 `assemble/{schedule, encode, artifact, report}`.
 
@@ -674,36 +667,13 @@ Reported by the encoding hunt.
 
 ## STR-027 - Split `sort.rs` and delete the legacy chunk modes
 
-`sort.rs` (about 2070 non-test lines) is key and tiling algebra (`SortKey`
-packing, `zoom_from_tile_id`, `PARTITION_SPLIT_Z`, `PARTITION_BASES`,
-`partition_from_key`, `partition_tile_range` - public because an artifact run
-may cross a partition boundary), a chunk file format (three magics, single and
-multi layouts, compressed frames, a filename grammar including legacy names,
-directory scan), a write side (`SortWriter`, `SpillCoalescer`, the chunk-id
-atomic, and six functions writing the same bytes across
-`SortRecord`/`PayloadRecord` x single/multi/compressed-multi/presorted - the
-doc on `write_sorted_payload_chunk` says "the bytes on disk are identical"), a
-read side (section parsing, `ChunkReader`, the merge heap, `SortPartition`,
-the hot-partition piece planner), and stats.
-
-Proposed: key algebra to the coords module; `sort/format.rs` with one
-`RecordSource` trait implemented by both stagings and one writer generic over
-it and `ChunkCompression` (removing four of six writers); `sort/write.rs`;
-`sort/merge.rs`; and piece planning (`plan_pieces`,
-`scan_source_buckets`, `choose_bucket_cuts`, `MAX_PIECES`, `MAX_BUCKETS`, the
-`ELIVAGAR_ASSEMBLE_SPLIT_TARGET` target - all assemble scheduling policy)
-moved next to the claim window it feeds, behind a small format
-"source cursor/seek" API.
-
-Legacy: `ChunkFileKind::Legacy`, the `_pNNNN` "first-cut P3" parser,
-`legacy_chunk_path`, `SortReaderMode::Legacy`, `new_whole_paths`,
-`SortReader::next`'s global iteration and the
-`first_cut_partition_suffix_falls_back_to_legacy_merge` test exist to read
-chunks from writers that no longer exist; checkpoint v6 already refuses every
-older checkpoint. The only other route into Legacy is a filename with a
-different split zoom, which should be an error. With legacy gone,
-`SortReader` reduces to a manifest of partitions and `take_partitions()`
-loses its None arm.
+The split into `sort/{key, format, write, merge}` with one generic chunk
+serializer, and the legacy chunk-mode deletion, landed. Remaining: piece
+planning (`plan_pieces`, `scan_source_buckets`, `choose_bucket_cuts`,
+`MAX_PIECES`, `MAX_BUCKETS`, the `ELIVAGAR_ASSEMBLE_SPLIT_TARGET` target - all
+assemble scheduling policy) still lives in `sort/merge.rs` and belongs next to
+the assemble claim window it feeds, behind a small format "source cursor/seek"
+API; key algebra could move on to a coordinates module.
 
 Reported by the storage hunt.
 
@@ -723,21 +693,18 @@ Reported by the storage hunt.
 
 ## STR-029 - Typestate and naming for the node and way indexes
 
-`NodeIndex -> NodeIndexReader` and `SortedNodeStore -> SortedNodeStoreReader`
-use consuming `into_reader`; `WayIndex` holds both phases in one struct with
-`Option` writers and mmaps. Proposed: `WayIndexWriter -> finish() ->
-WayIndexReader` (Sync), so the drain thread hands back a reader by type.
-`NodeIndex` / `SortedNodeStore` / `NodeStore` / `NodeStoreReader` /
-`NodeIndexReader` are five names for two backends; with the flat path dead in
-practice, one `SortedNodeStore` plus a hard error for unsorted input, or a
-`NodeLookup` trait with a backend-agnostic `stats()`. The bitpacking, bitmask
-and FOR codec (about 450 lines) is a separable `node_index/codec.rs`.
-Coordinates: node store `put(node_id, lat_e7, lon_e7)` / `get ->
-Option<(i32, i32)>`, `WayIndex::put(way_id, &[(i32, i32)])`, `decode_way`,
-`project_e7(lat, lon)` and phase12's extent locals agree on (lat, lon) order
-by convention only; proposed `LatLonE7 { lat, lon }` (repr C, 8 bytes, owner
-of the delta codec), `NodeId(i64)`, `WayId(i64)` (`WayIndex::get` accepts a
-node id today).
+The way index writer/reader typestate, the private FOR codec module and a
+`NodeId` newtype with typed `put_id`/`get_id` landed. Remaining: the node
+store still exposes six public types for two backends (`NodeIndex`,
+`NodeIndexReader`, `SortedNodeStore`, `SortedNodeStoreReader`, `NodeStore`,
+`NodeStoreReader`); consolidating them, or a `NodeLookup` trait, needs the
+phase12 construction and parallel-lookup boundary to move, and phase12's
+callers should move to the typed `NodeId` methods with it. Coordinates: node
+store `put(node_id, lat_e7, lon_e7)` / `get -> Option<(i32, i32)>`,
+`WayIndex::put(way_id, &[(i32, i32)])`, `decode_way`, `project_e7(lat, lon)`
+and phase12's extent locals agree on (lat, lon) order by convention only;
+proposed `LatLonE7 { lat, lon }` (repr C, 8 bytes, owner of the delta codec)
+and `WayId(i64)` (`WayIndex::get` accepts a node id today).
 
 Reported by the storage hunt.
 
@@ -809,20 +776,6 @@ mode flag changing `vector_layers`, which is a property of the layer set.
 an `Option`. Proposed: the writer takes an opaque metadata document built by a
 `metadata.rs` owning the TileJSON fields, `ocean_artifact` and `elivagar` as
 typed fields of one struct serialized once.
-
-Reported by the archive-surface hunt.
-
-## STR-033 - Writer storage modes as one path
-
-`TileBlob::{Memory, File}` and `DirStore::{Memory, Streaming}` are chosen
-together (`new` vs `new_streaming`) and matched separately in `add_tile`,
-`add_run`, `flush_run`, `finalize_directories` and `write_to`; mixed
-combinations are representable but never constructed, and the in-memory mode
-already writes differently (one-pass vs patch-and-rename).
-`finalize_directories` has three near-identical "try root, else double leaf
-size" loops. Proposed: a `Sink: Write + Seek` for the blob, a `DirSpill`
-trait, one `layout_directories` loop; the in-memory mode becomes a test/small
-sink, not a parallel path.
 
 Reported by the archive-surface hunt.
 

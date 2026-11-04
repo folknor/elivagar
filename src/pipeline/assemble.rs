@@ -67,9 +67,9 @@ struct AssembleCore {
     max_batch_bytes: usize,
     size_diag: TileSizeDiagnostics,
     reader_ns: u64,
-    reader_total_ns: Option<u64>,
-    partition_workers: Option<usize>,
-    partition_count: Option<usize>,
+    reader_total_ns: u64,
+    partition_workers: usize,
+    partition_count: usize,
 }
 
 struct PartitionBatch {
@@ -151,16 +151,18 @@ pub(super) fn phase_assemble(
 #[derive(Debug, Default)]
 pub(super) struct RunProvenance {
     /// XXH3-128 and byte length of the input PBF, hashed once by the
-    /// orchestrator and shared with the checkpoint rather than recomputed here.
-    /// `None` only if the input could not be read.
-    pub(super) input_identity: Option<(String, u64)>,
+    /// orchestrator rather than recomputed here. The checkpoint stores the
+    /// digest for resume validation. `None` only if the input could not be read.
+    pub(super) input_identity: Option<crate::provenance::InputIdentity>,
     /// The paths phase12 actually took, or those the checkpoint recorded for
     /// a resumed run. `None` only when neither is available.
     pub(super) effective: Option<crate::provenance::Effective>,
     /// The phase a resumed run started at; `None` for a full run.
     pub(super) resumed_from: Option<&'static str>,
     /// Invalidation key of the durable ocean artifact, when one is in play.
-    pub(super) ocean_artifact_key: Option<serde_json::Value>,
+    pub(super) ocean_artifact_key: Option<crate::ocean::OceanArtifactKey>,
+    /// Source identity of a computed-ocean run.
+    pub(super) ocean_source_key: Option<crate::ocean::OceanSourceKey>,
     /// The resolved ocean mode: `none`, `shapefile`, or `artifact`.
     pub(super) ocean_mode: &'static str,
 }
@@ -188,8 +190,6 @@ pub(super) fn phase_assemble_with_ocean(
     ),
     PipelineError,
 > {
-    use std::sync::mpsc::sync_channel;
-
     let pmtiles_config = PmtilesConfig {
         min_zoom: config.min_zoom,
         max_zoom: config.max_zoom,
@@ -223,218 +223,7 @@ pub(super) fn phase_assemble_with_ocean(
         pmtiles.set_ocean_only_metadata();
     }
 
-    const BATCH_SIZE: usize = 4096;
-    let assemble_budget = if config.assemble_batch_budget > 0 {
-        config.assemble_batch_budget
-    } else {
-        32 * 1024 * 1024 // 32 MB default
-    };
-
-    // Double-buffer pipeline: reader → encoder (main/rayon) → writer.
-    // sync_channel(1) allows one batch ahead, overlapping read/write I/O
-    // with CPU-bound rayon encoding.
-    // Error cascade: reader error → drops read_tx → encoder loop ends →
-    // drops encode_tx → writer loop ends → scope joins → error propagated.
-    let (read_tx, read_rx) = sync_channel::<Vec<PendingTile>>(1);
-    let (encode_tx, encode_rx) = sync_channel::<Vec<EncodedTile>>(1);
-
-    let scope_result: Result<AssembleCore, PipelineError> = if let Some(partitions) =
-        sort_reader.take_partitions()
-    {
-        phase_assemble_partitions(&partitions, pmtiles, config, ocean_tiles.as_deref())
-    } else {
-        std::thread::scope(|s| {
-            // --- Reader thread: k-way merge → PendingTile batches ---
-            let reader = s.spawn(move || -> Result<(u64, usize, u64), PipelineError> {
-                // Single wall-clock span for the whole thread, not per-record: this
-                // loop calls sort_reader.next() up to ~512M times at NA scale, and
-                // the k-way merge's read_record() is exactly this thread's serial
-                // bottleneck (perf-hunt item 14) - per-call #[hotpath::measure]
-                // would add two clock reads per call, the same overhead problem
-                // node_index.rs's get_from_group_cached explicitly avoids at a
-                // similar call count. One Instant::now() pair gives this thread's
-                // total wall time, comparable against phase_assemble's total to
-                // see how much of assemble is this serial reader.
-                let reader_started = std::time::Instant::now();
-                let mut features_read: u64 = 0;
-                let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
-                let mut current = PendingTile {
-                    tile_id: u64::MAX,
-                    features: Vec::new(),
-                };
-                // Incremental byte tracking for assemble batch HWM.
-                let mut current_tile_bytes: usize = 0;
-                let mut batch_bytes: usize = 0;
-                let mut max_batch_bytes: usize = 0;
-
-                loop {
-                    let record = sort_reader.next()?;
-                    let Some(r) = record else {
-                        if current.tile_id != u64::MAX {
-                            batch_bytes += 32 + current_tile_bytes;
-                            batch.push(current);
-                        }
-                        if !batch.is_empty() {
-                            if batch_bytes > max_batch_bytes {
-                                max_batch_bytes = batch_bytes;
-                            }
-                            let send_result = {
-                                let _wait = wait_span(&WAIT.assemble_reader_backpressure);
-                                read_tx.send(batch)
-                            };
-                            drop(send_result); // ignore: encoder may have exited
-                        }
-                        break;
-                    };
-                    features_read += 1;
-
-                    let tile_id = sort::tile_id_from_key(r.key);
-                    let layer_idx = sort::layer_from_key(r.key);
-
-                    if tile_id != current.tile_id {
-                        if current.tile_id != u64::MAX {
-                            batch_bytes += 32 + current_tile_bytes;
-                            batch.push(current);
-                            if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
-                                if batch_bytes > max_batch_bytes {
-                                    max_batch_bytes = batch_bytes;
-                                }
-                                let send_result = {
-                                    let _wait = wait_span(&WAIT.assemble_reader_backpressure);
-                                    read_tx.send(batch)
-                                };
-                                if send_result.is_err() {
-                                    break;
-                                }
-                                batch = Vec::with_capacity(BATCH_SIZE);
-                                batch_bytes = 0;
-                            }
-                        }
-                        current = PendingTile {
-                            tile_id,
-                            features: Vec::new(),
-                        };
-                        current_tile_bytes = 0;
-                    }
-                    let data_len = r.data.len();
-                    current.features.push((layer_idx, r.data));
-                    current_tile_bytes += 32 + data_len;
-                }
-                #[allow(clippy::cast_possible_truncation)]
-                let reader_ns = reader_started.elapsed().as_nanos() as u64;
-                Ok((features_read, max_batch_bytes, reader_ns))
-            });
-
-            // --- Writer thread: encoded tiles → PMTiles ---
-            // move takes ownership of pmtiles; returned via join handle for write_to().
-            let writer = s.spawn(
-                move || -> (
-                    u64,
-                    PmtilesWriter,
-                    [u64; 15],
-                    [u64; 15],
-                    [u64; 15],
-                    TileSizeDiagnostics,
-                ) {
-                    let mut pmtiles = pmtiles;
-                    let mut tiles_written: u64 = 0;
-                    let mut tiles_per_zoom = [0u64; 15];
-                    let mut unique_per_zoom = [0u64; 15];
-                    let mut bytes_per_zoom = [0u64; 15];
-                    let mut size_diag = TileSizeDiagnostics::default();
-                    loop {
-                        let batch = {
-                            let _wait = wait_span(&WAIT.assemble_write_input);
-                            match encode_rx.recv() {
-                                Ok(batch) => batch,
-                                Err(_) => break,
-                            }
-                        };
-                        for tile in batch {
-                            let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-                            let tile_bytes = tile.compressed.len() as u64;
-                            record_tile_size_diagnostics(&mut size_diag, tile.tile_id, tile_bytes);
-                            // Panic: disk I/O failure is unrecoverable mid-pipeline.
-                            let is_unique = pmtiles
-                                .add_tile(z, x, y, &tile.compressed)
-                                .expect("failed to write tile");
-                            tiles_written += 1;
-                            if (z as usize) < 15 {
-                                tiles_per_zoom[z as usize] += 1;
-                                if is_unique {
-                                    unique_per_zoom[z as usize] += 1;
-                                    bytes_per_zoom[z as usize] += tile_bytes;
-                                }
-                            }
-                        }
-                    }
-                    (
-                        tiles_written,
-                        pmtiles,
-                        tiles_per_zoom,
-                        unique_per_zoom,
-                        bytes_per_zoom,
-                        size_diag,
-                    )
-                },
-            );
-
-            // --- Main thread: receive batches, encode with rayon, forward to writer ---
-            let compression_level = config.compression_level;
-            let tile_format = config.tile_format;
-            let tile_compression = config.tile_compression;
-            loop {
-                let batch = {
-                    let _wait = wait_span(&WAIT.assemble_encode_input);
-                    match read_rx.recv() {
-                        Ok(batch) => batch,
-                        Err(_) => break,
-                    }
-                };
-                let encoded =
-                    encode_tile_batch(&batch, compression_level, tile_format, tile_compression)?;
-                let send_result = {
-                    let _wait = wait_span(&WAIT.assemble_writer_backpressure);
-                    encode_tx.send(encoded)
-                };
-                if send_result.is_err() {
-                    break;
-                }
-            }
-            drop(encode_tx);
-
-            let (features_read, max_batch_bytes, reader_ns) = {
-                let _wait = wait_span(&WAIT.assemble_reader_join);
-                reader.join().expect("reader panicked")
-            }?;
-            let (
-                tiles_written,
-                pmtiles,
-                tiles_per_zoom,
-                unique_per_zoom,
-                bytes_per_zoom,
-                size_diag,
-            ) = {
-                let _wait = wait_span(&WAIT.assemble_writer_join);
-                writer.join().expect("writer panicked")
-            };
-            Ok(AssembleCore {
-                features_read,
-                tiles_written,
-                pmtiles,
-                tiles_per_zoom,
-                unique_per_zoom,
-                bytes_per_zoom,
-                max_batch_bytes,
-                size_diag,
-                reader_ns,
-                reader_total_ns: None,
-                partition_workers: None,
-                partition_count: None,
-            })
-        })
-    };
-
+    let partitions = sort_reader.take_partitions();
     let AssembleCore {
         features_read,
         tiles_written,
@@ -448,26 +237,17 @@ pub(super) fn phase_assemble_with_ocean(
         reader_total_ns,
         partition_workers,
         partition_count,
-    } = scope_result?;
-    if let (Some(total_ns), Some(workers), Some(partitions)) =
-        (reader_total_ns, partition_workers, partition_count)
-    {
-        eprintln!(
-            "  Assemble partition readers: {} partitions, {} workers, max {:.1}s, total {:.1}s",
-            partitions,
-            workers,
-            reader_ns as f64 / 1_000_000_000.0,
-            total_ns as f64 / 1_000_000_000.0
-        );
-        emit_counter_u64("assemble_reader_total_ns", total_ns);
-        emit_counter_usize("assemble_partition_workers", workers);
-        emit_counter_usize("assemble_partitions", partitions);
-    } else {
-        eprintln!(
-            "  Assemble reader thread (k-way merge): {:.1}s",
-            reader_ns as f64 / 1_000_000_000.0
-        );
-    }
+    } = phase_assemble_partitions(&partitions, pmtiles, config, ocean_tiles.as_deref())?;
+    eprintln!(
+        "  Assemble partition readers: {} partitions, {} workers, max {:.1}s, total {:.1}s",
+        partition_count,
+        partition_workers,
+        reader_ns as f64 / 1_000_000_000.0,
+        reader_total_ns as f64 / 1_000_000_000.0
+    );
+    emit_counter_u64("assemble_reader_total_ns", reader_total_ns);
+    emit_counter_usize("assemble_partition_workers", partition_workers);
+    emit_counter_usize("assemble_partitions", partition_count);
     emit_counter_u64("assemble_reader_ns", reader_ns);
     let pbf_name = config
         .pbf_path
@@ -596,9 +376,9 @@ fn phase_assemble_partitions(
             max_batch_bytes: 0,
             size_diag: TileSizeDiagnostics::default(),
             reader_ns: 0,
-            reader_total_ns: Some(0),
-            partition_workers: Some(0),
-            partition_count: Some(0),
+            reader_total_ns: 0,
+            partition_workers: 0,
+            partition_count: 0,
         });
     }
 
@@ -965,9 +745,9 @@ fn phase_assemble_partitions(
         max_batch_bytes,
         size_diag,
         reader_ns: reader_max_ns,
-        reader_total_ns: Some(reader_total_ns),
-        partition_workers: Some(worker_count),
-        partition_count: Some(partition_count),
+        reader_total_ns,
+        partition_workers: worker_count,
+        partition_count,
     })
 }
 
@@ -1146,14 +926,13 @@ fn write_provenance(
         eprintln!("  warning: no PBF file name - omitting provenance metadata");
         return;
     };
-    let Some((xxh3_128, bytes)) = run.input_identity.clone() else {
+    let Some(identity) = run.input_identity else {
         eprintln!("  warning: input PBF not identified - omitting provenance metadata");
         return;
     };
     let input = crate::provenance::Input {
         name,
-        xxh3_128,
-        bytes,
+        identity,
         replication_timestamp,
         features,
     };
@@ -1180,9 +959,9 @@ fn write_provenance(
         // consumes an artifact gets it from the resolved ocean mode instead.
         artifact_key: config
             .ocean_artifact_key
-            .as_ref()
-            .and_then(|key| serde_json::from_str(&key.json()).ok())
+            .clone()
             .or_else(|| run.ocean_artifact_key.clone()),
+        source_key: run.ocean_source_key.clone(),
     };
     let value = crate::provenance::build(&input, config, &ocean, run.effective, run.resumed_from);
     pmtiles.add_metadata_member(crate::provenance::metadata_member(&value));

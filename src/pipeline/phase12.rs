@@ -2,21 +2,17 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::debug::{BUSY, WAIT, wait_span};
-use crate::geometry::{self, MercBbox, Point, merc_bbox};
-use crate::mvt::{self, GeomType};
+use crate::geometry::{self, MercBbox, Point};
 use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
-use crate::pmtiles_writer;
 use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter};
 use crate::way_index::WayIndexWriter;
-use crate::wire_format::encode_attrs_bytes;
 use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, MemberId, PrimitiveBlock, Way};
 
 use super::boundary_prescan::{BoundaryWayMeta, fold_relation};
 use super::emit::{
-    LineEmitScratch, PointEmitScratch, PolygonEmitScratch, RecordSink, RecordTally,
-    antimeridian_shifts_for_bbox, emit_line_feature, emit_point_or_centroid, emit_polygon_feature,
-    enrich_polygon_matches, push_sort_record, unwrap_antimeridian_path,
+    EmitCtx, FeatureGeometry, LineEmitScratch, PointEmitScratch, PolygonEmitScratch, RecordSink,
+    RecordTally, emit_match, enrich_polygon_matches, unwrap_antimeridian_path,
 };
 use super::relations::process_relation_blocks;
 use super::stats::{
@@ -1055,42 +1051,23 @@ pub(super) fn process_node(
     }
 
     let p = geometry::project_e7(lat_e7, lon_e7);
-    let pbbox = MercBbox {
-        min_x: p.x,
-        min_y: p.y,
-        max_x: p.x,
-        max_y: p.y,
+    let ctx = EmitCtx {
+        min_zoom,
+        max_zoom,
+        fanout_caps: &[],
+        polygon_simplify_factor: 1.0,
     };
-    let mut count: u64 = 0;
-    let mut geom_buf: Vec<u32> = Vec::new();
-    let mut attrs_buf: Vec<u8> = Vec::new();
-
+    let mut point = PointEmitScratch::new();
+    let mut count = 0;
     for m in &matches {
-        let z_lo = m.min_zoom.max(min_zoom);
-        let z_hi = m.max_zoom.min(max_zoom);
-        if z_lo > z_hi {
-            continue;
-        }
-
-        for z in z_lo..=z_hi {
-            encode_attrs_bytes(&mut attrs_buf, &m.attrs, z);
-            geometry::for_each_tile_in_bbox(&pbbox, z, |tx, ty| {
-                let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
-                let (px, py) = geometry::merc_to_tile_px(&p, tx, ty, z);
-                mvt::encode_point(&mut geom_buf, px, py);
-                push_sort_record(
-                    tile_id,
-                    osm_id,
-                    m.layer,
-                    m.paint_rank,
-                    GeomType::Point,
-                    &geom_buf,
-                    &attrs_buf,
-                    records,
-                );
-                count += 1;
-            });
-        }
+        count += emit_match(
+            osm_id,
+            FeatureGeometry::Node(&p),
+            m,
+            &ctx,
+            records,
+            &mut point,
+        );
     }
     count
 }
@@ -1716,19 +1693,6 @@ pub(super) fn drain_way_task_result(
     count
 }
 
-fn harvest_way_cap_events(acc: &mut WayAcc) {
-    for &(idx, tiles, oid) in &acc.polygon_emit.cap_events {
-        let layer = idx as usize / 15;
-        let zoom = idx as usize % 15;
-        acc.fanout.record_cap(layer, zoom, tiles, oid);
-    }
-    // `emit_polygon_feature` only clears cap_events when it runs, so a following
-    // non-polygon (or non-matching) way would re-harvest this way's events. The
-    // old thread-local path used `std::mem::take` per way; reproduce that
-    // consume-once semantics by clearing here.
-    acc.polygon_emit.cap_events.clear();
-}
-
 /// Process a raw way into a task-local arena.
 #[hotpath::measure]
 // cognitive_complexity is visible only without the hotpath feature, whose
@@ -1869,114 +1833,36 @@ pub(super) fn process_planned_way_into(
 
     {
         let merc = acc.merc.as_slice();
-        let merc_bbox_val = merc_bbox(merc);
 
         if is_closed {
             let area_m2 = geometry::area_sq_meters(merc);
             enrich_polygon_matches(&mut matches, area_m2);
         }
 
+        let ctx = EmitCtx {
+            min_zoom,
+            max_zoom,
+            fanout_caps,
+            polygon_simplify_factor,
+        };
         for m in &matches {
-            let z_lo = m.min_zoom.max(min_zoom);
-            let z_hi = m.max_zoom.min(max_zoom);
-            if z_lo > z_hi {
-                continue;
-            }
-
-            match m.geom_expect {
-                GeomExpect::Point
-                | GeomExpect::PolygonCentroid
-                | GeomExpect::PolygonPointOnSurface => {
-                    emit_point_or_centroid(
-                        osm_id,
-                        merc,
-                        None,
-                        &merc_bbox_val,
-                        m,
-                        z_lo,
-                        z_hi,
-                        &mut acc.sink,
-                        &mut acc.point_emit,
-                    );
-                }
-                GeomExpect::Line => {
-                    for shift in antimeridian_shifts_for_bbox(&merc_bbox_val) {
-                        if shift == 0.0 {
-                            emit_line_feature(
-                                osm_id,
-                                merc,
-                                &preserve_vertex_mask,
-                                m,
-                                z_lo,
-                                z_hi,
-                                &mut acc.sink,
-                                &mut acc.line_emit,
-                            );
-                        } else {
-                            let shifted: Vec<Point> = merc
-                                .iter()
-                                .map(|p| Point {
-                                    x: p.x + shift,
-                                    y: p.y,
-                                })
-                                .collect();
-                            emit_line_feature(
-                                osm_id,
-                                &shifted,
-                                &preserve_vertex_mask,
-                                m,
-                                z_lo,
-                                z_hi,
-                                &mut acc.sink,
-                                &mut acc.line_emit,
-                            );
-                        }
-                    }
-                }
-                GeomExpect::Polygon => {
-                    let fc = fanout_caps.get(m.layer as usize).copied().unwrap_or(0);
-                    for shift in antimeridian_shifts_for_bbox(&merc_bbox_val) {
-                        if shift == 0.0 {
-                            emit_polygon_feature(
-                                osm_id,
-                                merc,
-                                &preserve_vertex_mask,
-                                m,
-                                z_lo,
-                                z_hi,
-                                &mut acc.sink,
-                                &mut acc.polygon_emit,
-                                fc,
-                                polygon_simplify_factor,
-                            );
-                        } else {
-                            let shifted: Vec<Point> = merc
-                                .iter()
-                                .map(|p| Point {
-                                    x: p.x + shift,
-                                    y: p.y,
-                                })
-                                .collect();
-                            emit_polygon_feature(
-                                osm_id,
-                                &shifted,
-                                &preserve_vertex_mask,
-                                m,
-                                z_lo,
-                                z_hi,
-                                &mut acc.sink,
-                                &mut acc.polygon_emit,
-                                fc,
-                                polygon_simplify_factor,
-                            );
-                        }
-                    }
-                }
-            }
+            emit_match(
+                osm_id,
+                FeatureGeometry::Way {
+                    coords: merc,
+                    pins: &preserve_vertex_mask,
+                    line: &mut acc.line_emit,
+                    polygon: &mut acc.polygon_emit,
+                    fanout: &mut acc.fanout,
+                },
+                m,
+                &ctx,
+                &mut acc.sink,
+                &mut acc.point_emit,
+            );
         }
     }
     record_fanout_from_payload_records(&acc.sink.records[before..], &mut acc.fanout);
-    harvest_way_cap_events(acc);
     acc.bytes = acc.sink.bytes();
     pins_marked
 }

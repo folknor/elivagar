@@ -22,6 +22,7 @@ static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use elivagar::{RingOrientation, ring_is_simple, ring_role};
 
 /// Shortbread vector tile generator.
 #[derive(Parser)]
@@ -684,15 +685,14 @@ fn diag_layer(data: &[u8]) {
                 nr = rings.len()
             );
             for (ri, ring) in rings.iter().enumerate() {
-                let area = signed_area_ring(ring);
-                let winding = if area > 0 {
-                    "CW (outer)"
-                } else if area < 0 {
-                    "CCW (hole)"
-                } else {
-                    "ZERO"
+                let area2x = signed_area_ring(ring);
+                let area = area2x / 2;
+                let winding = match ring_role(area2x) {
+                    Some(RingOrientation::Positive) => "CW (outer)",
+                    Some(RingOrientation::Negative) => "CCW (hole)",
+                    None => "ZERO",
                 };
-                let simple = diag_ring_is_simple(ring);
+                let simple = ring_is_simple(ring);
                 let simple_str = if simple {
                     ""
                 } else {
@@ -720,7 +720,7 @@ fn diag_layer(data: &[u8]) {
     }
 }
 
-/// Inline MVT polygon decoder (avoids needing pub access to geometry module).
+/// Inline MVT polygon decoder used by diagnostics.
 fn diag_decode_polygon(commands: &[u32]) -> Vec<Vec<(i32, i32)>> {
     let mut rings: Vec<Vec<(i32, i32)>> = Vec::new();
     let mut cx: i32 = 0;
@@ -784,56 +784,17 @@ fn unzigzag_diag(n: u32) -> i32 {
     }
 }
 
-fn diag_ring_is_simple(ring: &[(i32, i32)]) -> bool {
-    if ring.len() < 4 {
-        return true;
-    }
-    let n = ring.len() - 1; // exclude closing vertex
-    for i in 0..n {
-        let a1 = ring[i];
-        let a2 = ring[i + 1];
-        for j in (i + 2)..n {
-            if j + 1 == ring.len() && i == 0 {
-                continue;
-            }
-            let b1 = ring[j];
-            let b2 = ring[(j + 1) % ring.len()];
-            // segments_cross: proper crossing only
-            let d1 = diag_cross_sign(a1, a2, b1);
-            let d2 = diag_cross_sign(a1, a2, b2);
-            let d3 = diag_cross_sign(b1, b2, a1);
-            let d4 = diag_cross_sign(b1, b2, a2);
-            if d1 != d2 && d3 != d4 && d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0 {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-fn diag_cross_sign(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32)) -> i8 {
-    let cross = i64::from(p2.0 - p1.0) * i64::from(p3.1 - p1.1)
-        - i64::from(p2.1 - p1.1) * i64::from(p3.0 - p1.0);
-    if cross > 0 {
-        1
-    } else if cross < 0 {
-        -1
-    } else {
-        0
-    }
-}
-
-fn signed_area_ring(ring: &[(i32, i32)]) -> i64 {
+fn signed_area_ring(ring: &[(i32, i32)]) -> i128 {
     if ring.len() < 3 {
         return 0;
     }
-    let mut sum: i64 = 0;
+    let mut sum: i128 = 0;
     for i in 0..ring.len() {
         let j = (i + 1) % ring.len();
-        sum += i64::from(ring[i].0) * i64::from(ring[j].1);
-        sum -= i64::from(ring[j].0) * i64::from(ring[i].1);
+        sum += i128::from(ring[i].0) * i128::from(ring[j].1);
+        sum -= i128::from(ring[j].0) * i128::from(ring[i].1);
     }
-    sum / 2
+    sum
 }
 
 #[allow(clippy::too_many_lines)]

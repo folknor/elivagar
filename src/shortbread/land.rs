@@ -1,5 +1,6 @@
 // Land coverage layers: land, sites, buildings, addresses.
 
+use super::osm_value;
 use super::*;
 use smallvec::{SmallVec, smallvec};
 
@@ -148,7 +149,9 @@ fn sites_kind(tags: &Tags<'_>) -> Option<&'static str> {
         tags,
         &[
             ("military", "danger_area", "danger_area"),
-            ("leisure", "sports_centre", "sports_centre"),
+            // OSM uses sports_centre, while the Shortbread sites fixture names
+            // its kind sports_center. Match the OSM tag and emit the fixture kind.
+            ("leisure", "sports_centre", "sports_center"),
             ("landuse", "construction", "construction"),
             ("amenity", "bicycle_parking", "bicycle_parking"),
             ("amenity", "college", "college"),
@@ -169,19 +172,13 @@ pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
         && v != "no"
     {
         let mut attrs = SmallVec::new();
-        if let Some(height) = tags
-            .get("height")
-            .and_then(parse_building_measurement_meters)
-        {
+        if let Some(height) = tags.get("height").and_then(osm_value::parse_length_m) {
             attrs.push(("height", AttrValue::Float(height), 0));
         }
-        if let Some(min_height) = tags
-            .get("min_height")
-            .and_then(parse_building_measurement_meters)
-        {
+        if let Some(min_height) = tags.get("min_height").and_then(osm_value::parse_length_m) {
             attrs.push(("min_height", AttrValue::Float(min_height), 0));
         }
-        if let Some(levels) = tags.get("building:levels").and_then(parse_building_levels) {
+        if let Some(levels) = tags.get("building:levels").and_then(osm_value::parse_count) {
             attrs.push(("building:levels", AttrValue::Float(levels), 0));
         }
         out.push(LayerMatch {
@@ -193,82 +190,6 @@ pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
             attrs,
         });
     }
-}
-
-fn parse_building_measurement_meters(raw: &str) -> Option<f64> {
-    let mut s = raw.trim().to_ascii_lowercase();
-    if s.is_empty() {
-        return None;
-    }
-    if let Some((first, _)) = s.split_once(';') {
-        s = first.trim().to_string();
-    }
-    if s.is_empty() {
-        return None;
-    }
-
-    let mut feet = false;
-    if s.ends_with("feet") {
-        feet = true;
-        s.truncate(s.len().saturating_sub(4));
-    } else if s.ends_with("ft") {
-        feet = true;
-        s.truncate(s.len().saturating_sub(2));
-    } else if s.ends_with('\'') {
-        feet = true;
-        s.truncate(s.len().saturating_sub(1));
-    } else if s.ends_with("meters") {
-        s.truncate(s.len().saturating_sub(6));
-    } else if s.ends_with("meter") {
-        s.truncate(s.len().saturating_sub(5));
-    } else if s.ends_with('m') {
-        s.truncate(s.len().saturating_sub(1));
-    }
-
-    let num = normalize_numeric_token(s.split_whitespace().next()?);
-    let value = num.parse::<f64>().ok()?;
-    if !value.is_finite() {
-        return None;
-    }
-    let meters = if feet { value * 0.3048 } else { value };
-    meters.is_finite().then_some(meters)
-}
-
-fn parse_building_levels(raw: &str) -> Option<f64> {
-    let s = raw.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let token = normalize_numeric_token(s.split(';').next()?.trim());
-    if token.is_empty() {
-        return None;
-    }
-    let levels = token.parse::<f64>().ok()?;
-    (levels.is_finite() && levels >= 0.0).then_some(levels)
-}
-
-fn normalize_numeric_token(token: &str) -> String {
-    let t = token.trim();
-    if !t.contains(',') {
-        return t.to_string();
-    }
-    if t.contains('.') {
-        // Assume commas are thousands separators when a dot-decimal exists.
-        return t.replace(',', "");
-    }
-    let comma_count = t.bytes().filter(|&b| b == b',').count();
-    if comma_count == 1
-        && let Some((left, right)) = t.split_once(',')
-    {
-        if right.len() == 3 && !left.is_empty() {
-            // Likely thousands separator, e.g. 1,234
-            return [left, right].concat();
-        }
-        // Likely locale decimal comma, e.g. 24,5
-        return [left, ".", right].concat();
-    }
-    // Multiple commas: assume thousands grouping.
-    t.replace(',', "")
 }
 
 // ---------------------------------------------------------------------------

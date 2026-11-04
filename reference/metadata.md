@@ -148,7 +148,8 @@ the contract comparison is defined over named fields, not the whole object.
 
 `input.xxh3_128` matches the `xxhash` brokkr records per dataset variant in
 `brokkr.toml`, byte for byte, with no coordination between the two - the same
-XXH3-128 over the same bytes. They can be compared directly.
+XXH3-128 over the same bytes. It is serialized as exactly 32 lowercase hex
+characters and can be compared directly.
 
 `config.tile.base_compression_level` is a **base**, not a uniform setting: the
 encoder clamps low zooms up and caps z13/z14 down. Recording the level alone
@@ -169,6 +170,14 @@ artifact-absent one is a contract mismatch, not a regression.
 Source selection (a separate simplified shapefile serving z0-7) and runtime
 simplification are different things; a single boolean conflates them.
 Runtime simplification is always enabled; the flag that disabled it was removed.
+
+`config.ocean.source_key` appears only when `mode` is `shapefile`. It records
+the full and optional simplified `.shp` and `.shx` hashes, the zoom span, and
+`OCEAN_POLICY_VERSION`. Its XXH3-128 values use the same 32-character lowercase
+hex form as `input.xxh3_128`. The simplified-input hash fields must be present,
+with explicit nulls when those inputs are absent. Artifact mode keeps its existing flat
+`artifact_key`, including compression level; artifact and no-ocean contracts
+do not gain a `source_key` member.
 
 `effective.shared_node_pins` is the largest of the three effective paths in
 blast radius. Pin scope changes which vertices survive simplification, so
@@ -292,8 +301,6 @@ Recorded here so they are not rediscovered as bugs:
   archives, so establish comparability with `elivagar inspect` first.
 - `input.replication_sequence` is not recorded (the pbfhogg header API for it
   is unconfirmed). `replication_timestamp` is.
-- `config.ocean` records shapefile hashes only via `artifact_key`, so a
-  `shapefile`-mode archive does not identify its shapefiles.
 - `data_bounds` is not recorded. It is derived from the input, and it drives
   ocean selection, so it explains ocean-layer diffs between variants. Note it
   is **derived**, so it is diagnostic, not contract.

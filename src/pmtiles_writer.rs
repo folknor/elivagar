@@ -48,7 +48,7 @@
 use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{self, BufReader, BufWriter, Seek, Write};
+use std::io::{self, BufReader, BufWriter, Cursor, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::pmtiles_reader::{RawDirEntry, encode_directory};
@@ -284,35 +284,278 @@ fn dedup_hashes(data: &[u8]) -> (u64, u64) {
 
 const _: () = assert!(std::mem::size_of::<RawDirEntry>() == 24);
 
-/// Storage for directory entries: in-memory or streamed to a temp file.
-/// Streaming avoids accumulating all ~200M+ directory entries in RAM at
-/// planet scale. Entries are built incrementally with run-length encoding
-/// in push_dir_entry(), so the on-disk format is already compacted.
-enum DirStore {
-    Memory(Vec<RawDirEntry>),
-    Streaming {
+/// Storage contract for directory entries. Both stores expose the same
+/// sequential read passes, so directory layout does not depend on storage.
+trait DirSpill: Send + Sync {
+    fn append(&mut self, entry: RawDirEntry) -> io::Result<()>;
+    fn flush(&mut self) -> io::Result<()>;
+    fn entry_count(&self) -> u64;
+    fn begin_read(&mut self) -> io::Result<()>;
+    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<RawDirEntry>>;
+    fn release_read(&mut self);
+    fn release_entries(&mut self);
+    fn cleanup(&mut self);
+}
+
+/// Small in-memory directory store used by tests and small sinks.
+struct MemoryDirSpill {
+    entries: Vec<RawDirEntry>,
+    read_position: usize,
+}
+
+impl MemoryDirSpill {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            read_position: 0,
+        }
+    }
+}
+
+impl DirSpill for MemoryDirSpill {
+    fn append(&mut self, entry: RawDirEntry) -> io::Result<()> {
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn entry_count(&self) -> u64 {
+        self.entries.len() as u64
+    }
+
+    fn begin_read(&mut self) -> io::Result<()> {
+        self.read_position = 0;
+        Ok(())
+    }
+
+    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<RawDirEntry>> {
+        let end = self
+            .read_position
+            .checked_add(count)
+            .filter(|&end| end <= self.entries.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "short directory store"))?;
+        let chunk = self.entries[self.read_position..end].to_vec();
+        self.read_position = end;
+        Ok(chunk)
+    }
+
+    fn release_read(&mut self) {
+        self.read_position = 0;
+    }
+
+    fn release_entries(&mut self) {
+        self.entries = Vec::new();
+        self.read_position = 0;
+    }
+
+    fn cleanup(&mut self) {}
+}
+
+/// Disk-backed directory spill. Its reader is reopened for each layout pass.
+struct FileDirSpill {
+    writer: BufWriter<File>,
+    reader: Option<BufReader<File>>,
+    path: PathBuf,
+    count: u64,
+}
+
+impl FileDirSpill {
+    fn new(tmp_dir: &Path) -> io::Result<Self> {
+        let path = tmp_dir.join("dir_entries.bin");
+        let file = File::create(&path)?;
+        let writer = BufWriter::with_capacity(1 << 16, file);
+        Ok(Self {
+            writer,
+            reader: None,
+            path,
+            count: 0,
+        })
+    }
+}
+
+impl DirSpill for FileDirSpill {
+    fn append(&mut self, entry: RawDirEntry) -> io::Result<()> {
+        self.writer.write_all(&entry.tile_id.to_le_bytes())?;
+        self.writer.write_all(&entry.offset.to_le_bytes())?;
+        self.writer.write_all(&entry.length.to_le_bytes())?;
+        self.writer.write_all(&entry.run_length.to_le_bytes())?;
+        self.count += 1;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+
+    fn entry_count(&self) -> u64 {
+        self.count
+    }
+
+    fn begin_read(&mut self) -> io::Result<()> {
+        self.flush()?;
+        self.reader = Some(BufReader::with_capacity(1 << 16, File::open(&self.path)?));
+        Ok(())
+    }
+
+    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<RawDirEntry>> {
+        let reader = self.reader.as_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory read pass not started",
+            )
+        })?;
+        read_dir_entries(reader, count)
+    }
+
+    fn release_read(&mut self) {
+        self.reader = None;
+    }
+
+    fn release_entries(&mut self) {}
+
+    fn cleanup(&mut self) {
+        self.release_read();
+        drop(std::fs::remove_file(&self.path));
+    }
+}
+
+/// Concrete directory store keeps the writer's auto traits while dispatching
+/// storage-specific operations through the spill contract.
+enum DirectorySpill {
+    Memory(MemoryDirSpill),
+    File(FileDirSpill),
+}
+
+impl DirSpill for DirectorySpill {
+    fn append(&mut self, entry: RawDirEntry) -> io::Result<()> {
+        match self {
+            Self::Memory(store) => store.append(entry),
+            Self::File(store) => store.append(entry),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Memory(store) => store.flush(),
+            Self::File(store) => store.flush(),
+        }
+    }
+
+    fn entry_count(&self) -> u64 {
+        match self {
+            Self::Memory(store) => store.entry_count(),
+            Self::File(store) => store.entry_count(),
+        }
+    }
+
+    fn begin_read(&mut self) -> io::Result<()> {
+        match self {
+            Self::Memory(store) => store.begin_read(),
+            Self::File(store) => store.begin_read(),
+        }
+    }
+
+    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<RawDirEntry>> {
+        match self {
+            Self::Memory(store) => store.read_chunk(count),
+            Self::File(store) => store.read_chunk(count),
+        }
+    }
+
+    fn release_read(&mut self) {
+        match self {
+            Self::Memory(store) => store.release_read(),
+            Self::File(store) => store.release_read(),
+        }
+    }
+
+    fn release_entries(&mut self) {
+        match self {
+            Self::Memory(store) => store.release_entries(),
+            Self::File(store) => store.release_entries(),
+        }
+    }
+
+    fn cleanup(&mut self) {
+        match self {
+            Self::Memory(store) => store.cleanup(),
+            Self::File(store) => store.cleanup(),
+        }
+    }
+}
+
+/// A seekable archive sink shared by in-memory and streaming writers.
+/// Streaming keeps tile data at its final offset in the partial archive;
+/// the memory sink uses a Cursor for tests and small outputs.
+enum BlobSink {
+    Memory(Cursor<Vec<u8>>),
+    File {
         writer: BufWriter<File>,
-        path: PathBuf,
-        count: u64,
+        partial_path: PathBuf,
     },
 }
 
-/// Tile data storage: in-memory or streamed to disk.
-/// Streaming mode avoids buffering all compressed tile data in RAM (~3 GB
-/// for a planet). The blob file IS the destination archive under a
-/// `.partial` name, pre-seeded with the reserved init section, so tile data
-/// lands at its final offset as it arrives and `write_to()` only appends the
-/// trailing sections and patches the prologue - no end-of-run data copy.
-enum TileBlob {
-    /// All tile data in a Vec (original behavior, for tests and small runs).
-    Memory(Vec<u8>),
-    /// Tile data streamed to `<output>.partial` starting at INIT_SECTION.
-    /// `offset` is relative to the data section start.
-    File {
-        writer: BufWriter<File>,
-        path: PathBuf,
-        offset: u64,
-    },
+impl BlobSink {
+    #[allow(clippy::cast_possible_truncation)]
+    fn memory() -> Self {
+        let mut cursor = Cursor::new(vec![0_u8; INIT_SECTION as usize]);
+        cursor.set_position(INIT_SECTION);
+        Self::Memory(cursor)
+    }
+
+    fn finish(&mut self, path: &Path) -> io::Result<()> {
+        match self {
+            Self::Memory(cursor) => {
+                cursor.flush()?;
+                let file = File::create(path)?;
+                let mut writer = BufWriter::with_capacity(1 << 20, file);
+                writer.write_all(cursor.get_ref())?;
+                writer.flush()
+            }
+            Self::File {
+                writer,
+                partial_path,
+            } => {
+                writer.flush()?;
+                std::fs::rename(partial_path.as_path(), path)
+            }
+        }
+    }
+}
+
+impl Write for BlobSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Memory(cursor) => cursor.write(buf),
+            Self::File { writer, .. } => writer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Memory(cursor) => cursor.flush(),
+            Self::File { writer, .. } => writer.flush(),
+        }
+    }
+}
+
+impl Seek for BlobSink {
+    fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+        match self {
+            Self::Memory(cursor) => cursor.seek(position),
+            Self::File { writer, .. } => writer.seek(position),
+        }
+    }
+}
+
+/// Tile data and the trailing archive sections share one seekable sink.
+struct TileBlob {
+    sink: BlobSink,
+    data_length: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,14 +586,14 @@ pub struct PmtilesWriter {
     /// Exact metadata supplied by an archive-preserving rewrite.  This is
     /// intentionally narrow: normal production writes always compose metadata.
     metadata_verbatim: Option<String>,
-    /// Concatenated compressed tile data (in-memory or file-backed).
+    /// Seekable archive sink with tile data appended at the fixed data offset.
     blob: TileBlob,
     /// Total number of tiles addressed (including deduped references).
     num_addressed: u64,
     /// Current run being built (flushed when a new non-extending tile arrives).
     current_run: Option<RawDirEntry>,
     /// Directory entries (in-memory or streamed to disk).
-    dir_store: DirStore,
+    dir_store: DirectorySpill,
     /// Shared payload equality index for individual tiles and tile runs.
     dedup: DedupIndex,
     /// Number of unique tile contents (after dedup).
@@ -437,10 +680,13 @@ impl PmtilesWriter {
             metadata_extensions: Vec::new(),
             ocean_only_metadata: false,
             metadata_verbatim: None,
-            blob: TileBlob::Memory(Vec::new()),
+            blob: TileBlob {
+                sink: BlobSink::memory(),
+                data_length: 0,
+            },
             num_addressed: 0,
             current_run: None,
-            dir_store: DirStore::Memory(Vec::new()),
+            dir_store: DirectorySpill::Memory(MemoryDirSpill::new()),
             dedup: DedupIndex::new(MAX_DEDUP_ENTRIES),
             unique_count: 0,
             dedup_stats: DedupStats::default(),
@@ -471,9 +717,7 @@ impl PmtilesWriter {
         #[allow(clippy::cast_possible_truncation)]
         writer.write_all(&vec![0_u8; INIT_SECTION as usize])?;
 
-        let dir_path = tmp_dir.join("dir_entries.bin");
-        let dir_file = File::create(&dir_path)?;
-        let dir_writer = BufWriter::with_capacity(1 << 16, dir_file);
+        let dir_store = DirectorySpill::File(FileDirSpill::new(tmp_dir)?);
 
         Ok(PmtilesWriter {
             config,
@@ -484,18 +728,16 @@ impl PmtilesWriter {
             metadata_extensions: Vec::new(),
             ocean_only_metadata: false,
             metadata_verbatim: None,
-            blob: TileBlob::File {
-                writer,
-                path: blob_path,
-                offset: 0,
+            blob: TileBlob {
+                sink: BlobSink::File {
+                    writer,
+                    partial_path: blob_path,
+                },
+                data_length: 0,
             },
             num_addressed: 0,
             current_run: None,
-            dir_store: DirStore::Streaming {
-                writer: dir_writer,
-                path: dir_path,
-                count: 0,
-            },
+            dir_store,
             dedup: DedupIndex::new(MAX_DEDUP_ENTRIES),
             unique_count: 0,
             dedup_stats: DedupStats::default(),
@@ -523,24 +765,9 @@ impl PmtilesWriter {
             return Ok(false);
         }
 
-        let offset;
-        match &mut self.blob {
-            TileBlob::Memory(vec) => {
-                offset = u64::try_from(vec.len()).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "tile blob offset exceeds u64")
-                })?;
-                vec.extend_from_slice(data);
-            }
-            TileBlob::File {
-                writer,
-                offset: file_offset,
-                ..
-            } => {
-                offset = *file_offset;
-                writer.write_all(data)?;
-                *file_offset += u64::from(key.length);
-            }
-        }
+        let offset = self.blob.data_length;
+        self.blob.sink.write_all(data)?;
+        self.blob.data_length += u64::from(key.length);
 
         self.dedup.insert(key, offset, &mut self.dedup_stats);
         self.push_dir_entry(tile_id, offset, key.length)?;
@@ -575,21 +802,9 @@ impl PmtilesWriter {
                 .record_reuse(key.length, u64::from(run_length));
             (offset, false)
         } else {
-            let offset = match &mut self.blob {
-                TileBlob::Memory(blob) => {
-                    let offset = u64::try_from(blob.len()).map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "tile blob offset exceeds u64")
-                    })?;
-                    blob.extend_from_slice(data);
-                    offset
-                }
-                TileBlob::File { writer, offset, .. } => {
-                    let current = *offset;
-                    writer.write_all(data)?;
-                    *offset += u64::from(key.length);
-                    current
-                }
-            };
+            let offset = self.blob.data_length;
+            self.blob.sink.write_all(data)?;
+            self.blob.data_length += u64::from(key.length);
             self.dedup.insert(key, offset, &mut self.dedup_stats);
             self.unique_count += 1;
             (offset, true)
@@ -645,8 +860,8 @@ impl PmtilesWriter {
         // Free dedup map - no longer needed after all tiles are added.
         self.dedup.release();
 
-        // Build directories: streaming mode reads entries from temp file in
-        // LEAF_SIZE chunks (O(1) memory), in-memory mode collects all entries.
+        // Build directories through sequential passes over the shared spill
+        // interface. File-backed leaf construction reads bounded chunks.
         let (root_bytes, leaf_bytes, num_entries) = self.finalize_directories()?;
         crate::debug::emit_counter_u64("pmtiles_dir_entries", num_entries);
         crate::debug::emit_counter_usize("pmtiles_root_dir_bytes", root_bytes.len());
@@ -664,17 +879,10 @@ impl PmtilesWriter {
         });
         let metadata_compressed = gzip_compress(metadata_json.as_bytes())?;
 
-        // Clean up streaming dir_entries temp file if it exists.
-        // Best-effort cleanup of streaming temp file - failure is harmless.
-        if let DirStore::Streaming { path: dir_path, .. } = &self.dir_store {
-            drop(std::fs::remove_file(dir_path));
-        }
+        // Best-effort cleanup of the streaming directory spill.
+        self.dir_store.cleanup();
 
-        // Determine tile data length.
-        let data_length = match &self.blob {
-            TileBlob::Memory(vec) => vec.len() as u64,
-            TileBlob::File { offset, .. } => *offset,
-        };
+        let data_length = self.blob.data_length;
 
         // Layout: [header 127] [root_dir] [zeros to INIT_SECTION] [tile_data]
         // [metadata] [leaf_dirs]. finalize_directories() guarantees the root
@@ -704,40 +912,14 @@ impl PmtilesWriter {
             num_entries,
         );
 
-        match &mut self.blob {
-            TileBlob::Memory(vec) => {
-                // Everything is known up front: one sequential pass.
-                let file = File::create(path)?;
-                let mut w = BufWriter::with_capacity(1 << 20, file);
-                w.write_all(&header)?;
-                w.write_all(&root_bytes)?;
-                w.write_all(&vec![0_u8; MAX_ROOT_BYTES - root_bytes.len()])?;
-                w.write_all(vec)?;
-                w.write_all(&metadata_compressed)?;
-                w.write_all(&leaf_bytes)?;
-                w.flush()?;
-            }
-            TileBlob::File {
-                writer,
-                path: blob_path,
-                ..
-            } => {
-                // The tile data is already in place. Append the trailing
-                // sections, overwrite the reserved prologue (the zeros
-                // between root end and INIT_SECTION were written at
-                // creation), and rename the partial into the archive.
-                writer.flush()?;
-                let mut file = File::options().write(true).open(&*blob_path)?;
-                file.seek(io::SeekFrom::Start(metadata_offset))?;
-                file.write_all(&metadata_compressed)?;
-                file.write_all(&leaf_bytes)?;
-                file.seek(io::SeekFrom::Start(0))?;
-                file.write_all(&header)?;
-                file.write_all(&root_bytes)?;
-                drop(file);
-                std::fs::rename(&*blob_path, path)?;
-            }
-        }
+        self.blob.sink.seek(io::SeekFrom::Start(metadata_offset))?;
+        self.blob.sink.write_all(&metadata_compressed)?;
+        self.blob.sink.write_all(&leaf_bytes)?;
+        self.blob.sink.seek(io::SeekFrom::Start(0))?;
+        self.blob.sink.write_all(&header)?;
+        self.blob.sink.write_all(&root_bytes)?;
+        self.blob.sink.flush()?;
+        self.blob.sink.finish(path)?;
         Ok(())
     }
 }
@@ -750,16 +932,7 @@ impl PmtilesWriter {
     /// Flush the current run-length entry to the dir store.
     fn flush_run(&mut self) -> io::Result<()> {
         if let Some(run) = self.current_run.take() {
-            match &mut self.dir_store {
-                DirStore::Memory(entries) => entries.push(run),
-                DirStore::Streaming { writer, count, .. } => {
-                    writer.write_all(&run.tile_id.to_le_bytes())?;
-                    writer.write_all(&run.offset.to_le_bytes())?;
-                    writer.write_all(&run.length.to_le_bytes())?;
-                    writer.write_all(&run.run_length.to_le_bytes())?;
-                    *count += 1;
-                }
-            }
+            self.dir_store.append(run)?;
         }
         Ok(())
     }
@@ -821,21 +994,13 @@ impl PmtilesWriter {
     #[hotpath::measure]
     fn collect_dir_entries(&mut self) -> io::Result<Vec<RawDirEntry>> {
         self.flush_run()?;
-        match &mut self.dir_store {
-            DirStore::Memory(entries) => Ok(std::mem::take(entries)),
-            DirStore::Streaming {
-                writer,
-                path,
-                count,
-            } => {
-                writer.flush()?;
-                #[allow(clippy::cast_possible_truncation)]
-                let num = *count as usize;
-                let file = File::open(path)?;
-                let mut reader = BufReader::with_capacity(1 << 16, file);
-                read_dir_entries(&mut reader, num)
-            }
-        }
+        self.dir_store.flush()?;
+        let count = directory_entry_count(self.dir_store.entry_count())?;
+        self.dir_store.begin_read()?;
+        let entries = self.dir_store.read_chunk(count)?;
+        self.dir_store.release_read();
+        self.dir_store.release_entries();
+        Ok(entries)
     }
 
     /// Override the dedup map capacity. Caps the payload dedup map's entry
@@ -862,87 +1027,19 @@ impl PmtilesWriter {
 
     /// Build root and leaf directory bytes from the dir store.
     ///
-    /// For in-memory mode, collects entries and delegates to `build_leaf_directories`.
-    /// For streaming mode, reads entries from the temp file in leaf-size
-    /// chunks, building leaf directories incrementally without materializing
-    /// all entries (O(1) memory vs O(n)).
-    ///
-    /// The compressed root MUST fit the init section (the spec's first-16,384
-    /// bytes window, which the fixed data offset turns into a hard budget), so
-    /// both arms retry with a doubled leaf fanout until it does. Termination:
-    /// once the fanout reaches the entry count there is one leaf and the root
-    /// has one entry. The retry re-reads the streaming temp file per attempt -
-    /// a sequential re-read of 24 bytes per entry, paid only when the previous
-    /// attempt's root overflowed ~16 KB.
+    /// Directory storage supplies sequential passes; one layout loop chooses
+    /// root-only output or retries leaf fanout until the compressed root fits.
+    /// Streaming stores reread their spill file per attempt, while the memory
+    /// sink is intended for tests and small outputs.
     ///
     /// Returns `(root_compressed, leaf_compressed, num_entries)`.
     #[hotpath::measure]
     fn finalize_directories(&mut self) -> io::Result<(Vec<u8>, Vec<u8>, u64)> {
-        const MAX_ROOT_ENTRIES: usize = 16384;
-        const LEAF_SIZE: usize = 4096;
-
         self.flush_run()?;
-
-        match &mut self.dir_store {
-            DirStore::Memory(entries) => {
-                let entries = std::mem::take(entries);
-                #[allow(clippy::cast_possible_truncation)]
-                let num = entries.len() as u64;
-                if entries.len() <= MAX_ROOT_ENTRIES {
-                    let root = gzip_compress(&encode_directory(&entries)?)?;
-                    if root.len() <= MAX_ROOT_BYTES {
-                        return Ok((root, Vec::new(), num));
-                    }
-                }
-                let mut leaf_size = LEAF_SIZE;
-                loop {
-                    let (root, leaf) = build_leaf_directories(&entries, leaf_size)?;
-                    if root.len() <= MAX_ROOT_BYTES {
-                        return Ok((root, leaf, num));
-                    }
-                    leaf_size *= 2;
-                }
-            }
-            DirStore::Streaming {
-                writer,
-                path,
-                count,
-            } => {
-                writer.flush()?;
-                #[allow(clippy::cast_possible_truncation)]
-                let count = *count as usize;
-                let path = path.clone();
-
-                if count <= MAX_ROOT_ENTRIES {
-                    // Small dataset: read all (at most 393 KB), single root
-                    // directory - unless it compresses past the budget.
-                    let file = File::open(&path)?;
-                    let mut reader = BufReader::with_capacity(1 << 16, file);
-                    let entries = read_dir_entries(&mut reader, count)?;
-                    let root = gzip_compress(&encode_directory(&entries)?)?;
-                    if root.len() <= MAX_ROOT_BYTES {
-                        return Ok((root, Vec::new(), count as u64));
-                    }
-                    let mut leaf_size = LEAF_SIZE;
-                    loop {
-                        let (root, leaf) = build_leaf_directories(&entries, leaf_size)?;
-                        if root.len() <= MAX_ROOT_BYTES {
-                            return Ok((root, leaf, count as u64));
-                        }
-                        leaf_size *= 2;
-                    }
-                }
-
-                let mut leaf_size = LEAF_SIZE;
-                loop {
-                    let (root, leaf) = build_leaf_directories_streaming(&path, count, leaf_size)?;
-                    if root.len() <= MAX_ROOT_BYTES {
-                        return Ok((root, leaf, count as u64));
-                    }
-                    leaf_size *= 2;
-                }
-            }
-        }
+        let result = layout_directories(&mut self.dir_store);
+        self.dir_store.release_read();
+        self.dir_store.release_entries();
+        result
     }
 
     /// Build the 127-byte header.
@@ -1013,66 +1110,72 @@ fn write_header_bounds(h: &mut [u8; 127], config: &PmtilesConfig) {
     write_i32_le(h, 123, f64_to_e7(center_lat));
 }
 
-/// Build leaf directories by streaming entries from the dir-entries temp
-/// file in `leaf_size` chunks, without materializing all entries.
+/// Convert the stored entry count for a platform-sized read pass.
+fn directory_entry_count(count: u64) -> io::Result<usize> {
+    usize::try_from(count).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PMTiles directory entry count exceeds addressable memory",
+        )
+    })
+}
+
+/// Choose root-only output or retry larger leaf chunks until the compressed
+/// root fits the reserved prologue. Every retry reads through the same spill
+/// interface, so memory and file stores use identical layout decisions.
+#[hotpath::measure]
+fn layout_directories(store: &mut dyn DirSpill) -> io::Result<(Vec<u8>, Vec<u8>, u64)> {
+    const MAX_ROOT_ENTRIES: usize = 16384;
+    const LEAF_SIZE: usize = 4096;
+
+    store.flush()?;
+    let entry_count = store.entry_count();
+    let count = directory_entry_count(entry_count)?;
+    let mut root_only = count <= MAX_ROOT_ENTRIES;
+    let mut leaf_size = LEAF_SIZE;
+
+    loop {
+        if root_only {
+            store.begin_read()?;
+            let entries = store.read_chunk(count)?;
+            store.release_read();
+            let root = gzip_compress(&encode_directory(&entries)?)?;
+            if root.len() <= MAX_ROOT_BYTES {
+                return Ok((root, Vec::new(), entry_count));
+            }
+            root_only = false;
+        } else {
+            let (root, leaves) = build_leaf_directories(store, count, leaf_size)?;
+            if root.len() <= MAX_ROOT_BYTES {
+                return Ok((root, leaves, entry_count));
+            }
+            leaf_size = leaf_size.checked_mul(2).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "PMTiles leaf size overflow")
+            })?;
+        }
+    }
+}
+
+/// Build leaf directories from the current spill store in `leaf_size` chunks.
 /// Returns (root_compressed, all_leaves_compressed).
 #[hotpath::measure]
-fn build_leaf_directories_streaming(
-    path: &Path,
+fn build_leaf_directories(
+    store: &mut dyn DirSpill,
     count: usize,
     leaf_size: usize,
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(1 << 16, file);
-
+    store.begin_read()?;
     let mut leaf_blob: Vec<u8> = Vec::new();
     let mut root_entries: Vec<RawDirEntry> = Vec::new();
     let mut remaining = count;
 
     while remaining > 0 {
         let chunk_size = remaining.min(leaf_size);
-        let chunk = read_dir_entries(&mut reader, chunk_size)?;
+        let chunk = store.read_chunk(chunk_size)?;
         remaining -= chunk_size;
-
         let first_tile_id = chunk[0].tile_id;
+
         let leaf_raw = encode_directory(&chunk)?;
-        let compressed = gzip_compress(&leaf_raw)?;
-
-        #[allow(clippy::cast_possible_truncation)]
-        let leaf_len = compressed.len() as u32;
-        let leaf_offset = leaf_blob.len() as u64;
-        leaf_blob.extend_from_slice(&compressed);
-
-        root_entries.push(RawDirEntry {
-            tile_id: first_tile_id,
-            offset: leaf_offset,
-            length: leaf_len,
-            run_length: 0,
-        });
-    }
-
-    let root_raw = encode_directory(&root_entries)?;
-    let root_compressed = gzip_compress(&root_raw)?;
-    Ok((root_compressed, leaf_blob))
-}
-
-/// Build leaf directories when entries exceed the root limit.
-/// Returns (root_compressed, all_leaves_compressed).
-#[hotpath::measure]
-fn build_leaf_directories(
-    entries: &[RawDirEntry],
-    leaf_size: usize,
-) -> io::Result<(Vec<u8>, Vec<u8>)> {
-    let mut leaf_blob: Vec<u8> = Vec::new();
-    let mut root_entries: Vec<RawDirEntry> = Vec::new();
-
-    for chunk in entries.chunks(leaf_size) {
-        let first_tile_id = match chunk.first() {
-            Some(e) => e.tile_id,
-            None => continue,
-        };
-
-        let leaf_raw = encode_directory(chunk)?;
         let compressed = gzip_compress(&leaf_raw)?;
 
         #[allow(clippy::cast_possible_truncation)]

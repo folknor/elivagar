@@ -1,18 +1,9 @@
-// Node coordinate index - two implementations.
+// Node coordinate storage has two backends. NodeIndex is a direct-addressed
+// flat mmap that supports arbitrary insertion order. SortedNodeStore is a
+// compact hierarchy for ascending node IDs. NodeStore and NodeStoreReader
+// dispatch to the selected backend.
 //
-// 1. NodeIndex (flat mmap): Direct-addressed at `node_id * 8`, 4 bytes lat_e7 +
-//    4 bytes lon_e7. Grows in 1 GB increments, backed by mmap. Works for any
-//    insertion order. Planet scale: ~96 GB file (IDs up to ~12B).
-//
-// 2. SortedNodeStore (compact in-RAM): Requires sorted insertion (ascending
-//    node IDs, guaranteed by PBF Sort.Type_then_ID). Three-level hierarchy:
-//    groups (64K nodes) → chunks (256 nodes) → individual nodes. Each level
-//    uses a 256-bit bitmask for O(1) presence test + popcount-based indexing
-//    into packed arrays. Denmark: ~420 MB vs 96 GB sparse mmap.
-//
-// NodeStore / NodeStoreReader enums dispatch to the appropriate backend.
-//
-// Flat mmap history: all madvise hints were tried and removed. See CLAUDE.md.
+// The flat mmap backend currently sets no madvise hints.
 
 use std::cell::UnsafeCell;
 use std::fs::File;
@@ -20,6 +11,41 @@ use std::io;
 use std::path::Path;
 
 use memmap2::{Mmap, MmapMut};
+
+/// An OSM node identifier. Legacy APIs still accept `i64`; the typed methods
+/// use this wrapper so node IDs are distinct from other integer keys.
+///
+/// Negative values can be wrapped for compatibility with those legacy APIs.
+/// Stores reject them on writes and return no match on reads.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NodeId(i64);
+
+impl NodeId {
+    pub const fn new(raw: i64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn as_i64(self) -> i64 {
+        self.0
+    }
+
+    fn as_nonnegative_u64(self) -> Option<u64> {
+        u64::try_from(self.0).ok()
+    }
+}
+
+impl From<i64> for NodeId {
+    fn from(raw: i64) -> Self {
+        Self::new(raw)
+    }
+}
+
+impl From<NodeId> for i64 {
+    fn from(node_id: NodeId) -> Self {
+        node_id.as_i64()
+    }
+}
 
 const ENTRY_SIZE: u64 = 8; // 4 bytes lat_e7 + 4 bytes lon_e7
 const GROW_INCREMENT: u64 = 1_073_741_824; // 1 GB
@@ -42,8 +68,7 @@ pub struct NodeIndex {
 impl NodeIndex {
     /// Create a new writable node index file at `path`.
     ///
-    /// No madvise hints are set during the write phase - see module-level
-    /// comment for history on why MADV_SEQUENTIAL was removed.
+    /// The flat mmap backend sets no madvise hints.
     pub fn create(path: &Path) -> io::Result<Self> {
         Self::create_internal(path, Some(MAX_FLAT_INDEX_SIZE))
     }
@@ -81,11 +106,21 @@ impl NodeIndex {
     /// Negative node IDs are invalid and rejected, matching `SortedNodeStore`.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
+        self.put_id(NodeId::new(node_id), lat_e7, lon_e7);
+    }
+
+    /// Write coordinates using a typed node identifier.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub fn put_id(&mut self, node_id: NodeId, lat_e7: i32, lon_e7: i32) {
         assert!(
-            node_id >= 0,
-            "NodeIndex: node IDs must be non-negative, got {node_id}"
+            node_id.as_i64() >= 0,
+            "NodeIndex: node IDs must be non-negative, got {}",
+            node_id.as_i64()
         );
-        let offset = (node_id as u64)
+        let id = node_id
+            .as_nonnegative_u64()
+            .expect("validated node ID must be non-negative");
+        let offset = id
             .checked_mul(ENTRY_SIZE)
             .expect("flat node index offset overflow");
         let needed = offset
@@ -100,7 +135,7 @@ impl NodeIndex {
                  Input is likely unsorted. Use a sorted PBF, run `pbfhogg sort input.pbf -o sorted.pbf`, \
                  or use --force-sorted only if the PBF is actually sorted.",
                 needed as f64 / (1024.0 * 1024.0 * 1024.0),
-                node_id,
+                node_id.as_i64(),
                 max_file_size as f64 / (1024.0 * 1024.0 * 1024.0),
             );
         }
@@ -141,6 +176,11 @@ impl NodeIndex {
         clippy::unwrap_used
     )]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
+        self.get_id(NodeId::new(node_id))
+    }
+
+    /// Read coordinates using a typed node identifier.
+    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
         get_from_mmap(&self.mmap, self.file_len, node_id)
     }
 
@@ -162,11 +202,8 @@ impl NodeIndex {
     clippy::cast_possible_truncation,
     clippy::unwrap_used
 )]
-fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: i64) -> Option<(i32, i32)> {
-    if node_id < 0 {
-        return None;
-    }
-    let offset = (node_id as u64).checked_mul(ENTRY_SIZE)?;
+fn get_from_mmap(mmap: &[u8], file_len: u64, node_id: NodeId) -> Option<(i32, i32)> {
+    let offset = node_id.as_nonnegative_u64()?.checked_mul(ENTRY_SIZE)?;
     let needed = offset.checked_add(ENTRY_SIZE)?;
 
     if needed > file_len {
@@ -197,6 +234,11 @@ pub struct NodeIndexReader {
 impl NodeIndexReader {
     /// Read coordinates for a node. Returns None if entry is unset (all zeros).
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
+        self.get_id(NodeId::new(node_id))
+    }
+
+    /// Read coordinates using a typed node identifier.
+    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
         get_from_mmap(&self.mmap, self.file_len, node_id)
     }
 }
@@ -251,80 +293,198 @@ fn count_set_bits(mask: &[u8; BITMASK_BYTES]) -> u16 {
 // compresses at its actual size.
 // ---------------------------------------------------------------------------
 
-/// Pack `values` at `bit_width` bits each, appending to `dest`.
-/// Output size: ⌈values.len() × bit_width / 8⌉ bytes.
-#[allow(clippy::cast_possible_truncation)]
-fn bitpack_values_into(values: &[u32], bit_width: u8, dest: &mut Vec<u8>) {
-    if bit_width == 0 {
-        return;
-    }
-    let bw = u32::from(bit_width);
-    let mask = if bw >= 32 { u64::MAX } else { (1u64 << bw) - 1 };
-    let mut accumulator: u64 = 0;
-    let mut bits_in_acc: u32 = 0;
-    for &v in values {
-        accumulator |= (u64::from(v) & mask) << bits_in_acc;
-        bits_in_acc += bw;
-        while bits_in_acc >= 8 {
-            dest.push(accumulator as u8);
-            accumulator >>= 8;
-            bits_in_acc -= 8;
-        }
-    }
-    if bits_in_acc > 0 {
-        dest.push(accumulator as u8);
-    }
-}
+mod codec {
+    use super::NODES_PER_CHUNK;
 
-/// Unpack `n` values at `bit_width` bits each from `packed` into `out[..n]`.
-///
-/// Uses a single u64 unaligned read per value (fast path) to avoid byte-by-byte
-/// assembly. Tried accumulator-based approach (refill loop with `while bits_in_acc < bw`):
-/// regressed synthetic by ~10% due to branch misprediction on the refill loop.
-/// Doesn't matter anyway - decompress_chunk is DRAM-latency-bound on real data
-/// (820ns avg on 270 MB blob vs 25ns synthetic with L1-hot data).
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::unwrap_used,
-    clippy::needless_range_loop
-)]
-fn bitunpack_values(packed: &[u8], n: usize, bit_width: u8, out: &mut [u32]) {
-    if bit_width == 0 {
-        for o in &mut out[..n] {
-            *o = 0;
-        }
-        return;
-    }
-    let bw = u32::from(bit_width);
-    let mask = if bw >= 32 { u64::MAX } else { (1u64 << bw) - 1 };
-    let mut bit_offset: usize = 0;
-    for i in 0..n {
-        let byte_idx = bit_offset / 8;
-        let bit_idx = bit_offset % 8;
-        // Read a u64 covering the bits we need. Fast path: single unaligned load
-        // when ≥8 bytes remain. Slow path: byte-by-byte near end of buffer.
-        let raw = if byte_idx + 8 <= packed.len() {
-            u64::from_le_bytes(packed[byte_idx..byte_idx + 8].try_into().unwrap())
-        } else {
-            let mut r: u64 = 0;
-            for b in byte_idx..packed.len() {
-                r |= u64::from(packed[b]) << ((b - byte_idx) * 8);
-            }
-            r
-        };
-        out[i] = ((raw >> bit_idx) & mask) as u32;
-        bit_offset += bw as usize;
-    }
-}
-
-/// Compute the minimum number of bits needed to represent the max value.
-fn required_bits(max_val: u32) -> u8 {
-    if max_val == 0 {
-        return 0;
-    }
+    /// Pack `values` at `bit_width` bits each, appending to `dest`.
+    /// Output size: ceiling of values.len() * bit_width / 8 bytes.
     #[allow(clippy::cast_possible_truncation)]
-    {
-        (32 - max_val.leading_zeros()) as u8
+    fn bitpack_values_into(values: &[u32], bit_width: u8, dest: &mut Vec<u8>) {
+        if bit_width == 0 {
+            return;
+        }
+        let bw = u32::from(bit_width);
+        let mask = if bw >= 32 { u64::MAX } else { (1u64 << bw) - 1 };
+        let mut accumulator: u64 = 0;
+        let mut bits_in_acc: u32 = 0;
+        for &v in values {
+            accumulator |= (u64::from(v) & mask) << bits_in_acc;
+            bits_in_acc += bw;
+            while bits_in_acc >= 8 {
+                dest.push(accumulator as u8);
+                accumulator >>= 8;
+                bits_in_acc -= 8;
+            }
+        }
+        if bits_in_acc > 0 {
+            dest.push(accumulator as u8);
+        }
+    }
+
+    /// Unpack `n` values at `bit_width` bits each from `packed` into `out[..n]`.
+    ///
+    /// Uses a single u64 unaligned read per value (fast path) to avoid byte-by-byte
+    /// assembly. Tried accumulator-based approach (refill loop with `while bits_in_acc < bw`):
+    /// regressed synthetic by ~10% due to branch misprediction on the refill loop.
+    /// Doesn't matter anyway - decompress_chunk is DRAM-latency-bound on real data
+    /// (820ns avg on 270 MB blob vs 25ns synthetic with L1-hot data).
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::unwrap_used,
+        clippy::needless_range_loop
+    )]
+    fn bitunpack_values(packed: &[u8], n: usize, bit_width: u8, out: &mut [u32]) {
+        if bit_width == 0 {
+            for o in &mut out[..n] {
+                *o = 0;
+            }
+            return;
+        }
+        let bw = u32::from(bit_width);
+        let mask = if bw >= 32 { u64::MAX } else { (1u64 << bw) - 1 };
+        let mut bit_offset: usize = 0;
+        for i in 0..n {
+            let byte_idx = bit_offset / 8;
+            let bit_idx = bit_offset % 8;
+            // Read a u64 covering the bits we need. Fast path: single unaligned load
+            // when 8 or more bytes remain. Slow path: byte-by-byte near end of buffer.
+            let raw = if byte_idx + 8 <= packed.len() {
+                u64::from_le_bytes(packed[byte_idx..byte_idx + 8].try_into().unwrap())
+            } else {
+                let mut r: u64 = 0;
+                for b in byte_idx..packed.len() {
+                    r |= u64::from(packed[b]) << ((b - byte_idx) * 8);
+                }
+                r
+            };
+            out[i] = ((raw >> bit_idx) & mask) as u32;
+            bit_offset += bw as usize;
+        }
+    }
+
+    /// Compute the minimum number of bits needed to represent the max value.
+    fn required_bits(max_val: u32) -> u8 {
+        if max_val == 0 {
+            return 0;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            (32 - max_val.leading_zeros()) as u8
+        }
+    }
+
+    /// Compress coordinates with exact-size FOR and append to `dest`.
+    /// Format: [lat_min:4][lon_min:4][lat_bits:1][lon_bits:1][packed lat][packed lon]
+    /// Packs exactly N values - no padding to block boundaries.
+    #[hotpath::measure]
+    #[allow(clippy::cast_possible_truncation)]
+    pub(super) fn compress_coords_into(
+        lats: &[i32],
+        lons: &[i32],
+        lat_offsets: &mut Vec<u32>,
+        lon_offsets: &mut Vec<u32>,
+        dest: &mut Vec<u8>,
+    ) {
+        let n = lats.len();
+
+        // Compute min values and offsets
+        let lat_min = lats.iter().copied().min().unwrap_or(0);
+        let lon_min = lons.iter().copied().min().unwrap_or(0);
+
+        // Offsets are unsigned and can span the full i32 coordinate range.
+        // Use modular arithmetic for the intermediate signed representation.
+        #[allow(clippy::cast_sign_loss)]
+        let lat_max_offset = lats
+            .iter()
+            .map(|&v| v.wrapping_sub(lat_min) as u32)
+            .max()
+            .unwrap_or(0);
+        #[allow(clippy::cast_sign_loss)]
+        let lon_max_offset = lons
+            .iter()
+            .map(|&v| v.wrapping_sub(lon_min) as u32)
+            .max()
+            .unwrap_or(0);
+
+        let lat_bits = required_bits(lat_max_offset);
+        let lon_bits = required_bits(lon_max_offset);
+
+        // Write 10-byte header
+        dest.extend_from_slice(&lat_min.to_le_bytes());
+        dest.extend_from_slice(&lon_min.to_le_bytes());
+        dest.push(lat_bits);
+        dest.push(lon_bits);
+
+        // Build offset arrays and pack
+        lat_offsets.clear();
+        lon_offsets.clear();
+        #[allow(clippy::cast_sign_loss)]
+        for i in 0..n {
+            lat_offsets.push(lats[i].wrapping_sub(lat_min) as u32);
+            lon_offsets.push(lons[i].wrapping_sub(lon_min) as u32);
+        }
+
+        bitpack_values_into(lat_offsets, lat_bits, dest);
+        bitpack_values_into(lon_offsets, lon_bits, dest);
+    }
+
+    /// Decompress all coordinates from a chunk into the output slice.
+    /// `n` comes from the chunk mask; `compressed` and `packed` come from its header.
+    /// For compressed: [lat_min:4][lon_min:4][lat_bits:1][lon_bits:1][packed lat][packed lon]
+    /// For raw: sequential (i32, i32) pairs.
+    ///
+    /// This is the dominant cost in the PBF read phase. On Denmark (dm6):
+    ///   ~24M calls, 820ns avg, ~20s cumulative (with 4-entry LRU cache).
+    ///   The 270 MB blob doesn't fit in L2 cache, so each miss fetches from DRAM.
+    ///   Synthetic benchmarks show 25ns/call (L1-hot) - NOT representative.
+    ///   Compute optimizations (accumulator unpacking, etc.) don't help because
+    ///   the CPU is waiting on memory, not on arithmetic.
+    #[hotpath::measure]
+    #[allow(clippy::unwrap_used, clippy::needless_range_loop)]
+    pub(super) fn decompress_chunk(
+        n: usize,
+        compressed: bool,
+        packed: &[u8],
+        out: &mut [(i32, i32)],
+    ) {
+        if !compressed {
+            // Raw (i32, i32) pairs - no FOR encoding
+            for i in 0..n {
+                let off = i * 8;
+                let lat = i32::from_le_bytes(packed[off..off + 4].try_into().unwrap());
+                let lon = i32::from_le_bytes(packed[off + 4..off + 8].try_into().unwrap());
+                out[i] = (lat, lon);
+            }
+            return;
+        }
+
+        // Read 10-byte header
+        let lat_min = i32::from_le_bytes(packed[0..4].try_into().unwrap());
+        let lon_min = i32::from_le_bytes(packed[4..8].try_into().unwrap());
+        let lat_bits = packed[8];
+        let lon_bits = packed[9];
+
+        // Unpack lat offsets
+        let lat_packed_bytes = (n * lat_bits as usize).div_ceil(8);
+        let lat_packed = &packed[10..10 + lat_packed_bytes];
+        let mut lat_buf = [0u32; NODES_PER_CHUNK];
+        bitunpack_values(lat_packed, n, lat_bits, &mut lat_buf);
+
+        // Unpack lon offsets
+        let lon_packed = &packed[10 + lat_packed_bytes..];
+        let mut lon_buf = [0u32; NODES_PER_CHUNK];
+        bitunpack_values(lon_packed, n, lon_bits, &mut lon_buf);
+
+        // Reconstruct coordinates
+        for i in 0..n {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                out[i] = (
+                    lat_min.wrapping_add(lat_buf[i] as i32),
+                    lon_min.wrapping_add(lon_buf[i] as i32),
+                );
+            }
+        }
     }
 }
 
@@ -351,116 +511,7 @@ struct Group {
     data: Box<[u8]>, // flat blob: all chunks' headers + packed data
 }
 
-/// Compress coordinates with exact-size FOR and append to `dest`.
-/// Format: [lat_min:4][lon_min:4][lat_bits:1][lon_bits:1][packed lat][packed lon]
-/// Packs exactly N values - no padding to block boundaries.
-#[hotpath::measure]
-#[allow(clippy::cast_possible_truncation)]
-fn compress_coords_into(
-    lats: &[i32],
-    lons: &[i32],
-    lat_offsets: &mut Vec<u32>,
-    lon_offsets: &mut Vec<u32>,
-    dest: &mut Vec<u8>,
-) {
-    let n = lats.len();
-
-    // Compute min values and offsets
-    let lat_min = lats.iter().copied().min().unwrap_or(0);
-    let lon_min = lons.iter().copied().min().unwrap_or(0);
-
-    #[allow(clippy::cast_sign_loss)]
-    let lat_max_offset = lats
-        .iter()
-        .map(|&v| (v - lat_min) as u32)
-        .max()
-        .unwrap_or(0);
-    #[allow(clippy::cast_sign_loss)]
-    let lon_max_offset = lons
-        .iter()
-        .map(|&v| (v - lon_min) as u32)
-        .max()
-        .unwrap_or(0);
-
-    let lat_bits = required_bits(lat_max_offset);
-    let lon_bits = required_bits(lon_max_offset);
-
-    // Write 10-byte header
-    dest.extend_from_slice(&lat_min.to_le_bytes());
-    dest.extend_from_slice(&lon_min.to_le_bytes());
-    dest.push(lat_bits);
-    dest.push(lon_bits);
-
-    // Build offset arrays and pack
-    lat_offsets.clear();
-    lon_offsets.clear();
-    #[allow(clippy::cast_sign_loss)]
-    for i in 0..n {
-        lat_offsets.push((lats[i] - lat_min) as u32);
-        lon_offsets.push((lons[i] - lon_min) as u32);
-    }
-
-    bitpack_values_into(lat_offsets, lat_bits, dest);
-    bitpack_values_into(lon_offsets, lon_bits, dest);
-}
-
-/// Decompress all coordinates from a chunk into the output slice.
-/// `node_mask` and `packed` come from the flat blob; `compressed` from flags_and_len.
-/// For compressed: [lat_min:4][lon_min:4][lat_bits:1][lon_bits:1][packed lat][packed lon]
-/// For raw: sequential (i32, i32) pairs.
-///
-/// This is the dominant cost in the PBF read phase. On Denmark (dm6):
-///   ~24M calls, 820ns avg, ~20s cumulative (with 4-entry LRU cache).
-///   The 270 MB blob doesn't fit in L2 cache, so each miss fetches from DRAM.
-///   Synthetic benchmarks show 25ns/call (L1-hot) - NOT representative.
-///   Compute optimizations (accumulator unpacking, etc.) don't help because
-///   the CPU is waiting on memory, not on arithmetic.
-#[hotpath::measure]
-#[allow(clippy::unwrap_used, clippy::needless_range_loop)]
-fn decompress_chunk(
-    node_mask: &[u8; BITMASK_BYTES],
-    compressed: bool,
-    packed: &[u8],
-    out: &mut [(i32, i32)],
-) {
-    let n = count_set_bits(node_mask) as usize;
-
-    if !compressed {
-        // Raw (i32, i32) pairs - no FOR encoding
-        for i in 0..n {
-            let off = i * 8;
-            let lat = i32::from_le_bytes(packed[off..off + 4].try_into().unwrap());
-            let lon = i32::from_le_bytes(packed[off + 4..off + 8].try_into().unwrap());
-            out[i] = (lat, lon);
-        }
-        return;
-    }
-
-    // Read 10-byte header
-    let lat_min = i32::from_le_bytes(packed[0..4].try_into().unwrap());
-    let lon_min = i32::from_le_bytes(packed[4..8].try_into().unwrap());
-    let lat_bits = packed[8];
-    let lon_bits = packed[9];
-
-    // Unpack lat offsets
-    let lat_packed_bytes = (n * lat_bits as usize).div_ceil(8);
-    let lat_packed = &packed[10..10 + lat_packed_bytes];
-    let mut lat_buf = [0u32; NODES_PER_CHUNK];
-    bitunpack_values(lat_packed, n, lat_bits, &mut lat_buf);
-
-    // Unpack lon offsets
-    let lon_packed = &packed[10 + lat_packed_bytes..];
-    let mut lon_buf = [0u32; NODES_PER_CHUNK];
-    bitunpack_values(lon_packed, n, lon_bits, &mut lon_buf);
-
-    // Reconstruct coordinates
-    for i in 0..n {
-        #[allow(clippy::cast_possible_wrap)]
-        {
-            out[i] = (lat_min + lat_buf[i] as i32, lon_min + lon_buf[i] as i32);
-        }
-    }
-}
+use self::codec::{compress_coords_into, decompress_chunk};
 
 // ---------------------------------------------------------------------------
 // Flat blob navigation
@@ -514,6 +565,7 @@ fn find_chunk_in_blob(data: &[u8], chunk_idx: usize) -> ChunkRef<'_> {
 
 /// Single cache entry: one decompressed chunk.
 struct CacheEntry {
+    reader_id: u64,
     group_id: usize,
     chunk_idx: usize,
     node_mask: [u8; BITMASK_BYTES],
@@ -524,6 +576,7 @@ struct CacheEntry {
 impl CacheEntry {
     fn new() -> Self {
         CacheEntry {
+            reader_id: 0,
             group_id: usize::MAX,
             chunk_idx: usize::MAX,
             node_mask: [0u8; BITMASK_BYTES],
@@ -583,6 +636,7 @@ thread_local! {
 #[inline]
 fn get_from_group_cached(
     group: &Group,
+    reader_id: u64,
     group_id: usize,
     chunk_id: u8,
     node_in_chunk: u8,
@@ -599,7 +653,11 @@ fn get_from_group_cached(
         // Search cache entries for a hit
         for i in 0..CACHE_ENTRIES {
             let entry = &cache.entries[i];
-            if entry.group_id == group_id && entry.chunk_idx == chunk_idx && entry.count != 0 {
+            if entry.reader_id == reader_id
+                && entry.group_id == group_id
+                && entry.chunk_idx == chunk_idx
+                && entry.count != 0
+            {
                 if !test_bit(&entry.node_mask, node_in_chunk) {
                     return None;
                 }
@@ -623,16 +681,18 @@ fn get_from_group_cached(
         // Evict last entry: swap it to front, then overwrite
         cache.entries.swap(0, CACHE_ENTRIES - 1);
         let entry = &mut cache.entries[0];
+        let count = count_set_bits(chunk.node_mask);
         decompress_chunk(
-            chunk.node_mask,
+            count as usize,
             chunk.compressed,
             chunk.packed,
             &mut entry.coords,
         );
         entry.node_mask = *chunk.node_mask;
+        entry.reader_id = reader_id;
         entry.group_id = group_id;
         entry.chunk_idx = chunk_idx;
-        entry.count = count_set_bits(chunk.node_mask);
+        entry.count = count;
         Some(entry.coords[node_idx])
     })
 }
@@ -646,7 +706,8 @@ fn get_from_blob_chunk(data: &[u8], chunk_idx: usize, node_in_chunk: u8) -> Opti
     }
     let node_idx = count_bits_before(chunk.node_mask, node_in_chunk);
     let mut coords = [(0i32, 0i32); NODES_PER_CHUNK];
-    decompress_chunk(chunk.node_mask, chunk.compressed, chunk.packed, &mut coords);
+    let count = count_set_bits(chunk.node_mask);
+    decompress_chunk(count as usize, chunk.compressed, chunk.packed, &mut coords);
     Some(coords[node_idx])
 }
 
@@ -689,7 +750,7 @@ pub struct SortedNodeStore {
     current_node_mask: [u8; BITMASK_BYTES],
     current_coords: Vec<(i32, i32)>,
 
-    last_node_id: i64,
+    last_node_id: Option<NodeId>,
     node_count: u64,
 }
 
@@ -714,7 +775,7 @@ impl SortedNodeStore {
             current_chunk_id: 0,
             current_node_mask: [0u8; BITMASK_BYTES],
             current_coords: Vec::with_capacity(NODES_PER_CHUNK),
-            last_node_id: -1,
+            last_node_id: None,
             node_count: 0,
         }
     }
@@ -723,15 +784,20 @@ impl SortedNodeStore {
     #[hotpath::measure]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
+        let node_id = NodeId::new(node_id);
+        let id = node_id
+            .as_nonnegative_u64()
+            .expect("SortedNodeStore: node IDs must be non-negative");
+        let previous = self.last_node_id;
         assert!(
-            node_id > self.last_node_id,
-            "SortedNodeStore: node IDs must be strictly increasing, got {node_id} after {}",
-            self.last_node_id
+            previous.is_none_or(|last| node_id > last),
+            "SortedNodeStore: node IDs must be strictly increasing, got {} after {}",
+            node_id.as_i64(),
+            previous.map_or(-1, NodeId::as_i64)
         );
-        self.last_node_id = node_id;
+        self.last_node_id = Some(node_id);
         self.node_count += 1;
 
-        let id = node_id as u64;
         let group_id = id / NODES_PER_GROUP;
         let chunk_id = ((id % NODES_PER_GROUP) / NODES_PER_CHUNK as u64) as u8;
         let node_in_chunk = (id % NODES_PER_CHUNK as u64) as u8;
@@ -766,6 +832,11 @@ impl SortedNodeStore {
 
         set_bit(&mut self.current_node_mask, node_in_chunk);
         self.current_coords.push((lat_e7, lon_e7));
+    }
+
+    /// Store coordinates using a typed node identifier.
+    pub fn put_id(&mut self, node_id: NodeId, lat_e7: i32, lon_e7: i32) {
+        self.put(node_id.as_i64(), lat_e7, lon_e7);
     }
 
     // scratch_lats, scratch_lons, scratch_lat_offsets, scratch_lon_offsets are hoisted
@@ -825,9 +896,8 @@ impl SortedNodeStore {
         if self.current_group_data.is_empty() {
             return;
         }
-        // Clone blob into an exact-sized Box, then clear the Vec to reuse
-        // its allocation for the next group. This avoids repeated alloc/dealloc
-        // cycles that cause mimalloc fragmentation.
+        // Clone the blob into exact-sized immutable storage, then clear the
+        // builder Vec while retaining its capacity for the next group.
         let data = self.current_group_data.clone().into_boxed_slice();
         self.current_group_data.clear();
 
@@ -858,20 +928,28 @@ impl SortedNodeStore {
         // node_store_nodes / node_store_groups counters carry the ledger need
         // and go to the sidecar, where measurements actually live.
 
+        // A cache key must identify the reader as well as its group/chunk.
+        // Allocation addresses can be reused after an earlier reader drops.
+        static NEXT_READER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let cache_id = NEXT_READER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         SortedNodeStoreReader {
             groups: self.groups,
             node_count,
             group_count,
+            cache_id,
         }
     }
 
     /// Read coordinates (used by tests; not performance-critical).
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
-        if node_id < 0 {
-            return None;
-        }
-        let id = node_id as u64;
+        self.get_id(NodeId::new(node_id))
+    }
+
+    /// Read coordinates using a typed node identifier.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
+        let id = node_id.as_nonnegative_u64()?;
         let group_id = id / NODES_PER_GROUP;
         let chunk_id = ((id % NODES_PER_GROUP) / NODES_PER_CHUNK as u64) as u8;
         let node_in_chunk = (id % NODES_PER_CHUNK as u64) as u8;
@@ -911,6 +989,7 @@ pub struct SortedNodeStoreReader {
     groups: Vec<Option<Box<Group>>>,
     node_count: u64,
     group_count: usize,
+    cache_id: u64,
 }
 
 impl SortedNodeStoreReader {
@@ -928,22 +1007,33 @@ impl SortedNodeStoreReader {
     /// calls on Denmark, the instrumentation overhead (>50%) dwarfs actual cost.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
-        if node_id < 0 {
-            return None;
-        }
-        let id = node_id as u64;
+        self.get_id(NodeId::new(node_id))
+    }
+
+    /// Look up coordinates using a typed node identifier.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
+        let id = node_id.as_nonnegative_u64()?;
         let group_id = (id / NODES_PER_GROUP) as usize;
         let chunk_id = ((id % NODES_PER_GROUP) / NODES_PER_CHUNK as u64) as u8;
         let node_in_chunk = (id % NODES_PER_CHUNK as u64) as u8;
 
         let group = self.groups.get(group_id)?.as_ref()?;
-        get_from_group_cached(group, group_id, chunk_id, node_in_chunk)
+        get_from_group_cached(group, self.cache_id, group_id, chunk_id, node_in_chunk)
     }
 }
 
 // ---------------------------------------------------------------------------
 // NodeStore / NodeStoreReader - enum dispatch
 // ---------------------------------------------------------------------------
+
+// Keep the concrete backend stores and readers alongside the dispatch types.
+// phase12 constructs a concrete backend and carries the enum reader into its
+// parallel lookup phase. Collapsing these public names requires moving that
+// selection and reader boundary in phase12, which is outside this module's
+// owned files. The current API has six public types for two backends and their
+// write/read transitions: NodeIndex, NodeIndexReader, SortedNodeStore,
+// SortedNodeStoreReader, NodeStore, and NodeStoreReader.
 
 /// Unified node store for the write phase.
 #[allow(clippy::large_enum_variant)]
@@ -954,9 +1044,13 @@ pub enum NodeStore {
 
 impl NodeStore {
     pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
+        self.put_id(NodeId::new(node_id), lat_e7, lon_e7);
+    }
+
+    pub fn put_id(&mut self, node_id: NodeId, lat_e7: i32, lon_e7: i32) {
         match self {
-            NodeStore::Flat(idx) => idx.put(node_id, lat_e7, lon_e7),
-            NodeStore::Sorted(store) => store.put(node_id, lat_e7, lon_e7),
+            NodeStore::Flat(idx) => idx.put_id(node_id, lat_e7, lon_e7),
+            NodeStore::Sorted(store) => store.put_id(node_id, lat_e7, lon_e7),
         }
     }
 
@@ -976,9 +1070,13 @@ pub enum NodeStoreReader {
 
 impl NodeStoreReader {
     pub fn get(&self, node_id: i64) -> Option<(i32, i32)> {
+        self.get_id(NodeId::new(node_id))
+    }
+
+    pub fn get_id(&self, node_id: NodeId) -> Option<(i32, i32)> {
         match self {
-            NodeStoreReader::Flat(reader) => reader.get(node_id),
-            NodeStoreReader::Sorted(reader) => reader.get(node_id),
+            NodeStoreReader::Flat(reader) => reader.get_id(node_id),
+            NodeStoreReader::Sorted(reader) => reader.get_id(node_id),
         }
     }
 
@@ -1153,6 +1251,56 @@ mod tests {
         assert_eq!(reader.get(10), Some((100_000, 200_000)));
         assert_eq!(reader.get(20), Some((300_000, 400_000)));
         assert_eq!(reader.get(999), None);
+    }
+
+    #[test]
+    fn sorted_compressed_chunk_spans_distant_longitudes() {
+        let mut store = SortedNodeStore::new();
+        // Repeated latitudes keep the chunk compressed even with 32-bit
+        // longitude offsets. Their span exceeds i32::MAX in E7 units.
+        for id in 1..=32 {
+            let lon = if id % 2 == 0 {
+                1_800_000_000
+            } else {
+                -1_800_000_000
+            };
+            store.put(id, 100, lon);
+        }
+        store.put(256, 200, 300); // flush the first chunk for builder reads
+        for id in 1..=32 {
+            let lon = if id % 2 == 0 {
+                1_800_000_000
+            } else {
+                -1_800_000_000
+            };
+            assert_eq!(store.get(id), Some((100, lon)));
+        }
+        let reader = store.into_reader();
+        for id in 1..=32 {
+            let lon = if id % 2 == 0 {
+                1_800_000_000
+            } else {
+                -1_800_000_000
+            };
+            assert_eq!(reader.get(id), Some((100, lon)));
+        }
+    }
+
+    #[test]
+    fn sorted_reader_caches_do_not_mix_stores() {
+        let mut first = SortedNodeStore::new();
+        first.put(10, 100, 200);
+        let first = first.into_reader();
+        let mut second = SortedNodeStore::new();
+        second.put(10, 300, 400);
+        second.put(20, 500, 600);
+        let second = second.into_reader();
+
+        assert_eq!(first.get(10), Some((100, 200)));
+        assert_eq!(second.get(10), Some((300, 400)));
+        assert_eq!(second.get(20), Some((500, 600)));
+        assert_eq!(first.get(20), None);
+        assert_eq!(first.get(10), Some((100, 200)));
     }
 
     #[test]

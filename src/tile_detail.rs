@@ -4,14 +4,17 @@
 //! links the crate and decodes tiles through this module. Decoding stops at
 //! structure: a [`DetailTile`] carries its layers, features, geometry
 //! components and rings in **wire order**, with no canonicalization and no
-//! hashing. Deciding what counts as "the same tile" - ordering, digests, the
-//! comparison - is the caller's, per the corpus redesign contract. The one
-//! knob here is [`Strictness`]: the gate decodes strict so foreign structure
+//! hashing. Polygon rings use the first nonzero-area ring's orientation as
+//! the exterior orientation; zero-area rings are skipped. Deciding what
+//! counts as "the same tile" - ordering, digests, the comparison - is the
+//! caller's, per the corpus redesign contract. The one knob here is
+//! [`Strictness`]: the gate decodes strict so foreign structure
 //! can never silently skip past it; a cross-producer comparison decodes
 //! tolerant.
 
 use std::sync::Arc;
 
+use crate::geometry;
 use protohoggr::{Cursor, WIRE_32BIT, WIRE_64BIT, WIRE_LEN, WIRE_VARINT};
 
 /// MVT decoding policy.
@@ -28,7 +31,8 @@ pub enum Strictness {
 }
 
 /// Ring role recovered from geometry: point and line features carry a single
-/// synthetic ring; polygon rings are classified outer/hole by signed area.
+/// synthetic ring; polygon rings use the first nonzero-area ring's winding as
+/// the exterior orientation, and zero-area rings are skipped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CanonRingRole {
     Point = 0,
@@ -637,17 +641,24 @@ fn decode_detail_polygons(
         return Err("polygon ring missing ClosePath".to_string());
     }
 
-    // Group rings into components: an outer ring opens a component, following
-    // holes attach to it. Winding sign classifies the role.
+    // Match classifyRings: the first nonzero-area ring establishes exterior
+    // winding, and zero-area rings do not participate in grouping.
     let mut grouped: Vec<Vec<DetailRing>> = Vec::new();
+    let mut exterior_orientation = None;
     for ring in rings {
-        let role = if signed_area(&ring) > 0 {
-            CanonRingRole::Outer
-        } else {
-            CanonRingRole::Hole
+        let Some(orientation) = geometry::ring_role(signed_area(&ring)) else {
+            continue;
+        };
+        let role = match exterior_orientation {
+            Some(exterior) if orientation == exterior => CanonRingRole::Outer,
+            Some(_) => CanonRingRole::Hole,
+            None => {
+                exterior_orientation = Some(orientation);
+                CanonRingRole::Outer
+            }
         };
         let ring = make_detail_ring(role, ring);
-        if role == CanonRingRole::Outer || grouped.is_empty() {
+        if role == CanonRingRole::Outer {
             grouped.push(vec![ring]);
         } else if let Some(component) = grouped.last_mut() {
             component.push(ring);
@@ -988,6 +999,29 @@ mod tests {
         assert_eq!(decoded.components[0].rings[1].role, CanonRingRole::Hole);
         assert_eq!(decoded.components[1].rings.len(), 1);
         assert_eq!(decoded.components[1].rings[0].role, CanonRingRole::Outer);
+    }
+
+    #[test]
+    fn polygon_grouping_self_calibrates_and_skips_zero_area_rings() {
+        let zero_area = [(0, 0), (10, 0), (20, 0), (0, 0)];
+        let negative_first = [(0, 0), (0, 10), (10, 10), (10, 0), (0, 0)];
+        let same_winding_outer = [(20, 0), (20, 10), (30, 10), (30, 0), (20, 0)];
+        let opposite_winding_hole = [(2, 2), (8, 2), (8, 8), (2, 8), (2, 2)];
+        let commands = polygon_commands(&[
+            &zero_area,
+            &negative_first,
+            &same_winding_outer,
+            &opposite_winding_hole,
+        ]);
+        let feature = feature_message(Some(3), Some(&commands));
+        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Strict).unwrap();
+
+        assert_eq!(decoded.components.len(), 2);
+        assert_eq!(decoded.components[0].rings.len(), 1);
+        assert_eq!(decoded.components[0].rings[0].role, CanonRingRole::Outer);
+        assert_eq!(decoded.components[1].rings.len(), 2);
+        assert_eq!(decoded.components[1].rings[0].role, CanonRingRole::Outer);
+        assert_eq!(decoded.components[1].rings[1].role, CanonRingRole::Hole);
     }
 
     fn value_with_varint_field(field: u32, raw: u64) -> Vec<u8> {

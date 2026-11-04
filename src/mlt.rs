@@ -1,3 +1,4 @@
+use crate::geometry;
 use crate::mvt::{Feature, GeomType, LayerBuilder, Value};
 
 use geo_types::{
@@ -258,6 +259,9 @@ fn decode_polygon_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
     }
 
     let mut polygons = group_rings_to_polygons(rings);
+    if polygons.is_empty() {
+        return Err("polygon geometry has no nonzero-area rings".to_string());
+    }
     if polygons.len() == 1
         && let Some(poly) = polygons.pop()
     {
@@ -282,25 +286,23 @@ fn group_rings_to_polygons(rings: Vec<LineString<i32>>) -> Vec<Polygon<i32>> {
     let mut polygons = Vec::new();
     let mut exterior: Option<LineString<i32>> = None;
     let mut holes: Vec<LineString<i32>> = Vec::new();
-    let mut exterior_sign: Option<i64> = None;
+    let mut exterior_orientation = None;
 
     for ring in rings {
-        let sign = ring_signed_area(&ring);
+        let Some(orientation) = geometry::ring_role(ring_signed_area(&ring)) else {
+            continue;
+        };
         if exterior.is_none() {
-            exterior_sign = Some(sign);
+            exterior_orientation = Some(orientation);
             exterior = Some(ring);
             continue;
         }
 
-        let same_as_exterior = exterior_sign
-            .map(|s| (sign >= 0) == (s >= 0))
-            .unwrap_or(true);
-        if same_as_exterior {
+        if exterior_orientation == Some(orientation) {
             if let Some(ext) = exterior.take() {
                 polygons.push(Polygon::new(ext, holes));
                 holes = Vec::new();
             }
-            exterior_sign = Some(sign);
             exterior = Some(ring);
         } else {
             holes.push(ring);
@@ -314,11 +316,11 @@ fn group_rings_to_polygons(rings: Vec<LineString<i32>>) -> Vec<Polygon<i32>> {
     polygons
 }
 
-fn ring_signed_area(ring: &LineString<i32>) -> i64 {
-    let mut sum = 0_i64;
+fn ring_signed_area(ring: &LineString<i32>) -> i128 {
+    let mut sum = 0_i128;
     for segment in ring.0.windows(2) {
         if let [a, b] = segment {
-            sum += i64::from(a.x) * i64::from(b.y) - i64::from(b.x) * i64::from(a.y);
+            sum += i128::from(a.x) * i128::from(b.y) - i128::from(b.x) * i128::from(a.y);
         }
     }
     sum
@@ -526,6 +528,29 @@ mod tests {
     use serde::Deserialize;
     use serde_json::{Number, Value as JsonValue};
     use std::collections::BTreeMap;
+
+    fn polygon_ring(points: &[(i32, i32)]) -> LineString<i32> {
+        LineString(points.iter().map(|&(x, y)| Coord { x, y }).collect())
+    }
+
+    #[test]
+    fn polygon_grouping_uses_first_nonzero_winding() {
+        let zero_area = polygon_ring(&[(0, 0), (10, 0), (20, 0), (0, 0)]);
+        let negative_first = polygon_ring(&[(0, 0), (0, 10), (10, 10), (10, 0), (0, 0)]);
+        let same_winding_outer = polygon_ring(&[(20, 0), (20, 10), (30, 10), (30, 0), (20, 0)]);
+        let opposite_winding_hole = polygon_ring(&[(2, 2), (8, 2), (8, 8), (2, 8), (2, 2)]);
+
+        let polygons = group_rings_to_polygons(vec![
+            zero_area,
+            negative_first,
+            same_winding_outer,
+            opposite_winding_hole,
+        ]);
+
+        assert_eq!(polygons.len(), 2);
+        assert!(polygons[0].interiors().is_empty());
+        assert_eq!(polygons[1].interiors().len(), 1);
+    }
 
     fn parse_decoded_layers<'a>(
         encoded: &'a [u8],

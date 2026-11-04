@@ -530,6 +530,223 @@ pub(super) fn centroid_of(points: &[Point]) -> Point {
     }
 }
 
+/// Per-invocation emission policy. Layer indices must have a configured cap slot.
+pub(super) struct EmitCtx<'a> {
+    pub(super) min_zoom: u8,
+    pub(super) max_zoom: u8,
+    pub(super) fanout_caps: &'a [u32],
+    pub(super) polygon_simplify_factor: f64,
+}
+
+pub(super) enum FeatureGeometry<'a> {
+    Node(&'a Point),
+    Way {
+        coords: &'a [Point],
+        pins: &'a [bool],
+        line: &'a mut LineEmitScratch,
+        polygon: &'a mut PolygonEmitScratch,
+        fanout: &'a mut super::stats::FanoutStats,
+    },
+    Area {
+        outer: &'a [Point],
+        inners: &'a [Vec<Point>],
+        pins: &'a FxHashSet<(i64, i64)>,
+        polygon: &'a mut MultipolygonEmitScratch,
+        simplify: &'a mut geometry::SimplifyMultiScratch,
+        fanout: &'a mut super::stats::FanoutStats,
+    },
+}
+
+fn harvest_cap_events(events: &mut Vec<(u16, u64, u64)>, fanout: &mut super::stats::FanoutStats) {
+    for (idx, tiles, osm_id) in events.drain(..) {
+        fanout.record_cap(idx as usize / 15, idx as usize % 15, tiles, osm_id);
+    }
+}
+
+/// The only LayerMatch dispatch. Harvest after each polygon call, before the
+/// next shifted copy or component can clear the emitter's event buffer.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn emit_match(
+    osm_id: u64,
+    geometry: FeatureGeometry<'_>,
+    m: &LayerMatch,
+    ctx: &EmitCtx<'_>,
+    records: &mut impl FeatureRecordSink,
+    point: &mut PointEmitScratch,
+) -> u64 {
+    let z_lo = m.min_zoom.max(ctx.min_zoom);
+    let z_hi = m.max_zoom.min(ctx.max_zoom);
+    if z_lo > z_hi {
+        return 0;
+    }
+    match m.geom_expect {
+        GeomExpect::Point | GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
+            match geometry {
+                FeatureGeometry::Node(p) => {
+                    // Preserve the node's projected world-edge coordinate;
+                    // centroid wrapping applies only to way/area geometry.
+                    let bbox = merc_bbox(std::slice::from_ref(p));
+                    let mut count = 0;
+                    for z in z_lo..=z_hi {
+                        encode_attrs_bytes(&mut point.attrs_buf, &m.attrs, z);
+                        geometry::for_each_tile_in_bbox(&bbox, z, |tx, ty| {
+                            let (px, py) = geometry::merc_to_tile_px(p, tx, ty, z);
+                            mvt::encode_point(&mut point.geom_buf, px, py);
+                            push_sort_record(
+                                pmtiles_writer::xy_to_tile_id(z, tx, ty),
+                                osm_id,
+                                m.layer,
+                                m.paint_rank,
+                                GeomType::Point,
+                                &point.geom_buf,
+                                &point.attrs_buf,
+                                records,
+                            );
+                            count += 1;
+                        });
+                    }
+                    count
+                }
+                FeatureGeometry::Way { coords, .. } => emit_point_or_centroid(
+                    osm_id,
+                    coords,
+                    None,
+                    &merc_bbox(coords),
+                    m,
+                    z_lo,
+                    z_hi,
+                    records,
+                    point,
+                ),
+                FeatureGeometry::Area { outer, inners, .. } => {
+                    if m.geom_expect == GeomExpect::Point {
+                        // The profile's plain point rules describe OSM nodes,
+                        // not polygon labels. match_multipolygon uses explicit
+                        // centroid/surface rules instead; do not invent a label.
+                        return 0;
+                    }
+                    emit_point_or_centroid(
+                        osm_id,
+                        outer,
+                        Some(inners),
+                        &merc_bbox(outer),
+                        m,
+                        z_lo,
+                        z_hi,
+                        records,
+                        point,
+                    )
+                }
+            }
+        }
+        GeomExpect::Line | GeomExpect::Polygon => {
+            let (coords, inners) = match &geometry {
+                FeatureGeometry::Node(_) => return 0,
+                FeatureGeometry::Way { coords, .. } => (*coords, None),
+                FeatureGeometry::Area { outer, inners, .. } => {
+                    if m.geom_expect == GeomExpect::Line {
+                        // Boundary lines emit once per member way in phase12,
+                        // with relation metadata from the boundary prescan.
+                        // Assembled area rings must not draw those lines again.
+                        return 0;
+                    }
+                    (*outer, Some(*inners))
+                }
+            };
+            let cap = if m.geom_expect == GeomExpect::Polygon {
+                ctx.fanout_caps[m.layer as usize]
+            } else {
+                0
+            };
+            let mut geometry = geometry;
+            let mut count = 0;
+            for shift in antimeridian_shifts_for_bbox(&merc_bbox(coords)) {
+                let shifted;
+                let shifted_inners;
+                let (coords, holes) = if shift == 0.0 {
+                    (coords, inners)
+                } else {
+                    shifted = coords
+                        .iter()
+                        .map(|p| Point {
+                            x: p.x + shift,
+                            y: p.y,
+                        })
+                        .collect::<Vec<_>>();
+                    shifted_inners = inners.map(|rings| {
+                        rings
+                            .iter()
+                            .map(|ring| {
+                                ring.iter()
+                                    .map(|p| Point {
+                                        x: p.x + shift,
+                                        y: p.y,
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    (shifted.as_slice(), shifted_inners.as_deref())
+                };
+                count += match &mut geometry {
+                    FeatureGeometry::Node(_) => unreachable!(),
+                    FeatureGeometry::Way {
+                        pins,
+                        line,
+                        polygon,
+                        fanout,
+                        ..
+                    } => {
+                        if m.geom_expect == GeomExpect::Line {
+                            emit_line_feature(osm_id, coords, pins, m, z_lo, z_hi, records, line)
+                        } else {
+                            let count = emit_polygon_feature(
+                                osm_id,
+                                coords,
+                                pins,
+                                m,
+                                z_lo,
+                                z_hi,
+                                records,
+                                polygon,
+                                cap,
+                                ctx.polygon_simplify_factor,
+                            );
+                            harvest_cap_events(&mut polygon.cap_events, fanout);
+                            count
+                        }
+                    }
+                    FeatureGeometry::Area {
+                        pins,
+                        polygon,
+                        simplify,
+                        fanout,
+                        ..
+                    } => {
+                        let count = emit_multipolygon_feature(
+                            osm_id,
+                            coords,
+                            holes.expect("area holes"),
+                            Some(pins),
+                            m,
+                            z_lo,
+                            z_hi,
+                            records,
+                            polygon,
+                            simplify,
+                            cap,
+                            ctx.polygon_simplify_factor,
+                        );
+                        harvest_cap_events(&mut polygon.cap_events, fanout);
+                        count
+                    }
+                };
+            }
+            count
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Feature emission helpers
 // ---------------------------------------------------------------------------
@@ -932,6 +1149,87 @@ mod landing2_tests {
     use crate::mvt;
     use smallvec::smallvec;
     use std::borrow::Cow;
+
+    #[test]
+    fn dispatch_clamps_node_zooms_and_preserves_world_edge() {
+        let m = LayerMatch {
+            layer: Layer::PlaceLabels,
+            min_zoom: 10,
+            max_zoom: 14,
+            geom_expect: GeomExpect::Point,
+            paint_rank: 0,
+            attrs: smallvec![],
+        };
+        let ctx = EmitCtx {
+            min_zoom: 12,
+            max_zoom: 12,
+            fanout_caps: &[],
+            polygon_simplify_factor: 1.0,
+        };
+        let p = pt(1.0, 0.500_1);
+        let mut records = Vec::new();
+        let mut point = PointEmitScratch::new();
+        assert_eq!(
+            emit_match(
+                7,
+                FeatureGeometry::Node(&p),
+                &m,
+                &ctx,
+                &mut records,
+                &mut point
+            ),
+            1
+        );
+        let (z, x, _) = pmtiles_writer::tile_id_to_zxy(sort::tile_id_from_key(records[0].key));
+        assert_eq!((z, x), (12, 4095));
+    }
+
+    #[test]
+    fn area_plain_point_and_line_are_explicit_skips() {
+        // Entire square fits inside tile (2048, 2048) at z12.
+        let outer = square(0.500_10, 0.500_11);
+        let keys = FxHashSet::default();
+        let mut polygon = MultipolygonEmitScratch::new();
+        let mut simplify = geometry::SimplifyMultiScratch::new();
+        let mut point = PointEmitScratch::new();
+        let mut fanout = super::super::stats::FanoutStats::new();
+        let mut records = Vec::new();
+        let ctx = EmitCtx {
+            min_zoom: 12,
+            max_zoom: 12,
+            fanout_caps: &[],
+            polygon_simplify_factor: 1.0,
+        };
+        for geom_expect in [GeomExpect::Point, GeomExpect::Line] {
+            let m = LayerMatch {
+                layer: Layer::Boundaries,
+                min_zoom: 12,
+                max_zoom: 12,
+                geom_expect,
+                paint_rank: 0,
+                attrs: smallvec![],
+            };
+            assert_eq!(
+                emit_match(
+                    7,
+                    FeatureGeometry::Area {
+                        outer: &outer,
+                        inners: &[],
+                        pins: &keys,
+                        polygon: &mut polygon,
+                        simplify: &mut simplify,
+                        fanout: &mut fanout,
+                    },
+                    &m,
+                    &ctx,
+                    &mut records,
+                    &mut point
+                ),
+                0
+            );
+        }
+        assert!(records.is_empty());
+    }
 
     #[test]
     fn relation_pins_survive_world_translation() {

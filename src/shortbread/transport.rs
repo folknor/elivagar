@@ -107,10 +107,13 @@ pub(super) fn first_tag_match<T: Copy>(tags: &Tags<'_>, rows: &[(&str, &str, T)]
 }
 
 fn public_transport_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
+    // The upstream raw coalesce can choose an unrelated present value, such
+    // as aeroway=gate when railway=halt qualified the feature. Match allowed
+    // key/value pairs in the upstream coalesce priority and keep aerialway's
+    // special fallback last.
     first_tag_match(
         tags,
         &[
-            ("aerialway", "station", ("aerialway_station", 13)),
             ("aeroway", "aerodrome", ("aerodrome", 11)),
             ("aeroway", "helipad", ("helipad", 13)),
             ("amenity", "bus_station", ("bus_station", 13)),
@@ -119,6 +122,7 @@ fn public_transport_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
             ("railway", "halt", ("halt", 13)),
             ("railway", "tram_stop", ("tram_stop", 14)),
             ("highway", "bus_stop", ("bus_stop", 14)),
+            ("aerialway", "station", ("aerialway_station", 13)),
         ],
     )
 }

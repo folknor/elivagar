@@ -27,6 +27,7 @@
 //! the top level to validate the durable world-ocean artifact, and relocating
 //! it would invalidate every artifact already built.
 
+use crate::ocean::{OceanArtifactKey, OceanSourceKey, Xxh128};
 use crate::shortbread::Layer;
 use crate::{TileCompression, TilePayloadFormat, TilegenConfig};
 use serde_json::{Value, json};
@@ -122,6 +123,13 @@ impl PbfFeatures {
     }
 }
 
+/// Content digest and byte length of the input PBF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputIdentity {
+    pub xxh3_128: Xxh128,
+    pub bytes: u64,
+}
+
 /// Identity of the input PBF.
 ///
 /// `xxh3_128` is the identity. `name` is a label recorded for humans and must
@@ -133,10 +141,7 @@ pub struct Input {
     /// File name only, never a path - an absolute path would be machine
     /// dependent and break same-input reproducibility across hosts.
     pub name: String,
-    /// XXH3-128 over the whole file, lowercase hex. Matches the `xxhash`
-    /// field brokkr records per dataset variant.
-    pub xxh3_128: String,
-    pub bytes: u64,
+    pub identity: InputIdentity,
     /// Replication timestamp from the PBF header, seconds since epoch. This
     /// describes the OSM snapshot, not the run, so it is reproducible.
     pub replication_timestamp: Option<i64>,
@@ -147,8 +152,8 @@ impl Input {
     fn to_json(&self) -> Value {
         json!({
             "name": self.name,
-            "xxh3_128": self.xxh3_128,
-            "bytes": self.bytes,
+            "xxh3_128": self.identity.xxh3_128.to_string(),
+            "bytes": self.identity.bytes,
             "replication_timestamp": self.replication_timestamp,
             "features": self.features.to_json(),
         })
@@ -177,17 +182,24 @@ pub struct OceanContract {
     /// boolean conflates them.
     pub low_zoom_source: &'static str,
     /// The durable artifact's invalidation key, when the artifact is active.
-    pub artifact_key: Option<Value>,
+    pub artifact_key: Option<OceanArtifactKey>,
+    /// Source identity for computed ocean. Absent in artifact and no-ocean
+    /// modes so their established contract shapes remain unchanged.
+    pub source_key: Option<OceanSourceKey>,
 }
 
 impl OceanContract {
     fn to_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "mode": self.mode,
             "runtime_simplification": self.runtime_simplification,
             "low_zoom_source": self.low_zoom_source,
-            "artifact_key": self.artifact_key,
-        })
+            "artifact_key": self.artifact_key.as_ref().map(OceanArtifactKey::to_json),
+        });
+        if let Some(source_key) = &self.source_key {
+            value["source_key"] = source_key.to_json();
+        }
+        value
     }
 }
 
@@ -419,22 +431,9 @@ pub fn metadata_member(value: &Value) -> String {
 /// would read as a planet-sized RSS spike in the phase whose memory the
 /// 30 GB ledger watches most closely. Buffered reads populate the same page
 /// cache without ever holding more than one buffer resident.
-pub fn hash_file(path: &Path) -> std::io::Result<(String, u64)> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
-    let mut buf = vec![0_u8; 8 << 20];
-    let mut len: u64 = 0;
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        len += n as u64;
-    }
-    let digest = hasher.digest128();
-    Ok((format!("{digest:032x}"), len))
+pub fn hash_file(path: &Path) -> std::io::Result<InputIdentity> {
+    let (xxh3_128, bytes) = Xxh128::hash_file(path)?;
+    Ok(InputIdentity { xxh3_128, bytes })
 }
 
 /// The input-PBF identity hash running on its own thread, overlapped with the
@@ -448,7 +447,7 @@ pub fn hash_file(path: &Path) -> std::io::Result<(String, u64)> {
 /// one to two orders of magnitude slower than the hash reads them; the
 /// hasher's readahead also warms the cache ahead of the pipeline reader.
 pub struct BackgroundHash {
-    handle: std::thread::JoinHandle<std::io::Result<(String, u64)>>,
+    handle: std::thread::JoinHandle<std::io::Result<InputIdentity>>,
 }
 
 impl BackgroundHash {
@@ -464,7 +463,7 @@ impl BackgroundHash {
     /// Block until the hash is done and return it. Any residual wait here is
     /// the caller's to instrument; a panic on the hasher thread propagates as
     /// an I/O-shaped error rather than being swallowed.
-    pub fn join(self) -> std::io::Result<(String, u64)> {
+    pub fn join(self) -> std::io::Result<InputIdentity> {
         self.handle.join().map_err(|_| {
             std::io::Error::other("input-hash thread panicked while hashing the input PBF")
         })?
@@ -487,8 +486,12 @@ mod tests {
     fn input() -> Input {
         Input {
             name: "denmark-locations-prepass.osm.pbf".to_string(),
-            xxh3_128: "58c47f32d3a55b04a56813565efc78ac".to_string(),
-            bytes: 531_544_047,
+            identity: InputIdentity {
+                xxh3_128: "58c47f32d3a55b04a56813565efc78ac"
+                    .parse()
+                    .expect("valid XXH3-128"),
+                bytes: 531_544_047,
+            },
             replication_timestamp: Some(1_771_622_445),
             features: features(),
         }
@@ -526,7 +529,9 @@ mod tests {
         let locations = input().to_json();
         let mut raw_input = input();
         raw_input.name = "denmark-raw.osm.pbf".to_string();
-        raw_input.xxh3_128 = "aa5bb8650000000000000000deadbeef".to_string();
+        raw_input.identity.xxh3_128 = "aa5bb8650000000000000000deadbeef"
+            .parse()
+            .expect("valid XXH3-128");
         raw_input.features = PbfFeatures {
             sort_type_then_id: true,
             ..PbfFeatures::default()
@@ -535,6 +540,53 @@ mod tests {
         assert_ne!(raw, locations);
         assert_ne!(raw["features"], locations["features"]);
         assert_ne!(raw["xxh3_128"], locations["xxh3_128"]);
+    }
+
+    #[test]
+    fn artifact_contract_keeps_the_flat_json_shape() {
+        // Keep the established wire schema local: corpus/ is excluded from
+        // the published crate, whose unit tests must still compile.
+        let mut expected = json!({
+            "mode": "artifact",
+            "runtime_simplification": true,
+            "low_zoom_source": "simplified",
+            "artifact_key": {
+                "full_shp_xxh128": "c10be1c7843cf9e59bed0a44c1e232e7",
+                "full_shx_xxh128": "c65e7ee5a2027b4e488f741119218a71",
+                "simplified_shp_xxh128": "b3417e31c2873dcfd106aa2e7d5e3b2a",
+                "simplified_shx_xxh128": "55c4a5d3476116d7b800122a074ba70b",
+                "min_zoom": 0,
+                "max_zoom": 14,
+                "compression_level": 6,
+                "policy_version": crate::ocean::OCEAN_POLICY_VERSION,
+            },
+        });
+        let mut key =
+            OceanArtifactKey::from_json(&expected["artifact_key"]).expect("valid artifact key");
+        let ocean = OceanContract {
+            mode: "artifact",
+            runtime_simplification: true,
+            low_zoom_source: "simplified",
+            artifact_key: Some(key.clone()),
+            source_key: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&ocean.to_json()).expect("serialized ocean contract"),
+            serde_json::to_string(&expected).expect("serialized committed ocean contract"),
+        );
+
+        key.source.simplified_shp_xxh128 = None;
+        key.source.simplified_shx_xxh128 = None;
+        expected["artifact_key"]["simplified_shp_xxh128"] = Value::Null;
+        expected["artifact_key"]["simplified_shx_xxh128"] = Value::Null;
+        let ocean = OceanContract {
+            artifact_key: Some(key),
+            ..ocean
+        };
+        assert_eq!(
+            serde_json::to_string(&ocean.to_json()).expect("serialized ocean contract"),
+            serde_json::to_string(&expected).expect("serialized committed ocean contract"),
+        );
     }
 
     #[test]
@@ -559,13 +611,13 @@ mod tests {
         let path = dir.path().join("input.bin");
         let bytes = b"elivagar provenance".to_vec();
         std::fs::write(&path, &bytes).expect("write");
-        let (hash, len) = hash_file(&path).expect("hash");
-        assert_eq!(len, bytes.len() as u64);
+        let identity = hash_file(&path).expect("hash");
+        assert_eq!(identity.bytes, bytes.len() as u64);
         assert_eq!(
-            hash,
+            identity.xxh3_128.to_string(),
             format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes))
         );
-        assert_eq!(hash.len(), 32, "must be 32 lowercase hex chars like brokkr");
+        assert_eq!(identity.xxh3_128.to_string().len(), 32);
     }
 
     #[test]
@@ -583,10 +635,10 @@ mod tests {
             }
         }
         std::fs::write(&path, &bytes).expect("write");
-        let (hash, len) = hash_file(&path).expect("hash");
-        assert_eq!(len, bytes.len() as u64);
+        let identity = hash_file(&path).expect("hash");
+        assert_eq!(identity.bytes, bytes.len() as u64);
         assert_eq!(
-            hash,
+            identity.xxh3_128.to_string(),
             format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes))
         );
     }
@@ -598,8 +650,7 @@ mod tests {
         std::fs::write(&path, b"elivagar provenance").expect("write");
         let background = BackgroundHash::spawn(path.clone()).join().expect("join");
         let synchronous = hash_file(&path).expect("hash");
-        assert_eq!(background.0, synchronous.0);
-        assert_eq!(background.1, synchronous.1);
+        assert_eq!(background, synchronous);
     }
 
     #[test]

@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+Design-hunt fixes, third wave. This changes output: the ocean artifact
+key moves to `OCEAN_POLICY_VERSION` v7, so the world ocean artifact must
+be rebuilt with `ocean-build`.
+
+- The polygon rect clipper rounds a clip crossing from a canonical
+  endpoint, so two rings sharing an edge in opposite directions cut it
+  at the same point; opposite traversals used to land one unit apart and
+  leave a sliver of missing fill.
+- Sites emits `kind=sports_center` as the Shortbread spec expects, while
+  still matching the real OSM tag `leisure=sports_centre`. Street polygon
+  labels classify by `aeroway`, and `rail` and `narrow_gauge` take their
+  z8 or z10 zoom from `service` as specified.
+- Computed-ocean archives record the shapefile source key in their
+  contract, so archives built from different water-polygon releases are
+  no longer contract-identical. Artifact keys travel as typed values and
+  can no longer be dropped from provenance by a JSON round-trip.
+- Resume refuses obsolete sort-chunk filenames and a different partition
+  split zoom instead of falling back to a legacy merge, and the legacy
+  single-reader assemble path is gone.
+- Library callers running more than one tilegen in a process get
+  markers in the right FIFO and counters reset per run.
+- OSM length and number parsing has one implementation; building
+  heights accept feet-and-inches values such as `5'6"`.
+
 Design-hunt fixes, second wave. Changes OSM output; ocean is unchanged.
 
 - Shortbread matchers no longer give up when one key carries an unlisted

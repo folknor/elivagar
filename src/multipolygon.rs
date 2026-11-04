@@ -8,7 +8,7 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::geometry::{self, Point, signed_area};
+use crate::geometry::{self, Point, RingOrientation, signed_area};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -227,7 +227,7 @@ fn ring_contains_ring(outer: &[Point], inner: &[Point], shift: f64) -> bool {
 /// Ensure all outer rings have positive signed_area (CW on screen).
 fn ensure_outer_orientation(rings: &mut [Vec<Point>]) {
     for ring in rings.iter_mut() {
-        if signed_area(ring) < 0.0 {
+        if geometry::ring_role(signed_area(ring)) == Some(RingOrientation::Negative) {
             ring.reverse();
         }
     }
@@ -236,7 +236,7 @@ fn ensure_outer_orientation(rings: &mut [Vec<Point>]) {
 /// Ensure all inner rings have negative signed_area (CCW on screen).
 fn ensure_inner_orientation(rings: &mut [Vec<Point>]) {
     for ring in rings.iter_mut() {
-        if signed_area(ring) > 0.0 {
+        if geometry::ring_role(signed_area(ring)) == Some(RingOrientation::Positive) {
             ring.reverse();
         }
     }

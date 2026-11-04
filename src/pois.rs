@@ -11,6 +11,7 @@
 
 use crate::shortbread::{
     Attr, GeomExpect, Layer, LayerMatch, Tags, attr_bool, attr_dyn, attr_int, attr_str, name_attrs,
+    osm_value,
 };
 use smallvec::{SmallVec, smallvec};
 
@@ -311,67 +312,21 @@ fn pois_match_man_made(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {
 }
 
 fn parse_ele_meters(raw: &str) -> Option<i64> {
-    let mut s = raw.trim().to_ascii_lowercase();
-    if s.is_empty() {
-        return None;
-    }
-    if let Some((first, _)) = s.split_once(';') {
-        s = first.trim().to_string();
-    }
-    if s.is_empty() {
-        return None;
-    }
-
-    let mut is_feet = false;
-    if s.ends_with("feet") {
-        is_feet = true;
-        s.truncate(s.len().saturating_sub(4));
-    } else if s.ends_with("ft") {
-        is_feet = true;
-        s.truncate(s.len().saturating_sub(2));
-    } else if s.ends_with('\'') {
-        is_feet = true;
-        s.truncate(s.len().saturating_sub(1));
-    } else if s.ends_with("meters") {
-        s.truncate(s.len().saturating_sub(6));
-    } else if s.ends_with("meter") {
-        s.truncate(s.len().saturating_sub(5));
-    } else if s.ends_with('m') {
-        s.truncate(s.len().saturating_sub(1));
-    }
-
-    let num = normalize_numeric_token(s.split_whitespace().next()?);
-    let value = num.parse::<f64>().ok()?;
-    let meters = if is_feet { value * 0.3048 } else { value };
-    let rounded = meters.round();
+    let rounded = osm_value::parse_length_m(raw)?.round();
     if !rounded.is_finite() {
         return None;
     }
-    rounded.to_string().parse::<i64>().ok()
-}
-
-fn normalize_numeric_token(token: &str) -> String {
-    let t = token.trim();
-    if !t.contains(',') {
-        return t.to_string();
+    // Elevation is emitted as i64. Reject values the attribute cannot
+    // represent instead of clamping them to an elevation OSM did not supply.
+    const I64_LOWER_BOUND_INCLUSIVE: f64 = -9_223_372_036_854_775_808.0;
+    const I64_UPPER_BOUND_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+    if rounded < I64_LOWER_BOUND_INCLUSIVE || rounded >= I64_UPPER_BOUND_EXCLUSIVE {
+        return None;
     }
-    if t.contains('.') {
-        // Assume commas are thousands separators when dot-decimal is present.
-        return t.replace(',', "");
-    }
-    let comma_count = t.bytes().filter(|&b| b == b',').count();
-    if comma_count == 1
-        && let Some((left, right)) = t.split_once(',')
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     {
-        if right.len() == 3 && !left.is_empty() {
-            // Likely thousands separator, e.g. 1,234
-            return [left, right].concat();
-        }
-        // Likely locale decimal comma, e.g. 999,5
-        return [left, ".", right].concat();
+        Some(rounded as i64)
     }
-    // Multiple commas: assume thousands grouping.
-    t.replace(',', "")
 }
 
 fn pois_match_natural(tags: &Tags<'_>) -> Option<SmallVec<[Attr; 8]>> {

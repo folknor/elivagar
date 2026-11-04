@@ -577,11 +577,15 @@ fn injected_pins_fixture(
 fn sum_geometry_cmd_words(mut reader: sort::SortReader) -> (u64, u64) {
     let mut records = 0u64;
     let mut words = 0u64;
-    while let Some(rec) = reader.next().expect("read sort record") {
-        records += 1;
-        if rec.data.len() >= 13 {
-            let cmd_count = u32::from_le_bytes(rec.data[9..13].try_into().expect("cmd_count"));
-            words += u64::from(cmd_count);
+    for partition in reader.take_partitions() {
+        let mut reader = sort::SortPartitionReader::open(&partition, sort::ChunkCompression::None)
+            .expect("open sort partition");
+        while let Some(rec) = reader.next().expect("read sort record") {
+            records += 1;
+            if rec.data.len() >= 13 {
+                let cmd_count = u32::from_le_bytes(rec.data[9..13].try_into().expect("cmd_count"));
+                words += u64::from(cmd_count);
+            }
         }
     }
     (records, words)
@@ -669,11 +673,15 @@ fn tile_features_ordered_by_paint_rank() {
         features: Vec::new(),
     };
     let mut observed = Vec::new();
-    while let Some(record) = reader.next().expect("read sorted record") {
-        assert_eq!(sort::tile_id_from_key(record.key), grouped.tile_id);
-        assert_eq!(sort::layer_from_key(record.key), Layer::Land as u8);
-        observed.push(sort::priority_from_key(record.key));
-        grouped.features.push((Layer::Land as u8, record.data));
+    for partition in reader.take_partitions() {
+        let mut reader = sort::SortPartitionReader::open(&partition, sort::ChunkCompression::None)
+            .expect("open sort partition");
+        while let Some(record) = reader.next().expect("read sorted record") {
+            assert_eq!(sort::tile_id_from_key(record.key), grouped.tile_id);
+            assert_eq!(sort::layer_from_key(record.key), Layer::Land as u8);
+            observed.push(sort::priority_from_key(record.key));
+            grouped.features.push((Layer::Land as u8, record.data));
+        }
     }
     assert_eq!(observed, [0, 2, 3, 5]);
     assert_eq!(grouped.features.len(), observed.len());
@@ -3367,10 +3375,10 @@ fn checkpoint_preserves_sort_chunk_compression() {
 fn computed_ocean() -> OceanMode {
     OceanMode::Computed {
         key: crate::ocean::OceanSourceKey {
-            full_shp_xxh128: 0xdead_beef,
-            full_shx_xxh128: 0xfeed_face,
-            simplified_shp_xxh128: Some(7),
-            simplified_shx_xxh128: Some(8),
+            full_shp_xxh128: crate::ocean::Xxh128::from_u128(0xdead_beef),
+            full_shx_xxh128: crate::ocean::Xxh128::from_u128(0xfeed_face),
+            simplified_shp_xxh128: Some(crate::ocean::Xxh128::from_u128(7)),
+            simplified_shx_xxh128: Some(crate::ocean::Xxh128::from_u128(8)),
             min_zoom: 0,
             max_zoom: 14,
             policy_version: crate::ocean::OCEAN_POLICY_VERSION,
@@ -3380,7 +3388,9 @@ fn computed_ocean() -> OceanMode {
 
 fn checkpoint_provenance() -> crate::pipeline::CheckpointProvenance {
     crate::pipeline::CheckpointProvenance {
-        input_xxh3_128: "58c47f32d3a55b04a56813565efc78ac".to_string(),
+        input_xxh3_128: "58c47f32d3a55b04a56813565efc78ac"
+            .parse()
+            .expect("valid XXH3-128"),
         producer_config: serde_json::json!({"min_zoom": 0, "max_zoom": 14}),
         effective: crate::provenance::Effective {
             coordinate_source: "inline",
@@ -3511,10 +3521,16 @@ fn checkpoint_records_the_input_it_was_built_from() {
     )
     .expect("save checkpoint");
     let (_, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
-    assert_eq!(loaded.input_xxh3_128, "58c47f32d3a55b04a56813565efc78ac");
+    assert_eq!(
+        loaded.input_xxh3_128.to_string(),
+        "58c47f32d3a55b04a56813565efc78ac"
+    );
     // The raw variant of the same extract hashes differently, which is what
     // makes an unsafe resume detectable at all.
-    assert_ne!(loaded.input_xxh3_128, "aa5bb8650000000000000000deadbeef");
+    assert_ne!(
+        loaded.input_xxh3_128.to_string(),
+        "aa5bb8650000000000000000deadbeef"
+    );
 }
 
 /// The effective paths survive a checkpoint round-trip as the same 'static
@@ -3540,7 +3556,9 @@ fn checkpoint_preserves_effective_paths() {
         1,
         &computed_ocean(),
         &crate::pipeline::CheckpointProvenance {
-            input_xxh3_128: "aa5bb8650000000000000000deadbeef".to_string(),
+            input_xxh3_128: "aa5bb8650000000000000000deadbeef"
+                .parse()
+                .expect("valid XXH3-128"),
             producer_config: crate::provenance::producer_config(&minimal_config()),
             effective: raw_paths,
             sort_chunk_compression: sort::ChunkCompression::None,
@@ -3554,14 +3572,16 @@ fn checkpoint_preserves_effective_paths() {
 #[test]
 fn checkpoint_preserves_all_ocean_modes() {
     let key = crate::ocean::OceanArtifactKey {
-        full_shp_xxh128: 1,
-        full_shx_xxh128: 2,
-        simplified_shp_xxh128: None,
-        simplified_shx_xxh128: None,
-        min_zoom: 0,
-        max_zoom: 14,
+        source: crate::ocean::OceanSourceKey {
+            full_shp_xxh128: crate::ocean::Xxh128::from_u128(1),
+            full_shx_xxh128: crate::ocean::Xxh128::from_u128(2),
+            simplified_shp_xxh128: None,
+            simplified_shx_xxh128: None,
+            min_zoom: 0,
+            max_zoom: 14,
+            policy_version: crate::ocean::OCEAN_POLICY_VERSION,
+        },
         compression_level: 6,
-        policy_version: crate::ocean::OCEAN_POLICY_VERSION,
     };
     let bounds = geometry::MercBbox {
         min_x: 0.0,
@@ -3594,7 +3614,8 @@ fn computed_ocean_modes_differ_when_the_shapefile_differs() {
     };
 
     let mut swapped_full = key.clone();
-    swapped_full.full_shp_xxh128 ^= 1;
+    swapped_full.full_shp_xxh128 =
+        crate::ocean::Xxh128::from_u128(swapped_full.full_shp_xxh128.as_u128() ^ 1);
     assert_ne!(base, OceanMode::Computed { key: swapped_full });
 
     // The split selection is identity too: the same full shapefile serving
@@ -3622,8 +3643,8 @@ fn computed_ocean_modes_differ_when_the_shapefile_differs() {
 #[test]
 fn computed_ocean_source_key_roundtrips_without_a_simplified_pass() {
     let key = crate::ocean::OceanSourceKey {
-        full_shp_xxh128: u128::MAX,
-        full_shx_xxh128: 0,
+        full_shp_xxh128: u128::MAX.into(),
+        full_shx_xxh128: 0.into(),
         simplified_shp_xxh128: None,
         simplified_shx_xxh128: None,
         min_zoom: 0,

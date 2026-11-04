@@ -24,6 +24,30 @@ pub use tiles::*;
 
 use std::f64::consts::PI;
 
+/// The sign of a ring's doubled shoelace area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RingOrientation {
+    Positive,
+    Negative,
+}
+
+/// Return a ring's orientation from its signed area or doubled shoelace sum.
+///
+/// Zero-area rings have no role under MapLibre's `classifyRings` semantics,
+/// so they return `None` and are skipped by ring grouping. An unordered value
+/// such as NaN also returns `None`.
+#[allow(clippy::needless_pass_by_value)] // scalar area; by-value keeps call sites simple
+pub fn ring_role<T>(area: T) -> Option<RingOrientation>
+where
+    T: PartialOrd + From<i8>,
+{
+    match area.partial_cmp(&T::from(0))? {
+        std::cmp::Ordering::Greater => Some(RingOrientation::Positive),
+        std::cmp::Ordering::Less => Some(RingOrientation::Negative),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
 /// MVT tile extent (pixels per tile axis).
 pub const EXTENT: f64 = 4096.0;
 

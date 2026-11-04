@@ -915,27 +915,34 @@ fn clip_ring_half_plane_multi(
     Some(rings_out)
 }
 
-/// Exact rational crossing of segment (a, b) with an axis line, rounded to
-/// nearest (ties away from zero). The cut line is a grid coordinate, so
-/// the un-rounded crossing is exact.
+/// Exact rational crossing, rounding the displacement from the endpoint
+/// with the smaller clipped-axis coordinate to nearest, ties away from zero.
+/// Canonical endpoint order makes shared edges bit-identical even when two
+/// rings traverse them oppositely. It is independent of the kept half-plane,
+/// so both halves of a partition also retain the same cut coordinate.
 fn crossing_point(a: IntPoint, b: IntPoint, axis: Axis, bound: i32) -> IntPoint {
+    let forward = match axis {
+        Axis::X => a.x < b.x,
+        Axis::Y => a.y < b.y,
+    };
+    let (a, b) = if forward { (a, b) } else { (b, a) };
     match axis {
         Axis::X => {
-            let num = i64::from(b.y - a.y) * i64::from(bound - a.x);
-            let den = i64::from(b.x - a.x);
-            let y = i64::from(a.y) + round_div(num, den);
+            let num = (i128::from(b.y) - i128::from(a.y)) * (i128::from(bound) - i128::from(a.x));
+            let den = i128::from(b.x) - i128::from(a.x);
+            let y = i128::from(a.y) + round_div(num, den);
             IntPoint::new(bound, i32::try_from(y).expect("clip crossing fits i32"))
         }
         Axis::Y => {
-            let num = i64::from(b.x - a.x) * i64::from(bound - a.y);
-            let den = i64::from(b.y - a.y);
-            let x = i64::from(a.x) + round_div(num, den);
+            let num = (i128::from(b.x) - i128::from(a.x)) * (i128::from(bound) - i128::from(a.y));
+            let den = i128::from(b.y) - i128::from(a.y);
+            let x = i128::from(a.x) + round_div(num, den);
             IntPoint::new(i32::try_from(x).expect("clip crossing fits i32"), bound)
         }
     }
 }
 
-fn round_div(num: i64, den: i64) -> i64 {
+fn round_div(num: i128, den: i128) -> i128 {
     let (n, d) = if den < 0 { (-num, -den) } else { (num, den) };
     if n >= 0 {
         (n + d / 2) / d
@@ -1220,6 +1227,72 @@ mod tests {
     use i_overlay::core::overlay_rule::OverlayRule;
     use i_overlay::i_float::int::point::IntPoint as OraclePoint;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn crossings_ignore_edge_direction_on_both_axes() {
+        for (a, b, bound) in [
+            (IntPoint::new(100, 110), IntPoint::new(102, 109), 101),
+            (IntPoint::new(100, 109), IntPoint::new(102, 110), 101),
+            (IntPoint::new(-102, -110), IntPoint::new(-100, -109), -101),
+            (
+                IntPoint::new(i32::MIN, i32::MAX),
+                IntPoint::new(i32::MAX, i32::MIN),
+                0,
+            ),
+        ] {
+            for axis in [Axis::X, Axis::Y] {
+                let (a, b) = match axis {
+                    Axis::X => (a, b),
+                    Axis::Y => (IntPoint::new(a.y, a.x), IntPoint::new(b.y, b.x)),
+                };
+                for cut in [a, b] {
+                    let bound = match axis {
+                        Axis::X => cut.x,
+                        Axis::Y => cut.y,
+                    };
+                    assert_eq!(crossing_point(a, b, axis, bound), cut);
+                }
+                assert_eq!(
+                    crossing_point(a, b, axis, bound),
+                    crossing_point(b, a, axis, bound)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clipped_neighbours_keep_identical_shared_edges() {
+        // All coordinates fit in one z0 tile. The shared diagonal has a
+        // half-integer crossing: endpoint-relative rounding without ordering
+        // produced y=110 for one ring and y=109 for its neighbour, opening
+        // a triangular gap with positive area in the kept half-plane.
+        let a = IntPoint::new(100, 110);
+        let b = IntPoint::new(102, 109);
+        let neighbours = [
+            vec![vec![a, IntPoint::new(100, 100), b]],
+            vec![vec![a, b, IntPoint::new(102, 120)]],
+        ];
+        for keep_left in [false, true] {
+            let rect = IntRect {
+                min_x: if keep_left { 0 } else { 101 },
+                max_x: if keep_left { 101 } else { 4096 },
+                min_y: 0,
+                max_y: 4096,
+            };
+            let cut = IntPoint::new(101, 109);
+            let endpoint = if keep_left { a } else { b };
+            for neighbour in &neighbours {
+                let mut out = Vec::new();
+                assert!(clip_shape_rect_fast(neighbour, rect, &mut out));
+                assert_eq!(out.len(), 1);
+                let ring = &out[0][0];
+                assert!(ring.iter().enumerate().any(|(i, &p)| {
+                    let q = ring[(i + 1) % ring.len()];
+                    (p == cut && q == endpoint) || (p == endpoint && q == cut)
+                }));
+            }
+        }
+    }
 
     #[test]
     fn buffered_cover_bounds_intersecting_cells_and_preserves_roots() {

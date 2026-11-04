@@ -16,6 +16,7 @@ use std::borrow::Cow;
 
 pub(crate) mod boundaries;
 mod land;
+pub(crate) mod osm_value;
 pub(crate) mod paint_order;
 mod streets;
 mod transport;
@@ -378,12 +379,9 @@ fn street_kind(val: &str) -> &str {
     val.strip_suffix("_link").unwrap_or(val)
 }
 
-/// Parse a tag value as i64, returning None on failure.
+/// Parse an integer tag using the locale policy in `osm_value::parse_int`.
 fn parse_i64(s: &str) -> Option<i64> {
-    // Try direct parse first, then strip commas for values like "123,456"
-    s.parse::<i64>()
-        .ok()
-        .or_else(|| s.replace(',', "").parse::<i64>().ok())
+    osm_value::parse_int(s)
 }
 
 // ---------------------------------------------------------------------------

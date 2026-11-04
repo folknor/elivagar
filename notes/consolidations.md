@@ -161,29 +161,6 @@ so invalid pairings are unconstructible. `OceanMode` is also `pub` from
 
 Reported by the pipeline, run-contract, ocean and archive-surface hunts.
 
-## CON-006 - How are content hashes represented and validated?
-
-`u128` in the ocean keys, lowercase-hex `String` in `provenance::Input`,
-`String` in `CheckpointProvenance.input_xxh3_128`, `(String, u64)` as
-`input_identity` threaded through `run()`, `RunProvenance` and the checkpoint.
-Two `hash_file`s (provenance: 8 MiB buffer, returns `(String, u64)`; ocean:
-1 MiB, returns `u128`). Two hex validators: `OceanArtifactKey::from_json`
-requires exactly 32 lowercase hex and present-but-null optionals;
-`OceanSourceKey::from_json` accepts any radix-16 length, uppercase, and
-missing optionals. The two keys share seven of eight fields with two
-hand-written codecs (`json!` vs a `format!` raw-string template).
-
-Owner proposed: one `Xxh128` newtype with one `Display`/`FromStr`;
-`InputIdentity { xxh3_128, bytes }`; `OceanArtifactKey { source:
-OceanSourceKey, compression_level }` by composition with one serde codec. The
-artifact key's `min_zoom`/`max_zoom` are always 0/14; derive from one
-constant or drop at the next policy bump. A `ShapefilePair { shp, shx }`
-removes the five independent `with_extension("shx")` derivations and the
-`OceanArtifactKey::from_inputs` parameters that let a caller pass a mismatched
-pair.
-
-Reported by the run-contract, ocean and archive-surface hunts.
-
 ---
 
 # Ocean
@@ -409,15 +386,14 @@ Reported by the polygon-engine and coordinate-spaces hunts.
 
 ## CON-016 - Which ring is an outer?
 
-- `tile_detail::decode_polygon` (the gate's hash): `area > 0` outer, zero
-  area is a hole, a leading hole opens a component.
-- `mlt::group_rings_to_polygons`: self-calibrating, first ring's sign defines
-  exterior (classifyRings-like), zero area counts as positive (`>= 0`).
-  MapLibre's classifyRings skips zero-area rings.
-- `ocean.rs` shapefile reader: `w == 0 || signed_area >= 0.0`.
-- `multipolygon.rs`: `signed_area < 0.0` / `> 0.0` in two places, plus its
-  own orientation and deterministic ring order, which the integer engine then
-  normalizes again.
+`geometry::ring_role` (no orientation for zero area, classifyRings semantics)
+now serves `tile_detail`, `mlt`, `multipolygon.rs` and `diag`; the duplicate
+`diag_ring_is_simple` is gone. Remaining sites:
+
+- `ocean.rs` shapefile reader: `w == 0 || signed_area >= 0.0` - adopting the
+  helper needs an explicit decision for a zero-area contour, including a
+  zero-area first contour, while keeping the first-contour-is-outer
+  convention the OSMCD split data relies on.
 - In-engine: `orient_ring` by slot, `clip_shape_rect_fast` re-orients by
   hand, `append_translated_ring` re-orients by slot.
 - `main.rs` diag prints "CW = outer" by its own sign; `geometry::signed_area`
@@ -426,24 +402,11 @@ Reported by the polygon-engine and coordinate-spaces hunts.
   Same convention (positive shoelace in y-down renders clockwise), named
   three ways.
 
-`tile_detail` and `mlt` already disagree on a zero-area ring and on a
-geometry whose first ring is negative - latent on engine output, but they are
-exactly the two sites (gate decoder, product encoder) that must agree on what
-the engine emitted. For tolerant cross-producer comparison with a producer
-that winds the other way, `tile_detail` would make every polygon an all-Hole
-component.
-
-Shoelace itself is implemented in `geometry::signed_area` (f64),
-`int_ocean::signed_area_2x` (i128), `signed_area_tile_2x`,
-`tile_detail::signed_area`, `mlt::ring_signed_area` (i64), the overlay test's
-`ring_area`, inline in `vw_refresh` and `is_convex_ring`;
-`geometry::ring_is_simple` is duplicated verbatim as
-`main.rs::diag_ring_is_simple`.
-
-Owner proposed: one `ring_role(area2x) -> Orientation` (zero case decided
-explicitly, classifyRings semantics) in a `geometry::ring` module; better, the
-engine emits roles in typed geometry so MLT and others never re-derive them
-(see `notes/structural.md`).
+Shoelace itself is still implemented in several places (`geometry::signed_area`
+f64, `int_ocean::signed_area_2x` i128, `signed_area_tile_2x`, the overlay
+test's `ring_area`, inline in `vw_refresh` and `is_convex_ring`). Better
+still, the engine emits roles in typed geometry so consumers never re-derive
+them (see `notes/structural.md`).
 
 Reported by the polygon-engine, encoding, storage and archive-surface hunts.
 
@@ -522,28 +485,6 @@ Reported by the coordinate-spaces and pipeline hunts.
 ---
 
 # Emission dispatch and per-layer policy
-
-## CON-020 - How does a `LayerMatch` become sort records?
-
-The way path (`process_planned_way_into`), the relation path
-(`process_prepared_relation_into`) and phase12 node emission each: `match
-m.geom_expect`; clamp `z_lo = m.min_zoom.max(min_zoom)` /
-`z_hi = m.max_zoom.min(max_zoom)`; fetch the cap with
-`fanout_caps.get(m.layer as usize).copied().unwrap_or(0)` (hiding an
-impossible case); run their own antimeridian loop; harvest cap events with an
-identical `/15 %15` loop and a duplicated "clear after harvest or
-double-count" comment. `emit_polygon_feature` and `emit_multipolygon_feature`
-are about 95% the same function. Three to four positional arguments (zooms,
-caps, simplify) travel separately through `process_relation_blocks`,
-`process_planned_way_into` and every emitter. The silent drop in the relation
-arm is in `notes/bugs.md`.
-
-Owner proposed: one `emit_match(osm_id, FeatureGeometry::{Way, Area{outer,
-inners}}, &LayerMatch, &EmitCtx, &mut Acc)` in `emit.rs` with an exhaustive
-match, owning the shift loop, cap lookup and cap-event harvest;
-`EmitCtx { zooms, fanout_caps, simplify }`.
-
-Reported by the pipeline, layer-identity and coordinate-spaces hunts.
 
 ## CON-021 - Which layers get which geometry policy?
 
@@ -706,30 +647,6 @@ returns kind and zoom without building attrs. Typed label payloads
 (`admin_level: AdminLevel`) lowered to attrs only at encode time.
 
 Reported by the encoding, Shortbread and layer-identity hunts.
-
-## CON-028 - Which layers have a paint order, and how is rank recovered?
-
-Verify no longer chooses its own layer set or zoom threshold: layer selection
-and rank recovery live in `shortbread/paint_order.rs` (with a private-field
-`PaintRank`), and rank is recovered from the attributes present in the tile.
-Residue on the producer side: the attribute min zoom 11 for `link`, `tunnel`
-and `bridge` is written three times in `streets.rs`; one named constant
-would stop the three drifting apart.
-
-Reported by the Shortbread, layer-identity and archive-surface hunts.
-
-## CON-029 - How is a length or numeric OSM tag parsed?
-
-`land.rs::parse_building_measurement_meters` and `pois.rs::parse_ele_meters`
-have character-identical unit-stripping preludes, each with a private copy of
-`normalize_numeric_token` - a duplicated decision ("how is an OSM length
-interpreted"): a fix for `"12 m"` or `"5'6\""` in one will not reach the
-other. `parse_i64` (comma-stripping, used for population and admin_level) is a
-third policy and disagrees with `normalize_numeric_token` on `"1,5"`
-(15 vs 1.5). Owner proposed: one `osm_value` module with `parse_length_m`,
-`parse_count`, `parse_int`, each documenting its locale policy.
-
-Reported by the Shortbread hunt.
 
 ## CON-030 - What is a POI, for the address layer?
 

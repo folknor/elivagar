@@ -234,7 +234,7 @@ const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 /// than absent.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CheckpointProvenance {
-    pub(crate) input_xxh3_128: String,
+    pub(crate) input_xxh3_128: crate::ocean::Xxh128,
     /// `provenance::producer_config` of the run that wrote the chunks.
     pub(crate) producer_config: serde_json::Value,
     pub(crate) effective: crate::provenance::Effective,
@@ -254,10 +254,7 @@ fn save_checkpoint(
     let ocean = match ocean_mode {
         OceanMode::None => serde_json::json!("none"),
         OceanMode::Computed { key } => serde_json::json!({ "computed": key.to_json() }),
-        OceanMode::Band { key } => serde_json::json!({
-            "band": serde_json::from_str::<serde_json::Value>(&key.json())
-                .map_err(|e| PipelineError(format!("ocean key is not valid JSON: {e}")))?,
-        }),
+        OceanMode::Band { key } => serde_json::json!({ "band": key.to_json() }),
     };
     let sort_chunk_compression = match provenance.sort_chunk_compression {
         sort::ChunkCompression::None => "none",
@@ -399,7 +396,8 @@ fn load_checkpoint(
         input_xxh3_128: doc["input_xxh3_128"]
             .as_str()
             .ok_or_else(stale)?
-            .to_string(),
+            .parse()
+            .map_err(|_| stale())?,
         producer_config: doc.get("producer_config").cloned().ok_or_else(stale)?,
         sort_chunk_compression: match doc
             .get("sort_chunk_compression")
@@ -433,10 +431,15 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
         let Some(full) = config.ocean_shapefile.as_deref() else {
             return Ok(OceanMode::None);
         };
+        let full = crate::ocean::ShapefilePair::from_shp(full);
+        let simplified = config
+            .ocean_simplified_shapefile
+            .as_deref()
+            .map(crate::ocean::ShapefilePair::from_shp);
         Ok(OceanMode::Computed {
             key: crate::ocean::OceanSourceKey::from_inputs(
-                full,
-                config.ocean_simplified_shapefile.as_deref(),
+                &full,
+                simplified.as_ref(),
                 config.min_zoom,
                 config.max_zoom,
             )
@@ -478,15 +481,14 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
     let full = config.ocean_shapefile.as_deref().ok_or_else(|| {
         PipelineError("ocean artifact requires the full shapefile for key validation".to_string())
     })?;
-    let simplified_shx = config
+    let full = crate::ocean::ShapefilePair::from_shp(full);
+    let simplified = config
         .ocean_simplified_shapefile
         .as_ref()
-        .map(|path| path.with_extension("shx"));
+        .map(|path| crate::ocean::ShapefilePair::from_shp(path));
     let key = crate::ocean::OceanArtifactKey::from_inputs(
-        full,
-        &full.with_extension("shx"),
-        config.ocean_simplified_shapefile.as_deref(),
-        simplified_shx.as_deref(),
+        &full,
+        simplified.as_ref(),
         0,
         14,
         config.compression_level,
@@ -583,6 +585,7 @@ fn layer_stats_enabled() -> bool {
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     crate::debug::reset_run_counters();
     crate::ocean::reset_ocean_counters();
+    sort::reset_sort_counters();
     if config.max_zoom > 14 {
         return Err(PipelineError(format!(
             "max_zoom {} exceeds maximum supported zoom level 14",
@@ -613,7 +616,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // 19 GB north-america input, because by then the file's head is evicted
     // from page cache and the "read it back out of cache" assumption fails at
     // exactly the scale where the read costs most.
-    let mut input_identity: Option<(String, u64)> = None;
+    let mut input_identity: Option<crate::provenance::InputIdentity> = None;
     let mut resumed_sort_chunks = None;
     // Only a full run computes the effective paths; a resume inherits them
     // from the checkpoint written by the run that built the chunks.
@@ -634,11 +637,11 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 checkpoint.sort_chunk_compression, config.compress_sort_chunks
             )));
         }
-        if checkpoint.input_xxh3_128 != identity.0 {
+        if checkpoint.input_xxh3_128 != identity.xxh3_128 {
             return Err(PipelineError(format!(
                 "checkpoint was built from a different PBF (chunks: {}, this run: {}); \
                  --skip-to would mix two inputs into one archive - re-run a full tilegen",
-                checkpoint.input_xxh3_128, identity.0,
+                checkpoint.input_xxh3_128, identity.xxh3_128,
             )));
         }
         // The chunks encode the producer config: zoom range, fanout caps,
@@ -741,7 +744,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 sw.chunk_count(),
                 &ocean_mode,
                 &CheckpointProvenance {
-                    input_xxh3_128: identity.0.clone(),
+                    input_xxh3_128: identity.xxh3_128,
                     producer_config: crate::provenance::producer_config(config),
                     effective: phase12_stats
                         .as_ref()
@@ -956,8 +959,12 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 SkipTo::Assemble => "assemble",
             }),
             ocean_artifact_key: match &ocean_mode {
-                OceanMode::Band { key } => serde_json::from_str(&key.json()).ok(),
+                OceanMode::Band { key } => Some(key.clone()),
                 OceanMode::None | OceanMode::Computed { .. } => None,
+            },
+            ocean_source_key: match &ocean_mode {
+                OceanMode::Computed { key } => Some(key.clone()),
+                OceanMode::None | OceanMode::Band { .. } => None,
             },
             // The resolved mode, not a guess from which paths are set: ocean
             // runs only when the full shapefile is present, so a
@@ -1328,13 +1335,18 @@ pub fn ocean_build(
     compression_level: u32,
     threads: usize,
 ) -> Result<(), PipelineError> {
+    crate::debug::reset_run_counters();
+    crate::ocean::reset_ocean_counters();
+    sort::reset_sort_counters();
     // Fail on missing inputs before retaining the active artifact. The key
     // itself is assembled from the buffers consumed by the passes below.
-    drop(std::fs::File::open(full_shapefile)?);
-    drop(std::fs::File::open(full_shapefile.with_extension("shx"))?);
-    if let Some(path) = simplified_shapefile {
-        drop(std::fs::File::open(path)?);
-        drop(std::fs::File::open(path.with_extension("shx"))?);
+    let full_files = crate::ocean::ShapefilePair::from_shp(full_shapefile);
+    let simplified_files = simplified_shapefile.map(crate::ocean::ShapefilePair::from_shp);
+    drop(std::fs::File::open(full_files.shp())?);
+    drop(std::fs::File::open(full_files.shx())?);
+    if let Some(files) = &simplified_files {
+        drop(std::fs::File::open(files.shp())?);
+        drop(std::fs::File::open(files.shx())?);
     }
     retain_outgoing_ocean_artifact(output_path)?;
     drop(std::fs::remove_dir_all(tmp_dir));
@@ -1353,7 +1365,10 @@ pub fn ocean_build(
     // Mirror the run pipeline's pass structure: z0-z7 always its own pass so
     // the low-zoom piece union fires, sourced from the simplified shapefile
     // when given (production) and from the full shapefile otherwise.
-    let low_source = simplified_shapefile.unwrap_or(full_shapefile);
+    let low_source = simplified_files
+        .as_ref()
+        .map(crate::ocean::ShapefilePair::shp)
+        .unwrap_or_else(|| full_files.shp());
     let (_, low_hashes) =
         crate::ocean::process_ocean_shapefile_with_hashes(low_source, &world, 0, 7, &mut writer)?;
     let (_, full_hashes) = crate::ocean::process_ocean_shapefile_with_hashes(
@@ -1368,15 +1383,15 @@ pub fn ocean_build(
             "full ocean shapefile changed between low and high zoom passes".to_string(),
         ));
     }
+    let source = crate::ocean::OceanSourceKey::from_hashes(
+        full_hashes,
+        simplified_shapefile.map(|_| low_hashes),
+        0,
+        14,
+    );
     let key = crate::ocean::OceanArtifactKey {
-        full_shp_xxh128: full_hashes.shp_xxh128,
-        full_shx_xxh128: full_hashes.shx_xxh128,
-        simplified_shp_xxh128: simplified_shapefile.map(|_| low_hashes.shp_xxh128),
-        simplified_shx_xxh128: simplified_shapefile.map(|_| low_hashes.shx_xxh128),
-        min_zoom: 0,
-        max_zoom: 14,
+        source,
         compression_level,
-        policy_version: crate::ocean::OCEAN_POLICY_VERSION,
     };
     writer.flush()?;
     let mut reader = writer.finish()?;

@@ -153,6 +153,9 @@ source, and sort chunk codec against the current run and refuses a mismatch,
 so `--skip-to` cannot silently blend two contracts into one archive. The
 checkpoint format is v7. The `--compress-sort-chunks` setting must match the
 run that wrote the chunks, including leaving compression unset on both runs.
+Resume also refuses obsolete chunk filenames and incompatible partition
+layouts, including chunks written with a different partition split zoom.
+Regenerate those chunks with a full run; they are not converted on resume.
 Checkpoints from v6 and earlier are refused; re-run a full tilegen.
 
 Resuming at `sort` or `assemble` also requires a valid chunk-count completion
@@ -259,9 +262,13 @@ the motivating case.
 Policy v6 discards a polygon if its original outer ring collapses during
 rescaling, simplification or cleanup, so a surviving hole cannot become a
 shell. Older artifacts must be rebuilt, followed by rotation of the
-artifact-active corpus baseline. Artifact builds hash the opened shapefile
-and index buffers used by each pass, so replacing an input path during the
-build cannot attach another file's hash to the geometry.
+artifact-active corpus baseline. Policy v7 additionally orders rect-clip
+endpoints by the clipped axis before rounding the displacement from the
+smaller coordinate, so opposite traversals of shared edges no longer leave
+one-unit fill gaps. This also requires an artifact rebuild and an adjudicated
+corpus rotation. Artifact builds hash the opened shapefile and index buffers
+used by each pass, so replacing an input path during the build cannot attach
+another file's hash to the geometry.
 
 Retention: when the output path already holds an artifact, `ocean-build`
 keeps the outgoing generation as `<stem>-v<policy_version>-<build_date>.pmtiles`

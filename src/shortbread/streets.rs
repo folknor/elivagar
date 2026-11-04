@@ -4,6 +4,8 @@
 use super::*;
 use smallvec::{SmallVec, smallvec};
 
+const STREET_FLAG_ATTRIBUTE_MIN_ZOOM: u8 = 11;
+
 // ---------------------------------------------------------------------------
 // Streets (line)
 // ---------------------------------------------------------------------------
@@ -46,7 +48,14 @@ fn street_match(tags: &Tags<'_>) -> Option<(&'static str, u8, bool)> {
             ("railway", "monorail", ("monorail", 10, true)),
         ],
     )?;
-    if rail && kind == "rail" && tags.has("service") {
+    // The z8 service override applies to both rail kinds with a non-empty
+    // service value. Empty and missing service follow the z10 rule.
+    if rail
+        && matches!(kind, "rail" | "narrow_gauge")
+        && tags
+            .get("service")
+            .is_some_and(|service| !service.is_empty())
+    {
         zoom = 8;
     }
     Some((kind, zoom, rail))
@@ -62,16 +71,16 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
     // kind: always emitted. Boolean attrs only when true (saves ~3-6 tags/feature).
     let mut attrs = smallvec![attr_dyn("kind", kind)];
     if is_link {
-        attrs.push(attr_bool_z("link", true, 11));
+        attrs.push(attr_bool_z("link", true, STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
     }
     if is_rail {
         attrs.push(attr_bool("rail", true));
     }
     if is_tunnel(tags) {
-        attrs.push(attr_bool_z("tunnel", true, 11));
+        attrs.push(attr_bool_z("tunnel", true, STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
     }
     if is_bridge(tags) {
-        attrs.push(attr_bool_z("bridge", true, 11));
+        attrs.push(attr_bool_z("bridge", true, STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
     }
     // Oneway: only for non-railway, only when true
     if !is_rail {
@@ -274,7 +283,7 @@ pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<
     if !has_name(tags) {
         return;
     }
-    if let Some((kind, _)) = street_polygon_match(tags) {
+    if let Some(kind) = street_polygon_label_kind(tags) {
         let mut attrs = smallvec![attr_str("kind", kind)];
         attrs.extend(name_attrs(tags));
         out.push(LayerMatch {
@@ -286,6 +295,18 @@ pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<
             attrs,
         });
     }
+}
+
+fn street_polygon_label_kind(tags: &Tags<'_>) -> Option<&'static str> {
+    transport::first_tag_match(
+        tags,
+        &[
+            ("aeroway", "runway", "runway"),
+            ("aeroway", "taxiway", "taxiway"),
+            ("highway", "pedestrian", "pedestrian"),
+            ("highway", "service", "service"),
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------

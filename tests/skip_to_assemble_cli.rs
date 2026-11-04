@@ -375,10 +375,10 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
     //
     // The producer config is generated rather than hand-encoded so it tracks
     // the CLI defaults instead of silently rotting when one of them changes.
-    let (pbf_hash, _) = elivagar::provenance::hash_file(&pbf_path).expect("hash pbf");
+    let identity = elivagar::provenance::hash_file(&pbf_path).expect("hash pbf");
     std::fs::write(
         tmp_dir.join("checkpoint.txt"),
-        checkpoint_json(&pbf_hash).to_string(),
+        checkpoint_json(&identity.xxh3_128.to_string()).to_string(),
     )
     .expect("write checkpoint");
     // Missing chunk path: checkpoint expects 1 chunk but there are none.
@@ -404,8 +404,10 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
     assert!(missing_err.contains("chunk count mismatch"));
 
     // Stale chunk path: checkpoint expects 1 chunk but 2 contiguous chunks exist.
-    std::fs::write(chunks_dir.join("chunk_0000.bin"), [0u8; 1]).expect("write stale chunk 0");
-    std::fs::write(chunks_dir.join("chunk_0001.bin"), [0u8; 1]).expect("write stale chunk 1");
+    std::fs::write(chunks_dir.join("chunk_0000_z7p00000.bin"), [0u8; 1])
+        .expect("write stale chunk 0");
+    std::fs::write(chunks_dir.join("chunk_0001_z7p00000.bin"), [0u8; 1])
+        .expect("write stale chunk 1");
     std::fs::write(tmp_dir.join("sort_chunks.count"), "1").expect("rewrite chunk checkpoint");
 
     let stale = run_elivagar(&[
