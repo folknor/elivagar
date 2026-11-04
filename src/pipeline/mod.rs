@@ -451,25 +451,115 @@ fn load_checkpoint(
     Ok((bounds, chunks, ocean_mode, provenance))
 }
 
-/// Resolve the writer contract once for assembly and artifact admission.
+/// Effective encoding, resolved from the public config without changing its API.
+/// The gzip default is ignored for MLT; brotli is rejected by run before IO.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TileContract {
+    Mvt {
+        compression: TileCompression,
+        level: u32,
+    },
+    Mlt,
+}
+
+impl TileContract {
+    pub(crate) fn from_config(config: &TilegenConfig) -> Self {
+        Self::from_fields(
+            config.tile_format,
+            config.tile_compression,
+            config.compression_level,
+        )
+    }
+
+    fn from_fields(format: TilePayloadFormat, compression: TileCompression, level: u32) -> Self {
+        match format {
+            TilePayloadFormat::Mvt => Self::Mvt { compression, level },
+            TilePayloadFormat::Mlt => Self::Mlt,
+        }
+    }
+
+    fn writer(
+        self,
+    ) -> (
+        pmtiles_writer::TileDataFormat,
+        pmtiles_writer::TileDataCompression,
+    ) {
+        use crate::pmtiles_writer::{TileDataCompression, TileDataFormat};
+        match self {
+            Self::Mvt { compression, .. } => (
+                TileDataFormat::Mvt,
+                match compression {
+                    TileCompression::Gzip => TileDataCompression::Gzip,
+                    TileCompression::Brotli => TileDataCompression::Brotli,
+                },
+            ),
+            Self::Mlt => (TileDataFormat::Mlt, TileDataCompression::None),
+        }
+    }
+
+    pub(crate) fn provenance_json(self) -> serde_json::Value {
+        let (format, compression) = self.writer();
+        match self {
+            Self::Mvt { level, .. } => serde_json::json!({
+                "format": format.metadata_payload(),
+                "compression": compression.metadata_value(),
+                "base_compression_level": level,
+                "compression_policy": COMPRESSION_POLICY,
+            }),
+            Self::Mlt => serde_json::json!({
+                "format": format.metadata_payload(),
+                "compression": compression.metadata_value(),
+            }),
+        }
+    }
+
+    fn compression_counter(self) -> i64 {
+        match self {
+            Self::Mvt {
+                compression: TileCompression::Gzip,
+                ..
+            } => 0,
+            Self::Mvt {
+                compression: TileCompression::Brotli,
+                ..
+            } => 1,
+            Self::Mlt => 2,
+        }
+    }
+}
+
+/// Version of the base-level to per-zoom compression mapping.
+/// This is deliberately excluded from OceanArtifactKey: changing compression
+/// effort preserves decoded MVT bytes. Run copies can use different levels;
+/// splice_ocean_layer decompresses and recompresses with the current policy.
+/// Rotating the world artifact and corpus for a size-only change buys no
+/// content safety. Changes to decoded content belong to OCEAN_POLICY_VERSION.
+pub(crate) const COMPRESSION_POLICY: &str = "zoom-v1";
+
+fn validate_compression_level(level: u32) -> Result<(), PipelineError> {
+    if level > 10 {
+        return Err(PipelineError(format!(
+            "compression level {level} exceeds maximum supported level 10"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn compression_level_for_zoom(z: u8, compression_level: u32) -> u32 {
+    match z {
+        0..=8 => compression_level.clamp(9, 10),
+        13..=14 => compression_level.min(3),
+        _ => compression_level,
+    }
+}
+
 fn configured_tile_contract(
     config: &TilegenConfig,
 ) -> (
     pmtiles_writer::TileDataFormat,
     pmtiles_writer::TileDataCompression,
 ) {
-    use crate::pmtiles_writer::{TileDataCompression, TileDataFormat};
-
-    match config.tile_format {
-        TilePayloadFormat::Mvt => {
-            let compression = match config.tile_compression {
-                TileCompression::Gzip => TileDataCompression::Gzip,
-                TileCompression::Brotli => TileDataCompression::Brotli,
-            };
-            (TileDataFormat::Mvt, compression)
-        }
-        TilePayloadFormat::Mlt => (TileDataFormat::Mlt, TileDataCompression::None),
-    }
+    TileContract::from_config(config).writer()
 }
 
 /// Resolve the ocean producer from the config, or fail.
@@ -642,6 +732,16 @@ fn layer_stats_enabled() -> bool {
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[hotpath::measure]
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
+    if config.tile_format == TilePayloadFormat::Mlt
+        && config.tile_compression == TileCompression::Brotli
+    {
+        return Err(PipelineError(
+            "MLT payloads are uncompressed; brotli is MVT only".into(),
+        ));
+    }
+    if config.tile_format == TilePayloadFormat::Mvt {
+        validate_compression_level(config.compression_level)?;
+    }
     crate::debug::reset_run_counters();
     crate::ocean::reset_ocean_counters();
     sort::reset_sort_counters();
@@ -734,10 +834,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     );
     eprintln!("    Zoom range: z{}-z{}", config.min_zoom, config.max_zoom);
     eprintln!("    Tmp dir:    {}", config.tmp_dir.display());
-    eprintln!(
-        "    Tile format:{:?}, compression:{:?}",
-        config.tile_format, config.tile_compression
-    );
+    eprintln!("    Tile contract: {:?}", TileContract::from_config(config));
     if (config.polygon_simplify_factor - 1.0).abs() > f64::EPSILON {
         eprintln!(
             "    Polygon simplify factor: {:.2}",
@@ -1096,10 +1193,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     );
     emit_counter(
         "tile_compression",
-        match config.tile_compression {
-            TileCompression::Gzip => 0,
-            TileCompression::Brotli => 1,
-        },
+        TileContract::from_config(config).compression_counter(),
     );
     if let Some(p3) = phase3_elapsed {
         emit_counter(
@@ -1431,6 +1525,7 @@ pub fn ocean_build(
     compression_level: u32,
     threads: usize,
 ) -> Result<(), PipelineError> {
+    validate_compression_level(compression_level)?;
     crate::debug::reset_run_counters();
     crate::ocean::reset_ocean_counters();
     sort::reset_sort_counters();

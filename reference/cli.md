@@ -147,9 +147,9 @@ Example, the production shape:
 |---|---|
 | `--skip-to <ocean\|sort\|assemble>` | resume from a checkpoint |
 | `--in-memory` | keep the tile blob in RAM. Faster for small extracts |
-| `--compression-level <0-10>` | gzip level. Default 6 |
+| `--compression-level <0-10>` | MVT base compression level. Default 6; library callers are also restricted to 0-10. Ignored for MLT. |
 | `--tile-format <mvt\|mlt>` | payload format. Default `mvt` |
-| `--tile-compression <gzip\|brotli>` | MVT only. Default `gzip` |
+| `--tile-compression <gzip\|brotli>` | MVT only. Default `gzip`; MLT ignores this default and stores uncompressed payloads. MLT with brotli is rejected by the library. |
 | `--compress-sort-chunks <lz4\|snappy>` | compress sort chunks: less disk I/O, more CPU. Wanted at planet scale, where scratch exceeds RAM |
 | `-j`, `--threads <N>` | rayon pool and pbfhogg decode pool. Default: logical CPUs |
 
@@ -240,7 +240,7 @@ release, not per run.
 | `--ocean <SPEC>` | repeatable, same spelling as `run --ocean`, shapefiles only. Required |
 | `-o`, `--output <PATH>` | output artifact path (required) |
 | `--tmp-dir <PATH>` | default `data/ocean-build_tmp` |
-| `--compression-level <0-10>` | default 6 |
+| `--compression-level <0-10>` | default 6; the library rejects values above 10 before accessing inputs or retaining the outgoing artifact |
 | `-j`, `--threads <N>` | default: logical CPUs |
 
 The `--ocean` spelling is shared with `run` deliberately: the shapefiles and

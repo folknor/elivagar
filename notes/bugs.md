@@ -22,26 +22,6 @@ find phantoms.
 
 # Run contract, provenance and resume
 
-## BUG-001 - MLT archives record a tile compression they do not use
-
-`assemble.rs` maps `TilePayloadFormat::Mlt` to `TileDataCompression::None` and
-ignores `config.tile_compression`. `provenance::config_json` writes
-`tile_compression_name(config.tile_compression)` unconditionally, and clap
-defaults that to gzip; `run()` also emits `tile_compression=0` (gzip) to the
-sidecar. So every MLT archive's comparability contract says `gzip`, while its
-header and top-level `tile_compression` metadata say `none` - one metadata
-document claiming two compressions. Nothing rejects
-`--tile-format mlt --tile-compression brotli` either (the help text "MVT only"
-is the only enforcement), and `base_compression_level` is recorded for MLT
-where it means nothing.
-
-Root cause per the hunters: format and compression are two independent enums
-while the legal space is `Mvt(Gzip|Brotli) | Mlt`. A `TileContract` /
-`TileEncoding` enum of that shape makes the lie unconstructible (the wider
-ownership question is in `notes/consolidations.md`, tile contract entry).
-
-Reported by the pipeline, run-contract and archive-surface hunts.
-
 ## BUG-002 - Ocean pass structure disagrees with itself; a single z0-z14 shapefile plus an artifact hands the low pass a z14 grid
 
 The question "which ocean passes exist, which shapefile feeds each, and which
@@ -278,3 +258,4 @@ and a corrupt record. Latent at real feature sizes; a `try_from` with an error
 or an assertion would make it explicit.
 
 Reported by the wave-4 wire-format fixer.
+

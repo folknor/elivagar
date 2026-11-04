@@ -14,7 +14,7 @@ use pbfhogg::ElementReader;
 use super::stats::{TileSizeDiagnostics, record_tile_size_diagnostics};
 use super::{
     EnvZero, PipelineError, TileCompression, TilePayloadFormat, TilegenConfig,
-    configured_tile_contract, env_integer,
+    compression_level_for_zoom, configured_tile_contract, env_integer,
 };
 
 // ---------------------------------------------------------------------------
@@ -28,7 +28,10 @@ pub(super) struct PendingTile {
 }
 const _: () = assert!(std::mem::size_of::<PendingTile>() == 32);
 
-/// An encoded + gzip-compressed tile ready for writing to PMTiles.
+/// A payload encoded under the run's tile contract, ready for PMTiles.
+/// Keep the contract on the run rather than every tile: a writer handles one
+/// contract, and the 32-byte batch item size is asserted below. Repeating the
+/// contract here would enlarge every queued tile without validating its bytes.
 pub(super) struct EncodedTile {
     pub(super) tile_id: u64,
     pub(super) compressed: Vec<u8>,
@@ -1344,15 +1347,6 @@ fn splice_ocean_layer(
     Ok(encoder.finish()?)
 }
 
-/// Match the compression regime used by normal MVT batch encoding.
-fn compression_level_for_zoom(z: u8, compression_level: u32) -> u32 {
-    match z {
-        0..=8 => compression_level.clamp(9, 10),
-        13..=14 => compression_level.min(3),
-        _ => compression_level,
-    }
-}
-
 fn encode_and_send_partition_batch(
     tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
     ctx: &PartitionEncodeCtx,
@@ -1528,20 +1522,18 @@ pub(super) fn encode_tile_batch(
     tile_format: TilePayloadFormat,
     tile_compression: TileCompression,
 ) -> Result<Vec<EncodedTile>, PipelineError> {
-    match tile_format {
-        TilePayloadFormat::Mvt => Ok(encode_tile_batch_mvt(
-            batch,
-            compression_level,
-            tile_compression,
-        )),
+    match super::TileContract::from_fields(tile_format, tile_compression, compression_level) {
+        super::TileContract::Mvt { compression, level } => {
+            Ok(encode_tile_batch_mvt(batch, level, compression))
+        }
         #[cfg(feature = "mlt")]
-        TilePayloadFormat::Mlt => encode_tile_batch_mlt(batch),
+        super::TileContract::Mlt => encode_tile_batch_mlt(batch),
         // Unreachable in practice: the CLI refuses --tile-format mlt without
         // the feature. A library caller can still construct the config, so
         // this fails loudly rather than silently writing MVT under an MLT
         // tile contract.
         #[cfg(not(feature = "mlt"))]
-        TilePayloadFormat::Mlt => Err(PipelineError(
+        super::TileContract::Mlt => Err(PipelineError(
             "tile format mlt requires a build with the `mlt` cargo feature".to_string(),
         )),
     }

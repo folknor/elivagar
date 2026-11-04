@@ -27,9 +27,9 @@
 //! the top level to validate the durable world-ocean artifact, and relocating
 //! it would invalidate every artifact already built.
 
+use crate::TilegenConfig;
 use crate::ocean::{OceanArtifactKey, OceanSourceKey, Xxh128};
 use crate::shortbread::Layer;
-use crate::{TileCompression, TilePayloadFormat, TilegenConfig};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -283,20 +283,6 @@ fn build_json() -> Value {
     })
 }
 
-fn tile_format_name(format: TilePayloadFormat) -> &'static str {
-    match format {
-        TilePayloadFormat::Mvt => "mvt",
-        TilePayloadFormat::Mlt => "mlt",
-    }
-}
-
-fn tile_compression_name(compression: TileCompression) -> &'static str {
-    match compression {
-        TileCompression::Gzip => "gzip",
-        TileCompression::Brotli => "brotli",
-    }
-}
-
 /// Fanout caps keyed by layer name, omitting unsupported layers and zeros.
 ///
 /// Layer arrays are indexed by `Layer` discriminant; emitting names rather
@@ -325,16 +311,7 @@ fn config_json(config: &TilegenConfig, ocean: &OceanContract) -> Value {
         "profile": "shortbread",
         "min_zoom": config.min_zoom,
         "max_zoom": config.max_zoom,
-        "tile": {
-            "format": tile_format_name(config.tile_format),
-            "compression": tile_compression_name(config.tile_compression),
-            // The supplied level is a base, not a uniform setting: the encoder
-            // clamps low zooms up and caps z13/z14 down. Recording the base
-            // alone would misdescribe the output, so the policy that maps base
-            // to per-zoom level is named and versioned alongside it.
-            "base_compression_level": config.compression_level,
-            "compression_policy": "zoom-v1",
-        },
+        "tile": crate::pipeline::TileContract::from_config(config).provenance_json(),
         "fanout_caps": fanout_cap_map(&config.fanout_caps),
         "polygon_simplify_factor": config.polygon_simplify_factor,
         "ocean": ocean.to_json(),

@@ -3848,3 +3848,62 @@ fn ocean_artifact_retention_noop_without_artifact() {
 // with the seam machinery (2026-08-07); shared-boundary consistency is
 // enforced at emission by shared-node pins (see
 // notes/simplify-then-reconcile-design.md).
+
+#[test]
+fn effective_tile_contract_matches_provenance_and_mlt_header() {
+    let mut config = minimal_config();
+    // Keep the established contract local: corpus/ is excluded from the
+    // published crate, whose unit tests must still compile.
+    let tile = TileContract::from_config(&config).provenance_json();
+    assert_eq!(
+        tile,
+        serde_json::json!({
+            "format": "mvt",
+            "compression": "gzip",
+            "base_compression_level": 6,
+            "compression_policy": "zoom-v1",
+        })
+    );
+    assert_eq!(compression_level_for_zoom(0, 6), 9);
+    assert_eq!(compression_level_for_zoom(9, 6), 6);
+    assert_eq!(compression_level_for_zoom(14, 6), 3);
+    config.tile_format = TilePayloadFormat::Mlt;
+    let contract = TileContract::from_config(&config);
+    assert_eq!(
+        contract.provenance_json(),
+        serde_json::json!({
+            "format": "mlt", "compression": "none"
+        })
+    );
+    assert_eq!(contract.writer().1.header_value(), 1);
+    assert_eq!(contract.compression_counter(), 2);
+    config.tile_compression = TileCompression::Brotli;
+    // The nonexistent input proves validation occurs before input access.
+    assert!(
+        run(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("brotli is MVT only")
+    );
+}
+
+#[test]
+fn library_entry_points_reject_invalid_compression_levels_before_io() {
+    let mut config = minimal_config();
+    for level in [11, u32::MAX] {
+        config.compression_level = level;
+        let error =
+            run(&config).expect_err("invalid compression level must fail before PBF access");
+        assert!(error.to_string().contains("maximum supported level 10"));
+        let error = ocean_build(
+            &config.pbf_path,
+            None,
+            &config.output_path,
+            &config.tmp_dir,
+            level,
+            config.threads,
+        )
+        .expect_err("invalid compression level must fail before shapefile access");
+        assert!(error.to_string().contains("maximum supported level 10"));
+    }
+}

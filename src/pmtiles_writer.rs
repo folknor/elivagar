@@ -93,7 +93,7 @@ impl TileDataFormat {
         }
     }
 
-    fn metadata_payload(self) -> &'static str {
+    pub(crate) fn metadata_payload(self) -> &'static str {
         match self {
             Self::Mvt => "mvt",
             Self::Mlt => "mlt",
@@ -120,7 +120,7 @@ impl TileDataCompression {
         }
     }
 
-    fn metadata_value(self) -> &'static str {
+    pub(crate) fn metadata_value(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Gzip => "gzip",
@@ -745,7 +745,7 @@ impl PmtilesWriter {
         })
     }
 
-    /// Add a tile. `data` must already be gzip-compressed.
+    /// Add a tile. `data` must already match the configured format and compression.
     /// Tile IDs MUST be strictly increasing in Hilbert order.
     /// Returns `true` if unique, `false` if deduplicated.
     ///

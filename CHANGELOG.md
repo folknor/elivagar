@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- MLT archives record tile compression `none` in their provenance
+  contract and sidecar counters, matching their header, instead of the
+  gzip default they never used; `--tile-format mlt` with
+  `--tile-compression brotli` is refused by the library, not only by the
+  CLI help. MVT contracts are byte-identical.
+- The per-zoom compression policy and the version label provenance
+  records for it are defined side by side.
+- Library callers passing a compression level the assembler cannot use
+  are refused before any IO, in both `run` and `ocean_build`.
+
 Design-hunt fixes, fourth wave. Output-neutral: a fresh denmark build is
 byte-identical to the third wave's.
 

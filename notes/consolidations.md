@@ -96,48 +96,6 @@ embedded in `ContractConfig` so it is a subset by construction.
 
 Reported by the pipeline, run-contract, ocean and storage hunts.
 
-## CON-004 - What is the tile contract (format, compression, per-zoom level, policy version)?
-
-- `assemble.rs`: MLT forces compression None; the config-to-writer mapping
-  around `set_tile_contract` hard-codes "MLT payloads are stored
-  uncompressed".
-- `provenance::config_json` and `run()` counters record `config.tile_compression`
-  raw.
-- `resolved_ocean_mode` checks format and compression independently.
-- `OceanTiles::open`, `verify`, `ArchiveView::open` compare raw header ints
-  `1`/`2` (a re-check against the file - fine, but magic numbers).
-- `compression_level_for_zoom` (z0-8 clamp to 9-10, z13-14 cap at 3) is the
-  policy; the label `"compression_policy": "zoom-v1"` in `provenance` is a
-  string literal nothing ties to it. Change the function without the string
-  and the contract reads as unchanged.
-- The ocean artifact key carries `compression_level` but no compression-policy
-  version: an artifact built under an older per-zoom policy still key-matches,
-  and assemble splices fresh-policy tiles next to old-policy run copies. The
-  ocean hunt notes `OCEAN_POLICY_VERSION`'s documented scope lists the MVT
-  encoder but not the gzip policy.
-- Vocabularies: `TilePayloadFormat`+`TileCompression` (lib.rs),
-  `TileDataFormat`+`TileDataCompression` (writer), header bytes, metadata
-  strings; name tables in `TileDataFormat::metadata_format`/
-  `metadata_payload`, `TileDataCompression::metadata_value`,
-  `provenance::tile_format_name`/`tile_compression_name`,
-  `inspect::compression_name`/`tile_type_name`/
-  `infer_payload_format_from_header`.
-- `PmtilesWriter::add_tile` documents "data must already be gzip-compressed"
-  while accepting a brotli or none contract and never checking the payload.
-
-Not a duplicate (run-contract hunt): the compression-level check in both
-`resolved_ocean_mode` (`declared_key`) and `OceanTiles::open` (full key
-equality) is one answer confirmed twice for a better message.
-
-Owner proposed: `enum TileContract { Mvt { compression, level }, Mlt }` with
-`header_tile_type()`, `header_compression()`, `metadata_name()`,
-`provenance_json()`; the per-zoom policy function and a
-`const COMPRESSION_POLICY` version next to each other, referenced by the
-provenance block and folded into the artifact key; a typed
-`CompressedTile { contract, bytes }` from the encoder.
-
-Reported by the pipeline, run-contract, ocean and archive-surface hunts.
-
 ## CON-005 - How do ocean mode and effective-path facts get their names?
 
 - `OceanMode::{None, Computed, Band}` is rendered `"none"/{"computed"}/{"band"}`

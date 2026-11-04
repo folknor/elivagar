@@ -154,7 +154,16 @@ characters and can be compared directly.
 `config.tile.base_compression_level` is a **base**, not a uniform setting: the
 encoder clamps low zooms up and caps z13/z14 down. Recording the level alone
 would misdescribe the output, so `compression_policy` names and versions the
-mapping from base to per-zoom level.
+mapping from base to per-zoom level. MLT stores uncompressed payloads and
+records `compression: "none"`; its tile contract omits the inapplicable base
+level and compression policy. The sidecar compression counter uses 0 for
+gzip, 1 for brotli, and 2 for none.
+
+The compression policy does not enter the ocean artifact key: changing
+compression effort preserves decoded MVT bytes. Artifact run copies may use
+a different compression level policy; spliced tiles are recompressed under
+the current policy. Decoded content changes require an ocean policy version
+change.
 
 `config.ocean.mode` is the **resolved** mode, taken from `OceanMode` rather
 than inferred from which config paths are set. Those differ: the ocean phase
