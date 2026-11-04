@@ -1,19 +1,21 @@
 use std::sync::atomic::Ordering;
 
 use crate::debug::{WAIT, emit_counter_u64, emit_counter_usize, wait_span};
+use crate::geometry::int_ocean::{TILE_BUFFER_I32, TILE_EXTENT_I32};
 #[cfg(feature = "mlt")]
 use crate::mlt;
 use crate::mvt::{self, LayerBuilder};
-use crate::pmtiles_writer::{
-    self, PmtilesConfig, PmtilesWriter, TileDataCompression, TileDataFormat,
-};
+use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter};
 use crate::shortbread::{self, Layer};
 use crate::sort;
 use crate::wire_format::add_feature_to_layer;
 use pbfhogg::ElementReader;
 
 use super::stats::{TileSizeDiagnostics, record_tile_size_diagnostics};
-use super::{PipelineError, TileCompression, TilePayloadFormat, TilegenConfig};
+use super::{
+    EnvZero, PipelineError, TileCompression, TilePayloadFormat, TilegenConfig,
+    configured_tile_contract, env_integer,
+};
 
 // ---------------------------------------------------------------------------
 // Phase 4: Tile assembly + PMTiles write
@@ -97,10 +99,35 @@ struct PartitionEncodeCtx {
     tile_compression: TileCompression,
 }
 
-#[derive(Clone, Copy)]
 struct ArtifactPartitionCtx<'a> {
     ocean: &'a crate::ocean::OceanTiles,
     band_empty: bool,
+    copy_ranges_by_zoom: Vec<Vec<(u64, u64)>>,
+}
+
+impl<'a> ArtifactPartitionCtx<'a> {
+    fn new(
+        ocean: &'a crate::ocean::OceanTiles,
+        min_zoom: u8,
+        max_zoom: u8,
+    ) -> Result<Self, PipelineError> {
+        let band_empty = ocean
+            .grids()
+            .iter()
+            .all(|grid| grid.band_is_empty(min_zoom, max_zoom));
+        let mut copy_ranges_by_zoom = Vec::new();
+        if !band_empty {
+            copy_ranges_by_zoom.reserve(15);
+            for z in 0..=14 {
+                copy_ranges_by_zoom.push(artifact_copy_ranges(ocean, z)?);
+            }
+        }
+        Ok(Self {
+            ocean,
+            band_empty,
+            copy_ranges_by_zoom,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -204,18 +231,8 @@ pub(super) fn phase_assemble_with_ocean(
     if config.dedup_cap > 0 {
         pmtiles.set_dedup_cap(config.dedup_cap);
     }
-    match config.tile_format {
-        TilePayloadFormat::Mvt => {
-            let compression = match config.tile_compression {
-                TileCompression::Gzip => TileDataCompression::Gzip,
-                TileCompression::Brotli => TileDataCompression::Brotli,
-            };
-            pmtiles.set_tile_contract(TileDataFormat::Mvt, compression);
-        }
-        TilePayloadFormat::Mlt => {
-            pmtiles.set_tile_contract(TileDataFormat::Mlt, TileDataCompression::None);
-        }
-    }
+    let (tile_format, tile_compression) = configured_tile_contract(config);
+    pmtiles.set_tile_contract(tile_format, tile_compression);
     if let Some(key) = &config.ocean_artifact_key {
         pmtiles.add_metadata_member(format!("\"ocean_artifact\":{}", key.json()));
     }
@@ -321,6 +338,17 @@ fn phase_assemble_partitions(
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::mpsc;
 
+    let split_target = env_integer(
+        "ELIVAGAR_ASSEMBLE_SPLIT_TARGET",
+        64 * 1024 * 1024u64,
+        EnvZero::Reject,
+    )?;
+    let worker_cap = env_integer("ELIVAGAR_ASSEMBLE_WORKERS", 8usize, EnvZero::Reject)?;
+    let park_budget = env_integer(
+        "ELIVAGAR_ASSEMBLE_PARK_BUDGET",
+        2 * 1024 * 1024 * 1024usize,
+        EnvZero::Reject,
+    )?;
     let union = partition_union(partitions, ocean);
     // H8b: split hot partitions into tile-range pieces. The z7 partition
     // scheme bounds MOST partitions well, but one dense z14-block prefix
@@ -333,11 +361,6 @@ fn phase_assemble_partitions(
     // pieces; the target is overridable for A/Bs and for forcing splits on
     // small extracts (the bit-identity gate builds denmark split and
     // unsplit and compares archives with cmp).
-    let split_target = std::env::var("ELIVAGAR_ASSEMBLE_SPLIT_TARGET")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(64 * 1024 * 1024);
     let mut split_partitions = 0usize;
     let mut split_pieces = 0usize;
     let mut split_union = Vec::with_capacity(union.len());
@@ -387,11 +410,6 @@ fn phase_assemble_partitions(
     // count window and 160.7s with the byte-budgeted claim window; 12 was
     // WORSE (176.1s, +3 GB RSS) - encode CPU saturates around 8. Env
     // override for future A/Bs.
-    let worker_cap = std::env::var("ELIVAGAR_ASSEMBLE_WORKERS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(8);
     let worker_count = config.threads.clamp(1, worker_cap).min(partition_count);
     let next_job = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
@@ -417,11 +435,6 @@ fn phase_assemble_partitions(
     // growing once over budget except for the <= worker_count partitions
     // already claimed, so worst case is budget + workers x fattest
     // partition - the same exposure class as the count window.
-    let park_budget = std::env::var("ELIVAGAR_ASSEMBLE_PARK_BUDGET")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(2 * 1024 * 1024 * 1024);
     struct ClaimState {
         next_write: usize,
         parked_bytes: usize,
@@ -444,13 +457,9 @@ fn phase_assemble_partitions(
     } else {
         32 * 1024 * 1024
     };
-    let artifact_ctx = ocean.map(|ocean| ArtifactPartitionCtx {
-        ocean,
-        band_empty: ocean
-            .grids()
-            .iter()
-            .all(|grid| grid.band_is_empty(config.min_zoom, config.max_zoom)),
-    });
+    let artifact_ctx = ocean
+        .map(|ocean| ArtifactPartitionCtx::new(ocean, config.min_zoom, config.max_zoom))
+        .transpose()?;
 
     let mut features_read: u64 = 0;
     let mut tiles_written: u64 = 0;
@@ -468,6 +477,7 @@ fn phase_assemble_partitions(
     let scope_result: Result<(), PipelineError> = std::thread::scope(|s| {
         for _ in 0..worker_count {
             let tx = tx.clone();
+            let artifact_ctx = artifact_ctx.as_ref();
             let union_ref = &union;
             let next_job_ref = &next_job;
             let stop_ref = &stop;
@@ -541,12 +551,7 @@ fn phase_assemble_partitions(
                                 )
                             })
                             .and_then(|artifact| {
-                                let items = artifact_run_copy_items(
-                                    artifact.ocean,
-                                    *start,
-                                    *end,
-                                    artifact.band_empty,
-                                )?;
+                                let items = artifact_run_copy_items(*start, *end, artifact)?;
                                 send_partition_batch(
                                     &tx,
                                     PartitionBatch {
@@ -766,7 +771,7 @@ fn read_encode_partition(
     tile_format: TilePayloadFormat,
     tile_compression: TileCompression,
     assemble_budget: usize,
-    artifact: Option<ArtifactPartitionCtx<'_>>,
+    artifact: Option<&ArtifactPartitionCtx<'_>>,
     tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
 ) -> Result<(), PipelineError> {
     const BATCH_SIZE: usize = 4096;
@@ -968,81 +973,228 @@ fn write_provenance(
 }
 
 fn artifact_run_copy_items(
-    ocean: &crate::ocean::OceanTiles,
     start: u64,
     end: u64,
-    band_empty: bool,
+    artifact: &ArtifactPartitionCtx<'_>,
 ) -> Result<Vec<PartitionItem>, PipelineError> {
     let mut items = Vec::new();
     if start >= end {
         return Ok(items);
     }
-    for run in ocean.runs_in(start, end) {
+    for run in artifact.ocean.runs_in(start, end) {
         let mut cursor = start.max(run.tile_id);
         let run_end = end.min(run.tile_id.saturating_add(u64::from(run.run_length)));
-        if !band_empty {
-            // A computed band suppresses the artifact even when it emits no
-            // tile. Coalesce the remaining members, while retaining zoom
-            // boundaries for the per-zoom writer counters.
-            let mut copy_start = None;
-            let mut copy_zoom = None;
+        if artifact.band_empty {
+            // Preserve zoom boundaries for the per-zoom writer counters.
+            // With an empty band, every tile in the source run is copied.
             while cursor < run_end {
-                let (z, x, y) = pmtiles_writer::tile_id_to_zxy(cursor);
-                let copy = !ocean.band_tile(z, x, y);
-                if copy && copy_zoom.is_none_or(|previous| previous == z) {
-                    copy_start.get_or_insert(cursor);
-                    copy_zoom = Some(z);
-                } else {
-                    if let Some(start) = copy_start.take() {
-                        items.push(PartitionItem::RunCopy {
-                            tile_id: start,
-                            run_length: u32::try_from(cursor - start).map_err(|_| {
-                                PipelineError("artifact split run length exceeds u32".to_string())
-                            })?,
-                            offset: run.offset,
-                            length: run.length,
-                        });
-                    }
-                    copy_zoom = None;
-                    if copy {
-                        copy_start = Some(cursor);
-                        copy_zoom = Some(z);
-                    }
-                }
-                cursor += 1;
-            }
-            if let Some(start) = copy_start {
-                items.push(PartitionItem::RunCopy {
-                    tile_id: start,
-                    run_length: u32::try_from(run_end - start).map_err(|_| {
-                        PipelineError("artifact split run length exceeds u32".to_string())
-                    })?,
-                    offset: run.offset,
-                    length: run.length,
-                });
+                let z = pmtiles_writer::tile_id_to_zxy(cursor).0;
+                let zoom_end = zoom_tile_id_range(z).1;
+                let sub_end = run_end.min(zoom_end);
+                append_artifact_run_copy(&mut items, cursor, sub_end, run.offset, run.length)?;
+                cursor = sub_end;
             }
             continue;
         }
+
+        // `band_tile` is the complement of one axis-aligned interior tile
+        // rectangle for each zoom (with world-edge columns removed). Those
+        // rectangles are converted once into Hilbert ID ranges in
+        // `ArtifactPartitionCtx`; intersecting them with this source run
+        // avoids decoding every tile ID in long artifact runs.
         while cursor < run_end {
-            let (z, _x, _y) = pmtiles_writer::tile_id_to_zxy(cursor);
-            let zoom_end = if z == 14 {
-                run_end
-            } else {
-                ((1_u64 << (2 * u32::from(z + 1))) - 1) / 3
-            };
+            let z = pmtiles_writer::tile_id_to_zxy(cursor).0;
+            let zoom_end = zoom_tile_id_range(z).1;
             let sub_end = run_end.min(zoom_end);
-            let length = u32::try_from(sub_end - cursor)
-                .map_err(|_| PipelineError("artifact split run length exceeds u32".to_string()))?;
-            items.push(PartitionItem::RunCopy {
-                tile_id: cursor,
-                run_length: length,
-                offset: run.offset,
-                length: run.length,
-            });
+            let ranges = &artifact.copy_ranges_by_zoom[z as usize];
+            let first = ranges.partition_point(|range| range.1 <= cursor);
+            for &(range_start, range_end) in &ranges[first..] {
+                if range_start >= sub_end {
+                    break;
+                }
+                append_artifact_run_copy(
+                    &mut items,
+                    range_start.max(cursor),
+                    range_end.min(sub_end),
+                    run.offset,
+                    run.length,
+                )?;
+            }
             cursor = sub_end;
         }
     }
     Ok(items)
+}
+
+fn append_artifact_run_copy(
+    items: &mut Vec<PartitionItem>,
+    start: u64,
+    end: u64,
+    offset: u64,
+    length: u32,
+) -> Result<(), PipelineError> {
+    if start >= end {
+        return Ok(());
+    }
+    items.push(PartitionItem::RunCopy {
+        tile_id: start,
+        run_length: u32::try_from(end - start)
+            .map_err(|_| PipelineError("artifact split run length exceeds u32".to_string()))?,
+        offset,
+        length,
+    });
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct TileRect {
+    min_x: u32,
+    min_y: u32,
+    max_x: u32,
+    max_y: u32,
+}
+
+fn artifact_copy_ranges(
+    ocean: &crate::ocean::OceanTiles,
+    z: u8,
+) -> Result<Vec<(u64, u64)>, PipelineError> {
+    let side = 1_u32 << z;
+    let Some(grid) = ocean.grid_for_zoom(z) else {
+        let (start, end) = zoom_tile_id_range(z);
+        return Ok(vec![(start, end)]);
+    };
+    let Some(rect) = non_band_tile_rect(grid, z) else {
+        return Ok(Vec::new());
+    };
+
+    let mut ranges = Vec::new();
+    collect_hilbert_rect_ranges(z, rect, 0, 0, side, &mut ranges)?;
+    ranges.sort_unstable_by_key(|range| range.0);
+
+    // Adjacent quadtree cells form one contiguous Hilbert interval. Merge
+    // them so every emitted RunCopy remains a maximal span within its zoom.
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    Ok(merged)
+}
+
+/// Convert `ocean_band_tile`'s buffered containment rule into the exact
+/// rectangular set of tiles that it leaves to the artifact at this zoom.
+fn non_band_tile_rect(grid: &crate::ocean::OceanPassGrid, z: u8) -> Option<TileRect> {
+    if z > grid.max_zoom {
+        return None;
+    }
+    let side = 1_u32 << z;
+    let shift = u32::from(grid.max_zoom - z);
+    let cell = i64::from(TILE_EXTENT_I32) << shift;
+    let buffer = i64::from(TILE_BUFFER_I32) << shift;
+    let limit = 1_i64 << (u32::from(grid.max_zoom) + 12);
+    let mut min_x = contained_axis_start(grid.inner_rect.min_x, cell, buffer, side);
+    let min_y = contained_axis_start(grid.inner_rect.min_y, cell, buffer, side);
+    let mut max_x = contained_axis_end(grid.inner_rect.max_x, cell, buffer, limit, side);
+    let max_y = contained_axis_end(grid.inner_rect.max_y, cell, buffer, limit, side);
+
+    let contains_world = grid.inner_rect.min_x <= grid.world_rect.min_x
+        && grid.inner_rect.min_y <= grid.world_rect.min_y
+        && grid.inner_rect.max_x >= grid.world_rect.max_x
+        && grid.inner_rect.max_y >= grid.world_rect.max_y;
+    if !contains_world {
+        if grid.inner_rect.min_x == grid.world_rect.min_x {
+            min_x = min_x.max(1);
+        }
+        if grid.inner_rect.max_x == grid.world_rect.max_x {
+            max_x = max_x.min(side - 1);
+        }
+    }
+
+    if min_x >= max_x || min_y >= max_y {
+        return None;
+    }
+    Some(TileRect {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    })
+}
+
+fn contained_axis_start(inner_min: i32, cell: i64, buffer: i64, side: u32) -> u32 {
+    let inner_min = i64::from(inner_min);
+    if inner_min <= 0 {
+        return 0;
+    }
+    let numerator = inner_min + buffer;
+    let quotient = numerator.div_euclid(cell);
+    let rounded = quotient
+        + if numerator.rem_euclid(cell) == 0 {
+            0
+        } else {
+            1
+        };
+    u32::try_from(rounded.clamp(0, i64::from(side))).expect("tile coordinate fits u32")
+}
+
+fn contained_axis_end(inner_max: i32, cell: i64, buffer: i64, limit: i64, side: u32) -> u32 {
+    let inner_max = i64::from(inner_max);
+    if inner_max >= limit {
+        return side;
+    }
+    let end = (inner_max - buffer).div_euclid(cell);
+    u32::try_from(end.clamp(0, i64::from(side))).expect("tile coordinate fits u32")
+}
+
+fn collect_hilbert_rect_ranges(
+    z: u8,
+    rect: TileRect,
+    x: u32,
+    y: u32,
+    side: u32,
+    ranges: &mut Vec<(u64, u64)>,
+) -> Result<(), PipelineError> {
+    let end_x = x + side;
+    let end_y = y + side;
+    if end_x <= rect.min_x || x >= rect.max_x || end_y <= rect.min_y || y >= rect.max_y {
+        return Ok(());
+    }
+    if rect.min_x <= x && rect.min_y <= y && rect.max_x >= end_x && rect.max_y >= end_y {
+        let last_x = end_x - 1;
+        let last_y = end_y - 1;
+        let start = [
+            pmtiles_writer::try_xy_to_tile_id(z, x, y)?,
+            pmtiles_writer::try_xy_to_tile_id(z, last_x, y)?,
+            pmtiles_writer::try_xy_to_tile_id(z, x, last_y)?,
+            pmtiles_writer::try_xy_to_tile_id(z, last_x, last_y)?,
+        ]
+        .into_iter()
+        .min()
+        .expect("four tile corners");
+        let length = u64::from(side) * u64::from(side);
+        ranges.push((start, start + length));
+        return Ok(());
+    }
+    if side == 1 {
+        return Ok(());
+    }
+
+    let half = side / 2;
+    for (child_x, child_y) in [(x, y), (x + half, y), (x + half, y + half), (x, y + half)] {
+        collect_hilbert_rect_ranges(z, rect, child_x, child_y, half, ranges)?;
+    }
+    Ok(())
+}
+
+fn zoom_tile_id_range(z: u8) -> (u64, u64) {
+    let tiles = 1_u64 << (2 * u32::from(z));
+    let next_zoom_tiles = tiles * 4;
+    ((tiles - 1) / 3, (next_zoom_tiles - 1) / 3)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1106,13 +1258,13 @@ fn write_encoded_item(
 fn raw_contains_ocean(raw: &[u8]) -> Result<bool, PipelineError> {
     Ok(crate::pmtiles_reader::decode_mvt_layers(raw)?
         .iter()
-        .any(|layer| layer.name == "ocean"))
+        .any(|layer| layer.name == Layer::Ocean.name()))
 }
 
 fn ocean_layer_field(compressed: &[u8]) -> Result<Vec<u8>, PipelineError> {
     let raw = crate::pmtiles_reader::gzip_decompress(compressed)?;
     let layers = crate::pmtiles_reader::decode_mvt_layers(&raw)?;
-    if layers.len() != 1 || layers[0].name != "ocean" {
+    if layers.len() != 1 || layers[0].name != Layer::Ocean.name() {
         return Err(PipelineError(
             "artifact tile must contain exactly one ocean layer".to_string(),
         ));
@@ -1206,7 +1358,7 @@ fn encode_and_send_partition_batch(
     ctx: &PartitionEncodeCtx,
     meta: &PartitionBatchMeta,
     pending_tiles: &[PendingTile],
-    artifact: Option<ArtifactPartitionCtx<'_>>,
+    artifact: Option<&ArtifactPartitionCtx<'_>>,
     artifact_cursor: &mut u64,
     final_end: Option<u64>,
 ) -> Result<(), PipelineError> {
@@ -1225,10 +1377,9 @@ fn encode_and_send_partition_batch(
         let mut encoded = encoded_tiles.into_iter().peekable();
         for tile in pending_tiles {
             items.extend(artifact_run_copy_items(
-                artifact.ocean,
                 *artifact_cursor,
                 tile.tile_id,
-                artifact.band_empty,
+                artifact,
             )?);
             if encoded
                 .peek()
@@ -1250,12 +1401,7 @@ fn encode_and_send_partition_batch(
             ));
         }
         if let Some(end) = final_end {
-            items.extend(artifact_run_copy_items(
-                artifact.ocean,
-                *artifact_cursor,
-                end,
-                artifact.band_empty,
-            )?);
+            items.extend(artifact_run_copy_items(*artifact_cursor, end, artifact)?);
         }
     } else {
         items.extend(encoded_tiles.into_iter().map(PartitionItem::Encoded));
@@ -1276,7 +1422,7 @@ fn encode_and_send_partition_batch(
 
 fn splice_artifact_ocean(
     encoded: &mut EncodedTile,
-    artifact: ArtifactPartitionCtx<'_>,
+    artifact: &ArtifactPartitionCtx<'_>,
     compression_level: u32,
 ) -> Result<(), PipelineError> {
     let (z, x, y) = pmtiles_writer::tile_id_to_zxy(encoded.tile_id);
@@ -1335,9 +1481,8 @@ fn add_reader_elapsed(reader_ns: &mut u64, started: std::time::Instant) {
     *reader_ns += started.elapsed().as_nanos() as u64;
 }
 
-/// Per-worker assembly state, persisted across batches via `thread_local!`.
-/// Avoids re-creating Compressor + pools on every batch boundary and keeps
-/// LayerBuilder HashMap capacity alive across tiles.
+/// Assembly state created for one tile. Pools reuse buffers during that
+/// tile's preparation and encoding; dropping them bounds retention across tiles.
 pub(super) struct AssemblyScratch {
     pub(super) encode_scratch: mvt::EncodeScratch,
     pub(super) merge_scratch: mvt::MergeScratch,
@@ -1425,12 +1570,7 @@ pub(super) fn encode_tile_batch_mvt(
                 let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
                 prepare_tile_layers(s, tile);
                 // Borrow only the layer field so encoding can use its own buffers.
-                let non_empty: Vec<&LayerBuilder> = s
-                    .layers
-                    .iter()
-                    .filter_map(|layer| layer.as_ref())
-                    .filter(|layer| !layer.is_empty())
-                    .collect();
+                let non_empty = non_empty_layers_in_tile_order(&s.layers);
                 if non_empty.is_empty() {
                     return None;
                 }
@@ -1533,11 +1673,16 @@ pub(super) fn prepare_non_empty_layers<'a>(
     tile: &PendingTile,
 ) -> Vec<&'a LayerBuilder> {
     prepare_tile_layers(s, tile);
-    // Max 26 elements (one per Shortbread layer) - with_capacity not needed.
-    s.layers
+    non_empty_layers_in_tile_order(&s.layers)
+}
+
+fn non_empty_layers_in_tile_order(layers: &[Option<LayerBuilder>]) -> Vec<&LayerBuilder> {
+    // Layer::ALL is the explicit archived tile order, shared by the MVT and
+    // MLT encoders. The array slots remain keyed by the layer's wire ID.
+    Layer::ALL
         .iter()
-        .filter_map(|l| l.as_ref())
-        .filter(|l| !l.is_empty())
+        .filter_map(|layer| layers.get(*layer as usize).and_then(Option::as_ref))
+        .filter(|layer| !layer.is_empty())
         .collect()
 }
 
@@ -1582,6 +1727,13 @@ pub(super) fn encode_tile_batch_mlt(
 }
 
 pub(super) const LAYER_COUNT: usize = Layer::count();
+
+// Both payload encoders consume builders in Shortbread tile order, and
+// artifact splicing appends the raw ocean field. Keep the shared order checked.
+const _: () = {
+    assert!(Layer::Ocean.tile_order() as usize == LAYER_COUNT - 1);
+    assert!(Layer::ALL[LAYER_COUNT - 1] as u8 == Layer::Ocean as u8);
+};
 
 /// Get or create a LayerBuilder at the given index.
 fn get_or_create_layer(layers: &mut [Option<LayerBuilder>], idx: usize) -> &mut LayerBuilder {

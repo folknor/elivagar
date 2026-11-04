@@ -608,11 +608,9 @@ fn children(cell: PyramidCell) -> [PyramidCell; 4] {
 /// - bbox strictly outside the rect: skip (a boundary touch yields only
 ///   zero-area geometry, which every downstream consumer drops);
 /// - bbox inside the rect: clone, the cut is an identity;
-/// - otherwise an exact integer Sutherland-Hodgman half-plane chain with
-///   snap-rounded crossings, guarded per pass: a ring crossing the cut
-///   line more than twice (would bridge into multiple components) or
-///   carrying a vertex exactly on the line (in/out ambiguity) falls back
-///   to the full i_overlay boolean - the R23-class safety net.
+/// - otherwise a snap-rounded integer half-plane chain with multi-crossing
+///   reconnection; ambiguous crossing pairs fall back to the in-tree
+///   polygon boolean engine.
 fn intersect_shapes_with_rect(
     scratch: &mut IntEmitScratch,
     shapes: &Shapes,
@@ -1043,6 +1041,12 @@ fn is_full_buffered_cell(frag: &Shapes, maxz: u8, cell: PyramidCell) -> bool {
 /// within the 128-unit buffer of the cell's tile edge lines, in zoom
 /// coordinates). Run endpoints include the cut vertices on clip lines, so
 /// fragment bounds survive; run interiors thin to 2-unit fidelity.
+/// This deliberately classifies the rounded coordinates, unlike the initial
+/// base-space pins in `build_edge_flags`. With a two-bit downshift, x=513
+/// rounds to 128: outside the base strip of width 512, inside this strip.
+/// Sharing a post-rescale window would change first-pass pins, not just
+/// remove duplicate arithmetic. Preserve this distinction unless changing
+/// polygon output and rotating the durable ocean artifact is intended.
 fn thin_window_runs(
     shape_z: &mut Shape,
     cell: PyramidCell,
@@ -1084,6 +1088,12 @@ fn thin_window_runs(
     }
 }
 
+// Classify before rescale, retaining source junctions and segment crossings.
+// Do not replace this with the rounded window in `thin_window_runs`: at
+// maxz=2, z=0, tx=ty=0, (513, 8192) is outside every base edge strip but
+// rounds to (128, 2048), inside the left zoom-space strip. Both points fit
+// within that one tile. Rescale carries these flags forward (OR-ing flags
+// on collapsed vertices); rounding must not silently introduce new pins.
 fn build_edge_flags(
     shape: &Shape,
     params: &PyramidParams<'_>,

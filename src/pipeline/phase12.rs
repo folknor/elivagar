@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::debug::{BUSY, WAIT, wait_span};
 use crate::geometry::{self, MercBbox, Point};
 use crate::node_index::{NodeIndex, NodeStore, NodeStoreReader, SortedNodeStore};
-use crate::shortbread::{self, GeomExpect, OsmGeomType, Tags};
+use crate::shortbread::{self, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter};
 use crate::way_index::WayIndexWriter;
 use pbfhogg::{BlobFilter, BlockType, Element, ElementReader, MemberId, PrimitiveBlock, Way};
@@ -18,7 +18,7 @@ use super::relations::process_relation_blocks;
 use super::stats::{
     FanoutStats, MissingRefStatsAtomic, Phase12Stats, record_fanout_from_payload_records,
 };
-use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb};
+use super::{EnvZero, PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb, env_integer};
 
 /// A way block plus its optional injected per-blob membership bitmap.
 struct WayBlock {
@@ -215,6 +215,14 @@ pub(super) fn phase_read_and_process(
 ) -> Result<(SortWriter, MercBbox, Phase12Stats), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
+    // ELIVAGAR_REL_BLOCKS_CAP overrides the buffer cap (bytes) - debug/test
+    // hook to force the re-read path on small extracts.
+    let rel_blocks_buffer_cap = env_integer(
+        "ELIVAGAR_REL_BLOCKS_CAP",
+        REL_BLOCKS_BUFFER_CAP,
+        EnvZero::Allow,
+    )?;
+
     let sort_chunk_budget = if config.sort_chunk_size > 0 {
         config.sort_chunk_size
     } else {
@@ -345,12 +353,6 @@ pub(super) fn phase_read_and_process(
     // late way blocks (common in locations-on-ways PBFs) don't hit a finalized way_index.
     let mut relation_blocks: Vec<PrimitiveBlock> = Vec::new();
     let mut relation_blocks_spilled = false;
-    // ELIVAGAR_REL_BLOCKS_CAP overrides the buffer cap (bytes) - debug/test
-    // hook to force the re-read path on small extracts.
-    let rel_blocks_buffer_cap: usize = std::env::var("ELIVAGAR_REL_BLOCKS_CAP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(REL_BLOCKS_BUFFER_CAP);
 
     // High-water-mark counters for in-flight memory tracking.
     let way_hwm = std::sync::Arc::new(AtomicUsize::new(0));
@@ -1547,18 +1549,10 @@ fn prepass_relation_plan(
                 }),
                 &mut boundary_way_meta,
             );
-            let mut rel_type = "";
-            for (k, v) in rel.tags() {
-                if k == "type" {
-                    rel_type = v;
-                    break;
-                }
-            }
-            if rel_type != "multipolygon" && rel_type != "boundary" {
+            if !shortbread::is_area_relation(&tag_helper) {
                 return;
             }
-            let matched =
-                !shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon).is_empty();
+            let matched = shortbread::area_relation_matches(&tag_helper).is_some();
             if matched {
                 matched_relations += 1;
             }
@@ -1873,40 +1867,18 @@ fn resolve_boundary_match(
     boundary_way_meta: &BoundaryWayMeta,
     matches: &mut smallvec::SmallVec<[shortbread::LayerMatch; 4]>,
 ) {
-    let meta = boundary_way_meta.get(&way_id).copied().unwrap_or_default();
-    let own = crate::shortbread::boundaries::boundary_match(tags);
-    let level = match (own.map(|(level, _)| level), meta.min_admin_level) {
-        (Some(own_level), Some(meta_level)) => Some(own_level.min(i64::from(meta_level))),
-        (Some(level), None) => Some(level),
-        (None, Some(level)) => Some(i64::from(level)),
-        (None, None) => None,
+    let Some(resolved) =
+        shortbread::boundaries::boundary_line(tags, boundary_way_meta.get(&way_id).copied())
+    else {
+        return;
     };
-    let Some(level) = level else { return };
-    let level_u8 = u8::try_from(level).expect("boundary level must fit u8");
-    let min_zoom = crate::shortbread::boundaries::boundary_min_zoom(level_u8)
-        .expect("boundary metadata only contains supported levels");
-    let maritime = tags.has_value("maritime", "yes") || tags.has_value("natural", "coastline");
-    let disputed = meta.disputed || tags.has_value("disputed", "yes");
-    let attrs = smallvec::smallvec![
-        shortbread::attr_int("admin_level", level),
-        shortbread::attr_bool("maritime", maritime),
-        shortbread::attr_bool("disputed", disputed),
-    ];
     if let Some(existing) = matches
         .iter_mut()
         .find(|m| m.layer == shortbread::Layer::Boundaries)
     {
-        existing.min_zoom = min_zoom;
-        existing.attrs = attrs;
+        *existing = resolved;
     } else {
-        matches.push(shortbread::LayerMatch {
-            layer: shortbread::Layer::Boundaries,
-            min_zoom,
-            max_zoom: 14,
-            geom_expect: GeomExpect::Line,
-            paint_rank: 0,
-            attrs,
-        });
+        matches.push(resolved);
     }
 }
 

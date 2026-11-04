@@ -595,12 +595,10 @@ Reported by the Shortbread and layer-identity hunts.
 
 ## STR-023 - Move `pois.rs` into `shortbread/` and dissolve `paint_order.rs`
 
-`pois.rs` sits at the crate root but is a profile module (`Layer::Pois`);
-mod.rs has a section header explaining it. `paint_order.rs` is a
-cross-cutting table keyed by strings; with kind enums it dissolves into
-`LandKind::rank` / `StreetKind::rank` beside their kinds, and verify imports
-the enums. `boundaries.rs` also owns `place_labels`, which has nothing to do
-with boundaries.
+`pois.rs` now lives in `shortbread/` and place labels have their own module.
+Remaining: `paint_order.rs` is a cross-cutting table keyed by strings; with
+kind enums it dissolves into `LandKind::rank` / `StreetKind::rank` beside
+their kinds, and verify imports the enums.
 
 Reported by the Shortbread and layer-identity hunts.
 
@@ -865,15 +863,10 @@ Reported by every hunt.
 - A property suite running random shapes through quantize, pyramid and decode,
   checking outer positive, holes inside outers, at most 500 rings, and no
   hole-oriented ring in slot 0 (polygon-engine hunt).
-- Full-range round-trip property tests for the node FOR bitpacking and chunk
-  record layout (storage hunt).
+- A full-range round-trip property test for the sort chunk record layout
+  (storage hunt).
 - A test building the ocean producer filter and the consumer copy/splice from
   one plan and checking every tile is owned by exactly one side - "the test
   this subsystem most lacks" (ocean hunt).
 - A semantic comparison of MVT and MLT output for the same tile (encoding
   hunt).
-- `decode(encode(x)) == x` for the PMTiles directory (archive-surface hunt).
-- An assertion that `EXTENT * BUFFER_FRACTION == TILE_BUFFER_I32` until the
-  constants have one owner (coordinate-spaces hunt).
-- A golden ocean digest pinned with `OCEAN_POLICY_VERSION` (ocean and encoding
-  hunts).

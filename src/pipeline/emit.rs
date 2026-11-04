@@ -12,7 +12,9 @@ use crate::geometry::{self, BUFFER_FRACTION, ClipRect, MercBbox, Point, merc_bbo
 use crate::multipolygon::MemberWay;
 use crate::mvt::{self, GeomType};
 use crate::pmtiles_writer;
-use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
+#[cfg(test)]
+use crate::shortbread::AttrValue;
+use crate::shortbread::{GeomExpect, Layer, LayerMatch};
 use crate::sort::{self, SortRecord};
 use crate::wire_format::{
     append_feature_data_with_attrs, encode_attrs_bytes, encode_feature_data_with_attrs,
@@ -129,33 +131,7 @@ fn relation_vertex_is_pinned(keys: &FxHashSet<(i64, i64)>, point: &Point) -> boo
 pub(super) fn enrich_polygon_matches(matches: &mut [LayerMatch], area_m2: f64) {
     for m in matches.iter_mut() {
         if m.layer == Layer::BoundaryLabels {
-            // Add way_area in hectares
-            let hectares = area_m2 / 10_000.0;
-            m.attrs.push(("way_area", AttrValue::Float(hectares), 0));
-
-            // Override min_zoom based on area (Planetiler thresholds)
-            let area_km2 = area_m2 / 1e6;
-            let admin_level = m
-                .attrs
-                .iter()
-                .find(|(k, _, _)| *k == "admin_level")
-                .and_then(|(_, v, _)| {
-                    if let AttrValue::Int(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-
-            if admin_level == 2 && area_km2 >= 2_000_000.0 {
-                m.min_zoom = 2;
-            } else if area_km2 >= 700_000.0 {
-                m.min_zoom = 3;
-            } else if area_km2 >= 100_000.0 {
-                m.min_zoom = 4;
-            }
-            // else stays at 5 (default from match_boundary_labels)
+            crate::shortbread::boundaries::enrich_boundary_label(m, area_m2);
         }
     }
 }

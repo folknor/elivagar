@@ -79,7 +79,7 @@ pub enum TileDataFormat {
 }
 
 impl TileDataFormat {
-    fn header_tile_type(self) -> u8 {
+    pub(crate) fn header_tile_type(self) -> u8 {
         match self {
             Self::Mvt => 1, // MVT
             Self::Mlt => 0, // Unknown in PMTiles header; explicit metadata carries mlt marker.
@@ -111,7 +111,7 @@ pub enum TileDataCompression {
 }
 
 impl TileDataCompression {
-    fn header_value(self) -> u8 {
+    pub(crate) fn header_value(self) -> u8 {
         match self {
             Self::None => 1,
             Self::Gzip => 2,

@@ -3,7 +3,7 @@ use smallvec::SmallVec;
 use crate::geometry::{self, Point};
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::shortbread::LayerMatch;
-use crate::shortbread::{self, OsmGeomType, Tags};
+use crate::shortbread::{self, Tags};
 use crate::sort::{self, SortWriter};
 use crate::way_index::WayIndexReader;
 use pbfhogg::MemberId;
@@ -45,26 +45,12 @@ pub(super) fn prepare_relation(
     way_index: &WayIndexReader,
     missing_ref_stats: &MissingRefStatsAtomic,
 ) -> Result<Option<PreparedRelation>, PipelineError> {
-    // Fast reject without tag allocation: most relations are not multipolygon/boundary.
-    let mut rel_type = "";
-    for (k, v) in rel.tags() {
-        if k == "type" {
-            rel_type = v;
-            break;
-        }
-    }
-    if rel_type != "multipolygon" && rel_type != "boundary" {
-        return Ok(None);
-    }
     let tags: SmallVec<[(&str, &str); 16]> = rel.tags().collect();
     let tag_helper = Tags(&tags);
-
-    // Match while PBF borrows are alive - attrs copy only the relevant tag values
-    // into Cow::Owned, avoiding cloning ALL tags to String.
-    let matches = shortbread::match_element(&tag_helper, OsmGeomType::MultiPolygon);
-    if matches.is_empty() {
+    // Match while PBF borrows are alive; copy only relevant attribute values.
+    let Some(matches) = shortbread::area_relation_matches(&tag_helper) else {
         return Ok(None);
-    }
+    };
 
     let mut member_ways: Vec<MemberWay> = Vec::new();
     let mut had_missing_way_ref = false;

@@ -291,3 +291,13 @@ fn cross_sign(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32)) -> i8 {
 #[allow(clippy::unwrap_used)]
 #[path = "../geometry_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn float_and_integer_tile_buffers_agree() {
+    assert_eq!(
+        (EXTENT * BUFFER_FRACTION).to_bits(),
+        f64::from(int_ocean::TILE_BUFFER_I32).to_bits(),
+        "float and integer tile buffers must agree until they have one owner",
+    );
+}

@@ -11,8 +11,9 @@ use crate::geometry::int_ocean::{
     quantize_polygon, shape_bbox,
 };
 use crate::geometry::pyramid::{
-    PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid,
-    emit_shape_pyramid_cell, split_for_parallel,
+    PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, Simplifier,
+    buffered_cell_rect_base, emit_shape_pyramid, emit_shape_pyramid_cell, split_for_parallel,
+    tile_cover,
 };
 use crate::geometry::{self, MercBbox, Point};
 use crate::mvt::GeomType;
@@ -302,6 +303,20 @@ impl OceanSourceKey {
         }
     }
 
+    pub(crate) fn full_shapefile_hashes(&self) -> OceanShapefileHashes {
+        OceanShapefileHashes {
+            shp_xxh128: self.full_shp_xxh128,
+            shx_xxh128: self.full_shx_xxh128,
+        }
+    }
+
+    pub(crate) fn simplified_shapefile_hashes(&self) -> Option<OceanShapefileHashes> {
+        Some(OceanShapefileHashes {
+            shp_xxh128: self.simplified_shp_xxh128?,
+            shx_xxh128: self.simplified_shx_xxh128?,
+        })
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).expect("OceanSourceKey has an infallible JSON representation")
     }
@@ -449,9 +464,10 @@ impl<'de> Deserialize<'de> for OceanArtifactKey {
 // Ocean input stats
 // ---------------------------------------------------------------------------
 //
-// process_ocean_shapefile runs up to twice per pipeline (simplified z0-7 plus
-// full-resolution z8+), so its input-side counts accumulate into these
-// process-global atomics and are drained at OCEAN_END by emit_ocean_counters.
+// Shapefile processing runs the low-zoom pass (simplified when configured,
+// full-resolution otherwise) and the full-resolution z8+ pass. Its input-side
+// counts accumulate into these process-global atomics and are drained at
+// OCEAN_END by emit_ocean_counters.
 // OceanAcc records its output at each spill flush because the phase12 sort
 // snapshot predates the ocean pass. The output counters use
 // payload bytes only, matching the other sort_layer_*_bytes counters; its
@@ -539,16 +555,17 @@ pub fn ocean_band_tile(z: u8, tx: u32, ty: u32, pass: &OceanPassGrid) -> bool {
     {
         return true;
     }
-    let shift = u32::from(pass.max_zoom - z);
-    let cell = 4096_i64 << shift;
-    let buffer = 128_i64 << shift;
-    let limit = 1_i64 << (u32::from(pass.max_zoom) + 12);
-    let clamp = |v: i64| i32::try_from(v.clamp(0, limit)).expect("ocean base coordinate fits i32");
+    let buffered = buffered_cell_rect_base(pass.max_zoom, PyramidCell { z, tx, ty });
+    // Keep the former world clamp and pass-world clipping around the shared
+    // unbounded buffer so antimeridian and edge ownership stay unchanged.
+    let world_limit = i32::try_from(1_i64 << (u32::from(pass.max_zoom) + 12))
+        .expect("ocean world coordinate fits i32");
+    let clamp_to_world = |value: i32| value.clamp(0, world_limit);
     let buffered = IntRect {
-        min_x: clamp(i64::from(tx) * cell - buffer),
-        min_y: clamp(i64::from(ty) * cell - buffer),
-        max_x: clamp((i64::from(tx) + 1) * cell + buffer),
-        max_y: clamp((i64::from(ty) + 1) * cell + buffer),
+        min_x: clamp_to_world(buffered.min_x),
+        min_y: clamp_to_world(buffered.min_y),
+        max_x: clamp_to_world(buffered.max_x),
+        max_y: clamp_to_world(buffered.max_y),
     };
     let clipped = IntRect {
         min_x: buffered.min_x.max(pass.world_rect.min_x),
@@ -567,10 +584,12 @@ fn pass_owns_root_range(
     pass: &OceanPassGrid,
     z_top: u8,
 ) -> bool {
-    // This deliberately follows pyramid::root_fragments rather than using the
-    // raw shapefile bbox. Root selection snaps the quantized bbox outward to
-    // z_top cells; a raw-bbox test can incorrectly discard a root touching the
-    // computed band.
+    // This record-level reject runs before the polygon is decoded, so it uses
+    // the shapefile's raw bbox. Pyramid root selection later uses normalized
+    // quantized geometry bounds; the header bbox encloses those vertices and
+    // rounding is monotone, so this remains conservative. Keep its existing
+    // snap and pass the rect to tile_cover to preserve the previous ocean
+    // root-range result while sharing the pyramid's index arithmetic.
     let scale = 1_i64 << (u32::from(pass.max_zoom) + 12);
     let snap = |value: f64| -> i32 {
         #[allow(clippy::cast_possible_truncation)]
@@ -583,22 +602,7 @@ fn pass_owns_root_range(
         max_x: snap(max_x),
         max_y: snap(max_y),
     };
-    let shift = u32::from(pass.max_zoom - z_top);
-    let cell = 4096_i64 << shift;
-    let max_tile = (1_u32 << z_top) - 1;
-    let index = |v: i32| -> u32 {
-        if v <= 0 {
-            0
-        } else {
-            u32::try_from(i64::from(v).div_euclid(cell))
-                .expect("ocean root tile fits u32")
-                .min(max_tile)
-        }
-    };
-    let tx0 = index(bbox.min_x);
-    let tx1 = index(bbox.max_x);
-    let ty0 = index(bbox.min_y);
-    let ty1 = index(bbox.max_y);
+    let (tx0, tx1, ty0, ty1) = tile_cover(bbox, pass.max_zoom, z_top, 0);
     for ty in ty0..=ty1 {
         for tx in tx0..=tx1 {
             if ocean_band_tile(z_top, tx, ty, pass) {
@@ -632,9 +636,6 @@ impl OceanTiles {
         pass_max_zooms: &[u8],
     ) -> std::io::Result<Self> {
         let view = ArchiveView::open(path)?;
-        if view.tile_type() != 1 || view.tile_compression() != 2 {
-            return Err(std::io::Error::other("ocean artifact must use MVT + gzip"));
-        }
         if view.min_zoom() != 0 || view.max_zoom() != 14 {
             return Err(std::io::Error::other("ocean artifact must cover z0-14"));
         }
@@ -659,7 +660,7 @@ impl OceanTiles {
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| std::io::Error::other("ocean artifact missing vector_layers"))?;
         if layers.len() != 1
-            || layers[0].get("id").and_then(serde_json::Value::as_str) != Some("ocean")
+            || layers[0].get("id").and_then(serde_json::Value::as_str) != Some(Layer::Ocean.name())
         {
             return Err(std::io::Error::other(
                 "ocean artifact must declare exactly one ocean layer",
@@ -675,7 +676,8 @@ impl OceanTiles {
             ));
         }
         let runs = view.read_all_runs()?;
-        let z14_end = ((1_u64 << 30) - 1) / 3 + 1;
+        // Exclusive end: the first z15 tile ID is outside the artifact contract.
+        let z14_end = ((1_u64 << 30) - 1) / 3;
         if runs.iter().any(|run| {
             run.tile_id >= z14_end
                 || run
@@ -697,10 +699,14 @@ impl OceanTiles {
     pub fn grids(&self) -> &[OceanPassGrid] {
         &self.grids
     }
-    /// Select the one pass which owns a tile. A simplified z0-7 pass precedes
-    /// the full-resolution pass when both shapefiles are configured.
+    /// Select the pass grid which owns a tile. Two configured grids split at
+    /// z7/z8; one grid serves every requested zoom, regardless of source file.
+    pub(crate) fn grid_for_zoom(&self, z: u8) -> Option<&OceanPassGrid> {
+        selected_pass_grid(&self.grids, z)
+    }
+
     pub fn band_tile(&self, z: u8, tx: u32, ty: u32) -> bool {
-        let grid = selected_pass_grid(&self.grids, z);
+        let grid = self.grid_for_zoom(z);
         let Some(grid) = grid else {
             return false;
         };
@@ -801,11 +807,10 @@ pub(crate) fn emit_ocean_counters() {
 const LARGE_PIECE_VERTICES: usize = 1024;
 
 /// Passes with `max_zoom` at or below this union their source pieces before
-/// pyramid descent (see the comment at the union site). Set to the top of the
-/// simplified-shapefile range: the production z0-z7 pass unions, the z8-z14
-/// full-polygons pass does not. A single z0-z14 full-shapefile pass keeps the
-/// old per-piece behavior at low zoom - extend the guard if that spelling's
-/// low zooms ever matter.
+/// pyramid descent. The runtime always processes z0-z7 as its own pass,
+/// sourcing it from the simplified file when configured and the full file
+/// otherwise, so that pass unions in either input layout. The z8-z14 pass
+/// stays per-piece.
 const LOW_ZOOM_UNION_MAX_ZOOM: u8 = 7;
 
 /// Union pre-split source pieces into seam-free shapes: every contour of
@@ -946,12 +951,8 @@ impl OceanAcc {
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Read ocean shapefile with mmap + bbox-first filtering, then process in parallel.
-///
-/// Mmaps the .shp file and reads the .shx index to get record offsets.
-/// For each record, reads only the 32-byte bbox from the mmap. Only shapes
-/// intersecting data_bounds get their full geometry parsed.
-/// Then all polygons are processed in parallel with rayon.
+/// Process synthetic test inputs without a pre-resolved source key.
+#[cfg(test)]
 #[allow(clippy::too_many_lines, clippy::unwrap_in_result)]
 #[hotpath::measure]
 pub(crate) fn process_ocean_shapefile(
@@ -970,6 +971,7 @@ pub(crate) fn process_ocean_shapefile(
         sort_writer,
         pass_grid,
         false,
+        None,
     )
     .map(|(count, _)| count)
 }
@@ -990,11 +992,39 @@ pub(crate) fn process_ocean_shapefile_with_hashes(
         sort_writer,
         None,
         true,
+        None,
     )?;
     let hashes = hashes.ok_or_else(|| {
         std::io::Error::other("ocean shapefile processing did not capture source hashes")
     })?;
     Ok((count, hashes))
+}
+
+/// Process a shapefile only if the buffers opened for this pass match the
+/// source key resolved before phase12. The comparison happens before parsing
+/// or emitting records, so a replaced input cannot stamp mixed chunks with
+/// the earlier key.
+#[hotpath::measure]
+pub(crate) fn process_ocean_shapefile_checked(
+    path: &std::path::Path,
+    data_bounds: &MercBbox,
+    min_zoom: u8,
+    max_zoom: u8,
+    sort_writer: &mut SortWriter,
+    pass_grid: Option<&OceanPassGrid>,
+    expected_hashes: OceanShapefileHashes,
+) -> Result<u64, std::io::Error> {
+    let (count, _) = process_ocean_shapefile_inner(
+        path,
+        data_bounds,
+        min_zoom,
+        max_zoom,
+        sort_writer,
+        pass_grid,
+        true,
+        Some(expected_hashes),
+    )?;
+    Ok(count)
 }
 
 #[allow(
@@ -1010,6 +1040,7 @@ fn process_ocean_shapefile_inner(
     sort_writer: &mut SortWriter,
     pass_grid: Option<&OceanPassGrid>,
     capture_hashes: bool,
+    expected_hashes: Option<OceanShapefileHashes>,
 ) -> Result<(u64, Option<OceanShapefileHashes>), std::io::Error> {
     if pass_grid.is_some_and(|grid| grid.band_is_empty(min_zoom, max_zoom)) {
         eprintln!("  Ocean band is empty; skipping shapefile geometry");
@@ -1108,12 +1139,26 @@ fn process_ocean_shapefile_inner(
     // --- Mmap the .shp file ---
     let shp_file = std::fs::File::open(files.shp())?;
     let shp_mmap = unsafe { memmap2::Mmap::map(&shp_file) }?;
-    // Keep the artifact key tied to the exact mapped bytes and index buffer
-    // this call parses, even if either input path is replaced after opening.
+    // Hash the exact mapped bytes and index buffer consumed here. Artifact
+    // builds record them in the key; regular runs compare them with the key
+    // resolved before phase12.
     let hashes = capture_hashes.then(|| OceanShapefileHashes {
         shp_xxh128: Xxh128::from_bytes(&shp_mmap),
         shx_xxh128: Xxh128::from_bytes(&shx_data),
     });
+    if let Some(expected) = expected_hashes {
+        let actual = hashes.expect("checked processing captures source hashes");
+        if actual != expected {
+            return Err(std::io::Error::other(format!(
+                "ocean shapefile inputs changed after source-key resolution for {}: expected .shp/.shx hashes {}/{}, opened {}/{}",
+                path.display(),
+                expected.shp_xxh128,
+                expected.shx_xxh128,
+                actual.shp_xxh128,
+                actual.shx_xxh128,
+            )));
+        }
+    }
     #[cfg(unix)]
     shp_mmap.advise(memmap2::Advice::Random)?;
     eprintln!(
@@ -2229,6 +2274,57 @@ mod tests {
                 .expect("explicit nulls are valid through serde");
             value.as_object_mut().expect("object").remove(field);
             assert!(serde_json::from_value::<OceanArtifactKey>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn ocean_artifact_rejects_runs_reaching_z15() {
+        let dir = tempfile::tempdir().expect("create artifact directory");
+        let path = dir.path().join("ocean.pmtiles");
+        let key = OceanArtifactKey {
+            source: OceanSourceKey::from_hashes(
+                OceanShapefileHashes {
+                    shp_xxh128: Xxh128::from_u128(1),
+                    shx_xxh128: Xxh128::from_u128(2),
+                },
+                None,
+                0,
+                14,
+            ),
+            compression_level: 6,
+        };
+        let world = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+        let first_z15 = pmtiles_writer::xy_to_tile_id(15, 0, 0);
+        for (start, length, accepted) in [
+            (first_z15 - 1, 1, true),
+            (first_z15, 1, false),
+            (first_z15 - 1, 2, false),
+        ] {
+            let mut writer = pmtiles_writer::PmtilesWriter::new(pmtiles_writer::PmtilesConfig {
+                min_zoom: 0,
+                max_zoom: 14,
+                bounds: (-180.0, -85.05, 180.0, 85.05),
+                center: (0.0, 0.0, 2),
+            });
+            writer.set_ocean_only_metadata();
+            writer.add_metadata_member(format!("\"ocean_artifact\":{}", key.json()));
+            // Admission reads directory ranges and metadata, not tile payloads.
+            writer
+                .add_run(start, length, &[0])
+                .expect("add directory run");
+            writer.write_to(&path).expect("write artifact");
+            let result = OceanTiles::open(&path, &key, &world, &[14]);
+            if accepted {
+                assert!(result.is_ok(), "last z14 tile must be admitted");
+            } else {
+                let error = result.err().expect("z15 run must be refused");
+                assert!(error.to_string().contains("outside z0-14 tile space"));
+            }
         }
     }
 

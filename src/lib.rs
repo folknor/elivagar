@@ -73,7 +73,7 @@ pub(crate) mod ocean;
 mod pipeline;
 pub mod pmtiles_reader;
 pub mod pmtiles_writer;
-pub(crate) mod pois;
+pub(crate) use shortbread::pois;
 pub mod provenance;
 pub mod shortbread;
 pub mod sort;

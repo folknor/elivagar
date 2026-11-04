@@ -333,10 +333,9 @@ fn parse_byte_size_min_1m(s: &str) -> Result<usize, String> {
 
 /// The ocean inputs named by `--ocean`, after parsing and validation.
 ///
-/// `low` is `Some` only for the two-pass z0-z7 + z8-z14 split; a single
-/// z0-z14 entry lands in `high` alone and serves every zoom, matching
-/// `ocean::selected_pass_grid`, which picks the last grid unless two grids are
-/// configured and z <= 7.
+/// `low` is `Some` only for the explicit z0-z7 + z8-z14 split. A single
+/// z0-z14 entry lands in `high`; the pipeline uses that file for both its low
+/// and high passes. Artifact band selection uses two grids only for the split.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct OceanInputs {
     low: Option<PathBuf>,

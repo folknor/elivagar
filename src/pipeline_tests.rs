@@ -3724,6 +3724,14 @@ fn retained_artifact_name_matcher_is_strict() {
         "ocean-tiles-vunknown-20260724.pmtiles",
         p
     ));
+    assert!(is_retained_artifact_name(
+        "ocean-tiles-v4-a1b2c3d4-20260724.pmtiles",
+        p
+    ));
+    assert!(is_retained_artifact_name(
+        "ocean-tiles-vunknown-unknown-20260724.pmtiles",
+        p
+    ));
     // Manually kept copies and near-misses survive the cleanup.
     assert!(!is_retained_artifact_name(
         "ocean-tiles-dp-20260712.pmtiles",
@@ -3738,6 +3746,18 @@ fn retained_artifact_name_matcher_is_strict() {
     assert!(!is_retained_artifact_name("ocean-tiles-v4-20260724.txt", p));
     assert!(!is_retained_artifact_name(
         "ocean-tiles-v-20260724.pmtiles",
+        p
+    ));
+    assert!(!is_retained_artifact_name(
+        "ocean-tiles-v4-a1b2c3-20260724.pmtiles",
+        p
+    ));
+    assert!(!is_retained_artifact_name(
+        "ocean-tiles-v4-A1B2C3D4-20260724.pmtiles",
+        p
+    ));
+    assert!(!is_retained_artifact_name(
+        "ocean-tiles-v4-unknown-20260724.pmtiles",
         p
     ));
 }
@@ -3763,11 +3783,11 @@ fn ocean_artifact_retention_keeps_one_generation() {
         .filter(|n| is_retained_artifact_name(n, "ocean-tiles-v"))
         .collect();
     assert_eq!(retained.len(), 1, "one generation deep: {retained:?}");
-    // The fixture bytes are not a readable archive, so the key is
-    // unreadable and the retained name carries the `unknown` version.
+    // The fixture bytes are not a readable archive, so the retained name
+    // carries `unknown` for both the version and key prefix.
     assert!(
-        retained[0].starts_with("ocean-tiles-vunknown-"),
-        "unreadable key retains as vunknown: {}",
+        retained[0].starts_with("ocean-tiles-vunknown-unknown-"),
+        "unreadable key retains with unknown version and key prefix: {}",
         retained[0]
     );
     assert_eq!(
@@ -3784,6 +3804,35 @@ fn ocean_artifact_retention_keeps_one_generation() {
         .filter(|n| is_retained_artifact_name(n, "ocean-tiles-v"))
         .count();
     assert_eq!(count, 1, "re-retention must not accumulate generations");
+}
+
+#[test]
+fn ocean_artifact_retention_preserves_previous_copy_when_link_cannot_be_created() {
+    let dir = tempfile::tempdir().expect("create artifact directory");
+    let output = dir.path().join("ocean-tiles.pmtiles");
+    std::fs::write(&output, b"outgoing artifact").expect("write active artifact");
+    let old_retained = dir.path().join("ocean-tiles-v3-20260101.pmtiles");
+    std::fs::write(&old_retained, b"previous generation").expect("write retained artifact");
+    let date = yyyymmdd_utc(
+        std::fs::metadata(&output)
+            .expect("metadata")
+            .modified()
+            .expect("mtime"),
+    );
+    let blocked = dir
+        .path()
+        .join(format!("ocean-tiles-vunknown-unknown-{date}.pmtiles"));
+    std::fs::create_dir(&blocked).expect("block retained link path");
+
+    assert!(retain_outgoing_ocean_artifact(&output).is_err());
+    assert_eq!(
+        std::fs::read(&old_retained).expect("read retained artifact"),
+        b"previous generation"
+    );
+    assert_eq!(
+        std::fs::read(&output).expect("read active artifact"),
+        b"outgoing artifact"
+    );
 }
 
 #[test]

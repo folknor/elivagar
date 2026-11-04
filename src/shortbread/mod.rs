@@ -5,11 +5,12 @@
 //
 // Layer matching is split by domain:
 //   water.rs      - water polygons/lines/labels, dam, pier
-//   boundaries.rs - boundaries, boundary_labels, place_labels
+//   boundaries.rs - boundaries, boundary_labels
+//   place_labels.rs - place_labels
 //   land.rs       - land, sites, buildings, addresses
 //   streets.rs    - streets, street_polygons, street_labels, bridges
 //   transport.rs  - aerialways, ferries, public_transport
-//   (pois.rs lives at crate root - see src/pois.rs)
+//   pois.rs       - points of interest
 
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -18,6 +19,8 @@ pub(crate) mod boundaries;
 mod land;
 pub(crate) mod osm_value;
 pub(crate) mod paint_order;
+mod place_labels;
+pub(crate) mod pois;
 mod streets;
 mod transport;
 mod water;
@@ -210,6 +213,20 @@ const _: () = assert!(std::mem::size_of::<LayerMatch>() == 408);
 // Core dispatch
 // ---------------------------------------------------------------------------
 
+/// Whether relation members can supply area geometry (including unmatched areas).
+pub(crate) fn is_area_relation(tags: &Tags<'_>) -> bool {
+    matches!(tags.get("type"), Some("multipolygon" | "boundary"))
+}
+
+/// The shared profile gate for storing and consuming area-relation member ways.
+pub(crate) fn area_relation_matches(tags: &Tags<'_>) -> Option<SmallVec<[LayerMatch; 4]>> {
+    if !is_area_relation(tags) {
+        return None;
+    }
+    let matches = match_element(tags, OsmGeomType::MultiPolygon);
+    (!matches.is_empty()).then_some(matches)
+}
+
 /// Match an OSM element against all Shortbread layers, returning every match.
 #[hotpath::measure]
 pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> SmallVec<[LayerMatch; 4]> {
@@ -234,7 +251,7 @@ pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> SmallVec<[Layer
 }
 
 fn match_node(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    boundaries::match_place_labels(tags, out);
+    place_labels::match_place_labels(tags, out);
     land::match_addresses_point(tags, out);
     streets::match_street_labels_points(tags, out);
     transport::match_public_transport_point(tags, out);
@@ -383,12 +400,6 @@ fn street_kind(val: &str) -> &str {
 fn parse_i64(s: &str) -> Option<i64> {
     osm_value::parse_int(s)
 }
-
-// ---------------------------------------------------------------------------
-// POIs (see src/pois.rs)
-// ---------------------------------------------------------------------------
-
-use crate::pois;
 
 // ---------------------------------------------------------------------------
 // Tests (see shortbread_tests.rs)

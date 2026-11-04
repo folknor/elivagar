@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+Design-hunt fixes, fourth wave. Output-neutral: a fresh denmark build is
+byte-identical to the third wave's.
+
+- Env knobs (`ELIVAGAR_ASSEMBLE_WORKERS`, `ELIVAGAR_ASSEMBLE_PARK_BUDGET`,
+  `ELIVAGAR_ASSEMBLE_SPLIT_TARGET`, `ELIVAGAR_REL_BLOCKS_CAP`) fail the
+  run on a malformed value instead of silently using the default, so a
+  results row can no longer claim an arm the run never took.
+- A computed-ocean run checks the shapefiles it reads against the key it
+  recorded, so a shapefile replaced mid-run is an error rather than a
+  silent mismatch between chunks and provenance.
+- Retained ocean artifacts carry a key-hash prefix in their name, and
+  retention no longer deletes an older copy before its replacement link
+  exists. The artifact zoom contract no longer admits a z15 tile.
+- Artifact run copies walk per-zoom id ranges rather than every tile id.
+- Boundary admin levels have one typed parser; comma-formatted way
+  levels such as `0,2` are rejected.
+- `inspect` reports whether an archive can be validated.
+- A golden test pins a small ocean's decoded tile digest together with
+  `OCEAN_POLICY_VERSION`, so an ocean change without a policy bump
+  fails the build.
+
 Design-hunt fixes, third wave. This changes output: the ocean artifact
 key moves to `OCEAN_POLICY_VERSION` v7, so the world ocean artifact must
 be rebuilt with `ocean-build`.

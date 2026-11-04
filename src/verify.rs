@@ -271,21 +271,9 @@ pub fn verify_opts_unique(
     let mut reader = PmtilesReader::open(path)?;
     let file_size = reader.file_size()?;
 
-    // Tile type must be MVT.
-    if reader.tile_type() != 1 {
-        return Err(VerifyError::Container(format!(
-            "expected tile type MVT (1), got {}",
-            reader.tile_type()
-        )));
-    }
-
-    // Tile compression must be gzip.
-    if reader.tile_compression() != 2 {
-        return Err(VerifyError::Container(format!(
-            "expected tile compression gzip (2), got {}",
-            reader.tile_compression()
-        )));
-    }
+    reader
+        .tile_decoder()
+        .map_err(|error| VerifyError::Container(error.to_string()))?;
 
     // Zoom sanity.
     if reader.min_zoom() > reader.max_zoom() {
@@ -565,7 +553,7 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
             break;
         }
     }
-    if name != "ocean" {
+    if name != Layer::Ocean.name() {
         return;
     }
 
@@ -1208,7 +1196,7 @@ fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
             break;
         }
     }
-    if name != "ocean" {
+    if name != Layer::Ocean.name() {
         return;
     }
 

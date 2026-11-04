@@ -58,6 +58,40 @@ impl From<String> for PipelineError {
     }
 }
 
+#[derive(Clone, Copy)]
+enum EnvZero {
+    Allow,
+    Reject,
+}
+
+/// Unset knobs use their default; set knobs must be plain decimal integers.
+fn env_integer<T>(name: &str, default: T, zero: EnvZero) -> Result<T, PipelineError>
+where
+    T: std::str::FromStr + PartialEq + From<u8>,
+    T::Err: std::fmt::Display,
+{
+    let Some(raw) = std::env::var_os(name) else {
+        return Ok(default);
+    };
+    let value = raw
+        .into_string()
+        .map_err(|_| PipelineError(format!("invalid {name}: value is not valid UTF-8")))?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(PipelineError(format!(
+            "invalid {name}={value:?}: expected a decimal integer without signs, whitespace or size suffixes"
+        )));
+    }
+    let parsed = value
+        .parse::<T>()
+        .map_err(|error| PipelineError(format!("invalid {name}={value:?}: {error}")))?;
+    if matches!(zero, EnvZero::Reject) && parsed == T::from(0) {
+        return Err(PipelineError(format!(
+            "invalid {name}={value:?}: value must be greater than zero"
+        )));
+    }
+    Ok(parsed)
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -417,6 +451,27 @@ fn load_checkpoint(
     Ok((bounds, chunks, ocean_mode, provenance))
 }
 
+/// Resolve the writer contract once for assembly and artifact admission.
+fn configured_tile_contract(
+    config: &TilegenConfig,
+) -> (
+    pmtiles_writer::TileDataFormat,
+    pmtiles_writer::TileDataCompression,
+) {
+    use crate::pmtiles_writer::{TileDataCompression, TileDataFormat};
+
+    match config.tile_format {
+        TilePayloadFormat::Mvt => {
+            let compression = match config.tile_compression {
+                TileCompression::Gzip => TileDataCompression::Gzip,
+                TileCompression::Brotli => TileDataCompression::Brotli,
+            };
+            (TileDataFormat::Mvt, compression)
+        }
+        TilePayloadFormat::Mlt => (TileDataFormat::Mlt, TileDataCompression::None),
+    }
+}
+
 /// Resolve the ocean producer from the config, or fail.
 ///
 /// Nothing here degrades silently. Every input is named explicitly on the
@@ -449,11 +504,12 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
     let Some(path) = config.ocean_tiles.as_deref() else {
         return computed(config);
     };
-    if config.tile_format != TilePayloadFormat::Mvt
-        || config.tile_compression != TileCompression::Gzip
-        || config.min_zoom != 0
-        || config.max_zoom != 14
-    {
+    let (tile_format, tile_compression) = configured_tile_contract(config);
+    let decoder = crate::pmtiles_reader::TileDecoder::from_header_fields(
+        tile_format.header_tile_type(),
+        tile_compression.header_value(),
+    );
+    if decoder.is_err() || config.min_zoom != 0 || config.max_zoom != 14 {
         return Err(PipelineError(format!(
             "ocean artifact {} was named but cannot serve this run: it is built for the MVT + gzip + z0-14 contract, and this run is {:?} + {:?} + z{}-z{}. Drop the artifact from --ocean to compute the ocean instead.",
             path.display(),
@@ -498,8 +554,8 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
 
 // Note on extract consumption (adjudicated 2026-07-12): artifact-served
 // interior tiles are NOT byte- or geometry-identical to the extract-computed
-// ones - the pyramid's root-cell selection and row-band bisection depend on
-// each piece's clipped extent, so a world-clipped piece descends with a
+// ones - the pyramid's root-cell selection and recursive buffered-range
+// bisection depend on each piece's clipped extent, so a world-clipped piece descends with a
 // different seam structure (denmark: 27 structural ocean diffs vs the
 // computed baseline, displacements mostly 10-97 units). Both renderings pass
 // every machine gate and the human viewer gate judged the artifact output
@@ -509,6 +565,9 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
 // baseline was captured from, and rotating the artifact forces a corpus
 // rotation (corpus check refuses on the key until then).
 
+/// Zoom maxima for artifact band grids. When both simplified low zooms and
+/// full-resolution high zooms are requested, each pass gets its own grid;
+/// otherwise one grid covers the requested range and source file.
 fn ocean_pass_max_zooms(config: &TilegenConfig) -> Vec<u8> {
     let mut zooms = Vec::with_capacity(2);
     if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
@@ -796,14 +855,33 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         };
 
         // --- Ocean shapefile processing ---
-        // When a simplified shapefile is provided, use it for z0-7 and the
-        // full-resolution shapefile for z8+. Otherwise use the full-res for all zooms.
+        // The low-zoom pass uses the simplified file when supplied, otherwise
+        // the full file. The full file always supplies requested z8+ zooms.
         emit_marker("OCEAN_START");
         emit_allocator_boundary("ocean_start");
         ocean_elapsed = if let Some(ref ocean_path) = config.ocean_shapefile {
             let ocean_start = Instant::now();
             eprintln!("--- Ocean shapefile ---");
             let mut ocean_features: u64 = 0;
+            let source_key = match &ocean_mode {
+                OceanMode::Computed { key } => key,
+                OceanMode::Band { key } => &key.source,
+                OceanMode::None => {
+                    return Err(PipelineError(
+                        "ocean shapefile has no resolved source key".to_string(),
+                    ));
+                }
+            };
+            let expected_full_hashes = source_key.full_shapefile_hashes();
+            let expected_low_hashes = if config.ocean_simplified_shapefile.is_some() {
+                source_key.simplified_shapefile_hashes().ok_or_else(|| {
+                    PipelineError(
+                        "resolved ocean key has no simplified shapefile hashes".to_string(),
+                    )
+                })?
+            } else {
+                expected_full_hashes
+            };
 
             // The low-zoom pass always exists as its own z0-z7 pass, sourced
             // from the simplified shapefile when one is named and from the
@@ -823,7 +901,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 } else {
                     eprintln!("  Low-zoom from full (z{}-z{}):", config.min_zoom, low_max);
                 }
-                ocean_features += crate::ocean::process_ocean_shapefile(
+                ocean_features += crate::ocean::process_ocean_shapefile_checked(
                     low_source,
                     &data_bounds,
                     config.min_zoom,
@@ -832,12 +910,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     active_ocean_artifact
                         .as_ref()
                         .and_then(|artifact| artifact.grids().first()),
+                    expected_low_hashes,
                 )?;
             }
             if config.max_zoom >= 8 {
                 let full_min = config.min_zoom.max(8);
                 eprintln!("  Full-resolution (z{full_min}-z{}):", config.max_zoom);
-                ocean_features += crate::ocean::process_ocean_shapefile(
+                ocean_features += crate::ocean::process_ocean_shapefile_checked(
                     ocean_path,
                     &data_bounds,
                     full_min,
@@ -846,6 +925,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     active_ocean_artifact
                         .as_ref()
                         .and_then(|artifact| artifact.grids().last()),
+                    expected_full_hashes,
                 )?;
             }
 
@@ -1245,12 +1325,10 @@ fn yyyymmdd_utc(t: std::time::SystemTime) -> String {
     format!("{year:04}{month:02}{day:02}")
 }
 
-/// Does `name` match the retained-generation naming scheme
-/// `<prefix><version>-<yyyymmdd>.pmtiles`, where `<prefix>` is
-/// `<stem>-v` and `<version>` is a policy version number (or `unknown`
-/// for an artifact whose key was unreadable)? The one-generation-deep
-/// cleanup deletes ONLY names this accepts, so the match is strict:
-/// manually kept copies under any other naming survive every rebuild.
+/// Does `name` match a retained-generation name under `<prefix><version>-...`?
+/// Accept the current key-prefixed scheme and the previous date-only scheme so
+/// the next retention pass can remove a generation left by an older build.
+/// Cleanup deletes only these exact shapes; manual names outside them survive.
 fn is_retained_artifact_name(name: &str, prefix: &str) -> bool {
     let Some(rest) = name.strip_prefix(prefix) else {
         return false;
@@ -1258,12 +1336,27 @@ fn is_retained_artifact_name(name: &str, prefix: &str) -> bool {
     let Some(rest) = rest.strip_suffix(".pmtiles") else {
         return false;
     };
-    let Some((version, date)) = rest.rsplit_once('-') else {
+    let Some((version, suffix)) = rest.split_once('-') else {
         return false;
     };
     let version_ok = !version.is_empty()
         && (version == "unknown" || version.bytes().all(|b| b.is_ascii_digit()));
-    version_ok && date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
+    if !version_ok {
+        return false;
+    }
+    let valid_date = |date: &str| date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit());
+    if valid_date(suffix) {
+        return true;
+    }
+    let Some((key_prefix, date)) = suffix.split_once('-') else {
+        return false;
+    };
+    let key_prefix_ok = (version == "unknown" && key_prefix == "unknown")
+        || (key_prefix.len() == 8
+            && key_prefix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+    key_prefix_ok && valid_date(date)
 }
 
 /// Keep the outgoing ocean artifact one generation deep before a rebuild
@@ -1275,24 +1368,27 @@ fn is_retained_artifact_name(name: &str, prefix: &str) -> bool {
 /// this rebuild change ocean bytes, and where".
 ///
 /// The outgoing file is hard-linked, not renamed: the active artifact path
-/// is never empty, a failed rebuild leaves everything as it was, and the
-/// link costs no disk until the writer's finalize rename swaps the inode
-/// out. Retained name: `<stem>-v<policy_version>-<build_date>.pmtiles`,
-/// policy version read from the artifact's own metadata (`unknown` if
-/// unreadable - a damaged artifact is still worth keeping), date from its
-/// mtime. Older retained generations are removed first; anything outside
-/// the naming scheme is never touched.
-// The exact name is also promised in reference/cli.md. Adding an input hash
-// would distinguish same-day rebuilds, but needs that contract updated in
-// the same change by its owner.
+/// is never empty, a failed rebuild leaves the active artifact unchanged,
+/// and the link costs no disk until the writer's finalize rename swaps the inode
+/// out. Retained name: `<stem>-v<policy_version>-<key_prefix>-<build_date>.pmtiles`.
+/// The prefix is the first eight lowercase hex characters of XXH3-128 over
+/// the byte-stable artifact key; it distinguishes source rotations and
+/// compression settings. Unreadable keys use `unknown` for both version and
+/// prefix, since a damaged artifact is still worth keeping. The date is from
+/// its mtime. Older retained generations are removed after the outgoing link
+/// is created; anything outside a recognized naming scheme is never touched.
 fn retain_outgoing_ocean_artifact(output_path: &Path) -> std::io::Result<()> {
     if !output_path.exists() {
         return Ok(());
     }
-    let version = crate::ocean::OceanTiles::declared_key(output_path).map_or_else(
-        |_| "unknown".to_string(),
-        |key| key.policy_version.to_string(),
-    );
+    let (version, key_prefix) = match crate::ocean::OceanTiles::declared_key(output_path) {
+        Ok(key) => {
+            let bytes = serde_json::to_vec(&key).map_err(std::io::Error::other)?;
+            let fingerprint = crate::ocean::Xxh128::from_bytes(&bytes).to_string();
+            (key.policy_version.to_string(), fingerprint[..8].to_string())
+        }
+        Err(_) => ("unknown".to_string(), "unknown".to_string()),
+    };
     let date = yyyymmdd_utc(std::fs::metadata(output_path)?.modified()?);
     let stem = output_path.file_stem().map_or_else(
         || "ocean-tiles".to_string(),
@@ -1302,7 +1398,12 @@ fn retain_outgoing_ocean_artifact(output_path: &Path) -> std::io::Result<()> {
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let retained_prefix = format!("{stem}-v");
-    let retained_name = format!("{stem}-v{version}-{date}.pmtiles");
+    let retained_name = format!("{stem}-v{version}-{key_prefix}-{date}.pmtiles");
+    let retained_path = dir.join(&retained_name);
+    if retained_path.exists() {
+        std::fs::remove_file(&retained_path)?;
+    }
+    std::fs::hard_link(output_path, &retained_path)?;
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -1311,11 +1412,6 @@ fn retain_outgoing_ocean_artifact(output_path: &Path) -> std::io::Result<()> {
             std::fs::remove_file(entry.path())?;
         }
     }
-    let retained_path = dir.join(&retained_name);
-    if retained_path.exists() {
-        std::fs::remove_file(&retained_path)?;
-    }
-    std::fs::hard_link(output_path, &retained_path)?;
     eprintln!(
         "Retained outgoing ocean artifact: {}",
         retained_path.display()

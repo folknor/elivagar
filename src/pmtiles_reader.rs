@@ -140,6 +140,40 @@ pub struct PmtilesReader {
     internal_compression: u8,
 }
 
+/// Tile decoder selected for archive workflows which parse MVT payloads.
+///
+/// The current MVT validation and archive-view paths support MVT with gzip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TileDecoder {
+    MvtGzip,
+}
+
+impl TileDecoder {
+    /// Select the supported decoder from PMTiles header tile type and
+    /// compression bytes.
+    pub fn from_header_fields(tile_type: u8, tile_compression: u8) -> io::Result<Self> {
+        if tile_type != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("expected tile type MVT (1), got {tile_type}"),
+            ));
+        }
+        if tile_compression != 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("expected tile compression gzip (2), got {tile_compression}"),
+            ));
+        }
+        Ok(Self::MvtGzip)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MvtGzip => "MVT + gzip",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TileEntry {
     pub tile_id: u64,
@@ -197,14 +231,7 @@ impl ArchiveView {
         if header[97] != 1 && header[97] != 2 {
             return Err(io::Error::other("unsupported PMTiles internal compression"));
         }
-        if header[99] != 1 {
-            return Err(io::Error::other("ArchiveView requires MVT tiles"));
-        }
-        if header[98] != 2 {
-            return Err(io::Error::other(
-                "ArchiveView requires gzip tile compression",
-            ));
-        }
+        TileDecoder::from_header_fields(header[99], header[98])?;
         Ok(Self {
             root_dir_offset: read_u64_le(&header, 8),
             root_dir_length: read_u64_le(&header, 16),
@@ -353,6 +380,11 @@ impl PmtilesReader {
     /// Tile compression byte: 0=unknown, 1=none, 2=gzip, 3=brotli, 4=zstd.
     pub fn tile_compression(&self) -> u8 {
         self.header[98]
+    }
+
+    /// Select the decoder supported by MVT-specific archive workflows.
+    pub fn tile_decoder(&self) -> io::Result<TileDecoder> {
+        TileDecoder::from_header_fields(self.tile_type(), self.tile_compression())
     }
 
     /// Internal compression byte (for directories/metadata).

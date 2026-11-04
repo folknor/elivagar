@@ -197,27 +197,6 @@ view.
 
 Reported by the pipeline, run-contract and ocean hunts.
 
-## CON-008 - Is the ocean policy version still honest?
-
-`OCEAN_POLICY_VERSION` is a bare `u32` whose doc says any change to
-`ocean_params`, the pyramid, the simplifiers, the overlay engine or the MVT
-encoder requires a bump. Three further "remember to bump" comments live in
-`int_ocean.rs`, `pyramid.rs`, `overlay/mod.rs`, and the `mvt/mod.rs` header
-says the same of encoding changes. Nothing mechanical ties the constant to the
-code it versions; the v2 history is a three-day silent-staleness incident.
-
-Owners proposed (the hunts suggest overlapping options):
-- a golden test building a small fixed synthetic world through ocean emission
-  and assemble, pinning the output digest together with the version (ocean
-  hunt; encoding hunt suggests a golden-bytes ocean tile naming the constant);
-- an `MVT_ENCODER_VERSION` folded into the artifact key (encoding hunt);
-- the ocean policy as a single hashable value (`OceanPolicy` implementing a
-  `PolygonPolicy` trait) whose hash is folded into the key or checked by a
-  test that fails when the hash changes without a bump (polygon-engine and
-  ocean hunts).
-
-Reported by the polygon-engine, encoding and ocean hunts.
-
 ---
 
 # Geometry and coordinates
@@ -256,39 +235,6 @@ geometry rather than the merger inferring them from position. The brotli
 to all the extents; name it.
 
 Reported by the polygon-engine, encoding, ocean and coordinate-spaces hunts.
-
-## CON-010 - Which tiles does a base-space rect touch, and what is a cell's buffered rect?
-
-`pyramid.rs` now owns one `tile_cover(rect, max_zoom, z, margin)` (margin 0
-for root selection, the 128-unit buffer for the fanout cap) and
-`buffered_cell_rect_base`; emit.rs and the dead int_ocean copies are moved
-onto it. Remaining copies:
-
-- `ocean.rs`: `pass_owns_root_range` (inline index closure, "deliberately
-  follows pyramid::root_fragments") should call
-  `tile_cover(bbox, pass.max_zoom, z_top, 0)`; `ocean_band_tile` (inline
-  buffered rect, clamped to the world) should call `buffered_cell_rect_base`,
-  keeping its world clipping and ownership checks.
-- Float `tiles::clamp_tile` / `for_each_tile_in_bbox` / `is_single_tile` for
-  lines and points.
-
-Moving the ocean pair is output-neutral only if the snap method matches (ocean
-snaps the raw float bbox, the pyramid the normalized quantized shape) - check
-that before deciding whether it needs an `OCEAN_POLICY_VERSION` bump.
-
-Reported by the polygon-engine and coordinate-spaces hunts.
-
-## CON-011 - Which vertices are in a cell's edge window?
-
-`build_edge_flags` (base space, buffer shifted by `maxz - z`, also flags
-segments crossing an edge line) and `thin_window_runs` (zoom space, unshifted
-buffer, no crossing test) both decide "is this vertex within 128 units of the
-cell's tile edges" with separately written left/right/top/bottom arithmetic.
-Shift-rounding moves vertices up to half a unit, so a vertex exactly at the
-window boundary can be in under one and out under the other. Owner proposed: a
-`CellWindow` built once per cell, in one space, applied after rescale.
-
-Reported by the polygon-engine hunt.
 
 ## CON-012 - Where does a Mercator coordinate land in tile pixels?
 
@@ -522,51 +468,6 @@ layer names or which producer it serves; ocean-policy constants move beside
 Reported by the pipeline, Shortbread, layer-identity, coordinate-spaces and
 polygon-engine hunts.
 
-## CON-023 - What is a boundary, and what does a boundary line match look like?
-
-Admin levels:
-- `boundaries::boundary_min_zoom` (`2 => 0, 4 => 7`, via `parse_i64`, which
-  strips commas);
-- `boundary_prescan::fold_relation` (`parse::<u8>` then `matches!(level, 2 | 4)`);
-- `phase12::resolve_boundary_match`
-  `.expect("boundary metadata only contains supported levels")` - the drift
-  detector: adding admin_level 6 to the prescan without the profile panics
-  mid-phase12. The parsers disagree on input like `"0,2"` and `" 2"`.
-- `AdminLevel` is `i64` in the match, `u8` in `BoundaryMeta`,
-  `u8::try_from(..).expect(..)` in phase12, `Int` in attrs.
-
-The match: `boundaries::match_boundaries_line` and
-`phase12::resolve_boundary_match` both build the Boundaries `LayerMatch`
-(attrs `admin_level`, `maritime`, `disputed`; maritime =
-`maritime=yes || natural=coastline` copied verbatim; `max_zoom: 14`,
-`paint_rank: 0`, `GeomExpect::Line`). phase12 runs on every way's matches and
-overwrites `min_zoom` and `attrs`, so the profile copy survives only as the
-`possible_feature` truthiness probe - the visible implementation lives in the
-pipeline. Disputed is decided three ways (way `disputed=yes` twice, relation
-`boundary=disputed` in the prescan).
-
-Owner proposed: `enum AdminLevel { Country = 2, State = 4 }` with one
-`parse` and `min_zoom()`; `shortbread::boundaries` exposes
-`boundary_line(tags, Option<BoundaryMeta>)` and owns `BoundaryMeta`, its fold,
-the resolution and the label-zoom policy; phase12 supplies only the relation
-fold and area. `place_labels` moves out of `boundaries.rs` to its own module.
-
-Reported by the pipeline, Shortbread and layer-identity hunts.
-
-## CON-024 - Which relations produce area geometry?
-
-`prepass_relation_plan` (phase12) and `prepare_relation` (relations.rs) each
-re-implement the `type in {multipolygon, boundary}` gate (identical
-hand-rolled loops) and `match_element(MultiPolygon)`. The prepass decides
-which ways enter `way_index`; the tail decides which relations read them back.
-Drift shows up as `missing_relation_way_refs`, which reads as input damage
-rather than a code bug. A third answer comes from outside: the injected
-WayMembers-v1 bitmap has superset semantics (quantified by
-`superset_ways_count`). Owner proposed: one
-`area_relation_matches(tags) -> Option<SmallVec<LayerMatch>>` in shortbread.
-
-Reported by the pipeline hunt.
-
 ## CON-025 - Which OSM geometries does each layer accept?
 
 `match_closed_way` and `match_multipolygon` are two hand-kept lists that must
@@ -659,19 +560,6 @@ acknowledges the coupling.
 
 Reported by the Shortbread hunt.
 
-## CON-031 - How is the ocean layer identified?
-
-By `"ocean"` string literals in `assemble.rs` (`raw_contains_ocean`,
-`ocean_layer_field`), `ocean.rs` (artifact vector_layers check) and
-`verify.rs` (twice, for geometry stats and ring checks); elsewhere by
-`Layer::Ocean`. `Layer::Ocean` itself lives in the profile enum although no
-matcher produces it - it exists so fanout caps and sort keys can index it, so
-"Shortbread layer" and "output layer" are the same type. Owner proposed:
-`Layer::Ocean.name()` everywhere; in a layer table, Ocean is the one row with
-no `classify`.
-
-Reported by the layer-identity and Shortbread hunts.
-
 ---
 
 # Storage, sort and resources
@@ -752,21 +640,3 @@ Reported by the storage hunt.
 ---
 
 # Archive surface
-
-## CON-037 - Can this archive be read, and as what?
-
-- `ArchiveView::open` rejects non-MVT or non-gzip.
-- `verify::verify_opts_unique` repeats the check with different text.
-- `ocean.rs` re-checks `tile_type() != 1 || tile_compression() != 2` right
-  after `ArchiveView::open` did.
-- `PmtilesReader::read_tile` decides by not deciding (always gunzips).
-- The artifact-contract cousin in `pipeline/mod.rs` is a stricter version of
-  the same predicate.
-- Metadata readability: `PmtilesReader::read_metadata` lossy,
-  `ArchiveView::metadata` strict.
-
-The reader defects are in `notes/bugs.md`. Owner proposed: a typed `Header`
-plus `TileContract`, with `reader.tile_decoder() -> Result<Decompressor,
-Unsupported>` deciding once.
-
-Reported by the archive-surface hunt.

@@ -42,6 +42,10 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
     let internal_compression = compression_name(reader.internal_compression());
     let tile_compression = compression_name(reader.tile_compression());
     let tile_type = tile_type_name(reader.tile_type());
+    let mvt_validation = match reader.tile_decoder() {
+        Ok(decoder) => format!("supported ({})", decoder.label()),
+        Err(error) => format!("unsupported: {error}"),
+    };
 
     // Zoom + bounds.
     let min_zoom = reader.min_zoom();
@@ -89,6 +93,7 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
     writeln!(out)?;
     writeln!(out, "  Tile type:          {tile_type}")?;
     writeln!(out, "  Tile compression:   {tile_compression}")?;
+    writeln!(out, "  MVT validation:     {mvt_validation}")?;
     writeln!(out, "  Internal compress:  {internal_compression}")?;
     writeln!(
         out,

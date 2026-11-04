@@ -2,12 +2,7 @@ use rustc_hash::FxHashMap;
 
 use crate::shortbread::Tags;
 
-/// Relation-derived boundary properties resolved onto a member way.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct BoundaryMeta {
-    pub(super) min_admin_level: Option<u8>,
-    pub(super) disputed: bool,
-}
+use crate::shortbread::boundaries::BoundaryMeta;
 
 pub(super) type BoundaryWayMeta = FxHashMap<i64, BoundaryMeta>;
 
@@ -16,23 +11,11 @@ pub(super) fn fold_relation<I>(tags: &Tags<'_>, way_ids: I, out: &mut BoundaryWa
 where
     I: IntoIterator<Item = i64>,
 {
-    let admin_level = if tags.has_value("boundary", "administrative") {
-        tags.get("admin_level")
-            .and_then(|value| value.parse::<u8>().ok())
-            .filter(|level| matches!(level, 2 | 4))
-    } else {
-        None
-    };
-    let disputed = tags.has_value("boundary", "disputed");
-    if admin_level.is_none() && !disputed {
+    let Some(relation) = BoundaryMeta::from_relation(tags) else {
         return;
-    }
+    };
     for way_id in way_ids {
-        let meta = out.entry(way_id).or_default();
-        if let Some(level) = admin_level {
-            meta.min_admin_level = Some(meta.min_admin_level.map_or(level, |old| old.min(level)));
-        }
-        meta.disputed |= disputed;
+        out.entry(way_id).or_default().fold_relation(relation);
     }
 }
 
@@ -52,7 +35,7 @@ mod tests {
         assert_eq!(
             out[&42],
             BoundaryMeta {
-                min_admin_level: Some(2),
+                min_admin_level: Some(crate::shortbread::boundaries::AdminLevel::Country),
                 disputed: true
             }
         );

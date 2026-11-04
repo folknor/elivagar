@@ -119,6 +119,11 @@ And the artifact's key is validated by re-hashing the shapefiles it claims to
 have been built from, so both sides must be present for the check to mean
 anything. Build one with `ocean-build`.
 
+When a run computes ocean geometry, it checks the opened shapefile and index
+buffers against the source key resolved before phase12, before emitting any
+records from that pass. Replacing an input between key resolution and reading
+it fails the run instead of recording the earlier key for different geometry.
+
 A named artifact that cannot serve the run is an **error**. It applies only to
 the exact MVT + gzip + z0-14 contract at a matching compression level, and a
 mismatch on any of those four fails the run rather than quietly computing the
@@ -271,14 +276,21 @@ used by each pass, so replacing an input path during the build cannot attach
 another file's hash to the geometry.
 
 Retention: when the output path already holds an artifact, `ocean-build`
-keeps the outgoing generation as `<stem>-v<policy_version>-<build_date>.pmtiles`
-next to it (version from the artifact's own metadata, `unknown` if
-unreadable; date from its mtime), one generation deep - the previous
-retained copy is removed, but only names matching that exact scheme are
-ever deleted, so manually kept copies survive. The keep is a hard link
-made before the build starts: the active path is never empty, a failed
-rebuild changes nothing, and the extra ~1 GB materializes only when the
-finalize rename swaps the inode out. The retained generation is the
+keeps the outgoing generation as
+`<stem>-v<policy_version>-<key_prefix>-<build_date>.pmtiles` next to it. The
+eight-character lowercase hex `key_prefix` is the start of the XXH3-128 hash
+of the artifact key, including its source hashes and compression level.
+Version comes from the artifact's own metadata, `unknown` if unreadable; an
+unreadable key also uses `unknown` for the prefix. The date comes from the
+artifact's mtime. Retention stays one generation deep: the previous retained
+copy is removed after the outgoing artifact's link is created. Cleanup also
+recognizes the earlier date-only name
+`<stem>-v<policy_version>-<build_date>.pmtiles`; other names are left alone.
+The keep is a hard link made before the build starts: a failed rebuild leaves
+the active artifact unchanged, but retention cleanup has already replaced the
+previous retained generation with a link to that active artifact. The active
+path is never empty, and the extra ~1 GB materializes only when the finalize
+rename swaps the inode out. The retained generation is the
 comparand for the archive-bracketing idiom (`brokkr svg -o` the same tile
 from each generation, diff one ROI with `scripts/validate/svg-roi.mjs`) -
 without it, every policy bump destroys the only artifact of the version
@@ -290,6 +302,11 @@ Header, tile statistics, section layout, provenance, and metadata (layer list
 with zoom ranges) for a PMTiles archive. Wrapped by `brokkr pmtiles-inspect` -
 the brokkr name avoids colliding with `brokkr inspect`, which is pbfhogg's PBF
 inspector.
+
+The `MVT validation` line reports whether the archive's declared tile type and
+compression are supported by the MVT validation and archive-view workflows.
+The current supported pair is MVT with gzip. Header inspection still works
+when that pair is unsupported.
 
 ### Provenance
 
@@ -453,12 +470,19 @@ was tunable from any shell and recorded nowhere.
 
 | var | effect |
 |---|---|
-| `ELIVAGAR_ASSEMBLE_WORKERS` | assemble worker cap, default 8. Measured on NA locations: 4 workers left the writer idle 68% of assemble; 8 cut assemble 186.4 to 160.7s; 12 was WORSE at 176.1s and +3 GB RSS - encode CPU saturates near 8 |
-| `ELIVAGAR_ASSEMBLE_PARK_BUDGET` | bytes of encoded-but-unwritten tiles workers may run ahead of the writer, default 2 GiB. The RAM ceiling on assemble, and the term the planet ledger's 6-9 GB assemble estimate is derived from |
-| `ELIVAGAR_ASSEMBLE_SPLIT_TARGET` | piece size in record bytes for hot-partition splitting, default 64 MiB; a partition over twice this splits into contiguous tile-range pieces read by independent workers (H8b - one dense z14-block partition otherwise puts hundreds of encoded MB behind one ordered slot). Output is byte-identical split or unsplit; set a tiny value to force splits on a small extract for that gate |
-| `ELIVAGAR_REL_BLOCKS_CAP` | relation-block buffer cap in bytes. Past it the tail re-reads relation blobs instead of holding them; set it to 1 to force the spill path on a small extract |
+| `ELIVAGAR_ASSEMBLE_WORKERS` | positive decimal integer; assemble worker cap, default 8. Measured on NA locations: 4 workers left the writer idle 68% of assemble; 8 cut assemble 186.4 to 160.7s; 12 was WORSE at 176.1s and +3 GB RSS - encode CPU saturates near 8 |
+| `ELIVAGAR_ASSEMBLE_PARK_BUDGET` | positive decimal integer; bytes of encoded-but-unwritten tiles workers may run ahead of the writer, default 2 GiB. The RAM ceiling on assemble, and the term the planet ledger's 6-9 GB assemble estimate is derived from |
+| `ELIVAGAR_ASSEMBLE_SPLIT_TARGET` | positive decimal integer; piece size in record bytes for hot-partition splitting, default 64 MiB; a partition over twice this splits into contiguous tile-range pieces read by independent workers (H8b - one dense z14-block partition otherwise puts hundreds of encoded MB behind one ordered slot). Output is byte-identical split or unsplit; set a tiny value to force splits on a small extract for that gate |
+| `ELIVAGAR_REL_BLOCKS_CAP` | non-negative decimal integer; relation-block buffer cap in bytes. Past it the tail re-reads relation blobs instead of holding them; zero forces the spill path |
 | `ELIVAGAR_LAYER_STATS=1` | per-layer per-zoom sort-stats firehose (~800 counters). Emitted at end of run, so it never affects timing. The per-layer totals are always emitted |
 | `BROKKR_MARKER_FIFO` | set by brokkr. Phase markers and counters go here; unset means every counter in `src/debug.rs` is a silent no-op |
+
+For the four integer knobs above, only an unset variable selects the default.
+Set values must contain only ASCII decimal digits and fit the target integer:
+`ELIVAGAR_ASSEMBLE_SPLIT_TARGET` uses `u64`; the other three use `usize`.
+Empty, malformed, non-UTF-8 or overflowing values fail the run instead of
+falling back. Signs, whitespace and size suffixes are rejected: `1G` fails;
+write `1073741824` for 1 GiB. Zero fails for the three assemble knobs.
 
 `BROKKR_MARKER_FIFO` is why a bare `elivagar run` emits no metrics at all: the
 sidecar numbers exist only for runs brokkr started with a measurement flag.

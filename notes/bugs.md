@@ -157,19 +157,6 @@ and resolution done once (see the budgets entry in
 Reported by the storage hunt; the pipeline and run-contract hunts flag the
 same sentinel.
 
-## BUG-013 - Env-var knobs fail open on typos
-
-`ELIVAGAR_ASSEMBLE_WORKERS`, `ELIVAGAR_ASSEMBLE_PARK_BUDGET`,
-`ELIVAGAR_ASSEMBLE_SPLIT_TARGET` and `ELIVAGAR_REL_BLOCKS_CAP` all go through
-`.parse().ok()...unwrap_or(default)`. `ELIVAGAR_REL_BLOCKS_CAP=1G` (the
-spelling every CLI budget accepts) silently means the default, as does
-`ELIVAGAR_ASSEMBLE_WORKERS=eight`. brokkr's `capture_env` then records the
-variable as set, so the results row claims an A/B arm the run never took -
-the failure class the "either it is explicit, or it is not set" rule was
-written against.
-
-Reported by the storage hunt.
-
 ## BUG-014 - `--threads` is not a thread budget
 
 The `TilegenConfig.threads` doc says it controls the rayon pool and pbfhogg
@@ -212,41 +199,6 @@ pyramid-exported "root cells for bbox" function.
 
 Reported by the ocean and coordinate-spaces hunts.
 
-## BUG-019 - Retained artifact names collide on same-day same-policy rebuilds
-
-`retain_outgoing_ocean_artifact` names the retained file by policy version and
-mtime date only, so a same-version shapefile rotation is indistinguishable
-in the name and two same-day rebuilds replace the retained generation. A
-short source-hash prefix would make it self-describing.
-
-Reported by the ocean hunt.
-
-## BUG-020 - `artifact_run_copy_items` walks band runs tile by tile
-
-It walks whole runs (`while cursor < run_end`) calling `tile_id_to_zxy` per
-tile. Artifact runs are long (the artifact addresses far more tiles than it
-stores); band-empty extracts skip this, but a near-world extract with a
-non-empty band walks hundreds of millions of tile ids. Intersecting run ranges
-with per-zoom band rectangles makes it proportional to band size.
-(Performance, not correctness.)
-
-Reported by the ocean hunt.
-
-## BUG-021 - Spliced ocean tiles may differ in layer order from computed ones
-
-The ocean hunt reports that spliced tiles carry the ocean layer last while
-computed tiles carry it in Shortbread layer order - a second, unrecorded
-difference between artifact-served and computed tiles. The layer-identity
-hunt reads it differently: `Layer::Ocean = 25` is the last discriminant, so
-locally assembled tiles also emit ocean last, and the two agree only because
-both happen to put it last; reordering the enum would make them differ (and
-break the pmtiles_writer test pinning `layers[25] == "ocean"`). Both readings
-recorded. Proposed owner either way: an explicit tile order in the layer
-table, with the splice inserting at the declared position or asserting ocean
-is maximal.
-
-Reported by the ocean and layer-identity hunts.
-
 ---
 
 # Geometry
@@ -282,6 +234,9 @@ within one tile and `prepare_for_reuse` is a no-op on fresh builders. Either
 the thread-local was removed deliberately (delete the pool plumbing threaded
 through three public signatures) or lost in a refactor (the alloc profile that
 justified it has silently regressed). `brokkr tilegen --alloc` settles which.
+The `AssemblyScratch` header meanwhile contradicts its own constructor, which
+documents the per-tile allocation as deliberate - whichever way this is
+settled, the two must agree.
 
 Reported by the encoding hunt.
 
@@ -313,40 +268,13 @@ Reported by the coordinate-spaces and archive-surface hunts.
 
 ---
 
-# Documentation drift
-
-## BUG-051 - Stale statements in comments and docs
-
-Facts the hunters found stated wrongly. Per the documentation rule, reword so
-the drifting specific is not hard-coded rather than updating it.
-
-- `pyramid.rs` and `clip_shape_rect_fast` comments say the fallback is "the
-  full i_overlay boolean"; it is the in-tree port.
-- `AssemblyScratch`'s header still claims thread-local persistence, while its
-  constructor documents deliberate per-tile allocation (see BUG-038).
-- `wire_format` documents a `u16 geometry command count`; the code writes and
-  reads `u32`. `add_feature_to_layer` references "the `as u8` encode on line
-  69" and `LayerBuilder::reclaim_features` (it is `prepare_for_reuse`).
-  `KEY_NAMES` marks `way_area` and `height` test-only, but `way_area` is
-  emitted by `enrich_polygon_matches` and `height` by land.rs buildings.
-- The `OceanInputs`, `LOW_ZOOM_UNION_MAX_ZOOM` and `ocean_pass_max_zooms`
-  comments describe the pre-v3 pass structure (see BUG-002's account).
-- An `ocean.rs` comment still describes unpartitioned chunk filenames; the
-  sort module now refuses those names.
-
-Reported across the polygon-engine, storage, encoding, run-contract, ocean and
-layer-identity hunts.
-
----
-
 # Found during the 2026-11-04 fix waves
 
-## BUG-053 - A regular run hashes the ocean shapefiles before reading them
+## BUG-059 - The sort record casts the geometry command count to u32 unchecked
 
-The artifact builder now keys on hashes of the bytes it actually read. The
-regular `run` path still computes `OceanSourceKey` before phase12 and reads the
-shapefiles later without comparing, so a shapefile replaced in between yields
-computed chunks, or an artifact boundary band, that differ from the key the
-checkpoint and provenance record.
+`wire_format` writes `geom_cmds.len() as u32` without an overflow check, so a
+feature with more than `u32::MAX` command words would write a wrapped count
+and a corrupt record. Latent at real feature sizes; a `try_from` with an error
+or an assertion would make it explicit.
 
-Reported by the wave-1 ocean fixer.
+Reported by the wave-4 wire-format fixer.

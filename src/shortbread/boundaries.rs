@@ -1,4 +1,4 @@
-// Boundary and place label layers: boundaries, boundary_labels, place_labels.
+// Boundary line and label matching for the Shortbread schema.
 
 use super::*;
 use smallvec::{SmallVec, smallvec};
@@ -7,50 +7,101 @@ use smallvec::{SmallVec, smallvec};
 // Boundaries
 // ---------------------------------------------------------------------------
 
-/// Returns admin_level (int) and min_zoom if boundary matches.
-pub(crate) fn boundary_min_zoom(admin_level: u8) -> Option<u8> {
-    match admin_level {
-        2 => Some(0),
-        4 => Some(7),
-        _ => None,
+/// Supported administrative boundary levels, ordered from country to state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub(crate) enum AdminLevel {
+    Country = 2,
+    State = 4,
+}
+
+impl AdminLevel {
+    /// Administrative levels are categorical codes, not locale-formatted counts.
+    /// Keep the strict prescan policy for both relations and standalone ways.
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.parse::<u8>().ok()? {
+            2 => Some(Self::Country),
+            4 => Some(Self::State),
+            _ => None,
+        }
+    }
+
+    const fn min_zoom(self) -> u8 {
+        match self {
+            Self::Country => 0,
+            Self::State => 7,
+        }
     }
 }
 
-pub(crate) fn boundary_match(tags: &Tags<'_>) -> Option<(i64, u8)> {
+/// Relation-derived properties folded onto a member way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BoundaryMeta {
+    pub(crate) min_admin_level: Option<AdminLevel>,
+    pub(crate) disputed: bool,
+}
+
+impl BoundaryMeta {
+    pub(crate) fn fold_relation(&mut self, relation: Self) {
+        self.min_admin_level = match (self.min_admin_level, relation.min_admin_level) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.disputed |= relation.disputed;
+    }
+
+    pub(crate) fn from_relation(tags: &Tags<'_>) -> Option<Self> {
+        let meta = Self {
+            min_admin_level: boundary_level(tags),
+            disputed: tags.has_value("boundary", "disputed"),
+        };
+        (meta.min_admin_level.is_some() || meta.disputed).then_some(meta)
+    }
+}
+
+fn boundary_level(tags: &Tags<'_>) -> Option<AdminLevel> {
     if !tags.has_value("boundary", "administrative") {
         return None;
     }
-    let level_str = tags.get("admin_level")?;
-    let level = parse_i64(level_str)?;
-    let level_u8 = u8::try_from(level).ok()?;
-    boundary_min_zoom(level_u8).map(|min_zoom| (level, min_zoom))
+    AdminLevel::parse(tags.get("admin_level")?)
+}
+
+pub(crate) fn boundary_line(tags: &Tags<'_>, relation: Option<BoundaryMeta>) -> Option<LayerMatch> {
+    let mut meta = relation.unwrap_or_default();
+    meta.fold_relation(BoundaryMeta {
+        min_admin_level: boundary_level(tags),
+        disputed: tags.has_value("disputed", "yes"),
+    });
+    let level = meta.min_admin_level?;
+    Some(LayerMatch {
+        layer: Layer::Boundaries,
+        min_zoom: level.min_zoom(),
+        max_zoom: 14,
+        geom_expect: GeomExpect::Line,
+        paint_rank: 0,
+        attrs: smallvec![
+            attr_int("admin_level", i64::from(level as u8)),
+            attr_bool(
+                "maritime",
+                tags.has_value("maritime", "yes") || tags.has_value("natural", "coastline")
+            ),
+            attr_bool("disputed", meta.disputed),
+        ],
+    })
 }
 
 pub(super) fn match_boundaries_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    if let Some((admin_level, min_zoom)) = boundary_match(tags) {
-        let maritime = tags.has_value("maritime", "yes") || tags.has_value("natural", "coastline");
-        let disputed = tags.has_value("disputed", "yes");
-        out.push(LayerMatch {
-            layer: Layer::Boundaries,
-            min_zoom,
-            max_zoom: 14,
-            geom_expect: GeomExpect::Line,
-            paint_rank: 0,
-            attrs: smallvec![
-                attr_int("admin_level", admin_level),
-                attr_bool("maritime", maritime),
-                attr_bool("disputed", disputed),
-            ],
-        });
+    if let Some(matched) = boundary_line(tags, None) {
+        out.push(matched);
     }
 }
 
 pub(super) fn match_boundary_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    if let Some((admin_level, _)) = boundary_match(tags) {
-        let mut attrs = smallvec![attr_int("admin_level", admin_level)];
+    if let Some(admin_level) = boundary_level(tags) {
+        let mut attrs = smallvec![attr_int("admin_level", i64::from(admin_level as u8))];
         attrs.extend(name_attrs(tags));
-        // Default min_zoom is 5. Area-based overrides (z2-z4 for large
-        // territories) are applied later in tilegen when geometry is available.
+        // Default min_zoom is 5; enrich_boundary_label applies area overrides
+        // once the emitter has measured the polygon.
         out.push(LayerMatch {
             layer: Layer::BoundaryLabels,
             min_zoom: 5,
@@ -62,69 +113,59 @@ pub(super) fn match_boundary_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
     }
 }
 
-// ---------------------------------------------------------------------------
-// Place labels
-// ---------------------------------------------------------------------------
+/// Apply the boundary label attributes and zoom policy that depend on area.
+pub(crate) fn enrich_boundary_label(matched: &mut LayerMatch, area_m2: f64) {
+    let hectares = area_m2 / 10_000.0;
+    matched
+        .attrs
+        .push(("way_area", AttrValue::Float(hectares), 0));
 
-pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    if !has_name(tags) {
-        return;
-    }
-    let place = match tags.get("place") {
-        Some(v) => v,
-        None => return,
-    };
-    if let Some((kind, min_zoom, pop_default)) = place_label_info(tags, place) {
-        let mut attrs = smallvec![attr_str("kind", kind)];
-        attrs.extend(name_attrs(tags));
-        let population = tags
-            .get("population")
-            .and_then(parse_i64)
-            .unwrap_or(pop_default);
-        attrs.push(attr_int("population", population));
-        out.push(LayerMatch {
-            layer: Layer::PlaceLabels,
-            min_zoom,
-            max_zoom: 14,
-            geom_expect: GeomExpect::Point,
-            paint_rank: 0,
-            attrs,
-        });
+    let area_km2 = area_m2 / 1e6;
+    let is_country = matches!(
+        matched
+            .attrs
+            .iter()
+            .find(|(key, _, _)| *key == "admin_level")
+            .map(|(_, value, _)| value),
+        Some(AttrValue::Int(level)) if *level == i64::from(AdminLevel::Country as u8)
+    );
+    if is_country && area_km2 >= 2_000_000.0 {
+        matched.min_zoom = 2;
+    } else if area_km2 >= 700_000.0 {
+        matched.min_zoom = 3;
+    } else if area_km2 >= 100_000.0 {
+        matched.min_zoom = 4;
     }
 }
 
-/// Returns (kind, min_zoom, population_default) for a place label.
-fn place_label_info(tags: &Tags<'_>, place: &str) -> Option<(&'static str, u8, i64)> {
-    // Capital detection.
-    // NOTE: OSM also uses capital=2 for national capitals (admin_level=2),
-    // but neither Planetiler nor Tilemaker handle it - consistent gap across
-    // all Shortbread implementations. Rarely used in practice (capital=yes
-    // is the standard tagging for national capitals).
-    let is_capital = tags.has_value("capital", "yes");
-    let is_state_capital = tags.has_value("capital", "4");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    match place {
-        "city" => {
-            let kind = if is_capital {
-                "capital"
-            } else if is_state_capital {
-                "state_capital"
-            } else {
-                "city"
-            };
-            let zoom = if is_capital || is_state_capital { 4 } else { 6 };
-            Some((kind, zoom, 100_000))
+    #[test]
+    fn admin_levels_use_the_same_strict_policy_for_ways_and_relations() {
+        for (raw, expected) in [
+            ("2", Some(AdminLevel::Country)),
+            ("4", Some(AdminLevel::State)),
+            ("02", Some(AdminLevel::Country)),
+            ("+2", Some(AdminLevel::Country)),
+            ("0,2", None),
+            (" 2", None),
+            ("2 ", None),
+            ("6", None),
+            ("256", None),
+        ] {
+            let pairs = [("boundary", "administrative"), ("admin_level", raw)];
+            let tags = Tags(&pairs);
+            assert_eq!(boundary_level(&tags), expected);
+            assert_eq!(
+                BoundaryMeta::from_relation(&tags).and_then(|m| m.min_admin_level),
+                expected
+            );
+            assert_eq!(
+                boundary_line(&tags, None).map(|m| m.min_zoom),
+                expected.map(AdminLevel::min_zoom)
+            );
         }
-        "town" => Some(("town", if is_capital { 4 } else { 7 }, 5_000)),
-        "village" => Some(("village", if is_capital { 4 } else { 10 }, 100)),
-        "hamlet" => Some(("hamlet", if is_capital { 4 } else { 10 }, 50)),
-        "suburb" => Some(("suburb", 10, 1_000)),
-        "quarter" => Some(("quarter", 10, 500)),
-        "neighbourhood" => Some(("neighbourhood", 10, 100)),
-        "isolated_dwelling" => Some(("isolated_dwelling", 10, 5)),
-        "farm" => Some(("farm", 10, 5)),
-        "island" => Some(("island", 10, 0)),
-        "locality" => Some(("locality", 10, 0)),
-        _ => None,
     }
 }

@@ -1202,6 +1202,57 @@ mod tests {
         assert_eq!(count_bits_before(&mask, 255), 255);
     }
 
+    // --- FOR codec property tests ---
+
+    #[test]
+    fn for_codec_round_trips_full_i32_range_at_every_chunk_length() {
+        fn next_i32(state: &mut u64) -> i32 {
+            *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut value = *state;
+            value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            let bytes = (value ^ (value >> 31)).to_le_bytes();
+            i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
+
+        let mut state = 0x7A31_19D4_C2E5_806B;
+        for n in 1..=NODES_PER_CHUNK {
+            let mut lats = (0..n).map(|_| next_i32(&mut state)).collect::<Vec<_>>();
+            let mut lons = (0..n).map(|_| next_i32(&mut state)).collect::<Vec<_>>();
+            if n >= 2 {
+                lats[0] = i32::MIN;
+                lats[n - 1] = i32::MAX;
+                lons[0] = i32::MAX;
+                lons[n - 1] = i32::MIN;
+            }
+
+            let mut lat_offsets = Vec::with_capacity(n);
+            let mut lon_offsets = Vec::with_capacity(n);
+            let mut packed = Vec::new();
+            compress_coords_into(
+                &lats,
+                &lons,
+                &mut lat_offsets,
+                &mut lon_offsets,
+                &mut packed,
+            );
+
+            if n >= 2 {
+                assert_eq!(packed[8], 32, "latitude width at chunk length {n}");
+                assert_eq!(packed[9], 32, "longitude width at chunk length {n}");
+            }
+
+            let mut decoded = vec![(0_i32, 0_i32); n];
+            decompress_chunk(n, true, &packed, &mut decoded);
+            let expected = lats
+                .iter()
+                .copied()
+                .zip(lons.iter().copied())
+                .collect::<Vec<_>>();
+            assert_eq!(decoded, expected, "round trip at chunk length {n}");
+        }
+    }
+
     // --- SortedNodeStore tests ---
 
     #[test]

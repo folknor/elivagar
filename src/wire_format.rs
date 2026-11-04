@@ -9,7 +9,7 @@
 // Format:
 //   u64   osm_id
 //   u8    geom_type (1=point, 2=line, 3=polygon)
-//   u16   geometry command count
+//   u32   geometry command count
 //   u32×  geometry commands
 //   u8    attribute count
 //   per attribute:
@@ -74,8 +74,8 @@ const KEY_NAMES: &[&str] = &[
     "shop",                    // 43
     "emergency",               // 44
     "historic",                // 45
-    "way_area",                // 46 (test-only: Float roundtrip)
-    "height",                  // 47 (test-only: zoom-dependent Float)
+    "way_area",                // 46
+    "height",                  // 47
     "ele",                     // 48 (POI elevation in meters)
     "min_height",              // 49
     "building:levels",         // 50
@@ -369,8 +369,7 @@ pub(crate) fn add_feature_to_layer(
     let osm_id = u64::from_le_bytes(data[0..8].try_into().expect("osm_id"));
     let mut pos: usize = 8;
 
-    // geom_type - inline match mirrors the `as u8` encode on line 69.
-    // A TryFrom impl would be more boilerplate than this 4-line match.
+    // geom_type - decode the discriminator written by the encoder.
     let gt_byte = data[pos];
     pos += 1;
     let geom_type = match gt_byte {
@@ -382,8 +381,8 @@ pub(crate) fn add_feature_to_layer(
 
     // geometry commands - bulk memcpy (little-endian wire format matches native u32 layout).
     // Each Feature owns its Vec<u32> because merge_same_attr_geometries needs random
-    // access across all Features in a tile. Vecs are pooled per rayon worker - pop from
-    // pool here, reclaimed after encode via LayerBuilder::reclaim_features.
+    // access across all Features in a tile. Buffers come from reusable pools and are
+    // returned after the tile is encoded.
     let cmd_count = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("cmd_count")) as usize;
     pos += 4;
     let cmd_bytes = cmd_count * 4;
