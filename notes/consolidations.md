@@ -172,33 +172,19 @@ polygon-engine hunts.
 
 ## CON-026 - What kind values exist per layer, and at what zoom?
 
-- The matchers (land.rs `land_match_*`, streets.rs `highway_zoom`,
-  `aeroway_zoom`, `railway_zoom`, `street_label_zoom_highway` plus inline
-  arms in `street_label_zoom`, `street_label_kind_raw` re-calling the line
-  zoom functions as a membership test, `street_polygon_match`).
-- `paint_order::is_known_land_kind` / `is_known_street_kind` and
-  `land_paint_rank` / `street_class_rank` (fallbacks `_ => 0` and the
-  `UNKNOWN_STREET_CLASS` sentinel), plus the paint_order test lists - a fourth
-  copy checked against the third while the matcher is never consulted.
-- `wire_format::KIND_VALUES`, a linear-search interning table (up to 129
-  string compares per kind per zoom) where a miss silently falls back to an
-  inline string; includes `motorway_link` etc., which are dead if streets.rs
-  strips `_link` into the `link` attr.
-- `corpus/style.toml`, whose comment says every kind `is_known_land_kind()`
-  accepts has a match - a hand-held agreement across repos.
-- `street_paint_rank(kind, ...)` is fed both stripped and raw values;
-  `street_labels` keeps `_link` on purpose.
-
-A kind added to `land_match_landuse` without a rank silently gets rank 0, and
-verify then rejects the archive as "unknown land kind" - at verify time, only
-on an archive containing one. The key-order mismatch already live between
-street label zoom and kind is in `notes/bugs.md`.
-
-Owner proposed: `LandKind`, `StreetKind` (with `link` separate,
-`from_osm("motorway_link") -> (Motorway, link=true)`) and so on per family,
-each carrying `(name, min_zoom, paint_rank)` in one table with `as_str()`
-for the wire; `is_known_*` becomes `from_str`; `KIND_VALUES` derives from the
-enums; brokkr's style test can enumerate them.
+Land and street kinds are typed (`LandKind`, `StreetClass`, `LinkClass`,
+`StreetKind`), each owning wire name and paint rank, and a wire_format test
+checks they are interned. What remains is the other families: water
+(`water.rs` polygon, line, label, dam and pier kinds), transport
+(`aerialway_kind`, ferry, `public_transport_match`), place labels
+(`place_label_info`) and sites (`sites_kind`) still emit `&'static str`
+literals from their row tables, so nothing ties them to
+`wire_format::KIND_VALUES`. A new kind in one of them silently misses the
+dictionary (costing bytes, not correctness - the table is a compression
+dictionary with an inline-string fallback, and that fallback stays). The
+gap: enums for those families, or at least a coverage test enumerating
+their row tables against `KIND_VALUES`. Deriving `KIND_VALUES` from enums
+would renumber ids and needs a `CHECKPOINT_VERSION` bump.
 
 Reported by the Shortbread, encoding and layer-identity hunts.
 

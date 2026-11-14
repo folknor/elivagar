@@ -328,9 +328,9 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)` plu
 - `pipeline.rs` - PBF → ocean → sort → assemble → PMTiles
 
 **Shortbread profile:**
-- `shortbread/` - tag matching, layer definitions, 26 layers (mod.rs, boundaries.rs, land.rs, streets.rs, transport.rs, water.rs)
+- `shortbread/` - tag matching, layer definitions, 26 layers, one module per layer family. Land and street kinds are enums (`LandKind`, `StreetClass`, `LinkClass`) owning their wire name and paint rank, which the matchers, verify and the wire-format coverage test all read
 - `shortbread_tests.rs` - spec test cases (65+), loaded via `#[path]` from shortbread/mod.rs
-- `pois.rs` - POI tag matching
+- `shortbread/pois.rs` - POI tag matching
 - `wire_format.rs` - sort record binary serialization
 
 **Geometry + encoding:**
@@ -496,7 +496,8 @@ features sorted, merged-feature components sorted - erasing intra-layer
 feature order, the one dimension the pipeline deliberately leaves
 unconstrained across archives, and nothing else). Within-run record order is
 total (chunk-independent sort + paint-order key, `src/sort.rs` +
-`src/shortbread/paint_order.rs`), so two builds of the same commit are
+the `paint_rank` methods on the kind enums in `src/shortbread/land.rs` and
+`src/shortbread/streets.rs`), so two builds of the same commit are
 byte-identical and never need this canonicalization; two builds of
 *different* commits can still legitimately reorder features (e.g. a
 paint-rank table change) without any semantic difference, which is what the

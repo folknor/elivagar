@@ -19,7 +19,6 @@ use std::borrow::Cow;
 pub(crate) mod boundaries;
 mod land;
 pub(crate) mod osm_value;
-pub(crate) mod paint_order;
 mod place_labels;
 pub(crate) mod pois;
 mod streets;
@@ -526,9 +525,86 @@ fn has_name(tags: &Tags<'_>) -> bool {
     tags.get("name").is_some_and(|v| !v.is_empty())
 }
 
-/// Strip _link suffix for street kind.
-fn street_kind(val: &str) -> &str {
-    val.strip_suffix("_link").unwrap_or(val)
+// ---------------------------------------------------------------------------
+// Paint-order recovery
+// ---------------------------------------------------------------------------
+
+pub use land::LandKind;
+pub use streets::{LinkClass, StreetClass, StreetKind};
+
+/// The paint attributes decoded from one feature of an ordered layer.
+#[derive(Clone, Copy)]
+pub(crate) struct RankAttributes<'a> {
+    /// The feature's `kind` string.
+    pub kind: &'a str,
+    pub link: bool,
+    pub tunnel: bool,
+    pub bridge: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RankError {
+    /// The land feature's kind is not a `LandKind`.
+    UnknownLandKind,
+    /// The streets or street_polygons feature's kind is not a `StreetClass`.
+    UnknownStreetKind,
+}
+
+impl Layer {
+    /// Whether the layer has a deliberate within-layer paint order: smaller
+    /// `LayerMatch::paint_rank` values are emitted first and painted below.
+    pub(crate) const fn has_paint_order(self) -> bool {
+        match self {
+            Layer::Land | Layer::Streets | Layer::StreetPolygons => true,
+            Layer::Ocean
+            | Layer::WaterPolygons
+            | Layer::WaterPolygonsLabels
+            | Layer::WaterLines
+            | Layer::WaterLinesLabels
+            | Layer::DamLines
+            | Layer::DamPolygons
+            | Layer::PierLines
+            | Layer::PierPolygons
+            | Layer::Boundaries
+            | Layer::BoundaryLabels
+            | Layer::PlaceLabels
+            | Layer::Sites
+            | Layer::Buildings
+            | Layer::Addresses
+            | Layer::StreetLabels
+            | Layer::StreetLabelsPoints
+            | Layer::StreetsPolygonsLabels
+            | Layer::Bridges
+            | Layer::Aerialways
+            | Layer::Ferries
+            | Layer::PublicTransport
+            | Layer::Pois => false,
+        }
+    }
+
+    /// Recover the producer's paint rank from decoded attributes, through the
+    /// same kind methods the matchers call. `Ok(None)` means the layer is
+    /// unordered; an ordered layer with an unknown kind is an error. Missing
+    /// boolean attributes are false: below their zoom floor they are absent
+    /// for the whole layer, leaving class order unchanged.
+    pub(crate) fn paint_rank_for(
+        self,
+        attrs: &RankAttributes<'_>,
+    ) -> Result<Option<u8>, RankError> {
+        if !self.has_paint_order() {
+            return Ok(None);
+        }
+        if self == Layer::Land {
+            let kind = LandKind::from_name(attrs.kind).ok_or(RankError::UnknownLandKind)?;
+            return Ok(Some(kind.paint_rank()));
+        }
+        let class = StreetClass::from_name(attrs.kind).ok_or(RankError::UnknownStreetKind)?;
+        Ok(Some(class.paint_rank(
+            attrs.link,
+            attrs.tunnel,
+            attrs.bridge,
+        )))
+    }
 }
 
 /// Parse an integer tag using the locale policy in `osm_value::parse_int`.

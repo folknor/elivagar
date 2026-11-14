@@ -6,8 +6,8 @@ name = "ocean"
 fill = "#aad3df"
 [[layer]]
 name = "land"
-# Every kind is_known_land_kind() accepts has a match below (colors follow
-# OSM Carto where one exists); the base fill only catches unknown kinds.
+# Every elivagar LandKind has a match below, enforced by a unit test (colors
+# follow OSM Carto where one exists); the base fill only catches unknown kinds.
 fill = "#f2efe9"
 [[layer.match]]
 key = "kind"

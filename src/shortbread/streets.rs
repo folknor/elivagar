@@ -7,69 +7,281 @@ use smallvec::{SmallVec, smallvec};
 const STREET_FLAG_ATTRIBUTE_MIN_ZOOM: u8 = 11;
 
 // ---------------------------------------------------------------------------
+// Street kinds
+// ---------------------------------------------------------------------------
+
+/// The class of a street, rail or aeroway line: the `kind` value the streets
+/// and street_polygons layers emit. Declared in paint order, so the class
+/// rank is the discriminant. Street zoom floors are not a class property
+/// (street_labels uses its own floors and rail has a service override), so
+/// they stay in the matcher rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StreetClass {
+    Track,
+    Footway,
+    Steps,
+    Path,
+    Cycleway,
+    Pedestrian,
+    LivingStreet,
+    Service,
+    Busway,
+    BusGuideway,
+    Taxiway,
+    Runway,
+    Unclassified,
+    Residential,
+    Tertiary,
+    Secondary,
+    Primary,
+    Trunk,
+    Motorway,
+    Funicular,
+    Monorail,
+    Tram,
+    LightRail,
+    Subway,
+    NarrowGauge,
+    Rail,
+}
+
+impl StreetClass {
+    /// Every variant in declaration order; a test pins it to the discriminants.
+    pub const ALL: [StreetClass; 26] = {
+        use StreetClass::*;
+        [
+            Track,
+            Footway,
+            Steps,
+            Path,
+            Cycleway,
+            Pedestrian,
+            LivingStreet,
+            Service,
+            Busway,
+            BusGuideway,
+            Taxiway,
+            Runway,
+            Unclassified,
+            Residential,
+            Tertiary,
+            Secondary,
+            Primary,
+            Trunk,
+            Motorway,
+            Funicular,
+            Monorail,
+            Tram,
+            LightRail,
+            Subway,
+            NarrowGauge,
+            Rail,
+        ]
+    };
+
+    /// The `kind` attribute value on the wire.
+    pub const fn as_str(self) -> &'static str {
+        use StreetClass::*;
+        match self {
+            Track => "track",
+            Footway => "footway",
+            Steps => "steps",
+            Path => "path",
+            Cycleway => "cycleway",
+            Pedestrian => "pedestrian",
+            LivingStreet => "living_street",
+            Service => "service",
+            Busway => "busway",
+            BusGuideway => "bus_guideway",
+            Taxiway => "taxiway",
+            Runway => "runway",
+            Unclassified => "unclassified",
+            Residential => "residential",
+            Tertiary => "tertiary",
+            Secondary => "secondary",
+            Primary => "primary",
+            Trunk => "trunk",
+            Motorway => "motorway",
+            Funicular => "funicular",
+            Monorail => "monorail",
+            Tram => "tram",
+            LightRail => "light_rail",
+            Subway => "subway",
+            NarrowGauge => "narrow_gauge",
+            Rail => "rail",
+        }
+    }
+
+    /// The class whose wire name is `name`, if the streets layers emit it.
+    pub fn from_name(name: &str) -> Option<StreetClass> {
+        Self::ALL.into_iter().find(|c| c.as_str() == name)
+    }
+
+    /// Whether the class is a railway, which carries the `rail` attribute and
+    /// no oneway attributes.
+    pub const fn is_rail(self) -> bool {
+        use StreetClass::*;
+        matches!(
+            self,
+            Funicular | Monorail | Tram | LightRail | Subway | NarrowGauge | Rail
+        )
+    }
+
+    /// Within-layer paint rank: class-major, then tunnel below normal below
+    /// bridge, then link below its parent. The largest value is 25*6+2*2+1.
+    pub const fn paint_rank(self, link: bool, tunnel: bool, bridge: bool) -> u8 {
+        let elev = if tunnel {
+            0
+        } else if bridge {
+            2
+        } else {
+            1
+        };
+        (self as u8) * 6 + elev * 2 + if link { 0 } else { 1 }
+    }
+}
+
+/// The five road classes that have `_link` variants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum LinkClass {
+    Motorway,
+    Trunk,
+    Primary,
+    Secondary,
+    Tertiary,
+}
+
+impl LinkClass {
+    /// Every variant in declaration order; a test pins it to the discriminants.
+    pub const ALL: [LinkClass; 5] = [
+        LinkClass::Motorway,
+        LinkClass::Trunk,
+        LinkClass::Primary,
+        LinkClass::Secondary,
+        LinkClass::Tertiary,
+    ];
+
+    /// The parent class, which the streets layer emits as `kind`.
+    pub const fn class(self) -> StreetClass {
+        match self {
+            LinkClass::Motorway => StreetClass::Motorway,
+            LinkClass::Trunk => StreetClass::Trunk,
+            LinkClass::Primary => StreetClass::Primary,
+            LinkClass::Secondary => StreetClass::Secondary,
+            LinkClass::Tertiary => StreetClass::Tertiary,
+        }
+    }
+
+    /// The raw OSM value, which street_labels keeps as its `kind`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LinkClass::Motorway => "motorway_link",
+            LinkClass::Trunk => "trunk_link",
+            LinkClass::Primary => "primary_link",
+            LinkClass::Secondary => "secondary_link",
+            LinkClass::Tertiary => "tertiary_link",
+        }
+    }
+}
+
+/// A street line as matched: a class, or a link road of one of the five
+/// classes that have links. The streets layer splits a link into its parent
+/// class plus `link=true`; street_labels keeps the raw `_link` name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreetKind {
+    Road(StreetClass),
+    Link(LinkClass),
+}
+
+impl StreetKind {
+    pub const fn class(self) -> StreetClass {
+        match self {
+            StreetKind::Road(class) => class,
+            StreetKind::Link(link) => link.class(),
+        }
+    }
+
+    pub const fn is_link(self) -> bool {
+        matches!(self, StreetKind::Link(_))
+    }
+
+    /// The `kind` value street_labels emits.
+    pub const fn label_name(self) -> &'static str {
+        match self {
+            StreetKind::Road(class) => class.as_str(),
+            StreetKind::Link(link) => link.as_str(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Streets (line)
 // ---------------------------------------------------------------------------
 
-/// Returns (kind_raw, min_zoom, is_railway) for the first listed match.
-fn street_match(tags: &Tags<'_>) -> Option<(&'static str, u8, bool)> {
-    let (kind, mut zoom, rail) = transport::first_tag_match(
+/// Returns (kind, min_zoom) for the first listed match.
+fn street_match(tags: &Tags<'_>) -> Option<(StreetKind, u8)> {
+    use StreetClass as C;
+    use StreetKind::{Link, Road};
+    let (kind, mut zoom) = transport::first_tag_match(
         tags,
         &[
-            ("highway", "motorway", ("motorway", 5, false)),
-            ("highway", "trunk", ("trunk", 6, false)),
-            ("highway", "motorway_link", ("motorway_link", 9, false)),
-            ("highway", "trunk_link", ("trunk_link", 9, false)),
-            ("highway", "primary", ("primary", 8, false)),
-            ("highway", "primary_link", ("primary_link", 8, false)),
-            ("highway", "secondary", ("secondary", 9, false)),
-            ("highway", "secondary_link", ("secondary_link", 9, false)),
-            ("highway", "tertiary", ("tertiary", 10, false)),
-            ("highway", "tertiary_link", ("tertiary_link", 10, false)),
-            ("highway", "unclassified", ("unclassified", 12, false)),
-            ("highway", "residential", ("residential", 12, false)),
-            ("highway", "busway", ("busway", 12, false)),
-            ("highway", "bus_guideway", ("bus_guideway", 12, false)),
-            ("highway", "living_street", ("living_street", 13, false)),
-            ("highway", "service", ("service", 13, false)),
-            ("highway", "pedestrian", ("pedestrian", 13, false)),
-            ("highway", "track", ("track", 13, false)),
-            ("highway", "footway", ("footway", 13, false)),
-            ("highway", "steps", ("steps", 13, false)),
-            ("highway", "path", ("path", 13, false)),
-            ("highway", "cycleway", ("cycleway", 13, false)),
-            ("aeroway", "runway", ("runway", 11, false)),
-            ("aeroway", "taxiway", ("taxiway", 13, false)),
-            ("railway", "rail", ("rail", 10, true)),
-            ("railway", "narrow_gauge", ("narrow_gauge", 10, true)),
-            ("railway", "light_rail", ("light_rail", 10, true)),
-            ("railway", "subway", ("subway", 10, true)),
-            ("railway", "tram", ("tram", 10, true)),
-            ("railway", "funicular", ("funicular", 10, true)),
-            ("railway", "monorail", ("monorail", 10, true)),
+            ("highway", "motorway", (Road(C::Motorway), 5)),
+            ("highway", "trunk", (Road(C::Trunk), 6)),
+            ("highway", "motorway_link", (Link(LinkClass::Motorway), 9)),
+            ("highway", "trunk_link", (Link(LinkClass::Trunk), 9)),
+            ("highway", "primary", (Road(C::Primary), 8)),
+            ("highway", "primary_link", (Link(LinkClass::Primary), 8)),
+            ("highway", "secondary", (Road(C::Secondary), 9)),
+            ("highway", "secondary_link", (Link(LinkClass::Secondary), 9)),
+            ("highway", "tertiary", (Road(C::Tertiary), 10)),
+            ("highway", "tertiary_link", (Link(LinkClass::Tertiary), 10)),
+            ("highway", "unclassified", (Road(C::Unclassified), 12)),
+            ("highway", "residential", (Road(C::Residential), 12)),
+            ("highway", "busway", (Road(C::Busway), 12)),
+            ("highway", "bus_guideway", (Road(C::BusGuideway), 12)),
+            ("highway", "living_street", (Road(C::LivingStreet), 13)),
+            ("highway", "service", (Road(C::Service), 13)),
+            ("highway", "pedestrian", (Road(C::Pedestrian), 13)),
+            ("highway", "track", (Road(C::Track), 13)),
+            ("highway", "footway", (Road(C::Footway), 13)),
+            ("highway", "steps", (Road(C::Steps), 13)),
+            ("highway", "path", (Road(C::Path), 13)),
+            ("highway", "cycleway", (Road(C::Cycleway), 13)),
+            ("aeroway", "runway", (Road(C::Runway), 11)),
+            ("aeroway", "taxiway", (Road(C::Taxiway), 13)),
+            ("railway", "rail", (Road(C::Rail), 10)),
+            ("railway", "narrow_gauge", (Road(C::NarrowGauge), 10)),
+            ("railway", "light_rail", (Road(C::LightRail), 10)),
+            ("railway", "subway", (Road(C::Subway), 10)),
+            ("railway", "tram", (Road(C::Tram), 10)),
+            ("railway", "funicular", (Road(C::Funicular), 10)),
+            ("railway", "monorail", (Road(C::Monorail), 10)),
         ],
     )?;
     // The z8 service override applies to both rail kinds with a non-empty
     // service value. Empty and missing service follow the z10 rule.
-    if rail
-        && matches!(kind, "rail" | "narrow_gauge")
+    if matches!(kind, Road(C::Rail | C::NarrowGauge))
         && tags
             .get("service")
             .is_some_and(|service| !service.is_empty())
     {
         zoom = 8;
     }
-    Some((kind, zoom, rail))
+    Some((kind, zoom))
 }
 
 pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    let (kind_raw, min_zoom, is_rail) = match street_match(tags) {
+    let (street, min_zoom) = match street_match(tags) {
         Some(v) => v,
         None => return,
     };
-    let kind = street_kind(kind_raw);
-    let is_link = kind_raw.ends_with("_link");
+    let class = street.class();
+    let is_link = street.is_link();
+    let is_rail = class.is_rail();
     // kind: always emitted. Boolean attrs only when true (saves ~3-6 tags/feature).
-    let mut attrs = smallvec![attr_dyn("kind", kind)];
+    let mut attrs = smallvec![attr_str("kind", class.as_str())];
     if is_link {
         attrs.push(attr_bool_z("link", true, STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
     }
@@ -113,8 +325,7 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
     if let Some(v) = tags.get("horse") {
         attrs.push(attr_dyn_z("horse", v, 14));
     }
-    let paint_rank =
-        paint_order::street_paint_rank(kind, is_link, is_tunnel(tags), is_bridge(tags));
+    let paint_rank = class.paint_rank(is_link, is_tunnel(tags), is_bridge(tags));
     out.push(LayerMatch {
         layer: Layer::Streets,
         min_zoom,
@@ -130,8 +341,8 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
 // ---------------------------------------------------------------------------
 
 pub(super) fn match_street_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    if let Some((kind, min_zoom)) = street_polygon_match(tags) {
-        let mut attrs = smallvec![attr_str("kind", kind)];
+    if let Some((class, min_zoom)) = street_polygon_match(tags) {
+        let mut attrs = smallvec![attr_str("kind", class.as_str())];
         if is_bridge(tags) {
             attrs.push(attr_bool("bridge", true));
         }
@@ -144,8 +355,7 @@ pub(super) fn match_street_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
         if let Some(v) = tags.get("surface") {
             attrs.push(attr_dyn("surface", v));
         }
-        let paint_rank =
-            paint_order::street_paint_rank(kind, false, is_tunnel(tags), is_bridge(tags));
+        let paint_rank = class.paint_rank(false, is_tunnel(tags), is_bridge(tags));
         out.push(LayerMatch {
             layer: Layer::StreetPolygons,
             min_zoom,
@@ -157,14 +367,14 @@ pub(super) fn match_street_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
     }
 }
 
-fn street_polygon_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
+fn street_polygon_match(tags: &Tags<'_>) -> Option<(StreetClass, u8)> {
     transport::first_tag_match(
         tags,
         &[
-            ("area:aeroway", "runway", ("runway", 11)),
-            ("area:aeroway", "taxiway", ("taxiway", 13)),
-            ("highway", "pedestrian", ("pedestrian", 14)),
-            ("highway", "service", ("service", 14)),
+            ("area:aeroway", "runway", (StreetClass::Runway, 11)),
+            ("area:aeroway", "taxiway", (StreetClass::Taxiway, 13)),
+            ("highway", "pedestrian", (StreetClass::Pedestrian, 14)),
+            ("highway", "service", (StreetClass::Service, 14)),
         ],
     )
 }
@@ -182,7 +392,7 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
         Some(class) => class,
         None => return,
     };
-    let mut attrs = smallvec![attr_dyn("kind", kind)];
+    let mut attrs = smallvec![attr_str("kind", kind.label_name())];
     attrs.extend(name_attrs(tags));
     // ref: semicolons → newlines
     if let Some(r) = tags.get("ref") {
@@ -213,41 +423,47 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
     });
 }
 
-fn street_label_kind_and_zoom(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
+fn street_label_kind_and_zoom(tags: &Tags<'_>) -> Option<(StreetKind, u8)> {
+    use StreetClass as C;
+    use StreetKind::{Link, Road};
     transport::first_tag_match(
         tags,
         &[
-            ("highway", "motorway", ("motorway", 10)),
-            ("highway", "trunk", ("trunk", 12)),
-            ("highway", "primary", ("primary", 12)),
-            ("highway", "secondary", ("secondary", 13)),
-            ("highway", "tertiary", ("tertiary", 13)),
-            ("highway", "motorway_link", ("motorway_link", 13)),
-            ("highway", "trunk_link", ("trunk_link", 13)),
-            ("highway", "primary_link", ("primary_link", 13)),
-            ("highway", "secondary_link", ("secondary_link", 13)),
-            ("highway", "tertiary_link", ("tertiary_link", 14)),
-            ("highway", "unclassified", ("unclassified", 14)),
-            ("highway", "residential", ("residential", 14)),
-            ("highway", "busway", ("busway", 14)),
-            ("highway", "bus_guideway", ("bus_guideway", 14)),
-            ("highway", "living_street", ("living_street", 14)),
-            ("highway", "service", ("service", 14)),
-            ("highway", "pedestrian", ("pedestrian", 14)),
-            ("highway", "track", ("track", 14)),
-            ("highway", "footway", ("footway", 14)),
-            ("highway", "steps", ("steps", 14)),
-            ("highway", "path", ("path", 14)),
-            ("highway", "cycleway", ("cycleway", 14)),
-            ("aeroway", "runway", ("runway", 11)),
-            ("aeroway", "taxiway", ("taxiway", 13)),
-            ("railway", "rail", ("rail", 10)),
-            ("railway", "narrow_gauge", ("narrow_gauge", 10)),
-            ("railway", "light_rail", ("light_rail", 10)),
-            ("railway", "subway", ("subway", 10)),
-            ("railway", "tram", ("tram", 10)),
-            ("railway", "funicular", ("funicular", 10)),
-            ("railway", "monorail", ("monorail", 10)),
+            ("highway", "motorway", (Road(C::Motorway), 10)),
+            ("highway", "trunk", (Road(C::Trunk), 12)),
+            ("highway", "primary", (Road(C::Primary), 12)),
+            ("highway", "secondary", (Road(C::Secondary), 13)),
+            ("highway", "tertiary", (Road(C::Tertiary), 13)),
+            ("highway", "motorway_link", (Link(LinkClass::Motorway), 13)),
+            ("highway", "trunk_link", (Link(LinkClass::Trunk), 13)),
+            ("highway", "primary_link", (Link(LinkClass::Primary), 13)),
+            (
+                "highway",
+                "secondary_link",
+                (Link(LinkClass::Secondary), 13),
+            ),
+            ("highway", "tertiary_link", (Link(LinkClass::Tertiary), 14)),
+            ("highway", "unclassified", (Road(C::Unclassified), 14)),
+            ("highway", "residential", (Road(C::Residential), 14)),
+            ("highway", "busway", (Road(C::Busway), 14)),
+            ("highway", "bus_guideway", (Road(C::BusGuideway), 14)),
+            ("highway", "living_street", (Road(C::LivingStreet), 14)),
+            ("highway", "service", (Road(C::Service), 14)),
+            ("highway", "pedestrian", (Road(C::Pedestrian), 14)),
+            ("highway", "track", (Road(C::Track), 14)),
+            ("highway", "footway", (Road(C::Footway), 14)),
+            ("highway", "steps", (Road(C::Steps), 14)),
+            ("highway", "path", (Road(C::Path), 14)),
+            ("highway", "cycleway", (Road(C::Cycleway), 14)),
+            ("aeroway", "runway", (Road(C::Runway), 11)),
+            ("aeroway", "taxiway", (Road(C::Taxiway), 13)),
+            ("railway", "rail", (Road(C::Rail), 10)),
+            ("railway", "narrow_gauge", (Road(C::NarrowGauge), 10)),
+            ("railway", "light_rail", (Road(C::LightRail), 10)),
+            ("railway", "subway", (Road(C::Subway), 10)),
+            ("railway", "tram", (Road(C::Tram), 10)),
+            ("railway", "funicular", (Road(C::Funicular), 10)),
+            ("railway", "monorail", (Road(C::Monorail), 10)),
         ],
     )
 }
@@ -323,5 +539,74 @@ pub(super) fn match_bridges(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
             paint_rank: 0,
             attrs: smallvec![attr_str("kind", "bridge")],
         });
+    }
+}
+
+#[cfg(test)]
+mod street_kind_tests {
+    use super::{LinkClass, StreetClass};
+
+    #[test]
+    fn all_is_every_variant_in_order() {
+        assert_eq!(StreetClass::ALL.len(), StreetClass::Rail as usize + 1);
+        for (i, class) in StreetClass::ALL.into_iter().enumerate() {
+            assert_eq!(class as usize, i);
+            assert_eq!(StreetClass::from_name(class.as_str()), Some(class));
+        }
+        assert_eq!(LinkClass::ALL.len(), LinkClass::Tertiary as usize + 1);
+        for (i, link) in LinkClass::ALL.into_iter().enumerate() {
+            assert_eq!(link as usize, i);
+            assert_eq!(link.as_str(), format!("{}_link", link.class().as_str()));
+        }
+    }
+
+    /// Independent of the rank method: (name, class rank, is_rail).
+    #[test]
+    fn class_ranks_match_independent_fixture() {
+        let fixture = [
+            ("track", 0, false),
+            ("footway", 1, false),
+            ("steps", 2, false),
+            ("path", 3, false),
+            ("cycleway", 4, false),
+            ("pedestrian", 5, false),
+            ("living_street", 6, false),
+            ("service", 7, false),
+            ("busway", 8, false),
+            ("bus_guideway", 9, false),
+            ("taxiway", 10, false),
+            ("runway", 11, false),
+            ("unclassified", 12, false),
+            ("residential", 13, false),
+            ("tertiary", 14, false),
+            ("secondary", 15, false),
+            ("primary", 16, false),
+            ("trunk", 17, false),
+            ("motorway", 18, false),
+            ("funicular", 19, true),
+            ("monorail", 20, true),
+            ("tram", 21, true),
+            ("light_rail", 22, true),
+            ("subway", 23, true),
+            ("narrow_gauge", 24, true),
+            ("rail", 25, true),
+        ];
+        assert_eq!(fixture.len(), StreetClass::ALL.len());
+        for (name, rank, rail) in fixture {
+            let class = StreetClass::from_name(name).expect("fixture class is a StreetClass");
+            assert_eq!(class.paint_rank(true, true, false), rank * 6, "{name}");
+            assert_eq!(class.is_rail(), rail, "{name}");
+        }
+    }
+
+    #[test]
+    fn link_below_parent_and_bridge_above_tunnel() {
+        let m = StreetClass::Motorway;
+        assert!(m.paint_rank(true, false, false) < m.paint_rank(false, false, false));
+        assert!(m.paint_rank(false, true, false) < m.paint_rank(false, false, true));
+        assert_eq!(
+            StreetClass::Rail.paint_rank(false, false, true),
+            25 * 6 + 2 * 2 + 1
+        );
     }
 }

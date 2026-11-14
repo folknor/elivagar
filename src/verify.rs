@@ -13,7 +13,7 @@ use crate::archive::Archive;
 use crate::mvt::decode::{
     self, Command, CommandKind, CommandSink, GeometryError, Grammar, Point, Words,
 };
-use crate::shortbread::{Layer, paint_order};
+use crate::shortbread::{Layer, RankAttributes, RankError};
 use crate::tiling::{ARCHIVE_MAX_ZOOM, TileId};
 
 /// One slot per archive zoom.
@@ -782,9 +782,9 @@ fn validate_paint_order<'a>(
     keys: &[&'a str],
     values: &[&'a [u8]],
 ) -> Result<(), String> {
-    if !paint_order::has_paint_order(layer) {
+    let Some(layer) = Layer::from_name(layer).filter(|l| l.has_paint_order()) else {
         return Ok(());
-    }
+    };
     let mut previous = None;
     for (feature_idx, feature) in features.iter().enumerate() {
         let attrs = decode_feature_attrs(feature, keys, values)
@@ -792,21 +792,18 @@ fn validate_paint_order<'a>(
         let kind = attrs
             .kind
             .ok_or_else(|| format!("feat {feature_idx}: missing kind attribute"))?;
-        let rank = match paint_order::rank_for(
-            layer,
-            &paint_order::RankAttributes {
-                kind,
-                link: attrs.link,
-                tunnel: attrs.tunnel,
-                bridge: attrs.bridge,
-            },
-        ) {
+        let rank = match layer.paint_rank_for(&RankAttributes {
+            kind,
+            link: attrs.link,
+            tunnel: attrs.tunnel,
+            bridge: attrs.bridge,
+        }) {
             Ok(Some(rank)) => rank,
-            Ok(None) => unreachable!("paint order policy changed during validation"),
-            Err(paint_order::RankError::UnknownLandKind) => {
+            Ok(None) => unreachable!("layer was filtered to ordered layers"),
+            Err(RankError::UnknownLandKind) => {
                 return Err(format!("feat {feature_idx}: unknown land kind {kind:?}"));
             }
-            Err(paint_order::RankError::UnknownStreetKind) => {
+            Err(RankError::UnknownStreetKind) => {
                 return Err(format!("feat {feature_idx}: unknown street kind {kind:?}"));
             }
         };
@@ -814,9 +811,7 @@ fn validate_paint_order<'a>(
             && rank < previous
         {
             return Err(format!(
-                "feat {feature_idx}: paint rank {} follows {}",
-                rank.value(),
-                previous.value()
+                "feat {feature_idx}: paint rank {rank} follows {previous}"
             ));
         }
         previous = Some(rank);

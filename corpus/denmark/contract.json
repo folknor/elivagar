@@ -3,13 +3,13 @@
     "cargo_features": [
       "default"
     ],
-    "cargo_lock_xxh3_128": "16969527e41a95e1772fe2f1e2261b72",
+    "cargo_lock_xxh3_128": "0fed0b9a071dfbd1453d41f8c837d4dd",
     "elivagar": {
-      "commit": "3df316aa2de061ea52e19afa1a4769976d3fb016",
-      "dirty": false
+      "commit": "8747b96d732657f88580c9f3b57cd8b62925e90f",
+      "dirty": true
     },
     "pbfhogg_reader": {
-      "version": "0.5.0"
+      "version": "0.6.0"
     }
   },
   "config": {
@@ -55,6 +55,6 @@
   "schema": 1,
   "style": {
     "path": "style.toml",
-    "xxh3_128": "ba8b46f98c9c5ba55e9cee0be9bd2f02"
+    "xxh3_128": "92dc21e7783cda76886cf0a3e5639a60"
   }
 }

@@ -221,8 +221,9 @@ changed files.
 `corpus/style.toml` is the committed 26-layer style (layer +
 attribute-value match, OSM-Carto-inspired colors); its hash is part of
 the corpus contract. Layer order is paint order, bottom first, with
-land below water_polygons so lakes are never occluded, and every kind
-`is_known_land_kind()` accepts has an explicit fill so no land feature
+land below water_polygons so lakes are never occluded, and every
+`LandKind` has an explicit fill (an elivagar unit test fails otherwise) so
+no land feature
 can render background-colored and read as missing (both fixed after the
 2026-07-19 eyeball pass caught land painting over lakes and
 near-invisible streets). Unstyled layers render magenta so schema drift

@@ -53,7 +53,7 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         polygon_simplify_factor: 1.0,
     };
     serde_json::json!({
-        "version": 11,
+        "version": 12,
         "bounds": [0.0, 0.0, 1.0, 1.0],
         "chunks": 1,
         "input_xxh3_128": pbf_hash,
@@ -70,7 +70,7 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
 /// A completion record saying the ocean phase finished with `chunks` chunks
 /// and no ocean, matching a run that names no `--ocean`.
 fn completion_json(chunks: usize) -> String {
-    serde_json::json!({"version": 11, "chunks": chunks, "ocean": {"mode": "none"}}).to_string()
+    serde_json::json!({"version": 12, "chunks": chunks, "ocean": {"mode": "none"}}).to_string()
 }
 
 fn write_tiny_pbf(path: &Path) {

@@ -33,6 +33,11 @@ use crate::sort::ChunkCompression;
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
 const COMPLETION_FILE: &str = "chunks_complete.json";
 
+/// v12 changes no field: the sort-record kind dictionary gained `cliff` and
+/// `sports_center`, so those kinds now encode as interned ids instead of
+/// inline strings. Old chunks would still decode, but their payload bytes
+/// differ, and equal sort keys tie-break on payload bytes.
+///
 /// v11 splits the record by producer: the PBF checkpoint carries no ocean
 /// identity, and the ocean chunks' identity moved to the completion record
 /// written after the ocean phase, which replaced the bare `sort_chunks.count`.
@@ -63,7 +68,7 @@ const COMPLETION_FILE: &str = "chunks_complete.json";
 ///
 /// The version moves whenever chunks built under unchanged recorded identity
 /// would differ. It is shared by both records.
-pub(super) const CHECKPOINT_VERSION: u32 = 11;
+pub(super) const CHECKPOINT_VERSION: u32 = 12;
 
 /// What produced the PBF chunks, and what phase12 derived from the input.
 ///

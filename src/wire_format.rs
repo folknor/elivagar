@@ -93,6 +93,13 @@ fn key_to_id(key: &str) -> u8 {
 /// Static value ID table for "kind" attribute values from the Shortbread schema.
 /// Index = value_id (u8). Unknown values fall back to raw string encoding (type 0).
 /// New values MUST be appended (never reorder).
+///
+/// This is a compression dictionary, not the schema: the vocabularies live
+/// with their matchers (`LandKind`, `StreetClass`, `LinkClass`), which tests
+/// check are covered here, and a miss costs bytes, never correctness. A
+/// change to the table changes sort-record bytes, which tie-break equal sort
+/// keys, so it moves `CHECKPOINT_VERSION`. `sports_centre` (57) is the OSM
+/// spelling and is never emitted; sites emits `sports_center`.
 const KIND_VALUES: &[&str] = &[
     // Water (14)
     "water",      // 0
@@ -228,7 +235,11 @@ const KIND_VALUES: &[&str] = &[
     "farm",              // 126
     "island",            // 127
     "locality",          // 128
+    // Appended: kinds the land and sites matchers emit that the table missed.
+    "cliff",         // 129
+    "sports_center", // 130
 ];
+const _: () = assert!(KIND_VALUES.len() <= 256, "kind value ids are u8");
 
 #[allow(clippy::cast_possible_truncation)]
 fn kind_value_to_id(s: &str) -> Option<u8> {
@@ -508,6 +519,29 @@ mod tests {
     use crate::shortbread::AttrValue;
     use std::borrow::Cow;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn kind_values_are_unique() {
+        for (i, a) in KIND_VALUES.iter().enumerate() {
+            assert!(
+                !KIND_VALUES[i + 1..].contains(a),
+                "kind value {a:?} appears twice"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_kind_vocabularies_are_interned() {
+        use crate::shortbread::{LandKind, LinkClass, StreetClass};
+        let names = LandKind::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .chain(StreetClass::ALL.iter().map(|c| c.as_str()))
+            .chain(LinkClass::ALL.iter().map(|l| l.as_str()));
+        for name in names {
+            assert!(kind_value_to_id(name).is_some(), "{name:?} is not interned");
+        }
+    }
 
     fn feature_tag_map(layer: &LayerBuilder, feature_idx: usize) -> BTreeMap<String, Value> {
         let mut out = BTreeMap::new();

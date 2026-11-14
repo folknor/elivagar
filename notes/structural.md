@@ -487,15 +487,6 @@ dispatch SmallVec.
 
 Reported by the Shortbread and layer-identity hunts.
 
-## STR-023 - Move `pois.rs` into `shortbread/` and dissolve `paint_order.rs`
-
-`pois.rs` now lives in `shortbread/` and place labels have their own module.
-Remaining: `paint_order.rs` is a cross-cutting table keyed by strings; with
-kind enums it dissolves into `LandKind::rank` / `StreetKind::rank` beside
-their kinds, and verify imports the enums.
-
-Reported by the Shortbread and layer-identity hunts.
-
 ---
 
 # Encoding and the sort record
