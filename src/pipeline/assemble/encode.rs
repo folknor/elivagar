@@ -18,17 +18,6 @@ use super::{EncodedTile, LAYER_COUNT, PendingTile};
 /// Brotli's I/O buffer size, independent of the tile coordinate grid.
 const BROTLI_BUFFER_BYTES: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UnknownSortLayerId(u8);
-
-fn sort_layer_error(tile: &PendingTile, error: UnknownSortLayerId) -> PipelineError {
-    let (z, x, y) = tile.tile_id.coord();
-    PipelineError(format!(
-        "corrupt or foreign sort record has unknown layer id {} in tile {z}/{x}/{y}",
-        error.0
-    ))
-}
-
 /// Assembly state for exactly one tile, built per tile and dropped with it.
 ///
 /// NOT pooled per thread, deliberately. The pooled version grew every buffer
@@ -151,7 +140,7 @@ fn encode_tile_mvt(
     let s = &mut scratch;
 
     let z = tile.tile_id.zoom();
-    prepare_tile_layers(s, tile).map_err(|error| sort_layer_error(tile, error))?;
+    prepare_tile_layers(s, tile);
     // Borrow only the layer field so encoding can use its own buffers.
     let non_empty = non_empty_layers_in_tile_order(&s.layers);
     if non_empty.is_empty() {
@@ -209,15 +198,8 @@ fn encode_tile_mvt(
 
 /// Both encoders consume this stage so format selection cannot change the
 /// geometry merge policy.
-fn prepare_tile_layers(
-    s: &mut AssemblyScratch,
-    tile: &PendingTile,
-) -> Result<(), UnknownSortLayerId> {
-    for &(layer_idx, ref data) in &tile.features {
-        let layer = Layer::ALL
-            .get(usize::from(layer_idx))
-            .copied()
-            .ok_or(UnknownSortLayerId(layer_idx))?;
+fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) {
+    for &(layer, ref data) in &tile.features {
         add_feature_to_layer(
             get_or_create_layer(&mut s.layers, usize::from(layer as u8)),
             data,
@@ -247,25 +229,16 @@ fn prepare_tile_layers(
             lb.merge_connected_lines(&mut s.line_merge_scratch);
         }
     }
-    Ok(())
 }
 
 /// Build non-empty per-layer builders for the MLT encoder and model tests.
-#[cfg(test)]
+#[cfg(any(feature = "mlt", test))]
 pub(in crate::pipeline) fn prepare_non_empty_layers<'a>(
     s: &'a mut AssemblyScratch,
     tile: &PendingTile,
 ) -> Vec<&'a LayerBuilder> {
-    prepare_non_empty_layers_checked(s, tile).expect("tile contains an unknown sort layer id")
-}
-
-#[cfg(any(feature = "mlt", test))]
-fn prepare_non_empty_layers_checked<'a>(
-    s: &'a mut AssemblyScratch,
-    tile: &PendingTile,
-) -> Result<Vec<&'a LayerBuilder>, UnknownSortLayerId> {
-    prepare_tile_layers(s, tile)?;
-    Ok(non_empty_layers_in_tile_order(&s.layers))
+    prepare_tile_layers(s, tile);
+    non_empty_layers_in_tile_order(&s.layers)
 }
 
 fn non_empty_layers_in_tile_order(layers: &[Option<LayerBuilder>]) -> Vec<&LayerBuilder> {
@@ -289,8 +262,7 @@ fn encode_tile_batch_mlt(batch: &[PendingTile]) -> Result<Vec<EncodedTile>, Pipe
         .par_iter()
         .map(|tile| {
             let mut scratch = AssemblyScratch::new();
-            let non_empty = prepare_non_empty_layers_checked(&mut scratch, tile)
-                .map_err(|error| sort_layer_error(tile, error))?;
+            let non_empty = prepare_non_empty_layers(&mut scratch, tile);
             if non_empty.is_empty() {
                 return Ok(None);
             }
@@ -339,7 +311,7 @@ mod tests {
                 let mut geometry = Vec::new();
                 mvt::encode_linestring(&mut geometry, &coords);
                 tile.features.push((
-                    Layer::Boundaries as u8,
+                    Layer::Boundaries,
                     crate::wire_format::encode_feature_data_with_attrs(
                         1,
                         mvt::GeomType::LineString,
@@ -355,7 +327,7 @@ mod tests {
             );
             for _ in 0..2 {
                 tile.features.push((
-                    Layer::Ocean as u8,
+                    Layer::Ocean,
                     crate::wire_format::encode_feature_data_with_attrs(
                         2,
                         mvt::GeomType::Polygon,

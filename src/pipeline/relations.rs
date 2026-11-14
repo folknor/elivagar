@@ -295,12 +295,12 @@ pub(super) fn process_relation_blocks(
             a.count += b.count;
             let base = a.sink.payload.len();
             a.sink.payload.append(&mut b.sink.payload);
-            a.sink.records.extend(
-                b.sink
-                    .records
-                    .drain(..)
-                    .map(|(key, off, len)| (key, off + base, len)),
-            );
+            a.sink
+                .records
+                .extend(b.sink.records.drain(..).map(|r| sort::PayloadRef {
+                    offset: r.offset + base,
+                    ..r
+                }));
             a.sink.tally.merge(&b.sink.tally);
             a.bytes += b.bytes;
             a.fanout.merge(&b.fanout);
@@ -324,11 +324,11 @@ pub(super) fn process_relation_blocks(
     {
         count += result.sink.records.len() as u64;
     }
-    for (key, off, len) in result.sink.records {
+    for record in result.sink.records {
         sort_writer
             .push_untracked(sort::SortRecord {
-                key,
-                data: result.sink.payload[off..off + len].into(),
+                key: record.key,
+                data: record.bytes(&result.sink.payload).into(),
             })
             .expect("sort push failed");
     }

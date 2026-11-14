@@ -1,5 +1,7 @@
 use super::*;
+use crate::shortbread::Layer;
 use crate::tiling::{MAX_ZOOM, PROFILE_ID_END, TileId, ZOOM_COUNT, zoom_ids};
+use std::fmt;
 
 /// Zoom level used to split each zoom block into ordered Hilbert ranges.
 ///
@@ -38,44 +40,108 @@ pub const SORT_PARTITIONS: usize = PARTITION_BASES[ZOOM_COUNT];
 // Sort key helpers
 // ---------------------------------------------------------------------------
 
-/// Sort key: u64 encoding `(tile_id << 16) | (layer << 8) | priority`.
-pub type SortKey = u64;
-
-/// Build a sort key from tile id, layer index, and priority.
+/// Sort key: a u64 packing `(tile_id << 16) | (layer << 8) | paint_rank`.
 ///
-/// Packs tile_id into bits 63-16, a 48-bit field that would drop bits above
-/// z23, so the tile must lie in the profile domain (`z <= MAX_ZOOM`). That is
-/// checked here, at the one place keys are minted, rather than trusted from
-/// the zoom validation in `run`: a key that lost bits would decode to a
-/// different, valid-looking tile and be misfiled silently.
-#[inline]
-pub fn make_sort_key(tile_id: TileId, layer: u8, priority: u8) -> SortKey {
-    assert!(
-        tile_id.is_profile(),
-        "sort key minted for tile {tile_id} beyond z{MAX_ZOOM}"
-    );
-    (tile_id.raw() << 16) | (u64::from(layer) << 8) | u64::from(priority)
+/// Packed rather than a `{ tile, layer, rank }` struct so the dominant chunk
+/// sort stays an integer sort on `raw()` and `SortRecord` stays 24 bytes;
+/// numeric order of the packed value is the record order. The layer is a
+/// [`Layer`] at mint, so the two adjacent bytes cannot be swapped. The rank
+/// stays a plain `u8`: the kind methods that produce it are its only source.
+///
+/// Keys read back from chunk files come through [`SortKey::from_raw`] and are
+/// not validated there, so the decoders that can meet a malformed key
+/// ([`SortKey::layer`], [`SortKey::partition`]) refuse rather than trust it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct SortKey(u64);
+
+impl SortKey {
+    /// Above every minted key: the open end of the last partition.
+    pub const MAX: Self = Self(u64::MAX);
+
+    /// Mint a key for a feature of `layer` on `tile`.
+    ///
+    /// Packs the tile id into bits 63-16, a 48-bit field that would drop bits
+    /// above z23, so the tile must lie in the profile domain
+    /// (`z <= MAX_ZOOM`). That is checked here, at the one place keys are
+    /// minted, rather than trusted from the zoom validation in `run`: a key
+    /// that lost bits would decode to a different, valid-looking tile and be
+    /// misfiled silently.
+    #[inline]
+    pub fn new(tile: TileId, layer: Layer, rank: u8) -> Self {
+        assert!(
+            tile.is_profile(),
+            "sort key minted for tile {tile} beyond z{MAX_ZOOM}"
+        );
+        Self((tile.raw() << 16) | (u64::from(layer as u8) << 8) | u64::from(rank))
+    }
+
+    /// A key as stored on the chunk wire. Unchecked; see the type docs.
+    #[inline]
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    #[inline]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    pub fn tile(self) -> TileId {
+        // 48 bits always fit below the archive id ceiling.
+        TileId::new(self.0 >> 16).expect("a 48-bit tile id is addressable")
+    }
+
+    /// The layer byte as stored, for diagnostics on a key [`Self::layer`]
+    /// refuses.
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    pub const fn layer_byte(self) -> u8 {
+        ((self.0 >> 8) & 0xFF) as u8
+    }
+
+    /// The layer, or `None` for a layer byte no [`Layer`] has.
+    #[inline]
+    pub fn layer(self) -> Option<Layer> {
+        Layer::ALL.get(usize::from(self.layer_byte())).copied()
+    }
+
+    /// The paint rank within the tile and layer.
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    pub const fn rank(self) -> u8 {
+        (self.0 & 0xFF) as u8
+    }
+
+    /// The sort partition holding this key.
+    ///
+    /// Partitions cover the profile domain only. A key beyond it cannot have
+    /// been minted by [`SortKey::new`], so it is refused loudly rather than
+    /// clamped into the last partition.
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn partition(self) -> usize {
+        let tile = self.tile();
+        assert!(
+            tile.is_profile(),
+            "sort key for tile {tile} lies beyond z{MAX_ZOOM}"
+        );
+        let zoom = tile.zoom();
+        let local_id = tile.raw() - zoom_ids(zoom).0;
+        let split_z = zoom.min(PARTITION_SPLIT_Z);
+        let shift = 2 * u32::from(zoom - split_z);
+        let prefix = (local_id >> shift) as usize;
+        let partition = PARTITION_BASES[zoom as usize] + prefix;
+        debug_assert!(partition < SORT_PARTITIONS);
+        partition
+    }
 }
 
-/// Extract tile_id from a sort key.
-#[inline]
-pub fn tile_id_from_key(key: SortKey) -> TileId {
-    // 48 bits always fit below the archive id ceiling.
-    TileId::new(key >> 16).expect("a 48-bit tile id is addressable")
-}
-
-/// Extract the layer index from a sort key.
-#[inline]
-#[allow(clippy::cast_possible_truncation)]
-pub fn layer_from_key(key: SortKey) -> u8 {
-    ((key >> 8) & 0xFF) as u8
-}
-
-/// Extract the paint-order priority from a sort key.
-#[inline]
-#[allow(clippy::cast_possible_truncation)]
-pub fn priority_from_key(key: SortKey) -> u8 {
-    (key & 0xFF) as u8
+impl fmt::Display for SortKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 /// Total order on sort records. Payload bytes are a pure function of a
@@ -120,7 +186,7 @@ fn for_each_equal_key_run<T>(
 /// the denmark bench because payload access costs applied to every comparison,
 /// ties or not.
 pub(super) fn sort_records_total(records: &mut [SortRecord]) {
-    records.sort_unstable_by_key(|r| r.key);
+    records.sort_unstable_by_key(|r| r.key.raw());
     for_each_equal_key_run(
         records,
         |r| r.key,
@@ -147,21 +213,18 @@ fn payload_prefix8(bytes: &[u8]) -> u64 {
 /// the full slice compare runs only on true prefix collisions. Measured on
 /// the denmark locations bench: direct within-run slice comparison cost
 /// ~0.7s of wall; the by-key pass alone is baseline-neutral.
-pub(super) fn sort_payload_records_total(records: &mut [PayloadRecord], payload: &[u8]) {
-    records.sort_unstable_by_key(|r| r.0);
-    let mut scratch: Vec<(u64, PayloadRecord)> = Vec::new();
+pub(super) fn sort_payload_records_total(records: &mut [PayloadRef], payload: &[u8]) {
+    records.sort_unstable_by_key(|r| r.key.raw());
+    let mut scratch: Vec<(u64, PayloadRef)> = Vec::new();
     for_each_equal_key_run(
         records,
-        |r| r.0,
+        |r| r.key,
         |run| {
             scratch.clear();
-            scratch.extend(
-                run.iter()
-                    .map(|&r| (payload_prefix8(&payload[r.1..r.1 + r.2]), r)),
-            );
+            scratch.extend(run.iter().map(|&r| (payload_prefix8(r.bytes(payload)), r)));
             scratch.sort_unstable_by(|a, b| {
                 a.0.cmp(&b.0)
-                    .then_with(|| payload[a.1.1..a.1.1 + a.1.2].cmp(&payload[b.1.1..b.1.1 + b.1.2]))
+                    .then_with(|| a.1.bytes(payload).cmp(b.1.bytes(payload)))
             });
             for (dst, &(_, r)) in run.iter_mut().zip(scratch.iter()) {
                 *dst = r;
@@ -170,32 +233,18 @@ pub(super) fn sort_payload_records_total(records: &mut [PayloadRecord], payload:
     );
 }
 
-/// Return the tile-id range partition for a sort key.
+/// The first tile of a partition.
 ///
-/// Partitions cover the profile domain only. A key beyond it cannot have been
-/// minted by `make_sort_key`, so it is refused loudly rather than clamped into
-/// the last partition.
-#[inline]
-#[allow(clippy::cast_possible_truncation)]
-pub fn partition_from_key(key: SortKey) -> usize {
-    let tile = tile_id_from_key(key);
+/// Partitions stay bare `usize`: they are dense indexes into per-partition
+/// vectors, and the confusion a newtype would guard against (a partition
+/// passed where a tile goes) is already a type error because tiles are
+/// [`TileId`]s and keys are [`SortKey`]s. A `u16` would not hold them anyway:
+/// there are 136,533.
+pub fn partition_start_tile_id(partition: usize) -> TileId {
     assert!(
-        tile.is_profile(),
-        "sort key for tile {tile} lies beyond z{MAX_ZOOM}"
+        partition < SORT_PARTITIONS,
+        "partition {partition} out of range"
     );
-    let zoom = tile.zoom();
-    let tile_id = tile.raw();
-    let local_id = tile_id - zoom_ids(zoom).0;
-    let split_z = zoom.min(PARTITION_SPLIT_Z);
-    let shift = 2 * u32::from(zoom - split_z);
-    let prefix = (local_id >> shift) as usize;
-    let partition = PARTITION_BASES[zoom as usize] + prefix;
-    debug_assert!(partition < SORT_PARTITIONS);
-    partition
-}
-
-pub fn partition_start_tile_id(partition: usize) -> u64 {
-    debug_assert!(partition < SORT_PARTITIONS);
     let mut zoom = MAX_ZOOM as usize;
     while partition < PARTITION_BASES[zoom] {
         zoom -= 1;
@@ -204,30 +253,32 @@ pub fn partition_start_tile_id(partition: usize) -> u64 {
     let prefix = partition - PARTITION_BASES[zoom];
     #[allow(clippy::cast_possible_truncation)]
     let first = zoom_ids(zoom as u8).0;
-    first + ((prefix as u64) << (2 * (zoom - split_z)))
+    TileId::new(first + ((prefix as u64) << (2 * (zoom - split_z))))
+        .expect("a partition start is a profile tile")
 }
 
-/// Tile-id interval covered by one partition. This is public because an
-/// external PMTiles run may cross a sort-partition boundary even when that
-/// partition has no OSM records.
+/// Tile-id interval `[start, end)` covered by one partition, as raw ids: the
+/// end of the last partition is the first z15 id, a boundary rather than an
+/// address of this domain. This is public because an external PMTiles run
+/// may cross a sort-partition boundary even when that partition has no OSM
+/// records.
 pub fn partition_tile_range(partition: usize) -> (u64, u64) {
-    let start = partition_start_tile_id(partition);
+    let start = partition_start_tile_id(partition).raw();
     let end = if partition + 1 >= SORT_PARTITIONS {
         PROFILE_ID_END
     } else {
-        partition_start_tile_id(partition + 1)
+        partition_start_tile_id(partition + 1).raw()
     };
     (start, end)
 }
 
+/// The smallest key past `partition`. Built from the raw packing rather than
+/// [`SortKey::new`] because it needs layer and rank zero, the bottom of the
+/// next tile, which `new` would spell with whatever `Layer` has id 0.
 pub(super) fn partition_next_key(partition: usize) -> SortKey {
     if partition + 1 >= SORT_PARTITIONS {
         SortKey::MAX
     } else {
-        make_sort_key(
-            TileId::new(partition_start_tile_id(partition + 1)).expect("partition start is a tile"),
-            0,
-            0,
-        )
+        SortKey::from_raw(partition_start_tile_id(partition + 1).raw() << 16)
     }
 }

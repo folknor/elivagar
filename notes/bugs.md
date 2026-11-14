@@ -25,10 +25,11 @@ find phantoms.
 ## BUG-065 - Sort records read back from chunk files are not checked against their partition
 
 `sort/format.rs` `read_record` and `next_header_discard_payload` return the
-raw key, and the merge reader never re-derives its partition. Keys are
-checked where they are minted (`make_sort_key` refuses tiles beyond z14) and
-in `partition_from_key`, but a corrupted or foreign chunk record reaches
-assembly unchecked. A key for a z15 tile then indexes slot 15 of the
+raw key (`SortKey::from_raw`), and the merge reader never re-derives its
+partition. Keys are checked where they are minted (`SortKey::new` refuses
+tiles beyond z14) and in `SortKey::partition`; on read-back only the layer
+byte is checked, when assembly groups the record into a tile. The tile part
+of a corrupted or foreign chunk record reaches assembly unchecked. A key for a z15 tile then indexes slot 15 of the
 `[u64; ZOOM_COUNT]` per-zoom counters in `assemble::report::WriteTally` and
 panics; a valid z14 key from another partition is written out of order and
 caught only by the writer's ordering check. The piece pre-scan checks the

@@ -269,12 +269,12 @@ pub fn write_sorted_chunk(
 
 /// Write arena-backed records as a sorted chunk file in the standard format.
 ///
-/// `records` entries are `(key, offset, len)` into `payload`. Only this in-memory
+/// `records` entries point into `payload`. Only this in-memory
 /// staging differs from `write_sorted_chunk`; the bytes on disk are identical.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_truncation)]
 pub fn write_sorted_payload_chunk(
-    records: &mut [PayloadRecord],
+    records: &mut [PayloadRef],
     payload: &[u8],
     path: &Path,
     compression: ChunkCompression,
@@ -289,7 +289,7 @@ pub fn write_sorted_payload_chunk(
 /// are suitable for `SortWriter::adopt_chunk_files` on that store.
 #[hotpath::measure]
 pub fn write_partitioned_payload_chunks(
-    records: &mut [PayloadRecord],
+    records: &mut [PayloadRef],
     payload: &[u8],
     sink: &ChunkSink,
 ) -> io::Result<Vec<PathBuf>> {
@@ -309,13 +309,13 @@ pub fn write_partitioned_payload_chunks(
 
 #[derive(Default)]
 struct CoalesceBuf {
-    records: Vec<PayloadRecord>,
+    records: Vec<PayloadRef>,
     payload: Vec<u8>,
 }
 
 impl CoalesceBuf {
     fn bytes(&self) -> usize {
-        self.payload.len() + self.records.len() * std::mem::size_of::<PayloadRecord>()
+        self.payload.len() + self.records.len() * std::mem::size_of::<PayloadRef>()
     }
 }
 
@@ -356,7 +356,7 @@ impl SpillCoalescer {
     /// producers only ever wait for memcpys, never disk writes. Two producers
     /// tripping the budget concurrently both write (each a full-ish buffer);
     /// the shared store-owned sink keeps the files distinct.
-    pub fn append(&self, records: &[PayloadRecord], payload: &[u8]) {
+    pub fn append(&self, records: &[PayloadRef], payload: &[u8]) {
         if records.is_empty() {
             return;
         }
@@ -364,11 +364,10 @@ impl SpillCoalescer {
             let mut buf = self.buf.lock().expect("spill coalescer lock");
             let base = buf.payload.len();
             buf.payload.extend_from_slice(payload);
-            buf.records.extend(
-                records
-                    .iter()
-                    .map(|&(key, off, len)| (key, off + base, len)),
-            );
+            buf.records.extend(records.iter().map(|&r| PayloadRef {
+                offset: r.offset + base,
+                ..r
+            }));
             if buf.bytes() >= self.budget {
                 Some(std::mem::take(&mut *buf))
             } else {

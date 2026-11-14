@@ -103,16 +103,16 @@ impl TileRuns {
     }
 
     /// The run covering `tile_id`, if any.
-    pub fn covering(&self, tile_id: u64) -> Option<&TileRun> {
-        let index = self.runs.partition_point(|run| run.start.raw() <= tile_id);
+    pub fn covering(&self, tile_id: TileId) -> Option<&TileRun> {
+        let index = self.runs.partition_point(|run| run.start <= tile_id);
         self.runs
             .get(index.checked_sub(1)?)
-            .filter(|run| run.contains(tile_id))
+            .filter(|run| run.contains(tile_id.raw()))
     }
 
     /// The payload addressed by `tile_id`, if any.
     pub fn find(&self, tile_id: TileId) -> Option<BlobRef> {
-        self.covering(tile_id.raw()).map(TileRun::blob)
+        self.covering(tile_id).map(TileRun::blob)
     }
 
     /// Runs intersecting the id range `[start, end)`. A returned run may

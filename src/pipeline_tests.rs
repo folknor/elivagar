@@ -664,7 +664,7 @@ fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
         crate::wire_format::encode_feature_data(1, mvt::GeomType::Point, &[9, 0, 0], &attrs, 14);
     writer
         .push(SortRecord {
-            key: sort::make_sort_key(TileId::at(0, 0, 0), Layer::Pois as u8, 0),
+            key: sort::SortKey::new(TileId::at(0, 0, 0), Layer::Pois, 0),
             data: feature,
         })
         .expect("push sort record");
@@ -684,7 +684,7 @@ fn tile_features_ordered_by_paint_rank() {
         let osm_id = u8::try_from(osm_id).expect("test id fits in u8");
         writer
             .push(SortRecord {
-                key: sort::make_sort_key(tile_id, Layer::Land as u8, rank),
+                key: sort::SortKey::new(tile_id, Layer::Land, rank),
                 data: Box::from([osm_id]),
             })
             .expect("push rank-tagged record");
@@ -699,10 +699,10 @@ fn tile_features_ordered_by_paint_rank() {
         let mut reader = sort::SortPartitionReader::open(&partition, sort::ChunkCompression::None)
             .expect("open sort partition");
         while let Some(record) = reader.next().expect("read sorted record") {
-            assert_eq!(sort::tile_id_from_key(record.key), grouped.tile_id);
-            assert_eq!(sort::layer_from_key(record.key), Layer::Land as u8);
-            observed.push(sort::priority_from_key(record.key));
-            grouped.features.push((Layer::Land as u8, record.data));
+            assert_eq!(record.key.tile(), grouped.tile_id);
+            assert_eq!(record.key.layer(), Some(Layer::Land));
+            observed.push(record.key.rank());
+            grouped.features.push((Layer::Land, record.data));
         }
     }
     assert_eq!(observed, [0, 2, 3, 5]);
@@ -719,7 +719,7 @@ fn parity_pending_tile(tile_id: TileId) -> PendingTile {
         tile_id,
         features: vec![
             (
-                Layer::Pois as u8,
+                Layer::Pois,
                 crate::wire_format::encode_feature_data(
                     11,
                     mvt::GeomType::Point,
@@ -729,7 +729,7 @@ fn parity_pending_tile(tile_id: TileId) -> PendingTile {
                 ),
             ),
             (
-                Layer::Streets as u8,
+                Layer::Streets,
                 crate::wire_format::encode_feature_data(
                     21,
                     mvt::GeomType::LineString,
@@ -845,21 +845,21 @@ fn oversize_top_list_keeps_largest_tiles_sorted() {
     insert_top_oversized(
         &mut top,
         OversizeTile {
-            tile_id: TileId::at(1, 0, 0).raw(),
+            tile_id: TileId::at(1, 0, 0),
             bytes: 100,
         },
     );
     insert_top_oversized(
         &mut top,
         OversizeTile {
-            tile_id: TileId::at(1, 1, 0).raw(),
+            tile_id: TileId::at(1, 1, 0),
             bytes: 900,
         },
     );
     insert_top_oversized(
         &mut top,
         OversizeTile {
-            tile_id: TileId::at(1, 1, 1).raw(),
+            tile_id: TileId::at(1, 1, 1),
             bytes: 500,
         },
     );
@@ -875,19 +875,19 @@ fn tile_size_diag_thresholds_are_strictly_greater_than_boundaries() {
     let warn = TILE_OVERSIZE_WARN_BYTES;
     let severe = TILE_OVERSIZE_SEVERE_BYTES;
 
-    record_tile_size_diagnostics(&mut diag, TileId::at(0, 0, 0).raw(), warn);
+    record_tile_size_diagnostics(&mut diag, TileId::at(0, 0, 0), warn);
     assert_eq!(diag.oversize_warn_count, 0);
     assert_eq!(diag.oversize_severe_count, 0);
 
-    record_tile_size_diagnostics(&mut diag, TileId::at(1, 0, 0).raw(), warn + 1);
+    record_tile_size_diagnostics(&mut diag, TileId::at(1, 0, 0), warn + 1);
     assert_eq!(diag.oversize_warn_count, 1);
     assert_eq!(diag.oversize_severe_count, 0);
 
-    record_tile_size_diagnostics(&mut diag, TileId::at(2, 0, 0).raw(), severe);
+    record_tile_size_diagnostics(&mut diag, TileId::at(2, 0, 0), severe);
     assert_eq!(diag.oversize_warn_count, 2);
     assert_eq!(diag.oversize_severe_count, 0);
 
-    record_tile_size_diagnostics(&mut diag, TileId::at(3, 0, 0).raw(), severe + 1);
+    record_tile_size_diagnostics(&mut diag, TileId::at(3, 0, 0), severe + 1);
     assert_eq!(diag.oversize_warn_count, 3);
     assert_eq!(diag.oversize_severe_count, 1);
 }
@@ -1293,7 +1293,7 @@ fn antimeridian_wrapped_line_emits_both_seam_tiles_without_duplicates() {
 
     let mut counts = std::collections::BTreeMap::new();
     for rec in &records {
-        let tile_id = sort::tile_id_from_key(rec.key);
+        let tile_id = rec.key.tile();
         *counts.entry(tile_id).or_insert(0usize) += 1;
     }
 
@@ -1360,7 +1360,7 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
 
     let mut counts = std::collections::BTreeMap::new();
     for rec in &records {
-        let tile_id = sort::tile_id_from_key(rec.key);
+        let tile_id = rec.key.tile();
         *counts.entry(tile_id).or_insert(0usize) += 1;
     }
 
@@ -1430,7 +1430,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
 
     let mut counts = std::collections::BTreeMap::new();
     for rec in &records {
-        let tile_id = sort::tile_id_from_key(rec.key);
+        let tile_id = rec.key.tile();
         *counts.entry(tile_id).or_insert(0usize) += 1;
     }
 
@@ -1459,25 +1459,6 @@ fn encode_tile_batch_mvt_empty_batch_is_empty() {
     let encoded = encode_tile_batch(&[], 6, TilePayloadFormat::Mvt, TileCompression::Gzip)
         .expect("mvt format should encode successfully");
     assert!(encoded.is_empty());
-}
-
-#[test]
-fn tile_encoders_reject_unknown_sort_layer_ids() {
-    let formats = [
-        TilePayloadFormat::Mvt,
-        #[cfg(feature = "mlt")]
-        TilePayloadFormat::Mlt,
-    ];
-    for format in formats {
-        let tile = PendingTile {
-            tile_id: TileId::at(3, 4, 5),
-            features: vec![(255, Box::new([]))],
-        };
-        match encode_tile_batch(&[tile], 6, format, TileCompression::Gzip) {
-            Err(error) => assert!(error.0.contains("unknown layer id 255 in tile 3/4/5")),
-            Ok(_) => panic!("{format:?} silently accepted an unknown layer id"),
-        }
-    }
 }
 
 #[cfg(feature = "mlt")]
@@ -1954,10 +1935,9 @@ fn test_layer_match(layer: Layer, geom_expect: GeomExpect) -> LayerMatch {
 }
 
 /// Decode the sort key fields from a SortRecord.
-fn decode_key(rec: &SortRecord) -> (TileId, u8) {
-    let tile_id = sort::tile_id_from_key(rec.key);
-    let layer_idx = sort::layer_from_key(rec.key);
-    (tile_id, layer_idx)
+fn decode_key(rec: &SortRecord) -> (TileId, Layer) {
+    let layer = rec.key.layer().expect("minted keys name a layer");
+    (rec.key.tile(), layer)
 }
 
 /// Decode the wire format header from a SortRecord's data payload.
@@ -2075,9 +2055,9 @@ fn emit_point_decodes_correctly() {
     let rec = &records[0];
 
     // Sort key: tile_id for z=0/x=0/y=0, layer = Pois
-    let (tile_id, layer_idx) = decode_key(rec);
+    let (tile_id, layer) = decode_key(rec);
     assert_eq!(tile_id, TileId::at(0, 0, 0));
-    assert_eq!(layer_idx, Layer::Pois as u8);
+    assert_eq!(layer, Layer::Pois);
 
     // Wire format: osm_id=42, geom_type=Point(1), has geometry commands
     let (osm_id, gt, cmd_count) = decode_data_header(&rec.data);
@@ -2282,15 +2262,14 @@ fn relation_labels_aggregate_components_once_per_layer_per_zoom() {
     );
     assert_eq!(sink.records.len(), 12, "one point per layer per zoom");
     let mut counts = [[0; 2]; 6];
-    for &(key, offset, len) in &sink.records {
-        let tile_id = sort::tile_id_from_key(key);
-        let (zoom, tx, ty) = zxy(tile_id);
+    for record in &sink.records {
+        let (zoom, tx, ty) = zxy(record.key.tile());
         let layer_index = layers
             .iter()
-            .position(|layer| *layer as u8 == sort::layer_from_key(key))
+            .position(|layer| Some(*layer) == record.key.layer())
             .unwrap();
         counts[layer_index][usize::from(zoom - 4)] += 1;
-        let decoded = decode_to_layer(&sink.payload[offset..offset + len]);
+        let decoded = decode_to_layer(record.bytes(&sink.payload));
         let feature = decoded.test_feature(0);
         assert_eq!(feature.id, Some(423));
         let coords = decode_commands_to_abs_coords(&feature.geometry);
@@ -2450,9 +2429,9 @@ fn emit_line_decodes_correctly() {
     let rec = &records[0];
 
     // Sort key
-    let (tile_id, layer_idx) = decode_key(rec);
+    let (tile_id, layer) = decode_key(rec);
     assert_eq!(tile_id, TileId::at(0, 0, 0));
-    assert_eq!(layer_idx, Layer::Streets as u8);
+    assert_eq!(layer, Layer::Streets);
 
     // Wire format
     let (osm_id, gt, cmd_count) = decode_data_header(&rec.data);
@@ -2493,7 +2472,7 @@ fn emit_line_cascading_simplification() {
     let z14_records: Vec<_> = records
         .iter()
         .filter(|r| {
-            let tid = sort::tile_id_from_key(r.key);
+            let tid = r.key.tile();
             let (z, _, _) = zxy(tid);
             z == 14
         })
@@ -2628,9 +2607,9 @@ fn emit_polygon_decodes_correctly() {
     let rec = &records[0];
 
     // Sort key
-    let (tile_id, layer_idx) = decode_key(rec);
+    let (tile_id, layer) = decode_key(rec);
     assert_eq!(tile_id, TileId::at(0, 0, 0));
-    assert_eq!(layer_idx, Layer::Buildings as u8);
+    assert_eq!(layer, Layer::Buildings);
 
     // Wire format
     let (osm_id, gt, cmd_count) = decode_data_header(&rec.data);
@@ -3375,9 +3354,9 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
-    let (tile_id, layer_idx) = decode_key(rec);
+    let (tile_id, layer) = decode_key(rec);
     assert_eq!(tile_id, TileId::at(0, 0, 0));
-    assert_eq!(layer_idx, Layer::Buildings as u8);
+    assert_eq!(layer, Layer::Buildings);
 
     let (osm_id, gt, cmd_count) = decode_data_header(&rec.data);
     assert_eq!(osm_id, 402);
@@ -3729,10 +3708,10 @@ fn zigzag(closed: bool) -> Vec<Point> {
 }
 
 /// Records sorted by key then payload, restricted to a zoom window.
-fn window_records(records: &[SortRecord], lo: u8, hi: u8) -> Vec<(u64, Vec<u8>)> {
-    let mut out: Vec<(u64, Vec<u8>)> = records
+fn window_records(records: &[SortRecord], lo: u8, hi: u8) -> Vec<(sort::SortKey, Vec<u8>)> {
+    let mut out: Vec<(sort::SortKey, Vec<u8>)> = records
         .iter()
-        .filter(|r| (lo..=hi).contains(&sort::tile_id_from_key(r.key).zoom()))
+        .filter(|r| (lo..=hi).contains(&r.key.tile().zoom()))
         .map(|r| (r.key, r.data.to_vec()))
         .collect();
     out.sort();

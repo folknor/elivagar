@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use smallvec::SmallVec;
 
 use crate::sort::{self, LayerZoom, PerLayerZoom};
+use crate::tiling::TileId;
 
 pub(super) const TILE_OVERSIZE_WARN_BYTES: u64 = 500 * 1024;
 pub(super) const TILE_OVERSIZE_SEVERE_BYTES: u64 = 1024 * 1024;
@@ -307,15 +308,15 @@ impl FanoutStats {
 /// Extract tiles-touched per (layer, zoom) from a set of payload sort records
 /// belonging to a single feature and record into FanoutStats.
 pub(super) fn record_fanout_from_payload_records(
-    records: &[sort::PayloadRecord],
+    records: &[sort::PayloadRef],
     stats: &mut FanoutStats,
 ) {
     if records.is_empty() {
         return;
     }
     let mut counts: SmallVec<[(LayerZoom, u32); 8]> = SmallVec::new();
-    for &(key, _, _) in records {
-        let Some(layer_zoom) = LayerZoom::of_key(key) else {
+    for record in records {
+        let Some(layer_zoom) = LayerZoom::of_key(record.key) else {
             continue;
         };
         if let Some(entry) = counts.iter_mut().find(|e| e.0 == layer_zoom) {
@@ -329,10 +330,21 @@ pub(super) fn record_fanout_from_payload_records(
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct OversizeTile {
-    pub(super) tile_id: u64,
+    pub(super) tile_id: TileId,
     pub(super) bytes: u64,
+}
+
+impl Default for OversizeTile {
+    /// An empty slot: zero bytes, so any real tile displaces it and reports
+    /// skip it. The tile is a placeholder, never read for a zero-byte slot.
+    fn default() -> Self {
+        Self {
+            tile_id: TileId::ZERO,
+            bytes: 0,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -364,7 +376,7 @@ pub(super) fn insert_top_oversized(
 
 pub(super) fn record_tile_size_diagnostics(
     size_diag: &mut TileSizeDiagnostics,
-    tile_id: u64,
+    tile_id: TileId,
     tile_bytes: u64,
 ) {
     size_diag.total_tile_bytes += tile_bytes;

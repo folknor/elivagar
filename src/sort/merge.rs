@@ -263,12 +263,38 @@ impl SortReader {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::shortbread::Layer;
     use crate::sort::key::PARTITION_BASES;
     use crate::tiling::{PROFILE_ID_END, TileId, zoom_ids};
 
-    /// Raw-id spelling for fixtures; the real constructor takes a `TileId`.
+    /// Raw-id spelling for fixtures; the real constructor takes a `TileId`
+    /// and a `Layer`.
     fn make_sort_key(tile_id: u64, layer: u8, priority: u8) -> SortKey {
-        super::make_sort_key(TileId::new(tile_id).unwrap(), layer, priority)
+        SortKey::new(
+            TileId::new(tile_id).unwrap(),
+            Layer::ALL[usize::from(layer)],
+            priority,
+        )
+    }
+
+    fn partition_from_key(key: SortKey) -> usize {
+        key.partition()
+    }
+
+    fn partition_start(partition: usize) -> u64 {
+        partition_start_tile_id(partition).raw()
+    }
+
+    fn key_bytes(key: SortKey) -> [u8; 8] {
+        key.raw().to_le_bytes()
+    }
+
+    fn raw_keys(keys: &[SortKey]) -> Vec<u64> {
+        keys.iter().map(|key| key.raw()).collect()
+    }
+
+    fn payload_ref(key: SortKey, offset: usize, len: usize) -> PayloadRef {
+        PayloadRef { key, offset, len }
     }
 
     fn base(zoom: usize) -> u64 {
@@ -302,7 +328,7 @@ mod tests {
         out
     }
 
-    fn collect_keys(reader: SortReader, compression: ChunkCompression) -> Vec<u64> {
+    fn collect_keys(reader: SortReader, compression: ChunkCompression) -> Vec<SortKey> {
         collect_records(reader, compression)
             .into_iter()
             .map(|record| record.key)
@@ -311,31 +337,37 @@ mod tests {
 
     #[test]
     fn sort_key_round_trip() {
+        let last_layer = u8::try_from(Layer::count() - 1).unwrap();
         let cases: Vec<(u64, u8, u8)> = vec![
             (0, 0, 0),
             (1, 2, 3),
-            (PROFILE_ID_END - 1, 0xFF, 0xFF),
+            (PROFILE_ID_END - 1, last_layer, 0xFF),
             (42, 7, 128),
             (1_000_000, 0, 255),
         ];
         for (tile_id, layer, priority) in cases {
             let key = make_sort_key(tile_id, layer, priority);
             assert_eq!(
-                tile_id_from_key(key).raw(),
+                key.tile().raw(),
                 tile_id,
                 "tile_id mismatch for ({tile_id}, {layer}, {priority})"
             );
             assert_eq!(
-                layer_from_key(key),
-                layer,
+                key.layer(),
+                Some(Layer::ALL[usize::from(layer)]),
                 "layer mismatch for ({tile_id}, {layer}, {priority})"
             );
+            assert_eq!(key.layer_byte(), layer);
             assert_eq!(
-                priority_from_key(key),
+                key.rank(),
                 priority,
                 "priority mismatch for ({tile_id}, {layer}, {priority})"
             );
         }
+        // A layer byte no Layer has decodes, but names no layer.
+        let forged = SortKey::from_raw(0xFF << 8);
+        assert_eq!(forged.layer_byte(), 0xFF);
+        assert_eq!(forged.layer(), None);
     }
 
     /// The 48-bit key field would silently drop the high bits of a z24+ id
@@ -344,8 +376,8 @@ mod tests {
     #[test]
     fn keys_beyond_the_profile_zoom_are_refused() {
         let first_z15 = TileId::at(15, 0, 0);
-        assert!(std::panic::catch_unwind(|| super::make_sort_key(first_z15, 0, 0)).is_err());
-        let forged = first_z15.raw() << 16;
+        assert!(std::panic::catch_unwind(|| SortKey::new(first_z15, Layer::ALL[0], 0)).is_err());
+        let forged = SortKey::from_raw(first_z15.raw() << 16);
         assert!(std::panic::catch_unwind(|| partition_from_key(forged)).is_err());
         let last_z14 = make_sort_key(PROFILE_ID_END - 1, 0, 0);
         assert_eq!(partition_from_key(last_z14), SORT_PARTITIONS - 1);
@@ -353,7 +385,7 @@ mod tests {
 
     #[test]
     fn merge_order_is_chunk_assignment_independent() {
-        fn merged(dir: &Path, chunks: &[&[(&[u8], u64)]]) -> Vec<(u64, Vec<u8>)> {
+        fn merged(dir: &Path, chunks: &[&[(&[u8], SortKey)]]) -> Vec<(SortKey, Vec<u8>)> {
             let mut paths = Vec::new();
             for (idx, chunk) in chunks.iter().enumerate() {
                 let mut records: Vec<SortRecord> = chunk
@@ -423,7 +455,9 @@ mod tests {
             partition_next_key(first),
             make_sort_key(z14_base + 16_384, 0, 0)
         );
-        assert!(make_sort_key(z14_base + 16_383, u8::MAX, u8::MAX) < partition_next_key(first));
+        // The largest key a tile can carry, layer and rank bytes both full.
+        let last_of_prefix = SortKey::from_raw(((z14_base + 16_383) << 16) | 0xFFFF);
+        assert!(last_of_prefix < partition_next_key(first));
 
         // One z7 prefix at z13 spans 4^(13-7) = 4,096 child tile ids.
         let z13_base = base(13);
@@ -495,15 +529,15 @@ mod tests {
 
         let p0 = PARTITION_BASES[14];
         let p1 = p0 + 1;
-        let k0 = make_sort_key(partition_start_tile_id(p0), 0, 0);
-        let k1 = make_sort_key(partition_start_tile_id(p1), 0, 0);
-        let k1b = make_sort_key(partition_start_tile_id(p1) + 7, 2, 3);
+        let k0 = make_sort_key(partition_start(p0), 0, 0);
+        let k1 = make_sort_key(partition_start(p1), 0, 0);
+        let k1b = make_sort_key(partition_start(p1) + 7, 2, 3);
 
         for key in [k1b, k0, k1] {
             writer
                 .push(SortRecord {
                     key,
-                    data: Box::from(key.to_le_bytes().as_slice()),
+                    data: Box::from(key_bytes(key).as_slice()),
                 })
                 .unwrap();
         }
@@ -541,14 +575,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let p0 = PARTITION_BASES[14];
         let p1 = p0 + 1;
-        let k0 = make_sort_key(partition_start_tile_id(p0), 0, 0);
-        let k1 = make_sort_key(partition_start_tile_id(p1), 0, 0);
+        let k0 = make_sort_key(partition_start(p0), 0, 0);
+        let k1 = make_sort_key(partition_start(p1), 0, 0);
         let mut payload = Vec::new();
         let mut records = Vec::new();
         for key in [k1, k0] {
             let off = payload.len();
-            payload.extend_from_slice(&key.to_le_bytes());
-            records.push((key, off, 8));
+            payload.extend_from_slice(&key_bytes(key));
+            records.push(payload_ref(key, off, 8));
         }
 
         let sink = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None)
@@ -569,15 +603,15 @@ mod tests {
 
         let p0 = PARTITION_BASES[14];
         let p1 = p0 + 1;
-        let k0 = make_sort_key(partition_start_tile_id(p0), 0, 0);
-        let k1 = make_sort_key(partition_start_tile_id(p1), 0, 0);
-        let k1b = make_sort_key(partition_start_tile_id(p1) + 7, 2, 3);
+        let k0 = make_sort_key(partition_start(p0), 0, 0);
+        let k1 = make_sort_key(partition_start(p1), 0, 0);
+        let k1b = make_sort_key(partition_start(p1) + 7, 2, 3);
 
         for key in [k1b, k0, k1] {
             writer
                 .push(SortRecord {
                     key,
-                    data: Box::from(key.to_le_bytes().as_slice()),
+                    data: Box::from(key_bytes(key).as_slice()),
                 })
                 .unwrap();
         }
@@ -596,7 +630,7 @@ mod tests {
         let mut part0 = SortPartitionReader::open(&partitions[0], compression).unwrap();
         let rec = part0.next().unwrap().expect("p0 record");
         assert_eq!(rec.key, k0);
-        assert_eq!(&rec.data[..], k0.to_le_bytes().as_slice());
+        assert_eq!(&rec.data[..], key_bytes(k0).as_slice());
         assert!(part0.next().unwrap().is_none());
 
         let mut part1 = SortPartitionReader::open(&partitions[1], compression).unwrap();
@@ -648,8 +682,8 @@ mod tests {
         let payload_path = chunk_path(dir.path(), 1, partition_from_key(first_key));
         let payload = [large.as_slice(), small.as_slice()].concat();
         let mut payload_records = vec![
-            (second_key, 0, large.len()),
-            (first_key, large.len(), small.len()),
+            payload_ref(second_key, 0, large.len()),
+            payload_ref(first_key, large.len(), small.len()),
         ];
         write_sorted_payload_chunk(&mut payload_records, &payload, &payload_path, compression)
             .unwrap();
@@ -677,14 +711,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let p0 = PARTITION_BASES[14];
         let p1 = p0 + 1;
-        let k0 = make_sort_key(partition_start_tile_id(p0), 0, 0);
-        let k1 = make_sort_key(partition_start_tile_id(p1), 0, 0);
+        let k0 = make_sort_key(partition_start(p0), 0, 0);
+        let k1 = make_sort_key(partition_start(p1), 0, 0);
         let mut payload = Vec::new();
         let mut records = Vec::new();
         for key in [k1, k0] {
             let off = payload.len();
-            payload.extend_from_slice(&key.to_le_bytes());
-            records.push((key, off, 8));
+            payload.extend_from_slice(&key_bytes(key));
+            records.push(payload_ref(key, off, 8));
         }
 
         let sink = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::Lz4)
@@ -706,11 +740,11 @@ mod tests {
         let p0 = PARTITION_BASES[14];
         let p1 = p0 + 1;
         for partition in [p0, p1] {
-            let key = make_sort_key(partition_start_tile_id(partition), 0, 0);
+            let key = make_sort_key(partition_start(partition), 0, 0);
             writer
                 .push(SortRecord {
                     key,
-                    data: Box::from(key.to_le_bytes().as_slice()),
+                    data: Box::from(key_bytes(key).as_slice()),
                 })
                 .unwrap();
         }
@@ -741,7 +775,7 @@ mod tests {
             expected_keys.push(key);
             writer
                 .push(SortRecord {
-                    key,
+                    key: SortKey::from_raw(key),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -752,7 +786,7 @@ mod tests {
         // Collect all output records and verify global sort order.
         let mut output_keys: Vec<u64> = Vec::new();
         for record in collect_records(reader, ChunkCompression::None) {
-            output_keys.push(record.key);
+            output_keys.push(record.key.raw());
         }
 
         assert_eq!(output_keys.len(), 1000);
@@ -783,7 +817,7 @@ mod tests {
             expected_keys.push(key);
             writer
                 .push(SortRecord {
-                    key,
+                    key: SortKey::from_raw(key),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -800,7 +834,7 @@ mod tests {
 
         let mut output_keys: Vec<u64> = Vec::new();
         for record in collect_records(reader, ChunkCompression::None) {
-            output_keys.push(record.key);
+            output_keys.push(record.key.raw());
         }
 
         assert_eq!(output_keys.len(), 500);
@@ -838,7 +872,7 @@ mod tests {
         for i in 0u32..100 {
             writer
                 .push(SortRecord {
-                    key: 42,
+                    key: SortKey::from_raw(42),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -848,7 +882,7 @@ mod tests {
 
         let mut count = 0u32;
         for record in collect_records(reader, ChunkCompression::None) {
-            assert_eq!(record.key, 42);
+            assert_eq!(record.key.raw(), 42);
             count += 1;
             assert_eq!(record.data.len(), 4);
         }
@@ -870,7 +904,7 @@ mod tests {
             data.extend_from_slice(&i.to_le_bytes());
             writer
                 .push(SortRecord {
-                    key,
+                    key: SortKey::from_raw(key),
                     data: data.into_boxed_slice(),
                 })
                 .unwrap();
@@ -882,13 +916,13 @@ mod tests {
         let mut prev_key = 0u64;
         let mut count = 0u64;
         for record in collect_records(reader, ChunkCompression::None) {
-            assert!(record.key >= prev_key);
-            prev_key = record.key;
+            assert!(record.key.raw() >= prev_key);
+            prev_key = record.key.raw();
             count += 1;
 
             // Verify the data payload starts with the key.
             let embedded_key = u64::from_le_bytes(record.data[..8].try_into().unwrap());
-            assert_eq!(embedded_key, record.key);
+            assert_eq!(embedded_key, record.key.raw());
         }
         assert_eq!(count, 50);
     }
@@ -900,7 +934,7 @@ mod tests {
         for i in 0u64..200 {
             writer
                 .push(SortRecord {
-                    key: i,
+                    key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -922,7 +956,7 @@ mod tests {
         for i in 0u64..200 {
             writer
                 .push(SortRecord {
-                    key: i,
+                    key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -950,7 +984,7 @@ mod tests {
         for i in 0u64..200 {
             writer
                 .push(SortRecord {
-                    key: i,
+                    key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -971,7 +1005,7 @@ mod tests {
         for i in 0u64..100 {
             writer
                 .push(SortRecord {
-                    key: i,
+                    key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -1003,7 +1037,7 @@ mod tests {
         for i in 0u64..50 {
             writer
                 .push(SortRecord {
-                    key: i,
+                    key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -1015,7 +1049,7 @@ mod tests {
         for i in 50u64..100 {
             writer
                 .push(SortRecord {
-                    key: i,
+                    key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -1037,7 +1071,7 @@ mod tests {
         for i in 0u64..300 {
             writer
                 .push(SortRecord {
-                    key: i,
+                    key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -1066,7 +1100,7 @@ mod tests {
         for i in 0u64..200 {
             writer
                 .push(SortRecord {
-                    key: i,
+                    key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -1102,7 +1136,7 @@ mod tests {
         for i in 0u64..200 {
             seeded
                 .push(SortRecord {
-                    key: i,
+                    key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
                 .unwrap();
@@ -1121,7 +1155,7 @@ mod tests {
         let mut resumed = resumed;
         resumed
             .push(SortRecord {
-                key: 7,
+                key: SortKey::from_raw(7),
                 data: Box::from(7u64.to_le_bytes().as_slice()),
             })
             .unwrap();
@@ -1137,13 +1171,13 @@ mod tests {
         let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None).unwrap();
         writer
             .push(SortRecord {
-                key: 40,
+                key: SortKey::from_raw(40),
                 data: Box::from(40u64.to_le_bytes().as_slice()),
             })
             .unwrap();
         writer
             .push(SortRecord {
-                key: 20,
+                key: SortKey::from_raw(20),
                 data: Box::from(20u64.to_le_bytes().as_slice()),
             })
             .unwrap();
@@ -1156,7 +1190,7 @@ mod tests {
         for key in [10u64, 30] {
             let offset = payload_a.len();
             payload_a.extend_from_slice(&key.to_le_bytes());
-            records_a.push((key, offset, 8));
+            records_a.push(payload_ref(SortKey::from_raw(key), offset, 8));
         }
         let mut paths =
             write_partitioned_payload_chunks(&mut records_a, &payload_a, &sink).unwrap();
@@ -1166,7 +1200,7 @@ mod tests {
         for key in [5u64, 50] {
             let offset = payload_b.len();
             payload_b.extend_from_slice(&key.to_le_bytes());
-            records_b.push((key, offset, 8));
+            records_b.push(payload_ref(SortKey::from_raw(key), offset, 8));
         }
         paths.extend(write_partitioned_payload_chunks(&mut records_b, &payload_b, &sink).unwrap());
         writer.adopt_chunk_files(paths);
@@ -1179,7 +1213,7 @@ mod tests {
         // finish flushes the writer buffer with chunk id two.
         let reader = writer.finish().unwrap();
         let keys = collect_keys(reader, ChunkCompression::None);
-        assert_eq!(keys, vec![5, 10, 20, 30, 40, 50]);
+        assert_eq!(raw_keys(&keys), vec![5, 10, 20, 30, 40, 50]);
     }
 
     #[test]
@@ -1191,7 +1225,7 @@ mod tests {
         let mut writer = SortWriter::new(dir.path(), 1, ChunkCompression::None).unwrap();
         let sink = writer.chunk_sink();
         let payload = 10u64.to_le_bytes();
-        let mut task_records = vec![(10, 0, payload.len())];
+        let mut task_records = vec![payload_ref(SortKey::from_raw(10), 0, payload.len())];
         let task_paths =
             write_partitioned_payload_chunks(&mut task_records, &payload, &sink).unwrap();
         writer.adopt_chunk_files(task_paths);
@@ -1199,13 +1233,13 @@ mod tests {
         // The writer's own flushes must skip 0 (taken by the task) and use 1, 2.
         writer
             .push(SortRecord {
-                key: 20,
+                key: SortKey::from_raw(20),
                 data: Box::from(20u64.to_le_bytes().as_slice()),
             })
             .unwrap();
         writer
             .push(SortRecord {
-                key: 30,
+                key: SortKey::from_raw(30),
                 data: Box::from(30u64.to_le_bytes().as_slice()),
             })
             .unwrap();
@@ -1220,7 +1254,11 @@ mod tests {
 
         let reader = writer.finish().unwrap();
         let keys = collect_keys(reader, ChunkCompression::None);
-        assert_eq!(keys, vec![10, 20, 30], "no records lost to a collision");
+        assert_eq!(
+            raw_keys(&keys),
+            vec![10, 20, 30],
+            "no records lost to a collision"
+        );
     }
 
     #[test]
@@ -1229,7 +1267,7 @@ mod tests {
         let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None).unwrap();
         writer
             .push(SortRecord {
-                key: 1,
+                key: SortKey::from_raw(1),
                 data: Box::from(1u64.to_le_bytes().as_slice()),
             })
             .unwrap();
@@ -1245,7 +1283,7 @@ mod tests {
         let mut writer2 = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None).unwrap();
         writer2
             .push(SortRecord {
-                key: 2,
+                key: SortKey::from_raw(2),
                 data: Box::from(2u64.to_le_bytes().as_slice()),
             })
             .unwrap();

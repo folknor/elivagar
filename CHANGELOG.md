@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Sort keys are a type. Breaking: `sort::SortKey` is a packed `u64`
+  newtype rather than an alias, minted by `SortKey::new(TileId, Layer,
+  rank)`; `make_sort_key`, `tile_id_from_key`, `layer_from_key`,
+  `priority_from_key` and `partition_from_key` become the methods
+  `tile`, `layer` (an `Option<Layer>`, with `layer_byte` for the raw
+  byte), `rank` and `partition`, and `from_raw`/`raw` cross the chunk
+  wire. `sort::PayloadRecord` is replaced by the named
+  `sort::PayloadRef { key, offset, len }`. `partition_start_tile_id`
+  returns a `TileId`, and `archive::TileRuns::covering` takes one. A
+  sort record whose layer byte names no layer is now refused when
+  assembly reads it back, instead of by the encoder. Chunk bytes and
+  output are unchanged.
+
 - One PMTiles archive module. Breaking: `pmtiles_reader` and
   `pmtiles_writer` are replaced by `archive`. `PmtilesReader` and
   `ArchiveView` merge into `archive::Archive`, which reads through

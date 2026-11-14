@@ -9,7 +9,7 @@ use crate::geometry::int_ocean::{
 };
 use crate::geometry::polygon::{Area, ExtentUnits, MIN_POLY_AREA_AREA};
 use crate::geometry::pyramid::{
-    PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid, tile_cover,
+    PyramidCell, PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid, tile_cover,
 };
 use crate::geometry::{
     self,
@@ -239,7 +239,7 @@ impl MultipolygonEmitScratch {
 // ---------------------------------------------------------------------------
 
 pub(super) struct RecordSink {
-    pub(super) records: Vec<sort::PayloadRecord>,
+    pub(super) records: Vec<sort::PayloadRef>,
     pub(super) payload: Vec<u8>,
     pub(super) tally: RecordTally,
 }
@@ -254,7 +254,7 @@ impl RecordSink {
     }
 
     pub(super) fn bytes(&self) -> usize {
-        self.payload.len() + self.records.len() * std::mem::size_of::<sort::PayloadRecord>()
+        self.payload.len() + self.records.len() * std::mem::size_of::<sort::PayloadRef>()
     }
 
     pub(super) fn clear_payload(&mut self) {
@@ -380,7 +380,11 @@ impl FeatureRecordSink for RecordSink {
             attrs_buf,
         );
         let len = range.end - range.start;
-        self.records.push((key, range.start, len));
+        self.records.push(sort::PayloadRef {
+            key,
+            offset: range.start,
+            len,
+        });
         self.tally.record(key, len);
     }
 }
@@ -399,7 +403,7 @@ pub(super) fn push_sort_record<T: FeatureRecordSink + ?Sized>(
     attrs_buf: &[u8],
     records: &mut T,
 ) {
-    let key = sort::make_sort_key(tile_id, layer as u8, paint_rank);
+    let key = sort::SortKey::new(tile_id, layer, paint_rank);
     records.push_feature(key, osm_id, geom_type, geom_buf, attrs_buf);
 }
 
@@ -1079,7 +1083,7 @@ pub(super) fn emit_polygon_feature(
     let mut count: u64 = 0;
     let attrs_by_zoom = &mut scratch.attrs_by_zoom;
     let pyramid = &mut scratch.pyramid;
-    let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32], _kind| {
+    let mut sink = |PyramidCell { z, tx, ty }, geom: &[u32], _kind| {
         // Zooms above the window are constructed (see `polygon_zoom_plan`)
         // but not emitted.
         if z < z_lo {
@@ -1187,7 +1191,7 @@ pub(super) fn emit_multipolygon_feature(
     let mut count: u64 = 0;
     let attrs_by_zoom = &mut emit_scratch.attrs_by_zoom;
     let pyramid = &mut emit_scratch.pyramid;
-    let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32], _kind| {
+    let mut sink = |PyramidCell { z, tx, ty }, geom: &[u32], _kind| {
         // Zooms above the window are constructed (see `polygon_zoom_plan`)
         // but not emitted.
         if z < z_lo {
@@ -1301,7 +1305,7 @@ mod landing2_tests {
             ),
             1
         );
-        let (z, x, _) = sort::tile_id_from_key(records[0].key).coord();
+        let (z, x, _) = records[0].key.tile().coord();
         assert_eq!((z, x), (12, 4095));
     }
 
@@ -1499,7 +1503,7 @@ mod landing2_tests {
         assert!(!records.is_empty());
 
         for rec in &records {
-            let tile_id = sort::tile_id_from_key(rec.key);
+            let tile_id = rec.key.tile();
             let z = tile_id.zoom();
             let want_count = if z >= 13 { 2 } else { 1 };
             assert_eq!(attr_count(&rec.data), want_count, "z{z}");

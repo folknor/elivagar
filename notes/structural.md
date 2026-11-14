@@ -214,7 +214,6 @@ Reported by the archive-surface, run-contract and pipeline hunts.
   document alone into its own archive module was refused: its inputs are
   producer policy, so the fix is the producer handing the writer the layer
   set and names, not a relocation.)
-- `ocean` imports `sort` to learn a zoom (see STR-011).
 - `mlt -> mvt`: MLT consumes the tile model through
   `cfg_attr(not(feature = "mlt"), allow(dead_code))` accessors in `mvt`.
 - `shortbread -> pois -> shortbread`: `pois.rs` reaches back into
@@ -280,35 +279,6 @@ tag-changing functions; the overlay engine stays generic. `UnwrappedMerc` vs
 `Merc`, or at least a debug assertion at the `project_e7` boundary.
 
 Reported by the polygon-engine, coordinate-spaces and ocean hunts.
-
-## STR-011 - A coordinates module for zoom, tile ids and grids
-
-The zoom and tile-id parts landed as `src/tiling.rs` (`MAX_ZOOM`,
-`ZOOM_COUNT`, the z31 archive ceiling, a validated `TileId` owning the
-Hilbert code, its tests and the per-zoom id ranges), with `LayerZoom`
-indexing `PerLayerZoom` and a `CapEvent` struct in stats. A `Zoom` newtype and
-a `PerZoom<T>` wrapper were refused, with the reasons in the `tiling` module
-docs. What remains has no home yet:
-
-- `TileCoord`: `(u8, u32, u32)` everywhere except the crate-private
-  `PyramidCell`; `PyramidSink`, `tile_filter` and every sink take bare
-  triples, and `TileId::coord` returns one.
-- Raw ids where they are not addresses or have not been typed: archive runs
-  start at a `TileId`, but range ends, `OversizeTile`, the artifact run
-  arithmetic in `assemble/artifact.rs` (`artifact_run_copy_items` and
-  `PartitionItem::RunCopy`'s `offset`/`length` pair rather than a
-  `BlobRef`) and the `OceanTiles::runs_in`/`run_covering` probes keep `u64`.
-- `SortKey` (`type SortKey = u64`; `make_sort_key(TileId, layer: u8,
-  priority: u8)` still takes two swappable u8s), `PartitionId` (bare `usize`,
-  cast to `u32` in section tables), and `PayloadRecord = (SortKey, usize,
-  usize)` destructured positionally at about ten sites; proposed
-  `SortKey { tile, layer: Layer, rank: PaintRank }` with packing internal,
-  `PartitionId(u16)`, `PayloadRef { key, offset, len: u32 }`.
-- `LayerMap<T>` for the `[_; Layer::count()]` arrays, the `Grid` of STR-010
-  and projection.
-
-Reported by the coordinate-spaces, storage, archive-surface, layer-identity,
-pipeline and polygon-engine hunts.
 
 ## STR-012 - Make ring role a type
 

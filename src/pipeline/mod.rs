@@ -1112,9 +1112,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     );
     emit_counter_u64("tile_max_bytes", tile_size_diag.max_tile.bytes);
     if tile_size_diag.max_tile.bytes > 0 {
-        let (z, x, y) = crate::tiling::TileId::new(tile_size_diag.max_tile.tile_id)
-            .expect("written tile ids are addresses")
-            .coord();
+        let (z, x, y) = tile_size_diag.max_tile.tile_id.coord();
         emit_counter_u64("tile_max_z", u64::from(z));
         emit_counter_u64("tile_max_x", u64::from(x));
         emit_counter_u64("tile_max_y", u64::from(y));
@@ -1128,9 +1126,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         if t.bytes == 0 {
             continue;
         }
-        let (z, x, y) = crate::tiling::TileId::new(t.tile_id)
-            .expect("written tile ids are addresses")
-            .coord();
+        let (z, x, y) = t.tile_id.coord();
         let prefix = format!("oversize_top_{}", i + 1);
         emit_counter_u64(&format!("{prefix}_z"), u64::from(z));
         emit_counter_u64(&format!("{prefix}_x"), u64::from(x));

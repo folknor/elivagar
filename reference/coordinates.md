@@ -130,7 +130,9 @@ The sort key is:
 
 The tile id field is 48 bits, so a key can be built only for a profile-domain
 tile; anything beyond z14 is refused when the key is built and when it is
-partitioned, never clamped.
+partitioned, never clamped. The layer byte is a Shortbread layer id, typed as
+a layer when the key is built; a key read back from a sort chunk whose layer
+byte names no layer is refused when assembly groups it into a tile.
 
 Sort partitioning first identifies the zoom range containing the tile id,
 then uses its high-order Hilbert range to select an ordered partition. The

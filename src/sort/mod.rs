@@ -66,7 +66,23 @@ pub struct SortRecord {
 }
 const _: () = assert!(std::mem::size_of::<SortRecord>() == 24);
 
-pub type PayloadRecord = (SortKey, usize, usize);
+/// A sort record whose payload lives in a producer's arena at
+/// `offset..offset + len`. `len` stays `usize`: a `u32` saves nothing after
+/// alignment and would add a cast at every use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PayloadRef {
+    pub key: SortKey,
+    pub offset: usize,
+    pub len: usize,
+}
+
+impl PayloadRef {
+    /// This record's payload within `arena`.
+    #[inline]
+    pub fn bytes(self, arena: &[u8]) -> &[u8] {
+        &arena[self.offset..self.offset + self.len]
+    }
+}
 
 const LAYER_ZOOM_COUNT: usize = crate::shortbread::Layer::count() * ZOOM_COUNT;
 
@@ -84,10 +100,10 @@ impl LayerZoom {
     }
 
     /// The layer and zoom of a record key. Keys are minted only for profile
-    /// tiles (`make_sort_key` asserts it), so only the layer byte can fail.
+    /// tiles (`SortKey::new` asserts it), so only the layer byte can fail.
     pub(crate) fn of_key(key: SortKey) -> Option<Self> {
-        let layer = *crate::shortbread::Layer::ALL.get(usize::from(layer_from_key(key)))?;
-        let zoom = tile_id_from_key(key).zoom();
+        let layer = key.layer()?;
+        let zoom = key.tile().zoom();
         assert!(
             zoom <= MAX_ZOOM,
             "sort keys are minted for profile zooms only"
@@ -232,10 +248,7 @@ use key::{
     PARTITION_SPLIT_Z, partition_next_key, record_cmp, sort_payload_records_total,
     sort_records_total,
 };
-pub use key::{
-    SORT_PARTITIONS, SortKey, layer_from_key, make_sort_key, partition_from_key,
-    partition_start_tile_id, partition_tile_range, priority_from_key, tile_id_from_key,
-};
+pub use key::{SORT_PARTITIONS, SortKey, partition_start_tile_id, partition_tile_range};
 pub use merge::{SortPartition, SortPartitionReader, SortReader};
 pub use write::{
     ChunkSink, SortWriter, SpillCoalescer, write_partitioned_payload_chunks, write_sorted_chunk,

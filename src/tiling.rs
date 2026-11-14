@@ -22,9 +22,19 @@
 //! one bound, and the code meets at least four: the archive's 31, the
 //! profile's 14, the ocean pass grids' 7 and 14, and the sort key's 48-bit id
 //! field (z23). The checks live where a zoom enters a domain: `TileId`
-//! construction for the archive, `make_sort_key` and `run`'s validation for
+//! construction for the archive, `SortKey::new` and `run`'s validation for
 //! the profile. Per-zoom storage is likewise a plain `[T; ZOOM_COUNT]`: a
 //! wrapper indexed by `u8` would check nothing the array index does not.
+//! The same holds for per-layer `[T; Layer::count()]` arrays: every index is
+//! a `Layer` cast, always in range, and the one place an unchecked layer
+//! byte enters (a sort key read back from a chunk) is refused by
+//! `SortKey::layer`, so a `LayerMap<T>` wrapper would only rename the cast.
+//!
+//! There is no `TileCoord` type either. A coordinate triple lives only
+//! between a tile enumeration and `TileId::at`: the pyramid hands its sinks a
+//! named `PyramidCell`, and everything downstream of a sink addresses tiles
+//! by `TileId`. [`TileId::coord`] returns a `(z, x, y)` tuple for display and
+//! for writers whose own API takes the three numbers.
 
 use std::fmt;
 use std::io;

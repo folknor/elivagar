@@ -13,6 +13,7 @@ use super::OceanArtifactKey;
 use super::band::OceanBand;
 use crate::archive::{Archive, BlobRef, MapSource, TileRun, TileRuns};
 use crate::shortbread::Layer;
+use crate::tiling::TileId;
 
 /// The artifact is mapped, not read, so assembly borrows its tile blobs
 /// without copying them.
@@ -180,7 +181,7 @@ impl OceanTiles {
         self.runs.intersecting(start, end)
     }
 
-    pub(crate) fn run_covering(&self, tile_id: u64) -> Option<TileRun> {
+    pub(crate) fn run_covering(&self, tile_id: TileId) -> Option<TileRun> {
         self.runs.covering(tile_id).copied()
     }
 

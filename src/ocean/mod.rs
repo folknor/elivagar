@@ -496,7 +496,7 @@ impl<'de> Deserialize<'de> for OceanArtifactKey {
 // OceanAcc records its output at each spill flush because the phase12 sort
 // snapshot predates the ocean pass. The output counters use
 // payload bytes only, matching the other sort_layer_*_bytes counters; its
-// accumulator byte budget also includes PayloadRecord storage and is not a
+// accumulator byte budget also includes PayloadRef storage and is not a
 // comparable measure. The input side records how many shapefile shapes were
 // read, how many overlapped the data bounds, how many polygon pieces they
 // parsed into, and how many shapefile bytes were mapped. Ocean is ~30% of wall
@@ -671,7 +671,7 @@ struct OceanWorkItem {
 }
 
 struct OceanAcc {
-    records: Vec<sort::PayloadRecord>,
+    records: Vec<sort::PayloadRef>,
     payload: Vec<u8>,
     bytes: usize,
     count: u64,
@@ -699,11 +699,12 @@ impl OceanAcc {
             .payload_bytes
             .fetch_add(self.payload.len() as u64, Ordering::Relaxed);
         if ocean_layer_stats_enabled() {
-            for &(key, _, len) in &self.records {
-                // Keys are minted for profile zooms only (make_sort_key).
-                let zoom = usize::from(sort::tile_id_from_key(key).zoom());
+            for record in &self.records {
+                // Keys are minted for profile zooms only (SortKey::new).
+                let zoom = usize::from(record.key.tile().zoom());
                 OCEAN_STATS.zoom_records[zoom].fetch_add(1, Ordering::Relaxed);
-                OCEAN_STATS.zoom_payload_bytes[zoom].fetch_add(len as u64, Ordering::Relaxed);
+                OCEAN_STATS.zoom_payload_bytes[zoom]
+                    .fetch_add(record.len as u64, Ordering::Relaxed);
             }
         }
         self.count += self.records.len() as u64;
@@ -717,12 +718,11 @@ impl OceanAcc {
 
         let payload_base = self.payload.len();
         self.payload.extend(other.payload);
-        self.records.extend(
-            other
-                .records
-                .into_iter()
-                .map(|(key, offset, len)| (key, payload_base + offset, len)),
-        );
+        self.records
+            .extend(other.records.into_iter().map(|r| sort::PayloadRef {
+                offset: payload_base + r.offset,
+                ..r
+            }));
         self.bytes += other.bytes;
     }
 }
@@ -1052,7 +1052,6 @@ fn process_ocean_shapefile_inner(
     // scale that could be 10-30 GB. The previous approach (par_iter().collect()
     // into Vec<Vec<SortRecord>> + serial push) was fine for regional extracts but
     // would blow memory and serialize sort+flush at planet scale.
-    let ocean_layer = Layer::Ocean as u8;
     let mut empty_attrs_bytes = Vec::new();
     encode_attrs_bytes(&mut empty_attrs_bytes, &[], grid_zoom);
 
@@ -1064,9 +1063,10 @@ fn process_ocean_shapefile_inner(
     // The traversal filter is band ownership only. The emission window must
     // not join it: a pruned cell loses its whole subtree, so filtering zooms
     // above the window here would drop every requested zoom below it.
-    let tile_filter = |z, tx, ty| band.is_none_or(|band| band.computed_owns(z, tx, ty));
-    let tile_filter_dyn: Option<&(dyn Fn(u8, u32, u32) -> bool + Sync)> =
-        band.map(|_| &tile_filter as &(dyn Fn(u8, u32, u32) -> bool + Sync));
+    let tile_filter =
+        |cell: PyramidCell| band.is_none_or(|band| band.computed_owns(cell.z, cell.tx, cell.ty));
+    let tile_filter_dyn: Option<&(dyn Fn(PyramidCell) -> bool + Sync)> =
+        band.map(|_| &tile_filter as &(dyn Fn(PyramidCell) -> bool + Sync));
     let params = ocean_params(grid_zoom, pass.first_zoom(), window.last, tile_filter_dyn);
     let first_emitted = window.first;
     // Per-piece item target for the parallel frontier. Root cells of a
@@ -1093,13 +1093,7 @@ fn process_ocean_shapefile_inner(
             let mut acc = OceanAcc::new();
             let cells = {
                 let mut scratch = PyramidScratch::new();
-                let mut sink = ocean_sink(
-                    feature_id,
-                    ocean_layer,
-                    &empty_attrs_bytes,
-                    first_emitted,
-                    &mut acc,
-                );
+                let mut sink = ocean_sink(feature_id, &empty_attrs_bytes, first_emitted, &mut acc);
                 split_for_parallel(
                     piece,
                     &params,
@@ -1141,7 +1135,6 @@ fn process_ocean_shapefile_inner(
                 item,
                 &pieces,
                 &params,
-                ocean_layer,
                 &empty_attrs_bytes,
                 first_emitted,
                 &mut acc,
@@ -1649,7 +1642,7 @@ fn ocean_params<'a>(
     maxz: u8,
     z_top: u8,
     z_bottom: u8,
-    tile_filter: Option<&'a (dyn Fn(u8, u32, u32) -> bool + Sync)>,
+    tile_filter: Option<&'a (dyn Fn(PyramidCell) -> bool + Sync)>,
 ) -> PyramidParams<'a> {
     PyramidParams {
         maxz,
@@ -1675,17 +1668,16 @@ fn ocean_min_area(_z: u8) -> Area {
 /// window's first zoom, are constructed but not written.
 fn ocean_sink<'a>(
     feature_id: u64,
-    layer_idx: u8,
     attrs_bytes: &'a [u8],
     first_emitted: u8,
     acc: &'a mut OceanAcc,
-) -> impl FnMut(u8, u32, u32, &[u32], PyramidEmitKind) + 'a {
-    move |z: u8, tx: u32, ty: u32, geom: &[u32], kind: PyramidEmitKind| {
-        if z < first_emitted {
+) -> impl FnMut(PyramidCell, &[u32], PyramidEmitKind) + 'a {
+    move |cell: PyramidCell, geom: &[u32], kind: PyramidEmitKind| {
+        if cell.z < first_emitted {
             return;
         }
-        let tile_id = crate::tiling::TileId::at(z, tx, ty);
-        let key = sort::make_sort_key(tile_id, layer_idx, 0);
+        let tile_id = crate::tiling::TileId::at(cell.z, cell.tx, cell.ty);
+        let key = sort::SortKey::new(tile_id, Layer::Ocean, 0);
         let range = append_feature_data_with_attrs(
             &mut acc.payload,
             if kind == PyramidEmitKind::FullFill {
@@ -1697,8 +1689,12 @@ fn ocean_sink<'a>(
             geom,
             attrs_bytes,
         );
-        acc.bytes += range.len() + std::mem::size_of::<sort::PayloadRecord>();
-        acc.records.push((key, range.start, range.len()));
+        acc.bytes += range.len() + std::mem::size_of::<sort::PayloadRef>();
+        acc.records.push(sort::PayloadRef {
+            key,
+            offset: range.start,
+            len: range.len(),
+        });
     }
 }
 
@@ -1707,7 +1703,6 @@ fn emit_ocean_piece(
     item: OceanWorkItem,
     pieces: &[Shape],
     params: &PyramidParams<'_>,
-    layer_idx: u8,
     attrs_bytes: &[u8],
     first_emitted: u8,
     acc: &mut OceanAcc,
@@ -1716,7 +1711,7 @@ fn emit_ocean_piece(
         let mut int_scratch = int_cell.borrow_mut();
         let mut scratch = PyramidScratch::new();
         std::mem::swap(&mut scratch.int, &mut *int_scratch);
-        let mut sink = ocean_sink(item.feature_id, layer_idx, attrs_bytes, first_emitted, acc);
+        let mut sink = ocean_sink(item.feature_id, attrs_bytes, first_emitted, acc);
         match item.kind {
             OceanWorkKind::Whole(piece_idx) => {
                 emit_shape_pyramid(&pieces[piece_idx], params, &mut scratch, &mut sink);
@@ -1739,6 +1734,8 @@ mod tests {
     use crate::sort::SortWriter;
     use std::fs;
     use std::path::Path;
+
+    const Z0_CELL: PyramidCell = PyramidCell { z: 0, tx: 0, ty: 0 };
 
     fn record_osm_id(data: &[u8]) -> u64 {
         // The sort record payload leads with the raw little-endian osm_id
@@ -1783,34 +1780,34 @@ mod tests {
 
         let mut fragment_acc = OceanAcc::new();
         let mut fragment_kinds = Vec::new();
-        let mut fragment_sink = ocean_sink(0, Layer::Ocean as u8, &attrs, 0, &mut fragment_acc);
+        let mut fragment_sink = ocean_sink(0, &attrs, 0, &mut fragment_acc);
         let mut scratch = PyramidScratch::new();
         emit_shape_pyramid(
             &piece_zero,
             &params,
             &mut scratch,
-            &mut |z, tx, ty, geom, kind| {
-                if (z, tx, ty) == (cell.z, cell.tx, cell.ty) {
+            &mut |at: PyramidCell, geom, kind| {
+                if at == cell {
                     fragment_kinds.push(kind);
                 }
-                fragment_sink(z, tx, ty, geom, kind);
+                fragment_sink(at, geom, kind);
             },
         );
         drop(fragment_sink);
 
         let mut fill_acc = OceanAcc::new();
         let mut fill_kinds = Vec::new();
-        let mut fill_sink = ocean_sink(1, Layer::Ocean as u8, &attrs, 0, &mut fill_acc);
+        let mut fill_sink = ocean_sink(1, &attrs, 0, &mut fill_acc);
         let mut scratch = PyramidScratch::new();
         emit_shape_pyramid(
             &piece_one,
             &params,
             &mut scratch,
-            &mut |z, tx, ty, geom, kind| {
-                if (z, tx, ty) == (cell.z, cell.tx, cell.ty) {
+            &mut |at: PyramidCell, geom, kind| {
+                if at == cell {
                     fill_kinds.push(kind);
                 }
-                fill_sink(z, tx, ty, geom, kind);
+                fill_sink(at, geom, kind);
             },
         );
         drop(fill_sink);
@@ -1818,9 +1815,8 @@ mod tests {
         assert!(fragment_kinds.contains(&PyramidEmitKind::Fragment));
         assert!(fill_kinds.contains(&PyramidEmitKind::FullFill));
         let id_for_tile = |acc: &OceanAcc| {
-            acc.records.iter().find_map(|(key, offset, len)| {
-                (sort::tile_id_from_key(*key) == tile_id)
-                    .then(|| record_osm_id(&acc.payload[*offset..*offset + *len]))
+            acc.records.iter().find_map(|r| {
+                (r.key.tile() == tile_id).then(|| record_osm_id(r.bytes(&acc.payload)))
             })
         };
         assert_eq!(id_for_tile(&fragment_acc), Some(0));
@@ -1831,27 +1827,22 @@ mod tests {
     fn full_fill_uses_canonical_id_and_fragment_keeps_piece_id() {
         let mut acc = OceanAcc::new();
         let attrs = Vec::new();
-        let mut sink = ocean_sink(77, Layer::Ocean as u8, &attrs, 0, &mut acc);
-        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::FullFill);
-        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::Fragment);
+        let mut sink = ocean_sink(77, &attrs, 0, &mut acc);
+        sink(Z0_CELL, &[9, 0, 0], PyramidEmitKind::FullFill);
+        sink(Z0_CELL, &[9, 0, 0], PyramidEmitKind::Fragment);
         drop(sink);
-        let (_, first_start, first_len) = acc.records[0];
+        let first = acc.records[0];
         assert_eq!(
-            record_osm_id(&acc.payload[first_start..first_start + first_len]),
+            record_osm_id(first.bytes(&acc.payload)),
             FULL_FILL_FEATURE_ID
         );
-        let (_, second_start, second_len) = acc.records[1];
-        assert_eq!(
-            record_osm_id(&acc.payload[second_start..second_start + second_len]),
-            77
-        );
-        let mut sink = ocean_sink(88, Layer::Ocean as u8, &attrs, 0, &mut acc);
-        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::FullFill);
+        assert_eq!(record_osm_id(acc.records[1].bytes(&acc.payload)), 77);
+        let mut sink = ocean_sink(88, &attrs, 0, &mut acc);
+        sink(Z0_CELL, &[9, 0, 0], PyramidEmitKind::FullFill);
         drop(sink);
-        let (_, third_start, third_len) = acc.records[2];
         assert_eq!(
-            &acc.payload[first_start..first_start + first_len],
-            &acc.payload[third_start..third_start + third_len],
+            first.bytes(&acc.payload),
+            acc.records[2].bytes(&acc.payload),
             "full fills from different pieces retain identical payloads"
         );
     }
@@ -1864,11 +1855,10 @@ mod tests {
         // truncated record and add_feature_to_layer would emit nothing.
         let mut attrs = Vec::new();
         encode_attrs_bytes(&mut attrs, &[], 14);
-        let mut sink = ocean_sink(0, Layer::Ocean as u8, &attrs, 0, &mut acc);
-        sink(0, 0, 0, &[9, 0, 0], PyramidEmitKind::Fragment);
+        let mut sink = ocean_sink(0, &attrs, 0, &mut acc);
+        sink(Z0_CELL, &[9, 0, 0], PyramidEmitKind::Fragment);
         drop(sink);
-        let (_, start, len) = acc.records[0];
-        let data = &acc.payload[start..start + len];
+        let data = acc.records[0].bytes(&acc.payload);
         let mut layer = crate::mvt::LayerBuilder::new("ocean");
         crate::wire_format::add_feature_to_layer(&mut layer, data);
         assert_eq!(layer.features()[0].id, Some(0));
@@ -1961,8 +1951,8 @@ mod tests {
         let emit_shapes = |shapes: &[Shape]| -> Emitted {
             let params = ocean_params(maxz, 0, maxz, None);
             let mut out: Emitted = Vec::new();
-            let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32], _kind: PyramidEmitKind| {
-                out.push((z, tx, ty, geom.to_vec()));
+            let mut sink = |cell: PyramidCell, geom: &[u32], _kind: PyramidEmitKind| {
+                out.push((cell.z, cell.tx, cell.ty, geom.to_vec()));
             };
             let mut scratch = PyramidScratch::new();
             for shape in shapes {
@@ -2580,7 +2570,10 @@ mod tests {
         assert_eq!(count, emitted, "emitted count should match sorted records");
     }
 
-    fn sorted_records(dir: &Path, run: impl FnOnce(&mut SortWriter)) -> Vec<(u64, Box<[u8]>)> {
+    fn sorted_records(
+        dir: &Path,
+        run: impl FnOnce(&mut SortWriter),
+    ) -> Vec<(sort::SortKey, Box<[u8]>)> {
         let mut sort_writer = SortWriter::new(dir, 1 << 20, sort::ChunkCompression::None).unwrap();
         run(&mut sort_writer);
         let mut reader = sort_writer.finish().unwrap();
@@ -2646,7 +2639,7 @@ mod tests {
             let restricted: Vec<_> = full
                 .iter()
                 .filter(|(key, _)| {
-                    let zoom = sort::tile_id_from_key(*key).zoom();
+                    let zoom = key.tile().zoom();
                     min_zoom <= zoom && zoom <= max_zoom
                 })
                 .cloned()

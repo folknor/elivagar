@@ -26,7 +26,7 @@ pub(crate) struct PyramidParams<'a> {
     pub pins: Option<&'a FxHashSet<(i32, i32)>>,
     /// Ocean supplies this ownership predicate so artifact-interior cells are
     /// pruned before geometry work. OSM leaves it unset.
-    pub tile_filter: Option<&'a (dyn Fn(u8, u32, u32) -> bool + Sync)>,
+    pub tile_filter: Option<&'a (dyn Fn(PyramidCell) -> bool + Sync)>,
     pub simplifier: Simplifier,
 }
 
@@ -42,7 +42,11 @@ pub(crate) enum PyramidEmitKind {
     FullFill,
 }
 
-pub(crate) type PyramidSink<'a> = &'a mut dyn FnMut(u8, u32, u32, &[u32], PyramidEmitKind);
+/// Receives each emitted tile's encoded geometry. The tile travels as a
+/// [`PyramidCell`] rather than a bare `(z, x, y)` triple so `x` and `y`
+/// cannot be swapped at a sink; no wider `TileCoord` type exists because
+/// everything past the sink addresses tiles by `TileId`.
+pub(crate) type PyramidSink<'a> = &'a mut dyn FnMut(PyramidCell, &[u32], PyramidEmitKind);
 
 pub(crate) struct PyramidScratch {
     pub int: IntEmitScratch,
@@ -409,7 +413,7 @@ fn emit_cell(
                     cell.ty,
                     &mut scratch.int,
                     &mut |tx, ty, geom| {
-                        sink(cell.z, tx, ty, geom, PyramidEmitKind::Fragment);
+                        emit_fragment(sink, cell.z, tx, ty, geom);
                     },
                 );
             }
@@ -438,7 +442,7 @@ fn emit_cell(
                     cell.ty,
                     &mut scratch.int,
                     &mut |tx, ty, geom| {
-                        sink(cell.z, tx, ty, geom, PyramidEmitKind::Fragment);
+                        emit_fragment(sink, cell.z, tx, ty, geom);
                     },
                 );
             }
@@ -451,13 +455,19 @@ fn emit_cell(
                     cell.ty,
                     &mut scratch.int,
                     &mut |tx, ty, geom| {
-                        sink(cell.z, tx, ty, geom, PyramidEmitKind::Fragment);
+                        emit_fragment(sink, cell.z, tx, ty, geom);
                     },
                 );
             }
         }
         scratch.return_shapes(normalized);
     }
+}
+
+/// Hand one encoded fragment to the sink. `tx`/`ty` are the tile the encoder
+/// reports, kept rather than re-read from the cell being descended.
+fn emit_fragment(sink: PyramidSink<'_>, z: u8, tx: u32, ty: u32, geom: &[u32]) {
+    sink(PyramidCell { z, tx, ty }, geom, PyramidEmitKind::Fragment);
 }
 
 /// Move every shape of `normalized` into `out`, partitioning the ones over
@@ -569,7 +579,15 @@ fn emit_full_subtree(
         cell.ty,
         &mut scratch.int,
         &mut |out_tx, out_ty, geom| {
-            sink(cell.z, out_tx, out_ty, geom, PyramidEmitKind::FullFill);
+            sink(
+                PyramidCell {
+                    z: cell.z,
+                    tx: out_tx,
+                    ty: out_ty,
+                },
+                geom,
+                PyramidEmitKind::FullFill,
+            );
         },
     );
     if cell.z < params.z_bottom {
@@ -581,7 +599,7 @@ fn emit_full_subtree(
 
 fn cell_is_owned(cell: PyramidCell, params: &PyramidParams<'_>) -> bool {
     match params.tile_filter {
-        Some(filter) => filter(cell.z, cell.tx, cell.ty),
+        Some(filter) => filter(cell),
         None => true,
     }
 }
@@ -1513,12 +1531,9 @@ mod tests {
 
             let mut scratch = PyramidScratch::new();
             let mut emitted = Vec::new();
-            emit_shape_pyramid(
-                &shape_base,
-                &params,
-                &mut scratch,
-                &mut |_, _, _, geom, _| emitted.push(geom.to_vec()),
-            );
+            emit_shape_pyramid(&shape_base, &params, &mut scratch, &mut |_, geom, _| {
+                emitted.push(geom.to_vec());
+            });
             assert!(!emitted.is_empty(), "case {case} emits polygon geometry");
             if case == 19 {
                 assert!(emitted.len() > 1, "over-cap input is partitioned");
@@ -1564,7 +1579,7 @@ mod tests {
             shape,
             params,
             &mut scratch,
-            &mut |z, tx, ty, geom, _kind| {
+            &mut |PyramidCell { z, tx, ty }, geom, _kind| {
                 out.entry((z, tx, ty))
                     .or_insert_with(Vec::new)
                     .extend_from_slice(geom);
@@ -1792,7 +1807,7 @@ mod tests {
             left_frag,
             &params,
             &mut ps,
-            &mut |z, tx, ty, geom, _kind| {
+            &mut |PyramidCell { z, tx, ty }, geom, _kind| {
                 left.insert((z, tx, ty), geom.to_vec());
             },
         );
@@ -1801,7 +1816,7 @@ mod tests {
             right_frag,
             &params,
             &mut ps,
-            &mut |z, tx, ty, geom, _kind| {
+            &mut |PyramidCell { z, tx, ty }, geom, _kind| {
                 right.insert((z, tx, ty), geom.to_vec());
             },
         );
@@ -1866,7 +1881,7 @@ mod tests {
             left_frag,
             &params,
             &mut ps,
-            &mut |z, tx, ty, geom, _kind| {
+            &mut |PyramidCell { z, tx, ty }, geom, _kind| {
                 left.insert((z, tx, ty), geom.to_vec());
             },
         );
@@ -1875,7 +1890,7 @@ mod tests {
             right_frag,
             &params,
             &mut ps,
-            &mut |z, tx, ty, geom, _kind| {
+            &mut |PyramidCell { z, tx, ty }, geom, _kind| {
                 right.insert((z, tx, ty), geom.to_vec());
             },
         );

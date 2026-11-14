@@ -4,8 +4,9 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::archive::{self, PmtilesWriter};
+use crate::archive::PmtilesWriter;
 use crate::debug::{WAIT, wait_span};
+use crate::shortbread::Layer;
 use crate::sort;
 use crate::tiling::TileId;
 
@@ -35,6 +36,19 @@ struct SortPiece {
     sources: Vec<sort::SortSourceSlice>,
 }
 
+/// The layer of a record read back from a chunk. Chunk keys are not
+/// validated when decoded, so a corrupt or foreign layer byte is refused
+/// here, where the record enters a tile, and never reaches an encoder.
+fn record_layer(key: sort::SortKey) -> Result<Layer, PipelineError> {
+    key.layer().ok_or_else(|| {
+        let (z, x, y) = key.tile().coord();
+        PipelineError(format!(
+            "corrupt or foreign sort record has unknown layer id {} in tile {z}/{x}/{y}",
+            key.layer_byte()
+        ))
+    })
+}
+
 const MAX_PIECES: u64 = 32;
 const MAX_BUCKETS: u64 = 4096;
 const MAX_SOURCE_SCAN_THREADS: usize = 8;
@@ -57,7 +71,7 @@ fn scan_source_buckets(
         let Some((key, _data_len)) = cursor.next_header_discard_payload()? else {
             break;
         };
-        let tile_id = sort::tile_id_from_key(key).raw();
+        let tile_id = key.tile().raw();
         let bucket = usize::try_from((tile_id.saturating_sub(range_start)) >> shift)
             .map_err(|_| std::io::Error::other("piece scan bucket does not fit usize"))?;
         if bucket >= bucket_count {
@@ -549,8 +563,7 @@ pub(super) fn phase_assemble_partitions(
                             PartitionItem::RunCopy {
                                 tile_id,
                                 run_length,
-                                offset,
-                                length,
+                                blob,
                             } => {
                                 let ocean = ocean.ok_or_else(|| {
                                     PipelineError(
@@ -561,7 +574,7 @@ pub(super) fn phase_assemble_partitions(
                                     &mut pmtiles,
                                     tile_id,
                                     run_length,
-                                    &ocean.raw_blob(archive::BlobRef { offset, length })?,
+                                    &ocean.raw_blob(blob)?,
                                 )?;
                             }
                         }
@@ -724,8 +737,8 @@ fn read_encode_partition(
                 };
                 batch_features_read += 1;
 
-                let tile_id = sort::tile_id_from_key(r.key);
-                let layer_idx = sort::layer_from_key(r.key);
+                let tile_id = r.key.tile();
+                let layer = record_layer(r.key)?;
                 if tile_id != current.tile_id || current.features.is_empty() {
                     if !current.features.is_empty() {
                         batch_bytes += 32 + current_tile_bytes;
@@ -764,7 +777,7 @@ fn read_encode_partition(
                     current_tile_bytes = 0;
                 }
                 let data_len = r.data.len();
-                current.features.push((layer_idx, r.data));
+                current.features.push((layer, r.data));
                 current_tile_bytes += 32 + data_len;
             }
             Ok(())
@@ -858,12 +871,68 @@ mod tests {
         TileId::new(raw).unwrap()
     }
 
+    fn key(tile: TileId, layer: u8, rank: u8) -> sort::SortKey {
+        sort::SortKey::new(tile, Layer::ALL[usize::from(layer)], rank)
+    }
+
+    #[test]
+    fn records_with_an_unknown_layer_byte_are_refused_at_read_back() {
+        let forged = sort::SortKey::from_raw((TileId::at(3, 4, 5).raw() << 16) | (255 << 8));
+        let error = record_layer(forged).expect_err("layer byte 255 names no layer");
+        assert!(
+            error.0.contains("unknown layer id 255 in tile 3/4/5"),
+            "{}",
+            error.0
+        );
+        assert_eq!(
+            record_layer(key(TileId::at(3, 4, 5), Layer::Ocean as u8, 0)).unwrap(),
+            Layer::Ocean
+        );
+
+        // End to end: the forged record goes through a chunk file and the
+        // partition reader, and assembly fails with the diagnostic.
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer =
+            sort::SortWriter::new(dir.path(), 1_000_000, sort::ChunkCompression::None).unwrap();
+        writer
+            .push(sort::SortRecord {
+                key: forged,
+                data: Box::from([0u8; 16].as_slice()),
+            })
+            .unwrap();
+        let mut reader = writer.finish().unwrap();
+        let partitions = reader.take_partitions();
+        let partition = &partitions[0];
+        let source =
+            sort::SortPartitionReader::open(partition, sort::ChunkCompression::None).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let contract = TileContract::Mvt {
+            compression: super::super::super::TileCompression::Gzip,
+            level: 6,
+        };
+        let error = read_encode_partition(
+            0,
+            source,
+            sort::partition_tile_range(partition.index),
+            contract,
+            1 << 20,
+            None,
+            &tx,
+        )
+        .expect_err("assembly refuses the forged layer byte");
+        assert!(
+            error.0.contains("unknown layer id 255 in tile 3/4/5"),
+            "{}",
+            error.0
+        );
+    }
+
     /// Records spread across one z14-block partition with a deliberately hot
     /// tile band, plus neighbor-partition records so chunks carry multiple
     /// sections. A leading flush forces a whole-file source as well.
     fn push_piece_fixture(writer: &mut sort::SortWriter, partition: usize) {
-        let base = sort::partition_start_tile_id(partition);
-        let neighbor_base = sort::partition_start_tile_id(partition + 1);
+        let base = sort::partition_start_tile_id(partition).raw();
+        let neighbor_base = sort::partition_start_tile_id(partition + 1).raw();
         for i in 0..50u64 {
             let tile_id = base + i * 16 + 3;
             let mut data = vec![0u8; 24];
@@ -871,7 +940,7 @@ mod tests {
             data[8] = 0xEE;
             writer
                 .push(sort::SortRecord {
-                    key: sort::make_sort_key(tile(tile_id), 6, 1),
+                    key: key(tile(tile_id), 6, 1),
                     data: data.into_boxed_slice(),
                 })
                 .unwrap();
@@ -890,14 +959,14 @@ mod tests {
             let layer = (i % 5) as u8;
             writer
                 .push(sort::SortRecord {
-                    key: sort::make_sort_key(tile(tile_id), layer, 0),
+                    key: key(tile(tile_id), layer, 0),
                     data: data.into_boxed_slice(),
                 })
                 .unwrap();
             if i % 3 == 0 {
                 writer
                     .push(sort::SortRecord {
-                        key: sort::make_sort_key(tile(neighbor_base + (i % 16)), 0, 0),
+                        key: key(tile(neighbor_base + (i % 16)), 0, 0),
                         data: Box::from(i.to_le_bytes().as_slice()),
                     })
                     .unwrap();
@@ -911,8 +980,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut writer = sort::SortWriter::new(dir.path(), 16 * 1024, compression).unwrap();
             let first_tile = TileId::at(14, 0, 0);
-            let partition_index =
-                sort::partition_from_key(sort::make_sort_key(first_tile, 0, 0)) + 5;
+            let partition_index = key(first_tile, 0, 0).partition() + 5;
             push_piece_fixture(&mut writer, partition_index);
             writer.flush().unwrap();
             let mut reader = writer.finish().unwrap();
@@ -956,7 +1024,7 @@ mod tests {
                 let mut piece_reader =
                     sort::SortPartitionReader::open_slices(&piece.sources, compression).unwrap();
                 while let Some(record) = piece_reader.next().unwrap() {
-                    let tile_id = sort::tile_id_from_key(record.key).raw();
+                    let tile_id = record.key.tile().raw();
                     assert!(
                         tile_id >= piece.start_tile && tile_id < piece.end_tile,
                         "record tile {tile_id} escaped piece [{}, {})",
@@ -984,30 +1052,30 @@ mod tests {
         let mut writer =
             sort::SortWriter::new(dir.path(), 1_000_000, sort::ChunkCompression::None).unwrap();
         let z7_tile = TileId::at(7, 0, 0);
-        let z7_key = sort::make_sort_key(z7_tile, 0, 0);
+        let z7_key = key(z7_tile, 0, 0);
         writer
             .push(sort::SortRecord {
                 key: z7_key,
-                data: Box::from(z7_key.to_le_bytes().as_slice()),
+                data: Box::from(z7_key.raw().to_le_bytes().as_slice()),
             })
             .unwrap();
         let z14_tile = TileId::at(14, 0, 0);
-        let z14_key = sort::make_sort_key(z14_tile, 0, 0);
+        let z14_key = key(z14_tile, 0, 0);
         writer
             .push(sort::SortRecord {
                 key: z14_key,
-                data: Box::from(z14_key.to_le_bytes().as_slice()),
+                data: Box::from(z14_key.raw().to_le_bytes().as_slice()),
             })
             .unwrap();
         let mut reader = writer.finish().unwrap();
         let partitions = reader.take_partitions();
         let z7_partition = partitions
             .iter()
-            .find(|partition| partition.index == sort::partition_from_key(z7_key))
+            .find(|partition| partition.index == z7_key.partition())
             .unwrap();
         let z14_partition = partitions
             .iter()
-            .find(|partition| partition.index == sort::partition_from_key(z14_key))
+            .find(|partition| partition.index == z14_key.partition())
             .unwrap();
         assert!(
             plan_pieces(z7_partition, sort::ChunkCompression::None, 1)

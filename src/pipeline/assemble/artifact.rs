@@ -2,7 +2,7 @@
 //! copy, which encoded tiles take the artifact's ocean layer, and the
 //! extraction of that layer field. Ownership itself is `OceanBand`'s.
 
-use crate::archive::TileRun;
+use crate::archive::{BlobRef, TileRun};
 use crate::ocean::band::TileRect;
 use crate::shortbread::Layer;
 use crate::tiling::{MAX_ZOOM, TileId, ZOOM_COUNT, zoom_ids};
@@ -42,7 +42,7 @@ impl<'a> ArtifactPartitionCtx<'a> {
         if self.ocean.band().computed_owns(z, x, y) {
             return None;
         }
-        self.ocean.run_covering(tile_id.raw())
+        self.ocean.run_covering(tile_id)
     }
 
     /// The raw MVT layer field (tag, length and body) of `run`'s payload,
@@ -72,7 +72,7 @@ pub(super) fn artifact_run_copy_items(
                 let z = artifact_tile(cursor)?.zoom();
                 let zoom_end = zoom_ids(z).1;
                 let sub_end = run_end.min(zoom_end);
-                append_artifact_run_copy(&mut items, cursor, sub_end, blob.offset, blob.length)?;
+                append_artifact_run_copy(&mut items, cursor, sub_end, blob)?;
                 cursor = sub_end;
             }
             continue;
@@ -97,8 +97,7 @@ pub(super) fn artifact_run_copy_items(
                     &mut items,
                     range_start.max(cursor),
                     range_end.min(sub_end),
-                    blob.offset,
-                    blob.length,
+                    blob,
                 )?;
             }
             cursor = sub_end;
@@ -119,12 +118,15 @@ fn artifact_tile(raw: u64) -> Result<TileId, PipelineError> {
         })
 }
 
+/// Queue a copy of `blob` over the ids `[start, end)`. The bounds are raw
+/// like every id-range boundary here (see `crate::tiling`): range arithmetic
+/// steps to exclusive ends that need not be addresses, and the start becomes
+/// a `TileId` once it names the run's first tile.
 fn append_artifact_run_copy(
     items: &mut Vec<PartitionItem>,
     start: u64,
     end: u64,
-    offset: u64,
-    length: u32,
+    blob: BlobRef,
 ) -> Result<(), PipelineError> {
     if start >= end {
         return Ok(());
@@ -133,8 +135,7 @@ fn append_artifact_run_copy(
         tile_id: artifact_tile(start)?,
         run_length: u32::try_from(end - start)
             .map_err(|_| PipelineError("artifact split run length exceeds u32".to_string()))?,
-        offset,
-        length,
+        blob,
     });
     Ok(())
 }
@@ -772,7 +773,7 @@ mod tests {
                 .iter()
                 .map(|&tile_id| PendingTile {
                     tile_id,
-                    features: vec![(Layer::Boundaries as u8, line_record())],
+                    features: vec![(Layer::Boundaries, line_record())],
                 })
                 .collect()
         };
@@ -809,7 +810,7 @@ mod tests {
         let ctx = ArtifactPartitionCtx::new(&tiles).unwrap();
         let pending = [PendingTile {
             tile_id: address,
-            features: vec![(Layer::Ocean as u8, polygon_record())],
+            features: vec![(Layer::Ocean, polygon_record())],
         }];
         let Err(error) = encode_partition_batch(&pending, MVT_GZIP_6, Some(&ctx)) else {
             panic!("computed ocean on an artifact-owned tile was accepted");

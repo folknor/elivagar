@@ -30,7 +30,7 @@ impl WriteTally {
     ) -> Result<(), PipelineError> {
         let (z, x, y) = tile.tile_id.coord();
         let bytes = tile.compressed.len() as u64;
-        record_tile_size_diagnostics(&mut self.size_diag, tile.tile_id.raw(), bytes);
+        record_tile_size_diagnostics(&mut self.size_diag, tile.tile_id, bytes);
         let unique = pmtiles.add_tile(z, x, y, &tile.compressed)?;
         self.addressed(z, 1, unique, bytes);
         Ok(())
@@ -50,7 +50,7 @@ impl WriteTally {
             .map_err(|_| PipelineError("tile payload length exceeds u64".to_string()))?;
         let unique = pmtiles.add_run(tile_id, run_length, data)?;
         self.addressed(z, u64::from(run_length), unique, bytes);
-        record_tile_size_diagnostics(&mut self.size_diag, tile_id.raw(), bytes);
+        record_tile_size_diagnostics(&mut self.size_diag, tile_id, bytes);
         if run_length > 1 {
             let rest = u64::from(run_length - 1);
             self.size_diag.total_tile_bytes += bytes * rest;

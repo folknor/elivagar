@@ -249,7 +249,7 @@ pub(super) fn partition_ranges_by_key(
     let mut ranges = Vec::new();
     let mut start = 0;
     while start < len {
-        let partition = partition_from_key(key_at(start));
+        let partition = key_at(start).partition();
         let next_key = partition_next_key(partition);
         let mut end = start + 1;
         while end < len && key_at(end) < next_key {
@@ -281,14 +281,14 @@ impl RecordSource for [SortRecord] {
     }
 }
 
-pub(super) struct PayloadSource<'a>(&'a [PayloadRecord], &'a [u8]);
+pub(super) struct PayloadSource<'a>(&'a [PayloadRef], &'a [u8]);
 impl RecordSource for PayloadSource<'_> {
     fn len(&self) -> usize {
         self.0.len()
     }
     fn record(&self, index: usize) -> (SortKey, &[u8]) {
-        let (key, offset, len) = self.0[index];
-        (key, &self.1[offset..offset + len])
+        let record = self.0[index];
+        (record.key, record.bytes(self.1))
     }
 }
 
@@ -303,7 +303,7 @@ pub(super) fn write_records<S: RecordSource + ?Sized>(
     let serialize = |out: &mut dyn Write, start: usize, end: usize| -> io::Result<()> {
         for index in start..end {
             let (key, data) = source.record(index);
-            out.write_all(&key.to_le_bytes())?;
+            out.write_all(&key.raw().to_le_bytes())?;
             out.write_all(&(data.len() as u32).to_le_bytes())?;
             out.write_all(data)?;
         }
@@ -400,7 +400,7 @@ pub(super) fn write_partitioned_sort_chunk(
 }
 
 pub(super) fn write_partitioned_payload_chunk(
-    records: &[PayloadRecord],
+    records: &[PayloadRef],
     payload: &[u8],
     tmp_dir: &Path,
     chunk_no: usize,
@@ -416,7 +416,7 @@ pub(super) fn write_partitioned_payload_chunk(
 
 #[allow(clippy::cast_possible_truncation)]
 pub(super) fn write_payload_chunk_records_presorted(
-    records: &[PayloadRecord],
+    records: &[PayloadRef],
     payload: &[u8],
     path: &Path,
     compression: ChunkCompression,
@@ -738,7 +738,7 @@ impl ChunkReader {
 
         let mut buf8 = [0u8; 8];
         self.reader.read_exact(&mut buf8)?;
-        let key = u64::from_le_bytes(buf8);
+        let key = SortKey::from_raw(u64::from_le_bytes(buf8));
 
         let mut buf4 = [0u8; 4];
         self.reader.read_exact(&mut buf4)?;
@@ -763,7 +763,7 @@ impl ChunkReader {
         }
         let mut buf8 = [0u8; 8];
         self.reader.read_exact(&mut buf8)?;
-        let key = u64::from_le_bytes(buf8);
+        let key = SortKey::from_raw(u64::from_le_bytes(buf8));
         let mut buf4 = [0u8; 4];
         self.reader.read_exact(&mut buf4)?;
         let data_len = u32::from_le_bytes(buf4);
@@ -829,7 +829,7 @@ mod tests {
                 })
                 .collect();
             records.push(SortRecord {
-                key,
+                key: SortKey::from_raw(key),
                 data: data.into_boxed_slice(),
             });
         }

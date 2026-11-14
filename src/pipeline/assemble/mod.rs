@@ -20,7 +20,7 @@ mod encode;
 mod report;
 mod schedule;
 
-use crate::archive::{self, LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter};
+use crate::archive::{self, BlobRef, LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter};
 use crate::debug::{WAIT, emit_counter_u64, emit_counter_usize, wait_span};
 use crate::shortbread::Layer;
 use crate::sort;
@@ -39,7 +39,7 @@ pub(super) use encode::{AssemblyScratch, prepare_non_empty_layers};
 /// A tile's features collected from the sort reader, ready for parallel encoding.
 pub(in crate::pipeline) struct PendingTile {
     pub(in crate::pipeline) tile_id: TileId,
-    pub(in crate::pipeline) features: Vec<(u8, Box<[u8]>)>, // (layer_idx, feature_data)
+    pub(in crate::pipeline) features: Vec<(Layer, Box<[u8]>)>,
 }
 
 const _: () = assert!(std::mem::size_of::<PendingTile>() == 32);
@@ -62,8 +62,7 @@ enum PartitionItem {
     RunCopy {
         tile_id: TileId,
         run_length: u32,
-        offset: u64,
-        length: u32,
+        blob: BlobRef,
     },
 }
 

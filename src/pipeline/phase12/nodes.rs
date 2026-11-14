@@ -243,9 +243,11 @@ impl NodeWorker {
         );
         for r in self.node_records.drain(..) {
             self.sink.tally.record(r.key, r.data.len());
-            self.sink
-                .records
-                .push((r.key, self.sink.payload.len(), r.data.len()));
+            self.sink.records.push(crate::sort::PayloadRef {
+                key: r.key,
+                offset: self.sink.payload.len(),
+                len: r.data.len(),
+            });
             self.sink.payload.extend_from_slice(&r.data);
         }
         self.features_emitted += n;

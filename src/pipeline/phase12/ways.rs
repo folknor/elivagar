@@ -458,11 +458,11 @@ pub(super) fn drain_way_task_result(
     // Flushed records plus the residual written here: each record is counted
     // exactly once, on whichever side of the flush it left the acc.
     let count = result.count + result.sink.records.len() as u64;
-    for (key, off, len) in result.sink.records {
+    for record in result.sink.records {
         sort_writer
             .push_untracked(SortRecord {
-                key,
-                data: result.sink.payload[off..off + len].into(),
+                key: record.key,
+                data: record.bytes(&result.sink.payload).into(),
             })
             .expect("sort push failed");
     }
