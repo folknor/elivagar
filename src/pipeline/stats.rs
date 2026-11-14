@@ -117,7 +117,6 @@ pub(super) struct Phase12Stats {
     pub(super) relation_plan_superset_ways: usize,
     pub(super) way_members_marked: u64,
     pub(super) way_pins_marked: u64,
-    pub(super) relation_blocks_drop_rss_kb: Option<u64>,
     pub(super) missing_refs: MissingRefStats,
     pub(super) sort_records: u64,
     pub(super) sort_record_bytes: u64,

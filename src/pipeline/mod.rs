@@ -501,18 +501,6 @@ fn peak_rss_kb() -> Option<u64> {
     None
 }
 
-/// Read current resident set size (VmRSS) from `/proc/self/status`.
-/// Returns `None` on non-Linux platforms or if parsing fails.
-fn current_rss_kb() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            return rest.trim().strip_suffix("kB")?.trim().parse().ok();
-        }
-    }
-    None
-}
-
 fn emit_allocator_boundary(name: &str) {
     emit_alloc_boundary(name);
 }
@@ -1073,9 +1061,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         emit_counter_usize("relation_plan_superset_ways", s.relation_plan_superset_ways);
         emit_counter_u64("way_members_marked", s.way_members_marked);
         emit_counter_u64("way_pins_marked", s.way_pins_marked);
-        if let Some(kb) = s.relation_blocks_drop_rss_kb {
-            emit_counter_u64("relation_blocks_drop_rss_kb", kb);
-        }
         emit_counter_u64(
             "missing_way_node_refs",
             s.missing_refs.missing_way_node_refs,

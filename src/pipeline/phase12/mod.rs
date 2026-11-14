@@ -27,7 +27,7 @@ use pbfhogg::{BlobFilter, BlockType, ElementReader, PrimitiveBlock};
 
 use super::relations::process_relation_blocks;
 use super::stats::{FanoutStats, MissingRefStatsAtomic, Phase12Stats};
-use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb};
+use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig};
 use crate::tiling::ZoomRange;
 use extent::CoordinateExtent;
 use input::{UnorderedBlockSource, WayBlock};
@@ -554,13 +554,6 @@ pub(super) fn phase_read_and_process(
     // coalesced chunk.
     sort_writer.adopt_chunk_files(spill.finish());
 
-    let rss_before_relation_drop = current_rss_kb();
-    drop(relations.blocks);
-    let rss_after_relation_drop = current_rss_kb();
-    let relation_blocks_drop_rss_kb = rss_before_relation_drop
-        .zip(rss_after_relation_drop)
-        .map(|(before, after)| before.saturating_sub(after));
-
     // Drop way_index to release compressed data + index memory before
     // ocean/sort/assemble phases.
     drop(way_index);
@@ -602,7 +595,6 @@ pub(super) fn phase_read_and_process(
         relation_plan_superset_ways,
         way_members_marked: way_counters.members_marked.load(Ordering::Relaxed),
         way_pins_marked: way_counters.pins_marked.load(Ordering::Relaxed),
-        relation_blocks_drop_rss_kb,
         missing_refs: missing_ref_stats.snapshot(),
         sort_records: sort_writer.total_records(),
         sort_record_bytes: sort_writer.total_record_bytes(),
