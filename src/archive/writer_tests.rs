@@ -383,6 +383,11 @@ fn test_metadata_json() {
     assert_eq!(layers[0]["id"], "water_polygons");
     assert_eq!(layers[15]["id"], "streets");
     assert_eq!(layers[25]["id"], "ocean");
+    assert_eq!(layers[25]["fields"], serde_json::json!({}));
+    assert_eq!(layers[0]["fields"], serde_json::json!({"kind": "String"}));
+    assert_eq!(layers[9]["fields"]["admin_level"], "Number");
+    assert_eq!(layers[9]["fields"]["way_area"], "Number");
+    assert_eq!(layers[8]["fields"]["maritime"], "Boolean");
     assert!(parsed.get("source_pbf").is_none());
     assert!(parsed.get("osmosis_replication_timestamp").is_none());
 }
@@ -520,7 +525,7 @@ fn metadata_serialization_keeps_the_existing_field_order() {
     let json = std::str::from_utf8(&json).unwrap();
 
     assert!(json.starts_with(
-        r#"{"name":"Shortbread","format":"pbf","tile_payload_format":"mvt","tile_compression":"gzip","type":"baselayer","minzoom":0,"maxzoom":14,"vector_layers":[{"id":"water_polygons","minzoom":4,"maxzoom":14}"#
+        r#"{"name":"Shortbread","format":"pbf","tile_payload_format":"mvt","tile_compression":"gzip","type":"baselayer","minzoom":0,"maxzoom":14,"vector_layers":[{"id":"water_polygons","fields":{"kind":"String"},"minzoom":4,"maxzoom":14}"#
     ));
     let source_position = json
         .find(r#","source_pbf":"denmark-latest.osm.pbf""#)

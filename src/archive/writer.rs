@@ -1342,6 +1342,8 @@ pub struct Tileset {
 pub struct VectorLayer {
     pub id: String,
     pub min_zoom: u8,
+    /// TileJSON field names and types (String, Number, Boolean).
+    pub fields: std::collections::BTreeMap<String, String>,
 }
 
 /// The archive's JSON schema and serialization live together here, inside
@@ -1385,6 +1387,7 @@ mod metadata {
     #[derive(Serialize)]
     struct VectorLayer<'a> {
         id: &'a str,
+        fields: &'a std::collections::BTreeMap<String, String>,
         minzoom: u8,
         maxzoom: u8,
     }
@@ -1415,6 +1418,7 @@ mod metadata {
                 .iter()
                 .map(|layer| VectorLayer {
                     id: &layer.id,
+                    fields: &layer.fields,
                     minzoom: layer.min_zoom.max(config.min_zoom),
                     maxzoom: config.max_zoom,
                 })

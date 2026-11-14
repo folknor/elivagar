@@ -506,6 +506,10 @@ without a geometry field, an unreadable tag or field, a value message that
 does not decode (referenced or not) and a tag index outside the layer's
 tables each fail the tile. `verify` is a check on elivagar's own output, so
 a foreign archive carrying extension fields fails it by design.
+Observed attribute keys must be allowed for their Shortbread layer, and
+values must match the schema, including integer versus floating-point types.
+Each metadata `vector_layers` entry must carry the complete canonical
+`fields` map. TileJSON advertises both numeric types as `Number`.
 
 | flag | meaning |
 |---|---|

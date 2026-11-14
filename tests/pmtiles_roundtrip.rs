@@ -370,6 +370,7 @@ fn test_mvt_layer_decode() {
             .map(|layer| elivagar::archive::VectorLayer {
                 id: layer.name().to_owned(),
                 min_zoom: layer.min_zoom(),
+                fields: layer.fields(),
             })
             .collect(),
     });

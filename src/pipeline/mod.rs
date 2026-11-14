@@ -227,6 +227,7 @@ pub(crate) fn shortbread_tileset(layers: &[shortbread::Layer]) -> archive::Tiles
             .map(|layer| archive::VectorLayer {
                 id: layer.name().to_owned(),
                 min_zoom: layer.min_zoom(),
+                fields: layer.fields(),
             })
             .collect(),
     }

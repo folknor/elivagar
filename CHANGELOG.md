@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Breaking: `archive::VectorLayer` gains a required `fields` map.
+  `shortbread::Layer::fields()` supplies the canonical TileJSON declarations.
+  Generated archive metadata now includes complete per-layer field maps.
+  Verify rejects metadata field maps that differ from the profile, undeclared
+  MVT attributes, and values with the wrong schema type, including integer
+  versus floating-point mismatches.
+
+
 - Breaking: `shortbread::LayerMatch`, `Attr`, `AttrValue`, `match_element`,
   `Tags`, `GeomExpect`, `OsmGeomType` and `Layer::accepts` are
   crate-private; they had no consumer. `Layer` and the kind enums keep

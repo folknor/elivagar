@@ -103,22 +103,6 @@ layer names or which producer it serves; ocean-policy constants move beside
 Reported by the pipeline, Shortbread, layer-identity, coordinate-spaces and
 polygon-engine hunts.
 
-## CON-027 - What attribute keys exist, and what type is each?
-
-Global key typing has landed: `shortbread::attr_keys!` declares every key's
-wire id, name and value type, `Attr` is built only through typed
-constructors, the sort-record decoder refuses a value type its key does not
-declare, and MLT columns take their type from the schema. What remains is
-per-layer: no code says which keys a layer may carry, so TileJSON
-`vector_layers` entries still have no `fields` and verify checks only layer
-names (plus the paint-order recovery keys). The settled design is link 2 of
-`notes/attr-schema-design.md`: allowed-key sets per layer, `fields` in the
-metadata (Int and Float both TileJSON `Number`), and verify checking both
-the observed keys and types and the metadata field map against the canonical
-declarations.
-
-Reported by the encoding, Shortbread and layer-identity hunts.
-
 ---
 
 # Storage, sort and resources

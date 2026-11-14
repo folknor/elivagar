@@ -23,6 +23,11 @@ header, and the writer's `add_run` / `set_metadata_verbatim`), the
 `tile_detail` MVT decoder with selectable unknown-field strictness, and typed
 provenance.
 
+Producers using `archive::VectorLayer` supply `fields: BTreeMap<String,
+String>` with TileJSON types `String`, `Number` or `Boolean`.
+`shortbread::Layer::fields()` returns the canonical map for that layer;
+integer and floating-point attributes both advertise `Number`.
+
 Archive read operations (including header decode and tile-contract checks)
 and `tile_detail` decoders return `DecodeError`, with `kind()` and `locus()`.
 `DecodeErrorKind` distinguishes malformed bytes, unsupported formats, OS I/O

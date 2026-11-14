@@ -2304,7 +2304,13 @@ fn relation_labels_aggregate_components_once_per_layer_per_zoom() {
     ];
     let matches = layers
         .iter()
-        .map(|&layer| test_layer_match(layer, layer.polygon_point_geom_expect()))
+        .map(|&layer| {
+            let mut matched = test_layer_match(layer, layer.polygon_point_geom_expect());
+            // This test measures label placement, not attributes. These layers
+            // have different field sets, so give each an empty attribute list.
+            matched.attrs.clear();
+            matched
+        })
         .collect();
     let relation = relations::PreparedRelation {
         osm_id: 42,

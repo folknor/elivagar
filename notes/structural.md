@@ -298,8 +298,8 @@ Going further, `build.rs` could generate the tables from `shortbread.yml`, at
 the cost of an overlay for non-spec decisions (paint ranks, the cliff line,
 numeric parsing); hand-written tables plus a test asserting every upstream
 `include_when` value and `min_zoom` override is represented gets most of the
-benefit. The layer table also lets `vector_layers` carry `fields` and lets
-verify check observed attributes against the schema.
+benefit. (`vector_layers` already carries `fields` and verify already checks
+observed attributes against the per-layer declarations in `define_layers!`.)
 
 Reported by the Shortbread and layer-identity hunts.
 

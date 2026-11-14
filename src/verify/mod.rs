@@ -513,14 +513,54 @@ fn build_tile_outcome(
     outcome
 }
 
-/// Geometry, extent and paint order, one layer at a time in wire order: the
-/// first violation of either check in that walk is the tile's one finding.
+/// Geometry, extent, paint order and attributes, one layer at a time in wire
+/// order: the first violation in that walk is the tile's one finding.
 /// Running the two checks as whole-tile passes instead would name a later
 /// layer's geometry fault ahead of an earlier layer's order fault.
 fn validate_tile_layers(tile: &[CheckedLayer<'_>], class: ValidationClass) -> Result<(), Finding> {
     for layer in tile {
         geometry::check_layer(layer, class)?;
         paint_order::check_layer(layer)?;
+        check_layer_fields(layer)?;
+    }
+    Ok(())
+}
+
+fn check_layer_fields(layer: &CheckedLayer<'_>) -> Result<(), Finding> {
+    use crate::mvt::message::ValueMessage;
+    use crate::shortbread::{AttrKey, Layer, ValueType};
+    let reject = |detail: String| {
+        Finding::Mvt(crate::DecodeError::malformed(
+            format!("[{}] attribute schema", layer.message.name),
+            detail,
+        ))
+    };
+    let canonical =
+        Layer::from_name(layer.message.name).ok_or_else(|| reject("unknown layer".to_owned()))?;
+    for name in &layer.message.keys {
+        if !AttrKey::from_name(name).is_some_and(|key| canonical.allowed_keys().contains(&key)) {
+            return Err(reject(format!("undeclared key {name:?}")));
+        }
+    }
+    for (idx, feature) in layer.features.iter().enumerate() {
+        for &(key_idx, value_idx) in &feature.tags {
+            let name = layer.message.keys[key_idx];
+            let key = AttrKey::from_name(name).expect("key checked above");
+            let observed = match layer.values[value_idx] {
+                ValueMessage::String(_) => ValueType::Str,
+                ValueMessage::Float(_) | ValueMessage::Double(_) => ValueType::Float,
+                ValueMessage::Int(_) | ValueMessage::UInt(_) | ValueMessage::SInt(_) => {
+                    ValueType::Int
+                }
+                ValueMessage::Bool(_) => ValueType::Bool,
+            };
+            if observed != key.value_type() {
+                return Err(reject(format!(
+                    "feat {idx} key {name:?}: expected {:?}, got {observed:?}",
+                    key.value_type()
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -550,6 +590,19 @@ fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, Ve
                 "vector_layers entry missing 'id' string",
             ))
         })?;
+        let canonical = crate::shortbread::Layer::from_name(id).ok_or_else(|| {
+            VerifyError::Metadata(crate::DecodeError::malformed(
+                "metadata schema",
+                format!("unknown layer {id:?}"),
+            ))
+        })?;
+        let expected = serde_json::json!(canonical.fields());
+        if layer.get("fields") != Some(&expected) {
+            return Err(VerifyError::Metadata(crate::DecodeError::malformed(
+                "metadata schema",
+                format!("[{id}] fields differ from canonical declarations"),
+            )));
+        }
         names.push(id.to_string());
     }
     Ok(names)
@@ -636,6 +689,75 @@ mod tests {
     }
     use flate2::write::GzEncoder;
     use std::io::Write;
+
+    #[test]
+    fn metadata_requires_the_complete_canonical_field_map() {
+        let fields = crate::shortbread::Layer::BoundaryLabels.fields();
+        let valid =
+            serde_json::json!({"vector_layers": [{"id": "boundary_labels", "fields": fields}]});
+        assert!(extract_declared_layers(&valid).is_ok());
+        for fields in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"admin_level": "Number"}),
+            serde_json::json!({"admin_level": "String", "way_area": "Number",
+                "name": "String", "name_en": "String", "name_de": "String"}),
+        ] {
+            let bad =
+                serde_json::json!({"vector_layers": [{"id": "boundary_labels", "fields": fields}]});
+            assert!(extract_declared_layers(&bad).is_err());
+        }
+        let mut extra = valid;
+        extra["vector_layers"][0]["fields"]["unexpected"] = serde_json::json!("String");
+        assert!(extract_declared_layers(&extra).is_err());
+    }
+
+    #[test]
+    fn observed_fields_require_layer_membership_and_exact_numeric_types() {
+        for (name, key, value, valid) in [
+            ("buildings", "height", Value::Double(3.0), true),
+            ("buildings", "height", Value::Int(3), false),
+            ("place_labels", "population", Value::Int(3), true),
+            ("place_labels", "population", Value::Double(3.0), false),
+            ("water_lines", "bridge", Value::Bool(true), true),
+            (
+                "water_lines",
+                "bridge",
+                Value::String("yes".to_owned()),
+                false,
+            ),
+            (
+                "water_lines",
+                "kind",
+                Value::String("river".to_owned()),
+                true,
+            ),
+            (
+                "buildings",
+                "kind",
+                Value::String("river".to_owned()),
+                false,
+            ),
+            ("buildings", "unknown", Value::Int(3), false),
+        ] {
+            let mut layer = LayerBuilder::new(name);
+            let k = layer.intern_key(key);
+            let v = layer.intern_value(value);
+            layer.add_feature(Feature {
+                id: None,
+                geom_type: GeomType::Point,
+                geometry: vec![9, 0, 0],
+                tags: vec![(k, v)],
+            });
+            let bytes = encode_tile(&[&layer]);
+            let checked = parse_checked_tile(&bytes).expect("valid MVT");
+            assert_eq!(
+                check_layer_fields(&checked[0]).is_ok(),
+                valid,
+                "{name}.{key}"
+            );
+        }
+    }
 
     #[test]
     fn payload_failures_keep_evidence_and_sources() {

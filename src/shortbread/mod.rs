@@ -345,7 +345,8 @@ macro_rules! define_layers {
             min_zoom = $min_zoom:literal,
             fanout_cap = $fanout_cap:literal,
             accepts = [$($accepted_geom:ident),*],
-            polygon_point = $polygon_point:expr;
+            polygon_point = $polygon_point:expr,
+            fields = [$($field:ident),*];
         )*
     ) => {
         const LAYER_COUNT: usize = [$(stringify!($variant)),*].len();
@@ -421,6 +422,24 @@ macro_rules! define_layers {
                 }
             }
 
+            pub(crate) const fn allowed_keys(self) -> &'static [AttrKey] {
+                match self {
+                    $(Self::$variant => &[$(AttrKey::$field),*],)*
+                }
+            }
+
+            /// Canonical TileJSON field map. Numeric types share Number.
+            pub fn fields(self) -> std::collections::BTreeMap<String, String> {
+                self.allowed_keys().iter().map(|key| {
+                    let ty = match key.value_type() {
+                        ValueType::Str => "String",
+                        ValueType::Int | ValueType::Float => "Number",
+                        ValueType::Bool => "Boolean",
+                    };
+                    (key.name().to_owned(), ty.to_owned())
+                }).collect()
+            }
+
             /// Total number of layers.
             pub const fn count() -> usize {
                 LAYER_COUNT
@@ -439,82 +458,108 @@ macro_rules! define_layers {
 define_layers! {
     WaterPolygons = 0, "water_polygons",
         tile_order = 0, min_zoom = 4, fanout_cap = true,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None,
+        fields = [Kind];
     WaterPolygonsLabels = 1, "water_polygons_labels",
         tile_order = 1, min_zoom = 4, fanout_cap = false,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::Centroid);
+        accepts = [ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::Centroid),
+        fields = [Kind, Name, NameEn, NameDe];
     WaterLines = 2, "water_lines",
         tile_order = 2, min_zoom = 9, fanout_cap = false,
-        accepts = [OpenWay, ClosedWay], polygon_point = None;
+        accepts = [OpenWay, ClosedWay], polygon_point = None,
+        fields = [Kind, Tunnel, Bridge];
     WaterLinesLabels = 3, "water_lines_labels",
         tile_order = 3, min_zoom = 9, fanout_cap = false,
-        accepts = [OpenWay, ClosedWay], polygon_point = None;
+        accepts = [OpenWay, ClosedWay], polygon_point = None,
+        fields = [Kind, Tunnel, Bridge, Name, NameEn, NameDe];
     DamLines = 4, "dam_lines",
         tile_order = 4, min_zoom = 12, fanout_cap = false,
-        accepts = [OpenWay, ClosedWay], polygon_point = None;
+        accepts = [OpenWay, ClosedWay], polygon_point = None,
+        fields = [Kind];
     DamPolygons = 5, "dam_polygons",
         tile_order = 5, min_zoom = 12, fanout_cap = true,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None,
+        fields = [Kind];
     PierLines = 6, "pier_lines",
         tile_order = 6, min_zoom = 12, fanout_cap = false,
-        accepts = [OpenWay, ClosedWay], polygon_point = None;
+        accepts = [OpenWay, ClosedWay], polygon_point = None,
+        fields = [Kind];
     PierPolygons = 7, "pier_polygons",
         tile_order = 7, min_zoom = 12, fanout_cap = true,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None,
+        fields = [Kind];
     Boundaries = 8, "boundaries",
         tile_order = 8, min_zoom = 0, fanout_cap = false,
-        accepts = [OpenWay, ClosedWay], polygon_point = None;
+        accepts = [OpenWay, ClosedWay], polygon_point = None,
+        fields = [AdminLevel, Maritime, Disputed];
     BoundaryLabels = 9, "boundary_labels",
         tile_order = 9, min_zoom = 2, fanout_cap = false,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface);
+        accepts = [ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface),
+        fields = [AdminLevel, WayArea, Name, NameEn, NameDe];
     PlaceLabels = 10, "place_labels",
         tile_order = 10, min_zoom = 4, fanout_cap = false,
-        accepts = [Node], polygon_point = None;
+        accepts = [Node], polygon_point = None,
+        fields = [Kind, Population, Name, NameEn, NameDe];
     Land = 11, "land",
         tile_order = 11, min_zoom = 7, fanout_cap = true,
-        accepts = [OpenWay, ClosedWay, MultiPolygon], polygon_point = None;
+        accepts = [OpenWay, ClosedWay, MultiPolygon], polygon_point = None,
+        fields = [Kind];
     Sites = 12, "sites",
         tile_order = 12, min_zoom = 14, fanout_cap = true,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None,
+        fields = [Kind];
     Buildings = 13, "buildings",
         tile_order = 13, min_zoom = 14, fanout_cap = true,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None,
+        fields = [Height, MinHeight, BuildingLevels];
     Addresses = 14, "addresses",
         tile_order = 14, min_zoom = 14, fanout_cap = false,
-        accepts = [Node, ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::CentroidIfConvex);
+        accepts = [Node, ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::CentroidIfConvex),
+        fields = [Housename, Housenumber];
     Streets = 15, "streets",
         tile_order = 15, min_zoom = 5, fanout_cap = false,
-        accepts = [OpenWay, ClosedWay], polygon_point = None;
+        accepts = [OpenWay, ClosedWay], polygon_point = None,
+        fields = [Kind, Link, Rail, Tunnel, Bridge, Oneway, OnewayReverse, Tracktype, Surface, Service, Bicycle, Horse];
     StreetPolygons = 16, "street_polygons",
         tile_order = 16, min_zoom = 11, fanout_cap = true,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None,
+        fields = [Kind, Bridge, Tunnel, Service, Surface];
     StreetLabels = 17, "street_labels",
         tile_order = 17, min_zoom = 10, fanout_cap = false,
-        accepts = [OpenWay, ClosedWay], polygon_point = None;
+        accepts = [OpenWay, ClosedWay], polygon_point = None,
+        fields = [Kind, Ref, RefRows, RefCols, Tunnel, Name, NameEn, NameDe];
     StreetLabelsPoints = 18, "street_labels_points",
         tile_order = 18, min_zoom = 12, fanout_cap = false,
-        accepts = [Node], polygon_point = None;
+        accepts = [Node], polygon_point = None,
+        fields = [Kind, Ref, Name, NameEn, NameDe];
     StreetsPolygonsLabels = 19, "streets_polygons_labels",
         tile_order = 19, min_zoom = 14, fanout_cap = false,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface);
+        accepts = [ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface),
+        fields = [Kind, Name, NameEn, NameDe];
     Bridges = 20, "bridges",
         tile_order = 20, min_zoom = 12, fanout_cap = true,
-        accepts = [ClosedWay, MultiPolygon], polygon_point = None;
+        accepts = [ClosedWay, MultiPolygon], polygon_point = None,
+        fields = [Kind];
     Aerialways = 21, "aerialways",
         tile_order = 21, min_zoom = 12, fanout_cap = false,
-        accepts = [OpenWay, ClosedWay], polygon_point = None;
+        accepts = [OpenWay, ClosedWay], polygon_point = None,
+        fields = [Kind];
     Ferries = 22, "ferries",
         tile_order = 22, min_zoom = 10, fanout_cap = false,
-        accepts = [OpenWay, ClosedWay], polygon_point = None;
+        accepts = [OpenWay, ClosedWay], polygon_point = None,
+        fields = [Kind, Name, NameEn, NameDe];
     PublicTransport = 23, "public_transport",
         tile_order = 23, min_zoom = 11, fanout_cap = false,
-        accepts = [Node, ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface);
+        accepts = [Node, ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface),
+        fields = [Kind, Iata, Name, NameEn, NameDe];
     Pois = 24, "pois",
         tile_order = 24, min_zoom = 14, fanout_cap = false,
-        accepts = [Node, ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface);
+        accepts = [Node, ClosedWay, MultiPolygon], polygon_point = Some(PolygonPointStrategy::PointOnSurface),
+        fields = [Name, NameEn, NameDe, Housename, Housenumber, Amenity, Highway, Office, Leisure, ManMade, Tourism, Cuisine, Vending, Religion, Denomination, Sport, TowerType, Information, Shop, Emergency, Historic, Natural, Ele, Atm, RecyclingGlassBottles, RecyclingPaper, RecyclingClothes, RecyclingScrapMetal];
     Ocean = 25, "ocean",
         tile_order = 25, min_zoom = 0, fanout_cap = false,
-        accepts = [], polygon_point = None;
+        accepts = [], polygon_point = None,
+        fields = [];
 }
 
 const fn accepted_layer_set(geom_type: OsmGeomType) -> ([Layer; LAYER_COUNT], usize) {
@@ -736,6 +781,8 @@ impl Hits {
                         }
                     }
                 }
+                #[cfg(test)]
+                check_declared_keys(&matched);
                 matched
             })
             .collect()
@@ -818,6 +865,18 @@ pub(crate) fn match_element(
     out
 }
 
+#[cfg(test)]
+fn check_declared_keys(matched: &LayerMatch) {
+    for attr in &matched.attrs {
+        assert!(
+            matched.layer.allowed_keys().contains(&attr.key),
+            "{} undeclared key {}",
+            matched.layer.name(),
+            attr.key.name()
+        );
+    }
+}
+
 /// Profile invariants every match holds, asserted on every test match.
 #[cfg(test)]
 fn check_match(matched: &LayerMatch, geom_type: OsmGeomType) {
@@ -832,6 +891,7 @@ fn check_match(matched: &LayerMatch, geom_type: OsmGeomType) {
         matched.min_zoom,
         matched.layer.min_zoom(),
     );
+    check_declared_keys(matched);
     for attr in &matched.attrs {
         assert!(
             attr.from_zoom <= MAX_ZOOM,
