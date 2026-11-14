@@ -1,5 +1,5 @@
 // Outgoing ocean artifact retention: before `ocean-build` replaces the
-// artifact in place, the outgoing generation is kept one generation deep
+// artifact at its path, the outgoing generation is kept one generation deep
 // beside it (reference/cli.md, Retention).
 
 use super::key::Xxh128;
@@ -60,7 +60,7 @@ fn is_retained_artifact_name(name: &str, prefix: &str) -> bool {
 }
 
 /// Keep the outgoing ocean artifact one generation deep before a rebuild
-/// replaces it. `ocean-build` writes the artifact in place, so without this
+/// replaces it. `ocean-build` publishes the artifact at the same path, so without this
 /// every policy bump destroys the only comparand for the version it
 /// replaces - and the retained generation is exactly what the
 /// archive-bracketing idiom (dump the same tile from each generation, diff

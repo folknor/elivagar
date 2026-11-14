@@ -491,22 +491,6 @@ Reported by the storage, polygon-engine and pipeline hunts.
 
 # Archive surface
 
-## STR-039 - The ocean artifact's memory map rests on an unenforced immutability assumption
-
-`ocean/artifact.rs` opens the world artifact through the crate-internal
-`Archive::open_mapped` so assembly can borrow tile blobs without copying.
-That is sound only while no process modifies or truncates the file for the
-life of the run; a concurrent rewrite is undefined behavior (or SIGBUS under
-a borrowed slice), and nothing enforces the assumption - the artifact is
-"built once per shapefile release", which is a habit, not a lock. Every
-other reader uses positional reads and turns truncation into an I/O error.
-Options: copy the artifact's blobs on read (measure the cost first: run
-copies hand the writer borrowed blobs, and every encoded tile the artifact
-owns extracts its ocean layer field from one),
-take an advisory lock plus a size/mtime recheck at assembly, or build to a
-new path and never rewrite in place (retention already names artifacts by
-date). Found while unifying the readers.
-
 ## STR-040 - Tiles sharing one artifact run each re-gunzip the same blob
 
 When assembly splices the artifact's ocean layer into an encoded OSM tile,

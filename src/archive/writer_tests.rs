@@ -653,8 +653,13 @@ fn write_to_streaming_produces_valid_header() {
     assert_eq!(writer.unique_tile_count(), 3);
 
     writer.write_to(&out_path).unwrap();
-    assert!(
-        !dir.path().join("test_streaming.pmtiles.partial").exists(),
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec![std::ffi::OsString::from("test_streaming.pmtiles")],
         "the partial file must be renamed away on completion"
     );
 
@@ -662,6 +667,63 @@ fn write_to_streaming_produces_valid_header() {
     assert!(bytes.len() > 127);
     assert_eq!(&bytes[0..7], b"PMTiles");
     assert_eq!(bytes[7], 3);
+}
+
+/// Publishing over an existing archive replaces the directory entry with a
+/// new inode in both modes: a hard link to the old file keeps its bytes, which
+/// is what keeps a memory map of the previous archive at that path sound. An
+/// abandoned streaming writer leaves no partial behind.
+#[test]
+fn write_to_never_rewrites_an_existing_inode() {
+    let dir = tempfile::tempdir().unwrap();
+    let spill = tempfile::tempdir().unwrap();
+    let config = || {
+        PmtilesConfig::new(
+            0,
+            0,
+            LonLatBbox {
+                west: -180.0,
+                south: -85.0,
+                east: 180.0,
+                north: 85.0,
+            },
+            MapCenter {
+                lon: 0.0,
+                lat: 0.0,
+                zoom: 0,
+            },
+        )
+        .expect("valid archive config")
+    };
+    let out_path = dir.path().join("out.pmtiles");
+    let link_path = dir.path().join("link.pmtiles");
+    let old = b"previous archive bytes".to_vec();
+    std::fs::write(&out_path, &old).unwrap();
+    std::fs::hard_link(&out_path, &link_path).unwrap();
+    let tile = gzip_compress(b"tile").unwrap();
+
+    let mut memory = PmtilesWriter::new(config());
+    memory.add_tile(0, 0, 0, &tile).unwrap();
+    memory.write_to(&out_path).unwrap();
+    assert_eq!(std::fs::read(&link_path).unwrap(), old);
+
+    std::fs::remove_file(&out_path).unwrap();
+    std::fs::hard_link(&link_path, &out_path).unwrap();
+    let mut streaming = PmtilesWriter::new_streaming(config(), spill.path(), &out_path).unwrap();
+    streaming.add_tile(0, 0, 0, &tile).unwrap();
+    streaming.write_to(&out_path).unwrap();
+    assert_eq!(std::fs::read(&link_path).unwrap(), old);
+    assert_ne!(std::fs::read(&out_path).unwrap(), old);
+
+    let mut abandoned = PmtilesWriter::new_streaming(config(), spill.path(), &out_path).unwrap();
+    abandoned.add_tile(0, 0, 0, &tile).unwrap();
+    drop(abandoned);
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["link.pmtiles", "out.pmtiles"]);
 }
 
 #[test]

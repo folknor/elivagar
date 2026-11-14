@@ -531,14 +531,73 @@ impl DirSpill for DirectorySpill {
     }
 }
 
+/// A fresh sibling file an archive is built in before it is published by
+/// rename. Opened with `create_new` under a per-process unique name, so it
+/// can never alias an existing inode - not a stale partial, not a hard link
+/// or symlink planted at a predictable name, not another writer's partial.
+/// Removed on drop unless published (best effort), so a failed or abandoned
+/// write does not normally leave it behind.
+struct Partial {
+    path: PathBuf,
+    published: bool,
+}
+
+impl Partial {
+    fn create(output_path: &Path) -> io::Result<(Self, File)> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        // A name left by a crashed process with a reused pid is skipped, not
+        // fatal; `create_new` is what guarantees no existing file is opened.
+        loop {
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut name = output_path.as_os_str().to_owned();
+            name.push(format!(".partial-{}-{n}", std::process::id()));
+            let path = PathBuf::from(name);
+            match File::options().write(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    return Ok((
+                        Self {
+                            path,
+                            published: false,
+                        },
+                        file,
+                    ));
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Rename the (already closed) partial over `path`.
+    fn publish(mut self, path: &Path) -> io::Result<()> {
+        std::fs::rename(&self.path, path)?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+impl Drop for Partial {
+    fn drop(&mut self) {
+        if !self.published {
+            drop(std::fs::remove_file(&self.path));
+        }
+    }
+}
+
 /// A seekable archive sink shared by in-memory and streaming writers.
 /// Streaming keeps tile data at its final offset in the partial archive;
 /// the memory sink uses a Cursor for tests and small outputs.
+///
+/// Both modes publish by renaming a fresh sibling over the output path and
+/// close every writable handle first, so no archive this crate writes ever
+/// truncates or rewrites an existing inode. That is what keeps a reader
+/// that memory-maps a previous archive at the same path (the ocean
+/// artifact, `ocean/artifact.rs`) sound against this crate's archive writes.
 enum BlobSink {
     Memory(Cursor<Vec<u8>>),
     File {
         writer: BufWriter<File>,
-        partial_path: PathBuf,
+        partial: Partial,
     },
 }
 
@@ -550,21 +609,26 @@ impl BlobSink {
         Self::Memory(cursor)
     }
 
-    fn finish(&mut self, path: &Path) -> io::Result<()> {
+    fn finish(self, path: &Path) -> io::Result<()> {
         match self {
             Self::Memory(cursor) => {
-                cursor.flush()?;
-                let file = File::create(path)?;
+                let (partial, file) = Partial::create(path)?;
                 let mut writer = BufWriter::with_capacity(1 << 20, file);
                 writer.write_all(cursor.get_ref())?;
-                writer.flush()
+                drop(
+                    writer
+                        .into_inner()
+                        .map_err(io::IntoInnerError::into_error)?,
+                );
+                partial.publish(path)
             }
-            Self::File {
-                writer,
-                partial_path,
-            } => {
-                writer.flush()?;
-                std::fs::rename(partial_path.as_path(), path)
+            Self::File { writer, partial } => {
+                drop(
+                    writer
+                        .into_inner()
+                        .map_err(io::IntoInnerError::into_error)?,
+                );
+                partial.publish(path)
             }
         }
     }
@@ -760,9 +824,9 @@ impl PmtilesWriter {
         }
     }
 
-    /// Create a streaming writer. Tile data is written directly into
-    /// `<output_path>.partial` at its final archive offset; `write_to()`
-    /// completes the prologue and renames it to `output_path`. Directory
+    /// Create a streaming writer. Tile data is written directly into a fresh
+    /// `<output_path>.partial-<pid>-<n>` sibling at its final archive offset;
+    /// `write_to()` completes the prologue and renames it to `output_path`. Directory
     /// entries stream to a temp file in `tmp_dir` as before.
     ///
     /// # Errors
@@ -772,10 +836,7 @@ impl PmtilesWriter {
         tmp_dir: &Path,
         output_path: &Path,
     ) -> io::Result<Self> {
-        let mut partial = output_path.as_os_str().to_owned();
-        partial.push(".partial");
-        let blob_path = PathBuf::from(partial);
-        let file = File::create(&blob_path)?;
+        let (partial, file) = Partial::create(output_path)?;
         let mut writer = BufWriter::with_capacity(1 << 20, file); // 1 MB buffer
         // Reserve the init section (header + root + zeros); the zeros between
         // the root's end and INIT_SECTION are written now so write_to() never
@@ -795,10 +856,7 @@ impl PmtilesWriter {
             metadata_layers: crate::shortbread::Layer::ALL.to_vec(),
             metadata_verbatim: None,
             blob: TileBlob {
-                sink: BlobSink::File {
-                    writer,
-                    partial_path: blob_path,
-                },
+                sink: BlobSink::File { writer, partial },
                 data_length: 0,
             },
             num_addressed: 0,
@@ -908,19 +966,23 @@ impl PmtilesWriter {
 
     /// Complete the PMTiles archive at `path`.
     ///
-    /// In-memory mode writes the whole archive in one pass. Streaming mode
-    /// appends metadata and leaf directories after the already-in-place tile
-    /// data, patches the header and root into the reserved init section, and
-    /// renames `<output>.partial` to `path` - so the archive appears at
-    /// `path` only when complete, and `path` must be on the same filesystem
+    /// In-memory mode writes the whole archive to a fresh sibling of `path`
+    /// in one pass. Streaming mode appends metadata and leaf directories
+    /// after the already-in-place tile data and patches the header and root
+    /// into the reserved init section of its partial. Both then close the
+    /// file and rename it over `path` - so the archive appears at `path`
+    /// only when complete, an existing file at `path` is replaced by a new
+    /// inode rather than rewritten (a reader mapping the old one keeps valid
+    /// pages), and in streaming mode `path` must be on the same filesystem
     /// as the `output_path` given to [`new_streaming`](Self::new_streaming)
-    /// (they are the same path in every production caller).
+    /// (they are the same path in every production caller). Consumes the
+    /// writer, so a published archive can never be written through again.
     ///
     /// # Errors
     /// Returns `io::Error` if file creation, directory encoding, writing, or
     /// the final rename fails.
     #[hotpath::measure]
-    pub fn write_to(&mut self, path: &Path) -> io::Result<()> {
+    pub fn write_to(mut self, path: &Path) -> io::Result<()> {
         // RAM-ledger snapshot of the dedup map at its final (largest) size,
         // taken before it is dropped. The byte figure is an estimate: bucket
         // entries are 24-byte (u64, u32, u64) tuples plus per-bucket Vec
@@ -1014,8 +1076,7 @@ impl PmtilesWriter {
         self.blob.sink.write_all(&header)?;
         self.blob.sink.write_all(&root_bytes)?;
         self.blob.sink.flush()?;
-        self.blob.sink.finish(path)?;
-        Ok(())
+        self.blob.sink.finish(path)
     }
 }
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `PmtilesWriter::write_to` consumes the writer, and both writer modes now
+  publish by renaming a fresh, exclusively created sibling over the output
+  path after closing it. The in-memory mode used to truncate an existing
+  file in place, and the streaming partial had the fixed name
+  `<output>.partial`, which a stale or linked file could alias; the
+  partial is now `<output>.partial-<pid>-<n>` and is removed if the
+  writer is dropped unpublished. No archive write can rewrite an existing
+  inode, so a run mapping the ocean artifact survives its replacement.
+  Output unchanged.
+
 - Every Shortbread `kind` value is declared in a typed family (water,
   pier, dam, aerialway, ferry, public transport, place, site, street label
   point and bridge kinds join `LandKind`, `StreetClass` and `LinkClass`),

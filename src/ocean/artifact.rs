@@ -20,12 +20,22 @@ use crate::tiling::TileId;
 type ArchiveView = Archive<MapSource>;
 
 fn open_view(path: &std::path::Path) -> std::io::Result<ArchiveView> {
-    // SAFETY: this assumes nothing modifies or truncates the artifact file
-    // while the run holds it - the artifact is built once per shapefile
-    // release and only replaced between runs. Nothing enforces that; a
-    // concurrent rewrite of the file is undefined behavior here, which is the
-    // price of the zero-copy splice. Every other reader goes through the
-    // positional-read source instead.
+    // SAFETY: this assumes nothing modifies or truncates the artifact's inode
+    // while the run holds it. This crate's archive writes honor that by
+    // construction: archive publication (`archive::writer`, both modes)
+    // renames a fresh `create_new` sibling over the path after closing it,
+    // and retention only hard-links and unlinks - so `ocean-build`, or a run
+    // whose `-o` names the artifact, replaces the directory entry and leaves
+    // the mapped inode intact. What remains is an input-immutability
+    // contract on everything else: a process (or safe Rust in this one)
+    // writing the file in place - `cp` over it, `rsync --inplace`,
+    // `truncate` - is undefined behavior here, typically SIGBUS. That is
+    // accepted as the price of the zero-copy splice, the same contract the
+    // shapefile mapping already rests on. An advisory lock or a size/mtime
+    // recheck would not discharge it (locks bind only cooperating writers;
+    // a recheck races the write), and copying blobs on read is the only
+    // in-process way to drop the assumption. Every other archive reader
+    // goes through the positional-read source instead.
     unsafe { Archive::open_mapped(path) }
 }
 

@@ -157,7 +157,7 @@ symmetric rd+wr (14 GB each way at ~800 MB/s, `pmtiles_write_wait_ns`
 2026-07-15 (commit follows this note): the writer adopts planetiler's
 section layout (tile data at fixed offset 16,384, metadata + leaf dirs
 appended after it, header + root patched into the reserved init
-section), so tile data streams once, directly into `<output>.partial`,
+section), so tile data streams once, directly into a partial sibling of the output,
 and finalize is rename-only. Riding along: the compressed root
 directory now always fits the spec's first-16,384-bytes window (leaf
 fanout doubles until it does) - NA's root was 19 KB before, past the

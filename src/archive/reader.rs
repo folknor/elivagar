@@ -183,7 +183,9 @@ impl Archive<MapSource> {
     /// returned archive, or anything borrowed from it, is alive: a mapped
     /// page changing or vanishing under a borrowed slice is undefined
     /// behavior (or SIGBUS), which no bounds check prevents. Nothing enforces
-    /// this; the caller asserts it.
+    /// this; the caller asserts it. Replacing the path is not a modification:
+    /// this crate's archive writer publishes by renaming a fresh file over
+    /// it, which leaves the mapped inode intact.
     pub(crate) unsafe fn open_mapped(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
         if file.metadata()?.len() < HEADER_LEN as u64 {
