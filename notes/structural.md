@@ -47,56 +47,45 @@ Reported by the pipeline hunt.
 
 ## STR-003 - Typed errors with a defined exit-code mapping
 
-Every failure is prose. `PipelineError(String)` carries resume refusals,
-contract refusals, unreadable input and mid-assemble I/O, all exiting 1;
-`main.rs` exits 2 for some invocation errors (`--ocean`, MLT without the
-feature) and 1 for others (`--fanout-cap` syntax, unknown layer, simplify
-factor range). brokkr - which links the crate and already gives exit codes
-1/2/3 meaning in the corpus gate - cannot tell "your invocation is wrong" from
-"your checkpoint is stale" from "disk failed", except by substring. The same
-shape recurs per subsystem:
+A chain; the settled rulings and the link plan are in
+`notes/typed-errors-design.md`. The first link landed `PipelineError` as an
+opaque error with `kind()`, a typed `ResumeRefusal`, and the exit table in
+`reference/cli.md`. Under its evidence rule a subsystem that still reports
+through untyped `io::Error` exits 2 (or 74 with an OS errno), so the residue
+is typing each subsystem at its source:
 
-- ocean: about a dozen artifact refusals as `io::Error::other` strings; the
-  key-mismatch message does not say which field differs, though "policy
-  version 4 vs 5" (rebuild) and "full shapefile hash differs" (re-download)
-  are different operator actions;
-- sort: `io::Error::new(InvalidData, format!(..))` for compression mismatch,
-  stale chunks, count mismatch, duplicate ids, partition out of range;
-- node store: a panic on the flat-index safety cap;
-- multipolygon: unclosed chains dropped (`join_ways` returns them, both
-  callers bind `_`), orphan inners promoted, degenerate rings dropped - all
-  invisible;
-- archive: `tile_detail` returns `Result<_, String>` everywhere,
-  the `archive` reader and directory codec return `io::Error` with an
-  `InvalidData`/`Unsupported` kind and a prose message (tests assert on
-  message fragments), `verify` collects
-  `tile_errors: Vec<String>` and tests assert on prefixes,
-  `VerifyError::{Container(String), Metadata(String)}`;
+- ocean: artifact admission refusals are `io::Error::other` strings in
+  `ocean/artifact.rs`, the key-mismatch message does not say which field
+  differs (policy version means rebuild, a shapefile hash means
+  re-download), and `ocean/shapefile.rs` rewraps read errors with
+  `io::Error::new(err.kind(), format!(..))`, erasing the errno;
+- sort: chunk-store validation (compression mismatch, stale or missing
+  chunk, count mismatch) is `io::Error` with an `InvalidData`/`NotFound`
+  kind in `SortReader::from_dir` and `SortWriter::resume`, so a stale chunk
+  set on a resume exits 2, not 3;
+- archive: `tile_detail` and `mvt::message` return `Result<_, String>`, the
+  `archive` reader and directory codec return prose `io::Error`s (tests
+  assert on message fragments), and `inspect`, `svg` and `diag` inherit
+  that; `diag` validates coordinates inside its `io::Result`, so a bad
+  coordinate exits 2 rather than 64;
+- verify: a `read_tile` failure becomes a "decompression failed" finding
+  (exit 1 on an operational failure), `tile_errors: Vec<String>`,
+  `VerifyError::{Container(String), Metadata(String)}` (exit 2), and
+  paint-order findings map the typed `RankError` back to prose;
 - encoding: `MltEncodeError::Encode(String)`, `GeometryDecode { message }`,
-  `check_merge -> Result<(), String>` whose tests match prose fragments;
-- profile: `validate_paint_order` returns `String`s;
-- geometry: `partition_shape_to_ring_cap` `expect`s on an indivisible rect,
-  aborting a planet run; the `.expect("... fits i32")` overflow invariants
-  rest on `maxz + 12 <= 30`, which no type states; `enforce_ring_cap`
-  returns a bool its only caller discards;
-- the sort-record decoder silently returns or breaks on every malformed case,
-  so a code bug yields a quietly wrong tile rather than a failure;
-- prose-only telemetry brokkr never reads under `--bench`: "input PBF not
-  identified - omitting provenance", "no sort checkpoint found - cannot
-  verify chunk integrity", the relation re-read spill notice.
-
-Proposed enums (from the hunts): `PipelineError { InvalidConfig,
-ResumeRefused { reason }, ArtifactRefused, InputUnreadable, CorruptInput, Io }`
-with one exit-code mapping in `main`; `RunRefusal` /
-`ArtifactRefusal::KeyMismatch { field, declared, expected }`;
-`ChunkStoreError { CompressionMismatch, StaleChunks, MissingChunk, Corrupt }`;
-`NodeStoreError::FlatCapExceeded`; `AssemblyReport { unclosed_chains,
-promoted_orphans, degenerate }` beside the missing-ref counters;
-`DecodeError { locus, kind: UnknownField | Truncated | Utf8 | IndexOutOfRange
-| CoordinateOverflow | BadCommand }`; `ArchiveError`; `TileFinding { coord,
-layer, feature, kind }` making `MAX_TILE_ERRORS` a presentation choice;
-`PaintOrderViolation`; `MergeViolation`; `EmitError::RingCapIndivisible`;
-a typed or counted `RecordError` in the sort decoder.
+  and both `check_merge -> Result<(), String>` functions
+  (`geometry/line_merge.rs`, `mvt/merge.rs`) whose tests match prose;
+- panics and silent drops: the node-store flat-index safety cap panics,
+  the relation re-read `expect`s on PBF read failure,
+  `partition_shape_to_ring_cap` `expect`s on an indivisible rect and
+  `enforce_ring_cap` returns a bool its only caller discards, multipolygon
+  assembly drops unclosed chains (`join_ways` returns them, both callers
+  bind `_`), promotes orphan inners and drops degenerate rings invisibly,
+  and the sort-record decoder silently returns on malformed input (its
+  doc comment defends that as a hot-path policy; adjudicate rather than
+  assume);
+- the `.expect("... fits i32")` overflow invariants rest on
+  `maxz + 12 <= 30`, which no type states.
 
 Reported by every hunt.
 

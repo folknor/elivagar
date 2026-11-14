@@ -28,6 +28,10 @@ is required when ocean is enabled, with optional simplified and artifact paths.
 Use `SimplifyFactor::new` for a finite multiplier in 0.1..=10 (default 1),
 and `FanoutCaps::parse_specs` or `FanoutCaps::set` for checked layer caps.
 `run` rejects MLT without the `mlt` build feature before phase work.
+`run` and `ocean_build` return a `PipelineError` whose `kind()` classifies the
+failure (invalid request, refused input, resume or ocean artifact, OS I/O,
+internal, or unclassified); the binary exits with the matching code from the
+[CLI reference](../reference/cli).
 
 ## From source
 

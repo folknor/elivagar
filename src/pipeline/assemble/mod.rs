@@ -195,18 +195,15 @@ impl<'a> AssembleSpec<'a> {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| {
-                PipelineError(
-                    "input PBF filename is unavailable for archive provenance".to_string(),
-                )
+                PipelineError::internal("input PBF filename is unavailable for archive provenance")
             })?
             .to_string();
         match (&ocean_tiles, &provenance.ocean_mode) {
             (Some(tiles), super::OceanMode::Band { key }) if tiles.key() == key => {}
             (None, super::OceanMode::None | super::OceanMode::Computed { .. }) => {}
             _ => {
-                return Err(PipelineError(
-                    "admitted ocean artifact tiles and the recorded ocean mode disagree"
-                        .to_string(),
+                return Err(PipelineError::internal(
+                    "admitted ocean artifact tiles and the recorded ocean mode disagree",
                 ));
             }
         }
@@ -214,8 +211,8 @@ impl<'a> AssembleSpec<'a> {
             .ocean_mode
             .contract_kind(provenance.low_zoom_source)?;
         if ocean_kind != config.contract.ocean.kind {
-            return Err(PipelineError(
-                "assembly ocean facts and the resolved run contract disagree".to_string(),
+            return Err(PipelineError::internal(
+                "assembly ocean facts and the resolved run contract disagree",
             ));
         }
         Ok(Self {
@@ -252,7 +249,7 @@ impl<'a> AssembleSpec<'a> {
             crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
         );
         if (key.source.min_zoom, key.source.max_zoom) != (first, last) {
-            return Err(PipelineError(format!(
+            return Err(PipelineError::internal(format!(
                 "ocean artifact key names z{}-z{}, but the artifact is z{first}-z{last}",
                 key.source.min_zoom, key.source.max_zoom
             )));
@@ -374,9 +371,8 @@ pub(in crate::pipeline) fn phase_assemble_with_ocean(
         } => {
             pmtiles.set_source_pbf_filename(pbf_name.clone());
             let reader = ElementReader::from_path(pbf_path).map_err(|error| {
-                PipelineError(format!(
-                    "cannot read input PBF header for archive provenance: {error}"
-                ))
+                PipelineError::failed("cannot read input PBF header for archive provenance")
+                    .with_cause(error)
             })?;
             let header = reader.header();
             let replication_timestamp = header.osmosis_replication_timestamp();

@@ -87,19 +87,18 @@ pub(super) fn encode_partition_batch(
         TileContract::Mlt if artifact.is_some() => Err(artifact_contract_error()),
         #[cfg(feature = "mlt")]
         TileContract::Mlt => encode_tile_batch_mlt(batch),
-        // Unreachable in practice: the CLI refuses --tile-format mlt without
-        // the feature. A library caller can still construct the config, so
-        // this fails loudly rather than silently writing MVT under an MLT
-        // tile contract.
+        // Unreachable: run planning refuses MLT without the feature before
+        // any work, so reaching this is a program fault. It still fails
+        // rather than silently writing MVT under an MLT tile contract.
         #[cfg(not(feature = "mlt"))]
-        TileContract::Mlt => Err(PipelineError(
-            "tile format mlt requires a build with the `mlt` cargo feature".to_string(),
+        TileContract::Mlt => Err(PipelineError::internal(
+            "tile format mlt requires a build with the `mlt` cargo feature",
         )),
     }
 }
 
 fn artifact_contract_error() -> PipelineError {
-    PipelineError("the ocean artifact serves only MVT + gzip tiles".to_string())
+    PipelineError::internal("the ocean artifact serves only MVT + gzip tiles")
 }
 
 /// Encode + compress a batch of MVT tiles in parallel using rayon.
@@ -163,7 +162,9 @@ fn encode_tile_mvt(
             .is_some_and(|layer| !layer.is_empty())
         {
             let (z, x, y) = tile.tile_id.coord();
-            return Err(PipelineError(format!(
+            // The builders come from sort records read back from disk, so
+            // this is not proof of a program fault.
+            return Err(PipelineError::failed(format!(
                 "non-band OSM tile {z}/{x}/{y} unexpectedly contains computed ocean"
             )));
         }
@@ -268,7 +269,7 @@ fn encode_tile_batch_mlt(batch: &[PendingTile]) -> Result<Vec<EncodedTile>, Pipe
             }
             let encoded = mlt::encode_tile(&non_empty).map_err(|err| {
                 let (z, x, y) = tile.tile_id.coord();
-                PipelineError(format!("mlt encode failed for tile {z}/{x}/{y}: {err}"))
+                PipelineError::failed(format!("mlt encode failed for tile {z}/{x}/{y}: {err}"))
             })?;
             Ok(Some(EncodedTile {
                 tile_id: tile.tile_id,

@@ -42,7 +42,8 @@ struct SortPiece {
 fn record_layer(key: sort::SortKey) -> Result<Layer, PipelineError> {
     key.layer().ok_or_else(|| {
         let (z, x, y) = key.tile().coord();
-        PipelineError(format!(
+        // Read back from a chunk on disk: not proof of a program fault.
+        PipelineError::failed(format!(
             "corrupt or foreign sort record has unknown layer id {} in tile {z}/{x}/{y}",
             key.layer_byte()
         ))
@@ -454,8 +455,8 @@ pub(super) fn phase_assemble_partitions(
                         }),
                         UnionPartition::ArtifactOnly { start, end } => artifact_ctx
                             .ok_or_else(|| {
-                                PipelineError(
-                                    "artifact-only partition without an ocean artifact".to_string(),
+                                PipelineError::internal(
+                                    "artifact-only partition without an ocean artifact",
                                 )
                             })
                             .and_then(|artifact| {
@@ -505,7 +506,7 @@ pub(super) fn phase_assemble_partitions(
                 };
                 let batch = result?;
                 if batch.order >= partition_count {
-                    return Err(PipelineError(format!(
+                    return Err(PipelineError::internal(format!(
                         "assemble partition batch has invalid order {} of {partition_count}",
                         batch.order
                     )));
@@ -528,7 +529,7 @@ pub(super) fn phase_assemble_partitions(
                 let batch_index = batch.batch_index;
                 let state = pending.entry(batch_order).or_default();
                 if state.batches.insert(batch_index, batch).is_some() {
-                    return Err(PipelineError(format!(
+                    return Err(PipelineError::internal(format!(
                         "duplicate assemble partition batch {batch_index} for partition {batch_order}"
                     )));
                 }
@@ -572,8 +573,8 @@ pub(super) fn phase_assemble_partitions(
                                 blob,
                             } => {
                                 let ocean = ocean.ok_or_else(|| {
-                                    PipelineError(
-                                        "artifact run copy without an ocean artifact".to_string(),
+                                    PipelineError::internal(
+                                        "artifact run copy without an ocean artifact",
                                     )
                                 })?;
                                 tally.write_run_copy(
@@ -587,7 +588,7 @@ pub(super) fn phase_assemble_partitions(
                     }
                     if batch_is_last {
                         if !state.batches.is_empty() {
-                            return Err(PipelineError(format!(
+                            return Err(PipelineError::internal(format!(
                                 "assemble partition {next_write} received batches after final marker"
                             )));
                         }
@@ -613,7 +614,9 @@ pub(super) fn phase_assemble_partitions(
             }
 
             if next_write != partition_count {
-                return Err(PipelineError(format!(
+                // A worker that failed sent its error first and it was
+                // returned above, so an early stop with no error is a fault.
+                return Err(PipelineError::internal(format!(
                     "assemble partition worker stopped after {next_write} of {partition_count} partitions"
                 )));
             }
@@ -859,7 +862,7 @@ fn send_partition_batch(
     batch: PartitionBatch,
 ) -> Result<(), PipelineError> {
     tx.send(Ok(batch))
-        .map_err(|_| PipelineError("assemble partition receiver stopped".to_string()))
+        .map_err(|_| PipelineError::failed("assemble partition receiver stopped"))
 }
 
 #[inline]
@@ -886,10 +889,12 @@ mod tests {
         let forged = sort::SortKey::from_raw((TileId::at(3, 4, 5).raw() << 16) | (255 << 8));
         let error = record_layer(forged).expect_err("layer byte 255 names no layer");
         assert!(
-            error.0.contains("unknown layer id 255 in tile 3/4/5"),
-            "{}",
-            error.0
+            error
+                .to_string()
+                .contains("unknown layer id 255 in tile 3/4/5"),
+            "{error}"
         );
+        assert_eq!(error.kind(), crate::ErrorKind::Failed);
         assert_eq!(
             record_layer(key(TileId::at(3, 4, 5), Layer::Ocean as u8, 0)).unwrap(),
             Layer::Ocean
@@ -927,10 +932,12 @@ mod tests {
         )
         .expect_err("assembly refuses the forged layer byte");
         assert!(
-            error.0.contains("unknown layer id 255 in tile 3/4/5"),
-            "{}",
-            error.0
+            error
+                .to_string()
+                .contains("unknown layer id 255 in tile 3/4/5"),
+            "{error}"
         );
+        assert_eq!(error.kind(), crate::ErrorKind::Failed);
     }
 
     /// Records spread across one z14-block partition with a deliberately hot

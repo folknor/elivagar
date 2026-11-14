@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{PipelineError, SkipTo};
+use super::{PipelineError, ResumeRefusal, SkipTo};
 use crate::debug::emit_counter;
 use crate::geometry::projection::MercBbox;
 use crate::ocean::{OceanSourceKey, Xxh128};
@@ -134,22 +134,27 @@ impl PbfCheckpoint {
 
     pub(crate) fn load(tmp_dir: &std::path::Path) -> Result<Self, PipelineError> {
         let path = tmp_dir.join(CHECKPOINT_FILE);
-        let content = std::fs::read_to_string(&path).map_err(|e| {
+        let content = read_record(&path, || {
             emit_counter("resume_refusal_missing_checkpoint", 1);
-            PipelineError(format!(
-                "no checkpoint in {}: {e} (run a full tilegen first)",
-                tmp_dir.display()
-            ))
+            PipelineError::resume(
+                ResumeRefusal::MissingCheckpoint,
+                format!(
+                    "no checkpoint in {} (run a full tilegen first)",
+                    tmp_dir.display()
+                ),
+            )
         })?;
-        let stale = || {
+        parse_versioned(&content).ok_or_else(|| {
             emit_counter("resume_refusal_stale_checkpoint", 1);
-            PipelineError(format!(
-                "checkpoint in {} predates v{CHECKPOINT_VERSION} or is malformed; \
-                 re-run a full tilegen to regenerate it",
-                tmp_dir.display()
-            ))
-        };
-        parse_versioned(&content).ok_or_else(stale)
+            PipelineError::resume(
+                ResumeRefusal::MalformedCheckpoint,
+                format!(
+                    "checkpoint in {} predates v{CHECKPOINT_VERSION} or is malformed; \
+                     re-run a full tilegen to regenerate it",
+                    tmp_dir.display()
+                ),
+            )
+        })
     }
 }
 
@@ -197,21 +202,27 @@ impl ChunkCompletion {
     /// assembled.
     pub(crate) fn load(tmp_dir: &std::path::Path) -> Result<Self, PipelineError> {
         let path = tmp_dir.join(COMPLETION_FILE);
-        let content = std::fs::read_to_string(&path).map_err(|error| {
+        let content = read_record(&path, || {
             emit_counter("resume_refusal_missing_sort_chunk_count", 1);
-            PipelineError(format!(
-                "chunk completion record {} is missing or unreadable ({error}); the ocean phase may not have completed, so \
-                 --skip-to sort or assemble is unsafe; rerun from --skip-to ocean or do a full tilegen",
-                path.display()
-            ))
+            PipelineError::resume(
+                ResumeRefusal::MissingCompletion,
+                format!(
+                    "chunk completion record {} is missing; the ocean phase may not have completed, so \
+                     --skip-to sort or assemble is unsafe; rerun from --skip-to ocean or do a full tilegen",
+                    path.display()
+                ),
+            )
         })?;
         parse_versioned(&content).ok_or_else(|| {
             emit_counter("resume_refusal_invalid_sort_chunk_count", 1);
-            PipelineError(format!(
-                "chunk completion record {} is invalid or predates v{CHECKPOINT_VERSION}; \
-                 --skip-to sort or assemble is unsafe; rerun from --skip-to ocean or do a full tilegen",
-                path.display()
-            ))
+            PipelineError::resume(
+                ResumeRefusal::MalformedCompletion,
+                format!(
+                    "chunk completion record {} is invalid or predates v{CHECKPOINT_VERSION}; \
+                     --skip-to sort or assemble is unsafe; rerun from --skip-to ocean or do a full tilegen",
+                    path.display()
+                ),
+            )
         })
     }
 
@@ -225,10 +236,13 @@ impl ChunkCompletion {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => {
                 emit_counter("resume_refusal_sort_chunk_count_clear", 1);
-                Err(PipelineError(format!(
-                    "could not clear prior chunk completion record {} before changing the chunk set: {error}",
-                    path.display()
-                )))
+                Err(PipelineError::io(
+                    format!(
+                        "could not clear prior chunk completion record {} before changing the chunk set",
+                        path.display()
+                    ),
+                    error,
+                ))
             }
         }
     }
@@ -259,20 +273,26 @@ pub(crate) fn admit(
     let pbf = PbfCheckpoint::load(tmp_dir)?;
     if pbf.sort_chunk_compression != run.sort_chunk_compression {
         emit_counter("resume_refusal_sort_compression", 1);
-        return Err(PipelineError(format!(
-            "checkpoint sort chunks use {:?} compression but this run requests {:?}; \
+        return Err(PipelineError::resume(
+            ResumeRefusal::SortCompressionChanged,
+            format!(
+                "checkpoint sort chunks use {:?} compression but this run requests {:?}; \
              --compress-sort-chunks must match the setting that wrote the chunks, so \
              --skip-to cannot resume; re-run a full tilegen",
-            pbf.sort_chunk_compression, run.sort_chunk_compression
-        )));
+                pbf.sort_chunk_compression, run.sort_chunk_compression
+            ),
+        ));
     }
     if pbf.input_xxh3_128 != run.input_xxh3_128 {
         emit_counter("resume_refusal_input", 1);
-        return Err(PipelineError(format!(
-            "checkpoint was built from a different PBF (chunks: {}, this run: {}); \
+        return Err(PipelineError::resume(
+            ResumeRefusal::InputChanged,
+            format!(
+                "checkpoint was built from a different PBF (chunks: {}, this run: {}); \
              --skip-to would mix two inputs into one archive - re-run a full tilegen",
-            pbf.input_xxh3_128, run.input_xxh3_128,
-        )));
+                pbf.input_xxh3_128, run.input_xxh3_128,
+            ),
+        ));
     }
     // The chunks encode the producer config: zoom range, fanout caps,
     // simplification. They cannot be reinterpreted under different settings,
@@ -281,11 +301,15 @@ pub(crate) fn admit(
         emit_counter("resume_refusal_producer_config", 1);
         let diffs =
             crate::provenance::producer_config_diff(&pbf.producer_config, &run.producer_config);
-        return Err(PipelineError(format!(
+        let message = format!(
             "checkpoint chunks were produced under a different config: {}; \
              --skip-to cannot reinterpret them - re-run a full tilegen",
             diffs.join("; "),
-        )));
+        );
+        return Err(PipelineError::resume(
+            ResumeRefusal::ProducerConfigChanged { fields: diffs },
+            message,
+        ));
     }
     let completion = match skip {
         SkipTo::Ocean => None,
@@ -293,11 +317,11 @@ pub(crate) fn admit(
             let completion = ChunkCompletion::load(tmp_dir)?;
             if completion.ocean != run.ocean {
                 emit_counter("resume_refusal_ocean", 1);
-                return Err(PipelineError(
+                return Err(PipelineError::resume(
+                    ResumeRefusal::OceanChanged,
                     "the ocean chunks on disk were produced from a different ocean input than \
                      this run names; --skip-to sort and assemble reuse them, so resume from \
-                     --skip-to ocean to rebuild the ocean instead"
-                        .to_string(),
+                     --skip-to ocean to rebuild the ocean instead",
                 ));
             }
             Some(completion)
@@ -308,16 +332,35 @@ pub(crate) fn admit(
 
 fn write_json<T: Serialize>(path: &std::path::Path, record: &T) -> Result<(), PipelineError> {
     let content = serde_json::to_string(record).map_err(|error| {
-        PipelineError(format!("could not serialize {}: {error}", path.display()))
+        PipelineError::internal(format!("could not serialize {}", path.display())).with_cause(error)
     })?;
-    std::fs::write(path, content)?; // io::Error message is sufficient context.
-    Ok(())
+    std::fs::write(path, content)
+        .map_err(|error| PipelineError::io(format!("could not write {}", path.display()), error))
+}
+
+/// Read a resume record. A missing file is the refusal `missing` builds;
+/// any other read failure is classed by its own evidence, since a
+/// permission or disk error does not show the record is absent. The bytes
+/// go to the parser unchanged, so invalid UTF-8 refuses as malformed.
+fn read_record(
+    path: &std::path::Path,
+    missing: impl FnOnce() -> PipelineError,
+) -> Result<Vec<u8>, PipelineError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(missing()),
+        Err(error) => Err(PipelineError::io(
+            format!("could not read {}", path.display()),
+            error,
+        )),
+    }
 }
 
 /// Parse a record, refusing any other version before reading its fields:
 /// an older layout would otherwise surface as a confusing field error.
-fn parse_versioned<T: serde::de::DeserializeOwned>(content: &str) -> Option<T> {
-    let doc: serde_json::Value = serde_json::from_str(content).ok()?;
+/// Bytes that are not UTF-8 fail here, as malformed.
+fn parse_versioned<T: serde::de::DeserializeOwned>(content: &[u8]) -> Option<T> {
+    let doc: serde_json::Value = serde_json::from_slice(content).ok()?;
     if doc.get("version").and_then(serde_json::Value::as_u64) != Some(u64::from(CHECKPOINT_VERSION))
     {
         return None;

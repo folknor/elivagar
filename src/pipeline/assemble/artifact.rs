@@ -123,7 +123,7 @@ fn artifact_tile(raw: u64) -> Result<TileId, PipelineError> {
     TileId::new(raw)
         .filter(|tile| tile.is_profile())
         .ok_or_else(|| {
-            PipelineError(format!(
+            PipelineError::artifact(format!(
                 "ocean artifact tile id {raw} lies beyond z{MAX_ZOOM}"
             ))
         })
@@ -145,7 +145,7 @@ fn append_artifact_run_copy(
     items.push(PartitionItem::RunCopy {
         tile_id: artifact_tile(start)?,
         run_length: u32::try_from(end - start)
-            .map_err(|_| PipelineError("artifact split run length exceeds u32".to_string()))?,
+            .map_err(|_| PipelineError::internal("artifact split run length exceeds u32"))?,
         blob,
     });
     Ok(())
@@ -233,12 +233,16 @@ fn collect_hilbert_rect_ranges(
 /// are the artifact build's to have encoded, and are not re-validated per
 /// spliced tile.
 fn ocean_layer_field(compressed: &[u8]) -> Result<Vec<u8>, PipelineError> {
-    let raw = crate::archive::gzip_decompress(compressed)?;
+    // The payload is already in memory (the artifact is mapped), so a
+    // decompression or parse failure rejects the artifact's own bytes.
+    let raw = crate::archive::gzip_decompress(compressed).map_err(|error| {
+        PipelineError::artifact("artifact tile is not valid gzip").with_cause(error)
+    })?;
     let layers = crate::mvt::message::parse_tile(&raw, crate::tile_detail::Strictness::Strict)
-        .map_err(|error| PipelineError(format!("artifact tile: {error}")))?;
+        .map_err(|error| PipelineError::artifact(format!("artifact tile: {error}")))?;
     if layers.len() != 1 || layers[0].name != Layer::Ocean.name() {
-        return Err(PipelineError(
-            "artifact tile must contain exactly one ocean layer".to_string(),
+        return Err(PipelineError::artifact(
+            "artifact tile must contain exactly one ocean layer",
         ));
     }
     drop(layers);
@@ -275,7 +279,7 @@ pub(super) fn plan_artifact_items(
         // strictly increasing and inside its range; anything else would make
         // the copies below overlap or reorder the writer's stream.
         if id < cursor.next || id >= cursor.end {
-            return Err(PipelineError(format!(
+            return Err(PipelineError::internal(format!(
                 "encoded tile {id} lies outside the unplanned partition range {}..{}",
                 cursor.next, cursor.end
             )));
@@ -779,7 +783,9 @@ mod tests {
             panic!("computed ocean on an artifact-owned tile was accepted");
         };
         assert!(
-            error.0.contains("unexpectedly contains computed ocean"),
+            error
+                .to_string()
+                .contains("unexpectedly contains computed ocean"),
             "{error:?}"
         );
     }

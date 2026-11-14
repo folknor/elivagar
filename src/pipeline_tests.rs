@@ -1597,7 +1597,8 @@ fn tileset_assembly_requires_consistent_provenance_and_preserves_extract_header_
     let Err(error) = RunPlan::resolve(&config) else {
         panic!("ordinary assembly needs an input name");
     };
-    assert!(error.0.contains("input PBF path"));
+    assert!(error.to_string().contains("input PBF path"));
+    assert_eq!(error.kind(), crate::ErrorKind::Config);
     config.pbf_path = pbf_path;
     // Ocean facts must agree: computed-ocean low-zoom source without ocean
     // is refused at construction.
@@ -3921,7 +3922,37 @@ fn band_and_computed_chunks_from_one_source_differ() {
 #[test]
 fn missing_checkpoint_refuses_resume() {
     let dir = tempfile::tempdir().expect("create tempdir");
-    assert!(checkpoint::PbfCheckpoint::load(dir.path()).is_err());
+    let error = checkpoint::PbfCheckpoint::load(dir.path()).expect_err("no checkpoint");
+    assert_eq!(
+        error.resume_refusal(),
+        Some(&crate::ResumeRefusal::MissingCheckpoint)
+    );
+    assert_eq!(error.kind().exit_code(), 3);
+}
+
+/// A checkpoint path that cannot be read for a reason other than absence is
+/// not a resume refusal: nothing shows the record is missing.
+#[test]
+fn unreadable_checkpoint_is_not_a_missing_one() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    // A directory in the record's place makes the read fail with an OS
+    // error other than NotFound.
+    std::fs::create_dir(dir.path().join("checkpoint.txt")).expect("mkdir");
+    let error = checkpoint::PbfCheckpoint::load(dir.path()).expect_err("unreadable");
+    assert_eq!(error.resume_refusal(), None, "{error}");
+    assert_eq!(error.kind(), crate::ErrorKind::Io, "{error}");
+}
+
+/// A record whose bytes are not UTF-8 is malformed, not unreadable.
+#[test]
+fn non_utf8_checkpoint_is_malformed() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    std::fs::write(dir.path().join("checkpoint.txt"), [0xff, 0xfe, b'{']).expect("write");
+    let error = checkpoint::PbfCheckpoint::load(dir.path()).expect_err("malformed");
+    assert_eq!(
+        error.resume_refusal(),
+        Some(&crate::ResumeRefusal::MalformedCheckpoint)
+    );
 }
 
 /// A v10 checkpoint, which still carried the ocean identity, is refused.
@@ -3981,6 +4012,10 @@ fn sort_resume_refuses_a_changed_ocean() {
             error.to_string().contains("different ocean input"),
             "{error}"
         );
+        assert_eq!(
+            error.resume_refusal(),
+            Some(&crate::ResumeRefusal::OceanChanged)
+        );
     }
     let resume = checkpoint::admit(
         dir.path(),
@@ -4015,6 +4050,15 @@ fn resume_refuses_changed_input_producer_or_codec() {
             panic!("resume must refuse: {expected}");
         };
         assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(error.kind(), crate::ErrorKind::ResumeRefused);
+        match (expected, error.resume_refusal()) {
+            ("different PBF", Some(crate::ResumeRefusal::InputChanged))
+            | ("compression", Some(crate::ResumeRefusal::SortCompressionChanged)) => {}
+            ("max_zoom", Some(crate::ResumeRefusal::ProducerConfigChanged { fields })) => {
+                assert!(fields.iter().any(|f| f.contains("max_zoom")), "{fields:?}");
+            }
+            (_, reason) => panic!("{expected}: unexpected reason {reason:?}"),
+        }
     }
 }
 
@@ -4032,11 +4076,19 @@ fn missing_or_malformed_completion_refuses_sort_resume() {
         error.to_string().contains("may not have completed"),
         "{error}"
     );
+    assert_eq!(
+        error.resume_refusal(),
+        Some(&crate::ResumeRefusal::MissingCompletion)
+    );
     std::fs::write(dir.path().join("chunks_complete.json"), "17").expect("write");
     let Err(error) = checkpoint::admit(dir.path(), SkipTo::Sort, &run) else {
         panic!("a malformed completion record must refuse");
     };
     assert!(error.to_string().contains("is invalid"), "{error}");
+    assert_eq!(
+        error.resume_refusal(),
+        Some(&crate::ResumeRefusal::MalformedCompletion)
+    );
 }
 
 #[test]

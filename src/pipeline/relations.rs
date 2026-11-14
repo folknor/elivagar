@@ -62,11 +62,14 @@ pub(super) fn prepare_relation(
                 let role = WayRole::from_str(member.role().unwrap_or(""));
                 let way_id = WayId::new(way_id);
                 let coords_e7 = way_index.get(way_id).map_err(|error| {
-                    PipelineError(format!(
-                        "failed to read member way {} for relation {}: {error}",
-                        way_id.as_i64(),
-                        rel.id()
-                    ))
+                    PipelineError::io(
+                        format!(
+                            "failed to read member way {} for relation {}",
+                            way_id.as_i64(),
+                            rel.id()
+                        ),
+                        error,
+                    )
                 })?;
                 if let Some(coords_e7) = coords_e7 {
                     let merc: Vec<Point> = coords_e7

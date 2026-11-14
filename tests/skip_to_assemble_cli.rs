@@ -389,11 +389,59 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
         ])
         .output()
         .expect("run resumed header assertion");
-    assert!(
-        !asserted.status.success(),
-        "raw input must not satisfy a locations assertion on resume"
-    );
+    // Raw input must not satisfy a locations assertion on resume; the
+    // header refusing it is refused input.
+    assert_eq!(asserted.status.code(), Some(65));
     assert!(String::from_utf8_lossy(&asserted.stderr).contains("LocationsOnWays"));
+}
+
+/// The exit table in reference/cli.md, for the classes reachable without a
+/// real dataset: usage errors, help, and a refused resume.
+#[test]
+fn exit_codes_follow_the_failure_class() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let pbf_path = dir.path().join("input.osm.pbf");
+    write_tiny_pbf(&pbf_path);
+    let pbf_s = pbf_path.to_string_lossy().into_owned();
+    let out_s = dir
+        .path()
+        .join("out.pmtiles")
+        .to_string_lossy()
+        .into_owned();
+    let tmp_s = dir.path().join("tmp").to_string_lossy().into_owned();
+
+    assert_eq!(run_elivagar(&["--help"]).status.code(), Some(0));
+    assert_eq!(run_elivagar(&["--version"]).status.code(), Some(0));
+    assert_eq!(
+        run_elivagar(&["run", "--no-such-flag"]).status.code(),
+        Some(64)
+    );
+    let bad_ocean = run_elivagar(&["run", &pbf_s, "-o", &out_s, "--ocean", "z0-z3:x.shp"]);
+    assert_eq!(bad_ocean.status.code(), Some(64), "{bad_ocean:?}");
+    let bad_factor = run_elivagar(&[
+        "run",
+        &pbf_s,
+        "-o",
+        &out_s,
+        "--polygon-simplify-factor",
+        "100",
+    ]);
+    assert_eq!(bad_factor.status.code(), Some(64), "{bad_factor:?}");
+
+    // No checkpoint under the scratch directory: the resume is refused.
+    let resume = run_elivagar(&[
+        "run",
+        &pbf_s,
+        "-o",
+        &out_s,
+        "--tmp-dir",
+        &tmp_s,
+        "--threads",
+        "1",
+        "--skip-to",
+        "ocean",
+    ]);
+    assert_eq!(resume.status.code(), Some(3), "{resume:?}");
 }
 
 #[test]

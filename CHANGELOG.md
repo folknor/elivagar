@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Breaking: `PipelineError` is no longer a public `String` tuple. It is an
+  opaque error with `kind() -> ErrorKind` (config, refused input, refused
+  resume, refused ocean artifact, OS I/O, internal, unclassified),
+  `resume_refusal() -> Option<&ResumeRefusal>` naming why a `--skip-to`
+  resume was refused, `message()`, and the underlying cause as `source()`.
+  `From<String>` is gone. A class is claimed only with evidence: an I/O
+  error without an OS errno is unclassified, never a guessed refusal.
+- Breaking: the binary's exit codes follow one table, documented in the CLI
+  reference: 2 unclassified, 3 refused resume, 4 refused ocean artifact,
+  64 invalid invocation (clap usage errors included, previously 2; library
+  validation errors, previously 1 or 2), 65 refused input, 70 internal,
+  74 OS I/O, with `verify` keeping 1 for a failing report. Pipeline and
+  subcommand failures previously all exited 1. `elivagar --version` now exists. A checkpoint that
+  cannot be read for a reason other than absence is reported as the read
+  failure rather than as a missing checkpoint. Tile output is unchanged.
+
 - Breaking: `TilegenConfig` now takes `ocean: Option<OceanInputs>`, checked
   `SimplifyFactor`, and checked `FanoutCaps` instead of separate optional
   ocean paths, a raw f64 and a raw cap array. Ocean spec and fanout parsers

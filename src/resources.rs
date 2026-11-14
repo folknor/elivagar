@@ -112,17 +112,17 @@ where
     };
     let value = raw
         .into_string()
-        .map_err(|_| PipelineError(format!("invalid {name}: value is not valid UTF-8")))?;
+        .map_err(|_| PipelineError::config(format!("invalid {name}: value is not valid UTF-8")))?;
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(PipelineError(format!(
+        return Err(PipelineError::config(format!(
             "invalid {name}={value:?}: expected a decimal integer without signs, whitespace or size suffixes"
         )));
     }
     let parsed = value
         .parse::<T>()
-        .map_err(|error| PipelineError(format!("invalid {name}={value:?}: {error}")))?;
+        .map_err(|error| PipelineError::config(format!("invalid {name}={value:?}: {error}")))?;
     if matches!(zero, EnvZero::Reject) && parsed == T::from(0) {
-        return Err(PipelineError(format!(
+        return Err(PipelineError::config(format!(
             "invalid {name}={value:?}: value must be greater than zero"
         )));
     }
@@ -138,7 +138,7 @@ fn budget(
     match value {
         None => Ok(default),
         Some(b) if b.get() >= min => Ok(b.get()),
-        Some(b) => Err(PipelineError(format!(
+        Some(b) => Err(PipelineError::config(format!(
             "{name} of {} bytes is below the minimum of {min} bytes",
             b.get()
         ))),

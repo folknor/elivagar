@@ -37,31 +37,8 @@ use stats::Phase12Stats;
 #[cfg(test)]
 use stats::missing_ref_summary_lines;
 
-/// Pipeline error type. Stringly-typed because no caller inspects variants -
-/// errors are only displayed or propagated. An enum would add boilerplate for no benefit.
-#[derive(Debug)]
-pub struct PipelineError(pub String);
-
-impl std::fmt::Display for PipelineError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for PipelineError {}
-
-// Intentionally converts to String - no caller inspects .source() programmatically.
-impl From<std::io::Error> for PipelineError {
-    fn from(e: std::io::Error) -> Self {
-        Self(e.to_string())
-    }
-}
-
-impl From<String> for PipelineError {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
+mod error;
+pub use error::{ErrorKind, PipelineError, ResumeRefusal};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -110,8 +87,8 @@ impl OceanMode {
                     artifact_key: key.to_json(),
                 })
             }
-            _ => Err(PipelineError(
-                "ocean mode and low-zoom source disagree".to_string(),
+            _ => Err(PipelineError::internal(
+                "ocean mode and low-zoom source disagree",
             )),
         }
     }
@@ -317,7 +294,7 @@ pub(crate) const COMPRESSION_POLICY: &str = "zoom-v1";
 
 fn validate_compression_level(level: u32) -> Result<(), PipelineError> {
     if level > 10 {
-        return Err(PipelineError(format!(
+        return Err(PipelineError::config(format!(
             "compression level {level} exceeds maximum supported level 10"
         )));
     }
@@ -351,14 +328,14 @@ fn resolve_ocean(
         config.ocean.as_ref().and_then(|o| o.simplified.as_deref()),
         config.ocean.as_ref().and_then(|o| o.artifact.as_deref()),
     )
-    .map_err(PipelineError)?
+    .map_err(PipelineError::config)?
     else {
         return Ok(ResolvedOcean::None);
     };
     let Some(path) = plan.artifact() else {
         let key = plan
             .source_key(window.first(), window.last())
-            .map_err(|e| PipelineError(format!("ocean shapefile is unreadable: {e}")))?;
+            .map_err(|e| PipelineError::io("ocean shapefile is unreadable", e))?;
         return Ok(ResolvedOcean::Computed { plan, key });
     };
     let (tile_format, tile_compression) = tile.writer();
@@ -369,7 +346,9 @@ fn resolve_ocean(
     if decoder.is_err()
         || !crate::ocean::artifact::artifact_serves_window(window.first(), window.last())
     {
-        return Err(PipelineError(format!(
+        // The request's tile contract and window, not the artifact's bytes,
+        // rule this out, so it is a config refusal.
+        return Err(PipelineError::config(format!(
             "ocean artifact {} was named but cannot serve this run: it is built for the MVT + gzip + z0-14 contract, and this run is {:?} + {:?} + z{}-z{}. Drop the artifact from --ocean to compute the ocean instead.",
             path.display(),
             config.tile_format,
@@ -495,14 +474,14 @@ use crate::debug::layer_stats_enabled;
 /// validated range. An excessive `max_zoom` is reported before a reversed pair.
 fn zoom_window(min_zoom: u8, max_zoom: u8) -> Result<ZoomRange, PipelineError> {
     if max_zoom > crate::tiling::MAX_ZOOM {
-        return Err(PipelineError(format!(
+        return Err(PipelineError::config(format!(
             "max_zoom {} exceeds maximum supported zoom level {}",
             max_zoom,
             crate::tiling::MAX_ZOOM
         )));
     }
     ZoomRange::new(min_zoom, max_zoom).ok_or_else(|| {
-        PipelineError(format!(
+        PipelineError::config(format!(
             "min_zoom {min_zoom} is greater than max_zoom {max_zoom}"
         ))
     })
@@ -534,22 +513,21 @@ impl RunPlan {
             .and_then(|name| name.to_str())
             .is_none()
         {
-            return Err(PipelineError(
-                "input PBF path must have a UTF-8 filename so archive provenance can identify it"
-                    .to_string(),
+            return Err(PipelineError::config(
+                "input PBF path must have a UTF-8 filename so archive provenance can identify it",
             ));
         }
         if config.tile_format == TilePayloadFormat::Mlt
             && config.tile_compression == TileCompression::Brotli
         {
-            return Err(PipelineError(
-                "MLT payloads are uncompressed; brotli is MVT only".into(),
+            return Err(PipelineError::config(
+                "MLT payloads are uncompressed; brotli is MVT only",
             ));
         }
         #[cfg(not(feature = "mlt"))]
         if config.tile_format == TilePayloadFormat::Mlt {
-            return Err(PipelineError(
-                "--tile-format mlt requires a build with the `mlt` feature".into(),
+            return Err(PipelineError::config(
+                "--tile-format mlt requires a build with the `mlt` feature",
             ));
         }
         if config.tile_format == TilePayloadFormat::Mvt {
@@ -594,8 +572,9 @@ impl RunPlan {
 
 /// # Errors
 ///
-/// Returns [`PipelineError`] on I/O failures, invalid configuration (e.g.
-/// `max_zoom > 14`), or corrupt input data.
+/// Returns [`PipelineError`], whose [`ErrorKind`] says whether the request
+/// was invalid, the input or resume state or ocean artifact was refused, the
+/// OS reported an I/O failure, or the failure is unclassified.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[hotpath::measure]
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
@@ -628,11 +607,11 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         // explicit header assertion before reusing any chunks.
         if config.locations_on_ways {
             let reader = pbfhogg::ElementReader::from_path(&config.pbf_path)
-                .map_err(|error| PipelineError(format!("failed to open PBF: {error}")))?;
+                .map_err(|error| PipelineError::failed("failed to open PBF").with_cause(error))?;
             phase12::resolve_locations_on_ways(true, reader.header().has_locations_on_ways())?;
         }
         let identity = crate::provenance::hash_file(&config.pbf_path)
-            .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?;
+            .map_err(|e| PipelineError::io("could not read input PBF", e))?;
         resume = Some(checkpoint::admit(
             &config.tmp_dir,
             skip,
@@ -700,10 +679,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    return Err(PipelineError(format!(
-                        "could not clear tmp dir {} before a full run: {error}",
-                        config.tmp_dir.display()
-                    )));
+                    return Err(PipelineError::io(
+                        format!(
+                            "could not clear tmp dir {} before a full run",
+                            config.tmp_dir.display()
+                        ),
+                        error,
+                    ));
                 }
             }
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
@@ -732,7 +714,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 let _wait = wait_span(&WAIT.input_hash_join);
                 input_hash
                     .join()
-                    .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?
+                    .map_err(|e| PipelineError::io("could not read input PBF", e))?
             };
             checkpoint::PbfCheckpoint::new(
                 &bounds_out,
@@ -802,7 +784,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     window,
                     &mut sort_writer,
                     producer_band,
-                    plan.pass_hashes(source_key, pass).map_err(PipelineError)?,
+                    plan.pass_hashes(source_key, pass)
+                        .map_err(PipelineError::internal)?,
                 )?;
             }
 
@@ -890,9 +873,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     };
 
     let input_identity = input_identity.ok_or_else(|| {
-        PipelineError(
-            "input PBF identity is unavailable; refusing to write an archive without provenance"
-                .to_string(),
+        PipelineError::internal(
+            "input PBF identity is unavailable; refusing to write an archive without provenance",
         )
     })?;
 

@@ -37,6 +37,36 @@ Hence: no auto-detection, `--ocean` names every ocean input, omitting it means
 no ocean, and a named input that cannot be honoured is an error rather than a
 fallback.
 
+## Exit status
+
+Every subcommand exits under one table. A code names a broad failure class,
+not a recovery to run, and a class is claimed only where the code raising it
+has evidence for it: a failure that has not been classified exits 2, never a
+guessed class. Several subsystems (sort chunk validation, the ocean
+artifact's admission and directory, the shapefile reader, the archive
+reader behind `inspect`, `svg`, `diag` and `verify`) still report through
+plain I/O errors, so their refusals currently exit 2, or 74 when the OS
+reported the failure.
+
+| code | meaning |
+|---|---|
+| 0 | success, including `--help` and `--version` |
+| 1 | `verify` ran and its report fails (see `verify` below) |
+| 2 | unclassified failure; it may follow substantial work or partial output |
+| 3 | `--skip-to` resume refused: the resume records under `--tmp-dir` are absent or do not match this run |
+| 4 | the named ocean artifact cannot serve this run because of its own bytes or identity |
+| 64 | invalid invocation: a clap usage error, or a value or combination the library refuses before work (including environment knobs, and an artifact named for a tile contract or zoom window it cannot serve) |
+| 65 | input bytes read and rejected, e.g. an unsorted PBF without an opt-in, malformed injected data, or a header that refuses `--locations-on-ways` |
+| 70 | an internal invariant failed |
+| 74 | an I/O failure the OS reported |
+
+A panic is outside the table: release builds use `panic = "abort"`, so the
+process ends by signal. Library callers read the same class from
+`PipelineError::kind()` (`ErrorKind::exit_code()` gives the code), and a
+refused resume names its reason through `PipelineError::resume_refusal()`.
+The `resume_refusal_*` sidecar counters are diagnostics only; their absence
+means the reason is unavailable, not that there was none.
+
 ## `elivagar run <INPUT> -o <OUTPUT> [OPTIONS]`
 
 Generate a PMTiles archive from an OSM PBF.
@@ -440,8 +470,11 @@ For the raw block use `scripts/dump-pmtiles-metadata.py`.
 
 End-to-end archive validation: container integrity, metadata schema, tile
 decompression, MVT payload structure, geometry commands, layer coverage, and
-ocean ring self-intersection. Exit 0 on pass, 1 on failure; stops after 100
-tile-level errors.
+ocean ring self-intersection. Exit 0 on pass, 1 when the report fails;
+stops after 100 tile-level errors. A tile whose bytes cannot be read is
+currently recorded as a finding, so exit 1 does not exclude an operational
+read failure. A verification that cannot complete exits under the table in
+"Exit status" at the top of this document.
 
 Payload structure is checked under the strict MVT policy `tile_detail`
 uses: a field MVT does not name, a duplicate singular field, a feature

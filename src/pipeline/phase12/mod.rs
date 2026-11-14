@@ -379,7 +379,7 @@ pub(super) fn phase_read_and_process(
     // result drain each have a separate OS thread.
     let decode_threads = resources.decode_threads;
     let reader = ElementReader::from_path(&config.pbf_path)
-        .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?
+        .map_err(|e| PipelineError::failed("failed to open PBF").with_cause(e))?
         .decode_threads(decode_threads);
 
     let header = reader.header();
@@ -483,9 +483,10 @@ pub(super) fn phase_read_and_process(
     } else {
         let blocks = reader
             .into_blocks_pipelined()
-            .map_err(|e| PipelineError(format!("PBF pipeline start failed: {e}")))?;
+            .map_err(|e| PipelineError::failed("PBF pipeline start failed").with_cause(e))?;
         for block_result in blocks {
-            let block = block_result.map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
+            let block =
+                block_result.map_err(|e| PipelineError::failed("PBF read failed").with_cause(e))?;
             router.route(block, None)?;
         }
     }
@@ -516,11 +517,13 @@ pub(super) fn phase_read_and_process(
     // buffer cap tripped.
     let rel_blocks_source: Box<dyn Iterator<Item = PrimitiveBlock> + Send> = if relations.spilled {
         let reader = ElementReader::from_path(&config.pbf_path)
-            .map_err(|e| PipelineError(format!("relation re-read: failed to open PBF: {e}")))?
+            .map_err(|e| {
+                PipelineError::failed("relation re-read: failed to open PBF").with_cause(e)
+            })?
             .with_blob_filter(BlobFilter::only_relations())
             .decode_threads(decode_threads);
         let blocks = reader.into_blocks_pipelined().map_err(|e| {
-            PipelineError(format!("relation re-read: PBF pipeline start failed: {e}"))
+            PipelineError::failed("relation re-read: PBF pipeline start failed").with_cause(e)
         })?;
         Box::new(blocks.map(|r| {
             // Panic: mid-tail I/O failure is unrecoverable (same policy

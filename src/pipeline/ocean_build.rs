@@ -27,10 +27,8 @@ pub fn ocean_build(
     crate::ocean::reset_ocean_counters();
     sort::reset_sort_counters();
     let plan = crate::ocean::OceanPlan::new(Some(full_shapefile), simplified_shapefile, None)
-        .map_err(PipelineError)?
-        .ok_or_else(|| {
-            PipelineError("ocean-build needs a full-resolution shapefile".to_string())
-        })?;
+        .map_err(PipelineError::config)?
+        .ok_or_else(|| PipelineError::config("ocean-build needs a full-resolution shapefile"))?;
     // Fail on missing inputs before retaining the active artifact. The key
     // itself is assembled from the buffers consumed by the passes below.
     for pass in crate::ocean::OceanPass::ALL {
@@ -61,7 +59,7 @@ pub fn ocean_build(
     let mut pass_hashes = Vec::with_capacity(crate::ocean::OceanPass::ALL.len());
     for pass in crate::ocean::OceanPass::ALL {
         let window = pass.emission(artifact_zooms).ok_or_else(|| {
-            PipelineError(format!("artifact zoom range misses the {pass:?} pass"))
+            PipelineError::internal(format!("artifact zoom range misses the {pass:?} pass"))
         })?;
         let (_, hashes) = crate::ocean::process_ocean_shapefile_with_hashes(
             plan.source(pass).shp(),
@@ -72,13 +70,15 @@ pub fn ocean_build(
         pass_hashes.push(hashes);
     }
     let [low_hashes, full_hashes] = pass_hashes[..] else {
-        return Err(PipelineError(
-            "ocean-build ran an unexpected number of passes".to_string(),
+        return Err(PipelineError::internal(
+            "ocean-build ran an unexpected number of passes",
         ));
     };
     if !plan.has_simplified() && low_hashes != full_hashes {
-        return Err(PipelineError(
-            "full ocean shapefile changed between low and high zoom passes".to_string(),
+        // Two observations of one input disagree; nothing shows which is
+        // wrong, so this stays unclassified.
+        return Err(PipelineError::failed(
+            "full ocean shapefile changed between low and high zoom passes",
         ));
     }
     let source = crate::ocean::OceanSourceKey::from_hashes(

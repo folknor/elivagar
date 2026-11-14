@@ -92,4 +92,6 @@ pub(crate) mod wire_format;
 
 pub use pipeline::TileCompression;
 pub use pipeline::TilePayloadFormat;
-pub use pipeline::{OceanMode, PipelineError, SkipTo, TilegenConfig, ocean_build, run};
+pub use pipeline::{
+    ErrorKind, OceanMode, PipelineError, ResumeRefusal, SkipTo, TilegenConfig, ocean_build, run,
+};

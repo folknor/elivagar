@@ -64,7 +64,7 @@ impl Prepass {
 fn join_handle(handle: PrepassHandle) -> Result<RelationPlan, PipelineError> {
     handle
         .join()
-        .map_err(|_| PipelineError("relation prepass thread panicked".to_string()))?
+        .map_err(|_| PipelineError::internal("relation prepass thread panicked"))?
 }
 
 impl Drop for Prepass {
@@ -82,7 +82,7 @@ fn prepass_relation_plan(
 ) -> Result<RelationPlan, PipelineError> {
     let start = std::time::Instant::now();
     let reader = ElementReader::from_path(pbf_path)
-        .map_err(|e| PipelineError(format!("relation prepass: failed to open PBF: {e}")))?
+        .map_err(|e| PipelineError::failed("relation prepass: failed to open PBF").with_cause(e))?
         .with_blob_filter(BlobFilter::only_relations())
         .decode_threads(decode_threads);
 
@@ -93,12 +93,13 @@ fn prepass_relation_plan(
     // kept; the set is dropped before the plan is returned.
     let mut superset_ways: FxHashSet<i64> = FxHashSet::default();
     let mut matched_relations: u64 = 0;
-    let blocks = reader
-        .into_blocks_pipelined()
-        .map_err(|e| PipelineError(format!("relation prepass: PBF pipeline start failed: {e}")))?;
+    let blocks = reader.into_blocks_pipelined().map_err(|e| {
+        PipelineError::failed("relation prepass: PBF pipeline start failed").with_cause(e)
+    })?;
     for block_result in blocks {
-        let block = block_result
-            .map_err(|e| PipelineError(format!("relation prepass: PBF read failed: {e}")))?;
+        let block = block_result.map_err(|e| {
+            PipelineError::failed("relation prepass: PBF read failed").with_cause(e)
+        })?;
         block.for_each_element(|element| {
             let Element::Relation(rel) = element else {
                 return;

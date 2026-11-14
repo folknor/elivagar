@@ -26,7 +26,7 @@ use elivagar::resources::ByteBudget;
 
 /// Shortbread vector tile generator.
 #[derive(Parser)]
-#[command(name = "elivagar")]
+#[command(name = "elivagar", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -347,11 +347,37 @@ fn parse_byte_size_min_1m(s: &str) -> Result<ByteBudget, String> {
     .ok_or_else(|| format!("expected >= 1M (e.g. 32M, 128M), got '{s}'"))
 }
 
+/// Exit for a request the command line or its values make invalid, before
+/// any work. The code matches clap's own usage errors.
+const EXIT_USAGE: i32 = 64;
+
+/// A verifier that ran and found the archive defective.
+const EXIT_NEGATIVE: i32 = 1;
+
+/// Print `message` and exit with `code`. Every failure leaves through here
+/// or through clap, so the exit table in `reference/cli.md` is this file.
+fn fail(message: impl std::fmt::Display, code: i32) -> ! {
+    eprintln!("Error: {message}");
+    std::process::exit(code);
+}
+
+fn usage(message: impl std::fmt::Display) -> ! {
+    fail(message, EXIT_USAGE)
+}
+
+/// A pipeline failure exits with its class's code.
+fn pipeline_failure(error: &elivagar::PipelineError) -> ! {
+    fail(error, error.kind().exit_code())
+}
+
+/// An `io::Error` from a subcommand that does not classify its failures:
+/// `Io` only with an OS errno, otherwise unclassified.
+fn io_failure(error: &std::io::Error) -> ! {
+    fail(error, elivagar::ErrorKind::of_io(error).exit_code())
+}
+
 fn ocean_build_command(args: &OceanBuildArgs) {
-    let inputs = elivagar::OceanInputs::parse_build_specs(&args.ocean).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        std::process::exit(2);
-    });
+    let inputs = elivagar::OceanInputs::parse_build_specs(&args.ocean).unwrap_or_else(|e| usage(e));
     let full = &inputs.full;
     let threads = args
         .threads
@@ -368,8 +394,7 @@ fn ocean_build_command(args: &OceanBuildArgs) {
         args.compression_level,
         threads,
     ) {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
+        pipeline_failure(&e);
     }
 }
 
@@ -382,15 +407,23 @@ fn main() {
         unsafe { std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "true") };
     }
 
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|error| {
+        // Help and version go to stdout and exit 0; a usage error joins the
+        // other invalid requests on EXIT_USAGE instead of clap's default 2,
+        // which is the unclassified-failure code here.
+        if !error.use_stderr() {
+            error.exit();
+        }
+        drop(error.print());
+        std::process::exit(EXIT_USAGE);
+    });
 
     match cli.command {
         Command::Run(args) => run(*args),
         Command::OceanBuild(args) => ocean_build_command(&args),
         Command::Inspect(args) => {
             if let Err(e) = elivagar::inspect::inspect(&args.file) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+                io_failure(&e);
             }
         }
         Command::Verify(args) => {
@@ -405,13 +438,13 @@ fn main() {
                         stats.print_summary();
                     }
                     if !report.passed {
-                        std::process::exit(1);
+                        // The report's findings may include tiles whose
+                        // bytes could not be read, not only decoded ones.
+                        std::process::exit(EXIT_NEGATIVE);
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
+                Err(elivagar::verify::VerifyError::Io(e)) => io_failure(&e),
+                Err(e) => fail(e, elivagar::ErrorKind::Failed.exit_code()),
             }
         }
         Command::Svg(args) => {
@@ -422,19 +455,19 @@ fn main() {
                 args.width,
                 args.height,
             ) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+                usage(e);
             }
             let layer_filter: Option<Vec<&str>> =
                 args.layers.as_deref().map(|s| s.split(',').collect());
             if let Err(e) = elivagar::svg::validate_layer_filter(layer_filter.as_deref()) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+                usage(e);
             }
             let result = if let Some(ref path) = args.output {
                 let mut file = std::fs::File::create(path).unwrap_or_else(|e| {
-                    eprintln!("Error creating {}: {e}", path.display());
-                    std::process::exit(1);
+                    fail(
+                        format_args!("creating {}: {e}", path.display()),
+                        elivagar::ErrorKind::of_io(&e).exit_code(),
+                    )
                 });
                 elivagar::svg::render_tile_grid_svg(
                     &args.file,
@@ -461,14 +494,12 @@ fn main() {
                 )
             };
             if let Err(e) = result {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+                io_failure(&e);
             }
         }
         Command::Diag(args) => {
             if let Err(e) = elivagar::diag::diag_tile(&args.file, args.z, args.x, args.y) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+                io_failure(&e);
             }
         }
     }
@@ -492,10 +523,7 @@ fn run(args: RunArgs) {
         SkipToArg::Assemble => elivagar::SkipTo::Assemble,
     });
 
-    let ocean_inputs = elivagar::OceanInputs::parse_specs(&args.ocean).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        std::process::exit(2);
-    });
+    let ocean_inputs = elivagar::OceanInputs::parse_specs(&args.ocean).unwrap_or_else(|e| usage(e));
     let config = elivagar::TilegenConfig {
         pbf_path: args.input,
         output_path: args.output,
@@ -528,15 +556,9 @@ fn run(args: RunArgs) {
             Some(SortChunkCompressionArg::Snappy) => elivagar::sort::ChunkCompression::Snappy,
         },
         fanout_caps: elivagar::FanoutCaps::parse_specs(args.fanout_cap_default, &args.fanout_cap)
-            .unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                std::process::exit(2);
-            }),
+            .unwrap_or_else(|e| usage(e)),
         polygon_simplify_factor: elivagar::SimplifyFactor::new(args.polygon_simplify_factor)
-            .unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                std::process::exit(2);
-            }),
+            .unwrap_or_else(|e| usage(e)),
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")
@@ -545,8 +567,9 @@ fn run(args: RunArgs) {
         .build();
 
     if let Err(e) = elivagar::run(&config) {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
+        // The hotpath guard's report is skipped on failure, as it always was:
+        // process::exit runs no destructors.
+        pipeline_failure(&e);
     }
 }
 

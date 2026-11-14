@@ -28,8 +28,8 @@ pub(super) fn detect_injected_features(
     has_locations: bool,
 ) -> Result<InjectedFeatures, PipelineError> {
     if (has_members || has_pins) && !has_locations {
-        return Err(PipelineError(
-            "injected WayMembers-v1 or SharedNodePins-v1 requires LocationsOnWays".to_string(),
+        return Err(PipelineError::input(
+            "injected WayMembers-v1 or SharedNodePins-v1 requires LocationsOnWays",
         ));
     }
     Ok(InjectedFeatures {
@@ -43,9 +43,8 @@ pub(in crate::pipeline) fn resolve_locations_on_ways(
     declared: bool,
 ) -> Result<bool, PipelineError> {
     if requested && !declared {
-        return Err(PipelineError(
-            "--locations-on-ways requires the input PBF header to declare LocationsOnWays"
-                .to_string(),
+        return Err(PipelineError::input(
+            "--locations-on-ways requires the input PBF header to declare LocationsOnWays",
         ));
     }
     Ok(declared)
@@ -55,19 +54,18 @@ fn validate_and_take_members(
     members: Option<(&[u8], u32)>,
     actual_way_count: usize,
 ) -> Result<Box<[u8]>, PipelineError> {
-    let (bitmap, encoded_count) = members.ok_or_else(|| {
-        PipelineError("injected way-members bitmap missing or malformed".to_string())
-    })?;
+    let (bitmap, encoded_count) = members
+        .ok_or_else(|| PipelineError::input("injected way-members bitmap missing or malformed"))?;
     let actual_way_count_u64 = u64::try_from(actual_way_count)
-        .map_err(|_| PipelineError("decoded way count does not fit in u64".to_string()))?;
+        .map_err(|_| PipelineError::internal("decoded way count does not fit in u64"))?;
     if u64::from(encoded_count) != actual_way_count_u64 {
-        return Err(PipelineError(format!(
+        return Err(PipelineError::input(format!(
             "injected way-members count mismatch: encoded {encoded_count}, decoded {actual_way_count}"
         )));
     }
     let expected_len = actual_way_count.div_ceil(8);
     if bitmap.len() != expected_len {
-        return Err(PipelineError(format!(
+        return Err(PipelineError::input(format!(
             "injected way-members bitmap length mismatch: got {}, expected {expected_len}",
             bitmap.len()
         )));
@@ -84,7 +82,7 @@ fn validate_way_pin_bitmaps(block: &PrimitiveBlock) -> Result<(), PipelineError>
             let ref_count = way.refs().count();
             let expected_len = ref_count.div_ceil(8);
             if bitmap.len() != expected_len {
-                return Err(PipelineError(format!(
+                return Err(PipelineError::input(format!(
                     "injected shared-node pins bitmap length mismatch for way {}: got {}, expected {expected_len}",
                     way.id(),
                     bitmap.len()
@@ -103,7 +101,7 @@ pub(in crate::pipeline) enum NodeStoreMode {
 }
 
 fn unsorted_flat_guard_error(pbf_size: u64) -> PipelineError {
-    PipelineError(format!(
+    PipelineError::input(format!(
         "PBF file is {:.1} GB but does not declare Sort.Type_then_ID.\n\
          The flat node index uses node IDs as direct file offsets and may need\n\
          many gigabytes even for a small extract. Choose an explicit option:\n\
@@ -222,7 +220,7 @@ impl UnorderedBlockSource {
         let (decoded_tx, decoded_rx) = std::sync::mpsc::sync_channel::<DecodedBlock>(decoded_cap);
 
         let mut reader = pbfhogg::BlobReader::from_path(path)
-            .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?;
+            .map_err(|e| PipelineError::failed("failed to open PBF").with_cause(e))?;
         reader.set_parse_waymembers(injected_members);
 
         let reader_err_tx = decoded_tx.clone();
@@ -240,7 +238,8 @@ impl UnorderedBlockSource {
                     }
                     Err(e) => {
                         drop(
-                            reader_err_tx.send(Err(PipelineError(format!("PBF read failed: {e}")))),
+                            reader_err_tx
+                                .send(Err(PipelineError::failed("PBF read failed").with_cause(e))),
                         );
                         break;
                     }
@@ -319,7 +318,7 @@ fn decode_blob(blob: &pbfhogg::Blob, injected_members: bool, injected_pins: bool
     let members = blob.way_members().zip(blob.way_member_count());
     let block = blob
         .to_primitiveblock()
-        .map_err(|e| PipelineError(format!("PBF decode failed: {e}")))?;
+        .map_err(|e| PipelineError::failed("PBF decode failed").with_cause(e))?;
     let members = if injected_members && block.block_type() == BlockType::Ways {
         let actual_way_count = block
             .elements()
