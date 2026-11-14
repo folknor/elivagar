@@ -1513,8 +1513,14 @@ mod tests {
             ));
         }
 
-        crate::geometry::int_ocean::quantize_polygon(&outer, &holes, 2)
+        crate::geometry::int_ocean::quantize_polygon(&outer, &holes, PROPERTY_GRID)
     }
+
+    /// The property suite quantizes at grid zoom 6 and emits z0-z6, so every
+    /// zoom coarser than the grid (z0-z5) goes through a nonzero pinned rescale. The
+    /// generator keeps its shapes inside the z2 tile (1, 1), which bounds the
+    /// descent to that tile's subtree: 256 cells at z6.
+    const PROPERTY_GRID: u8 = 6;
 
     fn decoded_contour(ring: &[(i32, i32)]) -> Vec<IntPoint> {
         ring.iter().map(|&(x, y)| p(x, y)).collect()
@@ -1522,27 +1528,41 @@ mod tests {
 
     #[test]
     fn seeded_quantized_pyramids_decode_with_polygon_ring_invariants() {
-        fn zero_tolerance(_: u8) -> ExtentUnits {
-            ExtentUnits::new(0)
-        }
-        fn zero_min_area(_: u8) -> Area {
-            Area::ZERO
-        }
-
-        let dp_tol: &(dyn Fn(u8) -> ExtentUnits + Sync) = &zero_tolerance;
-        let min_area: &(dyn Fn(u8) -> Area + Sync) = &zero_min_area;
-        let params = PyramidParams {
-            zooms: PyramidZooms::new(2, 2, 2).expect("test pyramid zooms"),
-            dp_tol,
-            min_area,
-            pins: None,
-            tile_filter: None,
-            simplifier: Simplifier::DouglasPeucker,
-        };
+        // Every tolerance below, at, and above WINDOW_DP_TOL, crossed with
+        // min-area off and on, is scheduled explicitly rather than sampled.
+        // The ring invariants hold for any parameters because emit_cell
+        // normalizes after rescale and simplification; the every-zoom-emits
+        // check is a fixture property instead, true because the generator's
+        // outer stays several hundred units wide at z0, far above these
+        // tolerances and this area threshold.
+        const TOLERANCES: [i64; 4] = [0, 2, 4, 16];
+        const MIN_AREAS: [u64; 2] = [0, 16];
+        const OVER_CAP_CASE: usize = 24;
         let mut seed = 0xbb67_ae85_84ca_a73b;
 
-        for case in 0..20 {
-            let hole_count = if case == 19 {
+        for case in 0..=OVER_CAP_CASE {
+            // The over-cap case runs at zero tolerance and area so no hole
+            // can be dropped below the cap before the partition sees it.
+            let (tol, area) = if case == OVER_CAP_CASE {
+                (0, 0)
+            } else {
+                (
+                    TOLERANCES[case % TOLERANCES.len()],
+                    MIN_AREAS[(case / TOLERANCES.len()) % MIN_AREAS.len()],
+                )
+            };
+            let dp_tol = move |_: u8| ExtentUnits::new(tol);
+            let min_area = move |_: u8| Area::from_u64(area);
+            let params = PyramidParams {
+                zooms: PyramidZooms::new(PROPERTY_GRID, 0, PROPERTY_GRID)
+                    .expect("test pyramid zooms"),
+                dp_tol: &dp_tol,
+                min_area: &min_area,
+                pins: None,
+                tile_filter: None,
+                simplifier: Simplifier::DouglasPeucker,
+            };
+            let hole_count = if case == OVER_CAP_CASE {
                 501
             } else {
                 usize::try_from(property_below(&mut seed, 25)).expect("hole count fits usize")
@@ -1569,15 +1589,28 @@ mod tests {
 
             let mut scratch = PyramidScratch::new();
             let mut emitted = Vec::new();
-            emit_shape_pyramid(&shape_base, &params, &mut scratch, &mut |_, geom, _| {
-                emitted.push(geom.to_vec());
+            emit_shape_pyramid(&shape_base, &params, &mut scratch, &mut |cell, geom, _| {
+                emitted.push((cell, geom.to_vec()));
             });
-            assert!(!emitted.is_empty(), "case {case} emits polygon geometry");
-            if case == 19 {
-                assert!(emitted.len() > 1, "over-cap input is partitioned");
+            for z in 0..=PROPERTY_GRID {
+                assert!(
+                    emitted.iter().any(|(cell, _)| cell.z == z),
+                    "case {case} emits polygon geometry at z{z}"
+                );
+            }
+            if case == OVER_CAP_CASE {
+                // The shape lies inside one z2 tile, so every hole reaches a
+                // single z2 cell; more than one geometry there is the ring-cap
+                // partition, not ordinary tile subdivision.
+                let z2: Vec<_> = emitted.iter().filter(|(cell, _)| cell.z == 2).collect();
+                assert!(
+                    z2.iter().all(|(cell, _)| (cell.tx, cell.ty) == (1, 1)),
+                    "over-cap input stays in z2 tile 1/1"
+                );
+                assert!(z2.len() > 1, "over-cap input is partitioned at z2");
             }
 
-            for geometry in emitted {
+            for (_, geometry) in emitted {
                 let rings = polygon_rings(&geometry);
                 assert!(!rings.is_empty(), "case {case} decodes polygon rings");
                 assert!(
@@ -1605,6 +1638,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn contained_hole_surviving_a_collapsed_outer_emits_nothing() {
+        // At shift 4 the outer rounds to (0,0), (4,4), (4,4) and dies while
+        // the strictly contained hole rounds to the valid triangle (2,2),
+        // (2,3), (3,3). The hole must not be promoted into slot 0. Both rings
+        // are translated by a multiple of 16, which leaves the rounding
+        // unchanged, into the interior of z2 tile 1/1 at grid zoom 6.
+        const OFFSET: i32 = 16 * 6000;
+        let at = |points: &[(i32, i32)]| -> Vec<(i32, i32)> {
+            points
+                .iter()
+                .map(|&(x, y)| (x + OFFSET, y + OFFSET))
+                .collect()
+        };
+        let outer = at(&[(0, 0), (64, 64), (64, 71)]);
+        let hole = at(&[(38, 39), (39, 41), (41, 42)]);
+        let shape = shape(&outer, &[hole.as_slice()]);
+        assert_eq!(
+            polygon::ring_role(signed_area_2x(&shape[0])),
+            Some(RingOrientation::Positive)
+        );
+        assert_eq!(
+            polygon::ring_role(signed_area_2x(&shape[1])),
+            Some(RingOrientation::Negative)
+        );
+        assert!(
+            shape[1]
+                .iter()
+                .all(|point| point_in_contour(point.x, point.y, &shape[0]))
+        );
+
+        let emitted = collect_pyramid(&shape, &params(PROPERTY_GRID, 0, PROPERTY_GRID, 0));
+        assert!(
+            emitted.keys().all(|&(z, _, _)| z > 2),
+            "a collapsed outer emits nothing at or above z2"
+        );
+        assert!(
+            emitted.keys().any(|&(z, _, _)| z == PROPERTY_GRID),
+            "the unrescaled shape still emits at grid zoom"
+        );
     }
 
     fn collect_pyramid(

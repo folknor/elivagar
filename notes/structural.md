@@ -594,13 +594,6 @@ Reported by the archive-surface hunt.
 
 Reported by every hunt.
 
-## STR-036 - Missing tests the hunters named as most valuable
-
-The polygon property suite, the sort chunk record round trips and both halves
-of the ocean ownership test landed. Remaining: the polygon property suite runs
-at a single zoom (z2), so it does not yet exercise multi-zoom rescaling;
-extend it across a zoom span.
-
 ## STR-038 - `lib.rs` re-exports ring helpers nothing outside the crate needs
 
 `lib.rs` publicly re-exports `RingOrientation`, `ring_is_simple` and
