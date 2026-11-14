@@ -39,6 +39,7 @@ fn way_block_for_members(ids: &[i64]) -> pbfhogg::PrimitiveBlock {
     pbfhogg::ElementReader::from_path(&path)
         .expect("open pbf")
         .into_blocks_pipelined()
+        .expect("start pipeline")
         .next()
         .expect("way block result")
         .expect("decode way block")

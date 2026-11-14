@@ -827,7 +827,10 @@ pub(super) fn phase_read_and_process(
         }
         source.join();
     } else {
-        for block_result in reader.into_blocks_pipelined() {
+        let blocks = reader
+            .into_blocks_pipelined()
+            .map_err(|e| PipelineError(format!("PBF pipeline start failed: {e}")))?;
+        for block_result in blocks {
             let block = block_result.map_err(|e| PipelineError(format!("PBF read failed: {e}")))?;
             route_block!(block, None);
         }
@@ -897,7 +900,10 @@ pub(super) fn phase_read_and_process(
                 .map_err(|e| PipelineError(format!("relation re-read: failed to open PBF: {e}")))?
                 .with_blob_filter(BlobFilter::only_relations())
                 .decode_threads(decode_threads);
-            Box::new(reader.into_blocks_pipelined().map(|r| {
+            let blocks = reader.into_blocks_pipelined().map_err(|e| {
+                PipelineError(format!("relation re-read: PBF pipeline start failed: {e}"))
+            })?;
+            Box::new(blocks.map(|r| {
                 // Panic: mid-tail I/O failure is unrecoverable (same policy
                 // as sort pushes).
                 r.expect("relation re-read: PBF read failed")
@@ -1543,7 +1549,10 @@ fn prepass_relation_plan(
     // kept; the set is dropped before the plan is returned.
     let mut superset_ways: FxHashSet<i64> = FxHashSet::default();
     let mut matched_relations: u64 = 0;
-    for block_result in reader.into_blocks_pipelined() {
+    let blocks = reader
+        .into_blocks_pipelined()
+        .map_err(|e| PipelineError(format!("relation prepass: PBF pipeline start failed: {e}")))?;
+    for block_result in blocks {
         let block = block_result
             .map_err(|e| PipelineError(format!("relation prepass: PBF read failed: {e}")))?;
         block.for_each_element(|element| {

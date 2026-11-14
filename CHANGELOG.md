@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- pbfhogg 0.6 as the PBF reader, plus hotpath 0.31 and the pmtiles 0.28
+  dev-dependency. Output is unchanged.
+
 Design-hunt fixes, tenth wave. This changes output.
 
 - A multipolygon relation gets one label point per zoom instead of one
