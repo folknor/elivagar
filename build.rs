@@ -13,13 +13,12 @@
 //! So every value here is either established or emitted as `unknown`, and
 //! freshness is handled explicitly rather than assumed.
 //!
-//! Freshness is the hard part. Cargo reruns a build script only when a
-//! declared input changes, but it relinks the crate whenever a path
-//! dependency's sources change - so without the `rerun-if-changed` lines
-//! below, editing a path dependency would rebuild elivagar while this script
-//! kept reporting the previous commit and dirty state. The declarations cover
-//! both what git records (HEAD and the refs it points into) and what git does
-//! not (uncommitted edits, via the source trees themselves).
+//! Freshness is the hard part. The dirty flag observes the whole git status,
+//! including untracked files outside src/. No fixed list of source inputs
+//! covers that state, and watching the repository recursively also walks
+//! ignored datasets and build outputs. An intentionally absent input makes
+//! Cargo rerun this small script on every build instead. Git resolves its own
+//! metadata paths, including worktrees and submodules with a .git file.
 //!
 //! Registry dependencies are deliberately absent: pbfhogg and protohoggr are
 //! pinned registry dependencies, so Cargo.lock identifies each by
@@ -79,20 +78,6 @@ fn dirty(repo: &Path) -> Option<bool> {
     }))
 }
 
-/// Declare the inputs that must invalidate this script.
-///
-/// The source tree covers uncommitted edits; HEAD covers checkouts; the ref
-/// HEAD names covers commits made on the branch in place.
-fn track(repo: &Path) {
-    println!("cargo:rerun-if-changed={}/src", repo.display());
-    println!("cargo:rerun-if-changed={}/Cargo.toml", repo.display());
-    let git_dir = repo.join(".git");
-    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-    if let Some(head) = git(repo, &["symbolic-ref", "-q", "HEAD"]) {
-        println!("cargo:rerun-if-changed={}", git_dir.join(head).display());
-    }
-}
-
 /// A Rust string literal for `value`. Debug formatting escapes quotes,
 /// backslashes and control characters; how it escapes them never reaches the
 /// archive, which sees only the decoded string.
@@ -129,7 +114,14 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.lock");
 
-    track(&manifest);
+    // Cargo treats a missing input as changed on every build. Never create
+    // this sentinel: status can change anywhere in the repository, and HEAD
+    // can move through loose or packed refs in a separate git directory.
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    println!(
+        "cargo:rerun-if-changed={}",
+        out_dir.join("always-rerun-provenance").display()
+    );
     let commit = commit(&manifest).unwrap_or_else(|| "unknown".to_string());
     let dirty = match dirty(&manifest) {
         Some(true) => "Some(true)",
@@ -166,7 +158,6 @@ fn main() {
         lock_hash = lit(&lock_hash),
         features = features.join(", "),
     );
-    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
     std::fs::write(out_dir.join("build_closure.rs"), source)
         .expect("cannot write the generated build closure");
 }

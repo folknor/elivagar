@@ -338,11 +338,15 @@ run provenance deliberately. It retains the unchanged top-level
 `ocean_artifact` identity and emits `ocean_artifact_no_run_provenance=1` on the
 counter channel when measured.
 
-`build.rs` declares the source tree, manifest, lockfile, HEAD and the current
-branch ref as inputs. Registry dependency identities come from the lockfile.
-There are no path dependencies; reintroducing one means tracking its tree
-there and giving it a commit/dirty pair of its own. The script writes the
-`build` values once, already typed, as generated Rust that `provenance.rs`
+`build.rs` reruns on every build through an intentionally absent Cargo rerun
+input. The dirty flag observes the whole git status, including untracked
+files, so a fixed source-file watch list cannot keep it fresh. This avoids
+recursively watching ignored datasets and build outputs. Git itself resolves
+HEAD and repository metadata, including worktrees and submodules whose `.git`
+is a file. Registry dependency identities come from the lockfile. A future
+path dependency would need its own git inspection and commit/dirty pair.
+The script writes the `build` values once, already typed, as generated Rust
+that `provenance.rs`
 includes, and a failed `git status` records `dirty` as unknown rather than
 clean. Its rerun declarations are intended to keep build
 provenance fresh; they are not independent proof of the code that ran.
