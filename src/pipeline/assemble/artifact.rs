@@ -47,6 +47,17 @@ impl<'a> ArtifactPartitionCtx<'a> {
 
     /// The raw MVT layer field (tag, length and body) of `run`'s payload,
     /// ready to append to an uncompressed OSM tile.
+    ///
+    /// Tiles sharing one run gunzip and parse its blob again each time, on
+    /// purpose. Measured on denmark locations, artifact-active, 2026-11-14:
+    /// 30895 spliced tiles over 10647 distinct blobs cost 111 ms summed
+    /// worker time (probe overhead included) in a 7.4 s run, so a perfect
+    /// cache saves a few ms of wall. A cache must also extract lazily,
+    /// after survival is settled, and could not live on this context: it
+    /// is built once and shared across every partition, so a cache here
+    /// would retain decompressed fields for the whole assembly. Reopen
+    /// only if a larger run shows repeated extraction of expensive blobs
+    /// costing real CPU or critical-path time.
     pub(super) fn ocean_field(&self, run: TileRun) -> Result<Vec<u8>, PipelineError> {
         ocean_layer_field(&self.ocean.raw_blob(run.blob())?)
     }

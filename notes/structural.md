@@ -491,17 +491,6 @@ Reported by the storage, polygon-engine and pipeline hunts.
 
 # Archive surface
 
-## STR-040 - Tiles sharing one artifact run each re-gunzip the same blob
-
-When assembly splices the artifact's ocean layer into an encoded OSM tile,
-each such tile decompresses its artifact blob to extract the ocean field. The
-artifact is run-heavy (it addresses far more tiles than it stores payloads),
-so many spliced tiles can share one run's blob and each gunzips it again.
-Caching the extracted ocean field per run (or per blob offset) within a
-partition batch would remove the repeats; measure the spliced-tile count and
-the gunzip share of `assemble` before deciding it pays. Found while moving
-the splice ahead of compression in `pipeline/assemble/encode.rs`.
-
 ## STR-034 - `verify.rs` is four tools in one file
 
 Container checks, MVT structural grammar, Shortbread paint-order rules
