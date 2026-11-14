@@ -5,7 +5,7 @@
 //
 // Encoded ocean tiles are cached in the durable world-ocean artifact, so an
 // encoding change here alters durable ocean bytes and requires bumping
-// OCEAN_POLICY_VERSION (src/ocean.rs). Without the bump, artifact-served
+// OCEAN_POLICY_VERSION (src/ocean/mod.rs). Without the bump, artifact-served
 // tiles keep the old encoding while run-computed band tiles get the new one.
 
 // FxHashMap (rustc-hash) is load-bearing twice over, and only one of the two is

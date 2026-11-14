@@ -46,7 +46,7 @@ output: Output }` (pipeline hunt) or
 `RunSpec { input, contract: ContractConfig }` + `Resources` +
 `Action { output, skip_to }` (run-contract hunt), built by fallible
 constructors that hold every validation now spread across `main.rs`, `run()`
-and `resolved_ocean_mode`. `ProducerContract` derives Serialize + PartialEq
+and `resolve_ocean` / `OceanPlan::new`. `ProducerContract` derives Serialize + PartialEq
 and is the checkpoint comparison key, so the pairwise `producer_config_*`
 tests go away. `TilegenConfig` disappears or becomes a thin serde DTO.
 Payoff: a new contract-relevant setting cannot be added without landing in
@@ -265,41 +265,24 @@ encoding and Shortbread hunts.
 
 ## STR-009 - Give ocean one module tree
 
-`ocean.rs` (about 2290 lines, about 1000 code) holds four jobs - artifact
-identity (`OCEAN_POLICY_VERSION`, both keys, `hash_file`), the artifact
-reader and band geometry (`OceanTiles`, `OceanPassGrid`, `ocean_band_tile`,
-`selected_pass_grid`), a shapefile reader (shx parsing, mmap,
-`read_exact_at`, ring role by signed area), and emission glue (union,
-`ocean_params`, `OceanAcc`, sink, rayon splitting, stats atomics). Ocean
-orchestration (pass split, artifact admission, retention, `ocean_build`,
-`yyyymmdd_utc`, `is_retained_artifact_name`) lives in `pipeline/mod.rs`, and
-artifact merging (run copies, splice, the hand-rolled protobuf field scanner)
-in `pipeline/assemble.rs`. That split is why the pass decision has seven
-sites.
+`src/ocean/` exists and owns the pass structure (`plan.rs`), band ownership
+(`band.rs`) and artifact admission (`artifact.rs`). What remains is the
+non-ownership half. `ocean/mod.rs` still holds three jobs: artifact identity
+(`OCEAN_POLICY_VERSION`, both keys, `Xxh128`), a shapefile reader (shx
+parsing, mmap, `read_exact_at`, ring role by signed area) and emission glue
+(union, `ocean_params`, `OceanAcc`, sink, rayon splitting, stats atomics).
+`ocean_build`, retention, `yyyymmdd_utc` and `is_retained_artifact_name`
+live in `pipeline/mod.rs`; run copies, splice and the hand-rolled protobuf
+field scanner (`ocean_layer_field`, `read_varint`, `raw_contains_ocean`)
+live in `pipeline/assemble.rs`.
 
-Proposed:
-```
-src/ocean/
-  mod.rs        OceanPlan (validated inputs, passes, grids, contract)
-  policy.rs     OCEAN_POLICY_VERSION, ocean_params, union threshold, golden test
-  key.rs        Xxh128, ShapefileHashes, OceanSourceKey, OceanArtifactKey
-  shapefile.rs  .shp/.shx reader yielding projected polygons; no sort or pyramid deps
-  emit.rs       union + pyramid emission into SortWriter, stats
-  artifact/
-    mod.rs      ARTIFACT_CONTRACT, admit() -> OceanArtifact, ArtifactRefusal
-    band.rs     PassGrid, owns(z,x,y), root-range prefilter
-    merge.rs    run-copy planning and splice (out of assemble.rs)
-    build.rs    ocean_build + retention (out of pipeline/mod.rs)
-```
-Payoffs: the shapefile reader becomes testable without a `SortWriter` and
-reusable; assemble stops interleaving partition scheduling with MVT field
-surgery; `pipeline/mod.rs` stops knowing the z7 split. `OceanPassGrid` should
-own its scale (`scale = 1 << (max_zoom + 12)` is written out in four places)
-and expose `tile_rect(z, x, y)` / `snap(merc)`; pass identity should be a
-`PassGrids { low: Option<Grid>, high: Grid }` or `grid_for_zoom(z)`, not a
-vector index. `OceanTiles::open` reads PMTiles header bounds by raw offsets
+Proposed: `policy.rs` (policy version, `ocean_params`), `key.rs`,
+`shapefile.rs` (a reader yielding projected polygons with no sort or pyramid
+deps, testable without a `SortWriter`), `emit.rs`, and `artifact/merge.rs`
+and `artifact/build.rs` taking the assemble and pipeline halves above, so
+assemble stops interleaving partition scheduling with MVT field surgery.
+`OceanArtifact::admit` reads PMTiles header bounds by raw offsets
 (`read_i32_le(header, 102)`), which belong behind an archive accessor.
-`OceanPassGrid::band_is_empty(min_zoom, max_zoom)` ignores both arguments.
 
 Reported by the ocean and coordinate-spaces hunts.
 
@@ -358,8 +341,7 @@ docs. What remains has no home yet:
   `SortKey { tile, layer: Layer, rank: PaintRank }` with packing internal,
   `PartitionId(u16)`, `PayloadRef { key, offset, len: u32 }`.
 - `LayerMap<T>` for the `[_; Layer::count()]` arrays, the `Grid` of STR-010
-  and projection. `assemble::non_band_tile_rect` spells the extent shift as a
-  literal `+ 12` beside `geometry/tiles::grid::EXTENT_LOG2`.
+  and projection.
 
 Reported by the coordinate-spaces, storage, archive-surface, layer-identity,
 pipeline and polygon-engine hunts.
@@ -719,11 +701,10 @@ Reported by the archive-surface hunt.
   `test_merge`, `TestMergeRun`, `TEST_CLIP_BOUNDARY`); `LayerBuilder` grows
   `test_feature`/`test_key` accessors duplicating the `pub(crate)` ones MLT
   uses.
-- `ocean.rs` tests include seven `point_in_polygon` tests for a `geometry`
-  function ocean no longer uses; band-ownership tests sit beside shapefile
-  parsing; `ocean_band_tile` and `selected_pass_grid` tests hard-code
-  `max_zoom: 14` and z7/z8, exercising the copy rather than agreement with the
-  pyramid.
+- `ocean/mod.rs` tests include seven `point_in_polygon` tests for a
+  `geometry` function ocean no longer uses. The band-ownership tests moved to
+  `ocean/band.rs`; several still hand-build a z14 `OceanPassGrid` rather than
+  going through `OceanBand`.
 - `sort.rs` tests (about 1100 lines) mix format round-trips and resume
   semantics; resume tests belong with the chunk-store manifest.
 - Writer tests hand-decode and reader tests hand-encode; inspect tests patch
@@ -736,11 +717,7 @@ Reported by every hunt.
 
 ## STR-036 - Missing tests the hunters named as most valuable
 
-The polygon property suite, the sort chunk record round trips and the
-producer-side band ownership check (exhaustive through z9 in `ocean.rs`)
-landed. Remaining: the consumer half of the ocean ownership test - drive
-`pipeline/assemble.rs`'s precomputed per-zoom Hilbert interior ranges, run
-copies and splice from the same pass grids and check every tile is served by
-exactly one side (ocean hunt). The polygon property suite also runs at a
-single zoom (z2), so it does not yet exercise multi-zoom rescaling; extend it
-across a zoom span.
+The polygon property suite, the sort chunk record round trips and both halves
+of the ocean ownership test landed. Remaining: the polygon property suite runs
+at a single zoom (z2), so it does not yet exercise multi-zoom rescaling;
+extend it across a zoom span.

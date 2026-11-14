@@ -4174,7 +4174,11 @@ fn checkpoint_preserves_all_ocean_modes() {
     };
     for mode in [OceanMode::None, computed_ocean(), OceanMode::Band { key }] {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let low_zoom_source = resolved_low_zoom_source(&minimal_config(), &mode);
+        let low_zoom_source = match mode {
+            OceanMode::None => None,
+            OceanMode::Computed { .. } => Some(crate::provenance::ActiveLowZoomSource::Simplified),
+            OceanMode::Band { .. } => Some(crate::provenance::ActiveLowZoomSource::Full),
+        };
         save_checkpoint(
             dir.path(),
             &bounds,

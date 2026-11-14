@@ -12,7 +12,7 @@
 //!
 //! The ocean emission path runs on this engine and its output is cached in
 //! the durable world-ocean artifact. A change that alters result bits must
-//! bump OCEAN_POLICY_VERSION (src/ocean.rs) - without it, stale artifacts
+//! bump OCEAN_POLICY_VERSION (src/ocean/mod.rs) - without it, stale artifacts
 //! keep key-validating and serve the pre-change geometry.
 
 mod port;

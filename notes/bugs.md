@@ -38,74 +38,6 @@ piece's tile range and return `InvalidData`.
 
 Found by the coordinates-core landing's review.
 
-## BUG-002 - Ocean pass structure disagrees with itself; a single z0-z14 shapefile plus an artifact hands the low pass a z14 grid
-
-The question "which ocean passes exist, which shapefile feeds each, and which
-grid owns each zoom" is answered at seven or eight sites:
-
-- `main.rs::resolve_ocean_inputs` accepts only `z0-z14` or `z0-z7`+`z8-z14`.
-- `pipeline::run` ocean phase always runs a low pass `min..=min(max,7)`
-  (simplified shapefile if named, else full) plus a high pass `8..=max` - the
-  OCEAN_POLICY_VERSION v3 "split always happens" rule.
-- `ocean_build` hard-codes `0,7` and `8,14` with a "mirror the run pipeline"
-  comment.
-- `pipeline::ocean_pass_max_zooms` returns two grids only when a simplified
-  shapefile is named, otherwise one grid at `max_zoom` - the pre-v3 rule.
-- `ocean::selected_pass_grid` picks the first grid iff
-  `grids.len() == 2 && z <= 7`.
-- `ocean::LOW_ZOOM_UNION_MAX_ZOOM = 7` decides the union per pass by
-  `max_zoom <= 7`.
-- `assemble::write_provenance` derives `low_zoom_source` with a comment
-  "mirrors ocean_pass_max_zooms".
-- `OceanSourceKey::from_inputs` / `OceanArtifactKey::from_inputs` re-derive
-  from `(full, Option<simplified>, min, max)`.
-
-Live disagreement: with `--ocean z0-z14:full.shp` plus an artifact, the run
-loop executes two passes but `ocean_pass_max_zooms` yields one z14 grid. The
-low pass gets `grids().first()` - the z14 grid - so `pass_owns_root_range` and
-`ocean_band_tile` snap at 2^26 resolution while the pass's pyramid works at
-2^19, and `OceanPassGrid::for_bounds` ceil/floored the inner rect at the wrong
-scale. Producer and consumer both use the same wrong grid, so they agree with
-each other; neither agrees with the pass that produced the chunks. No hunter
-proved a byte difference. Production always names the simplified shapefile,
-so the corpus never exercises this arm.
-
-Related consequences:
-
-- `--ocean z0-z14:full.shp` and `--ocean z0-z7:full.shp --ocean z8-z14:full.shp`
-  run identical work but record different `low_zoom_source` (`full` vs
-  `simplified`) and different `OceanSourceKey`s, so they are
-  contract-incomparable while byte-identical (ocean hunt).
-- Stale comments describe the pre-v3 structure: `OceanInputs` in `main.rs`
-  ("a single z0-z14 entry ... serves every zoom, matching
-  `ocean::selected_pass_grid`"), the `LOW_ZOOM_UNION_MAX_ZOOM` comment ("A
-  single z0-z14 full-shapefile pass keeps the old per-piece behavior"), and
-  the `ocean_pass_max_zooms` comment.
-- `selected_pass_grid` infers "a split exists" from a collection length, and
-  producers pick grids positionally with `first()` / `last()`.
-- The pass grids follow the run's zoom window: `ocean_pass_max_zooms` uses
-  `config.max_zoom` (and `min(max_zoom, 7)`) as the grid's base zoom, and the
-  run loop does the same. The settled rule (`reference/coordinates.md`,
-  `tiling` module docs, `TilegenConfig.min_zoom` doc) is that the window
-  truncates: construction follows the canonical range and only emission is
-  cut, which OSM emission now does. Ocean is the remaining exception, so a
-  narrowed computed-ocean run quantizes and simplifies on a different grid
-  than a full build. The plan's passes should carry canonical grids (7 and
-  `tiling::MAX_ZOOM`) and cut emission to the window; the exception notes in
-  those three places go when that lands. No `ZoomRange` type exists yet:
-  `tiling` holds the constants and `TileId` only.
-
-Proposed owner (all four hunts converge): one `OceanPlan` built once from the
-validated `--ocean` input, holding
-`passes: [OceanPass { zooms: ZoomRange, source, grid, union }]` and an optional
-artifact, exposing `grid_for_zoom(z)` and `contract()`. The run loop,
-`ocean_build`, `OceanTiles::open`, `selected_pass_grid`, the provenance
-`low_zoom_source` and both keys read it; the z7/z8 split becomes one constant
-only the plan sees. `resolve_ocean_inputs` moves into the library as
-`OceanPlan::parse`.
-
-Reported by the pipeline, run-contract, ocean and coordinate-spaces hunts.
-
 ## BUG-012 - `0` means three different things across the budget knobs; `--dedup-cap 0` silently gives the default
 
 The CLI now rejects `--dedup-cap 0` and resolves an omitted cap to the
@@ -128,31 +60,6 @@ same sentinel.
 ---
 
 # Ocean
-
-## BUG-015 - Producer/consumer band ownership disagreements are silent in both directions
-
-The band/artifact ownership answer (`ocean_band_tile`) is one function, but
-the grid fed to it is chosen independently by the producer (positional
-`first()/last()` in `run`) and the consumer (`selected_pass_grid` in
-`OceanTiles::band_tile`). The producer also applies a coarser prefilter,
-`pass_owns_root_range`, documented as "deliberately follows
-pyramid::root_fragments" - a hand copy that already differs in method (ocean
-snaps the raw float bbox, rounded and clamped; the pyramid takes the bbox of
-the normalized quantized shape). `band_is_empty` is evaluated per pass in
-`process_ocean_shapefile` and as `all(grids)` in assemble.
-
-The runtime re-check in `splice_artifact_ocean` ("non-band OSM tile
-unexpectedly contains computed ocean") fires only on tiles that also carry
-OSM content. An ocean-only tile the producer thinks is band and the consumer
-thinks is not is served computed with no error; the other direction drops
-the tile's ocean entirely with no error. No test builds both sides from one
-plan and checks every tile is owned by exactly one side.
-
-Proposed: the ocean plan's `grid_for_zoom` plus one `owns(z, x, y)` used by
-both the pyramid `tile_filter` and assemble; `pass_owns_root_range` calls a
-pyramid-exported "root cells for bbox" function.
-
-Reported by the ocean and coordinate-spaces hunts.
 
 ---
 

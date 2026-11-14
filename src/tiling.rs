@@ -7,9 +7,9 @@
 //!   zoom" asks it of [`MAX_ZOOM`], and per-zoom pipeline storage is sized by
 //!   [`ZOOM_COUNT`]. A run's configured zoom range is a truncation window over
 //!   this domain: construction follows each layer's own zoom range and only
-//!   emission is restricted, so a narrowed archive holds exactly the OSM
-//!   tiles a full build holds at those zooms. Computed ocean is the one
-//!   exception: its pass grid still takes the configured maximum zoom.
+//!   emission is restricted, so a narrowed archive holds exactly the tiles a
+//!   full build holds at those zooms. Computed ocean constructs on its fixed
+//!   z7 and z14 pass grids for the same reason.
 //! - The archive domain, `0..=ARCHIVE_MAX_ZOOM`. A PMTiles archive addresses
 //!   tiles up to z31, and the tools that read foreign archives (`svg`,
 //!   `diag`, `verify`, `inspect`) work in this domain.

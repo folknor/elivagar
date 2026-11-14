@@ -69,7 +69,7 @@ elivagar run input.osm.pbf -o out.pmtiles --skip-to assemble
 reuses PBF and ocean chunks, `--skip-to assemble` jumps straight to tile
 assembly.
 
-A resume validates the v9 checkpoint's input identity, producer config, ocean
+A resume validates the checkpoint's input identity, producer config, ocean
 source and low-zoom selection, and sort chunk codec against the current run
 and refuses a mismatch, so `--skip-to` cannot silently blend two contracts into
 one archive. Before v6, checkpoints recorded computed ocean as a bare string
@@ -85,8 +85,8 @@ world bounds.
 The `--compress-sort-chunks` setting must match the run that wrote the chunks.
 Resuming at `sort` or `assemble` also requires a valid chunk-count completion
 record from the completed ocean pass and final chunk flush. If it is missing
-or invalid, resume at `ocean` or run a full tilegen. Checkpoints from v8 and
-earlier require a full tilegen. See the [CLI reference](../reference/cli) for
+or invalid, resume at `ocean` or run a full tilegen. Checkpoints from an
+earlier format version require a full tilegen. See the [CLI reference](../reference/cli) for
 the complete resume contract.
 
 ## Memory

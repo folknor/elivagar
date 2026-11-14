@@ -1,10 +1,10 @@
 use std::sync::atomic::Ordering;
 
 use crate::debug::{WAIT, emit_counter_u64, emit_counter_usize, wait_span};
-use crate::geometry::int_ocean::{TILE_BUFFER_I32, TILE_EXTENT_I32};
 #[cfg(feature = "mlt")]
 use crate::mlt;
 use crate::mvt::{self, LayerBuilder};
+use crate::ocean::band::TileRect;
 use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter};
 use crate::shortbread::{self, Layer};
 use crate::sort;
@@ -296,20 +296,14 @@ struct ArtifactPartitionCtx<'a> {
 }
 
 impl<'a> ArtifactPartitionCtx<'a> {
-    fn new(
-        ocean: &'a crate::ocean::OceanTiles,
-        min_zoom: u8,
-        max_zoom: u8,
-    ) -> Result<Self, PipelineError> {
-        let band_empty = ocean
-            .grids()
-            .iter()
-            .all(|grid| grid.band_is_empty(min_zoom, max_zoom));
+    fn new(ocean: &'a crate::ocean::OceanTiles) -> Result<Self, PipelineError> {
+        let band = ocean.band();
+        let band_empty = band.is_empty();
         let mut copy_ranges_by_zoom = Vec::new();
         if !band_empty {
             copy_ranges_by_zoom.reserve(ZOOM_COUNT);
             for z in 0..=MAX_ZOOM {
-                copy_ranges_by_zoom.push(artifact_copy_ranges(ocean, z)?);
+                copy_ranges_by_zoom.push(artifact_copy_ranges(band, z)?);
             }
         }
         Ok(Self {
@@ -317,6 +311,17 @@ impl<'a> ArtifactPartitionCtx<'a> {
             band_empty,
             copy_ranges_by_zoom,
         })
+    }
+
+    /// The artifact run whose payload a surviving encoded tile takes its
+    /// ocean layer from, or `None` when the computed pass owns the tile's
+    /// ocean or the artifact holds nothing there.
+    fn splice_run(&self, tile_id: TileId) -> Option<crate::pmtiles_reader::RawDirEntry> {
+        let (z, x, y) = tile_id.coord();
+        if self.ocean.band().computed_owns(z, x, y) {
+            return None;
+        }
+        self.ocean.run_covering(tile_id.raw())
     }
 }
 
@@ -394,6 +399,9 @@ pub(super) struct RunProvenance {
     pub(super) resumed_from: Option<super::SkipTo>,
     /// The resolved ocean producer, carrying its source identity.
     pub(super) ocean_mode: super::OceanMode,
+    /// Which file served the low zooms, from the run's ocean plan; `None`
+    /// exactly when `ocean_mode` is `None`.
+    pub(super) low_zoom_source: Option<crate::provenance::ActiveLowZoomSource>,
 }
 
 impl Default for RunProvenance {
@@ -403,6 +411,7 @@ impl Default for RunProvenance {
             effective: None,
             resumed_from: None,
             ocean_mode: super::OceanMode::None,
+            low_zoom_source: None,
         }
     }
 }
@@ -721,9 +730,7 @@ fn phase_assemble_partitions(
     } else {
         32 * 1024 * 1024
     };
-    let artifact_ctx = ocean
-        .map(|ocean| ArtifactPartitionCtx::new(ocean, config.min_zoom, config.max_zoom))
-        .transpose()?;
+    let artifact_ctx = ocean.map(ArtifactPartitionCtx::new).transpose()?;
 
     let mut features_read: u64 = 0;
     let mut tiles_written: u64 = 0;
@@ -1021,9 +1028,10 @@ fn phase_assemble_partitions(
 }
 
 /// One raw batch handed from a partition's merge reader to its encoder
-/// thread: the batch metadata, the pending tiles, and for the final batch
-/// the partition's end tile (artifact gap filling runs to it).
-type RawPartitionBatch = (PartitionBatchMeta, Vec<PendingTile>, Option<u64>);
+/// thread: the batch metadata and the pending tiles. The encoder's
+/// `ArtifactCursor` holds the range end that artifact gap filling runs to
+/// once `meta.is_last` arrives.
+type RawPartitionBatch = (PartitionBatchMeta, Vec<PendingTile>);
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
@@ -1064,8 +1072,11 @@ fn read_encode_partition(
                 tile_format,
                 tile_compression,
             };
-            let mut artifact_cursor = range_start;
-            while let Ok((meta, batch, final_end)) = batch_rx.recv() {
+            let mut artifact_cursor = ArtifactCursor {
+                next: range_start,
+                end: partition_end,
+            };
+            while let Ok((meta, batch)) = batch_rx.recv() {
                 encode_and_send_partition_batch(
                     &writer_tx,
                     &encode_ctx,
@@ -1073,7 +1084,6 @@ fn read_encode_partition(
                     &batch,
                     artifact,
                     &mut artifact_cursor,
-                    final_end,
                 )?;
             }
             Ok(())
@@ -1112,7 +1122,7 @@ fn read_encode_partition(
                     };
                     let send_result = {
                         let _wait = wait_span(&WAIT.assemble_encode_backpressure);
-                        batch_tx.send((meta, batch, Some(partition_end)))
+                        batch_tx.send((meta, batch))
                     };
                     drop(send_result); // encoder may have exited on error
                     break;
@@ -1138,7 +1148,7 @@ fn read_encode_partition(
                             };
                             let send_result = {
                                 let _wait = wait_span(&WAIT.assemble_encode_backpressure);
-                                batch_tx.send((meta, batch, None))
+                                batch_tx.send((meta, batch))
                             };
                             if send_result.is_err() {
                                 // Encoder exited on error; its error surfaces
@@ -1176,11 +1186,10 @@ fn read_encode_partition(
 /// archive was built under.
 ///
 /// Every fact here is taken from the resolved run state rather than
-/// re-derived from config, because config admits states the run never enters:
-/// the artifact engages only for the exact MVT/gzip z0-14 contract, and the
-/// ocean phase runs only when the full shapefile is present, so a
-/// simplified-only config yields no ocean at all. Metadata that overstates is
-/// worse than metadata that is absent.
+/// re-derived from config: the ocean mode and low-zoom source come from the
+/// ocean plan `run` resolved once, which is what the passes and the artifact
+/// admission actually used. Metadata that overstates is worse than metadata
+/// that is absent.
 ///
 /// Ordinary run archives require the input name and identity. The ocean
 /// artifact builder bypasses this function because it has no PBF input.
@@ -1202,9 +1211,7 @@ fn write_provenance(
         features,
     };
     let ocean = crate::provenance::OceanContract {
-        kind: run
-            .ocean_mode
-            .contract_kind(super::resolved_low_zoom_source(config, &run.ocean_mode))?,
+        kind: run.ocean_mode.contract_kind(run.low_zoom_source)?,
         // Invariably true since --no-ocean-simplify was removed. The field
         // stays because it is part of the comparability contract and archives
         // built before that removal can carry false: dropping it would make
@@ -1242,8 +1249,8 @@ fn artifact_run_copy_items(
             continue;
         }
 
-        // `band_tile` is the complement of one axis-aligned interior tile
-        // rectangle for each zoom (with world-edge columns removed). Those
+        // `OceanBand::computed_owns` is the complement of one axis-aligned
+        // interior tile rectangle for each zoom (`artifact_tile_rect`). Those
         // rectangles are converted once into Hilbert ID ranges in
         // `ArtifactPartitionCtx`; intersecting them with this source run
         // avoids decoding every tile ID in long artifact runs.
@@ -1303,31 +1310,14 @@ fn append_artifact_run_copy(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-struct TileRect {
-    min_x: u32,
-    min_y: u32,
-    max_x: u32,
-    max_y: u32,
-}
-
+/// Hilbert id ranges of the tiles the artifact owns at one zoom: the band's
+/// artifact rectangle, merged into maximal spans.
 fn artifact_copy_ranges(
-    ocean: &crate::ocean::OceanTiles,
-    z: u8,
-) -> Result<Vec<(u64, u64)>, PipelineError> {
-    artifact_copy_ranges_for_grid(ocean.grid_for_zoom(z), z)
-}
-
-fn artifact_copy_ranges_for_grid(
-    grid: Option<&crate::ocean::OceanPassGrid>,
+    band: &crate::ocean::OceanBand,
     z: u8,
 ) -> Result<Vec<(u64, u64)>, PipelineError> {
     let side = 1_u32 << z;
-    let Some(grid) = grid else {
-        let (start, end) = zoom_ids(z);
-        return Ok(vec![(start, end)]);
-    };
-    let Some(rect) = non_band_tile_rect(grid, z) else {
+    let Some(rect) = band.artifact_tile_rect(z) else {
         return Ok(Vec::new());
     };
 
@@ -1348,71 +1338,6 @@ fn artifact_copy_ranges_for_grid(
         }
     }
     Ok(merged)
-}
-
-/// Convert `ocean_band_tile`'s buffered containment rule into the exact
-/// rectangular set of tiles that it leaves to the artifact at this zoom.
-fn non_band_tile_rect(grid: &crate::ocean::OceanPassGrid, z: u8) -> Option<TileRect> {
-    if z > grid.max_zoom {
-        return None;
-    }
-    let side = 1_u32 << z;
-    let shift = u32::from(grid.max_zoom - z);
-    let cell = i64::from(TILE_EXTENT_I32) << shift;
-    let buffer = i64::from(TILE_BUFFER_I32) << shift;
-    let limit = 1_i64 << (u32::from(grid.max_zoom) + 12);
-    let mut min_x = contained_axis_start(grid.inner_rect.min_x, cell, buffer, side);
-    let min_y = contained_axis_start(grid.inner_rect.min_y, cell, buffer, side);
-    let mut max_x = contained_axis_end(grid.inner_rect.max_x, cell, buffer, limit, side);
-    let max_y = contained_axis_end(grid.inner_rect.max_y, cell, buffer, limit, side);
-
-    let contains_world = grid.inner_rect.min_x <= grid.world_rect.min_x
-        && grid.inner_rect.min_y <= grid.world_rect.min_y
-        && grid.inner_rect.max_x >= grid.world_rect.max_x
-        && grid.inner_rect.max_y >= grid.world_rect.max_y;
-    if !contains_world {
-        if grid.inner_rect.min_x == grid.world_rect.min_x {
-            min_x = min_x.max(1);
-        }
-        if grid.inner_rect.max_x == grid.world_rect.max_x {
-            max_x = max_x.min(side - 1);
-        }
-    }
-
-    if min_x >= max_x || min_y >= max_y {
-        return None;
-    }
-    Some(TileRect {
-        min_x,
-        min_y,
-        max_x,
-        max_y,
-    })
-}
-
-fn contained_axis_start(inner_min: i32, cell: i64, buffer: i64, side: u32) -> u32 {
-    let inner_min = i64::from(inner_min);
-    if inner_min <= 0 {
-        return 0;
-    }
-    let numerator = inner_min + buffer;
-    let quotient = numerator.div_euclid(cell);
-    let rounded = quotient
-        + if numerator.rem_euclid(cell) == 0 {
-            0
-        } else {
-            1
-        };
-    u32::try_from(rounded.clamp(0, i64::from(side))).expect("tile coordinate fits u32")
-}
-
-fn contained_axis_end(inner_max: i32, cell: i64, buffer: i64, limit: i64, side: u32) -> u32 {
-    let inner_max = i64::from(inner_max);
-    if inner_max >= limit {
-        return side;
-    }
-    let end = (inner_max - buffer).div_euclid(cell);
-    u32::try_from(end.clamp(0, i64::from(side))).expect("tile coordinate fits u32")
 }
 
 fn collect_hilbert_rect_ranges(
@@ -1604,14 +1529,78 @@ fn splice_ocean_layer(
     Ok(encoder.finish()?)
 }
 
+/// Where artifact gap filling stands within one partition or piece: every
+/// address below `next` has been planned, and `end` is the exclusive end of
+/// the range this reader owns.
+struct ArtifactCursor {
+    next: u64,
+    end: u64,
+}
+
+/// One output item of an artifact-served batch, in address order.
+enum PlannedItem {
+    Copy(PartitionItem),
+    /// A surviving encoded tile and the artifact run whose ocean layer it
+    /// takes, if any.
+    Encoded {
+        tile: EncodedTile,
+        splice: Option<crate::pmtiles_reader::RawDirEntry>,
+    },
+}
+
+/// Interleave a batch's surviving encoded tiles with the artifact run copies
+/// that fill the addresses between them.
+///
+/// Only encoded tiles reserve an address. A pending tile whose layers all
+/// came out empty encodes to nothing, and its address falls inside a copy
+/// range like any other gap, so a tile the artifact owns keeps its ocean
+/// whether or not OSM content survived there. On the last batch the tail up to
+/// the range end is copied and the cursor closes.
+fn plan_artifact_items(
+    artifact: &ArtifactPartitionCtx<'_>,
+    cursor: &mut ArtifactCursor,
+    encoded: Vec<EncodedTile>,
+    is_last: bool,
+) -> Result<Vec<PlannedItem>, PipelineError> {
+    let mut items = Vec::with_capacity(encoded.len());
+    for tile in encoded {
+        let id = tile.tile_id.raw();
+        // Encoded ids come from this reader's own sorted input, so they are
+        // strictly increasing and inside its range; anything else would make
+        // the copies below overlap or reorder the writer's stream.
+        if id < cursor.next || id >= cursor.end {
+            return Err(PipelineError(format!(
+                "encoded tile {id} lies outside the unplanned partition range {}..{}",
+                cursor.next, cursor.end
+            )));
+        }
+        items.extend(
+            artifact_run_copy_items(cursor.next, id, artifact)?
+                .into_iter()
+                .map(PlannedItem::Copy),
+        );
+        let splice = artifact.splice_run(tile.tile_id);
+        items.push(PlannedItem::Encoded { tile, splice });
+        cursor.next = id + 1;
+    }
+    if is_last {
+        items.extend(
+            artifact_run_copy_items(cursor.next, cursor.end, artifact)?
+                .into_iter()
+                .map(PlannedItem::Copy),
+        );
+        cursor.next = cursor.end;
+    }
+    Ok(items)
+}
+
 fn encode_and_send_partition_batch(
     tx: &std::sync::mpsc::Sender<Result<PartitionBatch, PipelineError>>,
     ctx: &PartitionEncodeCtx,
     meta: &PartitionBatchMeta,
     pending_tiles: &[PendingTile],
     artifact: Option<&ArtifactPartitionCtx<'_>>,
-    artifact_cursor: &mut u64,
-    final_end: Option<u64>,
+    artifact_cursor: &mut ArtifactCursor,
 ) -> Result<(), PipelineError> {
     let encoded_tiles = if pending_tiles.is_empty() {
         Vec::new()
@@ -1623,40 +1612,27 @@ fn encode_and_send_partition_batch(
             ctx.tile_compression,
         )?
     };
-    let mut items = Vec::with_capacity(encoded_tiles.len());
-    if let Some(artifact) = artifact {
-        let mut encoded = encoded_tiles.into_iter().peekable();
-        for tile in pending_tiles {
-            items.extend(artifact_run_copy_items(
-                *artifact_cursor,
-                tile.tile_id.raw(),
-                artifact,
-            )?);
-            if encoded
-                .peek()
-                .is_some_and(|encoded| encoded.tile_id == tile.tile_id)
-            {
-                let Some(mut encoded) = encoded.next() else {
-                    return Err(PipelineError(
-                        "peeked encoded tile disappeared from partition batch".to_string(),
-                    ));
-                };
-                splice_artifact_ocean(&mut encoded, artifact, ctx.compression_level)?;
-                items.push(PartitionItem::Encoded(encoded));
+    let items = if let Some(artifact) = artifact {
+        let planned = plan_artifact_items(artifact, artifact_cursor, encoded_tiles, meta.is_last)?;
+        let mut items = Vec::with_capacity(planned.len());
+        for item in planned {
+            match item {
+                PlannedItem::Copy(item) => items.push(item),
+                PlannedItem::Encoded { mut tile, splice } => {
+                    if let Some(run) = splice {
+                        splice_artifact_ocean(&mut tile, artifact, run, ctx.compression_level)?;
+                    }
+                    items.push(PartitionItem::Encoded(tile));
+                }
             }
-            *artifact_cursor = tile.tile_id.raw() + 1;
         }
-        if encoded.next().is_some() {
-            return Err(PipelineError(
-                "encoded tile did not correspond to a partition input tile".to_string(),
-            ));
-        }
-        if let Some(end) = final_end {
-            items.extend(artifact_run_copy_items(*artifact_cursor, end, artifact)?);
-        }
+        items
     } else {
-        items.extend(encoded_tiles.into_iter().map(PartitionItem::Encoded));
-    }
+        encoded_tiles
+            .into_iter()
+            .map(PartitionItem::Encoded)
+            .collect()
+    };
     send_partition_batch(
         tx,
         PartitionBatch {
@@ -1671,19 +1647,16 @@ fn encode_and_send_partition_batch(
     )
 }
 
+/// Append the artifact's ocean layer to an encoded tile the artifact owns.
+/// The tile must not already carry ocean: the producer prunes artifact-owned
+/// cells, so computed ocean here means producer and consumer disagree on
+/// ownership, and appending would draw the ocean twice.
 fn splice_artifact_ocean(
     encoded: &mut EncodedTile,
     artifact: &ArtifactPartitionCtx<'_>,
+    run: crate::pmtiles_reader::RawDirEntry,
     compression_level: u32,
 ) -> Result<(), PipelineError> {
-    let (z, x, y) = encoded.tile_id.coord();
-    let band = !artifact.band_empty && artifact.ocean.band_tile(z, x, y);
-    if band {
-        return Ok(());
-    }
-    let Some(run) = artifact.ocean.run_covering(encoded.tile_id.raw()) else {
-        return Ok(());
-    };
     let raw = crate::pmtiles_reader::gzip_decompress(&encoded.compressed)?;
     if raw_contains_ocean(&raw)? {
         return Err(PipelineError(
@@ -1908,7 +1881,7 @@ fn prepare_tile_layers(
     for (li, layer) in s.layers.iter_mut().enumerate() {
         // Preserve the existing MVT ocean feature layout: it is also stored
         // in the durable world artifact. Removing this exclusion changes
-        // those bytes and requires an OCEAN_POLICY_VERSION bump in ocean.rs
+        // those bytes and requires an OCEAN_POLICY_VERSION bump in ocean/mod.rs
         // and an artifact rebuild. This is a compatibility constraint, not
         // a topology requirement: the merger concatenates complete polygons,
         // and MapLibre's 500-ring cap applies per polygon, not per feature.
@@ -2023,10 +1996,166 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// A sparse world artifact for the consumer tests: zooms 0-2 in one run
+    /// that crosses two zoom boundaries, z3 absent, a run from inside z4 to
+    /// inside z6, and alternating present and absent blocks through z9.
+    fn sparse_artifact_runs() -> Vec<(u64, u32)> {
+        let mut runs = vec![(0, u32::try_from(zoom_ids(3).0).expect("run fits u32"))];
+        let z4 = zoom_ids(4).0;
+        let z6 = zoom_ids(6).0;
+        runs.push((
+            z4 + 37,
+            u32::try_from(z6 + 1_000 - (z4 + 37)).expect("run fits u32"),
+        ));
+        let mut start = zoom_ids(7).0 + 11;
+        let end = zoom_ids(9).1;
+        while start < end {
+            let length = 500.min(end - start);
+            runs.push((start, u32::try_from(length).expect("run fits u32")));
+            start += 2 * length;
+        }
+        runs
+    }
+
+    fn write_sparse_artifact(
+        path: &std::path::Path,
+        key: &crate::ocean::OceanArtifactKey,
+        runs: &[(u64, u32)],
+    ) {
+        let mut writer = pmtiles_writer::PmtilesWriter::new(pmtiles_writer::PmtilesConfig {
+            min_zoom: 0,
+            max_zoom: MAX_ZOOM,
+            bounds: (-180.0, -85.05, 180.0, 85.05),
+            center: (0.0, 0.0, 2),
+        });
+        writer.set_ocean_only_metadata();
+        writer
+            .set_ocean_artifact_metadata(key.clone())
+            .expect("set artifact metadata");
+        for (index, &(start, length)) in runs.iter().enumerate() {
+            // Planning reads directory runs only; payload bytes are opaque.
+            let payload = [u8::try_from(index % 251).expect("payload byte")];
+            writer
+                .add_run(
+                    TileId::new(start).expect("artifact run id"),
+                    length,
+                    &payload,
+                )
+                .expect("add artifact run");
+        }
+        writer.write_to(path).expect("write artifact");
+    }
+
+    fn test_artifact_key() -> crate::ocean::OceanArtifactKey {
+        crate::ocean::OceanArtifactKey {
+            source: crate::ocean::OceanSourceKey {
+                full_shp_xxh128: crate::ocean::Xxh128::from_u128(1),
+                full_shx_xxh128: crate::ocean::Xxh128::from_u128(2),
+                simplified_shp_xxh128: None,
+                simplified_shx_xxh128: None,
+                min_zoom: 0,
+                max_zoom: MAX_ZOOM,
+                policy_version: crate::ocean::OCEAN_POLICY_VERSION,
+            },
+            compression_level: 6,
+        }
+    }
+
+    /// One planned output address: whether it came from a run copy, and for
+    /// an encoded tile whether it takes the artifact's ocean.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Served {
+        Copied,
+        Encoded { spliced: bool },
+    }
+
+    fn expand(items: Vec<PlannedItem>, out: &mut Vec<(u64, Served)>) {
+        for item in items {
+            match item {
+                PlannedItem::Copy(PartitionItem::RunCopy {
+                    tile_id,
+                    run_length,
+                    ..
+                }) => {
+                    let start = tile_id.raw();
+                    for id in start..start + u64::from(run_length) {
+                        out.push((id, Served::Copied));
+                    }
+                }
+                PlannedItem::Copy(PartitionItem::Encoded(_)) => {
+                    panic!("planner copies are run copies")
+                }
+                PlannedItem::Encoded { tile, splice } => out.push((
+                    tile.tile_id.raw(),
+                    Served::Encoded {
+                        spliced: splice.is_some(),
+                    },
+                )),
+            }
+        }
+    }
+
+    /// Plan `[start, end)` as one reader that sees `encoded` in batches of
+    /// `batch` tiles, closing with an empty final batch.
+    fn plan_reader(
+        ctx: &ArtifactPartitionCtx<'_>,
+        start: u64,
+        end: u64,
+        encoded: &[u64],
+        batch: usize,
+        out: &mut Vec<(u64, Served)>,
+    ) {
+        let mut cursor = ArtifactCursor { next: start, end };
+        let tiles: Vec<u64> = encoded
+            .iter()
+            .copied()
+            .filter(|&id| start <= id && id < end)
+            .collect();
+        for chunk in tiles.chunks(batch.max(1)) {
+            let chunk = chunk
+                .iter()
+                .map(|&id| EncodedTile {
+                    tile_id: tile(id),
+                    compressed: Vec::new(),
+                })
+                .collect();
+            expand(
+                plan_artifact_items(ctx, &mut cursor, chunk, false).expect("plan batch"),
+                out,
+            );
+        }
+        expand(
+            plan_artifact_items(ctx, &mut cursor, Vec::new(), true).expect("plan final batch"),
+            out,
+        );
+        assert_eq!(
+            cursor.next, end,
+            "the final batch closes the reader's range"
+        );
+    }
+
+    /// The consumer half of ocean ownership: the per-zoom Hilbert copy
+    /// ranges, run copies and splice decisions, driven from one band over a
+    /// sparse artifact, against an independent model of what each address
+    /// must hold. The producer half is `computed_owns` itself, which the
+    /// pyramid traversal filter calls.
     #[test]
-    fn producer_band_and_artifact_ranges_partition_every_planned_tile() {
+    fn artifact_consumer_serves_every_owned_address_exactly_once() {
         use crate::geometry::projection::MercBbox;
-        use crate::ocean::{OceanPassGrid, ocean_band_tile};
+
+        let dir = tempfile::tempdir().expect("create artifact directory");
+        let path = dir.path().join("ocean.pmtiles");
+        let key = test_artifact_key();
+        let runs = sparse_artifact_runs();
+        write_sparse_artifact(&path, &key, &runs);
+        let end = zoom_ids(9).1;
+        let present = |id: u64| {
+            runs.iter()
+                .any(|&(start, length)| start <= id && id < start + u64::from(length))
+        };
+        // Surviving encoded tiles, with gaps standing for addresses with no
+        // OSM input and for pending tiles that encoded to nothing.
+        let encoded: Vec<u64> = (0..end).filter(|id| id % 7 == 3 || id % 113 == 0).collect();
 
         for bounds in [
             MercBbox {
@@ -2054,33 +2183,132 @@ mod tests {
                 max_y: 1.0,
             },
         ] {
-            let grids = [
-                OceanPassGrid::for_bounds(&bounds, 7),
-                OceanPassGrid::for_bounds(&bounds, 14),
-            ];
-            for z in 0..=9 {
-                let grid = &grids[usize::from(z > 7)];
-                let ranges = artifact_copy_ranges_for_grid(Some(grid), z)
-                    .expect("build artifact Hilbert ranges");
-                assert!(ranges.windows(2).all(|pair| pair[0].1 < pair[1].0));
-                let side = 1_u32 << z;
-                for ty in 0..side {
-                    for tx in 0..side {
-                        let tile_id = TileId::at(z, tx, ty).raw();
-                        let index = ranges.partition_point(|range| range.1 <= tile_id);
-                        let artifact_owns = ranges
-                            .get(index)
-                            .is_some_and(|&(start, end)| start <= tile_id && tile_id < end);
-                        let producer_owns = ocean_band_tile(z, tx, ty, grid);
-                        assert_eq!(
-                            u8::from(producer_owns) + u8::from(artifact_owns),
-                            1,
-                            "tile z{z}/{tx}/{ty} in {bounds:?} must have one ocean owner"
-                        );
-                    }
-                }
+            let band = crate::ocean::OceanBand::for_bounds(&bounds);
+            let tiles = crate::ocean::OceanArtifact::admit(&path, 6, || Ok(key.clone()))
+                .and_then(|artifact| artifact.into_tiles(band))
+                .expect("admit sparse artifact");
+            let ctx = ArtifactPartitionCtx::new(&tiles).expect("artifact partition ctx");
+
+            let mut whole = Vec::new();
+            plan_reader(&ctx, 0, end, &encoded, usize::MAX, &mut whole);
+            let mut batched = Vec::new();
+            plan_reader(&ctx, 0, end, &encoded, 97, &mut batched);
+            // Adjacent pieces, one cut inside the z4-z6 run and one inside a
+            // z8 block, each with its own cursor.
+            let cuts = [0, zoom_ids(5).0 + 3, zoom_ids(8).0 + 250, end];
+            let mut pieces = Vec::new();
+            for pair in cuts.windows(2) {
+                plan_reader(&ctx, pair[0], pair[1], &encoded, 41, &mut pieces);
             }
+            assert_eq!(
+                whole, batched,
+                "batching must not change output in {bounds:?}"
+            );
+            assert_eq!(
+                whole, pieces,
+                "piece cuts must not change output in {bounds:?}"
+            );
+            assert!(
+                whole.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "output addresses must be strictly increasing in {bounds:?}"
+            );
+
+            let mut served = whole.into_iter().peekable();
+            for id in 0..end {
+                let (z, x, y) = tile(id).coord();
+                let computed = band.computed_owns(z, x, y);
+                let artifact_ocean = present(id) && !computed;
+                let expected = if encoded.binary_search(&id).is_ok() {
+                    Some(Served::Encoded {
+                        spliced: artifact_ocean,
+                    })
+                } else {
+                    artifact_ocean.then_some(Served::Copied)
+                };
+                let actual = served.next_if(|&(at, _)| at == id).map(|(_, how)| how);
+                assert_eq!(
+                    actual, expected,
+                    "address z{z}/{x}/{y} in {bounds:?} (computed owns: {computed})"
+                );
+            }
+            assert!(
+                served.next().is_none(),
+                "no output past the range in {bounds:?}"
+            );
         }
+    }
+
+    /// The production encode path drops a pending tile whose layers all come
+    /// out empty. Its address must still receive the artifact's ocean.
+    #[test]
+    fn a_pending_tile_that_encodes_to_nothing_keeps_its_artifact_ocean() {
+        use crate::geometry::projection::MercBbox;
+
+        let dir = tempfile::tempdir().expect("create artifact directory");
+        let path = dir.path().join("ocean.pmtiles");
+        let key = test_artifact_key();
+        let address = TileId::at(2, 1, 1);
+        write_sparse_artifact(&path, &key, &[(address.raw(), 1)]);
+        let world = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+        let tiles = crate::ocean::OceanArtifact::admit(&path, 6, || Ok(key.clone()))
+            .and_then(|artifact| artifact.into_tiles(crate::ocean::OceanBand::for_bounds(&world)))
+            .expect("admit artifact");
+        let ctx = ArtifactPartitionCtx::new(&tiles).expect("artifact partition ctx");
+        // A pending tile with no features prepares no layer and encodes to
+        // nothing, the same outcome as features that all drop.
+        let pending = [PendingTile {
+            tile_id: address,
+            features: Vec::new(),
+        }];
+        assert!(
+            encode_tile_batch(&pending, 6, TilePayloadFormat::Mvt, TileCompression::Gzip)
+                .expect("encode batch")
+                .is_empty()
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cursor = ArtifactCursor {
+            next: 0,
+            end: zoom_ids(2).1,
+        };
+        encode_and_send_partition_batch(
+            &tx,
+            &PartitionEncodeCtx {
+                compression_level: 6,
+                tile_format: TilePayloadFormat::Mvt,
+                tile_compression: TileCompression::Gzip,
+            },
+            &PartitionBatchMeta {
+                order: 0,
+                batch_index: 0,
+                is_last: true,
+                features_read: 0,
+                max_batch_bytes: 0,
+                reader_ns: 0,
+            },
+            &pending,
+            Some(&ctx),
+            &mut cursor,
+        )
+        .expect("encode and send");
+        let batch = rx.recv().expect("batch sent").expect("batch ok");
+        let copied: Vec<(u64, u32)> = batch
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                PartitionItem::RunCopy {
+                    tile_id,
+                    run_length,
+                    ..
+                } => Some((tile_id.raw(), *run_length)),
+                PartitionItem::Encoded(_) => None,
+            })
+            .collect();
+        assert_eq!(copied, vec![(address.raw(), 1)]);
     }
 
     #[test]

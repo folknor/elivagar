@@ -176,22 +176,22 @@ pub struct TilegenConfig {
     /// The zoom bounds are a truncation window over the profile range
     /// `0..=tiling::MAX_ZOOM`: geometry is constructed over each layer's own
     /// zoom range and only emission is restricted, so a narrowed archive holds
-    /// the same OSM tiles a full build holds at those zooms. Computed ocean
-    /// does not yet follow this rule (its pass grid takes `max_zoom`), and the
-    /// ocean artifact refuses any window but the full range.
+    /// the same tiles a full build holds at those zooms; computed ocean
+    /// follows the same rule on its fixed z7 and z14 pass grids. The ocean
+    /// artifact refuses any window but the full range.
     pub min_zoom: u8,
     /// Last zoom of the archive, at most `tiling::MAX_ZOOM`.
     pub max_zoom: u8,
     /// Ocean polygon shapefile (`water-polygons-split-3857`). Required for
-    /// water fill tiles. When combined with `ocean_simplified_shapefile`,
-    /// this is used only for z8+.
+    /// water fill tiles and for either of the next two fields. It feeds
+    /// z8-z14, and z0-z7 too unless `ocean_simplified_shapefile` is set.
     pub ocean_shapefile: Option<PathBuf>,
-    /// Simplified ocean shapefile for z0-7 (fewer vertices, faster at low zooms).
-    /// When set, `ocean_shapefile` is used only for z8+.
+    /// Simplified ocean shapefile for z0-7 (fewer vertices, faster at low
+    /// zooms). Setting it without `ocean_shapefile` is an error.
     pub ocean_simplified_shapefile: Option<PathBuf>,
-    /// Optional durable world-ocean PMTiles artifact. It activates only for
-    /// the exact MVT/gzip z0-14 contract; every other configuration keeps the
-    /// computed shapefile path.
+    /// Optional durable world-ocean PMTiles artifact. It serves only the
+    /// exact MVT/gzip z0-14 contract at its compression level; naming it for
+    /// any other run, or without `ocean_shapefile`, is an error.
     pub ocean_tiles: Option<PathBuf>,
     /// Metadata key written by the ocean-only artifact builder.
     pub ocean_artifact_key: Option<crate::ocean::OceanArtifactKey>,
@@ -279,6 +279,14 @@ pub struct TilegenConfig {
 }
 
 const CHECKPOINT_FILE: &str = "checkpoint.txt";
+/// v10 changes no field, only what the recorded identity means: computed
+/// ocean now constructs each pass on its canonical grid (z7 and z14, roots at
+/// the pass's first zoom) and the window only truncates emission, and an
+/// artifact-served run judges band ownership on both pass grids whatever the
+/// spelling. A v9 checkpoint from a narrowed window, or from a single
+/// `z0-z14` shapefile against an artifact, carries the same keys and producer
+/// config over chunks built the old way, so it is refused rather than reused.
+///
 /// v9 records ocean mode, low-zoom source, and source identity through the
 /// serde-tagged contract shared with provenance. v8 used a separate computed
 /// or band tag and did not record the low-zoom source explicitly.
@@ -302,7 +310,7 @@ const CHECKPOINT_FILE: &str = "checkpoint.txt";
 /// range. v4 added the input hash and effective paths but kept the
 /// whitespace-positional encoding, where every new field shifts an index and a
 /// miscount is a silent misparse. Neither is accepted; re-run a full tilegen.
-const CHECKPOINT_VERSION: u32 = 9;
+const CHECKPOINT_VERSION: u32 = 10;
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
 /// Default memory budget per sort chunk (1 GB).
@@ -366,22 +374,6 @@ fn save_checkpoint(
     });
     std::fs::write(path, content.to_string())?; // io::Error message is sufficient context.
     Ok(())
-}
-
-fn resolved_low_zoom_source(
-    config: &TilegenConfig,
-    ocean_mode: &OceanMode,
-) -> Option<crate::provenance::ActiveLowZoomSource> {
-    match ocean_mode {
-        OceanMode::None => None,
-        OceanMode::Computed { .. } | OceanMode::Band { .. } => Some(
-            if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
-                crate::provenance::ActiveLowZoomSource::Simplified
-            } else {
-                crate::provenance::ActiveLowZoomSource::Full
-            },
-        ),
-    }
 }
 
 /// Save the completed sort chunk count so a resume can reject stale leftovers.
@@ -648,35 +640,30 @@ fn configured_tile_contract(
 /// brokkr reads nothing from tilegen's stderr under `--bench`, so a bench run
 /// could switch ocean paths on four different conditions and leave no trace in
 /// the results row, the sidecar, or the archive.
-fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineError> {
-    let computed = |config: &TilegenConfig| -> Result<OceanMode, PipelineError> {
-        let Some(full) = config.ocean_shapefile.as_deref() else {
-            return Ok(OceanMode::None);
-        };
-        let full = crate::ocean::ShapefilePair::from_shp(full);
-        let simplified = config
-            .ocean_simplified_shapefile
-            .as_deref()
-            .map(crate::ocean::ShapefilePair::from_shp);
-        Ok(OceanMode::Computed {
-            key: crate::ocean::OceanSourceKey::from_inputs(
-                &full,
-                simplified.as_ref(),
-                config.min_zoom,
-                config.max_zoom,
-            )
-            .map_err(|e| PipelineError(format!("ocean shapefile is unreadable: {e}")))?,
-        })
+fn resolve_ocean(config: &TilegenConfig) -> Result<ResolvedOcean, PipelineError> {
+    let Some(plan) = crate::ocean::OceanPlan::new(
+        config.ocean_shapefile.as_deref(),
+        config.ocean_simplified_shapefile.as_deref(),
+        config.ocean_tiles.as_deref(),
+    )
+    .map_err(PipelineError)?
+    else {
+        return Ok(ResolvedOcean::None);
     };
-    let Some(path) = config.ocean_tiles.as_deref() else {
-        return computed(config);
+    let Some(path) = plan.artifact() else {
+        let key = plan
+            .source_key(config.min_zoom, config.max_zoom)
+            .map_err(|e| PipelineError(format!("ocean shapefile is unreadable: {e}")))?;
+        return Ok(ResolvedOcean::Computed { plan, key });
     };
     let (tile_format, tile_compression) = configured_tile_contract(config);
     let decoder = crate::pmtiles_reader::TileDecoder::from_header_fields(
         tile_format.header_tile_type(),
         tile_compression.header_value(),
     );
-    if decoder.is_err() || config.min_zoom != 0 || config.max_zoom != crate::tiling::MAX_ZOOM {
+    if decoder.is_err()
+        || !crate::ocean::artifact::artifact_serves_window(config.min_zoom, config.max_zoom)
+    {
         return Err(PipelineError(format!(
             "ocean artifact {} was named but cannot serve this run: it is built for the MVT + gzip + z0-14 contract, and this run is {:?} + {:?} + z{}-z{}. Drop the artifact from --ocean to compute the ocean instead.",
             path.display(),
@@ -686,37 +673,58 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
             config.max_zoom,
         )));
     }
-    if !path.exists() {
-        return Err(PipelineError(format!(
-            "configured ocean artifact does not exist: {}",
-            path.display()
-        )));
-    }
-    let declared = crate::ocean::OceanTiles::declared_key(path)?;
-    if declared.compression_level != config.compression_level {
-        return Err(PipelineError(format!(
-            "ocean artifact {} was built at compression level {} but this run uses {}. Rebuild the artifact, match --compression-level, or drop the artifact from --ocean.",
-            path.display(),
-            declared.compression_level,
-            config.compression_level,
-        )));
-    }
-    let full = config.ocean_shapefile.as_deref().ok_or_else(|| {
-        PipelineError("ocean artifact requires the full shapefile for key validation".to_string())
+    let artifact = crate::ocean::OceanArtifact::admit(path, config.compression_level, || {
+        plan.artifact_key(config.compression_level)
     })?;
-    let full = crate::ocean::ShapefilePair::from_shp(full);
-    let simplified = config
-        .ocean_simplified_shapefile
-        .as_ref()
-        .map(|path| crate::ocean::ShapefilePair::from_shp(path));
-    let key = crate::ocean::OceanArtifactKey::from_inputs(
-        &full,
-        simplified.as_ref(),
-        0,
-        crate::tiling::MAX_ZOOM,
-        config.compression_level,
-    )?;
-    Ok(OceanMode::Band { key })
+    Ok(ResolvedOcean::Artifact { plan, artifact })
+}
+
+/// The ocean this run produces, resolved once at entry.
+///
+/// An artifact arm exists only with an admitted artifact, so no later step
+/// re-pairs a key with a path. [`OceanMode`] is derived from this for the
+/// checkpoint and provenance, which describe the run rather than hold it.
+enum ResolvedOcean {
+    None,
+    Computed {
+        plan: crate::ocean::OceanPlan,
+        key: crate::ocean::OceanSourceKey,
+    },
+    Artifact {
+        plan: crate::ocean::OceanPlan,
+        artifact: crate::ocean::OceanArtifact,
+    },
+}
+
+impl ResolvedOcean {
+    fn mode(&self) -> OceanMode {
+        match self {
+            Self::None => OceanMode::None,
+            Self::Computed { key, .. } => OceanMode::Computed { key: key.clone() },
+            Self::Artifact { artifact, .. } => OceanMode::Band {
+                key: artifact.key().clone(),
+            },
+        }
+    }
+
+    fn plan(&self) -> Option<&crate::ocean::OceanPlan> {
+        match self {
+            Self::None => None,
+            Self::Computed { plan, .. } | Self::Artifact { plan, .. } => Some(plan),
+        }
+    }
+
+    fn source_key(&self) -> Option<&crate::ocean::OceanSourceKey> {
+        match self {
+            Self::None => None,
+            Self::Computed { key, .. } => Some(key),
+            Self::Artifact { artifact, .. } => Some(&artifact.key().source),
+        }
+    }
+
+    fn low_zoom_source(&self, min_zoom: u8) -> Option<crate::provenance::ActiveLowZoomSource> {
+        self.plan().map(|plan| plan.low_zoom_source(min_zoom))
+    }
 }
 
 // Note on extract consumption (adjudicated 2026-07-12): artifact-served
@@ -731,20 +739,6 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
 // artifact key, so a gate run must carry the same data/ocean-tiles.pmtiles the
 // baseline was captured from, and rotating the artifact forces a corpus
 // rotation (corpus check refuses on the key until then).
-
-/// Zoom maxima for artifact band grids. When both simplified low zooms and
-/// full-resolution high zooms are requested, each pass gets its own grid;
-/// otherwise one grid covers the requested range and source file.
-fn ocean_pass_max_zooms(config: &TilegenConfig) -> Vec<u8> {
-    let mut zooms = Vec::with_capacity(2);
-    if config.ocean_simplified_shapefile.is_some() && config.min_zoom <= 7 {
-        zooms.push(config.max_zoom.min(7));
-    }
-    if config.ocean_simplified_shapefile.is_none() || config.max_zoom >= 8 {
-        zooms.push(config.max_zoom);
-    }
-    zooms
-}
 
 // ---------------------------------------------------------------------------
 // RSS helpers
@@ -855,7 +849,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     let total_start = Instant::now();
     let skip = config.skip_to;
-    let ocean_mode = resolved_ocean_mode(config)?;
+    let ocean = resolve_ocean(config)?;
+    let ocean_mode = ocean.mode();
+    let low_zoom_source = ocean.low_zoom_source(config.min_zoom);
     // Identifying the input means reading all of it, so where that read happens
     // matters. A resume must hash up front to validate the chunks before any
     // work is done under them. A full run hashes on a background thread
@@ -884,7 +880,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         if checkpoint_ocean_mode != ocean_mode {
             return Err(PipelineError("checkpoint ocean mode differs from this run; --skip-to ocean, sort, and assemble cannot resume".to_string()));
         }
-        if checkpoint_low_zoom_source != resolved_low_zoom_source(config, &ocean_mode) {
+        if checkpoint_low_zoom_source != low_zoom_source {
             return Err(PipelineError(
                 "checkpoint low-zoom source differs from this run; resume is unsafe".to_string(),
             ));
@@ -954,7 +950,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     let mut phase12_rss: Option<u64> = None;
     let mut ocean_rss: Option<u64> = None;
     let mut phase12_stats: Option<Phase12Stats> = None;
-    let mut active_ocean_artifact: Option<std::sync::Arc<crate::ocean::OceanTiles>> = None;
+    let mut ocean_band: Option<crate::ocean::OceanBand> = None;
 
     let mut sort_writer = if matches!(skip, Some(SkipTo::Sort | SkipTo::Assemble)) {
         // Skip straight to later phases - reuse existing chunks on disk.
@@ -996,7 +992,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     .join()
                     .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?
             };
-            let low_zoom_source = resolved_low_zoom_source(config, &ocean_mode);
             save_checkpoint(
                 &config.tmp_dir,
                 &bounds_out,
@@ -1036,97 +1031,40 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         // Load data_bounds (needed for ocean, always available from checkpoint or just computed)
         let (data_bounds, _, _, _, _) = load_checkpoint(&config.tmp_dir)?;
 
-        active_ocean_artifact = if let (OceanMode::Band { key }, Some(path)) =
-            (&ocean_mode, config.ocean_tiles.as_deref())
-        {
-            let artifact = std::sync::Arc::new(crate::ocean::OceanTiles::open(
-                path,
-                key,
-                &data_bounds,
-                &ocean_pass_max_zooms(config),
-            )?);
-            eprintln!(
-                "  Ocean artifact active: {} runs, {} pass grids",
-                artifact.runs_in(0, u64::MAX).len(),
-                artifact.grids().len()
-            );
-            Some(artifact)
-        } else {
-            None
-        };
+        let band = crate::ocean::OceanBand::for_bounds(&data_bounds);
+        ocean_band = Some(band);
+        // Only an artifact-served run leaves tiles to someone else; a
+        // computed run owns every tile it emits.
+        let producer_band = matches!(ocean, ResolvedOcean::Artifact { .. }).then_some(&band);
 
         // --- Ocean shapefile processing ---
-        // The low-zoom pass uses the simplified file when supplied, otherwise
-        // the full file. The full file always supplies requested z8+ zooms.
+        // The plan fixes the passes: z0-z7 from the simplified file when one
+        // is named and from the full file otherwise, z8-z14 from the full
+        // file. The window only decides what each pass emits.
         emit_marker("OCEAN_START");
         emit_allocator_boundary("ocean_start");
-        ocean_elapsed = if let Some(ref ocean_path) = config.ocean_shapefile {
+        ocean_elapsed = if let (Some(plan), Some(source_key)) = (ocean.plan(), ocean.source_key()) {
             let ocean_start = Instant::now();
             eprintln!("--- Ocean shapefile ---");
             let mut ocean_features: u64 = 0;
-            let source_key = match &ocean_mode {
-                OceanMode::Computed { key } => key,
-                OceanMode::Band { key } => &key.source,
-                OceanMode::None => {
-                    return Err(PipelineError(
-                        "ocean shapefile has no resolved source key".to_string(),
-                    ));
-                }
-            };
-            let expected_full_hashes = source_key.full_shapefile_hashes();
-            let expected_low_hashes = if config.ocean_simplified_shapefile.is_some() {
-                source_key.simplified_shapefile_hashes().ok_or_else(|| {
-                    PipelineError(
-                        "resolved ocean key has no simplified shapefile hashes".to_string(),
-                    )
-                })?
-            } else {
-                expected_full_hashes
-            };
-
-            // The low-zoom pass always exists as its own z0-z7 pass, sourced
-            // from the simplified shapefile when one is named and from the
-            // full shapefile otherwise. The zoom split is what makes the
-            // low-zoom piece union (`process_ocean_shapefile`) fire: a single
-            // z0-z14 pass would keep per-piece descent at low zoom, where the
-            // source split grid is comparable to the tile size and per-piece
-            // simplification renders as seam wedges and dropped fragments.
-            let low_source = config
-                .ocean_simplified_shapefile
-                .as_deref()
-                .unwrap_or(ocean_path);
-            let low_max = config.max_zoom.min(7);
-            if config.min_zoom <= low_max {
-                if config.ocean_simplified_shapefile.is_some() {
-                    eprintln!("  Simplified (z{}-z{}):", config.min_zoom, low_max);
-                } else {
-                    eprintln!("  Low-zoom from full (z{}-z{}):", config.min_zoom, low_max);
-                }
+            for pass in crate::ocean::OceanPass::ALL {
+                let Some(window) = pass.emission(config.min_zoom, config.max_zoom) else {
+                    continue;
+                };
+                let source = plan.source(pass);
+                eprintln!(
+                    "  {pass:?} pass (z{}-z{}) from {}:",
+                    window.first,
+                    window.last,
+                    source.shp().display()
+                );
                 ocean_features += crate::ocean::process_ocean_shapefile_checked(
-                    low_source,
+                    source.shp(),
                     &data_bounds,
-                    config.min_zoom,
-                    low_max,
+                    window,
                     &mut sort_writer,
-                    active_ocean_artifact
-                        .as_ref()
-                        .and_then(|artifact| artifact.grids().first()),
-                    expected_low_hashes,
-                )?;
-            }
-            if config.max_zoom >= 8 {
-                let full_min = config.min_zoom.max(8);
-                eprintln!("  Full-resolution (z{full_min}-z{}):", config.max_zoom);
-                ocean_features += crate::ocean::process_ocean_shapefile_checked(
-                    ocean_path,
-                    &data_bounds,
-                    full_min,
-                    config.max_zoom,
-                    &mut sort_writer,
-                    active_ocean_artifact
-                        .as_ref()
-                        .and_then(|artifact| artifact.grids().last()),
-                    expected_full_hashes,
+                    producer_band,
+                    plan.pass_hashes(source_key, pass).map_err(PipelineError)?,
                 )?;
             }
 
@@ -1201,17 +1139,18 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
     // Loaded on every path, including a direct resume at assembly.
     let (data_bounds, _, _, _, _) = load_checkpoint(&config.tmp_dir)?;
-    if active_ocean_artifact.is_none()
-        && let (OceanMode::Band { key }, Some(path)) = (&ocean_mode, config.ocean_tiles.as_deref())
-    {
-        let pass_max_zooms = ocean_pass_max_zooms(config);
-        active_ocean_artifact = Some(std::sync::Arc::new(crate::ocean::OceanTiles::open(
-            path,
-            key,
-            &data_bounds,
-            &pass_max_zooms,
-        )?));
-    }
+    // The band the ocean phase produced under, or on a resume past it the
+    // same function of the same checkpoint bounds.
+    let ocean_band =
+        ocean_band.unwrap_or_else(|| crate::ocean::OceanBand::for_bounds(&data_bounds));
+    let active_ocean_artifact = match ocean {
+        ResolvedOcean::Artifact { artifact, .. } => {
+            let tiles = artifact.into_tiles(ocean_band)?;
+            eprintln!("  Ocean artifact active: {} runs", tiles.run_count());
+            Some(std::sync::Arc::new(tiles))
+        }
+        ResolvedOcean::None | ResolvedOcean::Computed { .. } => None,
+    };
 
     let input_identity = input_identity.ok_or_else(|| {
         PipelineError(
@@ -1245,6 +1184,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 .or(resumed_effective),
             resumed_from: skip,
             ocean_mode: ocean_mode.clone(),
+            low_zoom_source,
         },
     )?;
     // Drop the reader so every chunk reader flushes its byte tally before we
@@ -1577,7 +1517,7 @@ fn retain_outgoing_ocean_artifact(output_path: &Path) -> std::io::Result<()> {
     if !output_path.exists() {
         return Ok(());
     }
-    let (version, key_prefix) = match crate::ocean::OceanTiles::declared_key(output_path) {
+    let (version, key_prefix) = match crate::ocean::artifact::declared_key(output_path) {
         Ok(key) => {
             let bytes = serde_json::to_vec(&key).map_err(std::io::Error::other)?;
             let fingerprint = crate::ocean::Xxh128::from_bytes(&bytes).to_string();
@@ -1631,13 +1571,15 @@ pub fn ocean_build(
     crate::debug::reset_run_counters();
     crate::ocean::reset_ocean_counters();
     sort::reset_sort_counters();
+    let plan = crate::ocean::OceanPlan::new(Some(full_shapefile), simplified_shapefile, None)
+        .map_err(PipelineError)?
+        .ok_or_else(|| {
+            PipelineError("ocean-build needs a full-resolution shapefile".to_string())
+        })?;
     // Fail on missing inputs before retaining the active artifact. The key
     // itself is assembled from the buffers consumed by the passes below.
-    let full_files = crate::ocean::ShapefilePair::from_shp(full_shapefile);
-    let simplified_files = simplified_shapefile.map(crate::ocean::ShapefilePair::from_shp);
-    drop(std::fs::File::open(full_files.shp())?);
-    drop(std::fs::File::open(full_files.shx())?);
-    if let Some(files) = &simplified_files {
+    for pass in crate::ocean::OceanPass::ALL {
+        let files = plan.source(pass);
         drop(std::fs::File::open(files.shp())?);
         drop(std::fs::File::open(files.shx())?);
     }
@@ -1655,32 +1597,40 @@ pub fn ocean_build(
         max_x: 1.0,
         max_y: 1.0,
     };
-    // Mirror the run pipeline's pass structure: z0-z7 always its own pass so
-    // the low-zoom piece union fires, sourced from the simplified shapefile
-    // when given (production) and from the full shapefile otherwise.
-    let low_source = simplified_files
-        .as_ref()
-        .map(crate::ocean::ShapefilePair::shp)
-        .unwrap_or_else(|| full_files.shp());
-    let (_, low_hashes) =
-        crate::ocean::process_ocean_shapefile_with_hashes(low_source, &world, 0, 7, &mut writer)?;
-    let (_, full_hashes) = crate::ocean::process_ocean_shapefile_with_hashes(
-        full_shapefile,
-        &world,
-        8,
-        crate::tiling::MAX_ZOOM,
-        &mut writer,
-    )?;
-    if simplified_shapefile.is_none() && low_hashes != full_hashes {
+    // The same passes a run executes, over the artifact's whole zoom range.
+    let mut pass_hashes = Vec::with_capacity(crate::ocean::OceanPass::ALL.len());
+    for pass in crate::ocean::OceanPass::ALL {
+        let window = pass
+            .emission(
+                crate::ocean::artifact::ARTIFACT_MIN_ZOOM,
+                crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
+            )
+            .ok_or_else(|| {
+                PipelineError(format!("artifact zoom range misses the {pass:?} pass"))
+            })?;
+        let (_, hashes) = crate::ocean::process_ocean_shapefile_with_hashes(
+            plan.source(pass).shp(),
+            &world,
+            window,
+            &mut writer,
+        )?;
+        pass_hashes.push(hashes);
+    }
+    let [low_hashes, full_hashes] = pass_hashes[..] else {
+        return Err(PipelineError(
+            "ocean-build ran an unexpected number of passes".to_string(),
+        ));
+    };
+    if !plan.has_simplified() && low_hashes != full_hashes {
         return Err(PipelineError(
             "full ocean shapefile changed between low and high zoom passes".to_string(),
         ));
     }
     let source = crate::ocean::OceanSourceKey::from_hashes(
         full_hashes,
-        simplified_shapefile.map(|_| low_hashes),
-        0,
-        crate::tiling::MAX_ZOOM,
+        plan.has_simplified().then_some(low_hashes),
+        crate::ocean::artifact::ARTIFACT_MIN_ZOOM,
+        crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
     );
     let key = crate::ocean::OceanArtifactKey {
         source,
@@ -1692,8 +1642,8 @@ pub fn ocean_build(
         pbf_path: PathBuf::new(),
         output_path: output_path.to_path_buf(),
         tmp_dir: tmp_dir.to_path_buf(),
-        min_zoom: 0,
-        max_zoom: crate::tiling::MAX_ZOOM,
+        min_zoom: crate::ocean::artifact::ARTIFACT_MIN_ZOOM,
+        max_zoom: crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
@@ -1730,6 +1680,7 @@ pub fn ocean_build(
             effective: None,
             resumed_from: None,
             ocean_mode: OceanMode::Band { key },
+            low_zoom_source: Some(plan.low_zoom_source(crate::ocean::artifact::ARTIFACT_MIN_ZOOM)),
         },
     )?;
     Ok(())

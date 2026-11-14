@@ -78,7 +78,7 @@ the ocean is the point of that resume; ocean producer identity matters for
 ocean identity for artifact-active runs is the artifact key, which includes
 `compression_level`; the `OceanSourceKey` doc says compression level must not
 gate a resume because chunks hold geometry not encoded tiles. The refusal is
-moot only because `resolved_ocean_mode` already refuses a level mismatch - the
+moot only because artifact admission (`OceanArtifact::admit`) already refuses a level mismatch - the
 band chunks are a function of the source key plus band geometry, not of the
 artifact's encoding (run-contract hunt).
 
@@ -99,37 +99,6 @@ Reported by the pipeline, run-contract, ocean and storage hunts.
 ---
 
 # Ocean
-
-## CON-007 - May the artifact serve this run?
-
-1. `main.rs` - artifact without shapefile is an error.
-2. `resolved_ocean_mode` - format, compression and zoom contract against
-   config; existence; declared compression level vs config; full shapefile
-   present (again, with different prose than `main.rs`, so library callers
-   get only this one); recompute key. It opens the archive once just to read
-   the declared key.
-3. `OceanTiles::open` - format/compression/zoom against the header (magic
-   ints), world bounds read by raw header offsets, single ocean layer
-   (by the string `"ocean"`), full key equality, run range. It is reached at
-   two sites in `run()` (opened verbatim twice depending on the skip).
-4. `ocean_build` - what it writes.
-
-The artifact zoom contract `0/tiling::MAX_ZOOM` is restated in three places
-(`resolved_ocean_mode`, `ocean_build`, `OceanTiles::open`, whose run check
-reads `tiling::PROFILE_ID_END`).
-
-Agree today, held by hand. `OceanMode::Band { key }` does not carry the
-artifact path, so every use re-pairs it with `config.ocean_tiles` via
-`if let (OceanMode::Band { key }, Some(path)) = ...` (three times in `run`);
-Band with a None path silently proceeds without the artifact.
-
-Owner proposed: one `ARTIFACT_CONTRACT` constant (format, compression, zoom
-range) in an artifact module, and one
-`OceanArtifact::admit(path, &plan, &run_contract) -> Result<OceanArtifact,
-ArtifactRefusal>` called once before phase12, with Band owning the admitted
-view.
-
-Reported by the pipeline, run-contract and ocean hunts.
 
 ---
 
@@ -164,14 +133,15 @@ over each layer's own range; emission is cut). What remains:
 
 - The pyramid's grid arithmetic: `maxz`, `z_top` and `z_bottom` travel as
   three bare `u8`s in `PyramidParams`, and the shift `maxz - z` is written out
-  at each use in `geometry/pyramid.rs` plus `assemble::non_band_tile_rect`.
-  The proposed `ZoomSpan { maxz, top, bottom }` with `shift_for(z)` belongs
-  with the coordinate-space `Grid` in `notes/structural.md`.
+  at each use in `geometry/pyramid.rs` plus `OceanBand::artifact_tile_rect`
+  in `ocean/band.rs`. The proposed `ZoomSpan { maxz, top, bottom }` with
+  `shift_for(z)` belongs with the coordinate-space `Grid` in
+  `notes/structural.md`.
 - The window is still two bare `u8`s checked in `run` (`min <= max <=
   MAX_ZOOM`); no `ZoomRange` type carries the validation, and `EmitCtx`,
-  `relations.rs` and `phase12.rs` thread the pair separately.
-- Computed ocean does not follow the truncation rule; see the pass-grid item
-  in `notes/bugs.md` (ocean pass structure).
+  `relations.rs` and `phase12.rs` thread the pair separately. Ocean's
+  `PassWindow` (`ocean/plan.rs`) is a pass-local intersection of it, not a
+  validated window type.
 
 Reported by the polygon-engine, pipeline, coordinate-spaces, layer-identity,
 storage and archive-surface hunts.

@@ -63,8 +63,8 @@ for no ocean.** Each value is one of:
 
 Shapefile entries must partition z0-z14 exactly, and the only accepted
 partitions are a single `z0-z14` or the `z0-z7` + `z8-z14` pair. That is not
-arbitrary: `ocean::selected_pass_grid` implements one split, at z7/z8, and
-nowhere else. A `z0-z5` request is rejected rather than accepted and quietly
+arbitrary: the ocean plan (`ocean::plan`) has exactly two passes, z0-z7 on a
+z7 grid and z8-z14 on a z14 grid, and splits nowhere else. A `z0-z5` request is rejected rather than accepted and quietly
 served at z7, because the alternative is a false statement in the recorded
 invocation - which is the failure this flag exists to prevent.
 
@@ -76,7 +76,10 @@ the split exists to avoid paying for detail that cannot be seen. It is an
 optimization, not a correctness requirement, and `z0-z14:<full>` alone is a
 legal and slower way to say the same thing - internally it still runs as
 two passes, with the full shapefile serving both, so the low-zoom behavior
-below is identical under either spelling.
+below and the artifact band ownership are identical under either spelling.
+The provenance contract still records the spelling's roles: the pair records
+`low_zoom_source: simplified` and simplified hashes even when both entries
+name the same file, and `z0-z14` alone records `full` and none.
 
 Invalid index entries and truncated shapefile records fail the run. Selected
 polygon geometry must have finite coordinates and closed rings with at least
@@ -163,7 +166,7 @@ threads, so these counts do not divide a single process-wide allowance.
 A resume validates the checkpoint's input identity, producer config, ocean
 source and low-zoom selection, and sort chunk codec against the current run
 and refuses a mismatch, so `--skip-to` cannot silently blend two contracts into
-one archive. The checkpoint format is v9, with a tagged ocean contract carrying mode,
+one archive. The checkpoint carries a tagged ocean contract recording mode,
 low-zoom source, and source identity. Inline way coordinates contribute to the
 data extent in locations-on-ways mode, including ways without tags. The
 `--compress-sort-chunks` setting must match the run that wrote the chunks,
@@ -171,7 +174,9 @@ including leaving compression unset on both runs.
 Resume also refuses obsolete chunk filenames and incompatible partition
 layouts, including chunks written with a different partition split zoom.
 Regenerate those chunks with a full run; they are not converted on resume.
-Checkpoints from v8 and earlier are refused; re-run a full tilegen.
+Checkpoints from an earlier format version are refused; re-run a full
+tilegen. The version moves whenever chunks built under unchanged recorded
+identity would differ, as when computed ocean moved to canonical pass grids.
 
 Resuming at `sort` or `assemble` also requires a valid chunk-count completion
 record (`sort_chunks.count`), written after the ocean phase and final chunk
@@ -274,7 +279,7 @@ key mismatch named until the corpus is re-blessed (`brokkr pmtiles-corpus
 bless --rotate`) from a build carrying the new artifact - and that rotation
 commit is the review.
 
-`OCEAN_POLICY_VERSION` (`src/ocean.rs`) is the code half of the artifact key:
+`OCEAN_POLICY_VERSION` (`src/ocean/mod.rs`) is the code half of the artifact key:
 the shapefile hashes catch input rotations, the version stands in for "the
 geometry pipeline changed". Any change that alters emitted ocean geometry or
 encoding must bump it, which makes every existing artifact fail the key check

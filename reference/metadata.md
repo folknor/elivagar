@@ -260,7 +260,7 @@ geometry continues to emit each assembled component separately.
 ## Checkpoint provenance
 
 `--skip-to` reuses sort chunks from a previous run, and nothing in a later
-invocation reveals what produced them. The v9 checkpoint (JSON) records the
+invocation reveals what produced them. The checkpoint (JSON) records the
 input hash, producer config, ocean source identity and low-zoom selection,
 effective paths, and sort chunk codec. A resume validates all except the
 effective paths, which it inherits. The checkpoint and archive provenance use
@@ -290,6 +290,10 @@ not what produced the chunks on disk.
 source identity. v9 records the mode and low-zoom source explicitly in a tagged
 object and validates both on resume. A mismatch is a hard error. v6 added
 computed ocean source hashes and zoom spans; v5 stored only the word `computed` for that arm.
+v10 adds no field: it marks the change to canonical ocean pass grids (a
+narrowed window truncates emission instead of moving the grid, and an
+artifact-backed single `z0-z14` shapefile judges band ownership on both pass
+grids), so v9 chunks built the old way under identical keys are refused.
 
 **Sort chunk codec.** v7 records the chunk storage codec separately from
 producer config. The `--compress-sort-chunks` setting must match, including

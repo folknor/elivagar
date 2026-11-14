@@ -117,8 +117,10 @@ simplification, no size filter, no line merging, the top compression tier)
 asks about z14, and a run's configured zoom range is a truncation window over
 the profile domain: lines and polygons are constructed over each layer's own
 zoom range and only emission is restricted, so a narrowed archive holds
-exactly the OSM tiles a full build holds at those zooms. Computed ocean does
-not yet follow this rule, because its pass grid takes the configured maximum.
+exactly the tiles a full build holds at those zooms. Computed ocean follows
+the same rule on its own fixed grids: the low pass quantizes and descends on
+the z7 grid from z0, the high pass on the z14 grid from z8, and the window
+only decides which of those zooms are written.
 
 The sort key is:
 

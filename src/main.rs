@@ -346,8 +346,8 @@ fn parse_byte_size_min_1m(s: &str) -> Result<usize, String> {
 /// The ocean inputs named by `--ocean`, after parsing and validation.
 ///
 /// `low` is `Some` only for the explicit z0-z7 + z8-z14 split. A single
-/// z0-z14 entry lands in `high`; the pipeline uses that file for both its low
-/// and high passes. Artifact band selection uses two grids only for the split.
+/// z0-z14 entry lands in `high`; the pipeline's ocean plan then feeds both of
+/// its fixed passes, and both band grids, from that file.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct OceanInputs {
     low: Option<PathBuf>,
@@ -389,8 +389,8 @@ fn parse_ocean_spec(spec: &str) -> Result<(Option<(u8, u8)>, PathBuf), String> {
 /// Validate the whole `--ocean` set and map it onto the two shapefile passes.
 ///
 /// The zoom ranges are checked against what the engine can actually do rather
-/// than accepted and rounded: `selected_pass_grid` implements exactly one
-/// split, at z7/z8, so those are the only partitions expressible. Accepting
+/// than accepted and rounded: the ocean plan's two passes split at z7/z8 and
+/// nowhere else, so those are the only partitions expressible. Accepting
 /// `z0-z5` and quietly serving a z7 split would put a false statement in the
 /// recorded invocation, which is the whole thing this flag exists to prevent.
 fn resolve_ocean_inputs(specs: &[String]) -> Result<OceanInputs, String> {
@@ -1000,7 +1000,7 @@ mod tests {
 
     #[test]
     fn ocean_rejects_a_split_the_engine_cannot_do() {
-        // selected_pass_grid splits at z7/z8 and nowhere else. Accepting this
+        // The ocean passes split at z7/z8 and nowhere else. Accepting this
         // and serving a z7 split would put a false statement in the recorded
         // invocation.
         let err = ocean(&["z0-z5:simple.shp", "z6-z14:full.shp"]).unwrap_err();

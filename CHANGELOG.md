@@ -22,6 +22,22 @@
   the layers the window can hold, clamped to it.
 - pbfhogg 0.6 as the PBF reader, plus hotpath 0.31 and the pmtiles 0.28
   dev-dependency. Output is unchanged.
+- Computed ocean follows the same truncation rule: one ocean plan owns
+  the two passes (z0-z7 on a z7 grid, z8-z14 on a z14 grid), and a
+  narrowed window only cuts their emission, so its ocean tiles equal a
+  full build's. A single `z0-z14` shapefile against the world artifact
+  now judges band ownership on both pass grids; before, its low pass was
+  pruned on the z14 grid.
+- The world ocean artifact is admitted once at run entry, so a key
+  mismatch fails before phase12 instead of after it; its directory is
+  still read only at assembly.
+- An artifact-owned tile whose OSM features all encode to nothing keeps
+  its artifact ocean; it used to be dropped. Denmark output is unchanged.
+- A `TilegenConfig` naming a simplified ocean shapefile or an artifact
+  without the full shapefile is an error instead of silently no ocean.
+- Checkpoint format v10. It adds no field; v9 checkpoints are refused
+  because chunks built on the old pass grids carry identical keys.
+  Artifact bytes and `OCEAN_POLICY_VERSION` are unchanged.
 
 Design-hunt fixes, tenth wave. This changes output.
 
