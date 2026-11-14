@@ -2,7 +2,7 @@
 // dam_lines, dam_polygons, pier_lines, pier_polygons.
 
 use super::*;
-use smallvec::{SmallVec, smallvec};
+use smallvec::smallvec;
 
 wire_kinds! {
     /// `kind` of water_polygons and water_polygons_labels.
@@ -75,12 +75,11 @@ fn water_polygon_match(tags: &Tags<'_>) -> Option<(WaterPolygonKind, u8)> {
     None
 }
 
-pub(super) fn match_water_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_water_polygons(tags: &Tags<'_>, out: &mut Hits) {
     if let Some((kind, min_zoom)) = water_polygon_match(tags) {
         out.push(LayerMatch {
             layer: Layer::WaterPolygons,
             min_zoom,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_kind(kind)],
@@ -88,7 +87,7 @@ pub(super) fn match_water_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMat
     }
 }
 
-pub(super) fn match_water_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_water_polygons_labels(tags: &Tags<'_>, out: &mut Hits) {
     if !has_name(tags) {
         return;
     }
@@ -100,7 +99,6 @@ pub(super) fn match_water_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<[L
         out.push(LayerMatch {
             layer: Layer::WaterPolygonsLabels,
             min_zoom: label_zoom,
-            max_zoom: MAX_ZOOM,
             geom_expect: Layer::WaterPolygonsLabels.polygon_point_geom_expect(),
             paint_rank: 0,
             attrs,
@@ -124,19 +122,18 @@ fn water_line_match(tags: &Tags<'_>) -> Option<(WaterLineKind, u8)> {
     }
 }
 
-pub(super) fn match_water_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_water_lines(tags: &Tags<'_>, out: &mut Hits) {
     if let Some((kind, min_zoom)) = water_line_match(tags) {
         let mut attrs = smallvec![attr_kind(kind)];
         if is_tunnel(tags) {
-            attrs.push(attr_bool("tunnel", true));
+            attrs.push(attr_bool(BoolKey::Tunnel, true));
         }
         if is_bridge(tags) {
-            attrs.push(attr_bool("bridge", true));
+            attrs.push(attr_bool(BoolKey::Bridge, true));
         }
         out.push(LayerMatch {
             layer: Layer::WaterLines,
             min_zoom,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs,
@@ -144,7 +141,7 @@ pub(super) fn match_water_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch;
     }
 }
 
-pub(super) fn match_water_lines_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_water_lines_labels(tags: &Tags<'_>, out: &mut Hits) {
     if !has_name(tags) {
         return;
     }
@@ -152,10 +149,10 @@ pub(super) fn match_water_lines_labels(tags: &Tags<'_>, out: &mut SmallVec<[Laye
         let mut attrs = smallvec![attr_kind(kind)];
         attrs.extend(name_attrs(tags));
         if is_tunnel(tags) {
-            attrs.push(attr_bool("tunnel", true));
+            attrs.push(attr_bool(BoolKey::Tunnel, true));
         }
         if is_bridge(tags) {
-            attrs.push(attr_bool("bridge", true));
+            attrs.push(attr_bool(BoolKey::Bridge, true));
         }
         // Label layer has its own min_zoom per Shortbread spec
         let label_zoom = match kind {
@@ -165,7 +162,6 @@ pub(super) fn match_water_lines_labels(tags: &Tags<'_>, out: &mut SmallVec<[Laye
         out.push(LayerMatch {
             layer: Layer::WaterLinesLabels,
             min_zoom: label_zoom,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs,
@@ -177,12 +173,11 @@ pub(super) fn match_water_lines_labels(tags: &Tags<'_>, out: &mut SmallVec<[Laye
 // Dam + Pier
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_dam_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_dam_lines(tags: &Tags<'_>, out: &mut Hits) {
     if tags.has_value("waterway", "dam") {
         out.push(LayerMatch {
             layer: Layer::DamLines,
             min_zoom: 12,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs: smallvec![attr_kind(DamKind::Dam)],
@@ -190,12 +185,11 @@ pub(super) fn match_dam_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
     }
 }
 
-pub(super) fn match_dam_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_dam_polygons(tags: &Tags<'_>, out: &mut Hits) {
     if tags.has_value("waterway", "dam") {
         out.push(LayerMatch {
             layer: Layer::DamPolygons,
             min_zoom: 12,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_kind(DamKind::Dam)],
@@ -203,12 +197,11 @@ pub(super) fn match_dam_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
     }
 }
 
-pub(super) fn match_pier_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_pier_lines(tags: &Tags<'_>, out: &mut Hits) {
     if let Some(kind) = pier_kind(tags) {
         out.push(LayerMatch {
             layer: Layer::PierLines,
             min_zoom: 12,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs: smallvec![attr_kind(kind)],
@@ -216,12 +209,11 @@ pub(super) fn match_pier_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
     }
 }
 
-pub(super) fn match_pier_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_pier_polygons(tags: &Tags<'_>, out: &mut Hits) {
     if let Some(kind) = pier_kind(tags) {
         out.push(LayerMatch {
             layer: Layer::PierPolygons,
             min_zoom: 12,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_kind(kind)],

@@ -22,7 +22,7 @@ use pbfhogg::{Element, Way};
 use super::super::boundary_prescan::BoundaryWayMeta;
 use super::super::emit::{
     EmitCtx, FeatureGeometry, LineEmitScratch, PointEmitScratch, PolygonEmitScratch, RecordSink,
-    emit_match, enrich_polygon_matches, unwrap_antimeridian_path,
+    emit_match, unwrap_antimeridian_path,
 };
 use super::super::stats::{FanoutStats, MissingRefStatsAtomic, record_fanout_from_payload_records};
 use super::extent::CoordinateExtent;
@@ -536,14 +536,28 @@ pub(super) fn process_planned_way_into(
         return Ok(0);
     }
     let tag_helper = Tags(&tags_ref);
+    let boundary = boundary_way_meta.get(&way_id).copied();
     // Members are always resolved (a relation reads their geometry back), so the
     // both-geom pre-filter is only worth computing for non-members, where it
-    // gates the early return. Computing it for members would run two
-    // `match_element` passes whose result is never inspected.
-    if !plan.is_member && !boundary_way_meta.contains_key(&way_id) {
-        let possible_feature = !shortbread::match_element(&tag_helper, OsmGeomType::ClosedWay)
-            .is_empty()
-            || !shortbread::match_element(&tag_helper, OsmGeomType::OpenWay).is_empty();
+    // gates the early return. A way with boundary metadata can match with no
+    // tags of its own, so it skips the filter too. Matching reads only the
+    // tags and the geometry type, so a probe's result is the match for its
+    // type and is kept; the type the way actually has is decided below from
+    // its resolved coordinates, and a type the short-circuit left unprobed
+    // is matched then.
+    let mut closed_probe = None;
+    let mut open_probe = None;
+    if !plan.is_member && boundary.is_none() {
+        let closed = shortbread::match_element(&tag_helper, OsmGeomType::ClosedWay, None);
+        let possible_feature = if closed.is_empty() {
+            let open = shortbread::match_element(&tag_helper, OsmGeomType::OpenWay, None);
+            let admitted = !open.is_empty();
+            open_probe = Some(open);
+            admitted
+        } else {
+            true
+        };
+        closed_probe = Some(closed);
         if !possible_feature {
             return Ok(0);
         }
@@ -587,10 +601,10 @@ pub(super) fn process_planned_way_into(
     } else {
         OsmGeomType::OpenWay
     };
-    let mut matches = shortbread::match_element(&tag_helper, geom_type);
-    resolve_boundary_match(&tag_helper, way_id, boundary_way_meta, &mut matches);
+    let probe = if is_closed { closed_probe } else { open_probe };
+    let hits = probe.unwrap_or_else(|| shortbread::match_element(&tag_helper, geom_type, boundary));
 
-    if matches.is_empty() {
+    if hits.is_empty() {
         return Ok(0);
     }
 
@@ -649,10 +663,11 @@ pub(super) fn process_planned_way_into(
     {
         let merc = acc.merc.as_slice();
 
-        if is_closed {
-            let area_m2 = geometry::polygon::area_sq_meters(merc);
-            enrich_polygon_matches(&mut matches, area_m2);
-        }
+        let matches = if is_closed {
+            hits.finish(|| geometry::polygon::area_sq_meters(merc))
+        } else {
+            hits.finish_without_area()
+        };
 
         let emit_ctx = EmitCtx {
             window: ctx.window,
@@ -681,47 +696,31 @@ pub(super) fn process_planned_way_into(
     Ok(pins_marked)
 }
 
-fn resolve_boundary_match(
-    tags: &Tags<'_>,
-    way_id: i64,
-    boundary_way_meta: &BoundaryWayMeta,
-    matches: &mut smallvec::SmallVec<[shortbread::LayerMatch; 4]>,
-) {
-    let Some(resolved) =
-        shortbread::boundaries::boundary_line(tags, boundary_way_meta.get(&way_id).copied())
-    else {
-        return;
-    };
-    if let Some(existing) = matches
-        .iter_mut()
-        .find(|m| m.layer == shortbread::Layer::Boundaries)
-    {
-        *existing = resolved;
-    } else {
-        matches.push(resolved);
-    }
-}
-
 #[cfg(test)]
 mod boundary_synthesis_tests {
     use super::super::super::boundary_prescan::{BoundaryWayMeta, fold_relation};
-    use super::resolve_boundary_match;
-    use crate::shortbread::{self, AttrValue, Layer, Tags};
+    use crate::shortbread::{self, AttrKey, AttrValue, Layer, OsmGeomType, Tags};
     use smallvec::SmallVec;
 
+    /// The boundaries matches the way pipeline gets for way 42 under `meta`.
     fn synthesize(
         way_tags: &[(&str, &str)],
         meta: &BoundaryWayMeta,
     ) -> SmallVec<[shortbread::LayerMatch; 4]> {
-        let mut matches: SmallVec<[shortbread::LayerMatch; 4]> = SmallVec::new();
-        resolve_boundary_match(&Tags(way_tags), 42, meta, &mut matches);
+        let mut matches = shortbread::match_element(
+            &Tags(way_tags),
+            OsmGeomType::OpenWay,
+            meta.get(&42).copied(),
+        )
+        .finish_without_area();
+        matches.retain(|m| m.layer == Layer::Boundaries);
         matches
     }
 
     fn admin_level(m: &shortbread::LayerMatch) -> i64 {
-        for (k, v, _) in &m.attrs {
-            if *k == "admin_level"
-                && let AttrValue::Int(n) = v
+        for a in &m.attrs {
+            if a.key() == AttrKey::AdminLevel
+                && let AttrValue::Int(n) = a.value()
             {
                 return *n;
             }
@@ -730,9 +729,9 @@ mod boundary_synthesis_tests {
     }
 
     fn bool_attr(m: &shortbread::LayerMatch, key: &str) -> bool {
-        for (k, v, _) in &m.attrs {
-            if *k == key
-                && let AttrValue::Bool(b) = v
+        for a in &m.attrs {
+            if a.key().name() == key
+                && let AttrValue::Bool(b) = a.value()
             {
                 return *b;
             }

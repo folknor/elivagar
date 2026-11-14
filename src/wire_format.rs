@@ -13,95 +13,32 @@
 //   u32×  geometry commands
 //   u8    attribute count
 //   per attribute:
-//     u8   key_id (index into KEY_NAMES table)
+//     u8   key_id (`shortbread::AttrKey` discriminant)
 //     u8   value_type (0=string, 1=int, 2=bool, 3=float, 4=interned string)
 //     value bytes
 
 use crate::mvt::{self, GeomType, LayerBuilder, Value};
-use crate::shortbread::{self, AttrValue};
+use crate::shortbread::{self, AttrKey, AttrValue, ValueType};
 
 const _: () = assert!(
     cfg!(target_endian = "little"),
     "wire format assumes little-endian"
 );
 
-/// Static key ID table. All attribute key strings used in the Shortbread schema.
-/// Index = key_id (u8), used in wire format. New keys MUST be appended (never reorder).
-const KEY_NAMES: &[&str] = &[
-    "kind",                    // 0
-    "name",                    // 1
-    "name_en",                 // 2
-    "name_de",                 // 3
-    "admin_level",             // 4
-    "bridge",                  // 5
-    "tunnel",                  // 6
-    "link",                    // 7
-    "rail",                    // 8
-    "surface",                 // 9
-    "tracktype",               // 10
-    "service",                 // 11
-    "oneway",                  // 12
-    "oneway_reverse",          // 13
-    "bicycle",                 // 14
-    "horse",                   // 15
-    "ref",                     // 16
-    "ref_rows",                // 17
-    "ref_cols",                // 18
-    "population",              // 19
-    "maritime",                // 20
-    "disputed",                // 21
-    "iata",                    // 22
-    "housenumber",             // 23
-    "housename",               // 24
-    "amenity",                 // 25
-    "highway",                 // 26
-    "office",                  // 27
-    "leisure",                 // 28
-    "man_made",                // 29
-    "tourism",                 // 30
-    "cuisine",                 // 31
-    "vending",                 // 32
-    "religion",                // 33
-    "denomination",            // 34
-    "sport",                   // 35
-    "tower:type",              // 36
-    "information",             // 37
-    "atm",                     // 38
-    "recycling:glass_bottles", // 39
-    "recycling:paper",         // 40
-    "recycling:clothes",       // 41
-    "recycling:scrap_metal",   // 42
-    "shop",                    // 43
-    "emergency",               // 44
-    "historic",                // 45
-    "way_area",                // 46
-    "height",                  // 47
-    "ele",                     // 48 (POI elevation in meters)
-    "min_height",              // 49
-    "building:levels",         // 50
-    "natural",                 // 51 (POI peak/pass natural tag)
-];
-
-#[allow(clippy::cast_possible_truncation)]
-fn key_to_id(key: &str) -> u8 {
-    KEY_NAMES
-        .iter()
-        .position(|&k| k == key)
-        .unwrap_or_else(|| panic!("unknown wire format key: {key:?}")) as u8
-}
+// Attribute key ids are `shortbread::AttrKey` discriminants: the key schema
+// declares each key's id, name and value type once, and the decoder checks a
+// record's value type byte against that declaration.
 
 /// Static value ID table for "kind" attribute values from the Shortbread schema.
-/// Index = value_id (u8). Unknown values fall back to raw string encoding (type 0).
-/// New values MUST be appended (never reorder).
+/// Index = value_id (u8). New values MUST be appended (never reorder).
 ///
 /// This is a compression dictionary, not the schema: the vocabularies live
 /// with their matchers as `wire_kinds!` enums in `shortbread`, and each
-/// declaration carries a compile-time assertion (through `is_interned_kind`)
-/// that every one of its names is in this table, so a kind the profile emits
-/// cannot silently miss it. A miss would cost bytes, never correctness, and
-/// the inline-string fallback stays for any value outside the table. A
-/// change to the table changes sort-record bytes, which tie-break equal sort
-/// keys, so it moves `CHECKPOINT_VERSION`. `sports_centre` is the OSM
+/// variant's `KindId` is computed from this table at compile time, so a kind
+/// the profile emits cannot miss it and the encoder always writes the
+/// interned form. The decoder still accepts a raw string (type 0) for `kind`.
+/// A change to the table changes sort-record bytes, which tie-break equal
+/// sort keys, so it moves `CHECKPOINT_VERSION`. `sports_centre` is the OSM
 /// spelling and is never emitted; sites emits `sports_center`.
 const KIND_VALUES: &[&str] = &[
     // Water
@@ -260,22 +197,45 @@ pub(crate) const fn const_str_eq(a: &str, b: &str) -> bool {
     true
 }
 
-/// Whether `kind` has an interned id. `const` so the `wire_kinds!`
-/// declarations in `shortbread` can assert coverage at compile time.
-pub(crate) const fn is_interned_kind(kind: &str) -> bool {
-    let mut i = 0;
-    while i < KIND_VALUES.len() {
-        if const_str_eq(KIND_VALUES[i], kind) {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
+/// A `kind` value's id in [`KIND_VALUES`]. Every `KindId` names a table
+/// entry: the only constructor searches the table and panics on a miss, and
+/// the `wire_kinds!` declarations call it in `const` blocks, so a kind the
+/// profile emits that the table lacks fails the build, not a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KindId(u8);
 
-#[allow(clippy::cast_possible_truncation)]
-fn kind_value_to_id(s: &str) -> Option<u8> {
-    KIND_VALUES.iter().position(|&v| v == s).map(|i| i as u8)
+impl KindId {
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) const fn interned(kind: &str) -> Self {
+        let mut i = 0;
+        while i < KIND_VALUES.len() {
+            if const_str_eq(KIND_VALUES[i], kind) {
+                // KIND_VALUES.len() <= 256 is asserted above.
+                return Self(i as u8);
+            }
+            i += 1;
+        }
+        panic!("a kind name is missing from KIND_VALUES: append it and bump CHECKPOINT_VERSION")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(kind: &str) -> Option<Self> {
+        KIND_VALUES
+            .iter()
+            .position(|&v| v == kind)
+            .map(|i| Self(u8::try_from(i).expect("kind ids are u8")))
+    }
+
+    /// The dictionary id written after value type 4.
+    pub(crate) const fn id(self) -> u8 {
+        self.0
+    }
+
+    /// The `kind` string on the wire.
+    #[cfg(test)]
+    pub(crate) const fn name(self) -> &'static str {
+        KIND_VALUES[self.0 as usize]
+    }
 }
 
 /// Append a string with the wire format's u16 byte length, truncating only at
@@ -298,30 +258,22 @@ pub(crate) fn encode_attrs_bytes(buf: &mut Vec<u8>, attrs: &[shortbread::Attr], 
     buf.clear();
     buf.push(0);
     let mut encoded_count = 0_u8;
-    for (key, val, attr_zoom) in attrs {
-        if zoom < *attr_zoom {
+    for attr in attrs {
+        if !attr.visible_at(zoom) {
             continue;
         }
         if encoded_count == u8::MAX {
             break;
         }
-        let kid = key_to_id(key);
-        buf.push(kid);
-        match val {
+        buf.push(attr.key() as u8);
+        match attr.value() {
+            AttrValue::Kind(kind) => {
+                buf.push(4);
+                buf.push(kind.id());
+            }
             AttrValue::Str(s) => {
-                // For the "kind" key (id 0), try interning the value
-                if kid == 0 {
-                    if let Some(vid) = kind_value_to_id(s) {
-                        buf.push(4);
-                        buf.push(vid);
-                    } else {
-                        buf.push(0);
-                        append_wire_string(buf, s);
-                    }
-                } else {
-                    buf.push(0);
-                    append_wire_string(buf, s);
-                }
+                buf.push(0);
+                append_wire_string(buf, s);
             }
             AttrValue::Int(i) => {
                 buf.push(1);
@@ -380,16 +332,22 @@ pub(crate) fn append_feature_data_with_attrs(
     start..buf.len()
 }
 
+/// Test spelling: attributes as `(key name, value, from_zoom)`, checked
+/// against the key schema by `Attr::for_test`.
 #[cfg(test)]
 pub(crate) fn encode_feature_data(
     osm_id: u64,
     geom_type: GeomType,
     geom_cmds: &[u32],
-    attrs: &[shortbread::Attr],
+    attrs: &[(&str, AttrValue, u8)],
     zoom: u8,
 ) -> Box<[u8]> {
+    let attrs: Vec<shortbread::Attr> = attrs
+        .iter()
+        .map(|(key, value, from_zoom)| shortbread::Attr::for_test(key, value.clone(), *from_zoom))
+        .collect();
     let mut attrs_bytes = Vec::with_capacity(64);
-    encode_attrs_bytes(&mut attrs_bytes, attrs, zoom);
+    encode_attrs_bytes(&mut attrs_bytes, &attrs, zoom);
     encode_feature_data_with_attrs(osm_id, geom_type, geom_cmds, &attrs_bytes)
 }
 
@@ -411,6 +369,8 @@ pub(crate) enum RecordDecodeError {
     KeyId(u8),
     /// An attribute value type byte other than 0 to 4.
     ValueType(u8),
+    /// A value type the key's declared type does not permit.
+    KeyValueType { key: AttrKey, value_type: u8 },
     /// An interned kind value id past the kind table.
     KindValue(u8),
     /// A bool byte other than 0 or 1.
@@ -428,6 +388,12 @@ impl std::fmt::Display for RecordDecodeError {
             Self::GeomType(b) => write!(f, "sort record geometry type {b} is not 1, 2 or 3"),
             Self::KeyId(id) => write!(f, "sort record attribute key id {id} is unknown"),
             Self::ValueType(t) => write!(f, "sort record attribute value type {t} is unknown"),
+            Self::KeyValueType { key, value_type } => write!(
+                f,
+                "sort record attribute {} carries value type {value_type}, but the key is declared {:?}",
+                key.name(),
+                key.value_type()
+            ),
             Self::KindValue(id) => write!(f, "sort record kind value id {id} is unknown"),
             Self::Bool(b) => write!(f, "sort record bool byte {b} is not 0 or 1"),
             Self::Utf8 { at } => write!(f, "sort record string at byte {at} is not UTF-8"),
@@ -515,10 +481,25 @@ pub(crate) fn add_feature_to_layer(
             return Err(truncated(pos));
         }
         let key_byte = data[pos];
-        let key = *KEY_NAMES
-            .get(key_byte as usize)
-            .ok_or(RecordDecodeError::KeyId(key_byte))?;
+        let attr_key = AttrKey::from_id(key_byte).ok_or(RecordDecodeError::KeyId(key_byte))?;
+        let key = attr_key.name();
         let val_type = data[pos + 1];
+        // The key selects the permitted value representation: its declared
+        // type, plus the interned form for `kind`. This guarantees `kind` is
+        // a string, not that it is in the profile vocabulary.
+        let permitted = match (attr_key.value_type(), val_type) {
+            (ValueType::Str, 0) | (ValueType::Int, 1) | (ValueType::Bool, 2) => true,
+            (ValueType::Float, 3) => true,
+            (ValueType::Str, 4) => attr_key == AttrKey::Kind,
+            (_, 0..=4) => false,
+            (_, other) => return Err(RecordDecodeError::ValueType(other)),
+        };
+        if !permitted {
+            return Err(RecordDecodeError::KeyValueType {
+                key: attr_key,
+                value_type: val_type,
+            });
+        }
         pos += 2;
 
         let vi = match val_type {
@@ -616,6 +597,62 @@ mod tests {
     use std::borrow::Cow;
     use std::collections::BTreeMap;
 
+    type TestAttr = (&'static str, AttrValue, u8);
+
+    fn schema_attrs(attrs: &[TestAttr]) -> Vec<shortbread::Attr> {
+        attrs
+            .iter()
+            .map(|(key, value, zoom)| shortbread::Attr::for_test(key, value.clone(), *zoom))
+            .collect()
+    }
+
+    #[test]
+    fn decoder_checks_value_types_against_the_key_schema() {
+        // Calibrated both ways: a well-typed record decodes, a raw kind
+        // string still decodes, and a value type the key does not declare
+        // is refused before its payload is read.
+        let good = encode_feature_data(
+            1,
+            GeomType::Point,
+            &[9, 2, 4],
+            &[("admin_level", AttrValue::Int(2), 0)],
+            14,
+        );
+        add_feature_to_layer(&mut LayerBuilder::new("t"), &good).unwrap();
+        let attrs_at = 13 + 12 + 1;
+        assert_eq!(good[attrs_at], AttrKey::AdminLevel as u8);
+
+        let mut raw_kind = good[..attrs_at].to_vec();
+        raw_kind.extend_from_slice(&[AttrKey::Kind as u8, 0, 4, 0]);
+        raw_kind.extend_from_slice(b"town");
+        let mut layer = LayerBuilder::new("t");
+        add_feature_to_layer(&mut layer, &raw_kind).unwrap();
+        let (_, v) = layer.test_feature(0).tags[0];
+        assert_eq!(*layer.test_value(v), Value::String("town".to_string()));
+
+        let mut string_level = good[..attrs_at].to_vec();
+        string_level.extend_from_slice(&[AttrKey::AdminLevel as u8, 0, 1, 0, b'2']);
+        assert_eq!(
+            add_feature_to_layer(&mut LayerBuilder::new("t"), &string_level),
+            Err(RecordDecodeError::KeyValueType {
+                key: AttrKey::AdminLevel,
+                value_type: 0
+            })
+        );
+        let mut interned_name = good[..attrs_at].to_vec();
+        interned_name.extend_from_slice(&[AttrKey::Name as u8, 4, 0]);
+        assert!(matches!(
+            add_feature_to_layer(&mut LayerBuilder::new("t"), &interned_name),
+            Err(RecordDecodeError::KeyValueType { .. })
+        ));
+        let mut unknown_type = good[..attrs_at].to_vec();
+        unknown_type.extend_from_slice(&[AttrKey::Name as u8, 9]);
+        assert_eq!(
+            add_feature_to_layer(&mut LayerBuilder::new("t"), &unknown_type),
+            Err(RecordDecodeError::ValueType(9))
+        );
+    }
+
     #[test]
     fn malformed_records_are_rejected_not_dropped() {
         let attrs = [
@@ -681,7 +718,7 @@ mod tests {
         // MoveTo(1,1) + LineTo(2,2): command(1,1)=9, zigzag(1)=2, zigzag(1)=2, command(2,1)=18, zigzag(1)=2, zigzag(1)=2
         let geom_cmds: Vec<u32> = vec![9, 2, 2, 18, 2, 2];
 
-        let attrs: Vec<shortbread::Attr> = vec![
+        let attrs: Vec<TestAttr> = vec![
             ("name", AttrValue::Str(Cow::Borrowed("Main Street")), 0),
             ("admin_level", AttrValue::Int(4), 0),
             ("bridge", AttrValue::Bool(true), 0),
@@ -739,7 +776,7 @@ mod tests {
         let geom_type = GeomType::Point;
         let geom_cmds: Vec<u32> = vec![9, 10, 20]; // MoveTo(5, 10)
 
-        let attrs: Vec<shortbread::Attr> = vec![
+        let attrs: Vec<TestAttr> = vec![
             // attr_zoom=0 → always emit
             ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
             // attr_zoom=0 → always emit
@@ -798,8 +835,7 @@ mod tests {
         let geom_cmds: Vec<u32> = vec![9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15];
 
         // Use a known interned kind value
-        let attrs: Vec<shortbread::Attr> =
-            vec![("kind", AttrValue::Str(Cow::Borrowed("residential")), 0)];
+        let attrs: Vec<TestAttr> = vec![("kind", AttrValue::Str(Cow::Borrowed("residential")), 0)];
 
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 14);
 
@@ -827,8 +863,7 @@ mod tests {
         let test_kinds = ["water", "forest", "motorway", "park", "river"];
 
         for kind in test_kinds {
-            let attrs: Vec<shortbread::Attr> =
-                vec![("kind", AttrValue::Str(Cow::Borrowed(kind)), 0)];
+            let attrs: Vec<TestAttr> = vec![("kind", AttrValue::Str(Cow::Borrowed(kind)), 0)];
 
             let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
 
@@ -845,29 +880,6 @@ mod tests {
         }
     }
 
-    /// Test 5: Non-interned kind value falls back to raw string encoding.
-    #[test]
-    fn non_interned_kind_value_fallback() {
-        let geom_cmds: Vec<u32> = vec![9, 10, 20];
-
-        // "custom_kind" is not in KIND_VALUES
-        let attrs: Vec<shortbread::Attr> =
-            vec![("kind", AttrValue::Str(Cow::Borrowed("custom_kind")), 0)];
-
-        let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
-
-        let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded).unwrap();
-
-        let f = layer.test_feature(0);
-        let (k0, v0) = f.tags[0];
-        assert_eq!(layer.test_key(k0), "kind");
-        assert_eq!(
-            *layer.test_value(v0),
-            Value::String("custom_kind".to_string())
-        );
-    }
-
     /// Test 6: Attributes appear exactly at their minzoom boundary (no early leak).
     #[test]
     fn minzoom_boundary_mixed_types() {
@@ -875,7 +887,7 @@ mod tests {
         let geom_type = GeomType::Point;
         let geom_cmds: Vec<u32> = vec![9, 10, 20];
 
-        let attrs: Vec<shortbread::Attr> = vec![
+        let attrs: Vec<TestAttr> = vec![
             ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
             ("bridge", AttrValue::Bool(true), 5),
             ("admin_level", AttrValue::Int(6), 10),
@@ -914,7 +926,7 @@ mod tests {
     /// Test 7: Filtered attributes do not leak when the first attr in input is gated out.
     #[test]
     fn minzoom_filtering_leading_attr_gated_out() {
-        let attrs: Vec<shortbread::Attr> = vec![
+        let attrs: Vec<TestAttr> = vec![
             ("surface", AttrValue::Str(Cow::Borrowed("asphalt")), 12),
             ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
             ("bridge", AttrValue::Bool(false), 0),
@@ -935,14 +947,14 @@ mod tests {
     /// Test 8: Pre-encoded attrs path preserves minzoom filtering semantics.
     #[test]
     fn preencoded_attrs_respect_minzoom() {
-        let attrs: Vec<shortbread::Attr> = vec![
+        let attrs: Vec<TestAttr> = vec![
             ("kind", AttrValue::Str(Cow::Borrowed("city")), 0),
             ("tunnel", AttrValue::Bool(true), 12),
         ];
         let geom_cmds: Vec<u32> = vec![9, 10, 20];
 
         let mut attrs_bytes = Vec::new();
-        encode_attrs_bytes(&mut attrs_bytes, &attrs, 11);
+        encode_attrs_bytes(&mut attrs_bytes, &schema_attrs(&attrs), 11);
         let encoded = encode_feature_data_with_attrs(7, GeomType::Point, &geom_cmds, &attrs_bytes);
 
         let mut layer = LayerBuilder::new("test");
@@ -955,7 +967,7 @@ mod tests {
     /// Test 9: If all attrs are above zoom, encoded attr section must be empty.
     #[test]
     fn minzoom_filtering_all_attrs_gated_out() {
-        let attrs: Vec<shortbread::Attr> = vec![
+        let attrs: Vec<TestAttr> = vec![
             ("kind", AttrValue::Str(Cow::Borrowed("city")), 5),
             ("bridge", AttrValue::Bool(true), 5),
         ];
@@ -977,7 +989,7 @@ mod tests {
     #[test]
     fn attrs_count_is_capped_to_u8_max() {
         let geom_cmds: Vec<u32> = vec![9, 10, 20];
-        let attrs: Vec<shortbread::Attr> = (0..300)
+        let attrs: Vec<TestAttr> = (0..300)
             .map(|_| ("kind", AttrValue::Str(Cow::Borrowed("city")), 0))
             .collect();
 
@@ -992,7 +1004,7 @@ mod tests {
     #[test]
     fn attrs_cap_boundaries_remain_decodeable_with_mixed_values() {
         let geom_cmds: Vec<u32> = vec![9, 10, 20];
-        let attrs: Vec<shortbread::Attr> = (0..300)
+        let attrs: Vec<TestAttr> = (0..300)
             .map(|i| {
                 if i < 255 {
                     ("bridge", AttrValue::Bool(false), 0)
@@ -1003,7 +1015,7 @@ mod tests {
             .collect();
 
         let mut attrs_bytes = Vec::new();
-        encode_attrs_bytes(&mut attrs_bytes, &attrs, 14);
+        encode_attrs_bytes(&mut attrs_bytes, &schema_attrs(&attrs), 14);
         assert_eq!(attrs_bytes[0], u8::MAX);
         assert_eq!(attrs_bytes.len(), 1 + usize::from(u8::MAX) * 3);
 
@@ -1021,7 +1033,7 @@ mod tests {
     #[test]
     fn attrs_cap_and_minzoom_interaction_keeps_expected_prefix() {
         let geom_cmds: Vec<u32> = vec![9, 10, 20];
-        let mut attrs: Vec<shortbread::Attr> = Vec::new();
+        let mut attrs: Vec<TestAttr> = Vec::new();
 
         // 220 base attrs always present.
         for _ in 0..220 {
@@ -1066,7 +1078,7 @@ mod tests {
     fn overlong_raw_string_truncates_at_a_utf8_boundary() {
         let expected = "x".repeat(u16::MAX as usize - 2);
         let value = format!("{expected}\u{20ac}");
-        let attrs = vec![("name", AttrValue::Str(Cow::Owned(value)), 0)];
+        let attrs: Vec<TestAttr> = vec![("name", AttrValue::Str(Cow::Owned(value)), 0)];
         let geom_cmds: Vec<u32> = vec![9, 10, 20];
 
         let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);

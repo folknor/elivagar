@@ -3,6 +3,7 @@ use crate::mvt::decode::{
     self, Command, CommandKind, CommandSink, GeometryError, Grammar, Point as CommandPoint, Words,
 };
 use crate::mvt::{Feature, GeomType, LayerBuilder, Value};
+use crate::shortbread::{AttrKey, ValueType};
 
 use geo_types::{
     Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
@@ -10,19 +11,13 @@ use geo_types::{
 use mlt_core::encoder::{EncoderConfig, Profile};
 use mlt_core::{PropKind, PropValue as MltPropValue, TileLayer};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MltColumnType {
-    String,
-    Double,
-    Int,
-    Bool,
-    Mixed,
-}
-
+/// One property column: a profile key and the type the key schema declares
+/// for it. The type is static, so a key has the same column type in every
+/// tile; a value of another type is an encode error, never a widened column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MltColumnModel {
     pub key: String,
-    pub column_type: MltColumnType,
+    pub column_type: ValueType,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -55,11 +50,46 @@ pub(crate) enum MltEncodeError {
         source: MltGeometryError,
     },
     Encode(mlt_core::MltError),
+    /// A feature property the key schema does not admit: an unknown key, a
+    /// value of a type other than the key's, or a tag index that resolves
+    /// to nothing. Records reach the tile model through the sort-record
+    /// decoder, which already refuses the first two.
+    Property {
+        layer: String,
+        feature_index: usize,
+        problem: PropertyProblem,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PropertyProblem {
+    UnknownKey(String),
+    WrongType { key: String, declared: ValueType },
+    DanglingTag,
 }
 
 impl std::fmt::Display for MltEncodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Property {
+                layer,
+                feature_index,
+                problem,
+            } => {
+                write!(f, "layer '{layer}' feature#{feature_index}: ")?;
+                match problem {
+                    PropertyProblem::UnknownKey(key) => {
+                        write!(f, "property '{key}' is not a profile key")
+                    }
+                    PropertyProblem::WrongType { key, declared } => {
+                        write!(
+                            f,
+                            "property '{key}' is not of its declared type {declared:?}"
+                        )
+                    }
+                    PropertyProblem::DanglingTag => f.write_str("tag index resolves to nothing"),
+                }
+            }
             Self::GeometryDecode {
                 layer,
                 feature_index,
@@ -78,6 +108,7 @@ impl std::error::Error for MltEncodeError {
         match self {
             Self::GeometryDecode { source, .. } => Some(source),
             Self::Encode(source) => Some(source),
+            Self::Property { .. } => None,
         }
     }
 }
@@ -141,7 +172,7 @@ fn encode_layer(layer: &LayerBuilder) -> Result<Vec<u8>, MltEncodeError> {
 
 fn build_mlt_tile_layer(layer: &LayerBuilder) -> Result<TileLayer, MltEncodeError> {
     let features = layer.features();
-    let tile_model = build_tile_model(&[layer]);
+    let tile_model = build_tile_model(&[layer])?;
     let columns = tile_model
         .layers
         .first()
@@ -171,9 +202,10 @@ fn build_mlt_tile_layer(layer: &LayerBuilder) -> Result<TileLayer, MltEncodeErro
         let mut feature_builder = builder.feature(geom);
         feature_builder.id(feature.id);
         for (col, key) in columns.iter().zip(&property_keys) {
+            // build_tile_model checked every value against its column type.
             if let Some(value) = feature_value_for_key(layer, feature, &col.key) {
                 feature_builder
-                    .property(*key, value_to_mlt_prop(value, col.column_type))
+                    .property(*key, value_to_mlt_prop(value))
                     .map_err(MltEncodeError::Encode)?;
             }
         }
@@ -183,42 +215,21 @@ fn build_mlt_tile_layer(layer: &LayerBuilder) -> Result<TileLayer, MltEncodeErro
     Ok(builder.finish())
 }
 
-fn mlt_prop_kind(column_type: MltColumnType) -> PropKind {
+fn mlt_prop_kind(column_type: ValueType) -> PropKind {
     match column_type {
-        MltColumnType::String | MltColumnType::Mixed => PropKind::Str,
-        MltColumnType::Double => PropKind::F64,
-        MltColumnType::Int => PropKind::I64,
-        MltColumnType::Bool => PropKind::Bool,
+        ValueType::Str => PropKind::Str,
+        ValueType::Float => PropKind::F64,
+        ValueType::Int => PropKind::I64,
+        ValueType::Bool => PropKind::Bool,
     }
 }
 
-fn value_to_mlt_prop(value: &Value, column_type: MltColumnType) -> MltPropValue {
-    match column_type {
-        MltColumnType::String => MltPropValue::Str(match value {
-            Value::String(x) => Some(x.as_str().into()),
-            _ => None,
-        }),
-        MltColumnType::Double => MltPropValue::F64(match value {
-            Value::Double(x) => Some(*x),
-            _ => None,
-        }),
-        MltColumnType::Int => MltPropValue::I64(match value {
-            Value::Int(x) => Some(*x),
-            _ => None,
-        }),
-        MltColumnType::Bool => MltPropValue::Bool(match value {
-            Value::Bool(x) => Some(*x),
-            _ => None,
-        }),
-        MltColumnType::Mixed => {
-            let text = match value {
-                Value::String(x) => x.clone(),
-                Value::Double(x) => x.to_string(),
-                Value::Int(x) => x.to_string(),
-                Value::Bool(x) => x.to_string(),
-            };
-            MltPropValue::Str(Some(text.into()))
-        }
+fn value_to_mlt_prop(value: &Value) -> MltPropValue {
+    match value {
+        Value::String(x) => MltPropValue::Str(Some(x.as_str().into())),
+        Value::Double(x) => MltPropValue::F64(Some(*x)),
+        Value::Int(x) => MltPropValue::I64(Some(*x)),
+        Value::Bool(x) => MltPropValue::Bool(Some(*x)),
     }
 }
 
@@ -362,7 +373,9 @@ fn parse_paths(
     Ok(paths.paths)
 }
 
-pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
+/// The tile's layers and property columns, each column typed by the key
+/// schema. Every feature property is checked against it here.
+pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> Result<MltTileModel, MltEncodeError> {
     let mut out_layers = Vec::with_capacity(layers.len());
     let mut total_features = 0usize;
 
@@ -372,28 +385,34 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
 
         let mut columns: Vec<MltColumnModel> = Vec::new();
         let mut geometry_mix = MltGeometryMix::default();
-        for feature in layer.features() {
+        for (feature_index, feature) in layer.features().iter().enumerate() {
             match feature.geom_type {
                 GeomType::Point => geometry_mix.points += 1,
                 GeomType::LineString => geometry_mix.lines += 1,
                 GeomType::Polygon => geometry_mix.polygons += 1,
             }
+            let refuse = |problem| MltEncodeError::Property {
+                layer: layer.name().to_string(),
+                feature_index,
+                problem,
+            };
             for &(k_idx, v_idx) in &feature.tags {
-                let Some(key) = layer.key(k_idx) else {
-                    continue;
+                let (Some(key), Some(value)) = (layer.key(k_idx), layer.value(v_idx)) else {
+                    return Err(refuse(PropertyProblem::DanglingTag));
                 };
-                let Some(value) = layer.value(v_idx) else {
-                    continue;
-                };
-                let value_ty = value_type(value);
-                if let Some(column) = columns.iter_mut().find(|c| c.key == key) {
-                    if column.column_type != value_ty {
-                        column.column_type = MltColumnType::Mixed;
-                    }
-                } else {
+                let declared = AttrKey::from_name(key)
+                    .ok_or_else(|| refuse(PropertyProblem::UnknownKey(key.to_string())))?
+                    .value_type();
+                if value_type(value) != declared {
+                    return Err(refuse(PropertyProblem::WrongType {
+                        key: key.to_string(),
+                        declared,
+                    }));
+                }
+                if !columns.iter().any(|c| c.key == key) {
                     columns.push(MltColumnModel {
                         key: key.to_string(),
-                        column_type: value_ty,
+                        column_type: declared,
                     });
                 }
             }
@@ -408,19 +427,19 @@ pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {
         });
     }
 
-    MltTileModel {
+    Ok(MltTileModel {
         layer_count: out_layers.len(),
         feature_count: total_features,
         layers: out_layers,
-    }
+    })
 }
 
-fn value_type(value: &Value) -> MltColumnType {
+fn value_type(value: &Value) -> ValueType {
     match value {
-        Value::String(_) => MltColumnType::String,
-        Value::Double(_) => MltColumnType::Double,
-        Value::Int(_) => MltColumnType::Int,
-        Value::Bool(_) => MltColumnType::Bool,
+        Value::String(_) => ValueType::Str,
+        Value::Double(_) => ValueType::Float,
+        Value::Int(_) => ValueType::Int,
+        Value::Bool(_) => ValueType::Bool,
     }
 }
 
@@ -541,12 +560,13 @@ mod tests {
     #[test]
     fn property_lookup_preserves_indices_above_u16() {
         let mut layer = LayerBuilder::new("wide");
-        let mut key = 0;
-        let mut value = 0;
-        for i in 0..65_537_u32 {
-            key = layer.intern_key(&format!("key_{i}"));
-            value = layer.intern_value(Value::Int(i64::from(i)));
+        // Filler keys no feature carries, so the profile key lands at 65536.
+        for i in 0..65_536_u32 {
+            layer.intern_key(&format!("key_{i}"));
+            layer.intern_value(Value::Int(i64::from(i)));
         }
+        let key = layer.intern_key("population");
+        let value = layer.intern_value(Value::Int(65_536));
         assert_eq!((key, value), (65_536, 65_536));
         let feature = Feature {
             id: None,
@@ -555,13 +575,13 @@ mod tests {
             tags: vec![(key, value)],
         };
         assert_eq!(
-            feature_value_for_key(&layer, &feature, "key_65536"),
+            feature_value_for_key(&layer, &feature, "population"),
             Some(&Value::Int(65_536)),
         );
         layer.add_feature(feature);
-        let model = build_tile_model(&[&layer]);
+        let model = build_tile_model(&[&layer]).expect("schema properties");
         assert_eq!(model.layers[0].columns.len(), 1);
-        assert_eq!(model.layers[0].columns[0].key, "key_65536");
+        assert_eq!(model.layers[0].columns[0].key, "population");
     }
 
     #[test]
@@ -592,7 +612,7 @@ mod tests {
     fn build_tile_model_tracks_geometry_mix_and_sparse_columns() {
         let mut layer = LayerBuilder::new("mixed");
         let key_name = layer.intern_key("name");
-        let key_level = layer.intern_key("level");
+        let key_level = layer.intern_key("population");
         let v_name = layer.intern_value(Value::String("main".to_string()));
         let v_level = layer.intern_value(Value::Int(5));
 
@@ -615,22 +635,51 @@ mod tests {
             tags: vec![],
         });
 
-        let model = build_tile_model(&[&layer]);
+        let model = build_tile_model(&[&layer]).expect("schema properties");
         let lm = &model.layers[0];
         assert_eq!(lm.geometry_mix.points, 1);
         assert_eq!(lm.geometry_mix.lines, 1);
         assert_eq!(lm.geometry_mix.polygons, 1);
-        assert_eq!(lm.columns[0].key, "level");
-        assert_eq!(lm.columns[1].key, "name");
+        assert_eq!(lm.columns[0].key, "name");
+        assert_eq!(lm.columns[1].key, "population");
+    }
+
+    #[test]
+    fn build_tile_model_refuses_properties_outside_the_schema() {
+        // Calibrated both ways: the schema-typed tile above models cleanly;
+        // an unknown key and a wrong-typed value are refused, not widened.
+        for (key, value, unknown) in [
+            ("level", Value::Int(5), true),
+            ("population", Value::String("5".to_string()), false),
+        ] {
+            let mut layer = LayerBuilder::new("bad");
+            let k = layer.intern_key(key);
+            let v = layer.intern_value(value);
+            layer.add_feature(Feature {
+                id: Some(1),
+                geom_type: GeomType::Point,
+                geometry: point_geom(),
+                tags: vec![(k, v)],
+            });
+            let error = build_tile_model(&[&layer]).expect_err("outside the schema");
+            let MltEncodeError::Property { problem, .. } = error else {
+                panic!("expected a property refusal, got {error}");
+            };
+            assert_eq!(
+                matches!(problem, PropertyProblem::UnknownKey(_)),
+                unknown,
+                "{key}: {problem:?}"
+            );
+        }
     }
 
     #[test]
     fn build_tile_model_maps_pipeline_value_types() {
         let mut layer = LayerBuilder::new("types");
-        let ks = layer.intern_key("s");
-        let kd = layer.intern_key("d");
-        let ki = layer.intern_key("i");
-        let kb = layer.intern_key("b");
+        let ks = layer.intern_key("name");
+        let kd = layer.intern_key("way_area");
+        let ki = layer.intern_key("population");
+        let kb = layer.intern_key("bridge");
 
         let vs = layer.intern_value(Value::String("a".to_string()));
         let vd = layer.intern_value(Value::Double(2.5));
@@ -644,23 +693,29 @@ mod tests {
             tags: vec![(ks, vs), (kd, vd), (ki, vi), (kb, vb)],
         });
 
-        let model = build_tile_model(&[&layer]);
+        let model = build_tile_model(&[&layer]).expect("schema properties");
         let cols = &model.layers[0].columns;
         assert_eq!(
-            cols.iter().find(|c| c.key == "s").map(|c| c.column_type),
-            Some(MltColumnType::String)
+            cols.iter().find(|c| c.key == "name").map(|c| c.column_type),
+            Some(ValueType::Str)
         );
         assert_eq!(
-            cols.iter().find(|c| c.key == "d").map(|c| c.column_type),
-            Some(MltColumnType::Double)
+            cols.iter()
+                .find(|c| c.key == "way_area")
+                .map(|c| c.column_type),
+            Some(ValueType::Float)
         );
         assert_eq!(
-            cols.iter().find(|c| c.key == "i").map(|c| c.column_type),
-            Some(MltColumnType::Int)
+            cols.iter()
+                .find(|c| c.key == "population")
+                .map(|c| c.column_type),
+            Some(ValueType::Int)
         );
         assert_eq!(
-            cols.iter().find(|c| c.key == "b").map(|c| c.column_type),
-            Some(MltColumnType::Bool)
+            cols.iter()
+                .find(|c| c.key == "bridge")
+                .map(|c| c.column_type),
+            Some(ValueType::Bool)
         );
     }
 
@@ -760,9 +815,9 @@ mod tests {
         let k_kind = layer.intern_key("kind");
         let k_name = layer.intern_key("name");
         let k_pop = layer.intern_key("population");
-        let k_ratio = layer.intern_key("ratio");
-        let k_rank = layer.intern_key("rank");
-        let k_visible = layer.intern_key("visible");
+        let k_ratio = layer.intern_key("way_area");
+        let k_rank = layer.intern_key("ele");
+        let k_visible = layer.intern_key("bridge");
 
         let v_kind_city = layer.intern_value(Value::String("city".to_string()));
         let v_kind_road = layer.intern_value(Value::String("road".to_string()));
@@ -990,7 +1045,7 @@ mod tests {
         let mut layer = LayerBuilder::new("size_guard");
         let k_kind = layer.intern_key("kind");
         let k_name = layer.intern_key("name");
-        let k_rank = layer.intern_key("rank");
+        let k_rank = layer.intern_key("population");
 
         for i in 0..64u32 {
             let v_kind = layer.intern_value(Value::String("poi".to_string()));

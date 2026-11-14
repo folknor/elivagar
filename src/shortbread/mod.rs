@@ -12,17 +12,19 @@
 //   transport.rs  - aerialways, ferries, public_transport
 //   pois.rs       - points of interest
 
+#[cfg(test)]
 use crate::tiling::MAX_ZOOM;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 
 /// Declares one family of `kind` attribute values: a `#[repr(u8)]` enum with
 /// implicit discriminants in declaration order, `ALL` in that order, the wire
-/// name per variant, and the `WireKind` impl `attr_kind` takes. Every
-/// declaration asserts at compile time that its names are distinct and that
-/// each is interned in `wire_format::KIND_VALUES`, so a new kind cannot miss
-/// the dictionary unnoticed: append it there (never reorder) and bump
-/// `CHECKPOINT_VERSION`, since the table's ids land in sort-record bytes.
+/// name per variant, and the `WireKind` impl `attr_kind` takes. Each
+/// variant's dictionary id in `wire_format::KIND_VALUES` is computed in a
+/// `const` block (the discriminant is a family-local index, not that id), so
+/// a new kind missing from the dictionary fails the build: append it there
+/// (never reorder) and bump `CHECKPOINT_VERSION`, since the table's ids land
+/// in sort-record bytes. Names are asserted distinct at compile time.
 /// Kind families are declared only through this macro; the sealed trait
 /// keeps implementations inside `shortbread`, and the convention keeps them
 /// inside the macro.
@@ -55,8 +57,10 @@ macro_rules! wire_kinds {
         impl crate::shortbread::sealed::Sealed for $name {}
 
         impl crate::shortbread::WireKind for $name {
-            fn wire_name(self) -> &'static str {
-                self.as_str()
+            fn kind_id(self) -> crate::wire_format::KindId {
+                match self {
+                    $(Self::$variant => const { crate::wire_format::KindId::interned($wire) },)+
+                }
             }
         }
 
@@ -64,13 +68,6 @@ macro_rules! wire_kinds {
             let all = $name::ALL;
             let mut i = 0;
             while i < all.len() {
-                assert!(
-                    crate::wire_format::is_interned_kind(all[i].as_str()),
-                    concat!(
-                        "a ", stringify!($name), " name is missing from KIND_VALUES: ",
-                        "append it and bump CHECKPOINT_VERSION"
-                    )
-                );
                 let mut j = i + 1;
                 while j < all.len() {
                     assert!(
@@ -92,7 +89,186 @@ mod sealed {
 /// A `kind` value declared by `wire_kinds!`. The only way to build a `kind`
 /// attribute is `attr_kind`, which takes one of these.
 pub(crate) trait WireKind: sealed::Sealed + Copy {
-    fn wire_name(self) -> &'static str;
+    fn kind_id(self) -> crate::wire_format::KindId;
+}
+
+/// The value type a key declares. Interned kinds are `Str`: the dictionary
+/// is a sort-record encoding, and every consumer sees a string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValueType {
+    Str,
+    Int,
+    Bool,
+    Float,
+}
+
+/// Declares the attribute key schema once: each key's wire id (its
+/// discriminant in every generated enum), output name and value type. The
+/// typed key enums are what the `attr_*` constructors take, so a value of the
+/// wrong type for its key, or a `kind` built from a string, does not compile.
+/// `AttrKey` is the union. Ids land in sort-record bytes, which tie-break
+/// equal sort keys: append new keys, never renumber, and moving an id moves
+/// `CHECKPOINT_VERSION`.
+macro_rules! attr_keys {
+    (
+        kind: $kind:ident = $kind_id:literal, $kind_name:literal;
+        $($group:ident => $vt:ident { $($v:ident = $id:literal, $name:literal;)+ })+
+    ) => {
+        /// Every attribute key the profile emits.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(u8)]
+        pub(crate) enum AttrKey {
+            $kind = $kind_id,
+            $($($v = $id,)+)+
+        }
+
+        $(
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+            #[repr(u8)]
+            pub(crate) enum $group {
+                $($v = $id,)+
+            }
+
+            impl From<$group> for AttrKey {
+                fn from(key: $group) -> Self {
+                    match key {
+                        $($group::$v => Self::$v,)+
+                    }
+                }
+            }
+
+            impl $group {
+                /// The key's output name.
+                #[allow(dead_code)]
+                pub(crate) fn name(self) -> &'static str {
+                    AttrKey::from(self).name()
+                }
+            }
+        )+
+
+        impl AttrKey {
+            pub(crate) const ALL: [Self; [$kind_name, $($($name,)+)+].len()] =
+                [Self::$kind, $($(Self::$v,)+)+];
+
+            pub(crate) const fn name(self) -> &'static str {
+                match self {
+                    Self::$kind => $kind_name,
+                    $($(Self::$v => $name,)+)+
+                }
+            }
+
+            pub(crate) const fn value_type(self) -> ValueType {
+                match self {
+                    Self::$kind => ValueType::Str,
+                    $($(Self::$v => ValueType::$vt,)+)+
+                }
+            }
+
+            pub(crate) const fn from_id(id: u8) -> Option<Self> {
+                match id {
+                    $kind_id => Some(Self::$kind),
+                    $($($id => Some(Self::$v),)+)+
+                    _ => None,
+                }
+            }
+
+            #[allow(dead_code)]
+            pub(crate) fn from_name(name: &str) -> Option<Self> {
+                match name {
+                    $kind_name => Some(Self::$kind),
+                    $($($name => Some(Self::$v),)+)+
+                    _ => None,
+                }
+            }
+        }
+
+        // Ids are dense from 0 and names distinct, so `from_id` covers
+        // exactly the declared keys.
+        const _: () = {
+            let all = AttrKey::ALL;
+            assert!(all.len() <= 256, "attribute key ids are u8");
+            let mut seen = [false; AttrKey::ALL.len()];
+            let mut i = 0;
+            while i < all.len() {
+                let id = all[i] as usize;
+                assert!(id < all.len(), "attribute key ids must be dense from 0");
+                assert!(!seen[id], "two attribute keys share an id");
+                seen[id] = true;
+                let mut j = i + 1;
+                while j < all.len() {
+                    assert!(
+                        !crate::wire_format::const_str_eq(all[i].name(), all[j].name()),
+                        "two attribute keys share a name"
+                    );
+                    j += 1;
+                }
+                i += 1;
+            }
+        };
+    };
+}
+
+attr_keys! {
+    kind: Kind = 0, "kind";
+    StrKey => Str {
+        Name = 1, "name";
+        NameEn = 2, "name_en";
+        NameDe = 3, "name_de";
+        Surface = 9, "surface";
+        Tracktype = 10, "tracktype";
+        Service = 11, "service";
+        Bicycle = 14, "bicycle";
+        Horse = 15, "horse";
+        Ref = 16, "ref";
+        Iata = 22, "iata";
+        Housenumber = 23, "housenumber";
+        Housename = 24, "housename";
+        Amenity = 25, "amenity";
+        Highway = 26, "highway";
+        Office = 27, "office";
+        Leisure = 28, "leisure";
+        ManMade = 29, "man_made";
+        Tourism = 30, "tourism";
+        Cuisine = 31, "cuisine";
+        Vending = 32, "vending";
+        Religion = 33, "religion";
+        Denomination = 34, "denomination";
+        Sport = 35, "sport";
+        TowerType = 36, "tower:type";
+        Information = 37, "information";
+        Shop = 43, "shop";
+        Emergency = 44, "emergency";
+        Historic = 45, "historic";
+        Natural = 51, "natural";
+    }
+    IntKey => Int {
+        AdminLevel = 4, "admin_level";
+        RefRows = 17, "ref_rows";
+        RefCols = 18, "ref_cols";
+        Population = 19, "population";
+        Ele = 48, "ele";
+    }
+    BoolKey => Bool {
+        Bridge = 5, "bridge";
+        Tunnel = 6, "tunnel";
+        Link = 7, "link";
+        Rail = 8, "rail";
+        Oneway = 12, "oneway";
+        OnewayReverse = 13, "oneway_reverse";
+        Maritime = 20, "maritime";
+        Disputed = 21, "disputed";
+        Atm = 38, "atm";
+        RecyclingGlassBottles = 39, "recycling:glass_bottles";
+        RecyclingPaper = 40, "recycling:paper";
+        RecyclingClothes = 41, "recycling:clothes";
+        RecyclingScrapMetal = 42, "recycling:scrap_metal";
+    }
+    FloatKey => Float {
+        WayArea = 46, "way_area";
+        Height = 47, "height";
+        MinHeight = 49, "min_height";
+        BuildingLevels = 50, "building:levels";
+    }
 }
 
 pub(crate) mod boundaries;
@@ -110,7 +286,7 @@ mod water;
 
 /// What geometry the MVT feature should carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GeomExpect {
+pub(crate) enum GeomExpect {
     Point,
     Line,
     Polygon,
@@ -120,7 +296,7 @@ pub enum GeomExpect {
 
 /// Classification of the incoming OSM element.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OsmGeomType {
+pub(crate) enum OsmGeomType {
     Node,
     OpenWay,
     ClosedWay,
@@ -209,7 +385,7 @@ macro_rules! define_layers {
             }
 
             /// Whether this layer's matcher accepts this OSM geometry kind.
-            pub const fn accepts(self, geom_type: OsmGeomType) -> bool {
+            pub(crate) const fn accepts(self, geom_type: OsmGeomType) -> bool {
                 match self {
                     $(Self::$variant => geometry_matches!(geom_type; $($accepted_geom),*),)*
                 }
@@ -370,52 +546,228 @@ const MULTIPOLYGON_LAYER_SET: ([Layer; LAYER_COUNT], usize) =
 /// Denmark (20s → 31s). Linear scan wins at this size because the slice
 /// fits in a cache line, key comparisons short-circuit on first byte
 /// mismatch, and there's zero per-element setup cost.
-pub struct Tags<'a>(pub &'a [(&'a str, &'a str)]);
+pub(crate) struct Tags<'a>(pub(crate) &'a [(&'a str, &'a str)]);
 
 impl<'a> Tags<'a> {
-    pub fn get(&self, key: &str) -> Option<&'a str> {
+    pub(crate) fn get(&self, key: &str) -> Option<&'a str> {
         self.0.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
     }
 
-    pub fn has(&self, key: &str) -> bool {
+    pub(crate) fn has(&self, key: &str) -> bool {
         self.0.iter().any(|(k, _)| *k == key)
     }
 
-    pub fn has_value(&self, key: &str, val: &str) -> bool {
+    pub(crate) fn has_value(&self, key: &str, val: &str) -> bool {
         self.0.iter().any(|(k, v)| *k == key && *v == val)
     }
 
-    pub fn has_any(&self, key: &str, vals: &[&str]) -> bool {
+    pub(crate) fn has_any(&self, key: &str, vals: &[&str]) -> bool {
         self.0.iter().any(|(k, v)| *k == key && vals.contains(v))
     }
 }
 
-/// Attribute value for a layer match.
+/// Attribute value for a layer match. `Kind` carries the dictionary id of a
+/// `wire_kinds!` value; it is a string to every consumer.
 #[derive(Clone, Debug, PartialEq)]
-pub enum AttrValue {
+pub(crate) enum AttrValue {
+    /// Owned when built from tag text: relation matches outlive the PBF
+    /// block their tags borrow from.
     Str(Cow<'static, str>),
     Int(i64),
     Bool(bool),
     Float(f64),
+    Kind(crate::wire_format::KindId),
 }
 
-/// A single attribute: (key, value, min_zoom).
-/// min_zoom=0 means always emit; higher values mean only at that zoom+.
-/// Kept as a tuple: destructuring is clear, and a named struct would bloat ~100 construction sites.
-pub type Attr = (&'static str, AttrValue, u8);
+impl AttrValue {
+    /// The string a consumer sees, for `Str` and `Kind` values.
+    #[cfg(test)]
+    pub(crate) fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(s) => Some(s),
+            Self::Kind(kind) => Some(kind.name()),
+            Self::Int(_) | Self::Bool(_) | Self::Float(_) => None,
+        }
+    }
+}
 
-/// A single layer match result.
+/// One attribute of a match. Fields are private: an `Attr` is built only
+/// through the typed constructors below, so its value always has its key's
+/// declared type and `kind` always comes from a `wire_kinds!` family.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Attr {
+    key: AttrKey,
+    /// The first zoom the attribute is emitted at; 0 means always.
+    from_zoom: u8,
+    value: AttrValue,
+}
+
+impl Attr {
+    /// Emit this attribute only from zoom `z` up.
+    #[must_use]
+    pub(crate) fn visible_from(mut self, z: u8) -> Self {
+        self.from_zoom = z;
+        self
+    }
+
+    pub(crate) fn key(&self) -> AttrKey {
+        self.key
+    }
+
+    pub(crate) fn value(&self) -> &AttrValue {
+        &self.value
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn min_zoom(&self) -> u8 {
+        self.from_zoom
+    }
+
+    pub(crate) fn visible_at(&self, zoom: u8) -> bool {
+        zoom >= self.from_zoom
+    }
+
+    /// A test attribute named by its key string, checked against the schema:
+    /// an unknown key, a value of the wrong type or a kind missing from the
+    /// dictionary panics. A `kind` string becomes the interned value.
+    #[cfg(test)]
+    pub(crate) fn for_test(name: &str, value: AttrValue, from_zoom: u8) -> Self {
+        let key = AttrKey::from_name(name).unwrap_or_else(|| panic!("unknown key {name:?}"));
+        let value = match (key, value) {
+            (AttrKey::Kind, AttrValue::Str(s)) => {
+                let id = crate::wire_format::KindId::for_test(&s)
+                    .unwrap_or_else(|| panic!("kind {s:?} is not interned"));
+                AttrValue::Kind(id)
+            }
+            (_, value) => value,
+        };
+        let declared = match &value {
+            AttrValue::Str(_) | AttrValue::Kind(_) => ValueType::Str,
+            AttrValue::Int(_) => ValueType::Int,
+            AttrValue::Bool(_) => ValueType::Bool,
+            AttrValue::Float(_) => ValueType::Float,
+        };
+        assert_eq!(declared, key.value_type(), "{name} value type");
+        Self {
+            key,
+            from_zoom,
+            value,
+        }
+    }
+}
+
+/// A finished layer match: every decision the profile makes is in it, and
+/// emission reads only this. Matching yields [`Hits`], which become
+/// `LayerMatch`es only through [`Hits::finish`].
 /// SmallVec avoids heap allocation: most matches have 1-6 attrs (inline up to 8),
-/// and most elements match 1-3 layers (match_element returns SmallVec<[_; 4]>).
-pub struct LayerMatch {
-    pub layer: Layer,
-    pub min_zoom: u8,
-    pub max_zoom: u8,
-    pub geom_expect: GeomExpect,
-    pub paint_rank: u8,
-    pub attrs: SmallVec<[Attr; 8]>,
+/// and most elements match 1-3 layers. Every profile layer's range ends at
+/// `tiling::MAX_ZOOM`, so a match carries only where it starts.
+pub(crate) struct LayerMatch {
+    pub(crate) layer: Layer,
+    pub(crate) min_zoom: u8,
+    pub(crate) geom_expect: GeomExpect,
+    /// The sort key's low byte. A bare `u8` on purpose: the only invariant
+    /// it carries, that it is the rank `Layer::paint_rank_for` recovers from
+    /// the match's own attributes (0 for unordered layers), is relational,
+    /// and test builds assert it on every match instead.
+    pub(crate) paint_rank: u8,
+    pub(crate) attrs: SmallVec<[Attr; 8]>,
 }
-const _: () = assert!(std::mem::size_of::<LayerMatch>() == 408);
+// Inline in every `Hits` and in relation memory accounting.
+const _: () = assert!(std::mem::size_of::<LayerMatch>() == 280);
+
+/// A profile rule that needs a measurement of the element's geometry.
+#[derive(Clone, Copy, Debug)]
+enum AreaRule {
+    /// Boundary labels add `way_area` and lower their zoom by area.
+    BoundaryLabel(boundaries::AdminLevel),
+}
+
+struct Hit {
+    matched: LayerMatch,
+    area_rule: Option<AreaRule>,
+}
+
+/// The provisional result of matching one element. Nothing here can be
+/// emitted: [`Hits::finish`] applies every pending rule and yields the
+/// finished matches.
+pub(crate) struct Hits(SmallVec<[Hit; 4]>);
+
+impl Hits {
+    fn new() -> Self {
+        Self(SmallVec::new())
+    }
+
+    /// A match with no pending rule.
+    fn push(&mut self, matched: LayerMatch) {
+        self.0.push(Hit {
+            matched,
+            area_rule: None,
+        });
+    }
+
+    fn push_pending(&mut self, matched: LayerMatch, rule: AreaRule) {
+        self.0.push(Hit {
+            matched,
+            area_rule: Some(rule),
+        });
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Finish every match. `area_m2` is the element's area in square metres
+    /// (projected), called at most once and only when a match needs it.
+    pub(crate) fn finish(self, area_m2: impl FnOnce() -> f64) -> SmallVec<[LayerMatch; 4]> {
+        let mut area_m2 = Some(area_m2);
+        let mut area = None;
+        self.0
+            .into_iter()
+            .map(|hit| {
+                let mut matched = hit.matched;
+                if let Some(rule) = hit.area_rule {
+                    let area = *area.get_or_insert_with(|| {
+                        (area_m2.take().expect("area is measured at most once"))()
+                    });
+                    match rule {
+                        AreaRule::BoundaryLabel(level) => {
+                            boundaries::finish_boundary_label(&mut matched, level, area);
+                        }
+                    }
+                }
+                matched
+            })
+            .collect()
+    }
+
+    /// Finish an element that has no area (a node or an open way). Only
+    /// area-accepting layers carry area rules, so none is pending.
+    pub(crate) fn finish_without_area(self) -> SmallVec<[LayerMatch; 4]> {
+        self.finish(|| unreachable!("an area rule matched an element without area"))
+    }
+}
+
+/// Test matches built by hand carry no pending rule.
+#[cfg(test)]
+impl FromIterator<LayerMatch> for Hits {
+    fn from_iter<I: IntoIterator<Item = LayerMatch>>(iter: I) -> Self {
+        let mut hits = Self::new();
+        for matched in iter {
+            hits.push(matched);
+        }
+        hits
+    }
+}
+
+impl Hits {
+    /// The matches as matched, with pending rules dropped: what the profile
+    /// decided before any measurement.
+    #[cfg(test)]
+    pub(crate) fn into_provisional(self) -> SmallVec<[LayerMatch; 4]> {
+        self.0.into_iter().map(|hit| hit.matched).collect()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Core dispatch
@@ -427,11 +779,11 @@ pub(crate) fn is_area_relation(tags: &Tags<'_>) -> bool {
 }
 
 /// The shared profile gate for storing and consuming area-relation member ways.
-pub(crate) fn area_relation_matches(tags: &Tags<'_>) -> Option<SmallVec<[LayerMatch; 4]>> {
+pub(crate) fn area_relation_matches(tags: &Tags<'_>) -> Option<Hits> {
     if !is_area_relation(tags) {
         return None;
     }
-    let matches = match_element(tags, OsmGeomType::MultiPolygon);
+    let matches = match_element(tags, OsmGeomType::MultiPolygon, None);
     (!matches.is_empty()).then_some(matches)
 }
 
@@ -446,35 +798,83 @@ fn layers_for_geometry(geom_type: OsmGeomType) -> &'static [Layer] {
 }
 
 /// Match an OSM element against all Shortbread layers, returning every match.
+/// `boundary` is what the element's parent boundary relations fold onto a
+/// member way (`None` for nodes, relations and unrelated ways); the
+/// boundaries layer resolves it with the way's own tags.
 #[hotpath::measure]
-pub fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> SmallVec<[LayerMatch; 4]> {
-    let mut out = SmallVec::new();
+pub(crate) fn match_element(
+    tags: &Tags<'_>,
+    geom_type: OsmGeomType,
+    boundary: Option<boundaries::BoundaryMeta>,
+) -> Hits {
+    let mut out = Hits::new();
     for &layer in layers_for_geometry(geom_type) {
-        match_layer(tags, layer, geom_type, &mut out);
+        match_layer(tags, layer, geom_type, boundary, &mut out);
     }
     #[cfg(test)]
-    for matched in &out {
-        assert!(
-            matched.layer.accepts(geom_type),
-            "{} emitted for unsupported OSM geometry {geom_type:?}",
-            matched.layer.name(),
-        );
-        assert!(
-            matched.min_zoom >= matched.layer.min_zoom(),
-            "{} emitted at z{} below its layer floor z{}",
-            matched.layer.name(),
-            matched.min_zoom,
-            matched.layer.min_zoom(),
-        );
+    for hit in &out.0 {
+        check_match(&hit.matched, geom_type);
     }
     out
+}
+
+/// Profile invariants every match holds, asserted on every test match.
+#[cfg(test)]
+fn check_match(matched: &LayerMatch, geom_type: OsmGeomType) {
+    let name = matched.layer.name();
+    assert!(
+        matched.layer.accepts(geom_type),
+        "{name} emitted for unsupported OSM geometry {geom_type:?}"
+    );
+    assert!(
+        matched.min_zoom >= matched.layer.min_zoom(),
+        "{name} emitted at z{} below its layer floor z{}",
+        matched.min_zoom,
+        matched.layer.min_zoom(),
+    );
+    for attr in &matched.attrs {
+        assert!(
+            attr.from_zoom <= MAX_ZOOM,
+            "{name} attribute {} starts past z{MAX_ZOOM}",
+            attr.key.name()
+        );
+    }
+    // The rank a match carries is the rank verify recovers from its
+    // attributes: ordered layers through their kind methods, others 0.
+    let flag = |key: AttrKey| {
+        matched
+            .attrs
+            .iter()
+            .any(|a| a.key == key && a.value == AttrValue::Bool(true))
+    };
+    let kind = matched
+        .attrs
+        .iter()
+        .find(|a| a.key == AttrKey::Kind)
+        .and_then(|a| a.value.as_str())
+        .unwrap_or("");
+    let recovered = matched
+        .layer
+        .paint_rank_for(&RankAttributes {
+            kind,
+            link: flag(AttrKey::Link),
+            tunnel: flag(AttrKey::Tunnel),
+            bridge: flag(AttrKey::Bridge),
+        })
+        .unwrap_or_else(|e| panic!("{name} rank is unrecoverable: {e:?}"));
+    assert_eq!(
+        matched.paint_rank,
+        recovered.unwrap_or(0),
+        "{name} paint rank differs from its attributes"
+    );
 }
 
 fn match_layer(
     tags: &Tags<'_>,
     layer: Layer,
     geom_type: OsmGeomType,
-    out: &mut SmallVec<[LayerMatch; 4]>,
+    boundary: Option<boundaries::BoundaryMeta>,
+    out: &mut Hits,
 ) {
     match layer {
         Layer::WaterPolygons => water::match_water_polygons(tags, out),
@@ -485,7 +885,7 @@ fn match_layer(
         Layer::DamPolygons => water::match_dam_polygons(tags, out),
         Layer::PierLines => water::match_pier_lines(tags, out),
         Layer::PierPolygons => water::match_pier_polygons(tags, out),
-        Layer::Boundaries => boundaries::match_boundaries_line(tags, out),
+        Layer::Boundaries => boundaries::match_boundaries_line(tags, boundary, out),
         Layer::BoundaryLabels => boundaries::match_boundary_labels(tags, out),
         Layer::PlaceLabels => place_labels::match_place_labels(tags, out),
         Layer::Land => match geom_type {
@@ -536,39 +936,41 @@ fn match_layer(
 // Shared attribute helpers
 // ---------------------------------------------------------------------------
 
-/// The `kind` attribute. Kind values come only from `wire_kinds!`
-/// declarations, whose names are checked against the wire dictionary at
-/// compile time; the string helpers below refuse the key in debug builds.
-/// That refusal is a runtime check on exercised paths, not a type barrier.
+// The only constructors of `Attr`. Each takes the key enum of its value
+// type, and `kind` is not a `StrKey`: a kind comes only from a
+// `wire_kinds!` family through `attr_kind`.
+
+fn attr(key: impl Into<AttrKey>, value: AttrValue) -> Attr {
+    Attr {
+        key: key.into(),
+        from_zoom: 0,
+        value,
+    }
+}
+
 pub(crate) fn attr_kind(kind: impl WireKind) -> Attr {
-    ("kind", AttrValue::Str(Cow::Borrowed(kind.wire_name())), 0)
+    attr(AttrKey::Kind, AttrValue::Kind(kind.kind_id()))
 }
 
-pub(crate) fn attr_str(key: &'static str, val: &'static str) -> Attr {
-    debug_assert_ne!(key, "kind", "build kind attributes with attr_kind");
-    (key, AttrValue::Str(Cow::Borrowed(val)), 0)
+pub(crate) fn attr_str(key: StrKey, val: &'static str) -> Attr {
+    attr(key, AttrValue::Str(Cow::Borrowed(val)))
 }
 
-pub(crate) fn attr_dyn(key: &'static str, val: &str) -> Attr {
-    debug_assert_ne!(key, "kind", "build kind attributes with attr_kind");
-    (key, AttrValue::Str(Cow::Owned(val.to_string())), 0)
+/// A string attribute copied from tag text.
+pub(crate) fn attr_dyn(key: StrKey, val: &str) -> Attr {
+    attr(key, AttrValue::Str(Cow::Owned(val.to_string())))
 }
 
-fn attr_dyn_z(key: &'static str, val: &str, min_zoom: u8) -> Attr {
-    debug_assert_ne!(key, "kind", "build kind attributes with attr_kind");
-    (key, AttrValue::Str(Cow::Owned(val.to_string())), min_zoom)
+pub(crate) fn attr_int(key: IntKey, val: i64) -> Attr {
+    attr(key, AttrValue::Int(val))
 }
 
-pub(crate) fn attr_int(key: &'static str, val: i64) -> Attr {
-    (key, AttrValue::Int(val), 0)
+pub(crate) fn attr_bool(key: BoolKey, val: bool) -> Attr {
+    attr(key, AttrValue::Bool(val))
 }
 
-pub(crate) fn attr_bool(key: &'static str, val: bool) -> Attr {
-    (key, AttrValue::Bool(val), 0)
-}
-
-fn attr_bool_z(key: &'static str, val: bool, min_zoom: u8) -> Attr {
-    (key, AttrValue::Bool(val), min_zoom)
+pub(crate) fn attr_float(key: FloatKey, val: f64) -> Attr {
+    attr(key, AttrValue::Float(val))
 }
 
 fn is_tunnel(tags: &Tags<'_>) -> bool {
@@ -596,17 +998,17 @@ pub(crate) fn name_attrs(tags: &Tags<'_>) -> SmallVec<[Attr; 8]> {
     if let Some(v) = tags.get("name")
         && !v.is_empty()
     {
-        attrs.push(attr_dyn("name", v));
+        attrs.push(attr_dyn(StrKey::Name, v));
     }
     if let Some(v) = tags.get("name:en")
         && !v.is_empty()
     {
-        attrs.push(attr_dyn("name_en", v));
+        attrs.push(attr_dyn(StrKey::NameEn, v));
     }
     if let Some(v) = tags.get("name:de")
         && !v.is_empty()
     {
-        attrs.push(attr_dyn("name_de", v));
+        attrs.push(attr_dyn(StrKey::NameDe, v));
     }
     attrs
 }

@@ -1,6 +1,6 @@
 [
   {
-    "id": "props_001_mixed_sparse",
+    "id": "props_001_sparse",
     "features": [
       {
         "id": 1,
@@ -8,7 +8,7 @@
         "geometry": [9, 10, 10],
         "tags": [
           {"key": "name", "type": "string", "value": "alpha"},
-          {"key": "rank", "type": "int", "value": "1"}
+          {"key": "population", "type": "int", "value": "1"}
         ]
       },
       {
@@ -17,15 +17,15 @@
         "geometry": [9, 20, 20],
         "tags": [
           {"key": "name", "type": "string", "value": "beta"},
-          {"key": "rank", "type": "double", "value": "1.5"},
-          {"key": "open", "type": "bool", "value": "true"}
+          {"key": "population", "type": "int", "value": "2"},
+          {"key": "bridge", "type": "bool", "value": "true"}
         ]
       }
     ],
     "expected": [
       {"key": "name", "kind": "str", "non_null": 2},
-      {"key": "open", "kind": "bool", "non_null": 1},
-      {"key": "rank", "kind": "str", "non_null": 2}
+      {"key": "bridge", "kind": "bool", "non_null": 1},
+      {"key": "population", "kind": "u64", "non_null": 2}
     ]
   },
   {
@@ -36,11 +36,11 @@
         "geom_type": "point",
         "geometry": [9, 30, 30],
         "tags": [
-          {"key": "u", "type": "int", "value": "7"},
-          {"key": "i", "type": "int", "value": "-3"},
-          {"key": "si", "type": "int", "value": "-5"},
-          {"key": "d", "type": "double", "value": "12.25"},
-          {"key": "ok", "type": "bool", "value": "false"}
+          {"key": "population", "type": "int", "value": "7"},
+          {"key": "ele", "type": "int", "value": "-3"},
+          {"key": "admin_level", "type": "int", "value": "-5"},
+          {"key": "height", "type": "double", "value": "12.25"},
+          {"key": "bridge", "type": "bool", "value": "false"}
         ]
       },
       {
@@ -48,20 +48,20 @@
         "geom_type": "point",
         "geometry": [9, 40, 40],
         "tags": [
-          {"key": "u", "type": "int", "value": "9"},
-          {"key": "i", "type": "int", "value": "-8"},
-          {"key": "si", "type": "int", "value": "-13"},
-          {"key": "d", "type": "double", "value": "7.5"},
-          {"key": "ok", "type": "bool", "value": "true"}
+          {"key": "population", "type": "int", "value": "9"},
+          {"key": "ele", "type": "int", "value": "-8"},
+          {"key": "admin_level", "type": "int", "value": "-13"},
+          {"key": "height", "type": "double", "value": "7.5"},
+          {"key": "bridge", "type": "bool", "value": "true"}
         ]
       }
     ],
     "expected": [
-      {"key": "u", "kind": "u64", "non_null": 2},
-      {"key": "i", "kind": "i64", "non_null": 2},
-      {"key": "si", "kind": "i64", "non_null": 2},
-      {"key": "d", "kind": "f64", "non_null": 2},
-      {"key": "ok", "kind": "bool", "non_null": 2}
+      {"key": "population", "kind": "u64", "non_null": 2},
+      {"key": "ele", "kind": "i64", "non_null": 2},
+      {"key": "admin_level", "kind": "i64", "non_null": 2},
+      {"key": "height", "kind": "f64", "non_null": 2},
+      {"key": "bridge", "kind": "bool", "non_null": 2}
     ]
   }
 ]

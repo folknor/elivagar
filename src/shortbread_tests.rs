@@ -1,6 +1,40 @@
 use super::*;
 use std::borrow::Cow;
 
+/// A match as these tests read it: attributes lowered to what a consumer
+/// sees, `(key name, value, from_zoom)`, with kinds as strings.
+struct TestMatch {
+    layer: Layer,
+    min_zoom: u8,
+    geom_expect: GeomExpect,
+    attrs: Vec<(&'static str, AttrValue, u8)>,
+}
+
+/// The profile's matches before any measurement (no relation metadata,
+/// pending area rules dropped). Shadows the crate function for this module.
+fn match_element(tags: &Tags<'_>, geom_type: OsmGeomType) -> Vec<TestMatch> {
+    super::match_element(tags, geom_type, None)
+        .into_provisional()
+        .into_iter()
+        .map(|m| TestMatch {
+            layer: m.layer,
+            min_zoom: m.min_zoom,
+            geom_expect: m.geom_expect,
+            attrs: m
+                .attrs
+                .iter()
+                .map(|a| {
+                    let value = match &a.value {
+                        AttrValue::Kind(kind) => AttrValue::Str(Cow::Borrowed(kind.name())),
+                        other => other.clone(),
+                    };
+                    (a.key.name(), value, a.from_zoom)
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 #[test]
 fn input_geometry_dispatch_uses_the_layer_acceptance_declarations() {
     let cases: [(OsmGeomType, &[Layer]); 4] = [
@@ -138,7 +172,6 @@ fn test_highway_motorway_matches_streets_z5() {
         .find(|m| m.layer == Layer::Streets)
         .expect("should match Streets");
     assert_eq!(street.min_zoom, 5);
-    assert_eq!(street.max_zoom, 14);
     let kind = street
         .attrs
         .iter()
@@ -156,7 +189,6 @@ fn test_building_yes_matches_buildings_z14() {
         .find(|m| m.layer == Layer::Buildings)
         .expect("should match Buildings");
     assert_eq!(bldg.min_zoom, 14);
-    assert_eq!(bldg.max_zoom, 14);
     assert!(bldg.attrs.is_empty());
 }
 

@@ -328,7 +328,7 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)` plu
 - `pipeline.rs` - PBF → ocean → sort → assemble → PMTiles
 
 **Shortbread profile:**
-- `shortbread/` - tag matching, layer definitions, 26 layers, one module per layer family. Land and street kinds are enums (`LandKind`, `StreetClass`, `LinkClass`) owning their wire name and paint rank, which the matchers, verify and the wire-format coverage test all read
+- `shortbread/` - tag matching, layer definitions, 26 layers, one module per layer family. Every `kind` value is declared in a `wire_kinds!` enum (`LandKind`, `StreetClass`, `LinkClass` and the other families) owning its wire name and its sort-record dictionary id, computed at compile time; land and street kinds also own their paint rank, which the matchers and verify both read. Attribute keys are one typed schema (`attr_keys!`): each key's wire id, name and value type, with typed constructors so a wrong-typed value does not compile. Matching yields provisional `Hits`; `Hits::finish` applies the area rules (boundary label zoom and `way_area`) with a lazily measured area, and emission reads only the finished `LayerMatch`
 - `shortbread_tests.rs` - spec test cases (65+), loaded via `#[path]` from shortbread/mod.rs
 - `shortbread/pois.rs` - POI tag matching
 - `wire_format.rs` - sort record binary serialization

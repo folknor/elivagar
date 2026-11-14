@@ -239,6 +239,25 @@ parsing.
 
 Reported by the storage hunt.
 
+## STR-041 - The line cascade's convergence skip looks like it stops simplifying after z13
+
+`geometry::simplify::for_each_zoom_simplified` runs Douglas-Peucker at a
+zoom only when `last_max_dev_sq >= tol * tol`, where `last_max_dev_sq` is
+what `simplify_into` returns: the largest squared deviation of any point it
+*removed*. DP removes only points closer than the tolerance it ran with, and
+`simplify_tolerance` grows as zoom falls, so after the first DP (z13) the
+recorded deviation is below every lower zoom's tolerance and no later zoom
+runs DP. Every unpinned line would then carry its z13 simplification down to
+its layer floor. Observed while the attribute-schema landing removed
+`LayerMatch.max_zoom`: a five-vertex test line emitted at z0 through the
+cascade from z14 kept the vertex a direct z0 simplification drops (the test
+`emit_line_preserve_mask_keeps_required_vertices` now compares against a
+direct simplification instead). Not yet verified on real data: check
+per-zoom line vertex counts in a denmark build against a direct per-zoom DP,
+and if confirmed, the fix is an output change that rotates the corpus.
+
+Found while landing the attribute-schema chain, link 1.
+
 ---
 
 # Profile and layers
@@ -248,9 +267,11 @@ Reported by the storage hunt.
 The profile is a hand translation of a declarative document
 (`tests/fixtures/shortbread.yml`, checked in and read by nothing) into about
 40 imperative matcher functions, and per-layer facts leak out of
-`shortbread/` into emit.rs (min-area and subpixel exemptions, area-based zoom
-overrides), phase12's way path (boundary match placement), assemble (merge
-policy), wire_format.rs (key and kind vocabularies), `pipeline::shortbread_tileset` (vector_layers) and ocean.rs (ocean policy).
+`shortbread/` into emit.rs (min-area and subpixel exemptions), assemble (merge
+policy), `pipeline::shortbread_tileset` (vector_layers) and ocean.rs (ocean
+policy). The key schema (`attr_keys!`), the kind families and the area rules
+(`Hits::finish`) already live in `shortbread/`; the layer table would also
+own which keys each layer may carry.
 
 Proposed (Shortbread and layer-identity hunts):
 ```
@@ -279,24 +300,6 @@ numeric parsing); hand-written tables plus a test asserting every upstream
 `include_when` value and `min_zoom` override is represented gets most of the
 benefit. The layer table also lets `vector_layers` carry `fields` and lets
 verify check observed attributes against the schema.
-
-Reported by the Shortbread and layer-identity hunts.
-
-## STR-022 - `LayerMatch` is a wide, mutable, post-processed record
-
-It is mutated after construction by `resolve_boundary_match` (overwrite) and
-`enrich_polygon_matches` (push attr, lower zoom), so the profile's answer is
-provisional and the final answer is assembled in the pipeline.
-`LayerMatch.max_zoom` is always 14. `(min_zoom, max_zoom, paint_rank)` are
-three adjacent `u8`s each constructor sets independently
-(`shortbread::boundaries::boundary_line` among them) and many tests. A
-`const _: () = assert!(size_of::<LayerMatch>() == 408)` pins a struct whose
-inline `SmallVec<[Attr; 8]>` of string-keyed tuples is most of the size.
-Proposed: a `Hit` the pipeline completes by calling a profile function with
-geometry facts (area, relation meta), so the profile makes every decision and
-the pipeline supplies measurements; drop `max_zoom`; `Zoom` and `PaintRank`
-newtypes; attr construction at emission time shrinks what travels through the
-dispatch SmallVec.
 
 Reported by the Shortbread and layer-identity hunts.
 

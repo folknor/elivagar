@@ -1,5 +1,5 @@
 use super::*;
-use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
+use crate::shortbread::{Attr, AttrValue, GeomExpect, Layer, LayerMatch};
 use crate::tiling::TileId;
 
 fn zxy(tile_id: TileId) -> (u8, u32, u32) {
@@ -718,8 +718,7 @@ fn injected_pins_wrong_length_bitmap_fails_run() {
 fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
     let mut writer = sort::SortWriter::new(chunks_dir, 1024, sort::ChunkCompression::None)
         .expect("create sort writer");
-    let attrs: Vec<crate::shortbread::Attr> =
-        vec![("kind", AttrValue::Str(Cow::Borrowed("city")), 0)];
+    let attrs = [("kind", AttrValue::Str(Cow::Borrowed("city")), 0)];
     let feature =
         crate::wire_format::encode_feature_data(1, mvt::GeomType::Point, &[9, 0, 0], &attrs, 14);
     writer
@@ -773,7 +772,7 @@ fn tile_features_ordered_by_paint_rank() {
 #[cfg(feature = "mlt")]
 fn parity_pending_tile(tile_id: TileId) -> PendingTile {
     let point_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("city")), 0)];
-    let line_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("street")), 0)];
+    let line_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("residential")), 0)];
 
     PendingTile {
         tile_id,
@@ -952,36 +951,36 @@ fn tile_size_diag_thresholds_are_strictly_greater_than_boundaries() {
     assert_eq!(diag.oversize_severe_count, 1);
 }
 
-/// Helper: build a BoundaryLabels match with the given admin_level and default min_zoom=5.
-fn boundary_labels_match(admin_level: i64) -> LayerMatch {
-    LayerMatch {
-        layer: Layer::BoundaryLabels,
-        min_zoom: 5,
-        max_zoom: 14,
-        geom_expect: GeomExpect::PolygonPointOnSurface,
-        paint_rank: 0,
-        attrs: smallvec![
-            ("admin_level", AttrValue::Int(admin_level), 0),
-            ("name", AttrValue::Str(Cow::Borrowed("TestCountry")), 0),
-        ],
-    }
+/// The finished boundary_labels match of a closed administrative way with
+/// the given admin level and area.
+fn finished_boundary_label(admin_level: &str, area_m2: f64) -> LayerMatch {
+    let pairs = [
+        ("boundary", "administrative"),
+        ("admin_level", admin_level),
+        ("name", "TestCountry"),
+    ];
+    shortbread::match_element(
+        &shortbread::Tags(&pairs),
+        shortbread::OsmGeomType::ClosedWay,
+        None,
+    )
+    .finish(|| area_m2)
+    .into_iter()
+    .find(|m| m.layer == Layer::BoundaryLabels)
+    .expect("boundary label match")
 }
 
 /// admin_level=2 with area >= 2,000,000 km^2 -> min_zoom overridden to 2
 #[test]
 fn boundary_label_admin2_large_area() {
     let area_m2 = 2_000_000.0 * 1e6; // exactly 2M km^2
-    let mut matches = vec![boundary_labels_match(2)];
-    enrich_polygon_matches(&mut matches, area_m2);
+    let label = finished_boundary_label("2", area_m2);
 
-    assert_eq!(matches[0].min_zoom, 2);
-    // Also verify way_area was added (in hectares)
-    let way_area_attr = matches[0]
-        .attrs
-        .iter()
-        .find(|(k, _, _)| *k == "way_area")
-        .expect("way_area attr missing");
-    if let AttrValue::Float(h) = way_area_attr.1 {
+    assert_eq!(label.min_zoom, 2);
+    // Also verify way_area was added (in hectares), last
+    let way_area_attr = label.attrs.last().expect("attrs");
+    assert_eq!(way_area_attr.key(), shortbread::AttrKey::WayArea);
+    if let AttrValue::Float(h) = *way_area_attr.value() {
         let expected_hectares = area_m2 / 10_000.0;
         assert!(
             (h - expected_hectares).abs() < 0.01,
@@ -996,57 +995,57 @@ fn boundary_label_admin2_large_area() {
 #[test]
 fn boundary_label_admin4_700k_km2() {
     let area_m2 = 700_000.0 * 1e6;
-    let mut matches = vec![boundary_labels_match(4)];
-    enrich_polygon_matches(&mut matches, area_m2);
-
-    assert_eq!(matches[0].min_zoom, 3);
+    assert_eq!(finished_boundary_label("4", area_m2).min_zoom, 3);
 }
 
 /// admin_level=4 with area >= 100,000 km^2 (but < 700,000) -> min_zoom overridden to 4
 #[test]
 fn boundary_label_admin4_100k_km2() {
     let area_m2 = 150_000.0 * 1e6; // 150k km^2
-    let mut matches = vec![boundary_labels_match(4)];
-    enrich_polygon_matches(&mut matches, area_m2);
-
-    assert_eq!(matches[0].min_zoom, 4);
+    assert_eq!(finished_boundary_label("4", area_m2).min_zoom, 4);
 }
 
 /// admin_level=4 with area < 100,000 km^2 -> min_zoom stays at default (5)
 #[test]
 fn boundary_label_admin4_small_area() {
     let area_m2 = 50_000.0 * 1e6; // 50k km^2 - below 100k threshold
-    let mut matches = vec![boundary_labels_match(4)];
-    enrich_polygon_matches(&mut matches, area_m2);
-
     assert_eq!(
-        matches[0].min_zoom, 5,
+        finished_boundary_label("4", area_m2).min_zoom,
+        5,
         "small area should keep default min_zoom=5"
     );
 }
 
-/// Non-BoundaryLabels layer should be completely unchanged by enrich_polygon_matches.
+/// Finishing measures the area only when a match has an area rule, and once
+/// however many do; other layers are unchanged by it.
 #[test]
-fn non_boundary_labels_unchanged() {
-    let mut matches = vec![LayerMatch {
-        layer: Layer::Buildings,
-        min_zoom: 14,
-        max_zoom: 14,
-        geom_expect: GeomExpect::Polygon,
-        paint_rank: 0,
-        attrs: smallvec![],
-    }];
-    let original_min_zoom = matches[0].min_zoom;
-    let original_attr_count = matches[0].attrs.len();
+fn finishing_measures_area_only_for_area_rules() {
+    let building = [("building", "yes")];
+    let matches = shortbread::match_element(
+        &shortbread::Tags(&building),
+        shortbread::OsmGeomType::ClosedWay,
+        None,
+    )
+    .finish(|| panic!("a building has no area rule"));
+    let building = matches
+        .iter()
+        .find(|m| m.layer == Layer::Buildings)
+        .expect("building");
+    assert_eq!(building.min_zoom, 14);
+    assert!(building.attrs.is_empty());
 
-    enrich_polygon_matches(&mut matches, 9_999_999_999.0);
-
-    assert_eq!(matches[0].min_zoom, original_min_zoom);
-    assert_eq!(
-        matches[0].attrs.len(),
-        original_attr_count,
-        "attrs should not be modified"
-    );
+    let calls = std::cell::Cell::new(0);
+    let label = [("boundary", "administrative"), ("admin_level", "2")];
+    let _ = shortbread::match_element(
+        &shortbread::Tags(&label),
+        shortbread::OsmGeomType::ClosedWay,
+        None,
+    )
+    .finish(|| {
+        calls.set(calls.get() + 1);
+        1.0
+    });
+    assert_eq!(calls.get(), 1);
 }
 
 #[test]
@@ -1546,7 +1545,7 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
 
     let mut scratch = AssemblyScratch::new();
     let non_empty = prepare_non_empty_layers(&mut scratch, &tile).unwrap();
-    let model = mlt::build_tile_model(&non_empty);
+    let model = mlt::build_tile_model(&non_empty).expect("schema properties");
     let mvt_encoded = encode_tile_batch(
         &[parity_pending_tile(tile_id)],
         6,
@@ -2004,10 +2003,13 @@ fn test_layer_match(layer: Layer, geom_expect: GeomExpect) -> LayerMatch {
     LayerMatch {
         layer,
         min_zoom: 0,
-        max_zoom: 14,
         geom_expect,
         paint_rank: 0,
-        attrs: smallvec![("kind", AttrValue::Str(Cow::Borrowed("test")), 0)],
+        attrs: smallvec![Attr::for_test(
+            "kind",
+            AttrValue::Str(Cow::Borrowed("water")),
+            0
+        )],
     }
 }
 
@@ -2153,7 +2155,7 @@ fn emit_point_decodes_correctly() {
     assert_eq!(f.geom_type, mvt::GeomType::Point);
     let (k0, v0) = f.tags[0];
     assert_eq!(lb.test_key(k0), "kind");
-    assert_eq!(*lb.test_value(v0), mvt::Value::String("test".to_string()));
+    assert_eq!(*lb.test_value(v0), mvt::Value::String("water".to_string()));
 }
 
 #[test]
@@ -2561,10 +2563,12 @@ fn emit_line_cascading_simplification() {
 
 #[test]
 fn emit_line_preserve_mask_keeps_required_vertices() {
-    // A layer ending at z0, so the unpinned cascade is one direct
-    // simplification, the same work the pinned path does at that zoom.
-    let mut m = test_layer_match(Layer::Streets, GeomExpect::Line);
-    m.max_zoom = 0;
+    // The pinned path simplifies each zoom directly and must keep the pin
+    // where plain simplification at that zoom drops it. Every line layer's
+    // range ends at z14, so the unpinned path is the cascade from z14, which
+    // here keeps the vertex too; the plain reference is therefore a direct
+    // simplification at z0, the work the pinned path does without the pin.
+    let m = test_layer_match(Layer::Streets, GeomExpect::Line);
     let coords = [
         Point { x: 0.1, y: 0.10000 },
         Point { x: 0.3, y: 0.10001 },
@@ -2573,20 +2577,8 @@ fn emit_line_preserve_mask_keeps_required_vertices() {
         Point { x: 0.9, y: 0.10000 },
     ];
 
-    let mut records_plain = Vec::new();
     let mut records_pinned = Vec::new();
-    let mut scratch_plain = LineEmitScratch::new();
     let mut scratch_pinned = LineEmitScratch::new();
-    emit_line_feature(
-        1099,
-        &coords,
-        &[false; 5],
-        &m,
-        0,
-        0,
-        &mut records_plain,
-        &mut scratch_plain,
-    );
     emit_line_feature(
         1099,
         &coords,
@@ -2597,19 +2589,15 @@ fn emit_line_preserve_mask_keeps_required_vertices() {
         &mut records_pinned,
         &mut scratch_pinned,
     );
-
-    assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
-    let (_, _, plain_cmd_count) = decode_data_header(&records_plain[0].data);
-    let (_, _, pinned_cmd_count) = decode_data_header(&records_pinned[0].data);
+
+    let plain = geometry::simplify::simplify(&coords, geometry::simplify::simplify_tolerance(0));
     assert!(
-        pinned_cmd_count > plain_cmd_count,
-        "pinned shared line vertex should increase retained geometry detail"
+        !plain.iter().any(|p| p.x.to_bits() == coords[2].x.to_bits()),
+        "direct z0 simplification should drop the unpinned vertex"
     );
 
-    let plain_lb = decode_to_layer(&records_plain[0].data);
     let pinned_lb = decode_to_layer(&records_pinned[0].data);
-    let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
     let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
     let mut target_tc = Vec::new();
     geometry::tiles::to_tile_coords_into(&mut target_tc, &[Point { x: 0.5, y: 0.10002 }], 0, 0, 0);
@@ -2617,10 +2605,6 @@ fn emit_line_preserve_mask_keeps_required_vertices() {
     assert!(
         pinned_pts.contains(&expected),
         "pinned line geometry should retain required shared vertex {expected:?}"
-    );
-    assert!(
-        !plain_pts.contains(&expected),
-        "un-pinned line geometry should be allowed to drop non-required vertex {expected:?}"
     );
 }
 
@@ -2709,7 +2693,7 @@ fn emit_polygon_decodes_correctly() {
     assert_eq!(f.geom_type, mvt::GeomType::Polygon);
     let (k0, v0) = f.tags[0];
     assert_eq!(lb.test_key(k0), "kind");
-    assert_eq!(*lb.test_value(v0), mvt::Value::String("test".to_string()));
+    assert_eq!(*lb.test_value(v0), mvt::Value::String("water".to_string()));
 }
 
 #[test]
@@ -2719,12 +2703,11 @@ fn emit_polygon_zoom_dependent_attrs() {
     let m_z0 = LayerMatch {
         layer: Layer::Buildings,
         min_zoom: 0,
-        max_zoom: 14,
         geom_expect: GeomExpect::Polygon,
         paint_rank: 0,
         attrs: smallvec![
-            ("kind", AttrValue::Str(Cow::Borrowed("building")), 0),
-            ("height", AttrValue::Float(15.0), 10),
+            Attr::for_test("kind", AttrValue::Str(Cow::Borrowed("water")), 0),
+            Attr::for_test("height", AttrValue::Float(15.0), 10),
         ],
     };
     let coords_z0 = [
@@ -2763,12 +2746,11 @@ fn emit_polygon_zoom_dependent_attrs() {
     let m_z14 = LayerMatch {
         layer: Layer::Buildings,
         min_zoom: 14,
-        max_zoom: 14,
         geom_expect: GeomExpect::Polygon,
         paint_rank: 0,
         attrs: smallvec![
-            ("kind", AttrValue::Str(Cow::Borrowed("building")), 0),
-            ("height", AttrValue::Float(15.0), 10),
+            Attr::for_test("kind", AttrValue::Str(Cow::Borrowed("water")), 0),
+            Attr::for_test("height", AttrValue::Float(15.0), 10),
         ],
     };
     let coords_z14 = [

@@ -105,36 +105,17 @@ polygon-engine hunts.
 
 ## CON-027 - What attribute keys exist, and what type is each?
 
-- `shortbread::Attr = (&'static str, AttrValue, u8)` - string key, bare `u8`
-  min zoom (unchecked against the layer floor or 14). The comment defends the
-  tuple by construction-site count; the sites already go through `attr_*`
-  helpers.
-- `wire_format::KEY_NAMES` + `key_to_id`: `position(..)` per attribute per zoom
-  per feature, `panic!` on an unknown key - a typo in a Shortbread rule is a
-  runtime crash in phase12 found only when a matching object is hit.
-- `mlt::build_tile_model` re-infers each column's type per tile by scanning
-  values and falls back to a stringifying `Mixed` column when a key carries
-  two types in one tile, so the same key can be an i64 column in one tile and
-  a string column in the next - a consumer-visible inconsistency. The schema
-  is static in Shortbread.
-- TileJSON `vector_layers` entries carry no `fields` because no attribute
-  schema exists in code, and verify checks only layer names.
-- `attr_dyn` allocates a `String` per dynamic attr; `pois::would_match_poi`
-  builds and discards the full POI attr vector; phase12's `possible_feature`
-  runs `match_element` up to twice per way building and discarding every
-  attr (hot-path allocation spent on predicates).
-- Kind values are typed (`wire_kinds!` families, built only through
-  `attr_kind`), but the `kind` key itself is still a string, so the bar on
-  `attr_str("kind", ..)` / `attr_dyn("kind", ..)` is a `debug_assert` on
-  exercised paths. A closed `AttrKey` with a `Kind` variant carrying a
-  `WireKind` turns that into a type barrier.
-
-Owner proposed: `#[repr(u8)] enum AttrKey` owned by Shortbread (the
-discriminant is the wire id), `struct Attr { key, value, from_zoom: Zoom }`
-with `attr.visible_at(z)`, per-key value types from the schema (MLT columns
-typed statically; a wrong-typed value is a bug), and a classify step that
-returns kind and zoom without building attrs. Typed label payloads
-(`admin_level: AdminLevel`) lowered to attrs only at encode time.
+Global key typing has landed: `shortbread::attr_keys!` declares every key's
+wire id, name and value type, `Attr` is built only through typed
+constructors, the sort-record decoder refuses a value type its key does not
+declare, and MLT columns take their type from the schema. What remains is
+per-layer: no code says which keys a layer may carry, so TileJSON
+`vector_layers` entries still have no `fields` and verify checks only layer
+names (plus the paint-order recovery keys). The settled design is link 2 of
+`notes/attr-schema-design.md`: allowed-key sets per layer, `fields` in the
+metadata (Int and Float both TileJSON `Number`), and verify checking both
+the observed keys and types and the metadata field map against the canonical
+declarations.
 
 Reported by the encoding, Shortbread and layer-identity hunts.
 

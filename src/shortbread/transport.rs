@@ -1,7 +1,7 @@
 // Transport layers: aerialways, ferries, public_transport.
 
 use super::*;
-use smallvec::{SmallVec, smallvec};
+use smallvec::smallvec;
 
 wire_kinds! {
     /// `kind` of aerialways: the OSM `aerialway` value, unchanged.
@@ -44,12 +44,11 @@ wire_kinds! {
 // Aerialways
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_aerialways(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_aerialways(tags: &Tags<'_>, out: &mut Hits) {
     if let Some(kind) = aerialway_kind(tags) {
         out.push(LayerMatch {
             layer: Layer::Aerialways,
             min_zoom: 12,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs: smallvec![attr_kind(kind)],
@@ -68,7 +67,7 @@ fn aerialway_kind(tags: &Tags<'_>) -> Option<AerialwayKind> {
 // Ferries
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_ferries(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_ferries(tags: &Tags<'_>, out: &mut Hits) {
     if !tags.has_value("route", "ferry") {
         return;
     }
@@ -82,7 +81,6 @@ pub(super) fn match_ferries(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
     out.push(LayerMatch {
         layer: Layer::Ferries,
         min_zoom,
-        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Line,
         paint_rank: 0,
         attrs,
@@ -93,11 +91,11 @@ pub(super) fn match_ferries(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
 // Public transport
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_public_transport_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_public_transport_point(tags: &Tags<'_>, out: &mut Hits) {
     match_public_transport(tags, GeomExpect::Point, out);
 }
 
-pub(super) fn match_public_transport_polygon(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_public_transport_polygon(tags: &Tags<'_>, out: &mut Hits) {
     match_public_transport(
         tags,
         Layer::PublicTransport.polygon_point_geom_expect(),
@@ -105,21 +103,16 @@ pub(super) fn match_public_transport_polygon(tags: &Tags<'_>, out: &mut SmallVec
     );
 }
 
-fn match_public_transport(
-    tags: &Tags<'_>,
-    geom_expect: GeomExpect,
-    out: &mut SmallVec<[LayerMatch; 4]>,
-) {
+fn match_public_transport(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut Hits) {
     if let Some((kind, min_zoom)) = public_transport_match(tags) {
         let mut attrs = smallvec![attr_kind(kind)];
         attrs.extend(name_attrs(tags));
         if let Some(v) = tags.get("iata") {
-            attrs.push(attr_dyn("iata", v));
+            attrs.push(attr_dyn(StrKey::Iata, v));
         }
         out.push(LayerMatch {
             layer: Layer::PublicTransport,
             min_zoom,
-            max_zoom: MAX_ZOOM,
             geom_expect,
             paint_rank: 0,
             attrs,

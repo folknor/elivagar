@@ -1,7 +1,7 @@
 // Place label matching for the Shortbread schema.
 
 use super::*;
-use smallvec::{SmallVec, smallvec};
+use smallvec::smallvec;
 
 wire_kinds! {
     /// `kind` of place_labels. `capital` and `state_capital` are reachable
@@ -24,7 +24,7 @@ wire_kinds! {
     }
 }
 
-pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut Hits) {
     if !has_name(tags) {
         return;
     }
@@ -39,11 +39,10 @@ pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
             .get("population")
             .and_then(parse_i64)
             .unwrap_or(pop_default);
-        attrs.push(attr_int("population", population));
+        attrs.push(attr_int(IntKey::Population, population));
         out.push(LayerMatch {
             layer: Layer::PlaceLabels,
             min_zoom,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Point,
             paint_rank: 0,
             attrs,

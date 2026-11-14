@@ -1208,8 +1208,8 @@ use assemble::{AssemblyScratch, prepare_non_empty_layers};
 use emit::{
     LineEmitScratch, MultipolygonEmitScratch, PointEmitScratch, PolygonEmitScratch,
     antimeridian_shifts_for_bbox, emit_line_feature, emit_multipolygon_feature,
-    emit_point_or_centroid, emit_polygon_feature, enrich_polygon_matches, merc_point_key,
-    relation_shared_vertex_keys, unwrap_antimeridian_path,
+    emit_point_or_centroid, emit_polygon_feature, merc_point_key, relation_shared_vertex_keys,
+    unwrap_antimeridian_path,
 };
 #[cfg(test)]
 use phase12::{

@@ -2,7 +2,7 @@
 // street_labels_points, streets_polygons_labels, bridges.
 
 use super::*;
-use smallvec::{SmallVec, smallvec};
+use smallvec::smallvec;
 
 const STREET_FLAG_ATTRIBUTE_MIN_ZOOM: u8 = 11;
 
@@ -188,7 +188,7 @@ fn street_match(tags: &Tags<'_>) -> Option<(StreetKind, u8)> {
     Some((kind, zoom))
 }
 
-pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut Hits) {
     let (street, min_zoom) = match street_match(tags) {
         Some(v) => v,
         None => return,
@@ -199,16 +199,16 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
     // kind: always emitted. Boolean attrs only when true (saves ~3-6 tags/feature).
     let mut attrs = smallvec![attr_kind(class)];
     if is_link {
-        attrs.push(attr_bool_z("link", true, STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
+        attrs.push(attr_bool(BoolKey::Link, true).visible_from(STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
     }
     if is_rail {
-        attrs.push(attr_bool("rail", true));
+        attrs.push(attr_bool(BoolKey::Rail, true));
     }
     if is_tunnel(tags) {
-        attrs.push(attr_bool_z("tunnel", true, STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
+        attrs.push(attr_bool(BoolKey::Tunnel, true).visible_from(STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
     }
     if is_bridge(tags) {
-        attrs.push(attr_bool_z("bridge", true, STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
+        attrs.push(attr_bool(BoolKey::Bridge, true).visible_from(STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
     }
     // Oneway: only for non-railway, only when true
     if !is_rail {
@@ -219,33 +219,32 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
         );
         let is_reverse = oneway_val == Some("-1");
         if is_oneway {
-            attrs.push(attr_bool_z("oneway", true, 14));
+            attrs.push(attr_bool(BoolKey::Oneway, true).visible_from(14));
         }
         if is_reverse {
-            attrs.push(attr_bool_z("oneway_reverse", true, 14));
+            attrs.push(attr_bool(BoolKey::OnewayReverse, true).visible_from(14));
         }
     }
     // Optional string attrs
     if let Some(v) = tags.get("tracktype") {
-        attrs.push(attr_dyn_z("tracktype", v, 11));
+        attrs.push(attr_dyn(StrKey::Tracktype, v).visible_from(11));
     }
     if let Some(v) = tags.get("surface") {
-        attrs.push(attr_dyn_z("surface", v, 11));
+        attrs.push(attr_dyn(StrKey::Surface, v).visible_from(11));
     }
     if let Some(v) = tags.get("service") {
-        attrs.push(attr_dyn_z("service", v, 11));
+        attrs.push(attr_dyn(StrKey::Service, v).visible_from(11));
     }
     if let Some(v) = tags.get("bicycle") {
-        attrs.push(attr_dyn_z("bicycle", v, 14));
+        attrs.push(attr_dyn(StrKey::Bicycle, v).visible_from(14));
     }
     if let Some(v) = tags.get("horse") {
-        attrs.push(attr_dyn_z("horse", v, 14));
+        attrs.push(attr_dyn(StrKey::Horse, v).visible_from(14));
     }
     let paint_rank = class.paint_rank(is_link, is_tunnel(tags), is_bridge(tags));
     out.push(LayerMatch {
         layer: Layer::Streets,
         min_zoom,
-        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Line,
         paint_rank,
         attrs,
@@ -256,26 +255,25 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
 // Street polygons
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_street_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_street_polygons(tags: &Tags<'_>, out: &mut Hits) {
     if let Some((class, min_zoom)) = street_polygon_match(tags) {
         let mut attrs = smallvec![attr_kind(class)];
         if is_bridge(tags) {
-            attrs.push(attr_bool("bridge", true));
+            attrs.push(attr_bool(BoolKey::Bridge, true));
         }
         if is_tunnel(tags) {
-            attrs.push(attr_bool("tunnel", true));
+            attrs.push(attr_bool(BoolKey::Tunnel, true));
         }
         if let Some(v) = tags.get("service") {
-            attrs.push(attr_dyn("service", v));
+            attrs.push(attr_dyn(StrKey::Service, v));
         }
         if let Some(v) = tags.get("surface") {
-            attrs.push(attr_dyn("surface", v));
+            attrs.push(attr_dyn(StrKey::Surface, v));
         }
         let paint_rank = class.paint_rank(false, is_tunnel(tags), is_bridge(tags));
         out.push(LayerMatch {
             layer: Layer::StreetPolygons,
             min_zoom,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank,
             attrs,
@@ -299,7 +297,7 @@ fn street_polygon_match(tags: &Tags<'_>) -> Option<(StreetClass, u8)> {
 // Street labels
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut Hits) {
     let has_ref = tags.has("ref");
     if !has_name(tags) && !has_ref {
         return;
@@ -319,20 +317,19 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
             .map(|s| s.chars().count())
             .max()
             .unwrap_or(0);
-        attrs.push(attr_dyn("ref", &replaced));
+        attrs.push(attr_dyn(StrKey::Ref, &replaced));
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         {
-            attrs.push(attr_int("ref_rows", ref_rows as i64));
-            attrs.push(attr_int("ref_cols", ref_cols as i64));
+            attrs.push(attr_int(IntKey::RefRows, ref_rows as i64));
+            attrs.push(attr_int(IntKey::RefCols, ref_cols as i64));
         }
     }
     if is_tunnel(tags) {
-        attrs.push(attr_bool("tunnel", true));
+        attrs.push(attr_bool(BoolKey::Tunnel, true));
     }
     out.push(LayerMatch {
         layer: Layer::StreetLabels,
         min_zoom,
-        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Line,
         paint_rank: 0,
         attrs,
@@ -395,19 +392,18 @@ wire_kinds! {
     }
 }
 
-pub(super) fn match_street_labels_points(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_street_labels_points(tags: &Tags<'_>, out: &mut Hits) {
     if !tags.has_value("highway", "motorway_junction") {
         return;
     }
     let mut attrs = smallvec![attr_kind(StreetLabelPointKind::MotorwayJunction)];
     if let Some(v) = tags.get("ref") {
-        attrs.push(attr_dyn("ref", v));
+        attrs.push(attr_dyn(StrKey::Ref, v));
     }
     attrs.extend(name_attrs(tags));
     out.push(LayerMatch {
         layer: Layer::StreetLabelsPoints,
         min_zoom: 12,
-        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Point,
         paint_rank: 0,
         attrs,
@@ -418,7 +414,7 @@ pub(super) fn match_street_labels_points(tags: &Tags<'_>, out: &mut SmallVec<[La
 // Streets polygons labels
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut Hits) {
     if !has_name(tags) {
         return;
     }
@@ -428,7 +424,6 @@ pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<
         out.push(LayerMatch {
             layer: Layer::StreetsPolygonsLabels,
             min_zoom: 14,
-            max_zoom: MAX_ZOOM,
             geom_expect: Layer::StreetsPolygonsLabels.polygon_point_geom_expect(),
             paint_rank: 0,
             attrs,
@@ -459,12 +454,11 @@ wire_kinds! {
     }
 }
 
-pub(super) fn match_bridges(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_bridges(tags: &Tags<'_>, out: &mut Hits) {
     if tags.has_value("man_made", "bridge") {
         out.push(LayerMatch {
             layer: Layer::Bridges,
             min_zoom: 12,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_kind(BridgeKind::Bridge)],

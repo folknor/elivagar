@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Breaking: `shortbread::LayerMatch`, `Attr`, `AttrValue`, `match_element`,
+  `Tags`, `GeomExpect`, `OsmGeomType` and `Layer::accepts` are
+  crate-private; they had no consumer. `Layer` and the kind enums keep
+  their API. Attribute keys are one typed schema: a value of the wrong type
+  for its key, or a `kind` not built from a kind family, no longer compiles,
+  and a sort record whose value type disagrees with its key's fails the run
+  (exit 2). The experimental MLT encoder types each property column from the
+  schema and fails a tile carrying an unknown key or wrong-typed value
+  instead of widening that column to strings. Archives elivagar writes are
+  byte-unchanged.
+
 - Breaking: the archive writer no longer knows the Shortbread schema. A
   producer describes its tileset with `PmtilesWriter::set_tileset` and the
   new `archive::Tileset` / `archive::VectorLayer`; a writer given none

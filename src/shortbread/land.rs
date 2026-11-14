@@ -128,20 +128,19 @@ fn land_layer_match(kind: LandKind, geom_expect: GeomExpect) -> LayerMatch {
     LayerMatch {
         layer: Layer::Land,
         min_zoom: kind.min_zoom(),
-        max_zoom: MAX_ZOOM,
         geom_expect,
         paint_rank: kind.paint_rank(),
         attrs: smallvec![attr_kind(kind)],
     }
 }
 
-pub(super) fn match_land(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_land(tags: &Tags<'_>, out: &mut Hits) {
     if let Some(kind) = land_match(tags) {
         out.push(land_layer_match(kind, GeomExpect::Polygon));
     }
 }
 
-pub(super) fn match_land_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_land_lines(tags: &Tags<'_>, out: &mut Hits) {
     if tags.has_value("natural", "cliff") {
         out.push(land_layer_match(LandKind::Cliff, GeomExpect::Line));
     }
@@ -250,12 +249,11 @@ fn land_match_wetland(v: &str) -> Option<LandKind> {
 // Sites
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_sites(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_sites(tags: &Tags<'_>, out: &mut Hits) {
     if let Some(kind) = sites_kind(tags) {
         out.push(LayerMatch {
             layer: Layer::Sites,
             min_zoom: 14,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_kind(kind)],
@@ -302,24 +300,23 @@ fn sites_kind(tags: &Tags<'_>) -> Option<SiteKind> {
 // Buildings
 // ---------------------------------------------------------------------------
 
-pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut Hits) {
     if let Some(v) = tags.get("building")
         && v != "no"
     {
         let mut attrs = SmallVec::new();
         if let Some(height) = tags.get("height").and_then(osm_value::parse_length_m) {
-            attrs.push(("height", AttrValue::Float(height), 0));
+            attrs.push(attr_float(FloatKey::Height, height));
         }
         if let Some(min_height) = tags.get("min_height").and_then(osm_value::parse_length_m) {
-            attrs.push(("min_height", AttrValue::Float(min_height), 0));
+            attrs.push(attr_float(FloatKey::MinHeight, min_height));
         }
         if let Some(levels) = tags.get("building:levels").and_then(osm_value::parse_count) {
-            attrs.push(("building:levels", AttrValue::Float(levels), 0));
+            attrs.push(attr_float(FloatKey::BuildingLevels, levels));
         }
         out.push(LayerMatch {
             layer: Layer::Buildings,
             min_zoom: 14,
-            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs,
@@ -340,7 +337,7 @@ fn is_poi_element(tags: &Tags<'_>) -> bool {
     crate::pois::would_match_poi(tags)
 }
 
-fn match_addresses(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<[LayerMatch; 4]>) {
+fn match_addresses(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut Hits) {
     if is_poi_element(tags) {
         return;
     }
@@ -351,26 +348,25 @@ fn match_addresses(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<
     }
     let mut attrs = SmallVec::new();
     if let Some(v) = tags.get("addr:housename") {
-        attrs.push(attr_dyn("housename", v));
+        attrs.push(attr_dyn(StrKey::Housename, v));
     }
     if let Some(v) = tags.get("addr:housenumber") {
-        attrs.push(attr_dyn("housenumber", v));
+        attrs.push(attr_dyn(StrKey::Housenumber, v));
     }
     out.push(LayerMatch {
         layer: Layer::Addresses,
         min_zoom: 14,
-        max_zoom: MAX_ZOOM,
         geom_expect,
         paint_rank: 0,
         attrs,
     });
 }
 
-pub(super) fn match_addresses_point(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_addresses_point(tags: &Tags<'_>, out: &mut Hits) {
     match_addresses(tags, GeomExpect::Point, out);
 }
 
-pub(super) fn match_addresses_polygon(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_addresses_polygon(tags: &Tags<'_>, out: &mut Hits) {
     match_addresses(tags, Layer::Addresses.polygon_point_geom_expect(), out);
 }
 

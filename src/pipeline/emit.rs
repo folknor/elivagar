@@ -133,20 +133,6 @@ fn relation_vertex_is_pinned(keys: &FxHashSet<(i64, i64)>, point: &Point) -> boo
 }
 
 // ---------------------------------------------------------------------------
-// Polygon enrichment (area-dependent attrs + min_zoom overrides)
-// ---------------------------------------------------------------------------
-
-/// Enrich polygon matches with geometry-dependent data.
-/// - BoundaryLabels: `way_area` in hectares, min_zoom override based on area thresholds.
-pub(super) fn enrich_polygon_matches(matches: &mut [LayerMatch], area_m2: f64) {
-    for m in matches.iter_mut() {
-        if m.layer == Layer::BoundaryLabels {
-            crate::shortbread::boundaries::enrich_boundary_label(m, area_m2);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Scratch types for geometry emission
 // ---------------------------------------------------------------------------
 
@@ -498,7 +484,7 @@ fn polygon_z_bottom_after_caps(
 /// The zoom plan of one OSM polygon under a run's zoom window `z_lo..=z_hi`.
 ///
 /// Construction is canonical: the first zoom comes from the layer's own range
-/// (`m.min_zoom..=m.max_zoom`), not the window, because the pyramid clips
+/// (`m.min_zoom..=MAX_ZOOM`), not the window, because the pyramid clips
 /// every zoom from its root fragments and a root chosen inside a raised window
 /// would reach that zoom along a different path than a full build does. Only
 /// the descent's floor is cut at the window's top, which cannot change a
@@ -519,7 +505,7 @@ fn polygon_zoom_plan(
 ) -> Option<(u8, u8)> {
     // `z_lo..=z_hi` is the layer range already intersected with the window
     // (`emit_match`), so the layer's own bounds contain it.
-    let z_start = polygon_z_start(merc, m.min_zoom, m.max_zoom)?;
+    let z_start = polygon_z_start(merc, m.min_zoom, MAX_ZOOM)?;
     if z_start > z_hi {
         return None;
     }
@@ -587,7 +573,7 @@ pub(super) fn emit_match(
 ) -> Result<u64, RingCapError> {
     // A layer range that is empty (an area rule may raise `min_zoom` past
     // the top) or misses the window emits nothing.
-    let Some(zooms) = ZoomRange::new(m.min_zoom, m.max_zoom).and_then(|r| r.intersect(ctx.window))
+    let Some(zooms) = ZoomRange::new(m.min_zoom, MAX_ZOOM).and_then(|r| r.intersect(ctx.window))
     else {
         return Ok(0);
     };
@@ -999,7 +985,7 @@ pub(super) fn emit_line_feature(
         geometry::simplify::for_each_zoom_simplified(
             merc,
             z_lo,
-            m.max_zoom,
+            MAX_ZOOM,
             2,
             |_| 1.0,
             skip_bbox_check,
@@ -1231,6 +1217,7 @@ pub(super) fn emit_multipolygon_feature(
 mod landing2_tests {
     use super::*;
     use crate::mvt;
+    use crate::shortbread::Attr;
     use smallvec::smallvec;
     use std::borrow::Cow;
 
@@ -1285,7 +1272,6 @@ mod landing2_tests {
         let m = LayerMatch {
             layer: Layer::PlaceLabels,
             min_zoom: 10,
-            max_zoom: 14,
             geom_expect: GeomExpect::Point,
             paint_rank: 0,
             attrs: smallvec![],
@@ -1331,7 +1317,6 @@ mod landing2_tests {
             let m = LayerMatch {
                 layer: Layer::Boundaries,
                 min_zoom: 12,
-                max_zoom: 12,
                 geom_expect,
                 paint_rank: 0,
                 attrs: smallvec![],
@@ -1477,12 +1462,11 @@ mod landing2_tests {
         let m = LayerMatch {
             layer: Layer::Buildings,
             min_zoom: 12,
-            max_zoom: 14,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![
-                ("kind", AttrValue::Str(Cow::Borrowed("test")), 0),
-                ("height", AttrValue::Float(12.0), 13),
+                Attr::for_test("kind", AttrValue::Str(Cow::Borrowed("water")), 0),
+                Attr::for_test("height", AttrValue::Float(12.0), 13),
             ],
         };
         let mut records = Vec::new();

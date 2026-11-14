@@ -1,7 +1,7 @@
 // Boundary line and label matching for the Shortbread schema.
 
 use super::*;
-use smallvec::{SmallVec, smallvec};
+use smallvec::smallvec;
 
 // ---------------------------------------------------------------------------
 // Boundaries
@@ -76,59 +76,58 @@ pub(crate) fn boundary_line(tags: &Tags<'_>, relation: Option<BoundaryMeta>) -> 
     Some(LayerMatch {
         layer: Layer::Boundaries,
         min_zoom: level.min_zoom(),
-        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Line,
         paint_rank: 0,
         attrs: smallvec![
-            attr_int("admin_level", i64::from(level as u8)),
+            attr_int(IntKey::AdminLevel, i64::from(level as u8)),
             attr_bool(
-                "maritime",
+                BoolKey::Maritime,
                 tags.has_value("maritime", "yes") || tags.has_value("natural", "coastline")
             ),
-            attr_bool("disputed", meta.disputed),
+            attr_bool(BoolKey::Disputed, meta.disputed),
         ],
     })
 }
 
-pub(super) fn match_boundaries_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
-    if let Some(matched) = boundary_line(tags, None) {
+/// The boundaries layer for a way. `relation` is what the way's parent
+/// boundary relations folded onto it, resolved together with its own tags,
+/// so a member way with no admin tags of its own still matches.
+pub(super) fn match_boundaries_line(
+    tags: &Tags<'_>,
+    relation: Option<BoundaryMeta>,
+    out: &mut Hits,
+) {
+    if let Some(matched) = boundary_line(tags, relation) {
         out.push(matched);
     }
 }
 
-pub(super) fn match_boundary_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
+pub(super) fn match_boundary_labels(tags: &Tags<'_>, out: &mut Hits) {
     if let Some(admin_level) = boundary_level(tags) {
-        let mut attrs = smallvec![attr_int("admin_level", i64::from(admin_level as u8))];
+        let mut attrs = smallvec![attr_int(IntKey::AdminLevel, i64::from(admin_level as u8))];
         attrs.extend(name_attrs(tags));
-        // Default min_zoom is 5; enrich_boundary_label applies area overrides
+        // Default min_zoom is 5; the area rule applies the area overrides
         // once the emitter has measured the polygon.
-        out.push(LayerMatch {
-            layer: Layer::BoundaryLabels,
-            min_zoom: 5,
-            max_zoom: MAX_ZOOM,
-            geom_expect: Layer::BoundaryLabels.polygon_point_geom_expect(),
-            paint_rank: 0,
-            attrs,
-        });
+        out.push_pending(
+            LayerMatch {
+                layer: Layer::BoundaryLabels,
+                min_zoom: 5,
+                geom_expect: Layer::BoundaryLabels.polygon_point_geom_expect(),
+                paint_rank: 0,
+                attrs,
+            },
+            AreaRule::BoundaryLabel(admin_level),
+        );
     }
 }
 
 /// Apply the boundary label attributes and zoom policy that depend on area.
-pub(crate) fn enrich_boundary_label(matched: &mut LayerMatch, area_m2: f64) {
+pub(super) fn finish_boundary_label(matched: &mut LayerMatch, level: AdminLevel, area_m2: f64) {
     let hectares = area_m2 / 10_000.0;
-    matched
-        .attrs
-        .push(("way_area", AttrValue::Float(hectares), 0));
+    matched.attrs.push(attr_float(FloatKey::WayArea, hectares));
 
     let area_km2 = area_m2 / 1e6;
-    let is_country = matches!(
-        matched
-            .attrs
-            .iter()
-            .find(|(key, _, _)| *key == "admin_level")
-            .map(|(_, value, _)| value),
-        Some(AttrValue::Int(level)) if *level == i64::from(AdminLevel::Country as u8)
-    );
+    let is_country = level == AdminLevel::Country;
     if is_country && area_km2 >= 2_000_000.0 {
         matched.min_zoom = 2;
     } else if area_km2 >= 700_000.0 {

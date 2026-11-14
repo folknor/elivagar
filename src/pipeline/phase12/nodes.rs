@@ -286,10 +286,11 @@ pub(super) fn process_node(
     records: &mut Vec<SortRecord>,
 ) -> Result<u64, PipelineError> {
     let tag_helper = Tags(tags);
-    let matches = shortbread::match_element(&tag_helper, OsmGeomType::Node);
-    if matches.is_empty() {
+    let hits = shortbread::match_element(&tag_helper, OsmGeomType::Node, None);
+    if hits.is_empty() {
         return Ok(0);
     }
+    let matches = hits.finish_without_area();
 
     let p = geometry::projection::project_e7(lat_e7, lon_e7);
     let ctx = EmitCtx {

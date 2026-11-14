@@ -3,8 +3,7 @@ use smallvec::SmallVec;
 use crate::geometry::pyramid::RingCapError;
 use crate::geometry::{self, projection::Point};
 use crate::multipolygon::{self, MemberWay, WayRole};
-use crate::shortbread::LayerMatch;
-use crate::shortbread::{self, Tags};
+use crate::shortbread::{self, Hits, Tags};
 use crate::sort::{self, SortWriter};
 use crate::tiling::ZoomRange;
 use crate::way_index::{WayId, WayIndexReader};
@@ -13,7 +12,7 @@ use pbfhogg::MemberId;
 use super::PipelineError;
 use super::emit::{
     EmitCtx, FeatureGeometry, MultipolygonEmitScratch, PointEmitScratch, RecordSink, emit_match,
-    enrich_polygon_matches, relation_shared_vertex_keys, unwrap_antimeridian_path,
+    relation_shared_vertex_keys, unwrap_antimeridian_path,
 };
 use super::stats::{FanoutStats, MissingRefStatsAtomic, record_fanout_from_payload_records};
 
@@ -22,7 +21,9 @@ use super::stats::{FanoutStats, MissingRefStatsAtomic, record_fanout_from_payloa
 /// avoiding cloning all relation tags to owned Strings.
 pub(super) struct PreparedRelation {
     pub(super) osm_id: u64,
-    pub(super) matches: SmallVec<[LayerMatch; 4]>,
+    /// Matched while the tags are borrowed, finished once the assembled
+    /// geometry can be measured.
+    pub(super) matches: Hits,
     pub(super) member_ways: Vec<MemberWay>,
 }
 
@@ -386,20 +387,19 @@ pub(super) fn process_prepared_relation_into(
         return Ok(());
     }
 
-    let mut matches = rel.matches;
-
-    let total_area_m2: f64 = multi
-        .polygons
-        .iter()
-        .map(|(outer, inners)| {
-            geometry::polygon::area_sq_meters(outer)
-                - inners
-                    .iter()
-                    .map(|inner| geometry::polygon::area_sq_meters(inner))
-                    .sum::<f64>()
-        })
-        .sum();
-    enrich_polygon_matches(&mut matches, total_area_m2);
+    let matches = rel.matches.finish(|| {
+        multi
+            .polygons
+            .iter()
+            .map(|(outer, inners)| {
+                geometry::polygon::area_sq_meters(outer)
+                    - inners
+                        .iter()
+                        .map(|inner| geometry::polygon::area_sq_meters(inner))
+                        .sum::<f64>()
+            })
+            .sum()
+    });
 
     let ctx = EmitCtx {
         window,
