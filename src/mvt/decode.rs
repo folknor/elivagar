@@ -165,7 +165,7 @@ pub(crate) enum Grammar {
 
 impl Grammar {
     /// The grammar for an MVT `type` field value.
-    pub(crate) fn for_geom_type(geom_type: u64) -> Self {
+    pub(crate) fn for_geom_type(geom_type: u8) -> Self {
         match geom_type {
             1 => Self::Point,
             2 => Self::LineString,

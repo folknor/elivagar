@@ -367,8 +367,7 @@ The profile is a hand translation of a declarative document
 40 imperative matcher functions, and per-layer facts leak out of
 `shortbread/` into emit.rs (min-area and subpixel exemptions, area-based zoom
 overrides), phase12's way path (boundary match placement), assemble (merge
-policy), wire_format.rs (key and kind vocabularies), verify.rs (paint-order
-layer set), pmtiles_writer.rs (vector_layers) and ocean.rs (ocean policy).
+policy), wire_format.rs (key and kind vocabularies), pmtiles_writer.rs (vector_layers) and ocean.rs (ocean policy).
 
 Proposed (Shortbread and layer-identity hunts):
 ```
@@ -486,27 +485,6 @@ markers as `enum Phase { Phase12, Ocean, Sort, Assemble }` with start/end;
 a run-owned `Telemetry` handle (or reset at `run` entry).
 
 Reported by the storage, polygon-engine and pipeline hunts.
-
----
-
-# Archive surface
-
-## STR-034 - `verify.rs` is four tools in one file
-
-Container checks, MVT structural grammar, Shortbread paint-order rules
-(hard-coding the layer set and the `z < 11` switch), and ocean geometry stats
-and self-intersection. They now share one strict parse per tile
-(`parse_checked_tile` over `mvt::message`) but are still four functions
-reaching into it. Proposed: a `Check` trait over that parsed tile, with
-Shortbread rules owned by `shortbread/`. Decode-side types: `DetailFeature`
-carries both `geom_type: u8` and per-ring `CanonRingRole`
-(Point/Path/Outer/Hole), encoding one fact twice (a type-1 feature with a
-Path ring is constructible); svg and verify use `geom_type: u64`; the encode
-side's `mvt::GeomType` (with an `Unknown(u64)` arm for tolerant decoding)
-would serve all. `DetailAttr::Float(u32)` / `Double(u64)` store bits, which is
-right for hashing but deserves a comment or `F32Bits` newtype.
-
-Reported by the archive-surface hunt.
 
 ---
 

@@ -308,7 +308,7 @@ struct SvgLayer {
 }
 
 struct SvgFeature {
-    geom_type: u64,
+    geom_type: u8,
     paths: Vec<Vec<(f64, f64)>>,
 }
 
@@ -349,7 +349,7 @@ fn decode_layer(layer: &message::LayerMessage<'_>) -> io::Result<SvgLayer> {
 
 fn decode_feature(data: &[u8]) -> io::Result<SvgFeature> {
     let feature = message::parse_feature(data, Strictness::Tolerant).map_err(io::Error::other)?;
-    let geom_type = u64::from(feature.geom_type);
+    let geom_type = feature.geom_type;
     let paths = match &feature.geometry {
         Some(bytes) => decode_geometry_commands(bytes, geom_type)?,
         None => Vec::new(),
@@ -360,7 +360,7 @@ fn decode_feature(data: &[u8]) -> io::Result<SvgFeature> {
 /// Paths as drawn: each MoveTo point starts a path, a polygon ClosePath
 /// closes and ends it. The viewer decodes unvalidated so a mis-sequenced
 /// stream still draws and can be seen; a wire error fails the tile.
-fn decode_geometry_commands(data: &[u8], geom_type: u64) -> io::Result<Vec<Vec<(f64, f64)>>> {
+fn decode_geometry_commands(data: &[u8], geom_type: u8) -> io::Result<Vec<Vec<(f64, f64)>>> {
     struct Paths {
         polygon: bool,
         paths: Vec<Vec<(f64, f64)>>,

@@ -63,7 +63,7 @@ fn diag_layer(layer: &message::LayerMessage<'_>) {
                 continue;
             }
         };
-        let geom_type = u64::from(feature.geom_type);
+        let geom_type = feature.geom_type;
         let fid = feature.id.unwrap_or(0);
         if geom_type == 3 {
             let geometry = feature.geometry.as_deref().unwrap_or_default();
@@ -79,7 +79,7 @@ fn diag_layer(layer: &message::LayerMessage<'_>) {
     }
 }
 
-fn print_rings(fi: usize, fid: u64, geom_type: u64, rings: &[Vec<(i32, i32)>]) {
+fn print_rings(fi: usize, fid: u64, geom_type: u8, rings: &[Vec<(i32, i32)>]) {
     println!(
         "    Feature {fi}: id={fid} geom_type={geom_type} rings={nr}",
         nr = rings.len()

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `verify` holds its tile-level error list to the documented 100: a tile
+  carrying several structure findings could push the report past the cap.
+  Pass and fail verdicts and tile counts are unchanged.
+
 - `PmtilesWriter::write_to` consumes the writer, and both writer modes now
   publish by renaming a fresh, exclusively created sibling over the output
   path after closing it. The in-memory mode used to truncate an existing

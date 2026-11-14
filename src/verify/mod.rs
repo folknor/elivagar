@@ -2,6 +2,21 @@
 //!
 //! Validates a PMTiles archive end-to-end: container integrity, metadata schema,
 //! tile decompression, MVT payload structure, and layer coverage.
+//!
+//! This module is the coordinator: container checks, run traversal, the
+//! per-class outcome cache, the error cap and the report. Each tile is parsed
+//! once strictly (`tile`) and the checks read that parse as plain functions -
+//! `geometry` and `paint_order` per layer, `ocean` per tile. They are not a
+//! trait-object list on purpose: the set is fixed and always runs, nothing
+//! selects among them at runtime, and their outputs differ in kind (first
+//! error over an interleaved layer walk, every ring problem, a statistics
+//! accumulator), so what they share is the ordering and cap policy here, not
+//! an interface.
+
+mod geometry;
+mod ocean;
+mod paint_order;
+mod tile;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
@@ -10,11 +25,10 @@ use std::io;
 use std::path::Path;
 
 use crate::archive::Archive;
-use crate::mvt::decode::{
-    self, Command, CommandKind, CommandSink, GeometryError, Grammar, Point, Words,
-};
-use crate::shortbread::{Layer, RankAttributes, RankError};
+use crate::shortbread::Layer;
 use crate::tiling::{ARCHIVE_MAX_ZOOM, TileId};
+use geometry::MVT_EXTENT;
+use tile::{CheckedLayer, parse_checked_tile};
 
 /// One slot per archive zoom.
 pub const ARCHIVE_ZOOM_COUNT: usize = ARCHIVE_MAX_ZOOM as usize + 1;
@@ -26,15 +40,9 @@ fn tile_coord(tile_id: u64) -> (u8, u32, u32) {
         .expect("checked directory runs hold addressable ids")
         .coord()
 }
-use crate::mvt::message::{self, ValueMessage};
-use crate::tile_detail::Strictness;
 
 /// Maximum number of tile-level errors before aborting traversal.
 const MAX_TILE_ERRORS: usize = 100;
-const MVT_EXTENT: i64 = crate::geometry::tiles::grid::EXTENT as i64;
-const MVT_COORD_ABS_LIMIT: i64 = MVT_EXTENT * 32; // 131072
-const MVT_DELTA_LIMIT: i64 = MVT_EXTENT * 16; // 65536
-const MVT_DELTA_LIMIT_SEAM: i64 = MVT_EXTENT * 4; // 16384
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ValidationClass {
@@ -123,9 +131,9 @@ pub struct ZoomGeomStats {
 
 struct CachedTileOutcome {
     layer_names: Vec<String>,
-    structure_errors: Vec<String>,
-    geometry_error: Option<String>,
-    ocean_errors: Vec<String>,
+    /// Every finding for the payload in report order: structure, then the
+    /// first geometry or paint-order violation, then each ocean ring problem.
+    findings: Vec<String>,
     geometry_stats: Option<ZoomGeomStats>,
 }
 
@@ -413,27 +421,19 @@ pub fn verify_opts_unique(
             };
 
             layers_observed.extend(outcome.layer_names.iter().cloned());
-            for problem in &outcome.structure_errors {
-                tile_errors.push(format!("z{z}/{x}/{y}: {problem}"));
-            }
-            if tile_errors.len() < MAX_TILE_ERRORS
-                && let Some(msg) = &outcome.geometry_error
-            {
-                tile_errors.push(format!("z{z}/{x}/{y}: {msg}"));
-            }
-
-            // Ocean polygon ring validity: check for self-intersections.
-            if tile_errors.len() < MAX_TILE_ERRORS {
-                for problem in &outcome.ocean_errors {
-                    tile_errors.push(format!("z{z}/{x}/{y}: {problem}"));
-                    if tile_errors.len() >= MAX_TILE_ERRORS {
-                        break;
-                    }
-                }
-            }
+            // The cap truncates findings only; the tile is still accounted
+            // for (stats, tiles_checked) and traversal stops before the next.
+            let room = MAX_TILE_ERRORS.saturating_sub(tile_errors.len());
+            tile_errors.extend(
+                outcome
+                    .findings
+                    .iter()
+                    .take(room)
+                    .map(|problem| format!("z{z}/{x}/{y}: {problem}")),
+            );
 
             if let (Some(stats), Some(delta)) = (stats.as_mut(), outcome.geometry_stats.as_ref()) {
-                add_zoom_stats(stats.per_zoom.entry(z).or_default(), delta);
+                ocean::add_zoom_stats(stats.per_zoom.entry(z).or_default(), delta);
             }
 
             tiles_checked += 1;
@@ -463,9 +463,7 @@ fn build_tile_outcome(
 ) -> CachedTileOutcome {
     let mut outcome = CachedTileOutcome {
         layer_names: Vec::new(),
-        structure_errors: Vec::new(),
-        geometry_error: None,
-        ocean_errors: Vec::new(),
+        findings: Vec::new(),
         geometry_stats: None,
     };
     // One strict parse feeds every check below. A tile that does not parse
@@ -473,440 +471,42 @@ fn build_tile_outcome(
     let tile = match parse_checked_tile(data) {
         Ok(tile) => tile,
         Err(error) => {
-            outcome
-                .structure_errors
-                .push(format!("MVT decode failed: {error}"));
+            outcome.findings.push(format!("MVT decode failed: {error}"));
             return outcome;
         }
     };
     if tile.is_empty() {
-        outcome.structure_errors.push("no MVT layers".to_string());
+        outcome.findings.push("no MVT layers".to_string());
     }
     for layer in &tile {
         if layer.message.name.is_empty() {
-            outcome
-                .structure_errors
-                .push("empty layer name".to_string());
+            outcome.findings.push("empty layer name".to_string());
         }
         outcome.layer_names.push(layer.message.name.to_string());
     }
 
-    outcome.geometry_error = validate_tile_geometry(&tile, class).err();
-    outcome.ocean_errors = validate_ocean_rings(&tile);
+    if let Err(error) = validate_tile_layers(&tile, class) {
+        outcome.findings.push(error);
+    }
+    ocean::check_rings(&tile, &mut outcome.findings);
     if collect_stats {
         let mut collected = GeometryStats::default();
-        collect_ocean_geometry_stats(&tile, class.z, &mut collected);
+        ocean::collect_stats(&tile, class.z, &mut collected);
         outcome.geometry_stats = collected.per_zoom.remove(&class.z);
     }
     outcome
 }
 
-/// One layer as verify checks it: the envelope plus every feature parsed,
-/// every value decoded and every tag index resolved against the tables.
-struct CheckedLayer<'a> {
-    message: message::LayerMessage<'a>,
-    values: Vec<ValueMessage<'a>>,
-    features: Vec<CheckedFeature<'a>>,
-}
-
-struct CheckedFeature<'a> {
-    message: message::FeatureMessage<'a>,
-    tags: Vec<(usize, usize)>,
-}
-
-/// Parse a tile under the message reader's `Strict` policy and go further
-/// than its envelope: every feature and every value-table entry, referenced
-/// or not, must decode, and every tag index must name a key and a value.
-/// Verify reads elivagar's own output, which writes no field MVT does not
-/// name and no field twice.
-fn parse_checked_tile(data: &[u8]) -> Result<Vec<CheckedLayer<'_>>, String> {
-    let strict = Strictness::Strict;
-    let mut checked = Vec::new();
-    for message in message::parse_tile(data, strict)? {
-        let name = message.name;
-        let values = message
-            .values
-            .iter()
-            .enumerate()
-            .map(|(idx, bytes)| {
-                message::decode_value(bytes, strict)
-                    .map_err(|e| format!("[{name}] value {idx}: {e}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut features = Vec::with_capacity(message.features.len());
-        for (idx, bytes) in message.features.iter().enumerate() {
-            let feature = message::parse_feature(bytes, strict)
-                .map_err(|e| format!("[{name}] feat {idx}: {e}"))?;
-            let tags = message::tag_pairs(&feature.tags)
-                .map_err(|e| format!("[{name}] feat {idx}: {e}"))?;
-            if let Some(&(key, value)) = tags
-                .iter()
-                .find(|&&(key, value)| key >= message.keys.len() || value >= values.len())
-            {
-                return Err(format!(
-                    "[{name}] feat {idx}: tag ({key}, {value}) out of bounds"
-                ));
-            }
-            features.push(CheckedFeature {
-                message: feature,
-                tags,
-            });
-        }
-        checked.push(CheckedLayer {
-            message,
-            values,
-            features,
-        });
-    }
-    Ok(checked)
-}
-
-/// The ocean layers of a tile, each with its extent.
-fn ocean_layers<'t, 'a>(
-    tile: &'t [CheckedLayer<'a>],
-) -> impl Iterator<Item = &'t CheckedLayer<'a>> {
-    tile.iter()
-        .filter(|layer| layer.message.name == Layer::Ocean.name())
-}
-
-/// A feature's polygon geometry bytes, None for any other type.
-fn polygon_geometry<'f>(feature: &'f CheckedFeature<'_>) -> Option<&'f [u8]> {
-    (feature.message.geom_type == 3)
-        .then_some(feature.message.geometry.as_deref())
-        .flatten()
-}
-
-fn add_zoom_stats(target: &mut ZoomGeomStats, delta: &ZoomGeomStats) {
-    target.features += delta.features;
-    target.rings += delta.rings;
-    target.encoded_bytes += delta.encoded_bytes;
-    target.consecutive_dups += delta.consecutive_dups;
-    target.full_tile_features += delta.full_tile_features;
-    target
-        .ring_vertex_counts
-        .extend_from_slice(&delta.ring_vertex_counts);
-}
-
-/// Decode the ocean layer of one tile and accumulate geometry statistics.
-fn collect_ocean_geometry_stats(tile: &[CheckedLayer<'_>], z: u8, stats: &mut GeometryStats) {
-    for layer in ocean_layers(tile) {
-        // A zero extent is reported by validate_tile_geometry.
-        if layer.message.extent == 0 {
-            continue;
-        }
-        collect_ocean_layer_stats(layer, z, stats);
-    }
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn collect_ocean_layer_stats(layer: &CheckedLayer<'_>, z: u8, stats: &mut GeometryStats) {
-    let extent = i64::from(layer.message.extent);
-    let zs = stats.per_zoom.entry(z).or_default();
-    zs.encoded_bytes += layer.message.encoded_len as u64;
-    for feature in &layer.features {
-        let Some(gb) = polygon_geometry(feature) else {
-            continue;
-        };
-        // A polygon that does not decode is reported by validate_tile_geometry
-        // and validate_ocean_rings on the same tile; statistics skip it.
-        let Ok(rings) = decode::decode_polygon_rings(Words::packed(gb)) else {
-            continue;
-        };
-        if rings.is_empty() {
-            continue;
-        }
-
-        zs.features += 1;
-        zs.rings += rings.len() as u64;
-        for ring in &rings {
-            zs.ring_vertex_counts.push(ring.len() as u32);
-            // Adjacent equal pairs; the closing vertex duplicates the FIRST
-            // vertex (not its predecessor), so closure never counts.
-            for pair in ring.windows(2) {
-                if pair[0] == pair[1] {
-                    zs.consecutive_dups += 1;
-                }
-            }
-        }
-        if rings.len() == 1 && is_full_tile_rect_with_extent(&rings[0], extent) {
-            zs.full_tile_features += 1;
-        }
-    }
-}
-
-/// A closed 4-corner rectangle ring covering the full [0, 4096] extent
-/// (i.e. a buffered full-tile ocean fill).
-#[cfg(test)]
-fn is_full_tile_rect(ring: &[(i32, i32)]) -> bool {
-    is_full_tile_rect_with_extent(ring, MVT_EXTENT)
-}
-
-fn is_full_tile_rect_with_extent(ring: &[(i32, i32)], ext: i64) -> bool {
-    let n = if ring.first() == ring.last() && ring.len() > 1 {
-        ring.len() - 1
-    } else {
-        ring.len()
-    };
-    if n != 4 {
-        return false;
-    }
-    let (mut min_x, mut min_y) = (i32::MAX, i32::MAX);
-    let (mut max_x, mut max_y) = (i32::MIN, i32::MIN);
-    for &(x, y) in &ring[..n] {
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x);
-        max_y = max_y.max(y);
-        // Every vertex must be a corner of the bbox - checked below.
-    }
-    let corners = [
-        (min_x, min_y),
-        (max_x, min_y),
-        (max_x, max_y),
-        (min_x, max_y),
-    ];
-    let all_corners = ring[..n].iter().all(|v| corners.contains(v));
-    all_corners && min_x <= 0 && min_y <= 0 && i64::from(max_x) >= ext && i64::from(max_y) >= ext
-}
-
-/// Geometry limits, extent and paint order over every layer of a tile.
-fn validate_tile_geometry(tile: &[CheckedLayer<'_>], class: ValidationClass) -> Result<(), String> {
+/// Geometry, extent and paint order, one layer at a time in wire order: the
+/// first violation of either check in that walk is the tile's one finding.
+/// Running the two checks as whole-tile passes instead would name a later
+/// layer's geometry fault ahead of an earlier layer's order fault.
+fn validate_tile_layers(tile: &[CheckedLayer<'_>], class: ValidationClass) -> Result<(), String> {
     for layer in tile {
-        validate_layer_geometry(layer, class)?;
+        geometry::check_layer(layer, class)?;
+        paint_order::check_layer(layer).map_err(|e| format!("[{}] {e}", layer.message.name))?;
     }
     Ok(())
-}
-
-fn validate_layer_geometry(
-    layer: &CheckedLayer<'_>,
-    mut class: ValidationClass,
-) -> Result<(), String> {
-    let layer_name = layer.message.name;
-    if layer.message.extent == 0 {
-        return Err(format!("[{layer_name}] layer extent is zero"));
-    }
-    class.extent = i64::from(layer.message.extent);
-    for (feat_idx, feature) in layer.features.iter().enumerate() {
-        // The strict parse guarantees a geometry field.
-        let geometry = feature.message.geometry.as_deref().unwrap_or_default();
-        validate_geometry(
-            Words::packed(geometry),
-            u64::from(feature.message.geom_type),
-            class,
-            geometry.len(),
-        )
-        .map_err(|e| format!("[{layer_name}] feat {feat_idx}: {e}"))?;
-    }
-    validate_paint_order(layer).map_err(|e| format!("[{layer_name}] {e}"))?;
-    Ok(())
-}
-
-#[cfg(test)]
-fn validate_mvt_geometry(data: &[u8], class: ValidationClass) -> Result<(), String> {
-    validate_tile_geometry(&parse_checked_tile(data)?, class)
-}
-
-fn validate_paint_order(layer: &CheckedLayer<'_>) -> Result<(), String> {
-    let Some(rank_layer) = Layer::from_name(layer.message.name).filter(|l| l.has_paint_order())
-    else {
-        return Ok(());
-    };
-    let mut previous = None;
-    for (feature_idx, feature) in layer.features.iter().enumerate() {
-        let attrs = paint_attrs(layer, feature).map_err(|e| format!("feat {feature_idx}: {e}"))?;
-        let kind = attrs
-            .kind
-            .ok_or_else(|| format!("feat {feature_idx}: missing kind attribute"))?;
-        let rank = match rank_layer.paint_rank_for(&RankAttributes {
-            kind,
-            link: attrs.link,
-            tunnel: attrs.tunnel,
-            bridge: attrs.bridge,
-        }) {
-            Ok(Some(rank)) => rank,
-            Ok(None) => unreachable!("layer was filtered to ordered layers"),
-            Err(RankError::UnknownLandKind) => {
-                return Err(format!("feat {feature_idx}: unknown land kind {kind:?}"));
-            }
-            Err(RankError::UnknownStreetKind) => {
-                return Err(format!("feat {feature_idx}: unknown street kind {kind:?}"));
-            }
-        };
-        if let Some(previous) = previous
-            && rank < previous
-        {
-            return Err(format!(
-                "feat {feature_idx}: paint rank {rank} follows {previous}"
-            ));
-        }
-        previous = Some(rank);
-    }
-    Ok(())
-}
-
-#[derive(Default)]
-struct PaintAttrs<'a> {
-    kind: Option<&'a str>,
-    link: bool,
-    tunnel: bool,
-    bridge: bool,
-    seen_link: bool,
-    seen_tunnel: bool,
-    seen_bridge: bool,
-}
-
-/// The paint-rank attributes of one feature; `parse_checked_tile` has
-/// already bounds-checked every tag index.
-fn paint_attrs<'a>(
-    layer: &CheckedLayer<'a>,
-    feature: &CheckedFeature<'a>,
-) -> Result<PaintAttrs<'a>, String> {
-    let mut attrs = PaintAttrs::default();
-    for &(key_idx, value_idx) in &feature.tags {
-        let key = &layer.message.keys[key_idx];
-        let value = layer.values[value_idx];
-        match *key {
-            "kind" => match value {
-                ValueMessage::String(kind) if attrs.kind.replace(kind).is_none() => {}
-                ValueMessage::String(_) => {
-                    return Err("duplicate kind attribute".to_string());
-                }
-                _ => return Err("kind attribute is not a string".to_string()),
-            },
-            "link" | "tunnel" | "bridge" => {
-                let flag = match value {
-                    ValueMessage::Bool(flag) => flag,
-                    _ => return Err(format!("{key} attribute is not a bool")),
-                };
-                let (slot, seen) = match *key {
-                    "link" => (&mut attrs.link, &mut attrs.seen_link),
-                    "tunnel" => (&mut attrs.tunnel, &mut attrs.seen_tunnel),
-                    "bridge" => (&mut attrs.bridge, &mut attrs.seen_bridge),
-                    _ => unreachable!(),
-                };
-                if *seen {
-                    return Err(format!("duplicate {key} attribute"));
-                }
-                *slot = flag;
-                *seen = true;
-            }
-            _ => {}
-        }
-    }
-    Ok(attrs)
-}
-
-/// verify's checks on top of the shared decoder and its spec grammar: the
-/// vtzero count cap and the extent-scaled delta and absolute limits.
-struct GeometryLimits {
-    max_count: u32,
-    delta_limit: i64,
-    coord_limit: i64,
-}
-
-impl CommandSink for GeometryLimits {
-    fn command(&mut self, command: Command) -> Result<(), GeometryError> {
-        let name = match command.kind {
-            CommandKind::MoveTo => "MoveTo",
-            CommandKind::LineTo => "LineTo",
-            CommandKind::ClosePath => return Ok(()),
-        };
-        if command.count > self.max_count {
-            return Err(GeometryError::Consumer(format!(
-                "{name} count too large ({} > {})",
-                command.count, self.max_count
-            )));
-        }
-        Ok(())
-    }
-
-    fn point(&mut self, point: Point) -> Result<(), GeometryError> {
-        let (dx, dy) = (i64::from(point.dx), i64::from(point.dy));
-        if dx.abs() > self.delta_limit || dy.abs() > self.delta_limit {
-            return Err(GeometryError::Consumer(format!(
-                "suspicious geometry delta ({dx},{dy}) exceeds limit {}",
-                self.delta_limit
-            )));
-        }
-        if point.x.abs() > self.coord_limit || point.y.abs() > self.coord_limit {
-            return Err(GeometryError::Consumer(format!(
-                "geometry coordinate ({},{}) exceeds absolute limit {}",
-                point.x, point.y, self.coord_limit
-            )));
-        }
-        Ok(())
-    }
-}
-
-fn validate_geometry(
-    words: Words<'_>,
-    geom_type: u64,
-    class: ValidationClass,
-    raw_byte_len: usize,
-) -> Result<(), String> {
-    let delta_limit = if class.seam {
-        MVT_DELTA_LIMIT_SEAM / MVT_EXTENT * class.extent
-    } else {
-        MVT_DELTA_LIMIT / MVT_EXTENT * class.extent
-    };
-    // Maximum valid count: vtzero uses raw_byte_len / 2 (each varint is >=1
-    // byte, each point needs 2 varints). This is a generous upper bound that
-    // avoids false positives on large but valid geometries.
-    let mut limits = GeometryLimits {
-        max_count: u32::try_from(raw_byte_len / 2).unwrap_or(u32::MAX),
-        delta_limit,
-        coord_limit: MVT_COORD_ABS_LIMIT / MVT_EXTENT * class.extent,
-    };
-    decode::decode(words, Some(Grammar::for_geom_type(geom_type)), &mut limits)?;
-    Ok(())
-}
-
-#[cfg(test)]
-fn validate_geometry_commands(
-    commands: &[u32],
-    geom_type: u64,
-    class: ValidationClass,
-    raw_byte_len: usize,
-) -> Result<(), String> {
-    validate_geometry(Words::slice(commands), geom_type, class, raw_byte_len)
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Validate ocean polygon rings for self-intersections.
-/// Decodes MVT protobuf → finds ocean layer → decodes polygon geometry → checks each ring.
-fn validate_ocean_rings(tile: &[CheckedLayer<'_>]) -> Vec<String> {
-    let mut problems = Vec::new();
-    for layer in ocean_layers(tile) {
-        validate_ocean_layer_rings(layer, &mut problems);
-    }
-    problems
-}
-
-fn validate_ocean_layer_rings(layer: &CheckedLayer<'_>, problems: &mut Vec<String>) {
-    for (fi, feature) in layer.features.iter().enumerate() {
-        let Some(gb) = polygon_geometry(feature) else {
-            continue;
-        };
-
-        let rings = match decode::decode_polygon_rings(Words::packed(gb)) {
-            Ok(rings) => rings,
-            Err(error) => {
-                problems.push(format!("ocean feat {fi} polygon decode failed: {error}"));
-                continue;
-            }
-        };
-        for (ri, ring) in rings.iter().enumerate() {
-            if ring.len() >= 4 && !crate::geometry::polygon::ring_is_simple(ring) {
-                problems.push(format!(
-                    "ocean feat {fi} ring {ri} is self-intersecting ({} verts)",
-                    ring.len()
-                ));
-            }
-        }
-    }
 }
 
 fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, VerifyError> {
@@ -929,10 +529,33 @@ fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, Ve
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::geometry::MVT_DELTA_LIMIT_SEAM;
     use super::*;
     use crate::archive::{LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter};
+    use crate::mvt::decode::{self, Words};
     use crate::mvt::{Feature, GeomType, LayerBuilder, Value, encode_tile};
     use flate2::Compression;
+
+    fn validate_geometry_commands(
+        commands: &[u32],
+        geom_type: u8,
+        class: ValidationClass,
+        raw_byte_len: usize,
+    ) -> Result<(), String> {
+        geometry::validate_geometry(Words::slice(commands), geom_type, class, raw_byte_len)
+    }
+
+    fn validate_mvt_geometry(data: &[u8], class: ValidationClass) -> Result<(), String> {
+        validate_tile_layers(&parse_checked_tile(data)?, class)
+    }
+
+    fn is_full_tile_rect(ring: &[(i32, i32)]) -> bool {
+        ocean::is_full_tile_rect_with_extent(ring, MVT_EXTENT)
+    }
+
+    fn structure_findings(data: &[u8], class: ValidationClass) -> Vec<String> {
+        build_tile_outcome(data, class, false).findings
+    }
 
     fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
         TileId::at(z, x, y).raw()
@@ -1278,6 +901,39 @@ mod tests {
     }
 
     #[test]
+    fn layer_walk_reports_first_fault_across_both_checks() {
+        // An order fault in the first layer and a geometry fault in the
+        // second: the per-layer walk names the first layer's fault only.
+        let mut land = LayerBuilder::new("land");
+        let key = land.intern_key("kind");
+        for kind in ["forest", "residential"] {
+            let value = land.intern_value(Value::String(kind.to_string()));
+            land.add_feature(Feature {
+                id: None,
+                geom_type: GeomType::Point,
+                geometry: vec![9, 0, 0],
+                tags: vec![(key, value)],
+            });
+        }
+        let mut lines = LayerBuilder::new("water_lines");
+        lines.add_feature(Feature {
+            id: None,
+            geom_type: GeomType::LineString,
+            geometry: vec![cmd(1, 1), zz(0), zz(0), cmd(2, 1), zz(70_000), zz(0)],
+            tags: Vec::new(),
+        });
+        let findings = structure_findings(
+            &encode_tile(&[&land, &lines]),
+            ValidationClass::for_tile(11, 1),
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[land] feat 1: paint rank"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn order_check_uses_street_details_without_every_boolean_key() {
         for name in ["streets", "street_polygons"] {
             for bridge_first in [false, true] {
@@ -1309,20 +965,16 @@ mod tests {
     fn payload_structure_is_checked_strictly() {
         let class = ValidationClass::for_tile(11, 1);
         let clean = land_tile(&["residential"]);
-        assert!(
-            build_tile_outcome(&clean, class, false)
-                .structure_errors
-                .is_empty()
-        );
+        assert!(structure_findings(&clean, class).is_empty());
         // A field MVT does not name and a truncated tag both fail the tile.
         let mut foreign = clean.clone();
         foreign.extend_from_slice(&[8, 1]);
         let mut truncated = clean;
         truncated.push(0x80);
         for tile in [foreign, truncated] {
-            let outcome = build_tile_outcome(&tile, class, false);
-            assert_eq!(outcome.structure_errors.len(), 1, "{tile:?}");
-            assert!(outcome.structure_errors[0].starts_with("MVT decode failed"));
+            let findings = structure_findings(&tile, class);
+            assert_eq!(findings.len(), 1, "{tile:?}");
+            assert!(findings[0].starts_with("MVT decode failed"));
         }
     }
 

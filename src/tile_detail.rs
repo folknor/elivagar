@@ -46,7 +46,10 @@ pub enum CanonRingRole {
     Hole = 3,
 }
 
-/// A decoded MVT attribute value.
+/// A decoded MVT attribute value. `Float` and `Double` hold the IEEE bit
+/// patterns, not the numbers, so `Eq`, `Ord` and `Hash` are total: equality
+/// is bitwise (distinct signed zeros and NaN payloads stay distinct) and
+/// ordering is unsigned bit-pattern order, not numeric float order.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DetailAttr {
     String(Arc<str>),
@@ -77,6 +80,13 @@ pub struct DetailComponent {
 #[derive(Clone, Debug)]
 pub struct DetailFeature {
     pub id: Option<u64>,
+    /// The wire `type` value, kept raw rather than as an enum: tolerant
+    /// decoding preserves an unknown type (0, 4 and up) with empty
+    /// components, and a known type with no geometry is distinct from it.
+    /// The ring roles below are derived during decoding from this type and
+    /// the geometry commands, so they do not restate it; an enum here would
+    /// still admit a Point feature carrying Path rings, which only a geometry
+    /// type with associated data would rule out.
     pub geom_type: u8,
     pub attrs: Vec<(Arc<str>, DetailAttr)>,
     pub components: Vec<DetailComponent>,
