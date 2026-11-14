@@ -87,10 +87,12 @@ impl SortWriter {
             match by_id.get_mut(i).and_then(Option::take) {
                 Some((_, path)) => chunk_paths.push(path),
                 None => {
-                    let path = multi_chunk_path(tmp_dir, i);
+                    // The id alone does not say whether the chunk was a
+                    // single-partition or a multi file, so name the id and
+                    // directory rather than fabricate a filename.
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("missing chunk file: {}", path.display()),
+                        format!("missing chunk file: chunk {i} in {}", tmp_dir.display()),
                     ));
                 }
             }
@@ -221,7 +223,7 @@ impl SortWriter {
 
     /// Adopt chunk files written through this writer's `ChunkSink`.
     /// The sink already owns their ids, so adopting only adds them to the
-    /// manifest and does not separately reconstruct the chunk count.
+    /// in-memory chunk path list and does not separately reconstruct the chunk count.
     pub fn adopt_chunk_files(&mut self, paths: Vec<PathBuf>) {
         self.chunk_paths.extend(paths);
     }

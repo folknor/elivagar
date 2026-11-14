@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A resume now refuses a multi-partition sort chunk whose section table
+  is corrupt (out-of-order partitions or offsets, a zero-record section,
+  a table or section running past the file) instead of deriving silent
+  zero-size sections from it. A missing chunk on `--skip-to ocean` is
+  reported by id and directory rather than a guessed filename.
+
 - The provenance `build` block is typed. `build.rs` writes it once as
   generated Rust instead of string env vars that provenance parsed back,
   and a failed `git status` at build time now records `dirty` as null

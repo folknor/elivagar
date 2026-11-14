@@ -583,6 +583,46 @@ pub(crate) struct SortSourceSlice {
     pub(super) take_records: u32,
 }
 
+/// One section-table entry against its predecessor and the file: the
+/// writer's layout is partitions strictly increasing, sections back to back
+/// from the header end, and no zero-record section.
+fn check_section_entry(
+    prev: Option<&MultiChunkSection>,
+    partition: usize,
+    count: u32,
+    offset: u64,
+    header_end: u64,
+    file_len: u64,
+) -> Result<(), String> {
+    if count == 0 {
+        return Err(format!("partition {partition} has zero records"));
+    }
+    match prev {
+        Some(prev) if partition <= prev.partition => {
+            return Err(format!(
+                "partition {partition} follows partition {}",
+                prev.partition
+            ));
+        }
+        Some(prev) if offset <= prev.offset => {
+            return Err(format!(
+                "offset {offset} does not follow offset {}",
+                prev.offset
+            ));
+        }
+        None if offset != header_end => {
+            return Err(format!(
+                "first section at {offset}, header ends at {header_end}"
+            ));
+        }
+        _ => {}
+    }
+    if offset >= file_len {
+        return Err(format!("offset {offset} is past the {file_len}-byte file"));
+    }
+    Ok(())
+}
+
 pub(super) fn read_multi_chunk_sections(
     path: &Path,
     compression: ChunkCompression,
@@ -612,15 +652,39 @@ pub(super) fn read_multi_chunk_sections(
         ));
     }
 
-    let mut buf4 = [0u8; 4];
-    file.read_exact(&mut buf4)?;
-    let section_count = usize::try_from(u32::from_le_bytes(buf4)).map_err(|_| {
+    // This in-file table is the only section index. There is deliberately no
+    // persisted chunk-store manifest duplicating it: reopening every chunk
+    // header at SortReader::new measured 1.6 s of a ~600 s planet build (290
+    // chunks), assembly opens each section by offset either way, and a key's
+    // valid tile range already follows from the section's partition id. So
+    // the table is validated here against what the writer produces rather
+    // than trusted: partitions strictly increase, the first section starts at
+    // the header end, offsets strictly increase within the file, and every
+    // section holds at least one record. A multi file with zero sections
+    // (empty input) is valid.
+    let invalid = |what: String| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("section count does not fit usize in {}", path.display()),
+            format!("corrupt section table in {}: {what}", path.display()),
         )
-    })?;
-    let mut sections = Vec::with_capacity(section_count);
+    };
+    let file_len = file.metadata()?.len();
+    let mut buf4 = [0u8; 4];
+    file.read_exact(&mut buf4)?;
+    let section_count = u32::from_le_bytes(buf4);
+    if section_count as usize > SORT_PARTITIONS {
+        return Err(invalid(format!(
+            "{section_count} sections exceed {SORT_PARTITIONS} partitions"
+        )));
+    }
+    let header_end = 12 + 16 * u64::from(section_count);
+    if header_end > file_len {
+        return Err(invalid(format!(
+            "{section_count}-section table overruns the {file_len}-byte file"
+        )));
+    }
+    let section_count = section_count as usize;
+    let mut sections: Vec<MultiChunkSection> = Vec::with_capacity(section_count);
     for _ in 0..section_count {
         file.read_exact(&mut buf4)?;
         let partition = usize::try_from(u32::from_le_bytes(buf4)).map_err(|_| {
@@ -643,6 +707,16 @@ pub(super) fn read_multi_chunk_sections(
         file.read_exact(&mut buf8)?;
         let offset = u64::from_le_bytes(buf8);
 
+        check_section_entry(
+            sections.last(),
+            partition,
+            count,
+            offset,
+            header_end,
+            file_len,
+        )
+        .map_err(invalid)?;
+
         sections.push(MultiChunkSection {
             partition,
             offset,
@@ -651,15 +725,22 @@ pub(super) fn read_multi_chunk_sections(
         });
     }
     // Sections are written back to back in table order, so each one's byte
-    // extent is the gap to the next offset (file end for the last). The
-    // extent is a size signal for hot-partition splitting; reading records
-    // still relies only on offset + count.
-    let file_len = file.metadata()?.len();
+    // extent is the gap to the next offset (file end for the last); the
+    // checks above make every gap positive. The extent is a size signal for
+    // hot-partition splitting; reading records still relies only on offset +
+    // count. A plain section must hold at least its record headers.
     for i in 0..sections.len() {
         let next_offset = sections
             .get(i + 1)
             .map_or(file_len, |section| section.offset);
-        sections[i].byte_extent = next_offset.saturating_sub(sections[i].offset);
+        let extent = next_offset - sections[i].offset;
+        if compression == ChunkCompression::None && extent < 12 * u64::from(sections[i].count) {
+            return Err(invalid(format!(
+                "partition {} holds {} records in {extent} bytes",
+                sections[i].partition, sections[i].count
+            )));
+        }
+        sections[i].byte_extent = extent;
     }
     Ok(sections)
 }

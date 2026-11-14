@@ -585,8 +585,9 @@ Reported by the archive-surface hunt.
   uses.
 - Several band-ownership tests in `ocean/band.rs` still hand-build a z14
   `OceanPassGrid` rather than going through `OceanBand`.
-- `sort.rs` tests (about 1100 lines) mix format round-trips and resume
-  semantics; resume tests belong with the chunk-store manifest.
+- `src/sort/merge.rs` tests mix format round-trips and resume semantics;
+  resume tests belong beside `SortWriter::resume` and `SortReader::from_dir`
+  (there is no persisted chunk-store manifest to host them).
 - `archive/writer_tests.rs` hand-decodes directory varints and holds the
   directory codec tests that belong in `archive/directory.rs`, plus
   `test_varint_*` testing protohoggr, not this crate; verify tests assert on

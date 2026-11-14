@@ -33,7 +33,14 @@ of a corrupted or foreign chunk record reaches assembly unchecked. A key for a z
 `[u64; ZOOM_COUNT]` per-zoom counters in `assemble::report::WriteTally` and
 panics; a valid z14 key from another partition is written out of order and
 caught only by the writer's ordering check. The piece pre-scan checks the
-bucket range but runs only for split partitions. Proposed: validate every
+bucket range but runs only for split partitions, and even there
+`assemble/schedule.rs` bucket arithmetic does `tile_id.saturating_sub(range_start)`,
+folding keys below the partition range into bucket zero, and checks the upper
+bound against the rounded bucket envelope rather than `range_end`. The
+section's tile range needs no manifest: each section carries its partition id
+(`partition_tile_range`). The section table itself is now validated at open
+(partition order, offsets, counts); a bad record count or payload length that
+reads into the next section is still caught only by key checks. Proposed: validate every
 decoded key (normal reads and header-only scans) against its section's or
 piece's tile range and return `InvalidData`.
 

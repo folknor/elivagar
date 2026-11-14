@@ -163,7 +163,9 @@ impl SortPartitionReader {
     }
 }
 
-/// Manifest of ordered partitions from current chunk files.
+/// Per-partition source table built from the current chunk files' own
+/// headers (filename grammar plus each multi file's section table); nothing
+/// persisted outside the files indexes them.
 /// Unpartitioned names and incompatible split zooms are rejected.
 pub struct SortReader {
     partitions: Vec<Vec<SortPartitionSource>>,
@@ -213,7 +215,7 @@ impl SortReader {
         Self::new(&chunk_paths, compression)
     }
 
-    /// Read the chunk manifest. Merge cursors open lazily per partition.
+    /// Read every chunk file's header into the source table. Merge cursors open lazily per partition.
     pub(super) fn new(chunk_paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
         let mut partitions = vec![Vec::new(); SORT_PARTITIONS];
         for path in chunk_paths {
@@ -519,6 +521,52 @@ mod tests {
                 .expect("unsupported chunk name must refuse directory loading");
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn corrupt_multi_section_tables_are_refused() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None).unwrap();
+        let p0 = PARTITION_BASES[14];
+        for key in [
+            make_sort_key(partition_start(p0), 0, 0),
+            make_sort_key(partition_start(p0 + 1), 0, 0),
+        ] {
+            writer
+                .push(SortRecord {
+                    key,
+                    data: Box::from(key_bytes(key).as_slice()),
+                })
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        let path = chunk_files_by_id(dir.path()).unwrap()[0]
+            .as_ref()
+            .expect("chunk 0")
+            .1
+            .clone();
+        let good = fs::read(&path).unwrap();
+        // Table: magic (8), section count (4), then per section partition
+        // (4), record count (4), offset (8).
+        // Each corruption overwrites bytes at an offset.
+        let corruptions = [
+            ("sections exceed", 8, u32::MAX.to_le_bytes().to_vec()),
+            ("follows partition", 28, good[12..16].to_vec()),
+            ("does not follow offset", 36, good[20..28].to_vec()),
+            ("header ends", 20, 0u64.to_le_bytes().to_vec()),
+            ("zero records", 16, 0u32.to_le_bytes().to_vec()),
+        ];
+        assert!(SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None).is_ok());
+        for (needle, at, patch) in corruptions {
+            let mut bytes = good.clone();
+            bytes[at..at + patch.len()].copy_from_slice(&patch);
+            fs::write(&path, &bytes).unwrap();
+            let err = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None)
+                .err()
+                .expect("corrupt table must be refused");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{needle}");
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
         }
     }
 
@@ -1183,7 +1231,7 @@ mod tests {
             .unwrap();
 
         // Concurrent producers use a clone of the store-owned sink. Each
-        // producer writes its payload chunk and hands the path to the manifest.
+        // producer writes its payload chunk and hands the path to the writer.
         let sink = writer.chunk_sink();
         let mut payload_a = Vec::new();
         let mut records_a = Vec::new();

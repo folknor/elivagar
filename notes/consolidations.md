@@ -23,20 +23,6 @@ account lives in `notes/bugs.md` instead.
 
 # Run contract, provenance and resume
 
-## CON-003 - Should the chunk store carry a manifest?
-
-The resume contract itself is settled (`src/pipeline/checkpoint.rs`: a PBF
-record and an ocean completion record, one `admit`). What remains is the
-storage hunt's chunk-store manifest: the sort writer records the chunk list
-with each multi file's partition table inlined, so assemble need not reopen
-every multi file to read its section table and filenames could become
-opaque. Today the split zoom is in the filename (an unknown one refuses),
-the codec is in the checkpoint (single-partition files carry no magic), and
-the count is in the completion record checked against a directory scan.
-A manifest would also be the natural input for validating decoded keys
-against their section's tile range (BUG-065). Unmeasured; the payoff is the
-open-time reread, not resume safety.
-
 ---
 
 # Ocean
