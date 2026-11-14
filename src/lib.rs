@@ -15,7 +15,7 @@
 //!     output_path: "output.pmtiles".into(),
 //!     tmp_dir: "data/tilegen_tmp".into(),
 //!     min_zoom: 0,
-//!     max_zoom: 14,
+//!     max_zoom: elivagar::tiling::MAX_ZOOM,
 //!     ocean_shapefile: None,
 //!     ocean_simplified_shapefile: None,
 //!     ocean_tiles: None,
@@ -85,6 +85,7 @@ pub mod svg;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tile_detail;
+pub mod tiling;
 pub mod verify;
 pub(crate) mod way_index;
 pub(crate) mod wire_format;

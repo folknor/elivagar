@@ -8,6 +8,7 @@ use crate::mvt::{self, LayerBuilder};
 use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter};
 use crate::shortbread::{self, Layer};
 use crate::sort;
+use crate::tiling::{MAX_ZOOM, TileId, ZOOM_COUNT, zoom_ids};
 use crate::wire_format::add_feature_to_layer;
 use pbfhogg::ElementReader;
 
@@ -23,7 +24,7 @@ use super::{
 
 /// A tile's features collected from the sort reader, ready for parallel encoding.
 pub(super) struct PendingTile {
-    pub(super) tile_id: u64,
+    pub(super) tile_id: TileId,
     pub(super) features: Vec<(u8, Box<[u8]>)>, // (layer_idx, feature_data)
 }
 
@@ -31,7 +32,7 @@ pub(super) struct PendingTile {
 struct UnknownSortLayerId(u8);
 
 fn sort_layer_error(tile: &PendingTile, error: UnknownSortLayerId) -> PipelineError {
-    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+    let (z, x, y) = tile.tile_id.coord();
     PipelineError(format!(
         "corrupt or foreign sort record has unknown layer id {} in tile {z}/{x}/{y}",
         error.0
@@ -48,7 +49,7 @@ const BROTLI_BUFFER_BYTES: usize = 4096;
 /// contract, and the 32-byte batch item size is asserted below. Repeating the
 /// contract here would enlarge every queued tile without validating its bytes.
 pub(super) struct EncodedTile {
-    pub(super) tile_id: u64,
+    pub(super) tile_id: TileId,
     pub(super) compressed: Vec<u8>,
 }
 
@@ -57,7 +58,7 @@ pub(super) struct EncodedTile {
 pub(super) enum PartitionItem {
     Encoded(EncodedTile),
     RunCopy {
-        tile_id: u64,
+        tile_id: TileId,
         run_length: u32,
         offset: u64,
         length: u32,
@@ -104,7 +105,7 @@ fn scan_source_buckets(
         let Some((key, _data_len)) = cursor.next_header_discard_payload()? else {
             break;
         };
-        let tile_id = sort::tile_id_from_key(key);
+        let tile_id = sort::tile_id_from_key(key).raw();
         let bucket = usize::try_from((tile_id.saturating_sub(range_start)) >> shift)
             .map_err(|_| std::io::Error::other("piece scan bucket does not fit usize"))?;
         if bucket >= bucket_count {
@@ -252,9 +253,9 @@ struct AssembleCore {
     features_read: u64,
     tiles_written: u64,
     pmtiles: PmtilesWriter,
-    tiles_per_zoom: [u64; 15],
-    unique_per_zoom: [u64; 15],
-    bytes_per_zoom: [u64; 15],
+    tiles_per_zoom: [u64; ZOOM_COUNT],
+    unique_per_zoom: [u64; ZOOM_COUNT],
+    bytes_per_zoom: [u64; ZOOM_COUNT],
     max_batch_bytes: usize,
     size_diag: TileSizeDiagnostics,
     reader_ns: u64,
@@ -306,8 +307,8 @@ impl<'a> ArtifactPartitionCtx<'a> {
             .all(|grid| grid.band_is_empty(min_zoom, max_zoom));
         let mut copy_ranges_by_zoom = Vec::new();
         if !band_empty {
-            copy_ranges_by_zoom.reserve(15);
-            for z in 0..=14 {
+            copy_ranges_by_zoom.reserve(ZOOM_COUNT);
+            for z in 0..=MAX_ZOOM {
                 copy_ranges_by_zoom.push(artifact_copy_ranges(ocean, z)?);
             }
         }
@@ -656,9 +657,9 @@ fn phase_assemble_partitions(
             features_read: 0,
             tiles_written: 0,
             pmtiles,
-            tiles_per_zoom: [0; 15],
-            unique_per_zoom: [0; 15],
-            bytes_per_zoom: [0; 15],
+            tiles_per_zoom: [0; ZOOM_COUNT],
+            unique_per_zoom: [0; ZOOM_COUNT],
+            bytes_per_zoom: [0; ZOOM_COUNT],
             max_batch_bytes: 0,
             size_diag: TileSizeDiagnostics::default(),
             reader_ns: 0,
@@ -726,9 +727,9 @@ fn phase_assemble_partitions(
 
     let mut features_read: u64 = 0;
     let mut tiles_written: u64 = 0;
-    let mut tiles_per_zoom = [0u64; 15];
-    let mut unique_per_zoom = [0u64; 15];
-    let mut bytes_per_zoom = [0u64; 15];
+    let mut tiles_per_zoom = [0u64; ZOOM_COUNT];
+    let mut unique_per_zoom = [0u64; ZOOM_COUNT];
+    let mut bytes_per_zoom = [0u64; ZOOM_COUNT];
     let mut max_batch_bytes: usize = 0;
     let mut size_diag = TileSizeDiagnostics::default();
     let mut reader_max_ns: u64 = 0;
@@ -1081,8 +1082,10 @@ fn read_encode_partition(
         let read_result: Result<(), PipelineError> = (|| {
             let mut batch_features_read: u64 = 0;
             let mut batch: Vec<PendingTile> = Vec::with_capacity(BATCH_SIZE);
+            // No tile yet: an empty feature list marks it, since every
+            // started tile holds at least the record that started it.
             let mut current = PendingTile {
-                tile_id: u64::MAX,
+                tile_id: TileId::ZERO,
                 features: Vec::new(),
             };
             let mut current_tile_bytes: usize = 0;
@@ -1093,7 +1096,7 @@ fn read_encode_partition(
             loop {
                 let record = reader.next()?;
                 let Some(r) = record else {
-                    if current.tile_id != u64::MAX {
+                    if !current.features.is_empty() {
                         batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
                     }
@@ -1118,8 +1121,8 @@ fn read_encode_partition(
 
                 let tile_id = sort::tile_id_from_key(r.key);
                 let layer_idx = sort::layer_from_key(r.key);
-                if tile_id != current.tile_id {
-                    if current.tile_id != u64::MAX {
+                if tile_id != current.tile_id || current.features.is_empty() {
+                    if !current.features.is_empty() {
                         batch_bytes += 32 + current_tile_bytes;
                         batch.push(current);
                         if batch.len() >= BATCH_SIZE || batch_bytes >= assemble_budget {
@@ -1230,8 +1233,8 @@ fn artifact_run_copy_items(
             // Preserve zoom boundaries for the per-zoom writer counters.
             // With an empty band, every tile in the source run is copied.
             while cursor < run_end {
-                let z = pmtiles_writer::tile_id_to_zxy(cursor).0;
-                let zoom_end = zoom_tile_id_range(z).1;
+                let z = artifact_tile(cursor)?.zoom();
+                let zoom_end = zoom_ids(z).1;
                 let sub_end = run_end.min(zoom_end);
                 append_artifact_run_copy(&mut items, cursor, sub_end, run.offset, run.length)?;
                 cursor = sub_end;
@@ -1245,8 +1248,8 @@ fn artifact_run_copy_items(
         // `ArtifactPartitionCtx`; intersecting them with this source run
         // avoids decoding every tile ID in long artifact runs.
         while cursor < run_end {
-            let z = pmtiles_writer::tile_id_to_zxy(cursor).0;
-            let zoom_end = zoom_tile_id_range(z).1;
+            let z = artifact_tile(cursor)?.zoom();
+            let zoom_end = zoom_ids(z).1;
             let sub_end = run_end.min(zoom_end);
             let ranges = &artifact.copy_ranges_by_zoom[z as usize];
             let first = ranges.partition_point(|range| range.1 <= cursor);
@@ -1268,6 +1271,18 @@ fn artifact_run_copy_items(
     Ok(items)
 }
 
+/// The artifact's runs are checked against the profile domain when it is
+/// opened (`OceanTiles::open`), so a raw id inside one is a profile tile.
+fn artifact_tile(raw: u64) -> Result<TileId, PipelineError> {
+    TileId::new(raw)
+        .filter(|tile| tile.is_profile())
+        .ok_or_else(|| {
+            PipelineError(format!(
+                "ocean artifact tile id {raw} lies beyond z{MAX_ZOOM}"
+            ))
+        })
+}
+
 fn append_artifact_run_copy(
     items: &mut Vec<PartitionItem>,
     start: u64,
@@ -1279,7 +1294,7 @@ fn append_artifact_run_copy(
         return Ok(());
     }
     items.push(PartitionItem::RunCopy {
-        tile_id: start,
+        tile_id: artifact_tile(start)?,
         run_length: u32::try_from(end - start)
             .map_err(|_| PipelineError("artifact split run length exceeds u32".to_string()))?,
         offset,
@@ -1309,7 +1324,7 @@ fn artifact_copy_ranges_for_grid(
 ) -> Result<Vec<(u64, u64)>, PipelineError> {
     let side = 1_u32 << z;
     let Some(grid) = grid else {
-        let (start, end) = zoom_tile_id_range(z);
+        let (start, end) = zoom_ids(z);
         return Ok(vec![(start, end)]);
     };
     let Some(rect) = non_band_tile_rect(grid, z) else {
@@ -1417,14 +1432,15 @@ fn collect_hilbert_rect_ranges(
         let last_x = end_x - 1;
         let last_y = end_y - 1;
         let start = [
-            pmtiles_writer::try_xy_to_tile_id(z, x, y)?,
-            pmtiles_writer::try_xy_to_tile_id(z, last_x, y)?,
-            pmtiles_writer::try_xy_to_tile_id(z, x, last_y)?,
-            pmtiles_writer::try_xy_to_tile_id(z, last_x, last_y)?,
+            TileId::from_coord(z, x, y)?,
+            TileId::from_coord(z, last_x, y)?,
+            TileId::from_coord(z, x, last_y)?,
+            TileId::from_coord(z, last_x, last_y)?,
         ]
         .into_iter()
         .min()
-        .expect("four tile corners");
+        .expect("four tile corners")
+        .raw();
         let length = u64::from(side) * u64::from(side);
         ranges.push((start, start + length));
         return Ok(());
@@ -1440,28 +1456,23 @@ fn collect_hilbert_rect_ranges(
     Ok(())
 }
 
-fn zoom_tile_id_range(z: u8) -> (u64, u64) {
-    let tiles = 1_u64 << (2 * u32::from(z));
-    let next_zoom_tiles = tiles * 4;
-    ((tiles - 1) / 3, (next_zoom_tiles - 1) / 3)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn write_run_copy(
     pmtiles: &mut PmtilesWriter,
-    tile_id: u64,
+    tile_id: TileId,
     run_length: u32,
     data: &[u8],
     tiles_written: &mut u64,
-    tiles_per_zoom: &mut [u64; 15],
-    unique_per_zoom: &mut [u64; 15],
-    bytes_per_zoom: &mut [u64; 15],
+    tiles_per_zoom: &mut [u64; ZOOM_COUNT],
+    unique_per_zoom: &mut [u64; ZOOM_COUNT],
+    bytes_per_zoom: &mut [u64; ZOOM_COUNT],
     size_diag: &mut TileSizeDiagnostics,
 ) -> Result<(), PipelineError> {
-    let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let z = tile_id.zoom();
     let bytes = u64::try_from(data.len())
         .map_err(|_| PipelineError("tile payload length exceeds u64".to_string()))?;
     let unique = pmtiles.add_run(tile_id, run_length, data)?;
+    let tile_id = tile_id.raw();
     *tiles_written += u64::from(run_length);
     tiles_per_zoom[z as usize] += u64::from(run_length);
     if unique {
@@ -1486,14 +1497,14 @@ fn write_encoded_item(
     pmtiles: &mut PmtilesWriter,
     tile: &EncodedTile,
     tiles_written: &mut u64,
-    tiles_per_zoom: &mut [u64; 15],
-    unique_per_zoom: &mut [u64; 15],
-    bytes_per_zoom: &mut [u64; 15],
+    tiles_per_zoom: &mut [u64; ZOOM_COUNT],
+    unique_per_zoom: &mut [u64; ZOOM_COUNT],
+    bytes_per_zoom: &mut [u64; ZOOM_COUNT],
     size_diag: &mut TileSizeDiagnostics,
 ) -> Result<(), PipelineError> {
-    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+    let (z, x, y) = tile.tile_id.coord();
     let bytes = tile.compressed.len() as u64;
-    record_tile_size_diagnostics(size_diag, tile.tile_id, bytes);
+    record_tile_size_diagnostics(size_diag, tile.tile_id.raw(), bytes);
     let unique = pmtiles.add_tile(z, x, y, &tile.compressed)?;
     *tiles_written += 1;
     tiles_per_zoom[z as usize] += 1;
@@ -1581,11 +1592,11 @@ fn read_varint(data: &[u8], cursor: &mut usize) -> Result<u64, PipelineError> {
 fn splice_ocean_layer(
     mut raw: Vec<u8>,
     field: &[u8],
-    tile_id: u64,
+    tile_id: TileId,
     compression_level: u32,
 ) -> Result<Vec<u8>, PipelineError> {
     raw.extend_from_slice(field);
-    let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let z = tile_id.zoom();
     let level = compression_level_for_zoom(z, compression_level);
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(level));
     use std::io::Write;
@@ -1618,7 +1629,7 @@ fn encode_and_send_partition_batch(
         for tile in pending_tiles {
             items.extend(artifact_run_copy_items(
                 *artifact_cursor,
-                tile.tile_id,
+                tile.tile_id.raw(),
                 artifact,
             )?);
             if encoded
@@ -1633,7 +1644,7 @@ fn encode_and_send_partition_batch(
                 splice_artifact_ocean(&mut encoded, artifact, ctx.compression_level)?;
                 items.push(PartitionItem::Encoded(encoded));
             }
-            *artifact_cursor = tile.tile_id.saturating_add(1);
+            *artifact_cursor = tile.tile_id.raw() + 1;
         }
         if encoded.next().is_some() {
             return Err(PipelineError(
@@ -1665,12 +1676,12 @@ fn splice_artifact_ocean(
     artifact: &ArtifactPartitionCtx<'_>,
     compression_level: u32,
 ) -> Result<(), PipelineError> {
-    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(encoded.tile_id);
+    let (z, x, y) = encoded.tile_id.coord();
     let band = !artifact.band_empty && artifact.ocean.band_tile(z, x, y);
     if band {
         return Ok(());
     }
-    let Some(run) = artifact.ocean.run_covering(encoded.tile_id) else {
+    let Some(run) = artifact.ocean.run_covering(encoded.tile_id.raw()) else {
         return Ok(());
     };
     let raw = crate::pmtiles_reader::gzip_decompress(&encoded.compressed)?;
@@ -1805,7 +1816,7 @@ pub(super) fn encode_tile_batch_mvt(
                 let mut scratch = AssemblyScratch::new();
                 let s = &mut scratch;
 
-                let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+                let z = tile.tile_id.zoom();
                 prepare_tile_layers(s, tile).map_err(|error| sort_layer_error(tile, error))?;
                 // Borrow only the layer field so encoding can use its own buffers.
                 let non_empty = non_empty_layers_in_tile_order(&s.layers);
@@ -1909,11 +1920,10 @@ fn prepare_tile_layers(
         }
     }
 
-    // Full-resolution z14 lines retain the existing MVT policy. Below z14,
-    // join through degree-2 endpoints with the same clip-boundary protection
-    // in both formats; the merger itself selects line geometries.
-    let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
-    if z < 14 {
+    // Full-resolution top-zoom lines retain the existing MVT policy. Below
+    // it, join through degree-2 endpoints with the same clip-boundary
+    // protection in both formats; the merger itself selects line geometries.
+    if tile.tile_id.zoom() < MAX_ZOOM {
         for lb in s.layers.iter_mut().flatten() {
             lb.merge_connected_lines(&mut s.line_merge_scratch);
         }
@@ -1970,7 +1980,7 @@ pub(super) fn encode_tile_batch_mlt(
                     return Ok(None);
                 }
                 let encoded = mlt::encode_tile(&non_empty).map_err(|err| {
-                    let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile.tile_id);
+                    let (z, x, y) = tile.tile_id.coord();
                     PipelineError(format!("mlt encode failed for tile {z}/{x}/{y}: {err}"))
                 })?;
                 Ok(Some(EncodedTile {
@@ -2056,7 +2066,7 @@ mod tests {
                 let side = 1_u32 << z;
                 for ty in 0..side {
                     for tx in 0..side {
-                        let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                        let tile_id = TileId::at(z, tx, ty).raw();
                         let index = ranges.partition_point(|range| range.1 <= tile_id);
                         let artifact_owns = ranges
                             .get(index)
@@ -2077,7 +2087,7 @@ mod tests {
     fn shared_preparation_preserves_ocean_and_line_zoom_policy() {
         for z in [13, 14] {
             let mut tile = PendingTile {
-                tile_id: pmtiles_writer::xy_to_tile_id(z, 0, 0),
+                tile_id: TileId::at(z, 0, 0),
                 features: Vec::new(),
             };
             for coords in [[(100, 100), (200, 100)], [(200, 100), (300, 100)]] {
@@ -2155,6 +2165,10 @@ mod tests {
     /// Records spread across one z14-block partition with a deliberately hot
     /// tile band, plus neighbor-partition records so chunks carry multiple
     /// sections. A leading flush forces a whole-file source as well.
+    fn tile(raw: u64) -> TileId {
+        TileId::new(raw).unwrap()
+    }
+
     fn push_piece_fixture(writer: &mut sort::SortWriter, partition: usize) {
         let base = sort::partition_start_tile_id(partition);
         let neighbor_base = sort::partition_start_tile_id(partition + 1);
@@ -2165,7 +2179,7 @@ mod tests {
             data[8] = 0xEE;
             writer
                 .push(sort::SortRecord {
-                    key: sort::make_sort_key(tile_id, 6, 1),
+                    key: sort::make_sort_key(tile(tile_id), 6, 1),
                     data: data.into_boxed_slice(),
                 })
                 .unwrap();
@@ -2184,14 +2198,14 @@ mod tests {
             let layer = (i % 5) as u8;
             writer
                 .push(sort::SortRecord {
-                    key: sort::make_sort_key(tile_id, layer, 0),
+                    key: sort::make_sort_key(tile(tile_id), layer, 0),
                     data: data.into_boxed_slice(),
                 })
                 .unwrap();
             if i % 3 == 0 {
                 writer
                     .push(sort::SortRecord {
-                        key: sort::make_sort_key(neighbor_base + (i % 16), 0, 0),
+                        key: sort::make_sort_key(tile(neighbor_base + (i % 16)), 0, 0),
                         data: Box::from(i.to_le_bytes().as_slice()),
                     })
                     .unwrap();
@@ -2204,7 +2218,7 @@ mod tests {
         for compression in [sort::ChunkCompression::None, sort::ChunkCompression::Lz4] {
             let dir = tempfile::tempdir().unwrap();
             let mut writer = sort::SortWriter::new(dir.path(), 16 * 1024, compression).unwrap();
-            let first_tile = pmtiles_writer::xy_to_tile_id(14, 0, 0);
+            let first_tile = TileId::at(14, 0, 0);
             let partition_index =
                 sort::partition_from_key(sort::make_sort_key(first_tile, 0, 0)) + 5;
             push_piece_fixture(&mut writer, partition_index);
@@ -2250,7 +2264,7 @@ mod tests {
                 let mut piece_reader =
                     sort::SortPartitionReader::open_slices(&piece.sources, compression).unwrap();
                 while let Some(record) = piece_reader.next().unwrap() {
-                    let tile_id = sort::tile_id_from_key(record.key);
+                    let tile_id = sort::tile_id_from_key(record.key).raw();
                     assert!(
                         tile_id >= piece.start_tile && tile_id < piece.end_tile,
                         "record tile {tile_id} escaped piece [{}, {})",
@@ -2277,7 +2291,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut writer =
             sort::SortWriter::new(dir.path(), 1_000_000, sort::ChunkCompression::None).unwrap();
-        let z7_tile = pmtiles_writer::xy_to_tile_id(7, 0, 0);
+        let z7_tile = TileId::at(7, 0, 0);
         let z7_key = sort::make_sort_key(z7_tile, 0, 0);
         writer
             .push(sort::SortRecord {
@@ -2285,7 +2299,7 @@ mod tests {
                 data: Box::from(z7_key.to_le_bytes().as_slice()),
             })
             .unwrap();
-        let z14_tile = pmtiles_writer::xy_to_tile_id(14, 0, 0);
+        let z14_tile = TileId::at(14, 0, 0);
         let z14_key = sort::make_sort_key(z14_tile, 0, 0);
         writer
             .push(sort::SortRecord {

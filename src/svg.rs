@@ -6,8 +6,8 @@ use std::path::Path;
 use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
 use crate::pmtiles_reader::{PmtilesReader, find_entry};
-use crate::pmtiles_writer::xy_to_tile_id;
 use crate::shortbread::Layer;
+use crate::tiling::{ARCHIVE_MAX_ZOOM, TileId};
 
 use crate::geometry::tiles::EXTENT;
 
@@ -37,10 +37,10 @@ pub fn validate_tile_grid_coordinates(
             "tile grid width and height must be nonzero",
         ));
     }
-    if z > 31 {
+    if z > ARCHIVE_MAX_ZOOM {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("tile zoom {z} is outside the supported range 0 through 31"),
+            format!("tile zoom {z} is outside the supported range 0 through {ARCHIVE_MAX_ZOOM}"),
         ));
     }
 
@@ -109,7 +109,7 @@ pub fn render_tile_grid_svg(
         for dx in 0..width {
             let tx = x0 + dx;
             let ty = y0 + dy;
-            let target_id = xy_to_tile_id(z, tx, ty);
+            let target_id = TileId::at(z, tx, ty).raw();
             if let Some(entry) = find_entry(&runs, target_id) {
                 let decompressed = reader.read_tile(&entry)?;
                 let layers = decode_mvt_geometry(&decompressed)?;

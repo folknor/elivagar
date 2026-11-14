@@ -321,7 +321,7 @@ fn parse_tile_zoom(s: &str) -> Result<u8, String> {
     let z = s
         .parse::<u8>()
         .map_err(|_| format!("invalid tile zoom '{s}', expected 0 through 31"))?;
-    if z > 31 {
+    if z > elivagar::tiling::ARCHIVE_MAX_ZOOM {
         return Err(format!("invalid tile zoom '{s}', expected 0 through 31"));
     }
     Ok(z)
@@ -380,7 +380,7 @@ fn parse_ocean_spec(spec: &str) -> Result<(Option<(u8, u8)>, PathBuf), String> {
         .split_once("-")
         .ok_or_else(|| format!("'{range}' is not a zoom range (expected z0-z7)"))?;
     let (lo, hi) = (parse_z(lo)?, parse_z(hi)?);
-    if lo > hi || hi > 14 {
+    if lo > hi || hi > elivagar::tiling::MAX_ZOOM {
         return Err(format!("'{range}' is not a zoom range within z0-z14"));
     }
     Ok((Some((lo, hi)), PathBuf::from(path)))
@@ -571,13 +571,12 @@ fn main() {
 
 fn diag_ocean_rings(path: &Path, z: u8, x: u32, y: u32) -> std::io::Result<()> {
     use elivagar::pmtiles_reader::{PmtilesReader, find_entry};
-    use elivagar::pmtiles_writer::xy_to_tile_id;
     use protohoggr::{Cursor, WIRE_LEN};
 
     elivagar::svg::validate_tile_grid_coordinates(z, x, y, 1, 1)?;
     let mut reader = PmtilesReader::open(path)?;
     let runs = reader.read_all_runs()?;
-    let tile_id = xy_to_tile_id(z, x, y);
+    let tile_id = elivagar::tiling::TileId::from_coord(z, x, y)?.raw();
     let entry = find_entry(&runs, tile_id)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "tile not found"))?;
     let raw = reader.read_tile(&entry)?;
@@ -859,7 +858,7 @@ fn run(args: RunArgs) {
         output_path: args.output,
         tmp_dir: args.tmp_dir,
         min_zoom: 0,
-        max_zoom: 14,
+        max_zoom: elivagar::tiling::MAX_ZOOM,
         ocean_shapefile: ocean_inputs.high,
         ocean_simplified_shapefile: ocean_inputs.low,
         ocean_tiles: ocean_inputs.artifact,

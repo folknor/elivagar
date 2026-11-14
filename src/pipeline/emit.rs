@@ -1,6 +1,7 @@
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
+use super::stats::CapEvent;
 use crate::geometry::int_ocean::{
     IntRect, OSM_DP_TOL_PX, PinnedRings, Shape, TILE_BUFFER_I32, quantize_polygon_into,
     quantize_polygon_pinned_into, shape_bbox,
@@ -17,12 +18,12 @@ use crate::geometry::{
 };
 use crate::multipolygon::MemberWay;
 use crate::mvt::{self, GeomType};
-use crate::pmtiles_writer;
 #[cfg(test)]
 use crate::shortbread::AttrValue;
 use crate::shortbread::{GeomExpect, Layer, LayerMatch, OsmGeomType, PolygonPointStrategy};
 pub(crate) use crate::sort::RecordTally;
-use crate::sort::{self, SortRecord};
+use crate::sort::{self, LayerZoom, SortRecord};
+use crate::tiling::{MAX_ZOOM, TileId, ZOOM_COUNT};
 use crate::wire_format::{
     append_feature_data_with_attrs, encode_attrs_bytes, encode_feature_data_with_attrs,
 };
@@ -185,11 +186,10 @@ impl LineEmitScratch {
 
 pub(super) struct PolygonEmitScratch {
     pub(super) pyramid: PyramidScratch,
-    pub(super) attrs_by_zoom: [Option<Vec<u8>>; 15],
+    pub(super) attrs_by_zoom: [Option<Vec<u8>>; ZOOM_COUNT],
     pub(super) pin_keys: FxHashSet<(i64, i64)>,
     pub(super) base_pins: FxHashSet<(i32, i32)>,
-    /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64, osm_id as u64).
-    pub(super) cap_events: Vec<(u16, u64, u64)>,
+    pub(super) cap_events: Vec<CapEvent>,
     /// Quantized base shape + pin flags, ring Vecs recycled across features
     /// (H6: one fresh Shape per feature was 5.2 GB per denmark build).
     pub(super) shape_base: Shape,
@@ -212,10 +212,9 @@ impl PolygonEmitScratch {
 
 pub(super) struct MultipolygonEmitScratch {
     pub(super) pyramid: PyramidScratch,
-    pub(super) attrs_by_zoom: [Option<Vec<u8>>; 15],
+    pub(super) attrs_by_zoom: [Option<Vec<u8>>; ZOOM_COUNT],
     pub(super) base_pins: FxHashSet<(i32, i32)>,
-    /// Cap events: (layer_zoom_idx as u16, bbox_tiles as u64, osm_id as u64).
-    pub(super) cap_events: Vec<(u16, u64, u64)>,
+    pub(super) cap_events: Vec<CapEvent>,
     /// See `PolygonEmitScratch::shape_base`.
     pub(super) shape_base: Shape,
     pub(super) flags_base: PinnedRings,
@@ -390,7 +389,7 @@ impl FeatureRecordSink for RecordSink {
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_sort_record<T: FeatureRecordSink + ?Sized>(
-    tile_id: u64,
+    tile_id: TileId,
     osm_id: u64,
     layer: Layer,
     paint_rank: u8,
@@ -403,7 +402,9 @@ pub(super) fn push_sort_record<T: FeatureRecordSink + ?Sized>(
     records.push_feature(key, osm_id, geom_type, geom_buf, attrs_buf);
 }
 
-const OSM_POLYGON_MAX_Z: u8 = 14;
+/// OSM polygons quantize on the profile's top-zoom grid whatever the run's
+/// zoom window, so a narrowed archive's polygons match a full build's.
+const OSM_POLYGON_MAX_Z: u8 = MAX_ZOOM;
 
 fn polygon_min_area(z: u8, layer: Layer) -> Area {
     if z >= OSM_POLYGON_MAX_Z || layer == Layer::StreetPolygons || layer == Layer::Bridges {
@@ -458,34 +459,29 @@ fn polygon_z_bottom_after_caps(
     layer: Layer,
     osm_id: u64,
     fanout_cap: u32,
-    cap_events: &mut Vec<(u16, u64, u64)>,
+    cap_events: &mut Vec<CapEvent>,
 ) -> Option<u8> {
     if fanout_cap == 0 {
         return Some(z_hi);
     }
     let bbox = shape_bbox(shape_base)?;
     let mut z_bottom = z_hi;
+    let event = |z: u8, bbox_tiles: u64| CapEvent {
+        at: LayerZoom::new(layer, z).expect("OSM polygon zooms are profile zooms"),
+        bbox_tiles,
+        osm_id,
+    };
     for z in z_start..=z_hi {
         let bbox_tiles = tile_count_for_base_rect(bbox, OSM_POLYGON_MAX_Z, z);
         if bbox_tiles > u64::from(fanout_cap) {
-            #[allow(clippy::cast_possible_truncation)]
-            cap_events.push((
-                (layer as usize * 15 + z as usize) as u16,
-                bbox_tiles,
-                osm_id,
-            ));
+            cap_events.push(event(z, bbox_tiles));
             if z == z_start {
                 return None;
             }
             z_bottom = z - 1;
             for capped_z in z + 1..=z_hi {
                 let capped_tiles = tile_count_for_base_rect(bbox, OSM_POLYGON_MAX_Z, capped_z);
-                #[allow(clippy::cast_possible_truncation)]
-                cap_events.push((
-                    (layer as usize * 15 + capped_z as usize) as u16,
-                    capped_tiles,
-                    osm_id,
-                ));
+                cap_events.push(event(capped_z, capped_tiles));
             }
             break;
         }
@@ -493,7 +489,41 @@ fn polygon_z_bottom_after_caps(
     Some(z_bottom)
 }
 
-fn clear_attrs_cache(cache: &mut [Option<Vec<u8>>; 15]) {
+/// The zoom plan of one OSM polygon under a run's zoom window `z_lo..=z_hi`.
+///
+/// Construction is canonical: the first zoom comes from the layer's own range
+/// (`m.min_zoom..=m.max_zoom`), not the window, because the pyramid clips
+/// every zoom from its root fragments and a root chosen inside a raised window
+/// would reach that zoom along a different path than a full build does. Only
+/// the descent's floor is cut at the window's top, which cannot change a
+/// shallower zoom, and the sink drops zooms below the window. Returns
+/// `(z_top, z_bottom)` for the pyramid, or `None` when the polygon has no tile
+/// in the window. Cap events describe the requested archive: only zooms in
+/// the window are kept.
+#[allow(clippy::too_many_arguments)]
+fn polygon_zoom_plan(
+    shape_base: &Shape,
+    merc: &[Point],
+    m: &LayerMatch,
+    z_lo: u8,
+    z_hi: u8,
+    osm_id: u64,
+    fanout_cap: u32,
+    cap_events: &mut Vec<CapEvent>,
+) -> Option<(u8, u8)> {
+    let z_start = polygon_z_start(merc, m.min_zoom.min(z_lo), m.max_zoom.max(z_hi))?;
+    if z_start > z_hi {
+        return None;
+    }
+    let z_bottom = polygon_z_bottom_after_caps(
+        shape_base, z_start, z_hi, m.layer, osm_id, fanout_cap, cap_events,
+    );
+    cap_events.retain(|event| event.at.zoom() >= z_lo);
+    let z_bottom = z_bottom?;
+    (z_bottom >= z_lo).then_some((z_start, z_bottom))
+}
+
+fn clear_attrs_cache(cache: &mut [Option<Vec<u8>>; ZOOM_COUNT]) {
     cache.fill_with(|| None);
 }
 
@@ -530,9 +560,9 @@ pub(super) enum FeatureGeometry<'a> {
     },
 }
 
-fn harvest_cap_events(events: &mut Vec<(u16, u64, u64)>, fanout: &mut super::stats::FanoutStats) {
-    for (idx, tiles, osm_id) in events.drain(..) {
-        fanout.record_cap(idx as usize / 15, idx as usize % 15, tiles, osm_id);
+fn harvest_cap_events(events: &mut Vec<CapEvent>, fanout: &mut super::stats::FanoutStats) {
+    for event in events.drain(..) {
+        fanout.record_cap(event);
     }
 }
 
@@ -576,7 +606,7 @@ pub(super) fn emit_match(
                             let (px, py) = geometry::projection::merc_to_tile_px(p, tx, ty, z);
                             mvt::encode_point(&mut point.geom_buf, px, py);
                             push_sort_record(
-                                pmtiles_writer::xy_to_tile_id(z, tx, ty),
+                                TileId::at(z, tx, ty),
                                 osm_id,
                                 m.layer,
                                 m.paint_rank,
@@ -808,7 +838,7 @@ fn emit_projected_point(
     for z in z_lo..=z_hi {
         encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
         geometry::tiles::for_each_tile_in_bbox(&cbbox, z, |tx, ty| {
-            let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+            let tile_id = TileId::at(z, tx, ty);
             let (px, py) = geometry::projection::merc_to_tile_px(&p, tx, ty, z);
             mvt::encode_point(&mut scratch.geom_buf, px, py);
             push_sort_record(
@@ -860,7 +890,8 @@ pub(super) fn emit_line_feature(
         let single_tile = geometry::tiles::is_single_tile(&simp_bbox, z);
 
         // Skip min-size filtering at max zoom and for boundaries/streets
-        let skip_size_filter = z >= 14 || m.layer == Layer::Boundaries || m.layer == Layer::Streets;
+        let skip_size_filter =
+            z >= MAX_ZOOM || m.layer == Layer::Boundaries || m.layer == Layer::Streets;
         geometry::tiles::for_each_tile_in_bbox(&simp_bbox, z, |tx, ty| {
             if single_tile {
                 // Fast path: bbox fits in one tile - clipping is a no-op.
@@ -875,7 +906,7 @@ pub(super) fn emit_line_feature(
                 if scratch.geom_buf.is_empty() {
                     return;
                 }
-                let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                let tile_id = TileId::at(z, tx, ty);
                 push_sort_record(
                     tile_id,
                     osm_id,
@@ -901,7 +932,7 @@ pub(super) fn emit_line_feature(
                     if scratch.geom_buf.is_empty() {
                         return;
                     }
-                    let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+                    let tile_id = TileId::at(z, tx, ty);
                     push_sort_record(
                         tile_id,
                         osm_id,
@@ -922,11 +953,16 @@ pub(super) fn emit_line_feature(
     // at low zoom but must survive to maintain road network connectivity.
     let skip_bbox_check = m.layer == Layer::Boundaries || m.layer == Layer::Streets;
     if has_pins {
+        // Each zoom simplifies the source independently, so the window alone
+        // decides which zooms run.
         for z in (z_lo..=z_hi).rev() {
-            if z < 14 && !skip_bbox_check && geometry::simplify::merc_bbox_is_subpixel(merc, z) {
+            if z < MAX_ZOOM
+                && !skip_bbox_check
+                && geometry::simplify::merc_bbox_is_subpixel(merc, z)
+            {
                 break;
             }
-            if z < 14 {
+            if z < MAX_ZOOM {
                 let tol = geometry::simplify::simplify_tolerance(z);
                 let _ = geometry::simplify::simplify_into_with_required(
                     merc,
@@ -944,15 +980,21 @@ pub(super) fn emit_line_feature(
             }
         }
     } else {
+        // The cascade simplifies each zoom from the one above it, so it starts
+        // at the layer's own top zoom, not the window's: a cascade begun at a
+        // lowered window top would reach the window along a different chain
+        // than a full build. Zooms above the window run but do not emit.
         geometry::simplify::for_each_zoom_simplified(
             merc,
             z_lo,
-            z_hi,
+            m.max_zoom.max(z_hi),
             2,
             |_| 1.0,
             skip_bbox_check,
             |z, simplified| {
-                run_for_zoom(z, simplified);
+                if z <= z_hi {
+                    run_for_zoom(z, simplified);
+                }
             },
         );
     }
@@ -1006,14 +1048,12 @@ pub(super) fn emit_polygon_feature(
         &mut scratch.base_pins,
     );
 
-    let Some(z_start) = polygon_z_start(merc, z_lo, z_hi) else {
-        return 0;
-    };
-    let Some(z_bottom) = polygon_z_bottom_after_caps(
+    let Some((z_start, z_bottom)) = polygon_zoom_plan(
         &scratch.shape_base,
-        z_start,
+        merc,
+        m,
+        z_lo,
         z_hi,
-        m.layer,
         osm_id,
         fanout_cap,
         &mut scratch.cap_events,
@@ -1039,6 +1079,11 @@ pub(super) fn emit_polygon_feature(
     let attrs_by_zoom = &mut scratch.attrs_by_zoom;
     let pyramid = &mut scratch.pyramid;
     let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32], _kind| {
+        // Zooms above the window are constructed (see `polygon_zoom_plan`)
+        // but not emitted.
+        if z < z_lo {
+            return;
+        }
         let attrs_buf = attrs_by_zoom
             .get_mut(z as usize)
             .expect("OSM polygon zoom fits attr cache")
@@ -1047,7 +1092,7 @@ pub(super) fn emit_polygon_feature(
                 encode_attrs_bytes(&mut buf, &m.attrs, z);
                 buf
             });
-        let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+        let tile_id = TileId::at(z, tx, ty);
         push_sort_record(
             tile_id,
             osm_id,
@@ -1111,14 +1156,12 @@ pub(super) fn emit_multipolygon_feature(
         &mut emit_scratch.base_pins,
     );
 
-    let Some(z_start) = polygon_z_start(outer, z_lo, z_hi) else {
-        return 0;
-    };
-    let Some(z_bottom) = polygon_z_bottom_after_caps(
+    let Some((z_start, z_bottom)) = polygon_zoom_plan(
         &emit_scratch.shape_base,
-        z_start,
+        outer,
+        m,
+        z_lo,
         z_hi,
-        m.layer,
         osm_id,
         fanout_cap,
         &mut emit_scratch.cap_events,
@@ -1144,6 +1187,11 @@ pub(super) fn emit_multipolygon_feature(
     let attrs_by_zoom = &mut emit_scratch.attrs_by_zoom;
     let pyramid = &mut emit_scratch.pyramid;
     let mut sink = |z: u8, tx: u32, ty: u32, geom: &[u32], _kind| {
+        // Zooms above the window are constructed (see `polygon_zoom_plan`)
+        // but not emitted.
+        if z < z_lo {
+            return;
+        }
         let attrs_buf = attrs_by_zoom
             .get_mut(z as usize)
             .expect("OSM polygon zoom fits attr cache")
@@ -1152,7 +1200,7 @@ pub(super) fn emit_multipolygon_feature(
                 encode_attrs_bytes(&mut buf, &m.attrs, z);
                 buf
             });
-        let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+        let tile_id = TileId::at(z, tx, ty);
         push_sort_record(
             tile_id,
             osm_id,
@@ -1252,7 +1300,7 @@ mod landing2_tests {
             ),
             1
         );
-        let (z, x, _) = pmtiles_writer::tile_id_to_zxy(sort::tile_id_from_key(records[0].key));
+        let (z, x, _) = sort::tile_id_from_key(records[0].key).coord();
         assert_eq!((z, x), (12, 4095));
     }
 
@@ -1395,12 +1443,13 @@ mod landing2_tests {
             polygon_z_bottom_after_caps(&shape, 0, 4, Layer::Buildings, 777, 4, &mut cap_events)
                 .expect("low zooms stay below cap");
         assert_eq!(z_bottom, 1);
-        let capped_zooms: Vec<u8> = cap_events
-            .iter()
-            .map(|&(idx, _, _)| u8::try_from(idx as usize % 15).expect("zoom fits"))
-            .collect();
+        let capped_zooms: Vec<u8> = cap_events.iter().map(|event| event.at.zoom()).collect();
         assert_eq!(capped_zooms, vec![2, 3, 4]);
-        assert!(cap_events.windows(2).all(|w| w[0].1 <= w[1].1));
+        assert!(
+            cap_events
+                .windows(2)
+                .all(|w| w[0].bbox_tiles <= w[1].bbox_tiles)
+        );
     }
 
     fn attr_count(data: &[u8]) -> u8 {
@@ -1443,7 +1492,7 @@ mod landing2_tests {
 
         for rec in &records {
             let tile_id = sort::tile_id_from_key(rec.key);
-            let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile_id);
+            let z = tile_id.zoom();
             let want_count = if z >= 13 { 2 } else { 1 };
             assert_eq!(attr_count(&rec.data), want_count, "z{z}");
 

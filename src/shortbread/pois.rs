@@ -13,6 +13,7 @@ use crate::shortbread::{
     Attr, GeomExpect, Layer, LayerMatch, Tags, attr_bool, attr_dyn, attr_int, attr_str, name_attrs,
     osm_value,
 };
+use crate::tiling::MAX_ZOOM;
 use smallvec::{SmallVec, smallvec};
 
 // ---------------------------------------------------------------------------
@@ -40,7 +41,7 @@ fn match_pois(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<[Laye
         out.push(LayerMatch {
             layer: Layer::Pois,
             min_zoom: 14,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect,
             paint_rank: 0,
             attrs,

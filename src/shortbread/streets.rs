@@ -118,7 +118,7 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
     out.push(LayerMatch {
         layer: Layer::Streets,
         min_zoom,
-        max_zoom: 14,
+        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Line,
         paint_rank,
         attrs,
@@ -149,7 +149,7 @@ pub(super) fn match_street_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
         out.push(LayerMatch {
             layer: Layer::StreetPolygons,
             min_zoom,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank,
             attrs,
@@ -206,7 +206,7 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
     out.push(LayerMatch {
         layer: Layer::StreetLabels,
         min_zoom,
-        max_zoom: 14,
+        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Line,
         paint_rank: 0,
         attrs,
@@ -268,7 +268,7 @@ pub(super) fn match_street_labels_points(tags: &Tags<'_>, out: &mut SmallVec<[La
     out.push(LayerMatch {
         layer: Layer::StreetLabelsPoints,
         min_zoom: 12,
-        max_zoom: 14,
+        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Point,
         paint_rank: 0,
         attrs,
@@ -289,7 +289,7 @@ pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<
         out.push(LayerMatch {
             layer: Layer::StreetsPolygonsLabels,
             min_zoom: 14,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: Layer::StreetsPolygonsLabels.polygon_point_geom_expect(),
             paint_rank: 0,
             attrs,
@@ -318,7 +318,7 @@ pub(super) fn match_bridges(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
         out.push(LayerMatch {
             layer: Layer::Bridges,
             min_zoom: 12,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_str("kind", "bridge")],

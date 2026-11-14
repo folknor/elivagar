@@ -1,6 +1,18 @@
 use super::*;
 use protohoggr::encode_varint;
 
+fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
+    TileId::at(z, x, y).raw()
+}
+
+fn tid(raw: u64) -> TileId {
+    TileId::new(raw).unwrap()
+}
+
+fn tile_id_to_zxy(tile_id: u64) -> (u8, u32, u32) {
+    TileId::new(tile_id).unwrap().coord()
+}
+
 fn read_u64_le(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
 }
@@ -51,104 +63,6 @@ fn add_monotonic_unique_tiles(writer: &mut PmtilesWriter, z: u8, count: usize) {
         assert_eq!(z2, z, "tile_id {tile_id} should decode back to z={z}");
         let payload = (i as u64).to_le_bytes();
         writer.add_tile(z2, x, y, &payload).unwrap();
-    }
-}
-
-// -----------------------------------------------------------------------
-// Hilbert round-trip
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_hilbert_z0() {
-    assert_eq!(xy_to_tile_id(0, 0, 0), 0);
-    assert_eq!(tile_id_to_zxy(0), (0, 0, 0));
-}
-
-#[test]
-fn checked_hilbert_conversion_rejects_invalid_coordinates() {
-    assert!(try_xy_to_tile_id(31, (1_u32 << 31) - 1, (1_u32 << 31) - 1).is_ok());
-
-    for (z, x, y) in [(32, 0, 0), (64, 0, 0), (1, 2, 0), (1, 0, 2)] {
-        let error = try_xy_to_tile_id(z, x, y).expect_err("invalid coordinates must be refused");
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    }
-
-    assert!(std::panic::catch_unwind(|| xy_to_tile_id(1, 2, 0)).is_err());
-}
-
-#[test]
-fn test_hilbert_z1_known_values() {
-    // z=1: base = (4-1)/3 = 1, 4 tiles at IDs 1..4
-    assert_eq!(xy_to_tile_id(1, 0, 0), 1);
-    assert_eq!(xy_to_tile_id(1, 0, 1), 2);
-    assert_eq!(xy_to_tile_id(1, 1, 1), 3);
-    assert_eq!(xy_to_tile_id(1, 1, 0), 4);
-}
-
-#[test]
-fn test_hilbert_z2_base() {
-    // z=2: base = (16-1)/3 = 5
-    assert_eq!(xy_to_tile_id(2, 0, 0), 5);
-}
-
-#[test]
-fn test_hilbert_roundtrip_z1() {
-    for x in 0..2u32 {
-        for y in 0..2u32 {
-            let id = xy_to_tile_id(1, x, y);
-            let (z2, x2, y2) = tile_id_to_zxy(id);
-            assert_eq!(
-                (1u8, x, y),
-                (z2, x2, y2),
-                "roundtrip failed for z=1,x={x},y={y}"
-            );
-        }
-    }
-}
-
-#[test]
-fn test_hilbert_roundtrip_z2() {
-    for x in 0..4u32 {
-        for y in 0..4u32 {
-            let id = xy_to_tile_id(2, x, y);
-            let (z2, x2, y2) = tile_id_to_zxy(id);
-            assert_eq!(
-                (2u8, x, y),
-                (z2, x2, y2),
-                "roundtrip failed for z=2,x={x},y={y}"
-            );
-        }
-    }
-}
-
-#[test]
-fn test_hilbert_roundtrip_z5() {
-    let n = 1u32 << 5;
-    for x in 0..n {
-        for y in 0..n {
-            let id = xy_to_tile_id(5, x, y);
-            let (z2, x2, y2) = tile_id_to_zxy(id);
-            assert_eq!(
-                (5u8, x, y),
-                (z2, x2, y2),
-                "roundtrip failed for z=5,x={x},y={y}"
-            );
-        }
-    }
-}
-
-#[test]
-fn test_hilbert_roundtrip_z10_sample() {
-    for x in (0..1024u32).step_by(37) {
-        for y in (0..1024u32).step_by(41) {
-            let id = xy_to_tile_id(10, x, y);
-            let (z2, x2, y2) = tile_id_to_zxy(id);
-            assert_eq!(
-                (10u8, x, y),
-                (z2, x2, y2),
-                "roundtrip failed for z=10,x={x},y={y}"
-            );
-        }
     }
 }
 
@@ -771,7 +685,7 @@ fn add_run_records_one_blob_and_all_addressed_tiles() {
     };
     let mut writer = PmtilesWriter::new(config);
     let base = xy_to_tile_id(3, 0, 0);
-    assert!(writer.add_run(base, 4, b"ocean").expect("add run"));
+    assert!(writer.add_run(tid(base), 4, b"ocean").expect("add run"));
     assert_eq!(writer.num_addressed, 4);
     assert_eq!(writer.unique_tile_count(), 1);
     let entries = writer.collect_dir_entries().expect("collect directory");
@@ -839,10 +753,10 @@ fn add_run_rejects_overlapping_ids_without_mutating_writer() {
     };
     let mut writer = PmtilesWriter::new(config);
     let base = xy_to_tile_id(1, 0, 0);
-    writer.add_run(base, 2, b"shared").expect("first run");
+    writer.add_run(tid(base), 2, b"shared").expect("first run");
 
     let error = writer
-        .add_run(base + 1, 1, b"overlap")
+        .add_run(tid(base + 1), 1, b"overlap")
         .expect_err("a run overlapping the previous run must be rejected");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(writer.tile_count(), 2);
@@ -850,7 +764,7 @@ fn add_run_rejects_overlapping_ids_without_mutating_writer() {
 
     assert!(
         !writer
-            .add_run(base + 2, 1, b"shared")
+            .add_run(tid(base + 2), 1, b"shared")
             .expect("next run after rejected input")
     );
     let entries = writer.collect_dir_entries().expect("directory entries");
@@ -868,10 +782,13 @@ fn add_run_rejects_tile_id_overflow_without_mutating_writer() {
     };
     let mut writer = PmtilesWriter::new(config);
 
-    for run_length in [1, 2] {
+    // The last z31 id is addressable, so a one-tile run there is legal; a
+    // run reaching past it is not.
+    let last = crate::tiling::ARCHIVE_ID_END - 1;
+    for (start, run_length) in [(last, 2), (last - 1, 3), (last, u32::MAX)] {
         let error = writer
-            .add_run(u64::MAX, run_length, b"overflow")
-            .expect_err("the exclusive tile ID run end must not overflow");
+            .add_run(tid(start), run_length, b"overflow")
+            .expect_err("a run must end within the addressable tile ids");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
     assert_eq!(writer.tile_count(), 0);
@@ -895,7 +812,7 @@ fn add_run_counts_dedup_candidate_rejections() {
 
     assert!(
         writer
-            .add_run(xy_to_tile_id(1, 0, 0), 2, &data)
+            .add_run(tid(xy_to_tile_id(1, 0, 0)), 2, &data)
             .expect("add run")
     );
     assert_eq!(writer.dedup_stats.candidates, 1);
@@ -922,7 +839,7 @@ fn add_run_matches_expanded_add_tile_below_dedup_cap() {
     let payload = b"ocean";
     let mut run_writer = PmtilesWriter::new(run_config);
     let mut tile_writer = PmtilesWriter::new(tile_config);
-    assert!(run_writer.add_run(base, 4, payload).expect("add run"));
+    assert!(run_writer.add_run(tid(base), 4, payload).expect("add run"));
     for tile_id in base..base + 4 {
         let (z, x, y) = tile_id_to_zxy(tile_id);
         let _ = tile_writer.add_tile(z, x, y, payload).expect("add tile");
@@ -958,7 +875,7 @@ fn add_run_preserves_run_sharing_after_the_dedup_cap() {
     let mut tile_writer = PmtilesWriter::new(tile_config);
     run_writer.set_dedup_cap(0);
     tile_writer.set_dedup_cap(0);
-    assert!(run_writer.add_run(base, 4, payload).expect("add run"));
+    assert!(run_writer.add_run(tid(base), 4, payload).expect("add run"));
     for tile_id in base..base + 4 {
         let (z, x, y) = tile_id_to_zxy(tile_id);
         assert!(tile_writer.add_tile(z, x, y, payload).expect("add tile"));

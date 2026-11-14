@@ -171,9 +171,16 @@ pub struct TilegenConfig {
     pub output_path: PathBuf,
     /// Directory for temporary sort chunks and intermediate files.
     pub tmp_dir: PathBuf,
-    /// Minimum zoom level (0-14).
+    /// First zoom of the archive, at most `max_zoom`.
+    ///
+    /// The zoom bounds are a truncation window over the profile range
+    /// `0..=tiling::MAX_ZOOM`: geometry is constructed over each layer's own
+    /// zoom range and only emission is restricted, so a narrowed archive holds
+    /// the same OSM tiles a full build holds at those zooms. Computed ocean
+    /// does not yet follow this rule (its pass grid takes `max_zoom`), and the
+    /// ocean artifact refuses any window but the full range.
     pub min_zoom: u8,
-    /// Maximum zoom level (0-14). Must be >= `min_zoom`.
+    /// Last zoom of the archive, at most `tiling::MAX_ZOOM`.
     pub max_zoom: u8,
     /// Ocean polygon shapefile (`water-polygons-split-3857`). Required for
     /// water fill tiles. When combined with `ocean_simplified_shapefile`,
@@ -618,7 +625,7 @@ fn validate_compression_level(level: u32) -> Result<(), PipelineError> {
 pub(super) fn compression_level_for_zoom(z: u8, compression_level: u32) -> u32 {
     match z {
         0..=8 => compression_level.clamp(9, 10),
-        13..=14 => compression_level.min(3),
+        13..=crate::tiling::MAX_ZOOM => compression_level.min(3),
         _ => compression_level,
     }
 }
@@ -669,7 +676,7 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
         tile_format.header_tile_type(),
         tile_compression.header_value(),
     );
-    if decoder.is_err() || config.min_zoom != 0 || config.max_zoom != 14 {
+    if decoder.is_err() || config.min_zoom != 0 || config.max_zoom != crate::tiling::MAX_ZOOM {
         return Err(PipelineError(format!(
             "ocean artifact {} was named but cannot serve this run: it is built for the MVT + gzip + z0-14 contract, and this run is {:?} + {:?} + z{}-z{}. Drop the artifact from --ocean to compute the ocean instead.",
             path.display(),
@@ -706,7 +713,7 @@ fn resolved_ocean_mode(config: &TilegenConfig) -> Result<OceanMode, PipelineErro
         &full,
         simplified.as_ref(),
         0,
-        14,
+        crate::tiling::MAX_ZOOM,
         config.compression_level,
     )?;
     Ok(OceanMode::Band { key })
@@ -826,10 +833,11 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if config.tile_format == TilePayloadFormat::Mvt {
         validate_compression_level(config.compression_level)?;
     }
-    if config.max_zoom > 14 {
+    if config.max_zoom > crate::tiling::MAX_ZOOM {
         return Err(PipelineError(format!(
-            "max_zoom {} exceeds maximum supported zoom level 14",
-            config.max_zoom
+            "max_zoom {} exceeds maximum supported zoom level {}",
+            config.max_zoom,
+            crate::tiling::MAX_ZOOM
         )));
     }
     if config.min_zoom > config.max_zoom {
@@ -1312,15 +1320,17 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         }
         let layer_stats = layer_stats_enabled();
         for (i, (&recs, &bytes)) in s.layer_records.iter().zip(s.layer_bytes.iter()).enumerate() {
-            if recs > 0 && i < shortbread::Layer::ALL.len() {
-                let name = shortbread::Layer::ALL[i].name();
+            if recs > 0
+                && let Some(&layer) = shortbread::Layer::ALL.get(i)
+            {
+                let name = layer.name();
                 emit_counter_u64(&format!("sort_layer_{name}_records"), recs);
                 emit_counter_u64(&format!("sort_layer_{name}_bytes"), bytes);
                 if !layer_stats {
                     continue;
                 }
-                for z in 0..15u8 {
-                    let idx = i * 15 + z as usize;
+                for z in 0..=crate::tiling::MAX_ZOOM {
+                    let idx = crate::sort::LayerZoom::new(layer, z).expect("profile zoom");
                     let zr = s.layer_zoom_records[idx];
                     let zb = s.layer_zoom_bytes[idx];
                     if zr > 0 {
@@ -1333,15 +1343,15 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     if max > 0 {
                         emit_counter_u64(
                             &format!("sort_layer_{name}_z{z}_fanout_p50"),
-                            u64::from(s.fanout_stats.percentile(i, z as usize, 0.50)),
+                            u64::from(s.fanout_stats.percentile(idx, 0.50)),
                         );
                         emit_counter_u64(
                             &format!("sort_layer_{name}_z{z}_fanout_p95"),
-                            u64::from(s.fanout_stats.percentile(i, z as usize, 0.95)),
+                            u64::from(s.fanout_stats.percentile(idx, 0.95)),
                         );
                         emit_counter_u64(
                             &format!("sort_layer_{name}_z{z}_fanout_p99"),
-                            u64::from(s.fanout_stats.percentile(i, z as usize, 0.99)),
+                            u64::from(s.fanout_stats.percentile(idx, 0.99)),
                         );
                         emit_counter_u64(
                             &format!("sort_layer_{name}_z{z}_fanout_max"),
@@ -1361,8 +1371,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     }
                 }
                 for &thresh in &[128u32, 512, 2048] {
-                    for z in 0..15u8 {
-                        let n = s.fanout_stats.features_above(i, z as usize, thresh);
+                    for z in 0..=crate::tiling::MAX_ZOOM {
+                        let idx = crate::sort::LayerZoom::new(layer, z).expect("profile zoom");
+                        let n = s.fanout_stats.features_above(idx, thresh);
                         if n > 0 {
                             emit_counter_u64(&format!("sort_layer_{name}_z{z}_above_{thresh}"), n);
                         }
@@ -1370,14 +1381,15 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 }
             }
         }
-        for (rank, &(osm_id, layer, zoom, bbox_tiles)) in
-            s.fanout_stats.top_capped.iter().enumerate()
-        {
+        for (rank, event) in s.fanout_stats.top_capped.iter().enumerate() {
             let prefix = format!("fanout_capped_top_{}", rank + 1);
-            emit_counter_u64(&format!("{prefix}_osm_id"), osm_id);
-            emit_counter_u64(&format!("{prefix}_layer"), u64::from(layer));
-            emit_counter_u64(&format!("{prefix}_zoom"), u64::from(zoom));
-            emit_counter_u64(&format!("{prefix}_bbox_tiles"), bbox_tiles);
+            emit_counter_u64(&format!("{prefix}_osm_id"), event.osm_id);
+            emit_counter_u64(
+                &format!("{prefix}_layer"),
+                u64::from(event.at.layer() as u8),
+            );
+            emit_counter_u64(&format!("{prefix}_zoom"), u64::from(event.at.zoom()));
+            emit_counter_u64(&format!("{prefix}_bbox_tiles"), event.bbox_tiles);
         }
     }
     if let Some(kb) = phase12_rss {
@@ -1461,7 +1473,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     );
     emit_counter_u64("tile_max_bytes", tile_size_diag.max_tile.bytes);
     if tile_size_diag.max_tile.bytes > 0 {
-        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(tile_size_diag.max_tile.tile_id);
+        let (z, x, y) = crate::tiling::TileId::new(tile_size_diag.max_tile.tile_id)
+            .expect("written tile ids are addresses")
+            .coord();
         emit_counter_u64("tile_max_z", u64::from(z));
         emit_counter_u64("tile_max_x", u64::from(x));
         emit_counter_u64("tile_max_y", u64::from(y));
@@ -1475,7 +1489,9 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         if t.bytes == 0 {
             continue;
         }
-        let (z, x, y) = pmtiles_writer::tile_id_to_zxy(t.tile_id);
+        let (z, x, y) = crate::tiling::TileId::new(t.tile_id)
+            .expect("written tile ids are addresses")
+            .coord();
         let prefix = format!("oversize_top_{}", i + 1);
         emit_counter_u64(&format!("{prefix}_z"), u64::from(z));
         emit_counter_u64(&format!("{prefix}_x"), u64::from(x));
@@ -1652,7 +1668,7 @@ pub fn ocean_build(
         full_shapefile,
         &world,
         8,
-        14,
+        crate::tiling::MAX_ZOOM,
         &mut writer,
     )?;
     if simplified_shapefile.is_none() && low_hashes != full_hashes {
@@ -1664,7 +1680,7 @@ pub fn ocean_build(
         full_hashes,
         simplified_shapefile.map(|_| low_hashes),
         0,
-        14,
+        crate::tiling::MAX_ZOOM,
     );
     let key = crate::ocean::OceanArtifactKey {
         source,
@@ -1677,7 +1693,7 @@ pub fn ocean_build(
         output_path: output_path.to_path_buf(),
         tmp_dir: tmp_dir.to_path_buf(),
         min_zoom: 0,
-        max_zoom: 14,
+        max_zoom: crate::tiling::MAX_ZOOM,
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,

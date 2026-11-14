@@ -16,7 +16,16 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use elivagar::pmtiles_reader::{PmtilesReader, RawDirEntry, TileEntry, decode_mvt_layers};
-use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id};
+use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
+use elivagar::tiling::TileId;
+
+fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
+    TileId::at(z, x, y).raw()
+}
+
+fn tile_id_to_zxy(tile_id: u64) -> (u8, u32, u32) {
+    TileId::new(tile_id).expect("addressable tile id").coord()
+}
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use protohoggr::{encode_bytes_field_always, encode_varint, encode_varint_field_always};
@@ -367,13 +376,23 @@ fn test_mvt_layer_decode() {
         }
     }
 
-    // Also verify metadata contains Shortbread layer definitions.
+    // Also verify metadata contains Shortbread layer definitions. A z0-z5
+    // archive advertises only the layers whose zoom range reaches z5.
     let mut reader = PmtilesReader::open(&path).unwrap();
     let metadata = reader.read_metadata().unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&metadata).unwrap();
     assert_eq!(parsed["name"], "Shortbread");
     let vector_layers = parsed["vector_layers"].as_array().unwrap();
-    assert_eq!(vector_layers.len(), 26);
+    let reachable = elivagar::shortbread::Layer::ALL
+        .iter()
+        .filter(|layer| layer.min_zoom() <= 5)
+        .count();
+    assert!(reachable > 0 && reachable < 26);
+    assert_eq!(vector_layers.len(), reachable);
+    for layer in vector_layers {
+        assert!(layer["minzoom"].as_u64().unwrap() <= 5);
+        assert_eq!(layer["maxzoom"], 5);
+    }
 }
 
 #[test]

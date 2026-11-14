@@ -22,6 +22,22 @@ find phantoms.
 
 # Run contract, provenance and resume
 
+## BUG-065 - Sort records read back from chunk files are not checked against their partition
+
+`sort/format.rs` `read_record` and `next_header_discard_payload` return the
+raw key, and the merge reader never re-derives its partition. Keys are
+checked where they are minted (`make_sort_key` refuses tiles beyond z14) and
+in `partition_from_key`, but a corrupted or foreign chunk record reaches
+assembly unchecked. A key for a z15 tile then indexes slot 15 of the
+`[u64; ZOOM_COUNT]` per-zoom counters in `assemble::write_encoded_item` and
+panics; a valid z14 key from another partition is written out of order and
+caught only by the writer's ordering check. The piece pre-scan checks the
+bucket range but runs only for split partitions. Proposed: validate every
+decoded key (normal reads and header-only scans) against its section's or
+piece's tile range and return `InvalidData`.
+
+Found by the coordinates-core landing's review.
+
 ## BUG-002 - Ocean pass structure disagrees with itself; a single z0-z14 shapefile plus an artifact hands the low pass a z14 grid
 
 The question "which ocean passes exist, which shapefile feeds each, and which
@@ -67,6 +83,17 @@ Related consequences:
   the `ocean_pass_max_zooms` comment.
 - `selected_pass_grid` infers "a split exists" from a collection length, and
   producers pick grids positionally with `first()` / `last()`.
+- The pass grids follow the run's zoom window: `ocean_pass_max_zooms` uses
+  `config.max_zoom` (and `min(max_zoom, 7)`) as the grid's base zoom, and the
+  run loop does the same. The settled rule (`reference/coordinates.md`,
+  `tiling` module docs, `TilegenConfig.min_zoom` doc) is that the window
+  truncates: construction follows the canonical range and only emission is
+  cut, which OSM emission now does. Ocean is the remaining exception, so a
+  narrowed computed-ocean run quantizes and simplifies on a different grid
+  than a full build. The plan's passes should carry canonical grids (7 and
+  `tiling::MAX_ZOOM`) and cut emission to the window; the exception notes in
+  those three places go when that lands. No `ZoomRange` type exists yet:
+  `tiling` holds the constants and `TileId` only.
 
 Proposed owner (all four hunts converge): one `OceanPlan` built once from the
 validated `--ocean` input, holding

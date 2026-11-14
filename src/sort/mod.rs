@@ -68,8 +68,46 @@ const _: () = assert!(std::mem::size_of::<SortRecord>() == 24);
 
 pub type PayloadRecord = (SortKey, usize, usize);
 
-pub(crate) const ZOOM_LEVEL_COUNT: usize = 15;
-const LAYER_ZOOM_COUNT: usize = crate::shortbread::Layer::count() * ZOOM_LEVEL_COUNT;
+const LAYER_ZOOM_COUNT: usize = crate::shortbread::Layer::count() * ZOOM_COUNT;
+
+/// One Shortbread layer at one profile zoom: the index of [`PerLayerZoom`].
+/// Construction is the only bounds check, so indexing is total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LayerZoom {
+    layer: crate::shortbread::Layer,
+    zoom: u8,
+}
+
+impl LayerZoom {
+    pub(crate) fn new(layer: crate::shortbread::Layer, zoom: u8) -> Option<Self> {
+        (zoom <= MAX_ZOOM).then_some(Self { layer, zoom })
+    }
+
+    /// The layer and zoom of a record key. Keys are minted only for profile
+    /// tiles (`make_sort_key` asserts it), so only the layer byte can fail.
+    pub(crate) fn of_key(key: SortKey) -> Option<Self> {
+        let layer = *crate::shortbread::Layer::ALL.get(usize::from(layer_from_key(key)))?;
+        let zoom = tile_id_from_key(key).zoom();
+        assert!(
+            zoom <= MAX_ZOOM,
+            "sort keys are minted for profile zooms only"
+        );
+        Some(Self { layer, zoom })
+    }
+
+    pub(crate) fn layer(self) -> crate::shortbread::Layer {
+        self.layer
+    }
+
+    pub(crate) fn zoom(self) -> u8 {
+        self.zoom
+    }
+
+    /// Layer-major flat index, matching the sidecar counter order.
+    fn index(self) -> usize {
+        self.layer as usize * ZOOM_COUNT + usize::from(self.zoom)
+    }
+}
 
 /// Values indexed by a Shortbread layer and zoom.
 ///
@@ -94,14 +132,6 @@ impl<T> PerLayerZoom<T> {
         }
     }
 
-    pub(crate) fn flat_index(layer: usize, zoom: usize) -> Option<usize> {
-        if layer < crate::shortbread::Layer::count() && zoom < ZOOM_LEVEL_COUNT {
-            Some(layer * ZOOM_LEVEL_COUNT + zoom)
-        } else {
-            None
-        }
-    }
-
     pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
         self.values.iter()
     }
@@ -111,17 +141,17 @@ impl<T> PerLayerZoom<T> {
     }
 }
 
-impl<T> std::ops::Index<usize> for PerLayerZoom<T> {
+impl<T> std::ops::Index<LayerZoom> for PerLayerZoom<T> {
     type Output = T;
 
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.values[index]
+    fn index(&self, at: LayerZoom) -> &Self::Output {
+        &self.values[at.index()]
     }
 }
 
-impl<T> std::ops::IndexMut<usize> for PerLayerZoom<T> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.values[index]
+impl<T> std::ops::IndexMut<LayerZoom> for PerLayerZoom<T> {
+    fn index_mut(&mut self, at: LayerZoom) -> &mut Self::Output {
+        &mut self.values[at.index()]
     }
 }
 
@@ -149,17 +179,14 @@ impl RecordTally {
     }
 
     pub(crate) fn record(&mut self, key: SortKey, data_len: usize) {
-        let layer = layer_from_key(key) as usize;
         self.total_records += 1;
         self.total_record_bytes += data_len as u64;
-        if layer < crate::shortbread::Layer::count() {
+        if let Some(at) = LayerZoom::of_key(key) {
+            let layer = at.layer() as usize;
             self.layer_records[layer] += 1;
             self.layer_bytes[layer] += data_len as u64;
-            let zoom = zoom_from_tile_id(tile_id_from_key(key)) as usize;
-            if let Some(idx) = PerLayerZoom::<u64>::flat_index(layer, zoom) {
-                self.layer_zoom_records[idx] += 1;
-                self.layer_zoom_bytes[idx] += data_len as u64;
-            }
+            self.layer_zoom_records[at] += 1;
+            self.layer_zoom_bytes[at] += data_len as u64;
         }
     }
 
@@ -198,6 +225,7 @@ mod key;
 mod merge;
 mod write;
 
+use crate::tiling::{MAX_ZOOM, ZOOM_COUNT};
 pub use format::ChunkCompression;
 pub(crate) use format::{SortSourceSlice, SourcePosition, SourceSeek};
 use key::{
@@ -207,7 +235,6 @@ use key::{
 pub use key::{
     SORT_PARTITIONS, SortKey, layer_from_key, make_sort_key, partition_from_key,
     partition_start_tile_id, partition_tile_range, priority_from_key, tile_id_from_key,
-    zoom_from_tile_id,
 };
 pub use merge::{SortPartition, SortPartitionReader, SortReader};
 pub use write::{

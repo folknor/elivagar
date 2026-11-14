@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- New public `tiling` module: the profile top zoom `MAX_ZOOM`, the
+  archive ceiling z31, and a validated `TileId` owning the only Hilbert
+  conversions and per-zoom id ranges. Breaking: the writer's
+  `xy_to_tile_id`, `try_xy_to_tile_id` and `tile_id_to_zxy` and sort's
+  `zoom_from_tile_id` are removed in favour of `TileId::at`,
+  `TileId::from_coord`, `TileId::coord` and `TileId::zoom`;
+  `PmtilesWriter::add_run`, `sort::make_sort_key` and
+  `sort::tile_id_from_key` take or return a `TileId`. Output of a full
+  z0-z14 run is unchanged.
+- Out-of-range tile ids are refused instead of misread: the directory
+  reader and `add_run` reject ids and runs past the last z31 tile, sort
+  keys refuse tiles beyond z14 instead of clamping them into the last
+  partition, and `verify` counts addressed tiles at every archive zoom.
+- A narrowed `TilegenConfig` zoom window now truncates rather than
+  re-plans: lines and polygons are built over each layer's own zoom
+  range and only emission is cut, so a narrowed archive's OSM tiles
+  equal a full build's at those zooms, and the metadata advertises only
+  the layers the window can hold, clamped to it.
 - pbfhogg 0.6 as the PBF reader, plus hotpath 0.31 and the pmtiles 0.28
   dev-dependency. Output is unchanged.
 

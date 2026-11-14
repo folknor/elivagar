@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use smallvec::SmallVec;
 
-use crate::sort::{self, PerLayerZoom};
+use crate::sort::{self, LayerZoom, PerLayerZoom};
 
 pub(super) const TILE_OVERSIZE_WARN_BYTES: u64 = 500 * 1024;
 pub(super) const TILE_OVERSIZE_SEVERE_BYTES: u64 = 1024 * 1024;
@@ -150,8 +150,17 @@ pub(super) struct FanoutStats {
     pub(super) capped_features: PerLayerZoom<u64>,
     /// Estimated tiles saved by capping (sum of bbox tile counts).
     pub(super) capped_tiles: PerLayerZoom<u64>,
-    /// Top capped features by bbox tile count: (osm_id, layer, zoom, bbox_tiles).
-    pub(super) top_capped: Vec<(u64, u8, u8, u64)>,
+    /// Top capped features by bbox tile count.
+    pub(super) top_capped: Vec<CapEvent>,
+}
+
+/// One feature skipped by its layer's fanout cap at one zoom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CapEvent {
+    pub(super) at: LayerZoom,
+    /// Tiles the feature's bbox covers at that zoom.
+    pub(super) bbox_tiles: u64,
+    pub(super) osm_id: u64,
 }
 
 impl FanoutStats {
@@ -168,11 +177,7 @@ impl FanoutStats {
     }
 
     /// Record that a single feature touched `tiles` tiles at (layer, zoom).
-    #[allow(clippy::cast_possible_truncation)]
-    pub(super) fn record(&mut self, layer: usize, zoom: usize, tiles: u32) {
-        let Some(idx) = PerLayerZoom::<u32>::flat_index(layer, zoom) else {
-            return;
-        };
+    pub(super) fn record(&mut self, idx: LayerZoom, tiles: u32) {
         if tiles == 0 {
             return;
         }
@@ -193,20 +198,18 @@ impl FanoutStats {
     }
 
     /// Record that a feature was capped (skipped) at (layer, zoom) with bbox tile count.
-    #[allow(clippy::cast_possible_truncation)]
-    pub(super) fn record_cap(&mut self, layer: usize, zoom: usize, bbox_tiles: u64, osm_id: u64) {
-        let Some(idx) = PerLayerZoom::<u64>::flat_index(layer, zoom) else {
-            return;
-        };
-        self.capped_features[idx] += 1;
-        self.capped_tiles[idx] += bbox_tiles;
+    pub(super) fn record_cap(&mut self, event: CapEvent) {
+        let CapEvent { at, bbox_tiles, .. } = event;
+        self.capped_features[at] += 1;
+        self.capped_tiles[at] += bbox_tiles;
         // Track top 10 capped features by bbox tile count.
         const TOP_N: usize = 10;
-        if self.top_capped.len() < TOP_N || bbox_tiles > self.top_capped.last().map_or(0, |e| e.3) {
+        if self.top_capped.len() < TOP_N
+            || bbox_tiles > self.top_capped.last().map_or(0, |e| e.bbox_tiles)
+        {
+            self.top_capped.push(event);
             self.top_capped
-                .push((osm_id, layer as u8, zoom as u8, bbox_tiles));
-            self.top_capped
-                .sort_unstable_by_key(|e| std::cmp::Reverse(e.3));
+                .sort_unstable_by_key(|e| std::cmp::Reverse(e.bbox_tiles));
             self.top_capped.truncate(TOP_N);
         }
     }
@@ -246,17 +249,14 @@ impl FanoutStats {
         // Merge top capped: combine, sort, truncate.
         self.top_capped.extend_from_slice(&other.top_capped);
         self.top_capped
-            .sort_unstable_by_key(|e| std::cmp::Reverse(e.3));
+            .sort_unstable_by_key(|e| std::cmp::Reverse(e.bbox_tiles));
         self.top_capped.truncate(10);
     }
 
     /// Compute a percentile (0.0-1.0) from the histogram for a given (layer, zoom).
     /// Returns the upper bound of the bucket containing the percentile,
     /// capped at max_tiles to avoid reporting a percentile above the actual max.
-    pub(super) fn percentile(&self, layer: usize, zoom: usize, p: f64) -> u32 {
-        let Some(idx) = PerLayerZoom::<u32>::flat_index(layer, zoom) else {
-            return 0;
-        };
+    pub(super) fn percentile(&self, idx: LayerZoom, p: f64) -> u32 {
         let total = self.feature_count[idx];
         if total == 0 {
             return 0;
@@ -281,10 +281,7 @@ impl FanoutStats {
     }
 
     /// Count features with tiles_touched >= threshold for a given (layer, zoom).
-    pub(super) fn features_above(&self, layer: usize, zoom: usize, threshold: u32) -> u64 {
-        let Some(idx) = PerLayerZoom::<u64>::flat_index(layer, zoom) else {
-            return 0;
-        };
+    pub(super) fn features_above(&self, idx: LayerZoom, threshold: u32) -> u64 {
         if self.feature_count[idx] == 0 {
             return 0;
         }
@@ -316,26 +313,19 @@ pub(super) fn record_fanout_from_payload_records(
     if records.is_empty() {
         return;
     }
-    let mut counts: SmallVec<[(u16, u32); 8]> = SmallVec::new();
+    let mut counts: SmallVec<[(LayerZoom, u32); 8]> = SmallVec::new();
     for &(key, _, _) in records {
-        let layer = sort::layer_from_key(key) as usize;
-        let tile_id = sort::tile_id_from_key(key);
-        let zoom = sort::zoom_from_tile_id(tile_id) as usize;
-        let Some(layer_zoom) = PerLayerZoom::<u32>::flat_index(layer, zoom) else {
+        let Some(layer_zoom) = LayerZoom::of_key(key) else {
             continue;
         };
-        #[allow(clippy::cast_possible_truncation)]
-        let layer_zoom = layer_zoom as u16;
         if let Some(entry) = counts.iter_mut().find(|e| e.0 == layer_zoom) {
             entry.1 += 1;
         } else {
             counts.push((layer_zoom, 1));
         }
     }
-    for &(key, tiles) in &counts {
-        let layer = key as usize / sort::ZOOM_LEVEL_COUNT;
-        let zoom = key as usize % sort::ZOOM_LEVEL_COUNT;
-        stats.record(layer, zoom, tiles);
+    for &(at, tiles) in &counts {
+        stats.record(at, tiles);
     }
 }
 

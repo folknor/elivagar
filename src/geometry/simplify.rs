@@ -421,7 +421,7 @@ pub fn for_each_zoom_simplified<F, S>(
         // Track max deviation² from last DP run for cascade convergence check.
         let mut last_max_dev_sq: f64 = f64::MAX;
         for z in (z_lo..=z_hi).rev() {
-            if z < 14 {
+            if z < crate::tiling::MAX_ZOOM {
                 // Pre-DP subpixel check: if the cascade's bbox diagonal is < 1 pixel
                 // at this zoom, the feature is invisible here and at all coarser zooms.
                 // Skips DP entirely - O(1) vs O(n²).

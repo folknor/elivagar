@@ -22,7 +22,7 @@ pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
         out.push(LayerMatch {
             layer: Layer::PlaceLabels,
             min_zoom,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Point,
             paint_rank: 0,
             attrs,

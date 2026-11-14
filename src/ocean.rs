@@ -23,6 +23,7 @@ use crate::geometry::{
 };
 use crate::mvt::GeomType;
 use crate::pmtiles_reader::{ArchiveView, RawDirEntry};
+#[cfg(test)]
 use crate::pmtiles_writer;
 use crate::shortbread::Layer;
 use crate::sort::{self, SortWriter};
@@ -499,8 +500,8 @@ struct OceanStats {
     shapefile_bytes: AtomicU64,
     records: AtomicU64,
     payload_bytes: AtomicU64,
-    zoom_records: [AtomicU64; 15],
-    zoom_payload_bytes: [AtomicU64; 15],
+    zoom_records: [AtomicU64; ZOOM_COUNT],
+    zoom_payload_bytes: [AtomicU64; ZOOM_COUNT],
 }
 
 static OCEAN_STATS: OceanStats = OceanStats {
@@ -510,9 +511,11 @@ static OCEAN_STATS: OceanStats = OceanStats {
     shapefile_bytes: AtomicU64::new(0),
     records: AtomicU64::new(0),
     payload_bytes: AtomicU64::new(0),
-    zoom_records: [const { AtomicU64::new(0) }; 15],
-    zoom_payload_bytes: [const { AtomicU64::new(0) }; 15],
+    zoom_records: [const { AtomicU64::new(0) }; ZOOM_COUNT],
+    zoom_payload_bytes: [const { AtomicU64::new(0) }; ZOOM_COUNT],
 };
+
+use crate::tiling::ZOOM_COUNT;
 
 static OCEAN_LAYER_STATS_ENABLED: OnceLock<bool> = OnceLock::new();
 
@@ -651,7 +654,7 @@ impl OceanTiles {
         pass_max_zooms: &[u8],
     ) -> std::io::Result<Self> {
         let view = ArchiveView::open(path)?;
-        if view.min_zoom() != 0 || view.max_zoom() != 14 {
+        if view.min_zoom() != 0 || view.max_zoom() != crate::tiling::MAX_ZOOM {
             return Err(std::io::Error::other("ocean artifact must cover z0-14"));
         }
         let header = view.header();
@@ -691,14 +694,15 @@ impl OceanTiles {
             ));
         }
         let runs = view.read_all_runs()?;
-        // Exclusive end: the first z15 tile ID is outside the artifact contract.
-        let z14_end = ((1_u64 << 30) - 1) / 3;
+        // Exclusive end: the first id past the top zoom is outside the
+        // artifact contract.
+        let profile_end = crate::tiling::PROFILE_ID_END;
         if runs.iter().any(|run| {
-            run.tile_id >= z14_end
+            run.tile_id >= profile_end
                 || run
                     .tile_id
                     .checked_add(u64::from(run.run_length))
-                    .is_none_or(|end| end > z14_end)
+                    .is_none_or(|end| end > profile_end)
         }) {
             return Err(std::io::Error::other(
                 "ocean artifact directory run lies outside z0-14 tile space",
@@ -783,9 +787,9 @@ pub(crate) fn emit_ocean_counters() {
     let shapefile_bytes = OCEAN_STATS.shapefile_bytes.swap(0, Ordering::Relaxed);
     let records = OCEAN_STATS.records.swap(0, Ordering::Relaxed);
     let payload_bytes = OCEAN_STATS.payload_bytes.swap(0, Ordering::Relaxed);
-    let zoom_records: [u64; 15] =
+    let zoom_records: [u64; ZOOM_COUNT] =
         std::array::from_fn(|z| OCEAN_STATS.zoom_records[z].swap(0, Ordering::Relaxed));
-    let zoom_payload_bytes: [u64; 15] =
+    let zoom_payload_bytes: [u64; ZOOM_COUNT] =
         std::array::from_fn(|z| OCEAN_STATS.zoom_payload_bytes[z].swap(0, Ordering::Relaxed));
     if shapes == 0 {
         return;
@@ -803,9 +807,7 @@ pub(crate) fn emit_ocean_counters() {
     if !ocean_layer_stats_enabled() {
         return;
     }
-    for z in 0..15 {
-        let records = zoom_records[z];
-        let bytes = zoom_payload_bytes[z];
+    for (z, (&records, &bytes)) in zoom_records.iter().zip(&zoom_payload_bytes).enumerate() {
         if records > 0 {
             emit_counter_u64(&format!("sort_layer_ocean_z{z}_records"), records);
         }
@@ -934,11 +936,10 @@ impl OceanAcc {
             .fetch_add(self.payload.len() as u64, Ordering::Relaxed);
         if ocean_layer_stats_enabled() {
             for &(key, _, len) in &self.records {
-                let zoom = sort::zoom_from_tile_id(sort::tile_id_from_key(key)) as usize;
-                if zoom < 15 {
-                    OCEAN_STATS.zoom_records[zoom].fetch_add(1, Ordering::Relaxed);
-                    OCEAN_STATS.zoom_payload_bytes[zoom].fetch_add(len as u64, Ordering::Relaxed);
-                }
+                // Keys are minted for profile zooms only (make_sort_key).
+                let zoom = usize::from(sort::tile_id_from_key(key).zoom());
+                OCEAN_STATS.zoom_records[zoom].fetch_add(1, Ordering::Relaxed);
+                OCEAN_STATS.zoom_payload_bytes[zoom].fetch_add(len as u64, Ordering::Relaxed);
             }
         }
         self.count += self.records.len() as u64;
@@ -1916,7 +1917,7 @@ fn ocean_sink<'a>(
     acc: &'a mut OceanAcc,
 ) -> impl FnMut(u8, u32, u32, &[u32], PyramidEmitKind) + 'a {
     move |z: u8, tx: u32, ty: u32, geom: &[u32], kind: PyramidEmitKind| {
-        let tile_id = pmtiles_writer::xy_to_tile_id(z, tx, ty);
+        let tile_id = crate::tiling::TileId::at(z, tx, ty);
         let key = sort::make_sort_key(tile_id, layer_idx, 0);
         let range = append_feature_data_with_attrs(
             &mut acc.payload,
@@ -2009,7 +2010,7 @@ mod tests {
         let params = ocean_params(8, 8, None);
         let mut attrs = Vec::new();
         encode_attrs_bytes(&mut attrs, &[], 8);
-        let tile_id = pmtiles_writer::xy_to_tile_id(cell.z, cell.tx, cell.ty);
+        let tile_id = crate::tiling::TileId::at(cell.z, cell.tx, cell.ty);
 
         let mut fragment_acc = OceanAcc::new();
         let mut fragment_kinds = Vec::new();
@@ -2411,7 +2412,7 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let first_z15 = pmtiles_writer::xy_to_tile_id(15, 0, 0);
+        let first_z15 = crate::tiling::TileId::at(15, 0, 0).raw();
         for (start, length, accepted) in [
             (first_z15 - 1, 1, true),
             (first_z15, 1, false),
@@ -2429,7 +2430,7 @@ mod tests {
                 .expect("set artifact metadata");
             // Admission reads directory ranges and metadata, not tile payloads.
             writer
-                .add_run(start, length, &[0])
+                .add_run(crate::tiling::TileId::new(start).unwrap(), length, &[0])
                 .expect("add directory run");
             writer.write_to(&path).expect("write artifact");
             let result = OceanTiles::open(&path, &key, &world, &[14]);

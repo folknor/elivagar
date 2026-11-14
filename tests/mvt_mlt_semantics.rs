@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use elivagar::pmtiles_reader::{PmtilesReader, TileEntry};
-use elivagar::pmtiles_writer::tile_id_to_zxy;
 use elivagar::tile_detail::{CanonRingRole, DetailAttr, DetailFeature, DetailTile, Strictness};
+use elivagar::tiling::TileId;
 use elivagar::{TileCompression, TilePayloadFormat, TilegenConfig};
 use pbfhogg::block_builder::{BlockBuilder, HeaderBuilder};
 use pbfhogg::writer::{Compression, PbfWriter};
@@ -63,7 +63,7 @@ fn mvt_and_mlt_encode_the_same_tile_semantics() {
         mvt_tile_id, mlt_tile_id,
         "formats must address the same tile"
     );
-    assert_eq!(tile_id_to_zxy(mvt_tile_id).0, 14);
+    assert_eq!(TileId::new(mvt_tile_id).unwrap().zoom(), 14);
 
     let mvt_semantics = decode_mvt_semantics(&mvt_payload);
     let mlt_semantics = decode_mvt_semantics(&decode_mlt_as_mvt(&mlt_payload));

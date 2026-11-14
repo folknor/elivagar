@@ -76,7 +76,7 @@ pub(crate) fn boundary_line(tags: &Tags<'_>, relation: Option<BoundaryMeta>) -> 
     Some(LayerMatch {
         layer: Layer::Boundaries,
         min_zoom: level.min_zoom(),
-        max_zoom: 14,
+        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Line,
         paint_rank: 0,
         attrs: smallvec![
@@ -105,7 +105,7 @@ pub(super) fn match_boundary_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMa
         out.push(LayerMatch {
             layer: Layer::BoundaryLabels,
             min_zoom: 5,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: Layer::BoundaryLabels.polygon_point_geom_expect(),
             paint_rank: 0,
             attrs,

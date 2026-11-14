@@ -279,8 +279,7 @@ fn group_rings_to_polygons(rings: Vec<LineString<i32>>) -> Vec<Polygon<i32>> {
 
         if exterior_orientation == Some(orientation) {
             if let Some(ext) = exterior.take() {
-                polygons.push(Polygon::new(ext, holes));
-                holes = Vec::new();
+                polygons.push(Polygon::new(ext, std::mem::take(&mut holes)));
             }
             exterior = Some(ring);
         } else {

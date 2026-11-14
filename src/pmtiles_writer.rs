@@ -52,6 +52,7 @@ use std::io::{self, BufReader, BufWriter, Cursor, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::pmtiles_reader::{RawDirEntry, encode_directory};
+use crate::tiling::TileId;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
@@ -777,7 +778,7 @@ impl PmtilesWriter {
     /// increasing, the payload is too large, or a streaming file write fails.
     #[hotpath::measure]
     pub fn add_tile(&mut self, z: u8, x: u32, y: u32, data: &[u8]) -> io::Result<bool> {
-        let tile_id = try_xy_to_tile_id(z, x, y)?;
+        let tile_id = TileId::from_coord(z, x, y)?.raw();
         self.check_tile_order(tile_id)?;
         let (key, duplicate_offset) = self.dedup.lookup(data, &mut self.dedup_stats)?;
 
@@ -804,19 +805,27 @@ impl PmtilesWriter {
     /// Tile IDs in this run and all previous calls must be strictly increasing.
     ///
     /// # Errors
-    /// Returns `io::Error` for a zero or overflowing run, a non-increasing tile
-    /// ID, a payload that is too large, or a streaming write failure.
+    /// Returns `io::Error` for a zero run, a run reaching past the last
+    /// addressable tile id, a non-increasing tile ID, a payload that is too
+    /// large, or a streaming write failure.
     #[hotpath::measure]
-    pub fn add_run(&mut self, tile_id: u64, run_length: u32, data: &[u8]) -> io::Result<bool> {
+    pub fn add_run(&mut self, tile_id: TileId, run_length: u32, data: &[u8]) -> io::Result<bool> {
         if run_length == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "PMTiles run length must be non-zero",
             ));
         }
-        let run_end = tile_id.checked_add(u64::from(run_length)).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "PMTiles tile ID run overflows")
-        })?;
+        let tile_id = tile_id.raw();
+        let run_end = tile_id
+            .checked_add(u64::from(run_length))
+            .filter(|&end| end <= crate::tiling::ARCHIVE_ID_END)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "PMTiles tile ID run reaches past the last addressable tile",
+                )
+            })?;
         self.check_tile_order(tile_id)?;
         let (key, duplicate_offset) = self.dedup.lookup(data, &mut self.dedup_stats)?;
 
@@ -1300,13 +1309,17 @@ mod metadata {
             layer_type: "baselayer",
             minzoom: config.min_zoom,
             maxzoom: config.max_zoom,
+            // Each layer advertises its own zoom range intersected with the
+            // archive's; a layer whose range misses the archive's entirely
+            // has no tiles and is not advertised.
             vector_layers: layers
                 .iter()
                 .map(|layer| VectorLayer {
                     id: layer.name(),
-                    minzoom: layer.min_zoom(),
+                    minzoom: layer.min_zoom().max(config.min_zoom),
                     maxzoom: config.max_zoom,
                 })
+                .filter(|layer| layer.minzoom <= layer.maxzoom)
                 .collect(),
             source_pbf: source_pbf_filename,
             osmosis_replication_timestamp,
@@ -1374,131 +1387,6 @@ fn write_i32_le(buf: &mut [u8], offset: usize, val: i32) {
 #[allow(clippy::cast_possible_truncation)]
 fn f64_to_e7(val: f64) -> i32 {
     (val * 1e7).round() as i32
-}
-
-// ---------------------------------------------------------------------------
-// Hilbert curve: (z, x, y) <-> tile_id
-// ---------------------------------------------------------------------------
-
-/// Convert (z, x, y) to PMTiles Hilbert tile ID.
-///
-/// Panics when the coordinates cannot be represented as a PMTiles tile ID.
-/// Use [`try_xy_to_tile_id`] when coordinates are not already validated.
-#[inline]
-pub fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
-    match try_xy_to_tile_id(z, x, y) {
-        Ok(tile_id) => tile_id,
-        Err(error) => panic!("{error}"),
-    }
-}
-
-/// Convert validated tile coordinates to a PMTiles Hilbert tile ID.
-///
-/// PMTiles tile IDs fit in `u64` for zoom levels through 31. Coordinates must
-/// satisfy `x < 2^z` and `y < 2^z`.
-pub fn try_xy_to_tile_id(z: u8, x: u32, y: u32) -> io::Result<u64> {
-    if z > 31 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "PMTiles tile zoom must be at most 31",
-        ));
-    }
-    let grid_size = 1_u32 << z;
-    if x >= grid_size || y >= grid_size {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "PMTiles tile coordinates are outside the zoom grid",
-        ));
-    }
-    if z == 0 {
-        return Ok(0);
-    }
-    let n = u64::from(grid_size);
-    // Cumulative tiles for zoom levels 0..z-1: (4^z - 1) / 3
-    let base = (n * n - 1) / 3;
-    let d = hilbert_xy2d(grid_size, x, y);
-    base.checked_add(d)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "PMTiles tile ID exceeds u64"))
-}
-
-/// Convert PMTiles Hilbert tile ID back to (z, x, y).
-#[allow(clippy::cast_possible_truncation)]
-pub fn tile_id_to_zxy(tile_id: u64) -> (u8, u32, u32) {
-    if tile_id == 0 {
-        return (0, 0, 0);
-    }
-
-    // Find zoom level z where base(z) <= tile_id < base(z+1).
-    // base(z) = (4^z - 1) / 3
-    let mut z: u8 = 0;
-    loop {
-        z += 1;
-        if z >= 31 {
-            break;
-        }
-        let n = 1u64 << z;
-        let next_base = (n * n * 4 - 1) / 3;
-        if tile_id < next_base {
-            break;
-        }
-    }
-
-    let n = 1u64 << z;
-    let base = (n * n - 1) / 3;
-    let d = tile_id - base;
-    let (x, y) = hilbert_d2xy(n as u32, d);
-    (z, x, y)
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn hilbert_xy2d(n: u32, x: u32, y: u32) -> u64 {
-    let mut d: u64 = 0;
-    let (mut x, mut y) = (x, y);
-    let mut s = n / 2;
-    while s > 0 {
-        let rx: u32 = u32::from((x & s) > 0);
-        let ry: u32 = u32::from((y & s) > 0);
-        d += (s as u64 * s as u64) * u64::from((3 * rx) ^ ry);
-        // xy2d reflects within the full n x n grid (coords hold full values here),
-        // unlike d2xy which reflects within the current sub-square size `s`.
-        hilbert_rot(n, &mut x, &mut y, rx, ry);
-        s /= 2;
-    }
-    d
-}
-
-fn hilbert_d2xy(n: u32, d: u64) -> (u32, u32) {
-    let mut x: u32 = 0;
-    let mut y: u32 = 0;
-    let mut d = d;
-    let mut s: u32 = 1;
-    while s < n {
-        // Extract 2-bit quadrant value. Mapping of (3*rx)^ry:
-        //   0 -> (rx=0, ry=0)
-        //   1 -> (rx=0, ry=1)
-        //   2 -> (rx=1, ry=1)
-        //   3 -> (rx=1, ry=0)
-        #[allow(clippy::cast_possible_truncation)]
-        let val = (d & 3) as u32;
-        let rx = u32::from(val >= 2);
-        let ry = u32::from(val == 1 || val == 2);
-        hilbert_rot(s, &mut x, &mut y, rx, ry);
-        x += s * rx;
-        y += s * ry;
-        d >>= 2;
-        s <<= 1;
-    }
-    (x, y)
-}
-
-fn hilbert_rot(n: u32, x: &mut u32, y: &mut u32, rx: u32, ry: u32) {
-    if ry == 0 {
-        if rx == 1 {
-            *x = n - 1 - *x;
-            *y = n - 1 - *y;
-        }
-        std::mem::swap(x, y);
-    }
 }
 
 // ---------------------------------------------------------------------------

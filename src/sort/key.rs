@@ -1,4 +1,5 @@
 use super::*;
+use crate::tiling::{MAX_ZOOM, PROFILE_ID_END, TileId, ZOOM_COUNT, zoom_ids};
 
 /// Zoom level used to split each zoom block into ordered Hilbert ranges.
 ///
@@ -11,21 +12,13 @@ use super::*;
 /// output behind one claim-window slot.
 pub(super) const PARTITION_SPLIT_Z: u8 = 7;
 
-pub(super) const TILE_ID_BASES: [u64; 16] = {
-    let mut bases = [0u64; 16];
-    let mut z = 0usize;
-    while z < 16 {
-        bases[z] = ((1u64 << (2 * z)) - 1) / 3;
-        z += 1;
-    }
-    bases
-};
-
-pub(super) const PARTITION_BASES: [usize; 16] = {
-    let mut bases = [0usize; 16];
+/// `PARTITION_BASES[z]` is the first partition id of profile zoom `z`;
+/// `PARTITION_BASES[ZOOM_COUNT]` is the partition count.
+pub(super) const PARTITION_BASES: [usize; ZOOM_COUNT + 1] = {
+    let mut bases = [0usize; ZOOM_COUNT + 1];
     let mut z = 0usize;
     let mut acc = 0usize;
-    while z < 15 {
+    while z < ZOOM_COUNT {
         bases[z] = acc;
         let split_z = if z < PARTITION_SPLIT_Z as usize {
             z
@@ -35,14 +28,12 @@ pub(super) const PARTITION_BASES: [usize; 16] = {
         acc += 1usize << (2 * split_z);
         z += 1;
     }
-    bases[15] = acc;
+    bases[ZOOM_COUNT] = acc;
     bases
 };
 
 /// Number of ordered partition ids produced by the `PARTITION_SPLIT_Z` scheme.
-pub const SORT_PARTITIONS: usize = PARTITION_BASES[15];
-
-pub(super) const TILE_ID_LIMIT_EXCLUSIVE: u64 = TILE_ID_BASES[15];
+pub const SORT_PARTITIONS: usize = PARTITION_BASES[ZOOM_COUNT];
 // ---------------------------------------------------------------------------
 // Sort key helpers
 // ---------------------------------------------------------------------------
@@ -52,17 +43,25 @@ pub type SortKey = u64;
 
 /// Build a sort key from tile id, layer index, and priority.
 ///
-/// Packs tile_id into bits 63-16 (48-bit field). Overflows above z23, but
-/// max_zoom is validated to 14 at pipeline entry (max tile_id ~358M = 29 bits).
+/// Packs tile_id into bits 63-16, a 48-bit field that would drop bits above
+/// z23, so the tile must lie in the profile domain (`z <= MAX_ZOOM`). That is
+/// checked here, at the one place keys are minted, rather than trusted from
+/// the zoom validation in `run`: a key that lost bits would decode to a
+/// different, valid-looking tile and be misfiled silently.
 #[inline]
-pub fn make_sort_key(tile_id: u64, layer: u8, priority: u8) -> SortKey {
-    (tile_id << 16) | (u64::from(layer) << 8) | u64::from(priority)
+pub fn make_sort_key(tile_id: TileId, layer: u8, priority: u8) -> SortKey {
+    assert!(
+        tile_id.is_profile(),
+        "sort key minted for tile {tile_id} beyond z{MAX_ZOOM}"
+    );
+    (tile_id.raw() << 16) | (u64::from(layer) << 8) | u64::from(priority)
 }
 
 /// Extract tile_id from a sort key.
 #[inline]
-pub fn tile_id_from_key(key: SortKey) -> u64 {
-    key >> 16
+pub fn tile_id_from_key(key: SortKey) -> TileId {
+    // 48 bits always fit below the archive id ceiling.
+    TileId::new(key >> 16).expect("a 48-bit tile id is addressable")
 }
 
 /// Extract the layer index from a sort key.
@@ -171,25 +170,22 @@ pub(super) fn sort_payload_records_total(records: &mut [PayloadRecord], payload:
     );
 }
 
-/// Extract zoom level from a tile_id. Uses the PMTiles base offset formula:
-/// `base(z) = (4^z - 1) / 3`. Zoom is the largest z where `base(z) <= tile_id`.
-#[inline]
-#[allow(clippy::cast_possible_truncation)]
-pub fn zoom_from_tile_id(tile_id: u64) -> u8 {
-    let mut z: u8 = 14;
-    while z > 0 && tile_id < TILE_ID_BASES[z as usize] {
-        z -= 1;
-    }
-    z
-}
-
 /// Return the tile-id range partition for a sort key.
+///
+/// Partitions cover the profile domain only. A key beyond it cannot have been
+/// minted by `make_sort_key`, so it is refused loudly rather than clamped into
+/// the last partition.
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
 pub fn partition_from_key(key: SortKey) -> usize {
-    let tile_id = tile_id_from_key(key).min(TILE_ID_LIMIT_EXCLUSIVE - 1);
-    let zoom = zoom_from_tile_id(tile_id);
-    let local_id = tile_id - TILE_ID_BASES[zoom as usize];
+    let tile = tile_id_from_key(key);
+    assert!(
+        tile.is_profile(),
+        "sort key for tile {tile} lies beyond z{MAX_ZOOM}"
+    );
+    let zoom = tile.zoom();
+    let tile_id = tile.raw();
+    let local_id = tile_id - zoom_ids(zoom).0;
     let split_z = zoom.min(PARTITION_SPLIT_Z);
     let shift = 2 * u32::from(zoom - split_z);
     let prefix = (local_id >> shift) as usize;
@@ -200,13 +196,15 @@ pub fn partition_from_key(key: SortKey) -> usize {
 
 pub fn partition_start_tile_id(partition: usize) -> u64 {
     debug_assert!(partition < SORT_PARTITIONS);
-    let mut zoom = 14usize;
+    let mut zoom = MAX_ZOOM as usize;
     while partition < PARTITION_BASES[zoom] {
         zoom -= 1;
     }
     let split_z = zoom.min(PARTITION_SPLIT_Z as usize);
     let prefix = partition - PARTITION_BASES[zoom];
-    TILE_ID_BASES[zoom] + ((prefix as u64) << (2 * (zoom - split_z)))
+    #[allow(clippy::cast_possible_truncation)]
+    let first = zoom_ids(zoom as u8).0;
+    first + ((prefix as u64) << (2 * (zoom - split_z)))
 }
 
 /// Tile-id interval covered by one partition. This is public because an
@@ -215,7 +213,7 @@ pub fn partition_start_tile_id(partition: usize) -> u64 {
 pub fn partition_tile_range(partition: usize) -> (u64, u64) {
     let start = partition_start_tile_id(partition);
     let end = if partition + 1 >= SORT_PARTITIONS {
-        TILE_ID_LIMIT_EXCLUSIVE
+        PROFILE_ID_END
     } else {
         partition_start_tile_id(partition + 1)
     };
@@ -226,6 +224,10 @@ pub(super) fn partition_next_key(partition: usize) -> SortKey {
     if partition + 1 >= SORT_PARTITIONS {
         SortKey::MAX
     } else {
-        make_sort_key(partition_start_tile_id(partition + 1), 0, 0)
+        make_sort_key(
+            TileId::new(partition_start_tile_id(partition + 1)).expect("partition start is a tile"),
+            0,
+            0,
+        )
     }
 }

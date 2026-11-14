@@ -707,16 +707,17 @@ mod tests {
     use super::{extract_json_string, infer_payload_format_from_header, payload_contract_display};
     use super::{inspect, inspect_to_writer};
     use crate::pmtiles_reader::PmtilesReader;
-    use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id};
+    use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
+    use crate::tiling::{TileId, zoom_ids};
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom, Write};
     use std::path::Path;
 
     fn add_monotonic_unique_tiles(writer: &mut PmtilesWriter, z: u8, count: usize) {
-        let base = xy_to_tile_id(z, 0, 0);
+        let base = zoom_ids(z).0;
         for i in 0..count {
             let tile_id = base + i as u64;
-            let (z2, x, y) = tile_id_to_zxy(tile_id);
+            let (z2, x, y) = TileId::new(tile_id).unwrap().coord();
             assert_eq!(z2, z);
             let payload = (i as u64).to_le_bytes();
             writer.add_tile(z2, x, y, &payload).unwrap();

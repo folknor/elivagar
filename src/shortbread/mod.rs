@@ -12,6 +12,7 @@
 //   transport.rs  - aerialways, ferries, public_transport
 //   pois.rs       - points of interest
 
+use crate::tiling::MAX_ZOOM;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 

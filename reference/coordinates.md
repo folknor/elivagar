@@ -14,7 +14,7 @@ pixel is 16 extent units.
 | EPSG:3857 | Floating-point metres | Web Mercator metres, centered on the world origin. |
 | Normalized Mercator, wrapped | `Point { x, y }` floats | World coordinates where x runs west to east from 0 to 1 and y runs north to south from 0 to 1. Wrapped x is reduced modulo 1. |
 | Normalized Mercator, unwrapped | `Point { x, y }` floats | The same projected coordinates with x allowed outside 0 to 1 so a path crossing the antimeridian can take the short route. |
-| Base pixel grid, or base integer grid | Signed integer x and y | Normalized Mercator quantized at the configured maximum zoom, in MVT extent units at that zoom. These units are not 256-pixel rendered pixels. |
+| Base pixel grid, or base integer grid | Signed integer x and y | Normalized Mercator quantized at the grid's maximum zoom, in MVT extent units at that zoom: the profile's top zoom for OSM polygons, the pass maximum for ocean. These units are not 256-pixel rendered pixels. |
 | Zoom pixel grid, or zoom integer grid | Signed integer x and y | Base integer coordinates rescaled to zoom z. A tile spans 4096 units on each axis. |
 | Tile-local MVT coordinates | Signed integer x and y | Zoom-grid coordinates minus the selected tile origin. Buffered geometry may lie outside the usual 0 to 4096 tile square. |
 | Tile address | `(z, x, y)` | A zoom and a coordinate in that zoom's `2^z` by `2^z` tile matrix. |
@@ -106,12 +106,29 @@ never clipped.
 For a tile address `(z, x, y)`, the PMTiles id is
 `(4^z - 1) / 3 + H(2^z, x, y)`, where `H` is the Hilbert distance in that
 zoom's tile matrix. Zoom zero has tile id zero. This id is not an x/y encoding.
+Ids exist for zooms 0 through 31; the first z32 id, `(4^32 - 1) / 3`, still
+fits in 64 bits and is the exclusive end of the address space. A directory
+entry or run reaching past it is malformed.
+
+Two zoom domains share these ids. The archive domain is z0 through z31: the
+tools that read any archive work in it. The profile domain is z0 through z14,
+the Shortbread schema's top zoom. Every "last zoom" policy (no
+simplification, no size filter, no line merging, the top compression tier)
+asks about z14, and a run's configured zoom range is a truncation window over
+the profile domain: lines and polygons are constructed over each layer's own
+zoom range and only emission is restricted, so a narrowed archive holds
+exactly the OSM tiles a full build holds at those zooms. Computed ocean does
+not yet follow this rule, because its pass grid takes the configured maximum.
 
 The sort key is:
 
 ```text
 (tile_id << 16) | (layer << 8) | paint_priority
 ```
+
+The tile id field is 48 bits, so a key can be built only for a profile-domain
+tile; anything beyond z14 is refused when the key is built and when it is
+partitioned, never clamped.
 
 Sort partitioning first identifies the zoom range containing the tile id,
 then uses its high-order Hilbert range to select an ordered partition. The
@@ -143,4 +160,5 @@ coordinates, not persistent feature identifiers or archive hashes.
 
 The implementation for these conversions lives in `geometry/projection.rs`,
 `geometry/tiles.rs`, `geometry/int_ocean.rs`, `geometry/pyramid.rs`,
-`pipeline/emit.rs`, `pmtiles_writer.rs`, and `sort.rs`.
+`pipeline/emit.rs`, `tiling.rs` (zoom domains, tile ids and the Hilbert
+curve), and `sort/key.rs`.

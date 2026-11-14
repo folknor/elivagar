@@ -12,7 +12,7 @@ pub(super) fn match_aerialways(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
         out.push(LayerMatch {
             layer: Layer::Aerialways,
             min_zoom: 12,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],
@@ -54,7 +54,7 @@ pub(super) fn match_ferries(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
     out.push(LayerMatch {
         layer: Layer::Ferries,
         min_zoom,
-        max_zoom: 14,
+        max_zoom: MAX_ZOOM,
         geom_expect: GeomExpect::Line,
         paint_rank: 0,
         attrs,
@@ -91,7 +91,7 @@ fn match_public_transport(
         out.push(LayerMatch {
             layer: Layer::PublicTransport,
             min_zoom,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect,
             paint_rank: 0,
             attrs,

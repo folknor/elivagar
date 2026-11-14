@@ -337,32 +337,29 @@ Reported by the polygon-engine, coordinate-spaces and ocean hunts.
 
 ## STR-011 - A coordinates module for zoom, tile ids and grids
 
-There is no home for: `Zoom` (bare `u8` with 14 and 15 in about 80 places),
-`ZoomRange`, `TileCoord` (`(u8, u32, u32)` everywhere except the
-crate-private `PyramidCell`; `PyramidSink`, `tile_filter` and every sink take
-bare triples), `TileId` (bare `u64` in sort, emit, assemble, ocean, verify,
-svg, main and the writer, next to offsets and lengths of the same primitive in
-`DirEntry`, `RawDirEntry`, `TileEntry`, `BlobRef`, the dedup tuple
-`(u64, u32, u64)` and verify's `(u64, u32, u8, bool)` key), `SortKey`
-(`type SortKey = u64`, so any u64 is a key; `make_sort_key(tile_id, layer:
-u8, priority: u8)` takes two swappable u8s), `PartitionId` (bare `usize`, cast
-to `u32` in section tables), per-zoom and per-layer-zoom arrays
-(`[_; 15]` and `layer * 15 + z` hand-rolled in eight files, decoded by
-`idx / 15`, `idx % 15` in three, packed into a `u16` for cap events; arrays
-sized `32 * 15` with `layer >= 32` guards; `cap_events: Vec<(u16, u64, u64)>`
-and `top_capped: Vec<(u64, u8, u8, u64)>` with swappable `bbox_tiles` and
-`osm_id`), and `PayloadRecord = (SortKey, usize, usize)` destructured
-positionally at about ten sites.
+The zoom and tile-id parts landed as `src/tiling.rs` (`MAX_ZOOM`,
+`ZOOM_COUNT`, the z31 archive ceiling, a validated `TileId` owning the
+Hilbert code, its tests and the per-zoom id ranges), with `LayerZoom`
+indexing `PerLayerZoom` and a `CapEvent` struct in stats. A `Zoom` newtype and
+a `PerZoom<T>` wrapper were refused, with the reasons in the `tiling` module
+docs. What remains has no home yet:
 
-Proposed `src/coords/` (or `grid/`): `Zoom` with `MAX`/`COUNT`,
-`ZoomRange`, `PerZoom<T>`, `LayerMap<T>`, `PerLayerZoom<T>`, `LayerZoom` with
-`index()`, validated `TileCoord` and `TileId` with the only
-conversions, `SortKey { tile, layer: Layer, rank: PaintRank }` with packing
-internal, `PartitionId(u16)`, `PayloadRef { key, offset, len: u32 }` (also
-shrinking the 24-byte record), `CapEvent { at: LayerZoom, bbox_tiles, osm_id }`,
-the extent/buffer constants, the `Grid` of STR-010 and projection.
-`pmtiles_writer` and `sort` depend on it, not the other way round. Hilbert
-tests (`test_hilbert_*`) move from `pmtiles_writer_tests.rs` to it.
+- `TileCoord`: `(u8, u32, u32)` everywhere except the crate-private
+  `PyramidCell`; `PyramidSink`, `tile_filter` and every sink take bare
+  triples, and `TileId::coord` returns one.
+- Raw ids where they are not addresses or have not been typed: `RawDirEntry`,
+  `TileEntry` and `find_entry` keep `u64` (the wire record and its probe),
+  as do range ends, `OversizeTile`, the artifact run arithmetic in
+  `assemble.rs` and `OceanTiles::runs_in`/`run_covering`.
+- `SortKey` (`type SortKey = u64`; `make_sort_key(TileId, layer: u8,
+  priority: u8)` still takes two swappable u8s), `PartitionId` (bare `usize`,
+  cast to `u32` in section tables), and `PayloadRecord = (SortKey, usize,
+  usize)` destructured positionally at about ten sites; proposed
+  `SortKey { tile, layer: Layer, rank: PaintRank }` with packing internal,
+  `PartitionId(u16)`, `PayloadRef { key, offset, len: u32 }`.
+- `LayerMap<T>` for the `[_; Layer::count()]` arrays, the `Grid` of STR-010
+  and projection. `assemble::non_band_tile_rect` spells the extent shift as a
+  literal `+ 12` beside `geometry/tiles::grid::EXTENT_LOG2`.
 
 Reported by the coordinate-spaces, storage, archive-surface, layer-identity,
 pipeline and polygon-engine hunts.

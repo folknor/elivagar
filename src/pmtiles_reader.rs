@@ -605,9 +605,10 @@ pub(crate) fn encode_directory(entries: &[RawDirEntry]) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Sorted runs must not overlap and their ends must not overflow, or
-/// `find_entry`'s predecessor-only probe would silently miss covered tiles.
-/// A malformed archive becomes a container error instead.
+/// Sorted runs must not overlap and must end within the addressable tile ids,
+/// or `find_entry`'s predecessor-only probe would silently miss covered tiles
+/// and run expansion would mint ids with no zoom. A malformed archive becomes
+/// a container error instead.
 fn check_run_invariants(runs: &[RawDirEntry]) -> io::Result<()> {
     let mut prev_end = 0u64;
     for run in runs {
@@ -617,13 +618,18 @@ fn check_run_invariants(runs: &[RawDirEntry]) -> io::Result<()> {
         prev_end = run
             .tile_id
             .checked_add(u64::from(run.run_length))
-            .ok_or_else(|| io::Error::other("tile run end overflows"))?;
+            .filter(|&end| end <= crate::tiling::ARCHIVE_ID_END)
+            .ok_or_else(|| {
+                io::Error::other("tile run reaches past the last addressable PMTiles tile")
+            })?;
     }
     Ok(())
 }
 
 /// Find one addressed tile in a sorted list of non-overlapping PMTiles
-/// directory runs (the `read_all_runs` invariant).
+/// directory runs. The slice must satisfy the `read_all_runs` invariants
+/// (sorted, non-overlapping, ending within the addressable ids); a hand-built
+/// slice that does not gets an unspecified answer, not an error.
 pub fn find_entry(runs: &[RawDirEntry], tile_id: u64) -> Option<TileEntry> {
     let index = runs.partition_point(|run| run.tile_id <= tile_id);
     let run = runs.get(index.checked_sub(1)?)?;
@@ -672,6 +678,13 @@ pub fn decode_directory(data: &[u8]) -> io::Result<Vec<RawDirEntry>> {
         prev = prev
             .checked_add(delta)
             .ok_or_else(|| io::Error::other("tile_id delta: cumulative overflow"))?;
+        // Every entry, leaf pointers included, names a tile address.
+        if crate::tiling::TileId::new(prev).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "tile_id delta: id lies beyond the last addressable PMTiles tile",
+            ));
+        }
         tile_ids.push(prev);
     }
 
@@ -896,11 +909,25 @@ mod tests {
 
     #[test]
     fn decode_directory_rejects_tile_id_delta_overflow() {
-        // Entry 0 sets cumulative tile_id to u64::MAX; entry 1 overflows by +1.
-        let raw = encode_directory_raw(&[u64::MAX, 1], &[1, 1], &[1, 1], &[1, 2]);
+        // Entry 0 is a valid id; entry 1's delta overflows the cumulative sum.
+        let raw = encode_directory_raw(&[5, u64::MAX], &[1, 1], &[1, 1], &[1, 2]);
         let err = decode_directory(&raw).expect_err("tile_id overflow should fail");
         assert!(err.to_string().contains("tile_id delta"));
         assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn decode_directory_rejects_ids_beyond_the_address_space() {
+        let last = crate::tiling::ARCHIVE_ID_END - 1;
+        let raw = encode_directory_raw(&[last], &[1], &[1], &[1]);
+        assert!(
+            decode_directory(&raw).is_ok(),
+            "the last z31 id is addressable"
+        );
+        // A leaf pointer (run length 0) is checked like any other entry.
+        let raw = encode_directory_raw(&[last + 1], &[0], &[1], &[1]);
+        let err = decode_directory(&raw).expect_err("an id past z31 must fail");
+        assert!(err.to_string().contains("beyond"));
     }
 
     #[test]
@@ -929,7 +956,19 @@ mod tests {
             run_length: 2,
         }];
         let err = super::check_run_invariants(&overflowing).expect_err("overflow must fail");
-        assert!(err.to_string().contains("overflow"));
+        assert!(err.to_string().contains("past the last addressable"));
+
+        let last = crate::tiling::ARCHIVE_ID_END - 1;
+        let at_ceiling = |run_length| {
+            [RawDirEntry {
+                tile_id: last,
+                offset: 100,
+                length: 7,
+                run_length,
+            }]
+        };
+        assert!(super::check_run_invariants(&at_ceiling(1)).is_ok());
+        assert!(super::check_run_invariants(&at_ceiling(2)).is_err());
 
         let adjacent = [
             RawDirEntry {

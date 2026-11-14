@@ -263,7 +263,17 @@ impl SortReader {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::sort::key::{PARTITION_BASES, TILE_ID_BASES};
+    use crate::sort::key::PARTITION_BASES;
+    use crate::tiling::{PROFILE_ID_END, TileId, zoom_ids};
+
+    /// Raw-id spelling for fixtures; the real constructor takes a `TileId`.
+    fn make_sort_key(tile_id: u64, layer: u8, priority: u8) -> SortKey {
+        super::make_sort_key(TileId::new(tile_id).unwrap(), layer, priority)
+    }
+
+    fn base(zoom: usize) -> u64 {
+        zoom_ids(u8::try_from(zoom).unwrap()).0
+    }
 
     fn chunk_path_for_id(dir: &Path, id: usize) -> Option<PathBuf> {
         chunk_files_by_id(dir)
@@ -304,16 +314,14 @@ mod tests {
         let cases: Vec<(u64, u8, u8)> = vec![
             (0, 0, 0),
             (1, 2, 3),
-            (0xFF_FFFF_FFFF_FFFF, 0xFF, 0xFF),
+            (PROFILE_ID_END - 1, 0xFF, 0xFF),
             (42, 7, 128),
             (1_000_000, 0, 255),
         ];
         for (tile_id, layer, priority) in cases {
-            // tile_id is only 48 bits wide in the encoding
-            let tile_id = tile_id & 0x0000_FFFF_FFFF_FFFF;
             let key = make_sort_key(tile_id, layer, priority);
             assert_eq!(
-                tile_id_from_key(key),
+                tile_id_from_key(key).raw(),
                 tile_id,
                 "tile_id mismatch for ({tile_id}, {layer}, {priority})"
             );
@@ -328,6 +336,19 @@ mod tests {
                 "priority mismatch for ({tile_id}, {layer}, {priority})"
             );
         }
+    }
+
+    /// The 48-bit key field would silently drop the high bits of a z24+ id
+    /// and the partitions cover z0-z14 only, so a tile beyond the profile's
+    /// top zoom is refused at minting and at partitioning, not clamped.
+    #[test]
+    fn keys_beyond_the_profile_zoom_are_refused() {
+        let first_z15 = TileId::at(15, 0, 0);
+        assert!(std::panic::catch_unwind(|| super::make_sort_key(first_z15, 0, 0)).is_err());
+        let forged = first_z15.raw() << 16;
+        assert!(std::panic::catch_unwind(|| partition_from_key(forged)).is_err());
+        let last_z14 = make_sort_key(PROFILE_ID_END - 1, 0, 0);
+        assert_eq!(partition_from_key(last_z14), SORT_PARTITIONS - 1);
     }
 
     #[test]
@@ -391,7 +412,7 @@ mod tests {
         assert_eq!(SORT_PARTITIONS, 136_533);
 
         // One z7 prefix at z14 spans 4^(14-7) = 16,384 child tile ids.
-        let z14_base = TILE_ID_BASES[14];
+        let z14_base = base(14);
         let first = partition_from_key(make_sort_key(z14_base, 0, 0));
         let last_same_prefix = partition_from_key(make_sort_key(z14_base + 16_383, 0, 0));
         let next_prefix = partition_from_key(make_sort_key(z14_base + 16_384, 0, 0));
@@ -405,7 +426,7 @@ mod tests {
         assert!(make_sort_key(z14_base + 16_383, u8::MAX, u8::MAX) < partition_next_key(first));
 
         // One z7 prefix at z13 spans 4^(13-7) = 4,096 child tile ids.
-        let z13_base = TILE_ID_BASES[13];
+        let z13_base = base(13);
         let z13_first = partition_from_key(make_sort_key(z13_base, 0, 0));
         let z13_next = partition_from_key(make_sort_key(z13_base + 4_096, 0, 0));
         assert_eq!(z13_first, PARTITION_BASES[13]);
@@ -421,8 +442,8 @@ mod tests {
         let mut previous = 0usize;
         let mut first = true;
         for zoom in 0usize..15 {
-            let start = TILE_ID_BASES[zoom];
-            let end = TILE_ID_BASES[zoom + 1] - 1;
+            let start = base(zoom);
+            let end = base(zoom + 1) - 1;
             let step = ((end - start) / 17).max(1);
             let mut tile_id = start;
             loop {

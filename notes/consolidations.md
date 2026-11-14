@@ -114,10 +114,9 @@ Reported by the pipeline, run-contract, ocean and storage hunts.
    two sites in `run()` (opened verbatim twice depending on the skip).
 4. `ocean_build` - what it writes.
 
-The artifact zoom contract `0/14` is hard-coded in four places
-(`resolved_ocean_mode`, `ocean_build`, `OceanTiles::open` including a
-`z14_end = ((1 << 30) - 1) / 3 + 1` Hilbert formula that belongs to the tile-id
-module, and `artifact_run_copy_items`' `z == 14`).
+The artifact zoom contract `0/tiling::MAX_ZOOM` is restated in three places
+(`resolved_ocean_mode`, `ocean_build`, `OceanTiles::open`, whose run check
+reads `tiling::PROFILE_ID_END`).
 
 Agree today, held by hand. `OceanMode::Band { key }` does not carry the
 artifact path, so every use re-pairs it with `config.ocean_tiles` via
@@ -158,49 +157,24 @@ Reported by the polygon-engine and coordinate-spaces hunts.
 
 ## CON-013 - Is this the last zoom, and what is the maximum zoom?
 
-"The last zoom" (no simplification, no size filter) is decided from a literal
-14 rather than `config.max_zoom`: `emit.rs` (`z >= 14` in the skip-size
-filter, `z < 14` in the line pin path, `OSM_POLYGON_MAX_Z = 14` gating
-`polygon_dp_tol`, `polygon_min_area`, `polygon_z_start` and the quantization
-grid), `simplify.rs` (`z < 14` twice), `assemble.rs` (`z == 14`,
-`13..=14` in the compression table, `z < 14` for line merging),
-`resolve_boundary_match` (`max_zoom: 14`), `LayerMatch.max_zoom` (literal 14
-at about 40 construction sites, never varies, yet min()'d against config).
-The maximum is restated as `config.max_zoom > 14` in `run`, `0, 14` in the
-artifact sites, `[u64; 15]`, `0..15u8`, `zoom >= 15`.
+The zoom-constant half is settled: "max zoom" is `tiling::MAX_ZOOM` (the
+Shortbread top, z14), every last-zoom policy asks about it, and the
+`TilegenConfig` zoom bounds are a truncation window (OSM construction runs
+over each layer's own range; emission is cut). What remains:
 
-`TilegenConfig.min_zoom`/`max_zoom` exist, `run` rejects `max_zoom > 14`, and
-the CLI hardcodes 0/14 with no flag, so zoom is a library-only half-axis. With
-`max_zoom = 12` the top zoom would get DP and min-area filtering and lines the
-size filter, while OSM polygons still quantize at z14; `build_metadata` also
-writes `minzoom = layer.min_zoom()` without clamping to `config.min_zoom`.
-
-Owner proposed: `Zoom`, `ZoomRange` (validated `min <= max <= MAX`),
-`ZoomRange::is_last(z)`, a `ZoomSpan { maxz, top, bottom }` with
-`shift_for(z)` for the pyramid (removing six `maxz - z` subtractions), and an
-explicit decision whether "max zoom" means the configured last zoom or z14 -
-or drop the two config fields since no operator can reach them and the
-artifact refuses anything but z0-14.
+- The pyramid's grid arithmetic: `maxz`, `z_top` and `z_bottom` travel as
+  three bare `u8`s in `PyramidParams`, and the shift `maxz - z` is written out
+  at each use in `geometry/pyramid.rs` plus `assemble::non_band_tile_rect`.
+  The proposed `ZoomSpan { maxz, top, bottom }` with `shift_for(z)` belongs
+  with the coordinate-space `Grid` in `notes/structural.md`.
+- The window is still two bare `u8`s checked in `run` (`min <= max <=
+  MAX_ZOOM`); no `ZoomRange` type carries the validation, and `EmitCtx`,
+  `relations.rs` and `phase12.rs` thread the pair separately.
+- Computed ocean does not follow the truncation rule; see the pass-grid item
+  in `notes/bugs.md` (ocean pass structure).
 
 Reported by the polygon-engine, pipeline, coordinate-spaces, layer-identity,
 storage and archive-surface hunts.
-
-## CON-014 - What zoom is a tile id, and where does a zoom's id range end?
-
-The base formula `(4^z - 1) / 3` is spelled in `sort::TILE_ID_BASES`
-(`zoom_from_tile_id` scans down from a hard 14), `pmtiles_writer::xy_to_tile_id`
-and `tile_id_to_zxy` (inline, loops to z31), `assemble.rs`
-`artifact_run_copy_items` `zoom_end`, and `ocean.rs` `z14_end`.
-`zoom_from_tile_id` returns 14 silently for any id at or beyond base(15) while
-`tile_id_to_zxy` returns z15+; `partition_from_key` clamps out-of-range ids
-into the last partition (`.min(TILE_ID_LIMIT_EXCLUSIVE - 1)`) silently. If the
-max zoom ever changes the sort misfiles z15 records into the last partition.
-
-Owner proposed: `TileId(u64)` with `zoom()`, `zxy()`, `from_zxy()`,
-`zoom_start(z)`, `zoom_end(z)` in one tiling module (see the coordinates
-module in `notes/structural.md`).
-
-Reported by the storage, coordinate-spaces and archive-surface hunts.
 
 ## CON-017 - How is an MVT command stream decoded?
 

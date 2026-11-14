@@ -1,5 +1,10 @@
 use super::*;
 use crate::shortbread::{AttrValue, GeomExpect, Layer, LayerMatch};
+use crate::tiling::TileId;
+
+fn zxy(tile_id: TileId) -> (u8, u32, u32) {
+    tile_id.coord()
+}
 // Only the MLT parity test imports these by name; the other gzip-decoding
 // tests spell out flate2::read::GzDecoder / std::io::Read at the call site.
 #[cfg(feature = "mlt")]
@@ -659,7 +664,7 @@ fn one_tile_sort_reader(chunks_dir: &std::path::Path) -> sort::SortReader {
         crate::wire_format::encode_feature_data(1, mvt::GeomType::Point, &[9, 0, 0], &attrs, 14);
     writer
         .push(SortRecord {
-            key: sort::make_sort_key(pmtiles_writer::xy_to_tile_id(0, 0, 0), Layer::Pois as u8, 0),
+            key: sort::make_sort_key(TileId::at(0, 0, 0), Layer::Pois as u8, 0),
             data: feature,
         })
         .expect("push sort record");
@@ -673,7 +678,7 @@ fn tile_features_ordered_by_paint_rank() {
     // chunk, so this exercises both chunk sorting and the k-way merge.
     let mut writer = sort::SortWriter::new(dir.path(), 1, sort::ChunkCompression::None)
         .expect("create sort writer");
-    let tile_id = pmtiles_writer::xy_to_tile_id(10, 1, 1);
+    let tile_id = TileId::at(10, 1, 1);
     let ranks = [5u8, 0, 3, 2];
     for (osm_id, rank) in ranks.into_iter().enumerate() {
         let osm_id = u8::try_from(osm_id).expect("test id fits in u8");
@@ -706,7 +711,7 @@ fn tile_features_ordered_by_paint_rank() {
 
 /// Fixture for the MLT/MVT layer-model parity test.
 #[cfg(feature = "mlt")]
-fn parity_pending_tile(tile_id: u64) -> PendingTile {
+fn parity_pending_tile(tile_id: TileId) -> PendingTile {
     let point_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("city")), 0)];
     let line_attrs = vec![("kind", AttrValue::Str(Cow::Borrowed("street")), 0)];
 
@@ -840,21 +845,21 @@ fn oversize_top_list_keeps_largest_tiles_sorted() {
     insert_top_oversized(
         &mut top,
         OversizeTile {
-            tile_id: pmtiles_writer::xy_to_tile_id(1, 0, 0),
+            tile_id: TileId::at(1, 0, 0).raw(),
             bytes: 100,
         },
     );
     insert_top_oversized(
         &mut top,
         OversizeTile {
-            tile_id: pmtiles_writer::xy_to_tile_id(1, 1, 0),
+            tile_id: TileId::at(1, 1, 0).raw(),
             bytes: 900,
         },
     );
     insert_top_oversized(
         &mut top,
         OversizeTile {
-            tile_id: pmtiles_writer::xy_to_tile_id(1, 1, 1),
+            tile_id: TileId::at(1, 1, 1).raw(),
             bytes: 500,
         },
     );
@@ -870,23 +875,19 @@ fn tile_size_diag_thresholds_are_strictly_greater_than_boundaries() {
     let warn = TILE_OVERSIZE_WARN_BYTES;
     let severe = TILE_OVERSIZE_SEVERE_BYTES;
 
-    record_tile_size_diagnostics(&mut diag, pmtiles_writer::xy_to_tile_id(0, 0, 0), warn);
+    record_tile_size_diagnostics(&mut diag, TileId::at(0, 0, 0).raw(), warn);
     assert_eq!(diag.oversize_warn_count, 0);
     assert_eq!(diag.oversize_severe_count, 0);
 
-    record_tile_size_diagnostics(&mut diag, pmtiles_writer::xy_to_tile_id(1, 0, 0), warn + 1);
+    record_tile_size_diagnostics(&mut diag, TileId::at(1, 0, 0).raw(), warn + 1);
     assert_eq!(diag.oversize_warn_count, 1);
     assert_eq!(diag.oversize_severe_count, 0);
 
-    record_tile_size_diagnostics(&mut diag, pmtiles_writer::xy_to_tile_id(2, 0, 0), severe);
+    record_tile_size_diagnostics(&mut diag, TileId::at(2, 0, 0).raw(), severe);
     assert_eq!(diag.oversize_warn_count, 2);
     assert_eq!(diag.oversize_severe_count, 0);
 
-    record_tile_size_diagnostics(
-        &mut diag,
-        pmtiles_writer::xy_to_tile_id(3, 0, 0),
-        severe + 1,
-    );
+    record_tile_size_diagnostics(&mut diag, TileId::at(3, 0, 0).raw(), severe + 1);
     assert_eq!(diag.oversize_warn_count, 3);
     assert_eq!(diag.oversize_severe_count, 1);
 }
@@ -1296,8 +1297,8 @@ fn antimeridian_wrapped_line_emits_both_seam_tiles_without_duplicates() {
         *counts.entry(tile_id).or_insert(0usize) += 1;
     }
 
-    let left = pmtiles_writer::xy_to_tile_id(1, 0, 0);
-    let right = pmtiles_writer::xy_to_tile_id(1, 1, 0);
+    let left = TileId::at(1, 0, 0);
+    let right = TileId::at(1, 1, 0);
     assert_eq!(
         counts.len(),
         2,
@@ -1363,8 +1364,8 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
         *counts.entry(tile_id).or_insert(0usize) += 1;
     }
 
-    let left = pmtiles_writer::xy_to_tile_id(1, 0, 0);
-    let right = pmtiles_writer::xy_to_tile_id(1, 1, 0);
+    let left = TileId::at(1, 0, 0);
+    let right = TileId::at(1, 1, 0);
     assert_eq!(
         counts.len(),
         2,
@@ -1433,8 +1434,8 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
         *counts.entry(tile_id).or_insert(0usize) += 1;
     }
 
-    let left = pmtiles_writer::xy_to_tile_id(1, 0, 0);
-    let right = pmtiles_writer::xy_to_tile_id(1, 1, 0);
+    let left = TileId::at(1, 0, 0);
+    let right = TileId::at(1, 1, 0);
     assert_eq!(
         counts.len(),
         2,
@@ -1469,7 +1470,7 @@ fn tile_encoders_reject_unknown_sort_layer_ids() {
     ];
     for format in formats {
         let tile = PendingTile {
-            tile_id: pmtiles_writer::xy_to_tile_id(3, 4, 5),
+            tile_id: TileId::at(3, 4, 5),
             features: vec![(255, Box::new([]))],
         };
         match encode_tile_batch(&[tile], 6, format, TileCompression::Gzip) {
@@ -1483,7 +1484,7 @@ fn tile_encoders_reject_unknown_sort_layer_ids() {
 #[test]
 fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
     let tile = PendingTile {
-        tile_id: pmtiles_writer::xy_to_tile_id(3, 4, 5),
+        tile_id: TileId::at(3, 4, 5),
         features: Vec::new(),
     };
     match encode_tile_batch(&[tile], 6, TilePayloadFormat::Mlt, TileCompression::Gzip) {
@@ -1495,7 +1496,7 @@ fn encode_tile_batch_mlt_empty_tile_encodes_to_no_output() {
 #[cfg(feature = "mlt")]
 #[test]
 fn shared_layer_prep_model_matches_mvt_layer_assembly() {
-    let tile_id = pmtiles_writer::xy_to_tile_id(4, 8, 9);
+    let tile_id = TileId::at(4, 8, 9);
     let tile = parity_pending_tile(tile_id);
 
     let mut scratch = AssemblyScratch {
@@ -1967,7 +1968,7 @@ fn test_layer_match(layer: Layer, geom_expect: GeomExpect) -> LayerMatch {
 }
 
 /// Decode the sort key fields from a SortRecord.
-fn decode_key(rec: &SortRecord) -> (u64, u8) {
+fn decode_key(rec: &SortRecord) -> (TileId, u8) {
     let tile_id = sort::tile_id_from_key(rec.key);
     let layer_idx = sort::layer_from_key(rec.key);
     (tile_id, layer_idx)
@@ -2130,7 +2131,7 @@ fn emit_point_decodes_correctly() {
 
     // Sort key: tile_id for z=0/x=0/y=0, layer = Pois
     let (tile_id, layer_idx) = decode_key(rec);
-    assert_eq!(tile_id, pmtiles_writer::xy_to_tile_id(0, 0, 0));
+    assert_eq!(tile_id, TileId::at(0, 0, 0));
     assert_eq!(layer_idx, Layer::Pois as u8);
 
     // Wire format: osm_id=42, geom_type=Point(1), has geometry commands
@@ -2338,7 +2339,7 @@ fn relation_labels_aggregate_components_once_per_layer_per_zoom() {
     let mut counts = [[0; 2]; 6];
     for &(key, offset, len) in &sink.records {
         let tile_id = sort::tile_id_from_key(key);
-        let (zoom, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
+        let (zoom, tx, ty) = zxy(tile_id);
         let layer_index = layers
             .iter()
             .position(|layer| *layer as u8 == sort::layer_from_key(key))
@@ -2505,7 +2506,7 @@ fn emit_line_decodes_correctly() {
 
     // Sort key
     let (tile_id, layer_idx) = decode_key(rec);
-    assert_eq!(tile_id, pmtiles_writer::xy_to_tile_id(0, 0, 0));
+    assert_eq!(tile_id, TileId::at(0, 0, 0));
     assert_eq!(layer_idx, Layer::Streets as u8);
 
     // Wire format
@@ -2548,7 +2549,7 @@ fn emit_line_cascading_simplification() {
         .iter()
         .filter(|r| {
             let tid = sort::tile_id_from_key(r.key);
-            let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tid);
+            let (z, _, _) = zxy(tid);
             z == 14
         })
         .collect();
@@ -2560,7 +2561,10 @@ fn emit_line_cascading_simplification() {
 
 #[test]
 fn emit_line_preserve_mask_keeps_required_vertices() {
-    let m = test_layer_match(Layer::Streets, GeomExpect::Line);
+    // A layer ending at z0, so the unpinned cascade is one direct
+    // simplification, the same work the pinned path does at that zoom.
+    let mut m = test_layer_match(Layer::Streets, GeomExpect::Line);
+    m.max_zoom = 0;
     let coords = [
         Point { x: 0.1, y: 0.10000 },
         Point { x: 0.3, y: 0.10001 },
@@ -2680,7 +2684,7 @@ fn emit_polygon_decodes_correctly() {
 
     // Sort key
     let (tile_id, layer_idx) = decode_key(rec);
-    assert_eq!(tile_id, pmtiles_writer::xy_to_tile_id(0, 0, 0));
+    assert_eq!(tile_id, TileId::at(0, 0, 0));
     assert_eq!(layer_idx, Layer::Buildings as u8);
 
     // Wire format
@@ -2909,7 +2913,7 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
     assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
     let (tile_id, _) = decode_key(&records_pinned[0]);
-    let (z, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let (z, tx, ty) = zxy(tile_id);
     let mut target_tc = Vec::new();
     geometry::tiles::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
     let expected = target_tc[0];
@@ -3000,7 +3004,7 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
     assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
     let (tile_id, _) = decode_key(&records_pinned[0]);
-    let (z, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let (z, tx, ty) = zxy(tile_id);
     let mut target_tc = Vec::new();
     geometry::tiles::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
     let expected = target_tc[0];
@@ -3097,7 +3101,7 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
     assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
     let (tile_id, _) = decode_key(&records_pinned[0]);
-    let (z, tx, ty) = pmtiles_writer::tile_id_to_zxy(tile_id);
+    let (z, tx, ty) = zxy(tile_id);
     let mut target_tc = Vec::new();
     geometry::tiles::to_tile_coords_into(&mut target_tc, &[target], tx, ty, z);
     let expected = target_tc[0];
@@ -3427,7 +3431,7 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
 
     let rec = &records[0];
     let (tile_id, layer_idx) = decode_key(rec);
-    assert_eq!(tile_id, pmtiles_writer::xy_to_tile_id(0, 0, 0));
+    assert_eq!(tile_id, TileId::at(0, 0, 0));
     assert_eq!(layer_idx, Layer::Buildings as u8);
 
     let (osm_id, gt, cmd_count) = decode_data_header(&rec.data);
@@ -3745,12 +3749,136 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
     let mut zooms = std::collections::BTreeSet::new();
     for rec in &records {
         let (tile_id, _) = decode_key(rec);
-        let (z, _, _) = pmtiles_writer::tile_id_to_zxy(tile_id);
+        let (z, _, _) = zxy(tile_id);
         zooms.insert(z);
     }
     assert!(zooms.contains(&0));
     assert!(zooms.contains(&1));
     assert!(zooms.contains(&2));
+}
+
+/// A zigzag ring or path around (0.5, 0.5), wide enough to cross several z14
+/// tiles and jagged enough that simplification changes it at every zoom.
+fn zigzag(closed: bool) -> Vec<Point> {
+    let mut points = Vec::new();
+    for i in 0..40_u32 {
+        let t = f64::from(i) / 40.0;
+        let wiggle = if i % 2 == 0 { 0.000_02 } else { -0.000_02 };
+        points.push(Point {
+            x: 0.5 + 0.000_6 * t,
+            y: 0.5 + wiggle + 0.000_1 * (t * 7.0).sin(),
+        });
+    }
+    if closed {
+        for i in (0..40_u32).rev() {
+            let t = f64::from(i) / 40.0;
+            let wiggle = if i % 3 == 0 { 0.000_03 } else { 0.0 };
+            points.push(Point {
+                x: 0.5 + 0.000_6 * t,
+                y: 0.500_5 + wiggle,
+            });
+        }
+        points.push(points[0]);
+    }
+    points
+}
+
+/// Records sorted by key then payload, restricted to a zoom window.
+fn window_records(records: &[SortRecord], lo: u8, hi: u8) -> Vec<(u64, Vec<u8>)> {
+    let mut out: Vec<(u64, Vec<u8>)> = records
+        .iter()
+        .filter(|r| (lo..=hi).contains(&sort::tile_id_from_key(r.key).zoom()))
+        .map(|r| (r.key, r.data.to_vec()))
+        .collect();
+    out.sort();
+    out
+}
+
+const PARITY_WINDOWS: [(u8, u8); 5] = [(0, 8), (5, 14), (9, 11), (12, 12), (14, 14)];
+
+/// The run's zoom window truncates; it does not re-plan. Emitting under a
+/// window must give exactly the full build's records at those zooms, for the
+/// emitters whose construction is stateful across zooms: the unpinned line
+/// cascade and the polygon pyramid.
+#[test]
+fn zoom_window_emission_equals_full_emission_restricted() {
+    let line = zigzag(false);
+    let ring = zigzag(true);
+    let line_match = test_layer_match(Layer::WaterLines, GeomExpect::Line);
+    let polygon_match = test_layer_match(Layer::WaterPolygons, GeomExpect::Polygon);
+
+    let emit_line = |lo, hi| {
+        let mut records = Vec::new();
+        let mut scratch = LineEmitScratch::new();
+        emit_line_feature(
+            1,
+            &line,
+            &[],
+            &line_match,
+            lo,
+            hi,
+            &mut records,
+            &mut scratch,
+        );
+        records
+    };
+    let emit_polygon = |lo, hi| {
+        let mut records = Vec::new();
+        let mut scratch = PolygonEmitScratch::new();
+        emit_polygon_feature(
+            2,
+            &ring,
+            &[],
+            &polygon_match,
+            lo,
+            hi,
+            &mut records,
+            &mut scratch,
+            0,
+            1.0,
+        );
+        records
+    };
+    let emit_multipolygon = |lo, hi| {
+        let mut records = Vec::new();
+        let mut scratch = MultipolygonEmitScratch::new();
+        emit_multipolygon_feature(
+            3,
+            &ring,
+            &[],
+            None,
+            &polygon_match,
+            lo,
+            hi,
+            &mut records,
+            &mut scratch,
+            0,
+            1.0,
+        );
+        records
+    };
+
+    let full_line = emit_line(0, 14);
+    let full_polygon = emit_polygon(0, 14);
+    let full_multipolygon = emit_multipolygon(0, 14);
+    assert!(!full_line.is_empty() && !full_polygon.is_empty() && !full_multipolygon.is_empty());
+    for (lo, hi) in PARITY_WINDOWS {
+        assert_eq!(
+            window_records(&emit_line(lo, hi), 0, 14),
+            window_records(&full_line, lo, hi),
+            "line window z{lo}-z{hi}"
+        );
+        assert_eq!(
+            window_records(&emit_polygon(lo, hi), 0, 14),
+            window_records(&full_polygon, lo, hi),
+            "polygon window z{lo}-z{hi}"
+        );
+        assert_eq!(
+            window_records(&emit_multipolygon(lo, hi), 0, 14),
+            window_records(&full_multipolygon, lo, hi),
+            "multipolygon window z{lo}-z{hi}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

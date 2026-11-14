@@ -40,7 +40,7 @@ pub(super) fn match_water_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMat
         out.push(LayerMatch {
             layer: Layer::WaterPolygons,
             min_zoom,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],
@@ -60,7 +60,7 @@ pub(super) fn match_water_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<[L
         out.push(LayerMatch {
             layer: Layer::WaterPolygonsLabels,
             min_zoom: label_zoom,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: Layer::WaterPolygonsLabels.polygon_point_geom_expect(),
             paint_rank: 0,
             attrs,
@@ -96,7 +96,7 @@ pub(super) fn match_water_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch;
         out.push(LayerMatch {
             layer: Layer::WaterLines,
             min_zoom,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs,
@@ -125,7 +125,7 @@ pub(super) fn match_water_lines_labels(tags: &Tags<'_>, out: &mut SmallVec<[Laye
         out.push(LayerMatch {
             layer: Layer::WaterLinesLabels,
             min_zoom: label_zoom,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs,
@@ -142,7 +142,7 @@ pub(super) fn match_dam_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
         out.push(LayerMatch {
             layer: Layer::DamLines,
             min_zoom: 12,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs: smallvec![attr_str("kind", "dam")],
@@ -155,7 +155,7 @@ pub(super) fn match_dam_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
         out.push(LayerMatch {
             layer: Layer::DamPolygons,
             min_zoom: 12,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_str("kind", "dam")],
@@ -168,7 +168,7 @@ pub(super) fn match_pier_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
         out.push(LayerMatch {
             layer: Layer::PierLines,
             min_zoom: 12,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],
@@ -181,7 +181,7 @@ pub(super) fn match_pier_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatc
         out.push(LayerMatch {
             layer: Layer::PierPolygons,
             min_zoom: 12,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],

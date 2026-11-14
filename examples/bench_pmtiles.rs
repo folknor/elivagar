@@ -14,7 +14,8 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Instant;
 
-use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter, xy_to_tile_id};
+use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
+use elivagar::tiling::TileId;
 
 struct TestTile {
     z: u8,
@@ -137,7 +138,7 @@ fn generate_tiles(target: usize) -> Vec<TestTile> {
     }
 
     // Sort by Hilbert tile ID (required by both writers for clustered output)
-    coords.sort_by_key(|&(z, x, y)| xy_to_tile_id(z, x, y));
+    coords.sort_by_key(|&(z, x, y)| TileId::at(z, x, y));
 
     // Generate compressed tile data
     coords

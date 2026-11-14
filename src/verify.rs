@@ -10,8 +10,19 @@ use std::io;
 use std::path::Path;
 
 use crate::pmtiles_reader::{self, PmtilesReader};
-use crate::pmtiles_writer::tile_id_to_zxy;
 use crate::shortbread::{Layer, paint_order};
+use crate::tiling::{ARCHIVE_MAX_ZOOM, TileId};
+
+/// One slot per archive zoom.
+pub const ARCHIVE_ZOOM_COUNT: usize = ARCHIVE_MAX_ZOOM as usize + 1;
+
+/// Coordinates of an id inside a directory run. `read_all_runs` refuses runs
+/// reaching past the last addressable tile, so every such id is an address.
+fn tile_coord(tile_id: u64) -> (u8, u32, u32) {
+    TileId::new(tile_id)
+        .expect("checked directory runs hold addressable ids")
+        .coord()
+}
 use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
 /// Maximum number of tile-level errors before aborting traversal.
@@ -76,9 +87,10 @@ pub struct VerifyReport {
     pub unique_blobs: u64,
     /// Number of PMTiles directory tile runs traversed.
     pub directory_runs: u64,
-    /// Addressed tiles, grouped by zoom, retained even when shared payloads
-    /// are checked only once.
-    pub addressed_per_zoom: [u64; 15],
+    /// Addressed tiles, grouped by archive zoom (0 through 31: verify reads
+    /// any archive, not only profile-range ones), retained even when shared
+    /// payloads are checked only once.
+    pub addressed_per_zoom: [u64; ARCHIVE_ZOOM_COUNT],
     pub unique_payloads: bool,
     pub tile_errors: Vec<String>,
     /// BTreeSet, not a hash set: this is iterated to build the "undeclared
@@ -337,7 +349,7 @@ pub fn verify_opts_unique(
     let mut stats: Option<GeometryStats> = geometry_stats.then(GeometryStats::default);
     let mut seen_payloads: FxHashSet<(u64, u32, ValidationClass)> = FxHashSet::default();
     let mut unique_blobs: FxHashSet<(u64, u32)> = FxHashSet::default();
-    let mut addressed_per_zoom = [0_u64; 15];
+    let mut addressed_per_zoom = [0_u64; ARCHIVE_ZOOM_COUNT];
 
     for run in &runs {
         if tile_errors.len() >= MAX_TILE_ERRORS {
@@ -349,10 +361,8 @@ pub fn verify_opts_unique(
             .ok_or_else(|| VerifyError::Container("tile run overflows".to_string()))?;
         let mut unique_tiles = Vec::new();
         for tile_id in run.tile_id..run_end {
-            let (z, x, y) = tile_id_to_zxy(tile_id);
-            if let Some(addressed) = addressed_per_zoom.get_mut(z as usize) {
-                *addressed += 1;
-            }
+            let (z, x, y) = tile_coord(tile_id);
+            addressed_per_zoom[usize::from(z)] += 1;
             if unique_payloads {
                 let class = ValidationClass::for_tile(z, x);
                 if seen_payloads.insert((run.offset, run.length, class)) {
@@ -384,7 +394,7 @@ pub fn verify_opts_unique(
                     )
                 } else {
                     Box::new((run.tile_id..run_end).map(|tile_id| {
-                        let (z, x, y) = tile_id_to_zxy(tile_id);
+                        let (z, x, y) = tile_coord(tile_id);
                         (tile_id, z, x, y)
                     }))
                 };
@@ -409,7 +419,7 @@ pub fn verify_opts_unique(
                 Box::new(unique_tiles.into_iter())
             } else {
                 Box::new((run.tile_id..run_end).map(|tile_id| {
-                    let (z, x, y) = tile_id_to_zxy(tile_id);
+                    let (z, x, y) = tile_coord(tile_id);
                     (tile_id, z, x, y, ValidationClass::for_tile(z, x))
                 }))
             };
@@ -1337,8 +1347,12 @@ fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, Ve
 mod tests {
     use super::*;
     use crate::mvt::{Feature, GeomType, LayerBuilder, Value, encode_tile};
-    use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter, xy_to_tile_id};
+    use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
     use flate2::Compression;
+
+    fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
+        TileId::at(z, x, y).raw()
+    }
     use flate2::write::GzEncoder;
     use std::io::Write;
 

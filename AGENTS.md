@@ -343,7 +343,8 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)` plu
 
 **Infrastructure:**
 - `sort.rs` - external sort partitioned by Hilbert tile-id range at write time (z7-calibrated partitions, `PARTITION_SPLIT_Z`; chunk files uncompressed by default, LZ4/Snappy via `--compress-sort-chunks`; per-partition k-way merge via binary heap, consumed lazily by the assemble partition readers)
-- `pmtiles_writer.rs` - PMTiles v3 writer with Hilbert tile IDs
+- `tiling.rs` - the two zoom domains (profile top `MAX_ZOOM` = z14, archive ceiling z31), the validated `TileId`, and the only Hilbert and per-zoom id-range arithmetic
+- `pmtiles_writer.rs` - PMTiles v3 writer
 - `inspect.rs` - PMTiles v3 archive inspector (header + metadata reader)
 - `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG). Viewer-flavored and for the eyeball only - corpus tiles are adjudicated from the canonical renders brokkr commits, never from this output
 - `tile_detail.rs` - wire-order MVT decoder for out-of-crate adjudication: structural detail, no canonicalization, no hashing, selectable unknown-field strictness (strict for brokkr's gate, tolerant for cross-producer comparison). The one decode surface brokkr's canonical hash consumes

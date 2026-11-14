@@ -13,7 +13,7 @@ pub(super) fn match_land(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
         out.push(LayerMatch {
             layer: Layer::Land,
             min_zoom,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: paint_order::land_paint_rank(kind),
             attrs: smallvec![attr_str("kind", kind)],
@@ -26,7 +26,7 @@ pub(super) fn match_land_lines(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
         out.push(LayerMatch {
             layer: Layer::Land,
             min_zoom: 12,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: paint_order::land_paint_rank("cliff"),
             attrs: smallvec![attr_str("kind", "cliff")],
@@ -136,7 +136,7 @@ pub(super) fn match_sites(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) 
         out.push(LayerMatch {
             layer: Layer::Sites,
             min_zoom: 14,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs: smallvec![attr_str("kind", kind)],
@@ -184,7 +184,7 @@ pub(super) fn match_buildings(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4
         out.push(LayerMatch {
             layer: Layer::Buildings,
             min_zoom: 14,
-            max_zoom: 14,
+            max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
             attrs,
@@ -224,7 +224,7 @@ fn match_addresses(tags: &Tags<'_>, geom_expect: GeomExpect, out: &mut SmallVec<
     out.push(LayerMatch {
         layer: Layer::Addresses,
         min_zoom: 14,
-        max_zoom: 14,
+        max_zoom: MAX_ZOOM,
         geom_expect,
         paint_rank: 0,
         attrs,
