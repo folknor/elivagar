@@ -467,6 +467,66 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
 }
 
 #[test]
+fn unsorted_nodes_under_force_sorted_refuse_the_input() {
+    // The sorted node store used to assert on this, aborting the process;
+    // it now fails the run as refused input, carried out of the node worker.
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let pbf_path = dir.path().join("unsorted.osm.pbf");
+    let file = File::create(&pbf_path).expect("create pbf");
+    let mut writer = PbfWriter::new(file, PbfCompression::None);
+    let header = block_builder::HeaderBuilder::new()
+        .build()
+        .expect("build header");
+    writer.write_header(&header).expect("write header");
+    let mut builder = block_builder::BlockBuilder::new();
+    builder.add_node(10, 550_000_000, 100_000_000, [], None);
+    builder.add_node(5, 550_000_100, 100_000_100, [], None);
+    writer
+        .write_primitive_block(builder.take().expect("take block").expect("node block"))
+        .expect("write block");
+    writer.flush().expect("flush pbf");
+    let config = TilegenConfig {
+        pbf_path,
+        output_path: dir.path().join("unused.pmtiles"),
+        tmp_dir: dir.path().join("tmp"),
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean: None,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: true,
+        allow_unsafe_flat_index: false,
+        threads: std::num::NonZeroUsize::MIN,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: sort::ChunkCompression::None,
+        fanout_caps: crate::FanoutCaps::default(),
+        polygon_simplify_factor: crate::SimplifyFactor::default(),
+    };
+    let err = phase_read_and_process(
+        &RunPlan::resolve(&config).expect("resolve plan"),
+        &test_resources(&config),
+    )
+    .map(|_| ())
+    .expect_err("non-increasing node IDs must fail the run");
+    assert_eq!(err.kind(), ErrorKind::InputRefused);
+    assert!(matches!(
+        std::error::Error::source(&err)
+            .and_then(|e| e.downcast_ref::<crate::node_index::NodeStoreError>()),
+        Some(crate::node_index::NodeStoreError::NotIncreasing {
+            node_id: 5,
+            previous: 10
+        })
+    ));
+}
+
+#[test]
 fn injected_members_end_to_end_marks_ways_with_block_local_pins() {
     let stats = injected_fixture(Some(&way_members_payload(3, &[0x04])))
         .expect("valid injected PBF should succeed");
@@ -1334,7 +1394,8 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
                 &mut scratch,
                 None,
                 1.0,
-            );
+            )
+            .unwrap();
         } else {
             let shifted: Vec<Point> = coords
                 .iter()
@@ -1354,7 +1415,8 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
                 &mut scratch,
                 None,
                 1.0,
-            );
+            )
+            .unwrap();
         }
     }
 
@@ -1403,7 +1465,8 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 &mut emit_scratch,
                 None,
                 1.0,
-            );
+            )
+            .unwrap();
         } else {
             let outer_shifted: Vec<Point> = outer
                 .iter()
@@ -1424,7 +1487,8 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 &mut emit_scratch,
                 None,
                 1.0,
-            );
+            )
+            .unwrap();
         }
     }
 
@@ -1481,7 +1545,7 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     let tile = parity_pending_tile(tile_id);
 
     let mut scratch = AssemblyScratch::new();
-    let non_empty = prepare_non_empty_layers(&mut scratch, &tile);
+    let non_empty = prepare_non_empty_layers(&mut scratch, &tile).unwrap();
     let model = mlt::build_tile_model(&non_empty);
     let mvt_encoded = encode_tile_batch(
         &[parity_pending_tile(tile_id)],
@@ -1972,7 +2036,7 @@ fn decode_attr_count(data: &[u8]) -> u8 {
 /// Decode the full record via add_feature_to_layer and return the layer builder.
 fn decode_to_layer(data: &[u8]) -> mvt::LayerBuilder {
     let mut lb = mvt::LayerBuilder::new("test");
-    crate::wire_format::add_feature_to_layer(&mut lb, data);
+    crate::wire_format::add_feature_to_layer(&mut lb, data).expect("record decodes");
     lb
 }
 
@@ -2271,7 +2335,8 @@ fn relation_labels_aggregate_components_once_per_layer_per_zoom() {
         &[None; Layer::count()],
         1.0,
         &mut fanout,
-    );
+    )
+    .unwrap();
     assert_eq!(sink.records.len(), 12, "one point per layer per zoom");
     let mut counts = [[0; 2]; 6];
     for record in &sink.records {
@@ -2346,7 +2411,7 @@ fn dispatch_namespaces_mixed_source_ids_on_the_wire() {
         let mut records = Vec::new();
         assert_eq!(
             emit::emit_match(42, geometry, &m, &ctx, &mut records, &mut point_scratch),
-            1,
+            Ok(1),
         );
         let layer = decode_to_layer(&records[0].data);
         ids.push(layer.test_feature(0).id);
@@ -2365,7 +2430,7 @@ fn dispatch_namespaces_mixed_source_ids_on_the_wire() {
             &mut records,
             &mut point_scratch,
         ),
-        1,
+        Ok(1),
     );
     assert_eq!(
         decode_to_layer(&records[0].data).test_feature(0).id,
@@ -2584,7 +2649,8 @@ fn emit_polygon_too_few_points() {
         &mut scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -2612,7 +2678,8 @@ fn emit_polygon_decodes_correctly() {
         &mut scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -2681,7 +2748,8 @@ fn emit_polygon_zoom_dependent_attrs() {
         &mut scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -2737,7 +2805,8 @@ fn emit_polygon_zoom_dependent_attrs() {
         &mut scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_eq!(records.len(), 1);
     let lb = decode_to_layer(&records[0].data);
     let f = lb.test_feature(0);
@@ -2772,7 +2841,8 @@ fn emit_polygon_skips_self_intersecting_ring_below_z14() {
         &mut scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -2831,7 +2901,8 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         &mut scratch_plain,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     emit_polygon_feature(
         900,
         &coords,
@@ -2843,7 +2914,8 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         &mut scratch_pinned,
         None,
         1.0,
-    );
+    )
+    .unwrap();
 
     assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
@@ -2921,7 +2993,8 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         &mut emit_plain,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     emit_multipolygon_feature(
         990,
         &outer,
@@ -2934,7 +3007,8 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         &mut emit_pinned,
         None,
         1.0,
-    );
+    )
+    .unwrap();
 
     assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
@@ -3018,7 +3092,8 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         &mut emit_plain,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     emit_multipolygon_feature(
         991,
         &outer,
@@ -3031,7 +3106,8 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         &mut emit_pinned,
         None,
         1.0,
-    );
+    )
+    .unwrap();
 
     assert_eq!(records_plain.len(), 1);
     assert_eq!(records_pinned.len(), 1);
@@ -3094,7 +3170,8 @@ fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
         &mut emit_scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     emit_multipolygon_feature(
         9903,
         &outer_b,
@@ -3107,7 +3184,8 @@ fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
         &mut emit_scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_eq!(records.len(), 2);
     assert_simple_record_rings(&records);
 }
@@ -3187,7 +3265,8 @@ fn landing_b_historical_infinity_classes_emit_nothing() {
         &mut emit_scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     emit_multipolygon_feature(
         9905,
         &tiny_outer,
@@ -3200,7 +3279,8 @@ fn landing_b_historical_infinity_classes_emit_nothing() {
         &mut emit_scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert!(records.is_empty());
 }
 
@@ -3251,7 +3331,8 @@ fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
         &mut scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_no_backtrack_in_records(&records);
 
     let tier2 = [
@@ -3275,7 +3356,8 @@ fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
         &mut scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_no_backtrack_in_records(&records);
 
     let tier3 = [
@@ -3299,7 +3381,8 @@ fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
         &mut scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_no_backtrack_in_records(&records);
 }
 
@@ -3321,7 +3404,8 @@ fn emit_multipolygon_empty_outer() {
         &mut emit_scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
 
     assert_eq!(count, 0);
     assert!(records.is_empty());
@@ -3359,7 +3443,8 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
         &mut emit_scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
 
     assert_eq!(count, 1);
     assert_eq!(records.len(), 1);
@@ -3417,7 +3502,8 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
         &mut emit_scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
 
     assert_eq!(usize::try_from(count).unwrap(), records.len());
     assert!(
@@ -3470,7 +3556,8 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         &mut emit_a,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     emit_multipolygon_feature(
         404,
         &outer,
@@ -3483,7 +3570,8 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         &mut emit_b,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_eq!(outer_only.len(), 1);
     assert_eq!(with_bad_holes.len(), 1);
     let (_, _, outer_cmd_count) = decode_data_header(&outer_only[0].data);
@@ -3560,7 +3648,8 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         &mut emit_13,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     emit_multipolygon_feature(
         405,
         &outer,
@@ -3573,7 +3662,8 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         &mut emit_14,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_eq!(z13_records.len(), 1);
     assert_eq!(z14_records.len(), 1);
     let (_, _, z13_cmd_count) = decode_data_header(&z13_records[0].data);
@@ -3630,7 +3720,8 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
         &mut emit_13,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     emit_multipolygon_feature(
         4051,
         &bowtie_outer,
@@ -3643,7 +3734,8 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
         &mut emit_14,
         None,
         1.0,
-    );
+    )
+    .unwrap();
 
     for rec in z13_records.iter().chain(&z14_records) {
         let lb = decode_to_layer(&rec.data);
@@ -3677,7 +3769,8 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
         &mut emit_scratch,
         None,
         1.0,
-    );
+    )
+    .unwrap();
     assert_eq!(usize::try_from(count).unwrap(), records.len());
     assert!(!records.is_empty());
 
@@ -3771,7 +3864,8 @@ fn zoom_window_emission_equals_full_emission_restricted() {
             &mut scratch,
             None,
             1.0,
-        );
+        )
+        .unwrap();
         records
     };
     let emit_multipolygon = |lo, hi| {
@@ -3789,7 +3883,8 @@ fn zoom_window_emission_equals_full_emission_restricted() {
             &mut scratch,
             None,
             1.0,
-        );
+        )
+        .unwrap();
         records
     };
 
@@ -4387,7 +4482,8 @@ fn relation_boundary_area_subtracts_holes_before_selecting_label_zoom() {
             &[None; Layer::count()],
             1.0,
             &mut stats::FanoutStats::new(),
-        );
+        )
+        .unwrap();
         let labels: Vec<_> = sink
             .records
             .iter()

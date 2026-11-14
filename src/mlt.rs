@@ -52,9 +52,9 @@ pub(crate) enum MltEncodeError {
     GeometryDecode {
         layer: String,
         feature_index: usize,
-        message: String,
+        source: MltGeometryError,
     },
-    Encode(String),
+    Encode(mlt_core::MltError),
 }
 
 impl std::fmt::Display for MltEncodeError {
@@ -63,17 +63,63 @@ impl std::fmt::Display for MltEncodeError {
             Self::GeometryDecode {
                 layer,
                 feature_index,
-                message,
+                source,
             } => write!(
                 f,
-                "geometry decode failed for layer '{layer}' feature#{feature_index}: {message}"
+                "geometry decode failed for layer '{layer}' feature#{feature_index}: {source}"
             ),
-            Self::Encode(msg) => f.write_str(msg),
+            Self::Encode(error) => error.fmt(f),
         }
     }
 }
 
-impl std::error::Error for MltEncodeError {}
+impl std::error::Error for MltEncodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::GeometryDecode { source, .. } => Some(source),
+            Self::Encode(source) => Some(source),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MltGeometryError {
+    Command(GeometryError),
+    EmptyPoint,
+    NoValidPaths,
+    NoRings,
+    NoNonzeroRings,
+    ShortRing,
+}
+
+impl From<GeometryError> for MltGeometryError {
+    fn from(error: GeometryError) -> Self {
+        Self::Command(error)
+    }
+}
+
+impl std::fmt::Display for MltGeometryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::Command(error) => return error.fmt(f),
+            Self::EmptyPoint => "point geometry is empty",
+            Self::NoValidPaths => "linestring geometry has no valid paths",
+            Self::NoRings => "polygon geometry has no rings",
+            Self::NoNonzeroRings => "polygon geometry has no nonzero-area rings",
+            Self::ShortRing => "polygon ring has fewer than 3 vertices",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for MltGeometryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Command(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 pub(crate) fn encode_tile(layers: &[&LayerBuilder]) -> Result<Vec<u8>, MltEncodeError> {
     let mut out = Vec::new();
@@ -90,7 +136,7 @@ pub(crate) fn encode_tile(layers: &[&LayerBuilder]) -> Result<Vec<u8>, MltEncode
 fn encode_layer(layer: &LayerBuilder) -> Result<Vec<u8>, MltEncodeError> {
     build_mlt_tile_layer(layer)?
         .encode(EncoderConfig::from_profile(Profile::default()))
-        .map_err(|e| MltEncodeError::Encode(e.to_string()))
+        .map_err(MltEncodeError::Encode)
 }
 
 fn build_mlt_tile_layer(layer: &LayerBuilder) -> Result<TileLayer, MltEncodeError> {
@@ -105,22 +151,22 @@ fn build_mlt_tile_layer(layer: &LayerBuilder) -> Result<TileLayer, MltEncodeErro
         layer.name(),
         crate::geometry::tiles::grid::EXTENT.unsigned_abs(),
     )
-    .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
+    .map_err(MltEncodeError::Encode)?;
     let mut property_keys = Vec::with_capacity(columns.len());
 
     for col in columns {
         let key = builder
             .add_property(col.key.clone(), mlt_prop_kind(col.column_type))
-            .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
+            .map_err(MltEncodeError::Encode)?;
         property_keys.push(key);
     }
 
     for (idx, feature) in features.iter().enumerate() {
         let geom =
-            decode_feature_geometry(feature).map_err(|msg| MltEncodeError::GeometryDecode {
+            decode_feature_geometry(feature).map_err(|source| MltEncodeError::GeometryDecode {
                 layer: layer.name().to_string(),
                 feature_index: idx,
-                message: msg,
+                source,
             })?;
         let mut feature_builder = builder.feature(geom);
         feature_builder.id(feature.id);
@@ -128,12 +174,10 @@ fn build_mlt_tile_layer(layer: &LayerBuilder) -> Result<TileLayer, MltEncodeErro
             if let Some(value) = feature_value_for_key(layer, feature, &col.key) {
                 feature_builder
                     .property(*key, value_to_mlt_prop(value, col.column_type))
-                    .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
+                    .map_err(MltEncodeError::Encode)?;
             }
         }
-        feature_builder
-            .finish()
-            .map_err(|e| MltEncodeError::Encode(e.to_string()))?;
+        feature_builder.finish().map_err(MltEncodeError::Encode)?;
     }
 
     Ok(builder.finish())
@@ -191,7 +235,7 @@ fn feature_value_for_key<'a>(
     None
 }
 
-fn decode_feature_geometry(feature: &Feature) -> Result<Geometry<i32>, String> {
+fn decode_feature_geometry(feature: &Feature) -> Result<Geometry<i32>, MltGeometryError> {
     match feature.geom_type {
         GeomType::Point => decode_point_geometry(&feature.geometry),
         GeomType::LineString => decode_line_geometry(&feature.geometry),
@@ -199,10 +243,10 @@ fn decode_feature_geometry(feature: &Feature) -> Result<Geometry<i32>, String> {
     }
 }
 
-fn decode_point_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
+fn decode_point_geometry(commands: &[u32]) -> Result<Geometry<i32>, MltGeometryError> {
     let points = parse_points(commands)?;
     if points.is_empty() {
-        return Err("point geometry is empty".to_string());
+        return Err(MltGeometryError::EmptyPoint);
     }
     if points.len() == 1 {
         return Ok(Geometry::Point(Point(points[0])));
@@ -211,7 +255,7 @@ fn decode_point_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
     Ok(Geometry::MultiPoint(multi))
 }
 
-fn decode_line_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
+fn decode_line_geometry(commands: &[u32]) -> Result<Geometry<i32>, MltGeometryError> {
     let paths = parse_paths(commands, Grammar::LineString)?;
     let mut lines = Vec::new();
     for path in paths {
@@ -222,7 +266,7 @@ fn decode_line_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
     }
 
     if lines.is_empty() {
-        return Err("linestring geometry has no valid paths".to_string());
+        return Err(MltGeometryError::NoValidPaths);
     }
     if lines.len() == 1 {
         return Ok(Geometry::LineString(lines.remove(0)));
@@ -230,19 +274,19 @@ fn decode_line_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
     Ok(Geometry::MultiLineString(MultiLineString(lines)))
 }
 
-fn decode_polygon_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
+fn decode_polygon_geometry(commands: &[u32]) -> Result<Geometry<i32>, MltGeometryError> {
     let ring_points = parse_paths(commands, Grammar::Polygon)?;
     let mut rings = Vec::new();
     for points in ring_points {
         rings.push(close_ring(points)?);
     }
     if rings.is_empty() {
-        return Err("polygon geometry has no rings".to_string());
+        return Err(MltGeometryError::NoRings);
     }
 
     let mut polygons = group_rings_to_polygons(rings);
     if polygons.is_empty() {
-        return Err("polygon geometry has no nonzero-area rings".to_string());
+        return Err(MltGeometryError::NoNonzeroRings);
     }
     if polygons.len() == 1
         && let Some(poly) = polygons.pop()
@@ -252,9 +296,9 @@ fn decode_polygon_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
     Ok(Geometry::MultiPolygon(MultiPolygon(polygons)))
 }
 
-fn close_ring(mut points: Vec<Coord<i32>>) -> Result<LineString<i32>, String> {
+fn close_ring(mut points: Vec<Coord<i32>>) -> Result<LineString<i32>, MltGeometryError> {
     if points.len() < 3 {
-        return Err("polygon ring has fewer than 3 vertices".to_string());
+        return Err(MltGeometryError::ShortRing);
     }
     if let (Some(first), Some(last)) = (points.first().copied(), points.last().copied())
         && first != last
@@ -274,7 +318,7 @@ fn group_rings_to_polygons(rings: Vec<LineString<i32>>) -> Vec<Polygon<i32>> {
 }
 
 /// Our encoder's point stream, under the strict point grammar.
-fn parse_points(commands: &[u32]) -> Result<Vec<Coord<i32>>, String> {
+fn parse_points(commands: &[u32]) -> Result<Vec<Coord<i32>>, MltGeometryError> {
     let mut paths = parse_paths(commands, Grammar::Point)?;
     Ok(paths.drain(..).flatten().collect())
 }
@@ -282,7 +326,10 @@ fn parse_points(commands: &[u32]) -> Result<Vec<Coord<i32>>, String> {
 /// Our encoder's line or polygon stream as paths, one per MoveTo point,
 /// under the strict grammar for its type. ClosePath adds no vertex: polygon
 /// conversion closes a ring only when it is open.
-fn parse_paths(commands: &[u32], grammar: Grammar) -> Result<Vec<Vec<Coord<i32>>>, String> {
+fn parse_paths(
+    commands: &[u32],
+    grammar: Grammar,
+) -> Result<Vec<Vec<Coord<i32>>>, MltGeometryError> {
     struct Paths {
         paths: Vec<Vec<Coord<i32>>>,
         in_move: bool,
@@ -378,7 +425,6 @@ fn value_type(value: &Value) -> MltColumnType {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::mvt::{Feature, GeomType, LayerBuilder};
@@ -387,6 +433,53 @@ mod tests {
     use serde::Deserialize;
     use serde_json::{Number, Value as JsonValue};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn encode_errors_retain_typed_causes() {
+        use std::error::Error;
+        let mut layer = LayerBuilder::new("broken");
+        layer.add_feature(Feature {
+            id: None,
+            geom_type: GeomType::Point,
+            geometry: vec![9],
+            tags: Vec::new(),
+        });
+        let error = encode_tile(&[&layer]).expect_err("truncated geometry");
+        assert!(matches!(&error, MltEncodeError::GeometryDecode {
+            layer, feature_index: 0,
+            source: MltGeometryError::Command(GeometryError::Truncated),
+        } if layer == "broken"));
+        assert!(
+            error
+                .source()
+                .expect("geometry cause")
+                .source()
+                .expect("command cause")
+                .is::<GeometryError>()
+        );
+        let error = MltEncodeError::Encode(mlt_core::MltError::InvalidExtent(0));
+        assert!(matches!(
+            &error,
+            MltEncodeError::Encode(mlt_core::MltError::InvalidExtent(0))
+        ));
+        assert!(
+            error
+                .source()
+                .expect("encoder cause")
+                .is::<mlt_core::MltError>()
+        );
+        for result in [
+            decode_point_geometry(&[]),
+            decode_line_geometry(&[]),
+            decode_polygon_geometry(&[]),
+        ] {
+            assert!(matches!(
+                result,
+                Err(MltGeometryError::Command(GeometryError::Grammar(_)))
+            ));
+        }
+        assert_eq!(close_ring(Vec::new()), Err(MltGeometryError::ShortRing));
+    }
 
     fn polygon_ring(points: &[(i32, i32)]) -> LineString<i32> {
         LineString(points.iter().map(|&(x, y)| Coord { x, y }).collect())
@@ -733,7 +826,8 @@ mod tests {
     #[test]
     fn mlt_geometry_fixtures_roundtrip() {
         let fixtures_json = include_str!("../tests/fixtures/mlt_fixtures/geometry_fixtures.json");
-        let fixtures: Vec<GeometryFixture> = serde_json::from_str(fixtures_json).unwrap();
+        let fixtures: Vec<GeometryFixture> =
+            serde_json::from_str(fixtures_json).expect("valid fixture");
 
         for fixture in fixtures {
             let mut layer = LayerBuilder::new("fixture");
@@ -746,10 +840,11 @@ mod tests {
                 tags: vec![(key, val)],
             });
 
-            let encoded = encode_tile(&[&layer]).unwrap();
-            let parsed = parse_decoded_layers(&encoded).unwrap();
+            let encoded = encode_tile(&[&layer]).expect("valid fixture");
+            let parsed = parse_decoded_layers(&encoded).expect("valid fixture");
             assert_eq!(parsed.len(), 1, "fixture {}", fixture.id);
-            let fc = mlt_core::geojson::FeatureCollection::from_layers(parsed).unwrap();
+            let fc =
+                mlt_core::geojson::FeatureCollection::from_layers(parsed).expect("valid fixture");
             assert_eq!(fc.features.len(), 1, "fixture {}", fixture.id);
             let got = geometry_name(&fc.features[0].geometry);
             let source_geom = decode_feature_geometry(&Feature {
@@ -812,7 +907,8 @@ mod tests {
     #[test]
     fn mlt_property_fixtures_roundtrip() {
         let fixtures_json = include_str!("../tests/fixtures/mlt_fixtures/property_fixtures.json");
-        let cases: Vec<PropertyFixtureCase> = serde_json::from_str(fixtures_json).unwrap();
+        let cases: Vec<PropertyFixtureCase> =
+            serde_json::from_str(fixtures_json).expect("valid fixture");
 
         for case in cases {
             let mut layer = LayerBuilder::new("props_fixture");

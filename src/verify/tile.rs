@@ -21,7 +21,7 @@ pub(super) struct CheckedFeature<'a> {
 /// or not, must decode, and every tag index must name a key and a value.
 /// Verify reads elivagar's own output, which writes no field MVT does not
 /// name and no field twice.
-pub(super) fn parse_checked_tile(data: &[u8]) -> Result<Vec<CheckedLayer<'_>>, String> {
+pub(super) fn parse_checked_tile(data: &[u8]) -> Result<Vec<CheckedLayer<'_>>, crate::DecodeError> {
     let strict = Strictness::Strict;
     let mut checked = Vec::new();
     for message in message::parse_tile(data, strict)? {
@@ -32,21 +32,22 @@ pub(super) fn parse_checked_tile(data: &[u8]) -> Result<Vec<CheckedLayer<'_>>, S
             .enumerate()
             .map(|(idx, bytes)| {
                 message::decode_value(bytes, strict)
-                    .map_err(|e| format!("[{name}] value {idx}: {e}"))
+                    .map_err(|e| crate::DecodeError::caused(format!("[{name}] value {idx}"), e))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut features = Vec::with_capacity(message.features.len());
         for (idx, bytes) in message.features.iter().enumerate() {
             let feature = message::parse_feature(bytes, strict)
-                .map_err(|e| format!("[{name}] feat {idx}: {e}"))?;
+                .map_err(|e| crate::DecodeError::caused(format!("[{name}] feat {idx}"), e))?;
             let tags = message::tag_pairs(&feature.tags)
-                .map_err(|e| format!("[{name}] feat {idx}: {e}"))?;
+                .map_err(|e| crate::DecodeError::caused(format!("[{name}] feat {idx}"), e))?;
             if let Some(&(key, value)) = tags
                 .iter()
                 .find(|&&(key, value)| key >= message.keys.len() || value >= values.len())
             {
-                return Err(format!(
-                    "[{name}] feat {idx}: tag ({key}, {value}) out of bounds"
+                return Err(crate::DecodeError::malformed(
+                    format!("[{name}] feat {idx}"),
+                    format!("tag ({key}, {value}) out of bounds"),
                 ));
             }
             features.push(CheckedFeature {

@@ -150,7 +150,9 @@ pub(super) enum ChunkFileKind {
     Multi,
 }
 
-pub(super) fn parse_chunk_filename(path: &Path) -> io::Result<Option<(usize, ChunkFileKind)>> {
+pub(super) fn parse_chunk_filename(
+    path: &Path,
+) -> Result<Option<(usize, ChunkFileKind)>, ChunkStoreError> {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Ok(None);
     };
@@ -158,8 +160,8 @@ pub(super) fn parse_chunk_filename(path: &Path) -> io::Result<Option<(usize, Chu
         return Ok(None);
     }
     let invalid = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
+        ChunkStoreError::new(
+            ChunkStoreErrorKind::Stale,
             format!(
                 "unsupported sort chunk name {name}; regenerate chunks with split zoom {PARTITION_SPLIT_Z}"
             ),
@@ -187,7 +189,7 @@ pub(super) fn parse_chunk_filename(path: &Path) -> io::Result<Option<(usize, Chu
 pub(super) type ChunkScanEntry = (usize, ChunkFileKind, PathBuf);
 pub(super) type ChunkById = Vec<Option<(ChunkFileKind, PathBuf)>>;
 
-pub(super) fn scan_chunk_files(tmp_dir: &Path) -> io::Result<Vec<ChunkScanEntry>> {
+pub(super) fn scan_chunk_files(tmp_dir: &Path) -> Result<Vec<ChunkScanEntry>, ChunkStoreError> {
     let mut out = Vec::new();
     match fs::read_dir(tmp_dir) {
         Ok(entries) => {
@@ -200,13 +202,13 @@ pub(super) fn scan_chunk_files(tmp_dir: &Path) -> io::Result<Vec<ChunkScanEntry>
             }
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     }
     out.sort_unstable_by_key(|(chunk_no, _, _)| *chunk_no);
     Ok(out)
 }
 
-pub(super) fn chunk_files_by_id(tmp_dir: &Path) -> io::Result<ChunkById> {
+pub(super) fn chunk_files_by_id(tmp_dir: &Path) -> Result<ChunkById, ChunkStoreError> {
     let scanned = scan_chunk_files(tmp_dir)?;
     let max_id = scanned
         .iter()
@@ -216,8 +218,8 @@ pub(super) fn chunk_files_by_id(tmp_dir: &Path) -> io::Result<ChunkById> {
     let mut by_id = vec![None; max_id];
     for (chunk_no, kind, path) in scanned {
         if by_id[chunk_no].is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(ChunkStoreError::new(
+                ChunkStoreErrorKind::Stale,
                 format!("duplicate chunk id {chunk_no} in {}", tmp_dir.display()),
             ));
         }
@@ -494,7 +496,7 @@ impl SourceSeek {
         }
     }
 
-    pub(crate) fn cursor(&self) -> io::Result<SourceCursor> {
+    pub(crate) fn cursor(&self) -> Result<SourceCursor, ChunkStoreError> {
         Ok(SourceCursor {
             reader: ChunkReader::open_source(
                 &self.source,
@@ -572,7 +574,9 @@ impl SourceCursor {
         self.position
     }
 
-    pub(crate) fn next_header_discard_payload(&mut self) -> io::Result<Option<(SortKey, u32)>> {
+    pub(crate) fn next_header_discard_payload(
+        &mut self,
+    ) -> Result<Option<(SortKey, u32)>, ChunkStoreError> {
         let Some((key, data_len)) = self.reader.next_header_discard_payload()? else {
             return Ok(None);
         };
@@ -632,10 +636,10 @@ fn check_section_entry(
 pub(super) fn read_multi_chunk_sections(
     path: &Path,
     compression: ChunkCompression,
-) -> io::Result<Vec<MultiChunkSection>> {
-    let mut file = File::open(path)?;
+) -> Result<Vec<MultiChunkSection>, ChunkStoreError> {
+    let mut file = File::open(path).map_err(ChunkStoreError::open)?;
     let mut magic = [0u8; 8];
-    file.read_exact(&mut magic)?;
+    file.read_exact(&mut magic).map_err(ChunkStoreError::read)?;
     if &magic != multi_chunk_magic(compression) {
         let written_with = [
             ChunkCompression::None,
@@ -644,8 +648,12 @@ pub(super) fn read_multi_chunk_sections(
         ]
         .into_iter()
         .find(|&c| &magic == multi_chunk_magic(c));
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        return Err(ChunkStoreError::new(
+            if written_with.is_some() {
+                ChunkStoreErrorKind::CompressionMismatch
+            } else {
+                ChunkStoreErrorKind::Corrupt
+            },
             match written_with {
                 Some(actual) => format!(
                     "multi-partition chunk {} was written with {actual:?} compression \
@@ -669,14 +677,14 @@ pub(super) fn read_multi_chunk_sections(
     // section holds at least one record. A multi file with zero sections
     // (empty input) is valid.
     let invalid = |what: String| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
+        ChunkStoreError::new(
+            ChunkStoreErrorKind::Corrupt,
             format!("corrupt section table in {}: {what}", path.display()),
         )
     };
     let file_len = file.metadata()?.len();
     let mut buf4 = [0u8; 4];
-    file.read_exact(&mut buf4)?;
+    file.read_exact(&mut buf4).map_err(ChunkStoreError::read)?;
     let section_count = u32::from_le_bytes(buf4);
     if section_count as usize > SORT_PARTITIONS {
         return Err(invalid(format!(
@@ -692,25 +700,25 @@ pub(super) fn read_multi_chunk_sections(
     let section_count = section_count as usize;
     let mut sections: Vec<MultiChunkSection> = Vec::with_capacity(section_count);
     for _ in 0..section_count {
-        file.read_exact(&mut buf4)?;
+        file.read_exact(&mut buf4).map_err(ChunkStoreError::read)?;
         let partition = usize::try_from(u32::from_le_bytes(buf4)).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
+            ChunkStoreError::new(
+                ChunkStoreErrorKind::Corrupt,
                 format!("partition id does not fit usize in {}", path.display()),
             )
         })?;
         if partition >= SORT_PARTITIONS {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(ChunkStoreError::new(
+                ChunkStoreErrorKind::Corrupt,
                 format!("invalid partition {partition} in {}", path.display()),
             ));
         }
 
-        file.read_exact(&mut buf4)?;
+        file.read_exact(&mut buf4).map_err(ChunkStoreError::read)?;
         let count = u32::from_le_bytes(buf4);
 
         let mut buf8 = [0u8; 8];
-        file.read_exact(&mut buf8)?;
+        file.read_exact(&mut buf8).map_err(ChunkStoreError::read)?;
         let offset = u64::from_le_bytes(buf8);
 
         check_section_entry(
@@ -766,9 +774,14 @@ impl Drop for ChunkReader {
     }
 }
 
+type ChunkRecord = (SortKey, Box<[u8]>);
+
 impl ChunkReader {
-    pub(super) fn open(path: &Path, compression: ChunkCompression) -> io::Result<Self> {
-        let file = File::open(path)?;
+    pub(super) fn open(
+        path: &Path,
+        compression: ChunkCompression,
+    ) -> Result<Self, ChunkStoreError> {
+        let file = File::open(path).map_err(ChunkStoreError::open)?;
         let buf = BufReader::with_capacity(256 * 1024, file);
         let mut reader = match compression {
             ChunkCompression::None => ChunkRead::Plain(buf),
@@ -777,7 +790,9 @@ impl ChunkReader {
         };
 
         let mut buf4 = [0u8; 4];
-        reader.read_exact(&mut buf4)?;
+        reader
+            .read_exact(&mut buf4)
+            .map_err(ChunkStoreError::read)?;
         let remaining = u32::from_le_bytes(buf4);
 
         Ok(ChunkReader {
@@ -792,11 +807,11 @@ impl ChunkReader {
         source: &SortPartitionSource,
         compression: ChunkCompression,
         tile_range: (u64, u64),
-    ) -> io::Result<Self> {
+    ) -> Result<Self, ChunkStoreError> {
         let mut reader = match &source.section {
             None => Self::open(&source.path, compression),
             Some(section) => {
-                let mut file = File::open(&source.path)?;
+                let mut file = File::open(&source.path).map_err(ChunkStoreError::open)?;
                 file.seek(SeekFrom::Start(section.offset))?;
                 let buf = BufReader::with_capacity(256 * 1024, file);
                 // Compressed sections are independent frames starting at the
@@ -821,17 +836,19 @@ impl ChunkReader {
         Ok(reader)
     }
 
-    fn read_key(&mut self) -> io::Result<SortKey> {
+    fn read_key(&mut self) -> Result<SortKey, ChunkStoreError> {
         let mut buf = [0u8; 8];
-        self.reader.read_exact(&mut buf)?;
+        self.reader
+            .read_exact(&mut buf)
+            .map_err(ChunkStoreError::read)?;
         let key = SortKey::from_raw(u64::from_le_bytes(buf));
         let tile = key.tile().raw();
         let (start, end) = self.tile_range;
         // Check before payload allocation or skipping. Section counts and
         // payload lengths can otherwise carry a reader into another partition.
         if tile < start || tile >= end {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(ChunkStoreError::new(
+                ChunkStoreErrorKind::Corrupt,
                 format!("sort chunk tile id {tile} outside source range [{start}, {end})"),
             ));
         }
@@ -841,7 +858,7 @@ impl ChunkReader {
     // Allocates a Vec per record. A reusable buffer was considered but the heap
     // holds only k entries (1-4 chunks for Denmark, ~20 for planet) and records
     // vary in size, so a pool would often reallocate anyway. Not a bottleneck.
-    pub(super) fn read_record(&mut self) -> io::Result<Option<(SortKey, Box<[u8]>)>> {
+    pub(super) fn read_record(&mut self) -> Result<Option<ChunkRecord>, ChunkStoreError> {
         if self.remaining == 0 {
             return Ok(None);
         }
@@ -849,11 +866,15 @@ impl ChunkReader {
         let key = self.read_key()?;
 
         let mut buf4 = [0u8; 4];
-        self.reader.read_exact(&mut buf4)?;
+        self.reader
+            .read_exact(&mut buf4)
+            .map_err(ChunkStoreError::read)?;
         let data_len = u32::from_le_bytes(buf4);
 
         let mut data = vec![0u8; data_len as usize].into_boxed_slice();
-        self.reader.read_exact(&mut data)?;
+        self.reader
+            .read_exact(&mut data)
+            .map_err(ChunkStoreError::read)?;
 
         self.remaining -= 1;
         self.bytes_read += 12 + u64::from(data_len);
@@ -865,21 +886,26 @@ impl ChunkReader {
     /// compressed-source piece skip. Deliberately does NOT feed
     /// `bytes_read`: SORT_MERGE_BYTES accounts merged records, and a
     /// skipped or scanned record is not merged.
-    pub(super) fn next_header_discard_payload(&mut self) -> io::Result<Option<(SortKey, u32)>> {
+    pub(super) fn next_header_discard_payload(
+        &mut self,
+    ) -> Result<Option<(SortKey, u32)>, ChunkStoreError> {
         if self.remaining == 0 {
             return Ok(None);
         }
         let key = self.read_key()?;
         let mut buf4 = [0u8; 4];
-        self.reader.read_exact(&mut buf4)?;
+        self.reader
+            .read_exact(&mut buf4)
+            .map_err(ChunkStoreError::read)?;
         let data_len = u32::from_le_bytes(buf4);
         let copied = io::copy(
             &mut Read::by_ref(&mut self.reader).take(u64::from(data_len)),
             &mut io::sink(),
-        )?;
+        )
+        .map_err(ChunkStoreError::read)?;
         if copied != u64::from(data_len) {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
+            return Err(ChunkStoreError::new(
+                ChunkStoreErrorKind::Corrupt,
                 "sort chunk record truncated during payload skip",
             ));
         }
@@ -890,11 +916,11 @@ impl ChunkReader {
     /// Decode and discard `n` records. Used to enter a compressed section
     /// mid-stream for a partition piece; frames cannot be seeked into, so
     /// the records before the piece boundary are decompressed and dropped.
-    pub(super) fn skip_records(&mut self, n: u64) -> io::Result<()> {
+    pub(super) fn skip_records(&mut self, n: u64) -> Result<(), ChunkStoreError> {
         for _ in 0..n {
             if self.next_header_discard_payload()?.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
+                return Err(ChunkStoreError::new(
+                    ChunkStoreErrorKind::Corrupt,
                     "partition piece skip ran past its section's record count",
                 ));
             }
@@ -960,7 +986,7 @@ mod tests {
                         } else {
                             assert_eq!(
                                 result.expect_err("reject foreign tile").kind(),
-                                io::ErrorKind::InvalidData
+                                ChunkStoreErrorKind::Corrupt
                             );
                         }
                         let seek = SourceSeek::new(source, compression, partition);
@@ -976,7 +1002,7 @@ mod tests {
                         } else {
                             assert_eq!(
                                 result.expect_err("reject foreign header").kind(),
-                                io::ErrorKind::InvalidData
+                                ChunkStoreErrorKind::Corrupt
                             );
                         }
                     }
@@ -1033,7 +1059,7 @@ mod tests {
             let err = SortPartitionReader::open_slices(&[slice], compression, (start + 2, end))
                 .err()
                 .expect("reject out of piece");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(err.kind(), ChunkStoreErrorKind::Corrupt);
         }
     }
 

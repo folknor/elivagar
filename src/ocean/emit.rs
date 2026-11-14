@@ -19,10 +19,11 @@ use crate::geometry::int_ocean::{
 use crate::geometry::polygon::Area;
 use crate::geometry::projection::{MercBbox, Point};
 use crate::geometry::pyramid::{
-    PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, PyramidZooms, emit_shape_pyramid,
-    emit_shape_pyramid_cell, split_for_parallel,
+    PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, PyramidZooms, RingCapError,
+    emit_shape_pyramid, emit_shape_pyramid_cell, split_for_parallel,
 };
 use crate::mvt::GeomType;
+use crate::pipeline::PipelineError;
 use crate::shortbread::Layer;
 use crate::sort::{self, SortWriter};
 use crate::wire_format::{append_feature_data_with_attrs, encode_attrs_bytes};
@@ -272,7 +273,7 @@ pub(crate) fn process_ocean_shapefile(
     max_zoom: u8,
     sort_writer: &mut SortWriter,
     band: Option<&OceanBand>,
-) -> Result<u64, std::io::Error> {
+) -> Result<u64, PipelineError> {
     let window = crate::tiling::ZoomRange::new(min_zoom, max_zoom)
         .and_then(|zooms| OceanPass::for_zoom(min_zoom).emission(zooms))
         .filter(|window| window.zooms().last() == max_zoom)
@@ -287,11 +288,11 @@ pub(crate) fn process_ocean_shapefile_with_hashes(
     data_bounds: &MercBbox,
     window: PassWindow,
     sort_writer: &mut SortWriter,
-) -> Result<(u64, OceanShapefileHashes), std::io::Error> {
+) -> Result<(u64, OceanShapefileHashes), PipelineError> {
     let (count, hashes) =
         process_ocean_shapefile_inner(path, data_bounds, window, sort_writer, None, true, None)?;
     let hashes = hashes.ok_or_else(|| {
-        std::io::Error::other("ocean shapefile processing did not capture source hashes")
+        PipelineError::failed("ocean shapefile processing did not capture source hashes")
     })?;
     Ok((count, hashes))
 }
@@ -308,7 +309,7 @@ pub(crate) fn process_ocean_shapefile_checked(
     sort_writer: &mut SortWriter,
     band: Option<&OceanBand>,
     expected_hashes: OceanShapefileHashes,
-) -> Result<u64, std::io::Error> {
+) -> Result<u64, PipelineError> {
     let (count, _) = process_ocean_shapefile_inner(
         path,
         data_bounds,
@@ -338,7 +339,7 @@ fn process_ocean_shapefile_inner(
     band: Option<&OceanBand>,
     capture_hashes: bool,
     expected_hashes: Option<OceanShapefileHashes>,
-) -> Result<(u64, Option<OceanShapefileHashes>), std::io::Error> {
+) -> Result<(u64, Option<OceanShapefileHashes>), PipelineError> {
     let pass = window.pass();
     let grid_zoom = pass.grid_zoom();
     if band.is_some_and(OceanBand::is_empty) {
@@ -358,7 +359,7 @@ fn process_ocean_shapefile_inner(
     if let Some(expected) = expected_hashes {
         let actual = hashes.expect("checked processing captures source hashes");
         if actual != expected {
-            return Err(std::io::Error::other(format!(
+            return Err(PipelineError::failed(format!(
                 "ocean shapefile inputs changed after source-key resolution for {}: expected .shp/.shx hashes {}/{}, opened {}/{}",
                 path.display(),
                 expected.shp_xxh128,
@@ -523,19 +524,20 @@ fn process_ocean_shapefile_inner(
     // Split phase runs in parallel across pieces; each large piece emits
     // its above-frontier tiles into its own accumulator, merged (and
     // flushed) serially afterwards.
-    let piece_prep: Vec<(Vec<OceanWorkItem>, Option<OceanAcc>)> = pieces
+    type PiecePrep = (Vec<OceanWorkItem>, Option<OceanAcc>);
+    let piece_prep: Result<Vec<PiecePrep>, RingCapError> = pieces
         .par_iter()
         .enumerate()
         .map(|(piece_idx, piece)| {
             let feature_id = piece_idx as u64;
             if total_vertices(piece) < LARGE_PIECE_VERTICES {
-                return (
+                return Ok((
                     vec![OceanWorkItem {
                         feature_id,
                         kind: OceanWorkKind::Whole(piece_idx),
                     }],
                     None,
-                );
+                ));
             }
             let mut acc = OceanAcc::new();
             let cells = {
@@ -547,7 +549,7 @@ fn process_ocean_shapefile_inner(
                     SPLIT_ITEMS_PER_PIECE,
                     &mut scratch,
                     &mut sink,
-                )
+                )?
             };
             if acc.bytes >= chunk_size {
                 acc.flush(&spill);
@@ -559,13 +561,13 @@ fn process_ocean_shapefile_inner(
                     kind: OceanWorkKind::Cell(cell, frag),
                 })
                 .collect();
-            (items, Some(acc))
+            Ok((items, Some(acc)))
         })
         .collect();
 
     let mut work_items = Vec::with_capacity(pieces.len());
     let mut pre_emit = OceanAcc::new();
-    for (items, acc) in piece_prep {
+    for (items, acc) in piece_prep? {
         work_items.extend(items);
         if let Some(acc) = acc {
             pre_emit.merge_from(acc);
@@ -575,9 +577,11 @@ fn process_ocean_shapefile_inner(
         }
     }
 
+    // A failed item fails the pass: try_fold stops scheduling new items, and
+    // records already spilled belong to a run that is returning an error.
     let mut result = work_items
         .into_par_iter()
-        .fold(OceanAcc::new, |mut acc, item| {
+        .try_fold(OceanAcc::new, |mut acc, item| {
             emit_ocean_piece(
                 item,
                 &pieces,
@@ -585,19 +589,19 @@ fn process_ocean_shapefile_inner(
                 &empty_attrs_bytes,
                 first_emitted,
                 &mut acc,
-            );
+            )?;
             if acc.bytes >= chunk_size {
                 acc.flush(&spill);
             }
-            acc
+            Ok::<_, RingCapError>(acc)
         })
-        .reduce(OceanAcc::new, |mut a, b| {
+        .try_reduce(OceanAcc::new, |mut a, b| {
             a.merge_from(b);
             if a.bytes >= chunk_size {
                 a.flush(&spill);
             }
-            a
-        });
+            Ok(a)
+        })?;
 
     result.merge_from(pre_emit);
     result.flush(&spill);
@@ -703,22 +707,23 @@ fn emit_ocean_piece(
     attrs_bytes: &[u8],
     first_emitted: u8,
     acc: &mut OceanAcc,
-) {
+) -> Result<(), RingCapError> {
     OCEAN_INT_SCRATCH.with(|int_cell| {
         let mut int_scratch = int_cell.borrow_mut();
         let mut scratch = PyramidScratch::new();
         std::mem::swap(&mut scratch.int, &mut *int_scratch);
         let mut sink = ocean_sink(item.feature_id, attrs_bytes, first_emitted, acc);
-        match item.kind {
+        let result = match item.kind {
             OceanWorkKind::Whole(piece_idx) => {
-                emit_shape_pyramid(&pieces[piece_idx], params, &mut scratch, &mut sink);
+                emit_shape_pyramid(&pieces[piece_idx], params, &mut scratch, &mut sink)
             }
             OceanWorkKind::Cell(cell, frag) => {
-                emit_shape_pyramid_cell(cell, frag, params, &mut scratch, &mut sink);
+                emit_shape_pyramid_cell(cell, frag, params, &mut scratch, &mut sink)
             }
-        }
+        };
         std::mem::swap(&mut scratch.int, &mut *int_scratch);
-    });
+        result
+    })
 }
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -788,7 +793,8 @@ mod tests {
                 }
                 fragment_sink(at, geom, kind);
             },
-        );
+        )
+        .unwrap();
         drop(fragment_sink);
 
         let mut fill_acc = OceanAcc::new();
@@ -805,7 +811,8 @@ mod tests {
                 }
                 fill_sink(at, geom, kind);
             },
-        );
+        )
+        .unwrap();
         drop(fill_sink);
 
         assert!(fragment_kinds.contains(&PyramidEmitKind::Fragment));
@@ -848,7 +855,7 @@ mod tests {
         let mut acc = OceanAcc::new();
         // The decode side expects the encoded attrs-table form, exactly as
         // process_ocean_shapefile builds it - a bare empty Vec parses as a
-        // truncated record and add_feature_to_layer would emit nothing.
+        // truncated record and add_feature_to_layer rejects it.
         let mut attrs = Vec::new();
         encode_attrs_bytes(&mut attrs, &[], 14);
         let mut sink = ocean_sink(0, &attrs, 0, &mut acc);
@@ -856,7 +863,7 @@ mod tests {
         drop(sink);
         let data = acc.records[0].bytes(&acc.payload);
         let mut layer = crate::mvt::LayerBuilder::new("ocean");
-        crate::wire_format::add_feature_to_layer(&mut layer, data);
+        crate::wire_format::add_feature_to_layer(&mut layer, data).unwrap();
         assert_eq!(layer.features()[0].id, Some(0));
 
         let mut encoded = Vec::new();
@@ -952,7 +959,7 @@ mod tests {
             };
             let mut scratch = PyramidScratch::new();
             for shape in shapes {
-                emit_shape_pyramid(shape, &params, &mut scratch, &mut sink);
+                emit_shape_pyramid(shape, &params, &mut scratch, &mut sink).unwrap();
             }
             out
         };
@@ -1378,6 +1385,10 @@ mod tests {
             SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let err = process_ocean_shapefile(&shp_path, &world(), 0, 0, &mut sort_writer, None)
             .expect_err("out-of-range part index should fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let io = std::error::Error::source(&err)
+            .and_then(|e| e.downcast_ref::<std::io::Error>())
+            .expect("the shapefile read error is retained as the cause");
+        assert_eq!(io.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.kind(), crate::pipeline::ErrorKind::Failed);
     }
 }

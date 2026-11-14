@@ -6,6 +6,7 @@
 //! the codec, the reader's traversal and the writer's spill; everything a
 //! consumer sees is a [`TileRun`], whose run length is non-zero by type.
 
+use crate::{DecodeError, DecodeErrorKind};
 use std::io;
 use std::num::NonZeroU32;
 
@@ -75,13 +76,14 @@ pub struct TileRuns {
 
 impl TileRuns {
     /// Sort and check non-overlap. Ends are already bounded by `TileRun`.
-    pub(crate) fn from_unsorted(mut runs: Vec<TileRun>) -> io::Result<Self> {
+    pub(crate) fn from_unsorted(mut runs: Vec<TileRun>) -> Result<Self, DecodeError> {
         runs.sort_unstable_by_key(|run| run.start.raw());
         let mut prev_end = 0_u64;
         for run in &runs {
             if run.start.raw() < prev_end {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(DecodeError::new(
+                    DecodeErrorKind::Malformed,
+                    "directory",
                     "PMTiles tile runs overlap",
                 ));
             }
@@ -209,13 +211,14 @@ pub(crate) fn encode_directory(entries: &[WireEntry]) -> io::Result<Vec<u8>> {
 /// refusing it would make those archives unreadable. Zero-length payloads are
 /// accepted for the same reason; zero-length leaf pointers are refused by the
 /// reader's traversal, where the entry's role is known.
-pub(crate) fn decode_directory(data: &[u8]) -> io::Result<Vec<WireEntry>> {
-    let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
+pub(crate) fn decode_directory(data: &[u8]) -> Result<Vec<WireEntry>, DecodeError> {
+    let invalid =
+        |message: String| DecodeError::new(DecodeErrorKind::Malformed, "directory", message);
     let mut c = Cursor::new(data);
 
     let count = c
         .read_varint()
-        .map_err(|e| invalid(format!("directory count: {e}")))?;
+        .map_err(|e| DecodeError::caused("directory count", e))?;
     let count = usize::try_from(count)
         .map_err(|_| invalid("directory count does not fit address space".to_string()))?;
     // Each entry needs four varints of at least one byte each, after the
@@ -231,7 +234,7 @@ pub(crate) fn decode_directory(data: &[u8]) -> io::Result<Vec<WireEntry>> {
     for _ in 0..count {
         let delta = c
             .read_varint()
-            .map_err(|e| invalid(format!("tile_id delta: {e}")))?;
+            .map_err(|e| DecodeError::caused("directory tile_id delta", e))?;
         if !tile_ids.is_empty() && delta == 0 {
             return Err(invalid(
                 "tile_id delta must be positive after first entry".to_string(),
@@ -249,12 +252,12 @@ pub(crate) fn decode_directory(data: &[u8]) -> io::Result<Vec<WireEntry>> {
         tile_ids.push(prev);
     }
 
-    let mut read_u32_column = |name: &str| -> io::Result<Vec<u32>> {
+    let mut read_u32_column = |name: &str| -> Result<Vec<u32>, DecodeError> {
         let mut column = Vec::with_capacity(count);
         for _ in 0..count {
             let value = c
                 .read_varint()
-                .map_err(|e| invalid(format!("{name}: {e}")))?;
+                .map_err(|e| DecodeError::caused(format!("directory {name}"), e))?;
             column.push(u32::try_from(value).map_err(|_| invalid(format!("{name} exceeds u32")))?);
         }
         Ok(column)
@@ -266,7 +269,7 @@ pub(crate) fn decode_directory(data: &[u8]) -> io::Result<Vec<WireEntry>> {
     for i in 0..count {
         let v = c
             .read_varint()
-            .map_err(|e| invalid(format!("offset: {e}")))?;
+            .map_err(|e| DecodeError::caused("directory offset", e))?;
         let offset = if v == 0 {
             let Some(prev_entry) = i.checked_sub(1).map(|p| entries[p]) else {
                 return Err(invalid(
@@ -322,7 +325,7 @@ mod tests {
         encode_varint(&mut raw, 1);
         encode_varint(&mut raw, 5);
         let err = decode_directory(&raw).expect_err("should fail on truncated directory");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.kind(), DecodeErrorKind::Malformed);
     }
 
     #[test]
@@ -364,30 +367,34 @@ mod tests {
 
     fn run(start: u64, len: u32, offset: u64) -> TileRun {
         TileRun::new(
-            TileId::new(start).unwrap(),
-            NonZeroU32::new(len).unwrap(),
+            TileId::new(start).expect("test value"),
+            NonZeroU32::new(len).expect("test value"),
             BlobRef { offset, length: 7 },
         )
-        .unwrap()
+        .expect("test value")
     }
 
     #[test]
     fn tile_runs_reject_overlap_and_ends_past_z31() {
         assert!(TileRuns::from_unsorted(vec![run(12, 1, 200), run(10, 3, 100)]).is_err());
         assert!(TileRuns::from_unsorted(vec![run(13, 1, 200), run(10, 3, 100)]).is_ok());
-        let last = TileId::new(ARCHIVE_ID_END - 1).unwrap();
+        let last = TileId::new(ARCHIVE_ID_END - 1).expect("test value");
         let blob = BlobRef {
             offset: 0,
             length: 1,
         };
-        assert!(TileRun::new(last, NonZeroU32::new(1).unwrap(), blob).is_some());
-        assert!(TileRun::new(last, NonZeroU32::new(2).unwrap(), blob).is_none());
+        assert!(TileRun::new(last, NonZeroU32::new(1).expect("test value"), blob).is_some());
+        assert!(TileRun::new(last, NonZeroU32::new(2).expect("test value"), blob).is_none());
     }
 
     #[test]
     fn lookups_cover_run_interiors_boundaries_and_misses() {
-        let runs = TileRuns::from_unsorted(vec![run(10, 3, 100), run(20, 2, 200)]).unwrap();
-        let at = |id| runs.find(TileId::new(id).unwrap()).map(|blob| blob.offset);
+        let runs =
+            TileRuns::from_unsorted(vec![run(10, 3, 100), run(20, 2, 200)]).expect("test value");
+        let at = |id| {
+            runs.find(TileId::new(id).expect("test value"))
+                .map(|blob| blob.offset)
+        };
         assert_eq!((at(10), at(11), at(12)), (Some(100), Some(100), Some(100)));
         assert_eq!(at(20), Some(200));
         assert_eq!((at(9), at(13), at(22)), (None, None, None));

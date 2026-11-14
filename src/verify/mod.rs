@@ -13,6 +13,9 @@
 //! accumulator), so what they share is the ordering and cap policy here, not
 //! an interface.
 
+mod finding;
+pub use finding::{Finding, PaintOrderError, TileFinding};
+use std::sync::Arc;
 mod geometry;
 mod ocean;
 mod paint_order;
@@ -41,7 +44,7 @@ fn tile_coord(tile_id: u64) -> (u8, u32, u32) {
         .coord()
 }
 
-/// Maximum number of tile-level errors before aborting traversal.
+/// Maximum number of retained tile diagnostics; traversal always completes.
 const MAX_TILE_ERRORS: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -69,13 +72,15 @@ impl ValidationClass {
 #[derive(Debug)]
 pub enum VerifyError {
     Io(io::Error),
-    Container(String),
-    Metadata(String),
+    Decode(crate::DecodeError),
+    Container(crate::DecodeError),
+    Metadata(crate::DecodeError),
 }
 
 impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            VerifyError::Decode(e) => write!(f, "decode error: {e}"),
             VerifyError::Io(e) => write!(f, "I/O error: {e}"),
             VerifyError::Container(msg) => write!(f, "container error: {msg}"),
             VerifyError::Metadata(msg) => write!(f, "metadata error: {msg}"),
@@ -104,7 +109,9 @@ pub struct VerifyReport {
     /// payloads are checked only once.
     pub addressed_per_zoom: [u64; ARCHIVE_ZOOM_COUNT],
     pub unique_payloads: bool,
-    pub tile_errors: Vec<String>,
+    pub tile_errors: Vec<TileFinding>,
+    /// Total findings, including diagnostics omitted by the presentation cap.
+    pub tile_error_count: u64,
     /// BTreeSet, not a hash set: this is iterated to build the "undeclared
     /// layers" warning, so the report order must not depend on hash order.
     pub layers_observed: BTreeSet<String>,
@@ -133,7 +140,7 @@ struct CachedTileOutcome {
     layer_names: Vec<String>,
     /// Every finding for the payload in report order: structure, then the
     /// first geometry or paint-order violation, then each ocean ring problem.
-    findings: Vec<String>,
+    findings: Vec<Arc<Finding>>,
     geometry_stats: Option<ZoomGeomStats>,
 }
 
@@ -205,12 +212,12 @@ impl VerifyReport {
 
         if !self.tile_errors.is_empty() {
             println!();
-            println!("Tile errors ({}):", self.tile_errors.len());
+            println!("Tile errors ({}):", self.tile_error_count);
             for err in &self.tile_errors {
                 println!("  {err}");
             }
-            if self.tile_errors.len() >= MAX_TILE_ERRORS {
-                println!("  ... (stopped after {MAX_TILE_ERRORS} errors)");
+            if self.tile_error_count > self.tile_errors.len() as u64 {
+                println!("  ... (showing first {MAX_TILE_ERRORS} errors)");
             }
         }
 
@@ -297,35 +304,37 @@ pub fn verify_opts_unique(
     let reader = Archive::open(path)?;
     let header = *reader.header();
 
-    reader
-        .tile_decoder()
-        .map_err(|error| VerifyError::Container(error.to_string()))?;
+    reader.tile_decoder()?;
 
     // Zoom sanity.
     if header.min_zoom > header.max_zoom {
-        return Err(VerifyError::Container(format!(
-            "min_zoom ({}) > max_zoom ({})",
-            header.min_zoom, header.max_zoom
+        return Err(VerifyError::Container(crate::DecodeError::malformed(
+            "container",
+            format!(
+                "min_zoom ({}) > max_zoom ({})",
+                header.min_zoom, header.max_zoom
+            ),
         )));
     }
 
     // -- Section bounds --
-    reader
-        .check_layout()
-        .map_err(|error| VerifyError::Container(error.to_string()))?;
+    reader.check_layout()?;
 
     // Dedup invariant: unique <= addressed.
     if header.tile_contents > header.addressed_tiles {
-        return Err(VerifyError::Container(format!(
-            "num_unique ({}) > num_addressed ({})",
-            header.tile_contents, header.addressed_tiles
+        return Err(VerifyError::Container(crate::DecodeError::malformed(
+            "container",
+            format!(
+                "num_unique ({}) > num_addressed ({})",
+                header.tile_contents, header.addressed_tiles
+            ),
         )));
     }
 
     // -- Metadata --
     let metadata_json = reader.metadata()?;
     let parsed: serde_json::Value = serde_json::from_str(&metadata_json)
-        .map_err(|e| VerifyError::Metadata(format!("invalid JSON: {e}")))?;
+        .map_err(|e| VerifyError::Metadata(crate::DecodeError::caused("metadata JSON", e)))?;
 
     let layers_declared = extract_declared_layers(&parsed)?;
 
@@ -333,7 +342,8 @@ pub fn verify_opts_unique(
     let runs = reader.read_all_runs()?;
 
     let mut tiles_checked: u64 = 0;
-    let mut tile_errors: Vec<String> = Vec::new();
+    let mut tile_errors = Vec::new();
+    let mut tile_error_count = 0_u64;
     let mut layers_observed: BTreeSet<String> = BTreeSet::new();
     let mut stats: Option<GeometryStats> = geometry_stats.then(GeometryStats::default);
     let mut seen_payloads: FxHashSet<(u64, u32, ValidationClass)> = FxHashSet::default();
@@ -341,9 +351,6 @@ pub fn verify_opts_unique(
     let mut addressed_per_zoom = [0_u64; ARCHIVE_ZOOM_COUNT];
 
     for run in runs.as_slice() {
-        if tile_errors.len() >= MAX_TILE_ERRORS {
-            break;
-        }
         let run_start = run.start().raw();
         let run_end = run.end();
         let blob = run.blob();
@@ -368,6 +375,7 @@ pub fn verify_opts_unique(
         let decompressed = match reader.read_tile(blob) {
             Ok(data) => data,
             Err(e) => {
+                let finding = payload_finding(e)?;
                 let error_tiles: Box<dyn Iterator<Item = (u64, u8, u32, u32)>> = if unique_payloads
                 {
                     Box::new(
@@ -382,10 +390,15 @@ pub fn verify_opts_unique(
                     }))
                 };
                 for (_tile_id, z, x, y) in error_tiles {
-                    if tile_errors.len() >= MAX_TILE_ERRORS {
-                        break;
+                    tile_error_count += 1;
+                    if tile_errors.len() < MAX_TILE_ERRORS {
+                        tile_errors.push(TileFinding {
+                            z,
+                            x,
+                            y,
+                            finding: Arc::clone(&finding),
+                        });
                     }
-                    tile_errors.push(format!("z{z}/{x}/{y}: decompression failed: {e}"));
                     tiles_checked += 1;
                 }
                 continue;
@@ -407,9 +420,6 @@ pub fn verify_opts_unique(
                 }))
             };
         for (_tile_id, z, x, y, class) in validation_tiles {
-            if tile_errors.len() >= MAX_TILE_ERRORS {
-                break;
-            }
             let uncached_outcome =
                 unique_payloads.then(|| build_tile_outcome(&decompressed, class, geometry_stats));
             let outcome: &CachedTileOutcome = if let Some(outcome) = uncached_outcome.as_ref() {
@@ -421,15 +431,20 @@ pub fn verify_opts_unique(
             };
 
             layers_observed.extend(outcome.layer_names.iter().cloned());
-            // The cap truncates findings only; the tile is still accounted
-            // for (stats, tiles_checked) and traversal stops before the next.
+            // Retain a bounded diagnostic sample while counting every finding.
+            tile_error_count += outcome.findings.len() as u64;
             let room = MAX_TILE_ERRORS.saturating_sub(tile_errors.len());
             tile_errors.extend(
                 outcome
                     .findings
                     .iter()
                     .take(room)
-                    .map(|problem| format!("z{z}/{x}/{y}: {problem}")),
+                    .map(|problem| TileFinding {
+                        z,
+                        x,
+                        y,
+                        finding: Arc::clone(problem),
+                    }),
             );
 
             if let (Some(stats), Some(delta)) = (stats.as_mut(), outcome.geometry_stats.as_ref()) {
@@ -440,7 +455,7 @@ pub fn verify_opts_unique(
         }
     }
 
-    let passed = tile_errors.is_empty();
+    let passed = tile_error_count == 0;
 
     Ok(VerifyReport {
         tiles_checked,
@@ -449,6 +464,7 @@ pub fn verify_opts_unique(
         addressed_per_zoom,
         unique_payloads,
         tile_errors,
+        tile_error_count,
         layers_observed,
         layers_declared,
         passed,
@@ -471,22 +487,22 @@ fn build_tile_outcome(
     let tile = match parse_checked_tile(data) {
         Ok(tile) => tile,
         Err(error) => {
-            outcome.findings.push(format!("MVT decode failed: {error}"));
+            outcome.findings.push(Arc::new(Finding::Mvt(error)));
             return outcome;
         }
     };
     if tile.is_empty() {
-        outcome.findings.push("no MVT layers".to_string());
+        outcome.findings.push(Arc::new(Finding::NoLayers));
     }
     for layer in &tile {
         if layer.message.name.is_empty() {
-            outcome.findings.push("empty layer name".to_string());
+            outcome.findings.push(Arc::new(Finding::EmptyLayerName));
         }
         outcome.layer_names.push(layer.message.name.to_string());
     }
 
     if let Err(error) = validate_tile_layers(&tile, class) {
-        outcome.findings.push(error);
+        outcome.findings.push(Arc::new(error));
     }
     ocean::check_rings(&tile, &mut outcome.findings);
     if collect_stats {
@@ -501,10 +517,10 @@ fn build_tile_outcome(
 /// first violation of either check in that walk is the tile's one finding.
 /// Running the two checks as whole-tile passes instead would name a later
 /// layer's geometry fault ahead of an earlier layer's order fault.
-fn validate_tile_layers(tile: &[CheckedLayer<'_>], class: ValidationClass) -> Result<(), String> {
+fn validate_tile_layers(tile: &[CheckedLayer<'_>], class: ValidationClass) -> Result<(), Finding> {
     for layer in tile {
         geometry::check_layer(layer, class)?;
-        paint_order::check_layer(layer).map_err(|e| format!("[{}] {e}", layer.message.name))?;
+        paint_order::check_layer(layer)?;
     }
     Ok(())
 }
@@ -512,18 +528,70 @@ fn validate_tile_layers(tile: &[CheckedLayer<'_>], class: ValidationClass) -> Re
 fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, VerifyError> {
     let vector_layers = parsed
         .get("vector_layers")
-        .ok_or_else(|| VerifyError::Metadata("missing 'vector_layers' key".to_string()))?
+        .ok_or_else(|| {
+            VerifyError::Metadata(crate::DecodeError::malformed(
+                "metadata schema",
+                "missing 'vector_layers' key",
+            ))
+        })?
         .as_array()
-        .ok_or_else(|| VerifyError::Metadata("'vector_layers' is not an array".to_string()))?;
+        .ok_or_else(|| {
+            VerifyError::Metadata(crate::DecodeError::malformed(
+                "metadata schema",
+                "'vector_layers' is not an array",
+            ))
+        })?;
 
     let mut names = Vec::with_capacity(vector_layers.len());
     for layer in vector_layers {
         let id = layer.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
-            VerifyError::Metadata("vector_layers entry missing 'id' string".to_string())
+            VerifyError::Metadata(crate::DecodeError::malformed(
+                "metadata schema",
+                "vector_layers entry missing 'id' string",
+            ))
         })?;
         names.push(id.to_string());
     }
     Ok(names)
+}
+
+// Rejected payload bytes are findings; operational and opaque failures abort.
+fn payload_finding(error: crate::DecodeError) -> Result<Arc<Finding>, VerifyError> {
+    match error.kind() {
+        crate::DecodeErrorKind::Malformed | crate::DecodeErrorKind::Unsupported => {
+            Ok(Arc::new(Finding::Payload(error)))
+        }
+        crate::DecodeErrorKind::Io | crate::DecodeErrorKind::Failed => {
+            Err(VerifyError::Decode(error))
+        }
+    }
+}
+
+impl From<VerifyError> for crate::PipelineError {
+    fn from(error: VerifyError) -> Self {
+        match error {
+            VerifyError::Io(e) => e.into(),
+            VerifyError::Decode(e) | VerifyError::Container(e) | VerifyError::Metadata(e) => {
+                e.into()
+            }
+        }
+    }
+}
+
+impl From<crate::DecodeError> for VerifyError {
+    fn from(error: crate::DecodeError) -> Self {
+        Self::Decode(error)
+    }
+}
+
+impl std::error::Error for VerifyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Decode(error) => Some(error),
+            Self::Container(error) | Self::Metadata(error) => Some(error),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -543,10 +611,12 @@ mod tests {
         raw_byte_len: usize,
     ) -> Result<(), String> {
         geometry::validate_geometry(Words::slice(commands), geom_type, class, raw_byte_len)
+            .map_err(|e| e.to_string())
     }
 
     fn validate_mvt_geometry(data: &[u8], class: ValidationClass) -> Result<(), String> {
-        validate_tile_layers(&parse_checked_tile(data)?, class)
+        validate_tile_layers(&parse_checked_tile(data).map_err(|e| e.to_string())?, class)
+            .map_err(|e| e.to_string())
     }
 
     fn is_full_tile_rect(ring: &[(i32, i32)]) -> bool {
@@ -554,7 +624,11 @@ mod tests {
     }
 
     fn structure_findings(data: &[u8], class: ValidationClass) -> Vec<String> {
-        build_tile_outcome(data, class, false).findings
+        build_tile_outcome(data, class, false)
+            .findings
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
@@ -562,6 +636,135 @@ mod tests {
     }
     use flate2::write::GzEncoder;
     use std::io::Write;
+
+    #[test]
+    fn payload_failures_keep_evidence_and_sources() {
+        use std::error::Error;
+        let error = payload_finding(crate::DecodeError::from(io::Error::from_raw_os_error(5)))
+            .expect_err("operational failure must abort");
+        assert!(
+            error
+                .source()
+                .expect("decode cause")
+                .source()
+                .expect("original cause")
+                .is::<io::Error>()
+        );
+        assert_eq!(
+            crate::PipelineError::from(error).kind(),
+            crate::ErrorKind::Io
+        );
+        let error = payload_finding(crate::DecodeError::from(io::Error::other("opaque")))
+            .expect_err("opaque failure must abort");
+        assert_eq!(
+            crate::PipelineError::from(error).kind(),
+            crate::ErrorKind::Failed
+        );
+        let finding = payload_finding(crate::DecodeError::malformed("gzip", "bad bytes"))
+            .expect("rejected bytes are findings");
+        assert!(
+            matches!(&*finding, Finding::Payload(e) if e.kind() == crate::DecodeErrorKind::Malformed)
+        );
+        let error = extract_declared_layers(&serde_json::json!({})).expect_err("missing schema");
+        assert!(
+            matches!(&error, VerifyError::Metadata(e) if e.kind() == crate::DecodeErrorKind::Malformed)
+        );
+        assert_eq!(
+            crate::PipelineError::from(error).kind(),
+            crate::ErrorKind::InputRefused
+        );
+        let error = VerifyError::Metadata(crate::DecodeError::caused(
+            "metadata JSON",
+            serde_json::from_str::<serde_json::Value>("{").expect_err("bad JSON"),
+        ));
+        assert!(
+            error
+                .source()
+                .expect("decode")
+                .source()
+                .expect("JSON cause")
+                .is::<serde_json::Error>()
+        );
+    }
+
+    #[test]
+    fn findings_preserve_paint_order_reason_and_feature() {
+        let outcome = build_tile_outcome(
+            &land_tile(&["forest", "residential"]),
+            ValidationClass::for_tile(11, 1),
+            false,
+        );
+        assert!(matches!(
+            &*outcome.findings[0],
+            Finding::PaintOrder {
+                feature: 1,
+                cause: PaintOrderError::DecreasingRank {
+                    rank: 0,
+                    previous: 5
+                },
+                ..
+            }
+        ));
+        let outcome = build_tile_outcome(
+            &land_tile(&["unknown"]),
+            ValidationClass::for_tile(11, 1),
+            false,
+        );
+        assert!(matches!(
+            &*outcome.findings[0],
+            Finding::PaintOrder {
+                cause: PaintOrderError::UnknownLandKind(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn diagnostic_cap_does_not_stop_traversal() {
+        let mut writer = PmtilesWriter::new(
+            PmtilesConfig::new(
+                4,
+                4,
+                LonLatBbox {
+                    west: -180.0,
+                    south: -85.0,
+                    east: 180.0,
+                    north: 85.0,
+                },
+                MapCenter {
+                    lon: 0.0,
+                    lat: 0.0,
+                    zoom: 4,
+                },
+            )
+            .expect("config"),
+        );
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(b"not MVT").expect("gzip");
+        let bad = gzip.finish().expect("finish");
+        for id in 85..190 {
+            let (z, x, y) = tile_coord(id);
+            writer.add_tile(z, x, y, &bad).expect("tile");
+        }
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&land_tile(&["residential"])).expect("gzip");
+        let good = gzip.finish().expect("finish");
+        let (z, x, y) = tile_coord(190);
+        writer.add_tile(z, x, y, &good).expect("last tile");
+        let dir = tempfile::tempdir().expect("project temporary directory");
+        let path = dir.path().join("cap.pmtiles");
+        writer.write_to(&path).expect("archive");
+        let report = verify(&path).expect("completed verification");
+        assert_eq!(report.tiles_checked, 106);
+        assert_eq!(report.tile_errors.len(), MAX_TILE_ERRORS);
+        assert_eq!(report.tile_error_count, 105);
+        assert!(report.layers_observed.contains("land"));
+        assert!(!report.passed);
+        let report = verify_opts_unique(&path, false, true).expect("unique verification");
+        assert_eq!(report.addressed_per_zoom[4], 106);
+        assert!(report.layers_observed.contains("land"));
+        assert!(!report.passed);
+    }
 
     fn land_tile(kinds: &[&str]) -> Vec<u8> {
         let mut layer = LayerBuilder::new("land");
@@ -823,10 +1026,11 @@ mod tests {
             .iter()
             .find(|&&(x, _)| x == 0 || x == 3)
             .expect("pair includes a seam tile");
-        assert!(report.tile_errors[0].starts_with(&format!(
-            "z2/{}/{}: [water_lines] feat 0: suspicious geometry delta",
-            seam_tile.0, seam_tile.1
-        )));
+        let error = &report.tile_errors[0];
+        assert_eq!((error.z, error.x, error.y), (2, seam_tile.0, seam_tile.1));
+        assert!(
+            matches!(&*error.finding, Finding::Geometry { layer, feature: 0, .. } if layer == "water_lines")
+        );
     }
 
     #[test]
@@ -886,9 +1090,10 @@ mod tests {
         assert_eq!(report.tiles_checked, 2);
         assert_eq!(report.tile_errors.len(), 2);
         for (error, &(x, y)) in report.tile_errors.iter().zip(pair) {
-            assert!(error.starts_with(&format!(
-                "z2/{x}/{y}: [water_lines] feat 0: suspicious geometry delta"
-            )));
+            assert_eq!((error.z, error.x, error.y), (2, x, y));
+            assert!(
+                matches!(&*error.finding, Finding::Geometry { layer, feature: 0, .. } if layer == "water_lines")
+            );
         }
     }
 

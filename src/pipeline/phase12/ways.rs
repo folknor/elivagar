@@ -8,8 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::debug::{BUSY, WAIT, wait_span};
+use crate::geometry::pyramid::RingCapError;
 use crate::geometry::{self, projection::Point};
 use crate::node_index::{LatLonE7, NodeId, NodeStoreReader};
+use crate::pipeline::PipelineError;
 use crate::resources::WayAdmission;
 use crate::shortbread::{self, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter, SpillCoalescer};
@@ -42,6 +44,32 @@ pub(super) struct WayCounters {
     pub(super) ways: AtomicU64,
     pub(super) members_marked: AtomicU64,
     pub(super) pins_marked: AtomicU64,
+    /// The first way-task failure. A task that fails records it here and
+    /// stops; later tasks see it and skip their block. Read once the
+    /// dispatch has finished.
+    failure: std::sync::Mutex<Option<PipelineError>>,
+}
+
+impl WayCounters {
+    fn lock_failure(&self) -> std::sync::MutexGuard<'_, Option<PipelineError>> {
+        // Poisoning cannot lose a recorded failure: the slot is only written
+        // under the lock and never panics there.
+        self.failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn record_failure(&self, err: PipelineError) {
+        self.lock_failure().get_or_insert(err);
+    }
+
+    fn failed(&self) -> bool {
+        self.lock_failure().is_some()
+    }
+
+    pub(super) fn take_failure(&self) -> Option<PipelineError> {
+        self.lock_failure().take()
+    }
 }
 
 /// Everything a way task reads, shared by reference across the pool.
@@ -291,6 +319,10 @@ fn run_way_task(
     ticket: &mut Ticket<'_>,
     tx: &std::sync::mpsc::SyncSender<WayTaskResult>,
 ) {
+    // The run is already failing: nothing this block emits would be kept.
+    if cfg.counters.failed() {
+        return;
+    }
     // Summed across rayon workers, not a serial stage: read
     // phase12_plan_build_ns as thread-time.
     let plan_busy = wait_span(&BUSY.phase12_plan_build);
@@ -342,7 +374,13 @@ fn run_way_task(
             way.id(),
             "way plan misaligned with block ways"
         );
-        let pins_marked = process_planned_way_into(&way, &plan, &ctx, &mut acc);
+        let pins_marked = match process_planned_way_into(&way, &plan, &ctx, &mut acc) {
+            Ok(pins_marked) => pins_marked,
+            Err(err) => {
+                cfg.counters.record_failure(err.into());
+                return;
+            }
+        };
         cfg.counters
             .pins_marked
             .fetch_add(pins_marked, Ordering::Relaxed);
@@ -490,12 +528,12 @@ pub(super) fn process_planned_way_into(
     plan: &WayPlan,
     ctx: &WayCtx<'_>,
     acc: &mut WayAcc,
-) -> u64 {
+) -> Result<u64, RingCapError> {
     let way_id = plan.way_id.as_i64();
     let boundary_way_meta = ctx.boundary_way_meta;
     let tags_ref: Vec<(&str, &str)> = way.tags().collect();
     if tags_ref.is_empty() && !plan.is_member && !boundary_way_meta.contains_key(&way_id) {
-        return 0;
+        return Ok(0);
     }
     let tag_helper = Tags(&tags_ref);
     // Members are always resolved (a relation reads their geometry back), so the
@@ -507,7 +545,7 @@ pub(super) fn process_planned_way_into(
             .is_empty()
             || !shortbread::match_element(&tag_helper, OsmGeomType::OpenWay).is_empty();
         if !possible_feature {
-            return 0;
+            return Ok(0);
         }
     }
 
@@ -537,7 +575,7 @@ pub(super) fn process_planned_way_into(
         };
 
     if coords_e7.is_empty() {
-        return 0;
+        return Ok(0);
     }
     if plan.is_member {
         acc.way_puts.push((plan.way_id, coords_e7.clone()));
@@ -553,7 +591,7 @@ pub(super) fn process_planned_way_into(
     resolve_boundary_match(&tag_helper, way_id, boundary_way_meta, &mut matches);
 
     if matches.is_empty() {
-        return 0;
+        return Ok(0);
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -635,12 +673,12 @@ pub(super) fn process_planned_way_into(
                 &emit_ctx,
                 &mut acc.sink,
                 &mut acc.point_emit,
-            );
+            )?;
         }
     }
     record_fanout_from_payload_records(&acc.sink.records[before..], &mut acc.fanout);
     acc.bytes = acc.sink.bytes();
-    pins_marked
+    Ok(pins_marked)
 }
 
 fn resolve_boundary_match(

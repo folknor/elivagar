@@ -80,7 +80,7 @@ impl SortWriter {
         chunk_size_bytes: usize,
         start_chunk: usize,
         compression: ChunkCompression,
-    ) -> io::Result<Self> {
+    ) -> Result<Self, ChunkStoreError> {
         let mut chunk_paths: Vec<PathBuf> = Vec::with_capacity(start_chunk);
         let mut by_id = chunk_files_by_id(tmp_dir)?;
         for i in 0..start_chunk {
@@ -90,13 +90,16 @@ impl SortWriter {
                     // The id alone does not say whether the chunk was a
                     // single-partition or a multi file, so name the id and
                     // directory rather than fabricate a filename.
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
+                    return Err(ChunkStoreError::new(
+                        ChunkStoreErrorKind::Missing,
                         format!("missing chunk file: chunk {i} in {}", tmp_dir.display()),
                     ));
                 }
             }
         }
+
+        // Validate retained headers before deleting leftovers or writing new chunks.
+        let _ = SortReader::new(&chunk_paths, compression)?;
 
         // Delete leftover chunks from a previous run. Scan beyond gaps to
         // catch stale chunks that would otherwise contaminate a later sort.
@@ -201,7 +204,7 @@ impl SortWriter {
 
     /// Flush the remaining buffer and return a `SortReader` for the k-way
     /// merge phase.
-    pub fn finish(mut self) -> io::Result<SortReader> {
+    pub fn finish(mut self) -> Result<SortReader, ChunkStoreError> {
         self.flush()?;
         SortReader::new(&self.chunk_paths, self.compression)
     }

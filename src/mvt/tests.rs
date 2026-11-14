@@ -1498,7 +1498,10 @@ fn checker_fires_on_the_boundary_splice_the_old_merger_made() {
     let witness = [(0, true), (1, false)];
     let violation = test_check_merge(&input, &input, &[spliced], &witness, &[2])
         .expect_err("a join through the clip boundary must be rejected");
-    assert!(violation.contains("clip boundary"), "{violation}");
+    assert!(matches!(
+        violation,
+        crate::geometry::line_merge::MergeViolation::ClipBoundary { .. }
+    ));
 }
 
 #[test]
@@ -1516,7 +1519,10 @@ fn checker_fires_on_the_pre_88f40af_duplicate_pair_merge() {
         &[2, 3],
     )
     .expect_err("the fabricated spike must be rejected");
-    assert!(violation.contains("consume"), "{violation}");
+    assert!(matches!(
+        violation,
+        crate::geometry::line_merge::MergeViolation::Consumption { .. }
+    ));
 
     // Pass-2 route: an isolated duplicate pair, both endpoints degree 2.
     let input = lines(&[&[(0, 0), (10, 0)], &[(0, 0), (10, 0)]]);
@@ -1540,7 +1546,10 @@ fn checker_conservation_fires_on_a_dropped_edge() {
         .expect("real merge is valid");
     let truncated = vec![vec![(0, 0), (10, 0)]];
     let result = test_check_merge(&input, &retained, &truncated, &witness, &chain_ends);
-    assert!(result.is_err(), "a lost edge must be rejected");
+    assert!(matches!(
+        result,
+        Err(crate::geometry::line_merge::MergeViolation::Reconstruction { .. })
+    ));
 }
 
 #[test]

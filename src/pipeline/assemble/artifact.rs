@@ -239,7 +239,7 @@ fn ocean_layer_field(compressed: &[u8]) -> Result<Vec<u8>, PipelineError> {
         PipelineError::artifact("artifact tile is not valid gzip").with_cause(error)
     })?;
     let layers = crate::mvt::message::parse_tile(&raw, crate::tile_detail::Strictness::Strict)
-        .map_err(|error| PipelineError::artifact(format!("artifact tile: {error}")))?;
+        .map_err(|error| PipelineError::artifact("artifact tile").with_cause(error))?;
     if layers.len() != 1 || layers[0].name != Layer::Ocean.name() {
         return Err(PipelineError::artifact(
             "artifact tile must contain exactly one ocean layer",
@@ -667,7 +667,7 @@ mod tests {
     /// A gzip MVT payload holding one ocean layer, as the artifact stores.
     fn ocean_payload() -> Vec<u8> {
         let mut layer = crate::mvt::LayerBuilder::new(Layer::Ocean.name());
-        crate::wire_format::add_feature_to_layer(&mut layer, &polygon_record());
+        crate::wire_format::add_feature_to_layer(&mut layer, &polygon_record()).unwrap();
         let mut raw = Vec::new();
         crate::mvt::encode_tile_into(&mut raw, &[&layer], &mut crate::mvt::EncodeScratch::new());
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));

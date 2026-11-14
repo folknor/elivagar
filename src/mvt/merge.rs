@@ -349,7 +349,7 @@ pub(super) fn test_check_merge(
     merged: &[Vec<(i32, i32)>],
     witness: &[(usize, bool)],
     chain_ends: &[usize],
-) -> Result<(), String> {
+) -> Result<(), line_merge::MergeViolation> {
     let to_points = |lines: &[Vec<(i32, i32)>]| {
         lines
             .iter()

@@ -6,7 +6,7 @@
 //! a winding diagnosis looks for. A feature that does not decode prints its
 //! error instead of partial rings.
 
-use std::io;
+use crate::PipelineError;
 use std::path::Path;
 
 use crate::archive::Archive;
@@ -16,14 +16,15 @@ use crate::mvt::message;
 use crate::tile_detail::Strictness;
 
 /// Print the ring report for tile `z/x/y` of the archive at `path`.
-pub fn diag_tile(path: &Path, z: u8, x: u32, y: u32) -> io::Result<()> {
-    crate::svg::validate_tile_grid_coordinates(z, x, y, 1, 1)?;
+pub fn diag_tile(path: &Path, z: u8, x: u32, y: u32) -> Result<(), PipelineError> {
+    crate::svg::validate_tile_grid_coordinates(z, x, y, 1, 1)
+        .map_err(|e| PipelineError::config("invalid tile coordinates").with_cause(e))?;
     let reader = Archive::open(path)?;
     reader.tile_decoder()?;
     let runs = reader.read_all_runs()?;
     let blob = runs
         .find(crate::tiling::TileId::from_coord(z, x, y)?)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "tile not found"))?;
+        .ok_or_else(|| PipelineError::failed("tile not found"))?;
     let raw = reader.read_tile(blob)?;
 
     println!(
@@ -33,7 +34,7 @@ pub fn diag_tile(path: &Path, z: u8, x: u32, y: u32) -> io::Result<()> {
 
     // Tolerant like the viewer: any producer's tile, unknown fields skipped,
     // a malformed tile or layer message fails the command.
-    for layer in message::parse_tile(&raw, Strictness::Tolerant).map_err(io::Error::other)? {
+    for layer in message::parse_tile(&raw, Strictness::Tolerant)? {
         diag_layer(&layer);
     }
     Ok(())
@@ -114,5 +115,15 @@ fn print_rings(fi: usize, fid: u64, geom_type: u8, rings: &[Vec<(i32, i32)>]) {
                 println!("        ({x}, {y})");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn invalid_coordinates_are_config_before_open() {
+        let error = super::diag_tile(std::path::Path::new("not-opened.pmtiles"), 0, 1, 0)
+            .expect_err("invalid x");
+        assert_eq!(error.kind(), crate::ErrorKind::Config);
     }
 }

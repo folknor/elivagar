@@ -9,8 +9,8 @@ use crate::geometry::int_ocean::{
 };
 use crate::geometry::polygon::{Area, ExtentUnits, MIN_POLY_AREA_AREA};
 use crate::geometry::pyramid::{
-    PyramidCell, PyramidParams, PyramidScratch, PyramidZooms, Simplifier, emit_shape_pyramid,
-    tile_cover,
+    PyramidCell, PyramidParams, PyramidScratch, PyramidZooms, RingCapError, Simplifier,
+    emit_shape_pyramid, tile_cover,
 };
 use crate::geometry::{
     self,
@@ -584,12 +584,12 @@ pub(super) fn emit_match(
     ctx: &EmitCtx<'_>,
     records: &mut impl FeatureRecordSink,
     point: &mut PointEmitScratch,
-) -> u64 {
+) -> Result<u64, RingCapError> {
     // A layer range that is empty (an area rule may raise `min_zoom` past
     // the top) or misses the window emits nothing.
     let Some(zooms) = ZoomRange::new(m.min_zoom, m.max_zoom).and_then(|r| r.intersect(ctx.window))
     else {
-        return 0;
+        return Ok(0);
     };
     let (z_lo, z_hi) = (zooms.first(), zooms.last());
     let source = match &geometry {
@@ -604,7 +604,7 @@ pub(super) fn emit_match(
     };
     match m.geom_expect {
         GeomExpect::Point | GeomExpect::PolygonCentroid | GeomExpect::PolygonPointOnSurface => {
-            match geometry {
+            Ok(match geometry {
                 FeatureGeometry::Node(p) => {
                     // Preserve the node's projected world-edge coordinate;
                     // centroid wrapping applies only to way/area geometry.
@@ -646,7 +646,7 @@ pub(super) fn emit_match(
                         // The profile's plain point rules describe OSM nodes,
                         // not polygon labels. match_multipolygon uses explicit
                         // centroid/surface rules instead; do not invent a label.
-                        return 0;
+                        return Ok(0);
                     }
                     emit_point_or_centroid(
                         osm_id,
@@ -663,18 +663,18 @@ pub(super) fn emit_match(
                 FeatureGeometry::AreaLabel { point: p } => {
                     emit_projected_point(osm_id, *p, m, z_lo, z_hi, &mut records, point)
                 }
-            }
+            })
         }
         GeomExpect::Line | GeomExpect::Polygon => {
             let (coords, inners) = match &geometry {
-                FeatureGeometry::Node(_) | FeatureGeometry::AreaLabel { .. } => return 0,
+                FeatureGeometry::Node(_) | FeatureGeometry::AreaLabel { .. } => return Ok(0),
                 FeatureGeometry::Way { coords, .. } => (*coords, None),
                 FeatureGeometry::Area { outer, inners, .. } => {
                     if m.geom_expect == GeomExpect::Line {
                         // Boundary lines emit once per member way in phase12,
                         // with relation metadata from the boundary prescan.
                         // Assembled area rings must not draw those lines again.
-                        return 0;
+                        return Ok(0);
                     }
                     (*outer, Some(*inners))
                 }
@@ -747,8 +747,10 @@ pub(super) fn emit_match(
                                 cap,
                                 ctx.polygon_simplify_factor,
                             );
+                            // Harvest before propagating, so a failure
+                            // leaves no stale events in the scratch.
                             harvest_cap_events(&mut polygon.cap_events, fanout);
-                            count
+                            count?
                         }
                     }
                     FeatureGeometry::Area {
@@ -771,11 +773,11 @@ pub(super) fn emit_match(
                             ctx.polygon_simplify_factor,
                         );
                         harvest_cap_events(&mut polygon.cap_events, fanout);
-                        count
+                        count?
                     }
                 };
             }
-            count
+            Ok(count)
         }
     }
 }
@@ -1024,10 +1026,10 @@ pub(super) fn emit_polygon_feature(
     scratch: &mut PolygonEmitScratch,
     fanout_cap: Option<NonZeroU32>,
     tol_scale: f64,
-) -> u64 {
+) -> Result<u64, RingCapError> {
     scratch.cap_events.clear();
     if merc.len() < 4 {
-        return 0;
+        return Ok(0);
     }
     fill_pin_keys_from_mask(merc, preserve_vertex_mask, &mut scratch.pin_keys);
     let has_pins = !scratch.pin_keys.is_empty();
@@ -1050,7 +1052,7 @@ pub(super) fn emit_polygon_feature(
             });
     }
     if scratch.shape_base.is_empty() {
-        return 0;
+        return Ok(0);
     }
     fill_base_pins(
         &scratch.shape_base,
@@ -1068,7 +1070,7 @@ pub(super) fn emit_polygon_feature(
         fanout_cap,
         &mut scratch.cap_events,
     ) else {
-        return 0;
+        return Ok(0);
     };
 
     clear_attrs_cache(&mut scratch.attrs_by_zoom);
@@ -1114,8 +1116,8 @@ pub(super) fn emit_polygon_feature(
         );
         count += 1;
     };
-    emit_shape_pyramid(&scratch.shape_base, &params, pyramid, &mut sink);
-    count
+    emit_shape_pyramid(&scratch.shape_base, &params, pyramid, &mut sink)?;
+    Ok(count)
 }
 
 #[hotpath::measure]
@@ -1132,7 +1134,7 @@ pub(super) fn emit_multipolygon_feature(
     emit_scratch: &mut MultipolygonEmitScratch,
     fanout_cap: Option<NonZeroU32>,
     tol_scale: f64,
-) -> u64 {
+) -> Result<u64, RingCapError> {
     emit_scratch.cap_events.clear();
     if let Some(keys) = preserve_vertex_keys.filter(|k| !k.is_empty()) {
         quantize_polygon_pinned_into(
@@ -1157,7 +1159,7 @@ pub(super) fn emit_multipolygon_feature(
             });
     }
     if emit_scratch.shape_base.is_empty() {
-        return 0;
+        return Ok(0);
     }
     fill_base_pins(
         &emit_scratch.shape_base,
@@ -1175,7 +1177,7 @@ pub(super) fn emit_multipolygon_feature(
         fanout_cap,
         &mut emit_scratch.cap_events,
     ) else {
-        return 0;
+        return Ok(0);
     };
 
     clear_attrs_cache(&mut emit_scratch.attrs_by_zoom);
@@ -1221,8 +1223,8 @@ pub(super) fn emit_multipolygon_feature(
         );
         count += 1;
     };
-    emit_shape_pyramid(&emit_scratch.shape_base, &params, pyramid, &mut sink);
-    count
+    emit_shape_pyramid(&emit_scratch.shape_base, &params, pyramid, &mut sink)?;
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -1305,7 +1307,7 @@ mod landing2_tests {
                 &mut records,
                 &mut point
             ),
-            1
+            Ok(1)
         );
         let (z, x, _) = records[0].key.tile().coord();
         assert_eq!((z, x), (12, 4095));
@@ -1349,7 +1351,7 @@ mod landing2_tests {
                     &mut records,
                     &mut point
                 ),
-                0
+                Ok(0)
             );
         }
         assert!(records.is_empty());
@@ -1496,7 +1498,8 @@ mod landing2_tests {
             &mut scratch,
             None,
             1.0,
-        );
+        )
+        .expect("emission succeeds");
         assert_eq!(
             usize::try_from(count).expect("record count fits usize"),
             records.len()
@@ -1510,7 +1513,8 @@ mod landing2_tests {
             assert_eq!(attr_count(&rec.data), want_count, "z{z}");
 
             let mut lb = mvt::LayerBuilder::new("test");
-            crate::wire_format::add_feature_to_layer(&mut lb, &rec.data);
+            crate::wire_format::add_feature_to_layer(&mut lb, &rec.data)
+                .expect("emitted record decodes");
             let feature = lb.test_feature(0);
             let keys: Vec<&str> = feature
                 .tags

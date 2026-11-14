@@ -47,47 +47,32 @@ Reported by the pipeline hunt.
 
 ## STR-003 - Typed errors with a defined exit-code mapping
 
-A chain; the settled rulings and the link plan are in
-`notes/typed-errors-design.md`. The first link landed `PipelineError` as an
-opaque error with `kind()`, a typed `ResumeRefusal`, and the exit table in
-`reference/cli.md`. Under its evidence rule a subsystem that still reports
-through untyped `io::Error` exits 2 (or 74 with an OS errno), so the residue
-is typing each subsystem at its source:
-
-- ocean: artifact admission refusals are `io::Error::other` strings in
-  `ocean/artifact.rs`, the key-mismatch message does not say which field
-  differs (policy version means rebuild, a shapefile hash means
-  re-download), and `ocean/shapefile.rs` rewraps read errors with
-  `io::Error::new(err.kind(), format!(..))`, erasing the errno;
-- sort: chunk-store validation (compression mismatch, stale or missing
-  chunk, count mismatch) is `io::Error` with an `InvalidData`/`NotFound`
-  kind in `SortReader::from_dir` and `SortWriter::resume`, so a stale chunk
-  set on a resume exits 2, not 3;
-- archive: `tile_detail` and `mvt::message` return `Result<_, String>`, the
-  `archive` reader and directory codec return prose `io::Error`s (tests
-  assert on message fragments), and `inspect`, `svg` and `diag` inherit
-  that; `diag` validates coordinates inside its `io::Result`, so a bad
-  coordinate exits 2 rather than 64;
-- verify: a `read_tile` failure becomes a "decompression failed" finding
-  (exit 1 on an operational failure), `tile_errors: Vec<String>`,
-  `VerifyError::{Container(String), Metadata(String)}` (exit 2), and
-  paint-order findings map the typed `RankError` back to prose;
-- encoding: `MltEncodeError::Encode(String)`, `GeometryDecode { message }`,
-  and both `check_merge -> Result<(), String>` functions
-  (`geometry/line_merge.rs`, `mvt/merge.rs`) whose tests match prose;
-- panics and silent drops: the node-store flat-index safety cap panics,
-  the relation re-read `expect`s on PBF read failure,
-  `partition_shape_to_ring_cap` `expect`s on an indivisible rect and
-  `enforce_ring_cap` returns a bool its only caller discards, multipolygon
-  assembly drops unclosed chains (`join_ways` returns them, both callers
-  bind `_`), promotes orphan inners and drops degenerate rings invisibly,
-  and the sort-record decoder silently returns on malformed input (its
-  doc comment defends that as a hot-path policy; adjudicate rather than
-  assume);
-- the `.expect("... fits i32")` overflow invariants rest on
-  `maxz + 12 <= 30`, which no type states.
+The `.expect("... fits i32")` overflow invariants rest on
+`maxz + 12 <= 30`, which no type states. This is a type-level invariant
+(a validated zoom type whose bound makes the arithmetic total), not an
+error-path change, so it belongs to no typed-errors work.
 
 Reported by every hunt.
+
+## STR-037 - Phase12 panic sites the typed-errors chain did not name
+
+Found while carrying node-store and ring-cap errors through phase12, outside
+that chain's named sites:
+
+- `SortedNodeStoreInner::put_id` resizes `groups` to `id / 65536 + 1` slots,
+  so a sorted input whose first node ID is huge (legal under
+  `--force-sorted`) allocates proportionally or aborts on allocation
+  failure. An input-reachable abort; a group-count bound would be a refusal.
+- `Router::route_nodes` panics on a node block after the way phase on the
+  raw path ("node store is already finalized"). Block order is input, so a
+  PBF with ways before trailing nodes aborts instead of exiting 65.
+- The way drain and the relation tail push residual records with
+  `push_untracked(..).expect("sort push failed")`: a chunk-write I/O failure
+  there aborts rather than exiting 74.
+- `NodeWorkers::send` and `WayDispatch::send` `expect` a live receiver; a
+  worker panic surfaces as a second panic at the sender.
+
+Reported by the typed-errors link 7 implementer.
 
 ## STR-008 - Fix the dependency edges that point the wrong way
 

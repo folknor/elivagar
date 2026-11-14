@@ -38,7 +38,7 @@ use stats::Phase12Stats;
 use stats::missing_ref_summary_lines;
 
 mod error;
-pub use error::{ErrorKind, PipelineError, ResumeRefusal};
+pub use error::{ArtifactRefusal, ErrorKind, KeyMismatch, PipelineError, ResumeRefusal};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -578,6 +578,11 @@ impl RunPlan {
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[hotpath::measure]
 pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
+    run_inner(config).map_err(|error| error.chunk_context(config.skip_to.is_some()))
+}
+
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+fn run_inner(config: &TilegenConfig) -> Result<(), PipelineError> {
     crate::debug::reset_run_counters();
     crate::ocean::reset_ocean_counters();
     sort::reset_sort_counters();

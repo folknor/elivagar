@@ -293,6 +293,52 @@ fn reference_dedup(input: &[Vec<IntPoint>]) -> Vec<Vec<IntPoint>> {
     out
 }
 
+/// A failed witness invariant, independent of its diagnostic wording.
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MergeViolation {
+    SegmentOutOfRange { index: usize, retained: usize },
+    Consumption { consumed: usize, expected: usize },
+    ChainCount { chains: usize, outputs: usize },
+    Disconnected { chain: usize, junction: IntPoint },
+    ClipBoundary { chain: usize, junction: IntPoint },
+    Reconstruction { chain: usize },
+    Conservation,
+}
+
+#[cfg(any(test, debug_assertions))]
+impl std::fmt::Display for MergeViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SegmentOutOfRange { index, retained } => {
+                write!(f, "witness names segment {index} of {retained}")
+            }
+            Self::Consumption { consumed, expected } => write!(
+                f,
+                "chains consume {consumed} segments, independent dedup keeps {expected}"
+            ),
+            Self::ChainCount { chains, outputs } => {
+                write!(f, "{chains} witness chains for {outputs} output lines")
+            }
+            Self::Disconnected { chain, junction } => write!(
+                f,
+                "chain {chain} joins disconnected segments at {junction:?}"
+            ),
+            Self::ClipBoundary { chain, junction } => write!(
+                f,
+                "chain {chain} continues through clip boundary point {junction:?}"
+            ),
+            Self::Reconstruction { chain } => {
+                write!(f, "chain {chain} does not match its constituents")
+            }
+            Self::Conservation => f.write_str("output edges differ from the deduplicated input"),
+        }
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+impl std::error::Error for MergeViolation {}
+
 /// Checks what one [`merge_line_segments`] call did, from its witness:
 ///
 /// - consumption: the chains together use every retained segment exactly
@@ -314,7 +360,7 @@ pub(crate) fn check_merge(
     decoded: &[Vec<IntPoint>],
     witness: &[(usize, bool)],
     chain_ends: &[usize],
-) -> Result<(), String> {
+) -> Result<(), MergeViolation> {
     let expected = reference_dedup(input);
     let canonical = |line: &[IntPoint]| {
         let reversed: Vec<IntPoint> = line.iter().rev().copied().collect();
@@ -327,25 +373,26 @@ pub(crate) fn check_merge(
             retained
                 .get(idx)
                 .map(|l| canonical(l))
-                .ok_or_else(|| format!("witness names segment {idx} of {}", retained.len()))
+                .ok_or(MergeViolation::SegmentOutOfRange {
+                    index: idx,
+                    retained: retained.len(),
+                })
         })
         .collect::<Result<_, _>>()?;
     expected_lines.sort();
     consumed.sort();
     if consumed != expected_lines {
-        return Err(format!(
-            "chains consume {} segments, independent dedup keeps {}",
-            consumed.len(),
-            expected_lines.len()
-        ));
+        return Err(MergeViolation::Consumption {
+            consumed: consumed.len(),
+            expected: expected_lines.len(),
+        });
     }
 
     if chain_ends.len() != merged.len() {
-        return Err(format!(
-            "{} witness chains for {} output lines",
-            chain_ends.len(),
-            merged.len()
-        ));
+        return Err(MergeViolation::ChainCount {
+            chains: chain_ends.len(),
+            outputs: merged.len(),
+        });
     }
     let mut begin = 0;
     for (k, &end) in chain_ends.iter().enumerate() {
@@ -361,14 +408,10 @@ pub(crate) fn check_merge(
             if n > 0 {
                 let junction = oriented[0];
                 if rebuilt.last() != Some(&junction) {
-                    return Err(format!(
-                        "chain {k} joins disconnected segments at {junction:?}"
-                    ));
+                    return Err(MergeViolation::Disconnected { chain: k, junction });
                 }
                 if on_clip_boundary(junction) {
-                    return Err(format!(
-                        "chain {k} continues through clip boundary point {junction:?}"
-                    ));
+                    return Err(MergeViolation::ClipBoundary { chain: k, junction });
                 }
                 rebuilt.extend_from_slice(&oriented[1..]);
             } else {
@@ -376,16 +419,70 @@ pub(crate) fn check_merge(
             }
         }
         if rebuilt != merged[k] {
-            return Err(format!("chain {k} does not match its constituents"));
+            return Err(MergeViolation::Reconstruction { chain: k });
         }
         begin = end;
     }
 
     if edge_multiset(decoded) != edge_multiset(&expected) {
-        return Err("output edges differ from the deduplicated input".to_string());
+        return Err(MergeViolation::Conservation);
     }
     Ok(())
 }
 
 #[cfg(test)]
 pub(crate) const TEST_CLIP_BOUNDARY: (i32, i32) = (CLIP_BOUNDARY_LO, CLIP_BOUNDARY_HI);
+
+#[cfg(test)]
+mod violation_tests {
+    use super::*;
+
+    #[test]
+    fn checker_reports_each_witness_violation() {
+        let a = IntPoint::new(0, 0);
+        let b = IntPoint::new(10, 0);
+        let c = IntPoint::new(20, 0);
+        let input = vec![vec![a, b], vec![b, c]];
+        let merged = vec![vec![a, b, c]];
+        let witness = [(0, false), (1, false)];
+        let check = |output: &[Vec<IntPoint>],
+                     decoded: &[Vec<IntPoint>],
+                     parts: &[(usize, bool)],
+                     ends: &[usize]| {
+            check_merge(&input, &input, output, decoded, parts, ends)
+        };
+        assert!(matches!(
+            check(&merged, &merged, &[(2, false)], &[1]),
+            Err(MergeViolation::SegmentOutOfRange {
+                index: 2,
+                retained: 2
+            })
+        ));
+        assert!(matches!(
+            check(&merged, &merged, &[(0, false)], &[1]),
+            Err(MergeViolation::Consumption {
+                consumed: 1,
+                expected: 2
+            })
+        ));
+        assert!(matches!(
+            check(&merged, &merged, &witness, &[]),
+            Err(MergeViolation::ChainCount {
+                chains: 0,
+                outputs: 1
+            })
+        ));
+        assert!(matches!(
+            check(&merged, &merged, &[(0, false), (1, true)], &[2]),
+            Err(MergeViolation::Disconnected { chain: 0, .. })
+        ));
+        assert!(matches!(
+            check(&input, &merged, &witness, &[2, 2]),
+            Err(MergeViolation::Reconstruction { chain: 0 })
+        ));
+        assert_eq!(
+            check(&merged, &input[..1], &witness, &[2]),
+            Err(MergeViolation::Conservation)
+        );
+    }
+}

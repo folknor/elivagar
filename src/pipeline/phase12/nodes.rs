@@ -11,6 +11,7 @@
 use crate::debug::{BUSY, WAIT, wait_span};
 use crate::geometry;
 use crate::node_index::{LatLonE7, NodeId, NodeStore};
+use crate::pipeline::PipelineError;
 use crate::shortbread::{self, OsmGeomType, Tags};
 use crate::sort::{RecordTally, SortRecord, SpillCoalescer};
 use crate::tiling::ZoomRange;
@@ -35,7 +36,8 @@ pub(super) struct NodeOutcome {
 }
 
 impl NodeOutcome {
-    fn absorb(&mut self, worker: NodeWorker) {
+    /// Merge one joined worker; its failure, if any, is handed back.
+    fn absorb(&mut self, worker: NodeWorker) -> Option<PipelineError> {
         if worker.node_store.is_some() {
             self.node_store = worker.node_store;
         }
@@ -46,6 +48,7 @@ impl NodeOutcome {
             None => self.tally = Some(worker.sink.tally),
         }
         self.extent.merge(worker.extent);
+        worker.failure
     }
 }
 
@@ -115,20 +118,27 @@ impl NodeWorkers {
     }
 
     /// Close the channel, wait for every worker, and merge what they return
-    /// into `outcome`.
-    pub(super) fn join(mut self, outcome: &mut NodeOutcome) {
+    /// into `outcome`. The first worker failure, in join order, is returned
+    /// once every worker has stopped.
+    pub(super) fn join(mut self, outcome: &mut NodeOutcome) -> Result<(), PipelineError> {
         drop(self.tx.take());
         let _wait = wait_span(&WAIT.node_worker_join);
         // Join every worker before reporting a panic, so none is left
         // running when it propagates.
         let mut panicked = false;
+        let mut failure = None;
         for handle in std::mem::take(&mut self.handles) {
             match handle.join() {
-                Ok(worker) => outcome.absorb(worker),
+                Ok(worker) => {
+                    if let Some(err) = outcome.absorb(worker) {
+                        failure.get_or_insert(err);
+                    }
+                }
                 Err(_) => panicked = true,
             }
         }
         assert!(!panicked, "node worker thread panicked");
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -152,6 +162,10 @@ struct NodeWorker {
     extent: CoordinateExtent,
     node_records: Vec<SortRecord>,
     sink: RecordSink,
+    /// The first failure. Once set the worker stops storing and emitting but
+    /// keeps draining its channel, so the router's send never meets a closed
+    /// channel and mistakes the failure for a panic.
+    failure: Option<PipelineError>,
 }
 
 impl NodeWorker {
@@ -164,6 +178,7 @@ impl NodeWorker {
             extent: CoordinateExtent::default(),
             node_records: Vec::new(),
             sink: RecordSink::new(),
+            failure: None,
         }
     }
 
@@ -180,21 +195,32 @@ impl NodeWorker {
                 guard.recv()
             };
             let Ok(block) = received else { break };
+            if self.failure.is_some() {
+                continue;
+            }
             let _busy = wait_span(&BUSY.phase12_node_blocks);
-            block.for_each_element(|element| match element {
-                Element::DenseNode(node) => self.handle(
-                    node.id(),
-                    node.decimicro_lat(),
-                    node.decimicro_lon(),
-                    node.tags(),
-                ),
-                Element::Node(node) => self.handle(
-                    node.id(),
-                    node.decimicro_lat(),
-                    node.decimicro_lon(),
-                    node.tags(),
-                ),
-                _ => {}
+            block.for_each_element(|element| {
+                if self.failure.is_some() {
+                    return;
+                }
+                let handled = match element {
+                    Element::DenseNode(node) => self.handle(
+                        node.id(),
+                        node.decimicro_lat(),
+                        node.decimicro_lon(),
+                        node.tags(),
+                    ),
+                    Element::Node(node) => self.handle(
+                        node.id(),
+                        node.decimicro_lat(),
+                        node.decimicro_lon(),
+                        node.tags(),
+                    ),
+                    _ => Ok(()),
+                };
+                if let Err(err) = handled {
+                    self.failure = Some(err);
+                }
             });
             if self.sink.bytes() >= NODE_SINK_FLUSH_BYTES {
                 spill.append(&self.sink.records, &self.sink.payload);
@@ -213,17 +239,17 @@ impl NodeWorker {
         lat_e7: i32,
         lon_e7: i32,
         tags: impl Iterator<Item = (&'a str, &'a str)>,
-    ) {
+    ) -> Result<(), PipelineError> {
         self.node_count += 1;
         if let Some(ns) = self.node_store.as_mut() {
-            ns.put_coord_id(NodeId::new(id), LatLonE7::new(lat_e7, lon_e7));
+            ns.put_coord_id(NodeId::new(id), LatLonE7::new(lat_e7, lon_e7))?;
         }
         self.extent.include(lat_e7, lon_e7);
 
         // Collecting an empty iterator does not allocate.
         let tags_vec: Vec<(&str, &str)> = tags.collect();
         if tags_vec.is_empty() {
-            return;
+            return Ok(());
         }
         self.node_records.clear();
         #[allow(clippy::cast_sign_loss)]
@@ -234,7 +260,7 @@ impl NodeWorker {
             &tags_vec,
             self.window,
             &mut self.node_records,
-        );
+        )?;
         for r in self.node_records.drain(..) {
             self.sink.tally.record(r.key, r.data.len());
             self.sink.records.push(crate::sort::PayloadRef {
@@ -245,6 +271,7 @@ impl NodeWorker {
             self.sink.payload.extend_from_slice(&r.data);
         }
         self.features_emitted += n;
+        Ok(())
     }
 }
 
@@ -257,11 +284,11 @@ pub(super) fn process_node(
     tags: &[(&str, &str)],
     window: ZoomRange,
     records: &mut Vec<SortRecord>,
-) -> u64 {
+) -> Result<u64, PipelineError> {
     let tag_helper = Tags(tags);
     let matches = shortbread::match_element(&tag_helper, OsmGeomType::Node);
     if matches.is_empty() {
-        return 0;
+        return Ok(0);
     }
 
     let p = geometry::projection::project_e7(lat_e7, lon_e7);
@@ -280,7 +307,7 @@ pub(super) fn process_node(
             &ctx,
             records,
             &mut point,
-        );
+        )?;
     }
-    count
+    Ok(count)
 }

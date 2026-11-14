@@ -393,18 +393,74 @@ pub(crate) fn encode_feature_data(
     encode_feature_data_with_attrs(osm_id, geom_type, geom_cmds, &attrs_bytes)
 }
 
+/// A sort record whose bytes do not match the layout above.
+///
+/// Records are encoded by this pipeline but reach the decoder as bytes read
+/// back from chunk files, so a malformed one is persisted state that differs
+/// from what was written - a code bug or a damaged chunk, which the bytes
+/// alone cannot tell apart. The run therefore fails unclassified. This
+/// validates the record envelope only; the geometry command stream is copied
+/// as written, and its grammar is the encoder's contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordDecodeError {
+    /// The record ended before the field starting at `at` was complete.
+    Truncated { at: usize },
+    /// A geometry type byte other than 1, 2 or 3.
+    GeomType(u8),
+    /// An attribute key id past the key table.
+    KeyId(u8),
+    /// An attribute value type byte other than 0 to 4.
+    ValueType(u8),
+    /// An interned kind value id past the kind table.
+    KindValue(u8),
+    /// A bool byte other than 0 or 1.
+    Bool(u8),
+    /// A string value that is not UTF-8.
+    Utf8 { at: usize },
+    /// Bytes left over after the declared attributes.
+    TrailingBytes { consumed: usize, len: usize },
+}
+
+impl std::fmt::Display for RecordDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Truncated { at } => write!(f, "sort record truncated at byte {at}"),
+            Self::GeomType(b) => write!(f, "sort record geometry type {b} is not 1, 2 or 3"),
+            Self::KeyId(id) => write!(f, "sort record attribute key id {id} is unknown"),
+            Self::ValueType(t) => write!(f, "sort record attribute value type {t} is unknown"),
+            Self::KindValue(id) => write!(f, "sort record kind value id {id} is unknown"),
+            Self::Bool(b) => write!(f, "sort record bool byte {b} is not 0 or 1"),
+            Self::Utf8 { at } => write!(f, "sort record string at byte {at} is not UTF-8"),
+            Self::TrailingBytes { consumed, len } => write!(
+                f,
+                "sort record carries {} bytes after its attributes ({consumed} of {len})",
+                len - consumed
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RecordDecodeError {}
+
 /// Decode feature data from a sort record and add it to a layer builder.
-/// Silent returns on malformed data are intentional: this is an internal format
-/// encoded by our own pipeline, so corruption means a code bug (caught by tests).
-/// Logging here would add noise to a billion-call hot path.
+/// Every bounds check is a branch the decoder needs anyway, so rejecting a
+/// malformed record costs nothing on the success path. On error the layer
+/// may hold interned keys and values of the partial record; the caller fails
+/// the tile, so the builder is discarded.
 #[hotpath::measure]
 #[allow(clippy::cast_possible_truncation)]
 // Visible only without the hotpath feature (the measure macro's wrapping
 // masks it under --all-features).
 #[allow(clippy::too_many_lines)]
-pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
+// The expects are fixed-width slice-to-array conversions behind the bounds
+// checks that return the errors, so they cannot fire.
+#[allow(clippy::unwrap_in_result)]
+pub(crate) fn add_feature_to_layer(
+    layer: &mut LayerBuilder,
+    data: &[u8],
+) -> Result<(), RecordDecodeError> {
     if data.len() < 13 {
-        return;
+        return Err(RecordDecodeError::Truncated { at: 0 });
     }
 
     // osm_id
@@ -418,7 +474,7 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
         1 => GeomType::Point,
         2 => GeomType::LineString,
         3 => GeomType::Polygon,
-        _ => return,
+        other => return Err(RecordDecodeError::GeomType(other)),
     };
 
     // geometry commands - bulk memcpy (little-endian wire format matches native u32 layout).
@@ -429,7 +485,7 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
     pos += 4;
     let cmd_bytes = cmd_count * 4;
     if pos + cmd_bytes > data.len() {
-        return;
+        return Err(RecordDecodeError::Truncated { at: pos });
     }
     let mut geom_cmds = vec![0u32; cmd_count];
     // SAFETY: On little-endian, u32 byte layout matches the wire format.
@@ -446,69 +502,68 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
     pos += cmd_bytes;
 
     // attributes
+    let truncated = |at: usize| RecordDecodeError::Truncated { at };
     if pos >= data.len() {
-        return;
+        return Err(truncated(pos));
     }
     let attr_count = data[pos] as usize;
     pos += 1;
 
     let mut tag_pairs = Vec::with_capacity(attr_count);
     for _ in 0..attr_count {
-        if pos >= data.len() {
-            break;
+        if pos + 2 > data.len() {
+            return Err(truncated(pos));
         }
-        let key_id = data[pos] as usize;
-        pos += 1;
-        if key_id >= KEY_NAMES.len() {
-            break;
-        }
-        let key = KEY_NAMES[key_id];
+        let key_byte = data[pos];
+        let key = *KEY_NAMES
+            .get(key_byte as usize)
+            .ok_or(RecordDecodeError::KeyId(key_byte))?;
+        let val_type = data[pos + 1];
+        pos += 2;
 
-        if pos >= data.len() {
-            break;
-        }
-        let val_type = data[pos];
-        pos += 1;
-
-        let ki = layer.intern_key(key);
         let vi = match val_type {
             0 => {
                 // string
                 if pos + 2 > data.len() {
-                    break;
+                    return Err(truncated(pos));
                 }
                 let slen =
                     u16::from_le_bytes(data[pos..pos + 2].try_into().expect("slen")) as usize;
                 pos += 2;
                 if pos + slen > data.len() {
-                    break;
+                    return Err(truncated(pos));
                 }
-                let s = std::str::from_utf8(&data[pos..pos + slen]).unwrap_or("");
+                let s = std::str::from_utf8(&data[pos..pos + slen])
+                    .map_err(|_| RecordDecodeError::Utf8 { at: pos })?;
                 pos += slen;
                 layer.intern_string_value(s)
             }
             1 => {
                 // int
                 if pos + 8 > data.len() {
-                    break;
+                    return Err(truncated(pos));
                 }
                 let i = i64::from_le_bytes(data[pos..pos + 8].try_into().expect("int"));
                 pos += 8;
                 layer.intern_value(Value::Int(i))
             }
             2 => {
-                // bool
-                if pos >= data.len() {
-                    break;
-                }
-                let b = data[pos] != 0;
+                // bool: the encoder writes exactly 0 or 1.
+                let Some(&byte) = data.get(pos) else {
+                    return Err(truncated(pos));
+                };
+                let b = match byte {
+                    0 => false,
+                    1 => true,
+                    other => return Err(RecordDecodeError::Bool(other)),
+                };
                 pos += 1;
                 layer.intern_value(Value::Bool(b))
             }
             3 => {
                 // float
                 if pos + 8 > data.len() {
-                    break;
+                    return Err(truncated(pos));
                 }
                 let f = f64::from_le_bytes(data[pos..pos + 8].try_into().expect("float"));
                 pos += 8;
@@ -516,19 +571,27 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
             }
             4 => {
                 // interned string (kind value)
-                if pos >= data.len() {
-                    break;
-                }
-                let vid = data[pos] as usize;
+                let Some(&vid) = data.get(pos) else {
+                    return Err(truncated(pos));
+                };
                 pos += 1;
-                if vid >= KIND_VALUES.len() {
-                    break;
-                }
-                layer.intern_string_value(KIND_VALUES[vid])
+                let value = *KIND_VALUES
+                    .get(vid as usize)
+                    .ok_or(RecordDecodeError::KindValue(vid))?;
+                layer.intern_string_value(value)
             }
-            _ => break,
+            other => return Err(RecordDecodeError::ValueType(other)),
         };
+        // Key and value tables are separate, so interning the key after the
+        // value leaves both tables' order exactly as the encoder implies.
+        let ki = layer.intern_key(key);
         tag_pairs.push((ki, vi));
+    }
+    if pos != data.len() {
+        return Err(RecordDecodeError::TrailingBytes {
+            consumed: pos,
+            len: data.len(),
+        });
     }
 
     layer.add_feature(mvt::Feature {
@@ -537,6 +600,7 @@ pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
         geometry: geom_cmds,
         tags: tag_pairs,
     });
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +615,43 @@ mod tests {
     use crate::shortbread::AttrValue;
     use std::borrow::Cow;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn malformed_records_are_rejected_not_dropped() {
+        let attrs = [
+            ("name", AttrValue::Str(Cow::Borrowed("x")), 0),
+            ("bridge", AttrValue::Bool(true), 0),
+        ];
+        let good = encode_feature_data(9, GeomType::Point, &[9, 2, 4], &attrs, 14);
+        add_feature_to_layer(&mut LayerBuilder::new("t"), &good).unwrap();
+        let decode = |data: &[u8]| add_feature_to_layer(&mut LayerBuilder::new("t"), data);
+
+        // Calibrated both ways: the good record decodes above, and each
+        // corruption below is one the old decoder accepted or dropped silently.
+        let mut trailing = good.to_vec();
+        trailing.push(0);
+        assert!(matches!(
+            decode(&trailing),
+            Err(RecordDecodeError::TrailingBytes { .. })
+        ));
+        assert!(matches!(
+            decode(&good[..good.len() - 1]),
+            Err(RecordDecodeError::Truncated { .. })
+        ));
+        let mut bad_bool = good.to_vec();
+        *bad_bool.last_mut().unwrap() = 2;
+        assert_eq!(decode(&bad_bool), Err(RecordDecodeError::Bool(2)));
+        let mut bad_geom = good.to_vec();
+        bad_geom[8] = 7;
+        assert_eq!(decode(&bad_geom), Err(RecordDecodeError::GeomType(7)));
+        // String "x" sits after the 13-byte header, 12 command bytes, the
+        // attr count, key id, value type and the u16 length.
+        let mut bad_utf8 = good.to_vec();
+        let at = 13 + 12 + 1 + 2 + 2;
+        assert_eq!(bad_utf8[at], b'x');
+        bad_utf8[at] = 0xFF;
+        assert_eq!(decode(&bad_utf8), Err(RecordDecodeError::Utf8 { at }));
+    }
 
     #[test]
     fn kind_values_are_unique() {
@@ -590,7 +691,7 @@ mod tests {
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 14);
 
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
 
         // Exactly 1 feature
         assert_eq!(layer.test_feature_count(), 1);
@@ -653,7 +754,7 @@ mod tests {
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 10);
 
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
 
         assert_eq!(layer.test_feature_count(), 1);
         let f = layer.test_feature(0);
@@ -673,7 +774,7 @@ mod tests {
         let encoded_z12 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 12);
 
         let mut layer2 = LayerBuilder::new("test2");
-        add_feature_to_layer(&mut layer2, &encoded_z12);
+        add_feature_to_layer(&mut layer2, &encoded_z12).unwrap();
 
         let f2 = layer2.test_feature(0);
         assert_eq!(f2.tags.len(), 4);
@@ -703,7 +804,7 @@ mod tests {
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 14);
 
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
 
         assert_eq!(layer.test_feature_count(), 1);
         let f = layer.test_feature(0);
@@ -732,7 +833,7 @@ mod tests {
             let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
 
             let mut layer = LayerBuilder::new("test");
-            add_feature_to_layer(&mut layer, &encoded);
+            add_feature_to_layer(&mut layer, &encoded).unwrap();
 
             let f = layer.test_feature(0);
             let (_, v0) = f.tags[0];
@@ -756,7 +857,7 @@ mod tests {
         let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
 
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
 
         let f = layer.test_feature(0);
         let (k0, v0) = f.tags[0];
@@ -784,7 +885,7 @@ mod tests {
         // Below boundary: only min_zoom <= 9 attrs survive.
         let encoded_z9 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 9);
         let mut layer_z9 = LayerBuilder::new("z9");
-        add_feature_to_layer(&mut layer_z9, &encoded_z9);
+        add_feature_to_layer(&mut layer_z9, &encoded_z9).unwrap();
         let z9_tags = feature_tag_map(&layer_z9, 0);
         assert_eq!(z9_tags.len(), 2, "z9 must not include min_zoom=10 attrs");
         assert_eq!(
@@ -798,7 +899,7 @@ mod tests {
         // At boundary: min_zoom=10 attrs appear.
         let encoded_z10 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 10);
         let mut layer_z10 = LayerBuilder::new("z10");
-        add_feature_to_layer(&mut layer_z10, &encoded_z10);
+        add_feature_to_layer(&mut layer_z10, &encoded_z10).unwrap();
         let z10_tags = feature_tag_map(&layer_z10, 0);
         assert_eq!(z10_tags.len(), 4, "z10 should include all attrs");
         assert_eq!(
@@ -822,7 +923,7 @@ mod tests {
 
         let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 11);
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
 
         let tags = feature_tag_map(&layer, 0);
         assert_eq!(tags.len(), 2, "gated leading attr should be excluded");
@@ -845,7 +946,7 @@ mod tests {
         let encoded = encode_feature_data_with_attrs(7, GeomType::Point, &geom_cmds, &attrs_bytes);
 
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
         let f = layer.test_feature(0);
         assert_eq!(f.tags.len(), 1);
         assert_eq!(layer.test_key(f.tags[0].0), "kind");
@@ -862,7 +963,7 @@ mod tests {
 
         let encoded = encode_feature_data(42, GeomType::Point, &geom_cmds, &attrs, 4);
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
 
         let f = layer.test_feature(0);
         assert_eq!(
@@ -882,7 +983,7 @@ mod tests {
 
         let encoded = encode_feature_data(7, GeomType::Point, &geom_cmds, &attrs, 14);
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
 
         let f = layer.test_feature(0);
         assert_eq!(f.tags.len(), 255, "attrs must be capped to u8::MAX entries");
@@ -908,7 +1009,7 @@ mod tests {
 
         let encoded = encode_feature_data(77, GeomType::Point, &geom_cmds, &attrs, 14);
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
 
         let f = layer.test_feature(0);
         assert_eq!(f.tags.len(), 255);
@@ -934,7 +1035,7 @@ mod tests {
         // At z11, gated attrs are excluded and no cap is hit.
         let encoded_z11 = encode_feature_data(10, GeomType::Point, &geom_cmds, &attrs, 11);
         let mut layer_z11 = LayerBuilder::new("z11");
-        add_feature_to_layer(&mut layer_z11, &encoded_z11);
+        add_feature_to_layer(&mut layer_z11, &encoded_z11).unwrap();
         let f11 = layer_z11.test_feature(0);
         assert_eq!(f11.tags.len(), 220);
         for (k, _) in &f11.tags {
@@ -944,7 +1045,7 @@ mod tests {
         // At z12, both groups are eligible but capped at 255 total entries.
         let encoded_z12 = encode_feature_data(11, GeomType::Point, &geom_cmds, &attrs, 12);
         let mut layer_z12 = LayerBuilder::new("z12");
-        add_feature_to_layer(&mut layer_z12, &encoded_z12);
+        add_feature_to_layer(&mut layer_z12, &encoded_z12).unwrap();
         let f12 = layer_z12.test_feature(0);
         assert_eq!(f12.tags.len(), 255);
         let kind_count = f12
@@ -970,7 +1071,7 @@ mod tests {
 
         let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
         let mut layer = LayerBuilder::new("test");
-        add_feature_to_layer(&mut layer, &encoded);
+        add_feature_to_layer(&mut layer, &encoded).unwrap();
 
         let (_, value_idx) = layer.test_feature(0).tags[0];
         assert_eq!(

@@ -45,7 +45,7 @@ struct PartitionMergeReader {
 impl PartitionMergeReader {
     /// Prime the merge heap from already-open (and possibly skipped-into)
     /// chunk readers.
-    fn from_chunk_readers(mut chunk_readers: Vec<ChunkReader>) -> io::Result<Self> {
+    fn from_chunk_readers(mut chunk_readers: Vec<ChunkReader>) -> Result<Self, ChunkStoreError> {
         let mut heap = BinaryHeap::with_capacity(chunk_readers.len());
         for (idx, cr) in chunk_readers.iter_mut().enumerate() {
             if let Some((key, data)) = cr.read_record()? {
@@ -72,7 +72,7 @@ impl PartitionMergeReader {
         sources: &[SortPartitionSource],
         compression: ChunkCompression,
         tile_range: (u64, u64),
-    ) -> io::Result<Self> {
+    ) -> Result<Self, ChunkStoreError> {
         let mut chunk_readers = Vec::with_capacity(sources.len());
         for source in sources {
             chunk_readers.push(ChunkReader::open_source(source, compression, tile_range)?);
@@ -80,7 +80,7 @@ impl PartitionMergeReader {
         Self::from_chunk_readers(chunk_readers)
     }
 
-    fn next(&mut self) -> io::Result<Option<SortRecord>> {
+    fn next(&mut self) -> Result<Option<SortRecord>, ChunkStoreError> {
         let entry = match self.heap.pop() {
             Some(e) => e,
             None => return Ok(None),
@@ -134,7 +134,10 @@ pub struct SortPartitionReader {
 }
 
 impl SortPartitionReader {
-    pub fn open(partition: &SortPartition, compression: ChunkCompression) -> io::Result<Self> {
+    pub fn open(
+        partition: &SortPartition,
+        compression: ChunkCompression,
+    ) -> Result<Self, ChunkStoreError> {
         Ok(Self {
             inner: PartitionMergeReader::new(
                 &partition.sources,
@@ -148,7 +151,7 @@ impl SortPartitionReader {
         slices: &[SortSourceSlice],
         compression: ChunkCompression,
         tile_range: (u64, u64),
-    ) -> io::Result<Self> {
+    ) -> Result<Self, ChunkStoreError> {
         let mut chunk_readers = Vec::with_capacity(slices.len());
         for slice in slices {
             let mut reader =
@@ -169,7 +172,7 @@ impl SortPartitionReader {
     }
 
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> io::Result<Option<SortRecord>> {
+    pub fn next(&mut self) -> Result<Option<SortRecord>, ChunkStoreError> {
         self.inner.next()
     }
 }
@@ -192,13 +195,13 @@ impl SortReader {
         tmp_dir: &Path,
         expected_chunks: Option<usize>,
         compression: ChunkCompression,
-    ) -> io::Result<Self> {
+    ) -> Result<Self, ChunkStoreError> {
         let by_id = chunk_files_by_id(tmp_dir)?;
         if let Some(expected) = expected_chunks {
             for i in 0..expected {
                 if by_id.get(i).and_then(Option::as_ref).is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(ChunkStoreError::new(
+                        ChunkStoreErrorKind::Missing,
                         format!(
                             "chunk count mismatch: missing chunk {i} but checkpoint expects {expected}. \
                              Stale chunks from a previous run may be present - \
@@ -209,8 +212,8 @@ impl SortReader {
             }
             if by_id.len() > expected && by_id[expected..].iter().any(Option::is_some) {
                 let found = by_id.iter().filter(|entry| entry.is_some()).count();
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(ChunkStoreError::new(
+                    ChunkStoreErrorKind::CountMismatch,
                     format!(
                         "chunk count mismatch: found {found} but checkpoint expects {expected}. \
                          Stale chunks from a previous run may be present - \
@@ -227,14 +230,20 @@ impl SortReader {
     }
 
     /// Read every chunk file's header into the source table. Merge cursors open lazily per partition.
-    pub(super) fn new(chunk_paths: &[PathBuf], compression: ChunkCompression) -> io::Result<Self> {
+    pub(super) fn new(
+        chunk_paths: &[PathBuf],
+        compression: ChunkCompression,
+    ) -> Result<Self, ChunkStoreError> {
         let mut partitions = vec![Vec::new(); SORT_PARTITIONS];
         for path in chunk_paths {
             match parse_chunk_filename(path)?.map(|(_, kind)| kind) {
                 Some(ChunkFileKind::Partition(partition)) => {
                     // Preserve eager validation of the whole-file count prefix.
                     let _ = ChunkReader::open(path, compression)?;
-                    let byte_extent = fs::metadata(path)?.len().saturating_sub(4);
+                    let byte_extent = fs::metadata(path)
+                        .map_err(ChunkStoreError::open)?
+                        .len()
+                        .saturating_sub(4);
                     partitions[partition]
                         .push(SortPartitionSource::whole(path.clone(), byte_extent));
                 }
@@ -247,8 +256,8 @@ impl SortReader {
                     }
                 }
                 None => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(ChunkStoreError::new(
+                        ChunkStoreErrorKind::Stale,
                         format!("sort chunk requires a partition suffix: {}", path.display()),
                     ));
                 }
@@ -284,7 +293,7 @@ mod tests {
     /// and a `Layer`.
     fn make_sort_key(tile_id: u64, layer: u8, priority: u8) -> SortKey {
         SortKey::new(
-            TileId::new(tile_id).unwrap(),
+            TileId::new(tile_id).expect("sort test operation"),
             Layer::ALL[usize::from(layer)],
             priority,
         )
@@ -311,12 +320,12 @@ mod tests {
     }
 
     fn base(zoom: usize) -> u64 {
-        zoom_ids(u8::try_from(zoom).unwrap()).0
+        zoom_ids(u8::try_from(zoom).expect("sort test operation")).0
     }
 
     fn chunk_path_for_id(dir: &Path, id: usize) -> Option<PathBuf> {
         chunk_files_by_id(dir)
-            .unwrap()
+            .expect("sort test operation")
             .get(id)
             .and_then(Option::as_ref)
             .map(|(_, path)| path.clone())
@@ -324,7 +333,7 @@ mod tests {
 
     fn chunk_kind_for_id(dir: &Path, id: usize) -> Option<ChunkFileKind> {
         chunk_files_by_id(dir)
-            .unwrap()
+            .expect("sort test operation")
             .get(id)
             .and_then(Option::as_ref)
             .map(|(kind, _)| *kind)
@@ -333,8 +342,9 @@ mod tests {
     fn collect_records(mut reader: SortReader, compression: ChunkCompression) -> Vec<SortRecord> {
         let mut out = Vec::new();
         for partition in reader.take_partitions() {
-            let mut reader = SortPartitionReader::open(&partition, compression).unwrap();
-            while let Some(record) = reader.next().unwrap() {
+            let mut reader =
+                SortPartitionReader::open(&partition, compression).expect("sort test operation");
+            while let Some(record) = reader.next().expect("sort test operation") {
                 out.push(record);
             }
         }
@@ -350,7 +360,7 @@ mod tests {
 
     #[test]
     fn sort_key_round_trip() {
-        let last_layer = u8::try_from(Layer::count() - 1).unwrap();
+        let last_layer = u8::try_from(Layer::count() - 1).expect("sort test operation");
         let cases: Vec<(u64, u8, u8)> = vec![
             (0, 0, 0),
             (1, 2, 3),
@@ -409,10 +419,12 @@ mod tests {
                     })
                     .collect();
                 let path = chunk_path(dir, idx, partition_from_key(records[0].key));
-                write_sorted_chunk(&mut records, &path, ChunkCompression::None).unwrap();
+                write_sorted_chunk(&mut records, &path, ChunkCompression::None)
+                    .expect("sort test operation");
                 paths.push(path);
             }
-            let reader = SortReader::new(&paths, ChunkCompression::None).unwrap();
+            let reader =
+                SortReader::new(&paths, ChunkCompression::None).expect("sort test operation");
             let mut result = Vec::new();
             for record in collect_records(reader, ChunkCompression::None) {
                 result.push((record.key, record.data.into_vec()));
@@ -422,8 +434,8 @@ mod tests {
 
         let key = make_sort_key(7, 11, 2);
         let other = make_sort_key(7, 11, 3);
-        let left = tempfile::tempdir().unwrap();
-        let right = tempfile::tempdir().unwrap();
+        let left = tempfile::tempdir().expect("sort test operation");
+        let right = tempfile::tempdir().expect("sort test operation");
         let first = merged(
             left.path(),
             &[
@@ -523,22 +535,25 @@ mod tests {
         ] {
             let path = dir.path().join(name);
             assert_eq!(
-                parse_chunk_filename(&path).unwrap_err().kind(),
-                io::ErrorKind::InvalidData
+                parse_chunk_filename(&path)
+                    .expect_err("reject chunk name")
+                    .kind(),
+                ChunkStoreErrorKind::Stale
             );
-            fs::write(&path, []).unwrap();
+            fs::write(&path, []).expect("sort test operation");
             let error = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None)
                 .err()
                 .expect("unsupported chunk name must refuse directory loading");
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            fs::remove_file(path).unwrap();
+            assert_eq!(error.kind(), ChunkStoreErrorKind::Stale);
+            fs::remove_file(path).expect("sort test operation");
         }
     }
 
     #[test]
     fn corrupt_multi_section_tables_are_refused() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None)
+            .expect("sort test operation");
         let p0 = PARTITION_BASES[14];
         for key in [
             make_sort_key(partition_start(p0), 0, 0),
@@ -549,15 +564,15 @@ mod tests {
                     key,
                     data: Box::from(key_bytes(key).as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
-        writer.flush().unwrap();
-        let path = chunk_files_by_id(dir.path()).unwrap()[0]
+        writer.flush().expect("sort test operation");
+        let path = chunk_files_by_id(dir.path()).expect("sort test operation")[0]
             .as_ref()
             .expect("chunk 0")
             .1
             .clone();
-        let good = fs::read(&path).unwrap();
+        let good = fs::read(&path).expect("sort test operation");
         // Table: magic (8), section count (4), then per section partition
         // (4), record count (4), offset (8).
         // Each corruption overwrites bytes at an offset.
@@ -572,11 +587,11 @@ mod tests {
         for (needle, at, patch) in corruptions {
             let mut bytes = good.clone();
             bytes[at..at + patch.len()].copy_from_slice(&patch);
-            fs::write(&path, &bytes).unwrap();
+            fs::write(&path, &bytes).expect("sort test operation");
             let err = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None)
                 .err()
                 .expect("corrupt table must be refused");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{needle}");
+            assert_eq!(err.kind(), ChunkStoreErrorKind::Corrupt, "{needle}");
             assert!(err.to_string().contains(needle), "{needle}: {err}");
         }
     }
@@ -584,7 +599,8 @@ mod tests {
     #[test]
     fn uncompressed_writer_coalesces_partition_sections_into_one_file() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None)
+            .expect("sort test operation");
 
         let p0 = PARTITION_BASES[14];
         let p1 = p0 + 1;
@@ -598,20 +614,22 @@ mod tests {
                     key,
                     data: Box::from(key_bytes(key).as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
-        writer.flush().unwrap();
+        writer.flush().expect("sort test operation");
 
         assert_eq!(writer.chunk_count(), 1);
         assert_eq!(chunk_kind_for_id(dir.path(), 0), Some(ChunkFileKind::Multi));
 
-        let reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None).unwrap();
+        let reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None)
+            .expect("sort test operation");
         assert_eq!(
             collect_keys(reader, ChunkCompression::None),
             vec![k0, k1, k1b]
         );
 
-        let mut reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None).unwrap();
+        let mut reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None)
+            .expect("sort test operation");
         let partitions = reader.take_partitions();
         assert_eq!(partitions.len(), 2);
         assert_eq!(partitions[0].index, p0);
@@ -619,14 +637,37 @@ mod tests {
         assert!(partitions[0].sources[0].section.is_some());
         assert!(partitions[1].sources[0].section.is_some());
 
-        let mut part0 = SortPartitionReader::open(&partitions[0], ChunkCompression::None).unwrap();
-        assert_eq!(part0.next().unwrap().expect("p0 record").key, k0);
-        assert!(part0.next().unwrap().is_none());
+        let mut part0 = SortPartitionReader::open(&partitions[0], ChunkCompression::None)
+            .expect("sort test operation");
+        assert_eq!(
+            part0
+                .next()
+                .expect("sort test operation")
+                .expect("p0 record")
+                .key,
+            k0
+        );
+        assert!(part0.next().expect("sort test operation").is_none());
 
-        let mut part1 = SortPartitionReader::open(&partitions[1], ChunkCompression::None).unwrap();
-        assert_eq!(part1.next().unwrap().expect("p1 first").key, k1);
-        assert_eq!(part1.next().unwrap().expect("p1 second").key, k1b);
-        assert!(part1.next().unwrap().is_none());
+        let mut part1 = SortPartitionReader::open(&partitions[1], ChunkCompression::None)
+            .expect("sort test operation");
+        assert_eq!(
+            part1
+                .next()
+                .expect("sort test operation")
+                .expect("p1 first")
+                .key,
+            k1
+        );
+        assert_eq!(
+            part1
+                .next()
+                .expect("sort test operation")
+                .expect("p1 second")
+                .key,
+            k1b
+        );
+        assert!(part1.next().expect("sort test operation").is_none());
     }
 
     #[test]
@@ -645,20 +686,23 @@ mod tests {
         }
 
         let sink = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None)
-            .unwrap()
+            .expect("sort test operation")
             .chunk_sink();
-        let paths = write_partitioned_payload_chunks(&mut records, &payload, &sink).unwrap();
+        let paths = write_partitioned_payload_chunks(&mut records, &payload, &sink)
+            .expect("sort test operation");
 
         assert_eq!(paths.len(), 1);
         assert_eq!(sink.chunk_count(), 1);
         assert_eq!(chunk_kind_for_id(dir.path(), 0), Some(ChunkFileKind::Multi));
-        let reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None).unwrap();
+        let reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None)
+            .expect("sort test operation");
         assert_eq!(collect_keys(reader, ChunkCompression::None), vec![k0, k1]);
     }
 
     fn compressed_multi_round_trip(compression: ChunkCompression) {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 1_000_000, compression).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 1_000_000, compression).expect("sort test operation");
 
         let p0 = PARTITION_BASES[14];
         let p1 = p0 + 1;
@@ -672,30 +716,51 @@ mod tests {
                     key,
                     data: Box::from(key_bytes(key).as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
-        writer.flush().unwrap();
+        writer.flush().expect("sort test operation");
 
         assert_eq!(writer.chunk_count(), 1);
         assert_eq!(chunk_kind_for_id(dir.path(), 0), Some(ChunkFileKind::Multi));
 
-        let reader = SortReader::from_dir(dir.path(), Some(1), compression).unwrap();
+        let reader =
+            SortReader::from_dir(dir.path(), Some(1), compression).expect("sort test operation");
         assert_eq!(collect_keys(reader, compression), vec![k0, k1, k1b]);
 
-        let mut reader = SortReader::from_dir(dir.path(), Some(1), compression).unwrap();
+        let mut reader =
+            SortReader::from_dir(dir.path(), Some(1), compression).expect("sort test operation");
         let partitions = reader.take_partitions();
         assert_eq!(partitions.len(), 2);
 
-        let mut part0 = SortPartitionReader::open(&partitions[0], compression).unwrap();
-        let rec = part0.next().unwrap().expect("p0 record");
+        let mut part0 =
+            SortPartitionReader::open(&partitions[0], compression).expect("sort test operation");
+        let rec = part0
+            .next()
+            .expect("sort test operation")
+            .expect("p0 record");
         assert_eq!(rec.key, k0);
         assert_eq!(&rec.data[..], key_bytes(k0).as_slice());
-        assert!(part0.next().unwrap().is_none());
+        assert!(part0.next().expect("sort test operation").is_none());
 
-        let mut part1 = SortPartitionReader::open(&partitions[1], compression).unwrap();
-        assert_eq!(part1.next().unwrap().expect("p1 first").key, k1);
-        assert_eq!(part1.next().unwrap().expect("p1 second").key, k1b);
-        assert!(part1.next().unwrap().is_none());
+        let mut part1 =
+            SortPartitionReader::open(&partitions[1], compression).expect("sort test operation");
+        assert_eq!(
+            part1
+                .next()
+                .expect("sort test operation")
+                .expect("p1 first")
+                .key,
+            k1
+        );
+        assert_eq!(
+            part1
+                .next()
+                .expect("sort test operation")
+                .expect("p1 second")
+                .key,
+            k1b
+        );
+        assert!(part1.next().expect("sort test operation").is_none());
     }
 
     #[test]
@@ -726,9 +791,9 @@ mod tests {
             },
         ];
 
-        write_sorted_chunk(&mut records, &path, compression).unwrap();
+        write_sorted_chunk(&mut records, &path, compression).expect("sort test operation");
         let paths = vec![path];
-        let reader = SortReader::new(&paths, compression).unwrap();
+        let reader = SortReader::new(&paths, compression).expect("sort test operation");
         let decoded: Vec<_> = collect_records(reader, compression)
             .into_iter()
             .map(|record| (record.key, record.data.into_vec()))
@@ -745,9 +810,9 @@ mod tests {
             payload_ref(first_key, large.len(), small.len()),
         ];
         write_sorted_payload_chunk(&mut payload_records, &payload, &payload_path, compression)
-            .unwrap();
+            .expect("sort test operation");
         let payload_paths = vec![payload_path];
-        let reader = SortReader::new(&payload_paths, compression).unwrap();
+        let reader = SortReader::new(&payload_paths, compression).expect("sort test operation");
         let decoded: Vec<_> = collect_records(reader, compression)
             .into_iter()
             .map(|record| (record.key, record.data.into_vec()))
@@ -781,20 +846,23 @@ mod tests {
         }
 
         let sink = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::Lz4)
-            .unwrap()
+            .expect("sort test operation")
             .chunk_sink();
-        let paths = write_partitioned_payload_chunks(&mut records, &payload, &sink).unwrap();
+        let paths = write_partitioned_payload_chunks(&mut records, &payload, &sink)
+            .expect("sort test operation");
 
         assert_eq!(paths.len(), 1);
         assert_eq!(chunk_kind_for_id(dir.path(), 0), Some(ChunkFileKind::Multi));
-        let reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::Lz4).unwrap();
+        let reader = SortReader::from_dir(dir.path(), Some(1), ChunkCompression::Lz4)
+            .expect("sort test operation");
         assert_eq!(collect_keys(reader, ChunkCompression::Lz4), vec![k0, k1]);
     }
 
     #[test]
     fn multi_chunk_compression_mismatch_fails_loud() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::Lz4).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::Lz4)
+            .expect("sort test operation");
 
         let p0 = PARTITION_BASES[14];
         let p1 = p0 + 1;
@@ -805,14 +873,15 @@ mod tests {
                     key,
                     data: Box::from(key_bytes(key).as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
-        writer.flush().unwrap();
+        writer.flush().expect("sort test operation");
 
         let err = match SortReader::from_dir(dir.path(), Some(1), ChunkCompression::None) {
             Ok(_) => panic!("mismatched compression must not open"),
             Err(err) => err,
         };
+        assert_eq!(err.kind(), ChunkStoreErrorKind::CompressionMismatch);
         assert!(
             err.to_string().contains("compress-sort-chunks"),
             "unexpected error: {err}"
@@ -824,7 +893,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
 
         // Use a large chunk size so everything fits in one chunk.
-        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None)
+            .expect("sort test operation");
 
         // Push 1000 records with random-ish keys.
         let mut expected_keys: Vec<u64> = Vec::with_capacity(1000);
@@ -837,10 +907,10 @@ mod tests {
                     key: SortKey::from_raw(key),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
 
-        let reader = writer.finish().unwrap();
+        let reader = writer.finish().expect("sort test operation");
 
         // Collect all output records and verify global sort order.
         let mut output_keys: Vec<u64> = Vec::new();
@@ -868,7 +938,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
 
         // Very small chunk size forces multiple chunks.
-        let mut writer = SortWriter::new(dir.path(), 100, ChunkCompression::None).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 100, ChunkCompression::None).expect("sort test operation");
 
         let mut expected_keys: Vec<u64> = Vec::with_capacity(500);
         for i in 0u64..500 {
@@ -879,7 +950,7 @@ mod tests {
                     key: SortKey::from_raw(key),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
 
         // Should have produced multiple chunk files.
@@ -889,7 +960,7 @@ mod tests {
             writer.chunk_count()
         );
 
-        let reader = writer.finish().unwrap();
+        let reader = writer.finish().expect("sort test operation");
 
         let mut output_keys: Vec<u64> = Vec::new();
         for record in collect_records(reader, ChunkCompression::None) {
@@ -914,8 +985,9 @@ mod tests {
     fn empty_input() {
         let dir = tempfile::tempdir().expect("create tempdir");
 
-        let writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None).unwrap();
-        let mut reader = writer.finish().unwrap();
+        let writer = SortWriter::new(dir.path(), 1_000_000, ChunkCompression::None)
+            .expect("sort test operation");
+        let mut reader = writer.finish().expect("sort test operation");
 
         assert!(reader.take_partitions().is_empty());
     }
@@ -925,7 +997,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
 
         // Very small chunk size to force multi-chunk even with few records.
-        let mut writer = SortWriter::new(dir.path(), 50, ChunkCompression::None).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 50, ChunkCompression::None).expect("sort test operation");
 
         // 100 records all with the same key but different data.
         for i in 0u32..100 {
@@ -934,10 +1007,10 @@ mod tests {
                     key: SortKey::from_raw(42),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
 
-        let reader = writer.finish().unwrap();
+        let reader = writer.finish().expect("sort test operation");
 
         let mut count = 0u32;
         for record in collect_records(reader, ChunkCompression::None) {
@@ -952,7 +1025,8 @@ mod tests {
     fn data_integrity() {
         let dir = tempfile::tempdir().expect("create tempdir");
 
-        let mut writer = SortWriter::new(dir.path(), 200, ChunkCompression::None).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 200, ChunkCompression::None).expect("sort test operation");
 
         // Push records with keys and payload that can be verified.
         for i in 0u64..50 {
@@ -966,10 +1040,10 @@ mod tests {
                     key: SortKey::from_raw(key),
                     data: data.into_boxed_slice(),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
 
-        let reader = writer.finish().unwrap();
+        let reader = writer.finish().expect("sort test operation");
 
         // Records should come out sorted by key (ascending: 1, 2, ..., 50).
         let mut prev_key = 0u64;
@@ -980,7 +1054,8 @@ mod tests {
             count += 1;
 
             // Verify the data payload starts with the key.
-            let embedded_key = u64::from_le_bytes(record.data[..8].try_into().unwrap());
+            let embedded_key =
+                u64::from_le_bytes(record.data[..8].try_into().expect("sort test operation"));
             assert_eq!(embedded_key, record.key.raw());
         }
         assert_eq!(count, 50);
@@ -989,19 +1064,20 @@ mod tests {
     #[test]
     fn from_dir_accepts_matching_chunk_count() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 100, ChunkCompression::None).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 100, ChunkCompression::None).expect("sort test operation");
         for i in 0u64..200 {
             writer
                 .push(SortRecord {
                     key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
         let n = writer.chunk_count();
         assert!(n > 1, "need multiple chunks for meaningful test");
         // finish() consumes writer but chunks remain on disk
-        let _ = writer.finish().unwrap();
+        let _ = writer.finish().expect("sort test operation");
 
         // Exact match passes
         let reader = SortReader::from_dir(dir.path(), Some(n), ChunkCompression::None);
@@ -1011,24 +1087,25 @@ mod tests {
     #[test]
     fn from_dir_rejects_chunk_count_mismatch() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 100, ChunkCompression::None).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 100, ChunkCompression::None).expect("sort test operation");
         for i in 0u64..200 {
             writer
                 .push(SortRecord {
                     key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
         let n = writer.chunk_count();
-        let _ = writer.finish().unwrap();
+        let _ = writer.finish().expect("sort test operation");
 
         // Wrong count is rejected
         let result = SortReader::from_dir(dir.path(), Some(n + 5), ChunkCompression::None);
         let err = result
             .err()
             .expect("expected error for mismatched chunk count");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.kind(), ChunkStoreErrorKind::Missing);
         let msg = err.to_string();
         assert!(
             msg.contains("chunk count mismatch"),
@@ -1039,16 +1116,17 @@ mod tests {
     #[test]
     fn from_dir_skips_validation_when_none() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 100, ChunkCompression::None).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 100, ChunkCompression::None).expect("sort test operation");
         for i in 0u64..200 {
             writer
                 .push(SortRecord {
                     key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
-        let _ = writer.finish().unwrap();
+        let _ = writer.finish().expect("sort test operation");
 
         // None skips validation - always succeeds
         let reader = SortReader::from_dir(dir.path(), None, ChunkCompression::None);
@@ -1058,7 +1136,8 @@ mod tests {
     #[test]
     fn flush_makes_chunk_count_accurate() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None)
+            .expect("sort test operation");
 
         // Push some records (below chunk threshold)
         for i in 0u64..100 {
@@ -1067,21 +1146,21 @@ mod tests {
                     key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
         assert_eq!(writer.chunk_count(), 0, "no auto-flush yet");
 
         // Explicit flush
-        writer.flush().unwrap();
+        writer.flush().expect("sort test operation");
         assert_eq!(writer.chunk_count(), 1, "flush should create a chunk");
 
         // Double flush is a no-op
-        writer.flush().unwrap();
+        writer.flush().expect("sort test operation");
         assert_eq!(writer.chunk_count(), 1, "flush on empty buffer is no-op");
 
         // finish() after flush doesn't add another chunk
         let count_before = writer.chunk_count();
-        let _ = writer.finish().unwrap();
+        let _ = writer.finish().expect("sort test operation");
         // Can't check count after finish (consumed), but from_dir validates
         let reader = SortReader::from_dir(dir.path(), Some(count_before), ChunkCompression::None);
         assert!(reader.is_ok(), "count before finish should match disk");
@@ -1090,7 +1169,8 @@ mod tests {
     #[test]
     fn flush_then_push_then_finish() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None)
+            .expect("sort test operation");
 
         // First batch
         for i in 0u64..50 {
@@ -1099,9 +1179,9 @@ mod tests {
                     key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
-        writer.flush().unwrap();
+        writer.flush().expect("sort test operation");
         assert_eq!(writer.chunk_count(), 1);
 
         // Second batch
@@ -1111,11 +1191,11 @@ mod tests {
                     key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
 
         // finish() flushes the second batch
-        let reader = writer.finish().unwrap();
+        let reader = writer.finish().expect("sort test operation");
 
         // All 100 records should be readable in sorted order
         assert_eq!(collect_records(reader, ChunkCompression::None).len(), 100);
@@ -1126,21 +1206,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
 
         // Create 3 chunks on disk.
-        let mut writer = SortWriter::new(dir.path(), 120, ChunkCompression::None).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 120, ChunkCompression::None).expect("sort test operation");
         for i in 0u64..300 {
             writer
                 .push(SortRecord {
                     key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
         let total_chunks = writer.chunk_count();
         assert!(total_chunks >= 3, "expected >=3 chunks, got {total_chunks}");
-        let _ = writer.finish().unwrap();
+        let _ = writer.finish().expect("sort test operation");
 
         // Resume from checkpoint that keeps only first 2 chunks.
-        let resumed = SortWriter::resume(dir.path(), 120, 2, ChunkCompression::None).unwrap();
+        let resumed = SortWriter::resume(dir.path(), 120, 2, ChunkCompression::None)
+            .expect("sort test operation");
         assert_eq!(resumed.chunk_count(), 2);
 
         // Chunk id 2 should have been deleted as stale leftover.
@@ -1155,33 +1237,35 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
 
         // Create two chunks, then remove chunk_0001 to simulate corrupted checkpoint state.
-        let mut writer = SortWriter::new(dir.path(), 120, ChunkCompression::None).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 120, ChunkCompression::None).expect("sort test operation");
         for i in 0u64..200 {
             writer
                 .push(SortRecord {
                     key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
         assert!(writer.chunk_count() >= 2);
-        let _ = writer.finish().unwrap();
+        let _ = writer.finish().expect("sort test operation");
         let missing_path = chunk_path_for_id(dir.path(), 1).expect("chunk 1 exists");
-        std::fs::remove_file(missing_path).unwrap();
+        std::fs::remove_file(missing_path).expect("sort test operation");
 
         let err = SortWriter::resume(dir.path(), 120, 2, ChunkCompression::None)
             .err()
             .expect("resume should fail");
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(err.kind(), ChunkStoreErrorKind::Missing);
         assert!(err.to_string().contains("missing chunk file"));
     }
 
     #[test]
     fn resume_allows_empty_checkpoint() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let writer = SortWriter::resume(dir.path(), 1024, 0, ChunkCompression::None).unwrap();
+        let writer = SortWriter::resume(dir.path(), 1024, 0, ChunkCompression::None)
+            .expect("sort test operation");
         assert_eq!(writer.chunk_count(), 0);
-        let reader = writer.finish().unwrap();
+        let reader = writer.finish().expect("sort test operation");
         let keys = collect_keys(reader, ChunkCompression::None);
         assert!(keys.is_empty());
     }
@@ -1191,21 +1275,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
 
         // Seed stale chunks from a previous interrupted run.
-        let mut seeded = SortWriter::new(dir.path(), 120, ChunkCompression::None).unwrap();
+        let mut seeded =
+            SortWriter::new(dir.path(), 120, ChunkCompression::None).expect("sort test operation");
         for i in 0u64..200 {
             seeded
                 .push(SortRecord {
                     key: SortKey::from_raw(i),
                     data: Box::from(i.to_le_bytes().as_slice()),
                 })
-                .unwrap();
+                .expect("sort test operation");
         }
         assert!(seeded.chunk_count() >= 2, "expected stale chunks to exist");
-        let _ = seeded.finish().unwrap();
+        let _ = seeded.finish().expect("sort test operation");
         assert!(chunk_path_for_id(dir.path(), 0).is_some());
 
         // Empty-checkpoint resume should prune all stale chunks and start clean.
-        let resumed = SortWriter::resume(dir.path(), 120, 0, ChunkCompression::None).unwrap();
+        let resumed = SortWriter::resume(dir.path(), 120, 0, ChunkCompression::None)
+            .expect("sort test operation");
         assert_eq!(resumed.chunk_count(), 0);
         assert!(chunk_path_for_id(dir.path(), 0).is_none());
         assert!(chunk_path_for_id(dir.path(), 1).is_none());
@@ -1217,8 +1303,8 @@ mod tests {
                 key: SortKey::from_raw(7),
                 data: Box::from(7u64.to_le_bytes().as_slice()),
             })
-            .unwrap();
-        resumed.flush().unwrap();
+            .expect("sort test operation");
+        resumed.flush().expect("sort test operation");
         assert!(chunk_path_for_id(dir.path(), 0).is_some());
     }
 
@@ -1227,19 +1313,20 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
 
         // Main writer with one in-memory batch.
-        let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None)
+            .expect("sort test operation");
         writer
             .push(SortRecord {
                 key: SortKey::from_raw(40),
                 data: Box::from(40u64.to_le_bytes().as_slice()),
             })
-            .unwrap();
+            .expect("sort test operation");
         writer
             .push(SortRecord {
                 key: SortKey::from_raw(20),
                 data: Box::from(20u64.to_le_bytes().as_slice()),
             })
-            .unwrap();
+            .expect("sort test operation");
 
         // Concurrent producers use a clone of the store-owned sink. Each
         // producer writes its payload chunk and hands the path to the writer.
@@ -1251,8 +1338,8 @@ mod tests {
             payload_a.extend_from_slice(&key.to_le_bytes());
             records_a.push(payload_ref(SortKey::from_raw(key), offset, 8));
         }
-        let mut paths =
-            write_partitioned_payload_chunks(&mut records_a, &payload_a, &sink).unwrap();
+        let mut paths = write_partitioned_payload_chunks(&mut records_a, &payload_a, &sink)
+            .expect("sort test operation");
 
         let mut payload_b = Vec::new();
         let mut records_b = Vec::new();
@@ -1261,7 +1348,10 @@ mod tests {
             payload_b.extend_from_slice(&key.to_le_bytes());
             records_b.push(payload_ref(SortKey::from_raw(key), offset, 8));
         }
-        paths.extend(write_partitioned_payload_chunks(&mut records_b, &payload_b, &sink).unwrap());
+        paths.extend(
+            write_partitioned_payload_chunks(&mut records_b, &payload_b, &sink)
+                .expect("sort test operation"),
+        );
         writer.adopt_chunk_files(paths);
         assert_eq!(
             writer.chunk_count(),
@@ -1270,7 +1360,7 @@ mod tests {
         );
 
         // finish flushes the writer buffer with chunk id two.
-        let reader = writer.finish().unwrap();
+        let reader = writer.finish().expect("sort test operation");
         let keys = collect_keys(reader, ChunkCompression::None);
         assert_eq!(raw_keys(&keys), vec![5, 10, 20, 30, 40, 50]);
     }
@@ -1281,12 +1371,13 @@ mod tests {
         // store's sink, so no two writes claim the same chunk id.
         let dir = tempfile::tempdir().expect("create tempdir");
         // chunk_size 1 forces a flush on every push.
-        let mut writer = SortWriter::new(dir.path(), 1, ChunkCompression::None).unwrap();
+        let mut writer =
+            SortWriter::new(dir.path(), 1, ChunkCompression::None).expect("sort test operation");
         let sink = writer.chunk_sink();
         let payload = 10u64.to_le_bytes();
         let mut task_records = vec![payload_ref(SortKey::from_raw(10), 0, payload.len())];
-        let task_paths =
-            write_partitioned_payload_chunks(&mut task_records, &payload, &sink).unwrap();
+        let task_paths = write_partitioned_payload_chunks(&mut task_records, &payload, &sink)
+            .expect("sort test operation");
         writer.adopt_chunk_files(task_paths);
 
         // The writer's own flushes must skip 0 (taken by the task) and use 1, 2.
@@ -1295,13 +1386,13 @@ mod tests {
                 key: SortKey::from_raw(20),
                 data: Box::from(20u64.to_le_bytes().as_slice()),
             })
-            .unwrap();
+            .expect("sort test operation");
         writer
             .push(SortRecord {
                 key: SortKey::from_raw(30),
                 data: Box::from(30u64.to_le_bytes().as_slice()),
             })
-            .unwrap();
+            .expect("sort test operation");
 
         assert_eq!(writer.chunk_count(), 3, "3 distinct chunks allocated");
         for i in 0..3 {
@@ -1311,7 +1402,7 @@ mod tests {
             );
         }
 
-        let reader = writer.finish().unwrap();
+        let reader = writer.finish().expect("sort test operation");
         let keys = collect_keys(reader, ChunkCompression::None);
         assert_eq!(
             raw_keys(&keys),
@@ -1323,13 +1414,14 @@ mod tests {
     #[test]
     fn adopt_chunk_files_missing_or_corrupt_surfaces_error() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None).unwrap();
+        let mut writer = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None)
+            .expect("sort test operation");
         writer
             .push(SortRecord {
                 key: SortKey::from_raw(1),
                 data: Box::from(1u64.to_le_bytes().as_slice()),
             })
-            .unwrap();
+            .expect("sort test operation");
 
         let missing = chunk_path(dir.path(), 100, 0);
         writer.adopt_chunk_files(vec![missing]);
@@ -1337,24 +1429,94 @@ mod tests {
             .finish()
             .err()
             .expect("missing adopted chunk should fail");
-        assert_eq!(missing_err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(missing_err.kind(), ChunkStoreErrorKind::Missing);
 
-        let mut writer2 = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None).unwrap();
+        let mut writer2 = SortWriter::new(dir.path(), 10_000_000, ChunkCompression::None)
+            .expect("sort test operation");
         writer2
             .push(SortRecord {
                 key: SortKey::from_raw(2),
                 data: Box::from(2u64.to_le_bytes().as_slice()),
             })
-            .unwrap();
+            .expect("sort test operation");
 
         // Corrupt chunk header (too short for u32 record count).
         let corrupt = chunk_path(dir.path(), 101, 0);
-        std::fs::write(&corrupt, [0xAA, 0xBB]).unwrap();
+        std::fs::write(&corrupt, [0xAA, 0xBB]).expect("sort test operation");
         writer2.adopt_chunk_files(vec![corrupt]);
         let corrupt_err = writer2
             .finish()
             .err()
             .expect("corrupt adopted chunk should fail");
-        assert_eq!(corrupt_err.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(corrupt_err.kind(), ChunkStoreErrorKind::Corrupt);
+    }
+    #[test]
+    fn resume_checks_retained_headers_before_removing_leftovers() {
+        let dir = tempfile::Builder::new()
+            .prefix("resume-headers")
+            .tempdir_in(".")
+            .expect("test directory");
+        let retained = multi_chunk_path(dir.path(), 0);
+        let leftover = multi_chunk_path(dir.path(), 1);
+        fs::write(&retained, MULTI_CHUNK_MAGIC_LZ4).expect("write retained magic");
+        fs::write(&leftover, b"leftover").expect("write leftover");
+        let error = SortWriter::resume(dir.path(), 1024, 1, ChunkCompression::None)
+            .err()
+            .expect("compression mismatch");
+        assert_eq!(error.kind(), ChunkStoreErrorKind::CompressionMismatch);
+        assert!(leftover.exists());
+        fs::write(&retained, b"short").expect("truncate retained chunk");
+        let error = SortWriter::resume(dir.path(), 1024, 1, ChunkCompression::None)
+            .err()
+            .expect("corrupt retained header");
+        assert_eq!(error.kind(), ChunkStoreErrorKind::Corrupt);
+        assert!(leftover.exists());
+    }
+
+    #[test]
+    fn lazy_truncation_retains_chunk_provenance() {
+        let dir = tempfile::Builder::new()
+            .prefix("lazy-chunk")
+            .tempdir_in(".")
+            .expect("test directory");
+        for compression in [
+            ChunkCompression::None,
+            ChunkCompression::Lz4,
+            ChunkCompression::Snappy,
+        ] {
+            let path = chunk_path(dir.path(), 0, 0);
+            let mut records = [SortRecord {
+                key: make_sort_key(0, 0, 0),
+                data: Box::from([7u8]),
+            }];
+            write_sorted_chunk(&mut records, &path, compression).expect("write chunk");
+            let mut reader =
+                SortReader::from_dir(dir.path(), Some(1), compression).expect("admit header");
+            let partition = reader.take_partitions().pop().expect("one partition");
+            fs::write(&path, []).expect("truncate after admission");
+            let error = SortPartitionReader::open(&partition, compression)
+                .err()
+                .expect("lazy read must fail");
+            assert_eq!(error.kind(), ChunkStoreErrorKind::Corrupt);
+            let error = crate::PipelineError::from(error);
+            assert_eq!(error.kind(), crate::ErrorKind::Failed);
+            assert_eq!(
+                error.chunk_context(true).kind(),
+                crate::ErrorKind::ResumeRefused
+            );
+        }
+    }
+
+    #[test]
+    fn extra_chunks_are_a_typed_count_mismatch() {
+        let dir = tempfile::Builder::new()
+            .prefix("chunk-count")
+            .tempdir_in(".")
+            .expect("test directory");
+        fs::write(chunk_path(dir.path(), 0, 0), []).expect("write extra chunk");
+        let error = SortReader::from_dir(dir.path(), Some(0), ChunkCompression::None)
+            .err()
+            .expect("extra chunk refused");
+        assert_eq!(error.kind(), ChunkStoreErrorKind::CountMismatch);
     }
 }

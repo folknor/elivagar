@@ -85,7 +85,9 @@ fn build_store(
         let build_start = Instant::now();
         let mut store = SortedNodeStore::new();
         for i in 0..node_ids.len() {
-            store.put(node_ids[i], coords[i].0, coords[i].1);
+            store
+                .put(node_ids[i], coords[i].0, coords[i].1)
+                .expect("benchmark node IDs are strictly increasing");
         }
         let ms = build_start.elapsed().as_millis();
         eprintln!("done in {ms} ms");

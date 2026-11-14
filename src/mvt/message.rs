@@ -16,6 +16,7 @@
 //! parses every feature and decodes every value itself. Geometry command
 //! streams are decoded by `mvt::decode`, never here.
 
+use crate::DecodeError;
 use std::borrow::Cow;
 
 use protohoggr::{Cursor, WIRE_32BIT, WIRE_64BIT, WIRE_LEN, WIRE_VARINT};
@@ -73,50 +74,62 @@ fn strict(strictness: Strictness) -> bool {
 pub(crate) fn parse_tile(
     data: &[u8],
     strictness: Strictness,
-) -> Result<Vec<LayerMessage<'_>>, String> {
+) -> Result<Vec<LayerMessage<'_>>, DecodeError> {
     let mut layers = Vec::new();
     let mut cursor = Cursor::new(data);
     while let Some((field, wire_type)) = cursor
         .read_tag()
-        .map_err(|error| format!("read tile tag: {error}"))?
+        .map_err(|error| DecodeError::caused("read tile tag", error))?
     {
         if field == 3 && wire_type == WIRE_LEN {
             let bytes = cursor
                 .read_len_delimited()
-                .map_err(|error| format!("read tile layer: {error}"))?;
+                .map_err(|error| DecodeError::caused("read tile layer", error))?;
             layers.push(parse_layer(bytes, strictness)?);
         } else if strict(strictness) {
-            return Err(format!("unknown tile field {field}"));
+            return Err(DecodeError::malformed(
+                "MVT tile",
+                format!("unknown tile field {field}"),
+            ));
         } else {
             cursor
                 .skip_field(wire_type)
-                .map_err(|error| format!("skip tile field {field}: {error}"))?;
+                .map_err(|error| DecodeError::caused(format!("skip tile field {field}"), error))?;
         }
     }
     Ok(layers)
 }
 
-fn read_u32(cursor: &mut Cursor<'_>, what: &str) -> Result<u32, String> {
+fn read_u32(cursor: &mut Cursor<'_>, what: &str) -> Result<u32, DecodeError> {
     let raw = cursor
         .read_varint()
-        .map_err(|error| format!("read layer {what}: {error}"))?;
-    u32::try_from(raw).map_err(|_| format!("{what} out of range: {raw}"))
+        .map_err(|error| DecodeError::caused(format!("read layer {what}"), error))?;
+    u32::try_from(raw).map_err(|_| {
+        DecodeError::malformed("MVT layer scalar", format!("{what} out of range: {raw}"))
+    })
 }
 
-fn utf8<'a>(bytes: &'a [u8], what: &str) -> Result<&'a str, String> {
-    std::str::from_utf8(bytes).map_err(|error| format!("{what} is not UTF-8: {error}"))
+fn utf8<'a>(bytes: &'a [u8], what: &str) -> Result<&'a str, DecodeError> {
+    std::str::from_utf8(bytes)
+        .map_err(|error| DecodeError::caused(format!("{what} is not UTF-8"), error))
 }
 
 /// Reject a second occurrence of a singular field under `Strict`.
-fn once(seen: &mut bool, strictness: Strictness, what: &str) -> Result<(), String> {
+fn once(seen: &mut bool, strictness: Strictness, what: &str) -> Result<(), DecodeError> {
     if *seen && strict(strictness) {
-        return Err(format!("duplicate {what} field"));
+        return Err(DecodeError::malformed(
+            "MVT singular field",
+            format!("duplicate {what} field"),
+        ));
     }
     *seen = true;
     Ok(())
 }
 
-pub(crate) fn parse_layer(data: &[u8], strictness: Strictness) -> Result<LayerMessage<'_>, String> {
+pub(crate) fn parse_layer(
+    data: &[u8],
+    strictness: Strictness,
+) -> Result<LayerMessage<'_>, DecodeError> {
     let mut layer = LayerMessage {
         name: "",
         extent: crate::geometry::tiles::grid::EXTENT.unsigned_abs(),
@@ -130,31 +143,31 @@ pub(crate) fn parse_layer(data: &[u8], strictness: Strictness) -> Result<LayerMe
     let mut cursor = Cursor::new(data);
     while let Some((field, wire_type)) = cursor
         .read_tag()
-        .map_err(|error| format!("read layer tag: {error}"))?
+        .map_err(|error| DecodeError::caused("read layer tag", error))?
     {
         match (field, wire_type) {
             (1, WIRE_LEN) => {
                 once(&mut seen_name, strictness, "layer name")?;
                 let bytes = cursor
                     .read_len_delimited()
-                    .map_err(|error| format!("read layer name: {error}"))?;
+                    .map_err(|error| DecodeError::caused("read layer name", error))?;
                 layer.name = utf8(bytes, "layer name")?;
             }
             (2, WIRE_LEN) => layer.features.push(
                 cursor
                     .read_len_delimited()
-                    .map_err(|error| format!("read feature message: {error}"))?,
+                    .map_err(|error| DecodeError::caused("read feature message", error))?,
             ),
             (3, WIRE_LEN) => {
                 let bytes = cursor
                     .read_len_delimited()
-                    .map_err(|error| format!("read layer key: {error}"))?;
+                    .map_err(|error| DecodeError::caused("read layer key", error))?;
                 layer.keys.push(utf8(bytes, "layer key")?);
             }
             (4, WIRE_LEN) => layer.values.push(
                 cursor
                     .read_len_delimited()
-                    .map_err(|error| format!("read layer value: {error}"))?,
+                    .map_err(|error| DecodeError::caused("read layer value", error))?,
             ),
             (5, WIRE_VARINT) => {
                 once(&mut seen_extent, strictness, "layer extent")?;
@@ -166,11 +179,14 @@ pub(crate) fn parse_layer(data: &[u8], strictness: Strictness) -> Result<LayerMe
             }
             _ => {
                 if strict(strictness) {
-                    return Err(format!("unknown layer field {field}"));
+                    return Err(DecodeError::malformed(
+                        "MVT layer",
+                        format!("unknown layer field {field}"),
+                    ));
                 }
-                cursor
-                    .skip_field(wire_type)
-                    .map_err(|error| format!("skip layer field {field}: {error}"))?;
+                cursor.skip_field(wire_type).map_err(|error| {
+                    DecodeError::caused(format!("skip layer field {field}"), error)
+                })?;
             }
         }
     }
@@ -184,9 +200,12 @@ fn push_packed<'a>(
     slot: &mut Option<Cow<'a, [u8]>>,
     bytes: &'a [u8],
     what: &str,
-) -> Result<(), String> {
+) -> Result<(), DecodeError> {
     if bytes.last().is_some_and(|&byte| byte & 0x80 != 0) {
-        return Err(format!("{what} ends inside a varint"));
+        return Err(DecodeError::malformed(
+            "MVT packed field",
+            format!("{what} ends inside a varint"),
+        ));
     }
     match slot {
         None => *slot = Some(Cow::Borrowed(bytes)),
@@ -198,7 +217,7 @@ fn push_packed<'a>(
 pub(crate) fn parse_feature(
     data: &[u8],
     strictness: Strictness,
-) -> Result<FeatureMessage<'_>, String> {
+) -> Result<FeatureMessage<'_>, DecodeError> {
     let mut id = None;
     let mut geom_type = 0u8;
     let (mut seen_id, mut seen_type) = (false, false);
@@ -207,7 +226,7 @@ pub(crate) fn parse_feature(
     let mut cursor = Cursor::new(data);
     while let Some((field, wire_type)) = cursor
         .read_tag()
-        .map_err(|error| format!("read feature tag: {error}"))?
+        .map_err(|error| DecodeError::caused("read feature tag", error))?
     {
         match (field, wire_type) {
             (1, WIRE_VARINT) => {
@@ -215,41 +234,51 @@ pub(crate) fn parse_feature(
                 id = Some(
                     cursor
                         .read_varint()
-                        .map_err(|error| format!("read feature id: {error}"))?,
+                        .map_err(|error| DecodeError::caused("read feature id", error))?,
                 );
             }
             (2, WIRE_LEN) => {
                 let bytes = cursor
                     .read_len_delimited()
-                    .map_err(|error| format!("read feature tags: {error}"))?;
+                    .map_err(|error| DecodeError::caused("read feature tags", error))?;
                 push_packed(&mut tags, bytes, "feature tags")?;
             }
             (3, WIRE_VARINT) => {
                 once(&mut seen_type, strictness, "feature type")?;
                 let raw = cursor
                     .read_varint()
-                    .map_err(|error| format!("read feature type: {error}"))?;
-                geom_type =
-                    u8::try_from(raw).map_err(|_| format!("geometry type out of range: {raw}"))?;
+                    .map_err(|error| DecodeError::caused("read feature type", error))?;
+                geom_type = u8::try_from(raw).map_err(|_| {
+                    DecodeError::malformed(
+                        "MVT feature",
+                        format!("geometry type out of range: {raw}"),
+                    )
+                })?;
             }
             (4, WIRE_LEN) => {
                 let bytes = cursor
                     .read_len_delimited()
-                    .map_err(|error| format!("read feature geometry: {error}"))?;
+                    .map_err(|error| DecodeError::caused("read feature geometry", error))?;
                 push_packed(&mut geometry, bytes, "feature geometry")?;
             }
             _ => {
                 if strict(strictness) {
-                    return Err(format!("unknown feature field {field}"));
+                    return Err(DecodeError::malformed(
+                        "MVT feature",
+                        format!("unknown feature field {field}"),
+                    ));
                 }
-                cursor
-                    .skip_field(wire_type)
-                    .map_err(|error| format!("skip feature field {field}: {error}"))?;
+                cursor.skip_field(wire_type).map_err(|error| {
+                    DecodeError::caused(format!("skip feature field {field}"), error)
+                })?;
             }
         }
     }
     if geometry.is_none() && strict(strictness) {
-        return Err("feature has no geometry field".to_string());
+        return Err(DecodeError::malformed(
+            "MVT feature",
+            "feature has no geometry field",
+        ));
     }
     Ok(FeatureMessage {
         id,
@@ -262,21 +291,24 @@ pub(crate) fn parse_feature(
 /// A feature's packed tags as (key index, value index) pairs. An odd count
 /// or an index beyond u32 fails; bounds against the layer tables are the
 /// caller's.
-pub(crate) fn tag_pairs(tags: &[u8]) -> Result<Vec<(usize, usize)>, String> {
+pub(crate) fn tag_pairs(tags: &[u8]) -> Result<Vec<(usize, usize)>, DecodeError> {
     let mut cursor = Cursor::new(tags);
     let mut pairs = Vec::with_capacity(tags.len() / 2);
-    let index = |cursor: &mut Cursor<'_>, what: &str| -> Result<usize, String> {
+    let index = |cursor: &mut Cursor<'_>, what: &str| -> Result<usize, DecodeError> {
         let raw = cursor
             .read_varint()
-            .map_err(|error| format!("read feature tag {what}: {error}"))?;
-        u32::try_from(raw)
-            .map(|index| index as usize)
-            .map_err(|_| format!("feature tag {what} index exceeds u32"))
+            .map_err(|error| DecodeError::caused(format!("read feature tag {what}"), error))?;
+        u32::try_from(raw).map(|index| index as usize).map_err(|_| {
+            DecodeError::malformed("MVT tags", format!("feature tag {what} index exceeds u32"))
+        })
     };
     while !cursor.is_empty() {
         let key = index(&mut cursor, "key")?;
         if cursor.is_empty() {
-            return Err("feature tags have an odd index count".to_string());
+            return Err(DecodeError::malformed(
+                "MVT tags",
+                "feature tags have an odd index count",
+            ));
         }
         let value = index(&mut cursor, "value")?;
         pairs.push((key, value));
@@ -288,34 +320,34 @@ pub(crate) fn tag_pairs(tags: &[u8]) -> Result<Vec<(usize, usize)>, String> {
 pub(crate) fn decode_value(
     data: &[u8],
     strictness: Strictness,
-) -> Result<ValueMessage<'_>, String> {
+) -> Result<ValueMessage<'_>, DecodeError> {
     let mut out = None;
     let mut cursor = Cursor::new(data);
     while let Some((field, wire_type)) = cursor
         .read_tag()
-        .map_err(|error| format!("read value tag: {error}"))?
+        .map_err(|error| DecodeError::caused("read value tag", error))?
     {
         let varint = |cursor: &mut Cursor<'_>, what: &str| {
             cursor
                 .read_varint()
-                .map_err(|error| format!("read {what} value: {error}"))
+                .map_err(|error| DecodeError::caused(format!("read {what} value"), error))
         };
         let value = match (field, wire_type) {
             (1, WIRE_LEN) => ValueMessage::String(utf8(
                 cursor
                     .read_len_delimited()
-                    .map_err(|error| format!("read string value: {error}"))?,
+                    .map_err(|error| DecodeError::caused("read string value", error))?,
                 "string value",
             )?),
             (2, WIRE_32BIT) => ValueMessage::Float(
                 cursor
                     .read_fixed32()
-                    .map_err(|error| format!("read float value: {error}"))?,
+                    .map_err(|error| DecodeError::caused("read float value", error))?,
             ),
             (3, WIRE_64BIT) => ValueMessage::Double(
                 cursor
                     .read_fixed64()
-                    .map_err(|error| format!("read double value: {error}"))?,
+                    .map_err(|error| DecodeError::caused("read double value", error))?,
             ),
             (4, WIRE_VARINT) => ValueMessage::Int(varint(&mut cursor, "int")?),
             (5, WIRE_VARINT) => ValueMessage::UInt(varint(&mut cursor, "uint")?),
@@ -323,20 +355,26 @@ pub(crate) fn decode_value(
             (7, WIRE_VARINT) => ValueMessage::Bool(varint(&mut cursor, "bool")? != 0),
             _ => {
                 if strict(strictness) {
-                    return Err(format!("unknown value field {field}"));
+                    return Err(DecodeError::malformed(
+                        "MVT value",
+                        format!("unknown value field {field}"),
+                    ));
                 }
-                cursor
-                    .skip_field(wire_type)
-                    .map_err(|error| format!("skip value field {field}: {error}"))?;
+                cursor.skip_field(wire_type).map_err(|error| {
+                    DecodeError::caused(format!("skip value field {field}"), error)
+                })?;
                 continue;
             }
         };
         if out.is_some() && strict(strictness) {
-            return Err("MVT value has multiple value fields".to_string());
+            return Err(DecodeError::malformed(
+                "MVT value",
+                "MVT value has multiple value fields",
+            ));
         }
         out = Some(value);
     }
-    out.ok_or_else(|| "empty MVT value".to_string())
+    out.ok_or_else(|| DecodeError::malformed("MVT value", "empty MVT value"))
 }
 
 #[cfg(test)]
@@ -354,7 +392,8 @@ mod tests {
             assert!(
                 parse_feature(&feature, strictness)
                     .err()
-                    .unwrap()
+                    .expect("test value")
+                    .to_string()
                     .contains("ends inside a varint")
             );
         }
@@ -363,8 +402,11 @@ mod tests {
     #[test]
     fn whole_packed_occurrences_concatenate() {
         let feature = [0x18, 0x01, 0x22, 0x01, 0x09, 0x22, 0x02, 0x02, 0x04];
-        let parsed = parse_feature(&feature, Strictness::Strict).unwrap();
-        assert_eq!(parsed.geometry.unwrap().as_ref(), &[0x09, 0x02, 0x04][..]);
+        let parsed = parse_feature(&feature, Strictness::Strict).expect("test value");
+        assert_eq!(
+            parsed.geometry.expect("test value").as_ref(),
+            &[0x09, 0x02, 0x04][..]
+        );
     }
 
     #[test]
@@ -374,11 +416,14 @@ mod tests {
         assert!(
             parse_layer(&layer, Strictness::Strict)
                 .err()
-                .unwrap()
+                .expect("test value")
+                .to_string()
                 .contains("duplicate layer extent")
         );
         assert_eq!(
-            parse_layer(&layer, Strictness::Tolerant).unwrap().extent,
+            parse_layer(&layer, Strictness::Tolerant)
+                .expect("test value")
+                .extent,
             512
         );
     }
@@ -393,7 +438,41 @@ mod tests {
 
     #[test]
     fn tag_pairs_reject_an_odd_count() {
-        assert!(tag_pairs(&[0, 1, 2]).unwrap_err().contains("odd"));
-        assert_eq!(tag_pairs(&[0, 1]).unwrap(), vec![(0, 1)]);
+        assert!(
+            tag_pairs(&[0, 1, 2])
+                .unwrap_err()
+                .to_string()
+                .contains("odd")
+        );
+        assert_eq!(tag_pairs(&[0, 1]).expect("test value"), vec![(0, 1)]);
+    }
+}
+
+#[cfg(test)]
+mod typed_error_tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn message_rejection_retains_locus_and_original_cause() {
+        for mode in [Strictness::Strict, Strictness::Tolerant] {
+            let error = parse_tile(&[0x1a, 0x05, 0x0a], mode)
+                .err()
+                .expect("truncated layer");
+            assert_eq!(error.kind(), crate::DecodeErrorKind::Malformed);
+            assert_eq!(error.locus(), "read tile layer");
+            assert!(error.source().is_some());
+        }
+        let error = tag_pairs(&[0]).expect_err("odd tags");
+        assert_eq!(error.locus(), "MVT tags");
+        assert_eq!(error.kind(), crate::DecodeErrorKind::Malformed);
+        let error =
+            decode_value(&[0x0a, 0x01, 0xff], Strictness::Strict).expect_err("invalid UTF-8");
+        assert!(
+            error
+                .source()
+                .expect("UTF-8 cause")
+                .is::<std::str::Utf8Error>()
+        );
     }
 }

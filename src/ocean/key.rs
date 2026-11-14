@@ -311,8 +311,7 @@ impl OceanArtifactKey {
                 )));
             }
         }
-        serde_json::from_value(value.clone())
-            .map_err(|e| std::io::Error::other(format!("invalid ocean_artifact: {e}")))
+        serde_json::from_value(value.clone()).map_err(std::io::Error::other)
     }
 }
 

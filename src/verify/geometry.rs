@@ -1,7 +1,7 @@
 //! Per-layer extent and geometry command limits.
 
-use super::ValidationClass;
 use super::tile::CheckedLayer;
+use super::{Finding, ValidationClass};
 use crate::mvt::decode::{
     self, Command, CommandKind, CommandSink, GeometryError, Grammar, Point, Words,
 };
@@ -16,10 +16,12 @@ pub(super) const MVT_DELTA_LIMIT_SEAM: i64 = MVT_EXTENT * 4; // 16384
 pub(super) fn check_layer(
     layer: &CheckedLayer<'_>,
     mut class: ValidationClass,
-) -> Result<(), String> {
+) -> Result<(), Finding> {
     let layer_name = layer.message.name;
     if layer.message.extent == 0 {
-        return Err(format!("[{layer_name}] layer extent is zero"));
+        return Err(Finding::ZeroExtent {
+            layer: layer_name.to_string(),
+        });
     }
     class.extent = i64::from(layer.message.extent);
     for (feat_idx, feature) in layer.features.iter().enumerate() {
@@ -31,7 +33,11 @@ pub(super) fn check_layer(
             class,
             geometry.len(),
         )
-        .map_err(|e| format!("[{layer_name}] feat {feat_idx}: {e}"))?;
+        .map_err(|cause| Finding::Geometry {
+            layer: layer_name.to_string(),
+            feature: feat_idx,
+            cause: cause.into(),
+        })?;
     }
     Ok(())
 }
@@ -83,7 +89,7 @@ pub(super) fn validate_geometry(
     geom_type: u8,
     class: ValidationClass,
     raw_byte_len: usize,
-) -> Result<(), String> {
+) -> Result<(), GeometryError> {
     let delta_limit = if class.seam {
         MVT_DELTA_LIMIT_SEAM / MVT_EXTENT * class.extent
     } else {

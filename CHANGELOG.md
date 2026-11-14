@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+- Breaking: `NodeStore` and `SortedNodeStore` puts return
+  `Result<(), node_index::NodeStoreError>`. Negative node IDs, IDs that are
+  not strictly increasing under `--force-sorted`, IDs over the flat index
+  safety cap and unaddressable IDs now fail the run with exit 65 instead of
+  aborting the process; flat index growth and remap failures exit 74 with
+  their OS error. A polygon over the 500-ring cap in a clip rect too small to
+  split, proven impossible, exits 70 rather than aborting. A sort record that
+  does not decode during assembly, including trailing bytes, a bool byte
+  other than 0 or 1 and non-UTF-8 strings, now fails the run (exit 2) where
+  it used to drop the feature or its attributes silently. Multipolygon
+  salvage is counted in new `multipolygon_*` sidecar counters.
+
+- Breaking: verification reports expose typed `TileFinding`, `Finding` and
+  `PaintOrderError`, with `tile_error_count` counting beyond the first 100
+  retained diagnostics. Verification completes traversal past that cap.
+  Operational tile reads now abort with exit 74, opaque failures with 2;
+  rejected payload bytes remain findings (exit 1). Container and metadata
+  errors carry `DecodeError` and exit 65, preserving their original causes.
+
+- Breaking: archive reads, header decoding and `tile_detail` return typed
+  `DecodeError` with a kind, locus and preserved cause. Inspect, SVG and diag
+  return `PipelineError`: rejected bytes exit 65, OS I/O exits 74, and invalid
+  diag coordinates exit 64. Inspect prints unreadable metadata diagnostics
+  before returning the failure. Diag continues after feature decode failures.
+  `VerifyError::Decode` retains archive causes.
+
+- Sort chunk reads and writer `resume`/`finish` return typed `sort::ChunkStoreError`.
+  Retained chunk rejections, including deferred assembly reads, now exit 3
+  with `ResumeRefusal::ChunkStore { kind }`; fresh read-back failures remain
+  exit 2 and OS I/O failures retain exit 74. Writer resume validates retained
+  headers before deleting leftover chunks.
+
+- Ocean artifact admission and reads now expose `ArtifactRefusal` through
+  `PipelineError::artifact_refusal()`, with `KeyMismatch` naming differing
+  identity fields. Refusals exit 4 while OS failures retain exit 74 and their
+  causes. Shapefile point and part reads preserve the original I/O error.
+
+
 - Breaking: `PipelineError` is no longer a public `String` tuple. It is an
   opaque error with `kind() -> ErrorKind` (config, refused input, refused
   resume, refused ocean artifact, OS I/O, internal, unclassified),

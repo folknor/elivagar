@@ -1,5 +1,6 @@
 use smallvec::SmallVec;
 
+use crate::geometry::pyramid::RingCapError;
 use crate::geometry::{self, projection::Point};
 use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::shortbread::LayerMatch;
@@ -168,14 +169,14 @@ pub(super) struct RelationTail {
 // too_many_lines is visible only without the hotpath feature, whose measure
 // macro re-wraps the body.
 // Panics: a poisoned lock or a failed sort push is unrecoverable; the Result
-// carries only relation-preparation errors.
+// carries relation-source and preparation errors.
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::unwrap_in_result
 )]
 pub(super) fn process_relation_blocks(
-    relation_blocks: impl Iterator<Item = pbfhogg::PrimitiveBlock> + Send,
+    relation_blocks: impl Iterator<Item = Result<pbfhogg::PrimitiveBlock, PipelineError>> + Send,
     way_index: &WayIndexReader,
     missing_ref_stats: &MissingRefStatsAtomic,
     window: ZoomRange,
@@ -203,6 +204,18 @@ pub(super) fn process_relation_blocks(
 
     let result = relation_blocks
         .flat_map(|block| {
+            let block = match block {
+                Ok(block) => block,
+                Err(error) => {
+                    let mut slot = preparation_error
+                        .lock()
+                        .expect("relation preparation error lock");
+                    if slot.is_none() {
+                        *slot = Some(error);
+                    }
+                    return Vec::new().into_iter();
+                }
+            };
             // Prepare eagerly per block: PreparedRelation owns its data, so
             // the block can drop as soon as its relations are extracted. One
             // block's prepared set (~MBs) is the peak the producer side holds.
@@ -237,7 +250,7 @@ pub(super) fn process_relation_blocks(
         .par_bridge()
         .fold(RelAcc::new, |mut acc, (rel, rel_bytes)| {
             let before = acc.sink.records.len();
-            process_prepared_relation_into(
+            if let Err(error) = process_prepared_relation_into(
                 rel,
                 window,
                 &mut acc.sink,
@@ -246,7 +259,16 @@ pub(super) fn process_relation_blocks(
                 fanout_caps,
                 polygon_simplify_factor,
                 &mut acc.fanout,
-            );
+            ) {
+                // Same first-error slot as preparation: the tail runs to its
+                // barrier and returns the failure, never a partial success.
+                let mut slot = preparation_error
+                    .lock()
+                    .expect("relation preparation error lock");
+                if slot.is_none() {
+                    *slot = Some(error.into());
+                }
+            }
             // Track fanout for this relation's records.
             record_fanout_from_payload_records(&acc.sink.records[before..], &mut acc.fanout);
             // Drop the geometry-scaled scratches after EVERY relation. The
@@ -356,12 +378,12 @@ pub(super) fn process_prepared_relation_into(
     fanout_caps: &[Option<std::num::NonZeroU32>],
     polygon_simplify_factor: f64,
     fanout: &mut FanoutStats,
-) {
+) -> Result<(), RingCapError> {
     let multi = multipolygon::assemble_wrapped(&rel.member_ways);
     let shared_vertex_keys = relation_shared_vertex_keys(&rel.member_ways);
 
     if multi.polygons.is_empty() {
-        return;
+        return Ok(());
     }
 
     let mut matches = rel.matches;
@@ -397,7 +419,7 @@ pub(super) fn process_prepared_relation_into(
                     &ctx,
                     sink,
                     point_emit,
-                );
+                )?;
             }
             continue;
         }
@@ -425,7 +447,57 @@ pub(super) fn process_prepared_relation_into(
                 &ctx,
                 sink,
                 point_emit,
-            );
+            )?;
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod source_error_tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn relation_source_failure_retains_class_and_cause() {
+        let dir = tempfile::Builder::new()
+            .prefix("relation-source-error-")
+            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .expect("project-local test directory");
+        let way_index = crate::way_index::WayIndexWriter::create(dir.path())
+            .expect("way writer")
+            .finish_writing()
+            .expect("empty way reader");
+        let mut writer =
+            SortWriter::new(&dir.path().join("sort"), 1024, sort::ChunkCompression::None)
+                .expect("sort writer");
+        let spill = sort::SpillCoalescer::new(writer.chunk_sink(), 1024);
+        let source_error = PipelineError::failed("relation re-read: PBF read failed")
+            .with_cause(std::io::Error::from_raw_os_error(5));
+        let result = process_relation_blocks(
+            std::iter::once(Err(source_error)),
+            &way_index,
+            &MissingRefStatsAtomic::default(),
+            ZoomRange::new(0, 14).expect("zoom window"),
+            &mut writer,
+            &spill,
+            &mut FanoutStats::new(),
+            &[],
+            1.0,
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("source failure must abort the relation tail"),
+        };
+        assert_eq!(error.kind(), crate::ErrorKind::Failed);
+        assert_eq!(
+            error
+                .source()
+                .expect("PBF source")
+                .downcast_ref::<std::io::Error>()
+                .expect("original I/O cause")
+                .raw_os_error(),
+            Some(5)
+        );
     }
 }

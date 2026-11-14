@@ -1,7 +1,7 @@
 //! Ocean-layer ring simplicity and the `--geometry-stats` accumulator.
 
 use super::tile::{CheckedFeature, CheckedLayer};
-use super::{GeometryStats, ZoomGeomStats};
+use super::{Finding, GeometryStats, ZoomGeomStats};
 use crate::mvt::decode::{self, Words};
 use crate::shortbread::Layer;
 
@@ -22,7 +22,7 @@ fn polygon_geometry<'f>(feature: &'f CheckedFeature<'_>) -> Option<&'f [u8]> {
 
 /// Every self-intersecting or undecodable ocean polygon ring, appended in
 /// wire order.
-pub(super) fn check_rings(tile: &[CheckedLayer<'_>], problems: &mut Vec<String>) {
+pub(super) fn check_rings(tile: &[CheckedLayer<'_>], problems: &mut Vec<std::sync::Arc<Finding>>) {
     for layer in ocean_layers(tile) {
         for (fi, feature) in layer.features.iter().enumerate() {
             let Some(gb) = polygon_geometry(feature) else {
@@ -31,16 +31,20 @@ pub(super) fn check_rings(tile: &[CheckedLayer<'_>], problems: &mut Vec<String>)
             let rings = match decode::decode_polygon_rings(Words::packed(gb)) {
                 Ok(rings) => rings,
                 Err(error) => {
-                    problems.push(format!("ocean feat {fi} polygon decode failed: {error}"));
+                    problems.push(std::sync::Arc::new(Finding::OceanDecode {
+                        feature: fi,
+                        cause: error.into(),
+                    }));
                     continue;
                 }
             };
             for (ri, ring) in rings.iter().enumerate() {
                 if ring.len() >= 4 && !crate::geometry::polygon::ring_is_simple(ring) {
-                    problems.push(format!(
-                        "ocean feat {fi} ring {ri} is self-intersecting ({} verts)",
-                        ring.len()
-                    ));
+                    problems.push(std::sync::Arc::new(Finding::OceanSelfIntersection {
+                        feature: fi,
+                        ring: ri,
+                        vertices: ring.len(),
+                    }));
                 }
             }
         }

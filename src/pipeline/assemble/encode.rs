@@ -139,7 +139,7 @@ fn encode_tile_mvt(
     let s = &mut scratch;
 
     let z = tile.tile_id.zoom();
-    prepare_tile_layers(s, tile);
+    prepare_tile_layers(s, tile)?;
     // Borrow only the layer field so encoding can use its own buffers.
     let non_empty = non_empty_layers_in_tile_order(&s.layers);
     if non_empty.is_empty() {
@@ -199,12 +199,18 @@ fn encode_tile_mvt(
 
 /// Both encoders consume this stage so format selection cannot change the
 /// geometry merge policy.
-fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) {
+fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) -> Result<(), PipelineError> {
     for &(layer, ref data) in &tile.features {
         add_feature_to_layer(
             get_or_create_layer(&mut s.layers, usize::from(layer as u8)),
             data,
-        );
+        )
+        .map_err(|err| {
+            let (z, x, y) = tile.tile_id.coord();
+            // Read back from chunk files: persisted state, not proof of a
+            // program fault, so unclassified.
+            PipelineError::failed(format!("tile {z}/{x}/{y} {layer:?} sort record")).with_cause(err)
+        })?;
     }
 
     for (li, layer) in s.layers.iter_mut().enumerate() {
@@ -230,6 +236,7 @@ fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) {
             lb.merge_connected_lines(&mut s.line_merge_scratch);
         }
     }
+    Ok(())
 }
 
 /// Build non-empty per-layer builders for the MLT encoder and model tests.
@@ -237,9 +244,9 @@ fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) {
 pub(in crate::pipeline) fn prepare_non_empty_layers<'a>(
     s: &'a mut AssemblyScratch,
     tile: &PendingTile,
-) -> Vec<&'a LayerBuilder> {
-    prepare_tile_layers(s, tile);
-    non_empty_layers_in_tile_order(&s.layers)
+) -> Result<Vec<&'a LayerBuilder>, PipelineError> {
+    prepare_tile_layers(s, tile)?;
+    Ok(non_empty_layers_in_tile_order(&s.layers))
 }
 
 fn non_empty_layers_in_tile_order(layers: &[Option<LayerBuilder>]) -> Vec<&LayerBuilder> {
@@ -263,13 +270,14 @@ fn encode_tile_batch_mlt(batch: &[PendingTile]) -> Result<Vec<EncodedTile>, Pipe
         .par_iter()
         .map(|tile| {
             let mut scratch = AssemblyScratch::new();
-            let non_empty = prepare_non_empty_layers(&mut scratch, tile);
+            let non_empty = prepare_non_empty_layers(&mut scratch, tile)?;
             if non_empty.is_empty() {
                 return Ok(None);
             }
             let encoded = mlt::encode_tile(&non_empty).map_err(|err| {
                 let (z, x, y) = tile.tile_id.coord();
-                PipelineError::failed(format!("mlt encode failed for tile {z}/{x}/{y}: {err}"))
+                PipelineError::failed(format!("mlt encode failed for tile {z}/{x}/{y}"))
+                    .with_cause(err)
             })?;
             Ok(Some(EncodedTile {
                 tile_id: tile.tile_id,
@@ -338,7 +346,7 @@ mod tests {
                 ));
             }
             let mut scratch = AssemblyScratch::new();
-            let layers = prepare_non_empty_layers(&mut scratch, &tile);
+            let layers = prepare_non_empty_layers(&mut scratch, &tile).unwrap();
             assert_eq!(layers.len(), 2);
             let boundaries = scratch.layers[Layer::Boundaries as usize].as_ref().unwrap();
             assert_eq!(boundaries.features.len(), 1);

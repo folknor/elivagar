@@ -42,11 +42,12 @@ fallback.
 Every subcommand exits under one table. A code names a broad failure class,
 not a recovery to run, and a class is claimed only where the code raising it
 has evidence for it: a failure that has not been classified exits 2, never a
-guessed class. Several subsystems (sort chunk validation, the ocean
-artifact's admission and directory, the shapefile reader, the archive
-reader behind `inspect`, `svg`, `diag` and `verify`) still report through
-plain I/O errors, so their refusals currently exit 2, or 74 when the OS
-reported the failure.
+guessed class. Archive header, directory and payload reads, and the MVT
+message/detail decoders, establish byte rejection through `DecodeError`.
+`inspect`, `svg` and `diag` carry that evidence to exit 65; OS failures exit
+74 and opaque failures stay 2. Invalid diag coordinates exit 64. Individual
+feature failures in diag are printed and the report continues. Verify aborts on operational or opaque tile read failures; rejected payload
+bytes remain findings in a completed report.
 
 | code | meaning |
 |---|---|
@@ -56,16 +57,33 @@ reported the failure.
 | 3 | `--skip-to` resume refused: the resume records under `--tmp-dir` are absent or do not match this run |
 | 4 | the named ocean artifact cannot serve this run because of its own bytes or identity |
 | 64 | invalid invocation: a clap usage error, or a value or combination the library refuses before work (including environment knobs, and an artifact named for a tile contract or zoom window it cannot serve) |
-| 65 | input bytes read and rejected, e.g. an unsorted PBF without an opt-in, malformed injected data, or a header that refuses `--locations-on-ways` |
-| 70 | an internal invariant failed |
+| 65 | input bytes read and rejected, e.g. an unsorted PBF without an opt-in, node IDs the node store refuses (negative, not increasing under `--force-sorted`, over the flat index safety cap), malformed injected data, or a header that refuses `--locations-on-ways` |
+| 70 | an internal invariant failed, e.g. a polygon over the 500-ring cap reaching a clip rect too small to split, which the ring-cap partition proves cannot happen |
 | 74 | an I/O failure the OS reported |
 
 A panic is outside the table: release builds use `panic = "abort"`, so the
 process ends by signal. Library callers read the same class from
 `PipelineError::kind()` (`ErrorKind::exit_code()` gives the code), and a
 refused resume names its reason through `PipelineError::resume_refusal()`.
+The public `node_index::NodeStoreError` names the refused node ID; growth
+and remap failures of the flat index keep their `io::Error` and exit 74 with
+an OS errno. A sort record that does not decode during assembly fails the
+run unclassified (exit 2): the bytes were read back from chunk files, so
+they cannot tell a program fault from a damaged chunk.
+Chunk-store rejections, including deferred reads during assembly, carry
+`ResumeRefusal::ChunkStore { kind }` on a resumed run (exit 3). The public
+`sort::ChunkStoreError` and `ChunkStoreErrorKind` distinguish compression
+mismatch, stale names, missing chunks, count mismatch, corruption and I/O.
+The same read-back rejection during a full run stays unclassified (exit 2);
+operational OS failures retain exit 74 and their causes in either case.
 The `resume_refusal_*` sidecar counters are diagnostics only; their absence
 means the reason is unavailable, not that there was none.
+
+Library callers can inspect `PipelineError::artifact_refusal()` for a typed
+`ArtifactRefusal`. `KeyMismatch::fields` names every differing identity field
+(policy version, shapefile hashes, zooms, or compression level). Artifact
+admission and directory refusals exit 4; OS read failures exit 74. Shapefile
+hashing failures retain their own failure class.
 
 ## `elivagar run <INPUT> -o <OUTPUT> [OPTIONS]`
 
@@ -258,7 +276,8 @@ assertion: if set, the header must declare `LocationsOnWays`.
 When a node store is needed, input without the `Sort.Type_then_ID` header
 flag is refused at every file size unless `--force-sorted` or
 `--allow-unsafe-flat-index` is explicit. `--force-sorted` selects the compact
-store and checks monotonic node IDs; `--allow-unsafe-flat-index` selects the
+store and checks strictly increasing node IDs, refusing the input (exit 65)
+on the first that is not; `--allow-unsafe-flat-index` selects the
 flat index and bypasses its size guardrails. A small PBF can still contain
 large, sparse node IDs. Inline way coordinates (`--locations-on-ways`,
 including header detection) avoid the node store and this guard entirely.
@@ -392,6 +411,10 @@ compression are supported by the MVT validation and archive-view workflows.
 The current supported pair is MVT with gzip. Header inspection still works
 when that pair is unsupported.
 
+An unreadable metadata block is still described in the header report, then
+inspection returns its typed failure status. Unsupported tile formats remain
+reportable without reading tiles.
+
 ### Provenance
 
 The `elivagar` metadata member (`reference/metadata.md`, schema at
@@ -471,9 +494,10 @@ For the raw block use `scripts/dump-pmtiles-metadata.py`.
 End-to-end archive validation: container integrity, metadata schema, tile
 decompression, MVT payload structure, geometry commands, layer coverage, and
 ocean ring self-intersection. Exit 0 on pass, 1 when the report fails;
-stops after 100 tile-level errors. A tile whose bytes cannot be read is
-currently recorded as a finding, so exit 1 does not exclude an operational
-read failure. A verification that cannot complete exits under the table in
+retains the first 100 typed tile findings while counting all findings and
+completing traversal. Malformed payloads fail the report. Operational tile
+read failures abort with 74, opaque failures with 2. Container and metadata
+rejections exit 65. A verification that cannot complete exits under the table in
 "Exit status" at the top of this document.
 
 Payload structure is checked under the strict MVT policy `tile_detail`

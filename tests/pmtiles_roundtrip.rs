@@ -57,7 +57,7 @@ struct LayerSummary {
     feature_count: usize,
 }
 
-fn decode_mvt_layers(raw: &[u8]) -> Result<Vec<LayerSummary>, String> {
+fn decode_mvt_layers(raw: &[u8]) -> Result<Vec<LayerSummary>, elivagar::DecodeError> {
     Ok(decode_detail_tile(raw, Strictness::Tolerant)?
         .layers
         .iter()
@@ -766,9 +766,9 @@ fn test_verify_fail_invalid_metadata_json() {
     let err = elivagar::verify::verify(&path)
         .err()
         .expect("verify should fail");
-    let msg = err.to_string();
-    assert!(msg.contains("metadata error"), "unexpected error: {msg}");
-    assert!(msg.contains("invalid JSON"), "unexpected error: {msg}");
+    assert!(
+        matches!(err, elivagar::verify::VerifyError::Metadata(e) if e.kind() == elivagar::DecodeErrorKind::Malformed)
+    );
 }
 
 #[test]
@@ -948,7 +948,7 @@ fn test_verify_fail_suspicious_geometry_delta() {
         report
             .tile_errors
             .iter()
-            .any(|e| e.contains("suspicious geometry delta")),
+            .any(|e| matches!(&*e.finding, elivagar::verify::Finding::Geometry { .. })),
         "expected geometry delta error, got {:?}",
         report.tile_errors
     );

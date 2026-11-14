@@ -72,11 +72,53 @@ pub(crate) fn assemble_wrapped(members: &[MemberWay]) -> MultiPolygon {
     assemble_impl(members, true)
 }
 
-fn assemble_impl(members: &[MemberWay], wrapped: bool) -> MultiPolygon {
-    let (outer_ways, inner_ways, unclassified_ways) = separate_by_role(members);
+/// What one assembly salvaged around, by discard site. Behavior does not
+/// depend on it: assembly keeps what it can from a broken relation, and these
+/// make the losses observable through the `MULTIPOLYGON` counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AssemblyStats {
+    /// Member chains that never closed into a ring, dropped.
+    pub unclosed_chains: u64,
+    /// Closed rings under 3 distinct vertices, dropped.
+    pub degenerate_rings: u64,
+    /// Member ways under 2 coordinates, ignored.
+    pub short_members: u64,
+    /// Inner rings no outer contains, kept as outer shells.
+    pub orphan_inners: u64,
+}
 
-    let (mut outer_rings, _) = join_ways(&outer_ways);
-    let (mut inner_rings, _) = join_ways(&inner_ways);
+impl AssemblyStats {
+    fn publish(self) {
+        use crate::debug::MULTIPOLYGON;
+        use std::sync::atomic::Ordering::Relaxed;
+        for (counter, value) in [
+            (&MULTIPOLYGON.unclosed_chains, self.unclosed_chains),
+            (&MULTIPOLYGON.degenerate_rings, self.degenerate_rings),
+            (&MULTIPOLYGON.short_members, self.short_members),
+            (&MULTIPOLYGON.orphan_inners, self.orphan_inners),
+        ] {
+            if value > 0 {
+                counter.fetch_add(value, Relaxed);
+            }
+        }
+    }
+}
+
+fn assemble_impl(members: &[MemberWay], wrapped: bool) -> MultiPolygon {
+    let (multi, stats) = assemble_with_stats(members, wrapped);
+    stats.publish();
+    multi
+}
+
+pub(crate) fn assemble_with_stats(
+    members: &[MemberWay],
+    wrapped: bool,
+) -> (MultiPolygon, AssemblyStats) {
+    let mut stats = AssemblyStats::default();
+    let (outer_ways, inner_ways, unclassified_ways) = separate_by_role(members, &mut stats);
+
+    let mut outer_rings = join_ways(&outer_ways, &mut stats);
+    let mut inner_rings = join_ways(&inner_ways, &mut stats);
     if wrapped {
         for ring in outer_rings.iter_mut().chain(inner_rings.iter_mut()) {
             unwrap_ring(ring);
@@ -88,6 +130,7 @@ fn assemble_impl(members: &[MemberWay], wrapped: bool) -> MultiPolygon {
         &mut outer_rings,
         &mut inner_rings,
         wrapped,
+        &mut stats,
     );
 
     ensure_outer_orientation(&mut outer_rings);
@@ -95,13 +138,13 @@ fn assemble_impl(members: &[MemberWay], wrapped: bool) -> MultiPolygon {
     sort_rings_deterministic(&mut outer_rings);
     sort_rings_deterministic(&mut inner_rings);
 
-    let mut polygons = pair_rings(outer_rings, inner_rings, wrapped);
+    let mut polygons = pair_rings(outer_rings, inner_rings, wrapped, &mut stats);
     for (_, inners) in &mut polygons {
         sort_rings_deterministic(inners);
     }
     polygons.sort_by_key(|(outer, _)| ring_sort_key(outer));
     let polygons = polygons.into_boxed_slice();
-    MultiPolygon { polygons }
+    (MultiPolygon { polygons }, stats)
 }
 
 /// Place one label for an assembled relation, treating all polygon components
@@ -217,13 +260,14 @@ fn containment_shift(outer: &[Point], inner: &[Point], wrapped: bool) -> Option<
 /// Skips ways with fewer than 2 coordinates.
 type RingGroups<'a> = (Vec<&'a [Point]>, Vec<&'a [Point]>, Vec<&'a [Point]>);
 
-fn separate_by_role(members: &[MemberWay]) -> RingGroups<'_> {
+fn separate_by_role<'a>(members: &'a [MemberWay], stats: &mut AssemblyStats) -> RingGroups<'a> {
     let mut outers = Vec::with_capacity(members.len());
     let mut inners = Vec::with_capacity(members.len());
     let mut unclassified = Vec::with_capacity(members.len());
 
     for m in members {
         if m.coords.len() < 2 {
+            stats.short_members += 1;
             continue;
         }
         match m.role {
@@ -243,8 +287,9 @@ fn classify_unclassified(
     outer_rings: &mut Vec<Vec<Point>>,
     inner_rings: &mut Vec<Vec<Point>>,
     wrapped: bool,
+    stats: &mut AssemblyStats,
 ) {
-    let (mut unc_rings, _) = join_ways(unclassified_ways);
+    let mut unc_rings = join_ways(unclassified_ways, stats);
     if wrapped {
         for ring in &mut unc_rings {
             unwrap_ring(ring);
@@ -335,6 +380,7 @@ fn pair_rings(
     outer_rings: Vec<Vec<Point>>,
     inner_rings: Vec<Vec<Point>>,
     wrapped: bool,
+    stats: &mut AssemblyStats,
 ) -> Vec<(Vec<Point>, Vec<Vec<Point>>)> {
     if outer_rings.is_empty() {
         return Vec::new();
@@ -368,6 +414,7 @@ fn pair_rings(
             polygons[idx].1.push(inner);
         } else {
             // Orphan inner ring: promote to an oriented outer shell.
+            stats.orphan_inners += 1;
             inner.reverse();
             normalize_ring_start(&mut inner);
             polygons.push((inner, Vec::new()));
@@ -394,30 +441,33 @@ fn quantize(p: &Point) -> (i64, i64) {
 
 /// Join a list of coordinate sequences end-to-end to form closed rings.
 ///
-/// Returns `(closed_rings, unclosed_chains)`.
+/// Returns the closed rings. Chains that never close are dropped and counted
+/// in `stats`, as are closed rings too short to carry area.
 ///
 /// Two-pass algorithm: the first pass greedily appends ways to chains via an
 /// endpoint map. This can leave orphaned chains when `endpoint_map.insert()`
 /// overwrites entries for other chains. A second pass rebuilds the map from
 /// surviving chains and attempts pairwise joins until no more progress is made.
 #[allow(clippy::too_many_lines)]
-fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
+fn join_ways(ways: &[&[Point]], stats: &mut AssemblyStats) -> Vec<Vec<Point>> {
     let mut chains: Vec<Vec<Point>> = Vec::with_capacity(ways.len());
     // Maps an endpoint (quantized) to the index in `chains` that has that endpoint.
     let mut endpoint_map: FxHashMap<(i64, i64), usize> = FxHashMap::default();
-    let mut closed: Vec<Vec<Point>> = Vec::with_capacity(ways.len());
+    let mut closed = ClosedRings {
+        rings: Vec::with_capacity(ways.len()),
+        degenerate: 0,
+    };
 
     for way in ways {
         if way.len() < 2 {
+            // separate_by_role already counted and removed these.
             continue;
         }
         // Check if this single way is already a closed ring on its own.
         if quantize(&way[0]) == quantize(&way[way.len() - 1]) {
             let mut ring = way.to_vec();
             ring.pop(); // Remove duplicated closing vertex.
-            if ring.len() >= 3 {
-                closed.push(ring);
-            }
+            closed.push(ring);
             continue;
         }
         append_way_to_chains(way, &mut chains, &mut endpoint_map, &mut closed);
@@ -467,9 +517,7 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
                 if new_front == new_back {
                     let mut ring = std::mem::take(&mut chains[i]);
                     ring.pop();
-                    if ring.len() >= 3 {
-                        closed.push(ring);
-                    }
+                    closed.push(ring);
                 }
                 merged_any = true;
                 break;
@@ -504,9 +552,7 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
                 if new_front == new_back {
                     let mut ring = std::mem::take(&mut chains[i]);
                     ring.pop();
-                    if ring.len() >= 3 {
-                        closed.push(ring);
-                    }
+                    closed.push(ring);
                 }
                 merged_any = true;
                 break;
@@ -518,10 +564,29 @@ fn join_ways(ways: &[&[Point]]) -> (Vec<Vec<Point>>, Vec<Vec<Point>>) {
         }
     }
 
-    // Collect remaining unclosed chains (skip degenerate ones).
-    let unclosed: Vec<Vec<Point>> = chains.into_iter().filter(|c| c.len() >= 2).collect();
+    // Remaining chains never closed. Slots emptied by a join are not chains.
+    let unclosed = chains.iter().filter(|c| c.len() >= 2).count();
+    stats.unclosed_chains += u64::try_from(unclosed).unwrap_or(u64::MAX);
+    stats.degenerate_rings += closed.degenerate;
+    closed.rings
+}
 
-    (closed, unclosed)
+/// Closed rings under assembly, with the closures too short to keep.
+struct ClosedRings {
+    rings: Vec<Vec<Point>>,
+    degenerate: u64,
+}
+
+impl ClosedRings {
+    /// Keep a closed ring (closing vertex already removed) if it has the 3
+    /// vertices a ring needs; count it otherwise.
+    fn push(&mut self, ring: Vec<Point>) {
+        if ring.len() >= 3 {
+            self.rings.push(ring);
+        } else {
+            self.degenerate += 1;
+        }
+    }
 }
 
 /// Try to attach a single way to an existing chain, or start a new chain.
@@ -531,7 +596,7 @@ fn append_way_to_chains(
     way: &[Point],
     chains: &mut Vec<Vec<Point>>,
     endpoint_map: &mut FxHashMap<(i64, i64), usize>,
-    closed: &mut Vec<Vec<Point>>,
+    closed: &mut ClosedRings,
 ) {
     let way_front = quantize(&way[0]);
     let way_back = quantize(&way[way.len() - 1]);
@@ -572,7 +637,7 @@ fn attach_way(
     way: &[Point],
     chains: &mut Vec<Vec<Point>>,
     endpoint_map: &mut FxHashMap<(i64, i64), usize>,
-    closed: &mut Vec<Vec<Point>>,
+    closed: &mut ClosedRings,
 ) {
     let chain_front = quantize(&chains[idx][0]);
     let chain_back = quantize(&chains[idx][chains[idx].len() - 1]);
@@ -630,7 +695,7 @@ fn finalize_chain(
     idx: usize,
     chains: &mut [Vec<Point>],
     endpoint_map: &mut FxHashMap<(i64, i64), usize>,
-    closed: &mut Vec<Vec<Point>>,
+    closed: &mut ClosedRings,
 ) {
     let new_front = quantize(&chains[idx][0]);
     let new_back = quantize(&chains[idx][chains[idx].len() - 1]);
@@ -641,9 +706,7 @@ fn finalize_chain(
         endpoint_map.remove(&new_back);
         let mut ring = std::mem::take(&mut chains[idx]);
         ring.pop(); // Remove duplicated closing vertex.
-        if ring.len() >= 3 {
-            closed.push(ring);
-        }
+        closed.push(ring);
     } else {
         endpoint_map.insert(new_front, idx);
         endpoint_map.insert(new_back, idx);
@@ -903,6 +966,45 @@ mod tests {
         ]);
         assert_eq!(mp.polygons.len(), 2);
         assert!(mp.polygons.iter().all(|(_, holes)| holes.len() == 1));
+    }
+
+    #[test]
+    fn salvage_is_counted_at_every_discard_site() {
+        let open_chain = vec![pt(0.5, 0.5), pt(0.6, 0.5), pt(0.6, 0.6)];
+        let (mp, stats) = assemble_with_stats(
+            &[
+                make_member("outer", square(0.0, 0.1)),
+                make_member("outer", open_chain.clone()),
+                make_member("outer", vec![pt(0.7, 0.7)]),
+                make_member("outer", vec![pt(0.8, 0.8), pt(0.9, 0.8), pt(0.8, 0.8)]),
+                make_member("inner", square(0.3, 0.32)),
+                make_member("", open_chain),
+            ],
+            false,
+        );
+        assert_eq!(
+            stats,
+            AssemblyStats {
+                unclosed_chains: 2,
+                degenerate_rings: 1,
+                short_members: 1,
+                orphan_inners: 1,
+            }
+        );
+        // Salvage itself is unchanged: the shell and the promoted orphan.
+        assert_eq!(mp.polygons.len(), 2);
+    }
+
+    #[test]
+    fn clean_assembly_counts_nothing() {
+        let (_, stats) = assemble_with_stats(
+            &[
+                make_member("outer", square(0.0, 0.4)),
+                make_member("inner", square(0.1, 0.2)),
+            ],
+            false,
+        );
+        assert_eq!(stats, AssemblyStats::default());
     }
 
     #[test]

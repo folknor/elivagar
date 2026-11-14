@@ -89,6 +89,10 @@ pub enum ResumeRefusal {
     MalformedCompletion,
     /// The chunks were written under another sort-chunk compression.
     SortCompressionChanged,
+    /// The retained sort chunk store is absent, incompatible or corrupt.
+    ChunkStore {
+        kind: crate::sort::ChunkStoreErrorKind,
+    },
     /// The chunks were built from a different input PBF.
     InputChanged,
     /// The chunks were produced under a different producer config; the
@@ -98,12 +102,32 @@ pub enum ResumeRefusal {
     OceanChanged,
 }
 
+/// Why the named ocean artifact cannot serve the run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArtifactRefusal {
+    Missing,
+    Format,
+    Layout,
+    Metadata,
+    Coverage,
+    Directory,
+    Payload,
+    KeyMismatch(KeyMismatch),
+}
+
+/// All differing fields of an artifact's declared identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyMismatch {
+    pub fields: Vec<&'static str>,
+}
+
 #[derive(Debug)]
 enum Class {
     Config,
     Input,
     Resume(ResumeRefusal),
-    Artifact,
+    Artifact(ArtifactRefusal),
     Io,
     Internal,
     Failed,
@@ -145,7 +169,20 @@ impl PipelineError {
     }
 
     pub(crate) fn artifact(message: impl Into<String>) -> Self {
-        Self::new(Class::Artifact, message)
+        Self::artifact_refused(ArtifactRefusal::Payload, message)
+    }
+
+    pub(crate) fn artifact_refused(reason: ArtifactRefusal, message: impl Into<String>) -> Self {
+        Self::new(Class::Artifact(reason), message)
+    }
+
+    /// The reason, when the named ocean artifact was refused.
+    #[must_use]
+    pub fn artifact_refusal(&self) -> Option<&ArtifactRefusal> {
+        match &self.0.class {
+            Class::Artifact(reason) => Some(reason),
+            _ => None,
+        }
     }
 
     pub(crate) fn internal(message: impl Into<String>) -> Self {
@@ -157,13 +194,78 @@ impl PipelineError {
     }
 
     /// An `io::Error` under a context message, classed by
-    /// [`ErrorKind::of_io`].
+    /// [`ErrorKind::of_io`] unless a typed decode or chunk-store cause
+    /// establishes more.
     pub(crate) fn io(message: impl Into<String>, error: std::io::Error) -> Self {
         let class = match ErrorKind::of_io(&error) {
             ErrorKind::Io => Class::Io,
             _ => Class::Failed,
         };
-        Self::new(class, message).with_cause(error)
+        Self::new(class, message)
+            .with_cause(error)
+            .decode_context()
+            .chunk_context(false)
+    }
+
+    fn decode_context(mut self) -> Self {
+        if let Some(error) = self
+            .0
+            .cause
+            .as_deref()
+            .and_then(|e| crate::DecodeError::find(e))
+        {
+            self.0.class = match error.kind() {
+                crate::DecodeErrorKind::Malformed | crate::DecodeErrorKind::Unsupported => {
+                    Class::Input
+                }
+                crate::DecodeErrorKind::Io => Class::Io,
+                crate::DecodeErrorKind::Failed => Class::Failed,
+            };
+        }
+        self
+    }
+
+    // Called at the run boundary as well as conversion: lazy merge errors
+    // travel through assembly's standard I/O carriers before reaching here.
+    pub(crate) fn chunk_context(mut self, resumed: bool) -> Self {
+        fn find<'a>(
+            error: &'a (dyn std::error::Error + 'static),
+        ) -> Option<&'a crate::sort::ChunkStoreError> {
+            if let Some(chunk) = error.downcast_ref::<crate::sort::ChunkStoreError>() {
+                return Some(chunk);
+            }
+            if let Some(io) = error.downcast_ref::<std::io::Error>()
+                && let Some(inner) = io.get_ref()
+                && let Some(chunk) = find(inner)
+            {
+                return Some(chunk);
+            }
+            error.source().and_then(find)
+        }
+        if let Some(chunk) = self.0.cause.as_deref().and_then(|e| find(e)) {
+            let kind = chunk.kind();
+            if kind != crate::sort::ChunkStoreErrorKind::Io {
+                self.0.class = if resumed {
+                    Class::Resume(ResumeRefusal::ChunkStore { kind })
+                } else {
+                    Class::Failed
+                };
+            } else {
+                // Retain OS evidence even across standard I/O adapters.
+                let mut cause = std::error::Error::source(chunk);
+                while let Some(error) = cause {
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.raw_os_error().is_some())
+                    {
+                        self.0.class = Class::Io;
+                        break;
+                    }
+                    cause = error.source();
+                }
+            }
+        }
+        self
     }
 
     /// Attach the underlying error. `Display` appends it after the message.
@@ -183,7 +285,7 @@ impl PipelineError {
             Class::Config => ErrorKind::Config,
             Class::Input => ErrorKind::InputRefused,
             Class::Resume(_) => ErrorKind::ResumeRefused,
-            Class::Artifact => ErrorKind::ArtifactRefused,
+            Class::Artifact(_) => ErrorKind::ArtifactRefused,
             Class::Io => ErrorKind::Io,
             Class::Internal => ErrorKind::Internal,
             Class::Failed => ErrorKind::Failed,
@@ -231,16 +333,103 @@ impl std::error::Error for PipelineError {
 
 /// A bare `io::Error` keeps its own message and is classed by
 /// [`ErrorKind::of_io`]: never a domain refusal, since nothing here knows
-/// which operation produced it.
+/// which operation produced it. A typed decode or chunk-store cause is
+/// separate producer evidence and retains its classification through the carrier.
 impl From<std::io::Error> for PipelineError {
     fn from(error: std::io::Error) -> Self {
         Self::io(String::new(), error)
     }
 }
 
+impl From<crate::sort::ChunkStoreError> for PipelineError {
+    fn from(error: crate::sort::ChunkStoreError) -> Self {
+        Self::failed("sort chunk store")
+            .with_cause(error)
+            .chunk_context(false)
+    }
+}
+
+/// Node-ID rejections are refused input; growth and remap failures keep the
+/// ordinary I/O evidence rule.
+impl From<crate::node_index::NodeStoreError> for PipelineError {
+    fn from(error: crate::node_index::NodeStoreError) -> Self {
+        use crate::node_index::NodeStoreError;
+        let class = match &error {
+            NodeStoreError::Grow(io) | NodeStoreError::Remap(io) => match ErrorKind::of_io(io) {
+                ErrorKind::Io => Class::Io,
+                _ => Class::Failed,
+            },
+            _ => Class::Input,
+        };
+        Self::new(class, "node store").with_cause(error)
+    }
+}
+
+/// The ring-cap partition's indivisible-rect state is proven unreachable at
+/// its producer, so reaching it is an internal invariant violation.
+impl From<crate::geometry::pyramid::RingCapError> for PipelineError {
+    fn from(error: crate::geometry::pyramid::RingCapError) -> Self {
+        Self::internal("polygon emission").with_cause(error)
+    }
+}
+
+impl From<crate::DecodeError> for PipelineError {
+    fn from(error: crate::DecodeError) -> Self {
+        use crate::DecodeErrorKind;
+        let result = match error.kind() {
+            DecodeErrorKind::Malformed | DecodeErrorKind::Unsupported => {
+                Self::input("input decode failed")
+            }
+            DecodeErrorKind::Io => Self::new(Class::Io, "archive read failed"),
+            DecodeErrorKind::Failed => Self::failed("archive read failed"),
+        };
+        result.with_cause(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_cap_and_node_store_errors_keep_their_class_and_cause() {
+        use crate::geometry::int_ocean::IntRect;
+        use crate::geometry::pyramid::RingCapError;
+        use crate::node_index::NodeStoreError;
+        let ring_cap = RingCapError {
+            rect: IntRect {
+                min_x: 0,
+                min_y: 0,
+                max_x: 1,
+                max_y: 1,
+            },
+            contours: 501,
+        };
+        let err = PipelineError::from(ring_cap);
+        assert_eq!(err.kind(), ErrorKind::Internal);
+        assert_eq!(err.kind().exit_code(), 70);
+        assert!(
+            std::error::Error::source(&err)
+                .and_then(|e| e.downcast_ref::<RingCapError>())
+                .is_some()
+        );
+
+        let cap = NodeStoreError::SafetyCap {
+            node_id: 1,
+            needed_bytes: 2,
+            cap_bytes: 1,
+        };
+        assert_eq!(PipelineError::from(cap).kind(), ErrorKind::InputRefused);
+        let order = NodeStoreError::NotIncreasing {
+            node_id: 1,
+            previous: 2,
+        };
+        assert_eq!(PipelineError::from(order).kind(), ErrorKind::InputRefused);
+        let os = NodeStoreError::Grow(std::io::Error::from_raw_os_error(28));
+        assert_eq!(PipelineError::from(os).kind(), ErrorKind::Io);
+        let opaque = NodeStoreError::Remap(std::io::Error::other("opaque"));
+        assert_eq!(PipelineError::from(opaque).kind(), ErrorKind::Failed);
+    }
 
     #[test]
     fn io_conversion_needs_os_evidence() {

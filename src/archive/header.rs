@@ -13,6 +13,7 @@
 //! is a separate question, answered by [`TileDecoder::for_contract`] and by
 //! the reader's layout and section checks.
 
+use crate::{DecodeError, DecodeErrorKind};
 use std::io;
 
 /// The header occupies the first 127 bytes of every PMTiles v3 archive.
@@ -330,16 +331,18 @@ fn put_i32(bytes: &mut [u8; HEADER_LEN], offset: usize, value: i32) {
 impl Header {
     /// Decode the first 127 bytes of an archive. Refuses only a missing magic
     /// or a version other than 3.
-    pub fn decode(bytes: &[u8; HEADER_LEN]) -> io::Result<Self> {
+    pub fn decode(bytes: &[u8; HEADER_LEN]) -> Result<Self, DecodeError> {
         if &bytes[..7] != MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(DecodeError::new(
+                DecodeErrorKind::Malformed,
+                "header",
                 "not a PMTiles archive (magic mismatch)",
             ));
         }
         if bytes[7] != VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(DecodeError::new(
+                DecodeErrorKind::Unsupported,
+                "header",
                 format!("not PMTiles v3 (version byte {})", bytes[7]),
             ));
         }
@@ -431,16 +434,21 @@ pub enum TileDecoder {
 }
 
 impl TileDecoder {
-    pub fn for_contract(tile_type: TileType, tile_compression: Compression) -> io::Result<Self> {
+    pub fn for_contract(
+        tile_type: TileType,
+        tile_compression: Compression,
+    ) -> Result<Self, DecodeError> {
         if tile_type != TileType::Mvt {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(DecodeError::new(
+                DecodeErrorKind::Unsupported,
+                "header",
                 format!("expected tile type MVT, got {tile_type}"),
             ));
         }
         if tile_compression != Compression::Gzip {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(DecodeError::new(
+                DecodeErrorKind::Unsupported,
+                "header",
                 format!("expected tile compression gzip, got {tile_compression}"),
             ));
         }

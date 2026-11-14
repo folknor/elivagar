@@ -236,6 +236,8 @@ impl Default for RecordTally {
     }
 }
 
+mod error;
+pub use error::{ChunkStoreError, ChunkStoreErrorKind};
 mod format;
 mod key;
 mod merge;

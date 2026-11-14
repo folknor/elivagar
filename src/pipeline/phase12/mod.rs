@@ -201,18 +201,18 @@ impl Router<'_> {
 
     /// The raw path's node phase ends here: join its worker and take the
     /// store back. `None` in locations mode.
-    fn end_stored_node_phase(&mut self) -> Option<NodeStore> {
+    fn end_stored_node_phase(&mut self) -> Result<Option<NodeStore>, PipelineError> {
         let NodeRoute::Stored(state) = &mut self.nodes else {
-            return None;
+            return Ok(None);
         };
-        match std::mem::replace(state, StoredNodes::Ended) {
+        Ok(match std::mem::replace(state, StoredNodes::Ended) {
             StoredNodes::Pending(store) => Some(*store),
             StoredNodes::Running(workers) => {
-                workers.join(&mut self.node_outcome);
+                workers.join(&mut self.node_outcome)?;
                 self.node_outcome.node_store.take()
             }
             StoredNodes::Ended => None,
-        }
+        })
     }
 
     // The expects are routing invariants (store and outputs present exactly
@@ -224,13 +224,11 @@ impl Router<'_> {
             None
         } else {
             let store = self
-                .end_stored_node_phase()
+                .end_stored_node_phase()?
                 .expect("raw path reached the way phase without its node store");
-            let reader = Arc::new(
-                store
-                    .into_reader()
-                    .expect("failed to convert node store to reader"),
-            );
+            let reader = Arc::new(store.into_reader().map_err(|err| {
+                PipelineError::io("failed to convert the node store to a reader", err)
+            })?);
             let store_stats = reader.stats();
             self.node_store_stats = store_stats
                 .group_count
@@ -287,7 +285,7 @@ impl Router<'_> {
     /// and apply the node tally to the sort writer now that it is back.
     fn finish(self) -> Result<Routed, PipelineError> {
         let Self {
-            ctx: _,
+            ctx,
             nodes,
             mut node_outcome,
             node_store_stats,
@@ -303,7 +301,7 @@ impl Router<'_> {
             | NodeRoute::Inline {
                 workers: Some(workers),
                 ..
-            } => workers.join(&mut node_outcome),
+            } => workers.join(&mut node_outcome)?,
             NodeRoute::Stored(StoredNodes::Pending(_) | StoredNodes::Ended)
             | NodeRoute::Inline { workers: None, .. } => {}
         }
@@ -315,6 +313,11 @@ impl Router<'_> {
         let (way_index, mut sort_writer, way_features, fanout, way_extent) = match ways {
             Some(dispatch) => {
                 let drained = dispatch.finish();
+                // A failed way task stopped its block; the drained state
+                // is incomplete, so it is dropped with the failure.
+                if let Some(err) = ctx.way_counters.take_failure() {
+                    return Err(err);
+                }
                 (
                     drained.way_index,
                     drained.sort_writer,
@@ -357,8 +360,6 @@ impl Router<'_> {
 
 #[hotpath::measure]
 #[allow(clippy::too_many_lines)]
-// The relation re-read panics on mid-tail I/O failure, inside an iterator
-// that cannot return the run's Result.
 #[allow(clippy::unwrap_in_result)]
 pub(super) fn phase_read_and_process(
     config: &RunPlan,
@@ -515,24 +516,25 @@ pub(super) fn phase_read_and_process(
     let relation_blocks_buffered = relations.blocks.len();
     // Relation source: the in-RAM buffer, or a filtered PBF re-read when the
     // buffer cap tripped.
-    let rel_blocks_source: Box<dyn Iterator<Item = PrimitiveBlock> + Send> = if relations.spilled {
-        let reader = ElementReader::from_path(&config.pbf_path)
-            .map_err(|e| {
-                PipelineError::failed("relation re-read: failed to open PBF").with_cause(e)
-            })?
-            .with_blob_filter(BlobFilter::only_relations())
-            .decode_threads(decode_threads);
-        let blocks = reader.into_blocks_pipelined().map_err(|e| {
-            PipelineError::failed("relation re-read: PBF pipeline start failed").with_cause(e)
-        })?;
-        Box::new(blocks.map(|r| {
-            // Panic: mid-tail I/O failure is unrecoverable (same policy
-            // as sort pushes).
-            r.expect("relation re-read: PBF read failed")
-        }))
-    } else {
-        Box::new(std::mem::take(&mut relations.blocks).into_iter())
-    };
+    let rel_blocks_source: Box<dyn Iterator<Item = Result<PrimitiveBlock, PipelineError>> + Send> =
+        if relations.spilled {
+            let reader = ElementReader::from_path(&config.pbf_path)
+                .map_err(|e| {
+                    PipelineError::failed("relation re-read: failed to open PBF").with_cause(e)
+                })?
+                .with_blob_filter(BlobFilter::only_relations())
+                .decode_threads(decode_threads);
+            let blocks = reader.into_blocks_pipelined().map_err(|e| {
+                PipelineError::failed("relation re-read: PBF pipeline start failed").with_cause(e)
+            })?;
+            Box::new(blocks.map(|r| {
+                r.map_err(|error| {
+                    PipelineError::failed("relation re-read: PBF read failed").with_cause(error)
+                })
+            }))
+        } else {
+            Box::new(std::mem::take(&mut relations.blocks).into_iter().map(Ok))
+        };
     // Tail of phase12: one streamed parallel pass over all relations
     // (prepare interleaved with emit, a single end barrier), appending to
     // the same phase-wide spill coalescer. The span deliberately includes

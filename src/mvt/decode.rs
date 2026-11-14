@@ -76,7 +76,7 @@ impl Point {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GeometryError {
     /// A packed varint did not read.
-    Varint(String),
+    Varint(protohoggr::WireError),
     /// A word exceeds u32.
     WordOutOfRange(u64),
     UnknownCommand(u32),
@@ -134,9 +134,7 @@ impl<'a> Words<'a> {
                 if cursor.is_empty() {
                     return Ok(None);
                 }
-                let raw = cursor
-                    .read_varint()
-                    .map_err(|error| GeometryError::Varint(error.to_string()))?;
+                let raw = cursor.read_varint().map_err(GeometryError::Varint)?;
                 u32::try_from(raw)
                     .map(Some)
                     .map_err(|_| GeometryError::WordOutOfRange(raw))
@@ -367,6 +365,20 @@ pub(crate) fn decode_polygon_rings(
 }
 
 /// Every MoveTo/LineTo position in wire order, unvalidated. Test helper.
+impl std::error::Error for GeometryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Varint(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl From<GeometryError> for crate::DecodeError {
+    fn from(error: GeometryError) -> Self {
+        Self::caused("MVT geometry", error)
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn decode_positions(words: &[u32]) -> Vec<(i32, i32)> {
     struct Positions(Vec<(i32, i32)>);

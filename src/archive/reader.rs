@@ -12,6 +12,7 @@
 //! later access is bounded on its own; [`Archive::check_layout`] is the
 //! explicit whole-layout check for workflows that want to refuse up front.
 
+use crate::{DecodeError, DecodeErrorKind};
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -37,25 +38,32 @@ const GZIP_MAX_EXPANSION_PER_INPUT_BYTE: usize = 1032;
 /// Decompress one gzip member within the maximum expansion DEFLATE permits.
 /// This bounds output by the input rather than by a dataset-size policy, so
 /// large directory leaves and metadata stay readable.
-pub(crate) fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
+pub(crate) fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
     gzip_decompress_labeled(data, "gzip payload")
 }
 
-fn gzip_decompress_labeled(data: &[u8], label: &str) -> io::Result<Vec<u8>> {
+fn gzip_decompress_labeled(data: &[u8], label: &str) -> Result<Vec<u8>, DecodeError> {
     let max_output = data.len().saturating_mul(GZIP_MAX_EXPANSION_PER_INPUT_BYTE);
     let mut out = Vec::new();
     // Read one byte beyond the limit so oversized output is distinguishable
     // from output that ends exactly at the limit.
     let probe_limit = u64::try_from(max_output)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "gzip output limit too large"))?
+        .map_err(|_| {
+            DecodeError::new(
+                DecodeErrorKind::Malformed,
+                "archive",
+                "gzip output limit too large",
+            )
+        })?
         .saturating_add(1);
     GzDecoder::new(data)
         .take(probe_limit)
         .read_to_end(&mut out)
-        .map_err(|e| io::Error::new(e.kind(), format!("{label}: {e}")))?;
+        .map_err(|e| DecodeError::caused(label, e))?;
     if out.len() > max_output {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        return Err(DecodeError::new(
+            DecodeErrorKind::Malformed,
+            "archive",
             format!("decompressed {label} exceeds output limit"),
         ));
     }
@@ -76,25 +84,33 @@ pub trait Source {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    fn bytes(&self, offset: u64, length: u64, label: &str) -> io::Result<Cow<'_, [u8]>>;
+    fn bytes(&self, offset: u64, length: u64, label: &str) -> Result<Cow<'_, [u8]>, DecodeError>;
 }
 
-fn checked_range(offset: u64, length: u64, source_len: u64, label: &str) -> io::Result<usize> {
+fn checked_range(
+    offset: u64,
+    length: u64,
+    source_len: u64,
+    label: &str,
+) -> Result<usize, DecodeError> {
     let end = offset.checked_add(length).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
+        DecodeError::new(
+            DecodeErrorKind::Malformed,
+            label,
             format!("{label} range overflow"),
         )
     })?;
     if end > source_len {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
+        return Err(DecodeError::new(
+            DecodeErrorKind::Malformed,
+            label,
             format!("{label} outside archive"),
         ));
     }
     usize::try_from(length).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
+        DecodeError::new(
+            DecodeErrorKind::Malformed,
+            label,
             format!("{label} length does not fit address space"),
         )
     })
@@ -111,19 +127,27 @@ impl Source for FileSource {
         self.len
     }
 
-    fn bytes(&self, offset: u64, length: u64, label: &str) -> io::Result<Cow<'_, [u8]>> {
+    fn bytes(&self, offset: u64, length: u64, label: &str) -> Result<Cow<'_, [u8]>, DecodeError> {
         let size = checked_range(offset, length, self.len, label)?;
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(size)
-            .map_err(|e| io::Error::other(format!("cannot allocate {label} buffer: {e}")))?;
+        bytes.try_reserve_exact(size).map_err(|e| {
+            let mut error = DecodeError::caused(format!("allocate {label} buffer"), e);
+            error.set_kind(DecodeErrorKind::Failed);
+            error
+        })?;
         bytes.resize(size, 0);
         let mut file = self
             .file
             .lock()
             .map_err(|_| io::Error::other("archive file lock poisoned"))?;
         file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(&mut bytes)?;
+        file.read_exact(&mut bytes).map_err(|error| {
+            if error.raw_os_error().is_none() && error.kind() == io::ErrorKind::UnexpectedEof {
+                DecodeError::caused(label, error)
+            } else {
+                DecodeError::from(error)
+            }
+        })?;
         Ok(Cow::Owned(bytes))
     }
 }
@@ -138,7 +162,7 @@ impl Source for MapSource {
         self.map.len() as u64
     }
 
-    fn bytes(&self, offset: u64, length: u64, label: &str) -> io::Result<Cow<'_, [u8]>> {
+    fn bytes(&self, offset: u64, length: u64, label: &str) -> Result<Cow<'_, [u8]>, DecodeError> {
         let size = checked_range(offset, length, self.len(), label)?;
         // checked_range bounded offset + size by the map length, a usize.
         #[allow(clippy::cast_possible_truncation)]
@@ -164,7 +188,7 @@ pub struct Archive<S: Source = FileSource> {
 
 impl Archive<FileSource> {
     /// Open an archive for reading. Decodes the header only.
-    pub fn open(path: &Path) -> io::Result<Self> {
+    pub fn open(path: &Path) -> Result<Self, DecodeError> {
         let file = File::open(path)?;
         let len = file.metadata()?.len();
         Self::from_source(FileSource {
@@ -186,7 +210,7 @@ impl Archive<MapSource> {
     /// this; the caller asserts it. Replacing the path is not a modification:
     /// this crate's archive writer publishes by renaming a fresh file over
     /// it, which leaves the mapped inode intact.
-    pub(crate) unsafe fn open_mapped(path: &Path) -> io::Result<Self> {
+    pub(crate) unsafe fn open_mapped(path: &Path) -> Result<Self, DecodeError> {
         let file = File::open(path)?;
         if file.metadata()?.len() < HEADER_LEN as u64 {
             return Err(short_header());
@@ -197,26 +221,28 @@ impl Archive<MapSource> {
     }
 }
 
-fn short_header() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::UnexpectedEof,
+fn short_header() -> DecodeError {
+    DecodeError::new(
+        DecodeErrorKind::Malformed,
+        "header",
         "archive shorter than PMTiles header",
     )
 }
 
-fn unsupported_internal(compression: Compression) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
+fn unsupported_internal(compression: Compression) -> DecodeError {
+    DecodeError::new(
+        DecodeErrorKind::Unsupported,
+        "internal compression",
         format!("unsupported PMTiles internal compression: {compression}"),
     )
 }
 
-fn invalid(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.into())
+fn invalid(message: impl Into<String>) -> DecodeError {
+    DecodeError::new(DecodeErrorKind::Malformed, "archive", message.into())
 }
 
 impl<S: Source> Archive<S> {
-    fn from_source(source: S) -> io::Result<Self> {
+    fn from_source(source: S) -> Result<Self, DecodeError> {
         if source.len() < HEADER_LEN as u64 {
             return Err(short_header());
         }
@@ -237,12 +263,12 @@ impl<S: Source> Archive<S> {
     }
 
     /// Whether MVT-parsing workflows can read this archive's tiles.
-    pub fn tile_decoder(&self) -> io::Result<TileDecoder> {
+    pub fn tile_decoder(&self) -> Result<TileDecoder, DecodeError> {
         TileDecoder::for_contract(self.header.tile_type, self.header.tile_compression)
     }
 
     /// Refuse any section the header declares outside the archive.
-    pub fn check_layout(&self) -> io::Result<()> {
+    pub fn check_layout(&self) -> Result<(), DecodeError> {
         let len = self.file_len();
         for (name, section) in self.header.sections() {
             let Some(end) = section.end() else {
@@ -268,7 +294,7 @@ impl<S: Source> Archive<S> {
         offset: u64,
         length: u64,
         label: &str,
-    ) -> io::Result<Cow<'_, [u8]>> {
+    ) -> Result<Cow<'_, [u8]>, DecodeError> {
         let inside = offset
             .checked_add(length)
             .is_some_and(|end| end <= section.length);
@@ -287,7 +313,7 @@ impl<S: Source> Archive<S> {
 
     /// Refuse an internal compression this reader cannot undo, before any
     /// section is read: an operation known to fail must not allocate first.
-    fn require_internal_supported(&self) -> io::Result<()> {
+    fn require_internal_supported(&self) -> Result<(), DecodeError> {
         match self.header.internal_compression {
             Compression::None | Compression::Gzip => Ok(()),
             other => Err(unsupported_internal(other)),
@@ -298,7 +324,7 @@ impl<S: Source> Archive<S> {
         &self,
         raw: Cow<'a, [u8]>,
         label: &str,
-    ) -> io::Result<Cow<'a, [u8]>> {
+    ) -> Result<Cow<'a, [u8]>, DecodeError> {
         match self.header.internal_compression {
             Compression::None => Ok(raw),
             Compression::Gzip => gzip_decompress_labeled(&raw, label).map(Cow::Owned),
@@ -307,12 +333,12 @@ impl<S: Source> Archive<S> {
     }
 
     /// The metadata document as UTF-8.
-    pub fn metadata(&self) -> io::Result<String> {
+    pub fn metadata(&self) -> Result<String, DecodeError> {
         self.require_internal_supported()?;
         let section = self.header.metadata;
         let raw = self.in_section(section, 0, section.length, "metadata")?;
         let raw = self.internal_decompress(raw, "metadata")?.into_owned();
-        String::from_utf8(raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        String::from_utf8(raw).map_err(|e| DecodeError::caused("metadata UTF-8", e))
     }
 
     /// Every tile run, sorted, from a validated directory tree.
@@ -323,7 +349,7 @@ impl<S: Source> Archive<S> {
     /// end. A leaf's first id must equal its pointer's id, and every run must
     /// end inside its interval - the predecessor lookup a PMTiles client
     /// performs relies on both. Blobs must lie inside the tile data section.
-    pub fn read_all_runs(&self) -> io::Result<TileRuns> {
+    pub fn read_all_runs(&self) -> Result<TileRuns, DecodeError> {
         self.require_internal_supported()?;
         let root = self.header.root_dir;
         let raw = self
@@ -342,7 +368,7 @@ impl<S: Source> Archive<S> {
         hi: u64,
         level: u8,
         runs: &mut Vec<TileRun>,
-    ) -> io::Result<()> {
+    ) -> Result<(), DecodeError> {
         for (index, entry) in entries.iter().enumerate() {
             let upper = entries.get(index + 1).map_or(hi, |next| next.tile_id);
             if entry.tile_id < lo || entry.tile_id >= upper {
@@ -383,10 +409,11 @@ impl<S: Source> Archive<S> {
         hi: u64,
         level: u8,
         runs: &mut Vec<TileRun>,
-    ) -> io::Result<()> {
+    ) -> Result<(), DecodeError> {
         if level >= MAX_DIRECTORY_LEVELS {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(DecodeError::new(
+                DecodeErrorKind::Unsupported,
+                "archive",
                 format!("unsupported layout: more than {MAX_DIRECTORY_LEVELS} directory levels"),
             ));
         }
@@ -413,7 +440,7 @@ impl<S: Source> Archive<S> {
         self.collect_runs(&entries, pointer.tile_id, hi, level + 1, runs)
     }
 
-    fn check_blob(&self, blob: BlobRef) -> io::Result<()> {
+    fn check_blob(&self, blob: BlobRef) -> Result<(), DecodeError> {
         let inside = blob
             .offset
             .checked_add(u64::from(blob.length))
@@ -429,7 +456,7 @@ impl<S: Source> Archive<S> {
     }
 
     /// The stored payload bytes, still compressed.
-    pub fn raw_blob(&self, blob: BlobRef) -> io::Result<Cow<'_, [u8]>> {
+    pub fn raw_blob(&self, blob: BlobRef) -> Result<Cow<'_, [u8]>, DecodeError> {
         self.in_section(
             self.header.tile_data,
             blob.offset,
@@ -440,11 +467,12 @@ impl<S: Source> Archive<S> {
 
     /// One tile payload, decompressed by the header's tile compression (none
     /// or gzip; anything else is an error).
-    pub fn read_tile(&self, blob: BlobRef) -> io::Result<Vec<u8>> {
+    pub fn read_tile(&self, blob: BlobRef) -> Result<Vec<u8>, DecodeError> {
         let compression = self.header.tile_compression;
         if !matches!(compression, Compression::None | Compression::Gzip) {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(DecodeError::new(
+                DecodeErrorKind::Unsupported,
+                "archive",
                 format!("unsupported tile compression: {compression}"),
             ));
         }
@@ -470,16 +498,19 @@ mod tests {
     fn gzip_decompression_enforces_the_deflate_bound() {
         let payload = b"bounded gzip payload";
         let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(payload).unwrap();
-        let compressed = encoder.finish().unwrap();
-        assert_eq!(gzip_decompress(&compressed).unwrap().as_slice(), payload);
+        encoder.write_all(payload).expect("test value");
+        let compressed = encoder.finish().expect("test value");
+        assert_eq!(
+            gzip_decompress(&compressed).expect("test value").as_slice(),
+            payload
+        );
     }
 
     /// Lay out a hand-built archive: header, root, leaves, data, all with
     /// internal compression none, so directory shapes a conforming writer
     /// never produces can be tested.
     fn archive_with(root: &[WireEntry], leaves: &[u8], data_len: u64) -> Vec<u8> {
-        let root_bytes = encode_directory(root).unwrap();
+        let root_bytes = encode_directory(root).expect("test value");
         let root_offset = HEADER_LEN as u64;
         let leaf_offset = root_offset + root_bytes.len() as u64;
         let data_offset = leaf_offset + leaves.len() as u64;
@@ -528,7 +559,7 @@ mod tests {
         }
     }
 
-    fn runs_of(bytes: &[u8]) -> io::Result<TileRuns> {
+    fn runs_of(bytes: &[u8]) -> Result<TileRuns, DecodeError> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("a.pmtiles");
         std::fs::write(&path, bytes)?;
@@ -537,11 +568,11 @@ mod tests {
 
     #[test]
     fn leaf_routing_is_validated_before_flattening() {
-        let leaf = encode_directory(&[entry(10, 0, 4, 2), entry(14, 4, 4, 1)]).unwrap();
+        let leaf = encode_directory(&[entry(10, 0, 4, 2), entry(14, 4, 4, 1)]).expect("test value");
         let len = leaf.len() as u32;
         // Valid: the leaf interval [10, 20) holds runs 10..12 and 14..15.
         let ok = archive_with(&[entry(10, 0, len, 0), entry(20, 8, 4, 1)], &leaf, 12);
-        assert_eq!(runs_of(&ok).unwrap().len(), 3);
+        assert_eq!(runs_of(&ok).expect("test value").len(), 3);
         // The next root entry starts inside the leaf's last run.
         let crossing = archive_with(&[entry(10, 0, len, 0), entry(14, 8, 4, 1)], &leaf, 12);
         assert!(runs_of(&crossing).is_err());
@@ -559,7 +590,7 @@ mod tests {
     #[test]
     fn blobs_must_lie_inside_the_tile_data_section() {
         let ok = archive_with(&[entry(0, 0, 4, 1)], &[], 4);
-        assert_eq!(runs_of(&ok).unwrap().len(), 1);
+        assert_eq!(runs_of(&ok).expect("test value").len(), 1);
         let outside = archive_with(&[entry(0, 1, 4, 1)], &[], 4);
         assert!(runs_of(&outside).is_err());
     }
@@ -570,48 +601,91 @@ mod tests {
         let build = |levels: usize| {
             let mut leaves = Vec::new();
             let mut pointer = entry(5, 0, 0, 0);
-            let mut chain = vec![encode_directory(&[entry(5, 0, 4, 1)]).unwrap()];
+            let mut chain = vec![encode_directory(&[entry(5, 0, 4, 1)]).expect("test value")];
             for _ in 1..levels - 1 {
-                let below = chain.last().unwrap();
+                let below = chain.last().expect("test value");
                 let offset: usize = chain.iter().map(Vec::len).sum::<usize>() - below.len();
                 chain.push(
-                    encode_directory(&[entry(5, offset as u64, below.len() as u32, 0)]).unwrap(),
+                    encode_directory(&[entry(5, offset as u64, below.len() as u32, 0)])
+                        .expect("test value"),
                 );
             }
             for dir in &chain {
                 leaves.extend_from_slice(dir);
             }
-            let top = chain.last().unwrap();
+            let top = chain.last().expect("test value");
             pointer.offset = (leaves.len() - top.len()) as u64;
             pointer.length = top.len() as u32;
             archive_with(&[pointer], &leaves, 4)
         };
         assert_eq!(
             runs_of(&build(MAX_DIRECTORY_LEVELS as usize))
-                .unwrap()
+                .expect("test value")
                 .len(),
             1
         );
         let err = runs_of(&build(MAX_DIRECTORY_LEVELS as usize + 1)).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(err.kind(), DecodeErrorKind::Unsupported);
     }
 
     #[test]
     fn open_reads_the_header_of_an_archive_it_cannot_otherwise_read() {
         let mut bytes = archive_with(&[entry(0, 0, 4, 1)], &[], 4);
         bytes[97] = 9; // internal compression outside the spec
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("test value");
         let path = dir.path().join("a.pmtiles");
-        std::fs::write(&path, &bytes).unwrap();
-        let archive = Archive::open(&path).unwrap();
+        std::fs::write(&path, &bytes).expect("test value");
+        let archive = Archive::open(&path).expect("test value");
         assert_eq!(archive.header().internal_compression, Compression::Other(9));
         assert_eq!(
             archive.read_all_runs().unwrap_err().kind(),
-            io::ErrorKind::Unsupported
+            DecodeErrorKind::Unsupported
         );
-        std::fs::write(&path, b"PMTiles").unwrap();
+        std::fs::write(&path, b"PMTiles").expect("test value");
         assert!(Archive::open(&path).is_err());
-        std::fs::write(&path, b"").unwrap();
+        std::fs::write(&path, b"").expect("test value");
         assert!(Archive::open(&path).is_err());
+    }
+}
+
+#[cfg(test)]
+mod typed_error_tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn header_and_gzip_failures_establish_rejected_bytes() {
+        let error = short_header();
+        assert_eq!(error.kind(), DecodeErrorKind::Malformed);
+        let error = gzip_decompress(b"not gzip").expect_err("invalid gzip");
+        assert_eq!(error.kind(), DecodeErrorKind::Malformed);
+        assert_eq!(error.locus(), "gzip payload");
+        assert!(
+            error
+                .source()
+                .expect("gzip decoder cause")
+                .is::<io::Error>()
+        );
+    }
+
+    struct BrokenSource;
+    impl Source for BrokenSource {
+        fn len(&self) -> u64 {
+            HEADER_LEN as u64
+        }
+        fn bytes(&self, _: u64, _: u64, _: &str) -> Result<Cow<'_, [u8]>, DecodeError> {
+            Err(io::Error::from_raw_os_error(5).into())
+        }
+    }
+    #[test]
+    fn operational_failure_is_not_header_rejection() {
+        let error = Archive::from_source(BrokenSource)
+            .err()
+            .expect("source failed");
+        assert_eq!(error.kind(), DecodeErrorKind::Io);
+        assert_eq!(
+            crate::PipelineError::from(error).kind(),
+            crate::ErrorKind::Io
+        );
     }
 }

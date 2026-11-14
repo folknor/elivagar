@@ -1,5 +1,6 @@
 # Installation
 
+
 ## From crates.io
 
 ```sh
@@ -22,6 +23,15 @@ header, and the writer's `add_run` / `set_metadata_verbatim`), the
 `tile_detail` MVT decoder with selectable unknown-field strictness, and typed
 provenance.
 
+Archive read operations (including header decode and tile-contract checks)
+and `tile_detail` decoders return `DecodeError`, with `kind()` and `locus()`.
+`DecodeErrorKind` distinguishes malformed bytes, unsupported formats, OS I/O
+and opaque failures; `source()` retains the original decoder or I/O cause.
+`inspect`, SVG rendering and diag return `PipelineError` and preserve this
+classification. Conversion into `std::io::Error` retains the typed cause for
+adapters. Directory encoding and writer configuration keep their I/O surface.
+
+
 `TilegenConfig::ocean` is `Option<OceanInputs>`: the full-resolution shapefile
 is required when ocean is enabled, with optional simplified and artifact paths.
 `OceanInputs::parse_specs` accepts the CLI's repeatable ocean syntax.
@@ -32,6 +42,26 @@ and `FanoutCaps::parse_specs` or `FanoutCaps::set` for checked layer caps.
 failure (invalid request, refused input, resume or ocean artifact, OS I/O,
 internal, or unclassified); the binary exits with the matching code from the
 [CLI reference](../reference/cli).
+
+Library callers can inspect `PipelineError::artifact_refusal()` for a typed
+`ArtifactRefusal`. `KeyMismatch::fields` names every differing identity field
+(policy version, shapefile hashes, zooms, or compression level). Artifact
+admission and directory refusals exit 4; OS read failures exit 74. Shapefile
+hashing failures retain their own failure class.
+
+Sort chunk readers and writer `resume`/`finish` return `sort::ChunkStoreError`, with
+`kind()` distinguishing compression, stale names, missing chunks, counts,
+corruption and I/O. Pipeline resume refusals expose these through
+`ResumeRefusal::ChunkStore { kind }`. Invalid retained chunks exit 3; fresh
+run read-back failures stay unclassified (2), and OS failures retain 74.
+
+Verification reports expose `tile_errors: Vec<verify::TileFinding>` with
+coordinates and a shared typed `verify::Finding`. `tile_error_count` includes
+findings beyond the 100 retained diagnostics. Traversal continues past that
+cap. `verify::PaintOrderError` distinguishes attribute and rank failures.
+`VerifyError` retains typed decode causes for container and metadata failures
+and converts to `PipelineError`. Operational tile reads abort (74), opaque
+failures abort (2), and rejected tile bytes fail the completed report (1).
 
 ## From source
 

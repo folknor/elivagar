@@ -81,7 +81,7 @@ pub fn render_tile_svg(
     x: u32,
     y: u32,
     out: &mut dyn Write,
-) -> io::Result<()> {
+) -> Result<(), crate::PipelineError> {
     render_tile_grid_svg(pmtiles_path, z, x, y, 1, 1, None, out)
 }
 
@@ -98,9 +98,11 @@ pub fn render_tile_grid_svg(
     height: u32,
     layer_filter: Option<&[&str]>,
     out: &mut dyn Write,
-) -> io::Result<()> {
-    validate_tile_grid_coordinates(z, x0, y0, width, height)?;
-    validate_layer_filter(layer_filter)?;
+) -> Result<(), crate::PipelineError> {
+    validate_tile_grid_coordinates(z, x0, y0, width, height)
+        .map_err(|e| crate::PipelineError::config("invalid tile coordinates").with_cause(e))?;
+    validate_layer_filter(layer_filter)
+        .map_err(|e| crate::PipelineError::config("invalid layer filter").with_cause(e))?;
 
     let reader = Archive::open(pmtiles_path)?;
     reader.tile_decoder()?;
@@ -121,7 +123,8 @@ pub fn render_tile_grid_svg(
     }
 
     let svg = build_grid_svg(&tile_layers, width, height, layer_filter);
-    out.write_all(svg.as_bytes())
+    out.write_all(svg.as_bytes())?;
+    Ok(())
 }
 
 /// Build SVG for a grid of tiles. Each tile's geometry is offset by its grid position.
@@ -314,17 +317,19 @@ struct SvgFeature {
 
 /// The viewer reads any producer's tiles, so messages are walked tolerant:
 /// unknown fields are skipped, while a read error fails the tile.
-fn decode_mvt_geometry(data: &[u8]) -> io::Result<Vec<SvgLayer>> {
-    message::parse_tile(data, Strictness::Tolerant)
-        .map_err(io::Error::other)?
+fn decode_mvt_geometry(data: &[u8]) -> Result<Vec<SvgLayer>, crate::DecodeError> {
+    message::parse_tile(data, Strictness::Tolerant)?
         .iter()
         .map(decode_layer)
         .collect()
 }
 
-fn decode_layer(layer: &message::LayerMessage<'_>) -> io::Result<SvgLayer> {
+fn decode_layer(layer: &message::LayerMessage<'_>) -> Result<SvgLayer, crate::DecodeError> {
     if layer.extent == 0 {
-        return Err(io::Error::other("invalid layer extent"));
+        return Err(crate::DecodeError::malformed(
+            "MVT layer extent",
+            "invalid layer extent",
+        ));
     }
     let extent = f64::from(layer.extent);
     let mut features = Vec::with_capacity(layer.features.len());
@@ -347,8 +352,8 @@ fn decode_layer(layer: &message::LayerMessage<'_>) -> io::Result<SvgLayer> {
     })
 }
 
-fn decode_feature(data: &[u8]) -> io::Result<SvgFeature> {
-    let feature = message::parse_feature(data, Strictness::Tolerant).map_err(io::Error::other)?;
+fn decode_feature(data: &[u8]) -> Result<SvgFeature, crate::DecodeError> {
+    let feature = message::parse_feature(data, Strictness::Tolerant)?;
     let geom_type = feature.geom_type;
     let paths = match &feature.geometry {
         Some(bytes) => decode_geometry_commands(bytes, geom_type)?,
@@ -360,7 +365,10 @@ fn decode_feature(data: &[u8]) -> io::Result<SvgFeature> {
 /// Paths as drawn: each MoveTo point starts a path, a polygon ClosePath
 /// closes and ends it. The viewer decodes unvalidated so a mis-sequenced
 /// stream still draws and can be seen; a wire error fails the tile.
-fn decode_geometry_commands(data: &[u8], geom_type: u8) -> io::Result<Vec<Vec<(f64, f64)>>> {
+fn decode_geometry_commands(
+    data: &[u8],
+    geom_type: u8,
+) -> Result<Vec<Vec<(f64, f64)>>, crate::DecodeError> {
     struct Paths {
         polygon: bool,
         paths: Vec<Vec<(f64, f64)>>,
@@ -397,8 +405,7 @@ fn decode_geometry_commands(data: &[u8], geom_type: u8) -> io::Result<Vec<Vec<(f
         current: Vec::new(),
         in_move: false,
     };
-    decode::decode(Words::packed(data), None, &mut paths)
-        .map_err(|e| io::Error::other(format!("mvt geometry: {e}")))?;
+    decode::decode(Words::packed(data), None, &mut paths).map_err(crate::DecodeError::from)?;
     if !paths.current.is_empty() {
         paths.paths.push(paths.current);
     }
@@ -456,7 +463,7 @@ mod tests {
             bytes.push(u8::try_from(x).expect("final varint byte should fit in u8"));
         }
 
-        let paths = decode_geometry_commands(&bytes, 3).unwrap();
+        let paths = decode_geometry_commands(&bytes, 3).expect("test value");
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0][0], (10.0, 10.0));
         assert_eq!(paths[1][0], (30.0, 30.0));
@@ -523,7 +530,10 @@ mod tests {
             None,
         );
 
-        assert!(svg.find("<g id=\"ocean\"").unwrap() < svg.find("<g id=\"land\"").unwrap());
+        assert!(
+            svg.find("<g id=\"ocean\"").expect("test value")
+                < svg.find("<g id=\"land\"").expect("test value")
+        );
         assert!(svg.contains(&format!("fill=\"{ocean_color}\"")));
         assert_eq!(svg, reversed);
     }

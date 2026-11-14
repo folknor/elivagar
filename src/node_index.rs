@@ -84,6 +84,85 @@ const MAX_FLAT_INDEX_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 GB safety cap
 #[allow(clippy::cast_possible_wrap)]
 const COORD_XOR: i32 = 0x5555_5555_u32 as i32;
 
+/// A node the store refused to record, or an operational failure growing it.
+///
+/// Every variant except the two I/O ones is a property of the input's node
+/// IDs - negative, out of order for the sorted store, or too large for the
+/// flat store's guardrail or address arithmetic - so the run classes them as
+/// rejected input. The I/O variants keep their `io::Error` as the source.
+#[derive(Debug)]
+pub enum NodeStoreError {
+    /// A negative node ID; both backends address by non-negative IDs.
+    NegativeId { node_id: i64 },
+    /// The sorted store saw an ID not strictly above the previous one.
+    NotIncreasing { node_id: i64, previous: i64 },
+    /// The flat store would need more than its safety cap for this ID.
+    SafetyCap {
+        node_id: i64,
+        needed_bytes: u64,
+        cap_bytes: u64,
+    },
+    /// The ID's byte offset does not fit the flat store's address space.
+    OffsetOverflow { node_id: i64 },
+    /// Extending the flat index file failed.
+    Grow(io::Error),
+    /// Remapping the extended flat index failed.
+    Remap(io::Error),
+}
+
+impl NodeStoreError {
+    /// True for the variants that reject the input's node IDs.
+    #[must_use]
+    pub fn is_input_rejection(&self) -> bool {
+        !matches!(self, Self::Grow(_) | Self::Remap(_))
+    }
+}
+
+impl std::fmt::Display for NodeStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+        match self {
+            Self::NegativeId { node_id } => {
+                write!(f, "node IDs must be non-negative, got {node_id}")
+            }
+            Self::NotIncreasing { node_id, previous } => write!(
+                f,
+                "sorted node store needs strictly increasing node IDs, got {node_id} after \
+                 {previous}; the PBF is not actually sorted (drop --force-sorted, or sort it \
+                 with `pbfhogg sort input.pbf -o sorted.pbf`)"
+            ),
+            #[allow(clippy::cast_precision_loss)]
+            Self::SafetyCap {
+                node_id,
+                needed_bytes,
+                cap_bytes,
+            } => write!(
+                f,
+                "flat node index safety cap exceeded: requested {:.1} GB for node_id={node_id} \
+                 (cap: {:.1} GB). Input is likely unsorted. Use a sorted PBF, run \
+                 `pbfhogg sort input.pbf -o sorted.pbf`, or use --force-sorted only if the PBF \
+                 is actually sorted.",
+                *needed_bytes as f64 / GB,
+                *cap_bytes as f64 / GB,
+            ),
+            Self::OffsetOverflow { node_id } => {
+                write!(f, "node_id={node_id} overflows the flat node index offset")
+            }
+            Self::Grow(_) => f.write_str("failed to grow the flat node index file"),
+            Self::Remap(_) => f.write_str("failed to remap the flat node index"),
+        }
+    }
+}
+
+impl std::error::Error for NodeStoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Grow(err) | Self::Remap(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
 struct FlatNodeIndexInner {
     file: File,
     mmap: MmapMut,
@@ -134,33 +213,26 @@ impl FlatNodeIndexInner {
     /// Negative node IDs are invalid and rejected, matching `SortedNodeStore`.
     /// Write coordinates using a typed node identifier.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn put_id(&mut self, node_id: NodeId, coord: LatLonE7) {
-        assert!(
-            node_id.as_i64() >= 0,
-            "NodeIndex: node IDs must be non-negative, got {}",
-            node_id.as_i64()
-        );
+    fn put_id(&mut self, node_id: NodeId, coord: LatLonE7) -> Result<(), NodeStoreError> {
+        let raw = node_id.as_i64();
         let id = node_id
             .as_nonnegative_u64()
-            .expect("validated node ID must be non-negative");
+            .ok_or(NodeStoreError::NegativeId { node_id: raw })?;
         let offset = id
             .checked_mul(ENTRY_SIZE)
-            .expect("flat node index offset overflow");
+            .ok_or(NodeStoreError::OffsetOverflow { node_id: raw })?;
         let needed = offset
             .checked_add(ENTRY_SIZE)
-            .expect("flat node index file size overflow");
+            .ok_or(NodeStoreError::OffsetOverflow { node_id: raw })?;
 
         if let Some(max_file_size) = self.max_file_size
             && needed > max_file_size
         {
-            panic!(
-                "flat node index safety cap exceeded: requested {:.1} GB for node_id={} (cap: {:.1} GB). \
-                 Input is likely unsorted. Use a sorted PBF, run `pbfhogg sort input.pbf -o sorted.pbf`, \
-                 or use --force-sorted only if the PBF is actually sorted.",
-                needed as f64 / (1024.0 * 1024.0 * 1024.0),
-                node_id.as_i64(),
-                max_file_size as f64 / (1024.0 * 1024.0 * 1024.0),
-            );
+            return Err(NodeStoreError::SafetyCap {
+                node_id: raw,
+                needed_bytes: needed,
+                cap_bytes: max_file_size,
+            });
         }
 
         if needed > self.file_len {
@@ -170,19 +242,16 @@ impl FlatNodeIndexInner {
             if !missing.is_multiple_of(GROW_INCREMENT) {
                 increments += 1;
             }
-            let growth = increments
+            let new_len = increments
                 .checked_mul(GROW_INCREMENT)
-                .expect("flat node index growth overflow");
-            let new_len = self
-                .file_len
-                .checked_add(growth)
-                .expect("flat node index file size overflow");
-            // Panic: unrecoverable I/O - disk full or mmap failure means the run is dead.
-            self.file
-                .set_len(new_len)
-                .expect("failed to grow node index file");
-            self.mmap =
-                unsafe { MmapMut::map_mut(&self.file).expect("failed to remap node index") };
+                .and_then(|growth| self.file_len.checked_add(growth))
+                .ok_or(NodeStoreError::OffsetOverflow { node_id: raw })?;
+            // The mapping must cover the whole slot, so an ID past the
+            // address space is input the flat store cannot represent.
+            usize::try_from(new_len)
+                .map_err(|_| NodeStoreError::OffsetOverflow { node_id: raw })?;
+            self.file.set_len(new_len).map_err(NodeStoreError::Grow)?;
+            self.mmap = unsafe { MmapMut::map_mut(&self.file).map_err(NodeStoreError::Remap)? };
 
             self.file_len = new_len;
         }
@@ -191,6 +260,7 @@ impl FlatNodeIndexInner {
         self.mmap[off..off + 4].copy_from_slice(&(coord.lat ^ COORD_XOR).to_le_bytes());
         self.mmap[off + 4..off + 8].copy_from_slice(&(coord.lon ^ COORD_XOR).to_le_bytes());
         self.node_count += 1;
+        Ok(())
     }
 
     /// Read coordinates for a node. Returns None if entry is unset (all zeros).
@@ -792,17 +862,20 @@ impl SortedNodeStoreInner {
     /// Store typed coordinates. Node IDs MUST be strictly increasing.
     #[hotpath::measure]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn put_id(&mut self, node_id: NodeId, coord: LatLonE7) {
+    fn put_id(&mut self, node_id: NodeId, coord: LatLonE7) -> Result<(), NodeStoreError> {
         let id = node_id
             .as_nonnegative_u64()
-            .expect("SortedNodeStore: node IDs must be non-negative");
-        let previous = self.last_node_id;
-        assert!(
-            previous.is_none_or(|last| node_id > last),
-            "SortedNodeStore: node IDs must be strictly increasing, got {} after {}",
-            node_id.as_i64(),
-            previous.map_or(-1, NodeId::as_i64)
-        );
+            .ok_or(NodeStoreError::NegativeId {
+                node_id: node_id.as_i64(),
+            })?;
+        if let Some(previous) = self.last_node_id
+            && node_id <= previous
+        {
+            return Err(NodeStoreError::NotIncreasing {
+                node_id: node_id.as_i64(),
+                previous: previous.as_i64(),
+            });
+        }
         self.last_node_id = Some(node_id);
         self.node_count += 1;
 
@@ -840,6 +913,7 @@ impl SortedNodeStoreInner {
 
         set_bit(&mut self.current_node_mask, node_in_chunk);
         self.current_coords.push(coord);
+        Ok(())
     }
 
     // Offset scratch buffers are hoisted onto the struct to avoid alloc/dealloc
@@ -1054,18 +1128,23 @@ impl NodeStore {
     }
 
     /// Legacy tuple-coordinate writer.
-    pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
-        self.put_id(NodeId::new(node_id), lat_e7, lon_e7);
+    pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) -> Result<(), NodeStoreError> {
+        self.put_id(NodeId::new(node_id), lat_e7, lon_e7)
     }
 
     /// Store coordinates using a typed node identifier.
-    pub fn put_id(&mut self, node_id: NodeId, lat_e7: i32, lon_e7: i32) {
-        self.put_coord_id(node_id, LatLonE7::new(lat_e7, lon_e7));
+    pub fn put_id(
+        &mut self,
+        node_id: NodeId,
+        lat_e7: i32,
+        lon_e7: i32,
+    ) -> Result<(), NodeStoreError> {
+        self.put_coord_id(node_id, LatLonE7::new(lat_e7, lon_e7))
     }
 
     /// Store a typed coordinate using a typed node identifier.
     #[inline]
-    pub fn put_coord_id(&mut self, node_id: NodeId, coord: LatLonE7) {
+    pub fn put_coord_id(&mut self, node_id: NodeId, coord: LatLonE7) -> Result<(), NodeStoreError> {
         match &mut self.backend {
             NodeStoreBackend::Flat(idx) => idx.put_id(node_id, coord),
             NodeStoreBackend::Sorted(store) => store.put_id(node_id, coord),
@@ -1194,13 +1273,18 @@ impl SortedNodeStore {
     }
 
     #[inline]
-    pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) {
-        self.put_id(NodeId::new(node_id), lat_e7, lon_e7);
+    pub fn put(&mut self, node_id: i64, lat_e7: i32, lon_e7: i32) -> Result<(), NodeStoreError> {
+        self.put_id(NodeId::new(node_id), lat_e7, lon_e7)
     }
 
     #[inline]
-    pub fn put_id(&mut self, node_id: NodeId, lat_e7: i32, lon_e7: i32) {
-        self.inner.put_id(node_id, LatLonE7::new(lat_e7, lon_e7));
+    pub fn put_id(
+        &mut self,
+        node_id: NodeId,
+        lat_e7: i32,
+        lon_e7: i32,
+    ) -> Result<(), NodeStoreError> {
+        self.inner.put_id(node_id, LatLonE7::new(lat_e7, lon_e7))
     }
 
     #[inline]
@@ -1247,7 +1331,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_test.bin");
         let mut idx = NodeIndex::create(&path).unwrap();
-        idx.put(100, 555_000_000, 133_000_000);
+        idx.put(100, 555_000_000, 133_000_000).unwrap();
         assert_eq!(idx.get(100), Some((555_000_000, 133_000_000)));
     }
 
@@ -1256,9 +1340,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_test.bin");
         let mut idx = NodeIndex::create(&path).unwrap();
-        idx.put(10, 100_000, 200_000);
-        idx.put(20, 300_000, 400_000);
-        idx.put(30, 500_000, 600_000);
+        idx.put(10, 100_000, 200_000).unwrap();
+        idx.put(20, 300_000, 400_000).unwrap();
+        idx.put(30, 500_000, 600_000).unwrap();
         assert_eq!(idx.get(10), Some((100_000, 200_000)));
         assert_eq!(idx.get(20), Some((300_000, 400_000)));
         assert_eq!(idx.get(30), Some((500_000, 600_000)));
@@ -1269,7 +1353,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_test.bin");
         let mut idx = NodeIndex::create(&path).unwrap();
-        idx.put(5, 111, 222);
+        idx.put(5, 111, 222).unwrap();
         assert_eq!(idx.get(999), None);
     }
 
@@ -1279,7 +1363,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_test.bin");
         let mut idx = NodeIndex::create(&path).unwrap();
-        idx.put(1, 0, 0);
+        idx.put(1, 0, 0).unwrap();
         assert_eq!(idx.get(1), Some((0, 0)));
     }
 
@@ -1288,8 +1372,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_test.bin");
         let mut idx = NodeIndex::create(&path).unwrap();
-        idx.put(42, 111_000, 222_000);
-        idx.put(42, 333_000, 444_000);
+        idx.put(42, 111_000, 222_000).unwrap();
+        idx.put(42, 333_000, 444_000).unwrap();
         assert_eq!(idx.get(42), Some((333_000, 444_000)));
     }
 
@@ -1298,8 +1382,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_test.bin");
         let mut idx = NodeIndex::create(&path).unwrap();
-        idx.put(10, 100_000, 200_000);
-        idx.put(20, 300_000, 400_000);
+        idx.put(10, 100_000, 200_000).unwrap();
+        idx.put(20, 300_000, 400_000).unwrap();
 
         let reader = idx.into_reader().unwrap();
         assert_eq!(reader.get(10), Some((100_000, 200_000)));
@@ -1399,16 +1483,16 @@ mod tests {
     #[test]
     fn sorted_put_and_get() {
         let mut store = SortedNodeStore::new();
-        store.put(100, 555_000_000, 133_000_000);
+        store.put(100, 555_000_000, 133_000_000).unwrap();
         assert_eq!(store.get(100), Some((555_000_000, 133_000_000)));
     }
 
     #[test]
     fn sorted_put_multiple_get_each() {
         let mut store = SortedNodeStore::new();
-        store.put(10, 100_000, 200_000);
-        store.put(20, 300_000, 400_000);
-        store.put(30, 500_000, 600_000);
+        store.put(10, 100_000, 200_000).unwrap();
+        store.put(20, 300_000, 400_000).unwrap();
+        store.put(30, 500_000, 600_000).unwrap();
         assert_eq!(store.get(10), Some((100_000, 200_000)));
         assert_eq!(store.get(20), Some((300_000, 400_000)));
         assert_eq!(store.get(30), Some((500_000, 600_000)));
@@ -1417,22 +1501,22 @@ mod tests {
     #[test]
     fn sorted_get_nonexistent() {
         let mut store = SortedNodeStore::new();
-        store.put(5, 111, 222);
+        store.put(5, 111, 222).unwrap();
         assert_eq!(store.get(999), None);
     }
 
     #[test]
     fn sorted_zero_zero_is_valid() {
         let mut store = SortedNodeStore::new();
-        store.put(1, 0, 0);
+        store.put(1, 0, 0).unwrap();
         assert_eq!(store.get(1), Some((0, 0)));
     }
 
     #[test]
     fn sorted_into_reader() {
         let mut store = SortedNodeStore::new();
-        store.put(10, 100_000, 200_000);
-        store.put(20, 300_000, 400_000);
+        store.put(10, 100_000, 200_000).unwrap();
+        store.put(20, 300_000, 400_000).unwrap();
         let reader = store.into_reader();
         assert_eq!(reader.get(10), Some((100_000, 200_000)));
         assert_eq!(reader.get(20), Some((300_000, 400_000)));
@@ -1450,9 +1534,9 @@ mod tests {
             } else {
                 -1_800_000_000
             };
-            store.put(id, 100, lon);
+            store.put(id, 100, lon).unwrap();
         }
-        store.put(256, 200, 300); // flush the first chunk for builder reads
+        store.put(256, 200, 300).unwrap(); // flush the first chunk for builder reads
         for id in 1..=32 {
             let lon = if id % 2 == 0 {
                 1_800_000_000
@@ -1475,11 +1559,11 @@ mod tests {
     #[test]
     fn sorted_reader_caches_do_not_mix_stores() {
         let mut first = SortedNodeStore::new();
-        first.put(10, 100, 200);
+        first.put(10, 100, 200).unwrap();
         let first = first.into_reader();
         let mut second = SortedNodeStore::new();
-        second.put(10, 300, 400);
-        second.put(20, 500, 600);
+        second.put(10, 300, 400).unwrap();
+        second.put(20, 500, 600).unwrap();
         let second = second.into_reader();
 
         assert_eq!(first.get(10), Some((100, 200)));
@@ -1492,8 +1576,8 @@ mod tests {
     #[test]
     fn sorted_cross_chunk_boundary() {
         let mut store = SortedNodeStore::new();
-        store.put(255, 10, 20);
-        store.put(256, 30, 40);
+        store.put(255, 10, 20).unwrap();
+        store.put(256, 30, 40).unwrap();
         assert_eq!(store.get(255), Some((10, 20)));
         assert_eq!(store.get(256), Some((30, 40)));
     }
@@ -1501,8 +1585,8 @@ mod tests {
     #[test]
     fn sorted_cross_group_boundary() {
         let mut store = SortedNodeStore::new();
-        store.put(65535, 10, 20);
-        store.put(65536, 30, 40);
+        store.put(65535, 10, 20).unwrap();
+        store.put(65536, 30, 40).unwrap();
         let reader = store.into_reader();
         assert_eq!(reader.get(65535), Some((10, 20)));
         assert_eq!(reader.get(65536), Some((30, 40)));
@@ -1511,8 +1595,8 @@ mod tests {
     #[test]
     fn sorted_large_gap_in_ids() {
         let mut store = SortedNodeStore::new();
-        store.put(1_000_000, 10, 20);
-        store.put(10_000_000, 30, 40);
+        store.put(1_000_000, 10, 20).unwrap();
+        store.put(10_000_000, 30, 40).unwrap();
         let reader = store.into_reader();
         assert_eq!(reader.get(1_000_000), Some((10, 20)));
         assert_eq!(reader.get(10_000_000), Some((30, 40)));
@@ -1522,7 +1606,7 @@ mod tests {
     #[test]
     fn sorted_single_node() {
         let mut store = SortedNodeStore::new();
-        store.put(42, 100, 200);
+        store.put(42, 100, 200).unwrap();
         let reader = store.into_reader();
         assert_eq!(reader.get(42), Some((100, 200)));
         assert_eq!(reader.get(41), None);
@@ -1534,7 +1618,7 @@ mod tests {
         let mut store = SortedNodeStore::new();
         for i in 0..256i64 {
             #[allow(clippy::cast_possible_truncation)]
-            store.put(i, i as i32 * 100, i as i32 * 200);
+            store.put(i, i as i32 * 100, i as i32 * 200).unwrap();
         }
         let reader = store.into_reader();
         for i in 0..256i64 {
@@ -1556,31 +1640,80 @@ mod tests {
     #[test]
     fn sorted_high_node_id() {
         let mut store = SortedNodeStore::new();
-        store.put(12_000_000_000, 550_000_000, 130_000_000);
+        store.put(12_000_000_000, 550_000_000, 130_000_000).unwrap();
         let reader = store.into_reader();
         assert_eq!(reader.get(12_000_000_000), Some((550_000_000, 130_000_000)));
     }
 
     #[test]
-    #[should_panic(expected = "strictly increasing")]
     fn sorted_rejects_non_monotonic() {
         let mut store = SortedNodeStore::new();
-        store.put(10, 100, 200);
-        store.put(5, 300, 400);
+        store.put(10, 100, 200).unwrap();
+        let err = store.put(5, 300, 400).unwrap_err();
+        assert!(matches!(
+            err,
+            NodeStoreError::NotIncreasing {
+                node_id: 5,
+                previous: 10
+            }
+        ));
+        assert!(err.is_input_rejection());
     }
 
     #[test]
-    #[should_panic(expected = "strictly increasing")]
     fn sorted_rejects_duplicate_id() {
         let mut store = SortedNodeStore::new();
-        store.put(10, 100, 200);
-        store.put(10, 300, 400);
+        store.put(10, 100, 200).unwrap();
+        let err = store.put(10, 300, 400).unwrap_err();
+        assert!(matches!(
+            err,
+            NodeStoreError::NotIncreasing { node_id: 10, .. }
+        ));
+    }
+
+    #[test]
+    fn both_backends_reject_negative_ids() {
+        let mut sorted = NodeStore::new_sorted();
+        assert!(matches!(
+            sorted.put(-1, 0, 0),
+            Err(NodeStoreError::NegativeId { node_id: -1 })
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let mut flat = NodeStore::create_flat(&dir.path().join("neg.bin")).unwrap();
+        assert!(matches!(
+            flat.put(-1, 0, 0),
+            Err(NodeStoreError::NegativeId { node_id: -1 })
+        ));
+    }
+
+    #[test]
+    fn unbounded_flat_rejects_unaddressable_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut flat = NodeStore::create_flat_unbounded(&dir.path().join("big.bin")).unwrap();
+        let err = flat.put(i64::MAX, 1, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            NodeStoreError::OffsetOverflow { node_id: i64::MAX }
+        ));
+        assert!(err.is_input_rejection());
+    }
+
+    #[test]
+    fn grow_failures_keep_their_io_cause() {
+        let err = NodeStoreError::Grow(io::Error::from_raw_os_error(28));
+        assert!(!err.is_input_rejection());
+        let source = std::error::Error::source(&err)
+            .and_then(|e| e.downcast_ref::<io::Error>())
+            .unwrap();
+        assert_eq!(source.raw_os_error(), Some(28));
     }
 
     #[test]
     fn node_store_sorted_variant() {
         let mut store = NodeStore::new_sorted();
-        store.put_coord_id(NodeId::new(100), LatLonE7::new(555_000_000, 133_000_000));
+        store
+            .put_coord_id(NodeId::new(100), LatLonE7::new(555_000_000, 133_000_000))
+            .unwrap();
         let reader = store.into_reader().unwrap();
         assert_eq!(
             reader.get_coord_id(NodeId::new(100)),
@@ -1594,20 +1727,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_test.bin");
         let mut store = NodeStore::create_flat(&path).unwrap();
-        store.put(100, 555_000_000, 133_000_000);
+        store.put(100, 555_000_000, 133_000_000).unwrap();
         let reader = store.into_reader().unwrap();
         assert_eq!(reader.get(100), Some((555_000_000, 133_000_000)));
         assert_eq!(reader.get(999), None);
     }
 
     #[test]
-    #[should_panic(expected = "flat node index safety cap exceeded")]
     fn flat_index_safety_cap_triggers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_index_cap.bin");
         let mut idx = NodeIndex::create(&path).unwrap();
         #[allow(clippy::cast_possible_wrap)]
         let node_id = ((MAX_FLAT_INDEX_SIZE / ENTRY_SIZE) + 1) as i64;
-        idx.put(node_id, 1, 1);
+        let err = idx.put(node_id, 1, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            NodeStoreError::SafetyCap { node_id: id, cap_bytes: MAX_FLAT_INDEX_SIZE, .. }
+                if id == node_id
+        ));
+        assert!(err.is_input_rejection());
+        assert!(
+            err.to_string()
+                .contains("flat node index safety cap exceeded")
+        );
     }
 }

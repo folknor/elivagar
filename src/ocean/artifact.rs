@@ -12,6 +12,7 @@
 use super::OceanArtifactKey;
 use super::band::OceanBand;
 use crate::archive::{Archive, BlobRef, MapSource, TileRun, TileRuns};
+use crate::pipeline::{ArtifactRefusal, KeyMismatch, PipelineError};
 use crate::shortbread::Layer;
 use crate::tiling::TileId;
 
@@ -19,7 +20,7 @@ use crate::tiling::TileId;
 /// without copying them.
 type ArchiveView = Archive<MapSource>;
 
-fn open_view(path: &std::path::Path) -> std::io::Result<ArchiveView> {
+fn open_view(path: &std::path::Path) -> Result<ArchiveView, crate::DecodeError> {
     // SAFETY: this assumes nothing modifies or truncates the artifact's inode
     // while the run holds it. This crate's archive writes honor that by
     // construction: archive publication (`archive::writer`, both modes)
@@ -39,6 +40,50 @@ fn open_view(path: &std::path::Path) -> std::io::Result<ArchiveView> {
     unsafe { Archive::open_mapped(path) }
 }
 
+fn artifact_read(reason: ArtifactRefusal, error: crate::DecodeError) -> PipelineError {
+    match error.kind() {
+        crate::DecodeErrorKind::Io | crate::DecodeErrorKind::Failed => error.into(),
+        _ => PipelineError::artifact_refused(reason, "invalid ocean artifact").with_cause(error),
+    }
+}
+
+fn check_key(
+    declared: &OceanArtifactKey,
+    expected: &OceanArtifactKey,
+) -> Result<(), PipelineError> {
+    let mut fields = Vec::new();
+    macro_rules! compare {
+            ($($field:ident),* $(,)?) => {
+                $(if declared.$field != expected.$field {
+                    fields.push(stringify!($field));
+                })*
+            };
+        }
+    compare!(
+        full_shp_xxh128,
+        full_shx_xxh128,
+        simplified_shp_xxh128,
+        simplified_shx_xxh128,
+        min_zoom,
+        max_zoom,
+        policy_version
+    );
+    if declared.compression_level != expected.compression_level {
+        fields.push("compression_level");
+    }
+    if !fields.is_empty() {
+        let message = format!(
+            "ocean artifact key does not match current inputs: {}",
+            fields.join(", ")
+        );
+        return Err(PipelineError::artifact_refused(
+            ArtifactRefusal::KeyMismatch(KeyMismatch { fields }),
+            message,
+        ));
+    }
+    Ok(())
+}
+
 /// First zoom of the artifact contract.
 pub(crate) const ARTIFACT_MIN_ZOOM: u8 = 0;
 /// Last zoom of the artifact contract.
@@ -49,14 +94,16 @@ pub(crate) fn artifact_serves_window(min_zoom: u8, max_zoom: u8) -> bool {
     min_zoom == ARTIFACT_MIN_ZOOM && max_zoom == ARTIFACT_MAX_ZOOM
 }
 
-fn declared_key_of(view: &ArchiveView) -> std::io::Result<OceanArtifactKey> {
+fn declared_key_of(view: &ArchiveView) -> Result<OceanArtifactKey, crate::DecodeError> {
     let metadata: serde_json::Value = serde_json::from_str(&view.metadata()?)
-        .map_err(|e| std::io::Error::other(format!("invalid ocean artifact metadata: {e}")))?;
-    OceanArtifactKey::from_json(
-        metadata.get("ocean_artifact").ok_or_else(|| {
-            std::io::Error::other("ocean artifact missing ocean_artifact metadata")
-        })?,
-    )
+        .map_err(|e| crate::DecodeError::caused("artifact metadata JSON", e))?;
+    OceanArtifactKey::from_json(metadata.get("ocean_artifact").ok_or_else(|| {
+        crate::DecodeError::malformed(
+            "artifact metadata",
+            "ocean artifact missing ocean_artifact metadata",
+        )
+    })?)
+    .map_err(|e| crate::DecodeError::caused("artifact key", e))
 }
 
 /// The key an artifact file declares, without judging whether it can serve
@@ -65,7 +112,7 @@ fn declared_key_of(view: &ArchiveView) -> std::io::Result<OceanArtifactKey> {
 pub(crate) fn declared_key(path: &std::path::Path) -> std::io::Result<OceanArtifactKey> {
     // Identity only: no readability check, so retention can still read the
     // key of an artifact the current run could not serve.
-    declared_key_of(&open_view(path)?)
+    declared_key_of(&open_view(path)?).map_err(Into::into)
 }
 
 /// An artifact admitted for this run: every check that does not need the
@@ -88,28 +135,46 @@ impl OceanArtifact {
         path: &std::path::Path,
         compression_level: u32,
         expected: impl FnOnce() -> std::io::Result<OceanArtifactKey>,
-    ) -> std::io::Result<Self> {
-        if !path.exists() {
-            return Err(std::io::Error::other(format!(
-                "configured ocean artifact does not exist: {}",
-                path.display()
-            )));
+    ) -> Result<Self, PipelineError> {
+        if let Err(error) = std::fs::metadata(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(PipelineError::io("could not stat ocean artifact", error));
+            }
+            return Err(PipelineError::artifact_refused(
+                ArtifactRefusal::Missing,
+                format!(
+                    "configured ocean artifact does not exist: {}",
+                    path.display()
+                ),
+            )
+            .with_cause(error));
         }
-        let view = open_view(path)?;
-        view.tile_decoder()?;
-        view.check_layout()?;
-        let declared = declared_key_of(&view)?;
+        let view = open_view(path).map_err(|e| artifact_read(ArtifactRefusal::Layout, e))?;
+        view.tile_decoder()
+            .map_err(|e| artifact_read(ArtifactRefusal::Format, e))?;
+        view.check_layout()
+            .map_err(|e| artifact_read(ArtifactRefusal::Layout, e))?;
+        let declared =
+            declared_key_of(&view).map_err(|e| artifact_read(ArtifactRefusal::Metadata, e))?;
         if declared.compression_level != compression_level {
-            return Err(std::io::Error::other(format!(
-                "ocean artifact {} was built at compression level {} but this run uses {}. Rebuild the artifact, match --compression-level, or drop the artifact from --ocean.",
-                path.display(),
-                declared.compression_level,
-                compression_level,
-            )));
+            return Err(PipelineError::artifact_refused(
+                ArtifactRefusal::KeyMismatch(KeyMismatch {
+                    fields: vec!["compression_level"],
+                }),
+                format!(
+                    "ocean artifact {} was built at compression level {} but this run uses {}. Rebuild the artifact, match --compression-level, or drop the artifact from --ocean.",
+                    path.display(),
+                    declared.compression_level,
+                    compression_level,
+                ),
+            ));
         }
         let header = view.header();
         if header.min_zoom != ARTIFACT_MIN_ZOOM || header.max_zoom != ARTIFACT_MAX_ZOOM {
-            return Err(std::io::Error::other("ocean artifact must cover z0-14"));
+            return Err(PipelineError::artifact_refused(
+                ArtifactRefusal::Coverage,
+                "ocean artifact must cover z0-14",
+            ));
         }
         // A coverage inequality, not equality with a rounded world constant:
         // the artifact writes -85.05/85.05, inside the Mercator limit.
@@ -119,28 +184,43 @@ impl OceanArtifact {
             || bounds.east < 1_800_000_000
             || bounds.north < 850_500_000
         {
-            return Err(std::io::Error::other(
+            return Err(PipelineError::artifact_refused(
+                ArtifactRefusal::Coverage,
                 "ocean artifact header bounds must cover the world",
             ));
         }
-        let metadata: serde_json::Value = serde_json::from_str(&view.metadata()?)
-            .map_err(|e| std::io::Error::other(format!("invalid ocean artifact metadata: {e}")))?;
+        let metadata: serde_json::Value = serde_json::from_str(
+            &view
+                .metadata()
+                .map_err(|e| artifact_read(ArtifactRefusal::Metadata, e))?,
+        )
+        .map_err(|e| {
+            PipelineError::artifact_refused(
+                ArtifactRefusal::Metadata,
+                "invalid ocean artifact metadata",
+            )
+            .with_cause(e)
+        })?;
         let layers = metadata
             .get("vector_layers")
             .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| std::io::Error::other("ocean artifact missing vector_layers"))?;
+            .ok_or_else(|| {
+                PipelineError::artifact_refused(
+                    ArtifactRefusal::Metadata,
+                    "ocean artifact missing vector_layers",
+                )
+            })?;
         if layers.len() != 1
             || layers[0].get("id").and_then(serde_json::Value::as_str) != Some(Layer::Ocean.name())
         {
-            return Err(std::io::Error::other(
+            return Err(PipelineError::artifact_refused(
+                ArtifactRefusal::Metadata,
                 "ocean artifact must declare exactly one ocean layer",
             ));
         }
-        if declared != expected()? {
-            return Err(std::io::Error::other(
-                "ocean artifact key does not match current shapefile inputs",
-            ));
-        }
+        // Hash failures belong to the shapefile inputs, not the artifact.
+        let expected = expected().map_err(PipelineError::from)?;
+        check_key(&declared, &expected)?;
         Ok(Self {
             view,
             key: declared,
@@ -152,13 +232,17 @@ impl OceanArtifact {
     }
 
     /// Read the directory and bind it to the extract's band for assembly.
-    pub(crate) fn into_tiles(self, band: OceanBand) -> std::io::Result<OceanTiles> {
-        let runs = self.view.read_all_runs()?;
+    pub(crate) fn into_tiles(self, band: OceanBand) -> Result<OceanTiles, PipelineError> {
+        let runs = self
+            .view
+            .read_all_runs()
+            .map_err(|e| artifact_read(ArtifactRefusal::Directory, e))?;
         // Exclusive end: the first id past the top zoom is outside the
         // artifact contract.
         let profile_end = crate::tiling::PROFILE_ID_END;
         if runs.as_slice().iter().any(|run| run.end() > profile_end) {
-            return Err(std::io::Error::other(
+            return Err(PipelineError::artifact_refused(
+                ArtifactRefusal::Directory,
                 "ocean artifact directory run lies outside z0-14 tile space",
             ));
         }
@@ -203,8 +287,13 @@ impl OceanTiles {
         self.runs.covering(tile_id).copied()
     }
 
-    pub(crate) fn raw_blob(&self, blob: BlobRef) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
-        self.view.raw_blob(blob)
+    pub(crate) fn raw_blob(
+        &self,
+        blob: BlobRef,
+    ) -> Result<std::borrow::Cow<'_, [u8]>, PipelineError> {
+        self.view
+            .raw_blob(blob)
+            .map_err(|e| artifact_read(ArtifactRefusal::Payload, e))
     }
 }
 
@@ -215,6 +304,70 @@ mod tests {
     use super::*;
     use crate::archive;
     use crate::geometry::projection::MercBbox;
+
+    #[test]
+    fn key_mismatch_names_every_changed_field() {
+        let source = OceanSourceKey::from_hashes(
+            OceanShapefileHashes {
+                shp_xxh128: Xxh128::from_u128(1),
+                shx_xxh128: Xxh128::from_u128(2),
+            },
+            None,
+            0,
+            14,
+        );
+        let declared = OceanArtifactKey {
+            source,
+            compression_level: 6,
+        };
+        let mut expected = declared.clone();
+        expected.policy_version += 1;
+        expected.min_zoom = 1;
+        expected.max_zoom = 13;
+        expected.simplified_shp_xxh128 = Some(Xxh128::from_u128(3));
+        expected.simplified_shx_xxh128 = Some(Xxh128::from_u128(4));
+        expected.full_shp_xxh128 = Xxh128::from_u128(5);
+        expected.full_shx_xxh128 = Xxh128::from_u128(6);
+        expected.compression_level = 5;
+        let error = check_key(&declared, &expected).expect_err("changed identity");
+        assert_eq!(
+            error.artifact_refusal(),
+            Some(&ArtifactRefusal::KeyMismatch(KeyMismatch {
+                fields: vec![
+                    "full_shp_xxh128",
+                    "full_shx_xxh128",
+                    "simplified_shp_xxh128",
+                    "simplified_shx_xxh128",
+                    "min_zoom",
+                    "max_zoom",
+                    "policy_version",
+                    "compression_level"
+                ],
+            }))
+        );
+        assert_eq!(error.kind().exit_code(), 4);
+    }
+
+    #[test]
+    fn missing_and_malformed_artifacts_have_typed_reasons() {
+        let dir = tempfile::tempdir().expect("artifact directory");
+        let path = dir.path().join("artifact.pmtiles");
+        let missing = OceanArtifact::admit(&path, 6, || panic!("must not hash"))
+            .err()
+            .expect("missing artifact");
+        assert_eq!(missing.artifact_refusal(), Some(&ArtifactRefusal::Missing));
+        std::fs::write(&path, b"bad archive").expect("write malformed artifact");
+        let malformed = OceanArtifact::admit(&path, 6, || panic!("must not hash"))
+            .err()
+            .expect("malformed artifact");
+        assert_eq!(malformed.artifact_refusal(), Some(&ArtifactRefusal::Layout));
+        let operational = artifact_read(
+            ArtifactRefusal::Directory,
+            std::io::Error::from_raw_os_error(5).into(),
+        );
+        assert_eq!(operational.kind().exit_code(), 74);
+        assert!(std::error::Error::source(&operational).is_some());
+    }
 
     #[test]
     fn ocean_artifact_rejects_runs_reaching_z15() {
@@ -268,7 +421,11 @@ mod tests {
                 .expect("set artifact metadata");
             // Admission reads directory ranges and metadata, not tile payloads.
             writer
-                .add_run(crate::tiling::TileId::new(start).unwrap(), length, &[0])
+                .add_run(
+                    crate::tiling::TileId::new(start).expect("valid tile id"),
+                    length,
+                    &[0],
+                )
                 .expect("add directory run");
             writer.write_to(&path).expect("write artifact");
             let result = OceanArtifact::admit(&path, 6, || Ok(key.clone()))
@@ -277,7 +434,7 @@ mod tests {
                 assert!(result.is_ok(), "last z14 tile must be admitted");
             } else {
                 let error = result.err().expect("z15 run must be refused");
-                assert!(error.to_string().contains("outside z0-14 tile space"));
+                assert_eq!(error.artifact_refusal(), Some(&ArtifactRefusal::Directory));
             }
         }
     }
@@ -328,13 +485,34 @@ mod tests {
         let level = OceanArtifact::admit(&path, 5, || panic!("level is checked before hashing"))
             .err()
             .expect("level mismatch refused");
-        assert!(level.to_string().contains("compression level 6"));
+        assert_eq!(
+            level.artifact_refusal(),
+            Some(&ArtifactRefusal::KeyMismatch(KeyMismatch {
+                fields: vec!["compression_level"]
+            }))
+        );
         let mut other = key.clone();
         other.full_shp_xxh128 = Xxh128::from_u128(3);
         let mismatch = OceanArtifact::admit(&path, 6, || Ok(other))
             .err()
             .expect("key mismatch refused");
-        assert!(mismatch.to_string().contains("does not match"));
+        assert_eq!(
+            mismatch.artifact_refusal(),
+            Some(&ArtifactRefusal::KeyMismatch(KeyMismatch {
+                fields: vec!["full_shp_xxh128"]
+            }))
+        );
+        let hashing = OceanArtifact::admit(&path, 6, || Err(std::io::Error::from_raw_os_error(13)))
+            .err()
+            .expect("hash failure");
+        assert_eq!(hashing.kind(), crate::ErrorKind::Io);
+        assert_eq!(hashing.artifact_refusal(), None);
+        let opaque_hashing =
+            OceanArtifact::admit(&path, 6, || Err(std::io::Error::other("hash failure")))
+                .err()
+                .expect("opaque hash failure");
+        assert_eq!(opaque_hashing.kind(), crate::ErrorKind::Failed);
+        assert_eq!(opaque_hashing.artifact_refusal(), None);
         assert_eq!(
             OceanArtifact::admit(&path, 6, || Ok(key.clone()))
                 .expect("matching key admitted")

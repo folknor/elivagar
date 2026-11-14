@@ -66,6 +66,7 @@ mod config;
 pub use config::{FanoutCaps, OceanInputs, SimplifyFactor};
 pub mod archive;
 pub(crate) mod debug;
+mod decode_error;
 pub mod diag;
 pub(crate) mod geometry;
 pub mod inspect;
@@ -90,8 +91,10 @@ pub mod verify;
 pub(crate) mod way_index;
 pub(crate) mod wire_format;
 
+pub use decode_error::{DecodeError, DecodeErrorKind};
 pub use pipeline::TileCompression;
 pub use pipeline::TilePayloadFormat;
 pub use pipeline::{
-    ErrorKind, OceanMode, PipelineError, ResumeRefusal, SkipTo, TilegenConfig, ocean_build, run,
+    ArtifactRefusal, ErrorKind, KeyMismatch, OceanMode, PipelineError, ResumeRefusal, SkipTo,
+    TilegenConfig, ocean_build, run,
 };

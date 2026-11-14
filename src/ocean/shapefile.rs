@@ -390,17 +390,7 @@ impl RecordSource<'_> {
         let mut parts = vec![0_u8; num_parts * 4];
         if !parts.is_empty() {
             let read_offset = u64_from_usize(self.rec + 44);
-            if let Err(err) = self.shapefile.file.read_exact_at(&mut parts, read_offset) {
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!(
-                        "invalid shapefile record {} at offset {} in {}: failed to read part indices: {err}",
-                        self.record.index,
-                        self.record.offset,
-                        self.shapefile.path.display()
-                    ),
-                ));
-            }
+            self.shapefile.file.read_exact_at(&mut parts, read_offset)?;
         }
         (0..num_parts)
             .map(|j| {
@@ -428,21 +418,9 @@ impl RecordSource<'_> {
             let points_this_read = ((point_count - points_read) * 16).min(buf.len()) / 16;
             let byte_len = points_this_read * 16;
             let read_offset = u64_from_usize(self.rec + points_start + (start + points_read) * 16);
-            if let Err(err) = self
-                .shapefile
+            self.shapefile
                 .file
-                .read_exact_at(&mut buf[..byte_len], read_offset)
-            {
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!(
-                        "invalid shapefile record {} at offset {} in {}: failed to read point coordinates: {err}",
-                        self.record.index,
-                        self.record.offset,
-                        self.shapefile.path.display()
-                    ),
-                ));
-            }
+                .read_exact_at(&mut buf[..byte_len], read_offset)?;
             for idx in 0..points_this_read {
                 let b = idx * 16;
                 let x = le_f64_at(&buf, b);

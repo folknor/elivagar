@@ -370,12 +370,6 @@ fn pipeline_failure(error: &elivagar::PipelineError) -> ! {
     fail(error, error.kind().exit_code())
 }
 
-/// An `io::Error` from a subcommand that does not classify its failures:
-/// `Io` only with an OS errno, otherwise unclassified.
-fn io_failure(error: &std::io::Error) -> ! {
-    fail(error, elivagar::ErrorKind::of_io(error).exit_code())
-}
-
 fn ocean_build_command(args: &OceanBuildArgs) {
     let inputs = elivagar::OceanInputs::parse_build_specs(&args.ocean).unwrap_or_else(|e| usage(e));
     let full = &inputs.full;
@@ -423,7 +417,7 @@ fn main() {
         Command::OceanBuild(args) => ocean_build_command(&args),
         Command::Inspect(args) => {
             if let Err(e) = elivagar::inspect::inspect(&args.file) {
-                io_failure(&e);
+                pipeline_failure(&e);
             }
         }
         Command::Verify(args) => {
@@ -438,13 +432,11 @@ fn main() {
                         stats.print_summary();
                     }
                     if !report.passed {
-                        // The report's findings may include tiles whose
-                        // bytes could not be read, not only decoded ones.
+                        // Completed verification found rejected tile contents.
                         std::process::exit(EXIT_NEGATIVE);
                     }
                 }
-                Err(elivagar::verify::VerifyError::Io(e)) => io_failure(&e),
-                Err(e) => fail(e, elivagar::ErrorKind::Failed.exit_code()),
+                Err(e) => pipeline_failure(&e.into()),
             }
         }
         Command::Svg(args) => {
@@ -494,12 +486,12 @@ fn main() {
                 )
             };
             if let Err(e) = result {
-                io_failure(&e);
+                pipeline_failure(&e);
             }
         }
         Command::Diag(args) => {
             if let Err(e) = elivagar::diag::diag_tile(&args.file, args.z, args.x, args.y) {
-                io_failure(&e);
+                pipeline_failure(&e);
             }
         }
     }

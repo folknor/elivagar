@@ -10,14 +10,14 @@ use crate::archive::header::e7_to_degrees;
 use crate::archive::{Archive, Clustering, HEADER_LEN, Header, TileType};
 
 /// Inspect a PMTiles file and print its header and metadata.
-pub fn inspect(path: &Path) -> io::Result<()> {
+pub fn inspect(path: &Path) -> Result<(), crate::PipelineError> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     inspect_to_writer(path, &mut out)
 }
 
 #[allow(clippy::too_many_lines)]
-fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
+fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> Result<(), crate::PipelineError> {
     let reader = Archive::open(path)?;
     let file_size = reader.file_len();
     let h = *reader.header();
@@ -127,6 +127,9 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
         print_metadata_json(out, &json, metadata_value.as_ref())?;
     }
 
+    if let MetadataState::Unreadable(error) = metadata_state {
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -148,7 +151,7 @@ enum MetadataState {
     /// Present but too large to read here.
     TooLarge(u64),
     /// Present, sized sanely, and the read or decompression failed.
-    Unreadable,
+    Unreadable(crate::DecodeError),
 }
 
 impl MetadataState {
@@ -169,7 +172,7 @@ fn read_metadata_state(reader: &Archive, metadata_length: u64) -> MetadataState 
     }
     match reader.metadata() {
         Ok(json) => MetadataState::Json(json),
-        Err(_) => MetadataState::Unreadable,
+        Err(error) => MetadataState::Unreadable(error),
     }
 }
 
@@ -215,7 +218,7 @@ fn print_provenance(
             format_bytes(*len),
             format_bytes(MAX_METADATA_READ),
         )),
-        MetadataState::Unreadable => crate::provenance::ContractState::Unavailable(
+        MetadataState::Unreadable(_) => crate::provenance::ContractState::Unavailable(
             "metadata could not be read or decompressed".to_string(),
         ),
     };
@@ -648,38 +651,45 @@ mod tests {
         let base = zoom_ids(z).0;
         for i in 0..count {
             let tile_id = base + i as u64;
-            let (z2, x, y) = TileId::new(tile_id).unwrap().coord();
+            let (z2, x, y) = TileId::new(tile_id).expect("test value").coord();
             assert_eq!(z2, z);
             let payload = (i as u64).to_le_bytes();
-            writer.add_tile(z2, x, y, &payload).unwrap();
+            writer.add_tile(z2, x, y, &payload).expect("test value");
         }
     }
 
     fn inspect_output(path: &Path) -> String {
         let mut out = Vec::new();
-        inspect_to_writer(path, &mut out).unwrap();
-        String::from_utf8(out).unwrap()
+        inspect_to_writer(path, &mut out).expect("test value");
+        String::from_utf8(out).expect("test value")
     }
 
     fn corrupt_metadata_payload(path: &Path) -> u64 {
-        let reader = Archive::open(path).unwrap();
+        let reader = Archive::open(path).expect("test value");
         let metadata_offset = reader.header().metadata.offset;
         let metadata_length = reader.header().metadata.length;
         assert!(metadata_length > 0, "test archive must contain metadata");
 
-        let mut file = OpenOptions::new().write(true).open(path).unwrap();
-        file.seek(SeekFrom::Start(metadata_offset)).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("test value");
+        file.seek(SeekFrom::Start(metadata_offset))
+            .expect("test value");
         let byte_count = metadata_length.min(64) as usize;
         let junk = vec![0xFF; byte_count];
-        file.write_all(&junk).unwrap();
+        file.write_all(&junk).expect("test value");
         metadata_length
     }
 
     fn edit_header(path: &Path, edit: impl FnOnce(&mut Header)) {
-        let mut header = *Archive::open(path).unwrap().header();
+        let mut header = *Archive::open(path).expect("test value").header();
         edit(&mut header);
-        let mut file = OpenOptions::new().write(true).open(path).unwrap();
-        file.write_all(&header.encode()).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("test value");
+        file.write_all(&header.encode()).expect("test value");
     }
 
     fn world(min_zoom: u8, max_zoom: u8, center_zoom: u8) -> PmtilesConfig {
@@ -698,31 +708,31 @@ mod tests {
                 zoom: center_zoom,
             },
         )
-        .unwrap()
+        .expect("test value")
     }
 
     #[test]
     fn inspect_handles_root_only_archive() {
         let config = world(0, 0, 0);
         let mut writer = PmtilesWriter::new(config);
-        writer.add_tile(0, 0, 0, &[1, 2, 3]).unwrap();
+        writer.add_tile(0, 0, 0, &[1, 2, 3]).expect("test value");
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("test value");
         let path = dir.path().join("inspect_root_only.pmtiles");
-        writer.write_to(&path).unwrap();
+        writer.write_to(&path).expect("test value");
 
-        inspect(&path).unwrap();
+        inspect(&path).expect("test value");
     }
 
     #[test]
     fn inspect_root_only_output_includes_header_and_section_layout() {
         let config = world(0, 0, 0);
         let mut writer = PmtilesWriter::new(config);
-        writer.add_tile(0, 0, 0, &[1, 2, 3]).unwrap();
+        writer.add_tile(0, 0, 0, &[1, 2, 3]).expect("test value");
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("test value");
         let path = dir.path().join("inspect_root_only_output.pmtiles");
-        writer.write_to(&path).unwrap();
+        writer.write_to(&path).expect("test value");
 
         let output = inspect_output(&path);
         assert!(output.contains("PMTiles v3"));
@@ -744,11 +754,11 @@ mod tests {
         let mut writer = PmtilesWriter::new(config);
         add_monotonic_unique_tiles(&mut writer, 8, ROOT_THRESHOLD + 1);
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("test value");
         let path = dir.path().join("inspect_leaf.pmtiles");
-        writer.write_to(&path).unwrap();
+        writer.write_to(&path).expect("test value");
 
-        inspect(&path).unwrap();
+        inspect(&path).expect("test value");
     }
 
     #[test]
@@ -758,9 +768,9 @@ mod tests {
         let mut writer = PmtilesWriter::new(config);
         add_monotonic_unique_tiles(&mut writer, 8, ROOT_THRESHOLD + 1);
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("test value");
         let path = dir.path().join("inspect_leaf_output.pmtiles");
-        writer.write_to(&path).unwrap();
+        writer.write_to(&path).expect("test value");
 
         let output = inspect_output(&path);
         assert!(output.contains("Section layout:"));
@@ -771,16 +781,19 @@ mod tests {
     fn inspect_unreadable_metadata_uses_header_payload_fallback() {
         let config = world(0, 0, 0);
         let mut writer = PmtilesWriter::new(config);
-        writer.add_tile(0, 0, 0, &[7, 8, 9]).unwrap();
+        writer.add_tile(0, 0, 0, &[7, 8, 9]).expect("test value");
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("test value");
         let path = dir.path().join("inspect_bad_metadata.pmtiles");
-        writer.write_to(&path).unwrap();
+        writer.write_to(&path).expect("test value");
 
         let metadata_length = corrupt_metadata_payload(&path);
         assert!(metadata_length > 0);
 
-        let output = inspect_output(&path);
+        let mut out = Vec::new();
+        let error = inspect_to_writer(&path, &mut out).expect_err("bad metadata rejected");
+        assert_eq!(error.kind(), crate::ErrorKind::InputRefused);
+        let output = String::from_utf8(out).expect("text output");
         assert!(output.contains("Payload format:"));
         assert!(output.contains("Payload compress:"));
         assert!(output.contains("Payload format:     mvt (header)"));
@@ -792,11 +805,11 @@ mod tests {
     fn inspect_absent_metadata_uses_header_payload_fallback() {
         let config = world(0, 0, 0);
         let mut writer = PmtilesWriter::new(config);
-        writer.add_tile(0, 0, 0, &[9, 9, 9]).unwrap();
+        writer.add_tile(0, 0, 0, &[9, 9, 9]).expect("test value");
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("test value");
         let path = dir.path().join("inspect_no_metadata.pmtiles");
-        writer.write_to(&path).unwrap();
+        writer.write_to(&path).expect("test value");
 
         edit_header(&path, |header| header.metadata.length = 0);
 
@@ -814,8 +827,8 @@ mod tests {
             &super::MetadataState::Json(json.to_string()),
             metadata.as_ref(),
         )
-        .unwrap();
-        String::from_utf8(out).unwrap()
+        .expect("test value");
+        String::from_utf8(out).expect("test value")
     }
 
     fn provenance_output(member: &str) -> String {
@@ -940,8 +953,8 @@ mod tests {
                 }
                 _ => None,
             };
-            super::print_provenance(&mut out, state, metadata.as_ref()).unwrap();
-            String::from_utf8(out).unwrap()
+            super::print_provenance(&mut out, state, metadata.as_ref()).expect("test value");
+            String::from_utf8(out).expect("test value")
         };
         assert!(
             of(&super::MetadataState::Absent).contains("unavailable - archive stores no metadata"),
@@ -951,7 +964,10 @@ mod tests {
         assert!(too_large.contains("unavailable"), "{too_large}");
         assert!(too_large.contains("64.0 MB"), "{too_large}");
         assert!(
-            of(&super::MetadataState::Unreadable).contains("could not be read"),
+            of(&super::MetadataState::Unreadable(
+                crate::DecodeError::malformed("metadata", "bad bytes")
+            ))
+            .contains("could not be read"),
             "unreadable"
         );
         assert!(
@@ -1039,7 +1055,7 @@ mod tests {
     #[test]
     fn extract_json_string_returns_expected_value() {
         let json = r#"{"tile_payload_format":"mlt","tile_compression":"none"}"#;
-        let doc = serde_json::from_str::<serde_json::Value>(json).unwrap();
+        let doc = serde_json::from_str::<serde_json::Value>(json).expect("test value");
         assert_eq!(
             extract_json_string(&doc, "tile_payload_format").as_deref(),
             Some("mlt")

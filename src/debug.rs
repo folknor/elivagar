@@ -136,11 +136,24 @@ counter_group!(WaitCounters {
 // many workers and on three entry paths - the ocean extract pass, ocean-build,
 // and OSM ways/relations - so the tallies live in one process-global pair of
 // atomics rather than per-path locals. Observability only: the gate is
-// ring-cap-census.mjs at zero over the cap, plus the hard error the partition
-// raises if a shape stays over the cap in an indivisible rect.
+// ring-cap-census.mjs at zero over the cap, plus the internal-invariant error
+// the partition returns if a shape stays over the cap in an indivisible rect.
 counter_group!(RingCapCounters {
     partitions => "ring_cap_partitions",
     pieces => "ring_cap_pieces",
+});
+
+// Multipolygon assembly salvage (src/multipolygon.rs). Assembly keeps what it
+// can from broken relations rather than failing them; these make the losses
+// visible. `unclosed_chains` are member chains that never closed and were
+// dropped, `degenerate_rings` closed rings under 3 vertices dropped,
+// `short_members` member ways under 2 coordinates ignored, and
+// `orphan_inners` inner rings no outer contains, kept as outer shells.
+counter_group!(MultipolygonCounters {
+    unclosed_chains => "multipolygon_unclosed_chains",
+    degenerate_rings => "multipolygon_degenerate_rings",
+    short_members => "multipolygon_short_members",
+    orphan_inners => "multipolygon_orphan_inners",
 });
 
 counter_group!(BusyCounters {
@@ -165,20 +178,26 @@ pub static BUSY: BusyCounters = BusyCounters::new();
 /// pieces those shapes produced.
 pub static RING_CAP: RingCapCounters = RingCapCounters::new();
 
+/// Process-global multipolygon salvage tallies; drained with [`WAIT`].
+pub static MULTIPOLYGON: MultipolygonCounters = MultipolygonCounters::new();
+
 /// Discard totals left by a previous failed run before starting the next one.
 /// Pipeline runs must be sequential because these accumulators are shared.
 pub(crate) fn reset_run_counters() {
     WAIT.reset();
     BUSY.reset();
     RING_CAP.reset();
+    MULTIPOLYGON.reset();
 }
 
-/// Drain accumulated stall, busy and ring-cap totals to the sidecar. Call once
-/// at end of run; a no-op per counter when nothing accumulated.
+/// Drain accumulated stall, busy, ring-cap and multipolygon totals to the
+/// sidecar. Call once at end of run; a no-op per counter when nothing
+/// accumulated.
 pub fn emit_wait_counters() {
     WAIT.drain();
     BUSY.drain();
     RING_CAP.drain();
+    MULTIPOLYGON.drain();
 }
 
 /// RAII guard timing one blocking interval. On drop it adds the elapsed

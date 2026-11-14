@@ -199,7 +199,12 @@ that assert the streaming hash and the detail decode path remain one
 equivalence relation. Archive metadata, header bounds, and directory
 layout are outside the digest. The provenance contract checks input and
 producer config, and `elivagar verify` checks archive structure, directory
-layout and tile payloads. Neither validates geographic header bounds or
+layout and tile payloads. Its typed `TileFinding` diagnostics retain coordinates
+and a shared `Finding`; the first 100 are stored and `tile_error_count` counts
+all findings. This cap does not stop traversal or suppress later read failures.
+Operational reads abort verification instead of becoming negative findings;
+container and metadata rejections carry `DecodeError` through `VerifyError`.
+Neither validates geographic header bounds or
 center. Assembly derives extract bounds and center from the checkpoint's
 buffered data extent, converts them to WGS84, and the PMTiles writer rounds
 them to E7; the world-ocean artifact retains world bounds. Header regression
@@ -341,6 +346,15 @@ decode surface (the `archive` reader with run-level raw access, the
 provenance in full, the writer's `add_run` and mutate-only
 `set_metadata_verbatim`), and brokkr decides what the answers mean.
 There is no raw elivagar spelling.
+
+Archive read operations (including header decode and tile-contract checks)
+and `tile_detail` decoders return `DecodeError`, with `kind()` and `locus()`.
+`DecodeErrorKind` distinguishes malformed bytes, unsupported formats, OS I/O
+and opaque failures; `source()` retains the original decoder or I/O cause.
+`inspect`, SVG rendering and diag return `PipelineError` and preserve this
+classification. Conversion into `std::io::Error` retains the typed cause for
+adapters. Directory encoding and writer configuration keep their I/O surface.
+
 
 The command surface keeps the wrapper-era spellings (`brokkr
 pmtiles-corpus check|bless|render|render-manifest|rings|mutate`; bare

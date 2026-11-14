@@ -13,6 +13,7 @@
 //! can never silently skip past it; a cross-producer comparison decodes
 //! tolerant.
 
+use crate::DecodeError;
 use std::sync::Arc;
 
 use crate::geometry;
@@ -112,7 +113,7 @@ pub struct DetailTile {
 /// Messages are walked by the crate's one message reader (`mvt::message`),
 /// whose policy [`Strictness`] selects; this module adds the owned output,
 /// the geometry builders and ring grouping.
-pub fn decode_detail_tile(data: &[u8], strictness: Strictness) -> Result<DetailTile, String> {
+pub fn decode_detail_tile(data: &[u8], strictness: Strictness) -> Result<DetailTile, DecodeError> {
     let layers = message::parse_tile(data, strictness)?
         .into_iter()
         .map(|layer| decode_detail_layer(&layer, strictness))
@@ -123,7 +124,7 @@ pub fn decode_detail_tile(data: &[u8], strictness: Strictness) -> Result<DetailT
 fn decode_detail_layer(
     layer: &message::LayerMessage<'_>,
     strictness: Strictness,
-) -> Result<DetailLayer, String> {
+) -> Result<DetailLayer, DecodeError> {
     let keys: Vec<Arc<str>> = layer.keys.iter().map(|&key| Arc::from(key)).collect();
     let values = layer
         .values
@@ -144,7 +145,7 @@ fn decode_detail_layer(
 }
 
 /// Decode one MVT value message (the layer value table entry).
-pub fn decode_detail_attr(data: &[u8], strictness: Strictness) -> Result<DetailAttr, String> {
+pub fn decode_detail_attr(data: &[u8], strictness: Strictness) -> Result<DetailAttr, DecodeError> {
     #[allow(clippy::cast_possible_wrap)]
     Ok(match message::decode_value(data, strictness)? {
         ValueMessage::String(text) => DetailAttr::String(Arc::from(text)),
@@ -163,7 +164,7 @@ pub fn decode_detail_feature(
     keys: &[Arc<str>],
     values: &[DetailAttr],
     strictness: Strictness,
-) -> Result<DetailFeature, String> {
+) -> Result<DetailFeature, DecodeError> {
     let feature = message::parse_feature(data, strictness)?;
     let attrs = decode_detail_attrs(&feature.tags, keys, values)?;
     let components = match &feature.geometry {
@@ -182,18 +183,22 @@ fn decode_detail_attrs(
     data: &[u8],
     keys: &[Arc<str>],
     values: &[DetailAttr],
-) -> Result<Vec<(Arc<str>, DetailAttr)>, String> {
+) -> Result<Vec<(Arc<str>, DetailAttr)>, DecodeError> {
     let pairs = message::tag_pairs(data)?;
     let mut attrs = Vec::with_capacity(pairs.len());
     for (key_idx, value_idx) in pairs {
         attrs.push((
-            Arc::clone(
-                keys.get(key_idx)
-                    .ok_or_else(|| format!("key index out of range: {key_idx}"))?,
-            ),
+            Arc::clone(keys.get(key_idx).ok_or_else(|| {
+                DecodeError::malformed("MVT tag key", format!("key index out of range: {key_idx}"))
+            })?),
             values
                 .get(value_idx)
-                .ok_or_else(|| format!("value index out of range: {value_idx}"))?
+                .ok_or_else(|| {
+                    DecodeError::malformed(
+                        "MVT tag value",
+                        format!("value index out of range: {value_idx}"),
+                    )
+                })?
                 .clone(),
         ));
     }
@@ -204,9 +209,12 @@ fn decode_detail_geometry(
     geom_type: u8,
     data: &[u8],
     strictness: Strictness,
-) -> Result<Vec<DetailComponent>, String> {
+) -> Result<Vec<DetailComponent>, DecodeError> {
     if strictness == Strictness::Strict && !matches!(geom_type, 1..=3) {
-        return Err(format!("unsupported geometry type: {geom_type}"));
+        return Err(DecodeError::malformed(
+            "MVT geometry type",
+            format!("unsupported geometry type: {geom_type}"),
+        ));
     }
     // Strict runs the one spec 4.3.4 grammar; tolerant decodes unvalidated
     // and keeps the lenient quirks each builder documents. An unknown type
@@ -536,7 +544,7 @@ mod tests {
         };
         let tile = tile_message(&feature, "class", &value);
 
-        let decoded = decode_detail_tile(&tile, Strictness::Strict).unwrap();
+        let decoded = decode_detail_tile(&tile, Strictness::Strict).expect("test value");
         assert_eq!(decoded.layers.len(), 1);
         assert_eq!(decoded.layers[0].name.as_ref(), "test");
         assert_eq!(decoded.layers[0].extent, 4096);
@@ -557,6 +565,7 @@ mod tests {
         assert!(
             decode_detail_tile(&tile_with_unknown, Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("unknown tile field")
         );
         assert!(decode_detail_tile(&tile_with_unknown, Strictness::Tolerant).is_ok());
@@ -574,9 +583,11 @@ mod tests {
         assert!(
             decode_detail_feature(&feature, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("duplicate feature id")
         );
-        let tolerant = decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).unwrap();
+        let tolerant =
+            decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).expect("test value");
         assert_eq!(tolerant.id, Some(4));
         assert_eq!(tolerant.geom_type, 2);
 
@@ -587,6 +598,7 @@ mod tests {
         assert!(
             decode_detail_feature(&duplicate_type, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("duplicate feature type")
         );
     }
@@ -597,6 +609,7 @@ mod tests {
         assert!(
             decode_detail_feature(&missing, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("no geometry field")
         );
         assert!(decode_detail_feature(&missing, &[], &[], Strictness::Tolerant).is_ok());
@@ -605,11 +618,12 @@ mod tests {
         assert!(
             decode_detail_feature(&unknown_type, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("unsupported geometry type")
         );
         assert!(
             decode_detail_feature(&unknown_type, &[], &[], Strictness::Tolerant)
-                .unwrap()
+                .expect("test value")
                 .components
                 .is_empty()
         );
@@ -618,6 +632,7 @@ mod tests {
         assert!(
             decode_detail_feature(&empty_geometry, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("empty geometry command stream")
         );
     }
@@ -628,6 +643,7 @@ mod tests {
         assert!(
             decode_detail_feature(&zero_point_count, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("zero repeat count")
         );
         assert!(decode_detail_feature(&zero_point_count, &[], &[], Strictness::Tolerant).is_ok());
@@ -636,6 +652,7 @@ mod tests {
         assert!(
             decode_detail_feature(&split_point_moves, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("single MoveTo")
         );
 
@@ -643,6 +660,7 @@ mod tests {
         assert!(
             decode_detail_feature(&one_point_line, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("MoveTo missing LineTo")
         );
 
@@ -653,6 +671,7 @@ mod tests {
         assert!(
             decode_detail_feature(&split_line_to, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("LineTo must follow MoveTo")
         );
 
@@ -660,10 +679,11 @@ mod tests {
         assert!(
             decode_detail_feature(&closepath_line, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("ClosePath in non-polygon")
         );
-        let tolerant_line =
-            decode_detail_feature(&closepath_line, &[], &[], Strictness::Tolerant).unwrap();
+        let tolerant_line = decode_detail_feature(&closepath_line, &[], &[], Strictness::Tolerant)
+            .expect("test value");
         assert_eq!(
             tolerant_line.components[0].rings[0].points.as_slice(),
             &[(0, 0), (1, 1)][..]
@@ -673,6 +693,7 @@ mod tests {
         assert!(
             decode_detail_feature(&unclosed_polygon, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("missing ClosePath")
         );
         assert!(decode_detail_feature(&unclosed_polygon, &[], &[], Strictness::Tolerant).is_ok());
@@ -681,6 +702,7 @@ mod tests {
         assert!(
             decode_detail_feature(&short_polygon_line_to, &[], &[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("LineTo count must be greater than 1")
         );
     }
@@ -691,7 +713,8 @@ mod tests {
             9, 0, 0, 26, 20, 0, 0, 20, 19, 0, 15, 9, 4, 15, 26, 0, 12, 12, 0, 0, 11, 15,
         ];
         let feature = feature_message(Some(3), Some(&commands));
-        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Strict).unwrap();
+        let decoded =
+            decode_detail_feature(&feature, &[], &[], Strictness::Strict).expect("test value");
         let rings = &decoded.components[0].rings;
         assert_eq!(rings.len(), 2);
         assert_eq!(
@@ -711,7 +734,8 @@ mod tests {
         let second_outer = [(20, 0), (30, 0), (30, 10), (20, 10), (20, 0)];
         let commands = polygon_commands(&[&outer, &hole, &second_outer]);
         let feature = feature_message(Some(3), Some(&commands));
-        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Strict).unwrap();
+        let decoded =
+            decode_detail_feature(&feature, &[], &[], Strictness::Strict).expect("test value");
 
         assert_eq!(decoded.components.len(), 2);
         assert_eq!(decoded.components[0].rings.len(), 2);
@@ -734,7 +758,8 @@ mod tests {
             &opposite_winding_hole,
         ]);
         let feature = feature_message(Some(3), Some(&commands));
-        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Strict).unwrap();
+        let decoded =
+            decode_detail_feature(&feature, &[], &[], Strictness::Strict).expect("test value");
 
         assert_eq!(decoded.components.len(), 2);
         assert_eq!(decoded.components[0].rings.len(), 1);
@@ -749,7 +774,8 @@ mod tests {
         let collinear = [(0, 0), (10, 0), (20, 0), (0, 0)];
         let commands = polygon_commands(&[&collinear]);
         let feature = feature_message(Some(3), Some(&commands));
-        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Strict).unwrap();
+        let decoded =
+            decode_detail_feature(&feature, &[], &[], Strictness::Strict).expect("test value");
         assert_eq!(decoded.components.len(), 1);
         assert_eq!(decoded.components[0].rings.len(), 1);
         assert_eq!(decoded.components[0].rings[0].role, CanonRingRole::Outer);
@@ -757,15 +783,18 @@ mod tests {
         // Two zero-area rings: no shortcut, both skipped, as in MapLibre.
         let commands = polygon_commands(&[&collinear, &collinear]);
         let feature = feature_message(Some(3), Some(&commands));
-        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Strict).unwrap();
+        let decoded =
+            decode_detail_feature(&feature, &[], &[], Strictness::Strict).expect("test value");
         assert!(decoded.components.is_empty());
 
         // Tolerant: a lone one-point ring is kept too; no rings, no groups.
         let feature = feature_message(Some(3), Some(&[9, 2, 2]));
-        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).unwrap();
+        let decoded =
+            decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).expect("test value");
         assert_eq!(decoded.components.len(), 1);
         let feature = feature_message(Some(3), Some(&[]));
-        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).unwrap();
+        let decoded =
+            decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).expect("test value");
         assert!(decoded.components.is_empty());
     }
 
@@ -775,7 +804,8 @@ mod tests {
         // which would drop the ring as zero-area; MapLibre's area wraps to
         // the first vertex and reads -100.
         let feature = feature_message(Some(3), Some(&[9, 20, 0, 18, 19, 0, 0, 20]));
-        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).unwrap();
+        let decoded =
+            decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).expect("test value");
         assert_eq!(decoded.components.len(), 1);
         assert_eq!(decoded.components[0].rings[0].role, CanonRingRole::Outer);
     }
@@ -833,17 +863,18 @@ mod tests {
 
         for (bytes, expected) in cases {
             assert_eq!(
-                decode_detail_attr(&bytes, Strictness::Strict).unwrap(),
+                decode_detail_attr(&bytes, Strictness::Strict).expect("test value"),
                 expected
             );
             assert_eq!(
-                decode_detail_attr(&bytes, Strictness::Tolerant).unwrap(),
+                decode_detail_attr(&bytes, Strictness::Tolerant).expect("test value"),
                 expected
             );
         }
         assert!(
             decode_detail_attr(&[], Strictness::Strict)
                 .unwrap_err()
+                .to_string()
                 .contains("empty MVT value")
         );
 
@@ -852,7 +883,7 @@ mod tests {
         push_bytes_field(&mut unknown_then_string, 1, b"text");
         assert!(decode_detail_attr(&unknown_then_string, Strictness::Strict).is_err());
         assert_eq!(
-            decode_detail_attr(&unknown_then_string, Strictness::Tolerant).unwrap(),
+            decode_detail_attr(&unknown_then_string, Strictness::Tolerant).expect("test value"),
             DetailAttr::String(Arc::<str>::from("text"))
         );
 
@@ -860,7 +891,7 @@ mod tests {
         push_varint_field(&mut multiple_fields, 5, 2);
         assert!(decode_detail_attr(&multiple_fields, Strictness::Strict).is_err());
         assert_eq!(
-            decode_detail_attr(&multiple_fields, Strictness::Tolerant).unwrap(),
+            decode_detail_attr(&multiple_fields, Strictness::Tolerant).expect("test value"),
             DetailAttr::UInt(2)
         );
     }

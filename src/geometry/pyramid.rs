@@ -93,6 +93,34 @@ pub(crate) enum PyramidEmitKind {
 /// everything past the sink addresses tiles by `TileId`.
 pub(crate) type PyramidSink<'a> = &'a mut dyn FnMut(PyramidCell, &[u32], PyramidEmitKind);
 
+/// A shape over [`MAX_FEATURE_RINGS`] reached a clip rect too small to split.
+///
+/// This is an impossible in-memory state, proven at
+/// `partition_shape_to_ring_cap`, so the run boundary classes it as an
+/// internal invariant violation. It is a typed result rather than a panic so
+/// that the failure carries its evidence and a defined exit class instead of
+/// aborting a rayon worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RingCapError {
+    /// The indivisible clip rect, in the shape's global zoom-z coordinates.
+    pub rect: IntRect,
+    /// Contours the piece carried, over [`MAX_FEATURE_RINGS`].
+    pub contours: usize,
+}
+
+impl std::fmt::Display for RingCapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ring-cap partition reached an indivisible rect ({}, {})-({}, {}) with {} contours, \
+             over the {MAX_FEATURE_RINGS}-ring cap",
+            self.rect.min_x, self.rect.min_y, self.rect.max_x, self.rect.max_y, self.contours
+        )
+    }
+}
+
+impl std::error::Error for RingCapError {}
+
 pub(crate) struct PyramidScratch {
     pub int: IntEmitScratch,
     frag_pool: Vec<Shapes>,
@@ -132,15 +160,21 @@ pub(crate) fn emit_shape_pyramid(
     params: &PyramidParams<'_>,
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
-) {
+) -> Result<(), RingCapError> {
     if shape_base.is_empty() {
-        return;
+        return Ok(());
     }
 
-    let roots = root_fragments(shape_base, params, scratch);
-    for (cell, frag) in roots {
-        descend(cell, frag, params, scratch, sink);
+    let mut roots = root_fragments(shape_base, params, scratch).into_iter();
+    while let Some((cell, frag)) = roots.next() {
+        if let Err(err) = descend(cell, frag, params, scratch, sink) {
+            for (_, frag) in roots {
+                scratch.return_shapes(frag);
+            }
+            return Err(err);
+        }
     }
+    Ok(())
 }
 
 pub(crate) fn emit_shape_pyramid_cell(
@@ -149,12 +183,12 @@ pub(crate) fn emit_shape_pyramid_cell(
     params: &PyramidParams<'_>,
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
-) {
+) -> Result<(), RingCapError> {
     if cell.z < params.zooms.top() || cell.z > params.zooms.bottom() {
         scratch.return_shapes(frag);
-        return;
+        return Ok(());
     }
-    descend(cell, frag, params, scratch, sink);
+    descend(cell, frag, params, scratch, sink)
 }
 
 pub(crate) fn split_for_parallel(
@@ -163,9 +197,9 @@ pub(crate) fn split_for_parallel(
     target_items: usize,
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
-) -> Vec<(PyramidCell, Shapes)> {
+) -> Result<Vec<(PyramidCell, Shapes)>, RingCapError> {
     if shape_base.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let target = target_items.max(1);
@@ -202,7 +236,13 @@ pub(crate) fn split_for_parallel(
             scratch.return_shapes(frag);
             continue;
         }
-        emit_cell(cell, &frag, params, scratch, sink);
+        if let Err(err) = emit_cell(cell, &frag, params, scratch, sink) {
+            scratch.return_shapes(frag);
+            for (_, frag) in items {
+                scratch.return_shapes(frag);
+            }
+            return Err(err);
+        }
         for child in children(cell) {
             let mut child_frag = scratch.take_shapes();
             intersect_shapes_with_rect(
@@ -219,7 +259,7 @@ pub(crate) fn split_for_parallel(
         }
         scratch.return_shapes(frag);
     }
-    items
+    Ok(items)
 }
 
 fn root_fragments(
@@ -345,40 +385,41 @@ fn descend(
     params: &PyramidParams<'_>,
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
-) {
+) -> Result<(), RingCapError> {
     if frag.is_empty() {
         scratch.return_shapes(frag);
-        return;
+        return Ok(());
     }
 
     if !cell_is_owned(cell, params) {
         scratch.return_shapes(frag);
-        return;
+        return Ok(());
     }
 
     if is_full_buffered_cell(&frag, params.zooms.grid(), cell) {
         emit_full_subtree(cell, params, scratch, sink);
         scratch.return_shapes(frag);
-        return;
+        return Ok(());
     }
 
-    emit_cell(cell, &frag, params, scratch, sink);
-    if cell.z == params.zooms.bottom() {
-        scratch.return_shapes(frag);
-        return;
-    }
-
-    for child in children(cell) {
-        let mut child_frag = scratch.take_shapes();
-        intersect_shapes_with_rect(
-            &mut scratch.int,
-            &frag,
-            buffered_cell_rect_base(params.zooms.grid(), child),
-            &mut child_frag,
-        );
-        descend(child, child_frag, params, scratch, sink);
+    let mut result = emit_cell(cell, &frag, params, scratch, sink);
+    if result.is_ok() && cell.z < params.zooms.bottom() {
+        for child in children(cell) {
+            let mut child_frag = scratch.take_shapes();
+            intersect_shapes_with_rect(
+                &mut scratch.int,
+                &frag,
+                buffered_cell_rect_base(params.zooms.grid(), child),
+                &mut child_frag,
+            );
+            result = descend(child, child_frag, params, scratch, sink);
+            if result.is_err() {
+                break;
+            }
+        }
     }
     scratch.return_shapes(frag);
+    result
 }
 
 fn emit_cell(
@@ -387,7 +428,7 @@ fn emit_cell(
     params: &PyramidParams<'_>,
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
-) {
+) -> Result<(), RingCapError> {
     let shift = grid_shift(params.zooms.grid(), cell.z);
     let dp_tol = (params.dp_tol)(cell.z);
     let min_area = (params.min_area)(cell.z);
@@ -465,45 +506,55 @@ fn emit_cell(
 
         let mut normalized = scratch.take_shapes();
         normalize_into(&mut scratch.int, shape_z, min_area, &mut normalized);
-        // Each normalized shape encodes as one polygon geometry, which is one
-        // classified polygon in MapLibre - so the ring cap binds here and
-        // nowhere downstream. Shapes at or under the cap (all but a handful
-        // worldwide) take the existing path untouched.
-        if normalized.iter().any(|s| s.len() > MAX_FEATURE_RINGS) {
-            let mut capped = scratch.take_shapes();
-            enforce_ring_cap(
-                scratch,
-                &mut normalized,
-                buffered_tile_rect(cell.tx, cell.ty),
-                &mut capped,
-            );
-            for tile_shape in &capped {
-                encode_tile_shape(
-                    tile_shape,
-                    cell.tx,
-                    cell.ty,
-                    &mut scratch.int,
-                    &mut |tx, ty, geom| {
-                        emit_fragment(sink, cell.z, tx, ty, geom);
-                    },
-                );
-            }
-            scratch.return_shapes(capped);
-        } else {
-            for tile_shape in &normalized {
-                encode_tile_shape(
-                    tile_shape,
-                    cell.tx,
-                    cell.ty,
-                    &mut scratch.int,
-                    &mut |tx, ty, geom| {
-                        emit_fragment(sink, cell.z, tx, ty, geom);
-                    },
-                );
-            }
-        }
+        let result = emit_normalized(cell, &mut normalized, scratch, sink);
         scratch.return_shapes(normalized);
+        result?;
     }
+    Ok(())
+}
+
+/// Encode one cell's normalized shapes, partitioning any over the ring cap.
+///
+/// Each normalized shape encodes as one polygon geometry, which is one
+/// classified polygon in MapLibre - so the ring cap binds here and nowhere
+/// downstream. Shapes at or under the cap (all but a handful worldwide) take
+/// the plain path untouched.
+fn emit_normalized(
+    cell: PyramidCell,
+    normalized: &mut Shapes,
+    scratch: &mut PyramidScratch,
+    sink: PyramidSink<'_>,
+) -> Result<(), RingCapError> {
+    let encode = |scratch: &mut PyramidScratch, shapes: &Shapes, sink: PyramidSink<'_>| {
+        for tile_shape in shapes {
+            encode_tile_shape(
+                tile_shape,
+                cell.tx,
+                cell.ty,
+                &mut scratch.int,
+                &mut |tx, ty, geom| {
+                    emit_fragment(sink, cell.z, tx, ty, geom);
+                },
+            );
+        }
+    };
+    if !normalized.iter().any(|s| s.len() > MAX_FEATURE_RINGS) {
+        encode(scratch, normalized, sink);
+        return Ok(());
+    }
+    let mut capped = scratch.take_shapes();
+    let result = enforce_ring_cap(
+        scratch,
+        normalized,
+        buffered_tile_rect(cell.tx, cell.ty),
+        &mut capped,
+    );
+    // Nothing of a failing cell is emitted: the run is about to fail.
+    if result.is_ok() {
+        encode(scratch, &capped, sink);
+    }
+    scratch.return_shapes(capped);
+    result
 }
 
 /// Hand one encoded fragment to the sink. `tx`/`ty` are the tile the encoder
@@ -515,19 +566,18 @@ fn emit_fragment(sink: PyramidSink<'_>, z: u8, tx: u32, ty: u32, geom: &[u32]) {
 /// Move every shape of `normalized` into `out`, partitioning the ones over
 /// [`MAX_FEATURE_RINGS`] so no emitted shape exceeds the cap. `rect` is the
 /// shapes' clip rect in the same global zoom-z coordinates they are held in.
-/// Returns true when at least one shape was partitioned.
+/// Partitioning is reported through the `RING_CAP` counters; the result
+/// carries only the impossible indivisible-rect failure.
 fn enforce_ring_cap(
     scratch: &mut PyramidScratch,
     normalized: &mut Shapes,
     rect: IntRect,
     out: &mut Shapes,
-) -> bool {
-    let mut partitioned = false;
+) -> Result<(), RingCapError> {
     for shape in normalized.drain(..) {
         if shape.len() > MAX_FEATURE_RINGS {
-            partitioned = true;
             let before = out.len();
-            partition_shape_to_ring_cap(scratch, shape, rect, out);
+            partition_shape_to_ring_cap(scratch, shape, rect, out)?;
             RING_CAP.partitions.fetch_add(1, Ordering::Relaxed);
             RING_CAP.pieces.fetch_add(
                 u64::try_from(out.len() - before).unwrap_or(u64::MAX),
@@ -537,7 +587,7 @@ fn enforce_ring_cap(
             out.push(shape);
         }
     }
-    partitioned
+    Ok(())
 }
 
 /// Split one over-cap shape into pieces that each carry at most
@@ -561,29 +611,50 @@ fn partition_shape_to_ring_cap(
     shape: Shape,
     rect: IntRect,
     out: &mut Shapes,
-) {
-    // Unreachable: more than MAX_FEATURE_RINGS disjoint positive-area
-    // contours cannot inhabit a rect with no room to split. The error path
-    // exists because "unreachable" is an argument, not a proof, and emitting
-    // an over-cap shape anyway is precisely the silent-drop outcome this
-    // partition exists to end.
-    let (low, high) = split_rect(rect).expect(
-        "a shape over the MapLibre ring cap cannot inhabit an indivisible rect; \
-         emitting it would silently drop its smallest rings in MapLibre",
-    );
-    for half in [low, high] {
+) -> Result<(), RingCapError> {
+    // Unreachable, and why. The only external call passes the buffered tile
+    // rect, thousands of units on a side, which always splits. split_rect
+    // fails only for a rect whose longer side is under 2 units, and a
+    // recursive call reaches such a rect only with a piece that
+    // `intersect_rect_into` just produced against it. That clip always runs
+    // the overlay (no single-contour fast path). A clip edge of unit length
+    // carries no integer crossing except its corners, and a corner snaps to
+    // itself, so no subject endpoint outside the rect can win a snap there:
+    // every output vertex is one of the rect's at most 4 corners, leaving at
+    // most 6 distinct segments. The overlay merges coincident segments and
+    // extracts contours by visiting each graph link once, so no segment is
+    // shared by two contours, and each contour needs 3 - at most 2 contours
+    // before collinear cleanup, which never adds one. So a piece over the cap
+    // cannot be here. It is a typed error rather than an expect so the
+    // impossible state carries its evidence to an internal exit class;
+    // emitting the over-cap shape instead would be exactly the silent ring
+    // drop in MapLibre this partition exists to end.
+    let Some((low, high)) = split_rect(rect) else {
+        let contours = shape.len();
+        scratch.int.recycle_owned_shape(shape);
+        return Err(RingCapError { rect, contours });
+    };
+    let mut result = Ok(());
+    'halves: for half in [low, high] {
         let mut pieces = scratch.take_shapes();
         intersect_rect_into(&mut scratch.int, &shape, half, Area::ZERO, &mut pieces);
         for piece in pieces.drain(..) {
             if piece.len() > MAX_FEATURE_RINGS {
-                partition_shape_to_ring_cap(scratch, piece, half, out);
+                result = partition_shape_to_ring_cap(scratch, piece, half, out);
+                if result.is_err() {
+                    break;
+                }
             } else {
                 out.push(piece);
             }
         }
         scratch.return_shapes(pieces);
+        if result.is_err() {
+            break 'halves;
+        }
     }
     scratch.int.recycle_owned_shape(shape);
+    result
 }
 
 /// Halve a rect on its longer axis (tie: x), sharing the cut coordinate.
@@ -1591,7 +1662,8 @@ mod tests {
             let mut emitted = Vec::new();
             emit_shape_pyramid(&shape_base, &params, &mut scratch, &mut |cell, geom, _| {
                 emitted.push((cell, geom.to_vec()));
-            });
+            })
+            .expect("emission succeeds");
             for z in 0..=PROPERTY_GRID {
                 assert!(
                     emitted.iter().any(|(cell, _)| cell.z == z),
@@ -1697,7 +1769,8 @@ mod tests {
                     .or_insert_with(Vec::new)
                     .extend_from_slice(geom);
             },
-        );
+        )
+        .expect("emission succeeds");
         out
     }
 
@@ -1923,7 +1996,8 @@ mod tests {
             &mut |PyramidCell { z, tx, ty }, geom, _kind| {
                 left.insert((z, tx, ty), geom.to_vec());
             },
-        );
+        )
+        .expect("emission succeeds");
         emit_shape_pyramid_cell(
             PyramidCell { z: 1, tx: 1, ty: 0 },
             right_frag,
@@ -1932,7 +2006,8 @@ mod tests {
             &mut |PyramidCell { z, tx, ty }, geom, _kind| {
                 right.insert((z, tx, ty), geom.to_vec());
             },
-        );
+        )
+        .expect("emission succeeds");
 
         let window = IntRect {
             min_x: 4096 - 128,
@@ -1997,7 +2072,8 @@ mod tests {
             &mut |PyramidCell { z, tx, ty }, geom, _kind| {
                 left.insert((z, tx, ty), geom.to_vec());
             },
-        );
+        )
+        .expect("emission succeeds");
         emit_shape_pyramid_cell(
             PyramidCell { z: 1, tx: 1, ty: 0 },
             right_frag,
@@ -2006,7 +2082,8 @@ mod tests {
             &mut |PyramidCell { z, tx, ty }, geom, _kind| {
                 right.insert((z, tx, ty), geom.to_vec());
             },
-        );
+        )
+        .expect("emission succeeds");
 
         let window = IntRect {
             min_x: 4096 - 128,
@@ -2212,12 +2289,40 @@ mod tests {
         normalized.remove(0)
     }
 
+    /// Pieces, plus whether the shape was partitioned (more than one piece).
     fn cap_pieces(input: Shape, rect: IntRect) -> (Shapes, bool) {
         let mut scratch = PyramidScratch::new();
         let mut normalized: Shapes = vec![input];
         let mut out = Vec::new();
-        let partitioned = enforce_ring_cap(&mut scratch, &mut normalized, rect, &mut out);
+        enforce_ring_cap(&mut scratch, &mut normalized, rect, &mut out)
+            .expect("a tile rect always splits");
+        let partitioned = out.len() > 1;
         (out, partitioned)
+    }
+
+    #[test]
+    fn ring_cap_indivisible_rect_is_a_typed_error() {
+        // The state is unreachable from emission (see the proof at
+        // partition_shape_to_ring_cap), so it is constructed directly: an
+        // over-cap shape handed a rect with no room to split must fail with
+        // its evidence, never emit the over-cap shape or drop it.
+        let over_cap = holed_tile_shape(MAX_FEATURE_RINGS);
+        let contours = over_cap.len();
+        let rect = IntRect {
+            min_x: 7,
+            min_y: 9,
+            max_x: 8,
+            max_y: 10,
+        };
+        let mut scratch = PyramidScratch::new();
+        let mut out = Vec::new();
+        let err = partition_shape_to_ring_cap(&mut scratch, over_cap, rect, &mut out)
+            .expect_err("an indivisible rect must refuse");
+        assert_eq!(err, RingCapError { rect, contours });
+        assert!(
+            out.is_empty(),
+            "nothing may be emitted for the failing piece"
+        );
     }
 
     #[test]

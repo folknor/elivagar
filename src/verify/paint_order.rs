@@ -4,23 +4,29 @@
 //! the wire, which is why the attribute extraction stays here rather than
 //! coupling `shortbread/` to MVT value messages.
 
+use super::finding::{Finding, PaintOrderError};
 use super::tile::{CheckedFeature, CheckedLayer};
 use crate::mvt::message::ValueMessage;
 use crate::shortbread::{Layer, RankAttributes, RankError};
 
 /// Ranks never decrease in wire order; the first violation, or the first
 /// feature whose rank cannot be recovered. Unordered layers pass.
-pub(super) fn check_layer(layer: &CheckedLayer<'_>) -> Result<(), String> {
+pub(super) fn check_layer(layer: &CheckedLayer<'_>) -> Result<(), Finding> {
     let Some(rank_layer) = Layer::from_name(layer.message.name).filter(|l| l.has_paint_order())
     else {
         return Ok(());
     };
     let mut previous = None;
     for (feature_idx, feature) in layer.features.iter().enumerate() {
-        let attrs = paint_attrs(layer, feature).map_err(|e| format!("feat {feature_idx}: {e}"))?;
+        let finding = |cause| Finding::PaintOrder {
+            layer: layer.message.name.to_string(),
+            feature: feature_idx,
+            cause,
+        };
+        let attrs = paint_attrs(layer, feature).map_err(finding)?;
         let kind = attrs
             .kind
-            .ok_or_else(|| format!("feat {feature_idx}: missing kind attribute"))?;
+            .ok_or_else(|| finding(PaintOrderError::MissingKind))?;
         let rank = match rank_layer.paint_rank_for(&RankAttributes {
             kind,
             link: attrs.link,
@@ -30,18 +36,18 @@ pub(super) fn check_layer(layer: &CheckedLayer<'_>) -> Result<(), String> {
             Ok(Some(rank)) => rank,
             Ok(None) => unreachable!("layer was filtered to ordered layers"),
             Err(RankError::UnknownLandKind) => {
-                return Err(format!("feat {feature_idx}: unknown land kind {kind:?}"));
+                return Err(finding(PaintOrderError::UnknownLandKind(kind.to_string())));
             }
             Err(RankError::UnknownStreetKind) => {
-                return Err(format!("feat {feature_idx}: unknown street kind {kind:?}"));
+                return Err(finding(PaintOrderError::UnknownStreetKind(
+                    kind.to_string(),
+                )));
             }
         };
         if let Some(previous) = previous
             && rank < previous
         {
-            return Err(format!(
-                "feat {feature_idx}: paint rank {rank} follows {previous}"
-            ));
+            return Err(finding(PaintOrderError::DecreasingRank { rank, previous }));
         }
         previous = Some(rank);
     }
@@ -64,7 +70,7 @@ struct PaintAttrs<'a> {
 fn paint_attrs<'a>(
     layer: &CheckedLayer<'a>,
     feature: &CheckedFeature<'a>,
-) -> Result<PaintAttrs<'a>, String> {
+) -> Result<PaintAttrs<'a>, PaintOrderError> {
     let mut attrs = PaintAttrs::default();
     for &(key_idx, value_idx) in &feature.tags {
         let key = &layer.message.keys[key_idx];
@@ -73,14 +79,24 @@ fn paint_attrs<'a>(
             "kind" => match value {
                 ValueMessage::String(kind) if attrs.kind.replace(kind).is_none() => {}
                 ValueMessage::String(_) => {
-                    return Err("duplicate kind attribute".to_string());
+                    return Err(PaintOrderError::DuplicateAttribute("kind".to_string()));
                 }
-                _ => return Err("kind attribute is not a string".to_string()),
+                _ => {
+                    return Err(PaintOrderError::WrongAttributeType {
+                        attribute: "kind".to_string(),
+                        expected: "string",
+                    });
+                }
             },
             "link" | "tunnel" | "bridge" => {
                 let flag = match value {
                     ValueMessage::Bool(flag) => flag,
-                    _ => return Err(format!("{key} attribute is not a bool")),
+                    _ => {
+                        return Err(PaintOrderError::WrongAttributeType {
+                            attribute: key.to_string(),
+                            expected: "bool",
+                        });
+                    }
                 };
                 let (slot, seen) = match *key {
                     "link" => (&mut attrs.link, &mut attrs.seen_link),
@@ -89,7 +105,7 @@ fn paint_attrs<'a>(
                     _ => unreachable!(),
                 };
                 if *seen {
-                    return Err(format!("duplicate {key} attribute"));
+                    return Err(PaintOrderError::DuplicateAttribute(key.to_string()));
                 }
                 *slot = flag;
                 *seen = true;
