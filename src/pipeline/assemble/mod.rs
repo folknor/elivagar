@@ -27,8 +27,10 @@ use crate::sort;
 use crate::tiling::TileId;
 use pbfhogg::ElementReader;
 
+use super::PipelineError;
+#[cfg(test)]
+use super::TilegenConfig;
 use super::stats::TileSizeDiagnostics;
-use super::{PipelineError, TilegenConfig};
 
 #[cfg(test)]
 pub(super) use encode::encode_tile_batch;
@@ -101,8 +103,9 @@ pub(super) fn phase_assemble(
         ocean_mode: super::OceanMode::None,
         low_zoom_source: None,
     };
+    let plan = super::RunPlan::resolve(config)?;
     let spec = AssembleSpec::tileset(
-        config,
+        &plan,
         crate::geometry::projection::MercBbox {
             min_x: 0.0,
             min_y: 0.0,
@@ -150,8 +153,9 @@ pub(in crate::pipeline) struct TilesetProvenance {
 /// consume an artifact, and a tileset cannot claim an artifact key.
 enum ArchiveRole<'a> {
     Tileset {
-        /// The run config, still the source `provenance::build` classifies.
-        config: &'a TilegenConfig,
+        /// The classified contract resolved before any phase work.
+        contract: &'a crate::provenance::ContractConfig,
+        pbf_path: &'a std::path::Path,
         pbf_name: String,
         data_bounds: crate::geometry::projection::MercBbox,
         ocean_tiles: Option<std::sync::Arc<crate::ocean::OceanTiles>>,
@@ -181,7 +185,7 @@ impl<'a> AssembleSpec<'a> {
     /// records, and the low-zoom source is present exactly when there is
     /// ocean.
     pub(in crate::pipeline) fn tileset(
-        config: &'a TilegenConfig,
+        config: &'a super::RunPlan,
         data_bounds: crate::geometry::projection::MercBbox,
         ocean_tiles: Option<std::sync::Arc<crate::ocean::OceanTiles>>,
         provenance: TilesetProvenance,
@@ -206,18 +210,24 @@ impl<'a> AssembleSpec<'a> {
                 ));
             }
         }
-        provenance
+        let ocean_kind = provenance
             .ocean_mode
             .contract_kind(provenance.low_zoom_source)?;
+        if ocean_kind != config.contract.ocean.kind {
+            return Err(PipelineError(
+                "assembly ocean facts and the resolved run contract disagree".to_string(),
+            ));
+        }
         Ok(Self {
-            tile: super::TileContract::from_config(config),
-            zooms: super::zoom_window(config)?,
+            tile: config.contract.tile,
+            zooms: config.window,
             chunk_compression: config.compress_sort_chunks,
             output_path: &config.output_path,
             tmp_dir: &config.tmp_dir,
             in_memory: config.in_memory,
             role: ArchiveRole::Tileset {
-                config,
+                contract: &config.contract,
+                pbf_path: &config.pbf_path,
                 pbf_name,
                 data_bounds,
                 ocean_tiles,
@@ -356,13 +366,14 @@ pub(in crate::pipeline) fn phase_assemble_with_ocean(
     emit_counter_u64("assemble_reader_ns", reader_ns);
     match &spec.role {
         ArchiveRole::Tileset {
-            config,
+            contract,
+            pbf_path,
             pbf_name,
             provenance,
             ..
         } => {
             pmtiles.set_source_pbf_filename(pbf_name.clone());
-            let reader = ElementReader::from_path(&config.pbf_path).map_err(|error| {
+            let reader = ElementReader::from_path(pbf_path).map_err(|error| {
                 PipelineError(format!(
                     "cannot read input PBF header for archive provenance: {error}"
                 ))
@@ -380,7 +391,7 @@ pub(in crate::pipeline) fn phase_assemble_with_ocean(
             }
             write_provenance(
                 &mut pmtiles,
-                config,
+                (*contract).clone(),
                 pbf_name.clone(),
                 replication_timestamp,
                 pbf_features,
@@ -412,27 +423,13 @@ pub(in crate::pipeline) fn phase_assemble_with_ocean(
     ))
 }
 
-/// Write the `elivagar` provenance member describing the contract this
-/// archive was built under.
-///
-/// Every fact here is taken from the resolved run state rather than
-/// re-derived from config: the ocean mode and low-zoom source come from the
-/// ocean plan `run` resolved once, which is what the passes and the artifact
-/// admission actually used. Metadata that overstates is worse than metadata
-/// that is absent.
-///
-/// Only tileset archives reach this; the ocean artifact role has no input
-/// PBF and writes no run provenance.
-///
-/// This stays on the pipeline side rather than in `provenance.rs` by
-/// decision: it adapts resolved run state (`TilesetProvenance`, the ocean
-/// plan's `contract_kind`) into the typed `Input` and `OceanContract` that
-/// `provenance::build` takes. `provenance` is public and linked by brokkr, and
-/// it already depends on `TilegenConfig` in the wrong direction; moving this
-/// adapter in would add a dependency on pipeline run state as well.
+/// Write the resolved comparability contract with the run's observed input
+/// and effective execution paths. The contract is the one phase12 and the
+/// checkpoint consumed; assembly never derives producer or encoding settings
+/// from the caller's request. Artifact archives never reach this adapter.
 fn write_provenance(
     pmtiles: &mut PmtilesWriter,
-    config: &TilegenConfig,
+    config: crate::provenance::ContractConfig,
     name: String,
     replication_timestamp: Option<i64>,
     features: crate::provenance::PbfFeatures,
@@ -444,16 +441,7 @@ fn write_provenance(
         replication_timestamp,
         features,
     };
-    let ocean = crate::provenance::OceanContract {
-        kind: run.ocean_mode.contract_kind(run.low_zoom_source)?,
-        // Invariably true since --no-ocean-simplify was removed. The field
-        // stays because it is part of the comparability contract and archives
-        // built before that removal can carry false: dropping it would make
-        // those archives incomparable to these, which is the opposite of what
-        // the block is for.
-        runtime_simplification: true,
-    };
-    let value = crate::provenance::build(&input, config, &ocean, run.effective, run.resumed_from);
+    let value = crate::provenance::build_resolved(&input, config, run.effective, run.resumed_from);
     pmtiles.set_elivagar_metadata(value)?;
     Ok(())
 }

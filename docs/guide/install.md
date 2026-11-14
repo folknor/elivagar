@@ -22,6 +22,13 @@ header, and the writer's `add_run` / `set_metadata_verbatim`), the
 `tile_detail` MVT decoder with selectable unknown-field strictness, and typed
 provenance.
 
+`TilegenConfig::ocean` is `Option<OceanInputs>`: the full-resolution shapefile
+is required when ocean is enabled, with optional simplified and artifact paths.
+`OceanInputs::parse_specs` accepts the CLI's repeatable ocean syntax.
+Use `SimplifyFactor::new` for a finite multiplier in 0.1..=10 (default 1),
+and `FanoutCaps::parse_specs` or `FanoutCaps::set` for checked layer caps.
+`run` rejects MLT without the `mlt` build feature before phase work.
+
 ## From source
 
 ```sh

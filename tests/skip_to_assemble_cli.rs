@@ -30,9 +30,7 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         tmp_dir: std::path::PathBuf::from("unused"),
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
+        ocean: None,
         skip_to: None,
         in_memory: false,
         compression_level: 6,
@@ -47,8 +45,8 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         tile_format: elivagar::TilePayloadFormat::Mvt,
         tile_compression: elivagar::TileCompression::Gzip,
         compress_sort_chunks: elivagar::sort::ChunkCompression::None,
-        fanout_caps: [None; elivagar::shortbread::Layer::count()],
-        polygon_simplify_factor: 1.0,
+        fanout_caps: elivagar::FanoutCaps::default(),
+        polygon_simplify_factor: elivagar::SimplifyFactor::default(),
     };
     serde_json::json!({
         "version": 12,

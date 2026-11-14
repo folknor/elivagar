@@ -19,7 +19,7 @@
 #[global_allocator]
 static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use elivagar::resources::ByteBudget;
@@ -347,109 +347,12 @@ fn parse_byte_size_min_1m(s: &str) -> Result<ByteBudget, String> {
     .ok_or_else(|| format!("expected >= 1M (e.g. 32M, 128M), got '{s}'"))
 }
 
-/// The ocean inputs named by `--ocean`, after parsing and validation.
-///
-/// `low` is `Some` only for the explicit z0-z7 + z8-z14 split. A single
-/// z0-z14 entry lands in `high`; the pipeline's ocean plan then feeds both of
-/// its fixed passes, and both band grids, from that file.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct OceanInputs {
-    low: Option<PathBuf>,
-    high: Option<PathBuf>,
-    artifact: Option<PathBuf>,
-}
-
-/// Parse one `--ocean` value into either a zoom-ranged shapefile or an
-/// artifact. Nothing here consults the filesystem: a spec means what it says,
-/// and a path that does not exist is diagnosed later, by the code that opens
-/// it, rather than silently changing what the run is.
-fn parse_ocean_spec(spec: &str) -> Result<(Option<(u8, u8)>, PathBuf), String> {
-    let Some((range, path)) = spec.split_once(':') else {
-        // No range prefix: only the artifact is accepted bare, because it is
-        // the one input whose zoom coverage is a property of the file.
-        if Path::new(spec).extension().is_some_and(|e| e == "pmtiles") {
-            return Ok((None, PathBuf::from(spec)));
-        }
-        return Err(format!(
-            "'{spec}' needs a zoom range, e.g. z0-z14:{spec} (bare paths are accepted only for a .pmtiles artifact)"
-        ));
-    };
-    let parse_z = |t: &str| -> Result<u8, String> {
-        t.strip_prefix('z')
-            .ok_or_else(|| format!("'{t}' is not a zoom (expected z0-z14)"))?
-            .parse::<u8>()
-            .map_err(|_| format!("'{t}' is not a zoom (expected z0-z14)"))
-    };
-    let (lo, hi) = range
-        .split_once("-")
-        .ok_or_else(|| format!("'{range}' is not a zoom range (expected z0-z7)"))?;
-    let (lo, hi) = (parse_z(lo)?, parse_z(hi)?);
-    if lo > hi || hi > elivagar::tiling::MAX_ZOOM {
-        return Err(format!("'{range}' is not a zoom range within z0-z14"));
-    }
-    Ok((Some((lo, hi)), PathBuf::from(path)))
-}
-
-/// Validate the whole `--ocean` set and map it onto the two shapefile passes.
-///
-/// The zoom ranges are checked against what the engine can actually do rather
-/// than accepted and rounded: the ocean plan's two passes split at z7/z8 and
-/// nowhere else, so those are the only partitions expressible. Accepting
-/// `z0-z5` and quietly serving a z7 split would put a false statement in the
-/// recorded invocation, which is the whole thing this flag exists to prevent.
-fn resolve_ocean_inputs(specs: &[String]) -> Result<OceanInputs, String> {
-    let mut out = OceanInputs::default();
-    let mut ranges: Vec<((u8, u8), PathBuf)> = Vec::new();
-    for spec in specs {
-        match parse_ocean_spec(spec)? {
-            (None, path) => {
-                if out.artifact.replace(path).is_some() {
-                    return Err("--ocean names more than one .pmtiles artifact".to_string());
-                }
-            }
-            (Some(range), path) => ranges.push((range, path)),
-        }
-    }
-    ranges.sort_by_key(|(r, _)| *r);
-    match ranges.as_slice() {
-        [] => {}
-        [((0, 14), full)] => out.high = Some(full.clone()),
-        [((0, 7), low), ((8, 14), high)] => {
-            out.low = Some(low.clone());
-            out.high = Some(high.clone());
-        }
-        _ => {
-            return Err(
-                "--ocean shapefiles must partition z0-z14 as either z0-z14 alone or z0-z7 plus z8-z14 (the engine splits at z7/z8 and nowhere else)"
-                    .to_string(),
-            );
-        }
-    }
-    if out.artifact.is_some() && out.high.is_none() {
-        return Err(
-            "--ocean names a .pmtiles artifact but no shapefile: an extract computes its boundary band from the shapefiles, and the artifact's key is validated by re-hashing them"
-                .to_string(),
-        );
-    }
-    Ok(out)
-}
-
 fn ocean_build_command(args: &OceanBuildArgs) {
-    let inputs = match resolve_ocean_inputs(&args.ocean) {
-        Ok(inputs) if inputs.artifact.is_some() => {
-            eprintln!("error: ocean-build --ocean takes shapefiles, not a .pmtiles artifact");
-            std::process::exit(2);
-        }
-        Ok(inputs) => inputs,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(2);
-        }
-    };
-    let Some(full) = inputs.high.as_deref() else {
-        eprintln!("error: ocean-build needs a full-resolution shapefile");
+    let inputs = elivagar::OceanInputs::parse_build_specs(&args.ocean).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
         std::process::exit(2);
-    };
+    });
+    let full = &inputs.full;
     let threads = args
         .threads
         .unwrap_or_else(elivagar::resources::default_threads);
@@ -459,7 +362,7 @@ fn ocean_build_command(args: &OceanBuildArgs) {
         .expect("failed to configure rayon thread pool");
     if let Err(e) = elivagar::ocean_build(
         full,
-        inputs.low.as_deref(),
+        inputs.simplified.as_deref(),
         &args.output,
         &args.tmp_dir,
         args.compression_level,
@@ -589,41 +492,17 @@ fn run(args: RunArgs) {
         SkipToArg::Assemble => elivagar::SkipTo::Assemble,
     });
 
-    // The ocean is exactly what --ocean names. Nothing is inferred from the
-    // filesystem: a run used to change its ocean path depending on whether
-    // data/ocean-tiles.pmtiles happened to exist, which made two runs of the
-    // same binary on the same input differ with nothing in the recorded
-    // invocation to say how.
-    let ocean_inputs = match resolve_ocean_inputs(&args.ocean) {
-        Ok(inputs) => inputs,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(2);
-        }
-    };
-
-    // Refuse an MLT run up front rather than at the first encoded batch, which
-    // is minutes of phase12 and sort later. The flag value stays accepted by
-    // clap in every build so the error names the missing feature instead of
-    // reading as an unknown value.
-    #[cfg(not(feature = "mlt"))]
-    if matches!(args.tile_format, TileFormatArg::Mlt) {
-        eprintln!(
-            "error: --tile-format mlt requires a build with the `mlt` cargo feature \
-             (cargo build --release --features mlt)"
-        );
+    let ocean_inputs = elivagar::OceanInputs::parse_specs(&args.ocean).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
         std::process::exit(2);
-    }
-
+    });
     let config = elivagar::TilegenConfig {
         pbf_path: args.input,
         output_path: args.output,
         tmp_dir: args.tmp_dir,
         min_zoom: 0,
         max_zoom: elivagar::tiling::MAX_ZOOM,
-        ocean_shapefile: ocean_inputs.high,
-        ocean_simplified_shapefile: ocean_inputs.low,
-        ocean_tiles: ocean_inputs.artifact,
+        ocean: ocean_inputs,
         skip_to,
         in_memory: args.in_memory,
         compression_level: args.compression_level,
@@ -648,56 +527,16 @@ fn run(args: RunArgs) {
             Some(SortChunkCompressionArg::Lz4) => elivagar::sort::ChunkCompression::Lz4,
             Some(SortChunkCompressionArg::Snappy) => elivagar::sort::ChunkCompression::Snappy,
         },
-        fanout_caps: {
-            // Zero spells "uncapped" on the command line, so an explicit
-            // layer=0 un-caps that layer under a nonzero default.
-            let default_cap = args.fanout_cap_default.and_then(std::num::NonZeroU32::new);
-            let mut caps = [None; elivagar::shortbread::Layer::count()];
-            for layer in elivagar::shortbread::Layer::ALL {
-                if layer.supports_fanout_cap() {
-                    caps[layer as usize] = default_cap;
-                }
-            }
-            for spec in &args.fanout_cap {
-                let trimmed = spec.trim();
-                let (name, cap_str) = match trimmed.split_once('=') {
-                    Some(pair) => pair,
-                    None => {
-                        eprintln!(
-                            "Error: invalid --fanout-cap format, expected layer=N: '{trimmed}'"
-                        );
-                        std::process::exit(1);
-                    }
-                };
-                let name = name.trim();
-                let cap_val: u32 = cap_str.trim().parse().unwrap_or_else(|_| {
-                    eprintln!("Error: invalid cap value in --fanout-cap: '{trimmed}'");
-                    std::process::exit(1);
-                });
-                match elivagar::shortbread::Layer::from_name(name) {
-                    Some(layer) if layer.supports_fanout_cap() => {
-                        caps[layer as usize] = std::num::NonZeroU32::new(cap_val);
-                    }
-                    Some(_) => {
-                        eprintln!("Error: layer '{name}' does not support --fanout-cap");
-                        std::process::exit(1);
-                    }
-                    None => {
-                        eprintln!("Error: unknown layer name for --fanout-cap: '{name}'");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            caps
-        },
-        polygon_simplify_factor: {
-            let f = args.polygon_simplify_factor;
-            if f < 0.1 || f > 10.0 {
-                eprintln!("Error: --polygon-simplify-factor must be between 0.1 and 10.0, got {f}");
-                std::process::exit(1);
-            }
-            f
-        },
+        fanout_caps: elivagar::FanoutCaps::parse_specs(args.fanout_cap_default, &args.fanout_cap)
+            .unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }),
+        polygon_simplify_factor: elivagar::SimplifyFactor::new(args.polygon_simplify_factor)
+            .unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }),
     };
 
     let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")
@@ -715,86 +554,6 @@ fn run(args: RunArgs) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-
-    fn ocean(specs: &[&str]) -> Result<OceanInputs, String> {
-        let owned: Vec<String> = specs.iter().map(|s| (*s).to_string()).collect();
-        resolve_ocean_inputs(&owned)
-    }
-
-    #[test]
-    fn ocean_absent_means_no_ocean() {
-        assert_eq!(ocean(&[]).unwrap(), OceanInputs::default());
-    }
-
-    #[test]
-    fn ocean_single_full_range_serves_every_zoom() {
-        let got = ocean(&["z0-z14:full.shp"]).unwrap();
-        assert_eq!(got.high, Some(PathBuf::from("full.shp")));
-        assert_eq!(got.low, None);
-        assert_eq!(got.artifact, None);
-    }
-
-    #[test]
-    fn ocean_split_maps_low_and_high_passes() {
-        // Order of the flags must not matter; the ranges decide the passes.
-        let got = ocean(&["z8-z14:full.shp", "z0-z7:simple.shp"]).unwrap();
-        assert_eq!(got.low, Some(PathBuf::from("simple.shp")));
-        assert_eq!(got.high, Some(PathBuf::from("full.shp")));
-    }
-
-    #[test]
-    fn ocean_artifact_is_additive_to_the_shapefiles() {
-        let got = ocean(&["z0-z14:full.shp", "ocean-tiles.pmtiles"]).unwrap();
-        assert_eq!(got.high, Some(PathBuf::from("full.shp")));
-        assert_eq!(got.artifact, Some(PathBuf::from("ocean-tiles.pmtiles")));
-    }
-
-    #[test]
-    fn ocean_artifact_alone_is_rejected() {
-        // An extract computes its boundary band from the shapefiles and the
-        // artifact key is validated by re-hashing them, so an artifact with no
-        // shapefile is an incomplete spec, not a world build.
-        let err = ocean(&["ocean-tiles.pmtiles"]).unwrap_err();
-        assert!(err.contains("no shapefile"), "{err}");
-    }
-
-    #[test]
-    fn ocean_rejects_a_split_the_engine_cannot_do() {
-        // The ocean passes split at z7/z8 and nowhere else. Accepting this
-        // and serving a z7 split would put a false statement in the recorded
-        // invocation.
-        let err = ocean(&["z0-z5:simple.shp", "z6-z14:full.shp"]).unwrap_err();
-        assert!(err.contains("partition z0-z14"), "{err}");
-    }
-
-    #[test]
-    fn ocean_rejects_ranges_that_leave_a_gap() {
-        let err = ocean(&["z0-z7:simple.shp"]).unwrap_err();
-        assert!(err.contains("partition z0-z14"), "{err}");
-    }
-
-    #[test]
-    fn ocean_rejects_a_bare_shapefile() {
-        let err = ocean(&["full.shp"]).unwrap_err();
-        assert!(err.contains("needs a zoom range"), "{err}");
-    }
-
-    #[test]
-    fn ocean_rejects_two_artifacts() {
-        let err = ocean(&["z0-z14:full.shp", "a.pmtiles", "b.pmtiles"]).unwrap_err();
-        assert!(err.contains("more than one"), "{err}");
-    }
-
-    #[test]
-    fn ocean_rejects_malformed_ranges() {
-        assert!(
-            ocean(&["0-14:full.shp"])
-                .unwrap_err()
-                .contains("not a zoom")
-        );
-        assert!(ocean(&["z9-z2:full.shp"]).unwrap_err().contains("range"));
-        assert!(ocean(&["z0-z15:full.shp"]).unwrap_err().contains("range"));
-    }
 
     #[test]
     fn test_parse_byte_size_megabytes() {

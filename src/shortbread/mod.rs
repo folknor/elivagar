@@ -710,3 +710,10 @@ fn parse_i64(s: &str) -> Option<i64> {
 #[allow(clippy::unwrap_used)]
 #[path = "../shortbread_tests.rs"]
 mod tests;
+
+impl std::str::FromStr for Layer {
+    type Err = String;
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::from_name(name).ok_or_else(|| format!("unknown layer name: '{name}'"))
+    }
+}

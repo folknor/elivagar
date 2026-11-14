@@ -27,7 +27,7 @@ use pbfhogg::{BlobFilter, BlockType, ElementReader, PrimitiveBlock};
 
 use super::relations::process_relation_blocks;
 use super::stats::{FanoutStats, MissingRefStatsAtomic, Phase12Stats};
-use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig};
+use super::{PipelineError, RunPlan, SORT_CHUNKS_DIR};
 use crate::tiling::ZoomRange;
 use extent::CoordinateExtent;
 use input::{UnorderedBlockSource, WayBlock};
@@ -105,7 +105,7 @@ impl RelationBuffer {
 
 /// Run-wide inputs the router hands to the components it starts.
 struct RouteCtx<'a> {
-    config: &'a TilegenConfig,
+    config: &'a RunPlan,
     window: ZoomRange,
     locations_on_ways: bool,
     member_source: MemberSource,
@@ -266,8 +266,8 @@ impl Router<'_> {
             locations_on_ways: ctx.locations_on_ways,
             admission: ctx.admission,
             window: ctx.window,
-            fanout_caps: ctx.config.fanout_caps,
-            polygon_simplify_factor: ctx.config.polygon_simplify_factor,
+            fanout_caps: *ctx.config.contract.producer.fanout_caps(),
+            polygon_simplify_factor: ctx.config.contract.producer.simplify_factor(),
             sort_chunk_budget: ctx.sort_chunk_budget,
             spill: Arc::clone(&ctx.spill),
             missing_ref_stats: Arc::clone(&ctx.missing_ref_stats),
@@ -361,10 +361,10 @@ impl Router<'_> {
 // that cannot return the run's Result.
 #[allow(clippy::unwrap_in_result)]
 pub(super) fn phase_read_and_process(
-    config: &TilegenConfig,
-    window: ZoomRange,
+    config: &RunPlan,
     resources: &Resources,
 ) -> Result<(SortWriter, MercBbox, Phase12Stats), PipelineError> {
+    let window = config.window;
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
     let sort_chunk_budget = resources.sort_chunk;
@@ -543,8 +543,8 @@ pub(super) fn phase_read_and_process(
         &mut sort_writer,
         &spill,
         &mut fanout,
-        &config.fanout_caps,
-        config.polygon_simplify_factor,
+        config.contract.producer.fanout_caps(),
+        config.contract.producer.simplify_factor(),
     )?;
     let rel_count = relation_tail.rel_count;
     features_emitted += relation_tail.features;

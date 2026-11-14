@@ -156,6 +156,17 @@ Example, the production shape:
 | `--compress-sort-chunks <lz4\|snappy>` | compress sort chunks: less disk I/O, more CPU. Wanted at planet scale, where scratch exceeds RAM |
 | `-j`, `--threads <N>` | worker sizing input for Rayon, decode, phase12 and assembly; not a process-wide cap. Default: logical CPUs. Zero is rejected |
 
+Library callers use `TilegenConfig::ocean: Option<OceanInputs>`: `full` is
+required, while `simplified` and `artifact` are optional. `OceanInputs::parse_specs`
+applies the same partition rule as `--ocean`; `parse_build_specs` additionally
+rejects artifacts and requires ocean. No parser consults the filesystem.
+`SimplifyFactor::new` checks a finite value in 0.1..=10 and preserves the
+caller's f64; its default is 1. `FanoutCaps::parse_specs(default, overrides)`
+applies a default only to supported layers, trims whitespace, and applies the
+last override for each layer. Zero is uncapped. `FanoutCaps::set` also rejects
+unsupported layers; `Layer` implements `FromStr` for wire names. Missing MLT
+build support is refused by `run` before phase work or scratch mutation.
+
 The CLI sizes Rayon from `--threads`; library callers size Rayon separately.
 Phase12 derives decode workers with `max(threads / 3, 1)` and, in locations
 mode, node workers with `(threads / 4).clamp(2, 6)`. Way admission allows

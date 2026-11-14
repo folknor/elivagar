@@ -176,9 +176,7 @@ fn run_tilegen(
         tmp_dir: dir.join(format!("{suffix}_tmp")),
         min_zoom: 14,
         max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
+        ocean: None,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -193,8 +191,8 @@ fn run_tilegen(
         tile_format,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: elivagar::sort::ChunkCompression::None,
-        fanout_caps: [None; elivagar::shortbread::Layer::count()],
-        polygon_simplify_factor: 1.0,
+        fanout_caps: elivagar::FanoutCaps::default(),
+        polygon_simplify_factor: elivagar::SimplifyFactor::default(),
     };
     elivagar::run(&config).expect("run synthetic tile generation");
     output_path

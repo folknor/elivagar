@@ -153,17 +153,8 @@ pub struct TilegenConfig {
     pub min_zoom: u8,
     /// Last zoom of the archive, at most `tiling::MAX_ZOOM`.
     pub max_zoom: u8,
-    /// Ocean polygon shapefile (`water-polygons-split-3857`). Required for
-    /// water fill tiles and for either of the next two fields. It feeds
-    /// z8-z14, and z0-z7 too unless `ocean_simplified_shapefile` is set.
-    pub ocean_shapefile: Option<PathBuf>,
-    /// Simplified ocean shapefile for z0-7 (fewer vertices, faster at low
-    /// zooms). Setting it without `ocean_shapefile` is an error.
-    pub ocean_simplified_shapefile: Option<PathBuf>,
-    /// Optional durable world-ocean PMTiles artifact. It serves only the
-    /// exact MVT/gzip z0-14 contract at its compression level; naming it for
-    /// any other run, or without `ocean_shapefile`, is an error.
-    pub ocean_tiles: Option<PathBuf>,
+    /// Explicit ocean sources, or no ocean when absent.
+    pub ocean: Option<crate::OceanInputs>,
     /// Skip to a later phase, reusing checkpoint data from a previous run.
     pub skip_to: Option<SkipTo>,
     /// Keep tile blob in memory instead of streaming to a temp file.
@@ -229,15 +220,14 @@ pub struct TilegenConfig {
     pub compress_sort_chunks: sort::ChunkCompression,
     /// Per-layer fanout caps: maximum bbox tiles a polygon feature may touch
     /// at any zoom. When exceeded, the feature is skipped at that zoom.
-    /// `None` = uncapped. Only applies to polygon-geometry emit functions.
-    /// Indexed by `Layer` enum discriminant.
-    pub fanout_caps: [Option<std::num::NonZeroU32>; shortbread::Layer::count()],
+    /// An absent cap is uncapped. Only supported polygon layers accept caps.
+    pub fanout_caps: crate::FanoutCaps,
     /// Simplification tolerance multiplier for polygon layers. 1.0 = standard
     /// (same tolerance as lines). Values > 1.0 simplify more aggressively,
     /// reducing sort record volume. Polygon fill rendering is less sensitive
     /// to vertex precision than stroked lines, so higher tolerances are safe.
     /// Expected sweet spot: 1.0-2.0. Default: 1.0 (no change).
-    pub polygon_simplify_factor: f64,
+    pub polygon_simplify_factor: crate::SimplifyFactor,
 }
 
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
@@ -254,15 +244,11 @@ pub(crate) enum TileContract {
 }
 
 impl TileContract {
-    pub(crate) fn from_config(config: &TilegenConfig) -> Self {
-        Self::from_fields(
-            config.tile_format,
-            config.tile_compression,
-            config.compression_level,
-        )
-    }
-
-    fn from_fields(format: TilePayloadFormat, compression: TileCompression, level: u32) -> Self {
+    pub(crate) fn from_fields(
+        format: TilePayloadFormat,
+        compression: TileCompression,
+        level: u32,
+    ) -> Self {
         match format {
             TilePayloadFormat::Mvt => Self::Mvt { compression, level },
             TilePayloadFormat::Mlt => Self::Mlt,
@@ -346,12 +332,6 @@ pub(super) fn compression_level_for_zoom(z: u8, compression_level: u32) -> u32 {
     }
 }
 
-fn configured_tile_contract(
-    config: &TilegenConfig,
-) -> (archive::TileDataFormat, archive::TileDataCompression) {
-    TileContract::from_config(config).writer()
-}
-
 /// Resolve the ocean producer from the config, or fail.
 ///
 /// Nothing here degrades silently. Every input is named explicitly on the
@@ -361,11 +341,15 @@ fn configured_tile_contract(
 /// brokkr reads nothing from tilegen's stderr under `--bench`, so a bench run
 /// could switch ocean paths on four different conditions and leave no trace in
 /// the results row, the sidecar, or the archive.
-fn resolve_ocean(config: &TilegenConfig) -> Result<ResolvedOcean, PipelineError> {
+fn resolve_ocean(
+    config: &TilegenConfig,
+    tile: TileContract,
+    window: ZoomRange,
+) -> Result<ResolvedOcean, PipelineError> {
     let Some(plan) = crate::ocean::OceanPlan::new(
-        config.ocean_shapefile.as_deref(),
-        config.ocean_simplified_shapefile.as_deref(),
-        config.ocean_tiles.as_deref(),
+        config.ocean.as_ref().map(|o| o.full.as_path()),
+        config.ocean.as_ref().and_then(|o| o.simplified.as_deref()),
+        config.ocean.as_ref().and_then(|o| o.artifact.as_deref()),
     )
     .map_err(PipelineError)?
     else {
@@ -373,25 +357,25 @@ fn resolve_ocean(config: &TilegenConfig) -> Result<ResolvedOcean, PipelineError>
     };
     let Some(path) = plan.artifact() else {
         let key = plan
-            .source_key(config.min_zoom, config.max_zoom)
+            .source_key(window.first(), window.last())
             .map_err(|e| PipelineError(format!("ocean shapefile is unreadable: {e}")))?;
         return Ok(ResolvedOcean::Computed { plan, key });
     };
-    let (tile_format, tile_compression) = configured_tile_contract(config);
+    let (tile_format, tile_compression) = tile.writer();
     let decoder = crate::archive::TileDecoder::for_contract(
         tile_format.header_tile_type(),
         tile_compression.header_compression(),
     );
     if decoder.is_err()
-        || !crate::ocean::artifact::artifact_serves_window(config.min_zoom, config.max_zoom)
+        || !crate::ocean::artifact::artifact_serves_window(window.first(), window.last())
     {
         return Err(PipelineError(format!(
             "ocean artifact {} was named but cannot serve this run: it is built for the MVT + gzip + z0-14 contract, and this run is {:?} + {:?} + z{}-z{}. Drop the artifact from --ocean to compute the ocean instead.",
             path.display(),
             config.tile_format,
             config.tile_compression,
-            config.min_zoom,
-            config.max_zoom,
+            window.first(),
+            window.last(),
         )));
     }
     let artifact = crate::ocean::OceanArtifact::admit(path, config.compression_level, || {
@@ -509,20 +493,103 @@ use crate::debug::layer_stats_enabled;
 
 /// The run's zoom window, the one place the config's two numbers become a
 /// validated range. An excessive `max_zoom` is reported before a reversed pair.
-pub(crate) fn zoom_window(config: &TilegenConfig) -> Result<ZoomRange, PipelineError> {
-    if config.max_zoom > crate::tiling::MAX_ZOOM {
+fn zoom_window(min_zoom: u8, max_zoom: u8) -> Result<ZoomRange, PipelineError> {
+    if max_zoom > crate::tiling::MAX_ZOOM {
         return Err(PipelineError(format!(
             "max_zoom {} exceeds maximum supported zoom level {}",
-            config.max_zoom,
+            max_zoom,
             crate::tiling::MAX_ZOOM
         )));
     }
-    ZoomRange::new(config.min_zoom, config.max_zoom).ok_or_else(|| {
+    ZoomRange::new(min_zoom, max_zoom).ok_or_else(|| {
         PipelineError(format!(
-            "min_zoom {} is greater than max_zoom {}",
-            config.min_zoom, config.max_zoom
+            "min_zoom {min_zoom} is greater than max_zoom {max_zoom}"
         ))
     })
+}
+
+/// Validated request parts shared by execution, checkpoints and provenance.
+/// No phase accepts the caller DTO after this boundary.
+pub(crate) struct RunPlan {
+    window: ZoomRange,
+    contract: crate::provenance::ContractConfig,
+    ocean: ResolvedOcean,
+    resources: crate::resources::Resources,
+    pbf_path: PathBuf,
+    output_path: PathBuf,
+    tmp_dir: PathBuf,
+    skip_to: Option<SkipTo>,
+    in_memory: bool,
+    compress_sort_chunks: sort::ChunkCompression,
+    force_sorted: bool,
+    allow_unsafe_flat_index: bool,
+    locations_on_ways: bool,
+}
+
+impl RunPlan {
+    fn resolve(config: &TilegenConfig) -> Result<Self, PipelineError> {
+        if config
+            .pbf_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_none()
+        {
+            return Err(PipelineError(
+                "input PBF path must have a UTF-8 filename so archive provenance can identify it"
+                    .to_string(),
+            ));
+        }
+        if config.tile_format == TilePayloadFormat::Mlt
+            && config.tile_compression == TileCompression::Brotli
+        {
+            return Err(PipelineError(
+                "MLT payloads are uncompressed; brotli is MVT only".into(),
+            ));
+        }
+        #[cfg(not(feature = "mlt"))]
+        if config.tile_format == TilePayloadFormat::Mlt {
+            return Err(PipelineError(
+                "--tile-format mlt requires a build with the `mlt` feature".into(),
+            ));
+        }
+        if config.tile_format == TilePayloadFormat::Mvt {
+            validate_compression_level(config.compression_level)?;
+        }
+        let window = zoom_window(config.min_zoom, config.max_zoom)?;
+
+        let resources = crate::resources::Resources::resolve(config)?;
+        let contract = crate::provenance::ContractConfig::new(
+            config,
+            crate::provenance::OceanContract {
+                kind: crate::provenance::OceanContractKind::None,
+                runtime_simplification: true,
+            },
+        );
+        let ocean = resolve_ocean(config, contract.tile, window)?;
+        let contract = contract.with_ocean(crate::provenance::OceanContract {
+            kind: ocean
+                .mode()
+                .contract_kind(ocean.low_zoom_source(window.first()))?,
+            // Always true since the runtime bypass was removed; retained in
+            // the serialized comparability contract for older archives.
+            runtime_simplification: true,
+        });
+        Ok(Self {
+            window,
+            contract,
+            ocean,
+            resources,
+            pbf_path: config.pbf_path.clone(),
+            output_path: config.output_path.clone(),
+            tmp_dir: config.tmp_dir.clone(),
+            skip_to: config.skip_to,
+            in_memory: config.in_memory,
+            compress_sort_chunks: config.compress_sort_chunks,
+            force_sorted: config.force_sorted,
+            allow_unsafe_flat_index: config.allow_unsafe_flat_index,
+            locations_on_ways: config.locations_on_ways,
+        })
+    }
 }
 
 /// # Errors
@@ -535,37 +602,15 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     crate::debug::reset_run_counters();
     crate::ocean::reset_ocean_counters();
     sort::reset_sort_counters();
-    if config
-        .pbf_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_none()
-    {
-        return Err(PipelineError(
-            "input PBF path must have a UTF-8 filename so archive provenance can identify it"
-                .to_string(),
-        ));
-    }
-    if config.tile_format == TilePayloadFormat::Mlt
-        && config.tile_compression == TileCompression::Brotli
-    {
-        return Err(PipelineError(
-            "MLT payloads are uncompressed; brotli is MVT only".into(),
-        ));
-    }
-    if config.tile_format == TilePayloadFormat::Mvt {
-        validate_compression_level(config.compression_level)?;
-    }
-    let window = zoom_window(config)?;
-
-    let resources = crate::resources::Resources::resolve(config)?;
+    let mut config = RunPlan::resolve(config)?;
+    let window = config.window;
+    let resources = &config.resources;
     resources.emit();
-
     let total_start = Instant::now();
     let skip = config.skip_to;
-    let ocean = resolve_ocean(config)?;
+    let ocean = &config.ocean;
     let ocean_mode = ocean.mode();
-    let low_zoom_source = ocean.low_zoom_source(config.min_zoom);
+    let low_zoom_source = ocean.low_zoom_source(window.first());
     // Identifying the input means reading all of it, so where that read happens
     // matters. A resume must hash up front to validate the chunks before any
     // work is done under them. A full run hashes on a background thread
@@ -593,7 +638,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             skip,
             &checkpoint::RunIdentity {
                 input_xxh3_128: identity.xxh3_128,
-                producer_config: crate::provenance::producer_config(config),
+                producer_config: config.contract.producer.json(),
                 sort_chunk_compression: config.compress_sort_chunks,
                 ocean: ocean.chunks(),
             },
@@ -614,13 +659,13 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         config.pbf_path.display(),
         config.output_path.display()
     );
-    eprintln!("    Zoom range: z{}-z{}", config.min_zoom, config.max_zoom);
+    eprintln!("    Zoom range: z{}-z{}", window.first(), window.last());
     eprintln!("    Tmp dir:    {}", config.tmp_dir.display());
-    eprintln!("    Tile contract: {:?}", TileContract::from_config(config));
-    if (config.polygon_simplify_factor - 1.0).abs() > f64::EPSILON {
+    eprintln!("    Tile contract: {:?}", config.contract.tile);
+    if (config.contract.producer.simplify_factor() - 1.0).abs() > f64::EPSILON {
         eprintln!(
             "    Polygon simplify factor: {:.2}",
-            config.polygon_simplify_factor
+            config.contract.producer.simplify_factor()
         );
     }
     if let Some(s) = skip {
@@ -666,7 +711,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             let input_hash = crate::provenance::BackgroundHash::spawn(config.pbf_path.clone());
             let phase12_start = Instant::now();
             let (mut sw, bounds_out, p12_stats) =
-                phase12::phase_read_and_process(config, window, &resources)?;
+                phase12::phase_read_and_process(&config, resources)?;
             phase12_stats = Some(p12_stats);
             let phase12_elapsed = phase12_start.elapsed();
             emit_marker("PHASE12_END");
@@ -693,7 +738,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 &bounds_out,
                 sw.chunk_count(),
                 identity.xxh3_128,
-                crate::provenance::producer_config(config),
+                config.contract.producer.json(),
                 config.compress_sort_chunks,
                 phase12_stats
                     .as_ref()
@@ -835,7 +880,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // same function of the same checkpoint bounds.
     let ocean_band =
         ocean_band.unwrap_or_else(|| crate::ocean::OceanBand::for_bounds(&data_bounds));
-    let active_ocean_artifact = match ocean {
+    let active_ocean_artifact = match std::mem::replace(&mut config.ocean, ResolvedOcean::None) {
         ResolvedOcean::Artifact { artifact, .. } => {
             let tiles = artifact.into_tiles(ocean_band)?;
             eprintln!("  Ocean artifact active: {} runs", tiles.run_count());
@@ -866,7 +911,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     ) = assemble::phase_assemble_with_ocean(
         &mut sort_reader,
         assemble::AssembleSpec::tileset(
-            config,
+            &config,
             data_bounds,
             active_ocean_artifact,
             assemble::TilesetProvenance {
@@ -880,7 +925,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                 low_zoom_source,
             },
         )?,
-        &resources,
+        resources,
     )?;
     // Drop the reader so every chunk reader flushes its byte tally before we
     // emit the merge counters.
@@ -915,14 +960,14 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // only when the flags were passed explicitly rather than left at defaults.
     emit_counter(
         "tile_format",
-        match config.tile_format {
-            TilePayloadFormat::Mvt => 0,
-            TilePayloadFormat::Mlt => 1,
+        match config.contract.tile {
+            TileContract::Mvt { .. } => 0,
+            TileContract::Mlt => 1,
         },
     );
     emit_counter(
         "tile_compression",
-        TileContract::from_config(config).compression_counter(),
+        config.contract.tile.compression_counter(),
     );
     if let Some(p3) = phase3_elapsed {
         emit_counter(

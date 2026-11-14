@@ -22,21 +22,6 @@ decision it lives with that decision in `notes/consolidations.md`, not here.
 
 # Run configuration and orchestration
 
-## STR-001 - Replace the flat `TilegenConfig` with a typed run plan
-
-Narrowed. The artifact builder no longer fakes a run: `ocean_artifact_key`
-and `ocean_only_metadata` are gone and assembly takes an `AssembleSpec`
-role. What remains: `run()` and its phases still read the public
-`TilegenConfig` directly and re-derive the window, tile contract and
-producer config at several sites (`TileContract::from_config`,
-`configured_tile_contract`, `zoom_window`, `ProducerConfig::new`), so
-execution and provenance hold independent derivations of the same values,
-and `ArchiveRole::Tileset` still carries `&TilegenConfig` for
-`provenance::build`. The residue is a crate-private resolved plan built once
-at the top of `run` whose parts phase12, assembly, the checkpoint and
-provenance all consume. The settled shape and its rulings are in
-`notes/run-plan-design.md` (link 3).
-
 ## STR-002 - Make `run()` a phase state machine with typed hand-offs
 
 `run()` is a roughly 620-line function doing resume and contract validation,
@@ -49,8 +34,8 @@ counter emission that knows the internals of `Phase12Stats`, `FanoutStats`,
 `u64`s (features, tiles, unique tiles) and the writer thread another; the
 drain thread returns `(WayIndex, SortWriter, u64, FanoutStats)`.
 
-Proposed: `RunPlan::resolve(config)` performs every refusal before work;
-`enum Start { Full, ResumeOcean(ChunkSet), ResumeSort(ChunkSet),
+Proposed (the crate-private `RunPlan` already performs every refusal before
+work): `enum Start { Full, ResumeOcean(ChunkSet), ResumeSort(ChunkSet),
 ResumeAssemble(ChunkSet) }`, each phase producing the next typed artifact
 (`ChunkSet` -> `SortReader` -> `AssembleReport`); the artifact opens in
 exactly one place; phase12 returns a `ChunkSet { bounds, chunk_count, .. }`
@@ -114,19 +99,6 @@ layer, feature, kind }` making `MAX_TILE_ERRORS` a presentation choice;
 a typed or counted `RecordError` in the sort decoder.
 
 Reported by every hunt.
-
-## STR-005 - Move domain validation from `main.rs` into the library
-
-Only `main.rs` holds: `--ocean` spec parsing and the z0-z14 partition rule
-(`parse_ocean_spec`, `resolve_ocean_inputs`, its ten tests),
-`--fanout-cap` parsing and layer-name resolution (`process::exit` paths),
-the `polygon_simplify_factor` range check (which lets NaN through, and which
-library callers bypass entirely), and the early MLT-feature refusal (the
-library refuses only at the first encoded batch). `SkipToArg`,
-`TileFormatArg`, `TileCompressionArg` and `SortChunkCompressionArg`
-duplicate library enums with hand mappings. (`diag` already moved into the
-library; `threads` defaulting is already `resources::default_threads`.)
-The settled shape is link 2 of `notes/run-plan-design.md`.
 
 ## STR-008 - Fix the dependency edges that point the wrong way
 
@@ -194,8 +166,7 @@ Reported by the polygon-engine, coordinate-spaces and ocean hunts.
 
 Role is "index 0 of a `Shape` is the outer, the rest are holes" plus "outer
 has positive shoelace area"; every in-place compaction must preserve the
-slot-0 invariant by hand, and the sites already use different rules (the
-defects are in `notes/bugs.md`). Proposed:
+slot-0 invariant by hand, and the sites already use different rules. Proposed:
 `struct Polygon<S> { outer: Ring<S>, holes: Vec<Ring<S>> }` with orientation
 normalized at construction and one `Orientation::{Outer, Hole}`. If the
 pooled `Vec<Vec<IntPoint>>` layout is load-bearing for allocation, keep it as

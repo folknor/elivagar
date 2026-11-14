@@ -355,22 +355,27 @@ enum Profile {
 /// The producer subset is embedded rather than listed again, so what a resume
 /// must match is a subset of the archive contract by construction.
 #[derive(Debug, Clone, serde::Serialize)]
-struct ContractConfig {
+pub(crate) struct ContractConfig {
     profile: Profile,
     #[serde(flatten)]
-    producer: ProducerConfig,
-    tile: crate::pipeline::TileContract,
-    ocean: OceanContract,
+    pub(crate) producer: ProducerConfig,
+    pub(crate) tile: crate::pipeline::TileContract,
+    pub(crate) ocean: OceanContract,
 }
 
 impl ContractConfig {
-    fn new(config: &TilegenConfig, ocean: OceanContract) -> Self {
+    pub(crate) fn with_ocean(mut self, ocean: OceanContract) -> Self {
+        self.ocean = ocean;
+        self
+    }
+
+    pub(crate) fn new(config: &TilegenConfig, ocean: OceanContract) -> Self {
         let TilegenConfig {
             // Producer settings: see `ProducerConfig`.
             min_zoom: _,
             max_zoom: _,
-            fanout_caps: _,
-            polygon_simplify_factor: _,
+            fanout_caps: crate::FanoutCaps { values: _ },
+            polygon_simplify_factor: crate::SimplifyFactor { value: _ },
             // Encoding. In through `TileContract`, which drops what a format
             // does not use (MLT records no gzip level). The level is gated
             // although the corpus digest is over decoded content, so a level
@@ -384,9 +389,7 @@ impl ContractConfig {
             // Ocean inputs. In through the resolved `OceanContract` (mode,
             // low-zoom source and the content key of the named inputs), never
             // through paths, which are machine dependent.
-            ocean_shapefile: _,
-            ocean_simplified_shapefile: _,
-            ocean_tiles: _,
+            ocean: ocean_inputs,
             // Out: the input PBF is identified by `Input` (content hash and
             // header features), not by where it lives; output and scratch
             // locations do not change content.
@@ -414,10 +417,22 @@ impl ContractConfig {
             allow_unsafe_flat_index: _,
             locations_on_ways: _,
         } = config;
+        match ocean_inputs {
+            Some(crate::OceanInputs {
+                full: _,
+                simplified: _,
+                artifact: _,
+            })
+            | None => {}
+        }
         Self {
             profile: Profile::Shortbread,
             producer: ProducerConfig::new(config),
-            tile: crate::pipeline::TileContract::from_config(config),
+            tile: crate::pipeline::TileContract::from_fields(
+                config.tile_format,
+                config.tile_compression,
+                config.compression_level,
+            ),
             ocean,
         }
     }
@@ -428,7 +443,7 @@ impl ContractConfig {
 /// Serialized flattened into the archive's `config`, and on its own into the
 /// checkpoint, so both carry the same field names and values.
 #[derive(Debug, Clone, serde::Serialize)]
-struct ProducerConfig {
+pub(crate) struct ProducerConfig {
     min_zoom: u8,
     max_zoom: u8,
     fanout_caps: FanoutCaps,
@@ -436,12 +451,24 @@ struct ProducerConfig {
 }
 
 impl ProducerConfig {
+    pub(crate) fn fanout_caps(&self) -> &[Option<std::num::NonZeroU32>; Layer::count()] {
+        &self.fanout_caps.0
+    }
+
+    pub(crate) fn simplify_factor(&self) -> f64 {
+        self.polygon_simplify_factor
+    }
+
+    pub(crate) fn json(&self) -> Value {
+        serde_json::to_value(self).expect("producer config is JSON serializable")
+    }
+
     fn new(config: &TilegenConfig) -> Self {
         Self {
             min_zoom: config.min_zoom,
             max_zoom: config.max_zoom,
-            fanout_caps: FanoutCaps(config.fanout_caps),
-            polygon_simplify_factor: config.polygon_simplify_factor,
+            fanout_caps: FanoutCaps(*config.fanout_caps.as_array()),
+            polygon_simplify_factor: config.polygon_simplify_factor.get(),
         }
     }
 }
@@ -501,10 +528,24 @@ pub fn build(
     effective: Option<Effective>,
     resumed_from: Option<crate::pipeline::SkipTo>,
 ) -> Value {
+    build_resolved(
+        input,
+        ContractConfig::new(config, ocean.clone()),
+        effective,
+        resumed_from,
+    )
+}
+
+pub(crate) fn build_resolved(
+    input: &Input,
+    config: ContractConfig,
+    effective: Option<Effective>,
+    resumed_from: Option<crate::pipeline::SkipTo>,
+) -> Value {
     let provenance = Provenance {
         schema: SCHEMA_VERSION,
         input,
-        config: ContractConfig::new(config, ocean.clone()),
+        config,
         build: &BUILD,
         execution: Execution { resumed_from },
         effective,

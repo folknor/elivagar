@@ -162,6 +162,10 @@ diagnostically in `effective`. Elivagar records the evidence and exports
 no comparison of its own; which recorded fields refuse and which only
 warn is brokkr's policy.
 
+The run resolves this contract once into its private execution plan. Phase12
+uses its producer settings, checkpoints serialize that same producer value,
+and assembly records that same contract with the resolved ocean identity.
+
 ## The digest
 
 One definition, two committed representations:

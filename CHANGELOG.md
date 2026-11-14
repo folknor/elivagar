@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Breaking: `TilegenConfig` now takes `ocean: Option<OceanInputs>`, checked
+  `SimplifyFactor`, and checked `FanoutCaps` instead of separate optional
+  ocean paths, a raw f64 and a raw cap array. Ocean spec and fanout parsers
+  are available to library callers. Non-finite simplify factors are rejected;
+  MLT without build support is refused before phase work. Valid requests
+  retain their output and provenance bytes.
+
 - Breaking: `TilegenConfig` loses `ocean_artifact_key` and
   `ocean_only_metadata`. They existed only so `ocean_build` could fake a
   tilegen run; the artifact is now its own assembly role, which derives its

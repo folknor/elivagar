@@ -525,9 +525,7 @@ fn test_full_pipeline() {
         tmp_dir: tmp,
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
+        ocean: None,
         skip_to: None,
         in_memory: false,
         compression_level: 6,
@@ -542,8 +540,8 @@ fn test_full_pipeline() {
         tile_format: elivagar::TilePayloadFormat::Mvt,
         tile_compression: elivagar::TileCompression::Gzip,
         compress_sort_chunks: elivagar::sort::ChunkCompression::None,
-        fanout_caps: [None; elivagar::shortbread::Layer::count()],
-        polygon_simplify_factor: 1.0,
+        fanout_caps: elivagar::FanoutCaps::default(),
+        polygon_simplify_factor: elivagar::SimplifyFactor::default(),
     };
 
     elivagar::run(&config).expect("pipeline should succeed");

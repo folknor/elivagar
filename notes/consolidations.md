@@ -2,9 +2,7 @@
 
 Domain questions the 2026-10-28 design hunt found answered in more than one
 place. The unit of an entry is the question: every site answering it belongs
-to the one entry, with where its single owner should live. Where a hunter
-found the sites already disagreeing and that disagreement is a defect, the
-account lives in `notes/bugs.md` instead.
+to the one entry, with where its single owner should live.
 
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.

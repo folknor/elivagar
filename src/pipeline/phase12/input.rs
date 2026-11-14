@@ -6,7 +6,7 @@ use crate::debug::{WAIT, wait_span};
 use crate::node_index::NodeStore;
 use pbfhogg::{BlockType, Element, PrimitiveBlock};
 
-use super::super::{PipelineError, TilegenConfig};
+use super::super::{PipelineError, RunPlan};
 
 /// A way block plus its optional injected per-blob membership bitmap.
 pub(super) struct WayBlock {
@@ -140,7 +140,7 @@ pub(in crate::pipeline) fn select_node_store_mode(
 /// where ways carry their own coordinates.
 pub(super) fn create_node_store(
     mode: NodeStoreMode,
-    config: &TilegenConfig,
+    config: &RunPlan,
     header_sorted: bool,
 ) -> Result<Option<NodeStore>, PipelineError> {
     Ok(match mode {

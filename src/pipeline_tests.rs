@@ -441,9 +441,7 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
         tmp_dir: dir.path().join("tmp"),
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
+        ocean: None,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -458,12 +456,11 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [None; Layer::count()],
-        polygon_simplify_factor: 1.0,
+        fanout_caps: crate::FanoutCaps::default(),
+        polygon_simplify_factor: crate::SimplifyFactor::default(),
     };
     phase_read_and_process(
-        &config,
-        crate::pipeline::zoom_window(&config).unwrap(),
+        &RunPlan::resolve(&config).expect("resolve plan"),
         &test_resources(&config),
     )
     .map(|(_, _, stats)| stats)
@@ -570,9 +567,7 @@ fn injected_pins_fixture(
         tmp_dir: dir.path().join("tmp"),
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
+        ocean: None,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -587,12 +582,11 @@ fn injected_pins_fixture(
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [None; Layer::count()],
-        polygon_simplify_factor: 1.0,
+        fanout_caps: crate::FanoutCaps::default(),
+        polygon_simplify_factor: crate::SimplifyFactor::default(),
     };
     phase_read_and_process(
-        &config,
-        crate::pipeline::zoom_window(&config).unwrap(),
+        &RunPlan::resolve(&config).expect("resolve plan"),
         &test_resources(&config),
     )
     .map(|(sw, _, stats)| (dir, sw, stats))
@@ -1600,10 +1594,10 @@ fn tileset_assembly_requires_consistent_provenance_and_preserves_extract_header_
     };
     // The identity is a required field, so only the name can be missing.
     let pbf_path = std::mem::take(&mut config.pbf_path);
-    let Err(error) = assemble::AssembleSpec::tileset(&config, bounds, None, provenance()) else {
+    let Err(error) = RunPlan::resolve(&config) else {
         panic!("ordinary assembly needs an input name");
     };
-    assert!(error.0.contains("input PBF filename"));
+    assert!(error.0.contains("input PBF path"));
     config.pbf_path = pbf_path;
     // Ocean facts must agree: computed-ocean low-zoom source without ocean
     // is refused at construction.
@@ -1611,10 +1605,24 @@ fn tileset_assembly_requires_consistent_provenance_and_preserves_extract_header_
         low_zoom_source: Some(crate::provenance::ActiveLowZoomSource::Full),
         ..provenance()
     };
-    assert!(assemble::AssembleSpec::tileset(&config, bounds, None, mismatched).is_err());
+    assert!(
+        assemble::AssembleSpec::tileset(
+            &RunPlan::resolve(&config).expect("resolve plan"),
+            bounds,
+            None,
+            mismatched
+        )
+        .is_err()
+    );
     assemble::phase_assemble_with_ocean(
         &mut sort_reader,
-        assemble::AssembleSpec::tileset(&config, bounds, None, provenance()).expect("spec"),
+        assemble::AssembleSpec::tileset(
+            &RunPlan::resolve(&config).expect("resolve plan"),
+            bounds,
+            None,
+            provenance(),
+        )
+        .expect("spec"),
         &test_resources(&config),
     )
     .expect("assemble extract");
@@ -1725,9 +1733,7 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         tmp_dir,
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
+        ocean: None,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1742,8 +1748,8 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [None; shortbread::Layer::count()],
-        polygon_simplify_factor: 1.0,
+        fanout_caps: crate::FanoutCaps::default(),
+        polygon_simplify_factor: crate::SimplifyFactor::default(),
     };
 
     write_assembly_pbf(&config.pbf_path);
@@ -1782,9 +1788,7 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         tmp_dir,
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
+        ocean: None,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1799,8 +1803,8 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [None; shortbread::Layer::count()],
-        polygon_simplify_factor: 1.0,
+        fanout_caps: crate::FanoutCaps::default(),
+        polygon_simplify_factor: crate::SimplifyFactor::default(),
     };
 
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
@@ -1830,9 +1834,7 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         tmp_dir: mvt_tmp,
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
+        ocean: None,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1847,8 +1849,8 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [None; shortbread::Layer::count()],
-        polygon_simplify_factor: 1.0,
+        fanout_caps: crate::FanoutCaps::default(),
+        polygon_simplify_factor: crate::SimplifyFactor::default(),
     };
     write_assembly_pbf(&mvt_config.pbf_path);
     let _ = phase_assemble(&mut mvt_sort_reader, &mvt_config).expect("mvt assemble should succeed");
@@ -1886,9 +1888,7 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
             tmp_dir: mlt_tmp,
             min_zoom: 0,
             max_zoom: 14,
-            ocean_shapefile: None,
-            ocean_simplified_shapefile: None,
-            ocean_tiles: None,
+            ocean: None,
             skip_to: None,
             in_memory: true,
             compression_level: 6,
@@ -1903,8 +1903,8 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
             tile_format: TilePayloadFormat::Mlt,
             tile_compression: TileCompression::Gzip,
             compress_sort_chunks: sort::ChunkCompression::None,
-            fanout_caps: [None; shortbread::Layer::count()],
-            polygon_simplify_factor: 1.0,
+            fanout_caps: crate::FanoutCaps::default(),
+            polygon_simplify_factor: crate::SimplifyFactor::default(),
         };
         write_assembly_pbf(&mlt_config.pbf_path);
         let _ =
@@ -4078,9 +4078,7 @@ fn minimal_config() -> TilegenConfig {
         tmp_dir: std::path::PathBuf::from("unused"),
         min_zoom: 0,
         max_zoom: 14,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
+        ocean: None,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -4095,8 +4093,8 @@ fn minimal_config() -> TilegenConfig {
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [None; Layer::count()],
-        polygon_simplify_factor: 1.0,
+        fanout_caps: crate::FanoutCaps::default(),
+        polygon_simplify_factor: crate::SimplifyFactor::default(),
     }
 }
 
@@ -4182,14 +4180,17 @@ fn producer_config_covers_chunk_affecting_settings() {
     );
 
     let mut simplified = minimal_config();
-    simplified.polygon_simplify_factor = 2.0;
+    simplified.polygon_simplify_factor = crate::SimplifyFactor::new(2.0).expect("valid factor");
     assert_ne!(
         crate::provenance::producer_config(&base),
         crate::provenance::producer_config(&simplified)
     );
 
     let mut capped = minimal_config();
-    capped.fanout_caps[Layer::Buildings as usize] = std::num::NonZeroU32::new(2048);
+    capped
+        .fanout_caps
+        .set(Layer::Buildings, 2048)
+        .expect("supported layer");
     assert_ne!(
         crate::provenance::producer_config(&base),
         crate::provenance::producer_config(&capped)
@@ -4206,7 +4207,11 @@ fn effective_tile_contract_matches_provenance_and_mlt_header() {
     let mut config = minimal_config();
     // Keep the established contract local: corpus/ is excluded from the
     // published crate, whose unit tests must still compile.
-    let tile = TileContract::from_config(&config).provenance_json();
+    let tile = RunPlan::resolve(&config)
+        .expect("resolve plan")
+        .contract
+        .tile
+        .provenance_json();
     assert_eq!(
         tile,
         serde_json::json!({
@@ -4220,7 +4225,11 @@ fn effective_tile_contract_matches_provenance_and_mlt_header() {
     assert_eq!(compression_level_for_zoom(9, 6), 6);
     assert_eq!(compression_level_for_zoom(14, 6), 3);
     config.tile_format = TilePayloadFormat::Mlt;
-    let contract = TileContract::from_config(&config);
+    let contract = TileContract::from_fields(
+        config.tile_format,
+        config.tile_compression,
+        config.compression_level,
+    );
     assert_eq!(
         contract.provenance_json(),
         serde_json::json!({
@@ -4346,4 +4355,18 @@ fn relation_boundary_area_subtracts_holes_before_selecting_label_zoom() {
         };
         assert!((hectares - 9e6).abs() < 0.01);
     }
+}
+
+#[cfg(not(feature = "mlt"))]
+#[test]
+fn mlt_requires_build_support_before_input_or_scratch_access() {
+    let config = TilegenConfig {
+        tile_format: TilePayloadFormat::Mlt,
+        tmp_dir: std::path::PathBuf::from("data/test-unsupported-mlt-scratch"),
+        ..minimal_config()
+    };
+    assert!(!config.tmp_dir.exists());
+    let error = run(&config).expect_err("MLT requires build support");
+    assert!(error.to_string().contains("`mlt` feature"), "{error}");
+    assert!(!config.tmp_dir.exists());
 }
