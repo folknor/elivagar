@@ -113,7 +113,7 @@ pub(crate) const MIN_POLY_AREA_AREA: Area = RENDER_PX.squared_area();
 /// Positive is mathematical counter-clockwise; on y-down tile coordinates it
 /// renders clockwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RingOrientation {
+pub(crate) enum RingOrientation {
     Positive,
     Negative,
 }
@@ -124,7 +124,7 @@ pub enum RingOrientation {
 /// so they return `None` and are skipped by ring grouping. An unordered value
 /// such as NaN also returns `None`.
 #[allow(clippy::needless_pass_by_value)] // scalar area; by-value keeps call sites simple
-pub fn ring_role<T>(area: T) -> Option<RingOrientation>
+pub(crate) fn ring_role<T>(area: T) -> Option<RingOrientation>
 where
     T: PartialOrd + From<i8>,
 {
@@ -319,7 +319,7 @@ pub fn point_in_polygon(p: &Point, ring: &[Point]) -> bool {
 /// Check if a closed ring (first == last) has any self-intersections.
 /// Returns true if the ring is simple (no crossings). O(n²) but rings are
 /// typically small after DP simplification.
-pub fn ring_is_simple(ring: &[(i32, i32)]) -> bool {
+pub(crate) fn ring_is_simple(ring: &[(i32, i32)]) -> bool {
     if ring.len() < 4 {
         return true;
     }

@@ -544,13 +544,3 @@ Reported by the storage, polygon-engine and pipeline hunts.
 - No test iterates `Layer::ALL` against a descriptor invariant.
 
 Reported by every hunt.
-
-## STR-038 - `lib.rs` re-exports ring helpers nothing outside the crate needs
-
-`lib.rs` publicly re-exports `RingOrientation`, `ring_is_simple` and
-`ring_role`. Their only out-of-module consumer was `diag`, which moved from
-`main.rs` into the library, so nothing in this repository uses the
-re-exports. They widen the published surface; drop them unless a linking
-crate (brokkr, nidhogg) uses them, and record a breaking change if they go.
-
-Reported by the MVT decoder consolidation implementer, 2026-11-14.

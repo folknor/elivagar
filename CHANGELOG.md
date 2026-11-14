@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Breaking: removed the unused crate-root exports `RingOrientation`,
+  `ring_is_simple` and `ring_role`. These polygon helpers are now
+  crate-internal. Tile output is unchanged.
+
 - `verify` holds its tile-level error list to the documented 100: a tile
   carrying several structure findings could push the report past the cap.
   Pass and fail verdicts and tile counts are unchanged.
