@@ -71,14 +71,19 @@ fn scan_source_buckets(
         let Some((key, _data_len)) = cursor.next_header_discard_payload()? else {
             break;
         };
+        // The source cursor checked the exact partition range, including
+        // the upper bound when the final bucket is only partly occupied.
         let tile_id = key.tile().raw();
-        let bucket = usize::try_from((tile_id.saturating_sub(range_start)) >> shift)
+        let bucket = usize::try_from((tile_id - range_start) >> shift)
             .map_err(|_| std::io::Error::other("piece scan bucket does not fit usize"))?;
         if bucket >= bucket_count {
-            return Err(std::io::Error::other(format!(
-                "piece scan found tile id {tile_id} outside its partition range in {}",
-                source.path().display()
-            )));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "piece scan found tile id {tile_id} outside its partition range in {}",
+                    source.path().display()
+                ),
+            ));
         }
         // Records are key-sorted, so buckets are non-decreasing; fill each
         // bucket start with the source position before its first record.
@@ -431,21 +436,23 @@ pub(super) fn phase_assemble_partitions(
                                     )
                                 })
                         }
-                        UnionPartition::SortPiece(piece) => {
-                            sort::SortPartitionReader::open_slices(&piece.sources, compression)
-                                .map_err(PipelineError::from)
-                                .and_then(|reader| {
-                                    read_encode_partition(
-                                        order,
-                                        reader,
-                                        (piece.start_tile, piece.end_tile),
-                                        contract,
-                                        assemble_budget,
-                                        artifact_ctx,
-                                        &tx,
-                                    )
-                                })
-                        }
+                        UnionPartition::SortPiece(piece) => sort::SortPartitionReader::open_slices(
+                            &piece.sources,
+                            compression,
+                            (piece.start_tile, piece.end_tile),
+                        )
+                        .map_err(PipelineError::from)
+                        .and_then(|reader| {
+                            read_encode_partition(
+                                order,
+                                reader,
+                                (piece.start_tile, piece.end_tile),
+                                contract,
+                                assemble_budget,
+                                artifact_ctx,
+                                &tx,
+                            )
+                        }),
                         UnionPartition::ArtifactOnly { start, end } => artifact_ctx
                             .ok_or_else(|| {
                                 PipelineError(
@@ -1021,8 +1028,12 @@ mod tests {
                     "pieces must tile the partition range"
                 );
                 prev_end = piece.end_tile;
-                let mut piece_reader =
-                    sort::SortPartitionReader::open_slices(&piece.sources, compression).unwrap();
+                let mut piece_reader = sort::SortPartitionReader::open_slices(
+                    &piece.sources,
+                    compression,
+                    (piece.start_tile, piece.end_tile),
+                )
+                .unwrap();
                 while let Some(record) = piece_reader.next().unwrap() {
                     let tile_id = record.key.tile().raw();
                     assert!(

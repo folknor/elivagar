@@ -496,7 +496,11 @@ impl SourceSeek {
 
     pub(crate) fn cursor(&self) -> io::Result<SourceCursor> {
         Ok(SourceCursor {
-            reader: ChunkReader::open_source(&self.source, self.compression)?,
+            reader: ChunkReader::open_source(
+                &self.source,
+                self.compression,
+                partition_tile_range(self.partition_index),
+            )?,
             position: SourcePosition::default(),
         })
     }
@@ -553,6 +557,7 @@ impl SourceSeek {
                 start.records
             },
             take_records,
+            tile_range: partition_tile_range(self.partition_index),
         }))
     }
 }
@@ -581,6 +586,7 @@ pub(crate) struct SortSourceSlice {
     pub(super) source: SortPartitionSource,
     pub(super) skip_records: u64,
     pub(super) take_records: u32,
+    pub(super) tile_range: (u64, u64),
 }
 
 /// One section-table entry against its predecessor and the file: the
@@ -751,6 +757,7 @@ pub(super) struct ChunkReader {
     // Decompressed record bytes read from this chunk, flushed to
     // SORT_MERGE_BYTES on drop so the per-record path stays atomic-free.
     bytes_read: u64,
+    pub(super) tile_range: (u64, u64),
 }
 
 impl Drop for ChunkReader {
@@ -777,14 +784,16 @@ impl ChunkReader {
             reader,
             remaining,
             bytes_read: 0,
+            tile_range: (0, crate::tiling::PROFILE_ID_END),
         })
     }
 
     pub(super) fn open_source(
         source: &SortPartitionSource,
         compression: ChunkCompression,
+        tile_range: (u64, u64),
     ) -> io::Result<Self> {
-        match &source.section {
+        let mut reader = match &source.section {
             None => Self::open(&source.path, compression),
             Some(section) => {
                 let mut file = File::open(&source.path)?;
@@ -804,9 +813,29 @@ impl ChunkReader {
                     reader,
                     remaining: section.count,
                     bytes_read: 0,
+                    tile_range,
                 })
             }
+        }?;
+        reader.tile_range = tile_range;
+        Ok(reader)
+    }
+
+    fn read_key(&mut self) -> io::Result<SortKey> {
+        let mut buf = [0u8; 8];
+        self.reader.read_exact(&mut buf)?;
+        let key = SortKey::from_raw(u64::from_le_bytes(buf));
+        let tile = key.tile().raw();
+        let (start, end) = self.tile_range;
+        // Check before payload allocation or skipping. Section counts and
+        // payload lengths can otherwise carry a reader into another partition.
+        if tile < start || tile >= end {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("sort chunk tile id {tile} outside source range [{start}, {end})"),
+            ));
         }
+        Ok(key)
     }
 
     // Allocates a Vec per record. A reusable buffer was considered but the heap
@@ -817,9 +846,7 @@ impl ChunkReader {
             return Ok(None);
         }
 
-        let mut buf8 = [0u8; 8];
-        self.reader.read_exact(&mut buf8)?;
-        let key = SortKey::from_raw(u64::from_le_bytes(buf8));
+        let key = self.read_key()?;
 
         let mut buf4 = [0u8; 4];
         self.reader.read_exact(&mut buf4)?;
@@ -842,9 +869,7 @@ impl ChunkReader {
         if self.remaining == 0 {
             return Ok(None);
         }
-        let mut buf8 = [0u8; 8];
-        self.reader.read_exact(&mut buf8)?;
-        let key = SortKey::from_raw(u64::from_le_bytes(buf8));
+        let key = self.read_key()?;
         let mut buf4 = [0u8; 4];
         self.reader.read_exact(&mut buf4)?;
         let data_len = u32::from_le_bytes(buf4);
@@ -884,7 +909,136 @@ mod tests {
     use crate::test_support::next_random;
 
     #[test]
-    fn sort_chunk_record_layout_round_trips_full_width_keys_and_payloads() {
+    fn chunk_reads_and_scans_enforce_exact_partition_bounds() {
+        let dir = tempfile::Builder::new()
+            .prefix("chunk-bounds")
+            .tempdir_in(".")
+            .expect("create test directory");
+        for compression in [
+            ChunkCompression::None,
+            ChunkCompression::Lz4,
+            ChunkCompression::Snappy,
+        ] {
+            for partition in [SORT_PARTITIONS - 2, SORT_PARTITIONS - 1] {
+                let (start, end) = partition_tile_range(partition);
+                for tile in [start - 1, start, end - 1, end, u64::MAX >> 16] {
+                    let records = [SortRecord {
+                        key: SortKey::from_raw(tile << 16),
+                        data: Box::from([7u8]),
+                    }];
+                    for multi in [false, true] {
+                        let path = dir.path().join("chunk.bin");
+                        let ranges = [PartitionRange {
+                            partition,
+                            start: 0,
+                            end: 1,
+                        }];
+                        write_records(
+                            records.as_slice(),
+                            multi.then_some(ranges.as_slice()),
+                            &path,
+                            compression,
+                        )
+                        .expect("write test chunk");
+                        let source = if multi {
+                            let sections = read_multi_chunk_sections(&path, compression)
+                                .expect("read section table");
+                            SortPartitionSource::section(path, sections[0])
+                        } else {
+                            SortPartitionSource::whole(path, 13)
+                        };
+                        let valid = tile >= start && tile < end;
+                        let mut reader =
+                            ChunkReader::open_source(&source, compression, (start, end))
+                                .expect("open record reader");
+                        let result = reader.read_record();
+                        if valid {
+                            assert_eq!(
+                                result.expect("valid record").expect("one record").0,
+                                records[0].key
+                            );
+                        } else {
+                            assert_eq!(
+                                result.expect_err("reject foreign tile").kind(),
+                                io::ErrorKind::InvalidData
+                            );
+                        }
+                        let seek = SourceSeek::new(source, compression, partition);
+                        let result = seek
+                            .cursor()
+                            .expect("open scan")
+                            .next_header_discard_payload();
+                        if valid {
+                            assert_eq!(
+                                result.expect("valid header").expect("one header").0,
+                                records[0].key
+                            );
+                        } else {
+                            assert_eq!(
+                                result.expect_err("reject foreign header").kind(),
+                                io::ErrorKind::InvalidData
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn piece_reads_check_narrowed_range_after_compressed_skip() {
+        let dir = tempfile::Builder::new()
+            .prefix("piece-bounds")
+            .tempdir_in(".")
+            .expect("create test directory");
+        let partition = SORT_PARTITIONS - 1;
+        let (start, end) = partition_tile_range(partition);
+        for compression in [
+            ChunkCompression::None,
+            ChunkCompression::Lz4,
+            ChunkCompression::Snappy,
+        ] {
+            let records: Vec<_> = [start, start + 1, end - 1]
+                .into_iter()
+                .map(|tile| SortRecord {
+                    key: SortKey::from_raw(tile << 16),
+                    data: Box::from([7u8]),
+                })
+                .collect();
+            let path = dir.path().join("piece.bin");
+            write_records(records.as_slice(), None, &path, compression).expect("write chunk");
+            let seek =
+                SourceSeek::new(SortPartitionSource::whole(path, 39), compression, partition);
+            let mut cursor = seek.cursor().expect("open cursor");
+            cursor.next_header_discard_payload().expect("skip first");
+            let first = cursor.position();
+            cursor.next_header_discard_payload().expect("scan second");
+            let last = cursor.position();
+            let slice = seek
+                .slice(first, last)
+                .expect("slice source")
+                .expect("nonempty");
+            let mut reader =
+                SortPartitionReader::open_slices(&[slice], compression, (start + 1, end - 1))
+                    .expect("open valid piece");
+            assert_eq!(
+                reader.next().expect("read piece").expect("one record").key,
+                records[1].key
+            );
+            assert!(reader.next().expect("piece end").is_none());
+            let slice = seek
+                .slice(first, last)
+                .expect("slice source")
+                .expect("nonempty");
+            let err = SortPartitionReader::open_slices(&[slice], compression, (start + 2, end))
+                .err()
+                .expect("reject out of piece");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
+    fn sort_chunk_record_layout_round_trips_keys_and_payloads() {
         let mut seed = 0x6a09_e667_f3bc_c909;
         let mut records = Vec::with_capacity(512);
         for index in 0..512 {
@@ -910,13 +1064,16 @@ mod tests {
                 })
                 .collect();
             records.push(SortRecord {
-                key: SortKey::from_raw(key),
+                key: SortKey::from_raw(key % (crate::tiling::PROFILE_ID_END << 16)),
                 data: data.into_boxed_slice(),
             });
         }
         records[4].data = (0..=u8::MAX).collect::<Vec<_>>().into_boxed_slice();
 
-        let dir = tempfile::tempdir().expect("create sort chunk test directory");
+        let dir = tempfile::Builder::new()
+            .prefix("chunk-layout")
+            .tempdir_in(".")
+            .expect("create sort chunk test directory");
         for (case, compression) in [
             ChunkCompression::None,
             ChunkCompression::Lz4,

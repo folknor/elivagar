@@ -68,10 +68,14 @@ impl PartitionMergeReader {
         })
     }
 
-    fn new(sources: &[SortPartitionSource], compression: ChunkCompression) -> io::Result<Self> {
+    fn new(
+        sources: &[SortPartitionSource],
+        compression: ChunkCompression,
+        tile_range: (u64, u64),
+    ) -> io::Result<Self> {
         let mut chunk_readers = Vec::with_capacity(sources.len());
         for source in sources {
-            chunk_readers.push(ChunkReader::open_source(source, compression)?);
+            chunk_readers.push(ChunkReader::open_source(source, compression, tile_range)?);
         }
         Self::from_chunk_readers(chunk_readers)
     }
@@ -132,23 +136,30 @@ pub struct SortPartitionReader {
 impl SortPartitionReader {
     pub fn open(partition: &SortPartition, compression: ChunkCompression) -> io::Result<Self> {
         Ok(Self {
-            inner: PartitionMergeReader::new(&partition.sources, compression)?,
+            inner: PartitionMergeReader::new(
+                &partition.sources,
+                compression,
+                partition_tile_range(partition.index),
+            )?,
         })
     }
 
     pub(crate) fn open_slices(
         slices: &[SortSourceSlice],
         compression: ChunkCompression,
+        tile_range: (u64, u64),
     ) -> io::Result<Self> {
         let mut chunk_readers = Vec::with_capacity(slices.len());
         for slice in slices {
-            let mut reader = ChunkReader::open_source(&slice.source, compression)?;
+            let mut reader =
+                ChunkReader::open_source(&slice.source, compression, slice.tile_range)?;
             if slice.skip_records > 0 {
                 reader.skip_records(slice.skip_records)?;
             }
             // Compressed sources start at the frame boundary and discard
             // records before the piece; uncompressed slices seek to the first
             // record and carry a narrowed section count.
+            reader.tile_range = tile_range;
             reader.remaining = slice.take_records;
             chunk_readers.push(reader);
         }
