@@ -11,7 +11,7 @@ use super::plan::OceanPass;
 use super::{merc_ceil, merc_floor, rect_contains};
 use crate::geometry::int_ocean::{IntRect, TILE_BUFFER_I32, TILE_EXTENT_I32};
 use crate::geometry::projection::MercBbox;
-use crate::geometry::pyramid::{PyramidCell, buffered_cell_rect_base, tile_cover};
+use crate::geometry::pyramid::{PyramidCell, buffered_cell_rect_base, grid_shift, tile_cover};
 use crate::geometry::tiles::grid::EXTENT_LOG2;
 
 /// One pass's integer grid for ownership: the data bounds snapped inward onto
@@ -155,7 +155,7 @@ impl OceanBand {
             });
         }
         let grid = self.grid(OceanPass::for_zoom(z));
-        let shift = u32::from(grid.max_zoom - z);
+        let shift = grid_shift(grid.max_zoom, z);
         let cell = i64::from(TILE_EXTENT_I32) << shift;
         let buffer = i64::from(TILE_BUFFER_I32) << shift;
         let limit = OceanPassGrid::scale_for(grid.max_zoom);

@@ -463,7 +463,12 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
         fanout_caps: [None; Layer::count()],
         polygon_simplify_factor: 1.0,
     };
-    phase_read_and_process(&config, &test_resources(&config)).map(|(_, _, stats)| stats)
+    phase_read_and_process(
+        &config,
+        crate::pipeline::zoom_window(&config).unwrap(),
+        &test_resources(&config),
+    )
+    .map(|(_, _, stats)| stats)
 }
 
 #[test]
@@ -589,7 +594,12 @@ fn injected_pins_fixture(
         fanout_caps: [None; Layer::count()],
         polygon_simplify_factor: 1.0,
     };
-    phase_read_and_process(&config, &test_resources(&config)).map(|(sw, _, stats)| (dir, sw, stats))
+    phase_read_and_process(
+        &config,
+        crate::pipeline::zoom_window(&config).unwrap(),
+        &test_resources(&config),
+    )
+    .map(|(sw, _, stats)| (dir, sw, stats))
 }
 
 /// Drain a sort reader, returning (record count, total geometry command words).
@@ -2251,8 +2261,7 @@ fn relation_labels_aggregate_components_once_per_layer_per_zoom() {
     let mut fanout = stats::FanoutStats::new();
     relations::process_prepared_relation_into(
         relation,
-        4,
-        5,
+        crate::tiling::ZoomRange::new(4, 5).unwrap(),
         &mut sink,
         &mut point,
         &mut polygon,
@@ -2302,8 +2311,7 @@ fn dispatch_namespaces_mixed_source_ids_on_the_wire() {
     let m = test_layer_match(Layer::Pois, GeomExpect::PolygonPointOnSurface);
     let caps = [None; Layer::count()];
     let ctx = emit::EmitCtx {
-        min_zoom: 0,
-        max_zoom: 0,
+        window: crate::tiling::ZoomRange::new(0, 0).unwrap(),
         fanout_caps: &caps,
         polygon_simplify_factor: 1.0,
     };

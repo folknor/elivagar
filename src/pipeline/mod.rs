@@ -20,6 +20,7 @@ use crate::geometry;
 use crate::geometry::projection::MercBbox;
 use crate::shortbread;
 use crate::sort;
+use crate::tiling::ZoomRange;
 
 use std::path::{Path, PathBuf};
 
@@ -519,6 +520,24 @@ use crate::debug::layer_stats_enabled;
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// The run's zoom window, the one place the config's two numbers become a
+/// validated range. An excessive `max_zoom` is reported before a reversed pair.
+pub(crate) fn zoom_window(config: &TilegenConfig) -> Result<ZoomRange, PipelineError> {
+    if config.max_zoom > crate::tiling::MAX_ZOOM {
+        return Err(PipelineError(format!(
+            "max_zoom {} exceeds maximum supported zoom level {}",
+            config.max_zoom,
+            crate::tiling::MAX_ZOOM
+        )));
+    }
+    ZoomRange::new(config.min_zoom, config.max_zoom).ok_or_else(|| {
+        PipelineError(format!(
+            "min_zoom {} is greater than max_zoom {}",
+            config.min_zoom, config.max_zoom
+        ))
+    })
+}
+
 /// # Errors
 ///
 /// Returns [`PipelineError`] on I/O failures, invalid configuration (e.g.
@@ -550,19 +569,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     if config.tile_format == TilePayloadFormat::Mvt {
         validate_compression_level(config.compression_level)?;
     }
-    if config.max_zoom > crate::tiling::MAX_ZOOM {
-        return Err(PipelineError(format!(
-            "max_zoom {} exceeds maximum supported zoom level {}",
-            config.max_zoom,
-            crate::tiling::MAX_ZOOM
-        )));
-    }
-    if config.min_zoom > config.max_zoom {
-        return Err(PipelineError(format!(
-            "min_zoom {} is greater than max_zoom {}",
-            config.min_zoom, config.max_zoom
-        )));
-    }
+    let window = zoom_window(config)?;
 
     let resources = crate::resources::Resources::resolve(config)?;
     resources.emit();
@@ -672,7 +679,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             let input_hash = crate::provenance::BackgroundHash::spawn(config.pbf_path.clone());
             let phase12_start = Instant::now();
             let (mut sw, bounds_out, p12_stats) =
-                phase12::phase_read_and_process(config, &resources)?;
+                phase12::phase_read_and_process(config, window, &resources)?;
             phase12_stats = Some(p12_stats);
             let phase12_elapsed = phase12_start.elapsed();
             emit_marker("PHASE12_END");
@@ -747,14 +754,14 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             eprintln!("--- Ocean shapefile ---");
             let mut ocean_features: u64 = 0;
             for pass in crate::ocean::OceanPass::ALL {
-                let Some(window) = pass.emission(config.min_zoom, config.max_zoom) else {
+                let Some(window) = pass.emission(window) else {
                     continue;
                 };
                 let source = plan.source(pass);
                 eprintln!(
                     "  {pass:?} pass (z{}-z{}) from {}:",
-                    window.first,
-                    window.last,
+                    window.zooms().first(),
+                    window.zooms().last(),
                     source.shp().display()
                 );
                 ocean_features += crate::ocean::process_ocean_shapefile_checked(
@@ -1293,16 +1300,16 @@ pub fn ocean_build(
         max_y: 1.0,
     };
     // The same passes a run executes, over the artifact's whole zoom range.
+    let artifact_zooms = ZoomRange::new(
+        crate::ocean::artifact::ARTIFACT_MIN_ZOOM,
+        crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
+    )
+    .expect("the artifact zoom contract is a profile range");
     let mut pass_hashes = Vec::with_capacity(crate::ocean::OceanPass::ALL.len());
     for pass in crate::ocean::OceanPass::ALL {
-        let window = pass
-            .emission(
-                crate::ocean::artifact::ARTIFACT_MIN_ZOOM,
-                crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
-            )
-            .ok_or_else(|| {
-                PipelineError(format!("artifact zoom range misses the {pass:?} pass"))
-            })?;
+        let window = pass.emission(artifact_zooms).ok_or_else(|| {
+            PipelineError(format!("artifact zoom range misses the {pass:?} pass"))
+        })?;
         let (_, hashes) = crate::ocean::process_ocean_shapefile_with_hashes(
             plan.source(pass).shp(),
             &world,

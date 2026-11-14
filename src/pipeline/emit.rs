@@ -9,7 +9,8 @@ use crate::geometry::int_ocean::{
 };
 use crate::geometry::polygon::{Area, ExtentUnits, MIN_POLY_AREA_AREA};
 use crate::geometry::pyramid::{
-    PyramidCell, PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid, tile_cover,
+    PyramidCell, PyramidParams, PyramidScratch, PyramidZooms, Simplifier, emit_shape_pyramid,
+    tile_cover,
 };
 use crate::geometry::{
     self,
@@ -24,7 +25,7 @@ use crate::shortbread::AttrValue;
 use crate::shortbread::{GeomExpect, Layer, LayerMatch, OsmGeomType, PolygonPointStrategy};
 pub(crate) use crate::sort::RecordTally;
 use crate::sort::{self, LayerZoom, SortRecord};
-use crate::tiling::{MAX_ZOOM, TileId, ZOOM_COUNT};
+use crate::tiling::{MAX_ZOOM, TileId, ZOOM_COUNT, ZoomRange};
 use crate::wire_format::{
     append_feature_data_with_attrs, encode_attrs_bytes, encode_feature_data_with_attrs,
 };
@@ -516,7 +517,9 @@ fn polygon_zoom_plan(
     fanout_cap: Option<NonZeroU32>,
     cap_events: &mut Vec<CapEvent>,
 ) -> Option<(u8, u8)> {
-    let z_start = polygon_z_start(merc, m.min_zoom.min(z_lo), m.max_zoom.max(z_hi))?;
+    // `z_lo..=z_hi` is the layer range already intersected with the window
+    // (`emit_match`), so the layer's own bounds contain it.
+    let z_start = polygon_z_start(merc, m.min_zoom, m.max_zoom)?;
     if z_start > z_hi {
         return None;
     }
@@ -538,8 +541,8 @@ fn clear_attrs_cache(cache: &mut [Option<Vec<u8>>; ZOOM_COUNT]) {
 
 /// Per-invocation emission policy. Layer indices must have a configured cap slot.
 pub(super) struct EmitCtx<'a> {
-    pub(super) min_zoom: u8,
-    pub(super) max_zoom: u8,
+    /// The run's zoom window: only zooms inside it are emitted.
+    pub(super) window: ZoomRange,
     pub(super) fanout_caps: &'a [Option<NonZeroU32>],
     pub(super) polygon_simplify_factor: f64,
 }
@@ -582,11 +585,13 @@ pub(super) fn emit_match(
     records: &mut impl FeatureRecordSink,
     point: &mut PointEmitScratch,
 ) -> u64 {
-    let z_lo = m.min_zoom.max(ctx.min_zoom);
-    let z_hi = m.max_zoom.min(ctx.max_zoom);
-    if z_lo > z_hi {
+    // A layer range that is empty (an area rule may raise `min_zoom` past
+    // the top) or misses the window emits nothing.
+    let Some(zooms) = ZoomRange::new(m.min_zoom, m.max_zoom).and_then(|r| r.intersect(ctx.window))
+    else {
         return 0;
-    }
+    };
+    let (z_lo, z_hi) = (zooms.first(), zooms.last());
     let source = match &geometry {
         FeatureGeometry::Node(_) => FeatureSource::Node,
         FeatureGeometry::Way { .. } => FeatureSource::Way,
@@ -992,7 +997,7 @@ pub(super) fn emit_line_feature(
         geometry::simplify::for_each_zoom_simplified(
             merc,
             z_lo,
-            m.max_zoom.max(z_hi),
+            m.max_zoom,
             2,
             |_| 1.0,
             skip_bbox_check,
@@ -1071,9 +1076,8 @@ pub(super) fn emit_polygon_feature(
     let dp_tol = |z| polygon_dp_tol(z, tol_scale);
     let min_area = |z| polygon_min_area(z, m.layer);
     let params = PyramidParams {
-        maxz: OSM_POLYGON_MAX_Z,
-        z_top: z_start,
-        z_bottom,
+        zooms: PyramidZooms::new(OSM_POLYGON_MAX_Z, z_start, z_bottom)
+            .expect("a polygon zoom plan lies inside the profile grid"),
         dp_tol: &dp_tol,
         min_area: &min_area,
         pins,
@@ -1179,9 +1183,8 @@ pub(super) fn emit_multipolygon_feature(
     let dp_tol = |z| polygon_dp_tol(z, tol_scale);
     let min_area = |z| polygon_min_area(z, m.layer);
     let params = PyramidParams {
-        maxz: OSM_POLYGON_MAX_Z,
-        z_top: z_start,
-        z_bottom,
+        zooms: PyramidZooms::new(OSM_POLYGON_MAX_Z, z_start, z_bottom)
+            .expect("a polygon zoom plan lies inside the profile grid"),
         dp_tol: &dp_tol,
         min_area: &min_area,
         pins,
@@ -1286,8 +1289,7 @@ mod landing2_tests {
             attrs: smallvec![],
         };
         let ctx = EmitCtx {
-            min_zoom: 12,
-            max_zoom: 12,
+            window: ZoomRange::new(12, 12).expect("z12 window"),
             fanout_caps: &[],
             polygon_simplify_factor: 1.0,
         };
@@ -1319,8 +1321,7 @@ mod landing2_tests {
         let mut fanout = super::super::stats::FanoutStats::new();
         let mut records = Vec::new();
         let ctx = EmitCtx {
-            min_zoom: 12,
-            max_zoom: 12,
+            window: ZoomRange::new(12, 12).expect("z12 window"),
             fanout_caps: &[],
             polygon_simplify_factor: 1.0,
         };

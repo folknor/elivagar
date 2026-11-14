@@ -28,6 +28,7 @@ use pbfhogg::{BlobFilter, BlockType, ElementReader, PrimitiveBlock};
 use super::relations::process_relation_blocks;
 use super::stats::{FanoutStats, MissingRefStatsAtomic, Phase12Stats};
 use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb};
+use crate::tiling::ZoomRange;
 use extent::CoordinateExtent;
 use input::{UnorderedBlockSource, WayBlock};
 use nodes::{NodeOutcome, NodeWorkers};
@@ -105,6 +106,7 @@ impl RelationBuffer {
 /// Run-wide inputs the router hands to the components it starts.
 struct RouteCtx<'a> {
     config: &'a TilegenConfig,
+    window: ZoomRange,
     locations_on_ways: bool,
     member_source: MemberSource,
     pin_source: PinSource,
@@ -172,12 +174,11 @@ impl Router<'_> {
 
     fn route_nodes(&mut self, block: PrimitiveBlock) {
         let ctx = &self.ctx;
-        let (min_z, max_z) = (ctx.config.min_zoom, ctx.config.max_zoom);
         match &mut self.nodes {
             NodeRoute::Stored(state) => {
                 *state = match std::mem::replace(state, StoredNodes::Ended) {
                     StoredNodes::Pending(store) => {
-                        StoredNodes::Running(NodeWorkers::stored(*store, &ctx.spill, min_z, max_z))
+                        StoredNodes::Running(NodeWorkers::stored(*store, &ctx.spill, ctx.window))
                     }
                     StoredNodes::Running(workers) => StoredNodes::Running(workers),
                     StoredNodes::Ended => panic!(
@@ -193,7 +194,7 @@ impl Router<'_> {
             // from the consumer side); tagged-node emission and extent
             // tracking are order-free there, so blocks fan out to a pool.
             NodeRoute::Inline { workers, count } => workers
-                .get_or_insert_with(|| NodeWorkers::inline(*count, &ctx.spill, min_z, max_z))
+                .get_or_insert_with(|| NodeWorkers::inline(*count, &ctx.spill, ctx.window))
                 .send(block),
         }
     }
@@ -264,8 +265,7 @@ impl Router<'_> {
             pin_source: ctx.pin_source,
             locations_on_ways: ctx.locations_on_ways,
             admission: ctx.admission,
-            min_zoom: ctx.config.min_zoom,
-            max_zoom: ctx.config.max_zoom,
+            window: ctx.window,
             fanout_caps: ctx.config.fanout_caps,
             polygon_simplify_factor: ctx.config.polygon_simplify_factor,
             sort_chunk_budget: ctx.sort_chunk_budget,
@@ -362,6 +362,7 @@ impl Router<'_> {
 #[allow(clippy::unwrap_in_result)]
 pub(super) fn phase_read_and_process(
     config: &TilegenConfig,
+    window: ZoomRange,
     resources: &Resources,
 ) -> Result<(SortWriter, MercBbox, Phase12Stats), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
@@ -438,6 +439,7 @@ pub(super) fn phase_read_and_process(
     let mut router = Router {
         ctx: RouteCtx {
             config,
+            window,
             locations_on_ways,
             member_source,
             pin_source,
@@ -537,8 +539,7 @@ pub(super) fn phase_read_and_process(
         rel_blocks_source,
         &way_index,
         &missing_ref_stats,
-        config.min_zoom,
-        config.max_zoom,
+        window,
         &mut sort_writer,
         &spill,
         &mut fanout,

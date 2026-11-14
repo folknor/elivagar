@@ -13,6 +13,7 @@ use crate::node_index::{LatLonE7, NodeId, NodeStoreReader};
 use crate::resources::WayAdmission;
 use crate::shortbread::{self, OsmGeomType, Tags};
 use crate::sort::{SortRecord, SortWriter, SpillCoalescer};
+use crate::tiling::ZoomRange;
 use crate::way_index::{WayId, WayIndexWriter};
 use pbfhogg::{Element, Way};
 
@@ -54,8 +55,7 @@ pub(super) struct WayDispatchConfig {
     pub(super) pin_source: PinSource,
     pub(super) locations_on_ways: bool,
     pub(super) admission: WayAdmission,
-    pub(super) min_zoom: u8,
-    pub(super) max_zoom: u8,
+    pub(super) window: ZoomRange,
     pub(super) fanout_caps: [Option<std::num::NonZeroU32>; shortbread::Layer::count()],
     pub(super) polygon_simplify_factor: f64,
     pub(super) sort_chunk_budget: usize,
@@ -320,8 +320,7 @@ fn run_way_task(
 
     let ctx = WayCtx {
         node_reader: cfg.node_reader.as_deref(),
-        min_zoom: cfg.min_zoom,
-        max_zoom: cfg.max_zoom,
+        window: cfg.window,
         missing_ref_stats: &cfg.missing_ref_stats,
         fanout_caps: &cfg.fanout_caps,
         polygon_simplify_factor: cfg.polygon_simplify_factor,
@@ -472,8 +471,7 @@ pub(super) fn drain_way_task_result(
 /// The per-run inputs `process_planned_way_into` reads for every way.
 pub(super) struct WayCtx<'a> {
     pub(super) node_reader: Option<&'a NodeStoreReader>,
-    pub(super) min_zoom: u8,
-    pub(super) max_zoom: u8,
+    pub(super) window: ZoomRange,
     pub(super) missing_ref_stats: &'a MissingRefStatsAtomic,
     pub(super) fanout_caps: &'a [Option<std::num::NonZeroU32>],
     pub(super) polygon_simplify_factor: f64,
@@ -619,8 +617,7 @@ pub(super) fn process_planned_way_into(
         }
 
         let emit_ctx = EmitCtx {
-            min_zoom: ctx.min_zoom,
-            max_zoom: ctx.max_zoom,
+            window: ctx.window,
             fanout_caps: ctx.fanout_caps,
             polygon_simplify_factor: ctx.polygon_simplify_factor,
         };

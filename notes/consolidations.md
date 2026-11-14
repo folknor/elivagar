@@ -65,29 +65,6 @@ every geometry kind - i.e. lines and points onto the integer pipeline (see
 
 Reported by the polygon-engine and coordinate-spaces hunts.
 
-## CON-013 - Is this the last zoom, and what is the maximum zoom?
-
-The zoom-constant half is settled: "max zoom" is `tiling::MAX_ZOOM` (the
-Shortbread top, z14), every last-zoom policy asks about it, and the
-`TilegenConfig` zoom bounds are a truncation window (OSM construction runs
-over each layer's own range; emission is cut). What remains:
-
-- The pyramid's grid arithmetic: `maxz`, `z_top` and `z_bottom` travel as
-  three bare `u8`s in `PyramidParams`, and the shift `maxz - z` is written out
-  at each use in `geometry/pyramid.rs` plus `OceanBand::artifact_tile_rect`
-  in `ocean/band.rs`. The proposed `ZoomSpan { maxz, top, bottom }` with
-  `shift_for(z)` belongs with the coordinate-space `Grid` in
-  `notes/structural.md`.
-- The window is still two bare `u8`s checked in `run` (`min <= max <=
-  MAX_ZOOM`); no `ZoomRange` type carries the validation, and `EmitCtx`,
-  `relations.rs` and phase12 (node workers, way dispatch) thread the pair
-  separately. Ocean's
-  `PassWindow` (`ocean/plan.rs`) is a pass-local intersection of it, not a
-  validated window type.
-
-Reported by the polygon-engine, pipeline, coordinate-spaces, layer-identity,
-storage and archive-surface hunts.
-
 ## CON-017 - How is an MVT message (not its command stream) walked?
 
 The command stream is settled: every in-crate reader decodes through

@@ -5,6 +5,7 @@ use crate::multipolygon::{self, MemberWay, WayRole};
 use crate::shortbread::LayerMatch;
 use crate::shortbread::{self, Tags};
 use crate::sort::{self, SortWriter};
+use crate::tiling::ZoomRange;
 use crate::way_index::{WayId, WayIndexReader};
 use pbfhogg::MemberId;
 
@@ -174,8 +175,7 @@ pub(super) fn process_relation_blocks(
     relation_blocks: impl Iterator<Item = pbfhogg::PrimitiveBlock> + Send,
     way_index: &WayIndexReader,
     missing_ref_stats: &MissingRefStatsAtomic,
-    min_zoom: u8,
-    max_zoom: u8,
+    window: ZoomRange,
     sort_writer: &mut SortWriter,
     spill: &sort::SpillCoalescer,
     fanout_stats: &mut FanoutStats,
@@ -236,8 +236,7 @@ pub(super) fn process_relation_blocks(
             let before = acc.sink.records.len();
             process_prepared_relation_into(
                 rel,
-                min_zoom,
-                max_zoom,
+                window,
                 &mut acc.sink,
                 &mut acc.point_emit,
                 &mut acc.multipolygon_emit,
@@ -347,8 +346,7 @@ pub(super) fn process_relation_blocks(
 #[allow(clippy::too_many_lines)]
 pub(super) fn process_prepared_relation_into(
     rel: PreparedRelation,
-    min_zoom: u8,
-    max_zoom: u8,
+    window: ZoomRange,
     sink: &mut RecordSink,
     point_emit: &mut PointEmitScratch,
     multipolygon_emit: &mut MultipolygonEmitScratch,
@@ -373,8 +371,7 @@ pub(super) fn process_prepared_relation_into(
     enrich_polygon_matches(&mut matches, total_area_m2);
 
     let ctx = EmitCtx {
-        min_zoom,
-        max_zoom,
+        window,
         fanout_caps,
         polygon_simplify_factor,
     };

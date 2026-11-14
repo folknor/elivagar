@@ -27,8 +27,8 @@ use crate::geometry::int_ocean::{
 };
 use crate::geometry::polygon::{Area, ExtentUnits, MIN_POLY_AREA_AREA};
 use crate::geometry::pyramid::{
-    PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, Simplifier, emit_shape_pyramid,
-    emit_shape_pyramid_cell, split_for_parallel,
+    PyramidCell, PyramidEmitKind, PyramidParams, PyramidScratch, PyramidZooms, Simplifier,
+    emit_shape_pyramid, emit_shape_pyramid_cell, split_for_parallel,
 };
 use crate::geometry::{
     self,
@@ -744,9 +744,9 @@ pub(crate) fn process_ocean_shapefile(
     sort_writer: &mut SortWriter,
     band: Option<&OceanBand>,
 ) -> Result<u64, std::io::Error> {
-    let window = OceanPass::for_zoom(min_zoom)
-        .emission(min_zoom, max_zoom)
-        .filter(|window| window.last == max_zoom)
+    let window = crate::tiling::ZoomRange::new(min_zoom, max_zoom)
+        .and_then(|zooms| OceanPass::for_zoom(min_zoom).emission(zooms))
+        .filter(|window| window.zooms().last() == max_zoom)
         .expect("test window lies inside one ocean pass");
     process_ocean_shapefile_inner(path, data_bounds, window, sort_writer, band, false, None)
         .map(|(count, _)| count)
@@ -796,9 +796,9 @@ pub(crate) fn process_ocean_shapefile_checked(
 ///
 /// Construction is canonical: pieces are quantized on the pass grid, roots
 /// are chosen at the pass's first zoom and descent follows the pass, so the
-/// window `window.first..=window.last` only decides which constructed zooms
-/// are written. Descent stops at `window.last`, which cannot change a
-/// shallower zoom, and the sink drops zooms shallower than `window.first`. `band`,
+/// window's zooms only decide which constructed zooms are written. Descent
+/// stops at the window's last zoom, which cannot change a shallower zoom, and
+/// the sink drops zooms shallower than its first. `band`,
 /// when an artifact serves the run, prunes the cells the artifact owns.
 #[allow(clippy::too_many_lines, clippy::unwrap_in_result)]
 fn process_ocean_shapefile_inner(
@@ -810,7 +810,7 @@ fn process_ocean_shapefile_inner(
     capture_hashes: bool,
     expected_hashes: Option<OceanShapefileHashes>,
 ) -> Result<(u64, Option<OceanShapefileHashes>), std::io::Error> {
-    let pass = window.pass;
+    let pass = window.pass();
     let grid_zoom = pass.grid_zoom();
     if band.is_some_and(OceanBand::is_empty) {
         eprintln!("  Ocean band is empty; skipping shapefile geometry");
@@ -1067,8 +1067,10 @@ fn process_ocean_shapefile_inner(
         |cell: PyramidCell| band.is_none_or(|band| band.computed_owns(cell.z, cell.tx, cell.ty));
     let tile_filter_dyn: Option<&(dyn Fn(PyramidCell) -> bool + Sync)> =
         band.map(|_| &tile_filter as &(dyn Fn(PyramidCell) -> bool + Sync));
-    let params = ocean_params(grid_zoom, pass.first_zoom(), window.last, tile_filter_dyn);
-    let first_emitted = window.first;
+    let zooms = PyramidZooms::new(grid_zoom, pass.first_zoom(), window.zooms().last())
+        .expect("a pass window lies inside its pass grid");
+    let params = ocean_params(zooms, tile_filter_dyn);
+    let first_emitted = window.zooms().first();
     // Per-piece item target for the parallel frontier. Root cells of a
     // large piece usually exceed this on their own (the frontier loop is
     // then a no-op); it only forces expansion for single-root ranges.
@@ -1639,15 +1641,11 @@ fn total_vertices(piece: &Shape) -> usize {
 /// the pre-change geometry. The VW simplifier switch shipped exactly that way
 /// and served DP-era coastline spikes world-wide for three days.
 fn ocean_params<'a>(
-    maxz: u8,
-    z_top: u8,
-    z_bottom: u8,
+    zooms: PyramidZooms,
     tile_filter: Option<&'a (dyn Fn(PyramidCell) -> bool + Sync)>,
 ) -> PyramidParams<'a> {
     PyramidParams {
-        maxz,
-        z_top,
-        z_bottom,
+        zooms,
         dp_tol: &ocean_dp_tol,
         min_area: &ocean_min_area,
         pins: None,
@@ -1773,7 +1771,7 @@ mod tests {
             max_x: rect.max_x + 2_048,
             max_y: rect.max_y + 2_048,
         });
-        let params = ocean_params(8, 8, 8, None);
+        let params = ocean_params(PyramidZooms::new(8, 8, 8).unwrap(), None);
         let mut attrs = Vec::new();
         encode_attrs_bytes(&mut attrs, &[], 8);
         let tile_id = crate::tiling::TileId::at(cell.z, cell.tx, cell.ty);
@@ -1949,7 +1947,7 @@ mod tests {
 
         type Emitted = Vec<(u8, u32, u32, Vec<u32>)>;
         let emit_shapes = |shapes: &[Shape]| -> Emitted {
-            let params = ocean_params(maxz, 0, maxz, None);
+            let params = ocean_params(PyramidZooms::new(maxz, 0, maxz).unwrap(), None);
             let mut out: Emitted = Vec::new();
             let mut sink = |cell: PyramidCell, geom: &[u32], _kind: PyramidEmitKind| {
                 out.push((cell.z, cell.tx, cell.ty, geom.to_vec()));
@@ -2620,7 +2618,9 @@ mod tests {
         let run_window = |dir: &Path, min_zoom: u8, max_zoom: u8| {
             sorted_records(dir, |writer| {
                 for pass in OceanPass::ALL {
-                    if let Some(window) = pass.emission(min_zoom, max_zoom) {
+                    let zooms =
+                        crate::tiling::ZoomRange::new(min_zoom, max_zoom).expect("test window");
+                    if let Some(window) = pass.emission(zooms) {
                         process_ocean_shapefile_inner(
                             &shp_path, &bounds, window, writer, None, false, None,
                         )
@@ -2840,7 +2840,9 @@ mod tests {
             max_x: 1.0,
             max_y: 1.0,
         };
-        let window = OceanPass::Low.emission(0, 0).unwrap();
+        let window = OceanPass::Low
+            .emission(crate::tiling::ZoomRange::new(0, 0).unwrap())
+            .unwrap();
         let (_, hashes) =
             process_ocean_shapefile_with_hashes(&shp_path, &bounds, window, &mut sort_writer)
                 .unwrap();

@@ -30,6 +30,13 @@
 //! byte enters (a sort key read back from a chunk) is refused by
 //! `SortKey::layer`, so a `LayerMap<T>` wrapper would only rename the cast.
 //!
+//! A range of profile zooms is different: its ordering and its bound are an
+//! invariant the bare pair cannot hold, and the rule "the part of this range
+//! a run emits" was written out once per consumer. [`ZoomRange`] is that one
+//! rule. `run` builds the window from the config numbers, which stay plain
+//! `u8` because they are the entry point and the serialized contract; layer
+//! ranges and the ocean passes intersect with it.
+//!
 //! There is no `TileCoord` type either. A coordinate triple lives only
 //! between a tile enumeration and `TileId::at`: the pyramid hands its sinks a
 //! named `PyramidCell`, and everything downstream of a sink addresses tiles
@@ -44,6 +51,48 @@ pub const MAX_ZOOM: u8 = 14;
 
 /// Number of zooms in the profile domain, `0..=MAX_ZOOM`.
 pub const ZOOM_COUNT: usize = MAX_ZOOM as usize + 1;
+
+/// An inclusive, non-empty range of profile zooms, `first <= last <= MAX_ZOOM`.
+/// Construction is the only way to establish that, so the fields are private.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ZoomRange {
+    first: u8,
+    last: u8,
+}
+
+impl ZoomRange {
+    /// `None` when `first > last` or `last > MAX_ZOOM`.
+    pub(crate) const fn new(first: u8, last: u8) -> Option<Self> {
+        if first <= last && last <= MAX_ZOOM {
+            Some(Self { first, last })
+        } else {
+            None
+        }
+    }
+
+    pub(crate) const fn first(self) -> u8 {
+        self.first
+    }
+
+    pub(crate) const fn last(self) -> u8 {
+        self.last
+    }
+
+    /// The zooms both ranges hold, or `None` when they are disjoint.
+    pub(crate) const fn intersect(self, other: Self) -> Option<Self> {
+        let first = if self.first > other.first {
+            self.first
+        } else {
+            other.first
+        };
+        let last = if self.last < other.last {
+            self.last
+        } else {
+            other.last
+        };
+        Self::new(first, last)
+    }
+}
 
 /// The highest zoom a PMTiles tile id can address in `u64`.
 pub const ARCHIVE_MAX_ZOOM: u8 = 31;
@@ -214,6 +263,20 @@ fn hilbert_rot(n: u32, x: &mut u32, y: &mut u32, rx: u32, ry: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_ranges_refuse_reversed_or_beyond_profile_and_intersect() {
+        assert_eq!(ZoomRange::new(5, 4), None);
+        assert_eq!(ZoomRange::new(0, MAX_ZOOM + 1), None);
+        let window = ZoomRange::new(3, 9).expect("window");
+        let layer = ZoomRange::new(7, MAX_ZOOM).expect("layer");
+        assert_eq!(window.intersect(layer), ZoomRange::new(7, 9));
+        assert_eq!(layer.intersect(window), ZoomRange::new(7, 9));
+        assert_eq!(
+            window.intersect(ZoomRange::new(10, 12).expect("disjoint")),
+            None
+        );
+    }
 
     fn id(z: u8, x: u32, y: u32) -> u64 {
         TileId::at(z, x, y).raw()

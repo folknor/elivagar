@@ -8,6 +8,7 @@ use crate::geometry::int_ocean::{
 };
 use crate::geometry::polygon::{self, Area, ExtentUnits, RingOrientation, WINDOW_DP_TOL};
 use crate::mvt::MAX_FEATURE_RINGS;
+use crate::tiling::MAX_ZOOM;
 use rustc_hash::FxHashSet;
 use std::sync::atomic::Ordering;
 
@@ -18,9 +19,7 @@ use std::sync::atomic::Ordering;
 // keep key-validating and every artifact-active run serves the pre-change
 // geometry while all standing gates stay green.
 pub(crate) struct PyramidParams<'a> {
-    pub maxz: u8,
-    pub z_top: u8,
-    pub z_bottom: u8,
+    pub zooms: PyramidZooms,
     pub dp_tol: &'a (dyn Fn(u8) -> ExtentUnits + Sync),
     pub min_area: &'a (dyn Fn(u8) -> Area + Sync),
     pub pins: Option<&'a FxHashSet<(i32, i32)>>,
@@ -28,6 +27,52 @@ pub(crate) struct PyramidParams<'a> {
     /// pruned before geometry work. OSM leaves it unset.
     pub tile_filter: Option<&'a (dyn Fn(PyramidCell) -> bool + Sync)>,
     pub simplifier: Simplifier,
+}
+
+/// The zooms one pyramid run works over: `grid` is the zoom whose pixel grid
+/// the shape is quantized on, roots are chosen at `top`, and descent stops at
+/// `bottom`, with `top <= bottom <= grid <= MAX_ZOOM`. The constructor is the
+/// only check, so an ordering a caller got wrong is refused where it is built
+/// rather than silently emitting nothing. The grid is bounded by the profile
+/// top because base coordinates are `i32` at `grid + 12` bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PyramidZooms {
+    grid: u8,
+    top: u8,
+    bottom: u8,
+}
+
+impl PyramidZooms {
+    pub(crate) const fn new(grid: u8, top: u8, bottom: u8) -> Option<Self> {
+        if top <= bottom && bottom <= grid && grid <= MAX_ZOOM {
+            Some(Self { grid, top, bottom })
+        } else {
+            None
+        }
+    }
+
+    pub(crate) const fn grid(self) -> u8 {
+        self.grid
+    }
+
+    pub(crate) const fn top(self) -> u8 {
+        self.top
+    }
+
+    pub(crate) const fn bottom(self) -> u8 {
+        self.bottom
+    }
+}
+
+/// How many zoom levels `z` lies above the base grid at `grid_zoom`: one tile
+/// at `z` spans `4096 << grid_shift(grid_zoom, z)` base units. Every base-unit
+/// tile size, buffer and rescale goes through here.
+pub(crate) fn grid_shift(grid_zoom: u8, z: u8) -> u8 {
+    assert!(
+        z <= grid_zoom,
+        "zoom {z} is below the z{grid_zoom} base grid"
+    );
+    grid_zoom - z
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +133,7 @@ pub(crate) fn emit_shape_pyramid(
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
 ) {
-    if shape_base.is_empty() || !valid_params(params) {
+    if shape_base.is_empty() {
         return;
     }
 
@@ -105,7 +150,7 @@ pub(crate) fn emit_shape_pyramid_cell(
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
 ) {
-    if !valid_params(params) || cell.z < params.z_top || cell.z > params.z_bottom {
+    if cell.z < params.zooms.top() || cell.z > params.zooms.bottom() {
         scratch.return_shapes(frag);
         return;
     }
@@ -119,7 +164,7 @@ pub(crate) fn split_for_parallel(
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
 ) -> Vec<(PyramidCell, Shapes)> {
-    if shape_base.is_empty() || !valid_params(params) {
+    if shape_base.is_empty() {
         return Vec::new();
     }
 
@@ -139,7 +184,7 @@ pub(crate) fn split_for_parallel(
             .iter()
             .enumerate()
             .filter(|(_, (c, frag))| {
-                c.z < params.z_bottom
+                c.z < params.zooms.bottom()
                     && (need_count || shapes_vertices(frag) > OVERSIZED_FRAGMENT_VERTICES)
             })
             .max_by_key(|(_, (_, frag))| shapes_vertices(frag))
@@ -152,7 +197,7 @@ pub(crate) fn split_for_parallel(
             scratch.return_shapes(frag);
             continue;
         }
-        if is_full_buffered_cell(&frag, params.maxz, cell) {
+        if is_full_buffered_cell(&frag, params.zooms.grid(), cell) {
             emit_full_subtree(cell, params, scratch, sink);
             scratch.return_shapes(frag);
             continue;
@@ -163,7 +208,7 @@ pub(crate) fn split_for_parallel(
             intersect_shapes_with_rect(
                 &mut scratch.int,
                 &frag,
-                buffered_cell_rect_base(params.maxz, child),
+                buffered_cell_rect_base(params.zooms.grid(), child),
                 &mut child_frag,
             );
             if child_frag.is_empty() {
@@ -175,10 +220,6 @@ pub(crate) fn split_for_parallel(
         scratch.return_shapes(frag);
     }
     items
-}
-
-fn valid_params(params: &PyramidParams<'_>) -> bool {
-    params.z_top <= params.z_bottom && params.z_bottom <= params.maxz
 }
 
 fn root_fragments(
@@ -199,7 +240,8 @@ fn root_fragments(
         scratch.return_shapes(normalized);
         return Vec::new();
     };
-    let (tx_min, tx_max, ty_min, ty_max) = tile_cover(bbox, params.maxz, params.z_top, 0);
+    let (tx_min, tx_max, ty_min, ty_max) =
+        tile_cover(bbox, params.zooms.grid(), params.zooms.top(), 0);
     let mut roots = Vec::new();
     root_bisect(
         RootRange {
@@ -224,7 +266,7 @@ struct RootRange {
     ty1: u32,
 }
 
-/// Recursive quadrant bisection of the z_top cell range: cuts the shape set
+/// Recursive quadrant bisection of the top-zoom cell range: cuts the shape set
 /// with buffered RANGE rects, halving the longer axis each level -
 /// O(V log cells) total noding instead of the O(V x cells) of clipping the
 /// whole shape once per root cell. The cut identity holds because a child
@@ -244,7 +286,7 @@ fn root_bisect(
     if range.tx0 == range.tx1 && range.ty0 == range.ty1 {
         out.push((
             PyramidCell {
-                z: params.z_top,
+                z: params.zooms.top(),
                 tx: range.tx0,
                 ty: range.ty0,
             },
@@ -276,7 +318,7 @@ fn root_bisect(
         intersect_shapes_with_rect(
             &mut scratch.int,
             &frag,
-            buffered_range_rect_base(params.maxz, params.z_top, half),
+            buffered_range_rect_base(params.zooms.grid(), params.zooms.top(), half),
             &mut half_frag,
         );
         root_bisect(half, half_frag, params, scratch, out);
@@ -286,7 +328,7 @@ fn root_bisect(
 
 fn buffered_range_rect_base(maxz: u8, z: u8, r: RootRange) -> IntRect {
     let tile_size = cell_tile_size_base(maxz, z);
-    let buffer = i64::from(TILE_BUFFER_I32) << u32::from(maxz - z);
+    let buffer = i64::from(TILE_BUFFER_I32) << grid_shift(maxz, z);
     IntRect {
         min_x: i32::try_from(i64::from(r.tx0) * tile_size - buffer).expect("range min x fits i32"),
         min_y: i32::try_from(i64::from(r.ty0) * tile_size - buffer).expect("range min y fits i32"),
@@ -314,14 +356,14 @@ fn descend(
         return;
     }
 
-    if is_full_buffered_cell(&frag, params.maxz, cell) {
+    if is_full_buffered_cell(&frag, params.zooms.grid(), cell) {
         emit_full_subtree(cell, params, scratch, sink);
         scratch.return_shapes(frag);
         return;
     }
 
     emit_cell(cell, &frag, params, scratch, sink);
-    if cell.z == params.z_bottom {
+    if cell.z == params.zooms.bottom() {
         scratch.return_shapes(frag);
         return;
     }
@@ -331,7 +373,7 @@ fn descend(
         intersect_shapes_with_rect(
             &mut scratch.int,
             &frag,
-            buffered_cell_rect_base(params.maxz, child),
+            buffered_cell_rect_base(params.zooms.grid(), child),
             &mut child_frag,
         );
         descend(child, child_frag, params, scratch, sink);
@@ -346,7 +388,7 @@ fn emit_cell(
     scratch: &mut PyramidScratch,
     sink: PyramidSink<'_>,
 ) {
-    let shift = params.maxz - cell.z;
+    let shift = grid_shift(params.zooms.grid(), cell.z);
     let dp_tol = (params.dp_tol)(cell.z);
     let min_area = (params.min_area)(cell.z);
     for shape in frag {
@@ -590,7 +632,7 @@ fn emit_full_subtree(
             );
         },
     );
-    if cell.z < params.z_bottom {
+    if cell.z < params.zooms.bottom() {
         for child in children(cell) {
             emit_full_subtree(child, params, scratch, sink);
         }
@@ -1000,7 +1042,7 @@ pub(crate) fn tile_cover(rect: IntRect, maxz: u8, z: u8, margin: i32) -> (u32, u
     assert!(z <= maxz && margin >= 0);
     let max_tile = (1_u32 << z) - 1;
     let tile_size = cell_tile_size_base(maxz, z);
-    let margin = i64::from(margin) << u32::from(maxz - z);
+    let margin = i64::from(margin) << grid_shift(maxz, z);
     let index = |q: i64| {
         u32::try_from(q.div_euclid(tile_size).clamp(0, i64::from(max_tile)))
             .expect("clamped tile index fits u32")
@@ -1027,7 +1069,7 @@ pub(crate) fn buffered_cell_rect_base(maxz: u8, cell: PyramidCell) -> IntRect {
 }
 
 fn cell_tile_size_base(maxz: u8, z: u8) -> i64 {
-    i64::from(TILE_EXTENT_I32) << u32::from(maxz - z)
+    i64::from(TILE_EXTENT_I32) << grid_shift(maxz, z)
 }
 
 fn is_full_buffered_cell(frag: &Shapes, maxz: u8, cell: PyramidCell) -> bool {
@@ -1115,8 +1157,8 @@ fn build_edge_flags(
     cell: PyramidCell,
     out: &mut PinnedRings,
 ) {
-    let tile_size = cell_tile_size_base(params.maxz, cell.z);
-    let buffer = i64::from(TILE_BUFFER_I32) << u32::from(params.maxz - cell.z);
+    let tile_size = cell_tile_size_base(params.zooms.grid(), cell.z);
+    let buffer = i64::from(TILE_BUFFER_I32) << grid_shift(params.zooms.grid(), cell.z);
     let left = i64::from(cell.tx) * tile_size;
     let right = i64::from(cell.tx + 1) * tile_size;
     let top = i64::from(cell.ty) * tile_size;
@@ -1385,9 +1427,7 @@ mod tests {
         let dp_tol: &'static (dyn Fn(u8) -> ExtentUnits + Sync) =
             Box::leak(Box::new(move |_| ExtentUnits::new(tol)));
         PyramidParams {
-            maxz,
-            z_top,
-            z_bottom,
+            zooms: PyramidZooms::new(maxz, z_top, z_bottom).expect("test pyramid zooms"),
             dp_tol,
             min_area: &|_| Area::ZERO,
             pins: None,
@@ -1492,9 +1532,7 @@ mod tests {
         let dp_tol: &(dyn Fn(u8) -> ExtentUnits + Sync) = &zero_tolerance;
         let min_area: &(dyn Fn(u8) -> Area + Sync) = &zero_min_area;
         let params = PyramidParams {
-            maxz: 2,
-            z_top: 2,
-            z_bottom: 2,
+            zooms: PyramidZooms::new(2, 2, 2).expect("test pyramid zooms"),
             dp_tol,
             min_area,
             pins: None,
@@ -1594,8 +1632,8 @@ mod tests {
     ) -> BTreeMap<(u8, u32, u32), Vec<u32>> {
         let mut scratch = IntEmitScratch::new();
         let mut out = BTreeMap::new();
-        for z in params.z_top..=params.z_bottom {
-            let shift = params.maxz - z;
+        for z in params.zooms.top()..=params.zooms.bottom() {
+            let shift = grid_shift(params.zooms.grid(), z);
             let shape_z = rescale_shape(shape_base, shift);
             let normalized = normalize(shape_z, (params.min_area)(z));
             for shape in &normalized {

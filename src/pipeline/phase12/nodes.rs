@@ -13,6 +13,7 @@ use crate::geometry;
 use crate::node_index::{LatLonE7, NodeId, NodeStore};
 use crate::shortbread::{self, OsmGeomType, Tags};
 use crate::sort::{RecordTally, SortRecord, SpillCoalescer};
+use crate::tiling::ZoomRange;
 use pbfhogg::{Element, PrimitiveBlock};
 
 use super::super::emit::{EmitCtx, FeatureGeometry, PointEmitScratch, RecordSink, emit_match};
@@ -61,32 +62,28 @@ impl NodeWorkers {
     pub(super) fn stored(
         store: NodeStore,
         spill: &std::sync::Arc<SpillCoalescer>,
-        min_zoom: u8,
-        max_zoom: u8,
+        window: ZoomRange,
     ) -> Self {
-        Self::spawn(vec![Some(store)], spill, min_zoom, max_zoom)
+        Self::spawn(vec![Some(store)], spill, window)
     }
 
     /// Locations mode: a pool of `count` storeless workers.
     pub(super) fn inline(
         count: usize,
         spill: &std::sync::Arc<SpillCoalescer>,
-        min_zoom: u8,
-        max_zoom: u8,
+        window: ZoomRange,
     ) -> Self {
         Self::spawn(
             std::iter::repeat_with(|| None).take(count).collect(),
             spill,
-            min_zoom,
-            max_zoom,
+            window,
         )
     }
 
     fn spawn(
         stores: Vec<Option<NodeStore>>,
         spill: &std::sync::Arc<SpillCoalescer>,
-        min_zoom: u8,
-        max_zoom: u8,
+        window: ZoomRange,
     ) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(NODE_BLOCK_CHANNEL_CAP);
         let shared_rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
@@ -96,7 +93,7 @@ impl NodeWorkers {
                 let rx = std::sync::Arc::clone(&shared_rx);
                 let spill = std::sync::Arc::clone(spill);
                 std::thread::spawn(move || {
-                    let mut worker = NodeWorker::new(node_store, min_zoom, max_zoom);
+                    let mut worker = NodeWorker::new(node_store, window);
                     worker.run(&rx, &spill);
                     worker
                 })
@@ -149,8 +146,7 @@ impl Drop for NodeWorkers {
 /// One node worker's state, handed back when it is joined.
 struct NodeWorker {
     node_store: Option<NodeStore>,
-    min_zoom: u8,
-    max_zoom: u8,
+    window: ZoomRange,
     node_count: u64,
     features_emitted: u64,
     extent: CoordinateExtent,
@@ -159,11 +155,10 @@ struct NodeWorker {
 }
 
 impl NodeWorker {
-    fn new(node_store: Option<NodeStore>, min_zoom: u8, max_zoom: u8) -> Self {
+    fn new(node_store: Option<NodeStore>, window: ZoomRange) -> Self {
         Self {
             node_store,
-            min_zoom,
-            max_zoom,
+            window,
             node_count: 0,
             features_emitted: 0,
             extent: CoordinateExtent::default(),
@@ -237,8 +232,7 @@ impl NodeWorker {
             lat_e7,
             lon_e7,
             &tags_vec,
-            self.min_zoom,
-            self.max_zoom,
+            self.window,
             &mut self.node_records,
         );
         for r in self.node_records.drain(..) {
@@ -261,8 +255,7 @@ pub(super) fn process_node(
     lat_e7: i32,
     lon_e7: i32,
     tags: &[(&str, &str)],
-    min_zoom: u8,
-    max_zoom: u8,
+    window: ZoomRange,
     records: &mut Vec<SortRecord>,
 ) -> u64 {
     let tag_helper = Tags(tags);
@@ -273,8 +266,7 @@ pub(super) fn process_node(
 
     let p = geometry::projection::project_e7(lat_e7, lon_e7);
     let ctx = EmitCtx {
-        min_zoom,
-        max_zoom,
+        window,
         fanout_caps: &[],
         polygon_simplify_factor: 1.0,
     };

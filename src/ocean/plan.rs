@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use super::{OceanArtifactKey, OceanShapefileHashes, OceanSourceKey, ShapefilePair};
 use crate::provenance::ActiveLowZoomSource;
-use crate::tiling::MAX_ZOOM;
+use crate::tiling::{MAX_ZOOM, ZoomRange};
 
 /// Last zoom of the low pass. The engine splits here and nowhere else.
 const LOW_PASS_LAST_ZOOM: u8 = 7;
@@ -66,27 +66,41 @@ impl OceanPass {
         matches!(self, Self::Low)
     }
 
-    /// The part of this pass a run window `min_zoom..=max_zoom` emits, or
-    /// `None` when the window misses the pass.
-    pub(crate) fn emission(self, min_zoom: u8, max_zoom: u8) -> Option<PassWindow> {
-        let first = self.first_zoom().max(min_zoom);
-        let last = self.last_zoom().min(max_zoom);
-        (first <= last).then_some(PassWindow {
-            pass: self,
-            first,
-            last,
-        })
+    /// The zooms this pass constructs and may emit.
+    pub(crate) const fn zooms(self) -> ZoomRange {
+        match ZoomRange::new(self.first_zoom(), self.last_zoom()) {
+            Some(zooms) => zooms,
+            None => panic!("ocean pass zooms are a profile range"),
+        }
+    }
+
+    /// The part of this pass a run window emits, or `None` when the window
+    /// misses the pass.
+    pub(crate) fn emission(self, window: ZoomRange) -> Option<PassWindow> {
+        self.zooms()
+            .intersect(window)
+            .map(|zooms| PassWindow { pass: self, zooms })
     }
 }
 
 /// One pass restricted to the zooms a run emits. Construction still starts at
-/// `pass.first_zoom()` on `pass.grid_zoom()`; `first..=last` only says which
-/// of the constructed zooms are written.
+/// `pass.first_zoom()` on `pass.grid_zoom()`; `zooms` only says which of the
+/// constructed zooms are written. Built only by [`OceanPass::emission`], so
+/// the range always lies inside the pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PassWindow {
-    pub(crate) pass: OceanPass,
-    pub(crate) first: u8,
-    pub(crate) last: u8,
+    pass: OceanPass,
+    zooms: ZoomRange,
+}
+
+impl PassWindow {
+    pub(crate) const fn pass(self) -> OceanPass {
+        self.pass
+    }
+
+    pub(crate) const fn zooms(self) -> ZoomRange {
+        self.zooms
+    }
 }
 
 /// The validated ocean inputs of one run.
@@ -210,13 +224,14 @@ mod tests {
 
     #[test]
     fn emission_truncates_without_moving_construction() {
-        assert_eq!(OceanPass::Low.emission(8, 14), None);
-        assert_eq!(OceanPass::High.emission(0, 7), None);
-        let low = OceanPass::Low.emission(3, 5).expect("low window");
-        assert_eq!((low.first, low.last), (3, 5));
+        let w = |first, last| ZoomRange::new(first, last).expect("test window");
+        assert_eq!(OceanPass::Low.emission(w(8, 14)), None);
+        assert_eq!(OceanPass::High.emission(w(0, 7)), None);
+        let low = OceanPass::Low.emission(w(3, 5)).expect("low window");
+        assert_eq!((low.zooms().first(), low.zooms().last()), (3, 5));
         assert_eq!(low.pass.grid_zoom(), 7);
-        let high = OceanPass::High.emission(5, 12).expect("high window");
-        assert_eq!((high.first, high.last), (8, 12));
+        let high = OceanPass::High.emission(w(5, 12)).expect("high window");
+        assert_eq!((high.zooms().first(), high.zooms().last()), (8, 12));
         assert_eq!(high.pass.grid_zoom(), 14);
     }
 
