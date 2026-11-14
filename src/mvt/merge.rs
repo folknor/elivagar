@@ -231,6 +231,9 @@ fn decode_line_segments(commands: &[u32], segments: &mut Vec<Vec<IntPoint>>) {
     segments.retain(|s| s.len() >= 2);
 }
 /// Re-encode absolute-coordinate segments as MVT line geometry commands.
+/// Deltas outside i32 are encoder invariant violations, just as when rebasing
+/// appended geometry. Check even though pipeline coordinates are tile-local:
+/// two valid i32 coordinates need not have an i32-representable difference.
 fn encode_line_segments(segments: &[Vec<IntPoint>], buf: &mut Vec<u32>) {
     buf.clear();
     let mut cx: i32 = 0;
@@ -241,8 +244,18 @@ fn encode_line_segments(segments: &[Vec<IntPoint>], buf: &mut Vec<u32>) {
         }
         // MoveTo first point
         buf.push(command(1, 1));
-        buf.push(zigzag(seg[0].x - cx));
-        buf.push(zigzag(seg[0].y - cy));
+        buf.push(zigzag(
+            seg[0]
+                .x
+                .checked_sub(cx)
+                .expect("line MoveTo x delta fits i32"),
+        ));
+        buf.push(zigzag(
+            seg[0]
+                .y
+                .checked_sub(cy)
+                .expect("line MoveTo y delta fits i32"),
+        ));
         cx = seg[0].x;
         cy = seg[0].y;
         // LineTo remaining, skipping consecutive duplicates
@@ -254,8 +267,12 @@ fn encode_line_segments(segments: &[Vec<IntPoint>], buf: &mut Vec<u32>) {
             if x == cx && y == cy {
                 continue;
             }
-            buf.push(zigzag(x - cx));
-            buf.push(zigzag(y - cy));
+            buf.push(zigzag(
+                x.checked_sub(cx).expect("line LineTo x delta fits i32"),
+            ));
+            buf.push(zigzag(
+                y.checked_sub(cy).expect("line LineTo y delta fits i32"),
+            ));
             cx = x;
             cy = y;
             count += 1;
@@ -351,3 +368,48 @@ pub(super) fn test_check_merge(
 
 #[cfg(test)]
 pub(super) const TEST_CLIP_BOUNDARY: (i32, i32) = line_merge::TEST_CLIP_BOUNDARY;
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    #[test]
+    fn line_deltas_at_i32_limits_roundtrip() {
+        let segments = vec![
+            vec![IntPoint::new(i32::MIN, i32::MAX), IntPoint::new(-1, 0)],
+            vec![IntPoint::new(0, -1), IntPoint::new(i32::MAX, i32::MIN)],
+        ];
+        let mut encoded = Vec::new();
+        encode_line_segments(&segments, &mut encoded);
+        let mut decoded = Vec::new();
+        decode_line_segments(&encoded, &mut decoded);
+        assert_eq!(decoded, segments);
+    }
+
+    #[test]
+    fn overflowing_line_deltas_are_rejected() {
+        for axis in 0..2 {
+            for (start, end) in [(i32::MIN, i32::MAX), (i32::MAX, i32::MIN)] {
+                let point = |v| {
+                    if axis == 0 {
+                        IntPoint::new(v, 0)
+                    } else {
+                        IntPoint::new(0, v)
+                    }
+                };
+                for segments in [
+                    vec![vec![point(start), point(end)]],
+                    vec![vec![point(0), point(start)], vec![point(end), point(0)]],
+                ] {
+                    let result = std::panic::catch_unwind(|| {
+                        encode_line_segments(&segments, &mut Vec::new());
+                    });
+                    assert!(
+                        result.is_err(),
+                        "axis {axis}, {start} to {end}: {segments:?}"
+                    );
+                }
+            }
+        }
+    }
+}
