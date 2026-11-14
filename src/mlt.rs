@@ -1,4 +1,7 @@
 use crate::geometry;
+use crate::mvt::decode::{
+    self, Command, CommandKind, CommandSink, GeometryError, Grammar, Point as CommandPoint, Words,
+};
 use crate::mvt::{Feature, GeomType, LayerBuilder, Value};
 
 use geo_types::{
@@ -209,7 +212,7 @@ fn decode_point_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
 }
 
 fn decode_line_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
-    let paths = parse_paths(commands)?;
+    let paths = parse_paths(commands, Grammar::LineString)?;
     let mut lines = Vec::new();
     for path in paths {
         if path.len() < 2 {
@@ -228,7 +231,7 @@ fn decode_line_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
 }
 
 fn decode_polygon_geometry(commands: &[u32]) -> Result<Geometry<i32>, String> {
-    let ring_points = parse_paths(commands)?;
+    let ring_points = parse_paths(commands, Grammar::Polygon)?;
     let mut rings = Vec::new();
     for points in ring_points {
         rings.push(close_ring(points)?);
@@ -304,108 +307,46 @@ fn ring_signed_area(ring: &LineString<i32>) -> i128 {
     sum
 }
 
+/// Our encoder's point stream, under the strict point grammar.
 fn parse_points(commands: &[u32]) -> Result<Vec<Coord<i32>>, String> {
-    let mut out = Vec::new();
-    let mut cursor_x = 0_i32;
-    let mut cursor_y = 0_i32;
-    let mut i = 0_usize;
+    let mut paths = parse_paths(commands, Grammar::Point)?;
+    Ok(paths.drain(..).flatten().collect())
+}
 
-    while i < commands.len() {
-        let cmd = commands[i];
-        i += 1;
-        let cmd_id = cmd & 0x7;
-        let count = usize::try_from(cmd >> 3).map_err(|_| "command count overflow".to_string())?;
-        match cmd_id {
-            1 => {
-                for _ in 0..count {
-                    let (dx, dy, next_i) = read_delta_pair(commands, i)?;
-                    i = next_i;
-                    cursor_x += dx;
-                    cursor_y += dy;
-                    out.push(Coord {
-                        x: cursor_x,
-                        y: cursor_y,
-                    });
-                }
+/// Our encoder's line or polygon stream as paths, one per MoveTo point,
+/// under the strict grammar for its type. ClosePath adds no vertex: polygon
+/// conversion closes a ring only when it is open.
+fn parse_paths(commands: &[u32], grammar: Grammar) -> Result<Vec<Vec<Coord<i32>>>, String> {
+    struct Paths {
+        paths: Vec<Vec<Coord<i32>>>,
+        in_move: bool,
+    }
+    impl CommandSink for Paths {
+        fn command(&mut self, command: Command) -> Result<(), GeometryError> {
+            match command.kind {
+                CommandKind::MoveTo => self.in_move = true,
+                CommandKind::LineTo => self.in_move = false,
+                CommandKind::ClosePath => {}
             }
-            7 => {}
-            2 => return Err("point geometry contains LineTo command".to_string()),
-            _ => return Err(format!("unsupported command id {cmd_id} in point geometry")),
+            Ok(())
+        }
+        fn point(&mut self, point: CommandPoint) -> Result<(), GeometryError> {
+            let (x, y) = point.xy_i32()?;
+            if self.in_move || self.paths.is_empty() {
+                self.paths.push(Vec::new());
+            }
+            if let Some(path) = self.paths.last_mut() {
+                path.push(Coord { x, y });
+            }
+            Ok(())
         }
     }
-
-    Ok(out)
-}
-
-fn parse_paths(commands: &[u32]) -> Result<Vec<Vec<Coord<i32>>>, String> {
-    let mut paths = Vec::new();
-    let mut current = Vec::new();
-    let mut cursor_x = 0_i32;
-    let mut cursor_y = 0_i32;
-    let mut i = 0_usize;
-
-    while i < commands.len() {
-        let cmd = commands[i];
-        i += 1;
-        let cmd_id = cmd & 0x7;
-        let count = usize::try_from(cmd >> 3).map_err(|_| "command count overflow".to_string())?;
-
-        match cmd_id {
-            1 => {
-                for _ in 0..count {
-                    let (dx, dy, next_i) = read_delta_pair(commands, i)?;
-                    i = next_i;
-                    cursor_x += dx;
-                    cursor_y += dy;
-                    if !current.is_empty() {
-                        paths.push(std::mem::take(&mut current));
-                    }
-                    current.push(Coord {
-                        x: cursor_x,
-                        y: cursor_y,
-                    });
-                }
-            }
-            2 => {
-                if current.is_empty() {
-                    return Err("LineTo encountered before MoveTo".to_string());
-                }
-                for _ in 0..count {
-                    let (dx, dy, next_i) = read_delta_pair(commands, i)?;
-                    i = next_i;
-                    cursor_x += dx;
-                    cursor_y += dy;
-                    current.push(Coord {
-                        x: cursor_x,
-                        y: cursor_y,
-                    });
-                }
-            }
-            7 => {}
-            _ => return Err(format!("unsupported command id {cmd_id}")),
-        }
-    }
-
-    if !current.is_empty() {
-        paths.push(current);
-    }
-
-    Ok(paths)
-}
-
-fn read_delta_pair(commands: &[u32], index: usize) -> Result<(i32, i32, usize), String> {
-    if index + 1 >= commands.len() {
-        return Err("truncated geometry command stream".to_string());
-    }
-    let dx = decode_zigzag(commands[index])?;
-    let dy = decode_zigzag(commands[index + 1])?;
-    Ok((dx, dy, index + 2))
-}
-
-fn decode_zigzag(value: u32) -> Result<i32, String> {
-    let half = i32::try_from(value >> 1).map_err(|_| "zigzag value out of range".to_string())?;
-    let sign = i32::try_from(value & 1).map_err(|_| "zigzag sign out of range".to_string())?;
-    Ok(half ^ -sign)
+    let mut paths = Paths {
+        paths: Vec::new(),
+        in_move: false,
+    };
+    decode::decode(Words::slice(commands), Some(grammar), &mut paths)?;
+    Ok(paths.paths)
 }
 
 pub(crate) fn build_tile_model(layers: &[&LayerBuilder]) -> MltTileModel {

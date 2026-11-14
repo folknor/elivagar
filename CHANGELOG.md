@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- One MVT geometry command decoder. `tile_detail`, `verify`, `svg`,
+  `diag`, the line merger and the MLT encoder all decode through
+  `mvt::decode`, which owns command ids, truncation, zigzag, the
+  ClosePath cursor rule and the strict spec 4.3.4 grammar. `tile_detail`
+  returns identical detail for every input it accepted before, in both
+  modes; some strict-mode error messages changed wording. `verify` reads
+  geometry and tag varints with the protobuf reader, rejecting overlong
+  varints its hand parser let through. `svg` fails a tile with a wire
+  error instead of drawing what decoded before it. `diag` is now the
+  public `diag` module and prints a per-feature decode error instead of
+  partial rings. Output is unchanged.
+
 - Resume records are split by producer (checkpoint v11). `checkpoint.txt`
   holds only what the PBF phase depends on and derives; the ocean chunks'
   identity moved to a new completion record, `chunks_complete.json`,

@@ -5,6 +5,7 @@ use std::path::Path;
 
 use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
+use crate::mvt::decode::{self, Command, CommandKind, CommandSink, GeometryError, Point, Words};
 use crate::pmtiles_reader::{PmtilesReader, find_entry};
 use crate::shortbread::Layer;
 use crate::tiling::{ARCHIVE_MAX_ZOOM, TileId};
@@ -408,97 +409,52 @@ fn decode_feature(data: &[u8]) -> io::Result<SvgFeature> {
     Ok(SvgFeature { geom_type, paths })
 }
 
+/// Paths as drawn: each MoveTo point starts a path, a polygon ClosePath
+/// closes and ends it. The viewer decodes unvalidated so a mis-sequenced
+/// stream still draws and can be seen; a wire error fails the tile.
 fn decode_geometry_commands(data: &[u8], geom_type: u64) -> io::Result<Vec<Vec<(f64, f64)>>> {
-    let commands = decode_packed_varints(data)?;
-    let mut paths: Vec<Vec<(f64, f64)>> = Vec::new();
-    let mut current: Vec<(f64, f64)> = Vec::new();
-    let mut cx: i64 = 0;
-    let mut cy: i64 = 0;
-    let mut i = 0;
-
-    while i < commands.len() {
-        let op = commands[i];
-        i += 1;
-        let id = op & 0x7;
-        #[allow(clippy::cast_possible_truncation)]
-        let count = (op >> 3) as usize;
-
-        match id {
-            1 => {
-                // MoveTo
-                for _ in 0..count {
-                    if i + 1 >= commands.len() {
-                        break;
+    struct Paths {
+        polygon: bool,
+        paths: Vec<Vec<(f64, f64)>>,
+        current: Vec<(f64, f64)>,
+        in_move: bool,
+    }
+    impl CommandSink for Paths {
+        fn command(&mut self, command: Command) -> Result<(), GeometryError> {
+            match command.kind {
+                CommandKind::MoveTo => self.in_move = true,
+                CommandKind::LineTo => self.in_move = false,
+                CommandKind::ClosePath => {
+                    if self.polygon && !self.current.is_empty() {
+                        let first = self.current[0];
+                        self.current.push(first);
+                        self.paths.push(std::mem::take(&mut self.current));
                     }
-                    if !current.is_empty() {
-                        paths.push(std::mem::take(&mut current));
-                    }
-                    cx += zigzag_decode(commands[i]);
-                    cy += zigzag_decode(commands[i + 1]);
-                    i += 2;
-                    current.push((cx as f64, cy as f64));
                 }
             }
-            2 => {
-                // LineTo
-                for _ in 0..count {
-                    if i + 1 >= commands.len() {
-                        break;
-                    }
-                    cx += zigzag_decode(commands[i]);
-                    cy += zigzag_decode(commands[i + 1]);
-                    i += 2;
-                    current.push((cx as f64, cy as f64));
-                }
+            Ok(())
+        }
+        #[allow(clippy::cast_precision_loss)]
+        fn point(&mut self, point: Point) -> Result<(), GeometryError> {
+            if self.in_move && !self.current.is_empty() {
+                self.paths.push(std::mem::take(&mut self.current));
             }
-            7 if geom_type == 3 && !current.is_empty() => {
-                if let Some(&first) = current.first() {
-                    current.push(first);
-                    // Per MVT spec 4.3.3.3 ClosePath does NOT move the cursor;
-                    // the next ring's MoveTo is relative to the last LineTo vertex.
-                }
-                paths.push(std::mem::take(&mut current));
-            }
-            _ => {}
+            self.current.push((point.x as f64, point.y as f64));
+            Ok(())
         }
     }
-
-    if !current.is_empty() {
-        paths.push(current);
+    let mut paths = Paths {
+        polygon: geom_type == 3,
+        paths: Vec::new(),
+        current: Vec::new(),
+        in_move: false,
+    };
+    decode::decode(Words::packed(data), None, &mut paths)
+        .map_err(|e| io::Error::other(format!("mvt geometry: {e}")))?;
+    if !paths.current.is_empty() {
+        paths.paths.push(paths.current);
     }
-
-    Ok(paths)
-}
-
-fn decode_packed_varints(data: &[u8]) -> io::Result<Vec<u32>> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < data.len() {
-        let mut shift = 0u32;
-        let mut value: u64 = 0;
-        loop {
-            if i >= data.len() {
-                return Err(io::Error::other("geometry varint truncated"));
-            }
-            let b = data[i];
-            i += 1;
-            value |= u64::from(b & 0x7f) << shift;
-            if (b & 0x80) == 0 {
-                break;
-            }
-            shift += 7;
-            if shift > 63 {
-                return Err(io::Error::other("geometry varint too long"));
-            }
-        }
-        let v = u32::try_from(value).map_err(|_| io::Error::other("geometry command > u32"))?;
-        out.push(v);
-    }
-    Ok(out)
-}
-
-fn zigzag_decode(v: u32) -> i64 {
-    i64::from(v >> 1) ^ -i64::from(v & 1)
+    Ok(paths.paths)
 }
 
 #[cfg(test)]

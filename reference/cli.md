@@ -490,13 +490,17 @@ below the other layers.
 
 Polygons fill with `nonzero`, matching MapLibre; points are circles, lines are
 stroked paths, background is land-coloured. Grid lines are drawn when width or
-height exceeds 1.
+height exceeds 1. Command sequencing is not validated, so a mis-sequenced
+stream still draws; a wire error (unknown command, truncated parameters)
+fails the render.
 
 ## `elivagar diag <FILE> -z <Z> -x <X> -y <Y>`
 
 Ring winding for one tile: per-ring vertex count, signed area, and direction
 (CW outer, CCW hole) for every polygon feature across all layers. Prints
 first/last 3 vertices for large rings, all vertices for rings of 6 or fewer.
+Rings are raw (zero-area ones included). Polygons decode under the strict MVT
+grammar; a feature that fails prints its decode error instead of rings.
 Zooms must be 0 through 31, and X and Y must fit that zoom's tile matrix.
 
 ## Environment variables

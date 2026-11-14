@@ -9,6 +9,9 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
+use crate::mvt::decode::{
+    self, Command, CommandKind, CommandSink, GeometryError, Grammar, Point, Words,
+};
 use crate::pmtiles_reader::{self, PmtilesReader};
 use crate::shortbread::{Layer, paint_order};
 use crate::tiling::{ARCHIVE_MAX_ZOOM, TileId};
@@ -610,10 +613,9 @@ fn collect_ocean_layer_stats(layer_data: &[u8], z: u8, stats: &mut GeometryStats
         let Some(gb) = geom_bytes else {
             continue;
         };
-        let Ok(commands) = decode_packed_varints(gb) else {
-            continue;
-        };
-        let Ok(rings) = crate::mvt::decode::try_decode_mvt_polygon(&commands) else {
+        // A polygon that does not decode is reported by validate_mvt_geometry
+        // and validate_ocean_rings on the same tile; statistics skip it.
+        let Ok(rings) = decode::decode_polygon_rings(Words::packed(gb)) else {
             continue;
         };
         if rings.is_empty() {
@@ -963,254 +965,100 @@ fn validate_mvt_feature_geometry(feature: &[u8], class: ValidationClass) -> Resu
         }
         return Ok(());
     };
-    let raw_byte_len = geom_bytes.len();
-    let commands = decode_packed_varints(geom_bytes)?;
-    validate_geometry_commands(&commands, geom_type, class, raw_byte_len)
+    validate_geometry(
+        Words::packed(geom_bytes),
+        geom_type,
+        class,
+        geom_bytes.len(),
+    )
 }
 
+/// Packed varints of a feature's `tags` field.
 fn decode_packed_varints(data: &[u8]) -> Result<Vec<u32>, String> {
+    let mut cursor = Cursor::new(data);
     let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < data.len() {
-        let mut shift = 0u32;
-        let mut value: u64 = 0;
-        loop {
-            if i >= data.len() {
-                return Err("geometry varint truncated".to_string());
-            }
-            let b = data[i];
-            i += 1;
-            value |= u64::from(b & 0x7f) << shift;
-            if (b & 0x80) == 0 {
-                break;
-            }
-            shift += 7;
-            if shift > 63 {
-                return Err("geometry varint too long".to_string());
-            }
-        }
-        let v = u32::try_from(value).map_err(|_| "geometry command > u32".to_string())?;
-        out.push(v);
+    while !cursor.is_empty() {
+        let raw = cursor
+            .read_varint()
+            .map_err(|e| format!("packed varint decode failed: {e}"))?;
+        out.push(u32::try_from(raw).map_err(|_| "packed varint exceeds u32".to_string())?);
     }
     Ok(out)
 }
 
-fn zigzag_decode_u32(v: u32) -> i64 {
-    i64::from(v >> 1) ^ -i64::from(v & 1)
-}
-
-/// Decode and validate a single point (dx,dy pair) from the command stream,
-/// advancing the cursor and accumulating absolute coordinates.
-fn consume_geometry_point(
-    commands: &[u32],
-    i: &mut usize,
-    cx: &mut i64,
-    cy: &mut i64,
+/// verify's checks on top of the shared decoder and its spec grammar: the
+/// vtzero count cap and the extent-scaled delta and absolute limits.
+struct GeometryLimits {
+    max_count: u32,
     delta_limit: i64,
     coord_limit: i64,
+}
+
+impl CommandSink for GeometryLimits {
+    fn command(&mut self, command: Command) -> Result<(), GeometryError> {
+        let name = match command.kind {
+            CommandKind::MoveTo => "MoveTo",
+            CommandKind::LineTo => "LineTo",
+            CommandKind::ClosePath => return Ok(()),
+        };
+        if command.count > self.max_count {
+            return Err(GeometryError::Consumer(format!(
+                "{name} count too large ({} > {})",
+                command.count, self.max_count
+            )));
+        }
+        Ok(())
+    }
+
+    fn point(&mut self, point: Point) -> Result<(), GeometryError> {
+        let (dx, dy) = (i64::from(point.dx), i64::from(point.dy));
+        if dx.abs() > self.delta_limit || dy.abs() > self.delta_limit {
+            return Err(GeometryError::Consumer(format!(
+                "suspicious geometry delta ({dx},{dy}) exceeds limit {}",
+                self.delta_limit
+            )));
+        }
+        if point.x.abs() > self.coord_limit || point.y.abs() > self.coord_limit {
+            return Err(GeometryError::Consumer(format!(
+                "geometry coordinate ({},{}) exceeds absolute limit {}",
+                point.x, point.y, self.coord_limit
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn validate_geometry(
+    words: Words<'_>,
+    geom_type: u64,
+    class: ValidationClass,
+    raw_byte_len: usize,
 ) -> Result<(), String> {
-    if *i + 1 >= commands.len() {
-        return Err("too few points in geometry".to_string());
-    }
-    let dx = zigzag_decode_u32(commands[*i]);
-    let dy = zigzag_decode_u32(commands[*i + 1]);
-    *i += 2;
-    if dx.abs() > delta_limit || dy.abs() > delta_limit {
-        return Err(format!(
-            "suspicious geometry delta ({dx},{dy}) exceeds limit {delta_limit}"
-        ));
-    }
-    *cx += dx;
-    *cy += dy;
-    if cx.abs() > coord_limit || cy.abs() > coord_limit {
-        return Err(format!(
-            "geometry coordinate ({cx},{cy}) exceeds absolute limit {coord_limit}"
-        ));
-    }
+    let delta_limit = if class.seam {
+        MVT_DELTA_LIMIT_SEAM / MVT_EXTENT * class.extent
+    } else {
+        MVT_DELTA_LIMIT / MVT_EXTENT * class.extent
+    };
+    // Maximum valid count: vtzero uses raw_byte_len / 2 (each varint is >=1
+    // byte, each point needs 2 varints). This is a generous upper bound that
+    // avoids false positives on large but valid geometries.
+    let mut limits = GeometryLimits {
+        max_count: u32::try_from(raw_byte_len / 2).unwrap_or(u32::MAX),
+        delta_limit,
+        coord_limit: MVT_COORD_ABS_LIMIT / MVT_EXTENT * class.extent,
+    };
+    decode::decode(words, Some(Grammar::for_geom_type(geom_type)), &mut limits)?;
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 fn validate_geometry_commands(
     commands: &[u32],
     geom_type: u64,
     class: ValidationClass,
     raw_byte_len: usize,
 ) -> Result<(), String> {
-    if commands.is_empty() {
-        return Err("feature has empty geometry command stream".to_string());
-    }
-    let delta_limit = if class.seam {
-        MVT_DELTA_LIMIT_SEAM / MVT_EXTENT * class.extent
-    } else {
-        MVT_DELTA_LIMIT / MVT_EXTENT * class.extent
-    };
-
-    let coord_limit = MVT_COORD_ABS_LIMIT / MVT_EXTENT * class.extent;
-
-    // Maximum valid count: vtzero uses raw_byte_len / 2 (each varint is ≥1 byte,
-    // each point needs 2 varints). This is a generous upper bound that avoids
-    // false positives on large but valid geometries.
-    let max_count = u32::try_from(raw_byte_len / 2).unwrap_or(u32::MAX);
-
-    let mut i = 0usize;
-    let mut cx: i64 = 0;
-    let mut cy: i64 = 0;
-    let mut ring_points = 0usize;
-    let mut expect_linestring_moveto = true;
-    let mut polygon_phase = 0u8; // 0 = MoveTo, 1 = LineTo, 2 = ClosePath
-    let mut point_moveto_seen = false;
-    while i < commands.len() {
-        let op = commands[i];
-        i += 1;
-        let id = op & 0x7;
-        let count = op >> 3;
-        if count == 0 {
-            return Err("geometry command with zero repeat count".to_string());
-        }
-        match id {
-            1 => {
-                // MoveTo
-                if count > max_count {
-                    return Err(format!("MoveTo count too large ({count} > {max_count})"));
-                }
-                match geom_type {
-                    1 => {
-                        if point_moveto_seen {
-                            return Err(
-                                "point geometry must use a single MoveTo command (spec 4.3.4.2)"
-                                    .to_string(),
-                            );
-                        }
-                        point_moveto_seen = true;
-                    }
-                    2 => {
-                        if count != 1 {
-                            return Err(
-                                "linestring MoveTo count must be 1 (spec 4.3.4.3)".to_string()
-                            );
-                        }
-                        if !expect_linestring_moveto {
-                            return Err(
-                                "linestring MoveTo must follow a LineTo (spec 4.3.4.3)".to_string()
-                            );
-                        }
-                        expect_linestring_moveto = false;
-                    }
-                    3 => {
-                        if count != 1 {
-                            return Err(
-                                "polygon ring MoveTo count must be 1 (spec 4.3.4.4)".to_string()
-                            );
-                        }
-                        if polygon_phase != 0 {
-                            return Err(if polygon_phase == 1 {
-                                "polygon ring missing LineTo".to_string()
-                            } else {
-                                "polygon ring missing ClosePath".to_string()
-                            });
-                        }
-                        polygon_phase = 1;
-                    }
-                    _ => {}
-                }
-                for _ in 0..count {
-                    consume_geometry_point(
-                        commands,
-                        &mut i,
-                        &mut cx,
-                        &mut cy,
-                        delta_limit,
-                        coord_limit,
-                    )?;
-                    if geom_type == 3 {
-                        ring_points = 1;
-                    }
-                }
-            }
-            2 => {
-                // LineTo
-                if count > max_count {
-                    return Err(format!("LineTo count too large ({count} > {max_count})"));
-                }
-                match geom_type {
-                    1 => {
-                        return Err(
-                            "LineTo is invalid for point geometry (spec 4.3.4.2)".to_string()
-                        );
-                    }
-                    2 => {
-                        if expect_linestring_moveto {
-                            return Err(
-                                "linestring LineTo must follow MoveTo (spec 4.3.4.3)".to_string()
-                            );
-                        }
-                        expect_linestring_moveto = true;
-                    }
-                    3 => {
-                        if polygon_phase != 1 {
-                            return Err(
-                                "polygon LineTo must follow MoveTo (spec 4.3.4.4)".to_string()
-                            );
-                        }
-                        if count <= 1 {
-                            return Err(
-                                "polygon ring LineTo count must be greater than 1 (spec 4.3.4.4)"
-                                    .to_string(),
-                            );
-                        }
-                        polygon_phase = 2;
-                    }
-                    _ => {}
-                }
-                for _ in 0..count {
-                    consume_geometry_point(
-                        commands,
-                        &mut i,
-                        &mut cx,
-                        &mut cy,
-                        delta_limit,
-                        coord_limit,
-                    )?;
-                    if geom_type == 3 {
-                        ring_points += 1;
-                    }
-                }
-            }
-            7 => {
-                // ClosePath
-                if geom_type != 3 {
-                    return Err("ClosePath in non-polygon geometry".to_string());
-                }
-                if count != 1 {
-                    return Err("ClosePath command count is not 1 (spec 4.3.3.3)".to_string());
-                }
-                if ring_points < 3 {
-                    return Err(format!(
-                        "polygon ring has too few points ({ring_points}, need >=3)"
-                    ));
-                }
-                if polygon_phase != 2 {
-                    return Err("polygon ClosePath must follow LineTo (spec 4.3.4.4)".to_string());
-                }
-                ring_points = 0;
-                polygon_phase = 0;
-            }
-            _ => return Err(format!("unknown geometry command id {id}")),
-        }
-    }
-
-    if geom_type == 2 && !expect_linestring_moveto {
-        return Err("linestring MoveTo missing LineTo (spec 4.3.4.3)".to_string());
-    }
-    if geom_type == 3 {
-        match polygon_phase {
-            1 => return Err("polygon ring missing LineTo".to_string()),
-            2 => return Err("polygon ring missing ClosePath".to_string()),
-            _ => {}
-        }
-    }
-    Ok(())
+    validate_geometry(Words::slice(commands), geom_type, class, raw_byte_len)
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,11 +1131,7 @@ fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
             continue;
         };
 
-        // Decode packed varints to u32 commands
-        let Ok(commands) = decode_packed_varints(gb) else {
-            continue;
-        };
-        let rings = match crate::mvt::decode::try_decode_mvt_polygon(&commands) {
+        let rings = match decode::decode_polygon_rings(Words::packed(gb)) {
             Ok(rings) => rings,
             Err(error) => {
                 problems.push(format!("ocean feat {fi} polygon decode failed: {error}"));
@@ -1475,9 +1319,9 @@ mod tests {
             zz(1),
             zz(0),
         ];
-        let err = crate::mvt::decode::try_decode_mvt_polygon(&commands)
+        let err = decode::decode_polygon_rings(Words::slice(&commands))
             .expect_err("coordinate addition overflow should fail");
-        assert!(err.contains("coordinate overflows i32"));
+        assert!(err.to_string().contains("coordinate overflows i32"));
     }
 
     #[test]

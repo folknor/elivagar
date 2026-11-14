@@ -55,10 +55,15 @@ encoder/decoder convention violation is invisible to any single-decoder
 round-trip. Only an independent oracle (earcut's own `classifyRings`)
 catches it.
 
-Fix (active in the tree): encoder `mvt/mod.rs`, decoders
-`mvt/decode.rs` + `svg.rs` + `main.rs` diag, merge
-`mvt/merge.rs`, tests all moved to spec semantics; `mvt/tests.rs` now
-enforces "ClosePath does not move the cursor."
+Fix (active in the tree): the encoder `mvt/mod.rs`, every decoder,
+the merge `mvt/merge.rs` and the tests all moved to spec semantics;
+`mvt/tests.rs` enforces "ClosePath does not move the cursor." The
+decoders were later consolidated: every in-crate reader of a command
+stream (tile_detail, verify, svg, diag, the line merger, MLT, tests)
+now decodes through `mvt/decode.rs`, which owns the cursor rule once.
+That removes the copies but not the trap: one in-crate decoder still
+round-trips symmetrically with the encoder, so the literal-word tests
+and the earcut oracle remain the independent check.
 
 ## R24 - resolution
 

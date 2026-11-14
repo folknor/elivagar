@@ -2003,47 +2003,8 @@ fn decode_to_layer(data: &[u8]) -> mvt::LayerBuilder {
     lb
 }
 
-fn decode_zigzag(v: u32) -> i32 {
-    let n = i32::try_from(v >> 1).unwrap_or(i32::MAX);
-    if (v & 1) == 0 { n } else { -n - 1 }
-}
-
 fn decode_commands_to_abs_coords(cmds: &[u32]) -> Vec<(i32, i32)> {
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    let mut cx = 0i32;
-    let mut cy = 0i32;
-    let mut move_x = 0i32;
-    let mut move_y = 0i32;
-    while i < cmds.len() {
-        let cmd = cmds[i];
-        i += 1;
-        let id = cmd & 0x7;
-        let count = cmd >> 3;
-        match id {
-            1 | 2 => {
-                for _ in 0..count {
-                    if i + 1 >= cmds.len() {
-                        return out;
-                    }
-                    cx += decode_zigzag(cmds[i]);
-                    cy += decode_zigzag(cmds[i + 1]);
-                    i += 2;
-                    if id == 1 {
-                        move_x = cx;
-                        move_y = cy;
-                    }
-                    out.push((cx, cy));
-                }
-            }
-            7 => {
-                cx = move_x;
-                cy = move_y;
-            }
-            _ => break,
-        }
-    }
-    out
+    crate::mvt::decode::decode_positions(cmds)
 }
 
 fn contains_point_near(points: &[(i32, i32)], expected: (i32, i32)) -> bool {
@@ -2054,7 +2015,7 @@ fn contains_point_near(points: &[(i32, i32)], expected: (i32, i32)) -> bool {
 
 fn record_polygon_rings(rec: &SortRecord) -> Vec<Vec<(i32, i32)>> {
     let lb = decode_to_layer(&rec.data);
-    crate::mvt::decode::decode_mvt_polygon(&lb.test_feature(0).geometry)
+    crate::mvt::decode::polygon_rings(&lb.test_feature(0).geometry)
 }
 
 fn assert_no_backtrack_in_records(records: &[SortRecord]) {
@@ -3716,7 +3677,7 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
 
     for rec in z13_records.iter().chain(&z14_records) {
         let lb = decode_to_layer(&rec.data);
-        let rings = crate::mvt::decode::decode_mvt_polygon(&lb.test_feature(0).geometry);
+        let rings = crate::mvt::decode::polygon_rings(&lb.test_feature(0).geometry);
         for ring in rings {
             assert!(geometry::polygon::ring_is_simple(&ring));
         }

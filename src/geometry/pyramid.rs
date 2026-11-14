@@ -1226,7 +1226,7 @@ mod tests {
     };
     use crate::geometry::projection::Point;
     use crate::mvt::MAX_FEATURE_RINGS;
-    use crate::mvt::decode::decode_mvt_polygon;
+    use crate::mvt::decode::polygon_rings;
     use crate::test_support::next_random;
     use i_overlay::core::fill_rule::FillRule;
     use i_overlay::core::overlay::{IntOverlayOptions, Overlay, ShapeType};
@@ -1525,7 +1525,7 @@ mod tests {
             }
 
             for geometry in emitted {
-                let rings = decode_mvt_polygon(&geometry);
+                let rings = polygon_rings(&geometry);
                 assert!(!rings.is_empty(), "case {case} decodes polygon rings");
                 assert!(
                     rings.len() <= MAX_FEATURE_RINGS,
@@ -1641,7 +1641,7 @@ mod tests {
     fn decoded_cycles(bufs: &[Vec<u32>]) -> Vec<Vec<(i32, i32)>> {
         let mut out = Vec::new();
         for b in bufs {
-            for ring in decode_mvt_polygon(b) {
+            for ring in polygon_rings(b) {
                 let mut v = ring;
                 v.pop();
                 let n = v.len();
@@ -2172,7 +2172,7 @@ mod tests {
         for (&(_z, tx, ty), geom) in records {
             let ox = crate::geometry::int_ocean::tile_origin(tx);
             let oy = crate::geometry::int_ocean::tile_origin(ty);
-            let rings = decode_mvt_polygon(geom);
+            let rings = polygon_rings(geom);
             if rings.is_empty() {
                 continue;
             }

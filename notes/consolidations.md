@@ -87,45 +87,29 @@ over each layer's own range; emission is cut). What remains:
 Reported by the polygon-engine, pipeline, coordinate-spaces, layer-identity,
 storage and archive-surface hunts.
 
-## CON-017 - How is an MVT command stream decoded?
+## CON-017 - How is an MVT message (not its command stream) walked?
 
-Production decoders: `geometry::mvt_decode::decode_mvt_polygon` (lenient,
-used by verify, assemble, tests; unknown command skips zero words),
-`main.rs::diag_decode_polygon` (a verbatim copy with its own
-`unzigzag_diag`; its comment says it exists "to avoid needing pub access to
-geometry module"), `svg.rs` `decode_geometry_commands`, `verify.rs`
-`validate_geometry_commands`, `tile_detail.rs` (strict/tolerant, checked),
-`mlt.rs` `parse_points`/`parse_paths` (Result, plain `+=`),
-`mvt/merge.rs::append_geometry` (re-delta; truncates on short input, copies
-unknown commands) and `decode_line_segments` (wrapping; unknown command skips
-`count*2` words). Protobuf walkers: `pmtiles_reader::decode_mvt_layers`
-(silently stops on error), `verify::validate_mvt_*`,
-`verify::collect_ocean_*`/`validate_ocean_*`, `svg::decode_*`,
-`main::diag_*`, assemble's `ocean_layer_field`/`read_varint`/
-`raw_contains_ocean`. Test-only: `mvt/tests.rs` `parse_fixture_*`,
-`pipeline_tests.rs` `decode_commands_to_abs_coords`/`decode_commands_to_abs`,
-`decode_segments`. Zigzag alone: `mvt::decode_zigzag`, `merge::unzigzag` (in
-a module that imports `decode_zigzag`), `mlt::decode_zigzag`,
-`mvt_decode::unzigzag`, `tile_detail::unzigzag`, `svg::zigzag_decode`,
-`verify::zigzag_decode_u32`, `main::unzigzag_diag`, `way_index`'s pair.
-`verify::decode_packed_varints` and `svg::decode_packed_varints` are
-byte-identical.
+The command stream is settled: every in-crate reader decodes through
+`mvt::decode`. What remains is the protobuf layer around it, walked
+independently and with different error policies:
+`pmtiles_reader::decode_mvt_layers` (tag-read errors end the loop silently),
+verify's four per-tile parses (`decode_mvt_layers`, `validate_mvt_geometry`,
+`validate_ocean_rings`, `collect_ocean_geometry_stats`, the last two
+skipping unreadable fields silently), `svg::decode_mvt_geometry`/
+`decode_layer`/`decode_feature` (read errors on length-delimited fields
+dropped), `diag::diag_layer` (all read errors dropped), and assemble's
+`ocean_layer_field`/`read_varint`/`raw_contains_ocean`. Only `tile_detail`
+reads the tile/layer/feature messages with a stated policy.
 
-They disagree on unknown-command handling (skip 0, skip `2*count`, copy,
-error) and overflow (wrapping, panic, error). Each re-decides the R23 rule
-that ClosePath does not move the cursor; all production copies get it right
-today, but that is the decision that hid for three months and it now has
-eight owners. In-crate tests check the encoder against decoders written by
-the same hand - the symmetric-convention trap the earcut oracle exists for.
-The defects already present (verify's lenient decoder, tile_detail
-permissiveness) are in `notes/bugs.md`.
+Ring grouping (first nonzero-area ring sets the exterior winding,
+zero-area rings skipped) is also spelled twice, in `tile_detail`
+(`group_detail_rings`) and `mlt::group_rings_to_polygons`.
 
-Owner proposed (all five hunts agree on the direction): one decoder - a
-command iterator in `mvt/` or `tile_detail` with a strictness parameter and a
-typed error - used by verify, svg, diag and tests; internal consumers (line
-merger, MLT) should not decode at all once the tile model is typed geometry.
-`pmtiles_reader::MvtLayer`/`decode_mvt_layers` should leave the container
-reader.
+Owner proposed: `pmtiles_reader::MvtLayer`/`decode_mvt_layers` leaves the
+container reader (shared with the archive-module entry), and verify, svg
+and diag walk messages through one borrowed message reader with
+`tile_detail`'s strictness. MLT and the line merger stop decoding at all
+once the tile model is typed geometry (STR-013).
 
 Reported by the polygon-engine, encoding, archive-surface, coordinate-spaces
 and pipeline hunts.

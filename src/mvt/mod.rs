@@ -573,14 +573,6 @@ pub(crate) fn command(id: u32, count: u32) -> u32 {
     id | (count << 3)
 }
 
-#[inline]
-pub(super) fn decode_zigzag(v: u32) -> i32 {
-    #[allow(clippy::cast_possible_wrap)]
-    {
-        ((v >> 1) as i32) ^ (-((v & 1) as i32))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Test accessors (expose private fields for cross-module test assertions)
 // ---------------------------------------------------------------------------

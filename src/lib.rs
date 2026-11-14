@@ -66,6 +66,7 @@
 extern crate alloc;
 
 pub(crate) mod debug;
+pub mod diag;
 pub(crate) mod geometry;
 pub mod inspect;
 #[cfg(feature = "mlt")]

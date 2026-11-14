@@ -1,6 +1,5 @@
-use super::{
-    GeomType, LayerBuilder, LineMergeScratch, MergeScratch, command, decode_zigzag, zigzag,
-};
+use super::decode::{self, Command, CommandKind, CommandSink, GeometryError, Point, Words};
+use super::{GeomType, LayerBuilder, LineMergeScratch, MergeScratch, command, zigzag};
 use crate::geometry::line_merge;
 use crate::geometry::overlay::IntPoint;
 
@@ -8,59 +7,51 @@ use crate::geometry::overlay::IntPoint;
 /// adjusting delta encoding so the commands are relative to the running
 /// cursor (`cx`, `cy`). This allows multiple independently-encoded
 /// geometries to be concatenated into a valid multi-geometry.
+///
+/// Only the source's first point needs rebasing: after it the source and
+/// destination cursors coincide, so every later delta copies through. The
+/// source is our own encoder's output, so a stream that does not decode, or a
+/// rebased delta outside i32, is an encoder invariant violation.
 fn append_geometry(dest: &mut Vec<u32>, src: &[u32], cx: &mut i32, cy: &mut i32) {
-    // The source feature was encoded assuming cursor starts at (0,0).
-    // Track the source's absolute cursor so we can re-encode deltas
-    // relative to our running destination cursor.
-    let mut src_cx: i32 = 0;
-    let mut src_cy: i32 = 0;
-    let mut i = 0;
-    while i < src.len() {
-        let cmd = src[i];
-        let cmd_id = cmd & 0x7;
-        let cmd_count = cmd >> 3;
-        i += 1;
-
-        match cmd_id {
-            1 | 2 => {
-                // MoveTo or LineTo
-                let cmd_pos = dest.len();
-                dest.push(cmd);
-                let mut actual_count = 0u32;
-                for _ in 0..cmd_count {
-                    if i + 1 >= src.len() {
-                        break;
-                    }
-                    actual_count += 1;
-                    let dx = decode_zigzag(src[i]);
-                    let dy = decode_zigzag(src[i + 1]);
-                    // Absolute position in source coordinate space
-                    src_cx += dx;
-                    src_cy += dy;
-                    // Delta relative to our running cursor
-                    dest.push(zigzag(src_cx - *cx));
-                    dest.push(zigzag(src_cy - *cy));
-                    *cx = src_cx;
-                    *cy = src_cy;
-                    i += 2;
-                }
-                // Patch command header with actual count if truncated.
-                if actual_count != cmd_count {
-                    dest[cmd_pos] = (actual_count << 3) | cmd_id;
-                }
+    struct Append<'a> {
+        dest: &'a mut Vec<u32>,
+        cx: &'a mut i32,
+        cy: &'a mut i32,
+        rebased: bool,
+    }
+    impl CommandSink for Append<'_> {
+        fn command(&mut self, command: Command) -> Result<(), GeometryError> {
+            self.dest
+                .push(super::command(command.kind.id(), command.count));
+            Ok(())
+        }
+        fn point(&mut self, point: Point) -> Result<(), GeometryError> {
+            let (x, y) = point.xy_i32()?;
+            if self.rebased {
+                self.dest.push(zigzag(point.dx));
+                self.dest.push(zigzag(point.dy));
+            } else {
+                let dx = i32::try_from(i64::from(x) - i64::from(*self.cx))
+                    .map_err(|_| GeometryError::CoordinateOverflow("rebased x delta"))?;
+                let dy = i32::try_from(i64::from(y) - i64::from(*self.cy))
+                    .map_err(|_| GeometryError::CoordinateOverflow("rebased y delta"))?;
+                self.dest.push(zigzag(dx));
+                self.dest.push(zigzag(dy));
+                self.rebased = true;
             }
-            7 => {
-                // ClosePath - per MVT spec 4.3.3.3 the cursor does NOT move
-                // (it stays at the last LineTo vertex), in both the source
-                // and destination coordinate spaces.
-                dest.push(cmd);
-            }
-            _ => {
-                // Unknown command, copy as-is
-                dest.push(cmd);
-            }
+            *self.cx = x;
+            *self.cy = y;
+            Ok(())
         }
     }
+    let mut sink = Append {
+        dest,
+        cx,
+        cy,
+        rebased: false,
+    };
+    decode::decode(Words::slice(src), None, &mut sink)
+        .expect("merged features carry well-formed encoder output");
 }
 
 // ---------------------------------------------------------------------------
@@ -208,56 +199,45 @@ impl LayerBuilder {
     }
 }
 
-/// Decode MVT line geometry commands into absolute-coordinate segments.
+/// Decode MVT line geometry commands into absolute-coordinate segments,
+/// dropping segments of fewer than 2 points. The stream is our own encoder's
+/// output, whose line MoveTo count is always 1 (encode_linestring and
+/// encode_line_segments; append_geometry preserves headers), so anything else
+/// is an encoder invariant violation.
 fn decode_line_segments(commands: &[u32], segments: &mut Vec<Vec<IntPoint>>) {
-    segments.clear();
-    let mut i = 0;
-    let mut cx: i32 = 0;
-    let mut cy: i32 = 0;
-    while i < commands.len() {
-        let cmd = commands[i];
-        let cmd_id = cmd & 0x7;
-        let count = (cmd >> 3) as usize;
-        i += 1;
-        match cmd_id {
-            1 => {
-                // MoveTo: start a new segment
-                if i + count * 2 > commands.len() {
-                    break;
+    struct Segments<'a>(&'a mut Vec<Vec<IntPoint>>);
+    impl CommandSink for Segments<'_> {
+        fn command(&mut self, command: Command) -> Result<(), GeometryError> {
+            match command.kind {
+                CommandKind::MoveTo if command.count != 1 => Err(GeometryError::Consumer(
+                    "line MoveTo count must be 1".to_string(),
+                )),
+                CommandKind::MoveTo => {
+                    self.0.push(Vec::new());
+                    Ok(())
                 }
-                for _ in 0..count {
-                    cx = cx.wrapping_add(unzigzag(commands[i]));
-                    cy = cy.wrapping_add(unzigzag(commands[i + 1]));
-                    i += 2;
-                }
-                segments.push(vec![IntPoint::new(cx, cy)]);
-            }
-            2 => {
-                // LineTo: extend current segment
-                if i + count * 2 > commands.len() {
-                    break;
-                }
-                if let Some(seg) = segments.last_mut() {
-                    for _ in 0..count {
-                        cx = cx.wrapping_add(unzigzag(commands[i]));
-                        cy = cy.wrapping_add(unzigzag(commands[i + 1]));
-                        i += 2;
-                        seg.push(IntPoint::new(cx, cy));
-                    }
-                } else {
-                    i += count * 2;
-                }
-            }
-            _ => {
-                // Unknown command - skip
-                i += count * 2;
+                CommandKind::LineTo if self.0.is_empty() => Err(GeometryError::Consumer(
+                    "line LineTo without MoveTo".to_string(),
+                )),
+                CommandKind::LineTo => Ok(()),
+                CommandKind::ClosePath => Err(GeometryError::Consumer(
+                    "ClosePath in line geometry".to_string(),
+                )),
             }
         }
+        fn point(&mut self, point: Point) -> Result<(), GeometryError> {
+            let (x, y) = point.xy_i32()?;
+            if let Some(segment) = self.0.last_mut() {
+                segment.push(IntPoint::new(x, y));
+            }
+            Ok(())
+        }
     }
-    // Drop degenerate segments (< 2 points)
+    segments.clear();
+    decode::decode(Words::slice(commands), None, &mut Segments(segments))
+        .expect("line features carry well-formed encoder output");
     segments.retain(|s| s.len() >= 2);
 }
-
 /// Re-encode absolute-coordinate segments as MVT line geometry commands.
 fn encode_line_segments(segments: &[Vec<IntPoint>], buf: &mut Vec<u32>) {
     buf.clear();
@@ -298,11 +278,6 @@ fn encode_line_segments(segments: &[Vec<IntPoint>], buf: &mut Vec<u32>) {
             buf[lineto_pos] = command(2, count);
         }
     }
-}
-
-#[allow(clippy::cast_possible_wrap)]
-fn unzigzag(n: u32) -> i32 {
-    ((n >> 1) as i32) ^ (-((n & 1) as i32))
 }
 
 // ---------------------------------------------------------------------------

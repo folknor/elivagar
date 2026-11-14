@@ -15,6 +15,9 @@
 use std::sync::Arc;
 
 use crate::geometry;
+use crate::mvt::decode::{
+    self, Command, CommandKind, CommandSink, GeometryError, Grammar, Point, Words,
+};
 use protohoggr::{Cursor, WIRE_32BIT, WIRE_64BIT, WIRE_LEN, WIRE_VARINT};
 
 /// MVT decoding policy.
@@ -386,140 +389,129 @@ fn decode_detail_geometry(
     if strictness == Strictness::Strict && !matches!(geom_type, 1..=3) {
         return Err(format!("unsupported geometry type: {geom_type}"));
     }
-    if strictness == Strictness::Strict && data.is_empty() {
-        return Err("feature has empty geometry command stream".to_string());
-    }
+    // Strict runs the one spec 4.3.4 grammar; tolerant decodes unvalidated
+    // and keeps the lenient quirks each builder documents. An unknown type
+    // never reaches the decoder, so tolerant accepts its bytes unread.
+    let grammar = |grammar| (strictness == Strictness::Strict).then_some(grammar);
+    let words = Words::packed(data);
     match geom_type {
-        1 => decode_detail_points(data, strictness),
-        2 => decode_detail_lines(data, strictness),
-        3 => decode_detail_polygons(data, strictness),
+        1 => {
+            let mut sink = PointSink::default();
+            decode::decode(words, grammar(Grammar::Point), &mut sink)?;
+            Ok(sink.finish())
+        }
+        2 => {
+            let mut sink = LineSink::default();
+            decode::decode(words, grammar(Grammar::LineString), &mut sink)?;
+            Ok(sink.finish())
+        }
+        3 => {
+            let mut sink = PolygonSink::default();
+            decode::decode(words, grammar(Grammar::Polygon), &mut sink)?;
+            Ok(group_detail_rings(sink.rings))
+        }
         _ => Ok(Vec::new()),
     }
 }
 
-fn decode_detail_points(
-    data: &[u8],
-    strictness: Strictness,
-) -> Result<Vec<DetailComponent>, String> {
-    let mut cursor = Cursor::new(data);
-    let mut points = Vec::new();
-    let mut move_to_seen = false;
-    let (mut x, mut y) = (0i32, 0i32);
-    while !cursor.is_empty() {
-        let command = read_geometry_varint(&mut cursor, "point command")?;
-        if strictness == Strictness::Strict && command >> 3 == 0 {
-            return Err("geometry command with zero repeat count".to_string());
-        }
-        if command & 0x7 != 1 {
-            return Err(format!("point geometry contains command {}", command & 0x7));
-        }
-        if strictness == Strictness::Strict && move_to_seen {
-            return Err("point geometry must use a single MoveTo command".to_string());
-        }
-        move_to_seen = true;
-        for _ in 0..(command >> 3) {
-            x = x
-                .checked_add(unzigzag(read_geometry_varint(&mut cursor, "point x")?))
-                .ok_or_else(|| "point x overflows i32".to_string())?;
-            y = y
-                .checked_add(unzigzag(read_geometry_varint(&mut cursor, "point y")?))
-                .ok_or_else(|| "point y overflows i32".to_string())?;
-            points.push((x, y));
+/// Points: every MoveTo parameter, in one Point ring. Tolerant accepts zero
+/// counts and repeated MoveTo commands; any other command fails either way.
+#[derive(Default)]
+struct PointSink {
+    points: Vec<(i32, i32)>,
+}
+
+impl CommandSink for PointSink {
+    fn command(&mut self, command: Command) -> Result<(), GeometryError> {
+        if command.kind == CommandKind::MoveTo {
+            Ok(())
+        } else {
+            Err(GeometryError::Consumer(format!(
+                "point geometry contains command {}",
+                command.kind.id()
+            )))
         }
     }
-    if points.is_empty() {
-        Ok(Vec::new())
-    } else {
-        Ok(vec![make_detail_component(vec![make_detail_ring(
-            CanonRingRole::Point,
-            points,
-        )])])
+
+    fn point(&mut self, point: Point) -> Result<(), GeometryError> {
+        self.points.push(point.xy_i32()?);
+        Ok(())
     }
 }
 
-fn decode_detail_lines(
-    data: &[u8],
-    strictness: Strictness,
-) -> Result<Vec<DetailComponent>, String> {
-    let mut cursor = Cursor::new(data);
-    let mut components = Vec::new();
-    let mut path: Option<Vec<(i32, i32)>> = None;
-    let (mut x, mut y) = (0i32, 0i32);
-    while !cursor.is_empty() {
-        let command = read_geometry_varint(&mut cursor, "line command")?;
-        let id = command & 0x7;
-        let count = command >> 3;
-        if strictness == Strictness::Strict && count == 0 {
-            return Err("geometry command with zero repeat count".to_string());
-        }
-        match id {
-            1 => {
-                if strictness == Strictness::Strict && count != 1 {
-                    return Err("linestring MoveTo count must be 1".to_string());
-                }
-                if let Some(path) = path.take() {
-                    if strictness == Strictness::Strict && path.len() < 2 {
-                        return Err("linestring has fewer than 2 points".to_string());
-                    }
-                    push_detail_line(&mut components, path);
-                }
-                for n in 0..count {
-                    x = x
-                        .checked_add(unzigzag(read_geometry_varint(
-                            &mut cursor,
-                            "line MoveTo x",
-                        )?))
-                        .ok_or_else(|| "line x overflows i32".to_string())?;
-                    y = y
-                        .checked_add(unzigzag(read_geometry_varint(
-                            &mut cursor,
-                            "line MoveTo y",
-                        )?))
-                        .ok_or_else(|| "line y overflows i32".to_string())?;
-                    if n == 0 {
-                        path = Some(vec![(x, y)]);
-                    } else {
-                        push_detail_line(&mut components, vec![(x, y)]);
-                    }
-                }
-            }
-            2 => {
-                let path = path
-                    .as_mut()
-                    .ok_or_else(|| "line LineTo without MoveTo".to_string())?;
-                if strictness == Strictness::Strict && path.len() > 1 {
-                    return Err("linestring has multiple LineTo commands".to_string());
-                }
-                for _ in 0..count {
-                    x = x
-                        .checked_add(unzigzag(read_geometry_varint(
-                            &mut cursor,
-                            "line LineTo x",
-                        )?))
-                        .ok_or_else(|| "line x overflows i32".to_string())?;
-                    y = y
-                        .checked_add(unzigzag(read_geometry_varint(
-                            &mut cursor,
-                            "line LineTo y",
-                        )?))
-                        .ok_or_else(|| "line y overflows i32".to_string())?;
-                    path.push((x, y));
-                }
-            }
-            7 if strictness == Strictness::Strict => {
-                return Err("ClosePath in non-polygon geometry".to_string());
-            }
-            7 => {}
-            _ => return Err(format!("unknown line command {id}")),
+impl PointSink {
+    fn finish(self) -> Vec<DetailComponent> {
+        if self.points.is_empty() {
+            Vec::new()
+        } else {
+            vec![make_detail_component(vec![make_detail_ring(
+                CanonRingRole::Point,
+                self.points,
+            )])]
         }
     }
-    if let Some(path) = path {
-        if strictness == Strictness::Strict && path.len() < 2 {
-            return Err("linestring has fewer than 2 points".to_string());
+}
+
+/// Lines: one Path component per MoveTo. Tolerant quirks, kept because the
+/// cross-producer comparison depends on them: a MoveTo flushes the open path
+/// (a zero-count MoveTo leaves none open); the extra points of a multi-point
+/// MoveTo are emitted at once as one-point paths while the first point's path
+/// stays open; ClosePath is ignored.
+#[derive(Default)]
+struct LineSink {
+    components: Vec<DetailComponent>,
+    path: Option<Vec<(i32, i32)>>,
+    /// Points of the current MoveTo seen so far, None inside a LineTo.
+    move_points: Option<u32>,
+}
+
+impl CommandSink for LineSink {
+    fn command(&mut self, command: Command) -> Result<(), GeometryError> {
+        match command.kind {
+            CommandKind::MoveTo => {
+                if let Some(path) = self.path.take() {
+                    push_detail_line(&mut self.components, path);
+                }
+                self.move_points = Some(0);
+            }
+            CommandKind::LineTo => {
+                if self.path.is_none() {
+                    return Err(GeometryError::Consumer(
+                        "line LineTo without MoveTo".to_string(),
+                    ));
+                }
+                self.move_points = None;
+            }
+            CommandKind::ClosePath => {}
         }
-        push_detail_line(&mut components, path);
+        Ok(())
     }
-    Ok(components)
+
+    fn point(&mut self, point: Point) -> Result<(), GeometryError> {
+        let xy = point.xy_i32()?;
+        match self.move_points.as_mut() {
+            Some(0) => {
+                self.path = Some(vec![xy]);
+                self.move_points = Some(1);
+            }
+            Some(_) => push_detail_line(&mut self.components, vec![xy]),
+            None => {
+                if let Some(path) = self.path.as_mut() {
+                    path.push(xy);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LineSink {
+    fn finish(mut self) -> Vec<DetailComponent> {
+        if let Some(path) = self.path.take() {
+            push_detail_line(&mut self.components, path);
+        }
+        self.components
+    }
 }
 
 fn push_detail_line(components: &mut Vec<DetailComponent>, path: Vec<(i32, i32)>) {
@@ -531,118 +523,54 @@ fn push_detail_line(components: &mut Vec<DetailComponent>, path: Vec<(i32, i32)>
     }
 }
 
-#[allow(clippy::too_many_lines)]
-fn decode_detail_polygons(
-    data: &[u8],
-    strictness: Strictness,
-) -> Result<Vec<DetailComponent>, String> {
-    let mut cursor = Cursor::new(data);
-    let mut rings: Vec<Vec<(i32, i32)>> = Vec::new();
-    let mut ring_closed = false;
-    let (mut x, mut y) = (0i32, 0i32);
-    while !cursor.is_empty() {
-        let command = read_geometry_varint(&mut cursor, "polygon command")?;
-        let id = command & 0x7;
-        let count = command >> 3;
-        if strictness == Strictness::Strict && count == 0 {
-            return Err("geometry command with zero repeat count".to_string());
-        }
-        match id {
-            1 => {
-                if strictness == Strictness::Strict && count != 1 {
-                    return Err("polygon ring MoveTo count must be 1".to_string());
-                }
-                if strictness == Strictness::Strict && !rings.is_empty() && !ring_closed {
-                    return Err("polygon ring missing ClosePath".to_string());
-                }
-                for _ in 0..count {
-                    x = x
-                        .checked_add(unzigzag(read_geometry_varint(
-                            &mut cursor,
-                            "polygon MoveTo x",
-                        )?))
-                        .ok_or_else(|| "polygon x overflows i32".to_string())?;
-                    y = y
-                        .checked_add(unzigzag(read_geometry_varint(
-                            &mut cursor,
-                            "polygon MoveTo y",
-                        )?))
-                        .ok_or_else(|| "polygon y overflows i32".to_string())?;
-                    rings.push(vec![(x, y)]);
-                    ring_closed = false;
-                }
-            }
-            2 => {
-                if strictness == Strictness::Strict && ring_closed {
-                    return Err("polygon LineTo after ClosePath".to_string());
-                }
-                let ring = rings
-                    .last_mut()
-                    .ok_or_else(|| "polygon LineTo without MoveTo".to_string())?;
-                if strictness == Strictness::Strict && ring.len() > 1 {
-                    return Err("polygon ring has multiple LineTo commands".to_string());
-                }
-                if strictness == Strictness::Strict && count < 2 {
-                    return Err("polygon ring LineTo count must be at least 2".to_string());
-                }
-                for _ in 0..count {
-                    x = x
-                        .checked_add(unzigzag(read_geometry_varint(
-                            &mut cursor,
-                            "polygon LineTo x",
-                        )?))
-                        .ok_or_else(|| "polygon x overflows i32".to_string())?;
-                    y = y
-                        .checked_add(unzigzag(read_geometry_varint(
-                            &mut cursor,
-                            "polygon LineTo y",
-                        )?))
-                        .ok_or_else(|| "polygon y overflows i32".to_string())?;
-                    ring.push((x, y));
-                }
-            }
-            7 => {
-                if strictness == Strictness::Strict && count != 1 {
-                    return Err("ClosePath command count is not 1".to_string());
-                }
-                if strictness == Strictness::Strict && ring_closed {
-                    return Err("polygon ring has repeated ClosePath".to_string());
-                }
-                if strictness == Strictness::Strict && rings.is_empty() {
-                    return Err("polygon ClosePath without MoveTo".to_string());
-                }
-                if strictness == Strictness::Strict
-                    && let Some(ring) = rings.last()
-                    && ring.len() < 3
-                {
-                    return Err(format!(
-                        "polygon ring has too few points ({}, need 3)",
-                        ring.len()
+/// Polygons: raw rings in wire order. Tolerant quirks: each MoveTo point
+/// opens a ring, a LineTo after ClosePath extends the closed ring, and every
+/// ClosePath (any count) appends the ring's first vertex once.
+#[derive(Default)]
+struct PolygonSink {
+    rings: Vec<Vec<(i32, i32)>>,
+    in_move: bool,
+}
+
+impl CommandSink for PolygonSink {
+    fn command(&mut self, command: Command) -> Result<(), GeometryError> {
+        match command.kind {
+            CommandKind::MoveTo => self.in_move = true,
+            CommandKind::LineTo => {
+                if self.rings.is_empty() {
+                    return Err(GeometryError::Consumer(
+                        "polygon LineTo without MoveTo".to_string(),
                     ));
                 }
-                if let Some(ring) = rings.last_mut()
+                self.in_move = false;
+            }
+            CommandKind::ClosePath => {
+                // ClosePath does not alter the cursor (MVT 4.3.3.3); the
+                // decoder owns that, this only closes the ring.
+                if let Some(ring) = self.rings.last_mut()
                     && let Some(&first) = ring.first()
                 {
-                    // ClosePath does not alter x/y. This is required by MVT 4.3.3.3.
                     ring.push(first);
                 }
-                if !rings.is_empty() {
-                    ring_closed = true;
-                }
             }
-            _ => return Err(format!("unknown polygon command {id}")),
         }
+        Ok(())
     }
 
-    if strictness == Strictness::Strict && rings.is_empty() {
-        return Err("polygon geometry has no rings".to_string());
+    fn point(&mut self, point: Point) -> Result<(), GeometryError> {
+        let xy = point.xy_i32()?;
+        if self.in_move {
+            self.rings.push(vec![xy]);
+        } else if let Some(ring) = self.rings.last_mut() {
+            ring.push(xy);
+        }
+        Ok(())
     }
-    if strictness == Strictness::Strict && !ring_closed {
-        return Err("polygon ring missing ClosePath".to_string());
-    }
+}
 
-    // Match classifyRings: the first nonzero-area ring establishes exterior
-    // winding, and zero-area rings do not participate in grouping.
+/// Match classifyRings: the first nonzero-area ring establishes exterior
+/// winding, and zero-area rings do not participate in grouping.
+fn group_detail_rings(rings: Vec<Vec<(i32, i32)>>) -> Vec<DetailComponent> {
     let mut grouped: Vec<Vec<DetailRing>> = Vec::new();
     let mut exterior_orientation = None;
     for ring in rings {
@@ -664,14 +592,7 @@ fn decode_detail_polygons(
             component.push(ring);
         }
     }
-    Ok(grouped.into_iter().map(make_detail_component).collect())
-}
-
-fn read_geometry_varint(cursor: &mut Cursor<'_>, context: &str) -> Result<u32, String> {
-    let raw = cursor
-        .read_varint()
-        .map_err(|error| format!("read {context}: {error}"))?;
-    u32::try_from(raw).map_err(|_| format!("{context} out of range: {raw}"))
+    grouped.into_iter().map(make_detail_component).collect()
 }
 
 fn make_detail_ring(role: CanonRingRole, points: Vec<(i32, i32)>) -> DetailRing {
@@ -680,14 +601,6 @@ fn make_detail_ring(role: CanonRingRole, points: Vec<(i32, i32)>) -> DetailRing 
 
 fn make_detail_component(rings: Vec<DetailRing>) -> DetailComponent {
     DetailComponent { rings }
-}
-
-#[inline]
-fn unzigzag(value: u32) -> i32 {
-    #[allow(clippy::cast_possible_wrap)]
-    {
-        ((value >> 1) as i32) ^ (-((value & 1) as i32))
-    }
 }
 
 #[inline]
@@ -923,7 +836,7 @@ mod tests {
         assert!(
             decode_detail_feature(&one_point_line, &[], &[], Strictness::Strict)
                 .unwrap_err()
-                .contains("fewer than 2 points")
+                .contains("MoveTo missing LineTo")
         );
 
         let two_point_line = feature_message(Some(2), Some(&[9, 0, 0, 10, 2, 2]));
@@ -933,7 +846,7 @@ mod tests {
         assert!(
             decode_detail_feature(&split_line_to, &[], &[], Strictness::Strict)
                 .unwrap_err()
-                .contains("multiple LineTo")
+                .contains("LineTo must follow MoveTo")
         );
 
         let closepath_line = feature_message(Some(2), Some(&[9, 0, 0, 10, 2, 2, 15]));
@@ -961,7 +874,7 @@ mod tests {
         assert!(
             decode_detail_feature(&short_polygon_line_to, &[], &[], Strictness::Strict)
                 .unwrap_err()
-                .contains("LineTo count must be at least 2")
+                .contains("LineTo count must be greater than 1")
         );
     }
 

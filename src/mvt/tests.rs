@@ -679,34 +679,7 @@ fn test_append_geometry_two_polygons_cursor_continuity() {
 
 /// Decode MVT commands into absolute (x,y) coordinates (ignoring ClosePath).
 fn decode_commands_to_abs(cmds: &[u32]) -> Vec<(i32, i32)> {
-    let mut result = Vec::new();
-    let mut cx: i32 = 0;
-    let mut cy: i32 = 0;
-    let mut i = 0;
-    while i < cmds.len() {
-        let cmd = cmds[i];
-        let cmd_id = cmd & 0x7;
-        let cmd_count = cmd >> 3;
-        i += 1;
-        match cmd_id {
-            1 | 2 => {
-                for _ in 0..cmd_count {
-                    let dx = decode_zigzag(cmds[i]);
-                    let dy = decode_zigzag(cmds[i + 1]);
-                    cx += dx;
-                    cy += dy;
-                    result.push((cx, cy));
-                    i += 2;
-                }
-            }
-            7 => {
-                // ClosePath: cursor unchanged (MVT spec 4.3.3.3) - it stays
-                // at the last LineTo vertex, matching MapLibre's decoder.
-            }
-            _ => {}
-        }
-    }
-    result
+    crate::mvt::decode::decode_positions(cmds)
 }
 
 /// Regression test: appending a multi-ring polygon (exterior + hole) as a
