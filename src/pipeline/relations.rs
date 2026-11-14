@@ -366,7 +366,13 @@ pub(super) fn process_prepared_relation_into(
     let total_area_m2: f64 = multi
         .polygons
         .iter()
-        .map(|(outer, _)| geometry::polygon::area_sq_meters(outer))
+        .map(|(outer, inners)| {
+            geometry::polygon::area_sq_meters(outer)
+                - inners
+                    .iter()
+                    .map(|inner| geometry::polygon::area_sq_meters(inner))
+                    .sum::<f64>()
+        })
         .sum();
     enrich_polygon_matches(&mut matches, total_area_m2);
 

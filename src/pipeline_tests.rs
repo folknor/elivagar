@@ -4277,3 +4277,88 @@ fn library_entry_points_reject_invalid_compression_levels_before_io() {
         assert!(error.to_string().contains("maximum supported level 10"));
     }
 }
+
+#[test]
+fn relation_boundary_area_subtracts_holes_before_selecting_label_zoom() {
+    use crate::multipolygon::{MemberWay, WayRole};
+
+    // Scale rectangle widths to exercise the actual geographic area calculation.
+    // Gross area is 130,000 km2 (z4); net area is 90,000 km2 (z5).
+    let rectangle = |x, area_m2, inner| {
+        let (y0, y1) = if inner {
+            (0.497, 0.503)
+        } else {
+            (0.495, 0.505)
+        };
+        let unit = [
+            Point::new(0.0, y0),
+            Point::new(1.0, y0),
+            Point::new(1.0, y1),
+            Point::new(0.0, y1),
+        ];
+        let width = area_m2 / geometry::polygon::area_sq_meters(&unit);
+        vec![
+            Point::new(x, y0),
+            Point::new(x + width, y0),
+            Point::new(x + width, y1),
+            Point::new(x, y1),
+            Point::new(x, y0),
+        ]
+    };
+    for reverse in [false, true] {
+        let member_ways = [
+            (WayRole::Outer, 0.49, 120e9),
+            (WayRole::Inner, 0.491, 40e9),
+            (WayRole::Outer, 0.52, 10e9),
+        ]
+        .into_iter()
+        .map(|(role, x, area)| {
+            let mut coords = rectangle(x, area, role == WayRole::Inner);
+            if reverse {
+                coords.reverse();
+            }
+            MemberWay { role, coords }
+        })
+        .collect();
+        let tags = [
+            ("type", "boundary"),
+            ("boundary", "administrative"),
+            ("admin_level", "2"),
+        ];
+        let relation = relations::PreparedRelation {
+            osm_id: 42,
+            matches: shortbread::area_relation_matches(&shortbread::Tags(&tags))
+                .expect("boundary matches"),
+            member_ways,
+        };
+        let mut sink = emit::RecordSink::new();
+        relations::process_prepared_relation_into(
+            relation,
+            crate::tiling::ZoomRange::new(4, 5).unwrap(),
+            &mut sink,
+            &mut PointEmitScratch::new(),
+            &mut MultipolygonEmitScratch::new(),
+            &[None; Layer::count()],
+            1.0,
+            &mut stats::FanoutStats::new(),
+        );
+        let labels: Vec<_> = sink
+            .records
+            .iter()
+            .filter(|r| r.key.layer() == Some(Layer::BoundaryLabels))
+            .collect();
+        assert_eq!(labels.len(), 1, "net area must defer the label to z5");
+        assert_eq!(zxy(labels[0].key.tile()).0, 5);
+        let layer = decode_to_layer(labels[0].bytes(&sink.payload));
+        let feature = layer.test_feature(0);
+        let (_, value) = feature
+            .tags
+            .iter()
+            .find(|(key, _)| layer.test_key(*key) == "way_area")
+            .expect("way_area");
+        let mvt::Value::Double(hectares) = layer.test_value(*value) else {
+            panic!("way_area should be a double");
+        };
+        assert!((hectares - 9e6).abs() < 0.01);
+    }
+}
