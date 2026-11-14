@@ -104,6 +104,9 @@ pub enum NodeStoreError {
     },
     /// The ID's byte offset does not fit the flat store's address space.
     OffsetOverflow { node_id: i64 },
+    /// The sorted store addresses groups densely by ID, so it refuses IDs at
+    /// or above `limit` rather than size its directory by them.
+    IdCap { node_id: i64, limit: u64 },
     /// Extending the flat index file failed.
     Grow(io::Error),
     /// Remapping the extended flat index failed.
@@ -148,6 +151,10 @@ impl std::fmt::Display for NodeStoreError {
             Self::OffsetOverflow { node_id } => {
                 write!(f, "node_id={node_id} overflows the flat node index offset")
             }
+            Self::IdCap { node_id, limit } => write!(
+                f,
+                "node_id={node_id} is beyond the sorted node store's range (IDs below {limit})"
+            ),
             Self::Grow(_) => f.write_str("failed to grow the flat node index file"),
             Self::Remap(_) => f.write_str("failed to remap the flat node index"),
         }
@@ -338,6 +345,16 @@ impl FlatNodeIndexReaderInner {
 // blob grew 270→294 MB increasing DRAM pressure. Net PBF phase +800ms regression. Reverted.
 const NODES_PER_CHUNK: usize = 256;
 const NODES_PER_GROUP: u64 = 256 * 256; // 65536
+
+/// Exclusive upper bound on sorted-store node IDs. The group directory is a
+/// dense `Vec<Option<Box<Group>>>` indexed by `id / NODES_PER_GROUP`, so its
+/// length follows the largest ID, not the node count: one huge ID in a tiny
+/// file would otherwise allocate proportionally or abort. 2^40 caps the
+/// directory at 2^24 slots, a 128 MiB request on 64-bit targets, while
+/// sitting about two orders of magnitude above the OSM node ID range
+/// (around 2^34 in 2026). Dense indexing keeps the reader's lookup, the
+/// way-resolution hot path, a single index.
+const SORTED_NODE_ID_LIMIT: u64 = 1 << 40;
 const BITMASK_BYTES: usize = 32; // 256 bits
 
 /// Set bit `pos` (0..255) in a 256-bit mask.
@@ -876,6 +893,12 @@ impl SortedNodeStoreInner {
                 previous: previous.as_i64(),
             });
         }
+        if id >= SORTED_NODE_ID_LIMIT {
+            return Err(NodeStoreError::IdCap {
+                node_id: node_id.as_i64(),
+                limit: SORTED_NODE_ID_LIMIT,
+            });
+        }
         self.last_node_id = Some(node_id);
         self.node_count += 1;
 
@@ -885,18 +908,14 @@ impl SortedNodeStoreInner {
 
         if self.node_count == 1 {
             // First node: initialize builder state.
-            if self.groups.len() <= group_id as usize {
-                self.groups.resize_with(group_id as usize + 1, || None);
-            }
+            self.grow_groups(group_id as usize);
             self.current_group_id = group_id;
             self.current_chunk_id = chunk_id;
         } else if group_id != self.current_group_id {
             // New group: flush current chunk + group.
             self.flush_chunk();
             self.flush_group();
-            if self.groups.len() <= group_id as usize {
-                self.groups.resize_with(group_id as usize + 1, || None);
-            }
+            self.grow_groups(group_id as usize);
             self.current_group_id = group_id;
             self.current_chunk_mask = [0u8; BITMASK_BYTES];
             // current_group_data already cleared by flush_group
@@ -914,6 +933,24 @@ impl SortedNodeStoreInner {
         set_bit(&mut self.current_node_mask, node_in_chunk);
         self.current_coords.push(coord);
         Ok(())
+    }
+
+    /// Extend the directory to hold `group_id`. Growth stays geometric, so a
+    /// sorted file adding one group at a time does not reallocate per group,
+    /// but the request is clamped at the slot count `SORTED_NODE_ID_LIMIT`
+    /// allows rather than doubling past it.
+    #[allow(clippy::cast_possible_truncation)]
+    fn grow_groups(&mut self, group_id: usize) {
+        const MAX_SLOTS: usize = (SORTED_NODE_ID_LIMIT / NODES_PER_GROUP) as usize;
+        let target = group_id + 1;
+        let len = self.groups.len();
+        if len < target {
+            if self.groups.capacity() < target {
+                let wanted = target.max(self.groups.capacity().saturating_mul(2).min(MAX_SLOTS));
+                self.groups.reserve_exact(wanted - len);
+            }
+            self.groups.resize_with(target, || None);
+        }
     }
 
     // Offset scratch buffers are hoisted onto the struct to avoid alloc/dealloc
@@ -1643,6 +1680,18 @@ mod tests {
         store.put(12_000_000_000, 550_000_000, 130_000_000).unwrap();
         let reader = store.into_reader();
         assert_eq!(reader.get(12_000_000_000), Some((550_000_000, 130_000_000)));
+    }
+
+    #[test]
+    fn sorted_refuses_ids_past_its_dense_directory_range() {
+        let mut store = SortedNodeStore::new();
+        let limit = i64::try_from(SORTED_NODE_ID_LIMIT).unwrap();
+        let err = store.put(limit, 1, 1).unwrap_err();
+        assert!(matches!(err, NodeStoreError::IdCap { node_id, .. } if node_id == limit));
+        assert!(err.is_input_rejection());
+        // The refusal left no state behind: the ID below the limit stores.
+        store.put(limit - 1, 1, 1).unwrap();
+        assert_eq!(store.into_reader().get(limit - 1), Some((1, 1)));
     }
 
     #[test]

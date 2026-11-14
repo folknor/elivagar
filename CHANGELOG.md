@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Phase12 no longer aborts on four input or disk conditions. A node block
+  after the first way block on the node-store path, and a node ID at or
+  above 2^40 in the compact sorted store, now refuse the input (exit 65);
+  the sorted store used to size its directory by the largest ID. Sort
+  chunk and way index write failures now exit 74, or 2 when the OS
+  reported no error. Library breaks: `NodeStoreError` gains `IdCap`,
+  `SpillCoalescer::finish` returns `io::Result`, and
+  `WayIndexWriter::put` returns `io::Result`. Valid inputs produce
+  identical archives.
+
 - An OSM polygon whose antimeridian-unwrapped coordinates lie too many
   world widths out for the integer polygon engine is now skipped and
   counted (`osm_polygon_copy_unrepresentable`) instead of aborting the run

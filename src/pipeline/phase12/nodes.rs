@@ -108,6 +108,11 @@ impl NodeWorkers {
         }
     }
 
+    /// Every worker holds the shared receiver until this side closes the
+    /// channel: a typed failure is kept in the worker, which keeps draining.
+    /// A closed channel therefore means every worker panicked, and panicking
+    /// here surfaces that bug under either panic strategy; it is not an
+    /// input or I/O outcome with an exit class.
     pub(super) fn send(&self, block: PrimitiveBlock) {
         let _wait = wait_span(&WAIT.node_block_send);
         self.tx

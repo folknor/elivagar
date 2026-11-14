@@ -605,7 +605,11 @@ fn process_ocean_shapefile_inner(
 
     result.merge_from(pre_emit);
     result.flush(&spill);
-    sort_writer.adopt_chunk_files(spill.finish());
+    // Every producer above has completed, so the verdict is final.
+    let paths = spill
+        .finish()
+        .map_err(|err| PipelineError::io("ocean sort chunk write failed", err))?;
+    sort_writer.adopt_chunk_files(paths);
     let count = result.count;
 
     eprintln!("  {poly_count} polygons, {count} features");

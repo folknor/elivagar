@@ -443,9 +443,12 @@ impl WayIndexWriter {
 
     /// Write geometry for a way. Delta-varint encodes coords and appends to data file,
     /// records (way_id, offset) in the offsets file.
-    pub fn put(&mut self, way_id: WayId, coords: &[LatLonE7]) {
+    ///
+    /// A failed put may leave a partial entry behind, so the writer must not
+    /// be used again after an error.
+    pub fn put(&mut self, way_id: WayId, coords: &[LatLonE7]) -> io::Result<()> {
         if coords.is_empty() {
-            return;
+            return Ok(());
         }
 
         let data_offset = self.data_write_pos;
@@ -455,21 +458,16 @@ impl WayIndexWriter {
         encode_way(&mut self.encode_buf, coords);
 
         // Write compressed data
-        // Panic: unrecoverable I/O - disk full means the run is dead.
-        self.data_writer
-            .write_all(&self.encode_buf)
-            .expect("failed to write way data");
+        self.data_writer.write_all(&self.encode_buf)?;
         self.data_write_pos += self.encode_buf.len() as u64;
 
         // Write offset entry: way_id (i64 LE) + data_offset (u64 LE) = 16 bytes
         self.offsets_writer
-            .write_all(&way_id.as_i64().to_le_bytes())
-            .expect("failed to write way offset");
-        self.offsets_writer
-            .write_all(&data_offset.to_le_bytes())
-            .expect("failed to write way offset");
+            .write_all(&way_id.as_i64().to_le_bytes())?;
+        self.offsets_writer.write_all(&data_offset.to_le_bytes())?;
 
         self.way_count += 1;
+        Ok(())
     }
 
     /// Call after all ways have been written. Sorts offset entries by way_id on disk
@@ -582,7 +580,7 @@ mod tests {
             LatLonE7::new(30, 40),
             LatLonE7::new(50, 60),
         ];
-        idx.put(WayId::new(100), &coords);
+        idx.put(WayId::new(100), &coords).unwrap();
         let idx = idx.finish_writing().unwrap();
         let result = idx.get(WayId::new(100)).unwrap().unwrap();
         assert_eq!(result, coords);
@@ -602,9 +600,9 @@ mod tests {
             LatLonE7::new(700, 800),
         ];
 
-        idx.put(WayId::new(5), &coords_a);
-        idx.put(WayId::new(42), &coords_b);
-        idx.put(WayId::new(999), &coords_c);
+        idx.put(WayId::new(5), &coords_a).unwrap();
+        idx.put(WayId::new(42), &coords_b).unwrap();
+        idx.put(WayId::new(999), &coords_c).unwrap();
         let idx = idx.finish_writing().unwrap();
 
         assert_eq!(idx.get(WayId::new(5)).unwrap().unwrap(), coords_a);
@@ -616,7 +614,8 @@ mod tests {
     fn finish_produces_readable_index() {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
-        idx.put(WayId::new(7), &[LatLonE7::new(1, 2), LatLonE7::new(3, 4)]);
+        idx.put(WayId::new(7), &[LatLonE7::new(1, 2), LatLonE7::new(3, 4)])
+            .unwrap();
         let idx = idx.finish_writing().unwrap();
         assert_eq!(
             idx.get(WayId::new(7)).unwrap().unwrap(),
@@ -628,7 +627,7 @@ mod tests {
     fn get_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
-        idx.put(WayId::new(1), &[LatLonE7::new(1, 2)]);
+        idx.put(WayId::new(1), &[LatLonE7::new(1, 2)]).unwrap();
         let idx = idx.finish_writing().unwrap();
         // way_id 9999 was never written.
         assert!(idx.get(WayId::new(9999)).unwrap().is_none());
@@ -640,7 +639,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
         let empty: [LatLonE7; 0] = [];
-        idx.put(WayId::new(50), &empty);
+        idx.put(WayId::new(50), &empty).unwrap();
         let idx = idx.finish_writing().unwrap();
         assert!(idx.get(WayId::new(50)).unwrap().is_none());
     }
@@ -656,7 +655,7 @@ mod tests {
             LatLonE7::new(-200_000_000, -400_000_000), // large negative jump
             LatLonE7::new(0, 0),                     // jump to origin
         ];
-        idx.put(WayId::new(1), &coords);
+        idx.put(WayId::new(1), &coords).unwrap();
         let idx = idx.finish_writing().unwrap();
         assert_eq!(idx.get(WayId::new(1)).unwrap().unwrap(), coords);
     }
@@ -705,9 +704,9 @@ mod tests {
         // finish_writing sorts them for binary search.
         let dir = tempfile::tempdir().unwrap();
         let mut idx = WayIndexWriter::create(dir.path()).unwrap();
-        idx.put(WayId::new(500), &[LatLonE7::new(50, 60)]);
-        idx.put(WayId::new(100), &[LatLonE7::new(10, 20)]);
-        idx.put(WayId::new(300), &[LatLonE7::new(30, 40)]);
+        idx.put(WayId::new(500), &[LatLonE7::new(50, 60)]).unwrap();
+        idx.put(WayId::new(100), &[LatLonE7::new(10, 20)]).unwrap();
+        idx.put(WayId::new(300), &[LatLonE7::new(30, 40)]).unwrap();
         let idx = idx.finish_writing().unwrap();
 
         assert_eq!(

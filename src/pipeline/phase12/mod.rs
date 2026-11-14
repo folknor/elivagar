@@ -48,8 +48,10 @@ pub(super) use plans::{MembersForBlock, RawWay, annotate_block_shared_node_refs,
 
 /// Node routing. The raw path's single store-owning worker ends at the first
 /// way block, which takes the store back to build its reader; a node block
-/// after that would silently lose puts, so it is a panic. Locations mode
-/// runs a storeless pool for the whole read.
+/// after that would silently lose puts, so the input is refused - block
+/// order is the file's, and the raw path needs every node block before the
+/// first way block. Relation blocks do not end the node phase. Locations
+/// mode runs a storeless pool for the whole read.
 enum NodeRoute {
     Stored(StoredNodes),
     Inline {
@@ -125,8 +127,11 @@ struct Router<'a> {
     node_outcome: NodeOutcome,
     node_store_stats: Option<(u64, usize)>,
     prepass: Prepass,
-    /// The way index and sort writer, until the way dispatch takes them.
-    outputs: Option<(WayIndexWriter, SortWriter)>,
+    /// The way index, until the way dispatch takes it.
+    way_index: Option<WayIndexWriter>,
+    /// Every record reaches the sort through the spill coalescer; the writer
+    /// stays here and only takes the tallies.
+    sort_writer: SortWriter,
     ways: Option<WayDispatch>,
     relation_plan_needed_ways: usize,
     relation_plan_superset_ways: usize,
@@ -156,7 +161,7 @@ impl Router<'_> {
         // Classify block by reading first wire tag byte per group - no
         // element decoding. Sorted PBFs have single-type blocks.
         match block.block_type() {
-            BlockType::DenseNodes | BlockType::Nodes => self.route_nodes(block),
+            BlockType::DenseNodes | BlockType::Nodes => self.route_nodes(block)?,
             BlockType::Ways => {
                 if self.ways.is_none() {
                     self.start_way_phase()?;
@@ -172,7 +177,7 @@ impl Router<'_> {
         Ok(())
     }
 
-    fn route_nodes(&mut self, block: PrimitiveBlock) {
+    fn route_nodes(&mut self, block: PrimitiveBlock) -> Result<(), PipelineError> {
         let ctx = &self.ctx;
         match &mut self.nodes {
             NodeRoute::Stored(state) => {
@@ -181,9 +186,12 @@ impl Router<'_> {
                         StoredNodes::Running(NodeWorkers::stored(*store, &ctx.spill, ctx.window))
                     }
                     StoredNodes::Running(workers) => StoredNodes::Running(workers),
-                    StoredNodes::Ended => panic!(
-                        "node block after the way phase on the raw path: the node store is already finalized"
-                    ),
+                    StoredNodes::Ended => {
+                        return Err(PipelineError::input(
+                            "node block after the first way block: without locations on ways, \
+                             every node must precede the ways (sort it with `pbfhogg sort`)",
+                        ));
+                    }
                 };
                 if let StoredNodes::Running(workers) = state {
                     workers.send(block);
@@ -197,6 +205,7 @@ impl Router<'_> {
                 .get_or_insert_with(|| NodeWorkers::inline(*count, &ctx.spill, ctx.window))
                 .send(block),
         }
+        Ok(())
     }
 
     /// The raw path's node phase ends here: join its worker and take the
@@ -215,8 +224,8 @@ impl Router<'_> {
         })
     }
 
-    // The expects are routing invariants (store and outputs present exactly
-    // once), not input errors.
+    // The expects are routing invariants (store and way index present
+    // exactly once), not input errors.
     #[allow(clippy::unwrap_in_result)]
     fn start_way_phase(&mut self) -> Result<(), PipelineError> {
         let node_reader = if self.ctx.locations_on_ways {
@@ -271,18 +280,18 @@ impl Router<'_> {
             missing_ref_stats: Arc::clone(&ctx.missing_ref_stats),
             counters: Arc::clone(&ctx.way_counters),
         };
-        let (way_index, sort_writer) = self
-            .outputs
+        let way_index = self
+            .way_index
             .take()
-            .expect("way outputs taken before the way phase");
-        self.ways = Some(WayDispatch::spawn(cfg, way_index, sort_writer));
+            .expect("way index taken before the way phase");
+        self.ways = Some(WayDispatch::spawn(cfg, way_index));
         Ok(())
     }
 
     /// End of read: join the node workers (the raw path's already ended at
     /// its first way block unless the input had none), release the node
     /// store, join a prepass no way block joined, finish the way dispatch,
-    /// and apply the node tally to the sort writer now that it is back.
+    /// and apply the node and way tallies to the sort writer.
     fn finish(self) -> Result<Routed, PipelineError> {
         let Self {
             ctx,
@@ -290,7 +299,8 @@ impl Router<'_> {
             mut node_outcome,
             node_store_stats,
             prepass,
-            outputs,
+            way_index,
+            mut sort_writer,
             ways,
             relation_plan_needed_ways,
             relation_plan_superset_ways,
@@ -310,33 +320,29 @@ impl Router<'_> {
 
         prepass.finish()?;
 
-        let (way_index, mut sort_writer, way_features, fanout, way_extent) = match ways {
+        let (way_index, way_features, fanout, way_extent) = match ways {
             Some(dispatch) => {
                 let drained = dispatch.finish();
-                // A failed way task stopped its block; the drained state
-                // is incomplete, so it is dropped with the failure.
+                // A failed way task stopped its block, and a failed way index
+                // write poisoned the writer; the drained state is incomplete,
+                // so it is dropped with the failure before anything reads it.
                 if let Some(err) = ctx.way_counters.take_failure() {
                     return Err(err);
                 }
+                sort_writer.merge_tally(&drained.tally);
                 (
                     drained.way_index,
-                    drained.sort_writer,
                     drained.features,
                     drained.fanout,
                     drained.extent,
                 )
             }
-            None => {
-                let (way_index, sort_writer) =
-                    outputs.expect("way outputs neither dispatched nor held");
-                (
-                    way_index,
-                    sort_writer,
-                    0,
-                    FanoutStats::new(),
-                    CoordinateExtent::default(),
-                )
-            }
+            None => (
+                way_index.expect("way index neither dispatched nor held"),
+                0,
+                FanoutStats::new(),
+                CoordinateExtent::default(),
+            ),
         };
         if let Some(tally) = node_outcome.tally.take() {
             sort_writer.merge_tally(&tally);
@@ -360,7 +366,6 @@ impl Router<'_> {
 
 #[hotpath::measure]
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::unwrap_in_result)]
 pub(super) fn phase_read_and_process(
     config: &RunPlan,
     resources: &Resources,
@@ -454,7 +459,8 @@ pub(super) fn phase_read_and_process(
         node_outcome: NodeOutcome::default(),
         node_store_stats: None,
         prepass: Prepass::spawn(&config.pbf_path, decode_threads),
-        outputs: Some((way_index, sort_writer)),
+        way_index: Some(way_index),
+        sort_writer,
         ways: None,
         relation_plan_needed_ways: 0,
         relation_plan_superset_ways: 0,
@@ -508,7 +514,7 @@ pub(super) fn phase_read_and_process(
     // Finalize way index after all way blocks are processed.
     let way_index = way_index
         .finish_writing()
-        .expect("failed to finalize way index");
+        .map_err(|err| PipelineError::io("failed to finalize the way index", err))?;
     let way_count = way_counters.ways.load(Ordering::Relaxed);
     eprintln!("  Ways: {way_count}, Features so far: {features_emitted}");
     eprintln!("  Way index finalized, processing relations...");
@@ -556,8 +562,14 @@ pub(super) fn phase_read_and_process(
     let max_rel_inflight_bytes = relation_tail.max_inflight_bytes;
     drop(relation_tail_busy);
     // Every producer is done: write the coalescer's residual and adopt every
-    // coalesced chunk.
-    sort_writer.adopt_chunk_files(spill.finish());
+    // coalesced chunk. Producers never see a chunk write failure, so a run
+    // with no other failure reports it here; a run that failed otherwise
+    // returned that error first and the write failure goes unreported -
+    // both are true causes, and neither path can return success.
+    let paths = spill
+        .finish()
+        .map_err(|err| PipelineError::io("sort chunk write failed", err))?;
+    sort_writer.adopt_chunk_files(paths);
 
     // Drop way_index to release compressed data + index memory before
     // ocean/sort/assemble phases.

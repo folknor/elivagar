@@ -171,19 +171,6 @@ impl SortWriter {
         Ok(())
     }
 
-    /// Add a record to the buffer without updating statistics.
-    ///
-    /// Arena producers merge their own tally before pushing leftover tail records
-    /// through this path, so using `push` would double-count those tails.
-    pub(crate) fn push_untracked(&mut self, record: SortRecord) -> io::Result<()> {
-        self.buffer_bytes += record.data.len() + std::mem::size_of::<SortRecord>();
-        self.buffer.push(record);
-        if self.buffer_bytes >= self.chunk_size_bytes {
-            self.flush_chunk()?;
-        }
-        Ok(())
-    }
-
     /// Clone the store-owned sink for concurrent or direct chunk producers.
     pub fn chunk_sink(&self) -> ChunkSink {
         self.chunk_sink.clone()
@@ -338,11 +325,32 @@ impl CoalesceBuf {
 /// assemble by ~35s versus pre-fragmentation baselines. Coalesced ~1 GB
 /// chunks keep per-partition sections in the tens-of-KB range and the merge
 /// fan-in near the pre-campaign 28-70.
+///
+/// A chunk write failure is terminal. Producers never see it - `append`
+/// returns nothing, because a producer cannot act on a disk failure and
+/// io::Error is not Clone - so the coalescer keeps the first recorded cause,
+/// discards every later append, and `finish` reports it. Once any write has
+/// failed, no `finish` ever returns paths again. The verdict at `finish` is
+/// only sound once every producer has stopped appending: a writer still in
+/// flight could fail after the check.
 pub struct SpillCoalescer {
     buf: std::sync::Mutex<CoalesceBuf>,
     budget: usize,
     sink: ChunkSink,
     paths: std::sync::Mutex<Vec<PathBuf>>,
+    /// Fast discard hint for `append`; `failure` decides the verdict.
+    failed: std::sync::atomic::AtomicBool,
+    failure: std::sync::Mutex<SpillFailure>,
+}
+
+#[derive(Default)]
+enum SpillFailure {
+    #[default]
+    None,
+    /// The first recorded write failure, not yet reported.
+    Pending(io::Error),
+    /// Reported by an earlier `finish`; the coalescer stays failed.
+    Reported,
 }
 
 impl SpillCoalescer {
@@ -352,7 +360,27 @@ impl SpillCoalescer {
             budget,
             sink,
             paths: std::sync::Mutex::new(Vec::new()),
+            failed: std::sync::atomic::AtomicBool::new(false),
+            failure: std::sync::Mutex::new(SpillFailure::None),
         }
+    }
+
+    fn lock_failure(&self) -> std::sync::MutexGuard<'_, SpillFailure> {
+        // Only ever assigned under the lock; poisoning cannot lose a cause.
+        self.failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn record_failure(&self, err: io::Error) {
+        // Cause first, then the hint, both under the lock: an observer of
+        // the hint always finds the cause.
+        let mut failure = self.lock_failure();
+        if matches!(*failure, SpillFailure::None) {
+            *failure = SpillFailure::Pending(err);
+        }
+        self.failed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Bulk-append one producer sink. Record offsets are rebased onto the
@@ -362,7 +390,7 @@ impl SpillCoalescer {
     /// tripping the budget concurrently both write (each a full-ish buffer);
     /// the shared store-owned sink keeps the files distinct.
     pub fn append(&self, records: &[PayloadRef], payload: &[u8]) {
-        if records.is_empty() {
+        if records.is_empty() || self.failed.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
         let full = {
@@ -388,23 +416,80 @@ impl SpillCoalescer {
         if buf.records.is_empty() {
             return;
         }
-        // Panic: called from rayon workers and phase tails - disk I/O failure
-        // is unrecoverable here, same policy as the producer sinks had.
-        let paths = write_partitioned_payload_chunks(&mut buf.records, &buf.payload, &self.sink)
-            .expect("coalesced chunk write failed");
-        self.paths
-            .lock()
-            .expect("spill coalescer paths lock")
-            .extend(paths);
+        match write_partitioned_payload_chunks(&mut buf.records, &buf.payload, &self.sink) {
+            Ok(paths) => self
+                .paths
+                .lock()
+                .expect("spill coalescer paths lock")
+                .extend(paths),
+            Err(err) => self.record_failure(err),
+        }
     }
 
     /// Write any residual buffered records and return every chunk path this
     /// coalescer produced, ready for `SortWriter::adopt_chunk_files`. The
     /// coalescer is drained but reusable (a later phase may keep appending;
-    /// call `finish` again for the new paths).
-    pub fn finish(&self) -> Vec<PathBuf> {
-        let residual = std::mem::take(&mut *self.buf.lock().expect("spill coalescer lock"));
+    /// call `finish` again for the new paths) until a write fails.
+    ///
+    /// Call only once every producer has stopped appending. Returns the first
+    /// recorded write failure instead of paths; a later call on a failed
+    /// coalescer reports that it already failed.
+    pub fn finish(&self) -> io::Result<Vec<PathBuf>> {
+        // Both critical sections only move or extend vectors, so a poisoned
+        // lock still guards consistent contents.
+        let residual = std::mem::take(
+            &mut *self
+                .buf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        // The residual write is the most ordinary failure, so it runs before
+        // the verdict is read.
         self.write(residual);
-        std::mem::take(&mut *self.paths.lock().expect("spill coalescer paths lock"))
+        let paths = std::mem::take(
+            &mut *self
+                .paths
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut failure = self.lock_failure();
+        match std::mem::replace(&mut *failure, SpillFailure::Reported) {
+            SpillFailure::None => {
+                *failure = SpillFailure::None;
+                Ok(paths)
+            }
+            SpillFailure::Pending(err) => Err(err),
+            SpillFailure::Reported => Err(io::Error::other(
+                "sort chunk writes already failed in an earlier phase",
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod spill_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_chunk_write_is_reported_and_terminal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let chunks = dir.path().join("chunks");
+        let writer = SortWriter::new(&chunks, 1 << 20, ChunkCompression::None).expect("writer");
+        let spill = SpillCoalescer::new(writer.chunk_sink(), 1);
+        // The chunk directory is gone, so the budget-tripping write fails.
+        fs::remove_dir_all(&chunks).expect("remove chunk dir");
+        let record = [PayloadRef {
+            key: SortKey::from_raw(1 << 16),
+            offset: 0,
+            len: 4,
+        }];
+        spill.append(&record, b"abcd");
+        let err = spill.finish().expect_err("the write failure is reported");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        // Appends after the failure are discarded, and the coalescer never
+        // reports success again, even once the directory is back.
+        fs::create_dir_all(&chunks).expect("recreate chunk dir");
+        spill.append(&record, b"abcd");
+        assert!(spill.finish().is_err());
     }
 }

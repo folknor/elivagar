@@ -148,6 +148,23 @@ impl RelAcc {
     }
 }
 
+/// One finished fold accumulator's totals, once its records are flushed.
+struct RelTotals {
+    count: u64,
+    tally: sort::RecordTally,
+    fanout: FanoutStats,
+}
+
+impl RelTotals {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            tally: sort::RecordTally::default(),
+            fanout: FanoutStats::new(),
+        }
+    }
+}
+
 /// Totals from the streamed relation tail.
 pub(super) struct RelationTail {
     pub(super) rel_count: u64,
@@ -169,8 +186,9 @@ pub(super) struct RelationTail {
 #[hotpath::measure]
 // too_many_lines is visible only without the hotpath feature, whose measure
 // macro re-wraps the body.
-// Panics: a poisoned lock or a failed sort push is unrecoverable; the Result
-// carries relation-source and preparation errors.
+// Panics: a poisoned lock is unrecoverable; the Result carries
+// relation-source and preparation errors. Chunk write failures are held by
+// the spill coalescer and reported at its finish.
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -306,28 +324,21 @@ pub(super) fn process_relation_blocks(
         // scratches. A finished accumulator queues for its reduce sibling
         // holding whatever capacity it ratcheted, and par_bridge produces
         // hundreds of batch accumulators - measured at NA as ~13 GB of
-        // phase12 anon AFTER the per-relation monster gates landed. Reduce
-        // then merges empty sinks: tally, count and fanout only.
+        // phase12 anon AFTER the per-relation monster gates landed. Every
+        // record has left through the coalescer by here, so what reduces is
+        // totals only: count, tally (which a flush leaves in the sink) and
+        // fanout.
         .map(|mut acc| {
             acc.flush(spill);
-            acc.multipolygon_emit = MultipolygonEmitScratch::new();
-            acc.point_emit = PointEmitScratch::new();
-            acc.sink.payload = Vec::new();
-            acc.sink.records = Vec::new();
-            acc
+            RelTotals {
+                count: acc.count,
+                tally: acc.sink.tally,
+                fanout: acc.fanout,
+            }
         })
-        .reduce(RelAcc::new, |mut a, mut b| {
+        .reduce(RelTotals::new, |mut a, b| {
             a.count += b.count;
-            let base = a.sink.payload.len();
-            a.sink.payload.append(&mut b.sink.payload);
-            a.sink
-                .records
-                .extend(b.sink.records.drain(..).map(|r| sort::PayloadRef {
-                    offset: r.offset + base,
-                    ..r
-                }));
-            a.sink.tally.merge(&b.sink.tally);
-            a.bytes += b.bytes;
+            a.tally.merge(&b.tally);
             a.fanout.merge(&b.fanout);
             a
         });
@@ -340,26 +351,10 @@ pub(super) fn process_relation_blocks(
     }
 
     fanout_stats.merge(&result.fanout);
-    sort_writer.merge_tally(&result.sink.tally);
-    let mut count = result.count;
-    // Push remaining records (below chunk_size threshold) through sort_writer's
-    // normal buffering, so they merge with way records instead of creating
-    // tiny standalone chunk files.
-    #[allow(clippy::cast_possible_truncation)]
-    {
-        count += result.sink.records.len() as u64;
-    }
-    for record in result.sink.records {
-        sort_writer
-            .push_untracked(sort::SortRecord {
-                key: record.key,
-                data: record.bytes(&result.sink.payload).into(),
-            })
-            .expect("sort push failed");
-    }
+    sort_writer.merge_tally(&result.tally);
     Ok(RelationTail {
         rel_count: rel_count.into_inner(),
-        features: count,
+        features: result.count,
         max_inflight_bytes: max_inflight_bytes.into_inner(),
     })
 }

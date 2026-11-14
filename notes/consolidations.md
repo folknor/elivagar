@@ -112,7 +112,7 @@ polygon-engine hunts.
 `--sort-budget` is charged independently by the `SortWriter` buffer, the
 `SpillCoalescer` buffer (which keeps filling while a swapped-out full buffer
 is sorted and written; its doc concedes two producers can trip it
-concurrently), the drain thread's writer, and the 2x pre-serialization on
+concurrently), and the 2x pre-serialization on
 compressed writes. Real peak sort-side memory is a small multiple of the flag,
 stated nowhere. Owner proposed: one budget shared through the chunk store,
 buffers drawing from it.

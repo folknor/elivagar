@@ -1,7 +1,8 @@
 //! Way dispatch: a dispatcher thread admits whole way blocks into rayon
 //! under a count ceiling and a raw-byte budget, each task builds its block's
-//! plans and processes its ways into a task-local accumulator, and a drain
-//! thread owns the way index and sort writer for the duration.
+//! plans and processes its ways into a task-local accumulator whose records
+//! all leave through the spill coalescer, and a drain thread owns the way
+//! index and the merged record tally for the duration.
 
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use crate::node_index::{LatLonE7, NodeId, NodeStoreReader};
 use crate::pipeline::PipelineError;
 use crate::resources::WayAdmission;
 use crate::shortbread::{self, OsmGeomType, Tags};
-use crate::sort::{SortRecord, SortWriter, SpillCoalescer};
+use crate::sort::{RecordTally, SpillCoalescer};
 use crate::tiling::ZoomRange;
 use crate::way_index::{WayId, WayIndexWriter};
 use pbfhogg::{Element, Way};
@@ -95,10 +96,13 @@ pub(super) struct WayDispatchConfig {
 /// What the drain hands back once the last task result is written.
 pub(super) struct WayDrained {
     pub(super) way_index: WayIndexWriter,
-    pub(super) sort_writer: SortWriter,
+    /// Applied to the sort writer, which never leaves the router.
+    pub(super) tally: RecordTally,
     pub(super) features: u64,
     pub(super) fanout: FanoutStats,
     pub(super) extent: CoordinateExtent,
+    /// Set by the first way index write failure; the writer is poisoned.
+    index_failed: bool,
 }
 
 /// The running dispatcher and drain. Dropping it without
@@ -112,11 +116,7 @@ pub(super) struct WayDispatch {
 }
 
 impl WayDispatch {
-    pub(super) fn spawn(
-        cfg: WayDispatchConfig,
-        way_index: WayIndexWriter,
-        sort_writer: SortWriter,
-    ) -> Self {
+    pub(super) fn spawn(cfg: WayDispatchConfig, way_index: WayIndexWriter) -> Self {
         let (block_tx, block_rx) = std::sync::mpsc::sync_channel::<WayBlock>(1);
         // Capacity must be at least the in-flight task ceiling: rayon tasks
         // block on send() while holding a rayon thread. If capacity < inflight
@@ -126,25 +126,22 @@ impl WayDispatch {
         let (result_tx, result_rx) =
             std::sync::mpsc::sync_channel::<WayTaskResult>(cfg.admission.max_inflight);
 
+        // The dispatcher takes cfg; the drain keeps its own failure handle.
+        let counters = Arc::clone(&cfg.counters);
         let dispatcher = std::thread::spawn(move || dispatch(&cfg, &block_rx, result_tx));
 
         let drain = std::thread::spawn(move || {
             let mut drained = WayDrained {
                 way_index,
-                sort_writer,
+                tally: RecordTally::default(),
                 features: 0,
                 fanout: FanoutStats::new(),
                 extent: CoordinateExtent::default(),
+                index_failed: false,
             };
             while let Ok(result) = result_rx.recv() {
                 let _busy = wait_span(&BUSY.phase12_drain);
-                drained.features += drain_way_task_result(
-                    result,
-                    &mut drained.way_index,
-                    &mut drained.sort_writer,
-                    &mut drained.fanout,
-                    &mut drained.extent,
-                );
+                drain_way_task_result(result, &mut drained, &counters);
             }
             drained
         });
@@ -158,6 +155,12 @@ impl WayDispatch {
 
     /// Forward one way block; blocks while the dispatcher waits for
     /// admission (backpressure on the ordered consumer).
+    ///
+    /// The dispatcher holds its receiver until this side closes the channel:
+    /// way task failures go to `WayCounters` and the loop keeps receiving.
+    /// A closed channel therefore means the dispatcher thread panicked, and
+    /// panicking here surfaces that bug under either panic strategy; it is
+    /// not an input or I/O outcome with an exit class.
     pub(super) fn send(&self, block: WayBlock) {
         let _wait = wait_span(&WAIT.way_block_send);
         self.block_tx
@@ -402,20 +405,22 @@ fn run_way_task(
     // coalescer instead of funneling through the drain thread's serial
     // sort_writer pushes - measured on germany locations: 12.3 GB of records
     // through one thread, 141s of tasks blocked on way_result_send behind it.
-    acc.flush(&cfg.spill);
+    let result = acc.finish(&cfg.spill);
     {
         // Blocked here means the drain thread is the choke - tasks queue
         // behind its result channel while holding a rayon thread.
         let _wait = wait_span(&WAIT.way_result_send);
         // A closed result channel means the drain is gone, which only
         // happens when its thread panicked; that panic surfaces at its join.
-        drop(tx.send(acc.finish()));
+        drop(tx.send(result));
     }
 }
 
+/// What a finished task ships to the drain. It carries no records: every
+/// record left through the spill coalescer when the acc finished.
 pub(super) struct WayTaskResult {
     pub(super) count: u64,
-    pub(super) sink: RecordSink,
+    pub(super) tally: RecordTally,
     pub(super) fanout: FanoutStats,
     pub(super) way_puts: Vec<(WayId, Vec<LatLonE7>)>,
     pub(super) location_extent: CoordinateExtent,
@@ -467,10 +472,13 @@ impl WayAcc {
         self.bytes = 0;
     }
 
-    pub(super) fn finish(self) -> WayTaskResult {
+    /// Flush the residual records and keep only the totals, so no interface
+    /// can hand records past the coalescer.
+    pub(super) fn finish(mut self, spill: &SpillCoalescer) -> WayTaskResult {
+        self.flush(spill);
         WayTaskResult {
             count: self.count,
-            sink: self.sink,
+            tally: self.sink.tally,
             fanout: self.fanout,
             way_puts: self.way_puts,
             location_extent: self.location_extent,
@@ -478,32 +486,31 @@ impl WayAcc {
     }
 }
 
+/// Fold one task result into the drain's state. The first way index write
+/// failure poisons the writer - a put can fail between its data and offset
+/// writes - so it is recorded in `counters` and every later put, in this
+/// result and the rest, is skipped. The drain keeps receiving, so no task
+/// meets a closed channel; `Router::finish` takes the failure before the
+/// writer is ever finalized.
 #[hotpath::measure]
 pub(super) fn drain_way_task_result(
     result: WayTaskResult,
-    way_index: &mut WayIndexWriter,
-    sort_writer: &mut SortWriter,
-    fanout: &mut FanoutStats,
-    location_extent: &mut CoordinateExtent,
-) -> u64 {
-    location_extent.merge(result.location_extent);
-    for (way_id, coords_e7) in result.way_puts {
-        way_index.put(way_id, &coords_e7);
+    drained: &mut WayDrained,
+    counters: &WayCounters,
+) {
+    drained.extent.merge(result.location_extent);
+    if !drained.index_failed {
+        for (way_id, coords_e7) in result.way_puts {
+            if let Err(err) = drained.way_index.put(way_id, &coords_e7) {
+                counters.record_failure(PipelineError::io("way index write failed", err));
+                drained.index_failed = true;
+                break;
+            }
+        }
     }
-    sort_writer.merge_tally(&result.sink.tally);
-    fanout.merge(&result.fanout);
-    // Flushed records plus the residual written here: each record is counted
-    // exactly once, on whichever side of the flush it left the acc.
-    let count = result.count + result.sink.records.len() as u64;
-    for record in result.sink.records {
-        sort_writer
-            .push_untracked(SortRecord {
-                key: record.key,
-                data: record.bytes(&result.sink.payload).into(),
-            })
-            .expect("sort push failed");
-    }
-    count
+    drained.tally.merge(&result.tally);
+    drained.fanout.merge(&result.fanout);
+    drained.features += result.count;
 }
 
 /// The per-run inputs `process_planned_way_into` reads for every way.

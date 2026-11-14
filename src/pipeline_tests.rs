@@ -527,6 +527,67 @@ fn unsorted_nodes_under_force_sorted_refuse_the_input() {
 }
 
 #[test]
+fn a_node_block_after_the_first_way_block_refuses_the_input() {
+    // The raw path finalizes its node store at the first way block; a later
+    // node block used to panic and now refuses the input.
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let pbf_path = dir.path().join("late-nodes.osm.pbf");
+    let file = File::create(&pbf_path).expect("create pbf");
+    let mut writer = PbfWriter::new(file, PbfCompression::None);
+    let header = block_builder::HeaderBuilder::new()
+        .build()
+        .expect("build header");
+    writer.write_header(&header).expect("write header");
+    let mut nodes = block_builder::BlockBuilder::new();
+    nodes.add_node(1, 550_000_000, 100_000_000, [], None);
+    writer
+        .write_primitive_block(nodes.take().expect("take block").expect("node block"))
+        .expect("write block");
+    let mut ways = block_builder::BlockBuilder::new();
+    ways.add_way(10, [("highway", "residential")], &[1, 2], None);
+    writer
+        .write_primitive_block(ways.take().expect("take block").expect("way block"))
+        .expect("write block");
+    let mut late = block_builder::BlockBuilder::new();
+    late.add_node(2, 550_000_100, 100_000_100, [], None);
+    writer
+        .write_primitive_block(late.take().expect("take block").expect("node block"))
+        .expect("write block");
+    writer.flush().expect("flush pbf");
+    let config = TilegenConfig {
+        pbf_path,
+        output_path: dir.path().join("unused.pmtiles"),
+        tmp_dir: dir.path().join("tmp"),
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean: None,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: true,
+        allow_unsafe_flat_index: false,
+        threads: std::num::NonZeroUsize::MIN,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: sort::ChunkCompression::None,
+        fanout_caps: crate::FanoutCaps::default(),
+        polygon_simplify_factor: crate::SimplifyFactor::default(),
+    };
+    let err = phase_read_and_process(
+        &RunPlan::resolve(&config).expect("resolve plan"),
+        &test_resources(&config),
+    )
+    .map(|_| ())
+    .expect_err("a late node block must fail the run");
+    assert_eq!(err.kind(), ErrorKind::InputRefused);
+}
+
+#[test]
 fn injected_members_end_to_end_marks_ways_with_block_local_pins() {
     let stats = injected_fixture(Some(&way_members_payload(3, &[0x04])))
         .expect("valid injected PBF should succeed");

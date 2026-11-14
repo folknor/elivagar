@@ -57,7 +57,7 @@ bytes remain findings in a completed report.
 | 3 | `--skip-to` resume refused: the resume records under `--tmp-dir` are absent or do not match this run |
 | 4 | the named ocean artifact cannot serve this run because of its own bytes or identity |
 | 64 | invalid invocation: a clap usage error, or a value or combination the library refuses before work (including environment knobs, and an artifact named for a tile contract or zoom window it cannot serve) |
-| 65 | input bytes read and rejected, e.g. an unsorted PBF without an opt-in, node IDs the node store refuses (negative, not increasing under `--force-sorted`, over the flat index safety cap), malformed injected data, or a header that refuses `--locations-on-ways` |
+| 65 | input bytes read and rejected, e.g. an unsorted PBF without an opt-in, node IDs the node store refuses (negative, not increasing under `--force-sorted`, at or above 2^40 in the compact store, over the flat index safety cap), a node block after the first way block when the node store is in use, malformed injected data, or a header that refuses `--locations-on-ways` |
 | 70 | an internal invariant failed, e.g. a polygon over the 500-ring cap reaching a clip rect too small to split, which the ring-cap partition proves cannot happen |
 | 74 | an I/O failure the OS reported |
 
@@ -67,7 +67,11 @@ process ends by signal. Library callers read the same class from
 refused resume names its reason through `PipelineError::resume_refusal()`.
 The public `node_index::NodeStoreError` names the refused node ID; growth
 and remap failures of the flat index keep their `io::Error` and exit 74 with
-an OS errno. A sort record that does not decode during assembly fails the
+an OS errno. Sort chunk and way index write failures in phase12 and the
+ocean phase return their `io::Error` the same way: 74 with an OS errno, 2
+for a failure the OS did not report (a short write). A chunk write failure
+is reported when the phase collects its chunks, unless another failure of
+the same run is returned first. A sort record that does not decode during assembly fails the
 run unclassified (exit 2): the bytes were read back from chunk files, so
 they cannot tell a program fault from a damaged chunk.
 Chunk-store rejections, including deferred reads during assembly, carry
@@ -277,9 +281,12 @@ When a node store is needed, input without the `Sort.Type_then_ID` header
 flag is refused at every file size unless `--force-sorted` or
 `--allow-unsafe-flat-index` is explicit. `--force-sorted` selects the compact
 store and checks strictly increasing node IDs, refusing the input (exit 65)
-on the first that is not; `--allow-unsafe-flat-index` selects the
+on the first that is not, and refuses node IDs at or above 2^40 (its group
+directory is dense by ID); `--allow-unsafe-flat-index` selects the
 flat index and bypasses its size guardrails. A small PBF can still contain
-large, sparse node IDs. Inline way coordinates (`--locations-on-ways`,
+large, sparse node IDs. Either store needs every node block before the first
+way block, because the store is finalized there; a later node block refuses
+the input (exit 65). Inline way coordinates (`--locations-on-ways`,
 including header detection) avoid the node store and this guard entirely.
 
 ### Memory budgets

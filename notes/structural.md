@@ -31,8 +31,7 @@ depending on the skip), stderr reporting, and about 300 lines of sidecar
 counter emission that knows the internals of `Phase12Stats`, `FanoutStats`,
 `DedupStats` and `TileSizeDiagnostics`. Assemble returns a 6-tuple
 `(u64, u64, u64, usize, DedupStats, TileSizeDiagnostics)` with three adjacent
-`u64`s (features, tiles, unique tiles) and the writer thread another; the
-drain thread returns `(WayIndex, SortWriter, u64, FanoutStats)`.
+`u64`s (features, tiles, unique tiles) and the writer thread another.
 
 Proposed (the crate-private `RunPlan` already performs every refusal before
 work): `enum Start { Full, ResumeOcean(ChunkSet), ResumeSort(ChunkSet),
@@ -45,25 +44,21 @@ counter names.
 
 Reported by the pipeline hunt.
 
-## STR-037 - Phase12 panic sites the typed-errors chain did not name
+## STR-043 - Input-reachable phase12 conditions that abort or drop silently
 
-Found while carrying node-store and ring-cap errors through phase12, outside
-that chain's named sites:
+- `Router::route` ignores `BlockType::Mixed` blocks outright, so nodes and
+  ways in a mixed-type block never reach the store, the way phase or the
+  sort, with no counter and no refusal. pbfhogg's writer emits single-type
+  blocks, but block type is input.
+- `process_planned_way_into` asserts that the coordinate count equals the
+  ref count on the injected-pins path; on the raw path a missing node ref
+  drops a coordinate, so an injected-pins PBF with an unresolved ref aborts
+  instead of being refused or counted.
+- `run_way_task` `expect`s a members bitmap on every way block of the
+  injected-members path. Whether the locations source's validation makes
+  that unreachable for every input was not established.
 
-- `SortedNodeStoreInner::put_id` resizes `groups` to `id / 65536 + 1` slots,
-  so a sorted input whose first node ID is huge (legal under
-  `--force-sorted`) allocates proportionally or aborts on allocation
-  failure. An input-reachable abort; a group-count bound would be a refusal.
-- `Router::route_nodes` panics on a node block after the way phase on the
-  raw path ("node store is already finalized"). Block order is input, so a
-  PBF with ways before trailing nodes aborts instead of exiting 65.
-- The way drain and the relation tail push residual records with
-  `push_untracked(..).expect("sort push failed")`: a chunk-write I/O failure
-  there aborts rather than exiting 74.
-- `NodeWorkers::send` and `WayDispatch::send` `expect` a live receiver; a
-  worker panic surfaces as a second panic at the sender.
-
-Reported by the typed-errors link 7 implementer.
+Reported by the phase12 panic-sites implementer.
 
 ## STR-008 - Fix the dependency edges that point the wrong way
 
