@@ -1,5 +1,24 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Whether `ELIVAGAR_LAYER_STATS` is set, read once per process: the one
+/// reader both the pipeline and the ocean flush path consult.
+///
+/// The per-layer per-zoom sort stats (records, bytes, fanout percentiles,
+/// threshold counts) are a ~800-counter firehose - roughly 26 layers x 15 zooms
+/// x several metrics - that swamps `brokkr sidecar --counters` and floods an
+/// optimizer's context. They are diagnostic detail wanted only during layer or
+/// fanout-cap analysis, so they are emitted only when the variable is set. The
+/// per-layer totals (`sort_layer_<name>_records`/`_bytes`) are always emitted.
+///
+/// The gate is about volume, not cost: the pipeline's are emitted at end of
+/// run and never touch timing; the ocean flush path asks per flush, which is
+/// why the answer is cached. brokkr's `capture_env` records the variable with
+/// the run, so a run carrying the firehose is identifiable from its results row.
+pub(crate) fn layer_stats_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ELIVAGAR_LAYER_STATS").is_some())
+}
+
 /// Emit a named phase marker to the sidecar profiler, if active.
 ///
 /// The timestamp is monotonic microseconds from the first successful open of

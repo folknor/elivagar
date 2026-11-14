@@ -22,6 +22,7 @@ static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use elivagar::resources::ByteBudget;
 use elivagar::{RingOrientation, ring_is_simple, ring_role};
 
 /// Shortbread vector tile generator.
@@ -118,23 +119,23 @@ struct RunArgs {
     #[arg(long)]
     allow_unsafe_flat_index: bool,
 
-    /// Thread count.
-    #[arg(short = 'j', long = "threads")]
-    threads: Option<usize>,
+    /// Thread count, at least 1. Default: logical CPUs.
+    #[arg(short = 'j', long = "threads", value_parser = parse_threads)]
+    threads: Option<std::num::NonZeroUsize>,
 
     /// Sort chunk memory budget (e.g. 256M, 1G). Minimum 64M.
     #[arg(long, value_parser = parse_byte_size_min_64m)]
-    sort_budget: Option<usize>,
+    sort_budget: Option<ByteBudget>,
 
     /// In-flight way processing budget in raw block+plan bytes. Minimum 1M.
     /// Safety net only; the count ceiling (max(threads, 8)) is the primary control.
     /// Default when omitted: 128M (standard) or 4G (`--locations-on-ways`).
     #[arg(long, value_parser = parse_byte_size_min_1m)]
-    way_budget: Option<usize>,
+    way_budget: Option<ByteBudget>,
 
     /// Tile assembly batch budget (e.g. 32M). Minimum 1M.
     #[arg(long, value_parser = parse_byte_size_min_1m)]
-    assemble_budget: Option<usize>,
+    assemble_budget: Option<ByteBudget>,
 
     /// Entry cap for the PMTiles payload dedup map. Default 1000000 when omitted.
     /// Explicit zero is rejected; omit this flag to use the default.
@@ -142,7 +143,7 @@ struct RunArgs {
     /// are stored instead of referenced (archive bytes), and the map costs
     /// ~56 bytes per entry of RAM.
     #[arg(long, value_parser = parse_dedup_cap)]
-    dedup_cap: Option<usize>,
+    dedup_cap: Option<std::num::NonZeroUsize>,
 
     /// Assert the PBF header declares embedded way coordinates.
     /// Header detection is automatic.
@@ -201,8 +202,8 @@ struct OceanBuildArgs {
     tmp_dir: PathBuf,
     #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(0..=10))]
     compression_level: u32,
-    #[arg(short = 'j', long)]
-    threads: Option<usize>,
+    #[arg(short = 'j', long, value_parser = parse_threads)]
+    threads: Option<std::num::NonZeroUsize>,
 }
 
 /// Arguments for the `inspect` subcommand.
@@ -307,14 +308,18 @@ fn parse_byte_size(s: &str) -> Option<usize> {
     }
 }
 
-fn parse_dedup_cap(s: &str) -> Result<usize, String> {
+fn parse_dedup_cap(s: &str) -> Result<std::num::NonZeroUsize, String> {
     let value = s
         .parse::<usize>()
         .map_err(|_| format!("invalid dedup cap '{s}', expected a positive integer"))?;
-    if value == 0 {
-        return Err("dedup cap must be greater than zero; omit the flag to use the default".into());
-    }
-    Ok(value)
+    std::num::NonZeroUsize::new(value).ok_or_else(|| {
+        "dedup cap must be greater than zero; omit the flag to use the default".into()
+    })
+}
+
+fn parse_threads(s: &str) -> Result<std::num::NonZeroUsize, String> {
+    s.parse::<std::num::NonZeroUsize>()
+        .map_err(|_| format!("invalid thread count '{s}', expected a positive integer"))
 }
 
 fn parse_tile_zoom(s: &str) -> Result<u8, String> {
@@ -327,20 +332,20 @@ fn parse_tile_zoom(s: &str) -> Result<u8, String> {
     Ok(z)
 }
 
-fn parse_byte_size_min_64m(s: &str) -> Result<usize, String> {
-    let min = 64 * 1024 * 1024;
+fn parse_byte_size_min_64m(s: &str) -> Result<ByteBudget, String> {
     match parse_byte_size(s) {
-        Some(v) if v >= min => Ok(v),
-        _ => Err(format!("expected >= 64M (e.g. 256M, 1G), got '{s}'")),
+        Some(v) if v >= elivagar::resources::MIN_SORT_BUDGET => ByteBudget::new(v),
+        _ => None,
     }
+    .ok_or_else(|| format!("expected >= 64M (e.g. 256M, 1G), got '{s}'"))
 }
 
-fn parse_byte_size_min_1m(s: &str) -> Result<usize, String> {
-    let min = 1024 * 1024;
+fn parse_byte_size_min_1m(s: &str) -> Result<ByteBudget, String> {
     match parse_byte_size(s) {
-        Some(v) if v >= min => Ok(v),
-        _ => Err(format!("expected >= 1M (e.g. 32M, 128M), got '{s}'")),
+        Some(v) if v >= elivagar::resources::MIN_BUDGET => ByteBudget::new(v),
+        _ => None,
     }
+    .ok_or_else(|| format!("expected >= 1M (e.g. 32M, 128M), got '{s}'"))
 }
 
 /// The ocean inputs named by `--ocean`, after parsing and validation.
@@ -446,13 +451,11 @@ fn ocean_build_command(args: &OceanBuildArgs) {
         eprintln!("error: ocean-build needs a full-resolution shapefile");
         std::process::exit(2);
     };
-    let threads = args.threads.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(4)
-    });
+    let threads = args
+        .threads
+        .unwrap_or_else(elivagar::resources::default_threads);
     rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
+        .num_threads(threads.get())
         .build_global()
         .expect("failed to configure rayon thread pool");
     if let Err(e) = elivagar::ocean_build(
@@ -809,15 +812,13 @@ fn signed_area_ring(ring: &[(i32, i32)]) -> i128 {
 
 #[allow(clippy::too_many_lines)]
 fn run(args: RunArgs) {
-    let threads = args.threads.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(4)
-    });
+    let threads = args
+        .threads
+        .unwrap_or_else(elivagar::resources::default_threads);
 
     // Configure rayon's global thread pool before any rayon work.
     rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
+        .num_threads(threads.get())
         .build_global()
         .expect("failed to configure rayon thread pool");
 
@@ -870,12 +871,10 @@ fn run(args: RunArgs) {
         force_sorted: args.force_sorted,
         allow_unsafe_flat_index: args.allow_unsafe_flat_index,
         threads,
-        way_inflight_budget: args.way_budget.unwrap_or(0),
-        assemble_batch_budget: args.assemble_budget.unwrap_or(0),
-        dedup_cap: args
-            .dedup_cap
-            .unwrap_or(elivagar::pmtiles_writer::DEFAULT_DEDUP_CAP),
-        sort_chunk_size: args.sort_budget.unwrap_or(0),
+        way_inflight_budget: args.way_budget,
+        assemble_batch_budget: args.assemble_budget,
+        dedup_cap: args.dedup_cap,
+        sort_chunk_size: args.sort_budget,
         locations_on_ways: args.locations_on_ways,
         tile_format: match args.tile_format {
             TileFormatArg::Mvt => elivagar::TilePayloadFormat::Mvt,
@@ -891,8 +890,10 @@ fn run(args: RunArgs) {
             Some(SortChunkCompressionArg::Snappy) => elivagar::sort::ChunkCompression::Snappy,
         },
         fanout_caps: {
-            let default_cap = args.fanout_cap_default.unwrap_or(0);
-            let mut caps = [0; elivagar::shortbread::Layer::count()];
+            // Zero spells "uncapped" on the command line, so an explicit
+            // layer=0 un-caps that layer under a nonzero default.
+            let default_cap = args.fanout_cap_default.and_then(std::num::NonZeroU32::new);
+            let mut caps = [None; elivagar::shortbread::Layer::count()];
             for layer in elivagar::shortbread::Layer::ALL {
                 if layer.supports_fanout_cap() {
                     caps[layer as usize] = default_cap;
@@ -916,7 +917,7 @@ fn run(args: RunArgs) {
                 });
                 match elivagar::shortbread::Layer::from_name(name) {
                     Some(layer) if layer.supports_fanout_cap() => {
-                        caps[layer as usize] = cap_val;
+                        caps[layer as usize] = std::num::NonZeroU32::new(cap_val);
                     }
                     Some(_) => {
                         eprintln!("Error: layer '{name}' does not support --fanout-cap");

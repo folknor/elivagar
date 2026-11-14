@@ -21,7 +21,7 @@ use super::relations::process_relation_blocks;
 use super::stats::{
     FanoutStats, MissingRefStatsAtomic, Phase12Stats, record_fanout_from_payload_records,
 };
-use super::{EnvZero, PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb, env_integer};
+use super::{PipelineError, SORT_CHUNKS_DIR, TilegenConfig, current_rss_kb};
 
 /// A way block plus its optional injected per-blob membership bitmap.
 struct WayBlock {
@@ -145,39 +145,6 @@ fn fill_mask_from_pin_bitmap(bitmap: &[u8], mask: &mut [bool]) {
 }
 
 pub(super) const LON_E7_FULL_CIRCLE: i64 = 3_600_000_000;
-/// Default memory budget per sort chunk (1 GB).
-pub(super) const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
-/// Default way in-flight budget for the standard node-store path. Raw bytes
-/// (see the locations constant below for the semantics).
-pub(super) const DEFAULT_WAY_BUDGET: usize = 128 * 1024 * 1024; // 128 MB
-/// Default way in-flight budget for locations-on-ways mode, in RAW bytes:
-/// decompressed block size plus, once a task has built its plans, the plans'
-/// measured bytes. The primary admission control is the count ceiling
-/// (`max_inflight` = threads.max(8)); this budget is a safety net against
-/// pathologically fat blocks only, and on any input seen so far it never
-/// binds.
-///
-/// History: admission used to charge decompressed_size x 10
-/// (WAY_OUTPUT_MULTIPLIER) against the budget, which made admission
-/// concurrency inversely proportional to upstream blob packing - an input
-/// property this pipeline does not control. Extract blobs (8,000 elements,
-/// every Geofabrik file) cost ~35MB of budget so ~20 admitted; planet blobs
-/// (~66,500 elements, ~4.8MB compressed) cost several hundred MB so 2-3
-/// admitted, and planet phase12 ran at 7.2 of 32 cores with way_budget
-/// blocking 63.5% of wall. Raising the default (768M -> 8G, 2026-07-31)
-/// took planet 1062.5s -> 571.7s but was a workaround: a 500k-element blob
-/// would have re-broken it. The 2026-08-07 rework removed the multiplier so
-/// the count ceiling rules on any packing; the budget survives only to bound
-/// real memory when blocks are individually huge. Real in-flight memory is
-/// (count x raw block+plan bytes): planet-shaped 30MB blocks x 32 threads is
-/// ~1GB against this 4G net, while a hypothetical 500k-element blob (~270MB
-/// raw) is bounded at ~15 in flight.
-pub(super) const DEFAULT_WAY_BUDGET_LOCATIONS: usize = 4 * 1024 * 1024 * 1024; // 4 GB
-/// Relation blocks buffer at most this many decompressed bytes in RAM; past
-/// the cap the tail re-reads relation blobs from the PBF instead (planet-scale
-/// inputs hold several GB of relation blocks - an input-scaled stock the
-/// 30 GB RAM ledger cannot absorb).
-pub(super) const REL_BLOCKS_BUFFER_CAP: usize = 1024 * 1024 * 1024; // 1 GB
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NodeStoreMode {
@@ -228,22 +195,12 @@ pub(super) fn select_node_store_mode(
 #[allow(clippy::cognitive_complexity)]
 pub(super) fn phase_read_and_process(
     config: &TilegenConfig,
+    resources: &crate::resources::Resources,
 ) -> Result<(SortWriter, MercBbox, Phase12Stats), PipelineError> {
     eprintln!("\n--- Phase 1+2: Reading PBF + processing features ---");
 
-    // ELIVAGAR_REL_BLOCKS_CAP overrides the buffer cap (bytes) - debug/test
-    // hook to force the re-read path on small extracts.
-    let rel_blocks_buffer_cap = env_integer(
-        "ELIVAGAR_REL_BLOCKS_CAP",
-        REL_BLOCKS_BUFFER_CAP,
-        EnvZero::Allow,
-    )?;
-
-    let sort_chunk_budget = if config.sort_chunk_size > 0 {
-        config.sort_chunk_size
-    } else {
-        DEFAULT_SORT_CHUNK_SIZE
-    };
+    let rel_blocks_buffer_cap = resources.rel_blocks_buffer_cap;
+    let sort_chunk_budget = resources.sort_chunk;
 
     // Option so we can move to drain thread during way phase and get back after.
     let mut sort_writer: Option<SortWriter> = Some(SortWriter::new(
@@ -252,13 +209,10 @@ pub(super) fn phase_read_and_process(
         config.compress_sort_chunks,
     )?);
 
-    // Worker sizing, not a process-wide cap: pbfhogg decode uses
-    // max(threads / 3, 1); Rayon is sized separately by the caller (the CLI
-    // uses threads). Locations mode adds (threads / 4).clamp(2, 6) node
-    // workers, and way admission allows threads.max(8) blocks in flight.
-    // Assembly derives its partition workers from threads. Relation prepass,
-    // way dispatch and result drain each have a separate OS thread.
-    let decode_threads = (config.threads / 3).max(1);
+    // Worker sizing (crate::resources), not a process-wide cap; Rayon is
+    // sized separately by the caller. Relation prepass, way dispatch and
+    // result drain each have a separate OS thread.
+    let decode_threads = resources.decode_threads;
     let reader = ElementReader::from_path(&config.pbf_path)
         .map_err(|e| PipelineError(format!("failed to open PBF: {e}")))?
         .decode_threads(decode_threads);
@@ -282,6 +236,8 @@ pub(super) fn phase_read_and_process(
     };
     let locations_on_ways =
         resolve_locations_on_ways(config.locations_on_ways, header.has_locations_on_ways())?;
+    let way_admission = resources.way_admission(locations_on_ways);
+    way_admission.emit();
 
     let pbf_size = std::fs::metadata(&config.pbf_path)
         .map(|m| m.len())
@@ -457,11 +413,7 @@ pub(super) fn phase_read_and_process(
                     // out to a small worker pool (the single worker was the
                     // node-phase rate limiter: 16.6s serial on NA locations,
                     // node_block_send wait 16.5s from the consumer side).
-                    let worker_count = if locations_on_ways {
-                        (config.threads / 4).clamp(2, 6)
-                    } else {
-                        1
-                    };
+                    let worker_count = way_admission.node_workers;
                     let (ntx, nrx) = std::sync::mpsc::sync_channel::<PrimitiveBlock>(16);
                     let shared_rx = std::sync::Arc::new(std::sync::Mutex::new(nrx));
                     let mut ns = node_store_opt.take();
@@ -528,7 +480,7 @@ pub(super) fn phase_read_and_process(
                     // while holding a rayon thread. If capacity < inflight tasks,
                     // blocked senders tie up all rayon threads → worker (which runs
                     // inside rayon::in_place_scope) can't make progress → deadlock.
-                    let max_inflight = config.threads.max(8);
+                    let max_inflight = way_admission.max_inflight;
                     let (rtx, rrx) = std::sync::mpsc::sync_channel::<WayTaskResult>(max_inflight);
                     let nr_clone = nr.clone();
                     let way_hwm_clone = std::sync::Arc::clone(&way_hwm);
@@ -566,7 +518,8 @@ pub(super) fn phase_read_and_process(
                     // Multi-block overlap: rayon::scope allows multiple blocks' ways
                     // in the pool simultaneously. The max_inflight count ceiling is the
                     // primary admission control; the raw-byte budget is a safety net
-                    // against individually huge blocks (see the constants above).
+                    // against individually huge blocks (see the default's
+                    // comment in crate::resources).
                     // --way-budget is the only way to set this. An
                     // ELIVAGAR_WAY_BUDGET env override used to outrank the
                     // flag, so a run passing --way-budget 256M could use 768M
@@ -575,13 +528,7 @@ pub(super) fn phase_read_and_process(
                     // tilegen wrapper had no --way-budget passthrough; the
                     // wrapper is configured from brokkr.toml now, so the
                     // workaround outlived its reason.
-                    let way_budget = if config.way_inflight_budget > 0 {
-                        config.way_inflight_budget
-                    } else if locations_on_ways {
-                        DEFAULT_WAY_BUDGET_LOCATIONS
-                    } else {
-                        DEFAULT_WAY_BUDGET
-                    };
+                    let way_budget = way_admission.budget;
                     worker_handle = Some(std::thread::spawn(move || {
                         // Take refs outside loop - Copy into each move closure,
                         // avoids Arc::clone per spawn.
@@ -1776,7 +1723,7 @@ pub(super) fn process_planned_way_into(
     min_zoom: u8,
     max_zoom: u8,
     missing_ref_stats: &MissingRefStatsAtomic,
-    fanout_caps: &[u32],
+    fanout_caps: &[Option<std::num::NonZeroU32>],
     polygon_simplify_factor: f64,
     pins: PinSource,
     boundary_way_meta: &BoundaryWayMeta,

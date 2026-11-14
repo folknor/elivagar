@@ -48,7 +48,7 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--allow-unsafe-flat-index` | Bypass flat-index safety guardrails (unsafe; may cause severe IO/RSS degradation) |
 | `--locations-on-ways` | PBF has node coordinates embedded in ways |
 | `--sort-budget size` | Sort chunk memory budget (default: 1G, min: 64M). Accepts `256M`, `1G`, or raw bytes |
-| `--way-budget size` | In-flight way processing budget (default: 128M standard / 8G with `--locations-on-ways`, min: 1M). Charged as decompressed block size x10, and capped independently at `--threads` blocks in flight, so real memory is bounded by that count regardless of this value |
+| `--way-budget size` | In-flight way processing budget (default: 128M standard / 4G with `--locations-on-ways`, min: 1M). Charged in raw block plus plan bytes; the primary control is a count ceiling of `max(threads, 8)` blocks in flight, and this budget is a safety net against individually huge blocks |
 | `--assemble-budget size` | Tile assembly batch budget (default: 32M, min: 1M) |
 | `--tile-format mvt\|mlt` | Tile payload format (default: `mvt`). `mlt` requires a build with the `mlt` cargo feature; see [MLT output](#mlt-output) |
 | `--tile-compression gzip\|brotli` | Tile compression algorithm (default: `gzip`, MVT only) |
@@ -56,7 +56,7 @@ elivagar run <input.osm.pbf> -o <output.pmtiles> [options]
 | `--fanout-cap-default N` | Default fanout cap for supported OSM polygon layers (0 = uncapped); ocean is unaffected |
 | `--fanout-cap layer=N,...` | Per-layer fanout caps (e.g. `water_polygons=4096`). Features whose bbox tile count, including the 128-unit buffer, exceeds the cap are skipped at that zoom. Conservative upper bound; unsupported layers are rejected. Comma-separated |
 | `--polygon-simplify-factor F` | Simplification multiplier for polygon layers (default: 1.0, same as lines). Higher simplifies harder, cutting sort volume; fills tolerate this better than stroked lines do |
-| `-j N` / `--threads N` | Thread count (default: logical CPUs) |
+| `-j N` / `--threads N` | Thread count, at least 1 (default: logical CPUs) |
 
 ### Inspect a PMTiles archive
 

@@ -29,8 +29,15 @@ fn synthetic_ocean_archive_matches_policy_golden() {
     let scratch_path = dir.path().join("scratch");
 
     write_synthetic_ocean_shapefile(&shp_path);
-    elivagar::ocean_build(&shp_path, None, &archive_path, &scratch_path, 6, 1)
-        .expect("build synthetic ocean archive");
+    elivagar::ocean_build(
+        &shp_path,
+        None,
+        &archive_path,
+        &scratch_path,
+        6,
+        std::num::NonZeroUsize::MIN,
+    )
+    .expect("build synthetic ocean archive");
 
     let archive = ArchiveView::open(&archive_path).expect("open synthetic ocean archive");
     let metadata: serde_json::Value = serde_json::from_str(

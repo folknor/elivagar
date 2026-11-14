@@ -451,19 +451,19 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
         compression_level: 6,
         force_sorted: false,
         allow_unsafe_flat_index: false,
-        threads: 1,
-        way_inflight_budget: 0,
-        assemble_batch_budget: 0,
-        dedup_cap: 0,
-        sort_chunk_size: 0,
+        threads: std::num::NonZeroUsize::MIN,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [0; Layer::count()],
+        fanout_caps: [None; Layer::count()],
         polygon_simplify_factor: 1.0,
     };
-    phase_read_and_process(&config).map(|(_, _, stats)| stats)
+    phase_read_and_process(&config, &test_resources(&config)).map(|(_, _, stats)| stats)
 }
 
 #[test]
@@ -577,19 +577,19 @@ fn injected_pins_fixture(
         compression_level: 6,
         force_sorted: false,
         allow_unsafe_flat_index: false,
-        threads: 1,
-        way_inflight_budget: 0,
-        assemble_batch_budget: 0,
-        dedup_cap: 0,
-        sort_chunk_size: 0,
+        threads: std::num::NonZeroUsize::MIN,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [0; Layer::count()],
+        fanout_caps: [None; Layer::count()],
         polygon_simplify_factor: 1.0,
     };
-    phase_read_and_process(&config).map(|(sw, _, stats)| (dir, sw, stats))
+    phase_read_and_process(&config, &test_resources(&config)).map(|(sw, _, stats)| (dir, sw, stats))
 }
 
 /// Drain a sort reader, returning (record count, total geometry command words).
@@ -1332,7 +1332,7 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
                 1,
                 &mut records,
                 &mut scratch,
-                0,
+                None,
                 1.0,
             );
         } else {
@@ -1352,7 +1352,7 @@ fn antimeridian_wrapped_polygon_emits_both_seam_tiles_without_duplicates() {
                 1,
                 &mut records,
                 &mut scratch,
-                0,
+                None,
                 1.0,
             );
         }
@@ -1401,7 +1401,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 1,
                 &mut records,
                 &mut emit_scratch,
-                0,
+                None,
                 1.0,
             );
         } else {
@@ -1422,7 +1422,7 @@ fn antimeridian_wrapped_multipolygon_emits_both_seam_tiles_without_duplicates() 
                 1,
                 &mut records,
                 &mut emit_scratch,
-                0,
+                None,
                 1.0,
             );
         }
@@ -1602,6 +1602,7 @@ fn assembly_requires_run_identity_and_preserves_extract_header_bounds() {
     let error = assemble::phase_assemble_with_ocean(
         &mut sort_reader,
         &config,
+        &test_resources(&config),
         &bounds,
         None,
         assemble::RunProvenance::default(),
@@ -1612,6 +1613,7 @@ fn assembly_requires_run_identity_and_preserves_extract_header_bounds() {
     let error = assemble::phase_assemble_with_ocean(
         &mut sort_reader,
         &config,
+        &test_resources(&config),
         &bounds,
         None,
         assemble::RunProvenance {
@@ -1625,6 +1627,7 @@ fn assembly_requires_run_identity_and_preserves_extract_header_bounds() {
     assemble::phase_assemble_with_ocean(
         &mut sort_reader,
         &config,
+        &test_resources(&config),
         &bounds,
         None,
         assemble::RunProvenance {
@@ -1684,6 +1687,7 @@ fn ocean_artifact_assembly_has_world_bounds_and_no_run_provenance() {
     assemble::phase_assemble_with_ocean(
         &mut sort_reader,
         &config,
+        &test_resources(&config),
         &MercBbox {
             min_x: 0.5,
             min_y: 0.25,
@@ -1744,16 +1748,16 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         compression_level: 6,
         force_sorted: false,
         allow_unsafe_flat_index: false,
-        threads: 1,
-        way_inflight_budget: 0,
-        assemble_batch_budget: 0,
-        dedup_cap: 0,
-        sort_chunk_size: 0,
+        threads: std::num::NonZeroUsize::MIN,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [0; shortbread::Layer::count()],
+        fanout_caps: [None; shortbread::Layer::count()],
         polygon_simplify_factor: 1.0,
     };
 
@@ -1804,16 +1808,16 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         compression_level: 6,
         force_sorted: false,
         allow_unsafe_flat_index: false,
-        threads: 1,
-        way_inflight_budget: 0,
-        assemble_batch_budget: 0,
-        dedup_cap: 0,
-        sort_chunk_size: 0,
+        threads: std::num::NonZeroUsize::MIN,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [0; shortbread::Layer::count()],
+        fanout_caps: [None; shortbread::Layer::count()],
         polygon_simplify_factor: 1.0,
     };
 
@@ -1855,16 +1859,16 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         compression_level: 6,
         force_sorted: false,
         allow_unsafe_flat_index: false,
-        threads: 1,
-        way_inflight_budget: 0,
-        assemble_batch_budget: 0,
-        dedup_cap: 0,
-        sort_chunk_size: 0,
+        threads: std::num::NonZeroUsize::MIN,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [0; shortbread::Layer::count()],
+        fanout_caps: [None; shortbread::Layer::count()],
         polygon_simplify_factor: 1.0,
     };
     write_assembly_pbf(&mvt_config.pbf_path);
@@ -1914,16 +1918,16 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
             compression_level: 6,
             force_sorted: false,
             allow_unsafe_flat_index: false,
-            threads: 1,
-            way_inflight_budget: 0,
-            assemble_batch_budget: 0,
-            dedup_cap: 0,
-            sort_chunk_size: 0,
+            threads: std::num::NonZeroUsize::MIN,
+            way_inflight_budget: None,
+            assemble_batch_budget: None,
+            dedup_cap: None,
+            sort_chunk_size: None,
             locations_on_ways: false,
             tile_format: TilePayloadFormat::Mlt,
             tile_compression: TileCompression::Gzip,
             compress_sort_chunks: sort::ChunkCompression::None,
-            fanout_caps: [0; shortbread::Layer::count()],
+            fanout_caps: [None; shortbread::Layer::count()],
             polygon_simplify_factor: 1.0,
         };
         write_assembly_pbf(&mlt_config.pbf_path);
@@ -2331,7 +2335,7 @@ fn relation_labels_aggregate_components_once_per_layer_per_zoom() {
         &mut sink,
         &mut point,
         &mut polygon,
-        &[0; Layer::count()],
+        &[None; Layer::count()],
         1.0,
         &mut fanout,
     );
@@ -2376,7 +2380,7 @@ fn dispatch_namespaces_mixed_source_ids_on_the_wire() {
     ];
     let point = Point::new(0.5, 0.5);
     let m = test_layer_match(Layer::Pois, GeomExpect::PolygonPointOnSurface);
-    let caps = [0; Layer::count()];
+    let caps = [None; Layer::count()];
     let ctx = emit::EmitCtx {
         min_zoom: 0,
         max_zoom: 0,
@@ -2647,7 +2651,7 @@ fn emit_polygon_too_few_points() {
         0,
         &mut records,
         &mut scratch,
-        0,
+        None,
         1.0,
     );
     assert_eq!(count, 0);
@@ -2675,7 +2679,7 @@ fn emit_polygon_decodes_correctly() {
         0,
         &mut records,
         &mut scratch,
-        0,
+        None,
         1.0,
     );
     assert_eq!(records.len(), 1);
@@ -2744,7 +2748,7 @@ fn emit_polygon_zoom_dependent_attrs() {
         0,
         &mut records,
         &mut scratch,
-        0,
+        None,
         1.0,
     );
     assert_eq!(records.len(), 1);
@@ -2800,7 +2804,7 @@ fn emit_polygon_zoom_dependent_attrs() {
         14,
         &mut records,
         &mut scratch,
-        0,
+        None,
         1.0,
     );
     assert_eq!(records.len(), 1);
@@ -2835,7 +2839,7 @@ fn emit_polygon_skips_self_intersecting_ring_below_z14() {
         0,
         &mut records,
         &mut scratch,
-        0,
+        None,
         1.0,
     );
     assert_eq!(count, 0);
@@ -2894,7 +2898,7 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         13,
         &mut records_plain,
         &mut scratch_plain,
-        0,
+        None,
         1.0,
     );
     emit_polygon_feature(
@@ -2906,7 +2910,7 @@ fn emit_polygon_preserve_mask_keeps_required_vertices() {
         13,
         &mut records_pinned,
         &mut scratch_pinned,
-        0,
+        None,
         1.0,
     );
 
@@ -2984,7 +2988,7 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         13,
         &mut records_plain,
         &mut emit_plain,
-        0,
+        None,
         1.0,
     );
     emit_multipolygon_feature(
@@ -2997,7 +3001,7 @@ fn emit_multipolygon_preserve_keys_keep_required_vertices() {
         13,
         &mut records_pinned,
         &mut emit_pinned,
-        0,
+        None,
         1.0,
     );
 
@@ -3081,7 +3085,7 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         13,
         &mut records_plain,
         &mut emit_plain,
-        0,
+        None,
         1.0,
     );
     emit_multipolygon_feature(
@@ -3094,7 +3098,7 @@ fn emit_multipolygon_relation_derived_shared_keys_preserve_vertices() {
         13,
         &mut records_pinned,
         &mut emit_pinned,
-        0,
+        None,
         1.0,
     );
 
@@ -3157,7 +3161,7 @@ fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
         0,
         &mut records,
         &mut emit_scratch,
-        0,
+        None,
         1.0,
     );
     emit_multipolygon_feature(
@@ -3170,7 +3174,7 @@ fn landing_b_multipolygon_two_outers_nested_holes_emit_two_clean_features() {
         0,
         &mut records,
         &mut emit_scratch,
-        0,
+        None,
         1.0,
     );
     assert_eq!(records.len(), 2);
@@ -3250,7 +3254,7 @@ fn landing_b_historical_infinity_classes_emit_nothing() {
         0,
         &mut records,
         &mut emit_scratch,
-        0,
+        None,
         1.0,
     );
     emit_multipolygon_feature(
@@ -3263,7 +3267,7 @@ fn landing_b_historical_infinity_classes_emit_nothing() {
         0,
         &mut records,
         &mut emit_scratch,
-        0,
+        None,
         1.0,
     );
     assert!(records.is_empty());
@@ -3314,7 +3318,7 @@ fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
         13,
         &mut records,
         &mut scratch,
-        0,
+        None,
         1.0,
     );
     assert_no_backtrack_in_records(&records);
@@ -3338,7 +3342,7 @@ fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
         4,
         &mut records,
         &mut scratch,
-        0,
+        None,
         1.0,
     );
     assert_no_backtrack_in_records(&records);
@@ -3362,7 +3366,7 @@ fn landing_b_backtrack_regression_fixture_all_tiers_emit_no_aba() {
         4,
         &mut records,
         &mut scratch,
-        0,
+        None,
         1.0,
     );
     assert_no_backtrack_in_records(&records);
@@ -3384,7 +3388,7 @@ fn emit_multipolygon_empty_outer() {
         0,
         &mut records,
         &mut emit_scratch,
-        0,
+        None,
         1.0,
     );
 
@@ -3422,7 +3426,7 @@ fn emit_multipolygon_with_hole_decodes_correctly() {
         0,
         &mut records,
         &mut emit_scratch,
-        0,
+        None,
         1.0,
     );
 
@@ -3480,7 +3484,7 @@ fn emit_multipolygon_large_shape_clips_to_multiple_tiles() {
         2,
         &mut records,
         &mut emit_scratch,
-        0,
+        None,
         1.0,
     );
 
@@ -3533,7 +3537,7 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         0,
         &mut outer_only,
         &mut emit_a,
-        0,
+        None,
         1.0,
     );
     emit_multipolygon_feature(
@@ -3546,7 +3550,7 @@ fn emit_multipolygon_drops_degenerate_or_invalid_inner_rings() {
         0,
         &mut with_bad_holes,
         &mut emit_b,
-        0,
+        None,
         1.0,
     );
     assert_eq!(outer_only.len(), 1);
@@ -3623,7 +3627,7 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         13,
         &mut z13_records,
         &mut emit_13,
-        0,
+        None,
         1.0,
     );
     emit_multipolygon_feature(
@@ -3636,7 +3640,7 @@ fn emit_multipolygon_invalid_inner_rejected_below_z14_but_allowed_at_z14() {
         14,
         &mut z14_records,
         &mut emit_14,
-        0,
+        None,
         1.0,
     );
     assert_eq!(z13_records.len(), 1);
@@ -3693,7 +3697,7 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
         13,
         &mut z13_records,
         &mut emit_13,
-        0,
+        None,
         1.0,
     );
     emit_multipolygon_feature(
@@ -3706,7 +3710,7 @@ fn emit_multipolygon_invalid_outer_repaired_or_dropped_by_integer_normalize() {
         14,
         &mut z14_records,
         &mut emit_14,
-        0,
+        None,
         1.0,
     );
 
@@ -3740,7 +3744,7 @@ fn emit_multipolygon_emits_across_zoom_range_not_just_single_zoom() {
         2,
         &mut records,
         &mut emit_scratch,
-        0,
+        None,
         1.0,
     );
     assert_eq!(usize::try_from(count).unwrap(), records.len());
@@ -3834,7 +3838,7 @@ fn zoom_window_emission_equals_full_emission_restricted() {
             hi,
             &mut records,
             &mut scratch,
-            0,
+            None,
             1.0,
         );
         records
@@ -3852,7 +3856,7 @@ fn zoom_window_emission_equals_full_emission_restricted() {
             hi,
             &mut records,
             &mut scratch,
-            0,
+            None,
             1.0,
         );
         records
@@ -4020,18 +4024,66 @@ fn minimal_config() -> TilegenConfig {
         compression_level: 6,
         force_sorted: false,
         allow_unsafe_flat_index: false,
-        threads: 1,
-        way_inflight_budget: 0,
-        assemble_batch_budget: 0,
-        dedup_cap: 0,
-        sort_chunk_size: 0,
+        threads: std::num::NonZeroUsize::MIN,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [0; Layer::count()],
+        fanout_caps: [None; Layer::count()],
         polygon_simplify_factor: 1.0,
     }
+}
+
+fn test_resources(config: &TilegenConfig) -> crate::resources::Resources {
+    crate::resources::Resources::resolve(config).expect("test config resolves")
+}
+
+#[test]
+fn resources_resolve_defaults_and_refuse_budgets_below_minimum() {
+    use crate::resources::{ByteBudget, Resources};
+    let defaults = test_resources(&minimal_config());
+    assert_eq!(defaults.sort_chunk, crate::resources::DEFAULT_SORT_BUDGET);
+    assert_eq!(
+        defaults.assemble_batch,
+        crate::resources::DEFAULT_ASSEMBLE_BUDGET
+    );
+    assert_eq!(defaults.dedup_cap, crate::pmtiles_writer::DEFAULT_DEDUP_CAP);
+    assert_eq!(
+        defaults.way_admission(false).budget,
+        crate::resources::DEFAULT_WAY_BUDGET
+    );
+    assert_eq!(
+        defaults.way_admission(true).budget,
+        crate::resources::DEFAULT_WAY_BUDGET_LOCATIONS
+    );
+    let explicit = TilegenConfig {
+        way_inflight_budget: ByteBudget::new(crate::resources::MIN_BUDGET),
+        ..minimal_config()
+    };
+    assert_eq!(
+        test_resources(&explicit).way_admission(true).budget,
+        crate::resources::MIN_BUDGET,
+        "an explicit way budget outranks the mode default"
+    );
+    let tiny_sort = TilegenConfig {
+        sort_chunk_size: ByteBudget::new(1),
+        ..minimal_config()
+    };
+    assert!(Resources::resolve(&tiny_sort).is_err());
+    let tiny_way = TilegenConfig {
+        way_inflight_budget: ByteBudget::new(1),
+        ..minimal_config()
+    };
+    assert!(Resources::resolve(&tiny_way).is_err());
+    let tiny_assemble = TilegenConfig {
+        assemble_batch_budget: ByteBudget::new(1),
+        ..minimal_config()
+    };
+    assert!(Resources::resolve(&tiny_assemble).is_err());
 }
 
 /// Assemble-side settings are applied after the chunks are read, so changing
@@ -4075,7 +4127,7 @@ fn producer_config_covers_chunk_affecting_settings() {
     );
 
     let mut capped = minimal_config();
-    capped.fanout_caps[Layer::Buildings as usize] = 2048;
+    capped.fanout_caps[Layer::Buildings as usize] = std::num::NonZeroU32::new(2048);
     assert_ne!(
         crate::provenance::producer_config(&base),
         crate::provenance::producer_config(&capped)

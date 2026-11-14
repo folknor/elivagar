@@ -14,8 +14,8 @@ use pbfhogg::ElementReader;
 
 use super::stats::{TileSizeDiagnostics, record_tile_size_diagnostics};
 use super::{
-    EnvZero, PipelineError, TileCompression, TilePayloadFormat, TilegenConfig,
-    compression_level_for_zoom, configured_tile_contract, env_integer,
+    PipelineError, TileCompression, TilePayloadFormat, TilegenConfig, compression_level_for_zoom,
+    configured_tile_contract,
 };
 
 // ---------------------------------------------------------------------------
@@ -369,6 +369,7 @@ pub(super) fn phase_assemble(
     phase_assemble_with_ocean(
         sort_reader,
         config,
+        &crate::resources::Resources::resolve(config)?,
         &crate::geometry::projection::MercBbox {
             min_x: 0.0,
             min_y: 0.0,
@@ -456,6 +457,7 @@ fn archive_config(
 pub(super) fn phase_assemble_with_ocean(
     sort_reader: &mut sort::SortReader,
     config: &TilegenConfig,
+    resources: &crate::resources::Resources,
     data_bounds: &crate::geometry::projection::MercBbox,
     ocean_tiles: Option<std::sync::Arc<crate::ocean::OceanTiles>>,
     run: RunProvenance,
@@ -502,11 +504,7 @@ pub(super) fn phase_assemble_with_ocean(
     } else {
         PmtilesWriter::new_streaming(pmtiles_config, &config.tmp_dir, &config.output_path)?
     };
-    // TilegenConfig keeps zero as the library API's default sentinel. The CLI
-    // rejects explicit zero and resolves omission to the concrete writer cap.
-    if config.dedup_cap > 0 {
-        pmtiles.set_dedup_cap(config.dedup_cap);
-    }
+    pmtiles.set_dedup_cap(resources.dedup_cap);
     let (tile_format, tile_compression) = configured_tile_contract(config);
     pmtiles.set_tile_contract(tile_format, tile_compression);
     if let Some(key) = &config.ocean_artifact_key {
@@ -530,7 +528,13 @@ pub(super) fn phase_assemble_with_ocean(
         reader_total_ns,
         partition_workers,
         partition_count,
-    } = phase_assemble_partitions(&partitions, pmtiles, config, ocean_tiles.as_deref())?;
+    } = phase_assemble_partitions(
+        &partitions,
+        pmtiles,
+        config,
+        resources,
+        ocean_tiles.as_deref(),
+    )?;
     eprintln!(
         "  Assemble partition readers: {} partitions, {} workers, max {:.1}s, total {:.1}s",
         partition_count,
@@ -606,23 +610,15 @@ fn phase_assemble_partitions(
     partitions: &[sort::SortPartition],
     mut pmtiles: PmtilesWriter,
     config: &TilegenConfig,
+    resources: &crate::resources::Resources,
     ocean: Option<&crate::ocean::OceanTiles>,
 ) -> Result<AssembleCore, PipelineError> {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::mpsc;
 
-    let split_target = env_integer(
-        "ELIVAGAR_ASSEMBLE_SPLIT_TARGET",
-        64 * 1024 * 1024u64,
-        EnvZero::Reject,
-    )?;
-    let worker_cap = env_integer("ELIVAGAR_ASSEMBLE_WORKERS", 8usize, EnvZero::Reject)?;
-    let park_budget = env_integer(
-        "ELIVAGAR_ASSEMBLE_PARK_BUDGET",
-        2 * 1024 * 1024 * 1024usize,
-        EnvZero::Reject,
-    )?;
+    let split_target = resources.assemble_split_target;
+    let park_budget = resources.assemble_park_budget;
     let union = partition_union(partitions, ocean);
     // H8b: split hot partitions into tile-range pieces. The z7 partition
     // scheme bounds MOST partitions well, but one dense z14-block prefix
@@ -678,12 +674,7 @@ fn phase_assemble_partitions(
         });
     }
 
-    // Measured on NA locations (2026-07-09): 4 workers left the writer idle
-    // 68% of assemble; 8 workers cut assemble 186.4 -> 173.0s under the old
-    // count window and 160.7s with the byte-budgeted claim window; 12 was
-    // WORSE (176.1s, +3 GB RSS) - encode CPU saturates around 8. Env
-    // override for future A/Bs.
-    let worker_count = config.threads.clamp(1, worker_cap).min(partition_count);
+    let worker_count = resources.assemble_workers(partition_count);
     let next_job = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
     let (tx, rx) = mpsc::channel::<Result<PartitionBatch, PipelineError>>();
@@ -725,11 +716,7 @@ fn phase_assemble_partitions(
     let compression_level = config.compression_level;
     let tile_format = config.tile_format;
     let tile_compression = config.tile_compression;
-    let assemble_budget = if config.assemble_batch_budget > 0 {
-        config.assemble_batch_budget
-    } else {
-        32 * 1024 * 1024
-    };
+    let assemble_budget = resources.assemble_batch;
     let artifact_ctx = ocean.map(ArtifactPartitionCtx::new).transpose()?;
 
     let mut features_read: u64 = 0;

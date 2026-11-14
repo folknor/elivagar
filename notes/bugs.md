@@ -38,25 +38,6 @@ piece's tile range and return `InvalidData`.
 
 Found by the coordinates-core landing's review.
 
-## BUG-012 - `0` means three different things across the budget knobs; `--dedup-cap 0` silently gives the default
-
-The CLI now rejects `--dedup-cap 0` and resolves an omitted cap to the
-writer's `DEFAULT_DEDUP_CAP`, so the user-facing ambiguity is gone. The
-library sentinel remains: `TilegenConfig` budgets (`sort_chunk_size`,
-`way_inflight_budget`, `assemble_batch_budget`, `dedup_cap`) still read 0 as
-"use the default", fanout caps read 0 as "uncapped", and
-`PmtilesWriter::set_dedup_cap(0)` stops new dedup entries. Proposed types:
-`ByteBudget(NonZeroUsize)`, an entry cap,
-`enum FanoutCap { Uncapped, Tiles(NonZeroU32) }`,
-`enum DedupPolicy { Off, Cap(NonZeroUsize) }`, with `Option` meaning default
-and resolution done once. The consumers in `pipeline/phase12.rs` (including
-the locations-mode way-budget defaults), `pipeline/emit.rs` and
-`pipeline/relations.rs` must move together with the field types, and the
-change is a public `TilegenConfig` break brokkr must follow.
-
-Reported by the storage hunt; the pipeline and run-contract hunts flag the
-same sentinel.
-
 ---
 
 # Ocean

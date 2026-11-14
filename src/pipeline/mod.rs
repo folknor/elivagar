@@ -58,40 +58,6 @@ impl From<String> for PipelineError {
     }
 }
 
-#[derive(Clone, Copy)]
-enum EnvZero {
-    Allow,
-    Reject,
-}
-
-/// Unset knobs use their default; set knobs must be plain decimal integers.
-fn env_integer<T>(name: &str, default: T, zero: EnvZero) -> Result<T, PipelineError>
-where
-    T: std::str::FromStr + PartialEq + From<u8>,
-    T::Err: std::fmt::Display,
-{
-    let Some(raw) = std::env::var_os(name) else {
-        return Ok(default);
-    };
-    let value = raw
-        .into_string()
-        .map_err(|_| PipelineError(format!("invalid {name}: value is not valid UTF-8")))?;
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(PipelineError(format!(
-            "invalid {name}={value:?}: expected a decimal integer without signs, whitespace or size suffixes"
-        )));
-    }
-    let parsed = value
-        .parse::<T>()
-        .map_err(|error| PipelineError(format!("invalid {name}={value:?}: {error}")))?;
-    if matches!(zero, EnvZero::Reject) && parsed == T::from(0) {
-        return Err(PipelineError(format!(
-            "invalid {name}={value:?}: value must be greater than zero"
-        )));
-    }
-    Ok(parsed)
-}
-
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -219,38 +185,35 @@ pub struct TilegenConfig {
     /// workers in locations mode; way admission allows threads.max(8) blocks.
     /// Assembly derives partition workers from threads. Relation prepass, way
     /// dispatch and result drain also run on separate OS threads.
-    /// Default: `std::thread::available_parallelism()` (logical CPUs).
-    pub threads: usize,
-    // Keep these public budget fields raw until their consumers can migrate
-    // together: phase12 reads sort_chunk_size and way_inflight_budget as usize,
-    // while assemble reads assemble_batch_budget as usize.
-    /// Raw-byte budget for in-flight way processing.
-    /// 0 = mode-aware default:
+    /// There is no default here; the CLI's is
+    /// [`crate::resources::default_threads`] (logical CPUs).
+    pub threads: std::num::NonZeroUsize,
+    /// Raw-byte budget for in-flight way processing, at least
+    /// [`crate::resources::MIN_BUDGET`]. `None` = mode-aware default:
     /// - 128 MB (standard node-store path)
     /// - 4 GB (`locations_on_ways` mode)
     ///
     /// Safety net against individually huge blocks; the count ceiling
     /// (`threads.max(8)`) is the primary admission control.
-    pub way_inflight_budget: usize,
-    /// Byte budget for assemble tile batches (0 = default 32 MB).
+    pub way_inflight_budget: Option<crate::resources::ByteBudget>,
+    /// Byte budget for assemble tile batches, at least
+    /// [`crate::resources::MIN_BUDGET`] (`None` = 32 MB).
     /// Controls memory during tile assembly. Dense urban tiles at z14 can
     /// make fixed-count batches very large.
-    pub assemble_batch_budget: usize,
-    /// Entry cap for the PMTiles payload dedup map (0 = default 1M).
+    pub assemble_batch_budget: Option<crate::resources::ByteBudget>,
+    /// Entry cap for the PMTiles payload dedup map (`None` = 1M).
     /// Tile content is identical under any cap; past it, duplicate payloads
     /// are stored instead of referenced, costing archive bytes. The map costs
     /// ~56 bytes/entry of RAM. Not part of the provenance comparability
     /// contract for the same reason budgets are not: it cannot change what a
     /// consumer decodes from any tile.
-    /// This integer representation stays compatible with existing library
-    /// callers; the CLI rejects explicit zero because the writer API uses zero
-    /// to disable individual tile payload deduplication.
-    pub dedup_cap: usize,
-    /// Byte budget per sort chunk (0 = default 1 GB).
+    pub dedup_cap: Option<std::num::NonZeroUsize>,
+    /// Byte budget per sort chunk, at least
+    /// [`crate::resources::MIN_SORT_BUDGET`] (`None` = 1 GB).
     /// Records buffer in memory up to this limit, then flush as a sorted
     /// chunk file to disk. Lower values reduce peak RSS during PBF processing
     /// at the cost of more chunk files in the merge phase.
-    pub sort_chunk_size: usize,
+    pub sort_chunk_size: Option<crate::resources::ByteBudget>,
     /// Use pre-resolved node coordinates from way elements instead of building
     /// a node store. Requires a PBF produced by `pbfhogg add-locations-to-ways`.
     /// Always detected from the PBF header's `LocationsOnWays` optional
@@ -263,13 +226,11 @@ pub struct TilegenConfig {
     /// Compression algorithm for sort chunk files. Reduces disk I/O at the
     /// cost of CPU. Useful at planet scale where sort data exceeds available RAM.
     pub compress_sort_chunks: sort::ChunkCompression,
-    // phase12 passes raw u32 fanout caps through emit and relations. FanoutCap
-    // needs those field consumers and signatures to migrate together.
     /// Per-layer fanout caps: maximum bbox tiles a polygon feature may touch
     /// at any zoom. When exceeded, the feature is skipped at that zoom.
-    /// 0 = uncapped (default). Only applies to polygon-geometry emit functions.
+    /// `None` = uncapped. Only applies to polygon-geometry emit functions.
     /// Indexed by `Layer` enum discriminant.
-    pub fanout_caps: [u32; shortbread::Layer::count()],
+    pub fanout_caps: [Option<std::num::NonZeroU32>; shortbread::Layer::count()],
     /// Simplification tolerance multiplier for polygon layers. 1.0 = standard
     /// (same tolerance as lines). Values > 1.0 simplify more aggressively,
     /// reducing sort record volume. Polygon fill rendering is less sensitive
@@ -313,8 +274,6 @@ const CHECKPOINT_FILE: &str = "checkpoint.txt";
 const CHECKPOINT_VERSION: u32 = 10;
 const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
-/// Default memory budget per sort chunk (1 GB).
-const DEFAULT_SORT_CHUNK_SIZE: usize = 1 << 30;
 
 // ---------------------------------------------------------------------------
 // Checkpoint I/O
@@ -777,20 +736,7 @@ fn emit_allocator_boundary(name: &str) {
     emit_alloc_boundary(name);
 }
 
-/// The per-layer per-zoom sort stats (records, bytes, fanout percentiles,
-/// threshold counts) are a ~800-counter firehose - roughly 26 layers x 15 zooms
-/// x several metrics - that swamps `brokkr sidecar --counters` and floods an
-/// optimizer's context. They are diagnostic detail wanted only during layer or
-/// fanout-cap analysis, so they are emitted only when ELIVAGAR_LAYER_STATS is
-/// set. The per-layer totals (`sort_layer_<name>_records`/`_bytes`) are always
-/// emitted.
-///
-/// The gate is about volume, not cost: these are emitted at end of run and
-/// never touch timing. brokkr's `capture_env` records the variable with the
-/// run, so a run carrying the firehose is identifiable from its results row.
-fn layer_stats_enabled() -> bool {
-    std::env::var_os("ELIVAGAR_LAYER_STATS").is_some()
-}
+use crate::debug::layer_stats_enabled;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -841,11 +787,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         )));
     }
 
-    let sort_chunk_size = if config.sort_chunk_size > 0 {
-        config.sort_chunk_size
-    } else {
-        DEFAULT_SORT_CHUNK_SIZE
-    };
+    let resources = crate::resources::Resources::resolve(config)?;
+    resources.emit();
 
     let total_start = Instant::now();
     let skip = config.skip_to;
@@ -969,7 +912,8 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
 
             let input_hash = crate::provenance::BackgroundHash::spawn(config.pbf_path.clone());
             let phase12_start = Instant::now();
-            let (mut sw, bounds_out, p12_stats) = phase12::phase_read_and_process(config)?;
+            let (mut sw, bounds_out, p12_stats) =
+                phase12::phase_read_and_process(config, &resources)?;
             phase12_stats = Some(p12_stats);
             let phase12_elapsed = phase12_start.elapsed();
             emit_marker("PHASE12_END");
@@ -1022,7 +966,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             clear_sort_chunk_count(&config.tmp_dir)?;
             sort::SortWriter::resume(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
-                sort_chunk_size,
+                resources.sort_chunk,
                 pbf_chunks,
                 config.compress_sort_chunks,
             )?
@@ -1174,6 +1118,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     ) = assemble::phase_assemble_with_ocean(
         &mut sort_reader,
         config,
+        &resources,
         &data_bounds,
         active_ocean_artifact,
         assemble::RunProvenance {
@@ -1565,7 +1510,7 @@ pub fn ocean_build(
     output_path: &Path,
     tmp_dir: &Path,
     compression_level: u32,
-    threads: usize,
+    threads: std::num::NonZeroUsize,
 ) -> Result<(), PipelineError> {
     validate_compression_level(compression_level)?;
     crate::debug::reset_run_counters();
@@ -1588,7 +1533,7 @@ pub fn ocean_build(
     let chunks_dir = tmp_dir.join(SORT_CHUNKS_DIR);
     let mut writer = sort::SortWriter::new(
         &chunks_dir,
-        DEFAULT_SORT_CHUNK_SIZE,
+        crate::resources::DEFAULT_SORT_BUDGET,
         sort::ChunkCompression::None,
     )?;
     let world = MercBbox {
@@ -1655,17 +1600,19 @@ pub fn ocean_build(
         force_sorted: false,
         allow_unsafe_flat_index: false,
         threads,
-        way_inflight_budget: 0,
-        assemble_batch_budget: 0,
-        dedup_cap: 0,
-        sort_chunk_size: DEFAULT_SORT_CHUNK_SIZE,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
         locations_on_ways: false,
         tile_format: TilePayloadFormat::Mvt,
         tile_compression: TileCompression::Gzip,
         compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [0; shortbread::Layer::count()],
+        fanout_caps: [None; shortbread::Layer::count()],
         polygon_simplify_factor: 1.0,
     };
+    let resources = crate::resources::Resources::resolve(&config)?;
+    resources.emit();
     // The durable artifact has no input PBF. Its top-level ocean_artifact key
     // identifies its shapefile sources and policy without changing the wire
     // metadata consumed by brokkr and OceanTiles::open. Assembly counts the
@@ -1673,6 +1620,7 @@ pub fn ocean_build(
     let _ = assemble::phase_assemble_with_ocean(
         &mut reader,
         &config,
+        &resources,
         &world,
         None,
         assemble::RunProvenance {

@@ -179,7 +179,7 @@ pub(super) fn process_relation_blocks(
     sort_writer: &mut SortWriter,
     spill: &sort::SpillCoalescer,
     fanout_stats: &mut FanoutStats,
-    fanout_caps: &[u32],
+    fanout_caps: &[Option<std::num::NonZeroU32>],
     polygon_simplify_factor: f64,
 ) -> Result<RelationTail, PipelineError> {
     use rayon::prelude::*;
@@ -352,7 +352,7 @@ pub(super) fn process_prepared_relation_into(
     sink: &mut RecordSink,
     point_emit: &mut PointEmitScratch,
     multipolygon_emit: &mut MultipolygonEmitScratch,
-    fanout_caps: &[u32],
+    fanout_caps: &[Option<std::num::NonZeroU32>],
     polygon_simplify_factor: f64,
     fanout: &mut FanoutStats,
 ) {

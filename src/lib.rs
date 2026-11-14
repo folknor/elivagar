@@ -26,16 +26,16 @@
 //!     compression_level: 6,
 //!     force_sorted: false,
 //!     allow_unsafe_flat_index: false,
-//!     threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
-//!     way_inflight_budget: 0,
-//!     assemble_batch_budget: 0,
-//!     dedup_cap: 0,
-//!     sort_chunk_size: 0,
+//!     threads: elivagar::resources::default_threads(),
+//!     way_inflight_budget: None,
+//!     assemble_batch_budget: None,
+//!     dedup_cap: None,
+//!     sort_chunk_size: None,
 //!     locations_on_ways: false,
 //!     tile_format: elivagar::TilePayloadFormat::Mvt,
 //!     tile_compression: elivagar::TileCompression::Gzip,
 //!     compress_sort_chunks: elivagar::sort::ChunkCompression::None,
-//!     fanout_caps: [0; elivagar::shortbread::Layer::count()],
+//!     fanout_caps: [None; elivagar::shortbread::Layer::count()],
 //!     polygon_simplify_factor: 1.0,
 //! };
 //! elivagar::run(&config).expect("pipeline failed");
@@ -79,6 +79,7 @@ pub mod pmtiles_reader;
 pub mod pmtiles_writer;
 pub(crate) use shortbread::pois;
 pub mod provenance;
+pub mod resources;
 pub mod shortbread;
 pub mod sort;
 pub mod svg;

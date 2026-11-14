@@ -41,7 +41,6 @@ use crate::wire_format::{append_feature_data_with_attrs, encode_attrs_bytes};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Bump whenever a change affects durable ocean tile bytes.
@@ -527,10 +526,8 @@ static OCEAN_STATS: OceanStats = OceanStats {
 
 use crate::tiling::ZOOM_COUNT;
 
-static OCEAN_LAYER_STATS_ENABLED: OnceLock<bool> = OnceLock::new();
-
 fn ocean_layer_stats_enabled() -> bool {
-    *OCEAN_LAYER_STATS_ENABLED.get_or_init(|| std::env::var_os("ELIVAGAR_LAYER_STATS").is_some())
+    crate::debug::layer_stats_enabled()
 }
 
 /// Discard ocean totals left by a previous failed sequential pipeline run.

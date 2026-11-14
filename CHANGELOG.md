@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `TilegenConfig` budgets are typed instead of zero-means-default.
+  Breaking: `sort_chunk_size`, `way_inflight_budget` and
+  `assemble_batch_budget` are `Option<resources::ByteBudget>`,
+  `dedup_cap` is `Option<NonZeroUsize>`, `fanout_caps` holds
+  `Option<NonZeroU32>` per layer with `None` uncapped, `threads` is a
+  `NonZeroUsize` and `ocean_build` takes one. The new public `resources`
+  module owns the defaults, the minimums (now enforced for library
+  callers too) and `default_threads()`. Every budget, worker count and
+  env knob is resolved once per run and emitted as `res_*` sidecar
+  counters; a malformed env knob now fails the run even when its phase
+  is skipped. `-j 0` is rejected. Output is unchanged.
+
 - New public `tiling` module: the profile top zoom `MAX_ZOOM`, the
   archive ceiling z31, and a validated `TileId` owning the only Hilbert
   conversions and per-zoom id ranges. Breaking: the writer's

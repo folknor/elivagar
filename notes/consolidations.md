@@ -309,39 +309,6 @@ Reported by the encoding, Shortbread and layer-identity hunts.
 
 # Storage, sort and resources
 
-## CON-033 - What is this run's effective budget and thread count?
-
-| Question | Sites |
-|---|---|
-| sort chunk default | `DEFAULT_SORT_CHUNK_SIZE` in `pipeline/mod.rs` (private) and `phase12.rs` (`pub(super)`), "0 means default" resolved in both `run` and `phase_read_and_process` |
-| assemble batch default | literal 32 MiB in both `phase_assemble_with_ocean` and `phase_assemble_partitions` |
-| way budget default | inside phase12's way-block arm, keyed on effective locations mode; restated as `128M`/`4G` in `--way-budget` help |
-| dedup default | `MAX_DEDUP_ENTRIES` in the writer plus assemble's "if > 0 then set"; restated as "1000000" in help |
-| thread default | `available_parallelism().unwrap_or(4)` twice in `main.rs` (run, ocean-build) |
-| per-actor thread split | phase12 (decode /3, node workers /4 clamp, in-flight max 8), assemble (clamp 8 + env), `plan_pieces` (unbounded) |
-| ocean per-fold flush | `min(sort budget, OCEAN_CHUNK_SIZE_LIMIT)` in ocean.rs |
-| way-offset sort memory | `way_index::OFFSETS_SORT_BUDGET` (256 MB, no knob) |
-| relation block buffer | `REL_BLOCKS_BUFFER_CAP` + env override in phase12 |
-| layer-stats firehose | `ELIVAGAR_LAYER_STATS` read by `pipeline::layer_stats_enabled` (every call) and `ocean::ocean_layer_stats_enabled` (OnceLock), agreeing only because both test `var_os(..).is_some()` |
-
-They do not disagree yet beyond the defects in `notes/bugs.md` (thread doc,
-env fail-open, zero sentinel). Budgets rightly stay out of the contract, but
-the effective values never reach provenance or the sidecar as one record, so
-"what memory shape did this run have" can only be reconstructed by re-deriving
-defaults from source at that commit. Validation (the 64M/1M minimums) lives
-only in clap `value_parser`s, so a library caller (brokkr; `lib.rs`'s doc
-example passes zeros) can pass `sort_chunk_size: 1`. `dedup_cap` and
-`sort_chunk_size` are the same `usize`, adjacent and swappable.
-
-Owner proposed: a `resources` module with
-`Resources::resolve(&config, &InputFacts) -> ResolvedResources`, called once
-after header detection (the locations-dependent way default needs it),
-holding every budget, thread split and env override (validated, failing
-loudly), emitted once as `res_*` sidecar counters and passed by reference.
-Budget types per the zero-sentinel bug entry.
-
-Reported by the storage and pipeline hunts.
-
 ## CON-034 - What is the sort budget a budget of?
 
 `--sort-budget` is charged independently by the `SortWriter` buffer, the

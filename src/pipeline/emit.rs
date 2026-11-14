@@ -1,5 +1,6 @@
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
+use std::num::NonZeroU32;
 
 use super::stats::CapEvent;
 use crate::geometry::int_ocean::{
@@ -458,12 +459,12 @@ fn polygon_z_bottom_after_caps(
     z_hi: u8,
     layer: Layer,
     osm_id: u64,
-    fanout_cap: u32,
+    fanout_cap: Option<NonZeroU32>,
     cap_events: &mut Vec<CapEvent>,
 ) -> Option<u8> {
-    if fanout_cap == 0 {
+    let Some(fanout_cap) = fanout_cap else {
         return Some(z_hi);
-    }
+    };
     let bbox = shape_bbox(shape_base)?;
     let mut z_bottom = z_hi;
     let event = |z: u8, bbox_tiles: u64| CapEvent {
@@ -473,7 +474,7 @@ fn polygon_z_bottom_after_caps(
     };
     for z in z_start..=z_hi {
         let bbox_tiles = tile_count_for_base_rect(bbox, OSM_POLYGON_MAX_Z, z);
-        if bbox_tiles > u64::from(fanout_cap) {
+        if bbox_tiles > u64::from(fanout_cap.get()) {
             cap_events.push(event(z, bbox_tiles));
             if z == z_start {
                 return None;
@@ -508,7 +509,7 @@ fn polygon_zoom_plan(
     z_lo: u8,
     z_hi: u8,
     osm_id: u64,
-    fanout_cap: u32,
+    fanout_cap: Option<NonZeroU32>,
     cap_events: &mut Vec<CapEvent>,
 ) -> Option<(u8, u8)> {
     let z_start = polygon_z_start(merc, m.min_zoom.min(z_lo), m.max_zoom.max(z_hi))?;
@@ -535,7 +536,7 @@ fn clear_attrs_cache(cache: &mut [Option<Vec<u8>>; ZOOM_COUNT]) {
 pub(super) struct EmitCtx<'a> {
     pub(super) min_zoom: u8,
     pub(super) max_zoom: u8,
-    pub(super) fanout_caps: &'a [u32],
+    pub(super) fanout_caps: &'a [Option<NonZeroU32>],
     pub(super) polygon_simplify_factor: f64,
 }
 
@@ -672,7 +673,7 @@ pub(super) fn emit_match(
             let cap = if m.geom_expect == GeomExpect::Polygon {
                 ctx.fanout_caps[m.layer as usize]
             } else {
-                0
+                None
             };
             let mut geometry = geometry;
             let mut count = 0;
@@ -1012,7 +1013,7 @@ pub(super) fn emit_polygon_feature(
     z_hi: u8,
     records: &mut impl FeatureRecordSink,
     scratch: &mut PolygonEmitScratch,
-    fanout_cap: u32,
+    fanout_cap: Option<NonZeroU32>,
     tol_scale: f64,
 ) -> u64 {
     scratch.cap_events.clear();
@@ -1121,7 +1122,7 @@ pub(super) fn emit_multipolygon_feature(
     z_hi: u8,
     records: &mut impl FeatureRecordSink,
     emit_scratch: &mut MultipolygonEmitScratch,
-    fanout_cap: u32,
+    fanout_cap: Option<NonZeroU32>,
     tol_scale: f64,
 ) -> u64 {
     emit_scratch.cap_events.clear();
@@ -1439,9 +1440,16 @@ mod landing2_tests {
         let mut shape = Shape::new();
         quantize_polygon_into(&square(0.1, 0.9), &[], OSM_POLYGON_MAX_Z, &mut shape);
         let mut cap_events = Vec::new();
-        let z_bottom =
-            polygon_z_bottom_after_caps(&shape, 0, 4, Layer::Buildings, 777, 4, &mut cap_events)
-                .expect("low zooms stay below cap");
+        let z_bottom = polygon_z_bottom_after_caps(
+            &shape,
+            0,
+            4,
+            Layer::Buildings,
+            777,
+            NonZeroU32::new(4),
+            &mut cap_events,
+        )
+        .expect("low zooms stay below cap");
         assert_eq!(z_bottom, 1);
         let capped_zooms: Vec<u8> = cap_events.iter().map(|event| event.at.zoom()).collect();
         assert_eq!(capped_zooms, vec![2, 3, 4]);
@@ -1481,7 +1489,7 @@ mod landing2_tests {
             14,
             &mut records,
             &mut scratch,
-            0,
+            None,
             1.0,
         );
         assert_eq!(

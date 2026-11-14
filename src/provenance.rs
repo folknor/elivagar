@@ -317,25 +317,21 @@ fn build_json() -> Value {
     })
 }
 
-/// Fanout caps keyed by layer name, omitting unsupported layers and zeros.
+/// Fanout caps keyed by layer name, omitting unsupported and uncapped layers.
 ///
 /// Layer arrays are indexed by `Layer` discriminant; emitting names rather
 /// than positions keeps the metadata readable and survives a reordering of
 /// the enum, which a positional array would silently misattribute.
-fn fanout_cap_map(values: &[u32]) -> Value {
+fn fanout_cap_map(values: &[Option<std::num::NonZeroU32>]) -> Value {
     let mut map = serde_json::Map::new();
     for layer in Layer::ALL {
         if !layer.supports_fanout_cap() {
             continue;
         }
-        let idx = layer as usize;
-        let Some(&value) = values.get(idx) else {
+        let Some(Some(value)) = values.get(layer as usize) else {
             continue;
         };
-        if value == 0 {
-            continue;
-        }
-        map.insert(layer.name().to_string(), json!(value));
+        map.insert(layer.name().to_string(), json!(value.get()));
     }
     Value::Object(map)
 }
@@ -638,15 +634,19 @@ mod tests {
 
     #[test]
     fn fanout_cap_map_omits_defaults_and_unsupported_layers() {
-        let mut caps = [0_u32; Layer::count()];
-        caps[Layer::Buildings as usize] = 4096;
-        caps[Layer::Ocean as usize] = 2048;
+        let mut caps = [None; Layer::count()];
+        caps[Layer::Buildings as usize] = std::num::NonZeroU32::new(4096);
+        caps[Layer::Ocean as usize] = std::num::NonZeroU32::new(2048);
         let value = fanout_cap_map(&caps);
         let obj = value.as_object().expect("layer map must be an object");
         assert_eq!(
             obj.len(),
             1,
-            "zero-valued and unsupported layers must be omitted"
+            "uncapped and unsupported layers must be omitted"
+        );
+        assert_eq!(
+            serde_json::to_string(&value).expect("serializes"),
+            r#"{"buildings":4096}"#
         );
         assert_eq!(value[Layer::Buildings.name()], 4096);
         assert!(value.get(Layer::Ocean.name()).is_none());

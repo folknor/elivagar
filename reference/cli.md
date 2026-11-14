@@ -154,7 +154,7 @@ Example, the production shape:
 | `--tile-format <mvt\|mlt>` | payload format. Default `mvt` |
 | `--tile-compression <gzip\|brotli>` | MVT only. Default `gzip`; MLT ignores this default and stores uncompressed payloads. MLT with brotli is rejected by the library. |
 | `--compress-sort-chunks <lz4\|snappy>` | compress sort chunks: less disk I/O, more CPU. Wanted at planet scale, where scratch exceeds RAM |
-| `-j`, `--threads <N>` | worker sizing input for Rayon, decode, phase12 and assembly; not a process-wide cap. Default: logical CPUs |
+| `-j`, `--threads <N>` | worker sizing input for Rayon, decode, phase12 and assembly; not a process-wide cap. Default: logical CPUs. Zero is rejected |
 
 The CLI sizes Rayon from `--threads`; library callers size Rayon separately.
 Phase12 derives decode workers with `max(threads / 3, 1)` and, in locations
@@ -222,7 +222,7 @@ including header detection) avoid the node store and this guard entirely.
 | flag | default | meaning |
 |---|---|---|
 | `--sort-budget <SIZE>` | 1G | per-chunk sort buffer. Min 64M. Lower cuts phase12 RSS, costs merge chunks |
-| `--way-budget <SIZE>` | 128M, or 4G under `--locations-on-ways` | in-flight way processing, in raw bytes (decompressed block size plus measured plan bytes). Min 1M. The count ceiling (`threads.max(8)` blocks in flight) is the primary admission control; this budget is a safety net against individually huge blocks and never binds on normal input, whatever the blob packing. See the constant's comment in `src/pipeline/phase12.rs` |
+| `--way-budget <SIZE>` | 128M, or 4G under `--locations-on-ways` | in-flight way processing, in raw bytes (decompressed block size plus measured plan bytes). Min 1M. The count ceiling (`threads.max(8)` blocks in flight) is the primary admission control; this budget is a safety net against individually huge blocks and never binds on normal input, whatever the blob packing. See the constant's comment in `src/resources.rs` |
 | `--dedup-cap <N>` | 1000000 when omitted; 0 is rejected | positive entry cap for the PMTiles payload dedup map. Tile content is identical under any cap; past it duplicate payloads are stored instead of referenced, costing archive bytes, and the map costs ~56 bytes/entry of RAM. Deliberately outside the provenance contract, like the budgets: it cannot change what a consumer decodes |
 | `--assemble-budget <SIZE>` | 32M | tile assembly batch. Min 1M |
 
@@ -236,6 +236,16 @@ use the default. The standalone `PmtilesWriter::set_dedup_cap(0)` API prevents
 new dedup map entries. Existing entries remain eligible for lookups, so set
 zero before writing to disable tile-to-tile deduplication from the start. Run
 entries still share one payload across their tile range.
+
+Library callers state the same choices in types rather than with a zero
+sentinel. `TilegenConfig`'s byte budgets are `Option<ByteBudget>` and its dedup
+cap is `Option<NonZeroUsize>`, with `None` selecting the default above; fanout
+caps are `Option<NonZeroU32>` per layer, `None` meaning uncapped; `threads` is
+a required `NonZeroUsize`, and `elivagar::resources::default_threads()` is the
+CLI's default. The minimums are enforced by the library too, so a library
+caller cannot run a smaller budget than the CLI accepts. The run resolves every
+budget, worker count and environment knob once, in `src/resources.rs`, and
+emits the resolved values as `res_*` sidecar counters.
 
 ### Geometry
 
@@ -265,7 +275,7 @@ release, not per run.
 | `-o`, `--output <PATH>` | output artifact path (required) |
 | `--tmp-dir <PATH>` | default `data/ocean-build_tmp` |
 | `--compression-level <0-10>` | default 6; the library rejects values above 10 before accessing inputs or retaining the outgoing artifact |
-| `-j`, `--threads <N>` | default: logical CPUs |
+| `-j`, `--threads <N>` | default: logical CPUs. Zero is rejected |
 
 The `--ocean` spelling is shared with `run` deliberately: the shapefiles and
 the zoom split are part of the artifact's identity, so the key it records and
@@ -511,6 +521,9 @@ Set values must contain only ASCII decimal digits and fit the target integer:
 Empty, malformed, non-UTF-8 or overflowing values fail the run instead of
 falling back. Signs, whitespace and size suffixes are rejected: `1G` fails;
 write `1073741824` for 1 GiB. Zero fails for the three assemble knobs.
+All four are read once when the run starts, with the budgets, so a malformed
+value fails the run even when the phase that would use it is skipped by
+`--skip-to`.
 
 `BROKKR_MARKER_FIFO` is why a bare `elivagar run` emits no metrics at all: the
 sidecar numbers exist only for runs brokkr started with a measurement flag.

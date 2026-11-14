@@ -1044,6 +1044,13 @@ impl PmtilesWriter {
     /// entries remain eligible for lookups, so set zero before adding tiles to
     /// disable tile-to-tile deduplication from the start. Run entries still
     /// share one payload across their addressed tile range.
+    ///
+    /// The cap stays a plain count on purpose. Zero is not a sentinel here:
+    /// it is a capacity of zero entries, handled by the same insert-if-below
+    /// arithmetic as any other cap, so an `Off`/`Cap(n)` policy enum would
+    /// describe a mode the writer does not have. Only the pipeline's
+    /// `TilegenConfig::dedup_cap` is `Option<NonZeroUsize>`, because there
+    /// `None` means "the default".
     pub fn set_dedup_cap(&mut self, cap: usize) {
         self.dedup.cap = cap;
     }
