@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Every Shortbread `kind` value is declared in a typed family (water,
+  pier, dam, aerialway, ferry, public transport, place, site, street label
+  point and bridge kinds join `LandKind`, `StreetClass` and `LinkClass`),
+  and each declaration asserts at compile time that its names are distinct
+  and present in the wire interning dictionary, so a new kind can no
+  longer silently miss it. `StreetKind::label_name` is removed. Output
+  unchanged.
+
 - One MVT protobuf message reader. `tile_detail`, `verify`, `svg`, `diag`
   and the ocean artifact splice walk tile, layer, feature and value
   messages through `mvt::message`, so a truncated tag or field now fails

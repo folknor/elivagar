@@ -10,109 +10,43 @@ const STREET_FLAG_ATTRIBUTE_MIN_ZOOM: u8 = 11;
 // Street kinds
 // ---------------------------------------------------------------------------
 
-/// The class of a street, rail or aeroway line: the `kind` value the streets
-/// and street_polygons layers emit. Declared in paint order, so the class
-/// rank is the discriminant. Street zoom floors are not a class property
-/// (street_labels uses its own floors and rail has a service override), so
-/// they stay in the matcher rows.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum StreetClass {
-    Track,
-    Footway,
-    Steps,
-    Path,
-    Cycleway,
-    Pedestrian,
-    LivingStreet,
-    Service,
-    Busway,
-    BusGuideway,
-    Taxiway,
-    Runway,
-    Unclassified,
-    Residential,
-    Tertiary,
-    Secondary,
-    Primary,
-    Trunk,
-    Motorway,
-    Funicular,
-    Monorail,
-    Tram,
-    LightRail,
-    Subway,
-    NarrowGauge,
-    Rail,
+wire_kinds! {
+    /// The class of a street, rail or aeroway line: the `kind` value the streets
+    /// and street_polygons layers emit. Declared in paint order, so the class
+    /// rank is the discriminant. Street zoom floors are not a class property
+    /// (street_labels uses its own floors and rail has a service override), so
+    /// they stay in the matcher rows.
+    pub enum StreetClass {
+        Track = "track",
+        Footway = "footway",
+        Steps = "steps",
+        Path = "path",
+        Cycleway = "cycleway",
+        Pedestrian = "pedestrian",
+        LivingStreet = "living_street",
+        Service = "service",
+        Busway = "busway",
+        BusGuideway = "bus_guideway",
+        Taxiway = "taxiway",
+        Runway = "runway",
+        Unclassified = "unclassified",
+        Residential = "residential",
+        Tertiary = "tertiary",
+        Secondary = "secondary",
+        Primary = "primary",
+        Trunk = "trunk",
+        Motorway = "motorway",
+        Funicular = "funicular",
+        Monorail = "monorail",
+        Tram = "tram",
+        LightRail = "light_rail",
+        Subway = "subway",
+        NarrowGauge = "narrow_gauge",
+        Rail = "rail",
+    }
 }
 
 impl StreetClass {
-    /// Every variant in declaration order; a test pins it to the discriminants.
-    pub const ALL: [StreetClass; 26] = {
-        use StreetClass::*;
-        [
-            Track,
-            Footway,
-            Steps,
-            Path,
-            Cycleway,
-            Pedestrian,
-            LivingStreet,
-            Service,
-            Busway,
-            BusGuideway,
-            Taxiway,
-            Runway,
-            Unclassified,
-            Residential,
-            Tertiary,
-            Secondary,
-            Primary,
-            Trunk,
-            Motorway,
-            Funicular,
-            Monorail,
-            Tram,
-            LightRail,
-            Subway,
-            NarrowGauge,
-            Rail,
-        ]
-    };
-
-    /// The `kind` attribute value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        use StreetClass::*;
-        match self {
-            Track => "track",
-            Footway => "footway",
-            Steps => "steps",
-            Path => "path",
-            Cycleway => "cycleway",
-            Pedestrian => "pedestrian",
-            LivingStreet => "living_street",
-            Service => "service",
-            Busway => "busway",
-            BusGuideway => "bus_guideway",
-            Taxiway => "taxiway",
-            Runway => "runway",
-            Unclassified => "unclassified",
-            Residential => "residential",
-            Tertiary => "tertiary",
-            Secondary => "secondary",
-            Primary => "primary",
-            Trunk => "trunk",
-            Motorway => "motorway",
-            Funicular => "funicular",
-            Monorail => "monorail",
-            Tram => "tram",
-            LightRail => "light_rail",
-            Subway => "subway",
-            NarrowGauge => "narrow_gauge",
-            Rail => "rail",
-        }
-    }
-
     /// The class whose wire name is `name`, if the streets layers emit it.
     pub fn from_name(name: &str) -> Option<StreetClass> {
         Self::ALL.into_iter().find(|c| c.as_str() == name)
@@ -142,27 +76,19 @@ impl StreetClass {
     }
 }
 
-/// The five road classes that have `_link` variants.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum LinkClass {
-    Motorway,
-    Trunk,
-    Primary,
-    Secondary,
-    Tertiary,
+wire_kinds! {
+    /// The five road classes that have `_link` variants. The wire name is
+    /// the raw OSM value, which street_labels keeps as its `kind`.
+    pub enum LinkClass {
+        Motorway = "motorway_link",
+        Trunk = "trunk_link",
+        Primary = "primary_link",
+        Secondary = "secondary_link",
+        Tertiary = "tertiary_link",
+    }
 }
 
 impl LinkClass {
-    /// Every variant in declaration order; a test pins it to the discriminants.
-    pub const ALL: [LinkClass; 5] = [
-        LinkClass::Motorway,
-        LinkClass::Trunk,
-        LinkClass::Primary,
-        LinkClass::Secondary,
-        LinkClass::Tertiary,
-    ];
-
     /// The parent class, which the streets layer emits as `kind`.
     pub const fn class(self) -> StreetClass {
         match self {
@@ -171,17 +97,6 @@ impl LinkClass {
             LinkClass::Primary => StreetClass::Primary,
             LinkClass::Secondary => StreetClass::Secondary,
             LinkClass::Tertiary => StreetClass::Tertiary,
-        }
-    }
-
-    /// The raw OSM value, which street_labels keeps as its `kind`.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            LinkClass::Motorway => "motorway_link",
-            LinkClass::Trunk => "trunk_link",
-            LinkClass::Primary => "primary_link",
-            LinkClass::Secondary => "secondary_link",
-            LinkClass::Tertiary => "tertiary_link",
         }
     }
 }
@@ -207,11 +122,12 @@ impl StreetKind {
         matches!(self, StreetKind::Link(_))
     }
 
-    /// The `kind` value street_labels emits.
-    pub const fn label_name(self) -> &'static str {
+    /// The `kind` attribute street_labels emits: the class, or the raw
+    /// `_link` name.
+    pub(crate) fn label_attr(self) -> Attr {
         match self {
-            StreetKind::Road(class) => class.as_str(),
-            StreetKind::Link(link) => link.as_str(),
+            StreetKind::Road(class) => attr_kind(class),
+            StreetKind::Link(link) => attr_kind(link),
         }
     }
 }
@@ -281,7 +197,7 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
     let is_link = street.is_link();
     let is_rail = class.is_rail();
     // kind: always emitted. Boolean attrs only when true (saves ~3-6 tags/feature).
-    let mut attrs = smallvec![attr_str("kind", class.as_str())];
+    let mut attrs = smallvec![attr_kind(class)];
     if is_link {
         attrs.push(attr_bool_z("link", true, STREET_FLAG_ATTRIBUTE_MIN_ZOOM));
     }
@@ -342,7 +258,7 @@ pub(super) fn match_streets_line(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
 
 pub(super) fn match_street_polygons(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if let Some((class, min_zoom)) = street_polygon_match(tags) {
-        let mut attrs = smallvec![attr_str("kind", class.as_str())];
+        let mut attrs = smallvec![attr_kind(class)];
         if is_bridge(tags) {
             attrs.push(attr_bool("bridge", true));
         }
@@ -392,7 +308,7 @@ pub(super) fn match_street_labels_line(tags: &Tags<'_>, out: &mut SmallVec<[Laye
         Some(class) => class,
         None => return,
     };
-    let mut attrs = smallvec![attr_str("kind", kind.label_name())];
+    let mut attrs = smallvec![kind.label_attr()];
     attrs.extend(name_attrs(tags));
     // ref: semicolons → newlines
     if let Some(r) = tags.get("ref") {
@@ -472,11 +388,18 @@ fn street_label_kind_and_zoom(tags: &Tags<'_>) -> Option<(StreetKind, u8)> {
 // Street label points
 // ---------------------------------------------------------------------------
 
+wire_kinds! {
+    /// `kind` of street_labels_points.
+    pub(super) enum StreetLabelPointKind {
+        MotorwayJunction = "motorway_junction",
+    }
+}
+
 pub(super) fn match_street_labels_points(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if !tags.has_value("highway", "motorway_junction") {
         return;
     }
-    let mut attrs = smallvec![attr_str("kind", "motorway_junction")];
+    let mut attrs = smallvec![attr_kind(StreetLabelPointKind::MotorwayJunction)];
     if let Some(v) = tags.get("ref") {
         attrs.push(attr_dyn("ref", v));
     }
@@ -500,7 +423,7 @@ pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<
         return;
     }
     if let Some(kind) = street_polygon_label_kind(tags) {
-        let mut attrs = smallvec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_kind(kind)];
         attrs.extend(name_attrs(tags));
         out.push(LayerMatch {
             layer: Layer::StreetsPolygonsLabels,
@@ -513,14 +436,14 @@ pub(super) fn match_streets_polygons_labels(tags: &Tags<'_>, out: &mut SmallVec<
     }
 }
 
-fn street_polygon_label_kind(tags: &Tags<'_>) -> Option<&'static str> {
+fn street_polygon_label_kind(tags: &Tags<'_>) -> Option<StreetClass> {
     transport::first_tag_match(
         tags,
         &[
-            ("aeroway", "runway", "runway"),
-            ("aeroway", "taxiway", "taxiway"),
-            ("highway", "pedestrian", "pedestrian"),
-            ("highway", "service", "service"),
+            ("aeroway", "runway", StreetClass::Runway),
+            ("aeroway", "taxiway", StreetClass::Taxiway),
+            ("highway", "pedestrian", StreetClass::Pedestrian),
+            ("highway", "service", StreetClass::Service),
         ],
     )
 }
@@ -528,6 +451,13 @@ fn street_polygon_label_kind(tags: &Tags<'_>) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 // Bridges
 // ---------------------------------------------------------------------------
+
+wire_kinds! {
+    /// `kind` of bridges.
+    pub(super) enum BridgeKind {
+        Bridge = "bridge",
+    }
+}
 
 pub(super) fn match_bridges(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if tags.has_value("man_made", "bridge") {
@@ -537,7 +467,7 @@ pub(super) fn match_bridges(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
             max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
-            attrs: smallvec![attr_str("kind", "bridge")],
+            attrs: smallvec![attr_kind(BridgeKind::Bridge)],
         });
     }
 }

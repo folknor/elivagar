@@ -16,6 +16,85 @@ use crate::tiling::MAX_ZOOM;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 
+/// Declares one family of `kind` attribute values: a `#[repr(u8)]` enum with
+/// implicit discriminants in declaration order, `ALL` in that order, the wire
+/// name per variant, and the `WireKind` impl `attr_kind` takes. Every
+/// declaration asserts at compile time that its names are distinct and that
+/// each is interned in `wire_format::KIND_VALUES`, so a new kind cannot miss
+/// the dictionary unnoticed: append it there (never reorder) and bump
+/// `CHECKPOINT_VERSION`, since the table's ids land in sort-record bytes.
+/// Kind families are declared only through this macro; the sealed trait
+/// keeps implementations inside `shortbread`, and the convention keeps them
+/// inside the macro.
+macro_rules! wire_kinds {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $($(#[$vmeta:meta])* $variant:ident = $wire:literal),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[repr(u8)]
+        $vis enum $name {
+            $($(#[$vmeta])* $variant,)+
+        }
+
+        impl $name {
+            /// Every variant in declaration order.
+            pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant),+];
+
+            /// The `kind` attribute value on the wire.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+        }
+
+        impl crate::shortbread::sealed::Sealed for $name {}
+
+        impl crate::shortbread::WireKind for $name {
+            fn wire_name(self) -> &'static str {
+                self.as_str()
+            }
+        }
+
+        const _: () = {
+            let all = $name::ALL;
+            let mut i = 0;
+            while i < all.len() {
+                assert!(
+                    crate::wire_format::is_interned_kind(all[i].as_str()),
+                    concat!(
+                        "a ", stringify!($name), " name is missing from KIND_VALUES: ",
+                        "append it and bump CHECKPOINT_VERSION"
+                    )
+                );
+                let mut j = i + 1;
+                while j < all.len() {
+                    assert!(
+                        !crate::wire_format::const_str_eq(all[i].as_str(), all[j].as_str()),
+                        concat!("two ", stringify!($name), " variants share a wire name")
+                    );
+                    j += 1;
+                }
+                i += 1;
+            }
+        };
+    };
+}
+
+mod sealed {
+    pub(crate) trait Sealed {}
+}
+
+/// A `kind` value declared by `wire_kinds!`. The only way to build a `kind`
+/// attribute is `attr_kind`, which takes one of these.
+pub(crate) trait WireKind: sealed::Sealed + Copy {
+    fn wire_name(self) -> &'static str;
+}
+
 pub(crate) mod boundaries;
 mod land;
 pub(crate) mod osm_value;
@@ -457,15 +536,26 @@ fn match_layer(
 // Shared attribute helpers
 // ---------------------------------------------------------------------------
 
+/// The `kind` attribute. Kind values come only from `wire_kinds!`
+/// declarations, whose names are checked against the wire dictionary at
+/// compile time; the string helpers below refuse the key in debug builds.
+/// That refusal is a runtime check on exercised paths, not a type barrier.
+pub(crate) fn attr_kind(kind: impl WireKind) -> Attr {
+    ("kind", AttrValue::Str(Cow::Borrowed(kind.wire_name())), 0)
+}
+
 pub(crate) fn attr_str(key: &'static str, val: &'static str) -> Attr {
+    debug_assert_ne!(key, "kind", "build kind attributes with attr_kind");
     (key, AttrValue::Str(Cow::Borrowed(val)), 0)
 }
 
 pub(crate) fn attr_dyn(key: &'static str, val: &str) -> Attr {
+    debug_assert_ne!(key, "kind", "build kind attributes with attr_kind");
     (key, AttrValue::Str(Cow::Owned(val.to_string())), 0)
 }
 
 fn attr_dyn_z(key: &'static str, val: &str, min_zoom: u8) -> Attr {
+    debug_assert_ne!(key, "kind", "build kind attributes with attr_kind");
     (key, AttrValue::Str(Cow::Owned(val.to_string())), min_zoom)
 }
 

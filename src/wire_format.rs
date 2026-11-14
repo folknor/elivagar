@@ -95,13 +95,16 @@ fn key_to_id(key: &str) -> u8 {
 /// New values MUST be appended (never reorder).
 ///
 /// This is a compression dictionary, not the schema: the vocabularies live
-/// with their matchers (`LandKind`, `StreetClass`, `LinkClass`), which tests
-/// check are covered here, and a miss costs bytes, never correctness. A
+/// with their matchers as `wire_kinds!` enums in `shortbread`, and each
+/// declaration carries a compile-time assertion (through `is_interned_kind`)
+/// that every one of its names is in this table, so a kind the profile emits
+/// cannot silently miss it. A miss would cost bytes, never correctness, and
+/// the inline-string fallback stays for any value outside the table. A
 /// change to the table changes sort-record bytes, which tie-break equal sort
-/// keys, so it moves `CHECKPOINT_VERSION`. `sports_centre` (57) is the OSM
+/// keys, so it moves `CHECKPOINT_VERSION`. `sports_centre` is the OSM
 /// spelling and is never emitted; sites emits `sports_center`.
 const KIND_VALUES: &[&str] = &[
-    // Water (14)
+    // Water
     "water",      // 0
     "glacier",    // 1
     "riverbank",  // 2
@@ -116,7 +119,7 @@ const KIND_VALUES: &[&str] = &[
     "pier",       // 11
     "breakwater", // 12
     "groyne",     // 13
-    // Land (45)
+    // Land and sites
     "forest",                  // 14
     "farmland",                // 15
     "farmyard",                // 16
@@ -168,7 +171,7 @@ const KIND_VALUES: &[&str] = &[
     "parking",                 // 62
     "prison",                  // 63
     "university",              // 64
-    // Streets (28 + 5 _link)
+    // Streets, with motorway_junction, bridge and the _link names
     "motorway",          // 65
     "trunk",             // 66
     "primary",           // 67
@@ -201,7 +204,7 @@ const KIND_VALUES: &[&str] = &[
     "primary_link",      // 94
     "secondary_link",    // 95
     "tertiary_link",     // 96
-    // Transport (19)
+    // Transport
     "cable_car",         // 97
     "gondola",           // 98
     "goods",             // 99
@@ -221,7 +224,7 @@ const KIND_VALUES: &[&str] = &[
     "halt",              // 113
     "tram_stop",         // 114
     "bus_stop",          // 115
-    // Place labels (13)
+    // Place labels
     "capital",           // 116
     "state_capital",     // 117
     "city",              // 118
@@ -240,6 +243,35 @@ const KIND_VALUES: &[&str] = &[
     "sports_center", // 130
 ];
 const _: () = assert!(KIND_VALUES.len() <= 256, "kind value ids are u8");
+
+/// Byte equality usable in const evaluation, where `str` `==` is not.
+pub(crate) const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Whether `kind` has an interned id. `const` so the `wire_kinds!`
+/// declarations in `shortbread` can assert coverage at compile time.
+pub(crate) const fn is_interned_kind(kind: &str) -> bool {
+    let mut i = 0;
+    while i < KIND_VALUES.len() {
+        if const_str_eq(KIND_VALUES[i], kind) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
 
 #[allow(clippy::cast_possible_truncation)]
 fn kind_value_to_id(s: &str) -> Option<u8> {
@@ -527,19 +559,6 @@ mod tests {
                 !KIND_VALUES[i + 1..].contains(a),
                 "kind value {a:?} appears twice"
             );
-        }
-    }
-
-    #[test]
-    fn typed_kind_vocabularies_are_interned() {
-        use crate::shortbread::{LandKind, LinkClass, StreetClass};
-        let names = LandKind::ALL
-            .iter()
-            .map(|k| k.as_str())
-            .chain(StreetClass::ALL.iter().map(|c| c.as_str()))
-            .chain(LinkClass::ALL.iter().map(|l| l.as_str()));
-        for name in names {
-            assert!(kind_value_to_id(name).is_some(), "{name:?} is not interned");
         }
     }
 

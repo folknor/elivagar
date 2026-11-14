@@ -122,24 +122,6 @@ layer names or which producer it serves; ocean-policy constants move beside
 Reported by the pipeline, Shortbread, layer-identity, coordinate-spaces and
 polygon-engine hunts.
 
-## CON-026 - What kind values exist per layer, and at what zoom?
-
-Land and street kinds are typed (`LandKind`, `StreetClass`, `LinkClass`,
-`StreetKind`), each owning wire name and paint rank, and a wire_format test
-checks they are interned. What remains is the other families: water
-(`water.rs` polygon, line, label, dam and pier kinds), transport
-(`aerialway_kind`, ferry, `public_transport_match`), place labels
-(`place_label_info`) and sites (`sites_kind`) still emit `&'static str`
-literals from their row tables, so nothing ties them to
-`wire_format::KIND_VALUES`. A new kind in one of them silently misses the
-dictionary (costing bytes, not correctness - the table is a compression
-dictionary with an inline-string fallback, and that fallback stays). The
-gap: enums for those families, or at least a coverage test enumerating
-their row tables against `KIND_VALUES`. Deriving `KIND_VALUES` from enums
-would renumber ids and needs a `CHECKPOINT_VERSION` bump.
-
-Reported by the Shortbread, encoding and layer-identity hunts.
-
 ## CON-027 - What attribute keys exist, and what type is each?
 
 - `shortbread::Attr = (&'static str, AttrValue, u8)` - string key, bare `u8`
@@ -160,6 +142,11 @@ Reported by the Shortbread, encoding and layer-identity hunts.
   builds and discards the full POI attr vector; phase12's `possible_feature`
   runs `match_element` up to twice per way building and discarding every
   attr (hot-path allocation spent on predicates).
+- Kind values are typed (`wire_kinds!` families, built only through
+  `attr_kind`), but the `kind` key itself is still a string, so the bar on
+  `attr_str("kind", ..)` / `attr_dyn("kind", ..)` is a `debug_assert` on
+  exercised paths. A closed `AttrKey` with a `Kind` variant carrying a
+  `WireKind` turns that into a type barrier.
 
 Owner proposed: `#[repr(u8)] enum AttrKey` owned by Shortbread (the
 discriminant is the wire id), `struct Attr { key, value, from_zoom: Zoom }`

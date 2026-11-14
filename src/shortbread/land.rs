@@ -8,160 +8,60 @@ use smallvec::{SmallVec, smallvec};
 // Land
 // ---------------------------------------------------------------------------
 
-/// Every `kind` value the land layer emits. Each kind owns its wire name, its
-/// zoom floor and its paint rank, so the matcher, the verifier and the
-/// interning dictionary read one vocabulary. Zoom is a property of the output
-/// kind in this profile: the one kind reached from two tags (`forest`, from
-/// `landuse=forest` and `natural=wood`) has the same floor through both.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum LandKind {
-    Residential,
-    Commercial,
-    Retail,
-    Industrial,
-    Garages,
-    Railway,
-    Brownfield,
-    Greenfield,
-    Landfill,
-    Quarry,
-    Farmyard,
-    Farmland,
-    Meadow,
-    Orchard,
-    Vineyard,
-    Allotments,
-    PlantNursery,
-    GreenhouseHorticulture,
-    Park,
-    GolfCourse,
-    RecreationGround,
-    VillageGreen,
-    Cemetery,
-    GraveYard,
-    BareRock,
-    Scree,
-    Shingle,
-    Sand,
-    Beach,
-    Grassland,
-    Heath,
-    Scrub,
-    Bog,
-    Marsh,
-    StringBog,
-    Swamp,
-    WetMeadow,
-    Grass,
-    Garden,
-    Playground,
-    MiniatureGolf,
-    Forest,
-    Cliff,
+wire_kinds! {
+    /// Every `kind` value the land layer emits. Each kind owns its wire name, its
+    /// zoom floor and its paint rank, so the matcher, the verifier and the
+    /// interning dictionary read one vocabulary. Zoom is a property of the output
+    /// kind in this profile: the one kind reached from two tags (`forest`, from
+    /// `landuse=forest` and `natural=wood`) has the same floor through both.
+    pub enum LandKind {
+        Residential = "residential",
+        Commercial = "commercial",
+        Retail = "retail",
+        Industrial = "industrial",
+        Garages = "garages",
+        Railway = "railway",
+        Brownfield = "brownfield",
+        Greenfield = "greenfield",
+        Landfill = "landfill",
+        Quarry = "quarry",
+        Farmyard = "farmyard",
+        Farmland = "farmland",
+        Meadow = "meadow",
+        Orchard = "orchard",
+        Vineyard = "vineyard",
+        Allotments = "allotments",
+        PlantNursery = "plant_nursery",
+        GreenhouseHorticulture = "greenhouse_horticulture",
+        Park = "park",
+        GolfCourse = "golf_course",
+        RecreationGround = "recreation_ground",
+        VillageGreen = "village_green",
+        Cemetery = "cemetery",
+        GraveYard = "grave_yard",
+        BareRock = "bare_rock",
+        Scree = "scree",
+        Shingle = "shingle",
+        Sand = "sand",
+        Beach = "beach",
+        Grassland = "grassland",
+        Heath = "heath",
+        Scrub = "scrub",
+        Bog = "bog",
+        Marsh = "marsh",
+        StringBog = "string_bog",
+        Swamp = "swamp",
+        WetMeadow = "wet_meadow",
+        Grass = "grass",
+        Garden = "garden",
+        Playground = "playground",
+        MiniatureGolf = "miniature_golf",
+        Forest = "forest",
+        Cliff = "cliff",
+    }
 }
 
 impl LandKind {
-    /// Every variant in declaration order; a test pins it to the discriminants.
-    pub const ALL: [LandKind; 43] = {
-        use LandKind::*;
-        [
-            Residential,
-            Commercial,
-            Retail,
-            Industrial,
-            Garages,
-            Railway,
-            Brownfield,
-            Greenfield,
-            Landfill,
-            Quarry,
-            Farmyard,
-            Farmland,
-            Meadow,
-            Orchard,
-            Vineyard,
-            Allotments,
-            PlantNursery,
-            GreenhouseHorticulture,
-            Park,
-            GolfCourse,
-            RecreationGround,
-            VillageGreen,
-            Cemetery,
-            GraveYard,
-            BareRock,
-            Scree,
-            Shingle,
-            Sand,
-            Beach,
-            Grassland,
-            Heath,
-            Scrub,
-            Bog,
-            Marsh,
-            StringBog,
-            Swamp,
-            WetMeadow,
-            Grass,
-            Garden,
-            Playground,
-            MiniatureGolf,
-            Forest,
-            Cliff,
-        ]
-    };
-
-    /// The `kind` attribute value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        use LandKind::*;
-        match self {
-            Residential => "residential",
-            Commercial => "commercial",
-            Retail => "retail",
-            Industrial => "industrial",
-            Garages => "garages",
-            Railway => "railway",
-            Brownfield => "brownfield",
-            Greenfield => "greenfield",
-            Landfill => "landfill",
-            Quarry => "quarry",
-            Farmyard => "farmyard",
-            Farmland => "farmland",
-            Meadow => "meadow",
-            Orchard => "orchard",
-            Vineyard => "vineyard",
-            Allotments => "allotments",
-            PlantNursery => "plant_nursery",
-            GreenhouseHorticulture => "greenhouse_horticulture",
-            Park => "park",
-            GolfCourse => "golf_course",
-            RecreationGround => "recreation_ground",
-            VillageGreen => "village_green",
-            Cemetery => "cemetery",
-            GraveYard => "grave_yard",
-            BareRock => "bare_rock",
-            Scree => "scree",
-            Shingle => "shingle",
-            Sand => "sand",
-            Beach => "beach",
-            Grassland => "grassland",
-            Heath => "heath",
-            Scrub => "scrub",
-            Bog => "bog",
-            Marsh => "marsh",
-            StringBog => "string_bog",
-            Swamp => "swamp",
-            WetMeadow => "wet_meadow",
-            Grass => "grass",
-            Garden => "garden",
-            Playground => "playground",
-            MiniatureGolf => "miniature_golf",
-            Forest => "forest",
-            Cliff => "cliff",
-        }
-    }
-
     /// The kind whose wire name is `name`, if the land layer emits it.
     pub fn from_name(name: &str) -> Option<LandKind> {
         Self::ALL.into_iter().find(|k| k.as_str() == name)
@@ -231,7 +131,7 @@ fn land_layer_match(kind: LandKind, geom_expect: GeomExpect) -> LayerMatch {
         max_zoom: MAX_ZOOM,
         geom_expect,
         paint_rank: kind.paint_rank(),
-        attrs: smallvec![attr_str("kind", kind.as_str())],
+        attrs: smallvec![attr_kind(kind)],
     }
 }
 
@@ -358,26 +258,42 @@ pub(super) fn match_sites(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) 
             max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Polygon,
             paint_rank: 0,
-            attrs: smallvec![attr_str("kind", kind)],
+            attrs: smallvec![attr_kind(kind)],
         });
     }
 }
 
-fn sites_kind(tags: &Tags<'_>) -> Option<&'static str> {
+wire_kinds! {
+    /// `kind` of sites.
+    pub(super) enum SiteKind {
+        DangerArea = "danger_area",
+        SportsCenter = "sports_center",
+        Construction = "construction",
+        BicycleParking = "bicycle_parking",
+        College = "college",
+        Hospital = "hospital",
+        Parking = "parking",
+        Prison = "prison",
+        University = "university",
+    }
+}
+
+fn sites_kind(tags: &Tags<'_>) -> Option<SiteKind> {
+    use SiteKind as K;
     transport::first_tag_match(
         tags,
         &[
-            ("military", "danger_area", "danger_area"),
+            ("military", "danger_area", K::DangerArea),
             // OSM uses sports_centre, while the Shortbread sites fixture names
             // its kind sports_center. Match the OSM tag and emit the fixture kind.
-            ("leisure", "sports_centre", "sports_center"),
-            ("landuse", "construction", "construction"),
-            ("amenity", "bicycle_parking", "bicycle_parking"),
-            ("amenity", "college", "college"),
-            ("amenity", "hospital", "hospital"),
-            ("amenity", "parking", "parking"),
-            ("amenity", "prison", "prison"),
-            ("amenity", "university", "university"),
+            ("leisure", "sports_centre", K::SportsCenter),
+            ("landuse", "construction", K::Construction),
+            ("amenity", "bicycle_parking", K::BicycleParking),
+            ("amenity", "college", K::College),
+            ("amenity", "hospital", K::Hospital),
+            ("amenity", "parking", K::Parking),
+            ("amenity", "prison", K::Prison),
+            ("amenity", "university", K::University),
         ],
     )
 }

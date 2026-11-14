@@ -3,6 +3,27 @@
 use super::*;
 use smallvec::{SmallVec, smallvec};
 
+wire_kinds! {
+    /// `kind` of place_labels. `capital` and `state_capital` are reachable
+    /// only from `place=city`; a capital town, village or hamlet keeps its
+    /// place kind and takes only the capital zoom.
+    pub(super) enum PlaceKind {
+        Capital = "capital",
+        StateCapital = "state_capital",
+        City = "city",
+        Town = "town",
+        Village = "village",
+        Hamlet = "hamlet",
+        Suburb = "suburb",
+        Quarter = "quarter",
+        Neighbourhood = "neighbourhood",
+        IsolatedDwelling = "isolated_dwelling",
+        Farm = "farm",
+        Island = "island",
+        Locality = "locality",
+    }
+}
+
 pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>) {
     if !has_name(tags) {
         return;
@@ -12,7 +33,7 @@ pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
         None => return,
     };
     if let Some((kind, min_zoom, pop_default)) = place_label_info(tags, place) {
-        let mut attrs = smallvec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_kind(kind)];
         attrs.extend(name_attrs(tags));
         let population = tags
             .get("population")
@@ -31,7 +52,8 @@ pub(super) fn match_place_labels(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch
 }
 
 /// Returns (kind, min_zoom, population_default) for a place label.
-fn place_label_info(tags: &Tags<'_>, place: &str) -> Option<(&'static str, u8, i64)> {
+fn place_label_info(tags: &Tags<'_>, place: &str) -> Option<(PlaceKind, u8, i64)> {
+    use PlaceKind as K;
     // Capital detection.
     // NOTE: OSM also uses capital=2 for national capitals (admin_level=2),
     // but neither Planetiler nor Tilemaker handle it - consistent gap across
@@ -43,25 +65,25 @@ fn place_label_info(tags: &Tags<'_>, place: &str) -> Option<(&'static str, u8, i
     match place {
         "city" => {
             let kind = if is_capital {
-                "capital"
+                K::Capital
             } else if is_state_capital {
-                "state_capital"
+                K::StateCapital
             } else {
-                "city"
+                K::City
             };
             let zoom = if is_capital || is_state_capital { 4 } else { 6 };
             Some((kind, zoom, 100_000))
         }
-        "town" => Some(("town", if is_capital { 4 } else { 7 }, 5_000)),
-        "village" => Some(("village", if is_capital { 4 } else { 10 }, 100)),
-        "hamlet" => Some(("hamlet", if is_capital { 4 } else { 10 }, 50)),
-        "suburb" => Some(("suburb", 10, 1_000)),
-        "quarter" => Some(("quarter", 10, 500)),
-        "neighbourhood" => Some(("neighbourhood", 10, 100)),
-        "isolated_dwelling" => Some(("isolated_dwelling", 10, 5)),
-        "farm" => Some(("farm", 10, 5)),
-        "island" => Some(("island", 10, 0)),
-        "locality" => Some(("locality", 10, 0)),
+        "town" => Some((K::Town, if is_capital { 4 } else { 7 }, 5_000)),
+        "village" => Some((K::Village, if is_capital { 4 } else { 10 }, 100)),
+        "hamlet" => Some((K::Hamlet, if is_capital { 4 } else { 10 }, 50)),
+        "suburb" => Some((K::Suburb, 10, 1_000)),
+        "quarter" => Some((K::Quarter, 10, 500)),
+        "neighbourhood" => Some((K::Neighbourhood, 10, 100)),
+        "isolated_dwelling" => Some((K::IsolatedDwelling, 10, 5)),
+        "farm" => Some((K::Farm, 10, 5)),
+        "island" => Some((K::Island, 10, 0)),
+        "locality" => Some((K::Locality, 10, 0)),
         _ => None,
     }
 }

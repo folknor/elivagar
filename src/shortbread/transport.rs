@@ -3,6 +3,43 @@
 use super::*;
 use smallvec::{SmallVec, smallvec};
 
+wire_kinds! {
+    /// `kind` of aerialways: the OSM `aerialway` value, unchanged.
+    pub(super) enum AerialwayKind {
+        CableCar = "cable_car",
+        Gondola = "gondola",
+        Goods = "goods",
+        ChairLift = "chair_lift",
+        DragLift = "drag_lift",
+        TBar = "t-bar",
+        JBar = "j-bar",
+        Platter = "platter",
+        RopeTow = "rope_tow",
+    }
+}
+
+wire_kinds! {
+    /// `kind` of ferries.
+    pub(super) enum FerryKind {
+        Ferry = "ferry",
+    }
+}
+
+wire_kinds! {
+    /// `kind` of public_transport.
+    pub(super) enum PublicTransportKind {
+        Aerodrome = "aerodrome",
+        Helipad = "helipad",
+        BusStation = "bus_station",
+        FerryTerminal = "ferry_terminal",
+        Station = "station",
+        Halt = "halt",
+        TramStop = "tram_stop",
+        BusStop = "bus_stop",
+        AerialwayStation = "aerialway_station",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Aerialways
 // ---------------------------------------------------------------------------
@@ -15,25 +52,16 @@ pub(super) fn match_aerialways(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 
             max_zoom: MAX_ZOOM,
             geom_expect: GeomExpect::Line,
             paint_rank: 0,
-            attrs: smallvec![attr_str("kind", kind)],
+            attrs: smallvec![attr_kind(kind)],
         });
     }
 }
 
-fn aerialway_kind(tags: &Tags<'_>) -> Option<&'static str> {
+fn aerialway_kind(tags: &Tags<'_>) -> Option<AerialwayKind> {
     let v = tags.get("aerialway")?;
-    match v {
-        "cable_car" => Some("cable_car"),
-        "gondola" => Some("gondola"),
-        "goods" => Some("goods"),
-        "chair_lift" => Some("chair_lift"),
-        "drag_lift" => Some("drag_lift"),
-        "t-bar" => Some("t-bar"),
-        "j-bar" => Some("j-bar"),
-        "platter" => Some("platter"),
-        "rope_tow" => Some("rope_tow"),
-        _ => None,
-    }
+    AerialwayKind::ALL
+        .into_iter()
+        .find(|kind| kind.as_str() == v)
 }
 
 // ---------------------------------------------------------------------------
@@ -49,7 +77,7 @@ pub(super) fn match_ferries(tags: &Tags<'_>, out: &mut SmallVec<[LayerMatch; 4]>
     } else {
         10
     };
-    let mut attrs = smallvec![attr_str("kind", "ferry")];
+    let mut attrs = smallvec![attr_kind(FerryKind::Ferry)];
     attrs.extend(name_attrs(tags));
     out.push(LayerMatch {
         layer: Layer::Ferries,
@@ -83,7 +111,7 @@ fn match_public_transport(
     out: &mut SmallVec<[LayerMatch; 4]>,
 ) {
     if let Some((kind, min_zoom)) = public_transport_match(tags) {
-        let mut attrs = smallvec![attr_str("kind", kind)];
+        let mut attrs = smallvec![attr_kind(kind)];
         attrs.extend(name_attrs(tags));
         if let Some(v) = tags.get("iata") {
             attrs.push(attr_dyn("iata", v));
@@ -107,7 +135,8 @@ pub(super) fn first_tag_match<T: Copy>(tags: &Tags<'_>, rows: &[(&str, &str, T)]
         .map(|(_, _, result)| *result)
 }
 
-fn public_transport_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
+fn public_transport_match(tags: &Tags<'_>) -> Option<(PublicTransportKind, u8)> {
+    use PublicTransportKind as K;
     // The upstream raw coalesce can choose an unrelated present value, such
     // as aeroway=gate when railway=halt qualified the feature. Match allowed
     // key/value pairs in the upstream coalesce priority and keep aerialway's
@@ -115,15 +144,15 @@ fn public_transport_match(tags: &Tags<'_>) -> Option<(&'static str, u8)> {
     first_tag_match(
         tags,
         &[
-            ("aeroway", "aerodrome", ("aerodrome", 11)),
-            ("aeroway", "helipad", ("helipad", 13)),
-            ("amenity", "bus_station", ("bus_station", 13)),
-            ("amenity", "ferry_terminal", ("ferry_terminal", 12)),
-            ("railway", "station", ("station", 13)),
-            ("railway", "halt", ("halt", 13)),
-            ("railway", "tram_stop", ("tram_stop", 14)),
-            ("highway", "bus_stop", ("bus_stop", 14)),
-            ("aerialway", "station", ("aerialway_station", 13)),
+            ("aeroway", "aerodrome", (K::Aerodrome, 11)),
+            ("aeroway", "helipad", (K::Helipad, 13)),
+            ("amenity", "bus_station", (K::BusStation, 13)),
+            ("amenity", "ferry_terminal", (K::FerryTerminal, 12)),
+            ("railway", "station", (K::Station, 13)),
+            ("railway", "halt", (K::Halt, 13)),
+            ("railway", "tram_stop", (K::TramStop, 14)),
+            ("highway", "bus_stop", (K::BusStop, 14)),
+            ("aerialway", "station", (K::AerialwayStation, 13)),
         ],
     )
 }
