@@ -361,6 +361,18 @@ fn test_mvt_layer_decode() {
     .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
+    // The writer knows no schema; the producer declares it.
+    writer.set_tileset(elivagar::archive::Tileset {
+        name: "Shortbread".to_owned(),
+        layer_type: "baselayer".to_owned(),
+        vector_layers: elivagar::shortbread::Layer::ALL
+            .iter()
+            .map(|layer| elivagar::archive::VectorLayer {
+                id: layer.name().to_owned(),
+                min_zoom: layer.min_zoom(),
+            })
+            .collect(),
+    });
 
     // Write tiles with known MVT layer content.
     let layer_names_per_tile: Vec<Vec<&str>> = vec![

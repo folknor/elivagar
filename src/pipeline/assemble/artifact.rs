@@ -359,7 +359,9 @@ mod tests {
             )
             .expect("valid archive config"),
         );
-        writer.set_ocean_only_metadata();
+        writer.set_tileset(crate::pipeline::shortbread_tileset(&[
+            crate::shortbread::Layer::Ocean,
+        ]));
         writer
             .set_ocean_artifact_metadata(key.clone())
             .expect("set artifact metadata");
@@ -702,7 +704,9 @@ mod tests {
             )
             .unwrap(),
         );
-        writer.set_ocean_only_metadata();
+        writer.set_tileset(crate::pipeline::shortbread_tileset(&[
+            crate::shortbread::Layer::Ocean,
+        ]));
         writer.set_ocean_artifact_metadata(key.clone()).unwrap();
         for &address in addresses {
             writer.add_run(address, 1, payload).unwrap();

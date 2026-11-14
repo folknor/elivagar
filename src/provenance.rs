@@ -489,12 +489,19 @@ impl ProducerConfig {
 ///
 /// Compared as JSON rather than as a struct so the float factor needs no
 /// float-equality dance, and so a mismatch can name the field that differs.
+///
+/// This is the resume-compatibility subset only, not the archive
+/// comparability contract (`config` in the `elivagar` member, which adds
+/// the profile, tile encoding and ocean). Equal values here do not make two
+/// archives comparable. Public, and typed on the public request, because a
+/// caller preparing a resume (the CLI integration tests forge checkpoints
+/// with it) must compute exactly what the pipeline will check.
 pub fn producer_config(config: &TilegenConfig) -> Value {
     serde_json::to_value(ProducerConfig::new(config)).expect("producer config is JSON serializable")
 }
 
 /// Name the producer-config fields that differ, for a resume error.
-pub fn producer_config_diff(checkpoint: &Value, current: &Value) -> Vec<String> {
+pub(crate) fn producer_config_diff(checkpoint: &Value, current: &Value) -> Vec<String> {
     let mut diffs = Vec::new();
     let mut seen = rustc_hash::FxHashSet::default();
     let empty = serde_json::Map::new();
@@ -513,7 +520,13 @@ pub fn producer_config_diff(checkpoint: &Value, current: &Value) -> Vec<String> 
     diffs
 }
 
-/// Build the `elivagar` metadata value.
+/// Build the `elivagar` metadata value from a run's resolved contract.
+///
+/// Crate-private: the member describes a run that happened, so it is built
+/// only by the pipeline from its resolved plan. A public form taking a
+/// `TilegenConfig` was removed; it had no caller, and composing a contract
+/// from a request outside a run would record a config no tiles were made
+/// under.
 ///
 /// `effective` is omitted when the caller cannot supply the path choices that
 /// produced the tiles. They are not guessed from current config, which would
@@ -521,21 +534,6 @@ pub fn producer_config_diff(checkpoint: &Value, current: &Value) -> Vec<String> 
 ///
 /// `resumed_from` names the phase a resumed run started at, and is null for
 /// a full run.
-pub fn build(
-    input: &Input,
-    config: &TilegenConfig,
-    ocean: &OceanContract,
-    effective: Option<Effective>,
-    resumed_from: Option<crate::pipeline::SkipTo>,
-) -> Value {
-    build_resolved(
-        input,
-        ContractConfig::new(config, ocean.clone()),
-        effective,
-        resumed_from,
-    )
-}
-
 pub(crate) fn build_resolved(
     input: &Input,
     config: ContractConfig,

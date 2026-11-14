@@ -689,9 +689,10 @@ pub struct PmtilesWriter {
     source_pbf_filename: Option<String>,
     osmosis_replication_timestamp: Option<i64>,
     metadata_extensions: MetadataExtensions,
-    /// The declared tile layer set is metadata about the archive's contents,
-    /// not a separate writer mode.
-    metadata_layers: Vec<crate::shortbread::Layer>,
+    /// The producer's description of the tileset (name, type, declared
+    /// layers). The writer knows no schema; without one the document
+    /// declares no layers and carries no name or type.
+    tileset: Option<Tileset>,
     /// Exact metadata supplied by an archive-preserving rewrite.  This is
     /// intentionally narrow: normal production writes always compose metadata.
     metadata_verbatim: Option<String>,
@@ -764,7 +765,7 @@ impl PmtilesWriter {
         Ok(())
     }
 
-    /// Add the value produced by `provenance::build` to archive metadata.
+    /// Add the run's provenance member to archive metadata.
     /// Provenance owns this member's schema; the writer only composes it.
     pub(crate) fn set_elivagar_metadata(&mut self, value: serde_json::Value) -> io::Result<()> {
         if !value.is_object() {
@@ -783,9 +784,12 @@ impl PmtilesWriter {
         Ok(())
     }
 
-    /// Set the declared tile layer set to the ocean layer.
-    pub fn set_ocean_only_metadata(&mut self) {
-        self.metadata_layers = vec![crate::shortbread::Layer::Ocean];
+    /// Describe the tileset: its `name`, `type` and declared `vector_layers`.
+    ///
+    /// The schema is the producer's; the writer only intersects each declared
+    /// layer's zoom range with the archive's and drops layers that miss it.
+    pub fn set_tileset(&mut self, tileset: Tileset) {
+        self.tileset = Some(tileset);
     }
 
     /// Preserve an existing metadata document during an archive rewrite.
@@ -808,7 +812,7 @@ impl PmtilesWriter {
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
             metadata_extensions: MetadataExtensions::default(),
-            metadata_layers: crate::shortbread::Layer::ALL.to_vec(),
+            tileset: None,
             metadata_verbatim: None,
             blob: TileBlob {
                 sink: BlobSink::memory(),
@@ -853,7 +857,7 @@ impl PmtilesWriter {
             source_pbf_filename: None,
             osmosis_replication_timestamp: None,
             metadata_extensions: MetadataExtensions::default(),
-            metadata_layers: crate::shortbread::Layer::ALL.to_vec(),
+            tileset: None,
             metadata_verbatim: None,
             blob: TileBlob {
                 sink: BlobSink::File { writer, partial },
@@ -1012,7 +1016,7 @@ impl PmtilesWriter {
                 self.source_pbf_filename.as_deref(),
                 self.osmosis_replication_timestamp,
                 &self.metadata_extensions,
-                &self.metadata_layers,
+                self.tileset.as_ref(),
             )?
         };
         let metadata_compressed = gzip_compress(&metadata_json)?;
@@ -1317,31 +1321,57 @@ struct MetadataExtensions {
     elivagar: Option<serde_json::Value>,
 }
 
+/// The producer's description of a tileset, written into the metadata
+/// document's `name`, `type` and `vector_layers` members.
+///
+/// The container writer knows no tile schema: which layers exist, what the
+/// tileset is called and whether it is a base layer are the producer's
+/// policy, handed in through [`PmtilesWriter::set_tileset`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tileset {
+    pub name: String,
+    /// The TileJSON `type` member, e.g. `baselayer` or `overlay`.
+    pub layer_type: String,
+    /// Declared layers in document order.
+    pub vector_layers: Vec<VectorLayer>,
+}
+
+/// One declared layer: its id and the lowest zoom it appears at. The
+/// advertised range is this intersected with the archive's zoom range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorLayer {
+    pub id: String,
+    pub min_zoom: u8,
+}
+
 /// The archive's JSON schema and serialization live together here, inside
-/// the writer on purpose: a separate `archive::metadata` module was weighed
-/// and refused, because its inputs (the Shortbread name and layer set, the
-/// ocean artifact key, the provenance member) are producer policy carried by
-/// the writer's setters, so moving the document alone would add a hop without
-/// moving ownership. The read side stays `serde_json::Value`. Field
+/// the writer. The schema-specific inputs (tileset name, type and layer set,
+/// the ocean artifact key, the provenance member) are producer policy handed
+/// in through the writer's setters; the writer contributes only container
+/// facts (payload format and compression, the archive zoom range and the
+/// clamp of each layer to it). A separate `archive::metadata` module was
+/// weighed and refused, since moving the document alone would add a hop
+/// without moving ownership. The read side stays `serde_json::Value`. Field
 /// declaration order preserves the existing wire order, and the two optional
 /// extension keys are distinct fields, so the composed document cannot emit
 /// either key twice.
 mod metadata {
-    use super::{MetadataExtensions, PmtilesConfig, TileDataCompression, TileDataFormat};
+    use super::{MetadataExtensions, PmtilesConfig, TileDataCompression, TileDataFormat, Tileset};
     use serde::Serialize;
     use std::io;
 
     #[derive(Serialize)]
     struct MetadataDocument<'a> {
-        name: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<&'a str>,
         format: &'static str,
         tile_payload_format: &'static str,
         tile_compression: &'static str,
-        #[serde(rename = "type")]
-        layer_type: &'static str,
+        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+        layer_type: Option<&'a str>,
         minzoom: u8,
         maxzoom: u8,
-        vector_layers: Vec<VectorLayer>,
+        vector_layers: Vec<VectorLayer<'a>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_pbf: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1353,8 +1383,8 @@ mod metadata {
     }
 
     #[derive(Serialize)]
-    struct VectorLayer {
-        id: &'static str,
+    struct VectorLayer<'a> {
+        id: &'a str,
         minzoom: u8,
         maxzoom: u8,
     }
@@ -1366,24 +1396,26 @@ mod metadata {
         source_pbf_filename: Option<&str>,
         osmosis_replication_timestamp: Option<i64>,
         extensions: &MetadataExtensions,
-        layers: &[crate::shortbread::Layer],
+        tileset: Option<&Tileset>,
     ) -> io::Result<Vec<u8>> {
         let document = MetadataDocument {
-            name: "Shortbread",
+            name: tileset.map(|t| t.name.as_str()),
             format: tile_data_format.metadata_format(),
             tile_payload_format: tile_data_format.metadata_payload(),
             tile_compression: tile_data_compression.metadata_value(),
-            layer_type: "baselayer",
+            layer_type: tileset.map(|t| t.layer_type.as_str()),
             minzoom: config.min_zoom,
             maxzoom: config.max_zoom,
             // Each layer advertises its own zoom range intersected with the
             // archive's; a layer whose range misses the archive's entirely
             // has no tiles and is not advertised.
-            vector_layers: layers
+            vector_layers: tileset
+                .map(|t| t.vector_layers.as_slice())
+                .unwrap_or_default()
                 .iter()
                 .map(|layer| VectorLayer {
-                    id: layer.name(),
-                    minzoom: layer.min_zoom().max(config.min_zoom),
+                    id: &layer.id,
+                    minzoom: layer.min_zoom.max(config.min_zoom),
                     maxzoom: config.max_zoom,
                 })
                 .filter(|layer| layer.minzoom <= layer.maxzoom)
@@ -1404,7 +1436,7 @@ fn build_metadata(
     source_pbf_filename: Option<&str>,
     osmosis_replication_timestamp: Option<i64>,
     metadata_extensions: &MetadataExtensions,
-    metadata_layers: &[crate::shortbread::Layer],
+    tileset: Option<&Tileset>,
 ) -> io::Result<Vec<u8>> {
     metadata::build(
         config,
@@ -1413,7 +1445,7 @@ fn build_metadata(
         source_pbf_filename,
         osmosis_replication_timestamp,
         metadata_extensions,
-        metadata_layers,
+        tileset,
     )
 }
 

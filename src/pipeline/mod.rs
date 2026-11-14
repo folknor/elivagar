@@ -194,6 +194,11 @@ pub struct TilegenConfig {
     pub tile_compression: TileCompression,
     /// Compression algorithm for sort chunk files. Reduces disk I/O at the
     /// cost of CPU. Useful at planet scale where sort data exceeds available RAM.
+    ///
+    /// Naming `sort::ChunkCompression` here does not by itself make `sort`
+    /// public: the module is documented library surface on its own account
+    /// (the chunk writer and readers and their `ChunkStoreError`), so moving
+    /// this type out would narrow nothing.
     pub compress_sort_chunks: sort::ChunkCompression,
     /// Per-layer fanout caps: maximum bbox tiles a polygon feature may touch
     /// at any zoom. When exceeded, the feature is skipped at that zoom.
@@ -208,6 +213,24 @@ pub struct TilegenConfig {
 }
 
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
+
+/// The Shortbread tileset description handed to the archive writer: the
+/// profile, not the container, owns the name, the `baselayer` type and which
+/// layers an archive declares (every layer for an extract, the ocean layer
+/// alone for the world ocean artifact).
+pub(crate) fn shortbread_tileset(layers: &[shortbread::Layer]) -> archive::Tileset {
+    archive::Tileset {
+        name: "Shortbread".to_owned(),
+        layer_type: "baselayer".to_owned(),
+        vector_layers: layers
+            .iter()
+            .map(|layer| archive::VectorLayer {
+                id: layer.name().to_owned(),
+                min_zoom: layer.min_zoom(),
+            })
+            .collect(),
+    }
+}
 
 /// Effective encoding, resolved from the public config without changing its API.
 /// The gzip default is ignored for MLT; brotli is rejected by run before IO.

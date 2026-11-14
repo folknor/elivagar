@@ -78,11 +78,6 @@ Reported by the typed-errors link 7 implementer.
 
 - `sort.rs` imports `crate::pipeline::emit::RecordTally`: infrastructure
   depending on the orchestrator's emitter.
-- `provenance.rs` (public, linked by brokkr) depends on `TilegenConfig` while
-  the pipeline depends on provenance; the public surface drags the
-  pipeline's config through brokkr's API.
-- `TilegenConfig` exposes `sort::ChunkCompression` (forcing `pub mod sort`)
-  and `shortbread::Layer::count()`; the public surface is wider than needed.
 - `emit` is `pub(crate) mod` with `pub(super)` items, but it is the
   feature-to-sort-record layer shared by way and relation paths, not
   orchestration - it belongs top-level beside `geometry`.
@@ -90,12 +85,6 @@ Reported by the typed-errors link 7 implementer.
   encoded command streams; see STR-013) and on the pipeline's telemetry
   (`pyramid.rs` bumps `crate::debug::RING_CAP` atomics); return per-call
   stats and let the producer emit counters.
-- `archive::writer`'s metadata document imports `shortbread::Layer`, emits
-  `"name":"Shortbread"` and `"type":"baselayer"`, and owns the ocean-only
-  layer list; the container writer should not know the schema. (Moving the
-  document alone into its own archive module was refused: its inputs are
-  producer policy, so the fix is the producer handing the writer the layer
-  set and names, not a relocation.)
 - `mlt -> mvt`: MLT consumes the tile model through
   `cfg_attr(not(feature = "mlt"), allow(dead_code))` accessors in `mvt`.
 - `shortbread -> pois -> shortbread`: `pois.rs` reaches back into
@@ -261,7 +250,7 @@ The profile is a hand translation of a declarative document
 40 imperative matcher functions, and per-layer facts leak out of
 `shortbread/` into emit.rs (min-area and subpixel exemptions, area-based zoom
 overrides), phase12's way path (boundary match placement), assemble (merge
-policy), wire_format.rs (key and kind vocabularies), pmtiles_writer.rs (vector_layers) and ocean.rs (ocean policy).
+policy), wire_format.rs (key and kind vocabularies), `pipeline::shortbread_tileset` (vector_layers) and ocean.rs (ocean policy).
 
 Proposed (Shortbread and layer-identity hunts):
 ```

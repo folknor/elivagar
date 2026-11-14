@@ -21,7 +21,7 @@ pub use header::{
 pub use reader::{Archive, FileSource, MapSource, Source};
 pub use writer::{
     DEFAULT_DEDUP_CAP, DedupStats, PmtilesConfig, PmtilesWriter, TileDataCompression,
-    TileDataFormat,
+    TileDataFormat, Tileset, VectorLayer,
 };
 
 pub(crate) use reader::gzip_decompress;

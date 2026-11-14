@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Breaking: the archive writer no longer knows the Shortbread schema. A
+  producer describes its tileset with `PmtilesWriter::set_tileset` and the
+  new `archive::Tileset` / `archive::VectorLayer`; a writer given none
+  writes no `name` or `type` and an empty `vector_layers`, where it used to
+  declare all 26 Shortbread layers. `set_ocean_only_metadata` is removed.
+  The public `provenance::build` (no caller) is removed and
+  `provenance::producer_config_diff` is crate-private. Archives elivagar
+  writes are byte-unchanged.
+
 - Breaking: `NodeStore` and `SortedNodeStore` puts return
   `Result<(), node_index::NodeStoreError>`. Negative node IDs, IDs that are
   not strictly increasing under `--force-sorted`, IDs over the flat index

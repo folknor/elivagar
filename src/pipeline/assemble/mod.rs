@@ -326,10 +326,17 @@ pub(in crate::pipeline) fn phase_assemble_with_ocean(
     let ocean_tiles = match &spec.role {
         ArchiveRole::OceanArtifact { key } => {
             pmtiles.set_ocean_artifact_metadata(key.clone())?;
-            pmtiles.set_ocean_only_metadata();
+            pmtiles.set_tileset(crate::pipeline::shortbread_tileset(&[
+                crate::shortbread::Layer::Ocean,
+            ]));
             None
         }
-        ArchiveRole::Tileset { ocean_tiles, .. } => ocean_tiles.as_deref(),
+        ArchiveRole::Tileset { ocean_tiles, .. } => {
+            pmtiles.set_tileset(crate::pipeline::shortbread_tileset(
+                &crate::shortbread::Layer::ALL,
+            ));
+            ocean_tiles.as_deref()
+        }
     };
 
     let partitions = sort_reader.take_partitions();

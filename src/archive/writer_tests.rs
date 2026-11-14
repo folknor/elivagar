@@ -1,6 +1,47 @@
 use super::*;
 use protohoggr::encode_varint;
 
+fn shortbread_all() -> Tileset {
+    crate::pipeline::shortbread_tileset(&crate::shortbread::Layer::ALL)
+}
+
+/// A writer with no tileset description declares no layers and omits the
+/// schema members: the container writer knows no tile schema.
+#[test]
+fn bare_writer_metadata_declares_no_schema() {
+    let config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
+    let writer = PmtilesWriter::new(config);
+    let json = build_metadata(
+        &writer.config,
+        writer.tile_data_format,
+        writer.tile_data_compression,
+        None,
+        None,
+        &writer.metadata_extensions,
+        writer.tileset.as_ref(),
+    )
+    .expect("serialize metadata");
+    assert_eq!(
+        std::str::from_utf8(&json).unwrap(),
+        r#"{"format":"pbf","tile_payload_format":"mvt","tile_compression":"gzip","minzoom":0,"maxzoom":14,"vector_layers":[]}"#
+    );
+}
+
 fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
     TileId::at(z, x, y).raw()
 }
@@ -329,7 +370,7 @@ fn test_metadata_json() {
         None,
         None,
         &MetadataExtensions::default(),
-        &crate::shortbread::Layer::ALL,
+        Some(&shortbread_all()),
     )
     .expect("serialize metadata");
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -371,7 +412,7 @@ fn test_metadata_json_with_source_provenance() {
         Some("denmark-latest.osm.pbf"),
         Some(1_708_000_000),
         &MetadataExtensions::default(),
-        &crate::shortbread::Layer::ALL,
+        Some(&shortbread_all()),
     )
     .expect("serialize metadata");
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -405,7 +446,7 @@ fn test_metadata_json_escapes_source_pbf_special_chars() {
         Some(source),
         None,
         &MetadataExtensions::default(),
-        &crate::shortbread::Layer::ALL,
+        Some(&shortbread_all()),
     )
     .expect("serialize metadata");
 
@@ -439,7 +480,7 @@ fn test_metadata_json_mlt_contract() {
         None,
         None,
         &MetadataExtensions::default(),
-        &crate::shortbread::Layer::ALL,
+        Some(&shortbread_all()),
     )
     .expect("serialize metadata");
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -473,7 +514,7 @@ fn metadata_serialization_keeps_the_existing_field_order() {
         Some("denmark-latest.osm.pbf"),
         Some(1_708_000_000),
         &MetadataExtensions::default(),
-        &crate::shortbread::Layer::ALL,
+        Some(&shortbread_all()),
     )
     .expect("serialize metadata");
     let json = std::str::from_utf8(&json).unwrap();
@@ -531,7 +572,7 @@ fn metadata_setter_rejects_duplicates_and_non_objects() {
         None,
         None,
         &writer.metadata_extensions,
-        &writer.metadata_layers,
+        writer.tileset.as_ref(),
     )
     .expect("serialize metadata");
     let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
