@@ -85,22 +85,14 @@ pub fn simplify_tolerance(zoom: u8) -> f64 {
 /// Points whose perpendicular distance to the line segment between endpoints
 /// is less than `tolerance` are removed. Result is left in `output`.
 /// `keep_buf` is a reusable scratch buffer for the keep-flags array.
-///
-/// Returns the maximum deviation (squared) of any removed point. If this is less
-/// than the next zoom's tolerance², the cascade has converged and further DP calls
-/// can be skipped.
+#[cfg(test)]
 pub fn simplify_into(
     points: &[Point],
     tolerance: f64,
     keep_buf: &mut Vec<bool>,
     output: &mut Vec<Point>,
-) -> f64 {
-    output.clear();
-    if points.len() <= 2 {
-        output.extend_from_slice(points);
-        return 0.0;
-    }
-    simplify_impl(points, tolerance, &[], keep_buf, output)
+) {
+    simplify_into_with_required(points, tolerance, &[], keep_buf, output);
 }
 
 /// Simplify with required vertex indices that must survive simplification.
@@ -113,13 +105,13 @@ pub fn simplify_into_with_required(
     required_indices: &[usize],
     keep_buf: &mut Vec<bool>,
     output: &mut Vec<Point>,
-) -> f64 {
+) {
     output.clear();
     if points.len() <= 2 {
         output.extend_from_slice(points);
-        return 0.0;
+        return;
     }
-    simplify_impl(points, tolerance, required_indices, keep_buf, output)
+    simplify_impl(points, tolerance, required_indices, keep_buf, output);
 }
 
 fn simplify_impl(
@@ -128,7 +120,7 @@ fn simplify_impl(
     required_indices: &[usize],
     keep_buf: &mut Vec<bool>,
     output: &mut Vec<Point>,
-) -> f64 {
+) {
     keep_buf.clear();
     keep_buf.resize(points.len(), false);
     for &idx in required_indices {
@@ -143,17 +135,17 @@ fn simplify_impl(
             .is_some_and(|(first, last)| {
                 first.x.to_bits() == last.x.to_bits() && first.y.to_bits() == last.y.to_bits()
             });
-    let max_dev_sq = if closed {
-        simplify_closed(points, tolerance * tolerance, keep_buf)
+    if closed {
+        simplify_closed(points, tolerance * tolerance, keep_buf);
     } else {
         keep_buf[0] = true;
         keep_buf[points.len() - 1] = true;
         if required_indices.is_empty() {
-            dp_recurse(points, 0, points.len() - 1, tolerance * tolerance, keep_buf)
+            dp_recurse(points, 0, points.len() - 1, tolerance * tolerance, keep_buf);
         } else {
-            dp_recurse_with_required(points, 0, points.len() - 1, tolerance * tolerance, keep_buf)
+            dp_recurse_with_required(points, 0, points.len() - 1, tolerance * tolerance, keep_buf);
         }
-    };
+    }
     for (i, &keep) in keep_buf.iter().enumerate() {
         if keep {
             output.push(points[i]);
@@ -192,12 +184,11 @@ fn simplify_impl(
             "closed-line simplify produced a palindrome"
         );
     }
-    max_dev_sq
 }
 
 /// Simplify a closed line around a non-degenerate chord found by a two-sweep
 /// farthest-pair search. This is a long real chord, not a geometric diameter.
-fn simplify_closed(points: &[Point], tol_sq: f64, keep: &mut [bool]) -> f64 {
+fn simplify_closed(points: &[Point], tol_sq: f64, keep: &mut [bool]) {
     let unique_len = points.len() - 1;
     let a = farthest_point(points, 0, unique_len);
     let b = farthest_point(points, a, unique_len);
@@ -225,13 +216,11 @@ fn simplify_closed(points: &[Point], tol_sq: f64, keep: &mut [bool]) -> f64 {
     rotated_keep[0] = true;
     rotated_keep[b_rotated] = true;
     rotated_keep[unique_len] = true;
-    let left = dp_recurse_with_required(&rotated, 0, b_rotated, tol_sq, &mut rotated_keep);
-    let right =
-        dp_recurse_with_required(&rotated, b_rotated, unique_len, tol_sq, &mut rotated_keep);
+    dp_recurse_with_required(&rotated, 0, b_rotated, tol_sq, &mut rotated_keep);
+    dp_recurse_with_required(&rotated, b_rotated, unique_len, tol_sq, &mut rotated_keep);
     for (rotated_idx, &original_idx) in original.iter().enumerate() {
         keep[original_idx] |= rotated_keep[rotated_idx];
     }
-    left.max(right)
 }
 
 /// True when the vertex sequence equals its own reverse (bit-exact), i.e. the
@@ -268,21 +257,15 @@ pub fn simplify(points: &[Point], tolerance: f64) -> Vec<Point> {
 }
 
 /// Recursive step of Douglas-Peucker. Uses squared tolerance to avoid sqrt.
-/// Returns the maximum squared deviation found across all removed points.
-fn dp_recurse(points: &[Point], start: usize, end: usize, tol_sq: f64, keep: &mut [bool]) -> f64 {
+fn dp_recurse(points: &[Point], start: usize, end: usize, tol_sq: f64, keep: &mut [bool]) {
     if end <= start + 1 {
-        return 0.0;
+        return;
     }
     let (max_idx, max_dist_sq) = find_farthest(points, start, end);
     if max_dist_sq > tol_sq {
         keep[max_idx] = true;
-        let left = dp_recurse(points, start, max_idx, tol_sq, keep);
-        let right = dp_recurse(points, max_idx, end, tol_sq, keep);
-        left.max(right)
-    } else {
-        // All points in this segment are within tolerance - max_dist_sq is
-        // the largest deviation among them.
-        max_dist_sq
+        dp_recurse(points, start, max_idx, tol_sq, keep);
+        dp_recurse(points, max_idx, end, tol_sq, keep);
     }
 }
 
@@ -292,25 +275,22 @@ fn dp_recurse_with_required(
     end: usize,
     tol_sq: f64,
     keep: &mut [bool],
-) -> f64 {
+) {
     if end <= start + 1 {
-        return 0.0;
+        return;
     }
 
     if let Some(split_idx) = (start + 1..end).find(|&i| keep[i]) {
-        let left = dp_recurse_with_required(points, start, split_idx, tol_sq, keep);
-        let right = dp_recurse_with_required(points, split_idx, end, tol_sq, keep);
-        return left.max(right);
+        dp_recurse_with_required(points, start, split_idx, tol_sq, keep);
+        dp_recurse_with_required(points, split_idx, end, tol_sq, keep);
+        return;
     }
 
     let (max_idx, max_dist_sq) = find_farthest(points, start, end);
     if max_dist_sq > tol_sq {
         keep[max_idx] = true;
-        let left = dp_recurse_with_required(points, start, max_idx, tol_sq, keep);
-        let right = dp_recurse_with_required(points, max_idx, end, tol_sq, keep);
-        left.max(right)
-    } else {
-        max_dist_sq
+        dp_recurse_with_required(points, start, max_idx, tol_sq, keep);
+        dp_recurse_with_required(points, max_idx, end, tol_sq, keep);
     }
 }
 
@@ -320,8 +300,8 @@ fn dp_recurse_with_required(
 /// true maximum, not just any above-tolerance point. Early termination was
 /// investigated and rejected: there's no usable upper bound to prune against,
 /// and the loop body (one `perp_dist_sq` + compare per point) is already minimal.
-/// The real DP cost driver is the number of recursive calls, addressed by the
-/// cascade-level optimizations (subpixel skip, convergence skip, vertex pre-check).
+/// The real DP cost driver is the number of recursive calls; the line emitter's
+/// subpixel early break is what keeps those off invisible geometry.
 fn find_farthest(points: &[Point], start: usize, end: usize) -> (usize, f64) {
     let a = points[start];
     let b = points[end];
@@ -358,96 +338,6 @@ fn perp_dist_sq(p: &Point, a: &Point, dx: f64, dy: f64, len_sq: f64) -> f64 {
     let ex = p.x - proj_x;
     let ey = p.y - proj_y;
     ex * ex + ey * ey
-}
-
-// ---------------------------------------------------------------------------
-// Cascading simplification helpers
-// ---------------------------------------------------------------------------
-// These deduplicate the zoom-descending simplification loop used in
-// emit_line_feature, emit_polygon_feature, emit_multipolygon_feature,
-// and emit_ocean_polygon. Douglas-Peucker simplification is hierarchical,
-// so each zoom's result is always a subset of the previous zoom's.
-
-/// Scratch buffers for [`for_each_zoom_simplified`], reused via thread-local storage.
-/// Buffers grow to accommodate the largest geometry seen by each thread and stay allocated.
-struct SimplifySingleScratch {
-    cascade: Vec<Point>,
-    keep_buf: Vec<bool>,
-    simp_buf: Vec<Point>,
-}
-
-thread_local! {
-    static SIMPLIFY_SINGLE_SCRATCH: std::cell::RefCell<SimplifySingleScratch> =
-        const { std::cell::RefCell::new(SimplifySingleScratch {
-            cascade: Vec::new(),
-            keep_buf: Vec::new(),
-            simp_buf: Vec::new(),
-        }) };
-}
-
-/// Cascading simplification for a single geometry (line or polygon ring).
-///
-/// Iterates from `z_hi` down to `z_lo`, simplifying the geometry at each zoom
-/// using the previous zoom's result. Calls `callback(z, &simplified)` at each
-/// zoom level. Stops early if the simplified geometry drops below `min_points`.
-/// Uses thread-local scratch buffers to avoid per-call allocation.
-///
-/// `tol_scale` multiplies the base simplification tolerance. Use 1.0 for
-/// standard behavior (lines). Values > 1.0 simplify more aggressively (fewer
-/// vertices), useful for polygon fill layers where sub-pixel precision is less
-/// important than for stroked lines.
-#[hotpath::measure]
-pub fn for_each_zoom_simplified<F, S>(
-    merc: &[Point],
-    z_lo: u8,
-    z_hi: u8,
-    min_points: usize,
-    tol_scale: S,
-    skip_bbox_check: bool,
-    mut callback: F,
-) where
-    F: FnMut(u8, &[Point]),
-    S: Fn(u8) -> f64,
-{
-    SIMPLIFY_SINGLE_SCRATCH.with(|cell| {
-        let scratch = &mut *cell.borrow_mut();
-        let SimplifySingleScratch {
-            cascade,
-            keep_buf,
-            simp_buf,
-        } = scratch;
-        cascade.clear();
-        cascade.extend_from_slice(merc);
-        // Track max deviation² from last DP run for cascade convergence check.
-        let mut last_max_dev_sq: f64 = f64::MAX;
-        for z in (z_lo..=z_hi).rev() {
-            if z < crate::tiling::MAX_ZOOM {
-                // Pre-DP subpixel check: if the cascade's bbox diagonal is < 1 pixel
-                // at this zoom, the feature is invisible here and at all coarser zooms.
-                // Skips DP entirely - O(1) vs O(n²).
-                // Skipped for connectivity-critical layers (streets, boundaries) where
-                // short connecting ways must survive to maintain road network topology.
-                if !skip_bbox_check && merc_bbox_is_subpixel(cascade, z) {
-                    break;
-                }
-                // Option E: if cascade already has ≤ min_points vertices, DP can't
-                // reduce further - skip the call entirely.
-                if cascade.len() > min_points {
-                    let tol = simplify_tolerance(z) * tol_scale(z);
-                    // Option D: if last DP's max deviation is already below this
-                    // zoom's tolerance, the cascade is optimal - skip DP.
-                    if last_max_dev_sq >= tol * tol {
-                        last_max_dev_sq = simplify_into(cascade, tol, keep_buf, simp_buf);
-                        std::mem::swap(cascade, simp_buf);
-                    }
-                }
-            }
-            if cascade.len() < min_points {
-                break;
-            }
-            callback(z, cascade);
-        }
-    }); // SIMPLIFY_SINGLE_SCRATCH.with
 }
 
 #[cfg(test)]

@@ -249,24 +249,26 @@ parsing.
 
 Reported by the storage hunt.
 
-## STR-041 - The line cascade's convergence skip looks like it stops simplifying after z13
+## STR-044 - Closed lines judge collapse in Mercator, then quantize into retraces
 
-`geometry::simplify::for_each_zoom_simplified` runs Douglas-Peucker at a
-zoom only when `last_max_dev_sq >= tol * tol`, where `last_max_dev_sq` is
-what `simplify_into` returns: the largest squared deviation of any point it
-*removed*. DP removes only points closer than the tolerance it ran with, and
-`simplify_tolerance` grows as zoom falls, so after the first DP (z13) the
-recorded deviation is below every lower zoom's tolerance and no later zoom
-runs DP. Every unpinned line would then carry its z13 simplification down to
-its layer floor. Observed while the attribute-schema landing removed
-`LayerMatch.max_zoom`: a five-vertex test line emitted at z0 through the
-cascade from z14 kept the vertex a direct z0 simplification drops (the test
-`emit_line_preserve_mask_keeps_required_vertices` now compares against a
-direct simplification instead). Not yet verified on real data: check
-per-zoom line vertex counts in a denmark build against a direct per-zoom DP,
-and if confirmed, the fix is an output change that rotates the corpus.
+`simplify::simplify_impl` keeps a simplified closed line when three
+distinct Mercator vertices survive, but `mvt::encode_linestring` only drops
+consecutive duplicates after quantization, so a tiny loop `A, B, C, A`
+whose C rounds onto A ships as the out-and-back `a, b, a`. On denmark the
+boundary-line oracle's advisory palindrome count reads z7 207, z8 140,
+z9 81 once every line simplifies from the source per zoom (it read 124, 77,
+54 while unpinned lines carried z13 detail down), most of them 2 to 64
+extent units long, e.g. z11/1096/641 feat 0 sub 15, a maritime admin-4
+island loop. The pinned path has always had the exposure. The fix is a
+policy choice, not a mechanism: drop the loop, keep the collapsed stroke,
+or retain more source vertices so it stays a loop, with pins constraining
+the last. Whatever it is, collapse judged on the zoom grid is NOT monotone
+across zooms (two points that round together at one zoom can round apart
+at the next coarser one), so it must reject that zoom only and never take
+the emitter's descending-loop `break`, which is safe today only because
+Mercator collapse under a growing tolerance is monotone.
 
-Found while landing the attribute-schema chain, link 1.
+Found while landing per-zoom line simplification.
 
 ---
 
@@ -397,8 +399,7 @@ Reported by the storage, polygon-engine and pipeline hunts.
   sentinel survives). Proposed: per-module tests after the splits, the PBF
   fixture builders as a shared `test_support` synthetic-PBF writer, and a
   `TilegenConfig::for_test()` / resolved-resources builder.
-- `geometry_tests.rs` (loaded via `#[path]`) covers the float side including
-  `multi_simplify_*` for the parked cascade; the integer engine's tests sit
+- `geometry_tests.rs` (loaded via `#[path]`) covers the float side; the integer engine's tests sit
   inline in int_ocean.rs under `tests` and `landing1_tests` (a landing name);
   `bounds_boolean_skipped_when_bbox_contained` asserts an ocean.rs property
   (`push_quantized_pieces` in ocean/emit.rs) from inside int_ocean; `landing_b_*` names encode project history. pyramid

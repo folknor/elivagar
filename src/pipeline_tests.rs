@@ -2629,12 +2629,63 @@ fn emit_line_cascading_simplification() {
 }
 
 #[test]
+fn emit_line_simplifies_every_zoom_from_the_source() {
+    // The middle vertex deviates 1.5 z13 tolerances: z13 keeps it, z12
+    // (tolerance doubled) must drop it. A zoom-to-zoom cascade whose skip read
+    // the z13 removed-point deviation (zero here) as convergence kept it.
+    let t = geometry::simplify::simplify_tolerance(13);
+    let (ox, oy) = (0.5 + 1e-5, 0.5 + 1e-5);
+    let coords = [
+        Point { x: ox, y: oy },
+        Point {
+            x: ox + 10.0 * t,
+            y: oy + 1.5 * t,
+        },
+        Point {
+            x: ox + 20.0 * t,
+            y: oy,
+        },
+    ];
+    let m = test_layer_match(Layer::Streets, GeomExpect::Line);
+    let vertices_at = |z: u8| {
+        let mut records = Vec::new();
+        let mut scratch = LineEmitScratch::new();
+        emit_line_feature(
+            1,
+            &coords,
+            &[false; 3],
+            &m,
+            z,
+            z,
+            &mut records,
+            &mut scratch,
+        );
+        assert_eq!(records.len(), 1, "z{z} should emit one record");
+        let lb = decode_to_layer(&records[0].data);
+        decode_commands_to_abs_coords(&lb.test_feature(0).geometry).len()
+    };
+    assert_eq!(vertices_at(13), 3);
+    assert_eq!(vertices_at(12), 2);
+    let mut full = Vec::new();
+    let mut scratch = LineEmitScratch::new();
+    emit_line_feature(1, &coords, &[false; 3], &m, 12, 14, &mut full, &mut scratch);
+    let z12: Vec<_> = full
+        .iter()
+        .filter(|r| zxy(decode_key(r).0).0 == 12)
+        .collect();
+    assert_eq!(z12.len(), 1);
+    let lb = decode_to_layer(&z12[0].data);
+    assert_eq!(
+        decode_commands_to_abs_coords(&lb.test_feature(0).geometry).len(),
+        2,
+        "a full-range emission must simplify z12 as a direct z12 emission does"
+    );
+}
+
+#[test]
 fn emit_line_preserve_mask_keeps_required_vertices() {
-    // The pinned path simplifies each zoom directly and must keep the pin
-    // where plain simplification at that zoom drops it. Every line layer's
-    // range ends at z14, so the unpinned path is the cascade from z14, which
-    // here keeps the vertex too; the plain reference is therefore a direct
-    // simplification at z0, the work the pinned path does without the pin.
+    // Each zoom simplifies the source directly; the pin must survive where
+    // the same emission without the pin drops the vertex.
     let m = test_layer_match(Layer::Streets, GeomExpect::Line);
     let coords = [
         Point { x: 0.1, y: 0.10000 },
@@ -2658,17 +2709,33 @@ fn emit_line_preserve_mask_keeps_required_vertices() {
     );
     assert_eq!(records_pinned.len(), 1);
 
-    let plain = geometry::simplify::simplify(&coords, geometry::simplify::simplify_tolerance(0));
+    let mut records_plain = Vec::new();
+    let mut scratch_plain = LineEmitScratch::new();
+    emit_line_feature(
+        1099,
+        &coords,
+        &[false; 5],
+        &m,
+        0,
+        0,
+        &mut records_plain,
+        &mut scratch_plain,
+    );
+    assert_eq!(records_plain.len(), 1);
+
+    let mut target_tc = Vec::new();
+    geometry::tiles::to_tile_coords_into(&mut target_tc, &[Point { x: 0.5, y: 0.10002 }], 0, 0, 0);
+    let expected = target_tc[0];
+
+    let plain_lb = decode_to_layer(&records_plain[0].data);
+    let plain_pts = decode_commands_to_abs_coords(&plain_lb.test_feature(0).geometry);
     assert!(
-        !plain.iter().any(|p| p.x.to_bits() == coords[2].x.to_bits()),
-        "direct z0 simplification should drop the unpinned vertex"
+        !plain_pts.contains(&expected),
+        "unpinned emission at z0 should drop the vertex, got {plain_pts:?}"
     );
 
     let pinned_lb = decode_to_layer(&records_pinned[0].data);
     let pinned_pts = decode_commands_to_abs_coords(&pinned_lb.test_feature(0).geometry);
-    let mut target_tc = Vec::new();
-    geometry::tiles::to_tile_coords_into(&mut target_tc, &[Point { x: 0.5, y: 0.10002 }], 0, 0, 0);
-    let expected = target_tc[0];
     assert!(
         pinned_pts.contains(&expected),
         "pinned line geometry should retain required shared vertex {expected:?}"

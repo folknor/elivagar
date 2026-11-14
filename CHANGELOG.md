@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Lines without pinned vertices are simplified at every zoom again. The
+  zoom-to-zoom cascade they used ran Douglas-Peucker only at z13: its
+  convergence skip took the largest deviation among removed points as proof
+  that nothing more could go, so z12 and below carried z13 detail. Every
+  line now simplifies its source directly at each zoom's tolerance, the rule
+  lines with pinned vertices already followed. Output changes at z0-z12 in
+  the line layers (boundaries, ferries, water lines, pier lines and the
+  rest); z13 and z14 are unchanged.
+
 - Phase12 no longer aborts on four input or disk conditions. A node block
   after the first way block on the node-store path, and a node ID at or
   above 2^40 in the compact sorted store, now refuse the input (exit 65);

@@ -182,7 +182,7 @@ fn test_simplify_with_required_preserves_pinned_vertex() {
     ];
     let mut keep = Vec::new();
     let mut out = Vec::new();
-    let _ = simplify_into_with_required(&points, 0.01, &[2], &mut keep, &mut out);
+    simplify_into_with_required(&points, 0.01, &[2], &mut keep, &mut out);
     assert!(
         out.iter()
             .any(|p| approx_eq(p.x, 0.5) && approx_eq(p.y, 0.0001)),
@@ -199,7 +199,7 @@ fn test_simplify_with_required_ignores_out_of_range_indices() {
     ];
     let mut keep = Vec::new();
     let mut out = Vec::new();
-    let _ = simplify_into_with_required(&points, 0.01, &[999], &mut keep, &mut out);
+    simplify_into_with_required(&points, 0.01, &[999], &mut keep, &mut out);
     assert_eq!(out.len(), 2, "invalid required index must be ignored");
 }
 

@@ -151,6 +151,10 @@ assembly grouping; use the tile address or Hilbert id when identifying a tile.
 
 Floating-point simplification tolerance is measured in normalized Mercator
 units. One rendered pixel at zoom z is `1 / (256 * 2^z)` in that space.
+Lines simplify their source independently at each zoom below z14, with any
+pinned vertices required, and are never simplified from another zoom's
+result, so each zoom's line deviates from the source by at most that zoom's
+tolerance before clipping and quantization.
 
 Integer polygon simplification works after rescaling to a zoom grid. Its
 tolerance is measured in zoom-grid MVT extent units; 16 units equal one

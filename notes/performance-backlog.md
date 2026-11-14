@@ -348,9 +348,11 @@ change.
   item 20 stays parked; the distinct payoff (topology-aware line
   simplification with tile context) is a quality feature as much as perf.
   Still parked; revisit against planet profiles.
-- **Item 25 (pinned line DP cascade)**: line-layer analogue of the polygon
-  cascade; no line layer shows up in the top profiles (emit_line_feature
-  3.9-40s thread-time, wide spread but dominated by phase12 items). Parked.
+- **Item 25 (line DP cost)**: every line runs one direct DP from its source
+  per zoom; there is no cross-zoom cascade. No line layer showed up in the
+  top profiles (emit_line_feature 3.9-40s thread-time, wide spread but
+  dominated by phase12 items), though those readings predate unpinned lines
+  simplifying below z13. Parked.
 - **Item 26 (PMTiles writer sharding + faster dedup fingerprint)**: half
   landed - the in-place writer (`bc71cf1`) made finalize rename-only and
   deleted the serial tail; central offset assignment with worker pwrite

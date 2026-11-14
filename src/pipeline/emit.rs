@@ -878,7 +878,6 @@ pub(super) fn emit_line_feature(
             .enumerate()
             .filter_map(|(i, &keep)| keep.then_some(i)),
     );
-    let has_pins = !scratch.pinned_idxs.is_empty();
     let mut run_for_zoom = |z: u8, simplified: &[Point]| {
         encode_attrs_bytes(&mut scratch.attrs_buf, &m.attrs, z);
 
@@ -950,51 +949,36 @@ pub(super) fn emit_line_feature(
     // Short connecting ways (e.g. motorway junction links) are physically subpixel
     // at low zoom but must survive to maintain road network connectivity.
     let skip_bbox_check = m.layer == Layer::Boundaries || m.layer == Layer::Streets;
-    if has_pins {
-        // Each zoom simplifies the source independently, so the window alone
-        // decides which zooms run.
-        for z in (z_lo..=z_hi).rev() {
-            if z < MAX_ZOOM
-                && !skip_bbox_check
-                && geometry::simplify::merc_bbox_is_subpixel(merc, z)
-            {
-                break;
-            }
-            if z < MAX_ZOOM {
-                let tol = geometry::simplify::simplify_tolerance(z);
-                let _ = geometry::simplify::simplify_into_with_required(
-                    merc,
-                    tol,
-                    &scratch.pinned_idxs,
-                    &mut scratch.simplify_keep,
-                    &mut scratch.simplify_buf,
-                );
-                if scratch.simplify_buf.len() < 2 {
-                    break;
-                }
-                run_for_zoom(z, &scratch.simplify_buf);
-            } else {
-                run_for_zoom(z, merc);
-            }
+    // Every zoom below z14 simplifies the SOURCE at that zoom's tolerance, with
+    // the pins (possibly none) required; z14 emits the source verbatim. Each
+    // zoom is therefore a function of the source and the zoom alone, so the
+    // window decides only which zooms run, and the deviation from the source
+    // is bounded by that zoom's tolerance rather than accumulating down a
+    // chain. This replaced a zoom-to-zoom cascade whose convergence skip read
+    // the largest deviation among REMOVED points (at most the tolerance just
+    // used, so below every coarser tolerance) as proof nothing more could go,
+    // which skipped DP at every zoom after z13. With fixed source, anchors and
+    // pins, a coarser tolerance only prunes the DP subdivision further, so an
+    // empty result or a subpixel source stays so below and the breaks are safe.
+    for z in (z_lo..=z_hi).rev() {
+        if z >= MAX_ZOOM {
+            run_for_zoom(z, merc);
+            continue;
         }
-    } else {
-        // The cascade simplifies each zoom from the one above it, so it starts
-        // at the layer's own top zoom, not the window's: a cascade begun at a
-        // lowered window top would reach the window along a different chain
-        // than a full build. Zooms above the window run but do not emit.
-        geometry::simplify::for_each_zoom_simplified(
+        if !skip_bbox_check && geometry::simplify::merc_bbox_is_subpixel(merc, z) {
+            break;
+        }
+        geometry::simplify::simplify_into_with_required(
             merc,
-            z_lo,
-            MAX_ZOOM,
-            2,
-            |_| 1.0,
-            skip_bbox_check,
-            |z, simplified| {
-                if z <= z_hi {
-                    run_for_zoom(z, simplified);
-                }
-            },
+            geometry::simplify::simplify_tolerance(z),
+            &scratch.pinned_idxs,
+            &mut scratch.simplify_keep,
+            &mut scratch.simplify_buf,
         );
+        if scratch.simplify_buf.len() < 2 {
+            break;
+        }
+        run_for_zoom(z, &scratch.simplify_buf);
     }
     count
 }
