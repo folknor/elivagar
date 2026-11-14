@@ -328,6 +328,13 @@ pub(in crate::pipeline) fn phase_assemble_with_ocean(
 ///
 /// Ordinary run archives require the input name and identity. The ocean
 /// artifact builder bypasses this function because it has no PBF input.
+///
+/// This stays on the pipeline side rather than in `provenance.rs` by
+/// decision: it adapts resolved run state (`RunProvenance`, the ocean plan's
+/// `contract_kind`) into the typed `Input` and `OceanContract` that
+/// `provenance::build` takes. `provenance` is public and linked by brokkr, and
+/// it already depends on `TilegenConfig` in the wrong direction; moving this
+/// adapter in would add a dependency on pipeline run state as well.
 fn write_provenance(
     pmtiles: &mut PmtilesWriter,
     config: &TilegenConfig,

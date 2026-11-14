@@ -179,19 +179,6 @@ to a `tile_detail` printer.
 
 Reported by the pipeline, run-contract and layer-identity hunts.
 
-## STR-006 - Provenance build block and writer placement
-
-The `elivagar` member is now written from typed records (`Provenance`,
-`ContractConfig` with the producer config flattened in, `OceanContract` and
-`TileContract` serializers); the read side deliberately stays `Value` (the
-reasoning is on `Provenance` in `provenance.rs`). Residue: the `build` member
-is still a `json!` literal, and `repo_json(commit, dirty)` parses
-`"true"`/`"false"` from `env!` where `build.rs` could emit the typed value
-once; `write_provenance` still lives in `pipeline/assemble/mod.rs` rather
-than in `provenance.rs`.
-
-Reported by the archive-surface, run-contract and pipeline hunts.
-
 ## STR-008 - Fix the dependency edges that point the wrong way
 
 - `sort.rs` imports `crate::pipeline::emit::RecordTally`: infrastructure

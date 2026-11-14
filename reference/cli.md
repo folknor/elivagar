@@ -366,7 +366,7 @@ The `elivagar` metadata member (`reference/metadata.md`, schema at
                 fanout: none
     Ocean:      artifact, low zoom simplified, simplifier on
                 key: shp c10be1c7843c simplified b3417e31c287 level 6 policy 1
-    Build:      elivagar b833fc8730cd, pbfhogg 0f1eb01a1c1e
+    Build:      elivagar b833fc8730cd, pbfhogg 0.5.0
     Effective:  coords inline, way members relation_scan, pins block_local
 ```
 

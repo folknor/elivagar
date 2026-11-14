@@ -340,8 +340,11 @@ counter channel when measured.
 
 `build.rs` declares the source tree, manifest, lockfile, HEAD and the current
 branch ref as inputs. Registry dependency identities come from the lockfile.
-The script retains tracking support for path dependencies, but none are
-currently configured. Its rerun declarations are intended to keep build
+There are no path dependencies; reintroducing one means tracking its tree
+there and giving it a commit/dirty pair of its own. The script writes the
+`build` values once, already typed, as generated Rust that `provenance.rs`
+includes, and a failed `git status` records `dirty` as unknown rather than
+clean. Its rerun declarations are intended to keep build
 provenance fresh; they are not independent proof of the code that ran.
 
 `dirty` uses brokkr's definition, not git's: `*.md` and `.brokkr/results.db`

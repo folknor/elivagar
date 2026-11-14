@@ -39,6 +39,22 @@ piece's tile range and return `InvalidData`.
 
 Found by the coordinates-core landing's review.
 
+## BUG-068 - build.rs reruns on less than its dirty flag observes
+
+`build.rs` `dirty()` reads the whole `git status --porcelain` (minus `*.md`
+and `.brokkr/results.db`), but `track()` declares only `src/`, `Cargo.toml`,
+`Cargo.lock`, `build.rs`, `.git/HEAD` and the branch ref as rerun inputs. An
+edit to any other tracked or untracked file (`tests/`, `scripts/`, `corpus/`,
+...) marks the tree dirty by brokkr's rule, yet the script does not rerun, so
+the archive can record `dirty: false` for a tree brokkr would call dirty (and
+the reverse after the file is reverted). Either widen the declarations to
+match (cost: reruns on unrelated edits) or narrow `dirty()` to the inputs that
+reach the binary and document the divergence from brokkr's definition in
+`reference/metadata.md`. Separately, `track()` builds `.git/...` paths
+directly, which does not hold for a `.git` file (worktrees, submodules).
+
+Found by the spar on the typed build-closure landing.
+
 ---
 
 # Ocean

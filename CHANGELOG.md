@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The provenance `build` block is typed. `build.rs` writes it once as
+  generated Rust instead of string env vars that provenance parsed back,
+  and a failed `git status` at build time now records `dirty` as null
+  instead of false. Wire shape and bytes are otherwise unchanged.
+
 - Sort keys are a type. Breaking: `sort::SortKey` is a packed `u64`
   newtype rather than an alias, minted by `SortKey::new(TileId, Layer,
   rank)`; `make_sort_key`, `tile_id_from_key`, `layer_from_key`,

@@ -30,7 +30,7 @@
 use crate::TilegenConfig;
 use crate::ocean::Xxh128;
 use crate::shortbread::Layer;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::Path;
 
 /// Schema version of the `elivagar` metadata member.
@@ -269,17 +269,19 @@ pub struct Effective {
 /// the commit names the nearest ancestor of the code that ran, not the code
 /// that ran. Recording the pair keeps that distinction visible instead of
 /// letting a hash imply an identity it does not have. Either field may be
-/// `unknown` when git could not be consulted at build time - honest, and the
-/// only alternative to guessing.
-fn repo_json(commit: &str, dirty: &str) -> Value {
-    json!({
-        "commit": commit,
-        "dirty": match dirty {
-            "true" => Value::Bool(true),
-            "false" => Value::Bool(false),
-            _ => Value::Null,
-        },
-    })
+/// unknown when git could not be consulted at build time (`commit` is then
+/// the string `unknown`, `dirty` is null) - honest, and the only alternative
+/// to guessing.
+#[derive(Debug, serde::Serialize)]
+struct Repo {
+    commit: &'static str,
+    dirty: Option<bool>,
+}
+
+/// A registry dependency, identified by its locked semver or `unknown`.
+#[derive(Debug, serde::Serialize)]
+struct Reader {
+    version: &'static str,
 }
 
 /// The code closure that produced the archive.
@@ -295,20 +297,19 @@ fn repo_json(commit: &str, dirty: &str) -> Value {
 /// reader cannot resolve to a version. protohoggr appears only through that
 /// checksum for the same reason and needs no field of its own. elivagar remains
 /// the one git tree here, so only elivagar carries a commit/dirty pair.
-fn build_json() -> Value {
-    json!({
-        "elivagar": repo_json(
-            env!("ELIVAGAR_BUILD_ELIVAGAR_COMMIT"),
-            env!("ELIVAGAR_BUILD_ELIVAGAR_DIRTY"),
-        ),
-        "pbfhogg_reader": { "version": env!("ELIVAGAR_BUILD_PBFHOGG_VERSION") },
-        "cargo_lock_xxh3_128": env!("ELIVAGAR_BUILD_CARGO_LOCK_XXH3_128"),
-        "cargo_features": env!("ELIVAGAR_BUILD_CARGO_FEATURES")
-            .split(',')
-            .filter(|f| !f.is_empty())
-            .collect::<Vec<_>>(),
-    })
+///
+/// `build.rs` writes the values as the typed initializer of [`BUILD`], so the
+/// build script is the one place they are established and nothing here parses
+/// them back out of strings.
+#[derive(Debug, serde::Serialize)]
+struct Build {
+    elivagar: Repo,
+    pbfhogg_reader: Reader,
+    cargo_lock_xxh3_128: &'static str,
+    cargo_features: &'static [&'static str],
 }
+
+const BUILD: Build = include!(concat!(env!("OUT_DIR"), "/build_closure.rs"));
 
 /// Fanout caps keyed by layer name, omitting unsupported and uncapped layers.
 ///
@@ -507,7 +508,7 @@ pub fn build(
         schema: SCHEMA_VERSION,
         input,
         config: ContractConfig::new(config, ocean.clone()),
-        build: build_json(),
+        build: &BUILD,
         execution: Execution { resumed_from },
         effective,
     };
@@ -534,7 +535,7 @@ struct Provenance<'a> {
     schema: u32,
     input: &'a Input,
     config: ContractConfig,
-    build: Value,
+    build: &'a Build,
     execution: Execution,
     #[serde(skip_serializing_if = "Option::is_none")]
     effective: Option<Effective>,
@@ -596,6 +597,7 @@ impl BackgroundHash {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// The production boundary: every member reaches the archive through
     /// `serde_json::to_value`.
@@ -614,6 +616,36 @@ mod tests {
             ..input()
         };
         assert_eq!(json_of(&undated)["replication_timestamp"], Value::Null);
+    }
+
+    #[test]
+    fn build_keeps_its_established_wire_bytes() {
+        let build = |dirty, cargo_features| Build {
+            elivagar: Repo {
+                commit: "9d7e56a",
+                dirty,
+            },
+            pbfhogg_reader: Reader { version: "0.5.0" },
+            cargo_lock_xxh3_128: "0fed0b9a",
+            cargo_features,
+        };
+        assert_eq!(
+            json_of(&build(Some(true), &["default", "mlt"])).to_string(),
+            r#"{"cargo_features":["default","mlt"],"cargo_lock_xxh3_128":"0fed0b9a","elivagar":{"commit":"9d7e56a","dirty":true},"pbfhogg_reader":{"version":"0.5.0"}}"#,
+        );
+        assert_eq!(
+            json_of(&build(Some(false), &[]))["elivagar"]["dirty"],
+            json!(false)
+        );
+        assert_eq!(
+            json_of(&build(Some(false), &[]))["cargo_features"],
+            json!([])
+        );
+        assert_eq!(json_of(&build(None, &[]))["elivagar"]["dirty"], Value::Null);
+        // The generated closure itself takes the same shape.
+        let real = json_of(&BUILD);
+        assert!(real["elivagar"]["commit"].is_string());
+        assert!(real["cargo_features"].is_array());
     }
 
     #[test]

@@ -1,4 +1,12 @@
-//! Captures the build closure into env vars for archive provenance.
+//! Captures the build closure for archive provenance.
+//!
+//! The result is one generated Rust file, `$OUT_DIR/build_closure.rs`, holding
+//! the initializer of a typed constant whose struct `src/provenance.rs`
+//! declares. The types live with the serializer and the values are written
+//! here once, already typed - `dirty` as `Option<bool>`, features as a slice -
+//! so nothing on the consumer side reparses a string protocol. The file is
+//! rewritten in full on every run of this script; a stale copy left in
+//! `OUT_DIR` is never reused.
 //!
 //! Provenance that lies is worse than provenance that is absent: a stale
 //! commit invites a reader to attribute a diff to code that was never linked.
@@ -18,16 +26,16 @@
 //! content-addressed checksum and no git inspection is needed or possible.
 //! Only path dependencies need this treatment, which is why pinning them
 //! removed a whole class of staleness. There are currently no path
-//! dependencies, so `PATH_DEPS` is empty; leaving the machinery in place keeps
-//! the closure honest the day one is reintroduced.
+//! dependencies. Reintroducing one means tracking its tree here and giving it
+//! a commit/dirty field of its own in the provenance `Build` struct.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Path dependencies whose git state has to be captured by hand.
-const PATH_DEPS: [(&str, &str); 0] = [];
-
-fn git(repo: &Path, args: &[&str]) -> Option<String> {
+/// Trimmed stdout of a successful git command; None when git could not run
+/// or failed. Empty output is a success and stays `Some("")`, so a caller can
+/// tell a clean `status` apart from a failed one.
+fn git_output(repo: &Path, args: &[&str]) -> Option<String> {
     // current_dir rather than `-C`: same effect, and it fails cleanly when the
     // directory does not exist instead of asking git to interpret it.
     let out = Command::new("git")
@@ -39,11 +47,12 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     let text = String::from_utf8(out.stdout).ok()?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.to_string())
+    Some(text.trim().to_string())
+}
+
+/// Like [`git_output`], but empty output also reads as absent.
+fn git(repo: &Path, args: &[&str]) -> Option<String> {
+    git_output(repo, args).filter(|text| !text.is_empty())
 }
 
 /// Full 40-character commit. Abbreviations collide, and a provenance record
@@ -59,10 +68,9 @@ fn commit(repo: &Path) -> Option<String> {
 /// every build dirty and make the flag meaningless. This mirrors the rule
 /// brokkr applies when deciding whether a run's results may be stored.
 fn dirty(repo: &Path) -> Option<bool> {
-    let status = git(repo, &["status", "--porcelain"]).unwrap_or_default();
-    // A clean tree yields empty output, which `git` maps to None; that is
-    // indistinguishable here from a real failure, so probe separately.
-    git(repo, &["rev-parse", "--is-inside-work-tree"])?;
+    // A failed status is unknown, not clean: an empty string from a failed
+    // command would otherwise record `dirty: false` for a tree nobody read.
+    let status = git_output(repo, &["status", "--porcelain"])?;
     Some(status.lines().any(|line| {
         // Porcelain v1: two status columns, a space, then the path.
         let path = line.get(3..).unwrap_or("").trim();
@@ -85,8 +93,11 @@ fn track(repo: &Path) {
     }
 }
 
-fn emit(name: &str, value: &str) {
-    println!("cargo:rustc-env=ELIVAGAR_BUILD_{name}={value}");
+/// A Rust string literal for `value`. Debug formatting escapes quotes,
+/// backslashes and control characters; how it escapes them never reaches the
+/// archive, which sees only the decoded string.
+fn lit(value: &str) -> String {
+    format!("{value:?}")
 }
 
 /// The locked semver of a registry dependency, read straight from Cargo.lock.
@@ -118,44 +129,23 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.lock");
 
-    let repos = std::iter::once(("ELIVAGAR", manifest.clone())).chain(
-        PATH_DEPS
-            .iter()
-            .map(|(name, rel)| (*name, manifest.join(rel))),
-    );
-    for (name, repo) in repos {
-        track(&repo);
-        emit(
-            &format!("{name}_COMMIT"),
-            commit(&repo).as_deref().unwrap_or("unknown"),
-        );
-        emit(
-            &format!("{name}_DIRTY"),
-            match dirty(&repo) {
-                Some(true) => "true",
-                Some(false) => "false",
-                None => "unknown",
-            },
-        );
-    }
+    track(&manifest);
+    let commit = commit(&manifest).unwrap_or_else(|| "unknown".to_string());
+    let dirty = match dirty(&manifest) {
+        Some(true) => "Some(true)",
+        Some(false) => "Some(false)",
+        None => "None",
+    };
 
     // Identifies every registry dependency at once, protohoggr included, by
     // the checksums the lockfile already pins.
     let lock = std::fs::read(manifest.join("Cargo.lock")).unwrap_or_default();
-    emit(
-        "CARGO_LOCK_XXH3_128",
-        &format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&lock)),
-    );
+    let lock_hash = format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&lock));
 
     // pbfhogg is our PBF reader and moved from path to registry; its semver
     // still belongs in provenance even though it no longer has a git tree.
     let lock_text = String::from_utf8_lossy(&lock);
-    emit(
-        "PBFHOGG_VERSION",
-        locked_version(&lock_text, "pbfhogg")
-            .as_deref()
-            .unwrap_or("unknown"),
-    );
+    let pbfhogg = locked_version(&lock_text, "pbfhogg").unwrap_or_else(|| "unknown".to_string());
 
     // Cargo exposes enabled features as CARGO_FEATURE_<NAME>. Sorted so the
     // value is stable across builds rather than dependent on env iteration
@@ -165,5 +155,18 @@ fn main() {
         .map(|f| f.to_lowercase().replace('_', "-"))
         .collect();
     features.sort();
-    emit("CARGO_FEATURES", &features.join(","));
+    let features: Vec<String> = features.iter().map(|f| lit(f)).collect();
+
+    let source = format!(
+        "Build {{\n    elivagar: Repo {{ commit: {commit}, dirty: {dirty} }},\n    \
+         pbfhogg_reader: Reader {{ version: {pbfhogg} }},\n    \
+         cargo_lock_xxh3_128: {lock_hash},\n    cargo_features: &[{features}],\n}}\n",
+        commit = lit(&commit),
+        pbfhogg = lit(&pbfhogg),
+        lock_hash = lit(&lock_hash),
+        features = features.join(", "),
+    );
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    std::fs::write(out_dir.join("build_closure.rs"), source)
+        .expect("cannot write the generated build closure");
 }
