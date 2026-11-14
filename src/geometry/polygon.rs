@@ -171,24 +171,38 @@ pub(crate) struct RingGroup<R> {
 ///
 /// The first nonzero-area ring fixes the exterior orientation; each later
 /// ring of that orientation opens a polygon and each of the other attaches
-/// as a hole to the open one. Zero-area rings are skipped. Area wraps from
-/// the last vertex to the first, so an unclosed ring (tolerant decoding of
-/// a foreign stream) is measured as MapLibre's `calculateSignedArea` would.
+/// as a hole to the open one. Zero-area rings are skipped, except that a
+/// feature's only ring is returned as a polygon whatever its area, before
+/// any area is measured. Area wraps from the last vertex to the first, so an
+/// unclosed ring (tolerant decoding of a foreign stream) is measured as
+/// MapLibre's `calculateSignedArea` would.
 ///
-/// This is MapLibre `classifyRings` minus two things, both deliberate. Its
-/// 500-ring clamp is a rendering limit and is not applied: structural
-/// detail keeps every contour. And its shortcut returning a lone ring as a
-/// polygon whatever its area is not taken: a lone zero-area ring is skipped
-/// like any other, so `tile_detail` drops it and MLT refuses the polygon
-/// (the canonical ring-grouping oracle in scripts/validate keeps it).
+/// This is MapLibre `classifyRings`, lone-ring shortcut included, minus its
+/// 500-ring clamp: that is a rendering limit, and structural detail keeps
+/// every contour. The shortcut is kept so the corpus hash (through
+/// `tile_detail`), MLT, the ring-grouping oracle in scripts/validate and the
+/// renderer all see the same polygon for a lone degenerate ring; skipping it
+/// would make the hash blind to an encoder that started emitting such rings.
+/// Zero signed area is not proof of invisibility (a bow-tie's lobes cancel),
+/// which is a second reason not to drop it. Zero input rings give no groups.
 /// `area` is the ring's [`signed_area_2x`].
 pub(crate) fn group_rings<R>(
     rings: impl IntoIterator<Item = R>,
     area: impl Fn(&R) -> Area2x,
 ) -> Vec<RingGroup<R>> {
+    let mut rings = rings.into_iter().peekable();
+    let Some(first) = rings.next() else {
+        return Vec::new();
+    };
+    if rings.peek().is_none() {
+        return vec![RingGroup {
+            outer: first,
+            holes: Vec::new(),
+        }];
+    }
     let mut groups: Vec<RingGroup<R>> = Vec::new();
     let mut exterior = None;
-    for ring in rings {
+    for ring in std::iter::once(first).chain(rings) {
         let Some(orientation) = ring_role(area(&ring)) else {
             continue;
         };

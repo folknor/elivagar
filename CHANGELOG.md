@@ -20,6 +20,12 @@
   longer silently miss it. `StreetKind::label_name` is removed. Output
   unchanged.
 
+- A polygon feature whose only ring has zero area is kept as a one-ring
+  outer by `tile_detail` and by MLT conversion, as MapLibre's
+  `classifyRings` keeps it, instead of decoding to no components and
+  failing MLT encoding. Zero-area rings among two or more are still
+  skipped. Output unchanged.
+
 - One MVT protobuf message reader. `tile_detail`, `verify`, `svg`, `diag`
   and the ocean artifact splice walk tile, layer, feature and value
   messages through `mvt::message`, so a truncated tag or field now fails

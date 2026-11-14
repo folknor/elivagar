@@ -202,9 +202,11 @@ them to E7; the world-ocean artifact retains world bounds. Header regression
 checks cover those fields, and inspect displays their stored values.
 
 The detail decoder groups polygon rings using the first nonzero-area ring's
-winding as the exterior orientation and skips zero-area rings, a lone one
-included (MapLibre's classifyRings, and the ring-grouping oracle, keep a
-feature's only ring whatever its area). Ring area wraps from the last vertex
+winding as the exterior orientation and skips zero-area rings, except that
+a feature's only ring is kept as an outer whatever its area - MapLibre's
+classifyRings shortcut, which the ring-grouping oracle and the render core
+also take, so the hash sees a lone degenerate ring the renderer receives.
+MLT conversion groups by the same rule. Ring area wraps from the last vertex
 to the first, so an unclosed ring in tolerant decoding is measured as
 MapLibre measures it. It preserves every other ring for hashing, without the
 renderer's 500-ring clamp. This supports comparison with producers whose

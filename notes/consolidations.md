@@ -51,23 +51,6 @@ every geometry kind - i.e. lines and points onto the integer pipeline (see
 
 Reported by the polygon-engine and coordinate-spaces hunts.
 
-## CON-042 - What is a lone zero-area polygon ring?
-
-Two answers. `geometry::polygon::group_rings` (behind `tile_detail`, so the
-corpus hash, and MLT) skips every zero-area ring, so a feature whose only
-ring is degenerate decodes to no components and MLT refuses it. MapLibre's
-`classifyRings` returns a single-ring polygon before measuring area, and
-`scripts/validate/ring-grouping-oracle.mjs` plus brokkr's render core copy
-that, keeping the ring. elivagar's own output should never carry one (the
-min-area filter), so this is invisible on denmark today; the cost is that
-the hash and the renderer disagree on that input, and the hash would not
-see a regression that started emitting such rings beyond the feature
-existing. Adopting MapLibre's shortcut changes strict `tile_detail` output
-for a closed collinear ring and MLT acceptance, so it is a decision, not a
-cleanup; it was left out of the message-reader landing on purpose.
-
-Found while consolidating the MVT message reader.
-
 ## CON-018 - What identifies a vertex across features?
 
 `emit::merc_point_key` rounds Merc x/y times 1e12 (`FxHashSet<(i64, i64)>`

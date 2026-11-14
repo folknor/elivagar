@@ -5,7 +5,8 @@
 //! structure: a [`DetailTile`] carries its layers, features, geometry
 //! components and rings in **wire order**, with no canonicalization and no
 //! hashing. Polygon rings use the first nonzero-area ring's orientation as
-//! the exterior orientation; zero-area rings are skipped. Deciding what
+//! the exterior orientation; zero-area rings are skipped unless a feature's
+//! only ring, which is kept as MapLibre's classifyRings keeps it. Deciding what
 //! counts as "the same tile" - ordering, digests, the comparison - is the
 //! caller's, per the corpus redesign contract. The one knob here is
 //! [`Strictness`]: the gate decodes strict so foreign structure
@@ -35,7 +36,8 @@ pub enum Strictness {
 
 /// Ring role recovered from geometry: point and line features carry a single
 /// synthetic ring; polygon rings use the first nonzero-area ring's winding as
-/// the exterior orientation, and zero-area rings are skipped.
+/// the exterior orientation, and zero-area rings are skipped unless one is
+/// the feature's only ring (an Outer, whatever its area).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CanonRingRole {
     Point = 0,
@@ -730,6 +732,31 @@ mod tests {
         assert_eq!(decoded.components[1].rings.len(), 2);
         assert_eq!(decoded.components[1].rings[0].role, CanonRingRole::Outer);
         assert_eq!(decoded.components[1].rings[1].role, CanonRingRole::Hole);
+    }
+
+    #[test]
+    fn lone_zero_area_ring_is_kept_as_classifyrings_keeps_it() {
+        let collinear = [(0, 0), (10, 0), (20, 0), (0, 0)];
+        let commands = polygon_commands(&[&collinear]);
+        let feature = feature_message(Some(3), Some(&commands));
+        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Strict).unwrap();
+        assert_eq!(decoded.components.len(), 1);
+        assert_eq!(decoded.components[0].rings.len(), 1);
+        assert_eq!(decoded.components[0].rings[0].role, CanonRingRole::Outer);
+
+        // Two zero-area rings: no shortcut, both skipped, as in MapLibre.
+        let commands = polygon_commands(&[&collinear, &collinear]);
+        let feature = feature_message(Some(3), Some(&commands));
+        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Strict).unwrap();
+        assert!(decoded.components.is_empty());
+
+        // Tolerant: a lone one-point ring is kept too; no rings, no groups.
+        let feature = feature_message(Some(3), Some(&[9, 2, 2]));
+        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).unwrap();
+        assert_eq!(decoded.components.len(), 1);
+        let feature = feature_message(Some(3), Some(&[]));
+        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).unwrap();
+        assert!(decoded.components.is_empty());
     }
 
     #[test]

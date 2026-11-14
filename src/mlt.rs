@@ -411,6 +411,27 @@ mod tests {
         assert_eq!(polygons[1].interiors().len(), 1);
     }
 
+    #[test]
+    fn lone_zero_area_ring_encodes_as_a_degenerate_polygon() {
+        // MoveTo (0,0), LineTo (10,0) (20,0), ClosePath: one collinear ring.
+        let mut layer = LayerBuilder::new("degenerate");
+        layer.add_feature(Feature {
+            id: None,
+            geom_type: GeomType::Polygon,
+            geometry: vec![9, 0, 0, 18, 20, 0, 20, 0, 15],
+            tags: Vec::new(),
+        });
+        let Geometry::Polygon(polygon) =
+            decode_feature_geometry(&layer.features()[0]).expect("lone ring is kept")
+        else {
+            panic!("expected one polygon");
+        };
+        assert!(polygon.interiors().is_empty());
+        let encoded = encode_tile(&[&layer]).expect("mlt encode should succeed");
+        let parsed = parse_decoded_layers(&encoded).expect("encoded mlt should parse");
+        assert_eq!(parsed.len(), 1);
+    }
+
     fn parse_decoded_layers<'a>(
         encoded: &'a [u8],
     ) -> mlt_core::MltResult<Vec<mlt_core::ParsedLayer<'a>>> {
