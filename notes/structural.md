@@ -178,29 +178,16 @@ to a `tile_detail` printer.
 
 Reported by the pipeline, run-contract and layer-identity hunts.
 
-## STR-006 - Typed provenance with serde in both directions
+## STR-006 - Provenance build block and writer placement
 
-`provenance.rs` has `Input`, `PbfFeatures`, `OceanContract`, `Effective` with
-hand-written `to_json` and no `from_json`; the library hands brokkr
-`ContractDoc { input: Value, config: Value, build: Value }`, so "typed
-provenance in full" is typed only on the write side and every reader
-(inspect's `print_contract`/`print_diagnostics`/`pbf_feature_list`/
-`repo_display`, brokkr's gate) re-learns key names as string literals.
-`producer_config` and `config_json` are two hand-written `json!` literals
-that must list the same fields; the producer config is compared as JSON "so
-the float needs no float-equality dance". `"profile": "shortbread"` is a
-literal; `repo_json(commit, dirty)` parses `"true"`/`"false"` from `env!`
-(better once in `build.rs` into `Option<bool>`); `SCHEMA_VERSION: u32` is
-compared against `as_u64` in two places.
-
-Proposed: `#[derive(Serialize, Deserialize)] struct ProvenanceV1 { schema,
-input, config, build, effective: Option<_>, execution }` with additive
-members allowed and snake_case enums; `extract_contract` returns
-`Result<ProvenanceV1, ContractError>` with the no-contract cases as error
-variants; brokkr may still re-serialize for field-named diffs. Dependency
-direction flips: provenance takes typed contract parts it owns rather than
-picking fields out of `TilegenConfig` (see STR-008). `write_provenance` moves
-from assemble into `provenance.rs` taking typed inputs.
+The `elivagar` member is now written from typed records (`Provenance`,
+`ContractConfig` with the producer config flattened in, `OceanContract` and
+`TileContract` serializers); the read side deliberately stays `Value` (the
+reasoning is on `Provenance` in `provenance.rs`). Residue: the `build` member
+is still a `json!` literal, and `repo_json(commit, dirty)` parses
+`"true"`/`"false"` from `env!` where `build.rs` could emit the typed value
+once; `write_provenance` still lives in `pipeline/assemble.rs` rather than in
+`provenance.rs` (overlaps STR-007's assemble split).
 
 Reported by the archive-surface, run-contract and pipeline hunts.
 

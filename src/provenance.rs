@@ -100,7 +100,7 @@ pub(crate) fn extract_contract_from_value(metadata: &Value) -> ContractState {
 ///
 /// These are read from the header, not inferred from a filename, and they are
 /// what actually determines which paths the pipeline takes.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct PbfFeatures {
     /// `Sort.Type_then_ID` - enables the compact node store.
     pub sort_type_then_id: bool,
@@ -110,17 +110,6 @@ pub struct PbfFeatures {
     pub way_members_v1: bool,
     /// `SharedNodePins-v1` - injected global shared-node pins.
     pub shared_node_pins_v1: bool,
-}
-
-impl PbfFeatures {
-    fn to_json(self) -> Value {
-        json!({
-            "sort_type_then_id": self.sort_type_then_id,
-            "locations_on_ways": self.locations_on_ways,
-            "way_members_v1": self.way_members_v1,
-            "shared_node_pins_v1": self.shared_node_pins_v1,
-        })
-    }
 }
 
 /// Stable provenance names for the paths selected from PBF header facts.
@@ -176,7 +165,7 @@ pub enum OceanContractKind {
 }
 
 /// Content digest and byte length of the input PBF.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct InputIdentity {
     pub xxh3_128: Xxh128,
     pub bytes: u64,
@@ -188,28 +177,17 @@ pub struct InputIdentity {
 /// never be used to decide comparability: two files named for the same region
 /// and the same commit can be entirely different contracts, which is precisely
 /// how a raw-vs-locations comparison gets mistaken for a code regression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Input {
     /// File name only, never a path - an absolute path would be machine
     /// dependent and break same-input reproducibility across hosts.
     pub name: String,
+    #[serde(flatten)]
     pub identity: InputIdentity,
     /// Replication timestamp from the PBF header, seconds since epoch. This
     /// describes the OSM snapshot, not the run, so it is reproducible.
     pub replication_timestamp: Option<i64>,
     pub features: PbfFeatures,
-}
-
-impl Input {
-    fn to_json(&self) -> Value {
-        json!({
-            "name": self.name,
-            "xxh3_128": self.identity.xxh3_128.to_string(),
-            "bytes": self.identity.bytes,
-            "replication_timestamp": self.replication_timestamp,
-            "features": self.features.to_json(),
-        })
-    }
 }
 
 /// Ocean inputs as resolved for this run.
@@ -227,22 +205,43 @@ pub struct OceanContract {
     pub runtime_simplification: bool,
 }
 
-impl OceanContract {
-    fn to_json(&self) -> Value {
-        let is_none = matches!(&self.kind, OceanContractKind::None);
-        let has_artifact_key = matches!(&self.kind, OceanContractKind::Artifact { .. });
-        let mut value =
-            serde_json::to_value(&self.kind).expect("ocean contract is JSON serializable");
-        // Preserve the established provenance nulls and omission rules. The
-        // checkpoint uses the tagged kind directly without these diagnostics.
-        if is_none {
-            value["low_zoom_source"] = json!("none");
+/// The archive form differs from the checkpoint's tagged `OceanContractKind`
+/// and does not round-trip into it: it always carries `artifact_key` (null
+/// outside artifact mode), names the none mode's low-zoom source `"none"`,
+/// carries `source_key` only in computed mode, and adds
+/// `runtime_simplification`. Those rules predate the tagged kind and are
+/// pinned by committed corpus contracts, so they are spelled out here rather
+/// than derived.
+impl serde::Serialize for OceanContract {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        match &self.kind {
+            OceanContractKind::None => {
+                map.serialize_entry("mode", "none")?;
+                map.serialize_entry("low_zoom_source", "none")?;
+                map.serialize_entry("artifact_key", &Value::Null)?;
+            }
+            OceanContractKind::Shapefile {
+                low_zoom_source,
+                source_key,
+            } => {
+                map.serialize_entry("mode", "shapefile")?;
+                map.serialize_entry("low_zoom_source", low_zoom_source)?;
+                map.serialize_entry("source_key", source_key)?;
+                map.serialize_entry("artifact_key", &Value::Null)?;
+            }
+            OceanContractKind::Artifact {
+                low_zoom_source,
+                artifact_key,
+            } => {
+                map.serialize_entry("mode", "artifact")?;
+                map.serialize_entry("low_zoom_source", low_zoom_source)?;
+                map.serialize_entry("artifact_key", artifact_key)?;
+            }
         }
-        if !has_artifact_key {
-            value["artifact_key"] = Value::Null;
-        }
-        value["runtime_simplification"] = json!(self.runtime_simplification);
-        value
+        map.serialize_entry("runtime_simplification", &self.runtime_simplification)?;
+        map.end()
     }
 }
 
@@ -262,12 +261,6 @@ pub struct Effective {
     pub way_members: MembershipSource,
     /// Injected shared-node pins or the block-local fallback.
     pub shared_node_pins: PinScope,
-}
-
-impl Effective {
-    fn to_json(self) -> Value {
-        serde_json::to_value(self).expect("effective paths are JSON serializable")
-    }
 }
 
 /// One repository in the build closure.
@@ -322,33 +315,140 @@ fn build_json() -> Value {
 /// Layer arrays are indexed by `Layer` discriminant; emitting names rather
 /// than positions keeps the metadata readable and survives a reordering of
 /// the enum, which a positional array would silently misattribute.
-fn fanout_cap_map(values: &[Option<std::num::NonZeroU32>]) -> Value {
-    let mut map = serde_json::Map::new();
-    for layer in Layer::ALL {
-        if !layer.supports_fanout_cap() {
-            continue;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FanoutCaps([Option<std::num::NonZeroU32>; Layer::count()]);
+
+impl serde::Serialize for FanoutCaps {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        for layer in Layer::ALL {
+            if !layer.supports_fanout_cap() {
+                continue;
+            }
+            if let Some(cap) = self.0[layer as usize] {
+                map.serialize_entry(layer.name(), &cap.get())?;
+            }
         }
-        let Some(Some(value)) = values.get(layer as usize) else {
-            continue;
-        };
-        map.insert(layer.name().to_string(), json!(value.get()));
+        map.end()
     }
-    Value::Object(map)
 }
 
-fn config_json(config: &TilegenConfig, ocean: &OceanContract) -> Value {
-    json!({
-        "profile": "shortbread",
-        "min_zoom": config.min_zoom,
-        "max_zoom": config.max_zoom,
-        "tile": crate::pipeline::TileContract::from_config(config).provenance_json(),
-        "fanout_caps": fanout_cap_map(&config.fanout_caps),
-        "polygon_simplify_factor": config.polygon_simplify_factor,
-        "ocean": ocean.to_json(),
-    })
+/// The tile schema profile. One variant today; an enum so a second profile is
+/// a type change rather than a string edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Profile {
+    Shortbread,
+}
+
+/// The `config` half of the comparability contract.
+///
+/// Built only by [`ContractConfig::new`], which destructures the whole
+/// `TilegenConfig` with no rest pattern: a field added there is a compile
+/// error here until it is classified, in this struct or out of it with a
+/// reason. Before that, a new setting silently defaulted to "not in the
+/// contract", which is the dangerous default - two archives differing in it
+/// would pass the corpus gate's contract check.
+///
+/// The producer subset is embedded rather than listed again, so what a resume
+/// must match is a subset of the archive contract by construction.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ContractConfig {
+    profile: Profile,
+    #[serde(flatten)]
+    producer: ProducerConfig,
+    tile: crate::pipeline::TileContract,
+    ocean: OceanContract,
+}
+
+impl ContractConfig {
+    fn new(config: &TilegenConfig, ocean: OceanContract) -> Self {
+        let TilegenConfig {
+            // Producer settings: see `ProducerConfig`.
+            min_zoom: _,
+            max_zoom: _,
+            fanout_caps: _,
+            polygon_simplify_factor: _,
+            // Encoding. In through `TileContract`, which drops what a format
+            // does not use (MLT records no gzip level). The level is gated
+            // although the corpus digest is over decoded content, so a level
+            // change refuses a comparison whose content is equal. That is
+            // deliberate strictness: the contract names the encoding the
+            // archive was built under, and a level change rotates the
+            // baseline explicitly rather than passing as a no-op.
+            tile_format: _,
+            tile_compression: _,
+            compression_level: _,
+            // Ocean inputs. In through the resolved `OceanContract` (mode,
+            // low-zoom source and the content key of the named inputs), never
+            // through paths, which are machine dependent.
+            ocean_shapefile: _,
+            ocean_simplified_shapefile: _,
+            ocean_tiles: _,
+            // Out: the input PBF is identified by `Input` (content hash and
+            // header features), not by where it lives; output and scratch
+            // locations do not change content.
+            pbf_path: _,
+            output_path: _,
+            tmp_dir: _,
+            // Out: the artifact builder writes no run provenance at all.
+            ocean_artifact_key: _,
+            ocean_only_metadata: _,
+            // Out: resume point, recorded diagnostically as
+            // `execution.resumed_from`.
+            skip_to: _,
+            // Out: resources and storage strategy. None of these can change
+            // what a consumer decodes from any tile; thread counts would also
+            // break same-commit reproducibility.
+            in_memory: _,
+            threads: _,
+            way_inflight_budget: _,
+            assemble_batch_budget: _,
+            dedup_cap: _,
+            sort_chunk_size: _,
+            compress_sort_chunks: _,
+            // Out: node-store selection. The paths actually taken are recorded
+            // diagnostically in `effective`; the input facts that decide them
+            // are the header features in `input`. `locations_on_ways` only
+            // asserts the header flag.
+            force_sorted: _,
+            allow_unsafe_flat_index: _,
+            locations_on_ways: _,
+        } = config;
+        Self {
+            profile: Profile::Shortbread,
+            producer: ProducerConfig::new(config),
+            tile: crate::pipeline::TileContract::from_config(config),
+            ocean,
+        }
+    }
 }
 
 /// The config that determines what phase12 writes into sort chunks.
+///
+/// Serialized flattened into the archive's `config`, and on its own into the
+/// checkpoint, so both carry the same field names and values.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProducerConfig {
+    min_zoom: u8,
+    max_zoom: u8,
+    fanout_caps: FanoutCaps,
+    polygon_simplify_factor: f64,
+}
+
+impl ProducerConfig {
+    fn new(config: &TilegenConfig) -> Self {
+        Self {
+            min_zoom: config.min_zoom,
+            max_zoom: config.max_zoom,
+            fanout_caps: FanoutCaps(config.fanout_caps),
+            polygon_simplify_factor: config.polygon_simplify_factor,
+        }
+    }
+}
+
+/// The producer config as checkpoint JSON.
 ///
 /// This is the subset a `--skip-to` run may NOT change, because the chunks on
 /// disk were produced under it and cannot be reinterpreted: zoom range decides
@@ -365,12 +465,7 @@ fn config_json(config: &TilegenConfig, ocean: &OceanContract) -> Value {
 /// Compared as JSON rather than as a struct so the float factor needs no
 /// float-equality dance, and so a mismatch can name the field that differs.
 pub fn producer_config(config: &TilegenConfig) -> Value {
-    json!({
-        "min_zoom": config.min_zoom,
-        "max_zoom": config.max_zoom,
-        "fanout_caps": fanout_cap_map(&config.fanout_caps),
-        "polygon_simplify_factor": config.polygon_simplify_factor,
-    })
+    serde_json::to_value(ProducerConfig::new(config)).expect("producer config is JSON serializable")
 }
 
 /// Name the producer-config fields that differ, for a resume error.
@@ -408,19 +503,46 @@ pub fn build(
     effective: Option<Effective>,
     resumed_from: Option<crate::pipeline::SkipTo>,
 ) -> Value {
-    let mut value = json!({
-        "schema": SCHEMA_VERSION,
-        "input": input.to_json(),
-        "config": config_json(config, ocean),
-        "build": build_json(),
-        "execution": { "resumed_from": resumed_from },
-    });
-    if let Some(effective) = effective
-        && let Some(obj) = value.as_object_mut()
-    {
-        obj.insert("effective".to_string(), effective.to_json());
-    }
-    value
+    let provenance = Provenance {
+        schema: SCHEMA_VERSION,
+        input,
+        config: ContractConfig::new(config, ocean.clone()),
+        build: build_json(),
+        execution: Execution { resumed_from },
+        effective,
+    };
+    // Through `Value`, not straight into the metadata document: `Value`
+    // objects are sorted maps, and that ordering - not struct field order - is
+    // what the committed corpus contracts and same-commit byte identity rely
+    // on.
+    serde_json::to_value(&provenance).expect("provenance is JSON serializable")
+}
+
+/// The whole `elivagar` member as written. Typed on the write side only.
+///
+/// The read side stays `serde_json::Value` (`ContractDoc`) on purpose. The
+/// gating policy - which fields refuse, which only warn - belongs to the
+/// consumer that gates (brokkr), and what it needs from this crate is the
+/// evidence unnormalized: a typed decode would drop members this build does
+/// not know, collapse missing versus null, or supply defaults, and each of
+/// those can hide a contract difference between two archives. `inspect`
+/// likewise degrades field by field ("unknown - block declares no X") where a
+/// derived decode would fail the whole block. For the same reason this crate
+/// exports no `gated_eq`-style comparison of its own.
+#[derive(serde::Serialize)]
+struct Provenance<'a> {
+    schema: u32,
+    input: &'a Input,
+    config: ContractConfig,
+    build: Value,
+    execution: Execution,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective: Option<Effective>,
+}
+
+#[derive(serde::Serialize)]
+struct Execution {
+    resumed_from: Option<crate::pipeline::SkipTo>,
 }
 
 /// XXH3-128 of a file, lowercase hex, with its byte length.
@@ -475,6 +597,67 @@ impl BackgroundHash {
 mod tests {
     use super::*;
 
+    /// The production boundary: every member reaches the archive through
+    /// `serde_json::to_value`.
+    fn json_of<T: serde::Serialize>(value: &T) -> Value {
+        serde_json::to_value(value).expect("serializable")
+    }
+
+    #[test]
+    fn input_keeps_its_established_wire_bytes() {
+        assert_eq!(
+            json_of(&input()).to_string(),
+            r#"{"bytes":531544047,"features":{"locations_on_ways":true,"shared_node_pins_v1":true,"sort_type_then_id":true,"way_members_v1":true},"name":"denmark-locations-prepass.osm.pbf","replication_timestamp":1771622445,"xxh3_128":"58c47f32d3a55b04a56813565efc78ac"}"#,
+        );
+        let undated = Input {
+            replication_timestamp: None,
+            ..input()
+        };
+        assert_eq!(json_of(&undated)["replication_timestamp"], Value::Null);
+    }
+
+    #[test]
+    fn shapefile_ocean_contract_carries_source_key_and_null_artifact_key() {
+        let ocean = OceanContract {
+            kind: OceanContractKind::Shapefile {
+                low_zoom_source: ActiveLowZoomSource::Full,
+                source_key: json!({"k": 1}),
+            },
+            runtime_simplification: false,
+        };
+        assert_eq!(
+            json_of(&ocean).to_string(),
+            r#"{"artifact_key":null,"low_zoom_source":"full","mode":"shapefile","runtime_simplification":false,"source_key":{"k":1}}"#,
+        );
+    }
+
+    #[test]
+    fn producer_config_is_flattened_into_the_contract_config() {
+        let config = ContractConfig {
+            profile: Profile::Shortbread,
+            producer: ProducerConfig {
+                min_zoom: 2,
+                max_zoom: 13,
+                fanout_caps: FanoutCaps([None; Layer::count()]),
+                polygon_simplify_factor: 1.5,
+            },
+            tile: crate::pipeline::TileContract::Mlt,
+            ocean: OceanContract {
+                kind: OceanContractKind::None,
+                runtime_simplification: true,
+            },
+        };
+        let value = json_of(&config);
+        assert_eq!(
+            value.to_string(),
+            r#"{"fanout_caps":{},"max_zoom":13,"min_zoom":2,"ocean":{"artifact_key":null,"low_zoom_source":"none","mode":"none","runtime_simplification":true},"polygon_simplify_factor":1.5,"profile":"shortbread","tile":{"compression":"none","format":"mlt"}}"#,
+        );
+        let producer = json_of(&config.producer);
+        for (key, field) in producer.as_object().expect("object") {
+            assert_eq!(&value[key], field, "producer field {key} must match");
+        }
+    }
+
     fn features() -> PbfFeatures {
         PbfFeatures {
             sort_type_then_id: true,
@@ -500,7 +683,7 @@ mod tests {
 
     #[test]
     fn input_records_hash_and_observed_features() {
-        let value = input().to_json();
+        let value = json_of(&input());
         assert_eq!(value["xxh3_128"], "58c47f32d3a55b04a56813565efc78ac");
         assert_eq!(value["bytes"], 531_544_047_u64);
         assert_eq!(value["features"]["locations_on_ways"], true);
@@ -514,7 +697,7 @@ mod tests {
         // The incident this schema exists to prevent: same region, same
         // commit, same everything a filename can express, but a different
         // contract. The two must not compare equal.
-        let locations = input().to_json();
+        let locations = json_of(&input());
         let mut raw_input = input();
         raw_input.name = "denmark-raw.osm.pbf".to_string();
         raw_input.identity.xxh3_128 = "aa5bb8650000000000000000deadbeef"
@@ -524,7 +707,7 @@ mod tests {
             sort_type_then_id: true,
             ..PbfFeatures::default()
         };
-        let raw = raw_input.to_json();
+        let raw = json_of(&raw_input);
         assert_ne!(raw, locations);
         assert_ne!(raw["features"], locations["features"]);
         assert_ne!(raw["xxh3_128"], locations["xxh3_128"]);
@@ -550,7 +733,7 @@ mod tests {
                 r#"{"coordinate_source":"node_store","shared_node_pins":"block_local","way_members":"relation_scan"}"#,
             ),
         ] {
-            let value = effective.to_json();
+            let value = json_of(&effective);
             assert_eq!(value.to_string(), expected);
             assert_eq!(
                 serde_json::from_value::<Effective>(value).expect("typed paths"),
@@ -577,7 +760,7 @@ mod tests {
             runtime_simplification: true,
         };
         assert_eq!(
-            ocean.to_json().to_string(),
+            json_of(&ocean).to_string(),
             r#"{"artifact_key":null,"low_zoom_source":"none","mode":"none","runtime_simplification":true}"#,
         );
     }
@@ -611,7 +794,7 @@ mod tests {
             runtime_simplification: true,
         };
         assert_eq!(
-            serde_json::to_string(&ocean.to_json()).expect("serialized ocean contract"),
+            serde_json::to_string(&json_of(&ocean)).expect("serialized ocean contract"),
             serde_json::to_string(&expected).expect("serialized committed ocean contract"),
         );
 
@@ -627,7 +810,7 @@ mod tests {
             ..ocean
         };
         assert_eq!(
-            serde_json::to_string(&ocean.to_json()).expect("serialized ocean contract"),
+            serde_json::to_string(&json_of(&ocean)).expect("serialized ocean contract"),
             serde_json::to_string(&expected).expect("serialized committed ocean contract"),
         );
     }
@@ -637,7 +820,7 @@ mod tests {
         let mut caps = [None; Layer::count()];
         caps[Layer::Buildings as usize] = std::num::NonZeroU32::new(4096);
         caps[Layer::Ocean as usize] = std::num::NonZeroU32::new(2048);
-        let value = fanout_cap_map(&caps);
+        let value = json_of(&FanoutCaps(caps));
         let obj = value.as_object().expect("layer map must be an object");
         assert_eq!(
             obj.len(),

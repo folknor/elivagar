@@ -23,34 +23,6 @@ account lives in `notes/bugs.md` instead.
 
 # Run contract, provenance and resume
 
-## CON-001 - Which settings form the comparability contract?
-
-Sites: `provenance::config_json` and `provenance::Input::to_json` (each a
-hand-picked `json!` subset of `TilegenConfig`), brokkr's own rule that
-`input.name` warns but does not gate (lives only in brokkr and
-`reference/corpus.md`), and the `reference/corpus.md` prose. A new
-contract-relevant field added to `TilegenConfig` defaults to "not in the
-contract" silently - the run-contract hunt calls that the dangerous default.
-
-Already disagreeing: `reference/corpus.md` lists a "seam" member that does not
-exist; the contract omits computed-ocean source identity (in
-`notes/bugs.md`); MLT compression is misrecorded (in `notes/bugs.md`).
-
-Unrecorded choice: `compression_level` is in the contract while the corpus
-digest is over decoded content, so a level change refuses a comparison whose
-content is guaranteed equal. Defensible as strictness; nobody has written it
-down.
-
-Owner proposed: a typed `Contract { input, config: ContractConfig }` in
-`provenance.rs` with serde both ways and a `gated_eq` / `diff` /
-`gated()` projection that brokkr calls instead of applying its own
-exceptions, so the "name never gates" rule documented on `provenance::Input`
-is enforced by the type stating it. With `TilegenConfig` split so the contract
-is its own struct (see `notes/structural.md`), `config_json` becomes
-`serde_json::to_value(&spec.contract)`.
-
-Reported by the run-contract and archive-surface hunts.
-
 ## CON-003 - What must a resume match?
 
 Five carriers, each covering a different subset:

@@ -147,7 +147,20 @@ The strictness is a feature: an output-neutral config-schema change
 refuses the comparison (contract.json changes while digest does not),
 which forces the rotation commit to say so instead of letting two
 incomparable baselines drift silently - the exact failure mode of the
-2026-07-14 mis-bless.
+2026-07-14 mis-bless. The MVT base compression level is in the contract
+on the same terms: the digest is over decoded content, so a level change
+refuses a comparison whose content is equal, and it rotates the baseline
+explicitly rather than passing as a no-op.
+
+Every `TilegenConfig` field is classified in or out of the contract at
+one site, `provenance::ContractConfig::new`, which destructures the whole
+config with no rest pattern, so a new setting does not compile until it
+is classified. The fields left out are paths, the resume point,
+resources and storage strategy, and node-store selection - none of which
+changes what a consumer decodes, with the paths actually taken recorded
+diagnostically in `effective`. Elivagar records the evidence and exports
+no comparison of its own; which recorded fields refuse and which only
+warn is brokkr's policy.
 
 ## The digest
 

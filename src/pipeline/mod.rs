@@ -525,20 +525,9 @@ impl TileContract {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn provenance_json(self) -> serde_json::Value {
-        let (format, compression) = self.writer();
-        match self {
-            Self::Mvt { level, .. } => serde_json::json!({
-                "format": format.metadata_payload(),
-                "compression": compression.metadata_value(),
-                "base_compression_level": level,
-                "compression_policy": COMPRESSION_POLICY,
-            }),
-            Self::Mlt => serde_json::json!({
-                "format": format.metadata_payload(),
-                "compression": compression.metadata_value(),
-            }),
-        }
+        serde_json::to_value(self).expect("tile contract is JSON serializable")
     }
 
     fn compression_counter(self) -> i64 {
@@ -553,6 +542,23 @@ impl TileContract {
             } => 1,
             Self::Mlt => 2,
         }
+    }
+}
+
+/// The provenance `config.tile` member. MLT records only format and
+/// compression: it has no gzip level or zoom compression policy.
+impl serde::Serialize for TileContract {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let (format, compression) = self.writer();
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("format", &format.metadata_payload())?;
+        map.serialize_entry("compression", &compression.metadata_value())?;
+        if let Self::Mvt { level, .. } = self {
+            map.serialize_entry("base_compression_level", level)?;
+            map.serialize_entry("compression_policy", COMPRESSION_POLICY)?;
+        }
+        map.end()
     }
 }
 
