@@ -265,46 +265,12 @@ fn close_ring(mut points: Vec<Coord<i32>>) -> Result<LineString<i32>, String> {
 }
 
 fn group_rings_to_polygons(rings: Vec<LineString<i32>>) -> Vec<Polygon<i32>> {
-    let mut polygons = Vec::new();
-    let mut exterior: Option<LineString<i32>> = None;
-    let mut holes: Vec<LineString<i32>> = Vec::new();
-    let mut exterior_orientation = None;
-
-    for ring in rings {
-        let Some(orientation) = geometry::polygon::ring_role(ring_signed_area(&ring)) else {
-            continue;
-        };
-        if exterior.is_none() {
-            exterior_orientation = Some(orientation);
-            exterior = Some(ring);
-            continue;
-        }
-
-        if exterior_orientation == Some(orientation) {
-            if let Some(ext) = exterior.take() {
-                polygons.push(Polygon::new(ext, std::mem::take(&mut holes)));
-            }
-            exterior = Some(ring);
-        } else {
-            holes.push(ring);
-        }
-    }
-
-    if let Some(ext) = exterior {
-        polygons.push(Polygon::new(ext, holes));
-    }
-
-    polygons
-}
-
-fn ring_signed_area(ring: &LineString<i32>) -> i128 {
-    let mut sum = 0_i128;
-    for segment in ring.0.windows(2) {
-        if let [a, b] = segment {
-            sum += i128::from(a.x) * i128::from(b.y) - i128::from(b.x) * i128::from(a.y);
-        }
-    }
-    sum
+    geometry::polygon::group_rings(rings, |ring| {
+        geometry::polygon::signed_area_2x(ring.0.iter().map(|c| (c.x, c.y)))
+    })
+    .into_iter()
+    .map(|group| Polygon::new(group.outer, group.holes))
+    .collect()
 }
 
 /// Our encoder's point stream, under the strict point grammar.

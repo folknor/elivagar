@@ -1505,7 +1505,8 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     let mut decoder = GzDecoder::new(mvt_encoded[0].compressed.as_slice());
     let mut raw = Vec::new();
     decoder.read_to_end(&mut raw).expect("gunzip mvt tile");
-    let mvt_layers = crate::mvt::layers::decode_mvt_layers(&raw).expect("decode mvt layers");
+    let mvt_layers = crate::mvt::message::parse_tile(&raw, crate::tile_detail::Strictness::Strict)
+        .expect("decode mvt layers");
 
     assert_eq!(
         model.layers.len(),
@@ -1516,33 +1517,47 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     let mut model_sorted: Vec<_> = model.layers.iter().collect();
     model_sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let mut mvt_sorted: Vec<_> = mvt_layers.iter().collect();
-    mvt_sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    mvt_sorted.sort_by(|a, b| a.name.cmp(b.name));
 
     for (ml, mvt) in model_sorted.iter().zip(mvt_sorted.iter()) {
         assert_eq!(ml.name, mvt.name, "layer name mismatch");
         assert_eq!(
-            ml.feature_count, mvt.feature_count,
+            ml.feature_count,
+            mvt.features.len(),
             "feature count mismatch in {}",
             ml.name
         );
+        let geom_types: Vec<u8> = mvt
+            .features
+            .iter()
+            .map(|bytes| {
+                crate::mvt::message::parse_feature(bytes, crate::tile_detail::Strictness::Strict)
+                    .expect("decode mvt feature")
+                    .geom_type
+            })
+            .collect();
+        let count = |t: u8| geom_types.iter().filter(|&&g| g == t).count();
         assert_eq!(
-            ml.geometry_mix.points, mvt.points,
+            ml.geometry_mix.points,
+            count(1),
             "point count mismatch in {}",
             ml.name
         );
         assert_eq!(
-            ml.geometry_mix.lines, mvt.lines,
+            ml.geometry_mix.lines,
+            count(2),
             "line count mismatch in {}",
             ml.name
         );
         assert_eq!(
-            ml.geometry_mix.polygons, mvt.polygons,
+            ml.geometry_mix.polygons,
+            count(3),
             "polygon count mismatch in {}",
             ml.name
         );
         let mut model_keys: Vec<&str> = ml.columns.iter().map(|c| c.key.as_str()).collect();
         model_keys.sort();
-        let mut mvt_keys: Vec<&str> = mvt.keys.iter().map(String::as_str).collect();
+        let mut mvt_keys: Vec<&str> = mvt.keys.clone();
         mvt_keys.sort();
         assert_eq!(model_keys, mvt_keys, "property key mismatch in {}", ml.name);
     }

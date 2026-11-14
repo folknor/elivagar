@@ -30,8 +30,8 @@ use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
 pub(crate) mod decode;
-pub(crate) mod layers;
 mod merge;
+pub(crate) mod message;
 
 /// The most rings one CLASSIFIED POLYGON may carry - MapLibre's
 /// classifyRings clamps `EARCUT_MAX_RINGS = 500` per polygon (an outer plus

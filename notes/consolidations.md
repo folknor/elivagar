@@ -51,33 +51,22 @@ every geometry kind - i.e. lines and points onto the integer pipeline (see
 
 Reported by the polygon-engine and coordinate-spaces hunts.
 
-## CON-017 - How is an MVT message (not its command stream) walked?
+## CON-042 - What is a lone zero-area polygon ring?
 
-The command stream is settled: every in-crate reader decodes through
-`mvt::decode`. What remains is the protobuf layer around it, walked
-independently and with different error policies:
-`mvt::layers::decode_mvt_layers` (tag-read errors end the loop silently),
-verify's four per-tile parses (`decode_mvt_layers`, `validate_mvt_geometry`,
-`validate_ocean_rings`, `collect_ocean_geometry_stats`, the last two
-skipping unreadable fields silently), `svg::decode_mvt_geometry`/
-`decode_layer`/`decode_feature` (read errors on length-delimited fields
-dropped), `diag::diag_layer` (all read errors dropped), and the artifact
-consumer's `ocean_layer_field`/`read_varint` (`assemble/artifact.rs`). Only
-`tile_detail`
-reads the tile/layer/feature messages with a stated policy.
+Two answers. `geometry::polygon::group_rings` (behind `tile_detail`, so the
+corpus hash, and MLT) skips every zero-area ring, so a feature whose only
+ring is degenerate decodes to no components and MLT refuses it. MapLibre's
+`classifyRings` returns a single-ring polygon before measuring area, and
+`scripts/validate/ring-grouping-oracle.mjs` plus brokkr's render core copy
+that, keeping the ring. elivagar's own output should never carry one (the
+min-area filter), so this is invisible on denmark today; the cost is that
+the hash and the renderer disagree on that input, and the hash would not
+see a regression that started emitting such rings beyond the feature
+existing. Adopting MapLibre's shortcut changes strict `tile_detail` output
+for a closed collinear ring and MLT acceptance, so it is a decision, not a
+cleanup; it was left out of the message-reader landing on purpose.
 
-Ring grouping (first nonzero-area ring sets the exterior winding,
-zero-area rings skipped) is also spelled twice, in `tile_detail`
-(`group_detail_rings`) and `mlt::group_rings_to_polygons`.
-
-`MvtLayer`/`decode_mvt_layers` already left the container reader for the
-crate-private `mvt::layers`. Owner proposed: verify, svg
-and diag walk messages through one borrowed message reader with
-`tile_detail`'s strictness. MLT and the line merger stop decoding at all
-once the tile model is typed geometry (STR-013).
-
-Reported by the polygon-engine, encoding, archive-surface, coordinate-spaces
-and pipeline hunts.
+Found while consolidating the MVT message reader.
 
 ## CON-018 - What identifies a vertex across features?
 

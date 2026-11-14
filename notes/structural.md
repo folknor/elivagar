@@ -522,12 +522,10 @@ the splice ahead of compression in `pipeline/assemble/encode.rs`.
 
 Container checks, MVT structural grammar, Shortbread paint-order rules
 (hard-coding the layer set and the `z < 11` switch), and ocean geometry stats
-and self-intersection. Each walks the decoded tile separately - the payload
-is protobuf-parsed four times per tile (`decode_mvt_layers`,
-`validate_mvt_geometry`, `validate_ocean_rings`,
-`collect_ocean_geometry_stats`). Proposed: a `Check` trait over one decoded
-tile, with Shortbread rules owned by `shortbread/`; svg and diag become
-renderers over the same decoded tile. Decode-side types: `DetailFeature`
+and self-intersection. They now share one strict parse per tile
+(`parse_checked_tile` over `mvt::message`) but are still four functions
+reaching into it. Proposed: a `Check` trait over that parsed tile, with
+Shortbread rules owned by `shortbread/`. Decode-side types: `DetailFeature`
 carries both `geom_type: u8` and per-ring `CanonRingRole`
 (Point/Path/Outer/Hole), encoding one fact twice (a type-1 feature with a
 Path ring is constructible); svg and verify use `geom_type: u64`; the encode

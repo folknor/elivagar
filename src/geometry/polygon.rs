@@ -161,6 +161,55 @@ pub(crate) fn signed_area_2x(points: impl IntoIterator<Item = (i32, i32)>) -> Ar
     Area2x(area)
 }
 
+/// One grouped polygon: an outer ring and the holes that follow it.
+pub(crate) struct RingGroup<R> {
+    pub(crate) outer: R,
+    pub(crate) holes: Vec<R>,
+}
+
+/// Group decoded MVT polygon rings into polygons: the crate's one rule.
+///
+/// The first nonzero-area ring fixes the exterior orientation; each later
+/// ring of that orientation opens a polygon and each of the other attaches
+/// as a hole to the open one. Zero-area rings are skipped. Area wraps from
+/// the last vertex to the first, so an unclosed ring (tolerant decoding of
+/// a foreign stream) is measured as MapLibre's `calculateSignedArea` would.
+///
+/// This is MapLibre `classifyRings` minus two things, both deliberate. Its
+/// 500-ring clamp is a rendering limit and is not applied: structural
+/// detail keeps every contour. And its shortcut returning a lone ring as a
+/// polygon whatever its area is not taken: a lone zero-area ring is skipped
+/// like any other, so `tile_detail` drops it and MLT refuses the polygon
+/// (the canonical ring-grouping oracle in scripts/validate keeps it).
+/// `area` is the ring's [`signed_area_2x`].
+pub(crate) fn group_rings<R>(
+    rings: impl IntoIterator<Item = R>,
+    area: impl Fn(&R) -> Area2x,
+) -> Vec<RingGroup<R>> {
+    let mut groups: Vec<RingGroup<R>> = Vec::new();
+    let mut exterior = None;
+    for ring in rings {
+        let Some(orientation) = ring_role(area(&ring)) else {
+            continue;
+        };
+        match exterior {
+            Some(exterior) if orientation != exterior => {
+                if let Some(group) = groups.last_mut() {
+                    group.holes.push(ring);
+                }
+            }
+            _ => {
+                exterior = Some(orientation);
+                groups.push(RingGroup {
+                    outer: ring,
+                    holes: Vec::new(),
+                });
+            }
+        }
+    }
+    groups
+}
+
 /// Signed doubled shoelace area of the triangle formed by three integer points.
 pub(crate) fn triangle_area_2x(a: (i32, i32), b: (i32, i32), c: (i32, i32)) -> Area2x {
     let ab_x = i128::from(b.0) - i128::from(a.0);

@@ -202,10 +202,15 @@ them to E7; the world-ocean artifact retains world bounds. Header regression
 checks cover those fields, and inspect displays their stored values.
 
 The detail decoder groups polygon rings using the first nonzero-area ring's
-winding as the exterior orientation and skips zero-area rings. It preserves
-every other ring for hashing, without the renderer's 500-ring clamp. This
-supports comparison with producers whose exterior winding differs; structural
-strictness still checks the geometry commands before grouping.
+winding as the exterior orientation and skips zero-area rings, a lone one
+included (MapLibre's classifyRings, and the ring-grouping oracle, keep a
+feature's only ring whatever its area). Ring area wraps from the last vertex
+to the first, so an unclosed ring in tolerant decoding is measured as
+MapLibre measures it. It preserves every other ring for hashing, without the
+renderer's 500-ring clamp. This supports comparison with producers whose
+exterior winding differs; structural strictness still checks the geometry
+commands before grouping. Strict decoding also rejects a duplicate layer
+name, extent or version field, as it does a duplicate feature id or type.
 
 ## The SVG corpus
 
@@ -267,7 +272,7 @@ contract guard doing for the corpus what OCEAN_POLICY_VERSION does for
 runs. Recalibrate (rerun mutate + check, plus the ring-grouping oracle)
 whenever brokkr's gate code changes (the hash, the fold, the gating
 policy, the render core, the diff) AND whenever elivagar's decode
-surface changes (`tile_detail`, the pmtiles reader, the provenance
+surface changes (`tile_detail`, the archive reader, the provenance
 schema) - the boundary crossing is itself a trigger, since a semantic
 decoder drift compiles clean on both sides and shifts every hash. The
 calibrand suite lives in brokkr's tests, so it re-runs against the
@@ -325,7 +330,7 @@ canonicalization, the digest fold in both modes, the contract gating
 policy, the canonical SVG render core and style machinery, mutate,
 regress, and the calibration suite. elivagar's binary has no corpus or
 regress subcommands and never reads this baseline; it exposes the
-decode surface (the pmtiles reader with run-level raw access, the
+decode surface (the `archive` reader with run-level raw access, the
 `tile_detail` wire-order decoder with selectable strictness, typed
 provenance in full, the writer's `add_run` and mutate-only
 `set_metadata_verbatim`), and brokkr decides what the answers mean.

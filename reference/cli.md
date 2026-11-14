@@ -432,6 +432,13 @@ decompression, MVT payload structure, geometry commands, layer coverage, and
 ocean ring self-intersection. Exit 0 on pass, 1 on failure; stops after 100
 tile-level errors.
 
+Payload structure is checked under the strict MVT policy `tile_detail`
+uses: a field MVT does not name, a duplicate singular field, a feature
+without a geometry field, an unreadable tag or field, a value message that
+does not decode (referenced or not) and a tag index outside the layer's
+tables each fail the tile. `verify` is a check on elivagar's own output, so
+a foreign archive carrying extension fields fails it by design.
+
 | flag | meaning |
 |---|---|
 | `--geometry-stats` | per-zoom ocean statistics: ring counts, max/p99 ring vertices, consecutive duplicates, full-tile fills |

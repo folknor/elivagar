@@ -3,7 +3,8 @@
 use std::io::{self, Write};
 use std::path::Path;
 
-use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
+use crate::mvt::message;
+use crate::tile_detail::Strictness;
 
 use crate::archive::Archive;
 use crate::mvt::decode::{self, Command, CommandKind, CommandSink, GeometryError, Point, Words};
@@ -311,55 +312,23 @@ struct SvgFeature {
     paths: Vec<Vec<(f64, f64)>>,
 }
 
+/// The viewer reads any producer's tiles, so messages are walked tolerant:
+/// unknown fields are skipped, while a read error fails the tile.
 fn decode_mvt_geometry(data: &[u8]) -> io::Result<Vec<SvgLayer>> {
-    let mut layers = Vec::new();
-    let mut cursor = Cursor::new(data);
-    while let Ok(Some((field, wire_type))) = cursor.read_tag() {
-        if field == 3 && wire_type == WIRE_LEN {
-            let sub = cursor
-                .read_len_delimited()
-                .map_err(|e| io::Error::other(format!("mvt layer: {e}")))?;
-            layers.push(decode_layer(sub)?);
-        } else {
-            cursor
-                .skip_field(wire_type)
-                .map_err(|e| io::Error::other(format!("mvt skip: {e}")))?;
-        }
-    }
-    Ok(layers)
+    message::parse_tile(data, Strictness::Tolerant)
+        .map_err(io::Error::other)?
+        .iter()
+        .map(decode_layer)
+        .collect()
 }
 
-fn decode_layer(data: &[u8]) -> io::Result<SvgLayer> {
-    let mut name = String::new();
-    let mut feature_blobs: Vec<&[u8]> = Vec::new();
-    let mut extent = EXTENT;
-    let mut cursor = Cursor::new(data);
-    while let Ok(Some((field, wire_type))) = cursor.read_tag() {
-        if field == 5 && wire_type == WIRE_VARINT {
-            let value = cursor
-                .read_varint()
-                .map_err(|e| io::Error::other(format!("layer extent: {e}")))?;
-            if value == 0 || value > u64::from(u32::MAX) {
-                return Err(io::Error::other("invalid layer extent"));
-            }
-            extent = f64::from(
-                u32::try_from(value).map_err(|_| io::Error::other("invalid layer extent"))?,
-            );
-        } else if wire_type == WIRE_LEN {
-            if let Ok(sub) = cursor.read_len_delimited() {
-                match field {
-                    1 => name = String::from_utf8_lossy(sub).to_string(),
-                    2 => feature_blobs.push(sub),
-                    _ => {}
-                }
-            }
-        } else if cursor.skip_field(wire_type).is_err() {
-            break;
-        }
+fn decode_layer(layer: &message::LayerMessage<'_>) -> io::Result<SvgLayer> {
+    if layer.extent == 0 {
+        return Err(io::Error::other("invalid layer extent"));
     }
-
-    let mut features = Vec::with_capacity(feature_blobs.len());
-    for blob in feature_blobs {
+    let extent = f64::from(layer.extent);
+    let mut features = Vec::with_capacity(layer.features.len());
+    for blob in &layer.features {
         let mut feature = decode_feature(blob)?;
         // Normalize foreign layer coordinates into the SVG canvas grid.
         let scale = EXTENT / extent;
@@ -372,40 +341,19 @@ fn decode_layer(data: &[u8]) -> io::Result<SvgLayer> {
         features.push(feature);
     }
 
-    Ok(SvgLayer { name, features })
+    Ok(SvgLayer {
+        name: layer.name.to_string(),
+        features,
+    })
 }
 
 fn decode_feature(data: &[u8]) -> io::Result<SvgFeature> {
-    let mut geom_type: u64 = 0;
-    let mut geom_bytes: Option<&[u8]> = None;
-    let mut cursor = Cursor::new(data);
-    while let Ok(Some((field, wire_type))) = cursor.read_tag() {
-        match (field, wire_type) {
-            (3, WIRE_VARINT) => {
-                geom_type = cursor
-                    .read_varint()
-                    .map_err(|e| io::Error::other(format!("geom type: {e}")))?;
-            }
-            (4, WIRE_LEN) => {
-                geom_bytes = Some(
-                    cursor
-                        .read_len_delimited()
-                        .map_err(|e| io::Error::other(format!("geom data: {e}")))?,
-                );
-            }
-            _ => {
-                cursor
-                    .skip_field(wire_type)
-                    .map_err(|e| io::Error::other(format!("feature skip: {e}")))?;
-            }
-        }
-    }
-
-    let paths = match geom_bytes {
+    let feature = message::parse_feature(data, Strictness::Tolerant).map_err(io::Error::other)?;
+    let geom_type = u64::from(feature.geom_type);
+    let paths = match &feature.geometry {
         Some(bytes) => decode_geometry_commands(bytes, geom_type)?,
         None => Vec::new(),
     };
-
     Ok(SvgFeature { geom_type, paths })
 }
 

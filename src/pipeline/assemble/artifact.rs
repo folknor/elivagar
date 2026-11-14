@@ -211,75 +211,27 @@ fn collect_hilbert_rect_ranges(
     Ok(())
 }
 
-/// The artifact payload's single ocean layer as a raw MVT tile field. The
-/// payload is validated as exactly one ocean layer before its field bytes are
-/// taken verbatim; they are never decoded and re-encoded.
+/// The artifact payload's single ocean layer as a raw MVT tile field, taken
+/// verbatim: never decoded and re-encoded, so spliced bytes are the
+/// artifact's bytes.
+///
+/// A strict envelope parse admits a tile message holding nothing but layer
+/// fields, so once it finds exactly one layer, named ocean, the whole
+/// decompressed payload is that one field's tag, length and body - there is
+/// no offset to find. This admits the envelope only; features and values
+/// are the artifact build's to have encoded, and are not re-validated per
+/// spliced tile.
 fn ocean_layer_field(compressed: &[u8]) -> Result<Vec<u8>, PipelineError> {
     let raw = crate::archive::gzip_decompress(compressed)?;
-    let layers = crate::mvt::layers::decode_mvt_layers(&raw)?;
+    let layers = crate::mvt::message::parse_tile(&raw, crate::tile_detail::Strictness::Strict)
+        .map_err(|error| PipelineError(format!("artifact tile: {error}")))?;
     if layers.len() != 1 || layers[0].name != Layer::Ocean.name() {
         return Err(PipelineError(
             "artifact tile must contain exactly one ocean layer".to_string(),
         ));
     }
-    let mut i = 0;
-    while i < raw.len() {
-        let begin = i;
-        let tag = read_varint(&raw, &mut i)?;
-        let field = tag >> 3;
-        match tag & 7 {
-            0 => {
-                let _ = read_varint(&raw, &mut i)?;
-            }
-            1 => {
-                i = i
-                    .checked_add(8)
-                    .filter(|end| *end <= raw.len())
-                    .ok_or_else(|| {
-                        PipelineError("MVT fixed64 field exceeds payload".to_string())
-                    })?;
-            }
-            2 => {
-                let length = usize::try_from(read_varint(&raw, &mut i)?)
-                    .map_err(|_| PipelineError("MVT field length too large".to_string()))?;
-                let end = i
-                    .checked_add(length)
-                    .filter(|end| *end <= raw.len())
-                    .ok_or_else(|| PipelineError("MVT field exceeds payload".to_string()))?;
-                if field == 3 {
-                    return Ok(raw[begin..end].to_vec());
-                }
-                i = end;
-            }
-            5 => {
-                i = i
-                    .checked_add(4)
-                    .filter(|end| *end <= raw.len())
-                    .ok_or_else(|| {
-                        PipelineError("MVT fixed32 field exceeds payload".to_string())
-                    })?;
-            }
-            _ => return Err(PipelineError("unsupported MVT field wire type".to_string())),
-        }
-    }
-    Err(PipelineError(
-        "artifact ocean tile missing layer field".to_string(),
-    ))
-}
-
-fn read_varint(data: &[u8], cursor: &mut usize) -> Result<u64, PipelineError> {
-    let mut value = 0_u64;
-    for shift in (0..64).step_by(7) {
-        let byte = *data
-            .get(*cursor)
-            .ok_or_else(|| PipelineError("truncated MVT varint".to_string()))?;
-        *cursor += 1;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-    }
-    Err(PipelineError("overlong MVT varint".to_string()))
+    drop(layers);
+    Ok(raw)
 }
 
 /// Where artifact gap filling stands within one partition or piece: every
@@ -843,21 +795,24 @@ mod tests {
     }
 
     #[test]
-    fn ocean_layer_field_skips_non_length_delimited_tile_fields() {
-        // Unknown varint and fixed32 fields precede the MVT layer field. The
-        // extractor must skip by wire type, rather than treating every field
-        // as length-delimited.
-        let layer = [10, 5, b'o', b'c', b'e', b'a', b'n'];
-        let raw = [
-            8, 1, 21, 0, 0, 0, 0, 26, 7, 10, 5, b'o', b'c', b'e', b'a', b'n',
-        ];
-        assert_eq!(&raw[9..], layer);
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        encoder.write_all(&raw).expect("gzip raw tile");
-        let compressed = encoder.finish().expect("finish gzip");
-        assert_eq!(
-            ocean_layer_field(&compressed).expect("extract layer"),
-            raw[7..]
-        );
+    fn ocean_layer_field_is_the_whole_strict_payload_and_refuses_foreign_fields() {
+        let gzip = |raw: &[u8]| {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(raw).expect("gzip raw tile");
+            encoder.finish().expect("finish gzip")
+        };
+        let field = [26, 7, 10, 5, b'o', b'c', b'e', b'a', b'n'];
+        assert_eq!(ocean_layer_field(&gzip(&field)).unwrap(), field);
+
+        // A tile field other than a layer would make the payload more than
+        // the layer field, so it is refused rather than skipped.
+        let mut foreign = vec![8, 1];
+        foreign.extend_from_slice(&field);
+        assert!(ocean_layer_field(&gzip(&foreign)).is_err());
+
+        let mut two_layers = field.to_vec();
+        two_layers.extend_from_slice(&field);
+        assert!(ocean_layer_field(&gzip(&two_layers)).is_err());
     }
 }

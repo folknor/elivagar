@@ -18,7 +18,7 @@ use crate::geometry;
 use crate::mvt::decode::{
     self, Command, CommandKind, CommandSink, GeometryError, Grammar, Point, Words,
 };
-use protohoggr::{Cursor, WIRE_32BIT, WIRE_64BIT, WIRE_LEN, WIRE_VARINT};
+use crate::mvt::message::{self, ValueMessage};
 
 /// MVT decoding policy.
 ///
@@ -96,173 +96,53 @@ pub struct DetailTile {
 }
 
 /// Decode a decompressed MVT tile into structural detail.
+///
+/// Messages are walked by the crate's one message reader (`mvt::message`),
+/// whose policy [`Strictness`] selects; this module adds the owned output,
+/// the geometry builders and ring grouping.
 pub fn decode_detail_tile(data: &[u8], strictness: Strictness) -> Result<DetailTile, String> {
-    let mut layers = Vec::new();
-    let mut cursor = Cursor::new(data);
-    while let Some((field, wire_type)) = cursor
-        .read_tag()
-        .map_err(|error| format!("read tile tag: {error}"))?
-    {
-        if field == 3 && wire_type == WIRE_LEN {
-            let bytes = cursor
-                .read_len_delimited()
-                .map_err(|error| format!("read tile layer: {error}"))?;
-            layers.push(decode_detail_layer(bytes, strictness)?);
-        } else if strictness == Strictness::Strict {
-            return Err(format!("unknown tile field {field}"));
-        } else {
-            cursor
-                .skip_field(wire_type)
-                .map_err(|error| format!("skip tile field {field}: {error}"))?;
-        }
-    }
+    let layers = message::parse_tile(data, strictness)?
+        .into_iter()
+        .map(|layer| decode_detail_layer(&layer, strictness))
+        .collect::<Result<_, _>>()?;
     Ok(DetailTile { layers })
 }
 
-fn decode_detail_layer(data: &[u8], strictness: Strictness) -> Result<DetailLayer, String> {
-    let mut name: Arc<str> = Arc::from("");
-    let mut extent = crate::geometry::tiles::grid::EXTENT.unsigned_abs();
-    let mut version = 1u32;
-    let mut keys = Vec::new();
-    let mut values = Vec::new();
-    let mut feature_bytes = Vec::new();
-    let mut cursor = Cursor::new(data);
-    while let Some((field, wire_type)) = cursor
-        .read_tag()
-        .map_err(|error| format!("read layer tag: {error}"))?
-    {
-        match (field, wire_type) {
-            (1, WIRE_LEN) => {
-                let bytes = cursor
-                    .read_len_delimited()
-                    .map_err(|error| format!("read layer name: {error}"))?;
-                name = Arc::from(
-                    std::str::from_utf8(bytes)
-                        .map_err(|error| format!("layer name is not UTF-8: {error}"))?,
-                );
-            }
-            (2, WIRE_LEN) => feature_bytes.push(
-                cursor
-                    .read_len_delimited()
-                    .map_err(|error| format!("read feature message: {error}"))?,
-            ),
-            (3, WIRE_LEN) => {
-                let bytes = cursor
-                    .read_len_delimited()
-                    .map_err(|error| format!("read layer key: {error}"))?;
-                keys.push(Arc::from(
-                    std::str::from_utf8(bytes)
-                        .map_err(|error| format!("layer key is not UTF-8: {error}"))?,
-                ));
-            }
-            (4, WIRE_LEN) => values.push(decode_detail_attr(
-                cursor
-                    .read_len_delimited()
-                    .map_err(|error| format!("read layer value: {error}"))?,
-                strictness,
-            )?),
-            (5, WIRE_VARINT) => {
-                let raw = cursor
-                    .read_varint()
-                    .map_err(|error| format!("read layer extent: {error}"))?;
-                extent = u32::try_from(raw).map_err(|_| format!("extent out of range: {raw}"))?;
-            }
-            (15, WIRE_VARINT) => {
-                let raw = cursor
-                    .read_varint()
-                    .map_err(|error| format!("read layer version: {error}"))?;
-                version = u32::try_from(raw).map_err(|_| format!("version out of range: {raw}"))?;
-            }
-            _ => {
-                if strictness == Strictness::Strict {
-                    return Err(format!("unknown layer field {field}"));
-                }
-                cursor
-                    .skip_field(wire_type)
-                    .map_err(|error| format!("skip layer field {field}: {error}"))?;
-            }
-        }
-    }
-    let mut features = Vec::with_capacity(feature_bytes.len());
-    for bytes in feature_bytes {
-        features.push(decode_detail_feature(bytes, &keys, &values, strictness)?);
-    }
+fn decode_detail_layer(
+    layer: &message::LayerMessage<'_>,
+    strictness: Strictness,
+) -> Result<DetailLayer, String> {
+    let keys: Vec<Arc<str>> = layer.keys.iter().map(|&key| Arc::from(key)).collect();
+    let values = layer
+        .values
+        .iter()
+        .map(|bytes| decode_detail_attr(bytes, strictness))
+        .collect::<Result<Vec<_>, _>>()?;
+    let features = layer
+        .features
+        .iter()
+        .map(|bytes| decode_detail_feature(bytes, &keys, &values, strictness))
+        .collect::<Result<_, _>>()?;
     Ok(DetailLayer {
-        name,
-        extent,
-        version,
+        name: Arc::from(layer.name),
+        extent: layer.extent,
+        version: layer.version,
         features,
     })
 }
 
 /// Decode one MVT value message (the layer value table entry).
 pub fn decode_detail_attr(data: &[u8], strictness: Strictness) -> Result<DetailAttr, String> {
-    let mut out = None;
-    let mut cursor = Cursor::new(data);
-    while let Some((field, wire_type)) = cursor
-        .read_tag()
-        .map_err(|error| format!("read value tag: {error}"))?
-    {
-        let value = match (field, wire_type) {
-            (1, WIRE_LEN) => Some(DetailAttr::String(Arc::from(
-                std::str::from_utf8(
-                    cursor
-                        .read_len_delimited()
-                        .map_err(|error| format!("read string value: {error}"))?,
-                )
-                .map_err(|error| format!("string value is not UTF-8: {error}"))?,
-            ))),
-            (2, WIRE_32BIT) => Some(DetailAttr::Float(
-                cursor
-                    .read_fixed32()
-                    .map_err(|error| format!("read float value: {error}"))?,
-            )),
-            (3, WIRE_64BIT) => Some(DetailAttr::Double(
-                cursor
-                    .read_fixed64()
-                    .map_err(|error| format!("read double value: {error}"))?,
-            )),
-            (4, WIRE_VARINT) => {
-                let raw = cursor
-                    .read_varint()
-                    .map_err(|error| format!("read int value: {error}"))?;
-                #[allow(clippy::cast_possible_wrap)]
-                Some(DetailAttr::Int(raw as i64))
-            }
-            (5, WIRE_VARINT) => Some(DetailAttr::UInt(
-                cursor
-                    .read_varint()
-                    .map_err(|error| format!("read uint value: {error}"))?,
-            )),
-            (6, WIRE_VARINT) => Some(DetailAttr::SInt(unzigzag64(
-                cursor
-                    .read_varint()
-                    .map_err(|error| format!("read sint value: {error}"))?,
-            ))),
-            (7, WIRE_VARINT) => Some(DetailAttr::Bool(
-                cursor
-                    .read_varint()
-                    .map_err(|error| format!("read bool value: {error}"))?
-                    != 0,
-            )),
-            _ => {
-                if strictness == Strictness::Strict {
-                    return Err(format!("unknown value field {field}"));
-                }
-                cursor
-                    .skip_field(wire_type)
-                    .map_err(|error| format!("skip value field {field}: {error}"))?;
-                None
-            }
-        };
-        if value.is_some() && strictness == Strictness::Strict && out.is_some() {
-            return Err("MVT value has multiple value fields".to_string());
-        }
-        if value.is_some() {
-            out = value;
-        }
-    }
-    out.ok_or_else(|| "empty MVT value".to_string())
+    #[allow(clippy::cast_possible_wrap)]
+    Ok(match message::decode_value(data, strictness)? {
+        ValueMessage::String(text) => DetailAttr::String(Arc::from(text)),
+        ValueMessage::Float(bits) => DetailAttr::Float(bits),
+        ValueMessage::Double(bits) => DetailAttr::Double(bits),
+        ValueMessage::Int(raw) => DetailAttr::Int(raw as i64),
+        ValueMessage::UInt(raw) => DetailAttr::UInt(raw),
+        ValueMessage::SInt(raw) => DetailAttr::SInt(unzigzag64(raw)),
+        ValueMessage::Bool(flag) => DetailAttr::Bool(flag),
+    })
 }
 
 /// Decode one MVT feature message against the layer key/value tables.
@@ -272,76 +152,15 @@ pub fn decode_detail_feature(
     values: &[DetailAttr],
     strictness: Strictness,
 ) -> Result<DetailFeature, String> {
-    let mut id = None;
-    let mut seen_id = false;
-    let mut tag_bytes = Vec::new();
-    let mut geom_type = 0u8;
-    let mut seen_geom_type = false;
-    let mut geometry = None;
-    let mut cursor = Cursor::new(data);
-    while let Some((field, wire_type)) = cursor
-        .read_tag()
-        .map_err(|error| format!("read feature tag: {error}"))?
-    {
-        match (field, wire_type) {
-            (1, WIRE_VARINT) => {
-                if strictness == Strictness::Strict && seen_id {
-                    return Err("duplicate feature id field".to_string());
-                }
-                seen_id = true;
-                id = Some(
-                    cursor
-                        .read_varint()
-                        .map_err(|error| format!("read feature id: {error}"))?,
-                );
-            }
-            (2, WIRE_LEN) => {
-                tag_bytes.extend_from_slice(
-                    cursor
-                        .read_len_delimited()
-                        .map_err(|error| format!("read feature tags: {error}"))?,
-                );
-            }
-            (3, WIRE_VARINT) => {
-                if strictness == Strictness::Strict && seen_geom_type {
-                    return Err("duplicate feature type field".to_string());
-                }
-                seen_geom_type = true;
-                let raw = cursor
-                    .read_varint()
-                    .map_err(|error| format!("read feature type: {error}"))?;
-                geom_type =
-                    u8::try_from(raw).map_err(|_| format!("geometry type out of range: {raw}"))?;
-            }
-            (4, WIRE_LEN) => {
-                let bytes = cursor
-                    .read_len_delimited()
-                    .map_err(|error| format!("read feature geometry: {error}"))?;
-                geometry
-                    .get_or_insert_with(Vec::new)
-                    .extend_from_slice(bytes);
-            }
-            _ => {
-                if strictness == Strictness::Strict {
-                    return Err(format!("unknown feature field {field}"));
-                }
-                cursor
-                    .skip_field(wire_type)
-                    .map_err(|error| format!("skip feature field {field}: {error}"))?;
-            }
-        }
-    }
-    let attrs = decode_detail_attrs(&tag_bytes, keys, values)?;
-    let components = match geometry {
-        Some(geometry) => decode_detail_geometry(geom_type, &geometry, strictness)?,
-        None if strictness == Strictness::Strict => {
-            return Err("feature has no geometry field".to_string());
-        }
+    let feature = message::parse_feature(data, strictness)?;
+    let attrs = decode_detail_attrs(&feature.tags, keys, values)?;
+    let components = match &feature.geometry {
+        Some(geometry) => decode_detail_geometry(feature.geom_type, geometry, strictness)?,
         None => Vec::new(),
     };
     Ok(DetailFeature {
-        id,
-        geom_type,
+        id: feature.id,
+        geom_type: feature.geom_type,
         attrs,
         components,
     })
@@ -352,21 +171,9 @@ fn decode_detail_attrs(
     keys: &[Arc<str>],
     values: &[DetailAttr],
 ) -> Result<Vec<(Arc<str>, DetailAttr)>, String> {
-    let mut cursor = Cursor::new(data);
-    let mut attrs = Vec::with_capacity(data.len() / 2);
-    while !cursor.is_empty() {
-        let key_idx = usize::try_from(
-            cursor
-                .read_varint()
-                .map_err(|error| format!("read feature tag key: {error}"))?,
-        )
-        .map_err(|_| "feature tag key index overflow".to_string())?;
-        let value_idx = usize::try_from(
-            cursor
-                .read_varint()
-                .map_err(|error| format!("read feature tag value: {error}"))?,
-        )
-        .map_err(|_| "feature tag value index overflow".to_string())?;
+    let pairs = message::tag_pairs(data)?;
+    let mut attrs = Vec::with_capacity(pairs.len());
+    for (key_idx, value_idx) in pairs {
         attrs.push((
             Arc::clone(
                 keys.get(key_idx)
@@ -568,31 +375,25 @@ impl CommandSink for PolygonSink {
     }
 }
 
-/// Match classifyRings: the first nonzero-area ring establishes exterior
-/// winding, and zero-area rings do not participate in grouping.
+/// Rings grouped by the crate's one ring-grouping rule
+/// (`geometry::polygon::group_rings`).
 fn group_detail_rings(rings: Vec<Vec<(i32, i32)>>) -> Vec<DetailComponent> {
-    let mut grouped: Vec<Vec<DetailRing>> = Vec::new();
-    let mut exterior_orientation = None;
-    for ring in rings {
-        let Some(orientation) = geometry::polygon::ring_role(signed_area(&ring)) else {
-            continue;
-        };
-        let role = match exterior_orientation {
-            Some(exterior) if orientation == exterior => CanonRingRole::Outer,
-            Some(_) => CanonRingRole::Hole,
-            None => {
-                exterior_orientation = Some(orientation);
-                CanonRingRole::Outer
-            }
-        };
-        let ring = make_detail_ring(role, ring);
-        if role == CanonRingRole::Outer {
-            grouped.push(vec![ring]);
-        } else if let Some(component) = grouped.last_mut() {
-            component.push(ring);
-        }
-    }
-    grouped.into_iter().map(make_detail_component).collect()
+    geometry::polygon::group_rings(rings, |ring| {
+        geometry::polygon::signed_area_2x(ring.iter().copied())
+    })
+    .into_iter()
+    .map(|group| {
+        let mut rings = Vec::with_capacity(group.holes.len() + 1);
+        rings.push(make_detail_ring(CanonRingRole::Outer, group.outer));
+        rings.extend(
+            group
+                .holes
+                .into_iter()
+                .map(|hole| make_detail_ring(CanonRingRole::Hole, hole)),
+        );
+        make_detail_component(rings)
+    })
+    .collect()
 }
 
 fn make_detail_ring(role: CanonRingRole, points: Vec<(i32, i32)>) -> DetailRing {
@@ -611,18 +412,12 @@ fn unzigzag64(value: u64) -> i64 {
     }
 }
 
-fn signed_area(ring: &[(i32, i32)]) -> i128 {
-    ring.windows(2).fold(0i128, |area, pair| {
-        area + i128::from(pair[0].0) * i128::from(pair[1].1)
-            - i128::from(pair[1].0) * i128::from(pair[0].1)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use protohoggr::{WIRE_32BIT, WIRE_64BIT, WIRE_LEN, WIRE_VARINT};
 
     #[allow(clippy::cast_possible_truncation)]
     fn push_varint(out: &mut Vec<u8>, mut value: u64) {
@@ -935,6 +730,17 @@ mod tests {
         assert_eq!(decoded.components[1].rings.len(), 2);
         assert_eq!(decoded.components[1].rings[0].role, CanonRingRole::Outer);
         assert_eq!(decoded.components[1].rings[1].role, CanonRingRole::Hole);
+    }
+
+    #[test]
+    fn tolerant_unclosed_ring_area_includes_the_closing_edge() {
+        // (10,0) (0,0) (0,10) with no ClosePath: the open shoelace sum is 0,
+        // which would drop the ring as zero-area; MapLibre's area wraps to
+        // the first vertex and reads -100.
+        let feature = feature_message(Some(3), Some(&[9, 20, 0, 18, 19, 0, 0, 20]));
+        let decoded = decode_detail_feature(&feature, &[], &[], Strictness::Tolerant).unwrap();
+        assert_eq!(decoded.components.len(), 1);
+        assert_eq!(decoded.components[0].rings[0].role, CanonRingRole::Outer);
     }
 
     fn value_with_varint_field(field: u32, raw: u64) -> Vec<u8> {

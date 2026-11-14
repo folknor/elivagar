@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- One MVT protobuf message reader. `tile_detail`, `verify`, `svg`, `diag`
+  and the ocean artifact splice walk tile, layer, feature and value
+  messages through `mvt::message`, so a truncated tag or field now fails
+  everywhere instead of silently ending a walk. `verify` checks payload
+  structure strictly: unknown and duplicate singular fields, features
+  without geometry, undecodable values (referenced or not) and tag indices
+  outside the layer tables fail the tile, and it parses each tile once
+  instead of four times. `tile_detail` strict mode also rejects duplicate
+  layer name, extent and version fields; a packed tags or geometry field
+  ending inside a varint is refused in both modes instead of being
+  repaired by the next occurrence; and polygon ring area wraps to the
+  first vertex, as MapLibre's does, which changes tolerant output only for
+  unclosed rings. Ring grouping is one rule shared by `tile_detail` and
+  MLT. The artifact splice admits only a payload holding exactly one
+  ocean layer and nothing else, and takes it verbatim. Output unchanged.
+
 - A resume now refuses a multi-partition sort chunk whose section table
   is corrupt (out-of-order partitions or offsets, a zero-record section,
   a table or section running past the file) instead of deriving silent
