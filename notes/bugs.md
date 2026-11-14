@@ -87,3 +87,15 @@ it can move `boundary_labels` min zooms.
 
 Reported by the wave-10 relation fixer.
 
+## BUG-066 - The line merger's re-encoder subtracts in unchecked i32
+
+`encode_line_segments` in the line merger computes the MoveTo/LineTo deltas by
+subtracting tile-local `i32` coordinates without an overflow check. The decode
+side moved to a checked i64 cursor when every in-crate command-stream reader
+was consolidated onto `mvt::decode`; this encoder did not follow. Whether any
+reachable input can overflow (buffered tile-local coordinates are small) is
+unverified - either check the arithmetic or document the bound that makes it
+safe.
+
+Reported by the MVT decoder consolidation implementer, 2026-11-14.
+

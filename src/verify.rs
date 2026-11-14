@@ -9,10 +9,10 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
+use crate::archive::Archive;
 use crate::mvt::decode::{
     self, Command, CommandKind, CommandSink, GeometryError, Grammar, Point, Words,
 };
-use crate::pmtiles_reader::{self, PmtilesReader};
 use crate::shortbread::{Layer, paint_order};
 use crate::tiling::{ARCHIVE_MAX_ZOOM, TileId};
 
@@ -285,59 +285,36 @@ pub fn verify_opts_unique(
     unique_payloads: bool,
 ) -> Result<VerifyReport, VerifyError> {
     // -- Open and validate header --
-    let mut reader = PmtilesReader::open(path)?;
-    let file_size = reader.file_size()?;
+    let reader = Archive::open(path)?;
+    let header = *reader.header();
 
     reader
         .tile_decoder()
         .map_err(|error| VerifyError::Container(error.to_string()))?;
 
     // Zoom sanity.
-    if reader.min_zoom() > reader.max_zoom() {
+    if header.min_zoom > header.max_zoom {
         return Err(VerifyError::Container(format!(
             "min_zoom ({}) > max_zoom ({})",
-            reader.min_zoom(),
-            reader.max_zoom()
+            header.min_zoom, header.max_zoom
         )));
     }
 
     // -- Section bounds --
-    check_section_bounds(
-        "root_dir",
-        reader.root_dir_offset(),
-        reader.root_dir_length(),
-        file_size,
-    )?;
-    check_section_bounds(
-        "metadata",
-        reader.metadata_offset(),
-        reader.metadata_length(),
-        file_size,
-    )?;
-    check_section_bounds(
-        "leaf_dirs",
-        reader.leaf_dirs_offset(),
-        reader.leaf_dirs_length(),
-        file_size,
-    )?;
-    check_section_bounds(
-        "tile_data",
-        reader.data_offset(),
-        reader.data_length(),
-        file_size,
-    )?;
+    reader
+        .check_layout()
+        .map_err(|error| VerifyError::Container(error.to_string()))?;
 
     // Dedup invariant: unique <= addressed.
-    if reader.num_unique() > reader.num_addressed() {
+    if header.tile_contents > header.addressed_tiles {
         return Err(VerifyError::Container(format!(
             "num_unique ({}) > num_addressed ({})",
-            reader.num_unique(),
-            reader.num_addressed()
+            header.tile_contents, header.addressed_tiles
         )));
     }
 
     // -- Metadata --
-    let metadata_json = reader.read_metadata()?;
+    let metadata_json = reader.metadata()?;
     let parsed: serde_json::Value = serde_json::from_str(&metadata_json)
         .map_err(|e| VerifyError::Metadata(format!("invalid JSON: {e}")))?;
 
@@ -354,22 +331,21 @@ pub fn verify_opts_unique(
     let mut unique_blobs: FxHashSet<(u64, u32)> = FxHashSet::default();
     let mut addressed_per_zoom = [0_u64; ARCHIVE_ZOOM_COUNT];
 
-    for run in &runs {
+    for run in runs.as_slice() {
         if tile_errors.len() >= MAX_TILE_ERRORS {
             break;
         }
-        let run_end = run
-            .tile_id
-            .checked_add(u64::from(run.run_length))
-            .ok_or_else(|| VerifyError::Container("tile run overflows".to_string()))?;
+        let run_start = run.start().raw();
+        let run_end = run.end();
+        let blob = run.blob();
         let mut unique_tiles = Vec::new();
-        for tile_id in run.tile_id..run_end {
+        for tile_id in run_start..run_end {
             let (z, x, y) = tile_coord(tile_id);
             addressed_per_zoom[usize::from(z)] += 1;
             if unique_payloads {
                 let class = ValidationClass::for_tile(z, x);
-                if seen_payloads.insert((run.offset, run.length, class)) {
-                    unique_blobs.insert((run.offset, run.length));
+                if seen_payloads.insert((blob.offset, blob.length, class)) {
+                    unique_blobs.insert((blob.offset, blob.length));
                     unique_tiles.push((tile_id, z, x, y, class));
                 }
             }
@@ -377,15 +353,10 @@ pub fn verify_opts_unique(
         if unique_payloads && unique_tiles.is_empty() {
             continue;
         }
-        let representative = pmtiles_reader::TileEntry {
-            tile_id: run.tile_id,
-            offset: run.offset,
-            length: run.length,
-        };
 
         // Every addressed tile in a run has the same blob. Read and decompress
         // it once, then retain per-tile report attribution below.
-        let decompressed = match reader.read_tile(&representative) {
+        let decompressed = match reader.read_tile(blob) {
             Ok(data) => data,
             Err(e) => {
                 let error_tiles: Box<dyn Iterator<Item = (u64, u8, u32, u32)>> = if unique_payloads
@@ -396,7 +367,7 @@ pub fn verify_opts_unique(
                             .map(|&(tile_id, z, x, y, _class)| (tile_id, z, x, y)),
                     )
                 } else {
-                    Box::new((run.tile_id..run_end).map(|tile_id| {
+                    Box::new((run_start..run_end).map(|tile_id| {
                         let (z, x, y) = tile_coord(tile_id);
                         (tile_id, z, x, y)
                     }))
@@ -421,7 +392,7 @@ pub fn verify_opts_unique(
             if unique_payloads {
                 Box::new(unique_tiles.into_iter())
             } else {
-                Box::new((run.tile_id..run_end).map(|tile_id| {
+                Box::new((run_start..run_end).map(|tile_id| {
                     let (z, x, y) = tile_coord(tile_id);
                     (tile_id, z, x, y, ValidationClass::for_tile(z, x))
                 }))
@@ -491,7 +462,7 @@ fn build_tile_outcome(
 ) -> CachedTileOutcome {
     let mut layer_names = Vec::new();
     let mut structure_errors = Vec::new();
-    match pmtiles_reader::decode_mvt_layers(data) {
+    match crate::mvt::layers::decode_mvt_layers(data) {
         Ok(layers) => {
             if layers.is_empty() {
                 structure_errors.push("no MVT layers".to_string());
@@ -1149,26 +1120,6 @@ fn validate_ocean_layer_rings(layer_data: &[u8], problems: &mut Vec<String>) {
     }
 }
 
-fn check_section_bounds(
-    name: &str,
-    offset: u64,
-    length: u64,
-    file_size: u64,
-) -> Result<(), VerifyError> {
-    if let Some(end) = offset.checked_add(length) {
-        if end > file_size {
-            return Err(VerifyError::Container(format!(
-                "{name} section exceeds file bounds: offset {offset} + length {length} > file size {file_size}"
-            )));
-        }
-    } else {
-        return Err(VerifyError::Container(format!(
-            "{name} section offset+length overflows u64"
-        )));
-    }
-    Ok(())
-}
-
 fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, VerifyError> {
     let vector_layers = parsed
         .get("vector_layers")
@@ -1190,8 +1141,8 @@ fn extract_declared_layers(parsed: &serde_json::Value) -> Result<Vec<String>, Ve
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::archive::{LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter};
     use crate::mvt::{Feature, GeomType, LayerBuilder, Value, encode_tile};
-    use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
     use flate2::Compression;
 
     fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
@@ -1428,12 +1379,24 @@ mod tests {
         gzip.write_all(&tile).expect("gzip tile");
         let gzip = gzip.finish().expect("finish gzip tile");
 
-        let mut writer = PmtilesWriter::new(PmtilesConfig {
-            min_zoom: 2,
-            max_zoom: 2,
-            bounds: (-180.0, -85.0, 180.0, 85.0),
-            center: (0.0, 0.0, 2),
-        });
+        let mut writer = PmtilesWriter::new(
+            PmtilesConfig::new(
+                2,
+                2,
+                LonLatBbox {
+                    west: -180.0,
+                    south: -85.0,
+                    east: 180.0,
+                    north: 85.0,
+                },
+                MapCenter {
+                    lon: 0.0,
+                    lat: 0.0,
+                    zoom: 2,
+                },
+            )
+            .expect("valid archive config"),
+        );
         for &(x, y) in pair {
             writer.add_tile(2, x, y, &gzip).expect("add tile");
         }
@@ -1482,12 +1445,24 @@ mod tests {
         gzip.write_all(&tile).expect("gzip tile");
         let gzip = gzip.finish().expect("finish gzip tile");
 
-        let mut writer = PmtilesWriter::new(PmtilesConfig {
-            min_zoom: 2,
-            max_zoom: 2,
-            bounds: (-180.0, -85.0, 180.0, 85.0),
-            center: (0.0, 0.0, 2),
-        });
+        let mut writer = PmtilesWriter::new(
+            PmtilesConfig::new(
+                2,
+                2,
+                LonLatBbox {
+                    west: -180.0,
+                    south: -85.0,
+                    east: 180.0,
+                    north: 85.0,
+                },
+                MapCenter {
+                    lon: 0.0,
+                    lat: 0.0,
+                    zoom: 2,
+                },
+            )
+            .expect("valid archive config"),
+        );
         for &(x, y) in pair {
             writer.add_tile(2, x, y, &gzip).expect("add tile");
         }

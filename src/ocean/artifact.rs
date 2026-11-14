@@ -11,8 +11,22 @@
 
 use super::OceanArtifactKey;
 use super::band::OceanBand;
-use crate::pmtiles_reader::{ArchiveView, RawDirEntry};
+use crate::archive::{Archive, BlobRef, MapSource, TileRun, TileRuns};
 use crate::shortbread::Layer;
+
+/// The artifact is mapped, not read, so assembly borrows its tile blobs
+/// without copying them.
+type ArchiveView = Archive<MapSource>;
+
+fn open_view(path: &std::path::Path) -> std::io::Result<ArchiveView> {
+    // SAFETY: this assumes nothing modifies or truncates the artifact file
+    // while the run holds it - the artifact is built once per shapefile
+    // release and only replaced between runs. Nothing enforces that; a
+    // concurrent rewrite of the file is undefined behavior here, which is the
+    // price of the zero-copy splice. Every other reader goes through the
+    // positional-read source instead.
+    unsafe { Archive::open_mapped(path) }
+}
 
 /// First zoom of the artifact contract.
 pub(crate) const ARTIFACT_MIN_ZOOM: u8 = 0;
@@ -38,7 +52,9 @@ fn declared_key_of(view: &ArchiveView) -> std::io::Result<OceanArtifactKey> {
 /// anything. Retention of an outgoing artifact reads this, and must keep
 /// working for artifacts the current inputs would refuse.
 pub(crate) fn declared_key(path: &std::path::Path) -> std::io::Result<OceanArtifactKey> {
-    declared_key_of(&ArchiveView::open(path)?)
+    // Identity only: no readability check, so retention can still read the
+    // key of an artifact the current run could not serve.
+    declared_key_of(&open_view(path)?)
 }
 
 /// An artifact admitted for this run: every check that does not need the
@@ -52,9 +68,9 @@ pub(crate) struct OceanArtifact {
 impl OceanArtifact {
     /// Admit `path` for a run whose inputs hash to `expected()`.
     ///
-    /// `ArchiveView::open` refuses any header tile type or compression other
-    /// than MVT + gzip, so the format half of the contract is enforced there.
-    /// The declared compression level is compared before `expected` is
+    /// The format half of the contract - MVT + gzip, which the raw splice and
+    /// run-copy paths rely on - and the section layout are checked first. The
+    /// declared compression level is compared before `expected` is
     /// computed, because computing it hashes the shapefiles and a level
     /// mismatch deserves its own message.
     pub(crate) fn admit(
@@ -68,7 +84,9 @@ impl OceanArtifact {
                 path.display()
             )));
         }
-        let view = ArchiveView::open(path)?;
+        let view = open_view(path)?;
+        view.tile_decoder()?;
+        view.check_layout()?;
         let declared = declared_key_of(&view)?;
         if declared.compression_level != compression_level {
             return Err(std::io::Error::other(format!(
@@ -78,18 +96,17 @@ impl OceanArtifact {
                 compression_level,
             )));
         }
-        if view.min_zoom() != ARTIFACT_MIN_ZOOM || view.max_zoom() != ARTIFACT_MAX_ZOOM {
+        let header = view.header();
+        if header.min_zoom != ARTIFACT_MIN_ZOOM || header.max_zoom != ARTIFACT_MAX_ZOOM {
             return Err(std::io::Error::other("ocean artifact must cover z0-14"));
         }
-        let header = view.header();
-        let min_lon = crate::pmtiles_reader::read_i32_le(header, 102);
-        let min_lat = crate::pmtiles_reader::read_i32_le(header, 106);
-        let max_lon = crate::pmtiles_reader::read_i32_le(header, 110);
-        let max_lat = crate::pmtiles_reader::read_i32_le(header, 114);
-        if min_lon > -1_800_000_000
-            || min_lat > -850_500_000
-            || max_lon < 1_800_000_000
-            || max_lat < 850_500_000
+        // A coverage inequality, not equality with a rounded world constant:
+        // the artifact writes -85.05/85.05, inside the Mercator limit.
+        let bounds = header.bounds;
+        if bounds.west > -1_800_000_000
+            || bounds.south > -850_500_000
+            || bounds.east < 1_800_000_000
+            || bounds.north < 850_500_000
         {
             return Err(std::io::Error::other(
                 "ocean artifact header bounds must cover the world",
@@ -129,13 +146,7 @@ impl OceanArtifact {
         // Exclusive end: the first id past the top zoom is outside the
         // artifact contract.
         let profile_end = crate::tiling::PROFILE_ID_END;
-        if runs.iter().any(|run| {
-            run.tile_id >= profile_end
-                || run
-                    .tile_id
-                    .checked_add(u64::from(run.run_length))
-                    .is_none_or(|end| end > profile_end)
-        }) {
+        if runs.as_slice().iter().any(|run| run.end() > profile_end) {
             return Err(std::io::Error::other(
                 "ocean artifact directory run lies outside z0-14 tile space",
             ));
@@ -152,7 +163,7 @@ impl OceanArtifact {
 /// band that decides which of its tiles this run serves.
 pub(crate) struct OceanTiles {
     view: ArchiveView,
-    runs: Vec<RawDirEntry>,
+    runs: TileRuns,
     band: OceanBand,
 }
 
@@ -165,24 +176,15 @@ impl OceanTiles {
         self.runs.len()
     }
 
-    pub(crate) fn runs_in(&self, start: u64, end: u64) -> &[RawDirEntry] {
-        let first = self
-            .runs
-            .partition_point(|run| run.tile_id.saturating_add(u64::from(run.run_length)) <= start);
-        let last = self.runs.partition_point(|run| run.tile_id < end);
-        &self.runs[first..last]
+    pub(crate) fn runs_in(&self, start: u64, end: u64) -> &[TileRun] {
+        self.runs.intersecting(start, end)
     }
 
-    pub(crate) fn run_covering(&self, tile_id: u64) -> Option<RawDirEntry> {
-        let index = self.runs.partition_point(|run| run.tile_id <= tile_id);
-        index
-            .checked_sub(1)
-            .and_then(|index| self.runs.get(index))
-            .copied()
-            .filter(|run| tile_id < run.tile_id.saturating_add(u64::from(run.run_length)))
+    pub(crate) fn run_covering(&self, tile_id: u64) -> Option<TileRun> {
+        self.runs.covering(tile_id).copied()
     }
 
-    pub(crate) fn raw_blob(&self, offset: u64, length: u32) -> std::io::Result<&[u8]> {
-        self.view.raw_blob_at(offset, length)
+    pub(crate) fn raw_blob(&self, blob: BlobRef) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+        self.view.raw_blob(blob)
     }
 }

@@ -14,10 +14,10 @@ mod phase12;
 mod relations;
 mod stats;
 
+use crate::archive;
 #[cfg(test)]
 use crate::geometry;
 use crate::geometry::projection::MercBbox;
-use crate::pmtiles_writer;
 use crate::shortbread;
 use crate::sort;
 
@@ -269,13 +269,8 @@ impl TileContract {
         }
     }
 
-    fn writer(
-        self,
-    ) -> (
-        pmtiles_writer::TileDataFormat,
-        pmtiles_writer::TileDataCompression,
-    ) {
-        use crate::pmtiles_writer::{TileDataCompression, TileDataFormat};
+    fn writer(self) -> (archive::TileDataFormat, archive::TileDataCompression) {
+        use crate::archive::{TileDataCompression, TileDataFormat};
         match self {
             Self::Mvt { compression, .. } => (
                 TileDataFormat::Mvt,
@@ -352,10 +347,7 @@ pub(super) fn compression_level_for_zoom(z: u8, compression_level: u32) -> u32 {
 
 fn configured_tile_contract(
     config: &TilegenConfig,
-) -> (
-    pmtiles_writer::TileDataFormat,
-    pmtiles_writer::TileDataCompression,
-) {
+) -> (archive::TileDataFormat, archive::TileDataCompression) {
     TileContract::from_config(config).writer()
 }
 
@@ -385,9 +377,9 @@ fn resolve_ocean(config: &TilegenConfig) -> Result<ResolvedOcean, PipelineError>
         return Ok(ResolvedOcean::Computed { plan, key });
     };
     let (tile_format, tile_compression) = configured_tile_contract(config);
-    let decoder = crate::pmtiles_reader::TileDecoder::from_header_fields(
+    let decoder = crate::archive::TileDecoder::for_contract(
         tile_format.header_tile_type(),
-        tile_compression.header_value(),
+        tile_compression.header_compression(),
     );
     if decoder.is_err()
         || !crate::ocean::artifact::artifact_serves_window(config.min_zoom, config.max_zoom)

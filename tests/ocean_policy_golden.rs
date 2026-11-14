@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use elivagar::pmtiles_reader::ArchiveView;
+use elivagar::archive::{Archive, Compression};
 
 struct OceanGolden {
     policy_version: u32,
@@ -39,7 +39,7 @@ fn synthetic_ocean_archive_matches_policy_golden() {
     )
     .expect("build synthetic ocean archive");
 
-    let archive = ArchiveView::open(&archive_path).expect("open synthetic ocean archive");
+    let archive = Archive::open(&archive_path).expect("open synthetic ocean archive");
     let metadata: serde_json::Value = serde_json::from_str(
         &archive
             .metadata()
@@ -56,16 +56,22 @@ fn synthetic_ocean_archive_matches_policy_golden() {
     // order. The whole file is deliberately not hashed: its metadata carries
     // build provenance (commit, versions, timestamps, paths), and the gzip
     // bytes depend on the compressor implementation.
-    assert_eq!(archive.tile_compression(), 2, "synthetic archive is gzip");
+    assert_eq!(
+        archive.header().tile_compression,
+        Compression::Gzip,
+        "synthetic archive is gzip"
+    );
     let mut folded = Vec::new();
-    for run in archive.read_all_runs().expect("read archive runs") {
-        let payload = archive
-            .raw_blob_at(run.offset, run.length)
-            .expect("read tile payload");
-        let tile =
-            elivagar::pmtiles_reader::gzip_decompress(payload).expect("decompress tile payload");
-        folded.extend_from_slice(&run.tile_id.to_le_bytes());
-        folded.extend_from_slice(&run.run_length.to_le_bytes());
+    for run in archive
+        .read_all_runs()
+        .expect("read archive runs")
+        .as_slice()
+    {
+        let tile = archive
+            .read_tile(run.blob())
+            .expect("decompress tile payload");
+        folded.extend_from_slice(&run.start().raw().to_le_bytes());
+        folded.extend_from_slice(&run.run_length().get().to_le_bytes());
         folded.extend_from_slice(
             &u64::try_from(tile.len())
                 .expect("len fits u64")

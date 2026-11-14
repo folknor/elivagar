@@ -457,7 +457,9 @@ and written only by brokkr, so rotations stay atomic with their landing
 commits.
 
 What elivagar exposes instead is a library surface: the pmtiles reader
-(including run-level raw payload access), the `tile_detail` wire-order MVT
+(`archive::Archive`, including run-level raw payload access over validated
+directory runs, and the losslessly decoded `archive::Header`), the
+`tile_detail` wire-order MVT
 decoder with selectable unknown-field strictness (strict is the gate's mode -
 foreign wire fields error; tolerant skips them, for cross-producer
 comparison), typed provenance in full, and the writer's `add_run` plus the

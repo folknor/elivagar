@@ -5,8 +5,8 @@ use std::path::Path;
 
 use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
+use crate::archive::Archive;
 use crate::mvt::decode::{self, Command, CommandKind, CommandSink, GeometryError, Point, Words};
-use crate::pmtiles_reader::{PmtilesReader, find_entry};
 use crate::shortbread::Layer;
 use crate::tiling::{ARCHIVE_MAX_ZOOM, TileId};
 
@@ -101,7 +101,8 @@ pub fn render_tile_grid_svg(
     validate_tile_grid_coordinates(z, x0, y0, width, height)?;
     validate_layer_filter(layer_filter)?;
 
-    let mut reader = PmtilesReader::open(pmtiles_path)?;
+    let reader = Archive::open(pmtiles_path)?;
+    reader.tile_decoder()?;
     let runs = reader.read_all_runs()?;
 
     // Collect decoded layers per tile position
@@ -110,9 +111,8 @@ pub fn render_tile_grid_svg(
         for dx in 0..width {
             let tx = x0 + dx;
             let ty = y0 + dy;
-            let target_id = TileId::at(z, tx, ty).raw();
-            if let Some(entry) = find_entry(&runs, target_id) {
-                let decompressed = reader.read_tile(&entry)?;
+            if let Some(blob) = runs.find(TileId::at(z, tx, ty)) {
+                let decompressed = reader.read_tile(blob)?;
                 let layers = decode_mvt_geometry(&decompressed)?;
                 tile_layers.push((dx, dy, layers));
             }

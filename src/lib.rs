@@ -57,14 +57,16 @@
 //! The [`SkipTo`] enum allows resuming from a checkpoint, reusing sort chunks
 //! from a previous run.
 //!
-//! # PMTiles writer
+//! # PMTiles archives
 //!
-//! The [`pmtiles_writer`] module is also public for standalone use. It writes
-//! clustered PMTiles v3 archives with Hilbert-ordered tile IDs and content
-//! deduplication.
+//! The [`archive`] module is also public for standalone use: the one reader
+//! ([`archive::Archive`]), the header codec, and the writer
+//! ([`archive::PmtilesWriter`]), which writes clustered PMTiles v3 archives
+//! with Hilbert-ordered tile IDs and content deduplication.
 
 extern crate alloc;
 
+pub mod archive;
 pub(crate) mod debug;
 pub mod diag;
 pub(crate) mod geometry;
@@ -76,8 +78,6 @@ pub(crate) mod mvt;
 pub mod node_index;
 pub(crate) mod ocean;
 mod pipeline;
-pub mod pmtiles_reader;
-pub mod pmtiles_writer;
 pub(crate) use shortbread::pois;
 pub mod provenance;
 pub mod resources;

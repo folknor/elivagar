@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- One PMTiles archive module. Breaking: `pmtiles_reader` and
+  `pmtiles_writer` are replaced by `archive`. `PmtilesReader` and
+  `ArchiveView` merge into `archive::Archive`, which reads through
+  positional reads (the memory map is now crate-internal, used only for
+  the ocean artifact). The header is the typed, losslessly decoded
+  `archive::Header` with `TileType`, `Compression` and `Clustering`
+  enums and named E7 bounds and center, replacing the raw byte array and
+  its per-field accessors; `TileDecoder::from_header_fields` becomes
+  `for_contract` over those enums. `read_all_runs` returns `TileRuns` of
+  `TileRun` (non-zero run length, `TileId` start, `BlobRef` payload);
+  `RawDirEntry`, `TileEntry`, `find_entry`, `read_directory`,
+  `read_tile_raw`, `decode_directory`, `decode_mvt_layers`, the gzip and
+  byte helpers and `HEADER_SIZE` leave the public surface, and
+  `read_tile` and `raw_blob` take a `BlobRef`. The reader now refuses
+  leaf pointers outside the leaf section, payloads outside the tile data
+  section, leaves whose first id differs from their pointer, and runs
+  crossing their directory routing interval; nested leaves are followed
+  to four directory levels instead of being dropped. `PmtilesConfig` is
+  built by `PmtilesConfig::new` from `LonLatBbox` and `MapCenter`, which
+  refuses non-finite, out-of-range or inverted geography before any tile
+  work. `inspect` and the readability errors print unrecognized header
+  bytes by value. `svg` and `diag` refuse archives that are not MVT +
+  gzip instead of decoding their payloads as MVT. Output is unchanged.
+
 - One MVT geometry command decoder. `tile_detail`, `verify`, `svg`,
   `diag`, the line merger and the MLT encoder all decode through
   `mvt::decode`, which owns command ids, truncation, zigzag, the

@@ -28,14 +28,15 @@
 //! # Example
 //!
 //! ```no_run
-//! use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
+//! use elivagar::archive::{LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter};
 //!
-//! let config = PmtilesConfig {
-//!     min_zoom: 0,
-//!     max_zoom: 14,
-//!     bounds: (8.0, 54.5, 15.2, 57.8),
-//!     center: (11.5, 56.0, 7),
-//! };
+//! let config = PmtilesConfig::new(
+//!     0,
+//!     14,
+//!     LonLatBbox { west: 8.0, south: 54.5, east: 15.2, north: 57.8 },
+//!     MapCenter { lon: 11.5, lat: 56.0, zoom: 7 },
+//! )
+//! .expect("valid geography");
 //! let mut writer = PmtilesWriter::new(config);
 //!
 //! // Tile IDs must be strictly increasing in Hilbert order.
@@ -51,7 +52,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, BufReader, BufWriter, Cursor, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use crate::pmtiles_reader::{RawDirEntry, encode_directory};
+use super::directory::{WireEntry, encode_directory};
+use super::header::{
+    Clustering, Compression as HeaderCompression, E7Bbox, E7Center, HEADER_LEN, Header, LonLatBbox,
+    MapCenter, Section, TileType,
+};
 use crate::tiling::TileId;
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -60,16 +65,49 @@ use flate2::write::GzEncoder;
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// PMTiles writer configuration.
+/// PMTiles writer configuration: the archive's zoom range and its header
+/// geography. Built only through [`PmtilesConfig::new`], which validates the
+/// geography, so a writer never discovers bad coordinates after the tile
+/// work is done.
+#[derive(Clone, Copy, Debug)]
 pub struct PmtilesConfig {
-    /// Minimum zoom level in the archive.
-    pub min_zoom: u8,
-    /// Maximum zoom level in the archive.
-    pub max_zoom: u8,
-    /// Geographic bounds as (min_lon, min_lat, max_lon, max_lat) in WGS84.
-    pub bounds: (f64, f64, f64, f64),
-    /// Default map center as (lon, lat, zoom) in WGS84.
-    pub center: (f64, f64, u8),
+    min_zoom: u8,
+    max_zoom: u8,
+    bounds: E7Bbox,
+    center: E7Center,
+}
+
+impl PmtilesConfig {
+    /// # Errors
+    /// Refuses `min_zoom > max_zoom` and any bounds or center
+    /// [`LonLatBbox::to_e7`] / [`MapCenter::to_e7`] refuse.
+    pub fn new(
+        min_zoom: u8,
+        max_zoom: u8,
+        bounds: LonLatBbox,
+        center: MapCenter,
+    ) -> io::Result<Self> {
+        if min_zoom > max_zoom {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("PMTiles min zoom {min_zoom} exceeds max zoom {max_zoom}"),
+            ));
+        }
+        Ok(Self {
+            min_zoom,
+            max_zoom,
+            bounds: bounds.to_e7()?,
+            center: center.to_e7()?,
+        })
+    }
+
+    pub fn min_zoom(&self) -> u8 {
+        self.min_zoom
+    }
+
+    pub fn max_zoom(&self) -> u8 {
+        self.max_zoom
+    }
 }
 
 /// Tile payload format stored in PMTiles tile data.
@@ -80,10 +118,11 @@ pub enum TileDataFormat {
 }
 
 impl TileDataFormat {
-    pub(crate) fn header_tile_type(self) -> u8 {
+    pub(crate) fn header_tile_type(self) -> TileType {
         match self {
-            Self::Mvt => 1, // MVT
-            Self::Mlt => 0, // Unknown in PMTiles header; explicit metadata carries mlt marker.
+            Self::Mvt => TileType::Mvt,
+            // Unknown in the header; the metadata carries the mlt marker.
+            Self::Mlt => TileType::Unknown,
         }
     }
 
@@ -112,12 +151,12 @@ pub enum TileDataCompression {
 }
 
 impl TileDataCompression {
-    pub(crate) fn header_value(self) -> u8 {
+    pub(crate) fn header_compression(self) -> HeaderCompression {
         match self {
-            Self::None => 1,
-            Self::Gzip => 2,
-            Self::Brotli => 3,
-            Self::Zstd => 4,
+            Self::None => HeaderCompression::None,
+            Self::Gzip => HeaderCompression::Gzip,
+            Self::Brotli => HeaderCompression::Brotli,
+            Self::Zstd => HeaderCompression::Zstd,
         }
     }
 
@@ -150,7 +189,7 @@ const INIT_SECTION: u64 = 16384;
 
 /// Compressed root-directory byte budget inside the init section.
 #[allow(clippy::cast_possible_truncation)]
-const MAX_ROOT_BYTES: usize = INIT_SECTION as usize - 127;
+const MAX_ROOT_BYTES: usize = INIT_SECTION as usize - HEADER_LEN;
 
 // ---------------------------------------------------------------------------
 // Dedup statistics
@@ -191,6 +230,9 @@ struct DedupKey {
 }
 
 /// One payload equality index shared by individual tiles and tile runs.
+/// Buckets hold `(offset, length, fingerprint)` rather than a `BlobRef` plus
+/// fingerprint: the tuple is this index's private 24-byte entry, which the
+/// RAM-ledger counter in `write_to` sizes, and naming it would buy nothing.
 struct DedupIndex {
     buckets: FxHashMap<u64, Vec<(u64, u32, u64)>>,
     entries: usize,
@@ -283,16 +325,16 @@ fn dedup_hashes(data: &[u8]) -> (u64, u64) {
 // Internal types
 // ---------------------------------------------------------------------------
 
-const _: () = assert!(std::mem::size_of::<RawDirEntry>() == 24);
+const _: () = assert!(std::mem::size_of::<WireEntry>() == 24);
 
 /// Storage contract for directory entries. Both stores expose the same
 /// sequential read passes, so directory layout does not depend on storage.
 trait DirSpill: Send + Sync {
-    fn append(&mut self, entry: RawDirEntry) -> io::Result<()>;
+    fn append(&mut self, entry: WireEntry) -> io::Result<()>;
     fn flush(&mut self) -> io::Result<()>;
     fn entry_count(&self) -> u64;
     fn begin_read(&mut self) -> io::Result<()>;
-    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<RawDirEntry>>;
+    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<WireEntry>>;
     fn release_read(&mut self);
     fn release_entries(&mut self);
     fn cleanup(&mut self);
@@ -300,7 +342,7 @@ trait DirSpill: Send + Sync {
 
 /// Small in-memory directory store used by tests and small sinks.
 struct MemoryDirSpill {
-    entries: Vec<RawDirEntry>,
+    entries: Vec<WireEntry>,
     read_position: usize,
 }
 
@@ -314,7 +356,7 @@ impl MemoryDirSpill {
 }
 
 impl DirSpill for MemoryDirSpill {
-    fn append(&mut self, entry: RawDirEntry) -> io::Result<()> {
+    fn append(&mut self, entry: WireEntry) -> io::Result<()> {
         self.entries.push(entry);
         Ok(())
     }
@@ -333,7 +375,7 @@ impl DirSpill for MemoryDirSpill {
         Ok(())
     }
 
-    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<RawDirEntry>> {
+    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<WireEntry>> {
         let end = self
             .read_position
             .checked_add(count)
@@ -379,7 +421,7 @@ impl FileDirSpill {
 }
 
 impl DirSpill for FileDirSpill {
-    fn append(&mut self, entry: RawDirEntry) -> io::Result<()> {
+    fn append(&mut self, entry: WireEntry) -> io::Result<()> {
         self.writer.write_all(&entry.tile_id.to_le_bytes())?;
         self.writer.write_all(&entry.offset.to_le_bytes())?;
         self.writer.write_all(&entry.length.to_le_bytes())?;
@@ -402,7 +444,7 @@ impl DirSpill for FileDirSpill {
         Ok(())
     }
 
-    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<RawDirEntry>> {
+    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<WireEntry>> {
         let reader = self.reader.as_mut().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -432,7 +474,7 @@ enum DirectorySpill {
 }
 
 impl DirSpill for DirectorySpill {
-    fn append(&mut self, entry: RawDirEntry) -> io::Result<()> {
+    fn append(&mut self, entry: WireEntry) -> io::Result<()> {
         match self {
             Self::Memory(store) => store.append(entry),
             Self::File(store) => store.append(entry),
@@ -460,7 +502,7 @@ impl DirSpill for DirectorySpill {
         }
     }
 
-    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<RawDirEntry>> {
+    fn read_chunk(&mut self, count: usize) -> io::Result<Vec<WireEntry>> {
         match self {
             Self::Memory(store) => store.read_chunk(count),
             Self::File(store) => store.read_chunk(count),
@@ -594,7 +636,7 @@ pub struct PmtilesWriter {
     /// Total number of tiles addressed (including deduped references).
     num_addressed: u64,
     /// Current run being built (flushed when a new non-extending tile arrives).
-    current_run: Option<RawDirEntry>,
+    current_run: Option<WireEntry>,
     /// Directory entries (in-memory or streamed to disk).
     dir_store: DirectorySpill,
     /// Shared payload equality index for individual tiles and tile runs.
@@ -922,7 +964,7 @@ impl PmtilesWriter {
         // [metadata] [leaf_dirs]. finalize_directories() guarantees the root
         // fits the init section; the assert is the layout's load-bearing
         // invariant, not a recoverable condition.
-        let root_dir_offset: u64 = 127;
+        let root_dir_offset = HEADER_LEN as u64;
         let root_dir_length = root_bytes.len() as u64;
         assert!(
             root_bytes.len() <= MAX_ROOT_BYTES,
@@ -934,17 +976,36 @@ impl PmtilesWriter {
         let leaf_dirs_offset = metadata_offset + metadata_length;
         let leaf_dirs_length = leaf_bytes.len() as u64;
 
-        let header = self.build_header(
-            root_dir_offset,
-            root_dir_length,
-            metadata_offset,
-            metadata_length,
-            leaf_dirs_offset,
-            leaf_dirs_length,
-            data_offset,
-            data_length,
-            num_entries,
-        );
+        let header = Header {
+            root_dir: Section {
+                offset: root_dir_offset,
+                length: root_dir_length,
+            },
+            metadata: Section {
+                offset: metadata_offset,
+                length: metadata_length,
+            },
+            leaf_dirs: Section {
+                offset: leaf_dirs_offset,
+                length: leaf_dirs_length,
+            },
+            tile_data: Section {
+                offset: data_offset,
+                length: data_length,
+            },
+            addressed_tiles: self.num_addressed,
+            tile_entries: num_entries,
+            tile_contents: self.unique_count,
+            clustering: Clustering::Clustered,
+            internal_compression: HeaderCompression::Gzip,
+            tile_compression: self.tile_data_compression.header_compression(),
+            tile_type: self.tile_data_format.header_tile_type(),
+            min_zoom: self.config.min_zoom,
+            max_zoom: self.config.max_zoom,
+            bounds: self.config.bounds,
+            center: self.config.center,
+        }
+        .encode();
 
         self.blob.sink.seek(io::SeekFrom::Start(metadata_offset))?;
         self.blob.sink.write_all(&metadata_compressed)?;
@@ -985,7 +1046,7 @@ impl PmtilesWriter {
         }
         // Flush old run if any, then start new one
         self.flush_run()?;
-        self.current_run = Some(RawDirEntry {
+        self.current_run = Some(WireEntry {
             tile_id,
             offset,
             length,
@@ -1013,7 +1074,7 @@ impl PmtilesWriter {
         }
         self.num_addressed += u64::from(run_length);
         self.flush_run()?;
-        self.current_run = Some(RawDirEntry {
+        self.current_run = Some(WireEntry {
             tile_id,
             offset,
             length,
@@ -1026,7 +1087,7 @@ impl PmtilesWriter {
     /// from the streaming temp file if necessary).
     #[cfg(test)]
     #[hotpath::measure]
-    fn collect_dir_entries(&mut self) -> io::Result<Vec<RawDirEntry>> {
+    fn collect_dir_entries(&mut self) -> io::Result<Vec<WireEntry>> {
         self.flush_run()?;
         self.dir_store.flush()?;
         let count = directory_entry_count(self.dir_store.entry_count())?;
@@ -1085,73 +1146,6 @@ impl PmtilesWriter {
         self.dir_store.release_entries();
         result
     }
-
-    /// Build the 127-byte header.
-    #[allow(clippy::too_many_arguments)]
-    fn build_header(
-        &self,
-        root_dir_offset: u64,
-        root_dir_length: u64,
-        metadata_offset: u64,
-        metadata_length: u64,
-        leaf_dirs_offset: u64,
-        leaf_dirs_length: u64,
-        data_offset: u64,
-        data_length: u64,
-        num_entries: u64,
-    ) -> [u8; 127] {
-        let mut h = [0u8; 127];
-
-        h[0..7].copy_from_slice(b"PMTiles");
-        h[7] = 3;
-
-        write_u64_le(&mut h, 8, root_dir_offset);
-        write_u64_le(&mut h, 16, root_dir_length);
-        write_u64_le(&mut h, 24, metadata_offset);
-        write_u64_le(&mut h, 32, metadata_length);
-        write_u64_le(&mut h, 40, leaf_dirs_offset);
-        write_u64_le(&mut h, 48, leaf_dirs_length);
-        write_u64_le(&mut h, 56, data_offset);
-        write_u64_le(&mut h, 64, data_length);
-
-        write_header_counts(&mut h, self.num_addressed, num_entries, self.unique_count);
-
-        // Clustered
-        h[96] = 1;
-        // Internal compression: gzip
-        h[97] = 2;
-        // Tile compression + payload type are format dependent.
-        h[98] = self.tile_data_compression.header_value();
-        h[99] = self.tile_data_format.header_tile_type();
-
-        h[100] = self.config.min_zoom;
-        h[101] = self.config.max_zoom;
-
-        write_header_bounds(&mut h, &self.config);
-
-        h
-    }
-}
-
-/// Write tile count fields into header bytes 72..96.
-fn write_header_counts(h: &mut [u8; 127], num_addressed: u64, num_entries: u64, unique_count: u64) {
-    write_u64_le(h, 72, num_addressed);
-    write_u64_le(h, 80, num_entries);
-    write_u64_le(h, 88, unique_count);
-}
-
-/// Write bounds and center fields into header bytes 102..127.
-fn write_header_bounds(h: &mut [u8; 127], config: &PmtilesConfig) {
-    let (min_lon, min_lat, max_lon, max_lat) = config.bounds;
-    write_i32_le(h, 102, f64_to_e7(min_lon));
-    write_i32_le(h, 106, f64_to_e7(min_lat));
-    write_i32_le(h, 110, f64_to_e7(max_lon));
-    write_i32_le(h, 114, f64_to_e7(max_lat));
-
-    let (center_lon, center_lat, center_zoom) = config.center;
-    h[118] = center_zoom;
-    write_i32_le(h, 119, f64_to_e7(center_lon));
-    write_i32_le(h, 123, f64_to_e7(center_lat));
 }
 
 /// Convert the stored entry count for a platform-sized read pass.
@@ -1210,7 +1204,7 @@ fn build_leaf_directories(
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
     store.begin_read()?;
     let mut leaf_blob: Vec<u8> = Vec::new();
-    let mut root_entries: Vec<RawDirEntry> = Vec::new();
+    let mut root_entries: Vec<WireEntry> = Vec::new();
     let mut remaining = count;
 
     while remaining > 0 {
@@ -1228,7 +1222,7 @@ fn build_leaf_directories(
         leaf_blob.extend_from_slice(&compressed);
 
         // run_length=0 marks a leaf directory pointer
-        root_entries.push(RawDirEntry {
+        root_entries.push(WireEntry {
             tile_id: first_tile_id,
             offset: leaf_offset,
             length: leaf_len,
@@ -1262,7 +1256,12 @@ struct MetadataExtensions {
     elivagar: Option<serde_json::Value>,
 }
 
-/// The archive's JSON schema and serialization live together here. Field
+/// The archive's JSON schema and serialization live together here, inside
+/// the writer on purpose: a separate `archive::metadata` module was weighed
+/// and refused, because its inputs (the Shortbread name and layer set, the
+/// ocean artifact key, the provenance member) are producer policy carried by
+/// the writer's setters, so moving the document alone would add a hop without
+/// moving ownership. The read side stays `serde_json::Value`. Field
 /// declaration order preserves the existing wire order, and the two optional
 /// extension keys are distinct fields, so the composed document cannot emit
 /// either key twice.
@@ -1363,12 +1362,12 @@ fn build_metadata(
 
 /// Read `count` directory entries from a reader, 24 bytes at a time.
 /// Eliminates the double-buffer from the old `read_to_end` + parse approach.
-fn read_dir_entries<R: io::Read>(reader: &mut R, count: usize) -> io::Result<Vec<RawDirEntry>> {
+fn read_dir_entries<R: io::Read>(reader: &mut R, count: usize) -> io::Result<Vec<WireEntry>> {
     let mut entries = Vec::with_capacity(count);
     let mut buf = [0u8; 24];
     for _ in 0..count {
         reader.read_exact(&mut buf)?;
-        entries.push(RawDirEntry {
+        entries.push(WireEntry {
             tile_id: u64::from_le_bytes([
                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
             ]),
@@ -1382,25 +1381,11 @@ fn read_dir_entries<R: io::Read>(reader: &mut R, count: usize) -> io::Result<Vec
     Ok(entries)
 }
 
-fn write_u64_le(buf: &mut [u8], offset: usize, val: u64) {
-    buf[offset..offset + 8].copy_from_slice(&val.to_le_bytes());
-}
-
-fn write_i32_le(buf: &mut [u8], offset: usize, val: i32) {
-    buf[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
-}
-
-/// Round a floating-point coordinate to E7 (1e-7 degree units).
-#[allow(clippy::cast_possible_truncation)]
-fn f64_to_e7(val: f64) -> i32 {
-    (val * 1e7).round() as i32
-}
-
 // ---------------------------------------------------------------------------
-// Tests (see pmtiles_writer_tests.rs)
+// Tests (see writer_tests.rs)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-#[path = "pmtiles_writer_tests.rs"]
+#[path = "writer_tests.rs"]
 mod tests;

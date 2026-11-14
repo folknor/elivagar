@@ -99,8 +99,9 @@ shape recurs per subsystem:
   callers bind `_`), orphan inners promoted, degenerate rings dropped - all
   invisible;
 - archive: `tile_detail` returns `Result<_, String>` everywhere,
-  `pmtiles_reader` uses `io::Error::other(String)` (its own tests assert with
-  `err.to_string().contains("overflow")`), `verify` collects
+  the `archive` reader and directory codec return `io::Error` with an
+  `InvalidData`/`Unsupported` kind and a prose message (tests assert on
+  message fragments), `verify` collects
   `tile_errors: Vec<String>` and tests assert on prefixes,
   `VerifyError::{Container(String), Metadata(String)}`;
 - encoding: `MltEncodeError::Encode(String)`, `GeometryDecode { message }`,
@@ -232,12 +233,13 @@ Reported by the pipeline and ocean hunts.
   encoded command streams; see STR-013) and on the pipeline's telemetry
   (`pyramid.rs` bumps `crate::debug::RING_CAP` atomics); return per-call
   stats and let the producer emit counters.
-- `pmtiles_writer::build_metadata` imports `shortbread::Layer`, emits
+- `archive::writer`'s metadata document imports `shortbread::Layer`, emits
   `"name":"Shortbread"` and `"type":"baselayer"`, and owns the ocean-only
-  layer list; the container writer should not know the schema.
-- `emit`, `ocean`, `svg`, `verify`, `main` and `inspect` import
-  `pmtiles_writer` just to name a tile; `ocean` imports `sort` to learn a
-  zoom (see STR-011).
+  layer list; the container writer should not know the schema. (Moving the
+  document alone into its own archive module was refused: its inputs are
+  producer policy, so the fix is the producer handing the writer the layer
+  set and names, not a relocation.)
+- `ocean` imports `sort` to learn a zoom (see STR-011).
 - `mlt -> mvt`: MLT consumes the tile model through
   `cfg_attr(not(feature = "mlt"), allow(dead_code))` accessors in `mvt`.
 - `shortbread -> pois -> shortbread`: `pois.rs` reaches back into
@@ -268,8 +270,6 @@ Proposed: `policy.rs` (policy version, `ocean_params`), `key.rs`,
 deps, testable without a `SortWriter`), `emit.rs`, and `artifact/merge.rs`
 and `artifact/build.rs` taking the assemble and pipeline halves above, so
 assemble stops interleaving partition scheduling with MVT field surgery.
-`OceanArtifact::admit` reads PMTiles header bounds by raw offsets
-(`read_i32_le(header, 102)`), which belong behind an archive accessor.
 
 Reported by the ocean and coordinate-spaces hunts.
 
@@ -317,10 +317,11 @@ docs. What remains has no home yet:
 - `TileCoord`: `(u8, u32, u32)` everywhere except the crate-private
   `PyramidCell`; `PyramidSink`, `tile_filter` and every sink take bare
   triples, and `TileId::coord` returns one.
-- Raw ids where they are not addresses or have not been typed: `RawDirEntry`,
-  `TileEntry` and `find_entry` keep `u64` (the wire record and its probe),
-  as do range ends, `OversizeTile`, the artifact run arithmetic in
-  `assemble.rs` and `OceanTiles::runs_in`/`run_covering`.
+- Raw ids where they are not addresses or have not been typed: archive runs
+  start at a `TileId`, but range ends, `OversizeTile`, the artifact run
+  arithmetic in `assemble.rs` (`artifact_run_copy_items` and
+  `PartitionItem::RunCopy`'s `offset`/`length` pair rather than a
+  `BlobRef`) and the `OceanTiles::runs_in`/`run_covering` probes keep `u64`.
 - `SortKey` (`type SortKey = u64`; `make_sort_key(TileId, layer: u8,
   priority: u8)` still takes two swappable u8s), `PartitionId` (bare `usize`,
   cast to `u32` in section tables), and `PayloadRecord = (SortKey, usize,
@@ -593,34 +594,19 @@ Reported by the storage, polygon-engine and pipeline hunts.
 
 # Archive surface
 
-## STR-031 - One `archive` module: typed header, one reader, directory, metadata
+## STR-039 - The ocean artifact's memory map rests on an unenforced immutability assumption
 
-The scope has no model of a PMTiles archive: the header is a `[u8; 127]`
-indexed by magic offsets in five files, and two readers (`PmtilesReader`,
-seek+read allocating per call; `ArchiveView`, mmap borrowing) duplicate open,
-header parsing, directory reading, `read_all_runs` and metadata with divergent
-validation. Inside the header: tile type and compression as `u8` compared to
-literals `1`/`2` (named only in inspect), `bounds: (f64, f64, f64, f64)` and
-`center: (f64, f64, u8)` ordered only by a doc example (swapping lat and lon
-type-checks), `clustered` as `h[96] = 1`.
-
-Proposed:
-```
-archive/
-  header.rs     Header, TileType, Compression, LonLatBbox, Center; encode + decode -> HeaderError
-  tile_id.rs    (or the coords module)
-  directory.rs  DirEntry::{Run, Leaf}, encode/decode, run invariants, find_entry
-  reader.rs     one mmap reader, typed ArchiveError, tile decompression by header
-  writer.rs     container only: blobs, dedup index, directories, layout
-  metadata.rs   the TileJSON-ish document (layers, ocean_artifact, elivagar), serde
-```
-Delete `PmtilesReader` (archives larger than address space are not a 64-bit
-concern); `read_u64_le`, `read_i32_le`, `gzip_decompress` stop being `pub`
-(assemble reaches in for `gzip_decompress` and `decode_mvt_layers` today).
-`TileEntry` is `(TileId, BlobRef)`; the writer's `DirEntry` and dedup tuple use
-`BlobRef`.
-
-Reported by the archive-surface and coordinate-spaces hunts.
+`ocean/artifact.rs` opens the world artifact through the crate-internal
+`Archive::open_mapped` so assembly can borrow tile blobs without copying.
+That is sound only while no process modifies or truncates the file for the
+life of the run; a concurrent rewrite is undefined behavior (or SIGBUS under
+a borrowed slice), and nothing enforces the assumption - the artifact is
+"built once per shapefile release", which is a habit, not a lock. Every
+other reader uses positional reads and turns truncation into an I/O error.
+Options: copy the artifact's blobs on read (measure the splice cost first),
+take an advisory lock plus a size/mtime recheck at assembly, or build to a
+new path and never rewrite in place (retention already names artifacts by
+date). Found while unifying the readers.
 
 ## STR-034 - `verify.rs` is four tools in one file
 
@@ -694,10 +680,10 @@ Reported by the archive-surface hunt.
   going through `OceanBand`.
 - `sort.rs` tests (about 1100 lines) mix format round-trips and resume
   semantics; resume tests belong with the chunk-store manifest.
-- Writer tests hand-decode and reader tests hand-encode; inspect tests patch
-  header bytes by raw offset; verify tests assert on error-string prefixes;
-  `pmtiles_writer_tests.rs` houses Hilbert tests and `test_varint_*` testing
-  protohoggr, not this crate.
+- `archive/writer_tests.rs` hand-decodes directory varints and holds the
+  directory codec tests that belong in `archive/directory.rs`, plus
+  `test_varint_*` testing protohoggr, not this crate; verify tests assert on
+  error-string prefixes.
 - No test iterates `Layer::ALL` against a descriptor invariant.
 
 Reported by every hunt.
@@ -708,3 +694,13 @@ The polygon property suite, the sort chunk record round trips and both halves
 of the ocean ownership test landed. Remaining: the polygon property suite runs
 at a single zoom (z2), so it does not yet exercise multi-zoom rescaling;
 extend it across a zoom span.
+
+## STR-038 - `lib.rs` re-exports ring helpers nothing outside the crate needs
+
+`lib.rs` publicly re-exports `RingOrientation`, `ring_is_simple` and
+`ring_role`. Their only out-of-module consumer was `diag`, which moved from
+`main.rs` into the library, so nothing in this repository uses the
+re-exports. They widen the published surface; drop them unless a linking
+crate (brokkr, nidhogg) uses them, and record a breaking change if they go.
+
+Reported by the MVT decoder consolidation implementer, 2026-11-14.

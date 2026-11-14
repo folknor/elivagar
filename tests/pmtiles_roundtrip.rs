@@ -15,8 +15,11 @@ use std::fs::OpenOptions;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use elivagar::pmtiles_reader::{PmtilesReader, RawDirEntry, TileEntry, decode_mvt_layers};
-use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
+use elivagar::archive::{
+    Archive, BlobRef, Clustering, Compression as HeaderCompression, E7Bbox, E7Center, LonLatBbox,
+    MapCenter, PmtilesConfig, PmtilesWriter, TileRuns, TileType,
+};
+use elivagar::tile_detail::{Strictness, decode_detail_tile};
 use elivagar::tiling::TileId;
 
 fn xy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
@@ -30,22 +33,39 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use protohoggr::{encode_bytes_field_always, encode_varint, encode_varint_field_always};
 
-fn expand_runs(runs: &[RawDirEntry]) -> Vec<TileEntry> {
+/// One addressed tile and the payload it names.
+struct Entry {
+    tile_id: u64,
+    blob: BlobRef,
+}
+
+fn expand_runs(runs: &TileRuns) -> Vec<Entry> {
     let mut entries = Vec::new();
-    for run in runs {
-        let end = run
-            .tile_id
-            .checked_add(u64::from(run.run_length))
-            .expect("test archive tile run must not overflow");
-        for tile_id in run.tile_id..end {
-            entries.push(TileEntry {
+    for run in runs.as_slice() {
+        for tile_id in run.start().raw()..run.end() {
+            entries.push(Entry {
                 tile_id,
-                offset: run.offset,
-                length: run.length,
+                blob: run.blob(),
             });
         }
     }
     entries
+}
+
+struct LayerSummary {
+    name: String,
+    feature_count: usize,
+}
+
+fn decode_mvt_layers(raw: &[u8]) -> Result<Vec<LayerSummary>, String> {
+    Ok(decode_detail_tile(raw, Strictness::Tolerant)?
+        .layers
+        .iter()
+        .map(|layer| LayerSummary {
+            name: layer.name.to_string(),
+            feature_count: layer.features.len(),
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -173,9 +193,9 @@ fn gzip_bytes(data: &[u8]) -> Vec<u8> {
 }
 
 fn try_rewrite_metadata_json_in_place(path: &Path, json: &str) -> io::Result<()> {
-    let reader = PmtilesReader::open(path)?;
-    let metadata_offset = reader.metadata_offset();
-    let metadata_length = reader.metadata_length();
+    let reader = Archive::open(path)?;
+    let metadata_offset = reader.header().metadata.offset;
+    let metadata_length = reader.header().metadata.length;
     let replacement = gzip_bytes(json.as_bytes());
     if replacement.len() > metadata_length as usize {
         return Err(io::Error::new(
@@ -208,12 +228,22 @@ fn rewrite_metadata_json_in_place(path: &Path, json: &str) {
 
 #[test]
 fn test_header_fields() {
-    let config = PmtilesConfig {
-        min_zoom: 2,
-        max_zoom: 10,
-        bounds: (8.0, 54.5, 15.2, 57.8),
-        center: (11.5, 56.0, 7),
-    };
+    let config = PmtilesConfig::new(
+        2,
+        10,
+        LonLatBbox {
+            west: 8.0,
+            south: 54.5,
+            east: 15.2,
+            north: 57.8,
+        },
+        MapCenter {
+            lon: 11.5,
+            lat: 56.0,
+            zoom: 7,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     let tile = gzip_bytes(&encode_mvt_tile(&["streets"]));
@@ -223,59 +253,57 @@ fn test_header_fields() {
     let path = dir.path().join("header_test.pmtiles");
     writer.write_to(&path).unwrap();
 
-    let reader = PmtilesReader::open(&path).unwrap();
+    // Magic and version are checked by the decode itself.
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[0..7], b"PMTiles");
+    assert_eq!(bytes[7], 3);
 
-    // Magic + version
-    assert_eq!(&reader.header()[0..7], b"PMTiles");
-    assert_eq!(reader.header()[7], 3);
-
-    // Zoom range
-    assert_eq!(reader.min_zoom(), 2);
-    assert_eq!(reader.max_zoom(), 10);
-
-    // Tile type = MVT (1)
-    assert_eq!(reader.tile_type(), 1);
-
-    // Clustered = 1
-    assert_eq!(reader.header()[96], 1);
-
-    // Internal compression = gzip (2)
-    assert_eq!(reader.header()[97], 2);
-
-    // Tile compression = gzip (2)
-    assert_eq!(reader.header()[98], 2);
-
-    // Tile counts
-    assert_eq!(reader.num_addressed(), 1);
-    assert_eq!(reader.num_unique(), 1);
-
-    // Bounds (E7 encoding): 8.0 -> 80000000, 54.5 -> 545000000, etc.
-    let min_lon = i32::from_le_bytes(reader.header()[102..106].try_into().unwrap());
-    let min_lat = i32::from_le_bytes(reader.header()[106..110].try_into().unwrap());
-    let max_lon = i32::from_le_bytes(reader.header()[110..114].try_into().unwrap());
-    let max_lat = i32::from_le_bytes(reader.header()[114..118].try_into().unwrap());
-    assert_eq!(min_lon, 80_000_000);
-    assert_eq!(min_lat, 545_000_000);
-    assert_eq!(max_lon, 152_000_000);
-    assert_eq!(max_lat, 578_000_000);
-
-    // Center
-    let center_zoom = reader.header()[118];
-    let center_lon = i32::from_le_bytes(reader.header()[119..123].try_into().unwrap());
-    let center_lat = i32::from_le_bytes(reader.header()[123..127].try_into().unwrap());
-    assert_eq!(center_zoom, 7);
-    assert_eq!(center_lon, 115_000_000);
-    assert_eq!(center_lat, 560_000_000);
+    let reader = Archive::open(&path).unwrap();
+    let header = reader.header();
+    assert_eq!((header.min_zoom, header.max_zoom), (2, 10));
+    assert_eq!(header.tile_type, TileType::Mvt);
+    assert_eq!(header.clustering, Clustering::Clustered);
+    assert_eq!(header.internal_compression, HeaderCompression::Gzip);
+    assert_eq!(header.tile_compression, HeaderCompression::Gzip);
+    assert_eq!((header.addressed_tiles, header.tile_contents), (1, 1));
+    // E7 encoding: 8.0 -> 80000000, 54.5 -> 545000000, etc.
+    assert_eq!(
+        header.bounds,
+        E7Bbox {
+            west: 80_000_000,
+            south: 545_000_000,
+            east: 152_000_000,
+            north: 578_000_000,
+        }
+    );
+    assert_eq!(
+        header.center,
+        E7Center {
+            lon: 115_000_000,
+            lat: 560_000_000,
+            zoom: 7,
+        }
+    );
 }
 
 #[test]
 fn test_tile_roundtrip() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -297,7 +325,7 @@ fn test_tile_roundtrip() {
     writer.write_to(&path).unwrap();
 
     // Read back and verify every tile matches its original payload.
-    let mut reader = PmtilesReader::open(&path).unwrap();
+    let reader = Archive::open(&path).unwrap();
     let entries = expand_runs(&reader.read_all_runs().unwrap());
     assert_eq!(entries.len(), 5);
 
@@ -305,7 +333,7 @@ fn test_tile_roundtrip() {
         let (z, x, y) = tile_id_to_zxy(entry.tile_id);
         assert_eq!((z, x, y), coords[i], "tile {i} coord mismatch");
 
-        let decompressed = reader.read_tile(entry).unwrap();
+        let decompressed = reader.read_tile(entry.blob).unwrap();
         assert_eq!(
             decompressed, payloads[i],
             "tile {i} data mismatch at z{z}/{x}/{y}"
@@ -315,12 +343,22 @@ fn test_tile_roundtrip() {
 
 #[test]
 fn test_mvt_layer_decode() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 5,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        5,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -345,12 +383,12 @@ fn test_mvt_layer_decode() {
     writer.write_to(&path).unwrap();
 
     // Read back and decode MVT layers.
-    let mut reader = PmtilesReader::open(&path).unwrap();
+    let reader = Archive::open(&path).unwrap();
     let entries = expand_runs(&reader.read_all_runs().unwrap());
     assert_eq!(entries.len(), 3);
 
     for (i, entry) in entries.iter().enumerate() {
-        let raw = reader.read_tile(entry).unwrap();
+        let raw = reader.read_tile(entry.blob).unwrap();
         let layers = decode_mvt_layers(&raw).unwrap();
 
         let expected = &layer_names_per_tile[i];
@@ -378,8 +416,8 @@ fn test_mvt_layer_decode() {
 
     // Also verify metadata contains Shortbread layer definitions. A z0-z5
     // archive advertises only the layers whose zoom range reaches z5.
-    let mut reader = PmtilesReader::open(&path).unwrap();
-    let metadata = reader.read_metadata().unwrap();
+    let reader = Archive::open(&path).unwrap();
+    let metadata = reader.metadata().unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&metadata).unwrap();
     assert_eq!(parsed["name"], "Shortbread");
     let vector_layers = parsed["vector_layers"].as_array().unwrap();
@@ -397,12 +435,22 @@ fn test_mvt_layer_decode() {
 
 #[test]
 fn test_deduplication() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -425,16 +473,16 @@ fn test_deduplication() {
     writer.write_to(&path).unwrap();
 
     // Read back header counts.
-    let mut reader = PmtilesReader::open(&path).unwrap();
-    assert_eq!(reader.num_addressed(), 5);
-    assert_eq!(reader.num_unique(), 2);
+    let reader = Archive::open(&path).unwrap();
+    assert_eq!(reader.header().addressed_tiles, 5);
+    assert_eq!(reader.header().tile_contents, 2);
 
     // All 5 tiles should still be readable and decompressible.
     let entries = expand_runs(&reader.read_all_runs().unwrap());
     assert_eq!(entries.len(), 5);
 
     for entry in &entries {
-        let raw = reader.read_tile(entry).unwrap();
+        let raw = reader.read_tile(entry.blob).unwrap();
         let layers = decode_mvt_layers(&raw).unwrap();
         assert!(!layers.is_empty(), "tile should have at least one layer");
     }
@@ -443,7 +491,7 @@ fn test_deduplication() {
     // z1/1/1 is tile_id = xy_to_tile_id(1,1,1) = 3
     let unique_id = xy_to_tile_id(1, 1, 1);
     let unique_entry = entries.iter().find(|e| e.tile_id == unique_id).unwrap();
-    let layers = decode_mvt_layers(&reader.read_tile(unique_entry).unwrap()).unwrap();
+    let layers = decode_mvt_layers(&reader.read_tile(unique_entry.blob).unwrap()).unwrap();
     assert_eq!(layers.len(), 2);
     assert_eq!(layers[0].name, "streets");
     assert_eq!(layers[1].name, "buildings");
@@ -503,10 +551,10 @@ fn test_full_pipeline() {
     elivagar::run(&config).expect("pipeline should succeed");
 
     // Open and validate the output PMTiles.
-    let mut reader = PmtilesReader::open(&output).unwrap();
-    assert_eq!(reader.min_zoom(), 0);
-    assert_eq!(reader.max_zoom(), 14);
-    assert_eq!(reader.tile_type(), 1); // MVT
+    let reader = Archive::open(&output).unwrap();
+    assert_eq!(reader.header().min_zoom, 0);
+    assert_eq!(reader.header().max_zoom, 14);
+    assert_eq!(reader.header().tile_type, TileType::Mvt);
 
     let entries = expand_runs(&reader.read_all_runs().unwrap());
     assert!(
@@ -566,7 +614,7 @@ fn test_full_pipeline() {
     let mut total_layers_seen: BTreeSet<String> = BTreeSet::new();
 
     for entry in entries.iter().step_by(step.max(1)).take(sample_count) {
-        let raw = reader.read_tile(entry).unwrap();
+        let raw = reader.read_tile(entry.blob).unwrap();
         let layers = decode_mvt_layers(&raw).unwrap();
 
         assert!(
@@ -601,8 +649,8 @@ fn test_full_pipeline() {
     );
 
     // Verify metadata.
-    let mut reader = PmtilesReader::open(&output).unwrap();
-    let metadata = reader.read_metadata().unwrap();
+    let reader = Archive::open(&output).unwrap();
+    let metadata = reader.metadata().unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&metadata).unwrap();
     assert_eq!(parsed["name"], "Shortbread");
     assert_eq!(parsed["format"], "pbf");
@@ -616,12 +664,22 @@ fn test_full_pipeline() {
 
 #[test]
 fn test_verify_pass_synthetic() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -646,12 +704,22 @@ fn test_verify_pass_synthetic() {
 
 #[test]
 fn test_verify_fail_truncated_tile() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 0,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        0,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -672,12 +740,22 @@ fn test_verify_fail_truncated_tile() {
 
 #[test]
 fn test_verify_fail_invalid_metadata_json() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 0,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        0,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     let mvt = encode_mvt_tile(&["streets"]);
@@ -699,12 +777,22 @@ fn test_verify_fail_invalid_metadata_json() {
 
 #[test]
 fn test_verify_fail_metadata_missing_vector_layers() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 0,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        0,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     let mvt = encode_mvt_tile(&["streets"]);
@@ -729,12 +817,22 @@ fn test_verify_fail_metadata_missing_vector_layers() {
 
 #[test]
 fn test_verify_fail_metadata_vector_layers_schema() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 0,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        0,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     let mvt = encode_mvt_tile(&["streets"]);
@@ -760,12 +858,22 @@ fn test_verify_fail_metadata_vector_layers_schema() {
 
 #[test]
 fn test_metadata_rewrite_rejects_oversized_replacement() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 0,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        0,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     let mvt = encode_mvt_tile(&["streets"]);
@@ -775,8 +883,8 @@ fn test_metadata_rewrite_rejects_oversized_replacement() {
     let path = dir.path().join("verify_oversize_metadata_rewrite.pmtiles");
     writer.write_to(&path).unwrap();
 
-    let reader = PmtilesReader::open(&path).unwrap();
-    let metadata_length = reader.metadata_length() as usize;
+    let reader = Archive::open(&path).unwrap();
+    let metadata_length = reader.header().metadata.length as usize;
 
     // Build increasingly larger low-compressibility JSON until the gzipped
     // replacement exceeds the archive's metadata section.
@@ -811,12 +919,22 @@ fn test_metadata_rewrite_rejects_oversized_replacement() {
 
 #[test]
 fn test_verify_fail_suspicious_geometry_delta() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 0,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        0,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     let feature = encode_mvt_linestring_feature_with_delta(500_000, 0);

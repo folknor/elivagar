@@ -1,11 +1,11 @@
 use std::sync::atomic::Ordering;
 
+use crate::archive::{self, LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter, TileRun};
 use crate::debug::{WAIT, emit_counter_u64, emit_counter_usize, wait_span};
 #[cfg(feature = "mlt")]
 use crate::mlt;
 use crate::mvt::{self, LayerBuilder};
 use crate::ocean::band::TileRect;
-use crate::pmtiles_writer::{self, PmtilesConfig, PmtilesWriter};
 use crate::shortbread::{self, Layer};
 use crate::sort;
 use crate::tiling::{MAX_ZOOM, TileId, ZOOM_COUNT, zoom_ids};
@@ -316,7 +316,7 @@ impl<'a> ArtifactPartitionCtx<'a> {
     /// The artifact run whose payload a surviving encoded tile takes its
     /// ocean layer from, or `None` when the computed pass owns the tile's
     /// ocean or the artifact holds nothing there.
-    fn splice_run(&self, tile_id: TileId) -> Option<crate::pmtiles_reader::RawDirEntry> {
+    fn splice_run(&self, tile_id: TileId) -> Option<TileRun> {
         let (z, x, y) = tile_id.coord();
         if self.ocean.band().computed_owns(z, x, y) {
             return None;
@@ -357,7 +357,7 @@ pub(super) fn phase_assemble(
         u64,
         u64,
         usize,
-        pmtiles_writer::DedupStats,
+        archive::DedupStats,
         TileSizeDiagnostics,
     ),
     PipelineError,
@@ -422,29 +422,32 @@ impl Default for RunProvenance {
 fn archive_config(
     config: &TilegenConfig,
     data_bounds: &crate::geometry::projection::MercBbox,
-) -> PmtilesConfig {
+) -> std::io::Result<PmtilesConfig> {
     use crate::geometry::projection::{Point, unproject};
 
-    let (bounds, center) = if config.ocean_only_metadata {
-        ((-180.0, -85.05, 180.0, 85.05), (0.0, 0.0))
+    let bounds = if config.ocean_only_metadata {
+        LonLatBbox {
+            west: -180.0,
+            south: -85.05,
+            east: 180.0,
+            north: 85.05,
+        }
     } else {
         let (west, south) = unproject(&Point::new(data_bounds.min_x, data_bounds.max_y));
         let (east, north) = unproject(&Point::new(data_bounds.max_x, data_bounds.min_y));
-        (
-            (west, south, east, north),
-            ((west + east) * 0.5, (south + north) * 0.5),
-        )
+        LonLatBbox {
+            west,
+            south,
+            east,
+            north,
+        }
     };
-    PmtilesConfig {
-        min_zoom: config.min_zoom,
-        max_zoom: config.max_zoom,
-        bounds,
-        center: (
-            center.0,
-            center.1,
-            2_u8.clamp(config.min_zoom, config.max_zoom),
-        ),
-    }
+    let center = MapCenter {
+        lon: (bounds.west + bounds.east) * 0.5,
+        lat: (bounds.south + bounds.north) * 0.5,
+        zoom: 2_u8.clamp(config.min_zoom, config.max_zoom),
+    };
+    PmtilesConfig::new(config.min_zoom, config.max_zoom, bounds, center)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -467,7 +470,7 @@ pub(super) fn phase_assemble_with_ocean(
         u64,
         u64,
         usize,
-        pmtiles_writer::DedupStats,
+        archive::DedupStats,
         TileSizeDiagnostics,
     ),
     PipelineError,
@@ -498,7 +501,7 @@ pub(super) fn phase_assemble_with_ocean(
         }
         Some(name.to_string())
     };
-    let pmtiles_config = archive_config(config, data_bounds);
+    let pmtiles_config = archive_config(config, data_bounds)?;
     let mut pmtiles = if config.in_memory {
         PmtilesWriter::new(pmtiles_config)
     } else {
@@ -937,7 +940,7 @@ fn phase_assemble_partitions(
                                     &mut pmtiles,
                                     tile_id,
                                     run_length,
-                                    ocean.raw_blob(offset, length)?,
+                                    &ocean.raw_blob(archive::BlobRef { offset, length })?,
                                     &mut tiles_written,
                                     &mut tiles_per_zoom,
                                     &mut unique_per_zoom,
@@ -1221,8 +1224,9 @@ fn artifact_run_copy_items(
         return Ok(items);
     }
     for run in artifact.ocean.runs_in(start, end) {
-        let mut cursor = start.max(run.tile_id);
-        let run_end = end.min(run.tile_id.saturating_add(u64::from(run.run_length)));
+        let blob = run.blob();
+        let mut cursor = start.max(run.start().raw());
+        let run_end = end.min(run.end());
         if artifact.band_empty {
             // Preserve zoom boundaries for the per-zoom writer counters.
             // With an empty band, every tile in the source run is copied.
@@ -1230,7 +1234,7 @@ fn artifact_run_copy_items(
                 let z = artifact_tile(cursor)?.zoom();
                 let zoom_end = zoom_ids(z).1;
                 let sub_end = run_end.min(zoom_end);
-                append_artifact_run_copy(&mut items, cursor, sub_end, run.offset, run.length)?;
+                append_artifact_run_copy(&mut items, cursor, sub_end, blob.offset, blob.length)?;
                 cursor = sub_end;
             }
             continue;
@@ -1255,8 +1259,8 @@ fn artifact_run_copy_items(
                     &mut items,
                     range_start.max(cursor),
                     range_end.min(sub_end),
-                    run.offset,
-                    run.length,
+                    blob.offset,
+                    blob.length,
                 )?;
             }
             cursor = sub_end;
@@ -1428,14 +1432,14 @@ fn write_encoded_item(
 }
 
 fn raw_contains_ocean(raw: &[u8]) -> Result<bool, PipelineError> {
-    Ok(crate::pmtiles_reader::decode_mvt_layers(raw)?
+    Ok(crate::mvt::layers::decode_mvt_layers(raw)?
         .iter()
         .any(|layer| layer.name == Layer::Ocean.name()))
 }
 
 fn ocean_layer_field(compressed: &[u8]) -> Result<Vec<u8>, PipelineError> {
-    let raw = crate::pmtiles_reader::gzip_decompress(compressed)?;
-    let layers = crate::pmtiles_reader::decode_mvt_layers(&raw)?;
+    let raw = crate::archive::gzip_decompress(compressed)?;
+    let layers = crate::mvt::layers::decode_mvt_layers(&raw)?;
     if layers.len() != 1 || layers[0].name != Layer::Ocean.name() {
         return Err(PipelineError(
             "artifact tile must contain exactly one ocean layer".to_string(),
@@ -1531,7 +1535,7 @@ enum PlannedItem {
     /// takes, if any.
     Encoded {
         tile: EncodedTile,
-        splice: Option<crate::pmtiles_reader::RawDirEntry>,
+        splice: Option<TileRun>,
     },
 }
 
@@ -1641,16 +1645,16 @@ fn encode_and_send_partition_batch(
 fn splice_artifact_ocean(
     encoded: &mut EncodedTile,
     artifact: &ArtifactPartitionCtx<'_>,
-    run: crate::pmtiles_reader::RawDirEntry,
+    run: TileRun,
     compression_level: u32,
 ) -> Result<(), PipelineError> {
-    let raw = crate::pmtiles_reader::gzip_decompress(&encoded.compressed)?;
+    let raw = crate::archive::gzip_decompress(&encoded.compressed)?;
     if raw_contains_ocean(&raw)? {
         return Err(PipelineError(
             "non-band OSM tile unexpectedly contains computed ocean".to_string(),
         ));
     }
-    let ocean_field = ocean_layer_field(artifact.ocean.raw_blob(run.offset, run.length)?)?;
+    let ocean_field = ocean_layer_field(&artifact.ocean.raw_blob(run.blob())?)?;
     encoded.compressed = splice_ocean_layer(raw, &ocean_field, encoded.tile_id, compression_level)?;
     Ok(())
 }
@@ -2009,12 +2013,24 @@ mod tests {
         key: &crate::ocean::OceanArtifactKey,
         runs: &[(u64, u32)],
     ) {
-        let mut writer = pmtiles_writer::PmtilesWriter::new(pmtiles_writer::PmtilesConfig {
-            min_zoom: 0,
-            max_zoom: MAX_ZOOM,
-            bounds: (-180.0, -85.05, 180.0, 85.05),
-            center: (0.0, 0.0, 2),
-        });
+        let mut writer = archive::PmtilesWriter::new(
+            archive::PmtilesConfig::new(
+                0,
+                MAX_ZOOM,
+                LonLatBbox {
+                    west: -180.0,
+                    south: -85.05,
+                    east: 180.0,
+                    north: 85.05,
+                },
+                MapCenter {
+                    lon: 0.0,
+                    lat: 0.0,
+                    zoom: 2,
+                },
+            )
+            .expect("valid archive config"),
+        );
         writer.set_ocean_only_metadata();
         writer
             .set_ocean_artifact_metadata(key.clone())

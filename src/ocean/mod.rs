@@ -19,6 +19,8 @@ pub(crate) use artifact::{OceanArtifact, OceanTiles};
 pub(crate) use band::OceanBand;
 pub(crate) use plan::{OceanPass, OceanPlan, PassWindow};
 
+#[cfg(test)]
+use crate::archive;
 use crate::geometry::int_ocean::{
     IntEmitScratch, IntRect, OCEAN_DP_TOL_PX, Shape, Shapes, intersect_rect_into, normalize_into,
     quantize_polygon, shape_bbox,
@@ -33,8 +35,6 @@ use crate::geometry::{
     projection::{MercBbox, Point},
 };
 use crate::mvt::GeomType;
-#[cfg(test)]
-use crate::pmtiles_writer;
 use crate::shortbread::Layer;
 use crate::sort::{self, SortWriter};
 use crate::wire_format::{append_feature_data_with_attrs, encode_attrs_bytes};
@@ -2187,12 +2187,24 @@ mod tests {
             (first_z15, 1, false),
             (first_z15 - 1, 2, false),
         ] {
-            let mut writer = pmtiles_writer::PmtilesWriter::new(pmtiles_writer::PmtilesConfig {
-                min_zoom: 0,
-                max_zoom: 14,
-                bounds: (-180.0, -85.05, 180.0, 85.05),
-                center: (0.0, 0.0, 2),
-            });
+            let mut writer = archive::PmtilesWriter::new(
+                archive::PmtilesConfig::new(
+                    0,
+                    14,
+                    archive::LonLatBbox {
+                        west: -180.0,
+                        south: -85.05,
+                        east: 180.0,
+                        north: 85.05,
+                    },
+                    archive::MapCenter {
+                        lon: 0.0,
+                        lat: 0.0,
+                        zoom: 2,
+                    },
+                )
+                .expect("valid archive config"),
+            );
             writer.set_ocean_only_metadata();
             writer
                 .set_ocean_artifact_metadata(key.clone())
@@ -2229,12 +2241,24 @@ mod tests {
             ),
             compression_level: 6,
         };
-        let mut writer = pmtiles_writer::PmtilesWriter::new(pmtiles_writer::PmtilesConfig {
-            min_zoom: 0,
-            max_zoom: 14,
-            bounds: (-180.0, -85.05, 180.0, 85.05),
-            center: (0.0, 0.0, 2),
-        });
+        let mut writer = archive::PmtilesWriter::new(
+            archive::PmtilesConfig::new(
+                0,
+                14,
+                archive::LonLatBbox {
+                    west: -180.0,
+                    south: -85.05,
+                    east: 180.0,
+                    north: 85.05,
+                },
+                archive::MapCenter {
+                    lon: 0.0,
+                    lat: 0.0,
+                    zoom: 2,
+                },
+            )
+            .expect("valid archive config"),
+        );
         writer.set_ocean_only_metadata();
         writer
             .set_ocean_artifact_metadata(key.clone())

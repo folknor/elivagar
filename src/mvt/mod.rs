@@ -30,6 +30,7 @@ use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
 pub(crate) mod decode;
+pub(crate) mod layers;
 mod merge;
 
 /// The most rings one CLASSIFIED POLYGON may carry - MapLibre's

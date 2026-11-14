@@ -6,7 +6,8 @@
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::pmtiles_reader::PmtilesReader;
+use crate::archive::header::e7_to_degrees;
+use crate::archive::{Archive, Clustering, HEADER_LEN, Header, TileType};
 
 /// Inspect a PMTiles file and print its header and metadata.
 pub fn inspect(path: &Path) -> io::Result<()> {
@@ -17,46 +18,39 @@ pub fn inspect(path: &Path) -> io::Result<()> {
 
 #[allow(clippy::too_many_lines)]
 fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
-    let mut reader = PmtilesReader::open(path)?;
-    let file_size = reader.file_size()?;
-    let h = reader.header();
-    let version = h[7];
-
-    // Section offsets + lengths.
-    let root_dir_offset = reader.root_dir_offset();
-    let root_dir_length = reader.root_dir_length();
-    let metadata_offset = reader.metadata_offset();
-    let metadata_length = reader.metadata_length();
-    let leaf_dirs_offset = reader.leaf_dirs_offset();
-    let leaf_dirs_length = reader.leaf_dirs_length();
-    let data_offset = reader.data_offset();
-    let data_length = reader.data_length();
+    let reader = Archive::open(path)?;
+    let file_size = reader.file_len();
+    let h = *reader.header();
 
     // Tile counts.
-    let num_addressed = reader.num_addressed();
-    let num_entries = reader.num_entries();
-    let unique_tiles = reader.num_unique();
+    let num_addressed = h.addressed_tiles;
+    let num_entries = h.tile_entries;
+    let unique_tiles = h.tile_contents;
 
     // Flags.
-    let clustered = h[96] == 1;
-    let internal_compression = compression_name(reader.internal_compression());
-    let tile_compression = compression_name(reader.tile_compression());
-    let tile_type = tile_type_name(reader.tile_type());
+    let clustered = match h.clustering {
+        Clustering::Clustered => "true".to_string(),
+        Clustering::Unclustered => "false".to_string(),
+        Clustering::Other(byte) => format!("unrecognized ({byte})"),
+    };
+    let internal_compression = h.internal_compression.to_string();
+    let tile_compression = h.tile_compression.to_string();
+    let tile_type = h.tile_type.to_string();
     let mvt_validation = match reader.tile_decoder() {
         Ok(decoder) => format!("supported ({})", decoder.label()),
         Err(error) => format!("unsupported: {error}"),
     };
 
     // Zoom + bounds.
-    let min_zoom = reader.min_zoom();
-    let max_zoom = reader.max_zoom();
-    let min_lon = e7_to_f64(read_i32_le(h, 102));
-    let min_lat = e7_to_f64(read_i32_le(h, 106));
-    let max_lon = e7_to_f64(read_i32_le(h, 110));
-    let max_lat = e7_to_f64(read_i32_le(h, 114));
-    let center_zoom = h[118];
-    let center_lon = e7_to_f64(read_i32_le(h, 119));
-    let center_lat = e7_to_f64(read_i32_le(h, 123));
+    let min_zoom = h.min_zoom;
+    let max_zoom = h.max_zoom;
+    let min_lon = e7_to_degrees(h.bounds.west);
+    let min_lat = e7_to_degrees(h.bounds.south);
+    let max_lon = e7_to_degrees(h.bounds.east);
+    let max_lat = e7_to_degrees(h.bounds.north);
+    let center_zoom = h.center.zoom;
+    let center_lon = e7_to_degrees(h.center.lon);
+    let center_lat = e7_to_degrees(h.center.lat);
 
     let dedup_count = num_addressed.saturating_sub(unique_tiles);
     let dedup_pct = if num_addressed > 0 {
@@ -65,7 +59,7 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
         0.0
     };
 
-    let metadata_state = read_metadata_state(&mut reader, metadata_length);
+    let metadata_state = read_metadata_state(&reader, h.metadata.length);
     let metadata_json = metadata_state.json().map(ToOwned::to_owned);
     let metadata_value = metadata_json
         .as_deref()
@@ -82,13 +76,13 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
         payload_format_src,
         payload_compress_src,
     ) = payload_contract_display(
-        reader.tile_type(),
-        tile_compression,
+        h.tile_type,
+        &tile_compression,
         metadata_payload_format.as_deref(),
         metadata_tile_compression.as_deref(),
     );
 
-    writeln!(out, "PMTiles v{version}  {}", path.display())?;
+    writeln!(out, "PMTiles v3  {}", path.display())?;
     writeln!(out, "  File size:  {}", format_bytes(file_size))?;
     writeln!(out)?;
     writeln!(out, "  Tile type:          {tile_type}")?;
@@ -122,17 +116,7 @@ fn inspect_to_writer(path: &Path, out: &mut dyn Write) -> io::Result<()> {
         "  Deduplicated:     {dedup_count:>14} ({dedup_pct:.1}%)"
     )?;
     writeln!(out, "  Directory entries: {num_entries:>13}")?;
-    print_section_layout(
-        out,
-        root_dir_offset,
-        root_dir_length,
-        metadata_offset,
-        metadata_length,
-        leaf_dirs_offset,
-        leaf_dirs_length,
-        data_offset,
-        data_length,
-    )?;
+    print_section_layout(out, &h)?;
 
     print_provenance(out, &metadata_state, metadata_value.as_ref())?;
 
@@ -176,14 +160,14 @@ impl MetadataState {
     }
 }
 
-fn read_metadata_state(reader: &mut PmtilesReader, metadata_length: u64) -> MetadataState {
+fn read_metadata_state(reader: &Archive, metadata_length: u64) -> MetadataState {
     if metadata_length == 0 {
         return MetadataState::Absent;
     }
     if metadata_length > MAX_METADATA_READ {
         return MetadataState::TooLarge(metadata_length);
     }
-    match reader.read_metadata() {
+    match reader.metadata() {
         Ok(json) => MetadataState::Json(json),
         Err(_) => MetadataState::Unreadable,
     }
@@ -570,61 +554,44 @@ fn extract_number(value: Option<&serde_json::Value>) -> Option<u8> {
     u8::try_from(value?.as_u64()?).ok()
 }
 
-fn infer_payload_format_from_header(tile_type: u8) -> &'static str {
+fn infer_payload_format_from_header(tile_type: TileType) -> &'static str {
     match tile_type {
-        1 => "mvt",
-        0 => "unknown",
+        TileType::Mvt => "mvt",
         _ => "unknown",
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn print_section_layout(
-    out: &mut dyn Write,
-    root_dir_offset: u64,
-    root_dir_length: u64,
-    metadata_offset: u64,
-    metadata_length: u64,
-    leaf_dirs_offset: u64,
-    leaf_dirs_length: u64,
-    data_offset: u64,
-    data_length: u64,
-) -> io::Result<()> {
+fn print_section_layout(out: &mut dyn Write, h: &Header) -> io::Result<()> {
     writeln!(out)?;
     writeln!(out, "  Section layout:")?;
     writeln!(
         out,
         "    Header:      {:>13}  offset {:>13}",
-        format_bytes(127),
+        format_bytes(HEADER_LEN as u64),
         0,
     )?;
-    writeln!(
-        out,
-        "    Root dir:    {:>13}  offset {root_dir_offset:>13}",
-        format_bytes(root_dir_length),
-    )?;
-    writeln!(
-        out,
-        "    Tile data:   {:>13}  offset {data_offset:>13}",
-        format_bytes(data_length),
-    )?;
-    writeln!(
-        out,
-        "    Metadata:    {:>13}  offset {metadata_offset:>13}",
-        format_bytes(metadata_length),
-    )?;
-    if leaf_dirs_length > 0 {
+    // File order of elivagar's writer, not header field order.
+    for (label, section) in [
+        ("Root dir: ", h.root_dir),
+        ("Tile data:", h.tile_data),
+        ("Metadata: ", h.metadata),
+        ("Leaf dirs:", h.leaf_dirs),
+    ] {
+        if label == "Leaf dirs:" && section.length == 0 {
+            continue;
+        }
         writeln!(
             out,
-            "    Leaf dirs:   {:>13}  offset {leaf_dirs_offset:>13}",
-            format_bytes(leaf_dirs_length),
+            "    {label}   {:>13}  offset {:>13}",
+            format_bytes(section.length),
+            section.offset,
         )?;
     }
     Ok(())
 }
 
 fn payload_contract_display(
-    tile_type: u8,
+    tile_type: TileType,
     header_tile_compression: &str,
     metadata_payload_format: Option<&str>,
     metadata_tile_compression: Option<&str>,
@@ -665,49 +632,13 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn read_i32_le(buf: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes([
-        buf[offset],
-        buf[offset + 1],
-        buf[offset + 2],
-        buf[offset + 3],
-    ])
-}
-
-fn e7_to_f64(val: i32) -> f64 {
-    f64::from(val) / 1e7
-}
-
-fn compression_name(val: u8) -> &'static str {
-    match val {
-        0 => "unknown",
-        1 => "none",
-        2 => "gzip",
-        3 => "brotli",
-        4 => "zstd",
-        _ => "unrecognized",
-    }
-}
-
-fn tile_type_name(val: u8) -> &'static str {
-    match val {
-        0 => "unknown",
-        1 => "MVT",
-        2 => "PNG",
-        3 => "JPEG",
-        4 => "WebP",
-        5 => "AVIF",
-        _ => "unrecognized",
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::TileType;
     use super::{extract_json_string, infer_payload_format_from_header, payload_contract_display};
     use super::{inspect, inspect_to_writer};
-    use crate::pmtiles_reader::PmtilesReader;
-    use crate::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
+    use crate::archive::{Archive, Header, LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter};
     use crate::tiling::{TileId, zoom_ids};
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom, Write};
@@ -731,9 +662,9 @@ mod tests {
     }
 
     fn corrupt_metadata_payload(path: &Path) -> u64 {
-        let reader = PmtilesReader::open(path).unwrap();
-        let metadata_offset = reader.metadata_offset();
-        let metadata_length = reader.metadata_length();
+        let reader = Archive::open(path).unwrap();
+        let metadata_offset = reader.header().metadata.offset;
+        let metadata_length = reader.header().metadata.length;
         assert!(metadata_length > 0, "test archive must contain metadata");
 
         let mut file = OpenOptions::new().write(true).open(path).unwrap();
@@ -744,20 +675,35 @@ mod tests {
         metadata_length
     }
 
-    fn set_header_u64(path: &Path, offset: u64, value: u64) {
+    fn edit_header(path: &Path, edit: impl FnOnce(&mut Header)) {
+        let mut header = *Archive::open(path).unwrap().header();
+        edit(&mut header);
         let mut file = OpenOptions::new().write(true).open(path).unwrap();
-        file.seek(SeekFrom::Start(offset)).unwrap();
-        file.write_all(&value.to_le_bytes()).unwrap();
+        file.write_all(&header.encode()).unwrap();
+    }
+
+    fn world(min_zoom: u8, max_zoom: u8, center_zoom: u8) -> PmtilesConfig {
+        PmtilesConfig::new(
+            min_zoom,
+            max_zoom,
+            LonLatBbox {
+                west: -180.0,
+                south: -85.0,
+                east: 180.0,
+                north: 85.0,
+            },
+            MapCenter {
+                lon: 0.0,
+                lat: 0.0,
+                zoom: center_zoom,
+            },
+        )
+        .unwrap()
     }
 
     #[test]
     fn inspect_handles_root_only_archive() {
-        let config = PmtilesConfig {
-            min_zoom: 0,
-            max_zoom: 0,
-            bounds: (-180.0, -85.0, 180.0, 85.0),
-            center: (0.0, 0.0, 0),
-        };
+        let config = world(0, 0, 0);
         let mut writer = PmtilesWriter::new(config);
         writer.add_tile(0, 0, 0, &[1, 2, 3]).unwrap();
 
@@ -770,12 +716,7 @@ mod tests {
 
     #[test]
     fn inspect_root_only_output_includes_header_and_section_layout() {
-        let config = PmtilesConfig {
-            min_zoom: 0,
-            max_zoom: 0,
-            bounds: (-180.0, -85.0, 180.0, 85.0),
-            center: (0.0, 0.0, 0),
-        };
+        let config = world(0, 0, 0);
         let mut writer = PmtilesWriter::new(config);
         writer.add_tile(0, 0, 0, &[1, 2, 3]).unwrap();
 
@@ -799,12 +740,7 @@ mod tests {
     fn inspect_handles_leaf_directory_archive() {
         // Above MAX_ROOT_ENTRIES (16384) to force leaf directory layout.
         const ROOT_THRESHOLD: usize = 16384;
-        let config = PmtilesConfig {
-            min_zoom: 8,
-            max_zoom: 8,
-            bounds: (-180.0, -85.0, 180.0, 85.0),
-            center: (0.0, 0.0, 8),
-        };
+        let config = world(8, 8, 8);
         let mut writer = PmtilesWriter::new(config);
         add_monotonic_unique_tiles(&mut writer, 8, ROOT_THRESHOLD + 1);
 
@@ -818,12 +754,7 @@ mod tests {
     #[test]
     fn inspect_leaf_output_includes_leaf_dirs_section() {
         const ROOT_THRESHOLD: usize = 16384;
-        let config = PmtilesConfig {
-            min_zoom: 8,
-            max_zoom: 8,
-            bounds: (-180.0, -85.0, 180.0, 85.0),
-            center: (0.0, 0.0, 8),
-        };
+        let config = world(8, 8, 8);
         let mut writer = PmtilesWriter::new(config);
         add_monotonic_unique_tiles(&mut writer, 8, ROOT_THRESHOLD + 1);
 
@@ -838,12 +769,7 @@ mod tests {
 
     #[test]
     fn inspect_unreadable_metadata_uses_header_payload_fallback() {
-        let config = PmtilesConfig {
-            min_zoom: 0,
-            max_zoom: 0,
-            bounds: (-180.0, -85.0, 180.0, 85.0),
-            center: (0.0, 0.0, 0),
-        };
+        let config = world(0, 0, 0);
         let mut writer = PmtilesWriter::new(config);
         writer.add_tile(0, 0, 0, &[7, 8, 9]).unwrap();
 
@@ -864,12 +790,7 @@ mod tests {
 
     #[test]
     fn inspect_absent_metadata_uses_header_payload_fallback() {
-        let config = PmtilesConfig {
-            min_zoom: 0,
-            max_zoom: 0,
-            bounds: (-180.0, -85.0, 180.0, 85.0),
-            center: (0.0, 0.0, 0),
-        };
+        let config = world(0, 0, 0);
         let mut writer = PmtilesWriter::new(config);
         writer.add_tile(0, 0, 0, &[9, 9, 9]).unwrap();
 
@@ -877,8 +798,7 @@ mod tests {
         let path = dir.path().join("inspect_no_metadata.pmtiles");
         writer.write_to(&path).unwrap();
 
-        // PMTiles v3 header offset 32 stores metadata_length (u64 LE).
-        set_header_u64(&path, 32, 0);
+        edit_header(&path, |header| header.metadata.length = 0);
 
         let output = inspect_output(&path);
         assert!(output.contains("Payload format:     mvt (header)"));
@@ -1133,15 +1053,22 @@ mod tests {
 
     #[test]
     fn header_payload_format_inference_handles_legacy_and_unknown() {
-        assert_eq!(infer_payload_format_from_header(1), "mvt");
-        assert_eq!(infer_payload_format_from_header(0), "unknown");
-        assert_eq!(infer_payload_format_from_header(5), "unknown");
+        assert_eq!(infer_payload_format_from_header(TileType::Mvt), "mvt");
+        assert_eq!(
+            infer_payload_format_from_header(TileType::Unknown),
+            "unknown"
+        );
+        assert_eq!(infer_payload_format_from_header(TileType::Avif), "unknown");
+        assert_eq!(
+            infer_payload_format_from_header(TileType::Other(9)),
+            "unknown"
+        );
     }
 
     #[test]
     fn payload_contract_display_prefers_metadata_when_present() {
         let (fmt, comp, fmt_src, comp_src) =
-            payload_contract_display(1, "gzip", Some("mlt"), Some("none"));
+            payload_contract_display(TileType::Mvt, "gzip", Some("mlt"), Some("none"));
         assert_eq!(fmt, "mlt");
         assert_eq!(comp, "none");
         assert_eq!(fmt_src, "metadata");
@@ -1150,7 +1077,8 @@ mod tests {
 
     #[test]
     fn payload_contract_display_falls_back_to_header_for_legacy() {
-        let (fmt, comp, fmt_src, comp_src) = payload_contract_display(1, "gzip", None, None);
+        let (fmt, comp, fmt_src, comp_src) =
+            payload_contract_display(TileType::Mvt, "gzip", None, None);
         assert_eq!(fmt, "mvt");
         assert_eq!(comp, "gzip");
         assert_eq!(fmt_src, "header");

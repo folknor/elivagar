@@ -1524,7 +1524,7 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     let mut decoder = GzDecoder::new(mvt_encoded[0].compressed.as_slice());
     let mut raw = Vec::new();
     decoder.read_to_end(&mut raw).expect("gunzip mvt tile");
-    let mvt_layers = crate::pmtiles_reader::decode_mvt_layers(&raw).expect("decode mvt layers");
+    let mvt_layers = crate::mvt::layers::decode_mvt_layers(&raw).expect("decode mvt layers");
 
     assert_eq!(
         model.layers.len(),
@@ -1636,24 +1636,23 @@ fn assembly_requires_run_identity_and_preserves_extract_header_bounds() {
         },
     )
     .expect("assemble extract");
-    let bytes = std::fs::read(&config.output_path).expect("read archive");
+    let reader = crate::archive::Archive::open(&config.output_path).expect("open");
+    let header = reader.header();
     let (west, south) = unproject(&Point::new(bounds.min_x, bounds.max_y));
     let (east, north) = unproject(&Point::new(bounds.max_x, bounds.min_y));
-    for (offset, value) in [
-        (102, west),
-        (106, south),
-        (110, east),
-        (114, north),
-        (119, (west + east) * 0.5),
-        (123, (south + north) * 0.5),
+    for (actual, value) in [
+        (header.bounds.west, west),
+        (header.bounds.south, south),
+        (header.bounds.east, east),
+        (header.bounds.north, north),
+        (header.center.lon, (west + east) * 0.5),
+        (header.center.lat, (south + north) * 0.5),
     ] {
-        let actual = i32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("E7"));
-        assert!((f64::from(actual) / 1e7 - value).abs() <= 0.5e-7);
+        assert!((crate::archive::header::e7_to_degrees(actual) - value).abs() <= 0.5e-7);
     }
-    assert_eq!(bytes[118], 2);
-    let mut reader = crate::pmtiles_reader::PmtilesReader::open(&config.output_path).expect("open");
+    assert_eq!(header.center.zoom, 2);
     let metadata: serde_json::Value =
-        serde_json::from_str(&reader.read_metadata().expect("metadata")).expect("JSON");
+        serde_json::from_str(&reader.metadata().expect("metadata")).expect("JSON");
     assert_eq!(metadata["elivagar"]["config"]["ocean"]["mode"], "none");
 }
 
@@ -1701,22 +1700,19 @@ fn ocean_artifact_assembly_has_world_bounds_and_no_run_provenance() {
         },
     )
     .expect("artifact assembly must not open an empty PBF path");
-    let bytes = std::fs::read(&config.output_path).expect("read archive");
-    for (offset, expected) in [
-        (102, -1_800_000_000),
-        (106, -850_500_000),
-        (110, 1_800_000_000),
-        (114, 850_500_000),
-        (119, 0),
-        (123, 0),
-    ] {
-        assert_eq!(
-            i32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("E7")),
-            expected
-        );
-    }
-    let mut reader = crate::pmtiles_reader::PmtilesReader::open(&config.output_path).expect("open");
-    let text = reader.read_metadata().expect("metadata");
+    let reader = crate::archive::Archive::open(&config.output_path).expect("open");
+    let header = reader.header();
+    assert_eq!(
+        header.bounds,
+        crate::archive::E7Bbox {
+            west: -1_800_000_000,
+            south: -850_500_000,
+            east: 1_800_000_000,
+            north: 850_500_000,
+        }
+    );
+    assert_eq!((header.center.lon, header.center.lat), (0, 0));
+    let text = reader.metadata().expect("metadata");
     assert!(text.contains(&format!("\"ocean_artifact\":{}", key.json())));
     let metadata: serde_json::Value = serde_json::from_str(&text).expect("JSON");
     assert!(metadata.get("elivagar").is_none());
@@ -1765,9 +1761,8 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
         phase_assemble(&mut sort_reader, &config).expect("assemble should succeed");
 
-    let mut reader =
-        crate::pmtiles_reader::PmtilesReader::open(&output_path).expect("open generated pmtiles");
-    let metadata = reader.read_metadata().expect("read metadata");
+    let reader = crate::archive::Archive::open(&output_path).expect("open generated pmtiles");
+    let metadata = reader.metadata().expect("read metadata");
     let parsed: serde_json::Value = serde_json::from_str(&metadata).expect("parse metadata json");
     assert_eq!(parsed["source_pbf"], "source-file.osm.pbf");
     assert!(parsed.get("osmosis_replication_timestamp").is_none());
@@ -1824,9 +1819,8 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
     let (_features_read, _tiles_written, _unique_tiles, _batch_hwm, _dedup_stats, _size_diag) =
         phase_assemble(&mut sort_reader, &config).expect("assemble should succeed");
 
-    let mut reader =
-        crate::pmtiles_reader::PmtilesReader::open(&output_path).expect("open generated pmtiles");
-    let metadata = reader.read_metadata().expect("read metadata");
+    let reader = crate::archive::Archive::open(&output_path).expect("open generated pmtiles");
+    let metadata = reader.metadata().expect("read metadata");
     let parsed: serde_json::Value = serde_json::from_str(&metadata).expect("parse metadata json");
     assert_eq!(parsed["source_pbf"], "replication-source.osm.pbf");
     assert_eq!(parsed["osmosis_replication_timestamp"], 1_700_000_123);
@@ -1873,19 +1867,18 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
     };
     write_assembly_pbf(&mvt_config.pbf_path);
     let _ = phase_assemble(&mut mvt_sort_reader, &mvt_config).expect("mvt assemble should succeed");
-    let mut mvt_reader =
-        crate::pmtiles_reader::PmtilesReader::open(&mvt_output).expect("open mvt pmtiles");
-    let mvt_metadata = mvt_reader.read_metadata().expect("read mvt metadata");
+    let mvt_reader = crate::archive::Archive::open(&mvt_output).expect("open mvt pmtiles");
+    let mvt_metadata = mvt_reader.metadata().expect("read mvt metadata");
     let mvt_json: serde_json::Value =
         serde_json::from_str(&mvt_metadata).expect("parse mvt metadata");
     assert_eq!(
-        mvt_reader.tile_type(),
-        1,
+        mvt_reader.header().tile_type,
+        crate::archive::TileType::Mvt,
         "mvt header tile_type must be mvt"
     );
     assert_eq!(
-        mvt_reader.tile_compression(),
-        2,
+        mvt_reader.header().tile_compression,
+        crate::archive::Compression::Gzip,
         "mvt header tile_compression must be gzip"
     );
     assert_eq!(mvt_json["tile_payload_format"], "mvt");
@@ -1933,19 +1926,18 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         write_assembly_pbf(&mlt_config.pbf_path);
         let _ =
             phase_assemble(&mut mlt_sort_reader, &mlt_config).expect("mlt assemble should succeed");
-        let mut mlt_reader =
-            crate::pmtiles_reader::PmtilesReader::open(&mlt_output).expect("open mlt pmtiles");
-        let mlt_metadata = mlt_reader.read_metadata().expect("read mlt metadata");
+        let mlt_reader = crate::archive::Archive::open(&mlt_output).expect("open mlt pmtiles");
+        let mlt_metadata = mlt_reader.metadata().expect("read mlt metadata");
         let mlt_json: serde_json::Value =
             serde_json::from_str(&mlt_metadata).expect("parse mlt metadata");
         assert_eq!(
-            mlt_reader.tile_type(),
-            0,
+            mlt_reader.header().tile_type,
+            crate::archive::TileType::Unknown,
             "mlt header tile_type should remain unknown"
         );
         assert_eq!(
-            mlt_reader.tile_compression(),
-            1,
+            mlt_reader.header().tile_compression,
+            crate::archive::Compression::None,
             "mlt header tile_compression should be none"
         );
         assert_eq!(mlt_json["tile_payload_format"], "mlt");
@@ -4146,7 +4138,7 @@ fn resources_resolve_defaults_and_refuse_budgets_below_minimum() {
         defaults.assemble_batch,
         crate::resources::DEFAULT_ASSEMBLE_BUDGET
     );
-    assert_eq!(defaults.dedup_cap, crate::pmtiles_writer::DEFAULT_DEDUP_CAP);
+    assert_eq!(defaults.dedup_cap, crate::archive::DEFAULT_DEDUP_CAP);
     assert_eq!(
         defaults.way_admission(false).budget,
         crate::resources::DEFAULT_WAY_BUDGET
@@ -4410,7 +4402,10 @@ fn effective_tile_contract_matches_provenance_and_mlt_header() {
             "format": "mlt", "compression": "none"
         })
     );
-    assert_eq!(contract.writer().1.header_value(), 1);
+    assert_eq!(
+        contract.writer().1.header_compression(),
+        crate::archive::Compression::None
+    );
     assert_eq!(contract.compression_counter(), 2);
     config.tile_compression = TileCompression::Brotli;
     // The nonexistent input proves validation occurs before input access.

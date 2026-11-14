@@ -14,7 +14,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Instant;
 
-use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter};
+use elivagar::archive::{LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter};
 use elivagar::tiling::TileId;
 
 struct TestTile {
@@ -188,12 +188,22 @@ fn bench_elivagar(tiles: &[TestTile], runs: usize) -> (u128, u64) {
     for _ in 0..runs {
         let start = Instant::now();
 
-        let config = PmtilesConfig {
-            min_zoom: 0,
-            max_zoom: 14,
-            bounds: (-180.0, -85.0, 180.0, 85.0),
-            center: (0.0, 0.0, 0),
-        };
+        let config = PmtilesConfig::new(
+            0,
+            14,
+            LonLatBbox {
+                west: -180.0,
+                south: -85.0,
+                east: 180.0,
+                north: 85.0,
+            },
+            MapCenter {
+                lon: 0.0,
+                lat: 0.0,
+                zoom: 0,
+            },
+        )
+        .expect("valid archive config");
         let mut writer = PmtilesWriter::new(config);
         for tile in tiles {
             writer

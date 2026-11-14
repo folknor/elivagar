@@ -13,46 +13,79 @@ fn tile_id_to_zxy(tile_id: u64) -> (u8, u32, u32) {
     TileId::new(tile_id).unwrap().coord()
 }
 
-fn read_u64_le(buf: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
+/// The header of an archive written to bytes.
+fn header_of(bytes: &[u8]) -> Header {
+    Header::decode(bytes[..HEADER_LEN].try_into().unwrap()).unwrap()
 }
 
 #[test]
 fn header_coordinates_round_to_nearest_e7() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-12.34567896, -55.12345676, 12.34567896, 55.12345676),
-        center: (-0.00000006, 0.00000006, 2),
+    let config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -12.34567896,
+            south: -55.12345676,
+            east: 12.34567896,
+            north: 55.12345676,
+        },
+        MapCenter {
+            lon: -0.00000006,
+            lat: 0.00000006,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
+    let mut writer = PmtilesWriter::new(config);
+    writer.add_tile(0, 0, 0, &[1]).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("e7.pmtiles");
+    writer.write_to(&path).unwrap();
+    let header = header_of(&std::fs::read(&path).unwrap());
+    assert_eq!(
+        header.bounds,
+        E7Bbox {
+            west: -123_456_790,
+            south: -551_234_568,
+            east: 123_456_790,
+            north: 551_234_568,
+        }
+    );
+    assert_eq!(
+        header.center,
+        E7Center {
+            lon: -1,
+            lat: 1,
+            zoom: 2
+        }
+    );
+}
+
+#[test]
+fn config_refuses_invalid_geography_before_any_tile_work() {
+    let world = LonLatBbox {
+        west: -180.0,
+        south: -85.0,
+        east: 180.0,
+        north: 85.0,
     };
-    let mut header = [0; 127];
-    write_header_bounds(&mut header, &config);
-    for (offset, expected) in [
-        (102, -123_456_790),
-        (106, -551_234_568),
-        (110, 123_456_790),
-        (114, 551_234_568),
-        (119, -1),
-        (123, 1),
-    ] {
-        let stored = i32::from_le_bytes(header[offset..offset + 4].try_into().unwrap());
-        assert_eq!(stored, expected);
-        // Inspect reads signed E7 coordinates with this inverse conversion.
-        assert!(
-            (f64::from(stored) / 1e7
-                - match offset {
-                    102 => config.bounds.0,
-                    106 => config.bounds.1,
-                    110 => config.bounds.2,
-                    114 => config.bounds.3,
-                    119 => config.center.0,
-                    _ => config.center.1,
-                })
-            .abs()
-                <= 0.5e-7
-        );
-    }
-    assert_eq!(header[118], 2);
+    let center = MapCenter {
+        lon: 0.0,
+        lat: 0.0,
+        zoom: 0,
+    };
+    assert!(PmtilesConfig::new(3, 2, world, center).is_err());
+    let inverted = LonLatBbox {
+        west: 10.0,
+        east: 5.0,
+        ..world
+    };
+    assert!(PmtilesConfig::new(0, 2, inverted, center).is_err());
+    let nan = MapCenter {
+        lon: f64::NAN,
+        ..center
+    };
+    assert!(PmtilesConfig::new(0, 2, world, nan).is_err());
 }
 
 fn add_monotonic_unique_tiles(writer: &mut PmtilesWriter, z: u8, count: usize) {
@@ -103,13 +136,13 @@ fn test_varint_known_encoding() {
 fn test_directory_encode_decode() {
     use protohoggr::Cursor;
     let entries = vec![
-        RawDirEntry {
+        WireEntry {
             tile_id: 5,
             offset: 0,
             length: 100,
             run_length: 3,
         },
-        RawDirEntry {
+        WireEntry {
             tile_id: 10,
             offset: 100,
             length: 50,
@@ -152,13 +185,13 @@ fn test_directory_encode_decode() {
 fn test_directory_non_contiguous_offset() {
     use protohoggr::Cursor;
     let entries = vec![
-        RawDirEntry {
+        WireEntry {
             tile_id: 1,
             offset: 0,
             length: 100,
             run_length: 1,
         },
-        RawDirEntry {
+        WireEntry {
             tile_id: 5,
             offset: 500,
             length: 50,
@@ -190,7 +223,7 @@ fn directory_codec_roundtrip_property() {
 
     for case in 0_usize..128 {
         let count = case % 48;
-        let mut entries: Vec<RawDirEntry> = Vec::with_capacity(count);
+        let mut entries: Vec<WireEntry> = Vec::with_capacity(count);
         let mut tile_id = 0_u64;
         let mut offset;
 
@@ -215,7 +248,7 @@ fn directory_codec_roundtrip_property() {
             let value = u32::try_from(state >> 32).expect("shifted random value fits u32");
             let length = value;
             let run_length = if state & 4 == 0 { 0 } else { value };
-            entries.push(RawDirEntry {
+            entries.push(WireEntry {
                 tile_id,
                 offset,
                 length,
@@ -224,8 +257,8 @@ fn directory_codec_roundtrip_property() {
         }
 
         let encoded = encode_directory(&entries).expect("encode generated directory");
-        let decoded =
-            crate::pmtiles_reader::decode_directory(&encoded).expect("decode generated directory");
+        let decoded = super::super::directory::decode_directory(&encoded)
+            .expect("decode generated directory");
         assert_eq!(
             decoded, entries,
             "directory roundtrip failed in case {case}"
@@ -239,12 +272,22 @@ fn directory_codec_roundtrip_property() {
 
 #[test]
 fn test_dedup() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 1,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        1,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     let data = gzip_compress(b"same-content").unwrap();
@@ -263,12 +306,22 @@ fn test_dedup() {
 
 #[test]
 fn test_metadata_json() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
     let json = build_metadata(
         &config,
         TileDataFormat::Mvt,
@@ -295,12 +348,22 @@ fn test_metadata_json() {
 
 #[test]
 fn test_metadata_json_with_source_provenance() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
     let json = build_metadata(
         &config,
         TileDataFormat::Mvt,
@@ -318,12 +381,22 @@ fn test_metadata_json_with_source_provenance() {
 
 #[test]
 fn test_metadata_json_escapes_source_pbf_special_chars() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
     let source = "input\\\"name\nline\twith\rcontrols\\path.osm.pbf";
     let json = build_metadata(
         &config,
@@ -343,12 +416,22 @@ fn test_metadata_json_escapes_source_pbf_special_chars() {
 
 #[test]
 fn test_metadata_json_mlt_contract() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
     let json = build_metadata(
         &config,
         TileDataFormat::Mlt,
@@ -367,12 +450,22 @@ fn test_metadata_json_mlt_contract() {
 
 #[test]
 fn metadata_serialization_keeps_the_existing_field_order() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
     let json = build_metadata(
         &config,
         TileDataFormat::Mvt,
@@ -399,12 +492,22 @@ fn metadata_serialization_keeps_the_existing_field_order() {
 
 #[test]
 fn metadata_setter_rejects_duplicates_and_non_objects() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
 
     writer
@@ -443,12 +546,22 @@ fn metadata_setter_rejects_duplicates_and_non_objects() {
 fn test_run_length_dedup() {
     // PMTiles v3: run_length means all tiles in the run share the SAME data.
     // Consecutive dedup'd tiles pointing to the same offset should merge.
-    let config = PmtilesConfig {
-        min_zoom: 1,
-        max_zoom: 1,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 1),
-    };
+    let config = PmtilesConfig::new(
+        1,
+        1,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 1,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -469,12 +582,22 @@ fn test_run_length_dedup() {
 fn test_no_run_for_different_data() {
     // Consecutive tiles with different data should NOT form runs,
     // even if they have the same compressed length.
-    let config = PmtilesConfig {
-        min_zoom: 1,
-        max_zoom: 1,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 1),
-    };
+    let config = PmtilesConfig::new(
+        1,
+        1,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 1,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     // Add 4 tiles with distinct data - each gets a different offset, no runs possible
@@ -498,12 +621,22 @@ fn test_no_run_for_different_data() {
 #[test]
 fn write_to_streaming_produces_valid_header() {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 1,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        1,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let out_path = dir.path().join("test_streaming.pmtiles");
     let mut writer = PmtilesWriter::new_streaming(config, dir.path(), &out_path).unwrap();
@@ -535,11 +668,23 @@ fn write_to_streaming_produces_valid_header() {
 fn write_to_streaming_matches_in_memory() {
     // Both modes should produce byte-identical archives for the same input.
     let dir = tempfile::tempdir().expect("create tempdir");
-    let make_config = || PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 1),
+    let make_config = || {
+        PmtilesConfig::new(
+            0,
+            2,
+            LonLatBbox {
+                west: -180.0,
+                south: -85.0,
+                east: 180.0,
+                north: 85.0,
+            },
+            MapCenter {
+                lon: 0.0,
+                lat: 0.0,
+                zoom: 1,
+            },
+        )
+        .expect("valid archive config")
     };
 
     let tile_a = gzip_compress(b"tile-a").unwrap();
@@ -573,12 +718,22 @@ fn write_to_streaming_matches_in_memory() {
 
 #[test]
 fn write_to_produces_valid_header() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 1,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        1,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -614,12 +769,22 @@ fn write_to_produces_valid_header() {
 
 #[test]
 fn write_to_respects_tile_contract_in_header() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 0,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        0,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
     writer.set_tile_contract(TileDataFormat::Mlt, TileDataCompression::None);
     writer.add_tile(0, 0, 0, b"raw-mlt-payload").unwrap();
@@ -629,8 +794,13 @@ fn write_to_respects_tile_contract_in_header() {
     writer.write_to(&out_path).unwrap();
     let bytes = std::fs::read(&out_path).unwrap();
 
-    assert_eq!(bytes[98], 1, "tile_compression should be none");
-    assert_eq!(bytes[99], 0, "tile_type should be unknown for mlt payload");
+    let header = header_of(&bytes);
+    assert_eq!(header.tile_compression, HeaderCompression::None);
+    assert_eq!(
+        header.tile_type,
+        TileType::Unknown,
+        "tile_type should be unknown for mlt payload"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -639,12 +809,22 @@ fn write_to_respects_tile_contract_in_header() {
 
 #[test]
 fn test_dedup_metrics_basic() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     let data_a = gzip_compress(b"content-a").unwrap();
@@ -677,12 +857,22 @@ fn test_dedup_metrics_basic() {
 
 #[test]
 fn add_run_records_one_blob_and_all_addressed_tiles() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
     let base = xy_to_tile_id(3, 0, 0);
     assert!(writer.add_run(tid(base), 4, b"ocean").expect("add run"));
@@ -695,12 +885,22 @@ fn add_run_records_one_blob_and_all_addressed_tiles() {
 
 #[test]
 fn add_tile_rejects_non_increasing_ids_without_mutating_writer() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
     writer.add_tile(1, 0, 0, b"shared").expect("first tile");
 
@@ -727,12 +927,22 @@ fn add_tile_rejects_non_increasing_ids_without_mutating_writer() {
 
 #[test]
 fn add_tile_rejects_invalid_coordinates_without_mutating_writer() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
 
     let error = writer
@@ -745,12 +955,22 @@ fn add_tile_rejects_invalid_coordinates_without_mutating_writer() {
 
 #[test]
 fn add_run_rejects_overlapping_ids_without_mutating_writer() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
     let base = xy_to_tile_id(1, 0, 0);
     writer.add_run(tid(base), 2, b"shared").expect("first run");
@@ -774,12 +994,22 @@ fn add_run_rejects_overlapping_ids_without_mutating_writer() {
 
 #[test]
 fn add_run_rejects_tile_id_overflow_without_mutating_writer() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
 
     // The last z31 id is addressable, so a one-tile run there is legal; a
@@ -797,12 +1027,22 @@ fn add_run_rejects_tile_id_overflow_without_mutating_writer() {
 
 #[test]
 fn add_run_counts_dedup_candidate_rejections() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 2,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        2,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
     let data = gzip_compress(b"run fingerprint").expect("gzip payload");
     let (hash, fingerprint) = PmtilesWriter::compute_dedup_hashes(&data);
@@ -823,18 +1063,38 @@ fn add_run_counts_dedup_candidate_rejections() {
 
 #[test]
 fn add_run_matches_expanded_add_tile_below_dedup_cap() {
-    let run_config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
-    let tile_config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
+    let run_config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
+    let tile_config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
     let base = xy_to_tile_id(3, 0, 0);
     let payload = b"ocean";
     let mut run_writer = PmtilesWriter::new(run_config);
@@ -857,18 +1117,38 @@ fn add_run_matches_expanded_add_tile_below_dedup_cap() {
 
 #[test]
 fn add_run_preserves_run_sharing_after_the_dedup_cap() {
-    let run_config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
-    let tile_config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 2),
-    };
+    let run_config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
+    let tile_config = PmtilesConfig::new(
+        0,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 2,
+        },
+    )
+    .expect("valid archive config");
     let base = xy_to_tile_id(3, 0, 0);
     let payload = b"ocean";
     let mut run_writer = PmtilesWriter::new(run_config);
@@ -898,12 +1178,22 @@ fn add_run_preserves_run_sharing_after_the_dedup_cap() {
 
 #[test]
 fn test_dedup_cap_overflow() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 5,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        5,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     writer.set_dedup_cap(2);
@@ -933,12 +1223,22 @@ fn test_dedup_cap_overflow() {
 
 #[test]
 fn test_dedup_fingerprint_rejection() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 1,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        1,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -962,12 +1262,22 @@ fn test_dedup_fingerprint_rejection() {
 
 #[test]
 fn test_dedup_bucket_collision() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 1,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        1,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -1008,12 +1318,22 @@ fn test_dedup_bucket_collision() {
 
 #[test]
 fn test_dedup_len_mismatch_counter() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 1,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        1,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
 
@@ -1037,12 +1357,22 @@ fn test_dedup_len_mismatch_counter() {
 
 #[test]
 fn data_section_is_4k_aligned() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 1,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        1,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
 
     let mut writer = PmtilesWriter::new(config);
     let tile_a = gzip_compress(b"tile-a").unwrap();
@@ -1055,7 +1385,7 @@ fn data_section_is_4k_aligned() {
     writer.write_to(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
-    let data_offset = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
+    let data_offset = header_of(&bytes).tile_data.offset;
     assert_eq!(
         data_offset % 4096,
         0,
@@ -1065,12 +1395,22 @@ fn data_section_is_4k_aligned() {
 
 #[test]
 fn root_only_layout_offsets_are_consistent() {
-    let config = PmtilesConfig {
-        min_zoom: 0,
-        max_zoom: 0,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 0),
-    };
+    let config = PmtilesConfig::new(
+        0,
+        0,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
     writer.add_tile(0, 0, 0, &[1, 2, 3, 4]).unwrap();
 
@@ -1081,14 +1421,23 @@ fn root_only_layout_offsets_are_consistent() {
     let bytes = std::fs::read(&path).unwrap();
     assert!(bytes.len() > 127, "archive should be larger than header");
 
-    let root_dir_offset = read_u64_le(&bytes, 8);
-    let root_dir_length = read_u64_le(&bytes, 16);
-    let metadata_offset = read_u64_le(&bytes, 24);
-    let metadata_length = read_u64_le(&bytes, 32);
-    let leaf_dirs_offset = read_u64_le(&bytes, 40);
-    let leaf_dirs_length = read_u64_le(&bytes, 48);
-    let data_offset = read_u64_le(&bytes, 56);
-    let data_length = read_u64_le(&bytes, 64);
+    let header = header_of(&bytes);
+    let Section {
+        offset: root_dir_offset,
+        length: root_dir_length,
+    } = header.root_dir;
+    let Section {
+        offset: metadata_offset,
+        length: metadata_length,
+    } = header.metadata;
+    let Section {
+        offset: leaf_dirs_offset,
+        length: leaf_dirs_length,
+    } = header.leaf_dirs;
+    let Section {
+        offset: data_offset,
+        length: data_length,
+    } = header.tile_data;
 
     // Layout: [header][root][zeros to 16384][tile data][metadata][leaf dirs].
     assert_eq!(root_dir_offset, 127);
@@ -1125,11 +1474,23 @@ fn root_leaf_boundary_switches_at_threshold() {
     // the init-section byte budget and the entry-count threshold is the
     // deciding rule for them.
     const ROOT_THRESHOLD: usize = 16384;
-    let make_config = || PmtilesConfig {
-        min_zoom: 8,
-        max_zoom: 8,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 8),
+    let make_config = || {
+        PmtilesConfig::new(
+            8,
+            8,
+            LonLatBbox {
+                west: -180.0,
+                south: -85.0,
+                east: 180.0,
+                north: 85.0,
+            },
+            MapCenter {
+                lon: 0.0,
+                lat: 0.0,
+                zoom: 8,
+            },
+        )
+        .expect("valid archive config")
     };
 
     let dir = tempfile::tempdir().unwrap();
@@ -1146,16 +1507,16 @@ fn root_leaf_boundary_switches_at_threshold() {
     over_threshold.write_to(&over_threshold_path).unwrap();
     let over_threshold_bytes = std::fs::read(&over_threshold_path).unwrap();
 
-    let threshold_num_entries = read_u64_le(&at_threshold_bytes, 80);
-    let threshold_leaf_dirs_length = read_u64_le(&at_threshold_bytes, 48);
+    let threshold_num_entries = header_of(&at_threshold_bytes).tile_entries;
+    let threshold_leaf_dirs_length = header_of(&at_threshold_bytes).leaf_dirs.length;
     assert_eq!(threshold_num_entries, ROOT_THRESHOLD as u64);
     assert_eq!(
         threshold_leaf_dirs_length, 0,
         "threshold case should remain root-only"
     );
 
-    let over_num_entries = read_u64_le(&over_threshold_bytes, 80);
-    let over_leaf_dirs_length = read_u64_le(&over_threshold_bytes, 48);
+    let over_num_entries = header_of(&over_threshold_bytes).tile_entries;
+    let over_leaf_dirs_length = header_of(&over_threshold_bytes).leaf_dirs.length;
     assert_eq!(over_num_entries, (ROOT_THRESHOLD + 1) as u64);
     assert!(
         over_leaf_dirs_length > 0,
@@ -1173,12 +1534,22 @@ fn oversized_root_demotes_to_leaf_directories() {
     // entries that resist compression - irregular tile-id gaps and varying
     // payload lengths from a deterministic LCG - so 16,000 of them compress
     // to a root far over 16 KiB.
-    let config = PmtilesConfig {
-        min_zoom: 14,
-        max_zoom: 14,
-        bounds: (-180.0, -85.0, 180.0, 85.0),
-        center: (0.0, 0.0, 14),
-    };
+    let config = PmtilesConfig::new(
+        14,
+        14,
+        LonLatBbox {
+            west: -180.0,
+            south: -85.0,
+            east: 180.0,
+            north: 85.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 14,
+        },
+    )
+    .expect("valid archive config");
     let mut writer = PmtilesWriter::new(config);
 
     let mut rng: u64 = 0x243F_6A88_85A3_08D3;
@@ -1206,10 +1577,11 @@ fn oversized_root_demotes_to_leaf_directories() {
     writer.write_to(&path).unwrap();
     let bytes = std::fs::read(&path).unwrap();
 
-    let root_dir_offset = read_u64_le(&bytes, 8);
-    let root_dir_length = read_u64_le(&bytes, 16);
-    let leaf_dirs_length = read_u64_le(&bytes, 48);
-    let num_entries = read_u64_le(&bytes, 80);
+    let header = header_of(&bytes);
+    let root_dir_offset = header.root_dir.offset;
+    let root_dir_length = header.root_dir.length;
+    let leaf_dirs_length = header.leaf_dirs.length;
+    let num_entries = header.tile_entries;
 
     assert_eq!(num_entries, 16_000);
     assert_eq!(root_dir_offset, 127);

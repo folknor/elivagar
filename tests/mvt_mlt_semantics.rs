@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use elivagar::pmtiles_reader::{PmtilesReader, TileEntry};
+use elivagar::archive::Archive;
 use elivagar::tile_detail::{CanonRingRole, DetailAttr, DetailFeature, DetailTile, Strictness};
 use elivagar::tiling::TileId;
 use elivagar::{TileCompression, TilePayloadFormat, TilegenConfig};
@@ -203,18 +203,17 @@ fn run_tilegen(
 }
 
 fn read_single_tile(path: &Path) -> (u64, Vec<u8>) {
-    let mut reader = PmtilesReader::open(path).expect("open output archive");
+    let reader = Archive::open(path).expect("open output archive");
     let runs = reader.read_all_runs().expect("read archive directory");
     assert_eq!(runs.len(), 1, "fixture geometry must fit in one tile");
-    let run = runs[0];
-    assert_eq!(run.run_length, 1, "fixture must address exactly one tile");
-    let entry = TileEntry {
-        tile_id: run.tile_id,
-        offset: run.offset,
-        length: run.length,
-    };
-    let payload = reader.read_tile(&entry).expect("read tile payload");
-    (run.tile_id, payload)
+    let run = runs.as_slice()[0];
+    assert_eq!(
+        run.run_length().get(),
+        1,
+        "fixture must address exactly one tile"
+    );
+    let payload = reader.read_tile(run.blob()).expect("read tile payload");
+    (run.start().raw(), payload)
 }
 
 fn decode_mlt_as_mvt(payload: &[u8]) -> Vec<u8> {

@@ -11,19 +11,20 @@ use std::path::Path;
 
 use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
+use crate::archive::Archive;
 use crate::geometry::polygon::{RingOrientation, ring_is_simple, ring_role};
 use crate::mvt::decode::{self, Words};
-use crate::pmtiles_reader::{PmtilesReader, find_entry};
 
 /// Print the ring report for tile `z/x/y` of the archive at `path`.
 pub fn diag_tile(path: &Path, z: u8, x: u32, y: u32) -> io::Result<()> {
     crate::svg::validate_tile_grid_coordinates(z, x, y, 1, 1)?;
-    let mut reader = PmtilesReader::open(path)?;
+    let reader = Archive::open(path)?;
+    reader.tile_decoder()?;
     let runs = reader.read_all_runs()?;
-    let tile_id = crate::tiling::TileId::from_coord(z, x, y)?.raw();
-    let entry = find_entry(&runs, tile_id)
+    let blob = runs
+        .find(crate::tiling::TileId::from_coord(z, x, y)?)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "tile not found"))?;
-    let raw = reader.read_tile(&entry)?;
+    let raw = reader.read_tile(blob)?;
 
     println!(
         "Tile z{z}/{x}/{y} - {raw_len} bytes decompressed",

@@ -17,9 +17,10 @@ elivagar = "0.1"
 ```
 
 The public API is `elivagar::run` over a `TilegenConfig`, plus the decode and
-write surface: the PMTiles reader, the `tile_detail` MVT decoder with
-selectable unknown-field strictness, typed provenance, and the writer's
-`add_run` / `set_metadata_verbatim`.
+write surface in `elivagar::archive` (the PMTiles reader `Archive`, the typed
+header, and the writer's `add_run` / `set_metadata_verbatim`), the
+`tile_detail` MVT decoder with selectable unknown-field strictness, and typed
+provenance.
 
 ## From source
 

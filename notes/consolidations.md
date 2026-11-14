@@ -92,7 +92,7 @@ storage and archive-surface hunts.
 The command stream is settled: every in-crate reader decodes through
 `mvt::decode`. What remains is the protobuf layer around it, walked
 independently and with different error policies:
-`pmtiles_reader::decode_mvt_layers` (tag-read errors end the loop silently),
+`mvt::layers::decode_mvt_layers` (tag-read errors end the loop silently),
 verify's four per-tile parses (`decode_mvt_layers`, `validate_mvt_geometry`,
 `validate_ocean_rings`, `collect_ocean_geometry_stats`, the last two
 skipping unreadable fields silently), `svg::decode_mvt_geometry`/
@@ -105,8 +105,8 @@ Ring grouping (first nonzero-area ring sets the exterior winding,
 zero-area rings skipped) is also spelled twice, in `tile_detail`
 (`group_detail_rings`) and `mlt::group_rings_to_polygons`.
 
-Owner proposed: `pmtiles_reader::MvtLayer`/`decode_mvt_layers` leaves the
-container reader (shared with the archive-module entry), and verify, svg
+`MvtLayer`/`decode_mvt_layers` already left the container reader for the
+crate-private `mvt::layers`. Owner proposed: verify, svg
 and diag walk messages through one borrowed message reader with
 `tile_detail`'s strictness. MLT and the line merger stop decoding at all
 once the tile model is typed geometry (STR-013).

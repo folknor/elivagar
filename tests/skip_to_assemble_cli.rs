@@ -263,11 +263,9 @@ fn run_elivagar_with_fifo(args: &[&str], fifo_path: &Path) -> (std::process::Out
     (output, fifo)
 }
 
-fn geographic_header(path: &Path) -> Vec<u8> {
-    let mut file = std::fs::File::open(path).expect("open archive");
-    let mut header = [0; 127];
-    file.read_exact(&mut header).expect("read header");
-    header[102..127].to_vec()
+fn geographic_header(path: &Path) -> (elivagar::archive::E7Bbox, elivagar::archive::E7Center) {
+    let archive = elivagar::archive::Archive::open(path).expect("open archive");
+    (archive.header().bounds, archive.header().center)
 }
 
 fn make_fifo(path: &Path) {
@@ -327,8 +325,7 @@ fn skip_to_assemble_reuses_chunks_and_omits_phase3_metrics() {
         String::from_utf8_lossy(&first.stderr)
     );
     let first_header = geographic_header(&output_path);
-    let west = i32::from_le_bytes(first_header[0..4].try_into().expect("west"));
-    let east = i32::from_le_bytes(first_header[8..12].try_into().expect("east"));
+    let (west, east) = (first_header.0.west, first_header.0.east);
     assert!(
         west > -1_800_000_000 && east < 1_800_000_000,
         "a single-node extract must not have world bounds"

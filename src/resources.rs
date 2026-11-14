@@ -205,7 +205,7 @@ impl Resources {
             )?,
             dedup_cap: config
                 .dedup_cap
-                .map_or(crate::pmtiles_writer::DEFAULT_DEDUP_CAP, NonZeroUsize::get),
+                .map_or(crate::archive::DEFAULT_DEDUP_CAP, NonZeroUsize::get),
             decode_threads: (threads / 3).max(1),
             rel_blocks_buffer_cap: env_integer(
                 "ELIVAGAR_REL_BLOCKS_CAP",
