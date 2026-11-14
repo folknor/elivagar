@@ -761,9 +761,7 @@ fn test_merge_two_multi_ring_polygons_coords_in_bounds() {
     });
 
     let mut scratch = MergeScratch::new();
-    let mut gp = Vec::new();
-    let mut tp = Vec::new();
-    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+    layer.merge_same_attr_geometries(&mut scratch);
 
     assert_eq!(layer.test_feature_count(), 1, "should merge into 1 feature");
     let coords = decode_commands_to_abs(&layer.test_feature(0).geometry);
@@ -799,9 +797,7 @@ fn test_merge_two_multi_ring_polygons_coords_in_bounds() {
 fn test_merge_no_features() {
     let mut layer = LayerBuilder::new("test");
     let mut scratch = MergeScratch::new();
-    let mut gp = Vec::new();
-    let mut tp = Vec::new();
-    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+    layer.merge_same_attr_geometries(&mut scratch);
     assert_eq!(layer.test_feature_count(), 0);
 }
 
@@ -819,9 +815,7 @@ fn test_merge_single_feature() {
         tags: vec![(ki, vi)],
     });
     let mut scratch = MergeScratch::new();
-    let mut gp = Vec::new();
-    let mut tp = Vec::new();
-    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+    layer.merge_same_attr_geometries(&mut scratch);
     assert_eq!(layer.test_feature_count(), 1);
 }
 
@@ -850,9 +844,7 @@ fn test_merge_two_lines_same_attrs() {
     });
 
     let mut scratch = MergeScratch::new();
-    let mut gp = Vec::new();
-    let mut tp = Vec::new();
-    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+    layer.merge_same_attr_geometries(&mut scratch);
 
     // Should merge into 1 feature
     assert_eq!(layer.test_feature_count(), 1);
@@ -893,9 +885,7 @@ fn test_merge_different_attrs_not_merged() {
     });
 
     let mut scratch = MergeScratch::new();
-    let mut gp = Vec::new();
-    let mut tp = Vec::new();
-    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+    layer.merge_same_attr_geometries(&mut scratch);
 
     // Different attrs → no merge
     assert_eq!(layer.test_feature_count(), 2);
@@ -926,9 +916,7 @@ fn test_merge_points_not_merged() {
     });
 
     let mut scratch = MergeScratch::new();
-    let mut gp = Vec::new();
-    let mut tp = Vec::new();
-    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+    layer.merge_same_attr_geometries(&mut scratch);
 
     // Points are explicitly skipped
     assert_eq!(layer.test_feature_count(), 2);
@@ -962,9 +950,7 @@ fn test_merge_mixed_geom_types_separate() {
     });
 
     let mut scratch = MergeScratch::new();
-    let mut gp = Vec::new();
-    let mut tp = Vec::new();
-    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+    layer.merge_same_attr_geometries(&mut scratch);
 
     // Different geom types → no merge (even with same tags)
     assert_eq!(layer.test_feature_count(), 2);
@@ -990,9 +976,7 @@ fn test_merge_three_lines_same_attrs() {
     }
 
     let mut scratch = MergeScratch::new();
-    let mut gp = Vec::new();
-    let mut tp = Vec::new();
-    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+    layer.merge_same_attr_geometries(&mut scratch);
 
     // 3 features → 1 merged feature
     assert_eq!(layer.test_feature_count(), 1);
@@ -1001,7 +985,7 @@ fn test_merge_three_lines_same_attrs() {
 }
 
 #[test]
-fn test_merge_reclaims_to_pools() {
+fn test_merge_copies_out_of_scratch_exactly() {
     let mut layer = LayerBuilder::new("test");
     let ki = layer.intern_key("kind");
     let vi = layer.intern_value(Value::String("residential".into()));
@@ -1019,16 +1003,15 @@ fn test_merge_reclaims_to_pools() {
     }
 
     let mut scratch = MergeScratch::new();
-    let mut gp: Vec<Vec<u32>> = Vec::new();
-    let mut tp: Vec<Vec<(u32, u32)>> = Vec::new();
-    layer.merge_same_attr_geometries(&mut scratch, &mut gp, &mut tp);
+    layer.merge_same_attr_geometries(&mut scratch);
 
-    // Secondary features' vecs are reclaimed into the pools, and the merged
-    // primary's ORIGINAL geometry Vec joins the geom pool too (the merged
-    // stream is copied into a pooled Vec rather than swapped out of scratch,
-    // so the primary's old buffer is freed up for reuse).
-    assert_eq!(gp.len(), 3); // 2 secondaries + the primary's old geometry
-    assert_eq!(tp.len(), 2);
+    // The merged stream is copied out of scratch, not swapped: scratch keeps
+    // its capacity for the tile's later runs, and the primary holds an
+    // exact-size copy. Secondaries are gone.
+    assert_eq!(layer.test_feature_count(), 1);
+    let merged = &layer.test_feature(0).geometry;
+    assert_eq!(merged.capacity(), merged.len());
+    assert_eq!(&scratch.geom, merged);
 }
 
 #[test]

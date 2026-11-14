@@ -97,8 +97,9 @@ verify's four per-tile parses (`decode_mvt_layers`, `validate_mvt_geometry`,
 `validate_ocean_rings`, `collect_ocean_geometry_stats`, the last two
 skipping unreadable fields silently), `svg::decode_mvt_geometry`/
 `decode_layer`/`decode_feature` (read errors on length-delimited fields
-dropped), `diag::diag_layer` (all read errors dropped), and assemble's
-`ocean_layer_field`/`read_varint`/`raw_contains_ocean`. Only `tile_detail`
+dropped), `diag::diag_layer` (all read errors dropped), and the artifact
+consumer's `ocean_layer_field`/`read_varint` (`assemble/artifact.rs`). Only
+`tile_detail`
 reads the tile/layer/feature messages with a stated policy.
 
 Ring grouping (first nonzero-area ring sets the exterior winding,

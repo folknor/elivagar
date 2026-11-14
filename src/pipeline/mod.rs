@@ -323,7 +323,8 @@ impl serde::Serialize for TileContract {
 /// Version of the base-level to per-zoom compression mapping.
 /// This is deliberately excluded from OceanArtifactKey: changing compression
 /// effort preserves decoded MVT bytes. Run copies can use different levels;
-/// splice_ocean_layer decompresses and recompresses with the current policy.
+/// a tile that takes the artifact's ocean layer is compressed once, under
+/// the current policy, with that layer already appended.
 /// Rotating the world artifact and corpus for a size-only change buys no
 /// content safety. Changes to decoded content belong to OCEAN_POLICY_VERSION.
 pub(crate) const COMPRESSION_POLICY: &str = "zoom-v1";
@@ -1406,7 +1407,7 @@ use crate::sort::SortRecord;
 use assemble::{PendingTile, encode_tile_batch, phase_assemble};
 // Used only by the MLT/MVT layer-model parity test.
 #[cfg(all(test, feature = "mlt"))]
-use assemble::{AssemblyScratch, LAYER_COUNT, prepare_non_empty_layers};
+use assemble::{AssemblyScratch, prepare_non_empty_layers};
 #[cfg(test)]
 use emit::{
     LineEmitScratch, MultipolygonEmitScratch, PointEmitScratch, PolygonEmitScratch,

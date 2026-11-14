@@ -73,12 +73,7 @@ impl LayerBuilder {
     /// each run in-place via scratch buffer + swap. Tombstones secondaries
     /// with empty geometry, then retains non-tombstone features.
     #[hotpath::measure]
-    pub fn merge_same_attr_geometries(
-        &mut self,
-        scratch: &mut MergeScratch,
-        geom_pool: &mut Vec<Vec<u32>>,
-        tags_pool: &mut Vec<Vec<(u32, u32)>>,
-    ) {
+    pub fn merge_same_attr_geometries(&mut self, scratch: &mut MergeScratch) {
         // Build sorted index of non-Point features.
         scratch.indices.clear();
         for (i, f) in self.features.iter().enumerate() {
@@ -130,24 +125,21 @@ impl LayerBuilder {
                         &mut cy,
                     );
                 }
-                // Copy the merged stream into a pooled Vec instead of
+                // Copy the merged stream into an exact-size Vec instead of
                 // donating scratch.geom via swap: the swap left the scratch
                 // to regrow through a doubling-realloc chain on every merged
-                // run (310K runs / 3.8 GB exclusive churn on the denmark
-                // alloc profile). The copy keeps scratch.geom at high-water
-                // capacity forever and pooled destinations warm alongside it.
+                // run (310K runs / 3.8 GB exclusive churn on a denmark alloc
+                // profile). The copy keeps scratch.geom at its high-water
+                // capacity for the rest of this tile's runs and layers; the
+                // scratch itself lives exactly as long as the tile.
                 let first = scratch.indices[i];
-                let mut dest = geom_pool.pop().unwrap_or_default();
-                dest.clear();
-                dest.extend_from_slice(&scratch.geom);
-                let old = std::mem::replace(&mut self.features[first].geometry, dest);
-                geom_pool.push(old);
+                self.features[first].geometry = scratch.geom.clone();
                 self.features[first].id = None;
-                // Reclaim secondary features' Vecs into pools (mem::take leaves
-                // zero-capacity Vecs so retain can identify dead features).
+                // Drop secondaries' buffers now rather than at tile end;
+                // the emptied geometry is the tombstone `retain` reads.
                 for &idx in &scratch.indices[(i + 1)..j] {
-                    geom_pool.push(std::mem::take(&mut self.features[idx].geometry));
-                    tags_pool.push(std::mem::take(&mut self.features[idx].tags));
+                    drop(std::mem::take(&mut self.features[idx].geometry));
+                    drop(std::mem::take(&mut self.features[idx].tags));
                 }
             }
             i = j;

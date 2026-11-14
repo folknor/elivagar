@@ -187,12 +187,12 @@ The `elivagar` member is now written from typed records (`Provenance`,
 reasoning is on `Provenance` in `provenance.rs`). Residue: the `build` member
 is still a `json!` literal, and `repo_json(commit, dirty)` parses
 `"true"`/`"false"` from `env!` where `build.rs` could emit the typed value
-once; `write_provenance` still lives in `pipeline/assemble.rs` rather than in
-`provenance.rs` (overlaps STR-007's assemble split).
+once; `write_provenance` still lives in `pipeline/assemble/mod.rs` rather
+than in `provenance.rs`.
 
 Reported by the archive-surface, run-contract and pipeline hunts.
 
-## STR-007 - Split `phase12.rs` and `assemble.rs` along their real seams
+## STR-007 - Split `phase12.rs` along its real seams
 
 `phase12.rs` (about 2200 lines) holds PBF block routing (two `macro_rules!`
 that mutably capture about 20 locals because no struct owns the phase state),
@@ -205,17 +205,7 @@ channels, handles, tallies and extent so the macros become methods; an
 `phase12/{mod,router,node_worker,way_worker,plans,extent}.rs` with the
 prepass in `relations/`.
 
-`assemble.rs` (its legacy single-reader engine is now deleted) also hosts the ocean-layer MVT splicer, provenance assembly, the zoom
-compression policy and MLT layer prep. Proposed:
-`assemble/{schedule, encode, artifact, report}`.
-
-The ocean hunt adds: the splice decompresses the freshly encoded OSM tile to
-append the artifact's ocean field and recompresses it. Injecting the
-artifact's ocean layer bytes before compression (passing the raw layer field
-into `encode_tile_batch_mvt` for non-band tiles) removes a gunzip+gzip per
-spliced tile and the "unexpectedly contains computed ocean" decode.
-
-Reported by the pipeline and ocean hunts.
+Reported by the pipeline hunt.
 
 ## STR-008 - Fix the dependency edges that point the wrong way
 
@@ -261,15 +251,16 @@ non-ownership half. `ocean/mod.rs` still holds three jobs: artifact identity
 parsing, mmap, `read_exact_at`, ring role by signed area) and emission glue
 (union, `ocean_params`, `OceanAcc`, sink, rayon splitting, stats atomics).
 `ocean_build`, retention, `yyyymmdd_utc` and `is_retained_artifact_name`
-live in `pipeline/mod.rs`; run copies, splice and the hand-rolled protobuf
-field scanner (`ocean_layer_field`, `read_varint`, `raw_contains_ocean`)
-live in `pipeline/assemble.rs`.
+live in `pipeline/mod.rs`. (The consumer half - run-copy planning and the
+ocean layer field scanner - now has its own module,
+`pipeline/assemble/artifact.rs`, apart from partition scheduling; it stays
+under assembly because it produces assembly's writer items, while
+admission, directory access and band ownership stay in `ocean/`.)
 
 Proposed: `policy.rs` (policy version, `ocean_params`), `key.rs`,
 `shapefile.rs` (a reader yielding projected polygons with no sort or pyramid
-deps, testable without a `SortWriter`), `emit.rs`, and `artifact/merge.rs`
-and `artifact/build.rs` taking the assemble and pipeline halves above, so
-assemble stops interleaving partition scheduling with MVT field surgery.
+deps, testable without a `SortWriter`), `emit.rs`, and `artifact/build.rs`
+taking the pipeline half above.
 
 Reported by the ocean and coordinate-spaces hunts.
 
@@ -319,7 +310,7 @@ docs. What remains has no home yet:
   triples, and `TileId::coord` returns one.
 - Raw ids where they are not addresses or have not been typed: archive runs
   start at a `TileId`, but range ends, `OversizeTile`, the artifact run
-  arithmetic in `assemble.rs` (`artifact_run_copy_items` and
+  arithmetic in `assemble/artifact.rs` (`artifact_run_copy_items` and
   `PartitionItem::RunCopy`'s `offset`/`length` pair rather than a
   `BlobRef`) and the `OceanTiles::runs_in`/`run_covering` probes keep `u64`.
 - `SortKey` (`type SortKey = u64`; `make_sort_key(TileId, layer: u8,
@@ -531,9 +522,8 @@ types live in `mvt/`, and MLT consumes them through accessors that exist only
 for it. Proposed: a format-independent `tile_model/` (layers, features,
 attributes, interning, post-processing) with `mvt` and `mlt` as sibling
 sinks. `wire_format::add_feature_to_layer` decodes a sort record directly into
-a `LayerBuilder`, interning as it goes and handling per-worker Vec pools, so
-the codec depends on the tile model and the assembly pooling strategy;
-proposed: `wire_format` yields a borrowed
+a `LayerBuilder`, interning as it goes, so the codec depends on the tile
+model; proposed: `wire_format` yields a borrowed
 `FeatureRecord<'a> { id, geom: GeomView<'a>, attrs: AttrIter<'a> }` with a
 `ValueTag` enum and `read -> Result`, encoder and decoder side by side with a
 round-trip property test (today the layout is mirrored by hand: header size
@@ -603,7 +593,9 @@ life of the run; a concurrent rewrite is undefined behavior (or SIGBUS under
 a borrowed slice), and nothing enforces the assumption - the artifact is
 "built once per shapefile release", which is a habit, not a lock. Every
 other reader uses positional reads and turns truncation into an I/O error.
-Options: copy the artifact's blobs on read (measure the splice cost first),
+Options: copy the artifact's blobs on read (measure the cost first: run
+copies hand the writer borrowed blobs, and every encoded tile the artifact
+owns extracts its ocean layer field from one),
 take an advisory lock plus a size/mtime recheck at assembly, or build to a
 new path and never rewrite in place (retention already names artifacts by
 date). Found while unifying the readers.

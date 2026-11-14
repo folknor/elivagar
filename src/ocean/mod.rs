@@ -1870,9 +1870,7 @@ mod tests {
         let (_, start, len) = acc.records[0];
         let data = &acc.payload[start..start + len];
         let mut layer = crate::mvt::LayerBuilder::new("ocean");
-        let mut geom_pool = Vec::new();
-        let mut tags_pool = Vec::new();
-        crate::wire_format::add_feature_to_layer(&mut layer, data, &mut geom_pool, &mut tags_pool);
+        crate::wire_format::add_feature_to_layer(&mut layer, data);
         assert_eq!(layer.features()[0].id, Some(0));
 
         let mut encoded = Vec::new();

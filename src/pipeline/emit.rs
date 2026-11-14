@@ -1505,9 +1505,7 @@ mod landing2_tests {
             assert_eq!(attr_count(&rec.data), want_count, "z{z}");
 
             let mut lb = mvt::LayerBuilder::new("test");
-            let mut gp = Vec::new();
-            let mut tp = Vec::new();
-            crate::wire_format::add_feature_to_layer(&mut lb, &rec.data, &mut gp, &mut tp);
+            crate::wire_format::add_feature_to_layer(&mut lb, &rec.data);
             let feature = lb.test_feature(0);
             let keys: Vec<&str> = feature
                 .tags

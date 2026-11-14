@@ -1499,17 +1499,7 @@ fn shared_layer_prep_model_matches_mvt_layer_assembly() {
     let tile_id = TileId::at(4, 8, 9);
     let tile = parity_pending_tile(tile_id);
 
-    let mut scratch = AssemblyScratch {
-        encode_scratch: mvt::EncodeScratch::new(),
-        merge_scratch: mvt::MergeScratch::new(),
-        line_merge_scratch: mvt::LineMergeScratch::new(),
-        geom_pool: Vec::new(),
-        tags_pool: Vec::new(),
-        compression_levels: [const { None }; 11],
-        gz_buf: Vec::new(),
-        mvt_buf: Vec::new(),
-        layers: [const { None }; LAYER_COUNT],
-    };
+    let mut scratch = AssemblyScratch::new();
     let non_empty = prepare_non_empty_layers(&mut scratch, &tile);
     let model = mlt::build_tile_model(&non_empty);
     let mvt_encoded = encode_tile_batch(
@@ -1989,9 +1979,7 @@ fn decode_attr_count(data: &[u8]) -> u8 {
 /// Decode the full record via add_feature_to_layer and return the layer builder.
 fn decode_to_layer(data: &[u8]) -> mvt::LayerBuilder {
     let mut lb = mvt::LayerBuilder::new("test");
-    let mut gp = Vec::new();
-    let mut tp = Vec::new();
-    crate::wire_format::add_feature_to_layer(&mut lb, data, &mut gp, &mut tp);
+    crate::wire_format::add_feature_to_layer(&mut lb, data);
     lb
 }
 

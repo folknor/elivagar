@@ -157,8 +157,9 @@ impl EncodeScratch {
     }
 }
 
-/// Reusable scratch buffers for geometry merging, avoiding per-tile allocation.
-/// Created once per thread via `thread_local!`, reused across all tiles on that worker.
+/// Scratch buffers for geometry merging, reused across the merged runs and
+/// layers of one tile. Assembly builds one per tile and drops it with the
+/// tile: a per-thread pool grew to the fattest tile each worker ever saw.
 pub struct MergeScratch {
     pub(super) indices: Vec<usize>,
     pub(super) geom: Vec<u32>,
@@ -293,26 +294,6 @@ impl LayerBuilder {
 
     pub fn add_feature(&mut self, feature: Feature) {
         self.features.push(feature);
-    }
-
-    /// Reclaim feature buffers and clear interning state, keeping allocated capacity.
-    /// Used by assembly `thread_local!` to reuse `LayerBuilder` across tiles - the
-    /// HashMap bucket arrays survive, avoiding re-allocation on the next tile.
-    #[cfg_attr(not(feature = "mlt"), allow(dead_code))]
-    pub fn prepare_for_reuse(
-        &mut self,
-        geom_pool: &mut Vec<Vec<u32>>,
-        tags_pool: &mut Vec<Vec<(u32, u32)>>,
-    ) {
-        for f in self.features.drain(..) {
-            geom_pool.push(f.geometry);
-            tags_pool.push(f.tags);
-        }
-        self.keys.clear();
-        self.key_map.clear();
-        self.values.clear();
-        self.value_map.clear();
-        self.string_value_map.clear();
     }
 
     fn encode(&self, buf: &mut Vec<u8>, s: &mut EncodeScratch) {

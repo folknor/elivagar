@@ -359,12 +359,7 @@ pub(crate) fn encode_feature_data(
 // Visible only without the hotpath feature (the measure macro's wrapping
 // masks it under --all-features).
 #[allow(clippy::too_many_lines)]
-pub(crate) fn add_feature_to_layer(
-    layer: &mut LayerBuilder,
-    data: &[u8],
-    geom_pool: &mut Vec<Vec<u32>>,
-    tags_pool: &mut Vec<Vec<(u32, u32)>>,
-) {
+pub(crate) fn add_feature_to_layer(layer: &mut LayerBuilder, data: &[u8]) {
     if data.len() < 13 {
         return;
     }
@@ -385,17 +380,15 @@ pub(crate) fn add_feature_to_layer(
 
     // geometry commands - bulk memcpy (little-endian wire format matches native u32 layout).
     // Each Feature owns its Vec<u32> because merge_same_attr_geometries needs random
-    // access across all Features in a tile. Buffers come from reusable pools and are
-    // returned after the tile is encoded.
+    // access across all Features in a tile. Buffers are sized exactly and
+    // dropped with the tile.
     let cmd_count = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("cmd_count")) as usize;
     pos += 4;
     let cmd_bytes = cmd_count * 4;
     if pos + cmd_bytes > data.len() {
         return;
     }
-    let mut geom_cmds = geom_pool.pop().unwrap_or_default();
-    geom_cmds.clear();
-    geom_cmds.resize(cmd_count, 0);
+    let mut geom_cmds = vec![0u32; cmd_count];
     // SAFETY: On little-endian, u32 byte layout matches the wire format.
     // We copy `cmd_bytes` bytes from the data slice into the Vec's backing memory.
     // The source slice bounds are checked above. The destination is exactly `cmd_bytes` bytes.
@@ -416,8 +409,7 @@ pub(crate) fn add_feature_to_layer(
     let attr_count = data[pos] as usize;
     pos += 1;
 
-    let mut tag_pairs = tags_pool.pop().unwrap_or_default();
-    tag_pairs.clear();
+    let mut tag_pairs = Vec::with_capacity(attr_count);
     for _ in 0..attr_count {
         if pos >= data.len() {
             break;
@@ -545,9 +537,7 @@ mod tests {
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 14);
 
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
 
         // Exactly 1 feature
         assert_eq!(layer.test_feature_count(), 1);
@@ -610,9 +600,7 @@ mod tests {
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 10);
 
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
 
         assert_eq!(layer.test_feature_count(), 1);
         let f = layer.test_feature(0);
@@ -632,9 +620,7 @@ mod tests {
         let encoded_z12 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 12);
 
         let mut layer2 = LayerBuilder::new("test2");
-        let mut gp2 = Vec::new();
-        let mut tp2 = Vec::new();
-        add_feature_to_layer(&mut layer2, &encoded_z12, &mut gp2, &mut tp2);
+        add_feature_to_layer(&mut layer2, &encoded_z12);
 
         let f2 = layer2.test_feature(0);
         assert_eq!(f2.tags.len(), 4);
@@ -664,9 +650,7 @@ mod tests {
         let encoded = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 14);
 
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
 
         assert_eq!(layer.test_feature_count(), 1);
         let f = layer.test_feature(0);
@@ -695,9 +679,7 @@ mod tests {
             let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
 
             let mut layer = LayerBuilder::new("test");
-            let mut gp = Vec::new();
-            let mut tp = Vec::new();
-            add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+            add_feature_to_layer(&mut layer, &encoded);
 
             let f = layer.test_feature(0);
             let (_, v0) = f.tags[0];
@@ -721,9 +703,7 @@ mod tests {
         let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
 
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
 
         let f = layer.test_feature(0);
         let (k0, v0) = f.tags[0];
@@ -751,9 +731,7 @@ mod tests {
         // Below boundary: only min_zoom <= 9 attrs survive.
         let encoded_z9 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 9);
         let mut layer_z9 = LayerBuilder::new("z9");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer_z9, &encoded_z9, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer_z9, &encoded_z9);
         let z9_tags = feature_tag_map(&layer_z9, 0);
         assert_eq!(z9_tags.len(), 2, "z9 must not include min_zoom=10 attrs");
         assert_eq!(
@@ -767,9 +745,7 @@ mod tests {
         // At boundary: min_zoom=10 attrs appear.
         let encoded_z10 = encode_feature_data(osm_id, geom_type, &geom_cmds, &attrs, 10);
         let mut layer_z10 = LayerBuilder::new("z10");
-        let mut gp2 = Vec::new();
-        let mut tp2 = Vec::new();
-        add_feature_to_layer(&mut layer_z10, &encoded_z10, &mut gp2, &mut tp2);
+        add_feature_to_layer(&mut layer_z10, &encoded_z10);
         let z10_tags = feature_tag_map(&layer_z10, 0);
         assert_eq!(z10_tags.len(), 4, "z10 should include all attrs");
         assert_eq!(
@@ -793,9 +769,7 @@ mod tests {
 
         let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 11);
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
 
         let tags = feature_tag_map(&layer, 0);
         assert_eq!(tags.len(), 2, "gated leading attr should be excluded");
@@ -818,9 +792,7 @@ mod tests {
         let encoded = encode_feature_data_with_attrs(7, GeomType::Point, &geom_cmds, &attrs_bytes);
 
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
         let f = layer.test_feature(0);
         assert_eq!(f.tags.len(), 1);
         assert_eq!(layer.test_key(f.tags[0].0), "kind");
@@ -837,9 +809,7 @@ mod tests {
 
         let encoded = encode_feature_data(42, GeomType::Point, &geom_cmds, &attrs, 4);
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
 
         let f = layer.test_feature(0);
         assert_eq!(
@@ -859,9 +829,7 @@ mod tests {
 
         let encoded = encode_feature_data(7, GeomType::Point, &geom_cmds, &attrs, 14);
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
 
         let f = layer.test_feature(0);
         assert_eq!(f.tags.len(), 255, "attrs must be capped to u8::MAX entries");
@@ -887,9 +855,7 @@ mod tests {
 
         let encoded = encode_feature_data(77, GeomType::Point, &geom_cmds, &attrs, 14);
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
 
         let f = layer.test_feature(0);
         assert_eq!(f.tags.len(), 255);
@@ -915,9 +881,7 @@ mod tests {
         // At z11, gated attrs are excluded and no cap is hit.
         let encoded_z11 = encode_feature_data(10, GeomType::Point, &geom_cmds, &attrs, 11);
         let mut layer_z11 = LayerBuilder::new("z11");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer_z11, &encoded_z11, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer_z11, &encoded_z11);
         let f11 = layer_z11.test_feature(0);
         assert_eq!(f11.tags.len(), 220);
         for (k, _) in &f11.tags {
@@ -927,9 +891,7 @@ mod tests {
         // At z12, both groups are eligible but capped at 255 total entries.
         let encoded_z12 = encode_feature_data(11, GeomType::Point, &geom_cmds, &attrs, 12);
         let mut layer_z12 = LayerBuilder::new("z12");
-        let mut gp2 = Vec::new();
-        let mut tp2 = Vec::new();
-        add_feature_to_layer(&mut layer_z12, &encoded_z12, &mut gp2, &mut tp2);
+        add_feature_to_layer(&mut layer_z12, &encoded_z12);
         let f12 = layer_z12.test_feature(0);
         assert_eq!(f12.tags.len(), 255);
         let kind_count = f12
@@ -955,9 +917,7 @@ mod tests {
 
         let encoded = encode_feature_data(1, GeomType::Point, &geom_cmds, &attrs, 14);
         let mut layer = LayerBuilder::new("test");
-        let mut gp = Vec::new();
-        let mut tp = Vec::new();
-        add_feature_to_layer(&mut layer, &encoded, &mut gp, &mut tp);
+        add_feature_to_layer(&mut layer, &encoded);
 
         let (_, value_idx) = layer.test_feature(0).tags[0];
         assert_eq!(

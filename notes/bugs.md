@@ -29,7 +29,7 @@ raw key, and the merge reader never re-derives its partition. Keys are
 checked where they are minted (`make_sort_key` refuses tiles beyond z14) and
 in `partition_from_key`, but a corrupted or foreign chunk record reaches
 assembly unchecked. A key for a z15 tile then indexes slot 15 of the
-`[u64; ZOOM_COUNT]` per-zoom counters in `assemble::write_encoded_item` and
+`[u64; ZOOM_COUNT]` per-zoom counters in `assemble::report::WriteTally` and
 panics; a valid z14 key from another partition is written out of order and
 caught only by the writer's ordering check. The piece pre-scan checks the
 bucket range but runs only for split partitions. Proposed: validate every
@@ -54,23 +54,6 @@ Found by the coordinates-core landing's review.
 
 # Encoding and the sort record
 
-## BUG-038 - Per-tile `AssemblyScratch::new()` defeats the documented pooling
-
-`MergeScratch`, `LayerBuilder::prepare_for_reuse` and `AssemblyScratch` docs
-all describe a `thread_local!` reused across tiles, and the
-`merge_same_attr_geometries` comment cites a 3.8 GB churn saving from keeping
-scratch at high-water capacity. In fact both `encode_tile_batch_mvt` and
-`encode_tile_batch_mlt` call `AssemblyScratch::new()` per tile inside the
-rayon closure; there is no `thread_local!` in assemble. Pools reuse only
-within one tile and `prepare_for_reuse` is a no-op on fresh builders. Either
-the thread-local was removed deliberately (delete the pool plumbing threaded
-through three public signatures) or lost in a refactor (the alloc profile that
-justified it has silently regressed). `brokkr tilegen --alloc` settles which.
-The `AssemblyScratch` header meanwhile contradicts its own constructor, which
-documents the per-tile allocation as deliberate - whichever way this is
-settled, the two must agree.
-
-Reported by the encoding hunt.
 
 ---
 

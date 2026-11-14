@@ -163,8 +163,8 @@ gzip, 1 for brotli, and 2 for none.
 
 The compression policy does not enter the ocean artifact key: changing
 compression effort preserves decoded MVT bytes. Artifact run copies may use
-a different compression level policy; spliced tiles are recompressed under
-the current policy. Decoded content changes require an ocean policy version
+a different compression level policy; an encoded tile that takes the
+artifact's ocean layer is compressed under the current policy. Decoded content changes require an ocean policy version
 change.
 
 `config.ocean.mode` is the **resolved** mode, taken from `OceanMode` rather
