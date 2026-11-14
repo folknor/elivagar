@@ -107,7 +107,7 @@ pub(super) fn prepare_relation(
 }
 
 /// Per-worker accumulator for streaming relation outputs. Modeled on
-/// `WayAcc` in phase12.rs - each rayon worker hands its sink to the shared
+/// the way phase's `WayAcc` (`phase12::ways`) - each rayon worker hands its sink to the shared
 /// spill coalescer, eliminating the `Vec<Vec<SortRecord>>`
 /// double-materialization without fragmenting the chunk directory.
 pub(super) struct RelAcc {

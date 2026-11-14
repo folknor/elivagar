@@ -192,21 +192,6 @@ than in `provenance.rs`.
 
 Reported by the archive-surface, run-contract and pipeline hunts.
 
-## STR-007 - Split `phase12.rs` along its real seams
-
-`phase12.rs` (about 2200 lines) holds PBF block routing (two `macro_rules!`
-that mutably capture about 20 locals because no struct owns the phase state),
-the node worker, the way admission and dispatch actor with its condvar
-budget, way plans and shared-node pin detection, the relation prepass,
-data-extent tracking (eight `min/max_*_e7` locals merged by hand in the join
-macro), and boundary resolution. Proposed: a `Phase12` struct owning
-channels, handles, tallies and extent so the macros become methods; an
-`Extent` struct with `merge`; split into
-`phase12/{mod,router,node_worker,way_worker,plans,extent}.rs` with the
-prepass in `relations/`.
-
-Reported by the pipeline hunt.
-
 ## STR-008 - Fix the dependency edges that point the wrong way
 
 - `sort.rs` imports `crate::pipeline::emit::RecordTally`: infrastructure
@@ -450,7 +435,7 @@ The profile is a hand translation of a declarative document
 (`tests/fixtures/shortbread.yml`, checked in and read by nothing) into about
 40 imperative matcher functions, and per-layer facts leak out of
 `shortbread/` into emit.rs (min-area and subpixel exemptions, area-based zoom
-overrides), phase12.rs (boundary match construction), assemble.rs (merge
+overrides), phase12's way path (boundary match placement), assemble (merge
 policy), wire_format.rs (key and kind vocabularies), verify.rs (paint-order
 layer set), pmtiles_writer.rs (vector_layers) and ocean.rs (ocean policy).
 
@@ -490,8 +475,8 @@ It is mutated after construction by `resolve_boundary_match` (overwrite) and
 `enrich_polygon_matches` (push attr, lower zoom), so the profile's answer is
 provisional and the final answer is assembled in the pipeline.
 `LayerMatch.max_zoom` is always 14. `(min_zoom, max_zoom, paint_rank)` are
-three adjacent `u8`s constructed positionally in
-`phase12::resolve_boundary_match` and many tests. A
+three adjacent `u8`s each constructor sets independently
+(`shortbread::boundaries::boundary_line` among them) and many tests. A
 `const _: () = assert!(size_of::<LayerMatch>() == 408)` pins a struct whose
 inline `SmallVec<[Attr; 8]>` of string-keyed tuples is most of the size.
 Proposed: a `Hit` the pipeline completes by calling a profile function with
@@ -599,6 +584,17 @@ owns extracts its ocean layer field from one),
 take an advisory lock plus a size/mtime recheck at assembly, or build to a
 new path and never rewrite in place (retention already names artifacts by
 date). Found while unifying the readers.
+
+## STR-040 - Tiles sharing one artifact run each re-gunzip the same blob
+
+When assembly splices the artifact's ocean layer into an encoded OSM tile,
+each such tile decompresses its artifact blob to extract the ocean field. The
+artifact is run-heavy (it addresses far more tiles than it stores payloads),
+so many spliced tiles can share one run's blob and each gunzips it again.
+Caching the extracted ocean field per run (or per blob offset) within a
+partition batch would remove the repeats; measure the spliced-tile count and
+the gunzip share of `assemble` before deciding it pays. Found while moving
+the splice ahead of compression in `pipeline/assemble/encode.rs`.
 
 ## STR-034 - `verify.rs` is four tools in one file
 

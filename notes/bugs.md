@@ -82,3 +82,17 @@ safe.
 
 Reported by the MVT decoder consolidation implementer, 2026-11-14.
 
+## BUG-067 - `relation_blocks_drop_rss_kb` measures dropping an empty buffer
+
+Phase12 samples RSS around `drop(relations.blocks)` after the relation tail
+and emits the difference as the `relation_blocks_drop_rss_kb` counter. But
+the buffered blocks were already moved out (`std::mem::take`) into the
+iterator handed to `process_relation_blocks`, which consumes and drops them
+during the tail; on the spilled path the buffer was emptied when the cap
+tripped. The drop being measured is always of an empty `Vec`, so the counter
+reads noise, not the release of the relation stock. Either measure across
+the tail's consumption or delete the counter. Behavior was carried over
+unchanged by the phase12 module split.
+
+Reported by the phase12 split implementer, 2026-11-14.
+

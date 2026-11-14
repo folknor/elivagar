@@ -80,7 +80,8 @@ over each layer's own range; emission is cut). What remains:
   `notes/structural.md`.
 - The window is still two bare `u8`s checked in `run` (`min <= max <=
   MAX_ZOOM`); no `ZoomRange` type carries the validation, and `EmitCtx`,
-  `relations.rs` and `phase12.rs` thread the pair separately. Ocean's
+  `relations.rs` and phase12 (node workers, way dispatch) thread the pair
+  separately. Ocean's
   `PassWindow` (`ocean/plan.rs`) is a pass-local intersection of it, not a
   validated window type.
 
