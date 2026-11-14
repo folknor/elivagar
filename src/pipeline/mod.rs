@@ -164,10 +164,6 @@ pub struct TilegenConfig {
     /// exact MVT/gzip z0-14 contract at its compression level; naming it for
     /// any other run, or without `ocean_shapefile`, is an error.
     pub ocean_tiles: Option<PathBuf>,
-    /// Metadata key written by the ocean-only artifact builder.
-    pub ocean_artifact_key: Option<crate::ocean::OceanArtifactKey>,
-    /// Restrict PMTiles metadata to the ocean layer for an ocean artifact.
-    pub ocean_only_metadata: bool,
     /// Skip to a later phase, reusing checkpoint data from a previous run.
     pub skip_to: Option<SkipTo>,
     /// Keep tile blob in memory instead of streaming to a temp file.
@@ -869,20 +865,22 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         tile_size_diag,
     ) = assemble::phase_assemble_with_ocean(
         &mut sort_reader,
-        config,
+        assemble::AssembleSpec::tileset(
+            config,
+            data_bounds,
+            active_ocean_artifact,
+            assemble::TilesetProvenance {
+                input_identity,
+                effective: phase12_stats
+                    .as_ref()
+                    .map(|s| s.effective)
+                    .or(resumed_effective),
+                resumed_from: skip,
+                ocean_mode: ocean_mode.clone(),
+                low_zoom_source,
+            },
+        )?,
         &resources,
-        &data_bounds,
-        active_ocean_artifact,
-        assemble::RunProvenance {
-            input_identity: Some(input_identity),
-            effective: phase12_stats
-                .as_ref()
-                .map(|s| s.effective)
-                .or(resumed_effective),
-            resumed_from: skip,
-            ocean_mode: ocean_mode.clone(),
-            low_zoom_source,
-        },
     )?;
     // Drop the reader so every chunk reader flushes its byte tally before we
     // emit the merge counters.

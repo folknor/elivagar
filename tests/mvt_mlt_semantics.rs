@@ -179,8 +179,6 @@ fn run_tilegen(
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,

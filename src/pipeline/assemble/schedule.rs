@@ -10,7 +10,7 @@ use crate::shortbread::Layer;
 use crate::sort;
 use crate::tiling::TileId;
 
-use super::super::{PipelineError, TileContract, TilegenConfig};
+use super::super::{PipelineError, TileContract};
 use super::artifact::{
     ArtifactCursor, ArtifactPartitionCtx, artifact_run_copy_items, plan_artifact_items,
 };
@@ -272,7 +272,8 @@ fn batch_encoded_bytes(batch: &PartitionBatch) -> usize {
 pub(super) fn phase_assemble_partitions(
     partitions: &[sort::SortPartition],
     mut pmtiles: PmtilesWriter,
-    config: &TilegenConfig,
+    contract: TileContract,
+    compression: sort::ChunkCompression,
     resources: &crate::resources::Resources,
     ocean: Option<&crate::ocean::OceanTiles>,
 ) -> Result<AssembleCore, PipelineError> {
@@ -302,7 +303,7 @@ pub(super) fn phase_assemble_partitions(
             UnionPartition::Sort(partition)
                 if partition.record_bytes() > split_target.saturating_mul(2) =>
             {
-                match plan_pieces(partition, config.compress_sort_chunks, split_target)
+                match plan_pieces(partition, compression, split_target)
                     .map_err(PipelineError::from)?
                 {
                     Some(pieces) => {
@@ -371,8 +372,6 @@ pub(super) fn phase_assemble_partitions(
     );
     let write_progress_ref = &write_progress;
 
-    let compression = config.compress_sort_chunks;
-    let contract = TileContract::from_config(config);
     let assemble_budget = resources.assemble_batch;
     let artifact_ctx = ocean.map(ArtifactPartitionCtx::new).transpose()?;
 

@@ -444,8 +444,6 @@ fn injected_fixture(payload: Option<&[u8]>) -> Result<Phase12Stats, PipelineErro
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -575,8 +573,6 @@ fn injected_pins_fixture(
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1575,7 +1571,7 @@ fn write_assembly_pbf(path: &std::path::Path) {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn assembly_requires_run_identity_and_preserves_extract_header_bounds() {
+fn tileset_assembly_requires_consistent_provenance_and_preserves_extract_header_bounds() {
     use crate::geometry::projection::{Point, unproject};
     let dir = tempfile::Builder::new()
         .tempdir_in(env!("CARGO_MANIFEST_DIR"))
@@ -1595,41 +1591,31 @@ fn assembly_requires_run_identity_and_preserves_extract_header_bounds() {
         max_y: 0.5,
     };
     let mut sort_reader = one_tile_sort_reader(&dir.path().join("chunks"));
-    let error = assemble::phase_assemble_with_ocean(
-        &mut sort_reader,
-        &config,
-        &test_resources(&config),
-        &bounds,
-        None,
-        assemble::RunProvenance::default(),
-    )
-    .expect_err("ordinary assembly needs an input identity");
-    assert!(error.0.contains("input PBF identity"));
+    let provenance = || assemble::TilesetProvenance {
+        input_identity: identity,
+        effective: None,
+        resumed_from: None,
+        ocean_mode: OceanMode::None,
+        low_zoom_source: None,
+    };
+    // The identity is a required field, so only the name can be missing.
     let pbf_path = std::mem::take(&mut config.pbf_path);
-    let error = assemble::phase_assemble_with_ocean(
-        &mut sort_reader,
-        &config,
-        &test_resources(&config),
-        &bounds,
-        None,
-        assemble::RunProvenance {
-            input_identity: Some(identity),
-            ..Default::default()
-        },
-    )
-    .expect_err("ordinary assembly needs an input name");
+    let Err(error) = assemble::AssembleSpec::tileset(&config, bounds, None, provenance()) else {
+        panic!("ordinary assembly needs an input name");
+    };
     assert!(error.0.contains("input PBF filename"));
     config.pbf_path = pbf_path;
+    // Ocean facts must agree: computed-ocean low-zoom source without ocean
+    // is refused at construction.
+    let mismatched = assemble::TilesetProvenance {
+        low_zoom_source: Some(crate::provenance::ActiveLowZoomSource::Full),
+        ..provenance()
+    };
+    assert!(assemble::AssembleSpec::tileset(&config, bounds, None, mismatched).is_err());
     assemble::phase_assemble_with_ocean(
         &mut sort_reader,
-        &config,
+        assemble::AssembleSpec::tileset(&config, bounds, None, provenance()).expect("spec"),
         &test_resources(&config),
-        &bounds,
-        None,
-        assemble::RunProvenance {
-            input_identity: Some(identity),
-            ..Default::default()
-        },
     )
     .expect("assemble extract");
     let reader = crate::archive::Archive::open(&config.output_path).expect("open");
@@ -1670,34 +1656,31 @@ fn ocean_artifact_assembly_has_world_bounds_and_no_run_provenance() {
         },
         compression_level: 6,
     };
-    let config = TilegenConfig {
-        pbf_path: std::path::PathBuf::new(),
-        output_path: dir.path().join("ocean.pmtiles"),
-        tmp_dir: dir.path().join("scratch"),
-        ocean_artifact_key: Some(key.clone()),
-        ocean_only_metadata: true,
-        ..minimal_config()
-    };
+    let output_path = dir.path().join("ocean.pmtiles");
+    let tmp_dir = dir.path().join("scratch");
+    // The artifact streams its tile blob through scratch, as ocean_build does.
+    std::fs::create_dir_all(&tmp_dir).expect("scratch dir");
+    // A key whose level or zoom range the artifact cannot honour is refused.
+    let mut bad_level = key.clone();
+    bad_level.compression_level = 11;
+    assert!(assemble::AssembleSpec::ocean_artifact(bad_level, &output_path, &tmp_dir).is_err());
+    let mut bad_zooms = key.clone();
+    bad_zooms.source.max_zoom = 12;
+    assert!(assemble::AssembleSpec::ocean_artifact(bad_zooms, &output_path, &tmp_dir).is_err());
     let mut sort_reader = one_tile_sort_reader(&dir.path().join("chunks"));
     assemble::phase_assemble_with_ocean(
         &mut sort_reader,
-        &config,
-        &test_resources(&config),
-        &MercBbox {
-            min_x: 0.5,
-            min_y: 0.25,
-            max_x: 0.6,
-            max_y: 0.5,
-        },
-        None,
-        assemble::RunProvenance {
-            ocean_mode: OceanMode::Band { key: key.clone() },
-            ..Default::default()
-        },
+        assemble::AssembleSpec::ocean_artifact(key.clone(), &output_path, &tmp_dir)
+            .expect("artifact spec"),
+        &test_resources(&minimal_config()),
     )
-    .expect("artifact assembly must not open an empty PBF path");
-    let reader = crate::archive::Archive::open(&config.output_path).expect("open");
+    .expect("artifact assembly opens no PBF");
+    let reader = crate::archive::Archive::open(&output_path).expect("open");
     let header = reader.header();
+    assert_eq!((header.min_zoom, header.max_zoom), (0, 14));
+    assert_eq!(header.center.zoom, 2);
+    assert_eq!(header.tile_type, crate::archive::TileType::Mvt);
+    assert_eq!(header.tile_compression, crate::archive::Compression::Gzip);
     assert_eq!(
         header.bounds,
         crate::archive::E7Bbox {
@@ -1713,6 +1696,18 @@ fn ocean_artifact_assembly_has_world_bounds_and_no_run_provenance() {
     let metadata: serde_json::Value = serde_json::from_str(&text).expect("JSON");
     assert!(metadata.get("elivagar").is_none());
     assert!(metadata.get("source_pbf").is_none());
+    let layers = metadata["vector_layers"].as_array().expect("vector_layers");
+    assert_eq!(
+        layers.len(),
+        1,
+        "the artifact declares only the ocean layer"
+    );
+    assert_eq!(layers[0]["id"], "ocean");
+    let keys: Vec<&String> = metadata.as_object().expect("object").keys().collect();
+    assert!(
+        !keys.iter().any(|k| k.contains("replication")),
+        "no replication timestamp member: {keys:?}"
+    );
 }
 
 #[test]
@@ -1733,8 +1728,6 @@ fn phase_assemble_propagates_source_pbf_filename_to_metadata() {
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1792,8 +1785,6 @@ fn phase_assemble_propagates_replication_timestamp_to_metadata() {
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1842,8 +1833,6 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,
@@ -1900,8 +1889,6 @@ fn phase_assemble_tile_format_sets_consistent_payload_contract() {
             ocean_shapefile: None,
             ocean_simplified_shapefile: None,
             ocean_tiles: None,
-            ocean_artifact_key: None,
-            ocean_only_metadata: false,
             skip_to: None,
             in_memory: true,
             compression_level: 6,
@@ -4094,8 +4081,6 @@ fn minimal_config() -> TilegenConfig {
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
         skip_to: None,
         in_memory: true,
         compression_level: 6,

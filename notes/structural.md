@@ -24,35 +24,18 @@ decision it lives with that decision in `notes/consolidations.md`, not here.
 
 ## STR-001 - Replace the flat `TilegenConfig` with a typed run plan
 
-`TilegenConfig` is one flat bag of primitives holding inputs (pbf, three
-ocean `Option<PathBuf>`s), the producer contract (zooms, fanout caps,
-simplify factor), the tile contract (format, compression, level), resources
-(budgets, threads, dedup cap, `in_memory`), execution mode (`skip_to`,
-`tmp_dir`, `force_sorted`, `allow_unsafe_flat_index`, `locations_on_ways`,
-`output_path`), and artifact-builder-only flags (`ocean_artifact_key`,
-`ocean_only_metadata`). Library callers can construct states the CLI never
-would: simplified-without-full (silently no ocean), `ocean_tiles` without
-shapefiles, artifact key together with `ocean_tiles` (builder and consumer at
-once), `ocean_only_metadata` with OSM layers, MLT with brotli,
-`polygon_simplify_factor = NaN` (which would serialize into the contract),
-`min_zoom > max_zoom`. Some are rejected late in `run()`, some only in
-`main.rs`, some never. `main.rs` already has the right shape for ocean
-(`OceanInputs { low, high, artifact }`, validated) and then flattens it back.
-
-Proposed by all four hunts that touched it, in compatible shapes:
-`RunPlan { input, ocean: OceanPlan, producer: ProducerContract, tile:
-TileContract, chunks: ChunkFormat, resources: Resources, exec: Execution,
-output: Output }` (pipeline hunt) or
-`RunSpec { input, contract: ContractConfig }` + `Resources` +
-`Action { output, skip_to }` (run-contract hunt), built by fallible
-constructors that hold every validation now spread across `main.rs`, `run()`
-and `resolve_ocean` / `OceanPlan::new`. `ProducerContract` derives Serialize + PartialEq
-and is the checkpoint comparison key, so the pairwise `producer_config_*`
-tests go away. `TilegenConfig` disappears or becomes a thin serde DTO.
-Payoff: a new contract-relevant setting cannot be added without landing in
-provenance (today it silently defaults to "not in the contract").
-
-Reported by the pipeline, run-contract, ocean and storage hunts.
+Narrowed. The artifact builder no longer fakes a run: `ocean_artifact_key`
+and `ocean_only_metadata` are gone and assembly takes an `AssembleSpec`
+role. What remains: `run()` and its phases still read the public
+`TilegenConfig` directly and re-derive the window, tile contract and
+producer config at several sites (`TileContract::from_config`,
+`configured_tile_contract`, `zoom_window`, `ProducerConfig::new`), so
+execution and provenance hold independent derivations of the same values,
+and `ArchiveRole::Tileset` still carries `&TilegenConfig` for
+`provenance::build`. The residue is a crate-private resolved plan built once
+at the top of `run` whose parts phase12, assembly, the checkpoint and
+provenance all consume. The settled shape and its rulings are in
+`notes/run-plan-design.md` (link 3).
 
 ## STR-002 - Make `run()` a phase state machine with typed hand-offs
 
@@ -132,52 +115,18 @@ a typed or counted `RecordError` in the sort decoder.
 
 Reported by every hunt.
 
-## STR-004 - The ocean artifact builder should not be a faked tilegen run
-
-`ocean_build` constructs a full `TilegenConfig` with `pbf_path:
-PathBuf::new()`, zeroed caps, `locations_on_ways: false` and two builder-only
-flags (`ocean_artifact_key`, `ocean_only_metadata`, which can disagree with
-each other) so it can call `assemble::phase_assemble`. That pushes builder
-concerns into the run config and into assemble (`set_ocean_only_metadata`,
-the `ocean_artifact` metadata member, `write_provenance`'s "the artifact
-builder supplies its own key via config" branch), and it is why artifacts
-carry no provenance block.
-
-Proposed: factor "chunks to archive" out of assemble with an
-`ArchiveRole { Run(RunProvenance), OceanArtifact(OceanArtifactKey) }` /
-`Output::{Tileset, OceanArtifact { key }}` /
-`AssembleSpec { format, compression, zooms, metadata: MetadataSpec }`
-argument that both `run` and the builder construct; the builder never sees
-`fanout_caps`. Pre-1.0 and with a policy bump the normal way to rotate the
-artifact, the ocean hunt also proposes folding the top-level `ocean_artifact`
-metadata member into a typed, versioned `elivagar.ocean_artifact` member of
-the same provenance schema, so one reader parses both (`provenance.rs`
-currently explains it cannot move "because it would invalidate every artifact
-already built").
-
-Reported by the pipeline, run-contract and ocean hunts.
-
 ## STR-005 - Move domain validation from `main.rs` into the library
 
-Only `main.rs` holds: `--ocean` spec parsing and the partition rule,
-`--fanout-cap` parsing and layer-name resolution, the
-`polygon_simplify_factor` range check (`process::exit` from inside a struct
-literal), the MLT feature check, and `threads` defaulting. Library callers
-(brokkr, tests, `ocean_build` itself) bypass all of it, and brokkr's
-`--dry-run` cannot reach the ocean resolver. `main.rs` tests the ocean
-partition rules because that is where the parser lives. `SkipTo`/`SkipToArg`,
-`TileFormatArg`, `TileCompressionArg`, `SortChunkCompressionArg` duplicate
-library enums with hand mappings. `main.rs` also hosts the 270-line `diag`
-implementation.
-
-Proposed: constructors on the typed config (`OceanPlan::parse`,
-`FromStr for Layer` / `LayerCapSpec`, a validated `SimplifyFactor` holding the
-f64 bits); `main` becomes clap structs plus one `TryFrom<RunArgs>`; derive
-`ValueEnum` on the library enums behind a `cli` feature or keep mappings in
-one `cli` module; `diag` moves into the library beside svg/inspect or shrinks
-to a `tile_detail` printer.
-
-Reported by the pipeline, run-contract and layer-identity hunts.
+Only `main.rs` holds: `--ocean` spec parsing and the z0-z14 partition rule
+(`parse_ocean_spec`, `resolve_ocean_inputs`, its ten tests),
+`--fanout-cap` parsing and layer-name resolution (`process::exit` paths),
+the `polygon_simplify_factor` range check (which lets NaN through, and which
+library callers bypass entirely), and the early MLT-feature refusal (the
+library refuses only at the first encoded batch). `SkipToArg`,
+`TileFormatArg`, `TileCompressionArg` and `SortChunkCompressionArg`
+duplicate library enums with hand mappings. (`diag` already moved into the
+library; `threads` defaulting is already `resources::default_threads`.)
+The settled shape is link 2 of `notes/run-plan-design.md`.
 
 ## STR-008 - Fix the dependency edges that point the wrong way
 

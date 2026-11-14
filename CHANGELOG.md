@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Breaking: `TilegenConfig` loses `ocean_artifact_key` and
+  `ocean_only_metadata`. They existed only so `ocean_build` could fake a
+  tilegen run; the artifact is now its own assembly role, which derives its
+  whole tile contract from the artifact key and refuses a key naming a
+  compression level or zoom range the artifact does not have. A run can no
+  longer be configured as builder and consumer at once. Artifact and tile
+  output are unchanged.
+
 - The `build.dirty` provenance flag no longer reads a tree whose only
   change is `.brokkr/results.db` as dirty when that path sorts first, reads
   quoted markdown names as markdown, judges new untracked directories file

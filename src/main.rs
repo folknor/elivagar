@@ -624,8 +624,6 @@ fn run(args: RunArgs) {
         ocean_shapefile: ocean_inputs.high,
         ocean_simplified_shapefile: ocean_inputs.low,
         ocean_tiles: ocean_inputs.artifact,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
         skip_to,
         in_memory: args.in_memory,
         compression_level: args.compression_level,

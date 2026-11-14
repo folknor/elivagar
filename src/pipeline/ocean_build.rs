@@ -3,15 +3,12 @@
 // pipeline rather than under `ocean/`, which the pipeline depends on and
 // which must not depend back on assembly.
 
-use super::{
-    OceanMode, PipelineError, SORT_CHUNKS_DIR, TileCompression, TilePayloadFormat, TilegenConfig,
-    assemble, validate_compression_level,
-};
+use super::{PipelineError, SORT_CHUNKS_DIR, assemble, validate_compression_level};
 use crate::geometry::projection::MercBbox;
-use crate::shortbread;
+use crate::resources::ResourceRequest;
 use crate::sort;
 use crate::tiling::ZoomRange;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Build the durable world-ocean artifact without opening an OSM PBF. It uses
 /// the normal ocean, external-sort, and partitioned assembly path so artifact
@@ -96,53 +93,20 @@ pub fn ocean_build(
     };
     writer.flush()?;
     let mut reader = writer.finish()?;
-    let config = TilegenConfig {
-        pbf_path: PathBuf::new(),
-        output_path: output_path.to_path_buf(),
-        tmp_dir: tmp_dir.to_path_buf(),
-        min_zoom: crate::ocean::artifact::ARTIFACT_MIN_ZOOM,
-        max_zoom: crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
-        ocean_artifact_key: Some(key.clone()),
-        ocean_only_metadata: true,
-        skip_to: None,
-        in_memory: false,
-        compression_level,
-        force_sorted: false,
-        allow_unsafe_flat_index: false,
+    // Every budget at its default; the builder has no run config to ask.
+    let resources = crate::resources::Resources::resolve_request(&ResourceRequest {
         threads,
-        way_inflight_budget: None,
-        assemble_batch_budget: None,
+        way_inflight: None,
+        assemble_batch: None,
+        sort_chunk: None,
         dedup_cap: None,
-        sort_chunk_size: None,
-        locations_on_ways: false,
-        tile_format: TilePayloadFormat::Mvt,
-        tile_compression: TileCompression::Gzip,
-        compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [None; shortbread::Layer::count()],
-        polygon_simplify_factor: 1.0,
-    };
-    let resources = crate::resources::Resources::resolve(&config)?;
+    })?;
     resources.emit();
     // The durable artifact has no input PBF. Its top-level ocean_artifact key
     // identifies its shapefile sources and policy without changing the wire
     // metadata consumed by brokkr and OceanTiles::open. Assembly counts the
     // expected absence of run-shaped provenance without opening a PBF.
-    let _ = assemble::phase_assemble_with_ocean(
-        &mut reader,
-        &config,
-        &resources,
-        &world,
-        None,
-        assemble::RunProvenance {
-            input_identity: None,
-            effective: None,
-            resumed_from: None,
-            ocean_mode: OceanMode::Band { key },
-            low_zoom_source: Some(plan.low_zoom_source(crate::ocean::artifact::ARTIFACT_MIN_ZOOM)),
-        },
-    )?;
+    let spec = assemble::AssembleSpec::ocean_artifact(key, output_path, tmp_dir)?;
+    let _ = assemble::phase_assemble_with_ocean(&mut reader, spec, &resources)?;
     Ok(())
 }

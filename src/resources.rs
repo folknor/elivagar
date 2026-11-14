@@ -157,6 +157,17 @@ pub(crate) struct WayAdmission {
     pub(crate) node_workers: usize,
 }
 
+/// What a caller asked for: three optional byte budgets, an optional dedup
+/// cap and the worker sizing input. `None` selects the default.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResourceRequest {
+    pub(crate) threads: NonZeroUsize,
+    pub(crate) way_inflight: Option<ByteBudget>,
+    pub(crate) assemble_batch: Option<ByteBudget>,
+    pub(crate) sort_chunk: Option<ByteBudget>,
+    pub(crate) dedup_cap: Option<NonZeroUsize>,
+}
+
 /// The effective budgets, worker sizing and environment knobs of one run.
 #[derive(Clone, Debug)]
 pub(crate) struct Resources {
@@ -183,8 +194,21 @@ impl Resources {
     /// Every knob is read here, so a malformed one fails the run up front even
     /// when the phase that uses it would be skipped.
     pub(crate) fn resolve(config: &TilegenConfig) -> Result<Self, PipelineError> {
+        Self::resolve_request(&ResourceRequest {
+            threads: config.threads,
+            way_inflight: config.way_inflight_budget,
+            assemble_batch: config.assemble_batch_budget,
+            sort_chunk: config.sort_chunk_size,
+            dedup_cap: config.dedup_cap,
+        })
+    }
+
+    /// Resolve an explicit request. The ocean artifact builder has no run
+    /// config and asks for the defaults through this.
+    pub(crate) fn resolve_request(request: &ResourceRequest) -> Result<Self, PipelineError> {
+        let config = request;
         let threads = config.threads.get();
-        let way_budget = match config.way_inflight_budget {
+        let way_budget = match config.way_inflight {
             None => None,
             some => Some(budget("way in-flight budget", some, MIN_BUDGET, 0)?),
         };
@@ -192,14 +216,14 @@ impl Resources {
             threads,
             sort_chunk: budget(
                 "sort chunk budget",
-                config.sort_chunk_size,
+                config.sort_chunk,
                 MIN_SORT_BUDGET,
                 DEFAULT_SORT_BUDGET,
             )?,
             way_budget,
             assemble_batch: budget(
                 "assemble batch budget",
-                config.assemble_batch_budget,
+                config.assemble_batch,
                 MIN_BUDGET,
                 DEFAULT_ASSEMBLE_BUDGET,
             )?,

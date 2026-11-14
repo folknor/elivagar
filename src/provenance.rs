@@ -393,9 +393,6 @@ impl ContractConfig {
             pbf_path: _,
             output_path: _,
             tmp_dir: _,
-            // Out: the artifact builder writes no run provenance at all.
-            ocean_artifact_key: _,
-            ocean_only_metadata: _,
             // Out: resume point, recorded diagnostically as
             // `execution.resumed_from`.
             skip_to: _,

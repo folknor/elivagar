@@ -166,6 +166,7 @@ impl OceanArtifact {
             view: self.view,
             runs,
             band,
+            key: self.key,
         })
     }
 }
@@ -176,9 +177,16 @@ pub(crate) struct OceanTiles {
     view: ArchiveView,
     runs: TileRuns,
     band: OceanBand,
+    key: OceanArtifactKey,
 }
 
 impl OceanTiles {
+    /// The admitted key, so assembly can check it against the provenance
+    /// it records.
+    pub(crate) fn key(&self) -> &OceanArtifactKey {
+        &self.key
+    }
+
     pub(crate) fn band(&self) -> &OceanBand {
         &self.band
     }

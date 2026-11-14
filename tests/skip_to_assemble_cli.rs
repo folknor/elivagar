@@ -33,8 +33,6 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         ocean_shapefile: None,
         ocean_simplified_shapefile: None,
         ocean_tiles: None,
-        ocean_artifact_key: None,
-        ocean_only_metadata: false,
         skip_to: None,
         in_memory: false,
         compression_level: 6,
