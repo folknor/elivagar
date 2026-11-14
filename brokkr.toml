@@ -3,6 +3,28 @@ project = "elivagar"
 # Env variables that match these are captured by brokkr during runs and stored in the database.
 capture_env = ["ELIVAGAR*", "MALLOC*"]
 
+# build.rs's provenance rerun trigger: HEAD plus the git object id of the raw
+# status bytes, evaluated before every cargo call. build.rs reruns, and the
+# crate rebuilds, only when it changes; without it build.rs reruns on every
+# build, which stays exact but rebuilds every target. See build.rs.
+#
+# `if_exists` leaves the variable unset in a `brokkr --commit` worktree older
+# than the script, which build.rs treats exactly like plain cargo. The name is
+# not ELIVAGAR_*, because brokkr refuses a cargo_env name capture_env matches.
+#
+# Build-cost hazard: on a failed git read the script prints a value unique per
+# call, so every cargo call rebuilds the crate while every gate stays green.
+# The `build-observation-stable` script check below turns that red.
+[cargo_env]
+ELV_BUILD_OBSERVATION = { command = "python3 scripts/build_observation.py", if_exists = "scripts/build_observation.py" }
+
+[[script_check]]
+name = "build-observation-stable"
+command = "python3 scripts/check_build_observation_stable.py"
+expect = "build observation stable"
+match = "last-line"
+stage = "pre-clippy"
+
 # Replaces brokkr's legacy fallback (one --all-features sweep) with the
 # default-features build, and fans the test binaries out concurrently
 # (prebuilt binaries executed directly, budget = tests in flight, defaulting

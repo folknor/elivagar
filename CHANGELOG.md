@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The `build.dirty` provenance flag no longer reads a tree whose only
+  change is `.brokkr/results.db` as dirty when that path sorts first, reads
+  quoted markdown names as markdown, judges new untracked directories file
+  by file, and counts a source file renamed to markdown as dirty. Under
+  brokkr the build script now reruns, and the crate rebuilds, only when
+  HEAD or the git status changes, instead of on every cargo call. Tile
+  output is unchanged.
+
 - Breaking: removed the unused crate-root exports `RingOrientation`,
   `ring_is_simple` and `ring_role`. These polygon helpers are now
   crate-internal. Tile output is unchanged.

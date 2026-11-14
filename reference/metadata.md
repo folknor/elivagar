@@ -338,10 +338,23 @@ run provenance deliberately. It retains the unchanged top-level
 `ocean_artifact` identity and emits `ocean_artifact_no_run_provenance=1` on the
 counter channel when measured.
 
-`build.rs` reruns on every build through an intentionally absent Cargo rerun
-input. The dirty flag observes the whole git status, including untracked
-files, so a fixed source-file watch list cannot keep it fresh. This avoids
-recursively watching ignored datasets and build outputs. Git itself resolves
+The dirty flag observes the whole git status, including untracked files, so a
+fixed source-file watch list cannot keep it fresh, and watching the repository
+recursively would walk ignored datasets and build outputs. Rerunning
+`build.rs` rebuilds the whole crate, so it reruns only when its git inputs
+change: before every cargo call brokkr computes `ELV_BUILD_OBSERVATION`
+(`[cargo_env]` in brokkr.toml), HEAD plus git's object id of the raw status
+bytes, and `build.rs` declares `rerun-if-env-changed` on it. `build.rs`
+computes the same token from the bytes it stamps from; when the variable is
+absent (plain cargo, an old `brokkr --commit` worktree) or disagrees (the tree
+moved mid-build, a failed read), it also watches an intentionally absent input
+and so reruns on every build until the two agree - slower, never stale. Both
+observers strip `GIT_*` from git's environment, so they read this checkout. The
+guarantee is freshness equal to rerunning every build for any tree state that
+holds from the trigger's evaluation through the build; an edit inside that
+window, or git configuration visible to only one observer, is outside it.
+The `build-observation-stable` script check fails the gate when the trigger
+is stuck on its unique-per-call fallback. Git itself resolves
 HEAD and repository metadata, including worktrees and submodules whose `.git`
 is a file. Registry dependency identities come from the lockfile. A future
 path dependency would need its own git inspection and commit/dirty pair.
@@ -354,7 +367,10 @@ provenance fresh; they are not independent proof of the code that ran.
 `dirty` uses brokkr's definition, not git's: `*.md` and `.brokkr/results.db`
 are ignored. A dirty `results.db` is this repo's expected state and markdown
 never affects the binary, so counting either would mark nearly every build
-dirty and make the flag meaningless.
+dirty and make the flag meaningless. Status is read with untracked directories
+expanded to files and rename detection off, so a new directory holding only
+markdown is clean while a source file renamed to markdown is dirty (its
+deletion counts).
 
 ## Consumer contract
 
