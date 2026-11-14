@@ -10,6 +10,7 @@ mod assemble;
 mod boundary_prescan;
 mod checkpoint;
 pub(crate) mod emit;
+mod ocean_build;
 mod phase12;
 mod relations;
 mod stats;
@@ -17,12 +18,13 @@ mod stats;
 use crate::archive;
 #[cfg(test)]
 use crate::geometry;
+#[cfg(test)]
 use crate::geometry::projection::MercBbox;
 use crate::shortbread;
 use crate::sort;
 use crate::tiling::ZoomRange;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::debug::{
     WAIT, emit_alloc_boundary, emit_counter, emit_counter_u64, emit_counter_usize, emit_marker,
@@ -30,6 +32,7 @@ use crate::debug::{
 };
 use std::time::Instant;
 
+pub use ocean_build::ocean_build;
 use stats::Phase12Stats;
 #[cfg(test)]
 use stats::missing_ref_summary_lines;
@@ -1140,254 +1143,6 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         emit_counter_u64(&format!("{prefix}_y"), u64::from(y));
         emit_counter_u64(&format!("{prefix}_bytes"), t.bytes);
     }
-    Ok(())
-}
-
-/// UTC calendar date as `YYYYMMDD` for a file timestamp, used to name
-/// retained artifact generations. Days-to-civil conversion per Howard
-/// Hinnant's algorithm; pre-epoch timestamps clamp to the epoch.
-fn yyyymmdd_utc(t: std::time::SystemTime) -> String {
-    let secs = t
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let days = i64::try_from(secs / 86_400).unwrap_or(0);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}{month:02}{day:02}")
-}
-
-/// Does `name` match a retained-generation name under `<prefix><version>-...`?
-/// Accept the current key-prefixed scheme and the previous date-only scheme so
-/// the next retention pass can remove a generation left by an older build.
-/// Cleanup deletes only these exact shapes; manual names outside them survive.
-fn is_retained_artifact_name(name: &str, prefix: &str) -> bool {
-    let Some(rest) = name.strip_prefix(prefix) else {
-        return false;
-    };
-    let Some(rest) = rest.strip_suffix(".pmtiles") else {
-        return false;
-    };
-    let Some((version, suffix)) = rest.split_once('-') else {
-        return false;
-    };
-    let version_ok = !version.is_empty()
-        && (version == "unknown" || version.bytes().all(|b| b.is_ascii_digit()));
-    if !version_ok {
-        return false;
-    }
-    let valid_date = |date: &str| date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit());
-    if valid_date(suffix) {
-        return true;
-    }
-    let Some((key_prefix, date)) = suffix.split_once('-') else {
-        return false;
-    };
-    let key_prefix_ok = (version == "unknown" && key_prefix == "unknown")
-        || (key_prefix.len() == 8
-            && key_prefix
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
-    key_prefix_ok && valid_date(date)
-}
-
-/// Keep the outgoing ocean artifact one generation deep before a rebuild
-/// replaces it. `ocean-build` writes the artifact in place, so without this
-/// every policy bump destroys the only comparand for the version it
-/// replaces - and the retained generation is exactly what the
-/// archive-bracketing idiom (dump the same tile from each generation, diff
-/// the same ROI with `scripts/validate/svg-roi.mjs`) needs to answer "did
-/// this rebuild change ocean bytes, and where".
-///
-/// The outgoing file is hard-linked, not renamed: the active artifact path
-/// is never empty, a failed rebuild leaves the active artifact unchanged,
-/// and the link costs no disk until the writer's finalize rename swaps the inode
-/// out. Retained name: `<stem>-v<policy_version>-<key_prefix>-<build_date>.pmtiles`.
-/// The prefix is the first eight lowercase hex characters of XXH3-128 over
-/// the byte-stable artifact key; it distinguishes source rotations and
-/// compression settings. Unreadable keys use `unknown` for both version and
-/// prefix, since a damaged artifact is still worth keeping. The date is from
-/// its mtime. Older retained generations are removed after the outgoing link
-/// is created; anything outside a recognized naming scheme is never touched.
-fn retain_outgoing_ocean_artifact(output_path: &Path) -> std::io::Result<()> {
-    if !output_path.exists() {
-        return Ok(());
-    }
-    let (version, key_prefix) = match crate::ocean::artifact::declared_key(output_path) {
-        Ok(key) => {
-            let bytes = serde_json::to_vec(&key).map_err(std::io::Error::other)?;
-            let fingerprint = crate::ocean::Xxh128::from_bytes(&bytes).to_string();
-            (key.policy_version.to_string(), fingerprint[..8].to_string())
-        }
-        Err(_) => ("unknown".to_string(), "unknown".to_string()),
-    };
-    let date = yyyymmdd_utc(std::fs::metadata(output_path)?.modified()?);
-    let stem = output_path.file_stem().map_or_else(
-        || "ocean-tiles".to_string(),
-        |s| s.to_string_lossy().into_owned(),
-    );
-    let dir = output_path
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let retained_prefix = format!("{stem}-v");
-    let retained_name = format!("{stem}-v{version}-{key_prefix}-{date}.pmtiles");
-    let retained_path = dir.join(&retained_name);
-    if retained_path.exists() {
-        std::fs::remove_file(&retained_path)?;
-    }
-    std::fs::hard_link(output_path, &retained_path)?;
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name != retained_name && is_retained_artifact_name(name, &retained_prefix) {
-            std::fs::remove_file(entry.path())?;
-        }
-    }
-    eprintln!(
-        "Retained outgoing ocean artifact: {}",
-        retained_path.display()
-    );
-    Ok(())
-}
-
-/// Build the durable world-ocean artifact without opening an OSM PBF. It uses
-/// the normal ocean, external-sort, and partitioned assembly path so artifact
-/// bytes obey the same encoding and compression rules as runtime ocean tiles.
-#[allow(clippy::too_many_lines)]
-pub fn ocean_build(
-    full_shapefile: &Path,
-    simplified_shapefile: Option<&Path>,
-    output_path: &Path,
-    tmp_dir: &Path,
-    compression_level: u32,
-    threads: std::num::NonZeroUsize,
-) -> Result<(), PipelineError> {
-    validate_compression_level(compression_level)?;
-    crate::debug::reset_run_counters();
-    crate::ocean::reset_ocean_counters();
-    sort::reset_sort_counters();
-    let plan = crate::ocean::OceanPlan::new(Some(full_shapefile), simplified_shapefile, None)
-        .map_err(PipelineError)?
-        .ok_or_else(|| {
-            PipelineError("ocean-build needs a full-resolution shapefile".to_string())
-        })?;
-    // Fail on missing inputs before retaining the active artifact. The key
-    // itself is assembled from the buffers consumed by the passes below.
-    for pass in crate::ocean::OceanPass::ALL {
-        let files = plan.source(pass);
-        drop(std::fs::File::open(files.shp())?);
-        drop(std::fs::File::open(files.shx())?);
-    }
-    retain_outgoing_ocean_artifact(output_path)?;
-    drop(std::fs::remove_dir_all(tmp_dir));
-    let chunks_dir = tmp_dir.join(SORT_CHUNKS_DIR);
-    let mut writer = sort::SortWriter::new(
-        &chunks_dir,
-        crate::resources::DEFAULT_SORT_BUDGET,
-        sort::ChunkCompression::None,
-    )?;
-    let world = MercBbox {
-        min_x: 0.0,
-        min_y: 0.0,
-        max_x: 1.0,
-        max_y: 1.0,
-    };
-    // The same passes a run executes, over the artifact's whole zoom range.
-    let artifact_zooms = ZoomRange::new(
-        crate::ocean::artifact::ARTIFACT_MIN_ZOOM,
-        crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
-    )
-    .expect("the artifact zoom contract is a profile range");
-    let mut pass_hashes = Vec::with_capacity(crate::ocean::OceanPass::ALL.len());
-    for pass in crate::ocean::OceanPass::ALL {
-        let window = pass.emission(artifact_zooms).ok_or_else(|| {
-            PipelineError(format!("artifact zoom range misses the {pass:?} pass"))
-        })?;
-        let (_, hashes) = crate::ocean::process_ocean_shapefile_with_hashes(
-            plan.source(pass).shp(),
-            &world,
-            window,
-            &mut writer,
-        )?;
-        pass_hashes.push(hashes);
-    }
-    let [low_hashes, full_hashes] = pass_hashes[..] else {
-        return Err(PipelineError(
-            "ocean-build ran an unexpected number of passes".to_string(),
-        ));
-    };
-    if !plan.has_simplified() && low_hashes != full_hashes {
-        return Err(PipelineError(
-            "full ocean shapefile changed between low and high zoom passes".to_string(),
-        ));
-    }
-    let source = crate::ocean::OceanSourceKey::from_hashes(
-        full_hashes,
-        plan.has_simplified().then_some(low_hashes),
-        crate::ocean::artifact::ARTIFACT_MIN_ZOOM,
-        crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
-    );
-    let key = crate::ocean::OceanArtifactKey {
-        source,
-        compression_level,
-    };
-    writer.flush()?;
-    let mut reader = writer.finish()?;
-    let config = TilegenConfig {
-        pbf_path: PathBuf::new(),
-        output_path: output_path.to_path_buf(),
-        tmp_dir: tmp_dir.to_path_buf(),
-        min_zoom: crate::ocean::artifact::ARTIFACT_MIN_ZOOM,
-        max_zoom: crate::ocean::artifact::ARTIFACT_MAX_ZOOM,
-        ocean_shapefile: None,
-        ocean_simplified_shapefile: None,
-        ocean_tiles: None,
-        ocean_artifact_key: Some(key.clone()),
-        ocean_only_metadata: true,
-        skip_to: None,
-        in_memory: false,
-        compression_level,
-        force_sorted: false,
-        allow_unsafe_flat_index: false,
-        threads,
-        way_inflight_budget: None,
-        assemble_batch_budget: None,
-        dedup_cap: None,
-        sort_chunk_size: None,
-        locations_on_ways: false,
-        tile_format: TilePayloadFormat::Mvt,
-        tile_compression: TileCompression::Gzip,
-        compress_sort_chunks: sort::ChunkCompression::None,
-        fanout_caps: [None; shortbread::Layer::count()],
-        polygon_simplify_factor: 1.0,
-    };
-    let resources = crate::resources::Resources::resolve(&config)?;
-    resources.emit();
-    // The durable artifact has no input PBF. Its top-level ocean_artifact key
-    // identifies its shapefile sources and policy without changing the wire
-    // metadata consumed by brokkr and OceanTiles::open. Assembly counts the
-    // expected absence of run-shaped provenance without opening a PBF.
-    let _ = assemble::phase_assemble_with_ocean(
-        &mut reader,
-        &config,
-        &resources,
-        &world,
-        None,
-        assemble::RunProvenance {
-            input_identity: None,
-            effective: None,
-            resumed_from: None,
-            ocean_mode: OceanMode::Band { key },
-            low_zoom_source: Some(plan.low_zoom_source(crate::ocean::artifact::ARTIFACT_MIN_ZOOM)),
-        },
-    )?;
     Ok(())
 }
 

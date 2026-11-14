@@ -8,7 +8,6 @@
 //! - the exact complement of [`OceanBand::computed_owns`] at one zoom.
 
 use super::plan::OceanPass;
-use super::{merc_ceil, merc_floor, rect_contains};
 use crate::geometry::int_ocean::{IntRect, TILE_BUFFER_I32, TILE_EXTENT_I32};
 use crate::geometry::projection::MercBbox;
 use crate::geometry::pyramid::{PyramidCell, buffered_cell_rect_base, grid_shift, tile_cover};
@@ -246,6 +245,37 @@ pub(crate) fn pass_owns_root_range(
         }
     }
     false
+}
+
+/// True if `outer` contains `inner` (closed containment).
+pub(super) fn rect_contains(outer: IntRect, inner: IntRect) -> bool {
+    outer.min_x <= inner.min_x
+        && outer.min_y <= inner.min_y
+        && outer.max_x >= inner.max_x
+        && outer.max_y >= inner.max_y
+}
+
+/// The data bounds on a pass grid, rounded outward.
+pub(super) fn data_bounds_rect(data_bounds: &MercBbox, max_zoom: u8) -> IntRect {
+    let scale = OceanPassGrid::scale_for(max_zoom);
+    IntRect {
+        min_x: merc_floor(data_bounds.min_x, scale),
+        min_y: merc_floor(data_bounds.min_y, scale),
+        max_x: merc_ceil(data_bounds.max_x, scale),
+        max_y: merc_ceil(data_bounds.max_y, scale),
+    }
+}
+
+fn merc_floor(v: f64, scale: i64) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let q = (v * scale as f64).floor() as i64;
+    i32::try_from(q.clamp(0, scale)).expect("base ocean coordinate fits i32")
+}
+
+fn merc_ceil(v: f64, scale: i64) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let q = (v * scale as f64).ceil() as i64;
+    i32::try_from(q.clamp(0, scale)).expect("base ocean coordinate fits i32")
 }
 
 #[cfg(test)]

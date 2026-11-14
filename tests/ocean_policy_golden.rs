@@ -88,7 +88,7 @@ fn synthetic_ocean_archive_matches_policy_golden() {
     );
     assert_eq!(
         actual, expected,
-        "synthetic ocean output or policy version changed (observed {actual:?}); bump OCEAN_POLICY_VERSION in src/ocean/mod.rs when output behavior changed, then update OCEAN_GOLDEN",
+        "synthetic ocean output or policy version changed (observed {actual:?}); bump OCEAN_POLICY_VERSION in src/ocean/policy.rs when output behavior changed, then update OCEAN_GOLDEN",
     );
 }
 

@@ -189,3 +189,140 @@ impl OceanTiles {
         self.view.raw_blob(blob)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::super::key::{OceanShapefileHashes, OceanSourceKey, Xxh128};
+    use super::*;
+    use crate::archive;
+    use crate::geometry::projection::MercBbox;
+
+    #[test]
+    fn ocean_artifact_rejects_runs_reaching_z15() {
+        let dir = tempfile::tempdir().expect("create artifact directory");
+        let path = dir.path().join("ocean.pmtiles");
+        let key = OceanArtifactKey {
+            source: OceanSourceKey::from_hashes(
+                OceanShapefileHashes {
+                    shp_xxh128: Xxh128::from_u128(1),
+                    shx_xxh128: Xxh128::from_u128(2),
+                },
+                None,
+                0,
+                14,
+            ),
+            compression_level: 6,
+        };
+        let world = MercBbox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        };
+        let first_z15 = crate::tiling::TileId::at(15, 0, 0).raw();
+        for (start, length, accepted) in [
+            (first_z15 - 1, 1, true),
+            (first_z15, 1, false),
+            (first_z15 - 1, 2, false),
+        ] {
+            let mut writer = archive::PmtilesWriter::new(
+                archive::PmtilesConfig::new(
+                    0,
+                    14,
+                    archive::LonLatBbox {
+                        west: -180.0,
+                        south: -85.05,
+                        east: 180.0,
+                        north: 85.05,
+                    },
+                    archive::MapCenter {
+                        lon: 0.0,
+                        lat: 0.0,
+                        zoom: 2,
+                    },
+                )
+                .expect("valid archive config"),
+            );
+            writer.set_ocean_only_metadata();
+            writer
+                .set_ocean_artifact_metadata(key.clone())
+                .expect("set artifact metadata");
+            // Admission reads directory ranges and metadata, not tile payloads.
+            writer
+                .add_run(crate::tiling::TileId::new(start).unwrap(), length, &[0])
+                .expect("add directory run");
+            writer.write_to(&path).expect("write artifact");
+            let result = OceanArtifact::admit(&path, 6, || Ok(key.clone()))
+                .and_then(|artifact| artifact.into_tiles(OceanBand::for_bounds(&world)));
+            if accepted {
+                assert!(result.is_ok(), "last z14 tile must be admitted");
+            } else {
+                let error = result.err().expect("z15 run must be refused");
+                assert!(error.to_string().contains("outside z0-14 tile space"));
+            }
+        }
+    }
+
+    #[test]
+    fn ocean_artifact_admission_refuses_a_level_or_key_mismatch_before_reading_runs() {
+        let dir = tempfile::tempdir().expect("create artifact directory");
+        let path = dir.path().join("ocean.pmtiles");
+        let key = OceanArtifactKey {
+            source: OceanSourceKey::from_hashes(
+                OceanShapefileHashes {
+                    shp_xxh128: Xxh128::from_u128(1),
+                    shx_xxh128: Xxh128::from_u128(2),
+                },
+                None,
+                0,
+                14,
+            ),
+            compression_level: 6,
+        };
+        let mut writer = archive::PmtilesWriter::new(
+            archive::PmtilesConfig::new(
+                0,
+                14,
+                archive::LonLatBbox {
+                    west: -180.0,
+                    south: -85.05,
+                    east: 180.0,
+                    north: 85.05,
+                },
+                archive::MapCenter {
+                    lon: 0.0,
+                    lat: 0.0,
+                    zoom: 2,
+                },
+            )
+            .expect("valid archive config"),
+        );
+        writer.set_ocean_only_metadata();
+        writer
+            .set_ocean_artifact_metadata(key.clone())
+            .expect("set artifact metadata");
+        writer
+            .add_run(crate::tiling::TileId::ZERO, 1, &[0])
+            .expect("add directory run");
+        writer.write_to(&path).expect("write artifact");
+
+        let level = OceanArtifact::admit(&path, 5, || panic!("level is checked before hashing"))
+            .err()
+            .expect("level mismatch refused");
+        assert!(level.to_string().contains("compression level 6"));
+        let mut other = key.clone();
+        other.full_shp_xxh128 = Xxh128::from_u128(3);
+        let mismatch = OceanArtifact::admit(&path, 6, || Ok(other))
+            .err()
+            .expect("key mismatch refused");
+        assert!(mismatch.to_string().contains("does not match"));
+        assert_eq!(
+            OceanArtifact::admit(&path, 6, || Ok(key.clone()))
+                .expect("matching key admitted")
+                .key(),
+            &key
+        );
+        assert_eq!(declared_key(&path).expect("declared key"), key);
+    }
+}

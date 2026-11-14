@@ -209,7 +209,7 @@ fn prepare_tile_layers(s: &mut AssemblyScratch, tile: &PendingTile) {
     for (li, layer) in s.layers.iter_mut().enumerate() {
         // Preserve the existing MVT ocean feature layout: it is also stored
         // in the durable world artifact. Removing this exclusion changes
-        // those bytes and requires an OCEAN_POLICY_VERSION bump in ocean/mod.rs
+        // those bytes and requires an OCEAN_POLICY_VERSION bump in ocean/policy.rs
         // and an artifact rebuild. This is a compatibility constraint, not
         // a topology requirement: the merger concatenates complete polygons,
         // and MapLibre's 500-ring cap applies per polygon, not per feature.

@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 
 // The ocean producer's output from this engine is cached world-wide in the
 // durable ocean artifact (`ocean-build`, keyed by OCEAN_POLICY_VERSION in
-// src/ocean/mod.rs). A change here that alters emitted bytes reaches artifact
+// src/ocean/policy.rs). A change here that alters emitted bytes reaches artifact
 // consumers only through a version bump - without it, existing artifacts
 // keep key-validating and every artifact-active run serves the pre-change
 // geometry while all standing gates stay green.

@@ -294,7 +294,7 @@ key mismatch named until the corpus is re-blessed (`brokkr pmtiles-corpus
 bless --rotate`) from a build carrying the new artifact - and that rotation
 commit is the review.
 
-`OCEAN_POLICY_VERSION` (`src/ocean/mod.rs`) is the code half of the artifact key:
+`OCEAN_POLICY_VERSION` (`src/ocean/policy.rs`) is the code half of the artifact key:
 the shapefile hashes catch input rotations, the version stands in for "the
 geometry pipeline changed". Any change that alters emitted ocean geometry or
 encoding must bump it, which makes every existing artifact fail the key check

@@ -804,3 +804,91 @@ fn isolated_shared_segment_simplification_is_identical() {
         out_fwd.len()
     );
 }
+fn unit_square() -> Vec<Point> {
+    vec![
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 1.0, y: 0.0 },
+        Point { x: 1.0, y: 1.0 },
+        Point { x: 0.0, y: 1.0 },
+    ]
+}
+
+#[test]
+fn pip_inside_square() {
+    assert!(point_in_polygon(&Point::new(0.5, 0.5), &unit_square()));
+}
+
+#[test]
+fn pip_outside_square() {
+    assert!(!point_in_polygon(&Point::new(2.0, 0.5), &unit_square()));
+}
+
+#[test]
+fn pip_on_edge() {
+    // Edge behavior is implementation-defined for ray-casting;
+    // just verify it does not panic.
+    let _ = point_in_polygon(&Point::new(0.5, 0.0), &unit_square());
+}
+
+#[test]
+fn pip_inside_triangle() {
+    let tri = vec![
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 4.0, y: 0.0 },
+        Point { x: 2.0, y: 3.0 },
+    ];
+    assert!(point_in_polygon(&Point::new(2.0, 1.0), &tri));
+}
+
+#[test]
+fn pip_outside_triangle() {
+    let tri = vec![
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 4.0, y: 0.0 },
+        Point { x: 2.0, y: 3.0 },
+    ];
+    assert!(!point_in_polygon(&Point::new(0.0, 3.0), &tri));
+}
+
+#[test]
+fn pip_degenerate() {
+    // Fewer than 3 points should return false
+    assert!(!point_in_polygon(&Point::new(0.0, 0.0), &[]));
+    assert!(!point_in_polygon(
+        &Point::new(0.0, 0.0),
+        &[Point { x: 0.0, y: 0.0 }]
+    ));
+    assert!(!point_in_polygon(
+        &Point::new(0.0, 0.0),
+        &[Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 1.0 }],
+    ));
+}
+
+#[test]
+fn pip_concave() {
+    // An L-shaped (concave) polygon:
+    //
+    //   (0,0)---(2,0)
+    //     |        |
+    //   (0,2)---(1,2)
+    //            |
+    //   (0,3)---(1,3)   <-- not connected; full shape below
+    //
+    // Vertices (counter-clockwise on a math-y axis):
+    //   (0,0) (2,0) (2,1) (1,1) (1,3) (0,3)
+    let l_shape = vec![
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 2.0, y: 0.0 },
+        Point { x: 2.0, y: 1.0 },
+        Point { x: 1.0, y: 1.0 },
+        Point { x: 1.0, y: 3.0 },
+        Point { x: 0.0, y: 3.0 },
+    ];
+
+    // Inside the body of the L
+    assert!(point_in_polygon(&Point::new(0.5, 0.5), &l_shape));
+    assert!(point_in_polygon(&Point::new(0.5, 2.0), &l_shape));
+
+    // Inside the concavity (the cut-out region) - should be false
+    assert!(!point_in_polygon(&Point::new(1.5, 2.0), &l_shape));
+}

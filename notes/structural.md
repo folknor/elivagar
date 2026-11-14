@@ -224,32 +224,6 @@ encoding and Shortbread hunts.
 
 ---
 
-# Ocean
-
-## STR-009 - Give ocean one module tree
-
-`src/ocean/` exists and owns the pass structure (`plan.rs`), band ownership
-(`band.rs`) and artifact admission (`artifact.rs`). What remains is the
-non-ownership half. `ocean/mod.rs` still holds three jobs: artifact identity
-(`OCEAN_POLICY_VERSION`, both keys, `Xxh128`), a shapefile reader (shx
-parsing, mmap, `read_exact_at`, ring role by signed area) and emission glue
-(union, `ocean_params`, `OceanAcc`, sink, rayon splitting, stats atomics).
-`ocean_build`, retention, `yyyymmdd_utc` and `is_retained_artifact_name`
-live in `pipeline/mod.rs`. (The consumer half - run-copy planning and the
-ocean layer field scanner - now has its own module,
-`pipeline/assemble/artifact.rs`, apart from partition scheduling; it stays
-under assembly because it produces assembly's writer items, while
-admission, directory access and band ownership stay in `ocean/`.)
-
-Proposed: `policy.rs` (policy version, `ocean_params`), `key.rs`,
-`shapefile.rs` (a reader yielding projected polygons with no sort or pyramid
-deps, testable without a `SortWriter`), `emit.rs`, and `artifact/build.rs`
-taking the pipeline half above.
-
-Reported by the ocean and coordinate-spaces hunts.
-
----
-
 # Geometry and coordinates
 
 ## STR-010 - Type the coordinate spaces
@@ -586,8 +560,7 @@ Reported by the archive-surface hunt.
   private items through a block of `cfg(test)` re-exports in `mod.rs`; it
   mixes injected-PBF fixture builders (hand-written protobuf splicing,
   `splice_way_members`, `rebuild_blobheader_datasize`), emitter decode tests,
-  assemble metadata tests, checkpoint tests, artifact-retention tests and
-  boundary-label tests, and builds `TilegenConfig` struct literals seven or
+  assemble metadata tests, checkpoint tests and boundary-label tests, and builds `TilegenConfig` struct literals seven or
   eight times repeating every budget field as 0 (which is why the zero
   sentinel survives). Proposed: per-module tests after the splits, the PBF
   fixture builders as a shared `test_support` synthetic-PBF writer, and a
@@ -596,7 +569,7 @@ Reported by the archive-surface hunt.
   `multi_simplify_*` for the parked cascade; the integer engine's tests sit
   inline in int_ocean.rs under `tests` and `landing1_tests` (a landing name);
   `bounds_boolean_skipped_when_bbox_contained` asserts an ocean.rs property
-  from inside int_ocean; `landing_b_*` names encode project history. pyramid
+  (`push_quantized_pieces` in ocean/emit.rs) from inside int_ocean; `landing_b_*` names encode project history. pyramid
   tests use a test-only `rescale_shape` and a `collect_direct` reference that
   relies on dead `tile_range_for_rect`, so the cover-function drift between
   emit.rs and pyramid.rs is not covered. Proposed: tests per module named by
@@ -623,10 +596,8 @@ Reported by the archive-surface hunt.
   `test_merge`, `TestMergeRun`, `TEST_CLIP_BOUNDARY`); `LayerBuilder` grows
   `test_feature`/`test_key` accessors duplicating the `pub(crate)` ones MLT
   uses.
-- `ocean/mod.rs` tests include seven `point_in_polygon` tests for a
-  `geometry` function ocean no longer uses. The band-ownership tests moved to
-  `ocean/band.rs`; several still hand-build a z14 `OceanPassGrid` rather than
-  going through `OceanBand`.
+- Several band-ownership tests in `ocean/band.rs` still hand-build a z14
+  `OceanPassGrid` rather than going through `OceanBand`.
 - `sort.rs` tests (about 1100 lines) mix format round-trips and resume
   semantics; resume tests belong with the chunk-store manifest.
 - `archive/writer_tests.rs` hand-decodes directory varints and holds the

@@ -181,7 +181,7 @@ pub(crate) struct IntRect {
 // The OCEAN_* values, and any change to the bytes this module emits on the
 // ocean path (quantize, rescale, DP/VW simplify, encode), are baked into the
 // durable ocean artifact. Such a change requires bumping OCEAN_POLICY_VERSION
-// in src/ocean/mod.rs so stale artifacts fail the key check instead of silently
+// in src/ocean/policy.rs so stale artifacts fail the key check instead of silently
 // serving the old geometry.
 pub(crate) const OCEAN_DP_TOL_PX: i64 = RENDER_PX.get();
 // This remains 256 in doubled-area units, which is true Area(128). The
@@ -1914,7 +1914,7 @@ mod landing1_tests {
             max_y: 4096,
         };
         assert!(bb.min_x >= data.min_x && bb.max_x <= data.max_x);
-        // The skip is in ocean/mod.rs push_quantized_pieces; its observable
+        // The skip is in ocean/emit.rs push_quantized_pieces; its observable
         // contract is verbatim passthrough - assert the geometric identity
         // the skip relies on: intersect of a contained shape equals itself
         // up to ring rotation, so passthrough is legal.
