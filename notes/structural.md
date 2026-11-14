@@ -45,15 +45,6 @@ counter names.
 
 Reported by the pipeline hunt.
 
-## STR-003 - Typed errors with a defined exit-code mapping
-
-The `.expect("... fits i32")` overflow invariants rest on
-`maxz + 12 <= 30`, which no type states. This is a type-level invariant
-(a validated zoom type whose bound makes the arithmetic total), not an
-error-path change, so it belongs to no typed-errors work.
-
-Reported by every hunt.
-
 ## STR-037 - Phase12 panic sites the typed-errors chain did not name
 
 Found while carrying node-store and ring-cap errors through phase12, outside
@@ -76,8 +67,6 @@ Reported by the typed-errors link 7 implementer.
 
 ## STR-008 - Fix the dependency edges that point the wrong way
 
-- `sort.rs` imports `crate::pipeline::emit::RecordTally`: infrastructure
-  depending on the orchestrator's emitter.
 - `emit` is `pub(crate) mod` with `pub(super)` items, but it is the
   feature-to-sort-record layer shared by way and relation paths, not
   orchestration - it belongs top-level beside `geometry`.
@@ -123,7 +112,33 @@ ocean uses maxz 7 and 14), with `quantize: Merc -> Base`,
 tag-changing functions; the overlay engine stays generic. `UnwrappedMerc` vs
 `Merc`, or at least a debug assertion at the `project_e7` boundary.
 
+A grid-zoom newtype on its own was refused (reasons at `PyramidZooms`): the
+`fits i32` arithmetic rests on three premises - grid at most z14, in-range
+cell indices, and input coordinates - and a zoom type states only the first.
+Coordinate representability is now checked at quantization against the
+overlay engine's `2^30` interval (`int_ocean::Unrepresentable`), so the
+`Grid` here is the place the remaining two premises would become types.
+
 Reported by the polygon-engine, coordinate-spaces and ocean hunts.
+
+## STR-042 - Range premises the quantizer refusal does not cover
+
+Found while closing the polygon quantizer's overflow invariants:
+
+- Lines never pass the polygon quantizer. They clip in f64 and reach
+  `merc_to_tile_px`, whose `as i32` casts saturate, so an unwrapped way that
+  winds many world widths emits clamped garbage rather than a refusal. Whether
+  lines should share a representability rule needs its own argument.
+- `int_ocean::tile_origin` multiplies `i32::try_from(t) * TILE_EXTENT_I32` in
+  plain i32; release has overflow checks off, so a tile index at or above
+  `2^19` would wrap silently. Production indices are profile-zoom (< `2^14`),
+  so it holds by construction, unstated.
+- The ocean shapefile reader checks record bounds and read points against the
+  world, but not that a record's points lie inside its declared bounds. The
+  bounds drive the extract prefilter, so a record whose bounds lie is skipped
+  or admitted wrongly without its points ever being read.
+
+Reported by the zoom-invariant implementer.
 
 ## STR-012 - Make ring role a type
 

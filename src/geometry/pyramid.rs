@@ -34,7 +34,16 @@ pub(crate) struct PyramidParams<'a> {
 /// `bottom`, with `top <= bottom <= grid <= MAX_ZOOM`. The constructor is the
 /// only check, so an ordering a caller got wrong is refused where it is built
 /// rather than silently emitting nothing. The grid is bounded by the profile
-/// top because base coordinates are `i32` at `grid + 12` bits.
+/// top so the world spans at most `2^26` base units: that bounds tile sizes,
+/// buffers and shifts, and with in-range cell indices every buffered rect
+/// endpoint (at most `2^(grid+12) + 128 * 2^grid`) sits inside the overlay
+/// engine's `2^30` interval. It does not bound shape coordinates, which are
+/// unclamped and come from the input: quantization checks those itself
+/// (`int_ocean::Unrepresentable`), before any `PyramidZooms` exists. A
+/// validated grid-zoom newtype was considered for these `fits i32` sites and
+/// not built: it would type the shift but not the coordinates or the cell
+/// indices the same arithmetic also rests on, so it would claim a totality it
+/// does not deliver; the grid belongs with the typed coordinate spaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PyramidZooms {
     grid: u8,

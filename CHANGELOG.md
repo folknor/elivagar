@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- An OSM polygon whose antimeridian-unwrapped coordinates lie too many
+  world widths out for the integer polygon engine is now skipped and
+  counted (`osm_polygon_copy_unrepresentable`) instead of aborting the run
+  or overflowing the engine's arithmetic. An ocean shapefile with a finite
+  point or record bounds outside the projected world (normalized
+  `[-1, 2]`) now fails as invalid input. Valid inputs produce identical
+  archives.
+
 - Breaking: `archive::VectorLayer` gains a required `fields` map.
   `shortbread::Layer::fields()` supplies the canonical TileJSON declarations.
   Generated archive metadata now includes complete per-layer field maps.

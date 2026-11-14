@@ -999,6 +999,15 @@ pub(super) fn emit_line_feature(
     count
 }
 
+/// A polygon copy whose coordinates the integer engine cannot represent emits
+/// nothing and is counted; see `int_ocean::Unrepresentable` for why that is a
+/// property of the input rather than of the z14 grid.
+fn count_unrepresentable_copy() {
+    crate::debug::OSM_POLYGON
+        .copy_unrepresentable
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[hotpath::measure]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn emit_polygon_feature(
@@ -1019,7 +1028,7 @@ pub(super) fn emit_polygon_feature(
     }
     fill_pin_keys_from_mask(merc, preserve_vertex_mask, &mut scratch.pin_keys);
     let has_pins = !scratch.pin_keys.is_empty();
-    if has_pins {
+    let quantized = if has_pins {
         let pin_keys = &scratch.pin_keys;
         quantize_polygon_pinned_into(
             merc,
@@ -1028,9 +1037,15 @@ pub(super) fn emit_polygon_feature(
             |p| pin_keys.contains(&merc_point_key(p)),
             &mut scratch.shape_base,
             &mut scratch.flags_base,
-        );
+        )
     } else {
-        quantize_polygon_into(merc, &[], OSM_POLYGON_MAX_Z, &mut scratch.shape_base);
+        quantize_polygon_into(merc, &[], OSM_POLYGON_MAX_Z, &mut scratch.shape_base)
+    };
+    if quantized.is_err() {
+        count_unrepresentable_copy();
+        return Ok(0);
+    }
+    if !has_pins {
         scratch
             .flags_base
             .fill_for_shape(&scratch.shape_base, |_, ring, flags| {
@@ -1122,7 +1137,8 @@ pub(super) fn emit_multipolygon_feature(
     tol_scale: f64,
 ) -> Result<u64, RingCapError> {
     emit_scratch.cap_events.clear();
-    if let Some(keys) = preserve_vertex_keys.filter(|k| !k.is_empty()) {
+    let pinned = preserve_vertex_keys.filter(|k| !k.is_empty());
+    let quantized = if let Some(keys) = pinned {
         quantize_polygon_pinned_into(
             outer,
             inners,
@@ -1130,14 +1146,20 @@ pub(super) fn emit_multipolygon_feature(
             |p| relation_vertex_is_pinned(keys, p),
             &mut emit_scratch.shape_base,
             &mut emit_scratch.flags_base,
-        );
+        )
     } else {
         quantize_polygon_into(
             outer,
             inners,
             OSM_POLYGON_MAX_Z,
             &mut emit_scratch.shape_base,
-        );
+        )
+    };
+    if quantized.is_err() {
+        count_unrepresentable_copy();
+        return Ok(0);
+    }
+    if pinned.is_none() {
         emit_scratch
             .flags_base
             .fill_for_shape(&emit_scratch.shape_base, |_, ring, flags| {
@@ -1430,7 +1452,8 @@ mod landing2_tests {
     #[test]
     fn cap_suffix_property() {
         let mut shape = Shape::new();
-        quantize_polygon_into(&square(0.1, 0.9), &[], OSM_POLYGON_MAX_Z, &mut shape);
+        quantize_polygon_into(&square(0.1, 0.9), &[], OSM_POLYGON_MAX_Z, &mut shape)
+            .expect("an in-world square is representable");
         let mut cap_events = Vec::new();
         let z_bottom = polygon_z_bottom_after_caps(
             &shape,

@@ -171,6 +171,9 @@ impl Shapefile {
 
         let merc_min = geometry::projection::from_epsg3857(xmin, ymax);
         let merc_max = geometry::projection::from_epsg3857(xmax, ymin);
+        if !in_world_domain(merc_min) || !in_world_domain(merc_max) {
+            return Err(self.invalid(record, "polygon bounds lie outside the projected world"));
+        }
         if !accept(merc_min, merc_max) {
             return Ok(false);
         }
@@ -254,6 +257,18 @@ fn parse_shx(shx_data: &[u8], shx_path: &Path) -> std::io::Result<Vec<ShxRecord>
         });
     }
     Ok(records)
+}
+
+/// The world, with one world width of headroom on every side: normalized
+/// Mercator `[-1, 2]` on both axes. Water polygons lie inside `[0, 1]` and
+/// are never antimeridian-unwrapped, so this is generous; what it buys is
+/// that the integer polygon engine downstream can trust the points it gets.
+/// On ocean's z7 and z14 grids the interval quantizes to at most `2^27` in
+/// magnitude, inside the overlay engine's `2^30` coordinate interval. Finite
+/// points outside it are corrupt input and fail the source, rather than
+/// silently dropping water or overflowing the engine.
+fn in_world_domain(p: geometry::projection::Point) -> bool {
+    (-1.0..=2.0).contains(&p.x) && (-1.0..=2.0).contains(&p.y)
 }
 
 // Fixed-width field readers. Callers have already bounds-checked the slice;
@@ -428,7 +443,11 @@ impl RecordSource<'_> {
                 if !x.is_finite() || !y.is_finite() {
                     return Err(self.invalid("polygon point coordinate is non-finite"));
                 }
-                ring.push(geometry::projection::from_epsg3857(x, y));
+                let point = geometry::projection::from_epsg3857(x, y);
+                if !in_world_domain(point) {
+                    return Err(self.invalid("polygon point lies outside the projected world"));
+                }
+                ring.push(point);
             }
             points_read += points_this_read;
         }
@@ -767,7 +786,15 @@ mod tests {
 
     #[test]
     fn rejects_malformed_polygon_geometry() {
-        for defect in ["type", "bounds", "coordinate", "short_ring", "closure"] {
+        for defect in [
+            "type",
+            "bounds",
+            "world_bounds",
+            "coordinate",
+            "world_point",
+            "short_ring",
+            "closure",
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("malformed.shp");
             write_test_polygon_shapefile(&path);
@@ -777,7 +804,11 @@ mod tests {
             match defect {
                 "type" => write_u32_le(&mut shp, rec, 3),
                 "bounds" => write_f64_le(&mut shp, rec + 4, f64::NAN),
+                // Finite but far outside the world: once aborted the run at
+                // quantization, or slipped past it and overflowed the engine.
+                "world_bounds" => write_f64_le(&mut shp, rec + 4, -1.0e12),
                 "coordinate" => write_f64_le(&mut shp, points + 16, f64::INFINITY),
+                "world_point" => write_f64_le(&mut shp, points + 16, 1.0e12),
                 "short_ring" => write_u32_le(&mut shp, rec + 40, 3),
                 "closure" => write_f64_le(&mut shp, points + 4 * 16, 0.0),
                 _ => unreachable!(),

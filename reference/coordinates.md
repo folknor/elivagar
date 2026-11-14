@@ -69,7 +69,15 @@ inclusive, so a box on a tile boundary can include both sides.
 The integer polygon path quantizes a normalized coordinate `v` to the base
 grid with `round(v * 2^(M + 12))`, where `M` is the maximum zoom used to build
 that grid. This quantization does not clamp coordinates to the world, so an
-unwrapped x coordinate remains unwrapped. Since `4096 = 2^12`, one tile at
+unwrapped x coordinate remains unwrapped. Because it does not clamp, every
+rounded base coordinate is checked against the overlay engine's integer
+interval `[-2^30, 2^30 - 1]`, and a polygon with any vertex outside it (or
+non-finite) is refused whole rather than quantized: OSM polygons skip that
+world copy and count it, while ocean never reaches the check because the
+shapefile reader refuses points outside normalized `[-1, 2]`. `M` is at most
+z14, which bounds tile sizes and buffers but not input coordinates; an
+antimeridian unwrap follows each previous vertex and has no fixed span.
+Since `4096 = 2^12`, one tile at
 zoom `z` spans `4096 * 2^(M - z)` base units. Rescaling to zoom z rounds the
 signed base coordinate to the nearest integer, with exact half values rounded
 away from zero. The tile origin is `(tx * 4096, ty * 4096)` in zoom-grid

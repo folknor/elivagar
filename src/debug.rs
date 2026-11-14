@@ -156,6 +156,16 @@ counter_group!(MultipolygonCounters {
     orphan_inners => "multipolygon_orphan_inners",
 });
 
+// OSM polygon copies refused because a vertex quantizes outside the overlay
+// engine's coordinate interval (src/geometry/int_ocean.rs). One count per
+// attempted world copy per layer match, not per source polygon: antimeridian
+// unwrapping follows each previous vertex without bound, so a path winding
+// round the globe many times can reach it. Before the refusal such a copy
+// aborted the run or overflowed the engine's arithmetic.
+counter_group!(OsmPolygonCounters {
+    copy_unrepresentable => "osm_polygon_copy_unrepresentable",
+});
+
 counter_group!(BusyCounters {
     phase12_node_blocks => "phase12_node_blocks_ns",
     phase12_plan_build => "phase12_plan_build_ns",
@@ -181,6 +191,9 @@ pub static RING_CAP: RingCapCounters = RingCapCounters::new();
 /// Process-global multipolygon salvage tallies; drained with [`WAIT`].
 pub static MULTIPOLYGON: MultipolygonCounters = MultipolygonCounters::new();
 
+/// Process-global OSM polygon refusal tallies; drained with [`WAIT`].
+pub static OSM_POLYGON: OsmPolygonCounters = OsmPolygonCounters::new();
+
 /// Discard totals left by a previous failed run before starting the next one.
 /// Pipeline runs must be sequential because these accumulators are shared.
 pub(crate) fn reset_run_counters() {
@@ -188,16 +201,18 @@ pub(crate) fn reset_run_counters() {
     BUSY.reset();
     RING_CAP.reset();
     MULTIPOLYGON.reset();
+    OSM_POLYGON.reset();
 }
 
-/// Drain accumulated stall, busy, ring-cap and multipolygon totals to the
-/// sidecar. Call once at end of run; a no-op per counter when nothing
-/// accumulated.
+/// Drain accumulated stall, busy, ring-cap, multipolygon and OSM polygon
+/// totals to the sidecar. Call once at end of run; a no-op per counter when
+/// nothing accumulated.
 pub fn emit_wait_counters() {
     WAIT.drain();
     BUSY.drain();
     RING_CAP.drain();
     MULTIPOLYGON.drain();
+    OSM_POLYGON.drain();
 }
 
 /// RAII guard timing one blocking interval. On drop it adds the elapsed

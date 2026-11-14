@@ -10,7 +10,7 @@
 <p align="center">
   <a href="https://crates.io/crates/elivagar"><img src="https://img.shields.io/crates/v/elivagar" alt="crates.io"></a>
   <a href="https://docs.rs/elivagar"><img src="https://img.shields.io/docsrs/elivagar" alt="docs.rs"></a>
-  <img src="https://img.shields.io/badge/rust-1.97+-orange?logo=rust" alt="MSRV 1.97">
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/rust-MSRV%20in%20Cargo.toml-orange?logo=rust" alt="Minimum Rust version in Cargo.toml"></a>
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
 </p>
 
@@ -346,8 +346,8 @@ ones above are categorical, where passing means a count of zero.
 
 ## Building
 
-Requires Rust 1.97 or newer (edition 2024). Stable toolchain; no nightly
-features are used.
+The minimum Rust version is declared by `rust-version` in [Cargo.toml](Cargo.toml).
+Uses edition 2024 and the stable toolchain, with no nightly features.
 
 ```
 cargo build --release

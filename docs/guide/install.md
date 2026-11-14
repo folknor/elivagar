@@ -7,8 +7,10 @@
 cargo install elivagar
 ```
 
-That builds the binary from source with release optimizations. Requires Rust
-1.97 or newer; edition 2024, stable toolchain, no nightly features.
+That builds the binary from source with release optimizations. The minimum
+Rust version is declared by `rust-version` in
+[`Cargo.toml`](https://github.com/folknor/elivagar/blob/main/Cargo.toml).
+Uses edition 2024 and the stable toolchain, with no nightly features.
 
 ## As a library
 

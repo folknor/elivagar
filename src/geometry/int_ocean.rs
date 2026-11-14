@@ -287,7 +287,61 @@ pub(crate) struct DpScratch {
     out: Contour,
 }
 
+/// The overlay engine's integer coordinate interval, `[-2^30, 2^30 - 1]`
+/// (the in-tree port inherits i_overlay's `-2^(N-2)..=2^(N-2)-1` range for
+/// an `N`-bit engine; outside it a coordinate difference or cross product
+/// overflows). Every base coordinate the quantizer hands out lies in it.
+pub(crate) const BASE_COORD_MIN: i64 = -(1 << 30);
+pub(crate) const BASE_COORD_MAX: i64 = (1 << 30) - 1;
+
+/// A polygon with a vertex that is non-finite or quantizes outside the
+/// overlay interval. Quantization is unclamped on purpose (antimeridian
+/// copies sit outside `[0, 1]`), so representability is a property of the
+/// input, not of the grid zoom: an unwrapped OSM path follows its previous
+/// vertex and can accumulate many world widths. The whole polygon is refused
+/// rather than the offending ring, because dropping one hole would turn it
+/// into fill. The refusal concerns numeric representability only; it is not
+/// a policy on which geography is supported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Unrepresentable;
+
+/// Base-grid scale for grid zoom `maxz`. Premise, not checked here: `maxz`
+/// is at most the profile top (OSM polygons use the profile top, ocean its
+/// fixed z7 and z14 pass grids), so the shift is at most 26 bits.
+fn base_scale(maxz: u8) -> i64 {
+    1_i64 << (u32::from(maxz) + EXTENT_LOG2)
+}
+
+fn coord_is_representable(v: f64, scale: i64) -> bool {
+    #[allow(clippy::cast_precision_loss)]
+    let r = (v * scale as f64).round();
+    #[allow(clippy::cast_precision_loss)]
+    let ok = r.is_finite() && r >= BASE_COORD_MIN as f64 && r <= BASE_COORD_MAX as f64;
+    ok
+}
+
+/// Check every vertex of every ring - inners included even when the outer
+/// would collapse - before any quantization.
+fn check_representable(
+    outer: &[Point],
+    inners: &[Vec<Point>],
+    maxz: u8,
+) -> Result<(), Unrepresentable> {
+    let scale = base_scale(maxz);
+    let ok = std::iter::once(outer)
+        .chain(inners.iter().map(Vec::as_slice))
+        .flatten()
+        .all(|p| coord_is_representable(p.x, scale) && coord_is_representable(p.y, scale));
+    if ok { Ok(()) } else { Err(Unrepresentable) }
+}
+
+/// Quantize a polygon the caller already knows to be representable. The one
+/// production caller is ocean, whose shapefile reader refuses any point
+/// outside normalized `[-1, 2]`; on its z7 and z14 grids that bounds base
+/// coordinates at `2^27`, inside the overlay interval.
 pub(crate) fn quantize_polygon(outer: &[Point], inners: &[Vec<Point>], maxz: u8) -> Shape {
+    check_representable(outer, inners, maxz)
+        .expect("ocean points are reader-checked to normalized [-1, 2] on a grid of at most z14");
     let Some(outer) = quantize_ring(outer, maxz, true) else {
         return Vec::new();
     };
@@ -307,12 +361,19 @@ pub(crate) fn quantize_polygon(outer: &[Point], inners: &[Vec<Point>], maxz: u8)
 /// outer the output is left empty. Part of the H6 churn reduction -
 /// `emit_polygon_feature` quantized 4.5M polygons per denmark build at one
 /// fresh Shape each (5.2 GB exclusive).
+///
+/// An unrepresentable polygon leaves `out` empty and returns the refusal;
+/// ordinary collapse returns `Ok` with an empty shape.
 pub(crate) fn quantize_polygon_into(
     outer: &[Point],
     inners: &[Vec<Point>],
     maxz: u8,
     out: &mut Shape,
-) {
+) -> Result<(), Unrepresentable> {
+    if let Err(e) = check_representable(outer, inners, maxz) {
+        out.clear();
+        return Err(e);
+    }
     let mut used = 0usize;
     if quantize_ring_at(out, &mut used, outer, maxz, true) {
         for inner in inners {
@@ -322,10 +383,12 @@ pub(crate) fn quantize_polygon_into(
         used = 0;
     }
     out.truncate(used);
+    Ok(())
 }
 
 /// Quantize a polygon with pin flags into reused Shape + flags buffers.
-/// Same recycling contract as `quantize_polygon_into`.
+/// Same recycling and refusal contract as `quantize_polygon_into`; a refusal
+/// clears the flags too.
 pub(crate) fn quantize_polygon_pinned_into<F>(
     outer: &[Point],
     inners: &[Vec<Point>],
@@ -333,9 +396,15 @@ pub(crate) fn quantize_polygon_pinned_into<F>(
     mut pin_test: F,
     out: &mut Shape,
     out_flags: &mut PinnedRings,
-) where
+) -> Result<(), Unrepresentable>
+where
     F: FnMut(&Point) -> bool,
 {
+    if let Err(e) = check_representable(outer, inners, maxz) {
+        out.clear();
+        out_flags.truncate(0);
+        return Err(e);
+    }
     let mut used = 0usize;
     if quantize_ring_pinned_at(out, out_flags, &mut used, outer, maxz, true, &mut pin_test) {
         for inner in inners {
@@ -347,6 +416,7 @@ pub(crate) fn quantize_polygon_pinned_into<F>(
     out.truncate(used);
     out_flags.truncate(used);
     out_flags.validate_for(out);
+    Ok(())
 }
 
 /// Quantize one ring into slot `*used` of `out`, reusing the slot's Vec.
@@ -364,7 +434,7 @@ fn quantize_ring_at(
     }
     let ring = &mut out[*used];
     ring.clear();
-    let scale = 1_i64 << (u32::from(maxz) + EXTENT_LOG2);
+    let scale = base_scale(maxz);
     for p in points {
         push_nonduplicate(
             ring,
@@ -404,7 +474,7 @@ where
     ring.clear();
     flags.clear();
     let mut paired = PinnedRingMut::new(ring, flags);
-    let scale = 1_i64 << (u32::from(maxz) + EXTENT_LOG2);
+    let scale = base_scale(maxz);
     for p in points {
         paired.push_nonduplicate(
             IntPoint::new(quantize_coord(p.x, scale), quantize_coord(p.y, scale)),
@@ -829,7 +899,7 @@ fn fill_rect_contour(out: &mut Contour, rect: IntRect) {
 }
 
 fn quantize_ring(points: &[Point], maxz: u8, outer: bool) -> Option<Contour> {
-    let scale = 1_i64 << (u32::from(maxz) + EXTENT_LOG2);
+    let scale = base_scale(maxz);
     let mut ring = Vec::with_capacity(points.len());
     for p in points {
         push_nonduplicate(
@@ -845,10 +915,14 @@ fn quantize_ring(points: &[Point], maxz: u8, outer: bool) -> Option<Contour> {
     Some(ring)
 }
 
+/// Every caller has passed the polygon through `check_representable`, so the
+/// rounded value is finite and inside the overlay interval; the debug
+/// assertion restates that before the saturating float cast.
 fn quantize_coord(v: f64, scale: i64) -> i32 {
+    debug_assert!(coord_is_representable(v, scale));
     #[allow(clippy::cast_possible_truncation)]
     let rounded = (v * scale as f64).round() as i64;
-    i32::try_from(rounded).expect("base coordinate fits i32")
+    i32::try_from(rounded).expect("a representability-checked base coordinate fits i32")
 }
 
 fn shift_round(v: i32, s: u8) -> i32 {
@@ -1429,6 +1503,72 @@ mod tests {
     }
 
     #[test]
+    fn representability_is_the_overlay_interval_on_the_rounded_value() {
+        let scale = 1_i64 << 26;
+        #[allow(clippy::cast_precision_loss)]
+        let s = scale as f64;
+        // Exact endpoints: -2^30 is in, 2^30 - 1 is in, 2^30 is out.
+        assert!(coord_is_representable(-16.0, scale));
+        assert!(coord_is_representable(
+            ((1_i64 << 30) - 1) as f64 / s,
+            scale
+        ));
+        assert!(!coord_is_representable(16.0, scale));
+        // Rounding across the endpoints decides, not the raw product.
+        assert!(coord_is_representable(
+            (((1_i64 << 30) - 1) as f64 + 0.4) / s,
+            scale
+        ));
+        assert!(!coord_is_representable(
+            (((1_i64 << 30) - 1) as f64 + 0.6) / s,
+            scale
+        ));
+        assert!(!coord_is_representable(
+            (-(1_i64 << 30) as f64 - 0.6) / s,
+            scale
+        ));
+        assert!(!coord_is_representable(f64::NAN, scale));
+        assert!(!coord_is_representable(f64::INFINITY, scale));
+        // -32 world widths used to pass as i32::MIN; it is outside the engine.
+        assert!(!coord_is_representable(-32.0, scale));
+    }
+
+    #[test]
+    fn unrepresentable_inner_refuses_the_whole_polygon_and_clears_buffers() {
+        // A collapsed outer (all one point) must not hide an unrepresentable
+        // inner; the refusal also clears leftovers from an earlier call.
+        let good = merc_ring(&[(0.1, 0.1), (0.1, 0.2), (0.2, 0.2), (0.2, 0.1), (0.1, 0.1)]);
+        let collapsed = merc_ring(&[(0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5)]);
+        let far = merc_ring(&[(40.0, 0.1), (40.0, 0.2), (40.1, 0.2), (40.0, 0.1)]);
+        let mut shape = Shape::new();
+        quantize_polygon_into(&good, &[], 14, &mut shape).expect("in-world");
+        assert!(!shape.is_empty());
+        assert_eq!(
+            quantize_polygon_into(&collapsed, std::slice::from_ref(&far), 14, &mut shape),
+            Err(Unrepresentable)
+        );
+        assert!(shape.is_empty());
+
+        let mut flags = PinnedRings::default();
+        quantize_polygon_pinned_into(&good, &[], 14, |_| true, &mut shape, &mut flags)
+            .expect("in-world");
+        assert!(!shape.is_empty());
+        assert_eq!(
+            quantize_polygon_pinned_into(&good, &[far], 14, |_| true, &mut shape, &mut flags),
+            Err(Unrepresentable)
+        );
+        assert!(shape.is_empty());
+        flags.validate_for(&shape);
+
+        // Ordinary collapse is not a refusal.
+        assert_eq!(
+            quantize_polygon_into(&collapsed, &[], 14, &mut shape),
+            Ok(())
+        );
+        assert!(shape.is_empty());
+    }
+
+    #[test]
     fn quantized_base_pins_follow_duplicate_collapse_and_ring_orientation() {
         let outer = merc_ring(&[
             (0.0, 0.0),
@@ -1446,7 +1586,8 @@ mod tests {
             |point| point.x <= 0.0 && point.y > 0.0,
             &mut shape,
             &mut flags,
-        );
+        )
+        .expect("an in-world ring is representable");
         let pinned: Vec<_> = flags
             .pinned_points_for(&shape)
             .map(|point| (point.x, point.y))
