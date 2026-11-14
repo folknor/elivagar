@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Resume records are split by producer (checkpoint v11). `checkpoint.txt`
+  holds only what the PBF phase depends on and derives; the ocean chunks'
+  identity moved to a new completion record, `chunks_complete.json`,
+  which replaces `sort_chunks.count` and is written after the ocean
+  phase. `--skip-to ocean` now admits a different ocean input, or none,
+  since it rebuilds the ocean; `--skip-to sort` and `assemble` refuse an
+  ocean identity that differs from the run's. The artifact's compression
+  level no longer gates a resume, as chunks hold geometry. A full run
+  fails if it cannot clear the tmp dir. Ocean, input and producer-config
+  refusals now emit `resume_refusal_*` counters. Earlier checkpoints are
+  refused. `sort::ChunkCompression` gains serde derives. Output is
+  unchanged.
+
 - `TilegenConfig` budgets are typed instead of zero-means-default.
   Breaking: `sort_chunk_size`, `way_inflight_budget` and
   `assemble_batch_budget` are `Option<resources::ByteBudget>`,

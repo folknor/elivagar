@@ -171,9 +171,10 @@ an archive with no ocean.
 `--skip-to ocean` reuses PBF chunks from a previous full run.
 `--skip-to sort` reuses all chunks (PBF + ocean).
 `--skip-to assemble` reuses all chunks and jumps straight to tile assembly.
-Resumes require checkpoint v7 and the same `--compress-sort-chunks` setting
-that wrote the chunks. Resuming at `sort` or `assemble` also requires a valid
-chunk-count completion record. See [the CLI reference](reference/cli.md) for
+Resumes require a checkpoint of the current format and the same
+`--compress-sort-chunks` setting that wrote the chunks. Resuming at `sort` or
+`assemble` also requires a valid chunk completion record naming the same ocean
+input; resuming at `ocean` may change it. See [the CLI reference](reference/cli.md) for
 the full resume contract and supported fanout-cap layers.
 
 ### Flat index safety guardrails

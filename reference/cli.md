@@ -163,11 +163,12 @@ mode, node workers with `(threads / 4).clamp(2, 6)`. Way admission allows
 this value. Relation prepass, way dispatch and result drain use separate OS
 threads, so these counts do not divide a single process-wide allowance.
 
-A resume validates the checkpoint's input identity, producer config, ocean
-source and low-zoom selection, and sort chunk codec against the current run
-and refuses a mismatch, so `--skip-to` cannot silently blend two contracts into
-one archive. The checkpoint carries a tagged ocean contract recording mode,
-low-zoom source, and source identity. Inline way coordinates contribute to the
+A resume is checked against two records, each written by the producer whose
+chunks it describes. The checkpoint (`checkpoint.txt`), written after the PBF
+phase, records the input identity, producer config and sort chunk codec, and
+every resume refuses a mismatch in any of them, so `--skip-to` cannot silently
+blend two contracts into one archive. It records no ocean: the PBF phase reads
+none. Inline way coordinates contribute to the
 data extent in locations-on-ways mode, including ways without tags. The
 `--compress-sort-chunks` setting must match the run that wrote the chunks,
 including leaving compression unset on both runs.
@@ -178,23 +179,27 @@ Checkpoints from an earlier format version are refused; re-run a full
 tilegen. The version moves whenever chunks built under unchanged recorded
 identity would differ, as when computed ocean moved to canonical pass grids.
 
-Resuming at `sort` or `assemble` also requires a valid chunk-count completion
-record (`sort_chunks.count`), written after the ocean phase and final chunk
-flush. A missing, unreadable, or invalid record refuses the resume because
-the chunk set may be partial. Resume at `ocean` or run a full tilegen to
-regenerate it. Resuming at `ocean` clears any previous completion record
-before changing the chunk set, so a failed ocean pass cannot look complete.
+Resuming at `sort` or `assemble` also requires the chunk completion record
+(`chunks_complete.json`), written after the ocean phase and final chunk flush.
+It carries the total chunk count and the identity of the ocean chunks: none,
+computed from a shapefile source, or the boundary band of an artifact-served
+run, each with the source's content hashes, zoom span and ocean policy
+version. A missing, unreadable, or invalid record refuses the resume because
+the chunk set may be partial, and an ocean identity that differs from this
+run's refuses it because those resumes reuse the ocean chunks.
 
-The ocean source identity was added in checkpoint v6 (2026-07-14). v5 recorded
-computed ocean as the bare string `computed`, naming no source, so chunks built from one
-shapefile could be reused by a resume naming another while the archive's
-metadata described the second - the artifact arm had carried its key since it
-was introduced and the computed arm simply had not. Both arms now carry their
-producer's identity: shapefile content hashes plus the zoom span.
-Computed-ocean identity excludes the compression level, which is assemble-side
-and may differ across a resume. An artifact-backed resume must still match the
-artifact's compression level and key. Tile compression is independent of the
-sort chunk codec, which must match as described above.
+Resuming at `ocean` rebuilds the ocean, so it may name a different ocean
+input than the run that built the chunks, or none. It clears any previous
+completion record before changing the chunk set, so a failed ocean pass cannot
+look complete, and writes a new one when the pass completes.
+
+The ocean chunk identity excludes the compression level and the artifact's key
+as a whole: chunks hold geometry, not encoded tiles, so neither changes them.
+An artifact-backed run is still refused at entry unless the named artifact
+matches its compression level and was built from the named shapefiles. Tile
+compression is independent of the sort chunk codec, which must match as
+described above. A full run clears the tmp dir and fails if it cannot, so no
+earlier run's records survive beside its chunks.
 
 ### Node and way handling
 

@@ -69,23 +69,19 @@ elivagar run input.osm.pbf -o out.pmtiles --skip-to assemble
 reuses PBF and ocean chunks, `--skip-to assemble` jumps straight to tile
 assembly.
 
-A resume validates the checkpoint's input identity, producer config, ocean
-source and low-zoom selection, and sort chunk codec against the current run
-and refuses a mismatch, so `--skip-to` cannot silently blend two contracts into
-one archive. Before v6, checkpoints recorded computed ocean as a bare string
-naming no source, so chunks
-built from one shapefile could be reused by a resume naming another while the
-archive's metadata described the second. Both arms now carry their producer's
-identity. v9 uses a tagged ocean contract that also records the low-zoom
-source. The extent, expanded in v8, includes inline coordinates from every way
-in locations mode, since untagged nodes may be absent. This buffered extent also
-sets the archive header's WGS84 bounds and center; ocean artifacts retain
-world bounds.
+A resume validates the checkpoint's input identity, producer config and sort
+chunk codec against the current run and refuses a mismatch, so `--skip-to`
+cannot silently blend two contracts into one archive. The checkpoint's extent
+includes inline coordinates from every way in locations mode, since untagged
+nodes may be absent. This buffered extent also sets the archive header's WGS84
+bounds and center; ocean artifacts retain world bounds.
 
 The `--compress-sort-chunks` setting must match the run that wrote the chunks.
-Resuming at `sort` or `assemble` also requires a valid chunk-count completion
-record from the completed ocean pass and final chunk flush. If it is missing
-or invalid, resume at `ocean` or run a full tilegen. Checkpoints from an
+Resuming at `sort` or `assemble` also requires a valid completion record from
+the completed ocean pass and final chunk flush, and its ocean identity must
+match the run's, since those resumes reuse the ocean chunks. If it is missing,
+invalid or names another ocean, resume at `ocean`, which rebuilds the ocean
+from whatever ocean input the run names, or run a full tilegen. Checkpoints from an
 earlier format version require a full tilegen. See the [CLI reference](../reference/cli) for
 the complete resume contract.
 

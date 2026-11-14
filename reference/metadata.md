@@ -260,13 +260,12 @@ geometry continues to emit each assembled component separately.
 ## Checkpoint provenance
 
 `--skip-to` reuses sort chunks from a previous run, and nothing in a later
-invocation reveals what produced them. The checkpoint (JSON) records the
-input hash, producer config, ocean source identity and low-zoom selection,
-effective paths, and sort chunk codec. A resume validates all except the
-effective paths, which it inherits. The checkpoint and archive provenance use
-the same path enums and tagged ocean mode internally; archive provenance keeps
-its existing field names, explicit null artifact key for non-artifact modes,
-and omission of `source_key` outside computed-ocean mode.
+invocation reveals what produced them. The checkpoint (JSON, written after
+the PBF phase) records the input hash, producer config, effective paths, sort
+chunk codec and data extent. A resume validates all except the effective paths
+and extent, which it inherits. The ocean chunks' identity lives in the chunk
+completion record written after the ocean phase (below). The checkpoint and
+archive provenance use the same path enums.
 
 **Input hash.** A mismatch is a hard error: resuming would mix two inputs into
 one archive and stamp it with provenance describing only the second.
@@ -286,27 +285,25 @@ the named artifact's tile format, compression and compression-level contract.
 because re-derivation would describe what *this* invocation would have done,
 not what produced the chunks on disk.
 
-**Ocean source.** Computed ocean and artifact-backed ocean both carry their
-source identity. v9 records the mode and low-zoom source explicitly in a tagged
-object and validates both on resume. A mismatch is a hard error. v6 added
-computed ocean source hashes and zoom spans; v5 stored only the word `computed` for that arm.
-v10 adds no field: it marks the change to canonical ocean pass grids (a
-narrowed window truncates emission instead of moving the grid, and an
-artifact-backed single `z0-z14` shapefile judges band ownership on both pass
-grids), so v9 chunks built the old way under identical keys are refused.
+**Sort chunk codec.** Recorded separately from producer config. The
+`--compress-sort-chunks` setting must match, including uncompressed chunks. It
+is a decoding requirement, independent of tile compression applied later
+during assembly.
 
-**Sort chunk codec.** v7 records the chunk storage codec separately from
-producer config. The `--compress-sort-chunks` setting must match, including
-uncompressed chunks. It is a decoding requirement, independent of tile
-compression applied later during assembly.
+**Chunk completion and ocean identity.** Resuming at `sort` or `assemble`
+also requires the chunk completion record, written after the ocean pass and
+final chunk flush. It records the total chunk count and what produced the
+ocean chunks: no ocean, computed ocean, or the boundary band of an
+artifact-served run, the last two with the shapefile source key (content
+hashes, zoom span, ocean policy version). A missing, unreadable, or invalid
+record refuses the resume, and so does an ocean identity differing from the
+run's. The artifact's compression level is not part of it: chunks hold
+geometry, and artifact admission at run entry already binds the artifact to
+the run's level. Resuming at `ocean` admits any ocean input, since it rebuilds
+the ocean; it clears the previous record before modifying chunks and writes a
+fresh one only after completion.
 
-Resuming at `sort` or `assemble` also requires the separate chunk-count
-completion record, written after the ocean pass and final chunk flush. A
-missing, unreadable, or invalid record refuses the resume. Resuming at `ocean`
-clears the previous record before modifying chunks and writes a fresh one
-only after completion.
-
-**Data extent.** v8 includes the inline coordinates of every way in
+**Data extent.** It includes the inline coordinates of every way in
 locations-on-ways mode, independently of tags. This is needed because enriched
 inputs may omit untagged node elements. The checkpoint's Mercator extent
 includes the ocean overlap buffer and supplies both ocean selection and the
@@ -316,9 +313,9 @@ or a single latitude; empty input falls back to world bounds.
 Header coordinates are rounded to E7; inspect decodes them
 by dividing the signed integers by 10,000,000.
 
-v8 and earlier are rejected; re-run a full tilegen. v4 and earlier used a
-whitespace-positional encoding where each added field shifted an index and a
-miscount was a silent misparse; v7 introduced the current JSON encoding.
+Both records carry the format version, and a record from any other version is
+rejected; re-run a full tilegen. The version moves whenever chunks built under
+unchanged recorded identity would differ.
 
 ## Where the input hash is taken
 

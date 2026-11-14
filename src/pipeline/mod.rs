@@ -8,6 +8,7 @@
 
 mod assemble;
 mod boundary_prescan;
+mod checkpoint;
 pub(crate) mod emit;
 mod phase12;
 mod relations;
@@ -239,245 +240,7 @@ pub struct TilegenConfig {
     pub polygon_simplify_factor: f64,
 }
 
-const CHECKPOINT_FILE: &str = "checkpoint.txt";
-/// v10 changes no field, only what the recorded identity means: computed
-/// ocean now constructs each pass on its canonical grid (z7 and z14, roots at
-/// the pass's first zoom) and the window only truncates emission, and an
-/// artifact-served run judges band ownership on both pass grids whatever the
-/// spelling. A v9 checkpoint from a narrowed window, or from a single
-/// `z0-z14` shapefile against an artifact, carries the same keys and producer
-/// config over chunks built the old way, so it is refused rather than reused.
-///
-/// v9 records ocean mode, low-zoom source, and source identity through the
-/// serde-tagged contract shared with provenance. v8 used a separate computed
-/// or band tag and did not record the low-zoom source explicitly.
-///
-/// v8 includes inline way coordinates in the checkpoint extent for
-/// locations-on-ways inputs, whose producer may omit untagged node elements.
-/// Earlier checkpoints may understate their extent.
-///
-/// v7 is JSON and records everything a resume must verify: the input hash, the
-/// producer config, effective paths, and the sort chunk storage codec.
-///
-/// v6 added computed-ocean source identity. v5 recorded computed ocean as the bare
-/// string "computed", naming no source, so chunks built from one shapefile
-/// could be reused by a resume naming another while the archive's metadata
-/// described the second - the artifact arm had carried its key since it was
-/// introduced, and the computed arm simply had not. Both arms now carry the
-/// identity of their producer.
-///
-/// v3 and earlier stored only bounds, chunk count and ocean mode, so a resume
-/// could silently reuse chunks built from a different PBF or a different zoom
-/// range. v4 added the input hash and effective paths but kept the
-/// whitespace-positional encoding, where every new field shifts an index and a
-/// miscount is a silent misparse. Neither is accepted; re-run a full tilegen.
-const CHECKPOINT_VERSION: u32 = 10;
-const SORT_CHECKPOINT_FILE: &str = "sort_chunks.count";
 const SORT_CHUNKS_DIR: &str = "sort_chunks";
-
-// ---------------------------------------------------------------------------
-// Checkpoint I/O
-// ---------------------------------------------------------------------------
-
-/// Everything a resumed run must verify or inherit, recorded when the PBF
-/// phase produces the chunks.
-///
-/// Chunks on disk are the product of one PBF and one producer config, and
-/// nothing in a later invocation reveals either. Resuming against a different
-/// input, or a different zoom range or fanout cap, silently mixes two
-/// contracts into one archive and then stamps it with provenance describing
-/// only the second - the metadata would be confidently wrong, which is worse
-/// than absent.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CheckpointProvenance {
-    pub(crate) input_xxh3_128: crate::ocean::Xxh128,
-    /// `provenance::producer_config` of the run that wrote the chunks.
-    pub(crate) producer_config: serde_json::Value,
-    pub(crate) effective: crate::provenance::Effective,
-    /// Codec used for the serialized sort chunks. This is storage format,
-    /// not producer provenance, but readers must match it to decode the files.
-    pub(crate) sort_chunk_compression: sort::ChunkCompression,
-}
-
-fn save_checkpoint(
-    tmp_dir: &std::path::Path,
-    bounds: &MercBbox,
-    chunk_count: usize,
-    ocean_mode: &OceanMode,
-    low_zoom_source: Option<crate::provenance::ActiveLowZoomSource>,
-    provenance: &CheckpointProvenance,
-) -> Result<(), PipelineError> {
-    let path = tmp_dir.join(CHECKPOINT_FILE);
-    let ocean = ocean_mode.contract_kind(low_zoom_source)?;
-    let ocean = serde_json::to_value(ocean).map_err(|error| {
-        PipelineError(format!(
-            "could not serialize checkpoint ocean contract: {error}"
-        ))
-    })?;
-    let effective = serde_json::to_value(provenance.effective)
-        .map_err(|error| PipelineError(format!("could not serialize effective paths: {error}")))?;
-    let sort_chunk_compression = match provenance.sort_chunk_compression {
-        sort::ChunkCompression::None => "none",
-        sort::ChunkCompression::Lz4 => "lz4",
-        sort::ChunkCompression::Snappy => "snappy",
-    };
-    let content = serde_json::json!({
-        "version": CHECKPOINT_VERSION,
-        "bounds": [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y],
-        "chunks": chunk_count,
-        "ocean": ocean,
-        "input_xxh3_128": provenance.input_xxh3_128,
-        "producer_config": provenance.producer_config,
-        "sort_chunk_compression": sort_chunk_compression,
-        "effective": effective,
-    });
-    std::fs::write(path, content.to_string())?; // io::Error message is sufficient context.
-    Ok(())
-}
-
-/// Save the completed sort chunk count so a resume can reject stale leftovers.
-fn save_sort_chunk_count(tmp_dir: &std::path::Path, count: usize) -> Result<(), PipelineError> {
-    std::fs::write(tmp_dir.join(SORT_CHECKPOINT_FILE), count.to_string())?;
-    Ok(())
-}
-
-/// A skip-to-sort/assemble resume requires proof that the ocean pass finished.
-/// The count file is written only after that pass; absence or corruption means
-/// the chunk set may be partial and must not be assembled.
-fn load_sort_chunk_count(tmp_dir: &std::path::Path) -> Result<usize, PipelineError> {
-    let path = tmp_dir.join(SORT_CHECKPOINT_FILE);
-    let content = std::fs::read_to_string(&path).map_err(|error| {
-        emit_counter("resume_refusal_missing_sort_chunk_count", 1);
-        PipelineError(format!(
-            "sort chunk completion record {} is missing or unreadable ({error}); the ocean phase may not have completed, so \
-             --skip-to sort or assemble is unsafe; rerun from --skip-to ocean or do a full tilegen",
-            path.display()
-        ))
-    })?;
-    content.trim().parse().map_err(|error| {
-        emit_counter("resume_refusal_invalid_sort_chunk_count", 1);
-        PipelineError(format!(
-            "sort chunk completion record {} is invalid ({error}); \
-             --skip-to sort or assemble is unsafe; rerun from --skip-to ocean or do a full tilegen",
-            path.display()
-        ))
-    })
-}
-
-/// Invalidate a previous completion record before --skip-to ocean modifies
-/// the chunk set. A failed ocean pass must leave no record that makes its
-/// partial output appear complete.
-fn clear_sort_chunk_count(tmp_dir: &std::path::Path) -> Result<(), PipelineError> {
-    let path = tmp_dir.join(SORT_CHECKPOINT_FILE);
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => {
-            emit_counter("resume_refusal_sort_chunk_count_clear", 1);
-            Err(PipelineError(format!(
-                "could not clear prior sort chunk completion record {} before resuming ocean: {error}",
-                path.display()
-            )))
-        }
-    }
-}
-
-fn load_checkpoint(
-    tmp_dir: &std::path::Path,
-) -> Result<
-    (
-        MercBbox,
-        usize,
-        OceanMode,
-        Option<crate::provenance::ActiveLowZoomSource>,
-        CheckpointProvenance,
-    ),
-    PipelineError,
-> {
-    let path = tmp_dir.join(CHECKPOINT_FILE);
-    let content = std::fs::read_to_string(&path).map_err(|e| {
-        emit_counter("resume_refusal_missing_checkpoint", 1);
-        PipelineError(format!(
-            "no checkpoint in {}: {e} (run a full tilegen first)",
-            tmp_dir.display()
-        ))
-    })?;
-    let stale = || {
-        emit_counter("resume_refusal_stale_checkpoint", 1);
-        PipelineError(format!(
-            "checkpoint in {} predates v{CHECKPOINT_VERSION} or is malformed; \
-             re-run a full tilegen to regenerate it",
-            tmp_dir.display()
-        ))
-    };
-    let doc: serde_json::Value = serde_json::from_str(&content).map_err(|_| stale())?;
-    if doc.get("version").and_then(serde_json::Value::as_u64) != Some(u64::from(CHECKPOINT_VERSION))
-    {
-        return Err(stale());
-    }
-    let coord = |i: usize| -> Result<f64, PipelineError> {
-        doc["bounds"]
-            .get(i)
-            .and_then(serde_json::Value::as_f64)
-            .ok_or_else(stale)
-    };
-    let bounds = MercBbox {
-        min_x: coord(0)?,
-        min_y: coord(1)?,
-        max_x: coord(2)?,
-        max_y: coord(3)?,
-    };
-    let chunks = usize::try_from(
-        doc.get("chunks")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(stale)?,
-    )
-    .map_err(|_| stale())?;
-    let checkpoint_ocean: crate::provenance::OceanContractKind =
-        serde_json::from_value(doc["ocean"].clone()).map_err(|_| stale())?;
-    let (ocean_mode, low_zoom_source) = match checkpoint_ocean {
-        crate::provenance::OceanContractKind::None => (OceanMode::None, None),
-        crate::provenance::OceanContractKind::Shapefile {
-            low_zoom_source,
-            source_key,
-        } => (
-            OceanMode::Computed {
-                key: crate::ocean::OceanSourceKey::from_json(&source_key)?,
-            },
-            Some(low_zoom_source),
-        ),
-        crate::provenance::OceanContractKind::Artifact {
-            low_zoom_source,
-            artifact_key,
-        } => (
-            OceanMode::Band {
-                key: crate::ocean::OceanArtifactKey::from_json(&artifact_key)?,
-            },
-            Some(low_zoom_source),
-        ),
-    };
-    let provenance = CheckpointProvenance {
-        input_xxh3_128: doc["input_xxh3_128"]
-            .as_str()
-            .ok_or_else(stale)?
-            .parse()
-            .map_err(|_| stale())?,
-        producer_config: doc.get("producer_config").cloned().ok_or_else(stale)?,
-        sort_chunk_compression: match doc
-            .get("sort_chunk_compression")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("none") => sort::ChunkCompression::None,
-            Some("lz4") => sort::ChunkCompression::Lz4,
-            Some("snappy") => sort::ChunkCompression::Snappy,
-            _ => return Err(stale()),
-        },
-        effective: serde_json::from_value(doc["effective"].clone()).map_err(|error| {
-            PipelineError(format!("invalid checkpoint effective paths: {error}"))
-        })?,
-    };
-    Ok((bounds, chunks, ocean_mode, low_zoom_source, provenance))
-}
 
 /// Effective encoding, resolved from the public config without changing its API.
 /// The gzip default is ignored for MLT; brotli is rejected by run before IO.
@@ -672,6 +435,21 @@ impl ResolvedOcean {
         }
     }
 
+    /// The identity of the ocean chunks this run produces, as the completion
+    /// record stores it. The key is the one the passes are hashed under: the
+    /// run window for computed ocean, the artifact's fixed z0-z14 for a band.
+    fn chunks(&self) -> checkpoint::OceanChunks {
+        match self {
+            Self::None => checkpoint::OceanChunks::None,
+            Self::Computed { key, .. } => checkpoint::OceanChunks::Computed {
+                source_key: key.clone(),
+            },
+            Self::Artifact { artifact, .. } => checkpoint::OceanChunks::Band {
+                source_key: artifact.key().source.clone(),
+            },
+        }
+    }
+
     fn plan(&self) -> Option<&crate::ocean::OceanPlan> {
         match self {
             Self::None => None,
@@ -810,11 +588,10 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     // from page cache and the "read it back out of cache" assumption fails at
     // exactly the scale where the read costs most.
     let mut input_identity: Option<crate::provenance::InputIdentity> = None;
-    let mut resumed_sort_chunks = None;
-    // Only a full run computes the effective paths; a resume inherits them
-    // from the checkpoint written by the run that built the chunks.
-    let mut resumed_effective = None;
-    if skip.is_some() {
+    // A resume inherits the extent, chunk counts and effective paths from the
+    // records written by the run that built the chunks; see `checkpoint`.
+    let mut resume: Option<checkpoint::Resume> = None;
+    if let Some(skip) = skip {
         // Phase12 checks this on full runs; a resume must honor the same
         // explicit header assertion before reusing any chunks.
         if config.locations_on_ways {
@@ -824,54 +601,25 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         }
         let identity = crate::provenance::hash_file(&config.pbf_path)
             .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?;
-        let (_, _, checkpoint_ocean_mode, checkpoint_low_zoom_source, checkpoint) =
-            load_checkpoint(&config.tmp_dir)?;
-        if checkpoint_ocean_mode != ocean_mode {
-            return Err(PipelineError("checkpoint ocean mode differs from this run; --skip-to ocean, sort, and assemble cannot resume".to_string()));
-        }
-        if checkpoint_low_zoom_source != low_zoom_source {
-            return Err(PipelineError(
-                "checkpoint low-zoom source differs from this run; resume is unsafe".to_string(),
-            ));
-        }
-        if checkpoint.sort_chunk_compression != config.compress_sort_chunks {
-            emit_counter("resume_refusal_sort_compression", 1);
-            return Err(PipelineError(format!(
-                "checkpoint sort chunks use {:?} compression but this run requests {:?}; \
-                 --compress-sort-chunks must match the setting that wrote the chunks, so \
-                 --skip-to cannot resume; re-run a full tilegen",
-                checkpoint.sort_chunk_compression, config.compress_sort_chunks
-            )));
-        }
-        if checkpoint.input_xxh3_128 != identity.xxh3_128 {
-            return Err(PipelineError(format!(
-                "checkpoint was built from a different PBF (chunks: {}, this run: {}); \
-                 --skip-to would mix two inputs into one archive - re-run a full tilegen",
-                checkpoint.input_xxh3_128, identity.xxh3_128,
-            )));
-        }
-        // The chunks encode the producer config: zoom range, fanout caps,
-        // simplification. They cannot be reinterpreted under different
-        // settings, and reusing them would record settings the tiles were
-        // never built under.
-        let current_producer = crate::provenance::producer_config(config);
-        if checkpoint.producer_config != current_producer {
-            let diffs = crate::provenance::producer_config_diff(
-                &checkpoint.producer_config,
-                &current_producer,
-            );
-            return Err(PipelineError(format!(
-                "checkpoint chunks were produced under a different config: {}; \
-                 --skip-to cannot reinterpret them - re-run a full tilegen",
-                diffs.join("; "),
-            )));
-        }
-        if matches!(skip, Some(SkipTo::Sort | SkipTo::Assemble)) {
-            resumed_sort_chunks = Some(load_sort_chunk_count(&config.tmp_dir)?);
-        }
-        resumed_effective = Some(checkpoint.effective);
+        resume = Some(checkpoint::admit(
+            &config.tmp_dir,
+            skip,
+            &checkpoint::RunIdentity {
+                input_xxh3_128: identity.xxh3_128,
+                producer_config: crate::provenance::producer_config(config),
+                sort_chunk_compression: config.compress_sort_chunks,
+                ocean: ocean.chunks(),
+            },
+        )?);
         input_identity = Some(identity);
     }
+    let resumed_sort_chunks = resume
+        .as_ref()
+        .and_then(|r| r.completion.as_ref())
+        .map(|c| c.chunks);
+    let resumed_effective = resume.as_ref().map(|r| r.pbf.effective);
+    // The data extent: phase12's on a full run, the checkpoint's on a resume.
+    let mut data_bounds = resume.as_ref().map(|r| r.pbf.bounds());
     emit_allocator_boundary("run_start");
 
     eprintln!(
@@ -912,8 +660,20 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
         None
     } else {
         let mut sort_writer = if skip.is_none() {
-            // Full run: clean tmp dir and run PBF phase
-            drop(std::fs::remove_dir_all(&config.tmp_dir)); // Best-effort: may not exist yet.
+            // Full run: clean tmp dir and run PBF phase. The cleanup must
+            // succeed: a partial one could leave an earlier run's records
+            // beside the chunks this run writes, and a later resume would
+            // read them as describing those chunks.
+            match std::fs::remove_dir_all(&config.tmp_dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(PipelineError(format!(
+                        "could not clear tmp dir {} before a full run: {error}",
+                        config.tmp_dir.display()
+                    )));
+                }
+            }
             std::fs::create_dir_all(&config.tmp_dir)?; // io::Error message is sufficient context.
 
             let input_hash = crate::provenance::BackgroundHash::spawn(config.pbf_path.clone());
@@ -942,34 +702,32 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
                     .join()
                     .map_err(|e| PipelineError(format!("could not read input PBF: {e}")))?
             };
-            save_checkpoint(
-                &config.tmp_dir,
+            checkpoint::PbfCheckpoint::new(
                 &bounds_out,
                 sw.chunk_count(),
-                &ocean_mode,
-                low_zoom_source,
-                &CheckpointProvenance {
-                    input_xxh3_128: identity.xxh3_128,
-                    producer_config: crate::provenance::producer_config(config),
-                    effective: phase12_stats
-                        .as_ref()
-                        .map(|s| s.effective)
-                        .expect("phase12 stats are set immediately above"),
-                    sort_chunk_compression: config.compress_sort_chunks,
-                },
-            )?;
+                identity.xxh3_128,
+                crate::provenance::producer_config(config),
+                config.compress_sort_chunks,
+                phase12_stats
+                    .as_ref()
+                    .map(|s| s.effective)
+                    .expect("phase12 stats are set immediately above"),
+            )
+            .save(&config.tmp_dir)?;
+            data_bounds = Some(bounds_out);
             input_identity = Some(identity);
             sw
         } else {
-            // --skip-to ocean: load checkpoint, resume from PBF chunks
-            let (_, pbf_chunks, checkpoint_ocean_mode, _, _) = load_checkpoint(&config.tmp_dir)?;
-            if checkpoint_ocean_mode != ocean_mode {
-                return Err(PipelineError(
-                    "checkpoint ocean mode differs from this run; resume is unsafe".to_string(),
-                ));
-            }
+            // --skip-to ocean: keep the PBF chunks, rebuild the ocean. The
+            // ocean input may differ from the one that built the old ocean
+            // chunks; those are deleted, and the completion record is
+            // cleared first so a failed pass cannot look complete.
+            let pbf_chunks = resume
+                .as_ref()
+                .map(|r| r.pbf.chunks)
+                .expect("a resume was admitted above");
             eprintln!("--- Skipping PBF phase ({pbf_chunks} chunks from checkpoint) ---");
-            clear_sort_chunk_count(&config.tmp_dir)?;
+            checkpoint::ChunkCompletion::clear(&config.tmp_dir)?;
             sort::SortWriter::resume(
                 &config.tmp_dir.join(SORT_CHUNKS_DIR),
                 resources.sort_chunk,
@@ -978,9 +736,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
             )?
         };
 
-        // Load data_bounds (needed for ocean, always available from checkpoint or just computed)
-        let (data_bounds, _, _, _, _) = load_checkpoint(&config.tmp_dir)?;
-
+        let data_bounds = data_bounds.expect("set by phase12 or the admitted resume");
         let band = crate::ocean::OceanBand::for_bounds(&data_bounds);
         ocean_band = Some(band);
         // Only an artifact-served run leaves tiles to someone else; a
@@ -1054,7 +810,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     }
     let sort_chunks = sort_writer.as_ref().map(sort::SortWriter::chunk_count);
     if let Some(count) = sort_chunks {
-        save_sort_chunk_count(&config.tmp_dir, count)?;
+        checkpoint::ChunkCompletion::new(count, ocean.chunks()).save(&config.tmp_dir)?;
     }
     let expected_sort_chunks = sort_chunks.or(resumed_sort_chunks);
     let (mut sort_reader, phase3_elapsed, sort_rss) = if skip == Some(SkipTo::Assemble) {
@@ -1087,8 +843,7 @@ pub fn run(config: &TilegenConfig) -> Result<(), PipelineError> {
     emit_marker("SORT_END");
     emit_allocator_boundary("sort_end");
 
-    // Loaded on every path, including a direct resume at assembly.
-    let (data_bounds, _, _, _, _) = load_checkpoint(&config.tmp_dir)?;
+    let data_bounds = data_bounds.expect("set by phase12 or the admitted resume");
     // The band the ocean phase produced under, or on a resume past it the
     // same function of the same checkpoint bounds.
     let ocean_band =

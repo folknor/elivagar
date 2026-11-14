@@ -23,50 +23,19 @@ account lives in `notes/bugs.md` instead.
 
 # Run contract, provenance and resume
 
-## CON-003 - What must a resume match?
+## CON-003 - Should the chunk store carry a manifest?
 
-Five carriers, each covering a different subset:
-
-- the checkpoint's `producer_config` (zooms, fanout caps, simplify factor),
-  hand-listed and guarded by two pairwise tests
-  (`producer_config_excludes_assemble_side_settings`,
-  `producer_config_covers_chunk_affecting_settings`) that catch only the
-  fields they name;
-- the checkpoint's `OceanMode` and input hash, compared separately in `run()`
-  - ocean mode twice on `--skip-to ocean` (once in the up-front resume block,
-  again in the arm, with different prose);
-- the chunk filename (`_z7` encodes `PARTITION_SPLIT_Z`; a different split
-  zoom silently reclassifies files as `Legacy` and falls back to the global
-  merge);
-- the multi-chunk magic (compression, multi files only);
-- the checkpoint chunk count versus a directory scan.
-
-`effective` is inherited, never compared. Gaps already present
-(compression, phase completion) are in `notes/bugs.md`.
-
-Open decision: `--skip-to ocean` refuses an ocean-mode change, yet re-running
-the ocean is the point of that resume; ocean producer identity matters for
-`sort|assemble` resumes, not `ocean` ones (pipeline hunt). And the checkpoint's
-ocean identity for artifact-active runs is the artifact key, which includes
-`compression_level`; the `OceanSourceKey` doc says compression level must not
-gate a resume because chunks hold geometry not encoded tiles. The refusal is
-moot only because artifact admission (`OceanArtifact::admit`) already refuses a level mismatch - the
-band chunks are a function of the source key plus band geometry, not of the
-artifact's encoding (run-contract hunt).
-
-Related: `load_checkpoint` returns a 4-tuple and is called up to four times
-per run (resume guard, `--skip-to ocean` arm, data bounds, late artifact
-open), each re-parsing the file; on a full run it reads back what phase12
-returned a moment earlier (`bounds_out` is discarded and re-read).
-
-Owner proposed: a typed `Checkpoint` (own module) holding the producer
-contract, a chunk-store manifest (format version, compression, split zoom,
-chunk list with partition tables inlined), the ocean identity, input identity,
-effective enums and bounds; loaded once; one
-`Checkpoint::admits(&RunPlan) -> Result<(), ResumeRefusal>`. `ProducerConfig`
-embedded in `ContractConfig` so it is a subset by construction.
-
-Reported by the pipeline, run-contract, ocean and storage hunts.
+The resume contract itself is settled (`src/pipeline/checkpoint.rs`: a PBF
+record and an ocean completion record, one `admit`). What remains is the
+storage hunt's chunk-store manifest: the sort writer records the chunk list
+with each multi file's partition table inlined, so assemble need not reopen
+every multi file to read its section table and filenames could become
+opaque. Today the split zoom is in the filename (an unknown one refuses),
+the codec is in the checkpoint (single-partition files carry no magic), and
+the count is in the completion record checked against a directory scan.
+A manifest would also be the natural input for validating decoded keys
+against their section's tile range (BUG-065). Unmeasured; the payoff is the
+open-time reread, not resume safety.
 
 ---
 

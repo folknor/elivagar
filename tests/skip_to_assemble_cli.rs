@@ -53,10 +53,9 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
         polygon_simplify_factor: 1.0,
     };
     serde_json::json!({
-        "version": 10,
+        "version": 11,
         "bounds": [0.0, 0.0, 1.0, 1.0],
         "chunks": 1,
-        "ocean": {"mode": "none"},
         "input_xxh3_128": pbf_hash,
         "producer_config": elivagar::provenance::producer_config(&config),
         "sort_chunk_compression": "none",
@@ -66,6 +65,12 @@ fn checkpoint_json(pbf_hash: &str) -> serde_json::Value {
             "shared_node_pins": "block_local",
         },
     })
+}
+
+/// A completion record saying the ocean phase finished with `chunks` chunks
+/// and no ocean, matching a run that names no `--ocean`.
+fn completion_json(chunks: usize) -> String {
+    serde_json::json!({"version": 11, "chunks": chunks, "ocean": {"mode": "none"}}).to_string()
 }
 
 fn write_tiny_pbf(path: &Path) {
@@ -409,8 +414,8 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
     write_tiny_pbf(&pbf_path);
 
     // A coherent checkpoint, so every resume guard passes and the flow reaches
-    // the chunk-state validation this test is about: the ocean-mode guard (the
-    // run names no --ocean, matching "none"), the input-identity guard (needs
+    // the chunk-state validation this test is about: the completion record's
+    // ocean guard (the run names no --ocean, matching "none"), the input-identity guard (needs
     // this very PBF's hash), and the producer-config guard (must match what
     // the CLI resolves for the flags below).
     //
@@ -423,7 +428,8 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
     )
     .expect("write checkpoint");
     // Missing chunk path: checkpoint expects 1 chunk but there are none.
-    std::fs::write(tmp_dir.join("sort_chunks.count"), "1").expect("write chunk checkpoint");
+    std::fs::write(tmp_dir.join("chunks_complete.json"), completion_json(1))
+        .expect("write chunk completion record");
 
     let pbf_s = pbf_path.to_string_lossy().into_owned();
     let out_s = output_path.to_string_lossy().into_owned();
@@ -449,7 +455,8 @@ fn skip_to_assemble_fails_on_missing_or_stale_chunk_state() {
         .expect("write stale chunk 0");
     std::fs::write(chunks_dir.join("chunk_0001_z7p00000.bin"), [0u8; 1])
         .expect("write stale chunk 1");
-    std::fs::write(tmp_dir.join("sort_chunks.count"), "1").expect("rewrite chunk checkpoint");
+    std::fs::write(tmp_dir.join("chunks_complete.json"), completion_json(1))
+        .expect("rewrite chunk completion record");
 
     let stale = run_elivagar(&[
         "run",

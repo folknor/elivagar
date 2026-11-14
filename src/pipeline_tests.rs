@@ -3886,104 +3886,238 @@ fn zoom_window_emission_equals_full_emission_restricted() {
 }
 
 // ---------------------------------------------------------------------------
-// Checkpoint roundtrip tests
+// Resume record tests
 // ---------------------------------------------------------------------------
 
-#[test]
-fn checkpoint_roundtrip() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    let bounds = geometry::projection::MercBbox {
-        min_x: 0.1,
-        min_y: 0.2,
-        max_x: 0.8,
-        max_y: 0.9,
-    };
-    save_checkpoint(
-        dir.path(),
-        &bounds,
+/// A synthetic ocean source key, built by hand rather than through
+/// `OceanSourceKey::from_inputs`, which hashes real shapefiles off disk.
+fn test_source_key(simplified: bool) -> crate::ocean::OceanSourceKey {
+    crate::ocean::OceanSourceKey {
+        full_shp_xxh128: crate::ocean::Xxh128::from_u128(0xdead_beef),
+        full_shx_xxh128: crate::ocean::Xxh128::from_u128(0xfeed_face),
+        simplified_shp_xxh128: simplified.then(|| crate::ocean::Xxh128::from_u128(7)),
+        simplified_shx_xxh128: simplified.then(|| crate::ocean::Xxh128::from_u128(8)),
+        min_zoom: 0,
+        max_zoom: 14,
+        policy_version: crate::ocean::OCEAN_POLICY_VERSION,
+    }
+}
+
+const TEST_INPUT: &str = "58c47f32d3a55b04a56813565efc78ac";
+
+fn test_pbf_checkpoint(compression: sort::ChunkCompression) -> checkpoint::PbfCheckpoint {
+    checkpoint::PbfCheckpoint::new(
+        &geometry::projection::MercBbox {
+            min_x: 0.1,
+            min_y: 0.2,
+            max_x: 0.8,
+            max_y: 0.9,
+        },
         42,
-        &computed_ocean(),
-        Some(crate::provenance::ActiveLowZoomSource::Simplified),
-        &checkpoint_provenance(),
+        TEST_INPUT.parse().expect("valid XXH3-128"),
+        crate::provenance::producer_config(&minimal_config()),
+        compression,
+        crate::provenance::Effective {
+            coordinate_source: crate::provenance::CoordinateSource::NodeStore,
+            way_members: crate::provenance::MembershipSource::RelationScan,
+            shared_node_pins: crate::provenance::PinScope::BlockLocal,
+        },
     )
-    .unwrap();
-    let (loaded_bounds, loaded_chunks, ocean_mode, low_zoom_source, provenance) =
-        load_checkpoint(dir.path()).unwrap();
-    assert!((loaded_bounds.min_x - 0.1).abs() < 1e-10);
-    assert!((loaded_bounds.min_y - 0.2).abs() < 1e-10);
-    assert!((loaded_bounds.max_x - 0.8).abs() < 1e-10);
-    assert!((loaded_bounds.max_y - 0.9).abs() < 1e-10);
-    assert_eq!(loaded_chunks, 42);
-    assert_eq!(ocean_mode, computed_ocean());
-    assert_eq!(
-        low_zoom_source,
-        Some(crate::provenance::ActiveLowZoomSource::Simplified),
-    );
-    assert_eq!(provenance, checkpoint_provenance());
+}
+
+fn test_run_identity(ocean: checkpoint::OceanChunks) -> checkpoint::RunIdentity {
+    checkpoint::RunIdentity {
+        input_xxh3_128: TEST_INPUT.parse().expect("valid XXH3-128"),
+        producer_config: crate::provenance::producer_config(&minimal_config()),
+        sort_chunk_compression: sort::ChunkCompression::None,
+        ocean,
+    }
+}
+
+fn computed_chunks() -> checkpoint::OceanChunks {
+    checkpoint::OceanChunks::Computed {
+        source_key: test_source_key(true),
+    }
 }
 
 #[test]
-fn checkpoint_preserves_sort_chunk_compression() {
-    let bounds = geometry::projection::MercBbox {
-        min_x: 0.0,
-        min_y: 0.0,
-        max_x: 1.0,
-        max_y: 1.0,
-    };
+fn pbf_checkpoint_roundtrips_every_field() {
     for compression in [
         sort::ChunkCompression::None,
         sort::ChunkCompression::Lz4,
         sort::ChunkCompression::Snappy,
     ] {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let mut provenance = checkpoint_provenance();
-        provenance.sort_chunk_compression = compression;
-        save_checkpoint(
+        let saved = test_pbf_checkpoint(compression);
+        saved.save(dir.path()).expect("save checkpoint");
+        let loaded = checkpoint::PbfCheckpoint::load(dir.path()).expect("load checkpoint");
+        assert_eq!(loaded, saved);
+        let bounds = loaded.bounds();
+        assert!((bounds.min_x - 0.1).abs() < 1e-10 && (bounds.max_y - 0.9).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn chunk_completion_roundtrips_every_ocean_identity() {
+    for ocean in [
+        checkpoint::OceanChunks::None,
+        computed_chunks(),
+        checkpoint::OceanChunks::Band {
+            source_key: test_source_key(false),
+        },
+    ] {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let saved = checkpoint::ChunkCompletion::new(17, ocean);
+        saved.save(dir.path()).expect("save completion");
+        assert_eq!(
+            checkpoint::ChunkCompletion::load(dir.path()).expect("load completion"),
+            saved
+        );
+    }
+}
+
+/// A computed and a band chunk set from the same source differ: the band
+/// run left the interior to the artifact.
+#[test]
+fn band_and_computed_chunks_from_one_source_differ() {
+    assert_ne!(
+        computed_chunks(),
+        checkpoint::OceanChunks::Band {
+            source_key: test_source_key(true),
+        }
+    );
+}
+
+#[test]
+fn missing_checkpoint_refuses_resume() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    assert!(checkpoint::PbfCheckpoint::load(dir.path()).is_err());
+}
+
+/// A v10 checkpoint, which still carried the ocean identity, is refused.
+#[test]
+fn earlier_checkpoint_version_is_refused() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let mut doc = serde_json::to_value(test_pbf_checkpoint(sort::ChunkCompression::None))
+        .expect("serialize checkpoint");
+    doc["version"] = serde_json::json!(10);
+    doc["ocean"] = serde_json::json!({"mode": "none"});
+    std::fs::write(dir.path().join("checkpoint.txt"), doc.to_string()).expect("write");
+    let error = checkpoint::PbfCheckpoint::load(dir.path()).expect_err("v10 must be refused");
+    assert!(error.to_string().contains("predates"), "{error}");
+}
+
+/// `--skip-to ocean` rebuilds the ocean, so it needs no completion record
+/// and admits a different ocean input than the one that built the chunks.
+#[test]
+fn ocean_resume_admits_a_changed_ocean() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    test_pbf_checkpoint(sort::ChunkCompression::None)
+        .save(dir.path())
+        .expect("save");
+    checkpoint::ChunkCompletion::new(50, computed_chunks())
+        .save(dir.path())
+        .expect("save");
+    let resume = checkpoint::admit(
+        dir.path(),
+        SkipTo::Ocean,
+        &test_run_identity(checkpoint::OceanChunks::None),
+    )
+    .expect("an ocean resume may change the ocean");
+    assert_eq!(resume.pbf.chunks, 42);
+    assert!(resume.completion.is_none());
+}
+
+#[test]
+fn sort_resume_refuses_a_changed_ocean() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    test_pbf_checkpoint(sort::ChunkCompression::None)
+        .save(dir.path())
+        .expect("save");
+    checkpoint::ChunkCompletion::new(50, computed_chunks())
+        .save(dir.path())
+        .expect("save");
+    for skip in [SkipTo::Sort, SkipTo::Assemble] {
+        let Err(error) = checkpoint::admit(
             dir.path(),
-            &bounds,
-            1,
-            &computed_ocean(),
-            Some(crate::provenance::ActiveLowZoomSource::Simplified),
-            &provenance,
-        )
-        .expect("save checkpoint");
-        let (_, _, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
-        assert_eq!(loaded.sort_chunk_compression, compression);
+            skip,
+            &test_run_identity(checkpoint::OceanChunks::Band {
+                source_key: test_source_key(true),
+            }),
+        ) else {
+            panic!("{skip:?} must refuse ocean chunks from another producer");
+        };
+        assert!(
+            error.to_string().contains("different ocean input"),
+            "{error}"
+        );
+    }
+    let resume = checkpoint::admit(
+        dir.path(),
+        SkipTo::Sort,
+        &test_run_identity(computed_chunks()),
+    )
+    .expect("matching ocean admits");
+    assert_eq!(resume.completion.map(|c| c.chunks), Some(50));
+}
+
+#[test]
+fn resume_refuses_changed_input_producer_or_codec() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    test_pbf_checkpoint(sort::ChunkCompression::None)
+        .save(dir.path())
+        .expect("save");
+    let mut other_input = test_run_identity(checkpoint::OceanChunks::None);
+    other_input.input_xxh3_128 = "aa5bb8650000000000000000deadbeef".parse().expect("hash");
+    let mut other_producer = test_run_identity(checkpoint::OceanChunks::None);
+    other_producer.producer_config = crate::provenance::producer_config(&TilegenConfig {
+        max_zoom: 12,
+        ..minimal_config()
+    });
+    let mut other_codec = test_run_identity(checkpoint::OceanChunks::None);
+    other_codec.sort_chunk_compression = sort::ChunkCompression::Lz4;
+    for (run, expected) in [
+        (other_input, "different PBF"),
+        (other_producer, "max_zoom"),
+        (other_codec, "compression"),
+    ] {
+        let Err(error) = checkpoint::admit(dir.path(), SkipTo::Ocean, &run) else {
+            panic!("resume must refuse: {expected}");
+        };
+        assert!(error.to_string().contains(expected), "{error}");
     }
 }
 
-/// A computed-ocean mode with a synthetic source key.
-///
-/// Built by hand rather than through `OceanSourceKey::from_inputs`, which
-/// hashes real shapefiles off disk; these tests are about the checkpoint's
-/// encoding, not the hashing.
-fn computed_ocean() -> OceanMode {
-    OceanMode::Computed {
-        key: crate::ocean::OceanSourceKey {
-            full_shp_xxh128: crate::ocean::Xxh128::from_u128(0xdead_beef),
-            full_shx_xxh128: crate::ocean::Xxh128::from_u128(0xfeed_face),
-            simplified_shp_xxh128: Some(crate::ocean::Xxh128::from_u128(7)),
-            simplified_shx_xxh128: Some(crate::ocean::Xxh128::from_u128(8)),
-            min_zoom: 0,
-            max_zoom: 14,
-            policy_version: crate::ocean::OCEAN_POLICY_VERSION,
-        },
-    }
+#[test]
+fn missing_or_malformed_completion_refuses_sort_resume() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    test_pbf_checkpoint(sort::ChunkCompression::None)
+        .save(dir.path())
+        .expect("save");
+    let run = test_run_identity(checkpoint::OceanChunks::None);
+    let Err(error) = checkpoint::admit(dir.path(), SkipTo::Assemble, &run) else {
+        panic!("a missing completion record must refuse");
+    };
+    assert!(
+        error.to_string().contains("may not have completed"),
+        "{error}"
+    );
+    std::fs::write(dir.path().join("chunks_complete.json"), "17").expect("write");
+    let Err(error) = checkpoint::admit(dir.path(), SkipTo::Sort, &run) else {
+        panic!("a malformed completion record must refuse");
+    };
+    assert!(error.to_string().contains("is invalid"), "{error}");
 }
 
-fn checkpoint_provenance() -> crate::pipeline::CheckpointProvenance {
-    crate::pipeline::CheckpointProvenance {
-        input_xxh3_128: "58c47f32d3a55b04a56813565efc78ac"
-            .parse()
-            .expect("valid XXH3-128"),
-        producer_config: serde_json::json!({"min_zoom": 0, "max_zoom": 14}),
-        effective: crate::provenance::Effective {
-            coordinate_source: crate::provenance::CoordinateSource::Inline,
-            way_members: crate::provenance::MembershipSource::InjectedV1,
-            shared_node_pins: crate::provenance::PinScope::InjectedV1,
-        },
-        sort_chunk_compression: sort::ChunkCompression::None,
-    }
+#[test]
+fn clearing_the_completion_record_refuses_later_sort_resumes() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    checkpoint::ChunkCompletion::new(17, checkpoint::OceanChunks::None)
+        .save(dir.path())
+        .expect("save");
+    checkpoint::ChunkCompletion::clear(dir.path()).expect("clear");
+    assert!(checkpoint::ChunkCompletion::load(dir.path()).is_err());
+    checkpoint::ChunkCompletion::clear(dir.path()).expect("clearing an absent record is fine");
 }
 
 /// The chunks encode the producer config, so a resume must reject a changed
@@ -4132,213 +4266,6 @@ fn producer_config_covers_chunk_affecting_settings() {
         crate::provenance::producer_config(&base),
         crate::provenance::producer_config(&capped)
     );
-}
-
-/// A resumed run must not inherit chunks built from a different PBF: the
-/// archive would mix two inputs and carry provenance describing only one.
-#[test]
-fn checkpoint_records_the_input_it_was_built_from() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    let bounds = geometry::projection::MercBbox {
-        min_x: 0.0,
-        min_y: 0.0,
-        max_x: 1.0,
-        max_y: 1.0,
-    };
-    save_checkpoint(
-        dir.path(),
-        &bounds,
-        1,
-        &computed_ocean(),
-        Some(crate::provenance::ActiveLowZoomSource::Simplified),
-        &checkpoint_provenance(),
-    )
-    .expect("save checkpoint");
-    let (_, _, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
-    assert_eq!(
-        loaded.input_xxh3_128.to_string(),
-        "58c47f32d3a55b04a56813565efc78ac"
-    );
-    // The raw variant of the same extract hashes differently, which is what
-    // makes an unsafe resume detectable at all.
-    assert_ne!(
-        loaded.input_xxh3_128.to_string(),
-        "aa5bb8650000000000000000deadbeef"
-    );
-}
-
-/// The effective paths survive a checkpoint round-trip as the same typed
-/// values phase12 emits, so a resumed archive describes what actually
-/// built its chunks.
-#[test]
-fn checkpoint_preserves_effective_paths() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    let bounds = geometry::projection::MercBbox {
-        min_x: 0.0,
-        min_y: 0.0,
-        max_x: 1.0,
-        max_y: 1.0,
-    };
-    let raw_paths = crate::provenance::Effective {
-        coordinate_source: crate::provenance::CoordinateSource::NodeStore,
-        way_members: crate::provenance::MembershipSource::RelationScan,
-        shared_node_pins: crate::provenance::PinScope::BlockLocal,
-    };
-    save_checkpoint(
-        dir.path(),
-        &bounds,
-        1,
-        &computed_ocean(),
-        Some(crate::provenance::ActiveLowZoomSource::Simplified),
-        &crate::pipeline::CheckpointProvenance {
-            input_xxh3_128: "aa5bb8650000000000000000deadbeef"
-                .parse()
-                .expect("valid XXH3-128"),
-            producer_config: crate::provenance::producer_config(&minimal_config()),
-            effective: raw_paths,
-            sort_chunk_compression: sort::ChunkCompression::None,
-        },
-    )
-    .expect("save checkpoint");
-    let (_, _, _, _, loaded) = load_checkpoint(dir.path()).expect("load checkpoint");
-    assert_eq!(loaded.effective, raw_paths);
-}
-
-#[test]
-fn checkpoint_preserves_all_ocean_modes() {
-    let key = crate::ocean::OceanArtifactKey {
-        source: crate::ocean::OceanSourceKey {
-            full_shp_xxh128: crate::ocean::Xxh128::from_u128(1),
-            full_shx_xxh128: crate::ocean::Xxh128::from_u128(2),
-            simplified_shp_xxh128: None,
-            simplified_shx_xxh128: None,
-            min_zoom: 0,
-            max_zoom: 14,
-            policy_version: crate::ocean::OCEAN_POLICY_VERSION,
-        },
-        compression_level: 6,
-    };
-    let bounds = geometry::projection::MercBbox {
-        min_x: 0.0,
-        min_y: 0.0,
-        max_x: 1.0,
-        max_y: 1.0,
-    };
-    for mode in [OceanMode::None, computed_ocean(), OceanMode::Band { key }] {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let low_zoom_source = match mode {
-            OceanMode::None => None,
-            OceanMode::Computed { .. } => Some(crate::provenance::ActiveLowZoomSource::Simplified),
-            OceanMode::Band { .. } => Some(crate::provenance::ActiveLowZoomSource::Full),
-        };
-        save_checkpoint(
-            dir.path(),
-            &bounds,
-            1,
-            &mode,
-            low_zoom_source,
-            &checkpoint_provenance(),
-        )
-        .expect("save checkpoint");
-        let (_, _, loaded_mode, loaded_low_zoom_source, _) =
-            load_checkpoint(dir.path()).expect("load checkpoint");
-        assert_eq!(loaded_mode, mode);
-        assert_eq!(loaded_low_zoom_source, low_zoom_source);
-    }
-}
-
-/// The resume guards in `run` are `checkpoint_ocean_mode != ocean_mode`, so
-/// they only refuse a swapped computed source if the source is part of the
-/// mode's identity. Before the key existed, both sides of that comparison were
-/// the bare `Computed` and every swap compared equal: chunks built from one
-/// shapefile were reused by a `--skip-to sort` naming another, and the archive
-/// then described inputs that produced none of its ocean.
-#[test]
-fn computed_ocean_modes_differ_when_the_shapefile_differs() {
-    let base = computed_ocean();
-    let OceanMode::Computed { key } = &base else {
-        panic!("computed_ocean built the wrong variant");
-    };
-
-    let mut swapped_full = key.clone();
-    swapped_full.full_shp_xxh128 =
-        crate::ocean::Xxh128::from_u128(swapped_full.full_shp_xxh128.as_u128() ^ 1);
-    assert_ne!(base, OceanMode::Computed { key: swapped_full });
-
-    // The split selection is identity too: the same full shapefile serving
-    // z0-z14 alone produces different chunks than it does at z8-z14 with a
-    // simplified pass below it.
-    let mut dropped_simplified = key.clone();
-    dropped_simplified.simplified_shp_xxh128 = None;
-    dropped_simplified.simplified_shx_xxh128 = None;
-    assert_ne!(
-        base,
-        OceanMode::Computed {
-            key: dropped_simplified
-        }
-    );
-
-    let mut narrower = key.clone();
-    narrower.max_zoom = 12;
-    assert_ne!(base, OceanMode::Computed { key: narrower });
-
-    assert_eq!(base, computed_ocean());
-}
-
-/// A computed source key survives the checkpoint round-trip exactly, including
-/// the absent-simplified case, which encodes as null rather than a hash.
-#[test]
-fn computed_ocean_source_key_roundtrips_without_a_simplified_pass() {
-    let key = crate::ocean::OceanSourceKey {
-        full_shp_xxh128: u128::MAX.into(),
-        full_shx_xxh128: 0.into(),
-        simplified_shp_xxh128: None,
-        simplified_shx_xxh128: None,
-        min_zoom: 0,
-        max_zoom: 14,
-        policy_version: crate::ocean::OCEAN_POLICY_VERSION,
-    };
-    let decoded =
-        crate::ocean::OceanSourceKey::from_json(&key.to_json()).expect("decode source key");
-    assert_eq!(decoded, key);
-}
-
-#[test]
-fn sort_chunk_count_roundtrip() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    save_sort_chunk_count(dir.path(), 17).unwrap();
-    let loaded = load_sort_chunk_count(dir.path()).unwrap();
-    assert_eq!(loaded, 17);
-}
-
-#[test]
-fn missing_sort_chunk_count_refuses_resume() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    let error = load_sort_chunk_count(dir.path()).unwrap_err();
-    assert!(error.to_string().contains("may not have completed"));
-}
-
-#[test]
-fn malformed_sort_chunk_count_refuses_resume() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    std::fs::write(dir.path().join(SORT_CHECKPOINT_FILE), "not-a-count").unwrap();
-    let error = load_sort_chunk_count(dir.path()).unwrap_err();
-    assert!(error.to_string().contains("is invalid"));
-}
-
-#[test]
-fn restarting_ocean_clears_previous_sort_completion_record() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    save_sort_chunk_count(dir.path(), 17).unwrap();
-    clear_sort_chunk_count(dir.path()).unwrap();
-    assert!(load_sort_chunk_count(dir.path()).is_err());
-}
-
-#[test]
-fn load_checkpoint_missing_file() {
-    let dir = tempfile::tempdir().expect("create tempdir");
-    let result = load_checkpoint(dir.path());
-    assert!(result.is_err());
 }
 
 // ---------------------------------------------------------------------------
