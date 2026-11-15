@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Closed lines simplify the same way whichever vertex their source way
+  starts at, on input with injected shared-node pins; the source start is
+  no longer kept for its own sake. Raw input still keeps it, since its
+  block-local pins cannot see junctions across blocks. On raw input,
+  two-node ways now count toward shared-node detection, so a short
+  connector pins the vertex it joins.
+
 - A malformed ocean shapefile (a bad index entry, or a selected record
   with bad framing, shape type, bounds or geometry) now exits 65 as
   refused input, in both `run` and `ocean-build`, instead of exit 2.

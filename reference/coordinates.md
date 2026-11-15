@@ -170,6 +170,18 @@ starts at; simplification removes a closed line only when all its points
 coincide. Rounding to tile coordinates can produce the same out-and-back
 from a thin loop, and it is kept the same way.
 
+A closed line's simplified vertex set depends on its vertex cycle and its
+required vertices, not on which vertex the source starts at: the anchor
+search and DP run from a canonical rotation of the cycle. The source start is
+therefore not kept for its own sake. With injected shared-node pins it needs
+no special case, because a start shared with another way is pinned like any
+junction. Block-local pins (raw input) cannot see junctions with ways in
+other blocks, so on that path a closed line also requires its source start,
+which makes raw-input output start-dependent by construction. A ring whose
+coordinates cross the antimeridian is also outside the guarantee: unwrapping
+runs from the source start, so different starts can produce different
+unwrapped coordinates.
+
 Integer polygon simplification works after rescaling to a zoom grid. Its
 tolerance is measured in zoom-grid MVT extent units; 16 units equal one
 rendered pixel. Integer polygon area filters compare square extent units.

@@ -702,6 +702,10 @@ pub(super) fn process_planned_way_into(
                 FeatureGeometry::Way {
                     coords: merc,
                     pins: &preserve_vertex_mask,
+                    // Injected pins are global: a closed way start shared by
+                    // another way occurs twice outside closure positions and
+                    // is pinned. Block-local detection cannot vouch for it.
+                    line_start_required: is_closed && matches!(ctx.pins, PinSource::BlockLocal),
                     line: &mut acc.line_emit,
                     polygon: &mut acc.polygon_emit,
                     fanout: &mut acc.fanout,

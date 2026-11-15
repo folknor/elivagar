@@ -98,7 +98,10 @@ pub fn simplify_into(
 /// Simplify with required vertex indices that must survive simplification.
 ///
 /// `required_indices` are indices into `points`; out-of-range indices are ignored.
-/// Endpoints are always preserved regardless of `required_indices`.
+/// An open line always keeps both endpoints. A closed line (first equals last,
+/// more than three points) keeps only its required vertices and its
+/// farthest-pair anchors, independent of which vertex it starts at; see
+/// `simplify_closed`.
 pub fn simplify_into_with_required(
     points: &[Point],
     tolerance: f64,
@@ -155,21 +158,21 @@ fn simplify_impl(
         // The closed path retains vertices among indices 0..len-1 only (the
         // source closing duplicate at len-1 is never forced), so `output` holds
         // no trailing duplicate at this point. A loop that lies within
-        // tolerance of its farthest-pair chord keeps the forced {p0, pa, pb};
-        // when p0 coincides with an anchor (the start vertex sits at an
-        // extremity) only the two chord ends remain, and re-closing them gives
-        // the out-and-back [pa, pb, pa]. That stroke is kept, not dropped: it
+        // tolerance of its farthest-pair chord and carries no other required
+        // vertex keeps only the two chord ends, and re-closing them gives the
+        // out-and-back [pa, pb, pa]. That stroke is kept, not dropped: it
         // draws the loop within tolerance, it is the same shape the loop takes
         // when a third vertex instead rounds onto an anchor at tile
-        // quantization, and dropping it made whether a collapsed loop survived
-        // depend on where its source way happens to start. Only a loop whose
-        // points all coincide is removed, so a nonconstant closed source
-        // always simplifies to at least two points at every tolerance (the
-        // emitter's empty-result break relies on that being zoom-independent).
-        // The forced p0 is NOT canonicalized away: junction pins are
-        // incomplete (block-local detection misses cross-block and two-ref
-        // ways when the PBF carries no injected pins), and keeping the source
-        // start is what holds an unpinned junction at p0 in place.
+        // quantization, and dropping it would make whether a collapsed loop
+        // survives depend on its pins. Only a loop whose points all coincide
+        // is removed: for a nonconstant source the first anchor differs from
+        // the canonical start and the second is farther still from the first,
+        // so it always simplifies to at least two distinct points at every
+        // tolerance (the emitter's empty-result break relies on that being
+        // zoom-independent).
+        // The source start is not forced. A caller whose pins cannot vouch
+        // that the start is not a junction requires it explicitly (the
+        // raw-input line path does, see `emit_line_feature`).
         let first = output[0];
         let constant = output
             .iter()
@@ -190,11 +193,30 @@ fn simplify_impl(
 
 /// Simplify a closed line around a non-degenerate chord found by a two-sweep
 /// farthest-pair search. This is a long real chord, not a geometric diameter.
+///
+/// The result depends on the cycle and its required vertices only, not on
+/// where the source starts: the whole search (both farthest sweeps with their
+/// tie rule, then DP) runs on the least rotation of the annotated cycle, keyed
+/// per vertex on (y, x, required) in f64 total order, and the keep flags are
+/// mapped back to source indices. Requiredness is part of the key because a
+/// cycle can have several equal coordinate rotations (a loop traversed twice,
+/// distinct nodes at one coordinate) whose pins differ.
 fn simplify_closed(points: &[Point], tol_sq: f64, keep: &mut [bool]) {
     let unique_len = points.len() - 1;
-    let a = farthest_point(points, 0, unique_len);
-    let b = farthest_point(points, a, unique_len);
-    keep[0] = true;
+    // The closing duplicate is the start vertex: a requirement on it is a
+    // requirement on cycle index 0, and it is never kept itself (the caller
+    // re-closes the output).
+    keep[0] |= keep[unique_len];
+    keep[unique_len] = false;
+    let start = least_rotation(points, keep, unique_len);
+    let mut canonical = Vec::with_capacity(unique_len);
+    for offset in 0..unique_len {
+        canonical.push(points[(start + offset) % unique_len]);
+    }
+    let a = farthest_point(&canonical, 0, unique_len);
+    let b = farthest_point(&canonical, a, unique_len);
+    let a = (start + a) % unique_len;
+    let b = (start + b) % unique_len;
     keep[a] = true;
     keep[b] = true;
 
@@ -235,6 +257,34 @@ fn is_own_reverse(points: &[Point]) -> bool {
         let b = points[n - 1 - i];
         a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()
     })
+}
+
+/// Start index of the lexicographically least rotation of the first
+/// `unique_len` vertices, each compared as (y, x, required) in f64 total order.
+/// Two-pointer minimal rotation, linear in the cycle length.
+fn least_rotation(points: &[Point], required: &[bool], unique_len: usize) -> usize {
+    let cmp = |i: usize, j: usize| {
+        let (p, q) = (points[i], points[j]);
+        p.y.total_cmp(&q.y)
+            .then(p.x.total_cmp(&q.x))
+            .then(required[i].cmp(&required[j]))
+    };
+    let (mut i, mut j, mut k) = (0usize, 1usize, 0usize);
+    while i < unique_len && j < unique_len && k < unique_len {
+        match cmp((i + k) % unique_len, (j + k) % unique_len) {
+            std::cmp::Ordering::Equal => {
+                k += 1;
+                continue;
+            }
+            std::cmp::Ordering::Greater => i += k + 1,
+            std::cmp::Ordering::Less => j += k + 1,
+        }
+        if i == j {
+            j += 1;
+        }
+        k = 0;
+    }
+    i.min(j)
 }
 
 fn farthest_point(points: &[Point], source: usize, unique_len: usize) -> usize {
@@ -393,10 +443,8 @@ mod closed_ring_tests {
     #[test]
     fn collapsed_closed_ring_survives_whatever_its_start() {
         // A long narrow loop whose thin dimension collapses under a coarse
-        // tolerance. Started at an extremity, only the two chord ends remain;
-        // started mid-side, the forced start adds a third vertex. Both must
-        // survive as a closed stroke along the 20-unit chord - which of the
-        // two the source starts at must not decide whether it is drawn.
+        // tolerance. Started at an extremity or mid-side, it must survive as
+        // a closed stroke along the 20-unit chord.
         let at_extremity = [
             p(0.0, 0.0),
             p(10.0, 0.001),
@@ -416,17 +464,97 @@ mod closed_ring_tests {
         assert!(eq(out[0], out[2]), "result must be closed");
         assert!(is_own_reverse(&out), "the chord is an out-and-back");
         let out = simplify(&mid_side, 1.0);
-        assert!(
-            out.len() >= 3,
-            "collapsed loop keeps its chord, got {out:?}"
-        );
-        assert!(eq(out[0], out[out.len() - 1]), "result must be closed");
+        assert_eq!(out.len(), 3, "collapsed loop keeps its chord, got {out:?}");
+        assert!(eq(out[0], out[2]), "result must be closed");
         for anchor in [p(0.0, 0.0), p(20.0, 0.0)] {
             assert!(
                 out.iter().any(|&v| eq(v, anchor)),
                 "chord end {anchor:?} kept"
             );
         }
+    }
+
+    /// The kept vertex set as a cycle, rotated to its least (y, x) start, so
+    /// two results can be compared independent of where each was emitted from.
+    fn canonical_cycle(out: &[Point]) -> Vec<(u64, u64)> {
+        let cycle: Vec<(u64, u64)> = out[..out.len() - 1]
+            .iter()
+            .map(|q| (q.y.to_bits(), q.x.to_bits()))
+            .collect();
+        (0..cycle.len())
+            .map(|s| {
+                let mut r = cycle.clone();
+                r.rotate_left(s);
+                r
+            })
+            .min()
+            .expect("non-empty cycle")
+    }
+
+    /// Every rotation of `ring` (closing duplicate re-pointed), with the
+    /// required vertices `required` (indices into the unique cycle) moved along.
+    fn rotations(ring: &[Point], required: &[usize]) -> Vec<(Vec<Point>, Vec<usize>)> {
+        let n = ring.len() - 1;
+        (0..n)
+            .map(|s| {
+                let mut r: Vec<Point> = (0..n).map(|k| ring[(s + k) % n]).collect();
+                r.push(r[0]);
+                let req = required.iter().map(|&i| (i + n - s) % n).collect();
+                (r, req)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn closed_ring_result_is_independent_of_its_start() {
+        // An irregular loop with distance ties (square corners) and detail
+        // that some tolerances keep and others drop.
+        let ring = [
+            p(0.0, 0.0),
+            p(4.0, 0.3),
+            p(10.0, 0.0),
+            p(10.3, 5.0),
+            p(10.0, 10.0),
+            p(5.0, 9.6),
+            p(0.0, 10.0),
+            p(0.4, 5.0),
+            p(0.0, 0.0),
+        ];
+        for tol in [0.1, 0.35, 1.0, 6.0, 100.0] {
+            for required in [&[][..], &[3][..], &[1, 5][..]] {
+                let expected = canonical_cycle(&simplify_required(&ring, tol, required));
+                for (rotated, req) in rotations(&ring, required) {
+                    let out = simplify_required(&rotated, tol, &req);
+                    assert_eq!(
+                        canonical_cycle(&out),
+                        expected,
+                        "tol {tol} required {required:?}: start changed the result"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn required_closing_duplicate_is_the_start_vertex() {
+        // A coarse tolerance collapses the square onto its diagonal; a
+        // requirement given on the closing index must keep the start vertex.
+        // The start (5, 0) is no anchor: the chord runs (0, 0) to (10, 10).
+        let square = [
+            p(5.0, 0.0),
+            p(10.0, 0.0),
+            p(10.0, 10.0),
+            p(0.0, 10.0),
+            p(0.0, 0.0),
+            p(5.0, 0.0),
+        ];
+        let out = simplify(&square, 1000.0);
+        assert!(
+            !out.iter().any(|&v| eq(v, square[0])),
+            "unforced start dropped, got {out:?}"
+        );
+        let out = simplify_required(&square, 1000.0, &[5]);
+        assert!(out.iter().any(|&v| eq(v, square[0])), "got {out:?}");
     }
 
     #[test]

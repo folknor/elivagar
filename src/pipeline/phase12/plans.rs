@@ -118,15 +118,15 @@ pub(in crate::pipeline) fn build_way_plans(
 
 /// The node refs of a way that participate in shared-junction detection.
 ///
-/// Ways with <= 2 refs never contribute or receive a pin. For a closed ring the
-/// duplicated closing vertex is dropped (it is the same node as the first). For
-/// an open line ALL nodes count, endpoints included - shared endpoints are where
-/// ways connect and must be pinned so DP simplification does not move them to
-/// different positions in each way (which creates visible gaps at junctions).
+/// For a closed ring the duplicated closing vertex is dropped (it is the same
+/// node as the first). For an open line ALL nodes count, endpoints included -
+/// shared endpoints are where ways connect and must be pinned so DP
+/// simplification does not move them to different positions in each way
+/// (which creates visible gaps at junctions). Two-ref ways count too: their
+/// own endpoints are always kept, but a short connector ending on another
+/// way's interior must pin that vertex there. This is the occurrence rule
+/// pbfhogg's injected pins use, restricted to one block.
 fn shared_scan_slice(node_refs: &[i64]) -> &[i64] {
-    if node_refs.len() <= 2 {
-        return &[];
-    }
     let is_closed = node_refs.len() >= 4 && node_refs.first() == node_refs.last();
     if is_closed {
         &node_refs[..node_refs.len() - 1]
@@ -174,7 +174,7 @@ pub(in crate::pipeline) struct RawWay {
 #[cfg(test)]
 const _: () = assert!(std::mem::size_of::<RawWay>() == 104);
 
-/// Mark interior node refs that are shared by at least 2 ways in the same block.
+/// Mark node refs that occur at least twice across the ways of one block.
 ///
 /// This preserves common junction vertices during DP simplification without global
 /// topology indexing. Block-local detection catches most local road intersections

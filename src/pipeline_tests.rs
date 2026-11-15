@@ -1306,7 +1306,7 @@ fn finishing_measures_area_only_for_area_rules() {
 }
 
 #[test]
-fn block_shared_node_annotation_marks_only_shared_interiors() {
+fn block_shared_node_annotation_marks_only_shared_refs() {
     let mut raw = vec![
         RawWay {
             way_id: 1,
@@ -1324,7 +1324,8 @@ fn block_shared_node_annotation_marks_only_shared_interiors() {
         },
         RawWay {
             way_id: 3,
-            node_refs: vec![20, 777], // shared, but endpoint only => ignored
+            // A two-ref connector counts: it pins the node it shares.
+            node_refs: vec![88, 777],
             preserve_node_refs: Vec::new(),
             coords_e7: Vec::new(),
             tags: Vec::new(),
@@ -1334,8 +1335,8 @@ fn block_shared_node_annotation_marks_only_shared_interiors() {
     annotate_block_shared_node_refs(&mut raw);
 
     assert_eq!(raw[0].preserve_node_refs, vec![20]);
-    assert_eq!(raw[1].preserve_node_refs, vec![20]);
-    assert!(raw[2].preserve_node_refs.is_empty());
+    assert_eq!(raw[1].preserve_node_refs, vec![20, 88]);
+    assert_eq!(raw[2].preserve_node_refs, vec![88]);
 }
 
 #[test]
@@ -1594,7 +1595,17 @@ fn antimeridian_wrapped_line_emits_both_seam_tiles_without_duplicates() {
     let mut scratch = LineEmitScratch::new();
     for shift in antimeridian_shifts_for_bbox(&bbox) {
         if shift == 0.0 {
-            let _ = emit_line_feature(7001, &coords, &[], &m, 1, 1, &mut records, &mut scratch);
+            let _ = emit_line_feature(
+                7001,
+                &coords,
+                &[],
+                false,
+                &m,
+                1,
+                1,
+                &mut records,
+                &mut scratch,
+            );
         } else {
             let shifted: Vec<Point> = coords
                 .iter()
@@ -1603,7 +1614,17 @@ fn antimeridian_wrapped_line_emits_both_seam_tiles_without_duplicates() {
                     y: p.y,
                 })
                 .collect();
-            let _ = emit_line_feature(7001, &shifted, &[], &m, 1, 1, &mut records, &mut scratch);
+            let _ = emit_line_feature(
+                7001,
+                &shifted,
+                &[],
+                false,
+                &m,
+                1,
+                1,
+                &mut records,
+                &mut scratch,
+            );
         }
     }
 
@@ -2661,6 +2682,7 @@ fn dispatch_namespaces_mixed_source_ids_on_the_wire() {
             1 => emit::FeatureGeometry::Way {
                 coords: &outer,
                 pins: &[],
+                line_start_required: false,
                 line: &mut line,
                 polygon: &mut polygon,
                 fanout: &mut fanout,
@@ -2753,7 +2775,17 @@ fn emit_line_too_few_points() {
     let coords = [Point { x: 0.5, y: 0.5 }];
     let mut records = Vec::new();
     let mut scratch = LineEmitScratch::new();
-    let count = emit_line_feature(101, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
+    let count = emit_line_feature(
+        101,
+        &coords,
+        &[],
+        false,
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut scratch,
+    );
     assert_eq!(count, 0);
     assert!(records.is_empty());
 }
@@ -2764,7 +2796,17 @@ fn emit_line_decodes_correctly() {
     let coords = [Point { x: 0.3, y: 0.3 }, Point { x: 0.7, y: 0.7 }];
     let mut records = Vec::new();
     let mut scratch = LineEmitScratch::new();
-    emit_line_feature(100, &coords, &[], &m, 0, 0, &mut records, &mut scratch);
+    emit_line_feature(
+        100,
+        &coords,
+        &[],
+        false,
+        &m,
+        0,
+        0,
+        &mut records,
+        &mut scratch,
+    );
     assert_eq!(records.len(), 1);
 
     let rec = &records[0];
@@ -2805,7 +2847,17 @@ fn emit_line_cascading_simplification() {
     ];
     let mut records = Vec::new();
     let mut scratch = LineEmitScratch::new();
-    emit_line_feature(99, &coords, &[], &m, 0, 14, &mut records, &mut scratch);
+    emit_line_feature(
+        99,
+        &coords,
+        &[],
+        false,
+        &m,
+        0,
+        14,
+        &mut records,
+        &mut scratch,
+    );
 
     // At z=14 this line is ~0.4 pixel which is sub-pixel, but Streets skips
     // the size filter, so it should still produce a record at z=14.
@@ -2850,6 +2902,7 @@ fn emit_line_simplifies_every_zoom_from_the_source() {
             1,
             &coords,
             &[false; 3],
+            false,
             &m,
             z,
             z,
@@ -2864,7 +2917,17 @@ fn emit_line_simplifies_every_zoom_from_the_source() {
     assert_eq!(vertices_at(12), 2);
     let mut full = Vec::new();
     let mut scratch = LineEmitScratch::new();
-    emit_line_feature(1, &coords, &[false; 3], &m, 12, 14, &mut full, &mut scratch);
+    emit_line_feature(
+        1,
+        &coords,
+        &[false; 3],
+        false,
+        &m,
+        12,
+        14,
+        &mut full,
+        &mut scratch,
+    );
     let z12: Vec<_> = full
         .iter()
         .filter(|r| zxy(decode_key(r).0).0 == 12)
@@ -2897,6 +2960,7 @@ fn emit_line_preserve_mask_keeps_required_vertices() {
         1099,
         &coords,
         &[false, false, true, false, false],
+        false,
         &m,
         0,
         0,
@@ -2911,6 +2975,7 @@ fn emit_line_preserve_mask_keeps_required_vertices() {
         1099,
         &coords,
         &[false; 5],
+        false,
         &m,
         0,
         0,
@@ -2936,6 +3001,49 @@ fn emit_line_preserve_mask_keeps_required_vertices() {
         pinned_pts.contains(&expected),
         "pinned line geometry should retain required shared vertex {expected:?}"
     );
+}
+
+#[test]
+fn emit_closed_line_keeps_its_start_only_when_required() {
+    // A thin closed way starting mid-side. Closed-line simplification does
+    // not depend on the start, so z0 drops it; the raw-input flag (block-local
+    // pins cannot vouch that the start is no junction) keeps it.
+    let m = test_layer_match(Layer::Streets, GeomExpect::Line);
+    let start = Point { x: 0.5, y: 0.1 };
+    let coords = [
+        start,
+        Point { x: 0.9, y: 0.1 },
+        Point { x: 0.9, y: 0.10001 },
+        Point { x: 0.1, y: 0.10001 },
+        Point { x: 0.1, y: 0.1 },
+        start,
+    ];
+    let mut target_tc = Vec::new();
+    geometry::tiles::to_tile_coords_into(&mut target_tc, &[start], 0, 0, 0);
+    let expected = target_tc[0];
+    for required in [false, true] {
+        let mut records = Vec::new();
+        let mut scratch = LineEmitScratch::new();
+        emit_line_feature(
+            1,
+            &coords,
+            &[false; 6],
+            required,
+            &m,
+            0,
+            0,
+            &mut records,
+            &mut scratch,
+        );
+        assert_eq!(records.len(), 1);
+        let lb = decode_to_layer(&records[0].data);
+        let pts = decode_commands_to_abs_coords(&lb.test_feature(0).geometry);
+        assert_eq!(
+            pts.contains(&expected),
+            required,
+            "required {required}: got {pts:?}"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -4154,6 +4262,7 @@ fn zoom_window_emission_equals_full_emission_restricted() {
             1,
             &line,
             &[],
+            false,
             &line_match,
             lo,
             hi,

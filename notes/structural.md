@@ -216,17 +216,20 @@ Reported by the storage hunt.
 
 ## STR-046 - Closed-line simplification depends on the source start vertex
 
-`simplify::simplify_closed` forces the source start p0 and runs its
-farthest-pair search from it, so two closed ways with the same vertex cycle
-and different starts can simplify to different (equally tolerance-valid)
-shapes. Canonicalizing the start (least vertex, pins mapped through the
-rotation) would remove that, but is unsafe today: p0 is not always pinned
-(block-local shared-node detection misses cross-block connections and
-two-ref ways when the PBF carries no injected pins), and the forced p0 is
-what keeps an unpinned junction there in place. Needs complete junction
-pins first; antimeridian unwrapping also depends on traversal start.
+`simplify_closed` now runs on the least rotation of the (y, x, required)
+cycle and no longer forces the start, so closed lines are start-independent
+on injected-pin input. Two residues remain start-dependent:
 
-Found while settling the closed-line collapse policy.
+- Raw input (block-local pins) requires the closed way's source start on the
+  line path (`line_start_required` in `FeatureGeometry::Way`), because a
+  junction with a way in another block is unpinned. Closing it needs
+  cross-block pins on raw input, i.e. the global prepass removed for RSS and
+  serial wall cost.
+- Rings crossing the antimeridian: `unwrap_antimeridian_path` walks from the
+  source start, so a different start can give a different (not merely
+  translated) lift. Closing it means choosing the canonical start on wrapped
+  coordinates before unwrapping, with a defined policy for winding cycles and
+  exact half-world edges.
 
 ---
 

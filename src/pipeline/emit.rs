@@ -538,6 +538,13 @@ pub(super) enum FeatureGeometry<'a> {
     Way {
         coords: &'a [Point],
         pins: &'a [bool],
+        /// Line emission must also keep the source start of a closed way:
+        /// set when the pin source cannot vouch that an unpinned start is
+        /// not a junction (block-local detection misses cross-block shared
+        /// nodes). Closed-line simplification is otherwise independent of
+        /// the start, so without this an undetected junction at the start
+        /// could move. Polygons ignore it.
+        line_start_required: bool,
         line: &'a mut LineEmitScratch,
         polygon: &'a mut PolygonEmitScratch,
         fanout: &'a mut super::stats::FanoutStats,
@@ -704,6 +711,7 @@ pub(super) fn emit_match(
                     FeatureGeometry::Node(_) | FeatureGeometry::AreaLabel { .. } => unreachable!(),
                     FeatureGeometry::Way {
                         pins,
+                        line_start_required,
                         line,
                         polygon,
                         fanout,
@@ -714,6 +722,7 @@ pub(super) fn emit_match(
                                 osm_id,
                                 coords,
                                 pins,
+                                *line_start_required,
                                 m,
                                 z_lo,
                                 z_hi,
@@ -864,6 +873,7 @@ pub(super) fn emit_line_feature(
     osm_id: u64,
     merc: &[Point],
     preserve_vertex_mask: &[bool],
+    start_required: bool,
     m: &LayerMatch,
     z_lo: u8,
     z_hi: u8,
@@ -872,6 +882,9 @@ pub(super) fn emit_line_feature(
 ) -> u64 {
     let mut count: u64 = 0;
     scratch.pinned_idxs.clear();
+    if start_required && !preserve_vertex_mask.first().copied().unwrap_or(false) {
+        scratch.pinned_idxs.push(0);
+    }
     scratch.pinned_idxs.extend(
         preserve_vertex_mask
             .iter()
