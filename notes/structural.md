@@ -116,25 +116,6 @@ overlay engine's `2^30` interval (`int_ocean::Unrepresentable`), so the
 
 Reported by the polygon-engine, coordinate-spaces and ocean hunts.
 
-## STR-042 - Range premises the quantizer refusal does not cover
-
-Found while closing the polygon quantizer's overflow invariants:
-
-- Lines never pass the polygon quantizer. They clip in f64 and reach
-  `merc_to_tile_px`, whose `as i32` casts saturate, so an unwrapped way that
-  winds many world widths emits clamped garbage rather than a refusal. Whether
-  lines should share a representability rule needs its own argument.
-- `int_ocean::tile_origin` multiplies `i32::try_from(t) * TILE_EXTENT_I32` in
-  plain i32; release has overflow checks off, so a tile index at or above
-  `2^19` would wrap silently. Production indices are profile-zoom (< `2^14`),
-  so it holds by construction, unstated.
-- The ocean shapefile reader checks record bounds and read points against the
-  world, but not that a record's points lie inside its declared bounds. The
-  bounds drive the extract prefilter, so a record whose bounds lie is skipped
-  or admitted wrongly without its points ever being read.
-
-Reported by the zoom-invariant implementer.
-
 ## STR-012 - Make ring role a type
 
 Role is "index 0 of a `Shape` is the outer, the rest are holes" plus "outer
@@ -184,7 +165,7 @@ Reported by the polygon-engine and encoding hunts.
 
 The coordinate-spaces hunt's "bolder version": quantize-early integer
 geometry for every kind, so there is exactly one Merc-to-integer conversion,
-one per-zoom shift-round and one tile-local conversion. The float S-H line
+one per-zoom shift-round and one tile-local conversion. The float Cohen-Sutherland line
 clipper, float `to_tile_coords_into`, float DP with Merc tolerances and
 `merc_to_tile_px` go away, along with the +-1 shared-vertex disagreement and
 the two spellings of "one pixel". A large rewrite of `emit_line_feature` and

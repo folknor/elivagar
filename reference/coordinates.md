@@ -64,7 +64,15 @@ local_y = round((point.y * 2^z - ty) * 4096)
 
 Tile enumeration floors the scaled Mercator coordinate to get tile indices,
 then clamps those indices to the world edge. Bounding-box covers are
-inclusive, so a box on a tile boundary can include both sides.
+inclusive, so a box on a tile boundary can include both sides. A box that
+misses the world `[-1e-8, 1 + 1e-8]` on either axis covers no tile rather
+than clamping onto the edge tile; the slack admits the projected latitude
+clamp, which overshoots `[0, 1]` in y by about `7.1e-9`. Lines and points
+emit only their unshifted copy and the copies shifted one world width either
+way, so an unwrapped way winding further than that loses the content beyond
+them. Every emitted line or point coordinate therefore lies near its tile:
+inside it on the single-tile path, inside the buffered rectangle on the
+clipped path, and within one extent unit of the tile for points.
 
 The integer polygon path quantizes a normalized coordinate `v` to the base
 grid with `round(v * 2^(M + 12))`, where `M` is the maximum zoom used to build
@@ -100,7 +108,8 @@ The point path selects tiles from the point's bounding box and encodes the
 point without a clipping buffer. The line path selects candidate tiles from
 the unbuffered simplified line bounding box. When the line spans multiple
 tiles, it clips each segment to the selected tile's buffered rectangle; a
-single-tile bounding box uses a fast path without clipping. The polygon
+bounding box whose unclamped tile indices name one in-world tile uses a fast
+path without clipping. The polygon
 pyramid selects its root cells from the unbuffered shape bounds. As it
 descends, it intersects parent fragments with every child's buffered
 rectangle. A descendant can therefore contain geometry in its buffer even

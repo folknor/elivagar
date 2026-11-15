@@ -21,54 +21,82 @@ pub(crate) use super::polygon::RENDER_PX;
 /// Returns a list of `(tile_x, tile_y)` pairs.
 #[cfg(test)]
 pub fn tiles_for_bbox(bbox: &MercBbox, zoom: u8) -> Vec<(u32, u32)> {
+    let mut tiles = Vec::new();
+    for_each_tile_in_bbox(bbox, zoom, |tx, ty| tiles.push((tx, ty)));
+    tiles
+}
+
+/// How far outside the unit world a bbox may lie and still be enumerated.
+/// The projection clamps latitude to the Web Mercator limit, whose projected
+/// y overshoots `[0, 1]` by about `7.1e-9`; a polar node or line sits in that
+/// sliver and must still land on the edge tile. At z14 the slack is under
+/// one MVT extent unit.
+const WORLD_EDGE_SLACK: f64 = 1e-8;
+
+/// The inclusive tile index range `(tx_min, tx_max, ty_min, ty_max)` a bbox
+/// covers at `zoom`, or `None` when the bbox misses the world.
+///
+/// A bbox is admitted only if it meets `[-S, 1 + S]` on both axes (`S` is
+/// `WORLD_EDGE_SLACK`), compared so that a NaN bound refuses. Admitted
+/// indices are floored and clamped to the world edge. Refusing rather than
+/// clamping is what keeps every emitted coordinate near its tile: an
+/// antimeridian-unwrapped way can wind any number of world widths, the
+/// emitters try only the copies shifted by one world either way, and a copy
+/// lying wholly beyond the world used to clamp onto the edge tile and encode
+/// far outside it, saturating the float-to-i32 casts at the extreme. Content
+/// of such a way beyond the shifted copies is not emitted at all: wrapping is
+/// bounded, not complete.
+///
+/// Premise, not checked here: the bbox is ordered and was folded from finite
+/// coordinates (OSM input is fixed-point and label points are checked finite
+/// before emission); a min/max fold can hide a NaN vertex.
+#[inline]
+fn tile_range(bbox: &MercBbox, zoom: u8) -> Option<(u32, u32, u32, u32)> {
+    let lo = -WORLD_EDGE_SLACK;
+    let hi = 1.0 + WORLD_EDGE_SLACK;
+    let meets = bbox.max_x >= lo && bbox.min_x <= hi && bbox.max_y >= lo && bbox.min_y <= hi;
+    if !meets {
+        return None;
+    }
     let z_scale = f64::from(1u32 << zoom);
     let max_tile = (1u32 << zoom).saturating_sub(1);
-
-    let tx_min = clamp_tile(bbox.min_x * z_scale, max_tile);
-    let tx_max = clamp_tile(bbox.max_x * z_scale, max_tile);
-    let ty_min = clamp_tile(bbox.min_y * z_scale, max_tile);
-    let ty_max = clamp_tile(bbox.max_y * z_scale, max_tile);
-
-    let mut tiles = Vec::with_capacity(((tx_max - tx_min + 1) * (ty_max - ty_min + 1)) as usize);
-    for ty in ty_min..=ty_max {
-        for tx in tx_min..=tx_max {
-            tiles.push((tx, ty));
-        }
-    }
-    tiles
+    Some((
+        clamp_tile(bbox.min_x * z_scale, max_tile),
+        clamp_tile(bbox.max_x * z_scale, max_tile),
+        clamp_tile(bbox.min_y * z_scale, max_tile),
+        clamp_tile(bbox.max_y * z_scale, max_tile),
+    ))
 }
 
 /// Check whether a bbox falls entirely within a single tile at the given zoom.
 ///
 /// When true, clipping is unnecessary - all geometry coordinates are within
-/// the tile's non-buffered bounds (a subset of the buffered clip rect).
+/// the tile's non-buffered bounds (a subset of the buffered clip rect). The
+/// floored indices are compared before any clamping, so a bbox reaching past
+/// the world edge is never single-tile: it takes the clipped path, which
+/// bounds its coordinates to the buffered rect.
 #[inline]
 pub fn is_single_tile(bbox: &MercBbox, zoom: u8) -> bool {
     let z_scale = f64::from(1u32 << zoom);
-    let max_tile = (1u32 << zoom).saturating_sub(1);
-    let tx_min = clamp_tile(bbox.min_x * z_scale, max_tile);
-    let tx_max = clamp_tile(bbox.max_x * z_scale, max_tile);
-    tx_min == tx_max && {
-        let ty_min = clamp_tile(bbox.min_y * z_scale, max_tile);
-        let ty_max = clamp_tile(bbox.max_y * z_scale, max_tile);
-        ty_min == ty_max
-    }
+    let max_tile = f64::from((1u32 << zoom).saturating_sub(1));
+    let x = (bbox.min_x * z_scale).floor();
+    let y = (bbox.min_y * z_scale).floor();
+    // Integral floats in tile-index range compare exactly.
+    #[allow(clippy::float_cmp)]
+    let same = x == (bbox.max_x * z_scale).floor() && y == (bbox.max_y * z_scale).floor();
+    same && (0.0..=max_tile).contains(&x) && (0.0..=max_tile).contains(&y)
 }
 
-/// Iterate tiles for a bbox without allocating a Vec.
+/// Iterate tiles for a bbox without allocating a Vec. A bbox that misses the
+/// world yields nothing (see `tile_range`).
 #[inline]
 pub fn for_each_tile_in_bbox<F>(bbox: &MercBbox, zoom: u8, mut f: F)
 where
     F: FnMut(u32, u32),
 {
-    let z_scale = f64::from(1u32 << zoom);
-    let max_tile = (1u32 << zoom).saturating_sub(1);
-
-    let tx_min = clamp_tile(bbox.min_x * z_scale, max_tile);
-    let tx_max = clamp_tile(bbox.max_x * z_scale, max_tile);
-    let ty_min = clamp_tile(bbox.min_y * z_scale, max_tile);
-    let ty_max = clamp_tile(bbox.max_y * z_scale, max_tile);
-
+    let Some((tx_min, tx_max, ty_min, ty_max)) = tile_range(bbox, zoom) else {
+        return;
+    };
     for ty in ty_min..=ty_max {
         for tx in tx_min..=tx_max {
             f(tx, ty);

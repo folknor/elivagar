@@ -135,8 +135,11 @@ name the same file, and `z0-z14` alone records `full` and none.
 
 Invalid index entries and truncated shapefile records fail the run. Selected
 polygon geometry must have finite coordinates and closed rings with at least
-four points including closure; malformed geometry fails rather than being
-silently skipped. Null shape records are ignored.
+four points including closure, inside normalized Mercator `[-1, 2]` and
+inside the record's declared bounds; malformed geometry fails rather than
+being silently skipped. Records are selected by their declared bounds
+without reading their points, so a record whose bounds understate its points
+is caught only when it is selected. Null shape records are ignored.
 
 The low-zoom (z0-z7) pass unions its source pieces before pyramid descent
 (introduced at `OCEAN_POLICY_VERSION` v3; the ring-cap partition below

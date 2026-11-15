@@ -281,6 +281,50 @@ fn test_signed_area_unit_square() {
 
 // --- Tile intersection tests ---
 
+fn bbox(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> MercBbox {
+    MercBbox {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    }
+}
+
+#[test]
+fn a_bbox_beyond_the_world_covers_no_tile() {
+    // A far copy of a many-times-unwrapped way, and a NaN bound.
+    assert!(tiles_for_bbox(&bbox(3.2, 0.4, 3.3, 0.5), 10).is_empty());
+    assert!(tiles_for_bbox(&bbox(-0.3, 0.4, -0.2, 0.5), 10).is_empty());
+    assert!(tiles_for_bbox(&bbox(f64::NAN, 0.4, 0.5, 0.5), 10).is_empty());
+    assert!(!crate::geometry::tiles::is_single_tile(
+        &bbox(3.2, 0.4, 3.3, 0.5),
+        10
+    ));
+}
+
+#[test]
+fn the_world_edge_and_the_polar_sliver_still_land_on_edge_tiles() {
+    // lon 180 and the projected latitude clamp overshoot by ~7.1e-9.
+    assert_eq!(tiles_for_bbox(&bbox(1.0, 0.5, 1.0, 0.5), 3), vec![(7, 4)]);
+    assert_eq!(
+        tiles_for_bbox(&bbox(0.5, -7.1e-9, 0.5, -7.1e-9), 3),
+        vec![(4, 0)]
+    );
+    assert_eq!(
+        tiles_for_bbox(&bbox(0.5, 1.0 + 7.1e-9, 0.5, 1.0 + 7.1e-9), 3),
+        vec![(4, 7)]
+    );
+}
+
+#[test]
+fn a_bbox_reaching_past_the_edge_is_never_single_tile() {
+    use crate::geometry::tiles::is_single_tile;
+    // Clamped, both ends land on tile 0 at z0; unclamped they do not.
+    assert!(!is_single_tile(&bbox(0.9, 0.4, 1.1, 0.5), 0));
+    assert!(!is_single_tile(&bbox(1.0, 0.4, 5.0, 0.5), 3));
+    assert!(is_single_tile(&bbox(0.9, 0.4, 0.95, 0.5), 0));
+}
+
 #[test]
 fn test_tiles_for_bbox_zoom_0() {
     let bbox = MercBbox {

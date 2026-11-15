@@ -1295,8 +1295,15 @@ pub(crate) fn shape_bbox(shape: &Shape) -> Option<IntRect> {
     })
 }
 
+/// The zoom-grid origin `t * 4096` of tile index `t`. Cell indices come from
+/// pyramids at most z14, so the product is far inside i32; the multiply is
+/// checked anyway because release builds wrap silently, and an index at or
+/// above `2^19` would otherwise yield a wrong origin rather than an abort.
 pub(crate) fn tile_origin(t: u32) -> i32 {
-    i32::try_from(t).expect("tile coordinate fits i32") * TILE_EXTENT_I32
+    i32::try_from(t)
+        .ok()
+        .and_then(|t| t.checked_mul(TILE_EXTENT_I32))
+        .expect("tile origin fits i32")
 }
 
 pub(crate) fn buffered_tile_rect(tx: u32, ty: u32) -> IntRect {

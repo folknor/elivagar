@@ -425,6 +425,15 @@ impl RecordSource<'_> {
         if point_count < 4 {
             return Err(self.invalid("polygon ring has fewer than four points including closure"));
         }
+        // The record's declared bounds already decided admission; a point
+        // outside them means the header lied. Exact in file units: the full
+        // and simplified OSMCD inputs (78M and 1.8M points) have no point
+        // outside its record's bounds. Only admitted records are read, so a
+        // header that understates its points can still have its record
+        // skipped unseen - the prefilter trusts the header by design, and
+        // this check catches the lie whenever the record is admitted.
+        let (xmin, ymin) = (le_f64_at(self.header, 4), le_f64_at(self.header, 12));
+        let (xmax, ymax) = (le_f64_at(self.header, 20), le_f64_at(self.header, 28));
         let mut ring = Vec::with_capacity(point_count);
         let mut buf = vec![0_u8; RING_READ_BUFFER_BYTES];
         let mut points_read = 0usize;
@@ -442,6 +451,9 @@ impl RecordSource<'_> {
                 let y = le_f64_at(&buf, b + 8);
                 if !x.is_finite() || !y.is_finite() {
                     return Err(self.invalid("polygon point coordinate is non-finite"));
+                }
+                if !(xmin..=xmax).contains(&x) || !(ymin..=ymax).contains(&y) {
+                    return Err(self.invalid("polygon point lies outside the record bounds"));
                 }
                 let point = geometry::projection::from_epsg3857(x, y);
                 if !in_world_domain(point) {
@@ -794,6 +806,7 @@ mod tests {
             "world_point",
             "short_ring",
             "closure",
+            "outside_bounds",
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("malformed.shp");
@@ -811,11 +824,22 @@ mod tests {
                 "world_point" => write_f64_le(&mut shp, points + 16, 1.0e12),
                 "short_ring" => write_u32_le(&mut shp, rec + 40, 3),
                 "closure" => write_f64_le(&mut shp, points + 4 * 16, 0.0),
+                // A header understating its points: xmax shrunk to xmin.
+                "outside_bounds" => {
+                    let xmin = f64::from_le_bytes(shp[rec + 4..rec + 12].try_into().unwrap());
+                    write_f64_le(&mut shp, rec + 20, xmin);
+                }
                 _ => unreachable!(),
             }
             fs::write(&path, shp).unwrap();
             let err = read_all(&path).expect_err(defect);
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{defect}");
+            if defect == "outside_bounds" {
+                assert!(
+                    err.to_string().contains("outside the record bounds"),
+                    "{err}"
+                );
+            }
         }
     }
 

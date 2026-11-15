@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A line or point copy lying wholly outside the world, such as the far
+  copy of a way unwrapped across the antimeridian more than once, is no
+  longer clamped onto the edge tile and encoded far outside it (up to
+  saturated i32 coordinates); it covers no tile. Lines reaching past the
+  world edge take the clipped path instead of the unclipped single-tile
+  one. An ocean shapefile record with a point outside its declared bounds
+  now fails as invalid input when the record is selected. Lines and points
+  that do not cross the antimeridian produce unchanged tiles.
+
 - Lines without pinned vertices are simplified at every zoom again. The
   zoom-to-zoom cascade they used ran Douglas-Peucker only at z13: its
   convergence skip took the largest deviation among removed points as proof
