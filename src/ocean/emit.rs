@@ -384,7 +384,7 @@ fn process_ocean_shapefile_inner(
     // --- Parse phase: extract and clip polygons in parallel ---
     use rayon::prelude::*;
 
-    let parsed_records: Result<Vec<ParsedOceanRecord>, std::io::Error> = shapefile
+    let parsed_records: Result<Vec<ParsedOceanRecord>, super::ShapefileError> = shapefile
         .records()
         .par_iter()
         .map_init(IntEmitScratch::new, |scratch, &record| {
@@ -1389,10 +1389,15 @@ mod tests {
             SortWriter::new(dir.path(), 1 << 20, sort::ChunkCompression::None).unwrap();
         let err = process_ocean_shapefile(&shp_path, &world(), 0, 0, &mut sort_writer, None)
             .expect_err("out-of-range part index should fail");
-        let io = std::error::Error::source(&err)
-            .and_then(|e| e.downcast_ref::<std::io::Error>())
-            .expect("the shapefile read error is retained as the cause");
-        assert_eq!(io.kind(), std::io::ErrorKind::InvalidData);
-        assert_eq!(err.kind(), crate::pipeline::ErrorKind::Failed);
+        let cause = std::error::Error::source(&err)
+            .and_then(|e| e.downcast_ref::<super::super::ShapefileError>())
+            .expect("the shapefile refusal is retained as the cause");
+        assert!(matches!(cause, super::super::ShapefileError::Malformed(_)));
+        assert_eq!(err.kind(), crate::pipeline::ErrorKind::InputRefused);
+        assert_eq!(err.kind().exit_code(), 65);
+        assert!(
+            err.to_string().starts_with("invalid shapefile record 1"),
+            "{err}"
+        );
     }
 }

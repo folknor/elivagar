@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A malformed ocean shapefile (a bad index entry, or a selected record
+  with bad framing, shape type, bounds or geometry) now exits 65 as
+  refused input, in both `run` and `ocean-build`, instead of exit 2.
+  `PipelineError::kind()` reports `InputRefused` for it. Shapefile reads
+  that fail to deliver their bytes keep the I/O rule: 74 with an OS
+  errno, 2 without. Error text is unchanged.
+
 - A PBF block that pbfhogg labels mixed (for example one carrying a
   changeset group beside its ways) used to be dropped whole, silently; its
   nodes, ways or relations are now read. A block holding more than one

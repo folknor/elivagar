@@ -342,23 +342,6 @@ a run-owned `Telemetry` handle (or reset at `run` entry).
 
 Reported by the storage, polygon-engine and pipeline hunts.
 
-## STR-045 - Shapefile record refusals exit 2, not as refused input
-
-The ocean shapefile reader refuses malformed records: points outside their
-record's declared bounds, points outside the normalized [-1, 2] world domain,
-and the earlier staged record checks. These refusals reach the pipeline as
-`io::Error` values without an OS error number. Under the typed-errors evidence
-rule, such an error is classed `Failed` and exits 2. A malformed shapefile is
-bad input, though, and the exit table's class for refused input is 65, which
-the node-store and PBF ordering refusals already use. Typing the reader's
-refusals, so they carry their class rather than a bare `io::Error`, would let
-them exit 65 like the other input refusals.
-
-Also noted at the same site: with in-world record bounds now enforced, the
-per-point [-1, 2] check in the reader is redundant, and was kept deliberately.
-
-Reported by the session that bounded line and point tile coordinates.
-
 ---
 
 # Tests and documentation

@@ -54,7 +54,8 @@ Library callers can inspect `PipelineError::artifact_refusal()` for a typed
 `ArtifactRefusal`. `KeyMismatch::fields` names every differing identity field
 (policy version, shapefile hashes, zooms, or compression level). Artifact
 admission and directory refusals exit 4; OS read failures exit 74. Shapefile
-hashing failures retain their own failure class.
+hashing failures retain their own failure class. A malformed ocean shapefile
+is refused input (exit 65) in both `run` and `ocean_build`.
 
 Sort chunk readers and writer `resume`/`finish` return `sort::ChunkStoreError`, with
 `kind()` distinguishing compression, stale names, missing chunks, counts,

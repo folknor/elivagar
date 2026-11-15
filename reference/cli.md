@@ -57,7 +57,7 @@ bytes remain findings in a completed report.
 | 3 | `--skip-to` resume refused: the resume records under `--tmp-dir` are absent or do not match this run |
 | 4 | the named ocean artifact cannot serve this run because of its own bytes or identity |
 | 64 | invalid invocation: a clap usage error, or a value or combination the library refuses before work (including environment knobs, and an artifact named for a tile contract or zoom window it cannot serve) |
-| 65 | input bytes read and rejected, e.g. an unsorted PBF without an opt-in, node IDs the node store refuses (negative, not increasing under `--force-sorted`, at or above 2^40 in the compact store, over the flat index safety cap), a node block after the first way block when the node store is in use, a PBF block holding more than one element kind, malformed injected data, or a header that refuses `--locations-on-ways` |
+| 65 | input bytes read and rejected, e.g. an unsorted PBF without an opt-in, node IDs the node store refuses (negative, not increasing under `--force-sorted`, at or above 2^40 in the compact store, over the flat index safety cap), a node block after the first way block when the node store is in use, a PBF block holding more than one element kind, malformed injected data, a malformed ocean shapefile index or selected record (in `run` and `ocean-build`), or a header that refuses `--locations-on-ways` |
 | 70 | an internal invariant failed, e.g. a polygon over the 500-ring cap reaching a clip rect too small to split, which the ring-cap partition proves cannot happen |
 | 74 | an I/O failure the OS reported |
 
@@ -139,7 +139,11 @@ four points including closure, inside normalized Mercator `[-1, 2]` and
 inside the record's declared bounds; malformed geometry fails rather than
 being silently skipped. Records are selected by their declared bounds
 without reading their points, so a record whose bounds understate its points
-is caught only when it is selected. Null shape records are ignored.
+is caught only when it is selected. Null shape records are ignored. These
+refusals exit 65; a shapefile read that fails to deliver its bytes, including
+a short read from a file that changed after it was mapped, keeps the I/O rule
+(74 with an OS errno, 2 without), and inputs replaced after source-key
+resolution stay unclassified (2).
 
 The low-zoom (z0-z7) pass unions its source pieces before pyramid descent
 (introduced at `OCEAN_POLICY_VERSION` v3; the ring-cap partition below

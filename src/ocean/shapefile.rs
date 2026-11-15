@@ -21,6 +21,45 @@ use std::path::{Path, PathBuf};
 
 const RING_READ_BUFFER_BYTES: usize = 64 * 1024;
 
+/// Why a shapefile read failed. The two cases are the reader's evidence and
+/// nothing more: `Malformed` means bytes were read and refused here, so the
+/// pipeline classes it as refused input; `Read` means the bytes could not be
+/// obtained, and keeps the original `io::Error` so the ordinary errno evidence
+/// rule decides its class. A short positional read is `Read`, not
+/// `Malformed`: framing was already checked against the mapping, so it says
+/// the file changed under us, not that its bytes are bad.
+#[derive(Debug)]
+pub(crate) enum ShapefileError {
+    Malformed(String),
+    Read(std::io::Error),
+}
+
+impl std::fmt::Display for ShapefileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed(message) => f.write_str(message),
+            Self::Read(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ShapefileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Malformed(_) => None,
+            Self::Read(error) => Some(error),
+        }
+    }
+}
+
+impl From<std::io::Error> for ShapefileError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Read(error)
+    }
+}
+
+type Result<T> = std::result::Result<T, ShapefileError>;
+
 /// One `.shx` index entry, with byte offsets already converted from words.
 #[derive(Clone, Copy)]
 pub(super) struct ShxRecord {
@@ -44,7 +83,7 @@ pub(super) struct Shapefile {
 impl Shapefile {
     /// Read and validate the `.shx` index, then open and map the `.shp`.
     /// A malformed index is reported before the `.shp` is opened.
-    pub(super) fn open(path: &Path) -> std::io::Result<Self> {
+    pub(super) fn open(path: &Path) -> Result<Self> {
         let files = ShapefilePair::from_shp(path);
         let shx_path = files.shx();
         let shx = std::fs::read(shx_path)?;
@@ -117,7 +156,7 @@ impl Shapefile {
         record: ShxRecord,
         accept: impl FnOnce(Point, Point) -> bool,
         mut polygon: impl FnMut(&[Point], &[Vec<Point>]),
-    ) -> std::io::Result<bool> {
+    ) -> Result<bool> {
         let header_end = record
             .offset
             .checked_add(8)
@@ -188,33 +227,27 @@ impl Shapefile {
         Ok(true)
     }
 
-    fn invalid(&self, record: ShxRecord, reason: &str) -> std::io::Error {
+    fn invalid(&self, record: ShxRecord, reason: &str) -> ShapefileError {
         invalid_shapefile_record(&self.path, record, reason)
     }
 }
 
-fn parse_shx(shx_data: &[u8], shx_path: &Path) -> std::io::Result<Vec<ShxRecord>> {
+fn parse_shx(shx_data: &[u8], shx_path: &Path) -> Result<Vec<ShxRecord>> {
     if shx_data.len() < 100 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "invalid .shx file {}: expected at least 100-byte header, got {} bytes",
-                shx_path.display(),
-                shx_data.len()
-            ),
-        ));
+        return Err(ShapefileError::Malformed(format!(
+            "invalid .shx file {}: expected at least 100-byte header, got {} bytes",
+            shx_path.display(),
+            shx_data.len()
+        )));
     }
 
     let index_bytes = shx_data.len() - 100;
     if index_bytes % 8 != 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "invalid .shx file {}: {} trailing bytes after complete index records",
-                shx_path.display(),
-                index_bytes % 8
-            ),
-        ));
+        return Err(ShapefileError::Malformed(format!(
+            "invalid .shx file {}: {} trailing bytes after complete index records",
+            shx_path.display(),
+            index_bytes % 8
+        )));
     }
 
     let shape_count = index_bytes / 8;
@@ -224,28 +257,22 @@ fn parse_shx(shx_data: &[u8], shx_path: &Path) -> std::io::Result<Vec<ShxRecord>
         let offset_words = i32::from_be_bytes(field_bytes(shx_data, base));
         let content_words = i32::from_be_bytes(field_bytes(shx_data, base + 4));
         if offset_words < 0 || content_words < 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "invalid .shx record {} in {}: negative offset or content length",
-                    i + 1,
-                    shx_path.display()
-                ),
-            ));
+            return Err(ShapefileError::Malformed(format!(
+                "invalid .shx record {} in {}: negative offset or content length",
+                i + 1,
+                shx_path.display()
+            )));
         }
         let words_to_bytes = |words: i32, what: &str| {
             usize::try_from(words)
                 .ok()
                 .and_then(|words| words.checked_mul(2))
                 .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "invalid .shx record {} in {}: {what} overflow",
-                            i + 1,
-                            shx_path.display()
-                        ),
-                    )
+                    ShapefileError::Malformed(format!(
+                        "invalid .shx record {} in {}: {what} overflow",
+                        i + 1,
+                        shx_path.display()
+                    ))
                 })
         };
         let offset = words_to_bytes(offset_words, "offset")?;
@@ -293,16 +320,13 @@ fn u64_from_usize(v: usize) -> u64 {
     u64::try_from(v).expect("shapefile offset fits u64")
 }
 
-fn invalid_shapefile_record(path: &Path, record: ShxRecord, reason: &str) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!(
-            "invalid shapefile record {} at offset {} in {}: {reason}",
-            record.index,
-            record.offset,
-            path.display()
-        ),
-    )
+fn invalid_shapefile_record(path: &Path, record: ShxRecord, reason: &str) -> ShapefileError {
+    ShapefileError::Malformed(format!(
+        "invalid shapefile record {} at offset {} in {}: {reason}",
+        record.index,
+        record.offset,
+        path.display()
+    ))
 }
 
 /// One accepted polygon record: its index entry, absolute content offset and
@@ -315,14 +339,11 @@ struct RecordSource<'a> {
 }
 
 impl RecordSource<'_> {
-    fn invalid(&self, reason: &str) -> std::io::Error {
+    fn invalid(&self, reason: &str) -> ShapefileError {
         self.shapefile.invalid(self.record, reason)
     }
 
-    fn read_polygons(
-        &self,
-        polygon: &mut impl FnMut(&[Point], &[Vec<Point>]),
-    ) -> std::io::Result<()> {
+    fn read_polygons(&self, polygon: &mut impl FnMut(&[Point], &[Vec<Point>])) -> Result<()> {
         let num_parts_i32 = le_i32_at(self.header, 36);
         let num_points_i32 = le_i32_at(self.header, 40);
         if num_parts_i32 < 0 || num_points_i32 < 0 {
@@ -401,7 +422,7 @@ impl RecordSource<'_> {
         Ok(())
     }
 
-    fn read_ring_starts(&self, num_parts: usize) -> std::io::Result<Vec<usize>> {
+    fn read_ring_starts(&self, num_parts: usize) -> Result<Vec<usize>> {
         let mut parts = vec![0_u8; num_parts * 4];
         if !parts.is_empty() {
             let read_offset = u64_from_usize(self.rec + 44);
@@ -420,7 +441,7 @@ impl RecordSource<'_> {
         points_start: usize,
         start: usize,
         end: usize,
-    ) -> std::io::Result<Vec<Point>> {
+    ) -> Result<Vec<Point>> {
         let point_count = end - start;
         if point_count < 4 {
             return Err(self.invalid("polygon ring has fewer than four points including closure"));
@@ -456,6 +477,12 @@ impl RecordSource<'_> {
                     return Err(self.invalid("polygon point lies outside the record bounds"));
                 }
                 let point = geometry::projection::from_epsg3857(x, y);
+                // Implied by the bounds check above: the record bounds were
+                // world-checked, and the projection is monotone in each axis
+                // under IEEE rounding, so a point inside them projects inside
+                // the world. Kept as the explicit premise that the integer
+                // quantizer's `expect` in `int_ocean::quantize_polygon`
+                // names, so that premise does not ride on that argument.
                 if !in_world_domain(point) {
                     return Err(self.invalid("polygon point lies outside the projected world"));
                 }
@@ -643,7 +670,7 @@ mod tests {
     type Polygons = Vec<(Vec<Point>, Vec<Vec<Point>>)>;
 
     /// Read every record, accepting all of them, and collect the polygons.
-    fn read_all(path: &Path) -> std::io::Result<(usize, Polygons)> {
+    fn read_all(path: &Path) -> Result<(usize, Polygons)> {
         let shapefile = Shapefile::open(path)?;
         let mut hits = 0;
         let mut polygons = Vec::new();
@@ -741,7 +768,7 @@ mod tests {
         let err = Shapefile::open(&path)
             .err()
             .expect("short .shx header should fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(matches!(err, ShapefileError::Malformed(_)), "{err}");
         assert!(err.to_string().contains("invalid .shx file"));
     }
 
@@ -753,7 +780,7 @@ mod tests {
         fs::write(path.with_extension("shx"), [0u8; 64]).unwrap();
         fs::remove_file(&path).unwrap();
         let err = Shapefile::open(&path).err().expect("bad index");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(matches!(err, ShapefileError::Malformed(_)), "{err}");
     }
 
     #[test]
@@ -765,7 +792,10 @@ mod tests {
         let err = Shapefile::open(&path)
             .err()
             .expect("missing .shx should fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            matches!(&err, ShapefileError::Read(io) if io.kind() == std::io::ErrorKind::NotFound),
+            "{err}"
+        );
     }
 
     #[test]
@@ -777,7 +807,7 @@ mod tests {
         shp_data.truncate(120);
         fs::write(&path, shp_data).unwrap();
         let err = read_all(&path).expect_err("truncated record should fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(matches!(err, ShapefileError::Malformed(_)), "{err}");
         assert!(err.to_string().contains("extends past the .shp file"));
     }
 
@@ -792,7 +822,7 @@ mod tests {
         let err = Shapefile::open(&path)
             .err()
             .expect("negative .shx offset should fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(matches!(err, ShapefileError::Malformed(_)), "{err}");
         assert!(err.to_string().contains("negative offset"));
     }
 
@@ -833,7 +863,10 @@ mod tests {
             }
             fs::write(&path, shp).unwrap();
             let err = read_all(&path).expect_err(defect);
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{defect}");
+            assert!(
+                matches!(err, ShapefileError::Malformed(_)),
+                "{defect}: {err}"
+            );
             if defect == "outside_bounds" {
                 assert!(
                     err.to_string().contains("outside the record bounds"),

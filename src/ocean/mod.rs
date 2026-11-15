@@ -36,3 +36,4 @@ pub use key::{OceanArtifactKey, OceanSourceKey, ShapefilePair, Xxh128};
 pub(crate) use plan::{OceanPass, OceanPlan};
 #[cfg(test)]
 pub use policy::OCEAN_POLICY_VERSION;
+pub(crate) use shapefile::ShapefileError;

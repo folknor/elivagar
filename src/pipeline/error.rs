@@ -30,7 +30,7 @@ pub enum ErrorKind {
     /// Raised before any work.
     Config,
     /// Input bytes were read and rejected (malformed injected data, unsorted
-    /// input without the opt-in).
+    /// input without the opt-in, a malformed ocean shapefile).
     InputRefused,
     /// The resume state under the scratch directory is absent or does not
     /// match this run. [`PipelineError::resume_refusal`] names the reason.
@@ -362,6 +362,18 @@ impl From<crate::node_index::NodeStoreError> for PipelineError {
             _ => Class::Input,
         };
         Self::new(class, "node store").with_cause(error)
+    }
+}
+
+/// Shapefile bytes the reader refused are refused input; a failure to obtain
+/// the bytes keeps the ordinary I/O evidence rule.
+impl From<crate::ocean::ShapefileError> for PipelineError {
+    fn from(error: crate::ocean::ShapefileError) -> Self {
+        use crate::ocean::ShapefileError;
+        match error {
+            ShapefileError::Malformed(_) => Self::input(String::new()).with_cause(error),
+            ShapefileError::Read(io) => Self::from(io),
+        }
     }
 }
 
