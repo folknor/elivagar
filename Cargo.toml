@@ -1,6 +1,6 @@
 [package]
 name = "elivagar"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
@@ -63,7 +63,7 @@ rayon = "1.5"
 memmap2 = "0.9.11"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 brotli = "9.0.0"
-lz4_flex = "0.14"
+lz4_flex = "0.14.1"
 snap = "1"
 smallvec = "1.15.2"
 hotpath = "0.31.3"

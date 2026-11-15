@@ -143,6 +143,32 @@ fn locked_version(lock: &str, package: &str) -> Option<String> {
     None
 }
 
+/// The commit a packaged crate was published from, read from the
+/// `.cargo_vcs_info.json` that `cargo package` writes at the crate root.
+///
+/// A crate unpacked from a registry has no `.git` of its own, so a git query
+/// there walks up into whatever repository encloses the registry cache (a
+/// dotfiles repo in `$HOME`, say) and would stamp that repository's commit.
+/// The packaged file is the only honest source. `Some((commit, dirty))` when
+/// the file exists; the commit is None when it names no sha1 (a package made
+/// outside git), and `dirty` mirrors cargo's `"dirty": true`, which it writes
+/// only for `--allow-dirty` packages.
+fn packaged_vcs(manifest: &Path) -> Option<(Option<String>, bool)> {
+    let text = std::fs::read_to_string(manifest.join(".cargo_vcs_info.json")).ok()?;
+    let sha = text.split("\"sha1\"").nth(1).and_then(|rest| {
+        let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+        let rest = rest.strip_prefix('"')?;
+        let sha = &rest[..rest.find('"')?];
+        (sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then(|| sha.to_string())
+    });
+    let dirty = text.split("\"dirty\"").nth(1).is_some_and(|rest| {
+        rest.trim_start()
+            .strip_prefix(':')
+            .is_some_and(|v| v.trim_start().starts_with("true"))
+    });
+    Some((sha, dirty))
+}
+
 fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     println!("cargo:rerun-if-changed=build.rs");
@@ -150,6 +176,14 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.lock");
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+
+    if let Some((commit, dirty)) = packaged_vcs(&manifest) {
+        // A packaged source cannot change under us, so no freshness trigger.
+        let commit = commit.unwrap_or_else(|| "unknown".to_string());
+        let dirty = if dirty { "Some(true)" } else { "Some(false)" };
+        write_closure(&manifest, &out_dir, &commit, dirty);
+        return;
+    }
 
     // One read of each git input; the stamp and the token below are both
     // derived from these same bytes, never from a second read.
@@ -195,7 +229,12 @@ fn main() {
         Some(false) => "Some(false)",
         None => "None",
     };
+    write_closure(&manifest, &out_dir, &commit, dirty);
+}
 
+/// Writes `$OUT_DIR/build_closure.rs` from the established commit and dirty
+/// literal plus the lockfile and feature observations.
+fn write_closure(manifest: &Path, out_dir: &Path, commit: &str, dirty: &str) {
     // Identifies every registry dependency at once, protohoggr included, by
     // the checksums the lockfile already pins.
     let lock = std::fs::read(manifest.join("Cargo.lock")).unwrap_or_default();
@@ -220,7 +259,7 @@ fn main() {
         "Build {{\n    elivagar: Repo {{ commit: {commit}, dirty: {dirty} }},\n    \
          pbfhogg_reader: Reader {{ version: {pbfhogg} }},\n    \
          cargo_lock_xxh3_128: {lock_hash},\n    cargo_features: &[{features}],\n}}\n",
-        commit = lit(&commit),
+        commit = lit(commit),
         pbfhogg = lit(&pbfhogg),
         lock_hash = lit(&lock_hash),
         features = features.join(", "),

@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-11-15
+
+- Archives built from a published crate now stamp the commit recorded in
+  the package's `.cargo_vcs_info.json`. Previously the build asked git,
+  which inside a registry cache could answer with an enclosing
+  repository's commit.
 
 - Closed lines simplify the same way whichever vertex their source way
   starts at, on input with injected shared-node pins; the source start is
