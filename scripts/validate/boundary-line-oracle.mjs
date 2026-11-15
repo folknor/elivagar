@@ -10,7 +10,7 @@
 // narrow spit sharing one vertex at its neck), and denmark carries hundreds
 // of those on correct output. The merger defects these categories were built
 // for are gated in code instead, by the witness-based invariant checker in
-// src/mvt/merge.rs. --strict restores exit 1 on every category.
+// src/geometry/line_merge.rs. --strict restores exit 1 on every category.
 //
 // --census adds, per zoom, a histogram of retrace extent for palindromes and
 // spurs: the largest distance (extent units) from the retrace pivot out to

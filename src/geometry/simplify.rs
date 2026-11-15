@@ -154,19 +154,27 @@ fn simplify_impl(
     if closed {
         // The closed path retains vertices among indices 0..len-1 only (the
         // source closing duplicate at len-1 is never forced), so `output` holds
-        // no trailing duplicate at this point - count distinct over the whole
-        // slice. Keep the ring only when three distinct vertices survived; a
-        // fully-collapsed input yields the forced {p0, pa, pb} and drops here
-        // when those are not three distinct points.
-        let mut distinct: Vec<(u64, u64)> = Vec::new();
-        for point in output.iter() {
-            let key = (point.x.to_bits(), point.y.to_bits());
-            if !distinct.contains(&key) {
-                distinct.push(key);
-            }
-        }
-        let distinct = distinct.len();
-        if distinct < 3 {
+        // no trailing duplicate at this point. A loop that lies within
+        // tolerance of its farthest-pair chord keeps the forced {p0, pa, pb};
+        // when p0 coincides with an anchor (the start vertex sits at an
+        // extremity) only the two chord ends remain, and re-closing them gives
+        // the out-and-back [pa, pb, pa]. That stroke is kept, not dropped: it
+        // draws the loop within tolerance, it is the same shape the loop takes
+        // when a third vertex instead rounds onto an anchor at tile
+        // quantization, and dropping it made whether a collapsed loop survived
+        // depend on where its source way happens to start. Only a loop whose
+        // points all coincide is removed, so a nonconstant closed source
+        // always simplifies to at least two points at every tolerance (the
+        // emitter's empty-result break relies on that being zoom-independent).
+        // The forced p0 is NOT canonicalized away: junction pins are
+        // incomplete (block-local detection misses cross-block and two-ref
+        // ways when the PBF carries no injected pins), and keeping the source
+        // start is what holds an unpinned junction at p0 in place.
+        let first = output[0];
+        let constant = output
+            .iter()
+            .all(|q| q.x.to_bits() == first.x.to_bits() && q.y.to_bits() == first.y.to_bits());
+        if constant {
             output.clear();
         } else if output
             .first()
@@ -177,12 +185,6 @@ fn simplify_impl(
         {
             output.push(output[0]);
         }
-        // A valid simplified ring is never its own reverse (that is the
-        // fabricated-spike shape L3 exists to prevent).
-        debug_assert!(
-            output.len() < 2 || !is_own_reverse(output.as_slice()),
-            "closed-line simplify produced a palindrome"
-        );
     }
 }
 
@@ -225,6 +227,7 @@ fn simplify_closed(points: &[Point], tol_sq: f64, keep: &mut [bool]) {
 
 /// True when the vertex sequence equals its own reverse (bit-exact), i.e. the
 /// palindrome / out-and-back shape.
+#[cfg(test)]
 fn is_own_reverse(points: &[Point]) -> bool {
     let n = points.len();
     (0..n).all(|i| {
@@ -388,30 +391,48 @@ mod closed_ring_tests {
     }
 
     #[test]
-    fn thin_closed_ring_drops_or_stays_valid() {
-        // A long narrow loop: the thin dimension collapses under a coarse
-        // tolerance. Either it drops entirely or it survives as a valid,
-        // non-palindromic ring - never the fabricated hair shape.
-        let ring = [
+    fn collapsed_closed_ring_survives_whatever_its_start() {
+        // A long narrow loop whose thin dimension collapses under a coarse
+        // tolerance. Started at an extremity, only the two chord ends remain;
+        // started mid-side, the forced start adds a third vertex. Both must
+        // survive as a closed stroke along the 20-unit chord - which of the
+        // two the source starts at must not decide whether it is drawn.
+        let at_extremity = [
             p(0.0, 0.0),
             p(10.0, 0.001),
             p(20.0, 0.0),
             p(10.0, -0.001),
             p(0.0, 0.0),
         ];
-        let out = simplify(&ring, 1.0);
+        let mid_side = [
+            p(10.0, 0.001),
+            p(20.0, 0.0),
+            p(10.0, -0.001),
+            p(0.0, 0.0),
+            p(10.0, 0.001),
+        ];
+        let out = simplify(&at_extremity, 1.0);
+        assert_eq!(out.len(), 3, "collapsed loop keeps its chord, got {out:?}");
+        assert!(eq(out[0], out[2]), "result must be closed");
+        assert!(is_own_reverse(&out), "the chord is an out-and-back");
+        let out = simplify(&mid_side, 1.0);
         assert!(
-            out.is_empty() || (out.len() >= 4 && !is_own_reverse(&out)),
-            "thin ring must drop or stay a valid non-palindrome loop, got {out:?}"
+            out.len() >= 3,
+            "collapsed loop keeps its chord, got {out:?}"
         );
-        if !out.is_empty() {
-            // First == last (re-closed) and at least 3 distinct vertices.
-            assert!(eq(out[0], out[out.len() - 1]), "result must be closed");
+        assert!(eq(out[0], out[out.len() - 1]), "result must be closed");
+        for anchor in [p(0.0, 0.0), p(20.0, 0.0)] {
             assert!(
-                !(out.len() == 4 && eq(out[0], out[2])),
-                "must not be a [start, apex, start] hair"
+                out.iter().any(|&v| eq(v, anchor)),
+                "chord end {anchor:?} kept"
             );
         }
+    }
+
+    #[test]
+    fn constant_closed_ring_drops() {
+        let ring = [p(5.0, 5.0); 5];
+        assert!(simplify(&ring, 1.0).is_empty());
     }
 
     #[test]

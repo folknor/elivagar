@@ -214,26 +214,19 @@ parsing.
 
 Reported by the storage hunt.
 
-## STR-044 - Closed lines judge collapse in Mercator, then quantize into retraces
+## STR-046 - Closed-line simplification depends on the source start vertex
 
-`simplify::simplify_impl` keeps a simplified closed line when three
-distinct Mercator vertices survive, but `mvt::encode_linestring` only drops
-consecutive duplicates after quantization, so a tiny loop `A, B, C, A`
-whose C rounds onto A ships as the out-and-back `a, b, a`. On denmark the
-boundary-line oracle's advisory palindrome count reads z7 207, z8 140,
-z9 81 once every line simplifies from the source per zoom (it read 124, 77,
-54 while unpinned lines carried z13 detail down), most of them 2 to 64
-extent units long, e.g. z11/1096/641 feat 0 sub 15, a maritime admin-4
-island loop. The pinned path has always had the exposure. The fix is a
-policy choice, not a mechanism: drop the loop, keep the collapsed stroke,
-or retain more source vertices so it stays a loop, with pins constraining
-the last. Whatever it is, collapse judged on the zoom grid is NOT monotone
-across zooms (two points that round together at one zoom can round apart
-at the next coarser one), so it must reject that zoom only and never take
-the emitter's descending-loop `break`, which is safe today only because
-Mercator collapse under a growing tolerance is monotone.
+`simplify::simplify_closed` forces the source start p0 and runs its
+farthest-pair search from it, so two closed ways with the same vertex cycle
+and different starts can simplify to different (equally tolerance-valid)
+shapes. Canonicalizing the start (least vertex, pins mapped through the
+rotation) would remove that, but is unsafe today: p0 is not always pinned
+(block-local shared-node detection misses cross-block connections and
+two-ref ways when the PBF carries no injected pins), and the forced p0 is
+what keeps an unpinned junction there in place. Needs complete junction
+pins first; antimeridian unwrapping also depends on traversal start.
 
-Found while landing per-zoom line simplification.
+Found while settling the closed-line collapse policy.
 
 ---
 

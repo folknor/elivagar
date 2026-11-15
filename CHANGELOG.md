@@ -21,6 +21,15 @@
   now fails as invalid input when the record is selected. Lines and points
   that do not cross the antimeridian produce unchanged tiles.
 
+- A closed line that simplifies onto its farthest-pair chord is kept as a
+  closed out-and-back along that chord instead of being dropped. Whether
+  such a loop vanished used to depend on which vertex its source way
+  started at: started at an extremity it was dropped, started anywhere
+  else it shipped as the same out-and-back once rounded to tile
+  coordinates. Output changes at z7-z13 in boundaries, streets and pier
+  lines, all added geometry; the boundary-line oracle's advisory
+  palindrome count rises accordingly, its duplicate gate stays at 0.
+
 - Lines without pinned vertices are simplified at every zoom again. The
   zoom-to-zoom cascade they used ran Douglas-Peucker only at z13: its
   convergence skip took the largest deviation among removed points as proof
