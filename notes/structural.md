@@ -44,22 +44,6 @@ counter names.
 
 Reported by the pipeline hunt.
 
-## STR-043 - Input-reachable phase12 conditions that abort or drop silently
-
-- `Router::route` ignores `BlockType::Mixed` blocks outright, so nodes and
-  ways in a mixed-type block never reach the store, the way phase or the
-  sort, with no counter and no refusal. pbfhogg's writer emits single-type
-  blocks, but block type is input.
-- `process_planned_way_into` asserts that the coordinate count equals the
-  ref count on the injected-pins path; on the raw path a missing node ref
-  drops a coordinate, so an injected-pins PBF with an unresolved ref aborts
-  instead of being refused or counted.
-- `run_way_task` `expect`s a members bitmap on every way block of the
-  injected-members path. Whether the locations source's validation makes
-  that unreachable for every input was not established.
-
-Reported by the phase12 panic-sites implementer.
-
 ## STR-008 - Fix the dependency edges that point the wrong way
 
 - `emit` is `pub(crate) mod` with `pub(super)` items, but it is the
@@ -364,6 +348,23 @@ markers as `enum Phase { Phase12, Ocean, Sort, Assemble }` with start/end;
 a run-owned `Telemetry` handle (or reset at `run` entry).
 
 Reported by the storage, polygon-engine and pipeline hunts.
+
+## STR-045 - Shapefile record refusals exit 2, not as refused input
+
+The ocean shapefile reader refuses malformed records: points outside their
+record's declared bounds, points outside the normalized [-1, 2] world domain,
+and the earlier staged record checks. These refusals reach the pipeline as
+`io::Error` values without an OS error number. Under the typed-errors evidence
+rule, such an error is classed `Failed` and exits 2. A malformed shapefile is
+bad input, though, and the exit table's class for refused input is 65, which
+the node-store and PBF ordering refusals already use. Typing the reader's
+refusals, so they carry their class rather than a bare `io::Error`, would let
+them exit 65 like the other input refusals.
+
+Also noted at the same site: with in-world record bounds now enforced, the
+per-point [-1, 2] check in the reader is redundant, and was kept deliberately.
+
+Reported by the session that bounded line and point tile coordinates.
 
 ---
 

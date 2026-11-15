@@ -27,7 +27,7 @@ use super::super::emit::{
 };
 use super::super::stats::{FanoutStats, MissingRefStatsAtomic, record_fanout_from_payload_records};
 use super::extent::CoordinateExtent;
-use super::input::WayBlock;
+use super::input::{BlockKind, WayBlock, WayMembers, foreign_element_error};
 use super::plans::{
     MembersForBlock, PinSource, WayPlan, build_way_plans, estimate_way_plans_bytes,
     fill_mask_from_pin_bitmap,
@@ -76,10 +76,6 @@ impl WayCounters {
 /// Everything a way task reads, shared by reference across the pool.
 pub(super) struct WayDispatchConfig {
     pub(super) node_reader: Option<Arc<NodeStoreReader>>,
-    /// The relation plan's member-way set, or `None` when membership is
-    /// injected and every way block carries its own bitmap (the set is then
-    /// dropped at the first way block rather than held for the phase).
-    pub(super) needed_ways: Option<FxHashSet<i64>>,
     pub(super) boundary_way_meta: BoundaryWayMeta,
     pub(super) pin_source: PinSource,
     pub(super) locations_on_ways: bool,
@@ -329,14 +325,9 @@ fn run_way_task(
     // Summed across rayon workers, not a serial stage: read
     // phase12_plan_build_ns as thread-time.
     let plan_busy = wait_span(&BUSY.phase12_plan_build);
-    let members = match &cfg.needed_ways {
-        None => MembersForBlock::Bitmap(
-            way_block
-                .members
-                .as_deref()
-                .expect("way block without members bitmap on injected path"),
-        ),
-        Some(needed_ways) => MembersForBlock::Set(needed_ways),
+    let members = match &way_block.members {
+        WayMembers::Injected(members) => MembersForBlock::Bitmap(members.bitmap()),
+        WayMembers::Plan(needed_ways) => MembersForBlock::Set(needed_ways),
     };
     let (plans, marked, location_extent) = build_way_plans(
         &way_block.block,
@@ -366,8 +357,14 @@ fn run_way_task(
     acc.location_extent = location_extent;
     let mut plans = plans.into_iter();
     for element in way_block.block.elements() {
+        // The block was routed by its group labels, which name only each
+        // group's first element (see `routed_kind`). Plans and an injected
+        // bitmap index ways alone, so a foreign element cannot misalign
+        // them; it fails the run here before the block's result ships.
         let Element::Way(way) = element else {
-            continue;
+            cfg.counters
+                .record_failure(foreign_element_error(BlockKind::Ways));
+            return;
         };
         let Some(plan) = plans.next() else {
             continue;
@@ -592,6 +589,14 @@ pub(super) fn process_planned_way_into(
                 .node_locations()
                 .map(|loc| LatLonE7::new(loc.decimicro_lat(), loc.decimicro_lon()))
                 .collect();
+            // pbfhogg accepts a way with refs and no location arrays at all
+            // (block construction refuses only a partial or mismatched run).
+            // Its geometry is unresolvable, like the raw path's missing refs,
+            // and is counted the same way rather than dropped unseen.
+            if coords.is_empty() && !plan.node_refs.is_empty() {
+                ctx.missing_ref_stats
+                    .record_way_missing_nodes(plan.node_refs.len());
+            }
             (coords, plan.node_refs.clone())
         };
 
@@ -621,6 +626,16 @@ pub(super) fn process_planned_way_into(
     let mut preserve_vertex_mask: Vec<bool> = vec![false; coords_e7.len()];
     match ctx.pins {
         PinSource::Injected => {
+            // Not input-reachable, so a release assert rather than a
+            // refusal: injected pins require LocationsOnWays
+            // (`detect_injected_features`), so there is no node reader and
+            // the coordinates are the way's own location arrays. pbfhogg's
+            // block construction refuses a way whose non-empty location
+            // arrays disagree with its ref count, and a way with none
+            // returned above on empty coordinates. The pin bitmap was
+            // checked against the ref count at decode
+            // (`validate_way_pin_bitmaps`), so the mask fill below stays in
+            // bounds.
             assert_eq!(
                 coords_e7.len(),
                 plan.node_refs.len(),

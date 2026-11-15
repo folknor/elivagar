@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- A PBF block that pbfhogg labels mixed (for example one carrying a
+  changeset group beside its ways) used to be dropped whole, silently; its
+  nodes, ways or relations are now read. A block holding more than one
+  element kind, including a relation hidden in a way group, now refuses
+  the input (exit 65) instead of losing the elements its label did not
+  name. In locations-on-ways input, ways with node refs but no inline
+  coordinates are now counted in the missing node ref statistics.
+  Single-kind blocks, as pbfhogg's writer produces, give identical
+  archives.
+
 - A line or point copy lying wholly outside the world, such as the far
   copy of a way unwrapped across the antimeridian more than once, is no
   longer clamped onto the edge tile and encoded far outside it (up to

@@ -23,14 +23,15 @@ use crate::node_index::NodeStore;
 use crate::resources::{Resources, WayAdmission};
 use crate::sort::{SortWriter, SpillCoalescer};
 use crate::way_index::WayIndexWriter;
-use pbfhogg::{BlobFilter, BlockType, ElementReader, PrimitiveBlock};
+use pbfhogg::{BlobFilter, ElementReader, PrimitiveBlock};
+use rustc_hash::FxHashSet;
 
 use super::relations::process_relation_blocks;
 use super::stats::{FanoutStats, MissingRefStatsAtomic, Phase12Stats};
 use super::{PipelineError, RunPlan, SORT_CHUNKS_DIR};
 use crate::tiling::ZoomRange;
 use extent::CoordinateExtent;
-use input::{UnorderedBlockSource, WayBlock};
+use input::{BlockKind, InjectedMembers, UnorderedBlockSource, WayBlock, WayMembers};
 use nodes::{NodeOutcome, NodeWorkers};
 use plans::MemberSource;
 pub(super) use plans::PinSource;
@@ -133,6 +134,9 @@ struct Router<'a> {
     /// stays here and only takes the tallies.
     sort_writer: SortWriter,
     ways: Option<WayDispatch>,
+    /// The relation plan's member-way set once the way phase starts, when
+    /// membership comes from the plan rather than injected bitmaps.
+    plan_members: Option<Arc<FxHashSet<i64>>>,
     relation_plan_needed_ways: usize,
     relation_plan_superset_ways: usize,
     relations: RelationBuffer,
@@ -153,26 +157,36 @@ struct Routed {
 }
 
 impl Router<'_> {
+    /// Route one block by its kind (`input::routed_kind`, computed at decode
+    /// in locations mode). A block with no element elivagar reads is skipped.
     fn route(
         &mut self,
         block: PrimitiveBlock,
-        members: Option<Box<[u8]>>,
+        kind: Option<BlockKind>,
+        members: Option<InjectedMembers>,
     ) -> Result<(), PipelineError> {
-        // Classify block by reading first wire tag byte per group - no
-        // element decoding. Sorted PBFs have single-type blocks.
-        match block.block_type() {
-            BlockType::DenseNodes | BlockType::Nodes => self.route_nodes(block)?,
-            BlockType::Ways => {
+        match kind {
+            Some(BlockKind::Nodes) => self.route_nodes(block)?,
+            Some(BlockKind::Ways) => {
                 if self.ways.is_none() {
                     self.start_way_phase()?;
                 }
+                let members = match (self.ctx.member_source, members, &self.plan_members) {
+                    (MemberSource::Injected, Some(members), _) => WayMembers::Injected(members),
+                    (MemberSource::Plan, None, Some(set)) => WayMembers::Plan(Arc::clone(set)),
+                    _ => {
+                        return Err(PipelineError::internal(
+                            "way block membership does not match the run's member source",
+                        ));
+                    }
+                };
                 self.ways
                     .as_ref()
                     .expect("way dispatch started above")
                     .send(WayBlock { block, members });
             }
-            BlockType::Relations => self.relations.push(block),
-            BlockType::Empty | BlockType::Mixed => {}
+            Some(BlockKind::Relations) => self.relations.push(block),
+            None => {}
         }
         Ok(())
     }
@@ -255,11 +269,13 @@ impl Router<'_> {
             let _wait = wait_span(&WAIT.prepass_join);
             self.prepass.join()?
         };
-        let needed_ways = match self.ctx.member_source {
+        // Under injected membership the set is dropped here rather than held
+        // for the phase: every way block carries its own bitmap.
+        self.plan_members = match self.ctx.member_source {
             MemberSource::Plan => {
                 self.relation_plan_needed_ways = relation_plan.needed_ways.len();
                 self.relation_plan_superset_ways = relation_plan.superset_ways_count;
-                Some(relation_plan.needed_ways)
+                Some(Arc::new(relation_plan.needed_ways))
             }
             MemberSource::Injected => None,
         };
@@ -267,7 +283,6 @@ impl Router<'_> {
         let ctx = &self.ctx;
         let cfg = WayDispatchConfig {
             node_reader,
-            needed_ways,
             boundary_way_meta: relation_plan.boundary_way_meta,
             pin_source: ctx.pin_source,
             locations_on_ways: ctx.locations_on_ways,
@@ -302,6 +317,7 @@ impl Router<'_> {
             way_index,
             mut sort_writer,
             ways,
+            plan_members: _,
             relation_plan_needed_ways,
             relation_plan_superset_ways,
             relations,
@@ -462,6 +478,7 @@ pub(super) fn phase_read_and_process(
         way_index: Some(way_index),
         sort_writer,
         ways: None,
+        plan_members: None,
         relation_plan_needed_ways: 0,
         relation_plan_superset_ways: 0,
         relations: RelationBuffer {
@@ -483,8 +500,8 @@ pub(super) fn phase_read_and_process(
         )?;
         drop(reader);
         while let Some(item) = source.recv() {
-            let (block, members) = item?;
-            router.route(block, members)?;
+            let decoded = item?;
+            router.route(decoded.block, decoded.kind, decoded.members)?;
         }
         source.finish();
     } else {
@@ -494,7 +511,8 @@ pub(super) fn phase_read_and_process(
         for block_result in blocks {
             let block =
                 block_result.map_err(|e| PipelineError::failed("PBF read failed").with_cause(e))?;
-            router.route(block, None)?;
+            let kind = input::routed_kind(&block)?;
+            router.route(block, kind, None)?;
         }
     }
 

@@ -8,13 +8,114 @@ use pbfhogg::{BlockType, Element, PrimitiveBlock};
 
 use super::super::{PipelineError, RunPlan};
 
-/// A way block plus its optional injected per-blob membership bitmap.
+/// A way block plus the membership its plans resolve against.
 pub(super) struct WayBlock {
     pub(super) block: PrimitiveBlock,
-    pub(super) members: Option<Box<[u8]>>,
+    pub(super) members: WayMembers,
 }
 
-type DecodedBlock = Result<(PrimitiveBlock, Option<Box<[u8]>>), PipelineError>;
+/// One way block's membership source. Which variant a block gets is the
+/// run's choice (the header either declares WayMembers-v1 or not); the
+/// router builds it, so a way task never pairs a run mode with a block that
+/// lacks what that mode needs.
+pub(super) enum WayMembers {
+    /// The block's own injected bitmap, validated against its ways.
+    Injected(InjectedMembers),
+    /// The relation plan's member-way set, shared by every block.
+    Plan(std::sync::Arc<rustc_hash::FxHashSet<i64>>),
+}
+
+/// An injected way-members bitmap that has been checked against the block
+/// it came with: its encoded count equals the block's decoded way count and
+/// its length is that count rounded up to bytes. Only
+/// `validate_and_take_members` constructs one.
+pub(super) struct InjectedMembers(Box<[u8]>);
+
+impl InjectedMembers {
+    pub(super) fn bitmap(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// The element kind a block is routed as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BlockKind {
+    Nodes,
+    Ways,
+    Relations,
+}
+
+/// Classify a block for routing; `None` for a block holding no element
+/// elivagar reads (no groups, or only changeset or unknown groups).
+///
+/// pbfhogg's `block_type()` reads the first field tag of each group, so it
+/// is a label, not a kind test: a group that starts with a way can go on to
+/// hold relations, and `Mixed` also stands for dense plus plain node groups,
+/// a changeset group or an unknown field. The exact kind set is computed by
+/// pbfhogg at block construction but is not public. So:
+///
+/// - a node or way label is trusted here and enforced by its consumer, which
+///   walks every element anyway and refuses one of another kind (the node
+///   workers and `run_way_task`), at no extra cost;
+/// - a relation or `Mixed` label is walked here. Relation blocks are a small
+///   share of any extract, and their consumer cannot refuse foreign elements
+///   because the spilled relation re-read legitimately sees unindexed node
+///   and way blobs.
+///
+/// A block found to hold several kinds is refused input. This is
+/// conservative where a label hides the true kind - an empty dense-node
+/// group in front of ways labels the block as nodes, and the node worker
+/// then refuses the ways - rather than exact; exact acceptance needs the
+/// kind set from pbfhogg.
+pub(super) fn routed_kind(block: &PrimitiveBlock) -> Result<Option<BlockKind>, PipelineError> {
+    match block.block_type() {
+        BlockType::DenseNodes | BlockType::Nodes => return Ok(Some(BlockKind::Nodes)),
+        BlockType::Ways => return Ok(Some(BlockKind::Ways)),
+        BlockType::Empty => return Ok(None),
+        BlockType::Relations | BlockType::Mixed => {}
+    }
+    let mut kind = None;
+    for element in block.elements() {
+        let this = match element {
+            Element::Node(_) | Element::DenseNode(_) => BlockKind::Nodes,
+            Element::Way(_) => BlockKind::Ways,
+            Element::Relation(_) => BlockKind::Relations,
+            _ => continue,
+        };
+        match kind {
+            None => kind = Some(this),
+            Some(seen) if seen == this => {}
+            Some(seen) => return Err(mixed_kinds_error(seen, this)),
+        }
+    }
+    Ok(kind)
+}
+
+fn mixed_kinds_error(a: BlockKind, b: BlockKind) -> PipelineError {
+    PipelineError::input(format!(
+        "PBF block holds more than one element kind ({a:?} and {b:?}); elivagar reads \
+         one kind per block, as `pbfhogg sort` writes"
+    ))
+}
+
+/// The refusal a node worker or way task raises for an element of another
+/// kind in a block routed by its label.
+pub(super) fn foreign_element_error(routed: BlockKind) -> PipelineError {
+    PipelineError::input(format!(
+        "PBF block routed as {routed:?} by its group labels holds an element of another \
+         kind; elivagar reads one kind per block, as `pbfhogg sort` writes"
+    ))
+}
+
+/// A decoded block, its routing kind and, for a way block under injected
+/// membership, its validated bitmap.
+pub(super) struct Decoded {
+    pub(super) block: PrimitiveBlock,
+    pub(super) kind: Option<BlockKind>,
+    pub(super) members: Option<InjectedMembers>,
+}
+
+type DecodedBlock = Result<Decoded, PipelineError>;
 
 /// Injected-enrichment features declared by the PBF header.
 pub(super) struct InjectedFeatures {
@@ -53,7 +154,7 @@ pub(in crate::pipeline) fn resolve_locations_on_ways(
 fn validate_and_take_members(
     members: Option<(&[u8], u32)>,
     actual_way_count: usize,
-) -> Result<Box<[u8]>, PipelineError> {
+) -> Result<InjectedMembers, PipelineError> {
     let (bitmap, encoded_count) = members
         .ok_or_else(|| PipelineError::input("injected way-members bitmap missing or malformed"))?;
     let actual_way_count_u64 = u64::try_from(actual_way_count)
@@ -70,7 +171,7 @@ fn validate_and_take_members(
             bitmap.len()
         )));
     }
-    Ok(bitmap.into())
+    Ok(InjectedMembers(bitmap.into()))
 }
 
 fn validate_way_pin_bitmaps(block: &PrimitiveBlock) -> Result<(), PipelineError> {
@@ -319,7 +420,10 @@ fn decode_blob(blob: &pbfhogg::Blob, injected_members: bool, injected_pins: bool
     let block = blob
         .to_primitiveblock()
         .map_err(|e| PipelineError::failed("PBF decode failed").with_cause(e))?;
-    let members = if injected_members && block.block_type() == BlockType::Ways {
+    // The same classification routes the block, so the bitmap is validated
+    // for exactly the blocks the way tasks receive.
+    let kind = routed_kind(&block)?;
+    let members = if injected_members && kind == Some(BlockKind::Ways) {
         let actual_way_count = block
             .elements()
             .filter(|element| matches!(element, Element::Way(_)))
@@ -331,7 +435,11 @@ fn decode_blob(blob: &pbfhogg::Blob, injected_members: bool, injected_pins: bool
     if injected_pins {
         validate_way_pin_bitmaps(&block)?;
     }
-    Ok((block, members))
+    Ok(Decoded {
+        block,
+        kind,
+        members,
+    })
 }
 
 #[cfg(test)]
@@ -359,7 +467,7 @@ mod tests {
         assert_eq!(
             validate_and_take_members(Some((&[0x05], 3)), 3)
                 .expect("valid bitmap")
-                .as_ref(),
+                .bitmap(),
             &[0x05]
         );
     }

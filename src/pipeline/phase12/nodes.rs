@@ -19,6 +19,7 @@ use pbfhogg::{Element, PrimitiveBlock};
 
 use super::super::emit::{EmitCtx, FeatureGeometry, PointEmitScratch, RecordSink, emit_match};
 use super::extent::CoordinateExtent;
+use super::input::{BlockKind, foreign_element_error};
 
 const NODE_SINK_FLUSH_BYTES: usize = 8 * 1024 * 1024;
 const NODE_BLOCK_CHANNEL_CAP: usize = 16;
@@ -221,7 +222,9 @@ impl NodeWorker {
                         node.decimicro_lon(),
                         node.tags(),
                     ),
-                    _ => Ok(()),
+                    // The block was routed by its group labels, which name
+                    // only each group's first element (see `routed_kind`).
+                    _ => Err(foreign_element_error(BlockKind::Nodes)),
                 };
                 if let Err(err) = handled {
                     self.failure = Some(err);

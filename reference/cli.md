@@ -57,7 +57,7 @@ bytes remain findings in a completed report.
 | 3 | `--skip-to` resume refused: the resume records under `--tmp-dir` are absent or do not match this run |
 | 4 | the named ocean artifact cannot serve this run because of its own bytes or identity |
 | 64 | invalid invocation: a clap usage error, or a value or combination the library refuses before work (including environment knobs, and an artifact named for a tile contract or zoom window it cannot serve) |
-| 65 | input bytes read and rejected, e.g. an unsorted PBF without an opt-in, node IDs the node store refuses (negative, not increasing under `--force-sorted`, at or above 2^40 in the compact store, over the flat index safety cap), a node block after the first way block when the node store is in use, malformed injected data, or a header that refuses `--locations-on-ways` |
+| 65 | input bytes read and rejected, e.g. an unsorted PBF without an opt-in, node IDs the node store refuses (negative, not increasing under `--force-sorted`, at or above 2^40 in the compact store, over the flat index safety cap), a node block after the first way block when the node store is in use, a PBF block holding more than one element kind, malformed injected data, or a header that refuses `--locations-on-ways` |
 | 70 | an internal invariant failed, e.g. a polygon over the 500-ring cap reaching a clip rect too small to split, which the ring-cap partition proves cannot happen |
 | 74 | an I/O failure the OS reported |
 
@@ -291,6 +291,17 @@ large, sparse node IDs. Either store needs every node block before the first
 way block, because the store is finalized there; a later node block refuses
 the input (exit 65). Inline way coordinates (`--locations-on-ways`,
 including header detection) avoid the node store and this guard entirely.
+
+Every input reads one element kind per PBF block, as `pbfhogg sort` and
+pbfhogg's writer produce. A block holding nodes, ways or relations together
+refuses the input (exit 65), whether its groups say so or a group hides a
+second kind behind its first element; dense and plain node groups count as
+one kind. A block holding no node, way or relation (empty, or changeset and
+unknown groups only) is skipped. Detection is conservative where a group's
+first element mislabels it: an empty dense-node group in front of ways is
+refused rather than read as ways. A way that carries node refs but no
+inline coordinates in a locations-on-ways input is counted with the
+missing node refs, like an unresolved ref on the raw path.
 
 ### Memory budgets
 

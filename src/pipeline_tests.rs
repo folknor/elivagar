@@ -587,6 +587,202 @@ fn a_node_block_after_the_first_way_block_refuses_the_input() {
     assert_eq!(err.kind(), ErrorKind::InputRefused);
 }
 
+/// Byte range of the `index`-th frame (0 is the header frame): the start of
+/// its 4-byte header-length prefix, the BlobHeader range, and the blob end.
+fn frame_bounds(pbf: &[u8], index: usize) -> (usize, usize, usize, usize) {
+    let mut pos = 0usize;
+    for frame in 0.. {
+        let hdr_len = u32::from_be_bytes(pbf[pos..pos + 4].try_into().expect("header length"));
+        let hdr_start = pos + 4;
+        let hdr_end = hdr_start + hdr_len as usize;
+        let blob_end = hdr_end + blob_data_size(&pbf[hdr_start..hdr_end]);
+        if frame == index {
+            return (pos, hdr_start, hdr_end, blob_end);
+        }
+        pos = blob_end;
+    }
+    unreachable!("frame loop is unbounded")
+}
+
+/// The `PrimitiveBlock` bytes of an uncompressed data frame.
+fn primitive_block_bytes(pbf: &[u8], index: usize) -> Vec<u8> {
+    let (_, _, hdr_end, blob_end) = frame_bounds(pbf, index);
+    let blob = &pbf[hdr_end..blob_end];
+    let (_, start, end) = find_ld_field(blob, 1, 0);
+    blob[start..end].to_vec()
+}
+
+/// Replace the `PrimitiveBlock` of an uncompressed data frame, rebuilding
+/// the blob, the BlobHeader datasize and the frame's header-length prefix.
+fn replace_primitive_block(pbf: &mut Vec<u8>, index: usize, new_pb: &[u8]) {
+    let (hdr_len_pos, hdr_start, hdr_end, blob_end) = frame_bounds(pbf, index);
+    let header = pbf[hdr_start..hdr_end].to_vec();
+    let blob = pbf[hdr_end..blob_end].to_vec();
+    let (raw_entry, _, raw_val_end) = find_ld_field(&blob, 1, 0);
+    let mut new_blob = blob[..raw_entry].to_vec();
+    new_blob.push(0x0A);
+    append_varint(&mut new_blob, new_pb.len());
+    new_blob.extend_from_slice(new_pb);
+    new_blob.extend_from_slice(&blob[raw_val_end..]);
+    let new_header = rebuild_blobheader_datasize(&header, new_blob.len());
+    let mut frame = u32::try_from(new_header.len())
+        .expect("header length fits u32")
+        .to_be_bytes()
+        .to_vec();
+    frame.extend_from_slice(&new_header);
+    frame.extend_from_slice(&new_blob);
+    pbf.splice(hdr_len_pos..blob_end, frame);
+}
+
+fn ld_entry(field_tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut entry = vec![field_tag];
+    append_varint(&mut entry, value.len());
+    entry.extend_from_slice(value);
+    entry
+}
+
+/// How `block_kind_fixture` reshapes the way block.
+#[allow(clippy::enum_variant_names)]
+enum WayBlockShape {
+    /// Append a second group holding only an empty changeset, so pbfhogg
+    /// labels the block `Mixed` though it holds ways alone.
+    ChangesetGroup,
+    /// Append the relation block's group, so the block is labelled `Mixed`
+    /// and holds ways and a relation.
+    RelationGroup,
+    /// Append the relation into the way group itself, so the block is still
+    /// labelled `Ways` and hides a relation.
+    RelationInWayGroup,
+}
+
+/// A raw sorted PBF - node block, way block, relation block - whose way
+/// block is reshaped by `shape`. The relation is untagged with an empty
+/// role, so it reads only stringtable index 0 and stays valid when moved
+/// into the way block's stringtable.
+#[allow(clippy::unwrap_in_result)]
+fn block_kind_fixture(shape: &WayBlockShape) -> Result<Phase12Stats, PipelineError> {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let pbf_path = dir.path().join("block-kinds.osm.pbf");
+    let file = File::create(&pbf_path).expect("create pbf");
+    let mut writer = PbfWriter::new(file, PbfCompression::None);
+    let header = block_builder::HeaderBuilder::new()
+        .build()
+        .expect("build header");
+    writer.write_header(&header).expect("write header");
+    let mut nodes = block_builder::BlockBuilder::new();
+    nodes.add_node(1, 550_000_000, 100_000_000, [], None);
+    nodes.add_node(2, 550_000_100, 100_000_100, [], None);
+    writer
+        .write_primitive_block(nodes.take().expect("take block").expect("node block"))
+        .expect("write block");
+    let mut ways = block_builder::BlockBuilder::new();
+    ways.add_way(10, [("highway", "residential")], &[1, 2], None);
+    writer
+        .write_primitive_block(ways.take().expect("take block").expect("way block"))
+        .expect("write block");
+    let mut rels = block_builder::BlockBuilder::new();
+    rels.add_relation(
+        100,
+        [],
+        &[block_builder::MemberData {
+            id: pbfhogg::MemberId::Way(10),
+            role: "",
+        }],
+        None,
+    );
+    writer
+        .write_primitive_block(rels.take().expect("take block").expect("relation block"))
+        .expect("write block");
+    writer.flush().expect("flush pbf");
+
+    let mut pbf = std::fs::read(&pbf_path).expect("read pbf");
+    let way_pb = primitive_block_bytes(&pbf, 2);
+    let rel_pb = primitive_block_bytes(&pbf, 3);
+    let (_, rel_grp_start, rel_grp_end) = find_ld_field(&rel_pb, 2, 0);
+    let rel_group = &rel_pb[rel_grp_start..rel_grp_end];
+    let new_pb = match shape {
+        WayBlockShape::ChangesetGroup => {
+            let mut pb = way_pb.clone();
+            pb.extend_from_slice(&ld_entry(0x12, &ld_entry(0x2A, &[])));
+            pb
+        }
+        WayBlockShape::RelationGroup => {
+            let mut pb = way_pb.clone();
+            pb.extend_from_slice(&ld_entry(0x12, rel_group));
+            pb
+        }
+        WayBlockShape::RelationInWayGroup => {
+            let (grp_entry, grp_start, grp_end) = find_ld_field(&way_pb, 2, 0);
+            let mut group = way_pb[grp_start..grp_end].to_vec();
+            group.extend_from_slice(rel_group);
+            let mut pb = way_pb[..grp_entry].to_vec();
+            pb.extend_from_slice(&ld_entry(0x12, &group));
+            pb.extend_from_slice(&way_pb[grp_end..]);
+            pb
+        }
+    };
+    replace_primitive_block(&mut pbf, 2, &new_pb);
+    std::fs::write(&pbf_path, &pbf).expect("rewrite pbf");
+
+    let config = TilegenConfig {
+        pbf_path,
+        output_path: dir.path().join("unused.pmtiles"),
+        tmp_dir: dir.path().join("tmp"),
+        min_zoom: 0,
+        max_zoom: 14,
+        ocean: None,
+        skip_to: None,
+        in_memory: true,
+        compression_level: 6,
+        force_sorted: true,
+        allow_unsafe_flat_index: false,
+        threads: std::num::NonZeroUsize::MIN,
+        way_inflight_budget: None,
+        assemble_batch_budget: None,
+        dedup_cap: None,
+        sort_chunk_size: None,
+        locations_on_ways: false,
+        tile_format: TilePayloadFormat::Mvt,
+        tile_compression: TileCompression::Gzip,
+        compress_sort_chunks: sort::ChunkCompression::None,
+        fanout_caps: crate::FanoutCaps::default(),
+        polygon_simplify_factor: crate::SimplifyFactor::default(),
+    };
+    phase_read_and_process(
+        &RunPlan::resolve(&config).expect("resolve plan"),
+        &test_resources(&config),
+    )
+    .map(|(_, _, stats)| stats)
+}
+
+#[test]
+fn a_mixed_labelled_block_of_one_kind_is_routed_by_its_elements() {
+    // pbfhogg labels a block with a changeset group Mixed; its ways used to
+    // be dropped without a trace.
+    let stats = block_kind_fixture(&WayBlockShape::ChangesetGroup)
+        .expect("a ways-only block labelled Mixed is read");
+    assert_eq!(stats.way_count, 1);
+    assert_eq!(stats.rel_count, 1);
+}
+
+#[test]
+fn a_block_of_several_kinds_refuses_the_input() {
+    let err = block_kind_fixture(&WayBlockShape::RelationGroup)
+        .map(|_| ())
+        .expect_err("ways and a relation in one block must fail the run");
+    assert_eq!(err.kind(), ErrorKind::InputRefused);
+}
+
+#[test]
+fn a_relation_hidden_behind_a_way_label_refuses_the_input() {
+    // The group's first element names the label, so the block reads as
+    // ways; the way task meets the relation and refuses.
+    let err = block_kind_fixture(&WayBlockShape::RelationInWayGroup)
+        .map(|_| ())
+        .expect_err("a relation in a way group must fail the run");
+    assert_eq!(err.kind(), ErrorKind::InputRefused);
+}
+
 #[test]
 fn injected_members_end_to_end_marks_ways_with_block_local_pins() {
     let stats = injected_fixture(Some(&way_members_payload(3, &[0x04])))
