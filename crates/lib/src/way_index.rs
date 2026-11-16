@@ -507,6 +507,24 @@ impl WayIndexWriter {
         // SAFETY: file is written and flushed above, no other process modifies it.
         let data_mmap = Some(unsafe { Mmap::map(&data_file)? });
 
+        // Warm both maps before the relation tail reads them. The tail looks
+        // ways up in relation order, which the append order of way_data.bin
+        // does not follow, so a cold index costs one synchronous small read
+        // per page touched; the main pass's own sort-chunk writes can evict
+        // the index while it is still being appended. At planet on bygg
+        // (2026-11-16) that was 1.4M major faults across the tail. One
+        // sequential populate per map reads it back at readahead size.
+        let start = std::time::Instant::now();
+        let mut fell_back = 0;
+        for map in [&offsets_mmap, &data_mmap].into_iter().flatten() {
+            fell_back += populate(map)?;
+        }
+        crate::debug::emit_counter_u64(
+            "way_index_populate_ns",
+            u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        );
+        crate::debug::emit_counter_usize("way_index_populate_willneed", fell_back);
+
         let data_bytes = data_mmap.as_ref().map_or(0, |m| m.len());
         let index_bytes = entry_count * OFFSET_ENTRY_SIZE;
         crate::debug::emit_counter_u64("way_index_ways", self.way_count);
@@ -526,6 +544,24 @@ impl WayIndexWriter {
             way_count: self.way_count,
         })
     }
+}
+
+/// Prefault a read-only file map with `MADV_POPULATE_READ`. A kernel that
+/// does not know the advice (before Linux 5.14: `EINVAL`) gets the weaker
+/// `WILLNEED` prefetch request instead, and the return value counts that
+/// fallback (1) so the run records which warmup it got. Any other failure
+/// is an I/O error on the index itself and is returned.
+fn populate(map: &Mmap) -> io::Result<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        match map.advise(memmap2::Advice::PopulateRead) {
+            Ok(()) => return Ok(0),
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    map.advise(memmap2::Advice::WillNeed)?;
+    Ok(1)
 }
 
 impl WayIndexReader {
