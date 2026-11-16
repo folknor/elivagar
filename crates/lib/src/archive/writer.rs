@@ -1228,14 +1228,22 @@ fn directory_entry_count(count: u64) -> io::Result<usize> {
 /// interface, so memory and file stores use identical layout decisions.
 #[hotpath::measure]
 fn layout_directories(store: &mut dyn DirSpill) -> io::Result<(Vec<u8>, Vec<u8>, u64)> {
-    const MAX_ROOT_ENTRIES: usize = 16384;
     const LEAF_SIZE: usize = 4096;
+    layout_directories_from(store, LEAF_SIZE)
+}
+
+/// [`layout_directories`] starting from `leaf_size`; tests start small to
+/// reach the leaf-size retry without millions of entries.
+fn layout_directories_from(
+    store: &mut dyn DirSpill,
+    mut leaf_size: usize,
+) -> io::Result<(Vec<u8>, Vec<u8>, u64)> {
+    const MAX_ROOT_ENTRIES: usize = 16384;
 
     store.flush()?;
     let entry_count = store.entry_count();
     let count = directory_entry_count(entry_count)?;
     let mut root_only = count <= MAX_ROOT_ENTRIES;
-    let mut leaf_size = LEAF_SIZE;
 
     loop {
         if root_only {
@@ -1259,40 +1267,59 @@ fn layout_directories(store: &mut dyn DirSpill) -> io::Result<(Vec<u8>, Vec<u8>,
     }
 }
 
+/// Leaves read from the spill store per parallel encode batch: enough to
+/// keep every core busy, bounded so a planet directory (tens of millions of
+/// entries) is never materialized at once.
+const LEAF_BATCH: usize = 256;
+
 /// Build leaf directories from the current spill store in `leaf_size` chunks.
 /// Returns (root_compressed, all_leaves_compressed).
+///
+/// Leaves are independent, so each batch is encoded and gzipped in parallel
+/// and appended in leaf order: the bytes, the leaf offsets and the root are
+/// exactly what a serial pass writes. At planet the serial pass held the
+/// archive close for several seconds on one core.
 #[hotpath::measure]
 fn build_leaf_directories(
     store: &mut dyn DirSpill,
     count: usize,
     leaf_size: usize,
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    use rayon::prelude::*;
+
     store.begin_read()?;
     let mut leaf_blob: Vec<u8> = Vec::new();
     let mut root_entries: Vec<WireEntry> = Vec::new();
     let mut remaining = count;
+    let mut batch: Vec<Vec<WireEntry>> = Vec::with_capacity(LEAF_BATCH);
 
     while remaining > 0 {
-        let chunk_size = remaining.min(leaf_size);
-        let chunk = store.read_chunk(chunk_size)?;
-        remaining -= chunk_size;
-        let first_tile_id = chunk[0].tile_id;
+        batch.clear();
+        while remaining > 0 && batch.len() < LEAF_BATCH {
+            let chunk_size = remaining.min(leaf_size);
+            batch.push(store.read_chunk(chunk_size)?);
+            remaining -= chunk_size;
+        }
+        let compressed: Vec<io::Result<Vec<u8>>> = batch
+            .par_iter()
+            .map(|chunk| gzip_compress(&encode_directory(chunk)?))
+            .collect();
 
-        let leaf_raw = encode_directory(&chunk)?;
-        let compressed = gzip_compress(&leaf_raw)?;
+        for (chunk, compressed) in batch.iter().zip(compressed) {
+            let compressed = compressed?;
+            #[allow(clippy::cast_possible_truncation)]
+            let leaf_len = compressed.len() as u32;
+            let leaf_offset = leaf_blob.len() as u64;
+            leaf_blob.extend_from_slice(&compressed);
 
-        #[allow(clippy::cast_possible_truncation)]
-        let leaf_len = compressed.len() as u32;
-        let leaf_offset = leaf_blob.len() as u64;
-        leaf_blob.extend_from_slice(&compressed);
-
-        // run_length=0 marks a leaf directory pointer
-        root_entries.push(WireEntry {
-            tile_id: first_tile_id,
-            offset: leaf_offset,
-            length: leaf_len,
-            run_length: 0,
-        });
+            // run_length=0 marks a leaf directory pointer
+            root_entries.push(WireEntry {
+                tile_id: chunk[0].tile_id,
+                offset: leaf_offset,
+                length: leaf_len,
+                run_length: 0,
+            });
+        }
     }
 
     let root_raw = encode_directory(&root_entries)?;

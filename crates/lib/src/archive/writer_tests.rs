@@ -1702,3 +1702,100 @@ fn oversized_root_demotes_to_leaf_directories() {
         "root ({root_dir_length} B) must fit the spec's first 16,384 bytes"
     );
 }
+
+/// Entries that resist compression: irregular tile-id gaps, offsets and
+/// lengths from a deterministic LCG.
+fn irregular_entries(count: usize) -> Vec<WireEntry> {
+    let mut rng: u64 = 0x1319_8A2E_0370_7344;
+    let mut step = || {
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        rng >> 33
+    };
+    let mut tile_id = 0_u64;
+    let mut offset = 0_u64;
+    (0..count)
+        .map(|_| {
+            tile_id += 1 + step() % 1000;
+            let length = u32::try_from(9 + step() % 4000).expect("fits u32");
+            let entry = WireEntry {
+                tile_id,
+                offset,
+                length,
+                run_length: u32::try_from(1 + step() % 3).expect("fits u32"),
+            };
+            offset += u64::from(length);
+            entry
+        })
+        .collect()
+}
+
+/// The serial leaf builder the parallel one replaced, kept as the oracle.
+fn serial_leaf_directories(entries: &[WireEntry], leaf_size: usize) -> (Vec<u8>, Vec<u8>) {
+    let mut leaf_blob = Vec::new();
+    let mut root_entries = Vec::new();
+    for chunk in entries.chunks(leaf_size) {
+        let compressed = gzip_compress(&encode_directory(chunk).unwrap()).unwrap();
+        root_entries.push(WireEntry {
+            tile_id: chunk[0].tile_id,
+            offset: leaf_blob.len() as u64,
+            length: u32::try_from(compressed.len()).unwrap(),
+            run_length: 0,
+        });
+        leaf_blob.extend_from_slice(&compressed);
+    }
+    let root = gzip_compress(&encode_directory(&root_entries).unwrap()).unwrap();
+    (root, leaf_blob)
+}
+
+fn memory_store(entries: &[WireEntry]) -> MemoryDirSpill {
+    let mut store = MemoryDirSpill::new();
+    for entry in entries {
+        store.append(*entry).unwrap();
+    }
+    store.flush().unwrap();
+    store
+}
+
+#[test]
+fn parallel_leaf_directories_match_the_serial_build() {
+    // More than one LEAF_BATCH of leaves, with a short last leaf, so batch
+    // boundaries and the final partial batch are both exercised.
+    let leaf_size = 64;
+    let count = leaf_size * (LEAF_BATCH * 2 + 3) + 17;
+    let entries = irregular_entries(count);
+    let mut store = memory_store(&entries);
+    let parallel = build_leaf_directories(&mut store, count, leaf_size).unwrap();
+    assert_eq!(parallel, serial_leaf_directories(&entries, leaf_size));
+}
+
+#[test]
+fn layout_retry_matches_the_serial_build_at_the_fitting_leaf_size() {
+    // 16,000 irregular entries overflow a root-only directory (see
+    // oversized_root_demotes_to_leaf_directories); starting the leaf fanout
+    // at 1 gives the first leaf root one entry per tile, which overflows the
+    // same way, so the layout must double the leaf size at least once and
+    // still equal the serial build at the size it settled on.
+    const START: usize = 1;
+    let count = 16_000;
+    let entries = irregular_entries(count);
+    let mut store = memory_store(&entries);
+    let (root, leaves, num_entries) = layout_directories_from(&mut store, START).unwrap();
+    assert_eq!(num_entries, count as u64);
+    let mut leaf_size = START;
+    let (mut expected_root, mut expected_leaves) = serial_leaf_directories(&entries, leaf_size);
+    while expected_root.len() > MAX_ROOT_BYTES {
+        leaf_size *= 2;
+        (expected_root, expected_leaves) = serial_leaf_directories(&entries, leaf_size);
+    }
+    assert!(
+        leaf_size > START,
+        "the fixture must force at least one retry"
+    );
+    assert!(
+        !leaves.is_empty(),
+        "the fixture must settle on leaf directories"
+    );
+    assert_eq!((root, leaves), (expected_root, expected_leaves));
+}

@@ -1117,3 +1117,39 @@ the same spelling: `brokkr tilegen --bench 1 --dataset germany --variant
 locations`, then sidecar `--stalls` and the split counters. Check the
 results row's memory field first - the 07-26 rows carry ~10 GB against
 the baseline's 21.4 GB, which is the tell.
+
+## Planet phase12 way-index faults (2026-11-16, bygg, script bench)
+
+bygg: 24 threads, 28 GB RAM, one NVMe; kernel 7.2.14 (7.1.4 in August).
+Planet locations, `brokkr bench --iterations 1 tilegen --dataset planet
+--variant locations`, the bench store's first planet rows.
+
+| run | commit | wall | phase12 | p12 cores | p12 majflt |
+|---|---|---|---|---|---|
+| `b23cccaf` | `ad5b716` | 11:43 | 467 s | 18.8 | 1.56M |
+| `938a987b` | `ad5b716` | 11:42 | 469 s | 18.7 | 1.57M |
+| `0e9eb87b` | `5e9cd05` (August) | failed at ocean | 436 s | 18.6 | 1.41M |
+| `c437bee3` | `273ce43` frame replay | 11:10 | 437 s | 20.0 | 1.40M |
+| `0d9cea4e` | `23a8683` index populate | 10:03 | 371 s | 23.9 | 116K |
+
+The August typed run `4994452d` (`5e9cd05`) read 358 s, 22.5 cores, 59K
+major faults. The same commit rebuilt on 2026-11-16 faulted 1.41M times
+(its run fails at ocean on today's artifact key, after phase12), so most
+of the November phase12 loss was the host, not the code. Every fault fell
+in the relation tail, about 4.5 KB per fault, while the tail read the
+6.2 GB `way_data.bin` plus 0.6 GB sorted offsets back in relation order:
+the main pass's sort-chunk writes evict the freshly appended way index
+before the tail reads it. Two fixes, both host-independent:
+
+- `273ce43`: the cap-tripped relation buffer (1.9 GB decompressed at
+  planet against the 1 GB cap) no longer re-reads the input through
+  `BlobFilter::only_relations`, about 85 GB on this file; the tail
+  replays the recorded relation frames, 855 MB in one run
+  (`relation_replay_bytes`). Phase12 disk read 291 -> 193 GB. It did not
+  touch the faults: the re-read was not what evicted the index.
+- `23a8683`: `MADV_POPULATE_READ` on both way-index maps at
+  `finish_writing`, 2.43 s (`way_index_populate_ns`). Faults 1.40M ->
+  116K, phase12 back to 24 busy cores.
+
+The residual 116K faults are later reclaim: the tail itself writes about
+26 GB of sort output while it runs.
