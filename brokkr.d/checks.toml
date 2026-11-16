@@ -14,7 +14,7 @@
 # gate tool (so a plain build yields one executable); a sweep must not.
 [[check]]
 name = "default"
-packages = ["elivagar", "elivagar-cli", "elivagar-corpus", "elivagar-devkit", "elivagar-datasets"]
+packages = ["elivagar", "elivagar-cli", "elivagar-corpus", "elivagar-devkit", "elivagar-datasets", "elivagar-tools"]
 parallel = {}
 
 # The mlt feature: the encoder, its mlt-core round-trip tests and the

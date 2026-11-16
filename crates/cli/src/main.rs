@@ -19,6 +19,8 @@
 #[global_allocator]
 static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
+mod signals;
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -400,6 +402,8 @@ fn main() {
         // SAFETY: called before any threads are spawned.
         unsafe { std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "true") };
     }
+    // Before any thread exists, so every thread inherits the blocked mask.
+    signals::install();
 
     let cli = Cli::try_parse().unwrap_or_else(|error| {
         // Help and version go to stdout and exit 0; a usage error joins the
@@ -553,16 +557,21 @@ fn run(args: RunArgs) {
             .unwrap_or_else(|e| usage(e)),
     };
 
-    let _guard = hotpath::HotpathGuardBuilder::new("elivagar::main")
-        .percentiles(&[50.0, 95.0, 99.0])
-        .functions_limit(0)
-        .build();
+    // Held by the signal policy, so a SIGTERM or SIGINT mid-run (brokkr's
+    // `stop_at`) still writes the report before exiting 128 + signo.
+    signals::hold_profile(
+        hotpath::HotpathGuardBuilder::new("elivagar::main")
+            .percentiles(&[50.0, 95.0, 99.0])
+            .functions_limit(0)
+            .build(),
+    );
 
     if let Err(e) = elivagar::run(&config) {
         // The hotpath guard's report is skipped on failure, as it always was:
         // process::exit runs no destructors.
         pipeline_failure(&e);
     }
+    signals::finish_profile();
 }
 
 #[cfg(test)]

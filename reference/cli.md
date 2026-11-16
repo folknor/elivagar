@@ -434,9 +434,9 @@ it replaces.
 
 Header, tile statistics, section layout, provenance, and metadata (layer list
 with zoom ranges) for a PMTiles archive. In-session spelling: `brokkr run
-elivagar -- inspect <FILE>`. (The older `brokkr pmtiles-inspect` wrapper,
-named to avoid colliding with pbfhogg's `brokkr inspect`, is slated for
-deletion.)
+elivagar -- inspect <FILE>`; `brokkr run elivagar-devkit -- archive
+[--dataset D] [--variant V] [--commit H]` prints the stored archive path to
+hand it. The same pairing serves `diag`, `svg` and `verify`.
 
 The `MVT validation` line reports whether the archive's declared tile type and
 compression are supported by the MVT validation and archive-view workflows.
@@ -561,8 +561,13 @@ subcommands. They are the separate `elivagar-corpus` binary in
 in-process: the canonical semantic tile hash, the digest fold, the contract
 gating policy, the canonical SVG render core, the calibration instruments,
 and every baseline verdict. The spelling is `brokkr run elivagar-corpus --
-check|bless|render|render-manifest|rings|mutate|regress|compare-tiles ...`.
-(From the 2026-07-24 corpus redesign until the workspace split this layer
+check|bless|render|render-manifest|rings|mutate|regress|stats|compare-tiles ...`.
+`stats` prints per-zoom tile counts, distinct payloads and payload sizes
+(exit 0, or 4 if unreadable). `--file` conflicts with `--commit` and
+`--variant`; `regress --json` keeps stdout pure JSON. `bless` writes digest,
+contract and leaves atomically through a roll-forward journal,
+`<corpus>/.bless-journal`: while one exists `check` and `render-manifest`
+refuse with exit 3 and the next `bless` replays it. (From the 2026-07-24 corpus redesign until the workspace split this layer
 was native brokkr code, spelled `brokkr pmtiles-corpus ...`, `brokkr regress`
 and `brokkr compare-tiles`; the port keeps the flags and exit codes.)
 `reference/corpus.md` remains the methodology. The baseline state is
@@ -575,6 +580,17 @@ driver, `elivagar-devkit` in `crates/devkit`, which reads brokkr.toml and its
 `brokkr.d/` includes and owns the durable archive store
 `data/tilegen/<dataset>-<variant>-<commit>.pmtiles`:
 `brokkr run --with elivagar elivagar-devkit -- [--dry-run] tilegen|ocean-build ...`.
+tilegen names the archive from the commit recorded in the archive's
+provenance, so a `--with-commit` build lands under its own commit; the dry
+run shows that slot as COMMIT. `archive [--dataset D] [--variant V]
+[--commit H | --file P]` prints a resolved archive path, and `clean
+[--archives [--keep N]]` removes `data/tilegen_tmp`, `data/corpus-calibrands`
+and corpus-sort spill dirs whose owner pid is gone, optionally pruning the
+store (global `--dry-run` lists only).
+
+SIGTERM and SIGINT make `elivagar` write its hotpath or alloc report on a
+signal thread and exit `128 + signo`, so a run stopped early still yields
+its report.
 
 What elivagar exposes instead is a library surface: the pmtiles reader
 (`archive::Archive`, including run-level raw payload access over validated

@@ -11,9 +11,29 @@
 //!
 //! Run:  cargo run --release --features hotpath --example bench_node_store -- [--nodes N] [--runs R]
 //! Or:   brokkr bench node-store [--nodes N] [--runs N]
+//!
+//! Besides the human prose, the result figures go to stderr as a stable
+//! machine vocabulary, one `key=value` per line, every value an integer,
+//! printed once at the end. These keys are a contract with the brokkr
+//! bench script (benches/bench-node-store/node-store.lua); rename or drop
+//! one only together with that script and its version. Hit counts are
+//! deliberately not in it: they are answers about the store, not
+//! measurements.
+//!
+//! Always:
+//! - `nodes` - nodes put into the store per build
+//! - `build_best_us` - best-of build wall, microseconds (one build unless
+//!   `--build-only`, which repeats it `--runs` times)
+//! - `convert_us` - the last build's conversion to a reader, microseconds
+//!
+//! Without `--build-only`, also:
+//! - `way_lookups` - lookups per way-like loop
+//! - `way_lookup_best_us` - best-of way-like loop wall, microseconds
+//! - `random_lookups` - lookups per random loop
+//! - `random_lookup_best_us` - best-of random loop wall, microseconds
 
 use std::hint::black_box;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use elivagar::node_index::SortedNodeStore;
 
@@ -33,26 +53,43 @@ fn main() {
     eprintln!();
 
     let (node_ids, coords) = generate_and_print_nodes(config.nodes);
-    let (build_ms, reader) = build_store(&node_ids, &coords, &config);
+    let (build_best, convert, reader) = build_store(&node_ids, &coords, &config);
+    let build_ms = build_best.as_millis();
 
     if config.build_only {
         print_build_only_summary(&config, build_ms, node_ids.len());
+        print_build_keys(node_ids.len(), build_best, convert);
         return;
     }
 
     let (way_lookups, total_way_lookups, random_lookups) = generate_lookups(&node_ids, &config);
-    let best_way_ms = bench_way_lookups(&reader, &way_lookups, total_way_lookups, config.runs);
-    let best_rand_ms = bench_random_lookups(&reader, &random_lookups, config.runs);
+    let best_way = bench_way_lookups(&reader, &way_lookups, total_way_lookups, config.runs);
+    let best_rand = bench_random_lookups(&reader, &random_lookups, config.runs);
 
     print_summary(
         &config,
         build_ms,
         node_ids.len(),
-        best_way_ms,
+        best_way.as_millis(),
         total_way_lookups,
-        best_rand_ms,
+        best_rand.as_millis(),
         random_lookups.len(),
     );
+
+    // Machine vocabulary; see the module header.
+    print_build_keys(node_ids.len(), build_best, convert);
+    eprintln!("way_lookups={total_way_lookups}");
+    eprintln!("way_lookup_best_us={}", best_way.as_micros());
+    eprintln!("random_lookups={}", random_lookups.len());
+    eprintln!("random_lookup_best_us={}", best_rand.as_micros());
+}
+
+/// The always-present keys of the machine vocabulary (module header).
+fn print_build_keys(nodes: usize, build_best: Duration, convert: Duration) {
+    eprintln!();
+    eprintln!("nodes={nodes}");
+    eprintln!("build_best_us={}", build_best.as_micros());
+    eprintln!("convert_us={}", convert.as_micros());
 }
 
 fn generate_and_print_nodes(count: usize) -> (Vec<i64>, Vec<(i32, i32)>) {
@@ -73,9 +110,14 @@ fn build_store(
     node_ids: &[i64],
     coords: &[(i32, i32)],
     config: &BenchConfig,
-) -> (u128, elivagar::node_index::SortedNodeStoreReader) {
+) -> (
+    Duration,
+    Duration,
+    elivagar::node_index::SortedNodeStoreReader,
+) {
     let build_runs = if config.build_only { config.runs } else { 1 };
-    let mut best_build_ms = u128::MAX;
+    let mut best_build = Duration::MAX;
+    let mut convert = Duration::ZERO;
     let mut reader = None;
     for run in 0..build_runs {
         eprint!(
@@ -89,19 +131,20 @@ fn build_store(
                 .put(node_ids[i], coords[i].0, coords[i].1)
                 .expect("benchmark node IDs are strictly increasing");
         }
-        let ms = build_start.elapsed().as_millis();
-        eprintln!("done in {ms} ms");
-        if ms < best_build_ms {
-            best_build_ms = ms;
+        let elapsed = build_start.elapsed();
+        eprintln!("done in {} ms", elapsed.as_millis());
+        if elapsed < best_build {
+            best_build = elapsed;
         }
         if run == build_runs - 1 {
             eprint!("  Converting to reader... ");
             let convert_start = Instant::now();
             reader = Some(store.into_reader());
-            eprintln!("done in {} ms", convert_start.elapsed().as_millis());
+            convert = convert_start.elapsed();
+            eprintln!("done in {} ms", convert.as_millis());
         }
     }
-    (best_build_ms, reader.expect("reader must be built"))
+    (best_build, convert, reader.expect("reader must be built"))
 }
 
 fn print_build_only_summary(config: &BenchConfig, build_ms: u128, num_nodes: usize) {
@@ -151,8 +194,8 @@ fn bench_way_lookups(
     way_lookups: &[Vec<i64>],
     total_way_lookups: usize,
     runs: usize,
-) -> u128 {
-    let mut best_ms = u128::MAX;
+) -> Duration {
+    let mut best = Duration::MAX;
     for run in 0..runs {
         let start = Instant::now();
         let mut found = 0u64;
@@ -163,23 +206,23 @@ fn bench_way_lookups(
                 }
             }
         }
-        let ms = start.elapsed().as_millis();
+        let elapsed = start.elapsed();
         if run == 0 {
             eprintln!("  Way-like:  {found}/{total_way_lookups} hits");
         }
-        if ms < best_ms {
-            best_ms = ms;
+        if elapsed < best {
+            best = elapsed;
         }
     }
-    best_ms
+    best
 }
 
 fn bench_random_lookups(
     reader: &elivagar::node_index::SortedNodeStoreReader,
     random_lookups: &[i64],
     runs: usize,
-) -> u128 {
-    let mut best_ms = u128::MAX;
+) -> Duration {
+    let mut best = Duration::MAX;
     for run in 0..runs {
         let start = Instant::now();
         let mut found = 0u64;
@@ -188,15 +231,15 @@ fn bench_random_lookups(
                 found += 1;
             }
         }
-        let ms = start.elapsed().as_millis();
+        let elapsed = start.elapsed();
         if run == 0 {
             eprintln!("  Random:    {found}/{} hits", random_lookups.len());
         }
-        if ms < best_ms {
-            best_ms = ms;
+        if elapsed < best {
+            best = elapsed;
         }
     }
-    best_ms
+    best
 }
 
 fn print_summary(

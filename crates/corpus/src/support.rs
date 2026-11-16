@@ -23,7 +23,7 @@ pub(crate) fn self_peak_rss_kb() -> Option<u64> {
     Some(kb).filter(|kb| *kb > 0)
 }
 
-/// Unit-test scratch directories under the crate's gitignored target dir,
+/// Unit-test scratch directories under the workspace's gitignored target dir,
 /// never `/tmp`. Each name must be unique per module: the directory is
 /// cleared before it is handed back.
 #[cfg(test)]
@@ -44,8 +44,10 @@ pub(crate) mod test_scratch {
             "scratch name {name:?} is used twice in module {module:?}; the \
              allocator clears the path, so two tests sharing it race"
         );
+        // The workspace target dir (this crate sits at crates/corpus), so no
+        // stray crates/corpus/target/ appears.
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp")
+            .join("../../target/test-tmp/elivagar-corpus")
             .join(module)
             .join(name);
         if dir.exists() {

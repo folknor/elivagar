@@ -21,8 +21,8 @@ const DEFAULT_SCRATCH: &str = "data/scratch";
 const DEFAULT_OUTPUT: &str = "data/tilegen";
 /// brokkr's per-project state directory, holding the corpus sort spill.
 const PROJECT_STATE_DIR: &str = ".brokkr";
-/// Where `mutate` puts a calibrand by default, under the data dir. `brokkr
-/// clean` clears it.
+/// Where `mutate` puts a calibrand by default, under the data dir.
+/// `elivagar-devkit clean` clears it.
 const CORPUS_CALIBRAND_DIR: &str = "corpus-calibrands";
 /// The `--tmp-dir` tilegen passes elivagar, under the data dir.
 const TILEGEN_TMP_DIR: &str = "tilegen_tmp";

@@ -103,7 +103,11 @@ A rotation is one commit, and the commit IS the bless:
    SVGs in the same command. Without `--rotate`, bless refuses to
    replace an existing baseline. Bless refuses dirty builds (provenance
    `Build` dirty flags), non-locations archives, and non-MVT-gzip
-   archives at the door.
+   archives at the door. The digest, contract and leaves are committed
+   together through a roll-forward journal, `<corpus>/.bless-journal`:
+   a bless interrupted mid-write leaves the journal behind, `check` and
+   `render-manifest` refuse with exit 3 while it exists, and the next
+   `bless` replays it to completion before doing anything else.
 4. Commit the resulting `corpus/` diff with the landing. The reviewable
    git diff - contract changes by path, leaf hash changes by tile, SVG
    changes by pixel-relevant geometry - is the human gate the old bless

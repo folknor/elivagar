@@ -8,6 +8,11 @@
   `reference/` documents no longer ship inside the crate; read them in the
   repository or on the docs site.
 
+- SIGTERM and SIGINT now stop `elivagar` with exit status 128 plus the
+  signal number and a one-line note that the output is incomplete, instead
+  of the process dying by the signal. A profiled build writes its hotpath
+  report first, covering the run up to the signal.
+
 - Archive provenance records `build.elivagar.source_xxh3_128`, a content
   digest of the compiled source, so two builds of one dirty commit can be
   told apart. Readers that ignore unknown `build` members, as 0.2.0 does,

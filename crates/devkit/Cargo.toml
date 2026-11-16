@@ -16,6 +16,9 @@ name = "elivagar-devkit"
 path = "src/main.rs"
 
 [dependencies]
+# The archive reader and provenance contract: tilegen names an admitted
+# archive by the commit its own provenance says built it.
+elivagar = { path = "../lib" }
 clap = { version = "4.6", features = ["derive"] }
 # brokkr.toml composition and the typed tilegen block.
 toml = "1.1.3"

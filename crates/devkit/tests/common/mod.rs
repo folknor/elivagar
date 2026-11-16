@@ -49,6 +49,42 @@ pub fn git(repo: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// Write a one-tile PMTiles archive at `path` whose metadata is `metadata`
+/// verbatim. The tile payload is opaque bytes: nothing here decodes it.
+pub fn write_archive(path: &Path, metadata: &str) {
+    use elivagar::archive::{LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter};
+    let config = PmtilesConfig::new(
+        0,
+        0,
+        LonLatBbox {
+            west: 0.0,
+            south: 0.0,
+            east: 1.0,
+            north: 1.0,
+        },
+        MapCenter {
+            lon: 0.0,
+            lat: 0.0,
+            zoom: 0,
+        },
+    )
+    .expect("archive config");
+    let mut writer = PmtilesWriter::new(config);
+    writer.add_tile(0, 0, 0, b"tile").expect("add tile");
+    writer.set_metadata_verbatim(metadata.to_owned());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create parent");
+    }
+    writer.write_to(path).expect("write archive");
+}
+
+/// Archive metadata whose provenance records `commit` as the elivagar build.
+pub fn provenance_metadata(commit: &str) -> String {
+    format!(
+        r#"{{"elivagar":{{"schema":1,"input":{{}},"config":{{}},"build":{{"elivagar":{{"commit":"{commit}","dirty":false}}}}}}}}"#
+    )
+}
+
 /// Initialise a repo at `dir` with `count` empty commits; returns their full
 /// ids, oldest first.
 pub fn repo_with_commits(dir: &Path, count: usize) -> Vec<String> {

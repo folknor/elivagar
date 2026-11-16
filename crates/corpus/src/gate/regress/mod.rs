@@ -84,6 +84,10 @@ pub fn run(
         max_moved,
         max_examples,
     };
+    if json {
+        // stdout carries the JSON document alone; tagged lines go to stderr.
+        output::reserve_stdout();
+    }
     output::run_msg(&format!(
         "regress {} against {}",
         current.display(),

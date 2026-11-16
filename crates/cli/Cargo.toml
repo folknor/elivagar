@@ -21,6 +21,8 @@ path = "src/main.rs"
 elivagar = { version = "0.2.0", path = "../lib" }
 clap = { version = "4.6", features = ["derive"] }
 hotpath = "0.31.3"
+# SIGINT and SIGTERM taken with sigwait, so a stopped run writes its report.
+libc = "0.2"
 # The global pool's thread count, set from --threads before the run starts.
 rayon = "1.5"
 

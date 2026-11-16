@@ -6,6 +6,7 @@
 //! Module map:
 //! - `digest`   - leaf runs, the fold, `digest`/`leaves` formats, self-integrity.
 //! - `canon_sink` - shared byte writer for the frozen tile hash and regress.
+//! - `journal`  - makes bless's digest/contract/leaves write one atomic set.
 //! - `layout`   - committed corpus paths and tile SVG names.
 //! - `diff`     - the localized content diff (leaves / zooms / buckets).
 //! - `contract` - the comparability gate (provenance read + gating policy).
@@ -26,6 +27,7 @@ pub mod diff;
 pub mod digest;
 #[cfg(test)]
 pub(crate) mod fixture;
+pub(crate) mod journal;
 pub(crate) mod layout;
 pub mod manifest;
 pub mod mutate;
@@ -281,6 +283,11 @@ struct Passed {
 #[allow(clippy::too_many_lines)]
 fn gate_through_walk(archive: &Path, corpus_dir: &Path, sort_scratch: &Path) -> io::Result<Gate> {
     let layout = layout::CorpusLayout::new(corpus_dir);
+    // A leftover bless journal means the baseline set may be half replaced:
+    // baseline trouble, and nothing below may read or write it.
+    if let Some(msg) = journal::pending(corpus_dir) {
+        return Ok(refused(baseline_trouble(msg)));
+    }
     // STEP 1 - baseline integrity (subject: the baseline; exit 3 on damage).
     // Every read here goes through `baseline_material`, so an absent or
     // corrupted committed file is the exit-3 verdict rather than an escaping
@@ -561,6 +568,17 @@ pub fn render_manifest(
         Gate::Refused(o, r) => return Ok((o, r)),
         Gate::Passed(p) => p.view,
     };
+    render_manifest_files(&view, corpus_dir, style_path)
+}
+
+/// The writing half of `render_manifest`, for a view already known to equal
+/// the digest baseline (by the gate walk, or by `bless` having just written
+/// that baseline from it).
+fn render_manifest_files(
+    view: &ArchiveView,
+    corpus_dir: &Path,
+    style_path: &Path,
+) -> io::Result<(Outcome, CheckReport)> {
     let layout = layout::CorpusLayout::new(corpus_dir);
     let manifest_path = layout.manifest();
     if !manifest_path.exists() {
@@ -600,7 +618,7 @@ pub fn render_manifest(
         let name = manifest::file_name(entry);
         wanted.insert(name.clone());
         let svg = render::render_archive_tile_from_runs(
-            &view,
+            view,
             &runs,
             entry.z,
             entry.x,
@@ -609,7 +627,10 @@ pub fn render_manifest(
             (!entry.layers.is_empty()).then_some(entry.layers.as_slice()),
         )?;
         warnings.extend(svg.warnings);
-        std::fs::write(tiles.join(name), svg.bytes)?;
+        // Atomic per tile: an interrupted render leaves whole SVGs (old or
+        // new), never a truncated one; any stray temp is an orphan the sweep
+        // below removes and `check` reports as stale.
+        crate::atomic_write::replace(&tiles.join(name), &svg.bytes)?;
     }
     for entry in std::fs::read_dir(&tiles)? {
         let entry = entry?;
@@ -620,7 +641,7 @@ pub fn render_manifest(
         }
     }
     // Record the style identity brokkr authors (path + hash) into contract.json.
-    let view_contract = match candidate_contract(&view)? {
+    let view_contract = match candidate_contract(view)? {
         Ok(c) => c,
         Err(msg) => return Ok(archive_refused(msg)),
     };
@@ -727,6 +748,9 @@ pub fn bless(
     sort_scratch: &Path,
 ) -> io::Result<(Outcome, CheckReport)> {
     let layout = layout::CorpusLayout::new(corpus_dir);
+    // Finish any set an earlier bless committed but did not finish writing,
+    // so everything below reads one coherent baseline.
+    journal::replay(corpus_dir)?;
     let a = ArchiveView::open(archive)?;
     if let Some(msg) = format_guard(&a) {
         return Ok(archive_refused(msg));
@@ -779,10 +803,18 @@ pub fn bless(
         };
         let (d, current_leaves) = compute(&a, base.mode, sort_scratch)?;
         let mut lines = vec!["rotation requires --rotate".to_string()];
-        if let Ok(Ok(base_contract)) = contract_from_file(&layout.contract()) {
-            for path in contract::contract_diff(&base_contract, &contract) {
-                lines.push(format!("contract {path}"));
+        // An unreadable committed contract does not block naming the content
+        // delta, but its diff lines are missing, so say why.
+        match contract_from_file(&layout.contract()) {
+            Ok(Ok(base_contract)) => {
+                for path in contract::contract_diff(&base_contract, &contract) {
+                    lines.push(format!("contract {path}"));
+                }
             }
+            Ok(Err(msg)) => lines.push(format!("contract diff unavailable: {msg}")),
+            Err(e) => lines.push(format!(
+                "contract diff unavailable: committed corpus contract: {e}"
+            )),
         }
         lines.extend(diff::zoom_delta_lines(&base.zooms, &d.zooms));
         match base.mode {
@@ -807,23 +839,32 @@ pub fn bless(
     }
     let (d, l) = compute(&a, mode, sort_scratch)?;
     std::fs::create_dir_all(corpus_dir)?;
-    let digest_path = layout.digest();
-    let contract_path = layout.contract();
     let leaves_path = layout.leaves();
-    crate::atomic_write::replace(&digest_path, digest::digest_text(&d).as_bytes())?;
-    crate::atomic_write::replace(&contract_path, contract_text(&contract, None)?.as_bytes())?;
+    // Digest, contract and leaves land as one set through the journal
+    // (`journal.rs`): staged first, then committed together. Same bytes as
+    // the three separate replaces this used to do.
+    let mut staged = vec![
+        crate::atomic_write::stage(&layout.digest(), digest::digest_text(&d).as_bytes())?,
+        crate::atomic_write::stage(
+            &layout.contract(),
+            contract_text(&contract, None)?.as_bytes(),
+        )?,
+    ];
+    let mut remove = Vec::new();
     if mode == DigestMode::Leaves {
-        crate::atomic_write::replace(&leaves_path, digest::leaves_text(&l).as_bytes())?;
+        staged.push(crate::atomic_write::stage(
+            &leaves_path,
+            digest::leaves_text(&l).as_bytes(),
+        )?);
     } else if leaves_path.exists() {
-        std::fs::remove_file(&leaves_path)?;
+        remove.push(leaves_path);
     }
+    journal::commit(corpus_dir, staged, &remove)?;
     if layout.manifest().exists() {
-        let (verdict, r) = render_manifest(
-            archive,
-            corpus_dir,
-            &corpus_style_path(corpus_dir),
-            sort_scratch,
-        )?;
+        // The archive was just proven equal to the baseline it wrote, so the
+        // gate walk `render_manifest` would run first (a second full digest
+        // computation) is skipped: render straight from the open view.
+        let (verdict, r) = render_manifest_files(&a, corpus_dir, &corpus_style_path(corpus_dir))?;
         if verdict != Outcome::Pass {
             return Ok((verdict, r));
         }

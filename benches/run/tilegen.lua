@@ -29,10 +29,10 @@
 --
 -- stop ends the measured child at a phase marker. Under skip-to, markers of
 -- skipped phases never fire and are refused at validate. Profiling marks
--- the measured child only; the setup child is not profiled. elivagar does
--- not cancel on SIGTERM, so a stop under --hotpath or --alloc ends the
--- child before its report is written and the capture is missing: profile
--- full runs.
+-- the measured child only; the setup child is not profiled. elivagar takes
+-- the stop's SIGTERM on a signal thread that writes the hotpath report and
+-- exits 143, so a stop under --hotpath or --alloc captures a report covering
+-- the run up to the marker (crates/cli/src/signals.rs).
 --
 --   brokkr bench tilegen --dataset denmark --variant locations
 --   brokkr bench tilegen --dataset denmark --skip-to assemble

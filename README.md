@@ -268,7 +268,10 @@ Those competitor runs are stale and predate several campaigns on our side;
 re-run them before quoting a ratio. These numbers came from the retired typed
 `brokkr tilegen --bench`, whose rows stay in `.brokkr/results.db`; re-measure
 with `brokkr bench tilegen --dataset D` (runs land in brokkr's bench store,
-read with `brokkr results`; per-phase detail via `brokkr sidecar`).
+read with `brokkr results`; per-phase detail via `brokkr sidecar`), and the
+competitors with `brokkr bench planetiler` and `brokkr bench tilemaker` after
+installing their pinned toolchains with `brokkr run elivagar-tools --
+planetiler|tilemaker`.
 
 ### Sort chunk compression
 

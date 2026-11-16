@@ -7,9 +7,10 @@
 -- became --runs N in one process; here --iterations repeats processes and
 -- runs repeats the writers inside one, default 1).
 --
--- The example reports each writer's best-of-runs milliseconds on stderr;
--- those are measurements and are recorded, never ranked on. Its closing
--- "faster" line compares the two writers and is not recorded.
+-- The example ends its stderr with a key=value vocabulary of integer
+-- measurements, documented in its header; this script records exactly
+-- those keys, shown and never ranked on. Its prose "faster" line compares
+-- the two writers and is not recorded.
 --
 -- The example writes bench_elivagar.pmtiles and bench_pmtiles_rs.pmtiles
 -- into its required --out-dir, here a fresh output() under the
@@ -19,14 +20,20 @@
 --   brokkr bench pmtiles-writer --tiles 2000000
 --   brokkr bench --hotpath pmtiles-writer
 
+local KEYS = {
+    "tiles", "tile_bytes", "gen_us",
+    "elivagar_best_us", "elivagar_bytes",
+    "pmtiles_rs_best_us", "pmtiles_rs_bytes",
+}
+
 function bench(params)
     local out = output("archives")
     local r = binary_with({ measured = true, hotpath = "pmtiles-writer" },
         "--out-dir", out, "--tiles", params.tiles, "--runs", params.runs):ok()
     if params.verbose == "yes" then print(r.stderr) end
-    local eli = r.stderr:match("\n  elivagar:%s+(%d+) ms")
-    local rs = r.stderr:match("\n  pmtiles%-rs:%s+(%d+) ms")
-    if not eli or not rs then fail("bench_pmtiles did not report both writers' ms") end
-    record.elivagar_ms = tonumber(eli)
-    record.pmtiles_rs_ms = tonumber(rs)
+    for _, key in ipairs(KEYS) do
+        local v = r.stderr:match("\n" .. key .. "=(%d+)\n")
+        if not v then fail("bench_pmtiles did not report " .. key .. "=") end
+        record[key] = tonumber(v)
+    end
 end

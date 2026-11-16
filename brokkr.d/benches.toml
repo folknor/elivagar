@@ -45,11 +45,12 @@ bench_tests = "../benches/tests"
 [bench.node-store]
 script_file = "../benches/bench-node-store/node-store.lua"
 description = "SortedNodeStore build and way-like and random lookups over synthetic nodes, one example process"
-version = 2
+version = 3
 date = 2026-11-16
 changelog = [
   { version = 1, date = 2026-11-16, note = "Ported typed node-store: the bench_node_store example, process wall ranked, its summary ms recorded" },
   { version = 2, date = 2026-11-16, note = "Node ID generator keeps IDs under the store's 2^40 cap: large gaps 1% at 10K-100K instead of 20% at 10K-1M, nodes capped at 1000 M; v1 panicked at the default size" },
+  { version = 3, date = 2026-11-16, note = "Record the example's key=value vocabulary instead of scraped summary ms: nodes, build_best_us, convert_us, and without build-only way_lookups, way_lookup_best_us, random_lookups, random_lookup_best_us; build_ms, way_like_ms, random_ms are gone" },
 ]
 target = "bench_node_store"
 profile = "release"
@@ -67,11 +68,12 @@ params.verbose = { choices = ["yes", "no"], default = "no", help = "yes: print t
 [bench.pmtiles-writer]
 script_file = "../benches/bench-pmtiles/pmtiles-writer.lua"
 description = "elivagar's and pmtiles-rs's PMTiles writers over synthetic z0-z14 tiles, one example process"
-version = 2
+version = 3
 date = 2026-11-16
 changelog = [
   { version = 1, date = 2026-11-16, note = "Ported typed pmtiles-writer: the bench_pmtiles example, process wall ranked, each writer's ms recorded" },
   { version = 2, date = 2026-11-16, note = "Archives written to an explicit --out-dir in the iteration's out/ instead of the hard-coded data/ under the project root" },
+  { version = 3, date = 2026-11-16, note = "Record the example's key=value vocabulary instead of scraped prose ms: tiles, tile_bytes, gen_us, elivagar_best_us, elivagar_bytes, pmtiles_rs_best_us, pmtiles_rs_bytes; elivagar_ms and pmtiles_rs_ms are gone" },
 ]
 target = "bench_pmtiles"
 profile = "release"
@@ -80,6 +82,33 @@ alloc_features = ["hotpath-alloc"]
 params.tiles = { integer = "u64", min = 1, default = "500000", help = "synthetic tiles" }
 params.runs = { integer = "u32", min = 1, default = "1", help = "writes per writer inside the process, best reported" }
 params.verbose = { choices = ["yes", "no"], default = "no", help = "yes: print the example's stderr" }
+
+# -- compare
+
+[bench.planetiler]
+script_file = "../benches/compare/planetiler.lua"
+description = "Planetiler's bundled Shortbread profile over a dataset's PBF, the pinned release jar on the pinned JDK"
+version = 1
+date = 2026-11-16
+changelog = [
+  { version = 1, date = 2026-11-16, note = "Ported typed planetiler: the release jar run directly, no compile; the ocean is the host tilegen block's full-resolution shapefile via --ocean_path instead of a primed data/sources download; heap max of 2x PBF MB and 2048" },
+]
+params.dataset = { from = "datasets", default = "denmark", help = "the dataset" }
+params.variant = { from = "datasets.{dataset}.pbf", default = "raw", help = "the input PBF variant" }
+params.tilegen = { from = "host.tilegen", default = "default", help = "the host tilegen block whose full-resolution ocean shapefile planetiler reads" }
+params.verbose = { choices = ["yes", "no"], default = "no", help = "yes: print planetiler's output" }
+
+[bench.tilemaker]
+script_file = "../benches/compare/tilemaker.lua"
+description = "Tilemaker with the shortbread-tilemaker config over a dataset's PBF, the pinned build, --fast"
+version = 1
+date = 2026-11-16
+changelog = [
+  { version = 1, date = 2026-11-16, note = "Ported typed tilemaker: same pins and flags; --config is the installed copy with absolute shapefile paths, so boundary_labels points are read, which typed tilemaker silently skipped" },
+]
+params.dataset = { from = "datasets", default = "denmark", help = "the dataset" }
+params.variant = { from = "datasets.{dataset}.pbf", default = "raw", help = "the input PBF variant" }
+params.verbose = { choices = ["yes", "no"], default = "no", help = "yes: print tilemaker's output" }
 
 # -- run
 

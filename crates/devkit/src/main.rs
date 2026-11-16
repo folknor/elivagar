@@ -7,7 +7,12 @@
 //! ```text
 //! brokkr run --with elivagar elivagar-devkit -- tilegen --dataset denmark --variant locations
 //! brokkr run --with elivagar elivagar-devkit -- ocean-build
+//! brokkr run elivagar-devkit -- archive --dataset denmark --variant locations
+//! brokkr run elivagar-devkit -- clean [--dry-run] [--archives --keep N]
 //! ```
+//!
+//! tilegen names the admitted archive by the commit its provenance says
+//! built it, so `--with-commit X` files X's output under X.
 //!
 //! Measured modes stay in brokkr: brokkr benches only measure.
 
@@ -17,7 +22,8 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
-use elivagar_devkit::archive_store::{ArchiveKey, ArchiveStore};
+use elivagar_devkit::archive_store::{self, ArchiveKey, ArchiveStore};
+use elivagar_devkit::clean::{self, CleanOpts};
 use elivagar_devkit::config::{self, Paths};
 use elivagar_devkit::tilegen::{self, DEFAULT_TILEGEN};
 use elivagar_devkit::{DevError, git};
@@ -25,7 +31,7 @@ use elivagar_devkit::{DevError, git};
 #[derive(Parser)]
 #[command(
     name = "elivagar-devkit",
-    about = "tilegen and ocean-build for elivagar"
+    about = "tilegen, ocean-build, archive resolution and clean for elivagar"
 )]
 struct Cli {
     /// Host section of brokkr.toml to resolve paths from (default: the kernel
@@ -38,7 +44,8 @@ struct Cli {
     #[arg(long, global = true)]
     elivagar: Option<PathBuf>,
 
-    /// Validate config and path resolution and print the argv, without running
+    /// Validate config and path resolution and print the argv, without
+    /// running; for `clean`, name what would go and remove nothing
     #[arg(long, global = true)]
     dry_run: bool,
 
@@ -64,6 +71,34 @@ enum Command {
     /// Build the world ocean artifact from [<host>.tilegen.default].ocean
     #[command(name = "ocean-build")]
     OceanBuild,
+    /// Print the path of a stored archive, for `elivagar inspect|diag|svg|verify`
+    Archive {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PBF variant the archive was built from
+        #[arg(long, default_value = "raw")]
+        variant: String,
+        /// Revision whose archive to pick (default: HEAD)
+        #[arg(long, conflicts_with = "file")]
+        commit: Option<String>,
+        /// An explicit archive outside the store, e.g. the world ocean artifact
+        #[arg(long)]
+        file: Option<String>,
+    },
+    /// Remove tilegen_tmp, corpus calibrands and stale corpus-sort spill
+    /// dirs; with --archives, prune the archive store. Host scratch is left
+    /// to `brokkr clean`.
+    Clean {
+        /// Prune stored archives, keeping the newest --keep per (dataset,
+        /// variant)
+        #[arg(long)]
+        archives: bool,
+        /// Archives to keep per (dataset, variant) with --archives (default
+        /// 2: the current build plus one comparand)
+        #[arg(long, default_value_t = 2, requires = "archives")]
+        keep: usize,
+    },
 }
 
 fn main() -> ExitCode {
@@ -75,6 +110,13 @@ fn main() -> ExitCode {
             skip_to,
         } => run_tilegen(&cli, dataset, variant, skip_to.as_deref()),
         Command::OceanBuild => run_ocean_build(&cli),
+        Command::Archive {
+            dataset,
+            variant,
+            commit,
+            file,
+        } => run_archive(&cli, dataset, variant, commit.as_deref(), file.as_deref()),
+        Command::Clean { archives, keep } => run_clean(&cli, *archives, *keep),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -136,16 +178,18 @@ fn run_tilegen(
 
     if cli.dry_run {
         dry_run_msg(&format!("elivagar {}", args.join(" ")));
+        // The commit is read from the archive after the run, so a dry run
+        // can only name the slot it fills.
         dry_run_msg(&format!(
             "output: {}",
             ArchiveStore::new(&paths.output_dir)
-                .path_for(&ArchiveKey::new(
-                    dataset,
-                    variant,
-                    git::head(&paths.root)?.short()
-                )?)
+                .path_for(&ArchiveKey::new(dataset, variant, "COMMIT")?)
                 .display()
         ));
+        dry_run_msg(
+            "COMMIT is the commit the elivagar binary was built from, read from the \
+             archive's provenance",
+        );
         dry_run_msg("ok");
         return Ok(());
     }
@@ -201,23 +245,32 @@ fn run_child(exe: &Path, args: &[String], cwd: &Path) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Move the scratch output into the store under HEAD's short hash. Every way
-/// of ending without a durable archive is an error, and the scratch output is
-/// left in place on each, so it can be moved by hand.
+/// Move the scratch output into the store under the short hash of the commit
+/// the elivagar binary was built from, as the archive's own provenance
+/// records it - not the live HEAD, which `--with-commit` decouples from the
+/// binary. Every way of ending without a durable archive is an error, and the
+/// scratch output is left in place on each, so it can be moved by hand.
 fn admit(paths: &Paths, dataset: &str, variant: &str) -> Result<(), DevError> {
     let scratch = paths.tilegen_scratch_output();
-    // A git failure is fatal rather than a `-unknown` suffix: no resolver
+    // An unknown commit is fatal rather than a `-unknown` suffix: no resolver
     // constructs that name, so the archive would be unreachable.
-    let commit = git::head(&paths.root)
-        .map_err(|e| {
-            DevError::Io(std::io::Error::other(format!(
-                "cannot name the tilegen archive: git commit of {} unavailable ({e}); \
-                 output left in {}",
-                paths.root.display(),
-                paths.scratch_dir.display(),
-            )))
+    let commit = archive_store::built_commit(&scratch)
+        .map_err(|e| match e {
+            DevError::Verify(m) => DevError::Verify(format!(
+                "{m}; output left in {}",
+                paths.scratch_dir.display()
+            )),
+            other => other,
         })?
         .short();
+    let head = git::head(&paths.root).ok().as_ref().map(git::Commit::short);
+    if head.as_deref() != Some(commit.as_str()) {
+        run_msg(&format!(
+            "the elivagar binary was built from {commit}, not the checkout's HEAD{}; \
+             naming the archive by {commit}",
+            head.map(|h| format!(" {h}")).unwrap_or_default()
+        ));
+    }
     let store = ArchiveStore::new(&paths.output_dir);
     let key = ArchiveKey::new(dataset, variant, commit)?;
     let tmp_dir = paths.tilegen_tmp();
@@ -229,6 +282,46 @@ fn admit(paths: &Paths, dataset: &str, variant: &str) -> Result<(), DevError> {
              so copy an archive elsewhere and address it with --file to keep both",
             key.commit()
         ));
+    }
+    Ok(())
+}
+
+/// `archive`: the resolved path alone on stdout, untagged, so it can be
+/// handed straight to `brokkr run elivagar -- inspect <path>`.
+fn run_archive(
+    cli: &Cli,
+    dataset: &str,
+    variant: &str,
+    commit: Option<&str>,
+    file: Option<&str>,
+) -> Result<(), DevError> {
+    let paths = config::load(cli.host.as_deref())?;
+    let path = ArchiveStore::new(&paths.output_dir).resolve(
+        dataset,
+        variant,
+        commit,
+        file,
+        &paths.root,
+    )?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn run_clean(cli: &Cli, archives: bool, keep: usize) -> Result<(), DevError> {
+    let paths = config::load(cli.host.as_deref())?;
+    let report = clean::clean(
+        &paths,
+        CleanOpts {
+            archives: archives.then_some(keep),
+            dry_run: cli.dry_run,
+        },
+    )?;
+    let msg = if cli.dry_run { dry_run_msg } else { run_msg };
+    for line in &report.lines {
+        msg(line);
+    }
+    if report.lines.is_empty() {
+        msg("nothing to clean");
     }
     Ok(())
 }

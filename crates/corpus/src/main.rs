@@ -13,6 +13,7 @@
 //!   3 baseline trouble, 4 could not run (any error that is not a verdict).
 //! - regress: 0 pass, 1 regressed, 3 could not complete.
 //! - compare-tiles: 0, or 1 on error.
+//! - stats: 0, or 4 if the archive cannot be resolved or read.
 //! - clap usage errors: 2.
 
 mod atomic_write;
@@ -67,8 +68,9 @@ struct CorpusArchiveArgs {
     /// Commit short hash selecting which archive to open (default: current HEAD)
     #[arg(long)]
     commit: Option<String>,
-    /// Explicit PMTiles path, skips dataset/variant/commit resolution
-    #[arg(long)]
+    /// Explicit PMTiles path, skips dataset/variant/commit resolution (so it
+    /// refuses --variant and --commit rather than silently ignoring them)
+    #[arg(long, conflicts_with_all = ["variant", "commit"])]
     file: Option<String>,
 }
 
@@ -141,7 +143,8 @@ enum Command {
         #[command(flatten)]
         archive: CorpusArchiveArgs,
         /// Output path for the mutated archive. Default: a calibrand under
-        /// data/corpus-calibrands/ that a routine `brokkr clean` clears.
+        /// data/corpus-calibrands/ that a routine
+        /// `brokkr run elivagar-devkit -- clean` clears.
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
         /// Mutation to apply
@@ -163,7 +166,7 @@ side comes from --commit/--file; the COMPARAND from --against-commit/--against \
 Comparability is YOUR responsibility. regress reads no provenance contract by \
 design - it is the attribution instrument, and cross-contract diffs (artifact-\
 active vs computed, an intended config change) are legitimate uses. Read the \
-provenance blocks via `brokkr pmtiles-inspect` first: comparing across \
+provenance blocks via `brokkr run elivagar -- inspect <path>` first: comparing across \
 variants or configs reports a six-figure diff on two correct builds.",
         group(
             ArgGroup::new("comparand")
@@ -182,8 +185,9 @@ variants or configs reports a six-figure diff on two correct builds.",
         /// Commit short hash selecting the CURRENT output (default: current HEAD)
         #[arg(long)]
         commit: Option<String>,
-        /// Explicit CURRENT PMTiles path, skips dataset/variant/commit resolution
-        #[arg(long)]
+        /// Explicit CURRENT PMTiles path, skips dataset/variant/commit
+        /// resolution (an explicit --variant or --commit alongside is refused)
+        #[arg(long, conflicts_with_all = ["variant", "commit"])]
         file: Option<String>,
         /// PBF variant of the COMPARAND output (defaults to raw; set it
         /// independently of --variant - a cross-variant diff is a legitimate use)
@@ -192,8 +196,9 @@ variants or configs reports a six-figure diff on two correct builds.",
         /// Commit short hash selecting the COMPARAND output from data/tilegen/
         #[arg(long)]
         against_commit: Option<String>,
-        /// Explicit COMPARAND PMTiles path
-        #[arg(long)]
+        /// Explicit COMPARAND PMTiles path (an explicit --against-variant
+        /// alongside is refused: the path is used as given)
+        #[arg(long, conflicts_with = "against_variant")]
         against: Option<String>,
         /// Geometry tolerance in the layer's extent units (default 0)
         #[arg(long, default_value_t = 0)]
@@ -214,6 +219,12 @@ variants or configs reports a six-figure diff on two correct builds.",
         /// Emit a machine-readable report to stdout
         #[arg(long)]
         json: bool,
+    },
+    /// Per-zoom directory statistics of an archive: tile count, distinct
+    /// payloads, payload length min/max/mean (exit 0, or 4 if unreadable)
+    Stats {
+        #[command(flatten)]
+        archive: CorpusArchiveArgs,
     },
     /// Compare feature counts between two PMTiles archives
     #[command(name = "compare-tiles")]
@@ -293,6 +304,10 @@ fn regress(host: Option<&str>, cmd: &Command) -> Result<(), DevError> {
     else {
         unreachable!("dispatched on Command::Regress");
     };
+    if *json {
+        // Before resolution, so a resolution error stays off the JSON stream.
+        output::reserve_stdout();
+    }
     let paths = config::load(host)?;
     let store = ArchiveStore::new(paths.output_dir.as_path());
     let current = store.resolve(
@@ -436,6 +451,10 @@ fn corpus(host: Option<&str>, cmd: &Command) -> Result<(), DevError> {
             let path = resolve(archive)?;
             corpus_gate::rings(&path, output)?;
             Ok(())
+        }
+        Command::Stats { archive } => {
+            let path = resolve(archive)?;
+            gate::stats::run(&path)
         }
         Command::Mutate {
             archive,

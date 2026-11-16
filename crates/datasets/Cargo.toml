@@ -11,6 +11,9 @@ publish = false
 # Run as `brokkr run elivagar-datasets -- download-ocean` (or
 # `download-natural-earth`): brokkr holds the machine lock for the whole run.
 # Links no elivagar; transfers go through curl, extraction through unzip.
+# `download <region>` fetches a Geofabrik PBF, derives the indexed and
+# locations variants through pbfhogg's library, and appends all three
+# entries to brokkr.d/hosts/<host>.toml; `register` pins hand-made variants.
 [[bin]]
 name = "elivagar-datasets"
 path = "src/main.rs"
@@ -18,6 +21,12 @@ path = "src/main.rs"
 [dependencies]
 elivagar-devkit = { path = "../devkit" }
 clap = { version = "4.6", features = ["derive"] }
+# Reading the host's composed dataset tables, which devkit hands over as toml.
+toml = "1.1.3"
+# Reading a downloaded PBF's header (its replication sequence) and deriving
+# the indexed and locations variants: cat and add-locations-to-ways live
+# under the default `commands` feature. The same requirement as crates/lib's.
+pbfhogg = "0.6.0"
 
 [lints]
 workspace = true

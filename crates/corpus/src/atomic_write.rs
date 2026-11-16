@@ -19,6 +19,70 @@ fn temp_suffix() -> String {
 /// resolved first, so the link survives and its target is replaced; the
 /// target's permission bits carry over.
 pub(crate) fn replace(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    stage(path, contents)?.commit()
+}
+
+/// A fully written, fsynced sibling temp file not yet renamed over its target.
+/// [`Staged::commit`] performs the rename; dropping it uncommitted removes the
+/// temp file. Used to stage several files before any of them changes (the
+/// bless journal in `gate::corpus::journal`).
+pub(crate) struct Staged {
+    pub(crate) tmp: PathBuf,
+    pub(crate) target: PathBuf,
+    committed: bool,
+}
+
+impl Staged {
+    /// Rename the temp over the target and sync the directory.
+    pub(crate) fn commit(mut self) -> std::io::Result<()> {
+        std::fs::rename(&self.tmp, &self.target)?;
+        self.committed = true;
+        sync_parent(&self.target);
+        Ok(())
+    }
+
+    /// Leave the temp in place for someone else (the journal replay) to
+    /// rename; dropping no longer removes it.
+    pub(crate) fn keep(mut self) -> (PathBuf, PathBuf) {
+        self.committed = true;
+        (
+            std::mem::take(&mut self.tmp),
+            std::mem::take(&mut self.target),
+        )
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.committed {
+            drop(std::fs::remove_file(&self.tmp));
+        }
+    }
+}
+
+/// Best-effort directory fsync after a rename, as in brokkr: the target has
+/// already changed, so a failure is a warning.
+pub(crate) fn sync_parent(target: &Path) {
+    let dir = target
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    if let Ok(d) = File::open(&dir)
+        && let Err(e) = d.sync_all()
+        && !matches!(e.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP))
+    {
+        crate::output::warn(&format!(
+            "{} was replaced, but syncing {} failed: {e}; whether the new contents \
+             survive a crash is unconfirmed",
+            target.display(),
+            dir.display()
+        ));
+    }
+}
+
+/// Write `contents` to a fsynced sibling temp of `path` (symlink resolved,
+/// permissions carried over) without touching `path` itself.
+pub(crate) fn stage(path: &Path, contents: &[u8]) -> std::io::Result<Staged> {
     let target = match std::fs::canonicalize(path) {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
@@ -49,25 +113,15 @@ pub(crate) fn replace(path: &Path, contents: &[u8]) -> std::io::Result<()> {
                 meta.permissions().mode() & 0o7777,
             ))?;
         }
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, &target)
+        file.sync_all()
     })();
     if let Err(e) = result {
         drop(std::fs::remove_file(&tmp));
         return Err(e);
     }
-    // Best effort, as in brokkr: the target has already changed.
-    if let Ok(d) = File::open(&dir)
-        && let Err(e) = d.sync_all()
-        && !matches!(e.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP))
-    {
-        crate::output::warn(&format!(
-            "{} was replaced, but syncing {} failed: {e}; whether the new contents \
-             survive a crash is unconfirmed",
-            target.display(),
-            dir.display()
-        ));
-    }
-    Ok(())
+    Ok(Staged {
+        tmp,
+        target,
+        committed: false,
+    })
 }

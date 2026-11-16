@@ -11,12 +11,26 @@
 //! `--out-dir` is required: the two archives are written there as
 //! `bench_elivagar.pmtiles` and `bench_pmtiles_rs.pmtiles`. There is no
 //! default location; the directory is created if missing.
+//!
+//! Besides the human prose, the result figures go to stderr as a stable
+//! machine vocabulary, one `key=value` per line, every value an integer,
+//! printed once after the summary. These keys are a contract with the
+//! brokkr bench script (benches/bench-pmtiles/pmtiles-writer.lua); rename
+//! or drop one only together with that script and its version.
+//!
+//! - `tiles` - tiles generated and written by each writer
+//! - `tile_bytes` - total compressed payload bytes of those tiles
+//! - `gen_us` - tile generation wall, microseconds
+//! - `elivagar_best_us` - elivagar writer, best-of-runs wall, microseconds
+//! - `elivagar_bytes` - archive size of elivagar's best run
+//! - `pmtiles_rs_best_us` - pmtiles-rs writer, best-of-runs wall, microseconds
+//! - `pmtiles_rs_bytes` - archive size of pmtiles-rs's best run
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use elivagar::archive::{LonLatBbox, MapCenter, PmtilesConfig, PmtilesWriter};
 use elivagar::tiling::TileId;
@@ -39,10 +53,11 @@ fn main() {
     eprint!("  Generating tiles... ");
     let gen_start = Instant::now();
     let tiles = generate_tiles(num_tiles);
+    let gen_elapsed = gen_start.elapsed();
     let data_bytes: usize = tiles.iter().map(|t| t.data.len()).sum();
     eprintln!(
         "done in {:.1?} ({} tiles, {:.1} MB compressed)",
-        gen_start.elapsed(),
+        gen_elapsed,
         tiles.len(),
         data_bytes as f64 / 1_000_000.0
     );
@@ -60,12 +75,14 @@ fn main() {
         .build();
 
     eprint!("  elivagar:   ");
-    let (eli_ms, eli_size) = bench_elivagar(&tiles, runs, &eli_path);
+    let (eli_best, eli_size) = bench_elivagar(&tiles, runs, &eli_path);
+    let eli_ms = eli_best.as_millis();
     eprintln!("{eli_ms} ms ({:.1} MB)", eli_size as f64 / 1_000_000.0);
 
     // Benchmark pmtiles-rs writer
     eprint!("  pmtiles-rs: ");
-    let (pm_ms, pm_size) = bench_pmtiles_rs(&tiles, runs, &rs_path);
+    let (pm_best, pm_size) = bench_pmtiles_rs(&tiles, runs, &rs_path);
+    let pm_ms = pm_best.as_millis();
     eprintln!("{pm_ms} ms ({:.1} MB)", pm_size as f64 / 1_000_000.0);
 
     eprintln!();
@@ -97,6 +114,16 @@ fn main() {
     } else {
         eprintln!("  -> roughly equal");
     }
+
+    // Machine vocabulary; see the module header.
+    eprintln!();
+    eprintln!("tiles={}", tiles.len());
+    eprintln!("tile_bytes={data_bytes}");
+    eprintln!("gen_us={}", gen_elapsed.as_micros());
+    eprintln!("elivagar_best_us={}", eli_best.as_micros());
+    eprintln!("elivagar_bytes={eli_size}");
+    eprintln!("pmtiles_rs_best_us={}", pm_best.as_micros());
+    eprintln!("pmtiles_rs_bytes={pm_size}");
 }
 
 fn parse_args() -> (usize, usize, PathBuf) {
@@ -194,8 +221,8 @@ fn make_tile_data(z: u8, x: u32, y: u32) -> Vec<u8> {
 // Elivagar benchmark
 // ---------------------------------------------------------------------------
 
-fn bench_elivagar(tiles: &[TestTile], runs: usize, out_path: &Path) -> (u128, u64) {
-    let mut best_ms = u128::MAX;
+fn bench_elivagar(tiles: &[TestTile], runs: usize, out_path: &Path) -> (Duration, u64) {
+    let mut best = Duration::MAX;
     let mut file_size = 0u64;
 
     for _ in 0..runs {
@@ -225,22 +252,22 @@ fn bench_elivagar(tiles: &[TestTile], runs: usize, out_path: &Path) -> (u128, u6
         }
         writer.write_to(out_path).expect("elivagar write_to");
 
-        let ms = start.elapsed().as_millis();
-        if ms < best_ms {
-            best_ms = ms;
+        let elapsed = start.elapsed();
+        if elapsed < best {
+            best = elapsed;
             file_size = fs::metadata(out_path).map(|m| m.len()).unwrap_or(0);
         }
     }
 
-    (best_ms, file_size)
+    (best, file_size)
 }
 
 // ---------------------------------------------------------------------------
 // pmtiles-rs benchmark
 // ---------------------------------------------------------------------------
 
-fn bench_pmtiles_rs(tiles: &[TestTile], runs: usize, out_path: &Path) -> (u128, u64) {
-    let mut best_ms = u128::MAX;
+fn bench_pmtiles_rs(tiles: &[TestTile], runs: usize, out_path: &Path) -> (Duration, u64) {
+    let mut best = Duration::MAX;
     let mut file_size = 0u64;
 
     for _ in 0..runs {
@@ -264,12 +291,12 @@ fn bench_pmtiles_rs(tiles: &[TestTile], runs: usize, out_path: &Path) -> (u128, 
         }
         writer.finalize().expect("pmtiles-rs finalize");
 
-        let ms = start.elapsed().as_millis();
-        if ms < best_ms {
-            best_ms = ms;
+        let elapsed = start.elapsed();
+        if elapsed < best {
+            best = elapsed;
             file_size = fs::metadata(out_path).map(|m| m.len()).unwrap_or(0);
         }
     }
 
-    (best_ms, file_size)
+    (best, file_size)
 }

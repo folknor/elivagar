@@ -8,3 +8,4 @@ pub(crate) mod constants;
 pub(crate) mod corpus;
 pub(crate) mod eliv;
 pub(crate) mod regress;
+pub(crate) mod stats;

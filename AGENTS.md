@@ -31,7 +31,7 @@ Invoked as `brokkr` from the project root (reads `./brokkr.toml` for project det
 - `brokkr sidecar <UUID> --durations` - phase duration table from markers
 - `brokkr sidecar --compare <A> <B>` - phase-aligned sidecar comparison
 - `brokkr sidecar dirty` - inspect last failed/dirty run
-- `brokkr clean` - reclaims free launch leases (a script-bench iteration's directory under `<scratch>/bench-iterations/` included, unless still borrowed), wipes and recreates the host scratch dir (`data/scratch`) and removes `data/tilegen_tmp` (the `--tmp-dir` brokkr hands elivagar), both through the reservation gate so a live bench iteration keeps them; also removes `corpus-calibrands/`, stale sidecar FIFOs and brokkr run-artefact trees. Spares the durable tilegen archives (`--archives [--keep N]` prunes them) and never touches `.brokkr/results.db`, `.brokkr/sidecar.db` or the bench store. `--dry-run` lists without deleting
+- `brokkr clean` - reclaims free launch leases (a script-bench iteration's directory under `<scratch>/bench-iterations/` included, unless still borrowed), wipes and recreates the host scratch dir (`data/scratch`) through the reservation gate so a live bench iteration keeps it, and removes stale sidecar FIFOs and brokkr run-artefact trees. Never touches `.brokkr/results.db`, `.brokkr/sidecar.db` or the bench store. `--dry-run` lists without deleting. Elivagar's own leftovers (`data/tilegen_tmp`, `data/corpus-calibrands`, stale corpus-sort spill dirs whose owner pid is gone) and archive pruning belong to `elivagar-devkit clean` (below)
 - `brokkr bench [NAME]` - run a registered script bench (see Elivagar commands); bare, it lists the benches
 - `brokkr history [--command CMD] [--project P] [--failed] [--since DATE] [--slow MS] [-n N] [--all]` - query global command history (stored in `$XDG_DATA_HOME/brokkr/history.db`). Every brokkr invocation is recorded with timing, exit status, project, and git context. Works from any directory.
 
@@ -43,19 +43,47 @@ workspace and brokkr only builds and launches it via `brokkr run`:
 - `crates/lib` - the `elivagar` library
 - `crates/cli` - `elivagar-cli`, the `elivagar` binary
 - `crates/corpus` - `elivagar-corpus`: the corpus gate (`check`, `bless`,
-  `render`, `render-manifest`, `rings`, `mutate`), `regress` and
-  `compare-tiles`, linking `crates/lib` by path
-- `crates/devkit` - `elivagar-devkit`: `tilegen` and `ocean-build` plain runs.
-  It reads brokkr.toml and its `brokkr.d/` includes, resolves git, and owns
-  the durable archive store `data/tilegen/<dataset>-<variant>-<commit>.pmtiles`.
-  A global `--dry-run` goes before the subcommand.
+  `render`, `render-manifest`, `rings`, `mutate`), `regress`, `stats` and
+  `compare-tiles`, linking `crates/lib` by path. `--file` conflicts with
+  `--commit` and `--variant`. `bless` commits digest, contract and leaves
+  atomically through a roll-forward journal (`<corpus>/.bless-journal`):
+  while one exists `check` and `render-manifest` refuse with exit 3, and the
+  next `bless` replays it. `regress --json` keeps stdout pure JSON.
+- `crates/devkit` - `elivagar-devkit`: `tilegen` and `ocean-build` plain runs,
+  `archive` and `clean`. It reads brokkr.toml and its `brokkr.d/` includes,
+  resolves git, and owns the durable archive store
+  `data/tilegen/<dataset>-<variant>-<commit>.pmtiles`. tilegen names the
+  archive from the commit recorded in the archive's own provenance, not the
+  live HEAD, so `brokkr run --with-commit` builds land under their own name;
+  its dry run shows that slot as COMMIT. A global `--dry-run` goes before the
+  subcommand (for `clean` it lists and removes nothing).
+- `crates/datasets` - `elivagar-datasets`: downloads and dataset
+  registration. `download <region>` (an alias such as `denmark` or a
+  Geofabrik path such as `europe/france`) fetches the extract, reads its
+  replication seq through pbfhogg, derives the `indexed` (pbfhogg cat) and
+  `locations` (add-locations-to-ways: external index, inject-prepass,
+  zstd:1) variants through pbfhogg's library, and appends the dataset tables
+  to `brokkr.d/hosts/<host>.toml` as text - existing bytes untouched, rolled
+  back on failure. `--no-derive` registers the raw extract alone. `register
+  <dataset> <variant> <file>` hashes a hand-made file in the data dir and
+  pins it as a variant of a registered dataset.
+- `crates/tools` - `elivagar-tools`: installs the competitor toolchains the
+  comparison benches run. `planetiler` (pinned Temurin JDK + Planetiler
+  release jar), `tilemaker` (pinned tilemaker build, pinned
+  shortbread-tilemaker config rewritten with absolute shapefile paths, and
+  the 4326 ocean; the build needs Boost system, filesystem and
+  program_options 1.66 or newer on the host), `ocean-4326` (the EPSG:4326
+  ocean shapefiles, full downloaded, simplified reprojected with ogr2ogr).
 
 ```
 # In-tree tools (plain runs, nothing measured or stored in results.db)
 brokkr run --with elivagar elivagar-devkit -- [--dry-run] tilegen
            [--dataset D] [--variant V] [--skip-to ocean|sort|assemble]
 brokkr run --with elivagar elivagar-devkit -- [--dry-run] ocean-build
-# Corpus, regress, compare (corpus dir defaults to corpus/<dataset>;
+brokkr run elivagar-devkit -- archive [--dataset D] [--variant V]
+           [--commit H | --file P]       # prints the resolved archive path
+brokkr run elivagar-devkit -- [--dry-run] clean [--archives [--keep N]]
+# Corpus, regress, stats, compare (corpus dir defaults to corpus/<dataset>;
 # resolver --variant defaults to raw)
 brokkr run elivagar-corpus -- check|bless|render|render-manifest|rings|mutate
            [--dataset D] [--variant V] [--commit H | --file P]
@@ -63,10 +91,22 @@ brokkr run elivagar-corpus -- check|bless|render|render-manifest|rings|mutate
 brokkr run elivagar-corpus -- regress [--dataset D] [--variant V]
            [--commit H | --file P]
            (--against PATH | --against-commit H) [--against-variant V]
-           [--tol N --max-moved M ...]
+           [--tol N --max-moved M ...] [--json]
+brokkr run elivagar-corpus -- stats [--dataset D] [--variant V]
+           [--commit H | --file P]       # per-zoom tiles, distinct payloads, sizes
 brokkr run elivagar-corpus -- compare-tiles <file_a> <file_b> [--sample N]
-# Archive inspection on an explicit path
+# Archive inspection on an explicit path (get one from devkit archive)
 brokkr run elivagar -- inspect|diag|svg|verify <path> [...]
+# verify --unique-payloads checks each distinct payload once while still
+# accounting for every addressed tile - the only tractable way to verify
+# the run-heavy world ocean artifact. --geometry-stats adds ocean stats.
+# Datasets and downloads
+brokkr run elivagar-datasets -- download <region> [--no-derive]
+brokkr run elivagar-datasets -- register <dataset> <variant> <file>
+brokkr run elivagar-datasets -- download-ocean
+brokkr run elivagar-datasets -- download-natural-earth
+# Competitor toolchains, for brokkr bench planetiler / tilemaker
+brokkr run elivagar-tools -- planetiler|tilemaker|ocean-4326
 # THE standing output gate: fresh denmark locations build + corpus digest
 # check against the committed corpus/denmark/ baseline:
 #   brokkr run --with elivagar elivagar-devkit -- tilegen --dataset denmark --variant locations
@@ -78,9 +118,8 @@ Measured runs are brokkr script benches: registered in
 bench follows), with the Lua in `benches/<family>/<name>.lua` and shared
 modules in `benches/lib/`. brokkr's own options go BEFORE the bench name,
 the bench's params after it; `brokkr bench <name> --help` lists the params
-and their defaults, `brokkr man bench` documents the runner. The typed
-`brokkr tilegen --bench/--hotpath/--alloc`, `brokkr pmtiles-writer` and
-`brokkr node-store` are superseded by these.
+and their defaults, `brokkr man bench` documents the runner. There is no
+suite: each bench runs on its own.
 
 ```
 # Measured runs: brokkr options, then the bench name, then its params
@@ -90,8 +129,16 @@ brokkr bench [--iterations N] [--hotpath | --alloc] [--commit REF] [--dry-run]
 brokkr bench [...] pmtiles-writer [--tiles N] [--runs N]
 brokkr bench [...] node-store [--nodes M] [--ways K] [--random M] [--runs N]
                               [--build-only yes|no]
+brokkr bench [...] planetiler [--dataset D] [--variant V] [--tilegen BLOCK]
+brokkr bench [...] tilemaker [--dataset D] [--variant V]
 brokkr bench --test        # the bench contract tests
 ```
+
+The pmtiles-writer and node-store benches run the `crates/lib/examples`
+programs, which print a stable `key=value` vocabulary the benches record.
+planetiler and tilemaker (`benches/compare/`) need their toolchains
+installed first with `elivagar-tools`; planetiler reads the full-resolution
+ocean shapefile of the chosen tilegen block.
 
 `--iterations` defaults to the bench table's setting (3 when absent) and the
 result is the fastest iteration. `--hotpath` / `--alloc` build with the
@@ -102,42 +149,14 @@ untimed setup run per iteration: a script bench keeps no state between
 iterations, so each iteration first runs the same argv without `--skip-to`
 up to the checkpoint, then times the resumed run - the checkpoint is always
 the same commit, block and input. `--stop` ends the measured child at a
-phase marker; under `--hotpath`/`--alloc` that loses the report (elivagar
-does not cancel on SIGTERM), so profile full runs.
+phase marker; under `--hotpath`/`--alloc` the stop's SIGTERM still yields a
+report covering the run up to the marker (elivagar takes SIGTERM and SIGINT
+on a signal thread that writes the report, then exits `128 + signo`; see
+`crates/cli/src/signals.rs`).
 
-The brokkr commands below remain. The thin archive wrappers (`verify pmtiles`,
-`pmtiles-inspect`, `diag`, `svg`, `pmtiles-stats`, `suite elivagar`) are slated
-for deletion in favour of `brokkr run elivagar -- ...` on a path; prefer the
-in-tree spelling.
-
-```
-# Competitor measured commands
-brokkr planetiler [--bench [N]] [--dataset D] [--variant V]
-brokkr tilemaker [--bench [N]] [--dataset D] [--variant V]
-
-# Verification (wrapper, slated for deletion)
-brokkr verify pmtiles [--dataset D] [--variant V] [--commit H | --file P]
-                      [--geometry-stats] [--unique-payloads]
-# --commit picks which archive to open, never which toolchain to build.
-# --file is the escape hatch for archives that are not dataset output,
-# i.e. the world ocean artifact. --unique-payloads verifies each distinct
-# compressed payload once while still accounting for every addressed tile -
-# the only tractable way to verify the run-heavy artifact, which addresses
-# many times more tiles than it stores payloads.
-
-# Archive inspection wrappers, slated for deletion (named pmtiles-inspect
-# because brokkr inspect is pbfhogg's PBF inspector)
-brokkr pmtiles-inspect [--dataset D] [--commit H | --file P]
-brokkr diag [--dataset D] [--commit H | --file P] -z Z -x X -y Y
-brokkr svg [--dataset D] [--commit H | --file P] -z Z -x X -y Y [-W] [-H] [-l] [-o]
-
-# Downloads (in-tree, crates/datasets)
-brokkr run elivagar-datasets -- download-ocean
-brokkr run elivagar-datasets -- download-natural-earth
-
-# Suite
-brokkr suite elivagar [--bench [N]] [--dataset D] [--variant V]
-```
+The resolvers' `--commit` (devkit `archive`, corpus commands) picks which
+archive to open, never which toolchain to build; `--file` is the escape hatch
+for archives that are not dataset output, i.e. the world ocean artifact.
 
 **`tilegen` has no pipeline flags**, in either spelling (`brokkr bench
 tilegen` for measured runs, devkit `tilegen` for plain runs; both expand the
@@ -270,11 +289,6 @@ is no `--force`: a run of a dirty tree is stored, marked dirty, listed with
 the root `brokkr.toml` do not count as dirty). `--verbose yes` is a bench
 param that prints the child's captured output.
 
-The remaining typed commands (`planetiler`, `tilemaker`, `suite`) keep
-`--force` (run with dirty git tree, results not stored), `--verbose`,
-`--commit <hash>`, `--features <F>` and `--wait` (queue behind lock instead
-of failing).
-
 ### brokkr.toml and brokkr.d/
 
 The root `brokkr.toml` holds only project-wide settings (`capture_env`,
@@ -288,9 +302,9 @@ its paths, drives, tilegen contract and datasets. A host file looks like:
 data = "data"
 scratch = "data/scratch"
 
-# The tilegen contract. Everything `brokkr tilegen` and devkit `tilegen`
-# pass to elivagar comes
-# from here; there are no override flags. Paths are relative to `data`.
+# The tilegen contract. Everything the tilegen bench and devkit `tilegen`
+# pass to elivagar comes from here; there are no override flags. Paths are
+# relative to `data`.
 [<host>.tilegen.default]
 ocean = [
     "z0-z7:simplified-water-polygons-split-3857/simplified_water_polygons.shp",
@@ -318,9 +332,9 @@ seq = 4704
 - `--dataset denmark --variant locations` - elivagar auto-detects `LocationsOnWays` from the PBF header. That detection reads the header, not the filesystem, and survives on purpose: it is a property of an input that is itself named explicitly and hashed into provenance. `elivagar inspect` prints the header features it found.
 - `xxhash` - XXH128 file hash. Run `brokkr env` to see computed values.
 
-- Datasets are registered by hand in `brokkr.d/hosts/<host>.toml` for now:
-  `brokkr download <region>` no longer exists in brokkr, and nothing in-tree
-  registers a downloaded PBF yet. Fill `xxhash` from `brokkr env`.
+- Datasets are registered with `elivagar-datasets download <region>`, which
+  writes the raw, indexed and locations tables with `xxhash` and `seq`
+  filled in; `elivagar-datasets register` pins a hand-made variant.
 - `scratch` is the host's brokkr scratch drive, `data/scratch` on every host.
   Bench iterations live under it (`bench-iterations/` there, each removed when
   its iteration ends), deliberately outside elivagar's own `--tmp-dir`

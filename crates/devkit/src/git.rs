@@ -25,7 +25,9 @@ impl Commit {
         self.0[..SHORT_HASH_LEN].to_owned()
     }
 
-    fn parse(value: &str) -> Result<Self, String> {
+    /// Accept a full object id as recorded elsewhere (an archive's build
+    /// provenance), refusing anything abbreviated or non-hex.
+    pub fn parse(value: &str) -> Result<Self, String> {
         if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(format!(
                 "commit id must be 40 or 64 hexadecimal characters; got {value:?}"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/lib", "crates/cli", "crates/corpus", "crates/devkit", "crates/datasets"]
+members = ["crates/lib", "crates/cli", "crates/corpus", "crates/devkit", "crates/datasets", "crates/tools"]
 # A plain build selects only the product, so it yields the one `elivagar`
 # executable. The dev tools are built by name (`brokkr run elivagar-corpus`,
 # `brokkr run --with elivagar elivagar-devkit`),

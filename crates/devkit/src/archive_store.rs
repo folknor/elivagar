@@ -115,9 +115,12 @@ impl ArchiveStore {
         let path = self.path_for(&key);
         if !path.exists() {
             return Err(DevError::Config(format!(
-                "no {} build for {}; run `brokkr tilegen --variant {}` first (looked for {})",
+                "no {} build for {}; run `brokkr run --with elivagar --with-commit {} \
+                 elivagar-devkit -- tilegen --dataset {} --variant {}` first (looked for {})",
                 key.variant,
                 key.commit,
+                key.commit,
+                key.dataset,
                 key.variant,
                 path.display()
             )));
@@ -193,9 +196,30 @@ impl ArchiveStore {
     /// Remove archives of one `(dataset, variant)` beyond the newest `keep`
     /// by modification time, returning how many were removed.
     fn prune_group(&self, dataset: &str, variant: &str, keep: usize) -> io::Result<usize> {
+        let mut removed = 0;
+        for path in self.prune_candidates(dataset, variant, keep)? {
+            if std::fs::remove_file(path).is_ok() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// The archives of one `(dataset, variant)` beyond the newest `keep` by
+    /// modification time: what retention, and `clean --archives --keep N`,
+    /// remove. Only names [`Self::path_for`] constructs for the group are
+    /// candidates, so hand-named files, the ocean artifact and pre-rename
+    /// archives are never among them. Filenames are never parsed back into
+    /// keys, since dataset names carry hyphens.
+    pub fn prune_candidates(
+        &self,
+        dataset: &str,
+        variant: &str,
+        keep: usize,
+    ) -> io::Result<Vec<PathBuf>> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
         let mut archives: Vec<(SystemTime, PathBuf)> = Vec::new();
@@ -208,17 +232,18 @@ impl ArchiveStore {
             if !Self::matches_name(name, dataset, variant) {
                 continue;
             }
-            let modified = entry.metadata()?.modified()?;
-            archives.push((modified, path));
+            let metadata = entry.metadata()?;
+            if !metadata.is_file() {
+                continue;
+            }
+            archives.push((metadata.modified()?, path));
         }
         archives.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-        let mut removed = 0;
-        for (_, path) in archives.iter().skip(keep) {
-            if std::fs::remove_file(path).is_ok() {
-                removed += 1;
-            }
-        }
-        Ok(removed)
+        Ok(archives
+            .into_iter()
+            .skip(keep)
+            .map(|(_, path)| path)
+            .collect())
     }
 
     fn matches_name(file_name: &str, dataset: &str, variant: &str) -> bool {
@@ -286,6 +311,54 @@ impl ArchiveStore {
             .collect();
         if found.len() == 1 { found.pop() } else { None }
     }
+}
+
+/// The commit the elivagar that wrote `archive` was built from, read from the
+/// archive's own provenance (`elivagar.build.elivagar.commit`).
+///
+/// This, not the live checkout's HEAD, is what an admitted archive is named
+/// by: `brokkr run --with elivagar --with-commit X` runs a binary built from
+/// X while HEAD names something else, and naming its output by HEAD would
+/// file X's tiles under the wrong revision. Every way of not knowing - no
+/// readable metadata, no contract, no build block, the `unknown` stamp a
+/// build without git records, anything but a full object id - is an error,
+/// never a fallback to HEAD.
+pub fn built_commit(archive: &Path) -> Result<crate::git::Commit, DevError> {
+    use elivagar::provenance::{ContractState, extract_contract};
+
+    let refuse = |why: String| {
+        DevError::Verify(format!(
+            "cannot name {}: {why}; the commit that built it is unknown",
+            archive.display()
+        ))
+    };
+    let unreadable =
+        |e: elivagar::DecodeError| refuse(format!("unreadable archive metadata ({e})"));
+    let metadata = elivagar::archive::Archive::open(archive)
+        .map_err(unreadable)?
+        .metadata()
+        .map_err(unreadable)?;
+    let doc = match extract_contract(&metadata) {
+        ContractState::Contract(doc) => doc,
+        ContractState::Absent => return Err(refuse("no elivagar provenance".into())),
+        ContractState::Unavailable(why) => {
+            return Err(refuse(format!("provenance unavailable ({why})")));
+        }
+        ContractState::Invalid => return Err(refuse("invalid provenance".into())),
+        ContractState::UnknownSchema(schema) => {
+            return Err(refuse(format!("unknown provenance schema {schema}")));
+        }
+        ContractState::Incomplete(field) => {
+            return Err(refuse(format!("provenance has no {field}")));
+        }
+    };
+    let commit = doc
+        .build
+        .get("elivagar")
+        .and_then(|repo| repo.get("commit")?.as_str())
+        .ok_or_else(|| refuse("provenance records no build.elivagar.commit".into()))?;
+    crate::git::Commit::parse(commit)
+        .map_err(|e| refuse(format!("build.elivagar.commit is {commit:?} ({e})")))
 }
 
 fn archive_prefix(dataset: &str, variant: &str) -> String {
