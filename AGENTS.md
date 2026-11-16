@@ -71,8 +71,9 @@ workspace and brokkr only builds and launches it via `brokkr run`:
   comparison benches run. `planetiler` (pinned Temurin JDK + Planetiler
   release jar), `tilemaker` (pinned tilemaker build, pinned
   shortbread-tilemaker config rewritten with absolute shapefile paths, and
-  the 4326 ocean; the build needs Boost system, filesystem and
-  program_options 1.66 or newer on the host), `ocean-4326` (the EPSG:4326
+  the 4326 ocean; the build needs the host packages tilemaker's
+  docs/INSTALL.md lists: Boost filesystem and program_options, Lua 5.3,
+  shapelib, sqlite3 and rapidjson dev packages), `ocean-4326` (the EPSG:4326
   ocean shapefiles, full downloaded, simplified reprojected with ogr2ogr).
 
 ```

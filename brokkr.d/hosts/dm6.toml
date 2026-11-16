@@ -11,7 +11,7 @@ data = "nvme"
 scratch = "nvme"
 target = "nvme"
 
-# Shapefiles only - the paths `brokkr download-ocean` extracts to. dm6 has no
+# Shapefiles only - the paths `elivagar-datasets download-ocean` extracts to. dm6 has no
 # ocean-tiles.pmtiles registered because building one is an `ocean-build` run
 # per shapefile release, not per host; add the line here once it has one.
 [dm6.tilegen.default]

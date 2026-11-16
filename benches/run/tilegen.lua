@@ -1,5 +1,6 @@
 -- tilegen: one `elivagar run` of a dataset's PBF variant under the host's
--- tilegen block, the workload the typed `brokkr tilegen --bench` measured.
+-- tilegen block, the workload the former typed `brokkr tilegen --bench`
+-- measured before brokkr dropped its elivagar commands.
 -- The block is bound as the `tilegen` param (host.tilegen.NAME), so the
 -- whole contract is stored with the run, and expanded by lib/tilegen.lua
 -- into exactly the flags the in-tree producer (crates/devkit, `brokkr run`)
@@ -8,7 +9,7 @@
 -- scratch directory, always given explicitly, so no run shares
 -- data/tilegen_tmp with another elivagar process and nothing outlives the
 -- iteration. The archive is never read: checking output is the corpus
--- gate's, `brokkr pmtiles-corpus check`.
+-- gate's, `brokkr run elivagar-corpus -- check`.
 --
 -- The result is the elivagar child's wall (measured = true), launch to
 -- reap, which is what typed --bench reported.

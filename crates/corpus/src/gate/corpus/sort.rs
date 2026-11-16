@@ -154,7 +154,7 @@ struct TempDir {
 
 // The spill directory keeps brokkr's `brokkr-corpus-sort-PID-ID` name and is
 // made under `.brokkr/corpus-sort`, so the leftovers of a killed sort are the
-// ones `brokkr clean` already recognises and removes.
+// ones `elivagar-devkit clean` recognises and removes.
 impl TempDir {
     fn create(base: &Path) -> io::Result<Self> {
         fs::create_dir_all(base)?;

@@ -59,6 +59,10 @@ function bench(params)
     record.tilemaker = first_line(binary_with({ program = "cat" }, i.tilemaker_marker):ok())
     record.shortbread_tilemaker = first_line(binary_with({ program = "cat" }, i.shortbread_marker):ok())
 
+    -- process.lua's one require, `languages`, is optional (pcall) and the
+    -- checkout ships only languages.lua.sample, so its "module not found"
+    -- on stderr is expected. tilemaker's exit status is the completion
+    -- signal.
     local r = binary_with({ program = i.tilemaker, measured = true },
         "--input", params.variant.file,
         "--output", output("tilemaker.pmtiles"),

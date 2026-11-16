@@ -1,12 +1,14 @@
-//! `brokkr compare-tiles` - the lenient per-layer census of two archives.
+//! `elivagar-corpus compare-tiles` - the lenient per-layer census of two
+//! archives.
 //!
-//! Native brokkr code over the linked elivagar crate. It used to build and run
+//! Ported from brokkr's former `brokkr compare-tiles`, native code over the
+//! linked elivagar crate. Before that it built and ran
 //! elivagar's `compare_tiles` cargo example, which carried its own hand-rolled
 //! PMTiles reader and MVT scanner; both now come from the crate, so there is one
 //! decoder in the system rather than three.
 //!
 //! This is the **lenient** half of the pair `elivagar.md` describes: where
-//! `brokkr regress` diffs two archives feature by feature and returns a verdict,
+//! `elivagar-corpus regress` diffs two archives feature by feature and returns a verdict,
 //! this samples tiles and reports per-layer feature counts side by side. It has
 //! no pass/fail and gates nothing - it answers "roughly what changed, and
 //! where" for two archives that may not be comparable at all (different

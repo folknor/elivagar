@@ -51,8 +51,9 @@ struct Cli {
 }
 
 /// The archive selector shared by every corpus subcommand: the same
-/// `[--dataset D] [--variant V] [--commit H | --file P]` resolver brokkr's
-/// `pmtiles-inspect`/`diag`/`svg` use.
+/// `[--dataset D] [--variant V] [--commit H | --file P]` resolver
+/// `elivagar-devkit archive` uses (brokkr's former `pmtiles-inspect`/`diag`/
+/// `svg` wrappers used it too).
 #[derive(Args)]
 struct CorpusArchiveArgs {
     /// Dataset name from brokkr.toml

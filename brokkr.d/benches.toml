@@ -1,6 +1,6 @@
 # Script benches (`brokkr man bench`, `brokkr man bench-config`), run as
 # `brokkr bench NAME ...` and stored in brokkr's per-user bench store, which
-# `brokkr results` reads. They replace the typed measured commands
+# `brokkr results` reads. They replace the former typed measured commands
 # (`brokkr tilegen --bench/--hotpath/--alloc`, `brokkr pmtiles-writer`,
 # `brokkr node-store`).
 #
@@ -28,7 +28,7 @@
 # what makes the measurement not this workload's: invalid params, a tilegen
 # block the producer would not run, a child that did not complete, a
 # measurement block that does not describe the requested work. Checking
-# output is the corpus gate's (`brokkr pmtiles-corpus check`) and
+# output is the corpus gate's (`brokkr run elivagar-corpus -- check`) and
 # verify's; custom commands live in-tree and run through `brokkr run`.
 #
 # bench_scripts makes `brokkr check` refuse any .lua under benches/ that is

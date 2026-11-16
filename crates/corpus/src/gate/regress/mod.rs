@@ -1,8 +1,10 @@
-//! `brokkr regress` - the two-archive semantic diff (tier-3 attribution).
+//! `elivagar-corpus regress` - the two-archive semantic diff (tier-3
+//! attribution).
 //!
-//! Native brokkr code over the linked elivagar crate since the corpus redesign;
-//! it used to shell out to `elivagar regress`, which no longer exists. brokkr
-//! owns the adjudication, elivagar owns the pipeline and the decode surface.
+//! Ported from brokkr, where it ran as `brokkr regress` (native code over the
+//! linked elivagar crate since the corpus redesign; before that it shelled out
+//! to `elivagar regress`, which no longer exists). This crate owns the
+//! adjudication, the library owns the pipeline and the decode surface.
 //!
 //! What it computes: a semantic diff of two PMTiles archives (MVT + gzip only).
 //! Every tile is reduced to a canonical form - layers sorted, features sorted,
@@ -22,10 +24,11 @@
 //! (adjudicating artifact-active vs computed output, pricing an intended config
 //! change). A hard refusal here would block those and push people back to a raw
 //! spelling that no longer exists. Comparability is the caller's
-//! responsibility; `brokkr pmtiles-inspect` reads the provenance blocks, and a
-//! cross-variant comparison reports six-figure diffs on two correct builds.
+//! responsibility; `brokkr run elivagar -- inspect <path>` (path from
+//! `elivagar-devkit archive`) reads the provenance blocks, and a cross-variant
+//! comparison reports six-figure diffs on two correct builds.
 //!
-//! The standing output gate is `brokkr pmtiles-corpus check`, not this.
+//! The standing output gate is `elivagar-corpus check`, not this.
 
 use std::path::Path;
 

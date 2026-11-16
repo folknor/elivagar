@@ -14,7 +14,8 @@ data = "nvme"
 scratch = "nvme"
 target = "nvme"
 
-# The tilegen contract. `brokkr tilegen` is configured entirely from here -
+# The tilegen contract. `elivagar-devkit tilegen` and the tilegen bench are
+# configured entirely from here -
 # there are no override flags, and nothing is auto-detected. brokkr used to
 # stat data/ for the ocean shapefiles and pass whichever it found, which meant
 # two runs of the same binary on the same PBF could produce different ocean
