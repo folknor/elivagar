@@ -26,82 +26,133 @@ Invoked as `brokkr` from the project root (reads `./brokkr.toml` for project det
 - `brokkr check [-- args]` - run clippy + tests. Supports `--features` and `--no-default-features`
 - `brokkr env` - show environment info and dataset status with computed XXH128 hashes (copy into the `xxhash` field in `brokkr.toml`)
 - `brokkr results` - table of recent results. `brokkr results [UUID]` - look up specific result by UUID prefix (shows full detail + hotpath report)
-- `brokkr results [--commit X] [--compare A B] [--command CMD] [--mode M] [--grep STR] [--grep-v STR] [--dataset D] [--meta K=V] [--env K=V] [--top N]` - query/compare benchmark results from SQLite. `--mode` filters by measurement mode (`bench`/`hotpath`/`alloc`); `--grep` substring-matches against both the subprocess `cli_args` and the recorded `brokkr_args` (use it to find runs by flag/axis); `--grep-v` excludes. Use `--top 0` to show all hotpath functions. Use `--compare A B --mode hotpath` to diff two hotpath runs.
+- `brokkr results [--commit X] [--compare A B] [--command CMD] [--param K=V] [--grep STR] [--grep-v STR] [--env K=V] [--top N] [--mode M] [--dataset D] [--meta K=V]` - query/compare runs. Typed rows from `.brokkr/results.db` print first, then this project's script-bench runs from the bench store (or results server). For bench runs: `--command` substring-matches the bench name; `--param NAME=VALUE` matches a bound param exactly (`--param dataset=denmark`; it excludes every typed row); `--grep`/`--grep-v` substring-match brokkr's argv, every child's argv, child env additions and captured env as `NAME=VALUE`; `--env` matches a captured variable exactly. `--mode`, `--dataset` and `--meta` apply only to the historical typed rows and exclude every bench run. `--compare A B` pairs bench runs by bench, params and measurement kind (timing, `--hotpath`, `--alloc` never pair with each other), clean-tree runs only, so a hotpath diff is a plain `--compare` of two `brokkr bench --hotpath` runs. `--top 0` shows all hotpath functions.
 - `brokkr sidecar <UUID> --samples [--fields F1,F2] [--every N] [--phase P] [--range A..B] [--where EXPR]` - query sidecar /proc samples (JSONL, downsampled, per-phase, filtered); `--stat FIELD` for stats on one field
 - `brokkr sidecar <UUID> --durations` - phase duration table from markers
 - `brokkr sidecar --compare <A> <B>` - phase-aligned sidecar comparison
 - `brokkr sidecar dirty` - inspect last failed/dirty run
-- `brokkr clean` - remove tilegen_tmp and scratch files
+- `brokkr clean` - reclaims free launch leases (a script-bench iteration's directory under `<scratch>/bench-iterations/` included, unless still borrowed), wipes and recreates the host scratch dir (`data/scratch`) and removes `data/tilegen_tmp` (the `--tmp-dir` brokkr hands elivagar), both through the reservation gate so a live bench iteration keeps them; also removes `corpus-calibrands/`, stale sidecar FIFOs and brokkr run-artefact trees. Spares the durable tilegen archives (`--archives [--keep N]` prunes them) and never touches `.brokkr/results.db`, `.brokkr/sidecar.db` or the bench store. `--dry-run` lists without deleting
+- `brokkr bench [NAME]` - run a registered script bench (see Elivagar commands); bare, it lists the benches
 - `brokkr history [--command CMD] [--project P] [--failed] [--since DATE] [--slow MS] [-n N] [--all]` - query global command history (stored in `$XDG_DATA_HOME/brokkr/history.db`). Every brokkr invocation is recorded with timing, exit status, project, and git context. Works from any directory.
 
 ### Elivagar commands
 
-Commands are top-level (no `bench`/`hotpath` namespace). Measurement modes are flags: `--bench [N]` (full benchmark, N runs), `--hotpath [N]` (function-level timing), `--alloc [N]` (allocation tracking). Without a measurement flag, the command does a plain build+run.
+brokkr's job here is measurement. Elivagar-specific tooling lives in this
+workspace and brokkr only builds and launches it via `brokkr run`:
+
+- `crates/lib` - the `elivagar` library
+- `crates/cli` - `elivagar-cli`, the `elivagar` binary
+- `crates/corpus` - `elivagar-corpus`: the corpus gate (`check`, `bless`,
+  `render`, `render-manifest`, `rings`, `mutate`), `regress` and
+  `compare-tiles`, linking `crates/lib` by path
+- `crates/devkit` - `elivagar-devkit`: `tilegen` and `ocean-build` plain runs.
+  It reads brokkr.toml and its `brokkr.d/` includes, resolves git, and owns
+  the durable archive store `data/tilegen/<dataset>-<variant>-<commit>.pmtiles`.
+  A global `--dry-run` goes before the subcommand.
 
 ```
-# Measured commands
-brokkr tilegen [--bench [N] | --hotpath [N] | --alloc [N]] [--dataset D]
-               [--variant V] [--skip-to ocean|sort|assemble] [--dry-run]
-               [--stop MARKER]
-brokkr pmtiles-writer [--bench [N] | --hotpath [N] | --alloc [N]] [--tiles N]
-brokkr node-store [--bench [N] | --hotpath [N] | --alloc [N]] [--nodes N]
+# In-tree tools (plain runs, nothing measured or stored in results.db)
+brokkr run --with elivagar elivagar-devkit -- [--dry-run] tilegen
+           [--dataset D] [--variant V] [--skip-to ocean|sort|assemble]
+brokkr run --with elivagar elivagar-devkit -- [--dry-run] ocean-build
+# Corpus, regress, compare (corpus dir defaults to corpus/<dataset>;
+# resolver --variant defaults to raw)
+brokkr run elivagar-corpus -- check|bless|render|render-manifest|rings|mutate
+           [--dataset D] [--variant V] [--commit H | --file P]
+           [--corpus DIR] [...]
+brokkr run elivagar-corpus -- regress [--dataset D] [--variant V]
+           [--commit H | --file P]
+           (--against PATH | --against-commit H) [--against-variant V]
+           [--tol N --max-moved M ...]
+brokkr run elivagar-corpus -- compare-tiles <file_a> <file_b> [--sample N]
+# Archive inspection on an explicit path
+brokkr run elivagar -- inspect|diag|svg|verify <path> [...]
+# THE standing output gate: fresh denmark locations build + corpus digest
+# check against the committed corpus/denmark/ baseline:
+#   brokkr run --with elivagar elivagar-devkit -- tilegen --dataset denmark --variant locations
+#   brokkr run elivagar-corpus -- check --dataset denmark --variant locations
+```
+
+Measured runs are brokkr script benches: registered in
+`brokkr.d/benches.toml` (its header comment is the layout and the rules a
+bench follows), with the Lua in `benches/<family>/<name>.lua` and shared
+modules in `benches/lib/`. brokkr's own options go BEFORE the bench name,
+the bench's params after it; `brokkr bench <name> --help` lists the params
+and their defaults, `brokkr man bench` documents the runner. The typed
+`brokkr tilegen --bench/--hotpath/--alloc`, `brokkr pmtiles-writer` and
+`brokkr node-store` are superseded by these.
+
+```
+# Measured runs: brokkr options, then the bench name, then its params
+brokkr bench [--iterations N] [--hotpath | --alloc] [--commit REF] [--dry-run]
+             tilegen [--dataset D] [--variant V] [--tilegen BLOCK]
+                     [--skip-to ocean|sort|assemble] [--stop MARKER]
+brokkr bench [...] pmtiles-writer [--tiles N] [--runs N]
+brokkr bench [...] node-store [--nodes M] [--ways K] [--random M] [--runs N]
+                              [--build-only yes|no]
+brokkr bench --test        # the bench contract tests
+```
+
+`--iterations` defaults to the bench table's setting (3 when absent) and the
+result is the fastest iteration. `--hotpath` / `--alloc` build with the
+bench's `hotpath_features` / `alloc_features` and require the marked child's
+report; a profiled run pairs only with runs of the same class. `--tilegen`
+picks the host's tilegen block (default `default`). `--skip-to` costs an
+untimed setup run per iteration: a script bench keeps no state between
+iterations, so each iteration first runs the same argv without `--skip-to`
+up to the checkpoint, then times the resumed run - the checkpoint is always
+the same commit, block and input. `--stop` ends the measured child at a
+phase marker; under `--hotpath`/`--alloc` that loses the report (elivagar
+does not cancel on SIGTERM), so profile full runs.
+
+The brokkr commands below remain. The thin archive wrappers (`verify pmtiles`,
+`pmtiles-inspect`, `diag`, `svg`, `pmtiles-stats`, `suite elivagar`) are slated
+for deletion in favour of `brokkr run elivagar -- ...` on a path; prefer the
+in-tree spelling.
+
+```
+# Competitor measured commands
 brokkr planetiler [--bench [N]] [--dataset D] [--variant V]
 brokkr tilemaker [--bench [N]] [--dataset D] [--variant V]
 
-# Verification
+# Verification (wrapper, slated for deletion)
 brokkr verify pmtiles [--dataset D] [--variant V] [--commit H | --file P]
                       [--geometry-stats] [--unique-payloads]
-# Same archive resolver as pmtiles-inspect/diag/svg/regress: --commit picks
-# which archive to open, never which toolchain to build. --file is the escape
-# hatch for archives that are not dataset output, i.e. the world ocean
-# artifact. --unique-payloads verifies each distinct compressed payload once
-# while still accounting for every addressed tile - the only tractable way to
-# verify the run-heavy artifact, which addresses ~23x more tiles than it
-# stores payloads.
-# THE standing output gate: fresh denmark locations build + corpus digest
-# check against the committed corpus/denmark/ baseline:
-#   brokkr tilegen --dataset denmark --variant locations
-#   brokkr pmtiles-corpus check --dataset denmark --variant locations
-# (native brokkr code linking the elivagar crate - the corpus redesign
-# of 2026-07-24 moved the gate machinery into brokkr; there is no raw
-# elivagar spelling anymore. See the corpus sections below.)
+# --commit picks which archive to open, never which toolchain to build.
+# --file is the escape hatch for archives that are not dataset output,
+# i.e. the world ocean artifact. --unique-payloads verifies each distinct
+# compressed payload once while still accounting for every addressed tile -
+# the only tractable way to verify the run-heavy artifact, which addresses
+# many times more tiles than it stores payloads.
 
-# Corpus, regress, ocean artifact (native brokkr code over the linked
-# elivagar crate; corpus dir defaults to corpus/<dataset>; durable
-# archives are <dataset>-<variant>-<commit>.pmtiles, resolver --variant
-# defaults to raw)
-brokkr pmtiles-corpus check|bless|render|render-manifest|rings|mutate
-                      [--dataset D] [--variant V] [--commit H | --file P]
-                      [--corpus DIR] [...]
-brokkr regress [--dataset D] [--variant V] [--commit H | --file P]
-               (--against PATH | --against-commit H) [--against-variant V]
-               [--tol N --max-moved M ...]
-brokkr ocean-build [--dry-run]
-
-# Archive inspection (wrap the elivagar subcommands; named pmtiles-inspect
+# Archive inspection wrappers, slated for deletion (named pmtiles-inspect
 # because brokkr inspect is pbfhogg's PBF inspector)
 brokkr pmtiles-inspect [--dataset D] [--commit H | --file P]
 brokkr diag [--dataset D] [--commit H | --file P] -z Z -x X -y Y
 brokkr svg [--dataset D] [--commit H | --file P] -z Z -x X -y Y [-W] [-H] [-l] [-o]
 
-# Utilities
-brokkr compare-tiles <file_a> <file_b> [--sample N]
-brokkr download-ocean
-brokkr download-natural-earth
-brokkr download <region> [--osc-seq N]  # PBF + indexed + OSC diffs, auto-registers in brokkr.toml
+# Downloads (in-tree, crates/datasets)
+brokkr run elivagar-datasets -- download-ocean
+brokkr run elivagar-datasets -- download-natural-earth
 
 # Suite
 brokkr suite elivagar [--bench [N]] [--dataset D] [--variant V]
 ```
 
-**`tilegen` has no pipeline flags.** Ocean inputs, tile format, budgets and
-geometry all live in `[<host>.tilegen.default]` in brokkr.toml: either it is
+**`tilegen` has no pipeline flags**, in either spelling (`brokkr bench
+tilegen` for measured runs, devkit `tilegen` for plain runs; both expand the
+block into the same elivagar flags in the same order, the bench differing only
+in its output path and an explicit `--tmp-dir` inside the iteration's
+scratch). Ocean inputs, tile format, budgets and
+geometry all live in a `[<host>.tilegen.<block>]` table (`default` unless
+`--tilegen` names another) in the host's
+`brokkr.d/hosts/<host>.toml`: either it is
 explicit in the block, or it is not set. What remains on the command line is
-the input axis (`--dataset`, `--variant`), the measurement mode, and the
-per-invocation resume point (`--skip-to`). To A/B a setting, edit the block -
-the resolved value lands in the results DB as the literal subprocess
-invocation in `cli_args`, so `brokkr results --grep` still finds any arm after
-the fact.
+the input axis (`--dataset`, `--variant`), the block choice, the measurement
+mode, and the per-invocation resume point (`--skip-to`). To A/B a setting,
+edit the block or add a second one - the bench run stores the whole block as
+its bound param plus every child's argv, so `brokkr results` still tells the
+arms apart after the fact.
 
 That inversion is deliberate. A flag that can be omitted has a default
 somewhere else, and this pipeline kept losing to exactly that: brokkr used to
@@ -111,20 +162,21 @@ invocation saying how. `meta.*` kv pairs remain reserved for runtime
 observations only; anything derivable from the invocation is not duplicated
 there.
 
-Two flags worth knowing: `--dry-run` validates argv, config and path
-resolution without building or running, which is how you sanity-check a queued
-script before leaving it overnight; `--stop MARKER` kills the child when that
-sidecar marker fires, for benchmarking one phase.
+Two flags worth knowing: `brokkr bench --dry-run` checks the invocation
+without building or running, which is how you sanity-check a queued script
+before leaving it overnight; `--stop MARKER` (a tilegen param) ends the
+measured child when that sidecar marker fires, for benchmarking one phase.
 
 ### Sidecar profiler
 
-Every `--bench`, `--hotpath`, and `--alloc` run automatically samples
-`/proc/{pid}/{stat,io,status}` at 100ms intervals AND reads phase markers plus
-application counters from a FIFO. All of it lands in `.brokkr/sidecar.db`
-(gitignored, local-only), NOT results.db. Preserved even if the child is
-OOM-killed. The git-tracked `.brokkr/results.db` keeps only the small per-run
-row (`elapsed_ms` plus git/host/env metadata and the literal `cli_args`); the
-whole metric firehose lives in the sidecar.
+Every child of a `brokkr bench` run (timing, `--hotpath` or `--alloc`) has
+`/proc/{pid}/{stat,io,status}` sampled at 100ms intervals AND its phase
+markers plus application counters read from a FIFO. All of it is stored with
+the bench run in brokkr's bench store, not in the git-tracked
+`.brokkr/results.db`, and is preserved even if the child is OOM-killed.
+`brokkr sidecar <uuid>` reads one child's record through the views below.
+(Runs of the superseded typed commands keep theirs in the local-only
+`.brokkr/sidecar.db`, read by the same command.)
 
 brokkr creates the FIFO, sets `BROKKR_MARKER_FIFO` in the child's environment,
 and drains it on a background thread. Two line formats share the FIFO:
@@ -132,12 +184,12 @@ and drains it on a background thread. Two line formats share the FIFO:
 - Counters: `{timestamp_us} @{name}={value}\n` (value must parse as i64 or the
   line is dropped - there is no string/categorical counter channel)
 
-Emission lives in `src/debug.rs` (`emit_marker`, `emit_counter`,
+Emission lives in `crates/lib/src/debug.rs` (`emit_marker`, `emit_counter`,
 `emit_counter_u64`/`_usize`, `emit_alloc_boundary`) - OnceLock fd
 caching, O_NONBLOCK, silent no-op when `BROKKR_MARKER_FIFO` is unset. That means
 the metrics are visible ONLY through `brokkr sidecar <uuid>` after a measured
-run: a bare `elivagar run`, or `brokkr tilegen` with no measurement flag, emits
-none of them (run mode stores nothing and attaches no sidecar).
+run: a bare `elivagar run` or devkit `tilegen` emits none of them (a plain
+run stores nothing and attaches no sidecar).
 
 What elivagar emits:
 - Phase boundary markers, and ONLY these: `PHASE12_START/END`, `OCEAN_START/END`,
@@ -145,7 +197,7 @@ What elivagar emits:
   boundaries - the marker-consuming views (default summary, `--durations`,
   `--phase`) each treat a marker as a segment boundary, so keeping the stream to
   ~4 boundaries is what keeps those views compact.
-- `<category>_wait_ns` cumulative stall counters (`src/debug.rs`: the `WAIT`
+- `<category>_wait_ns` cumulative stall counters (`crates/lib/src/debug.rs`: the `WAIT`
   static plus the `wait_span` RAII guard). One per blocking category
   (`sort_chunk_write`, `assemble_partition_batch`, `assemble_encode_input`,
   `pmtiles_write`, ...); each `wait_span` adds its measured nanoseconds to the
@@ -157,7 +209,7 @@ What elivagar emits:
   belongs in the counter channel - a per-event marker would flood the phase
   views. brokkr's `--stalls` rolls up every `*_wait_ns` counter (max per name,
   since they are cumulative) as a fraction of wall.
-- `phase12_*_ns` actor busy counters (`src/debug.rs`: the `BUSY` static,
+- `phase12_*_ns` actor busy counters (`crates/lib/src/debug.rs`: the `BUSY` static,
   same `wait_span` guard, flushed by the same `emit_wait_counters()`). Busy
   time on phase12's actors - ordered-consumer node-block work and
   drain-thread result handling are serial-stage time; plan build and the
@@ -210,18 +262,34 @@ Query with `brokkr sidecar <uuid>` (JSONL by default, `--human` for tables):
 
 ### Common flags
 
-All measurement commands share: `--force` (run with dirty git tree, results not stored), `--verbose` (full output), `--commit <hash>` (build and benchmark an old commit), `--features <F>` (cargo features), `--wait` (queue behind lock instead of failing).
+`brokkr bench` takes its own options before the bench name: `--iterations N`,
+`--hotpath`, `--alloc`, `--commit REF` (build REF in a persistent worktree and
+run it; the bench scripts are always the working tree's), `--dry-run`. There
+is no `--force`: a run of a dirty tree is stored, marked dirty, listed with
+`-dirty` by `brokkr results` and never compared (changes to `.md` files and
+the root `brokkr.toml` do not count as dirty). `--verbose yes` is a bench
+param that prints the child's captured output.
 
-### brokkr.toml
+The remaining typed commands (`planetiler`, `tilemaker`, `suite`) keep
+`--force` (run with dirty git tree, results not stored), `--verbose`,
+`--commit <hash>`, `--features <F>` and `--wait` (queue behind lock instead
+of failing).
+
+### brokkr.toml and brokkr.d/
+
+The root `brokkr.toml` holds only project-wide settings (`capture_env`,
+`[bin]`, `[cargo_env]`) and an `include` list. The rest is split under
+`brokkr.d/`: `checks.toml` (check sweeps and test settings), `lints.toml`
+(text lints and script checks), and one `hosts/<host>.toml` per host holding
+its paths, drives, tilegen contract and datasets. A host file looks like:
 
 ```toml
-project = "elivagar"
-
 [<host>]
 data = "data"
 scratch = "data/scratch"
 
-# The tilegen contract. Everything `brokkr tilegen` passes to elivagar comes
+# The tilegen contract. Everything `brokkr tilegen` and devkit `tilegen`
+# pass to elivagar comes
 # from here; there are no override flags. Paths are relative to `data`.
 [<host>.tilegen.default]
 ocean = [
@@ -247,29 +315,33 @@ seq = 4704
   Drop the `.pmtiles` line for an artifact-absent arm; `brokkr results --grep`
   separates the arms afterwards, because the resolved value is in `cli_args`.
 - `pbf.<variant>` - PBF files keyed by variant name. `--variant` selects (default: `raw`).
-- `brokkr tilegen --dataset denmark --variant locations` - elivagar auto-detects `LocationsOnWays` from the PBF header. That detection reads the header, not the filesystem, and survives on purpose: it is a property of an input that is itself named explicitly and hashed into provenance. `elivagar inspect` prints the header features it found.
+- `--dataset denmark --variant locations` - elivagar auto-detects `LocationsOnWays` from the PBF header. That detection reads the header, not the filesystem, and survives on purpose: it is a property of an input that is itself named explicitly and hashed into provenance. `elivagar inspect` prints the header features it found.
 - `xxhash` - XXH128 file hash. Run `brokkr env` to see computed values.
 
-Benchmark results stored in `.brokkr/results.db` (SQLite, tracked in git). Each
-`--bench` row is one number plus provenance: brokkr's OWN external wall-clock
-`elapsed_ms` (best-of-N, measured by brokkr wrapping the subprocess start to
-exit - the same pbfhogg-parity path), plus git/host/env metadata and the literal
-`cli_args`/`brokkr_args`. tilegen no longer self-reports timing on stderr: brokkr
-reads nothing from tilegen's stderr in `--bench`, and every pipeline metric goes
-to sidecar.db (above), not the results row. `--hotpath`/`--alloc` rows
-additionally carry the hotpath JSON timing/alloc report (and that capture path
-still scrapes stderr, so those rows also show node-store stats and the
-locations-on-ways flag - the `--bench` row does not). Runs with different flags
-are distinguishable via `cli_args`/`brokkr_args` - `brokkr results --grep ...`
-finds any flag combination. Bench and hotpath require a clean git tree (ignoring
-`*.md` and `.brokkr/results.db`); use `--force` to run anyway (results will not
-be stored). Example: `brokkr tilegen --bench --force --dataset denmark`.
+- Datasets are registered by hand in `brokkr.d/hosts/<host>.toml` for now:
+  `brokkr download <region>` no longer exists in brokkr, and nothing in-tree
+  registers a downloaded PBF yet. Fill `xxhash` from `brokkr env`.
+- `scratch` is the host's brokkr scratch drive, `data/scratch` on every host.
+  Bench iterations live under it (`bench-iterations/` there, each removed when
+  its iteration ends), deliberately outside elivagar's own `--tmp-dir`
+  (`data/tilegen_tmp`, the default for plain runs), which every full run wipes.
 
-**NEVER run two elivagar processes at the same time.** They share `data/tilegen_tmp/` (causes crashes) and hotpath uses conflicting cargo feature flags (causes build conflicts). Always run sequentially.
+Bench results go to brokkr's bench store - the per-user `bench.db`, or the
+results server when `results_server` is set - not to the git-tracked
+`.brokkr/results.db`, which holds the typed-command history. `brokkr results`
+reads both. A bench run stores, per arm, its bound params (the whole tilegen
+block included), its measurement (the fastest iteration's elivagar child
+wall, launch to reap, or the hotpath/alloc report), every child's argv,
+ending, /proc samples and marker FIFO records, and its stderr's tail. Every
+attempted run is stored, failed and dirty ones included; dirty runs are
+marked and never compared. Timing, `--hotpath` and `--alloc` runs pair only
+within their own class.
+
+**NEVER run two elivagar processes at the same time.** Plain runs share `data/tilegen_tmp/` (causes crashes), and hotpath uses conflicting cargo feature flags (causes build conflicts). Bench iterations pass their own `--tmp-dir`, but still contend for the machine and the build. Always run sequentially.
 
 ## Scripts
 
-Build/bench/verify tooling is in `brokkr`; the scripts that matter are the
+Build and bench tooling is in `brokkr`, gate and devkit tooling in `crates/`; the scripts that matter are the
 Node validation oracles below. (`scripts/ocean-coverage.sh` and the
 `ocean-coverage` subcommand were deleted 2026-07-24: the verbatim baseline
 they needed required `--no-ocean-simplify`, removed 2026-07-14, and the
@@ -286,12 +358,12 @@ false negative - is covered baseline-free by `zoom-overlay.mjs`,
 - `zoom-overlay.mjs <file.pmtiles> <z> <x> <y> <detailZ> [layer] [-o out.svg]` - low-zoom generalization adjudicator: one tile's polygons as fill with the same archive's detailZ geometry superimposed as a rescaled outline. A correct generalization tracks the outline within a few pixels evenhandedly; seam wedges, dropped fragments and spikes show as fill leaving the line locally. Render the same composite from a known-bad archive first to calibrate the eyeball.
 - `ring-grouping-oracle.mjs <file.pmtiles> -o <out.txt>` - emits the canonical polygon ring grouping dump used to differentially inspect corpus rendering.
 - `validate.mjs` / `roundtrip.mjs` - vtvalidate structural checks and decode/re-encode round-trip (NOTE: a round-trip through any single decoder cannot catch symmetric encoder/decoder convention bugs - that is what the earcut oracle is for).
-- `boundary-line-oracle.mjs <file.pmtiles> [--only categories] [--census] [--min-extent N] [--strict]` - the `boundaries`-layer line-fidelity instrument. Decodes every line feature into its MoveTo-delimited sub-lines and counts, per zoom, palindromes (a sub-line equal to its own reverse), spurs (a retrace apex not at the sub-line ends, closure pair excluded for closed loops), intra-feature duplicates, and cross-feature duplicates (exact and reversed) - the last catches the maritime=true/false double-draw that `merge_same_attr_geometries` cannot merge across differing attributes. Only the two duplicate categories gate (exit 1): they read 0 on correct output. Palindrome and spur are ADVISORY: as output shapes they cannot separate a fabricated out-and-back from real geometry that quantization made degenerate, and denmark carries hundreds of those on correct output (2026-09-30 recalibration, reference/performance.md). The merger defects they were built for are gated in code by the witness-based invariant checker in `src/geometry/line_merge.rs`. `--census` adds a per-zoom histogram of retrace extent, `--min-extent N` names only offenders at least N units long, `--strict` gates every category. Run on any change touching boundary-line emission, the line merger, or closed-line simplification.
+- `boundary-line-oracle.mjs <file.pmtiles> [--only categories] [--census] [--min-extent N] [--strict]` - the `boundaries`-layer line-fidelity instrument. Decodes every line feature into its MoveTo-delimited sub-lines and counts, per zoom, palindromes (a sub-line equal to its own reverse), spurs (a retrace apex not at the sub-line ends, closure pair excluded for closed loops), intra-feature duplicates, and cross-feature duplicates (exact and reversed) - the last catches the maritime=true/false double-draw that `merge_same_attr_geometries` cannot merge across differing attributes. Only the two duplicate categories gate (exit 1): they read 0 on correct output. Palindrome and spur are ADVISORY: as output shapes they cannot separate a fabricated out-and-back from real geometry that quantization made degenerate, and denmark carries hundreds of those on correct output (2026-09-30 recalibration, reference/performance.md). The merger defects they were built for are gated in code by the witness-based invariant checker in `crates/lib/src/geometry/line_merge.rs`. `--census` adds a per-zoom histogram of retrace extent, `--min-extent N` names only offenders at least N units long, `--strict` gates every category. Run on any change touching boundary-line emission, the line merger, or closed-line simplification.
 - `line-probe.mjs <file.pmtiles> <z> <x> <y> <featIdx> <subIdx>` - dumps one `boundaries` sub-line exactly as MapLibre decodes it (per-vertex coordinates) plus any spur apexes, for drilling into a boundary-line-oracle offender.
 - `seam-probe.mjs <file.pmtiles> <z> <x> <y> [layer|all] [tolPx]` - cross-ring shared-edge adjudicator for polygon layers, consumer-path decode: classifies segment pairs from different rings as exact (bit-identical shared chain - the pinned-DP guarantee holding on the wire) or near-miss (nearly coincident but diverging - the seam signature). ADVISORY, not a gate: the near-miss count is a continuous measure that cannot separate close geography from a seam without source knowledge, so it names drill-down coordinates for feature-probe/zoom-overlay rather than rendering verdicts. Written for shared-edge seam analysis; use feature-probe/zoom-overlay for drill-down.
 - `line-hausdorff.mjs <a.pmtiles> <b.pmtiles> <zmax> <minx,miny,maxx,maxy>` - per zoom and line layer, over tiles whose bytes differ inside a normalized-Mercator bbox, the distance from each side's in-tile vertices to the other side's nearest line SEGMENT (regress's displacement is vertex-to-vertex, so removing one interior vertex can read as thousands of units). ADVISORY, uncalibrated. Written for the 2026-11-15 per-zoom line simplification landing, where changed ferries, water_lines and land lines stayed within one tolerance (16 units) and the outliers were dropped sub-pixel features plus tiny loops in the tile buffer.
-- `svg-roi.mjs <minx> <miny> <maxx> <maxy> <file.svg...>` - prints every path edge touching a bbox ROI in SVG dumps made with `brokkr svg -o`, so one defect region can be compared across many archives without reading whole tiles (no deps, plain node). Built for the 2026-07-15 stale-ocean-artifact hunt; the archive-bracketing idiom is: dump the same tile from each archive, scan the same ROI, diff the edges.
-- `overlay-diff.mjs [--rings] <overlay.svg...>` - summarizes `brokkr regress --overlay` SVGs: per changed feature pair, the vertices and edges present on only one side, and how many differing edges touch the visible tile square [0, 4096]^2 (no deps, plain node). ADVISORY: 0 touching edges proves a change cannot alter what a tile-clipping fill renderer draws, but says nothing about strokes, translated layers or consumers that draw the buffer. Calibrated both ways on a synthetic pair; written for the 2026-09-30 OCEAN_POLICY_VERSION v5 adjudication, where every changed edge in 40 tiles sat in the right-hand buffer.
+- `svg-roi.mjs <minx> <miny> <maxx> <maxy> <file.svg...>` - prints every path edge touching a bbox ROI in SVG dumps made with `brokkr run elivagar -- svg <path> ... -o`, so one defect region can be compared across many archives without reading whole tiles (no deps, plain node). Built for the 2026-07-15 stale-ocean-artifact hunt; the archive-bracketing idiom is: dump the same tile from each archive, scan the same ROI, diff the edges.
+- `overlay-diff.mjs [--rings] <overlay.svg...>` - summarizes `regress --overlay` SVGs (`brokkr run elivagar-corpus -- regress ... --overlay`): per changed feature pair, the vertices and edges present on only one side, and how many differing edges touch the visible tile square [0, 4096]^2 (no deps, plain node). ADVISORY: 0 touching edges proves a change cannot alter what a tile-clipping fill renderer draws, but says nothing about strokes, translated layers or consumers that draw the buffer. Calibrated both ways on a synthetic pair; written for the 2026-09-30 OCEAN_POLICY_VERSION v5 adjudication, where every changed edge in 40 tiles sat in the right-hand buffer.
 
 ## Oracle discipline
 
@@ -321,7 +393,7 @@ removal; the lesson outlives it.)
 
 ## Architecture
 
-Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)` plus the decode/write surface brokkr's corpus gate links (`archive`, `tile_detail`, `provenance`). CLI uses clap derive with subcommands (`run`, `ocean-build`, `inspect`, `verify`, `svg`, `diag`) - the corpus and regress subcommands moved to brokkr in the 2026-07-24 corpus redesign.
+Cargo workspace. `crates/lib` is the `elivagar` library crate; `crates/cli` is `elivagar-cli`, which owns the `elivagar` binary and the tests that drive it (cargo hands `CARGO_BIN_EXE_elivagar` only to the package that owns the bin). Module paths below are relative to `crates/lib/src/`. Public API is `elivagar::run(&TilegenConfig)` plus the decode/write surface the corpus gate in `crates/corpus` links (`archive`, `tile_detail`, `provenance`). CLI uses clap derive with subcommands (`run`, `ocean-build`, `inspect`, `verify`, `svg`, `diag`); corpus, regress and compare-tiles live in `crates/corpus` (`elivagar-corpus`), and the brokkr.toml-aware tilegen and ocean-build drivers in `crates/devkit` (`elivagar-devkit`).
 
 ### Modules
 
@@ -350,8 +422,8 @@ Single-crate library + binary. Public API is `elivagar::run(&TilegenConfig)` plu
 - `resources.rs` - budget types, defaults and minimums, thread splits and env knobs, resolved once per run into `Resources` (emitted as `res_*` sidecar counters)
 - `archive/` - PMTiles v3: `header.rs` (the 127-byte header, decoded losslessly, and `TileDecoder`, the one MVT+gzip readability decision), `directory.rs` (directory codec; `TileRun`/`TileRuns`, the leaf sentinel never leaves the codec), `reader.rs` (`Archive`, the only reader: positional reads publicly, a crate-internal mmap for the ocean artifact; validates directory routing and section bounds), `writer.rs` (the writer)
 - `inspect.rs` - PMTiles v3 archive inspector (header + metadata reader)
-- `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG). Viewer-flavored and for the eyeball only - corpus tiles are adjudicated from the canonical renders brokkr commits, never from this output
-- `tile_detail.rs` - wire-order MVT decoder for out-of-crate adjudication: structural detail, no canonicalization, no hashing, selectable unknown-field strictness (strict for brokkr's gate, tolerant for cross-producer comparison). The one decode surface brokkr's canonical hash consumes
+- `svg.rs` - single-tile SVG renderer (decodes MVT geometry from PMTiles, outputs SVG). Viewer-flavored and for the eyeball only - corpus tiles are adjudicated from the canonical renders `elivagar-corpus` commits, never from this output
+- `tile_detail.rs` - wire-order MVT decoder for out-of-crate adjudication: structural detail, no canonicalization, no hashing, selectable unknown-field strictness (strict for the corpus gate, tolerant for cross-producer comparison). The one decode surface the corpus canonical hash consumes
 - `node_index.rs` - node coordinate index (SortedNodeStore for sorted PBFs, flat mmap fallback)
 - `way_index.rs` - flat mmap'd way geometry index
 
@@ -431,13 +503,13 @@ a partial contract would let two archives differing in a fanout cap or the
 simplify factor display identically. `Build`, `Effective` and `Resumed` are
 diagnostic and must never be equality-gated.
 
-For the standing gate, reporting became enforcement: `brokkr pmtiles-corpus
-check` compares the committed contract against this block before reading
-content and refuses a mismatch with the field named. `brokkr regress` reads
-nothing here by design - it diffs whatever two archives it is handed - so for
-ad-hoc comparisons these lines let you refuse; nothing refuses for you.
-elivagar itself only prints the block; since the corpus redesign the
-comparison lives in brokkr, which links this crate.
+For the standing gate, reporting became enforcement: `elivagar-corpus check`
+compares the committed contract against this block before reading
+content and refuses a mismatch with the field named. `elivagar-corpus regress`
+reads nothing here by design - it diffs whatever two archives it is handed - so
+for ad-hoc comparisons these lines let you refuse; nothing refuses for you.
+The `elivagar` binary itself only prints the block; the comparison lives in
+`crates/corpus`, which links the library.
 
 Every way of having no contract names itself - `absent`, `unavailable`,
 `invalid`, an uninterpretable schema, an `INCOMPLETE` contract - because
@@ -452,32 +524,34 @@ Validates a PMTiles archive end-to-end: container integrity, metadata schema, ti
 
 Renders tiles from a PMTiles archive as SVG. Supports single tiles or NxM grids (`-W`/`-H`, default 1x1). `--layers` filters to specific layers (comma-separated, e.g. `ocean,boundaries`). Decodes MVT geometry and draws each layer with a distinct color. Points render as circles, lines as stroked paths, polygons as filled paths with `nonzero` fill-rule (matching MapLibre and OpenLayers, which both fill nonzero; `evenodd` agrees only for well-formed alternating outers/holes and papers over exactly the ring-role bugs worth catching). Background is land-colored (`#f2efe9`). Grid lines drawn between tiles when width or height > 1. Output goes to stdout by default, or to a file with `-o`.
 
-### The standing gate: `brokkr pmtiles-corpus check`
+### The standing gate: `elivagar-corpus check`
 
 **`reference/corpus.md` is the full methodology** - rotation adjudication,
 contract semantics, digest modes, calibration discipline, limitations. The
 terse version: for an output-neutral landing, build fresh and check -
-`brokkr tilegen --dataset denmark --variant locations`, then
-`brokkr pmtiles-corpus check --dataset denmark --variant locations`.
+`brokkr run --with elivagar elivagar-devkit -- tilegen --dataset denmark
+--variant locations`, then `brokkr run elivagar-corpus -- check --dataset
+denmark --variant locations`.
 Exit 0 passes; exit 1 names changed tiles; exit 2 is a contract refusal,
 never a verdict; exit 3 is baseline trouble (damaged or stale baseline),
 never a verdict on the archive. An intended output change rotates the
-baseline with `brokkr pmtiles-corpus bless --dataset denmark --variant
-locations --rotate` inside the landing commit, adjudicated on the corpus
-git diff. A landing with an explicit geometry tolerance gates on `brokkr
-regress` with `--tol N --max-moved M` (the move budget is mandatory - it
-defaults to 0 and `--tol` alone accepts nothing). Routine checks are
-denmark-only.
+baseline with `brokkr run elivagar-corpus -- bless --dataset denmark
+--variant locations --rotate` inside the landing commit, adjudicated on the
+corpus git diff. A landing with an explicit geometry tolerance gates on
+`elivagar-corpus regress` with `--tol N --max-moved M` (the move budget is
+mandatory - it defaults to 0 and `--tol` alone accepts nothing). Routine
+checks are denmark-only.
 
-Since the corpus redesign (2026-07-24, second landing that day), the gate
-is native brokkr code: brokkr links the elivagar crate and owns the
-canonical hash, the digest fold, the contract gating policy, the render
-core, and all verdicts; elivagar's binary no longer has corpus or regress
-subcommands and never reads `corpus/`. There is no raw elivagar spelling
-anymore - the brokkr spellings above are the only spellings. The baseline
-state (`corpus/<dataset>/`, `corpus/style.toml`) stays committed in THIS
-repo so rotations stay atomic with their landings; brokkr is its sole
-reader and writer. elivagar exposes the library surface brokkr consumes:
+The gate lives in `crates/corpus` (`elivagar-corpus`), linking `crates/lib`
+by path. It owns the canonical hash, the digest fold, the contract gating
+policy, the render core, and all verdicts; the `elivagar` binary has no
+corpus or regress subcommands and never reads `corpus/`. (From the 2026-07-24
+corpus redesign until the workspace split this was native brokkr code under
+`brokkr pmtiles-corpus` and `brokkr regress`; the in-tree port keeps the same
+flags and exit codes.) The baseline state (`corpus/<dataset>/`,
+`corpus/style.toml`) is committed in this repo so rotations stay atomic with
+their landings; `elivagar-corpus` is its sole reader and writer. The library
+surface the corpus crate consumes:
 the pmtiles reader (run-level raw access), the `tile_detail` MVT decoder
 with selectable strictness, typed provenance in full, and the writer's
 `add_run`/`set_metadata_verbatim`. Durable archives are named
@@ -485,10 +559,10 @@ with selectable strictness, typed provenance in full, and the writer's
 (default raw; regress adds `--against-variant` for the comparand side);
 a wrong variant fails loudly at resolution, before the archive opens.
 
-### `brokkr regress` - the two-archive semantic diff
+### `elivagar-corpus regress` - the two-archive semantic diff
 
-This takes two explicit archives, with no registry (native brokkr code since
-the corpus redesign; there is no elivagar subcommand). It is the attribution
+Spelled `brokkr run elivagar-corpus -- regress ...`. This takes two explicit
+archives, with no registry. It is the attribution
 instrument (`--overlay` renders per-tile diff SVGs), not the standing gate; the
 natural comparand source is
 `data/tilegen/<dataset>-<variant>-<commit>.pmtiles`. What it
@@ -497,9 +571,9 @@ computes: a semantic diff of two PMTiles archives
 features sorted, merged-feature components sorted - erasing intra-layer
 feature order, the one dimension the pipeline deliberately leaves
 unconstrained across archives, and nothing else). Within-run record order is
-total (chunk-independent sort + paint-order key, `src/sort.rs` +
-the `paint_rank` methods on the kind enums in `src/shortbread/land.rs` and
-`src/shortbread/streets.rs`), so two builds of the same commit are
+total (chunk-independent sort + paint-order key, `crates/lib/src/sort.rs` +
+the `paint_rank` methods on the kind enums in `crates/lib/src/shortbread/land.rs` and
+`crates/lib/src/shortbread/streets.rs`), so two builds of the same commit are
 byte-identical and never need this canonicalization; two builds of
 *different* commits can still legitimately reorder features (e.g. a
 paint-rank table change) without any semantic difference, which is what the
@@ -516,7 +590,7 @@ Comparing a locations archive against a raw build reports a six-figure
 structural diff for two correct builds, as 2026-07-09 and 2026-07-14 showed.
 The corpus gate refuses that comparison mechanically via its contract; regress
 does not, so establish comparability from the provenance blocks (`brokkr
-pmtiles-inspect`) before reading a verdict.
+run elivagar -- inspect <path>`) before reading a verdict.
 
 ### `elivagar diag <FILE> -z <Z> -x <X> -y <Y>`
 
@@ -525,7 +599,7 @@ Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, 
 ## Key conventions
 
 - The global allocator is the system allocator, decided by measurement - do
-  not reintroduce an allocator dependency without a fresh A/B (main.rs has
+  not reintroduce an allocator dependency without a fresh A/B (crates/cli/src/main.rs has
   the numbers; mimalloc and jemalloc lost at `98824b4`)
 - `.unwrap()` forbidden by clippy - use `expect()` or propagate errors
 - Cast lints are strict - annotate with `#[allow(clippy::cast_*)]` where needed
@@ -539,32 +613,34 @@ Diagnoses ocean polygon ring winding for a specific tile. Decodes MVT protobuf, 
 
 Baselines, benchmark machines, gate commands, discipline, and the rules for
 reading hotpath/alloc/bench numbers live in `reference/performance.md`. That
-document plus `.brokkr/results.db` is the measurement record specs cite - though
-after the sidecar migration the tracked results row holds only wall-clock
-`elapsed_ms`; the per-phase timings and per-layer stats a spec wants to quote now
-come from the local-only `.brokkr/sidecar.db` (`brokkr sidecar <uuid>`), so
-capture those numbers into the spec or `reference/performance.md` when they
-matter, since sidecar.db does not travel between machines.
+document plus brokkr's bench store (read through `brokkr results`, which also
+reads the typed-command history in `.brokkr/results.db`) is the measurement
+record specs cite. The bench store is not in git: unless the host publishes to
+a results server, it does not travel between machines, so capture the numbers
+a spec quotes (per-phase timings, per-layer stats) into the spec or
+`reference/performance.md` when they matter.
 
-Typical loop, from a clean tree:
+Typical loop, from a clean tree (a dirty one is stored but marked and never
+compared):
 
 ```
-brokkr tilegen --bench --dataset denmark      # -> UUID, wall-clock best-of-3
-brokkr results <uuid>                          # row: elapsed_ms + provenance
-brokkr sidecar <uuid> --human                  # per-phase RSS / IO / cores
-brokkr sidecar <uuid> --stalls --human         # WAIT_ blocking-time breakdown
-brokkr sidecar <uuid> --counters               # all ~900 metric counters
-brokkr tilegen --hotpath --dataset denmark     # function-level timing report
-brokkr tilegen --alloc  --dataset denmark      # per-function allocation report
+brokkr bench tilegen --dataset denmark          # -> UUID, fastest of 3 iterations
+brokkr results <uuid>                           # the run: params, measurement, children
+brokkr sidecar <uuid> --human                   # per-phase RSS / IO / cores
+brokkr sidecar <uuid> --stalls --human          # WAIT_ blocking-time breakdown
+brokkr sidecar <uuid> --counters                # all ~900 metric counters
+brokkr bench --hotpath tilegen --dataset denmark  # function-level timing report
+brokkr bench --alloc tilegen --dataset denmark    # per-function allocation report
 ```
 
-Never run two elivagar processes at once (shared `tilegen_tmp/`, conflicting
-hotpath feature flags) - the three modes go one at a time.
+Never run two elivagar processes at once (shared `tilegen_tmp/` for plain
+runs, conflicting hotpath feature flags) - the three modes go one at a time.
 
 ## Data
 
-- `data/tilegen_tmp/` - temporary sort chunks (inside gitignored `data/`)
-- Ocean shapefile not included - pass via `--ocean` flag
+- `data/tilegen_tmp/` - elivagar's default `--tmp-dir`: sort chunks for plain runs, wiped by every full run (inside gitignored `data/`)
+- `data/scratch/` - the host's brokkr scratch; bench iterations live under it, each with its own `--tmp-dir`
+- Ocean shapefile not included - fetch with `brokkr run elivagar-datasets -- download-ocean`, pass via `--ocean` flag
 
 ## Document folders
 

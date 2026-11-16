@@ -1,0 +1,47 @@
+# The inputs the build.rs source-identity recipe and its pre-Cargo trigger
+# must agree on: the untracked-file content cap, the Git environment prefix
+# and metadata directory, the paths that are not build inputs, and the
+# root-only exclusions of a no-git tree walk.
+#
+# Read by two parsers. build.rs embeds it with `include_str!` and reads it
+# with the std-only scanner in build/source_inputs.rs, which panics on a
+# malformed file so the build fails loudly. scripts/source_identity.py, the
+# trigger brokkr runs from `[cargo_env]` before every cargo call, reads it
+# with Python's `tomllib`. It lives inside the package so a published crate
+# still carries it.
+#
+# Build-cost hazard. The Rust scanner reads top-level keys only: basic or
+# literal strings, arrays of strings, and non-negative decimal integers
+# (underscores allowed). Both readers refuse unknown, missing and duplicate
+# keys and duplicate entries. If the trigger cannot read this file it prints
+# a fresh `unidentifiable-<time_ns>` on every call, so every cargo call
+# reruns build.rs and recompiles the crate while every gate stays green. The
+# `source-identity-stable` script check turns that red, and
+# crates/lib/tests/source_identity.rs pins that both readers read the same
+# values.
+
+# The largest untracked file hashed by content; above it a file is hashed by
+# length and modification time.
+untracked_content_cap = 4_194_304
+
+# Every variable with this prefix is stripped from Git subprocesses, so a
+# hook's GIT_DIR or GIT_INDEX_FILE cannot point the reads at another
+# repository or index.
+git_environment_prefix = "GIT_"
+
+# Git metadata: marks a checkout, and is skipped at the root of a tree walk.
+git_metadata_directory = ".git"
+
+# Files whose name ends in one of these are not build inputs anywhere in the
+# tree. Nothing compiled reads markdown, and counting it would mark nearly
+# every build dirty and recompile the crate on every doc edit.
+excluded_suffixes = [".md"]
+
+# Repository-relative paths that are not build inputs. results.db is
+# rewritten by every measured brokkr run; counting it would recompile the
+# crate after every benchmark.
+excluded_paths = [".brokkr/results.db"]
+
+# Root-level names skipped when a checkout without git metadata is hashed as
+# a plain tree. Same-named nested directories remain inputs.
+root_tree_exclusions = ["target", "data", "research", ".brokkr", "node_modules"]

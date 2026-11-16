@@ -1,0 +1,39 @@
+[package]
+name = "elivagar-corpus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The elivagar corpus gate, regress diff and compare-tiles census"
+publish = false
+
+[[bin]]
+name = "elivagar-corpus"
+path = "src/main.rs"
+
+[dependencies]
+# The gate reads archives through the in-tree library, linked by path.
+elivagar = { path = "../lib" }
+# brokkr.toml host composition, git and the durable archive store.
+elivagar-devkit = { path = "../devkit" }
+# The streaming canonical tile hash walks MVT bytes with protohoggr's cursor
+# (src/gate/eliv.rs re-exports it); the same version the library uses.
+protohoggr = "0.5.0"
+clap = { version = "4.6", features = ["derive"] }
+# brokkr.toml host composition, and the corpus style and manifest files.
+toml = "1.1.3"
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip as in brokkr, where this code came from: bless re-serializes
+# the contract parsed from archive metadata into the committed contract.json,
+# so a float must parse to the value that prints back as the same text.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# The library's backend, so the workspace links one zlib.
+flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
+rayon = "1.5"
+rustc-hash = "2"
+libc = "0.2"
+
+[lints]
+workspace = true

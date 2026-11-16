@@ -1,0 +1,103 @@
+# Script benches (`brokkr man bench`, `brokkr man bench-config`), run as
+# `brokkr bench NAME ...` and stored in brokkr's per-user bench store, which
+# `brokkr results` reads. They replace the typed measured commands
+# (`brokkr tilegen --bench/--hotpath/--alloc`, `brokkr pmtiles-writer`,
+# `brokkr node-store`).
+#
+# Layout. This file is the registry: one [bench.NAME] table per bench,
+# holding its annotations, build settings and params. The Lua lives in
+# benches/FAMILY/NAME.lua at the repository root, never inline, so the
+# registry stays a list a reader can scan. FAMILY is the elivagar command
+# or cargo target the bench drives (run, bench-pmtiles, ...). NAME is the
+# bench's name and the file's stem both: unique across every family,
+# without a family prefix, lowercase words joined by '-', so
+# `brokkr bench NAME` names one file. Tables here are grouped by family in
+# alphabetical order, one comment line naming each family. script_file
+# resolves against this file's directory, hence the leading "../". Lua
+# shared by several benches goes in the bench_lib directory, benches/lib;
+# no bench script goes there. Load modules with require("stop"),
+# require("tilegen"). A bench's description is one line saying what it
+# measures; what the script does and why belongs in its header comment.
+# version starts at 1 and goes up, with a changelog entry and a new date,
+# whenever a change makes its runs stop comparing with earlier ones.
+#
+# A bench only benchmarks: it sets up its input, times the workload and
+# records the measurement. It never judges the workload's output - no
+# declared answers, no comparison with another tool's output, no check that
+# the archive is right, no answer kept in record. What it may refuse is
+# what makes the measurement not this workload's: invalid params, a tilegen
+# block the producer would not run, a child that did not complete, a
+# measurement block that does not describe the requested work. Checking
+# output is the corpus gate's (`brokkr pmtiles-corpus check`) and
+# verify's; custom commands live in-tree and run through `brokkr run`.
+#
+# bench_scripts makes `brokkr check` refuse any .lua under benches/ that is
+# neither a registered script_file, a bench_lib module nor a contract test.
+# bench_tests holds the contract tests (`brokkr man bench contract-tests`),
+# run by `brokkr check` and by `brokkr bench --test`.
+
+bench_lib = "../benches/lib"
+bench_scripts = "../benches"
+bench_tests = "../benches/tests"
+
+# -- bench-node-store
+
+[bench.node-store]
+script_file = "../benches/bench-node-store/node-store.lua"
+description = "SortedNodeStore build and way-like and random lookups over synthetic nodes, one example process"
+version = 2
+date = 2026-11-16
+changelog = [
+  { version = 1, date = 2026-11-16, note = "Ported typed node-store: the bench_node_store example, process wall ranked, its summary ms recorded" },
+  { version = 2, date = 2026-11-16, note = "Node ID generator keeps IDs under the store's 2^40 cap: large gaps 1% at 10K-100K instead of 20% at 10K-1M, nodes capped at 1000 M; v1 panicked at the default size" },
+]
+target = "bench_node_store"
+profile = "release"
+hotpath_features = ["hotpath"]
+alloc_features = ["hotpath-alloc"]
+params.nodes = { integer = "u32", min = 1, max = 1000, default = "50", help = "synthetic nodes, in millions" }
+params.ways = { integer = "u32", min = 1, default = "4000", help = "way-like lookup groups, in thousands" }
+params.random = { integer = "u32", min = 1, default = "10", help = "random lookups, in millions" }
+params.runs = { integer = "u32", min = 1, default = "1", help = "timed loop repetitions inside the process; build-only repeats the build" }
+params.build-only = { choices = ["yes", "no"], default = "no", help = "yes: build the store only, no lookups" }
+params.verbose = { choices = ["yes", "no"], default = "no", help = "yes: print the example's stderr" }
+
+# -- bench-pmtiles
+
+[bench.pmtiles-writer]
+script_file = "../benches/bench-pmtiles/pmtiles-writer.lua"
+description = "elivagar's and pmtiles-rs's PMTiles writers over synthetic z0-z14 tiles, one example process"
+version = 2
+date = 2026-11-16
+changelog = [
+  { version = 1, date = 2026-11-16, note = "Ported typed pmtiles-writer: the bench_pmtiles example, process wall ranked, each writer's ms recorded" },
+  { version = 2, date = 2026-11-16, note = "Archives written to an explicit --out-dir in the iteration's out/ instead of the hard-coded data/ under the project root" },
+]
+target = "bench_pmtiles"
+profile = "release"
+hotpath_features = ["hotpath"]
+alloc_features = ["hotpath-alloc"]
+params.tiles = { integer = "u64", min = 1, default = "500000", help = "synthetic tiles" }
+params.runs = { integer = "u32", min = 1, default = "1", help = "writes per writer inside the process, best reported" }
+params.verbose = { choices = ["yes", "no"], default = "no", help = "yes: print the example's stderr" }
+
+# -- run
+
+[bench.tilegen]
+script_file = "../benches/run/tilegen.lua"
+description = "elivagar run of a dataset under the host's tilegen block, optionally resumed or stopped at a phase marker"
+version = 1
+date = 2026-11-16
+changelog = [
+  { version = 1, date = 2026-11-16, note = "Ported typed tilegen: the host block bound and expanded as crates/devkit does, explicit --tmp-dir in iteration scratch, skip-to resumed from an untimed setup run, marker stops and profiling" },
+]
+target = "elivagar"
+profile = "release"
+hotpath_features = ["hotpath"]
+alloc_features = ["hotpath-alloc"]
+params.dataset = { from = "datasets", default = "denmark", help = "the dataset" }
+params.variant = { from = "datasets.{dataset}.pbf", default = "raw", help = "the input PBF variant; its locations_on_ways and force_sorted assertions become flags" }
+params.tilegen = { from = "host.tilegen", default = "default", help = "the host's tilegen block, the whole pipeline contract" }
+params.skip-to = { choices = ["ocean", "sort", "assemble"], help = "resume at this phase from a checkpoint an untimed setup run makes in the same iteration" }
+params.stop = { validated = true, help = "stop at a marker: FOO_END, FOO, -FOO, -FOO_END or =FOO_START, for PHASE12, OCEAN, SORT, ASSEMBLE" }
+params.verbose = { choices = ["yes", "no"], default = "no", help = "yes: print the child's captured output" }

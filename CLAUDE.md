@@ -119,6 +119,6 @@ Guide pages under `docs/guide/` ARE hand-written for outside readers. They may
 compress or omit internal detail, but must never contradict `reference/` or
 AGENTS.md.
 
-Run `pnpm build` after touching anything under `docs/`, and
-`cargo package --list` after touching what ships - only `docs/public/*.svg`
-may appear there.
+Run `pnpm build` after touching anything under `docs/`. The published crates
+are `crates/lib` and `crates/cli`, so nothing under `docs/`, `reference/` or
+the repository root ships except the README each manifest names.

@@ -1,0 +1,23 @@
+[package]
+name = "elivagar-datasets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Acquire the ocean and Natural Earth shapefiles elivagar's dev hosts feed tilegen"
+publish = false
+
+# Run as `brokkr run elivagar-datasets -- download-ocean` (or
+# `download-natural-earth`): brokkr holds the machine lock for the whole run.
+# Links no elivagar; transfers go through curl, extraction through unzip.
+[[bin]]
+name = "elivagar-datasets"
+path = "src/main.rs"
+
+[dependencies]
+elivagar-devkit = { path = "../devkit" }
+clap = { version = "4.6", features = ["derive"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,122 @@
+# Text lints and script checks run by `brokkr check`.
+#
+# The pipeline rules scope to crates/lib and crates/cli. crates/corpus is a
+# gate tool: it reads the committed baseline from disk and inflates tiles to
+# canonicalize them, which is its job, not a pipeline inferring meaning.
+
+# Guards the crates/lib/build.rs provenance rerun trigger configured under
+# [cargo_env] in brokkr.toml: when the source-identity script cannot describe
+# the tree or read its shared inputs file it prints a value unique per call,
+# so every cargo call would recompile the crate while every gate stays green.
+# This runs the trigger twice and turns that red.
+[[script_check]]
+name = "source-identity-stable"
+command = "python3 scripts/check_source_identity_stable.py"
+expect = "source identity stable"
+match = "last-line"
+stage = "pre-clippy"
+
+# The trigger's own unit tests: the shared-inputs reader, pathspecs and the
+# fail-safe branch. The Rust-vs-Python agreement test runs with cargo test.
+[[script_check]]
+name = "source-identity-fixtures"
+command = "python3 -B scripts/test_source_identity.py"
+expect = "source identity tests ok"
+match = "last-line"
+stage = "pre-clippy"
+
+# Sidecar markers are ONLY the four phase-boundary pairs: every
+# marker-consuming view treats a marker as a segment boundary, so anything
+# else floods them. Accumulated quantities go in emit_counter or a wait_span.
+[[textlint]]
+require_live_paths = true
+name = "markers-only-for-phase-boundaries"
+pattern = '\bemit_marker\s*\('
+paths = ["crates/lib/src/**/*.rs", "crates/cli/src/**/*.rs", "crates/lib/examples/**/*.rs"]
+exclude = ["crates/lib/src/debug.rs"]
+except = ['emit_marker\("(?:PHASE12|OCEAN|SORT|ASSEMBLE)_(?:START|END)"\)']
+region = "code"
+must_scan = ["crates/lib/src/pipeline/mod.rs", "crates/lib/src/ocean/emit.rs"]
+message = "markers are reserved for PHASE12, OCEAN, SORT and ASSEMBLE START/END; accumulated quantities go in emit_counter or a wait_span"
+
+[[textlint]]
+require_live_paths = true
+name = "marker-fifo-only-in-debug"
+pattern = 'BROKKR_MARKER_FIFO'
+paths = ["crates/lib/src/**/*.rs", "crates/cli/src/**/*.rs"]
+exclude = ["crates/lib/src/debug.rs"]
+region = "string"
+must_scan = ["crates/lib/src/pipeline/mod.rs", "crates/cli/src/main.rs"]
+message = "only crates/lib/src/debug.rs opens the sidecar FIFO"
+
+# The system allocator is the allocator, decided by measurement (the CLI's
+# main.rs has the A/B). Its one global_allocator is hotpath-alloc's counter.
+[[textlint]]
+require_live_paths = true
+name = "no-global-allocator"
+pattern = '\bglobal_allocator\b'
+paths = ["crates/lib/src/**/*.rs", "crates/cli/src/**/*.rs", "crates/lib/tests/**/*.rs", "crates/cli/tests/**/*.rs", "crates/lib/examples/**/*.rs"]
+exclude = ["crates/cli/src/main.rs"]
+region = "code"
+must_scan = ["crates/lib/src/lib.rs", "crates/lib/examples/bench_pmtiles.rs"]
+message = "the system allocator is the allocator; no global_allocator without a fresh A/B"
+
+# glibc-only allocator calls live in debug.rs behind its target_env gnu gate.
+[[textlint]]
+require_live_paths = true
+name = "glibc-allocator-calls-live-in-debug"
+pattern = '\blibc::(?:mallopt|mallinfo2?|malloc_trim|malloc_stats|malloc_info|M_[A-Z_]+)\b'
+paths = ["crates/lib/src/**/*.rs", "crates/cli/src/**/*.rs", "crates/lib/tests/**/*.rs", "crates/cli/tests/**/*.rs", "crates/lib/examples/**/*.rs"]
+exclude = ["crates/lib/src/debug.rs"]
+region = "code"
+must_scan = ["crates/lib/src/pipeline/mod.rs", "crates/cli/src/main.rs"]
+message = "glibc-only allocator calls belong in crates/lib/src/debug.rs behind its target_env gnu gate"
+
+# archive/reader.rs is the only PMTiles reader: header decode, directory
+# routing and payload decompression happen nowhere else.
+[[textlint]]
+require_live_paths = true
+name = "archive-decode-only-in-archive"
+pattern = '\bHeader::decode\b|\bdecode_directory\b'
+paths = ["crates/lib/src/**/*.rs", "crates/cli/src/**/*.rs", "crates/lib/tests/**/*.rs", "crates/cli/tests/**/*.rs", "crates/lib/examples/**/*.rs"]
+exclude = ["crates/lib/src/archive/**"]
+region = "code"
+must_scan = ["crates/lib/src/inspect.rs", "crates/lib/src/verify/mod.rs"]
+message = "PMTiles headers and directories are read only through archive::Archive"
+
+[[textlint]]
+require_live_paths = true
+name = "tile-decompression-only-in-archive-reader"
+pattern = '\b(?:GzDecoder|MultiGzDecoder|ZlibDecoder|DeflateDecoder|Decompressor|BrotliDecompress\w*)\b'
+paths = ["crates/lib/src/**/*.rs", "crates/cli/src/**/*.rs"]
+exclude = ["crates/lib/src/archive/reader.rs"]
+region = "code"
+test_code = "skip"
+must_scan = ["crates/lib/src/svg.rs", "crates/lib/src/verify/mod.rs", "crates/lib/src/tile_detail.rs"]
+message = "tile payloads decompress through the archive reader, the one TileDecoder decision"
+
+# Either it is explicit, or it is not set: a run's meaning never comes from
+# the filesystem. retention.rs manages files the artifact build wrote;
+# sort/format.rs scans tmp_dir for an explicit --skip-to resume.
+[[textlint]]
+require_live_paths = true
+name = "no-filesystem-inference"
+pattern = '\.(?:exists|try_exists|is_file|is_dir)\s*\(|\bread_dir\s*\('
+paths = ["crates/lib/src/**/*.rs", "crates/cli/src/**/*.rs"]
+exclude = ["crates/lib/src/ocean/retention.rs", "crates/lib/src/sort/format.rs"]
+region = "code"
+test_code = "skip"
+must_scan = ["crates/lib/src/pipeline/mod.rs", "crates/lib/src/ocean/artifact.rs", "crates/lib/src/ocean/plan.rs", "crates/cli/src/main.rs"]
+message = "a run's meaning comes from its invocation, never from what happens to be on disk"
+
+# Env knobs are a fixed ELIVAGAR_* set resolved once, listed in reference/cli.md.
+[[textlint]]
+require_live_paths = true
+name = "env-reads-only-in-resources"
+pattern = '\benv::vars?(?:_os)?\s*\('
+paths = ["crates/lib/src/**/*.rs", "crates/cli/src/**/*.rs"]
+exclude = ["crates/lib/src/resources.rs", "crates/lib/src/debug.rs", "crates/cli/src/main.rs"]
+region = "code"
+test_code = "skip"
+must_scan = ["crates/lib/src/pipeline/mod.rs", "crates/lib/src/ocean/emit.rs"]
+message = "env knobs are resolved once in crate::resources; a knob is a flag or an env var, never both"

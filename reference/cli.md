@@ -4,10 +4,16 @@ The complete command-line surface. This document is the reference for what
 elivagar accepts; `AGENTS.md` summarises the commands a session reaches for
 most, and defers here for the full set.
 
-Note that most work in this repo does not invoke `elivagar` directly - `brokkr`
-wraps the measured paths (`brokkr tilegen`, `brokkr pmtiles-inspect`) and
-records provenance that a raw invocation does
-not. Reach for the raw binary when there is no wrapper for what you need.
+Note that most work in this repo does not invoke `elivagar` with hand-written
+flags. Measured runs go through the `tilegen` script bench (`brokkr bench
+[--hotpath|--alloc] tilegen ...`, registered in `brokkr.d/benches.toml`),
+which records results that a raw invocation does not; plain dataset builds go
+through the in-tree devkit (`brokkr run --with elivagar elivagar-devkit --
+tilegen ...`). Both expand the host's tilegen block into the same flags; the
+bench differs only in writing its archive and `--tmp-dir` inside its
+iteration directory under the host scratch. Archive
+inspection is the binary itself on a path
+(`brokkr run elivagar -- inspect <path>`).
 
 ## The rule that shapes this surface
 
@@ -312,7 +318,7 @@ missing node refs, like an unresolved ref on the raw path.
 | flag | default | meaning |
 |---|---|---|
 | `--sort-budget <SIZE>` | 1G | per-chunk sort buffer. Min 64M. Lower cuts phase12 RSS, costs merge chunks |
-| `--way-budget <SIZE>` | 128M, or 4G under `--locations-on-ways` | in-flight way processing, in raw bytes (decompressed block size plus measured plan bytes). Min 1M. The count ceiling (`threads.max(8)` blocks in flight) is the primary admission control; this budget is a safety net against individually huge blocks and never binds on normal input, whatever the blob packing. See the constant's comment in `src/resources.rs` |
+| `--way-budget <SIZE>` | 128M, or 4G under `--locations-on-ways` | in-flight way processing, in raw bytes (decompressed block size plus measured plan bytes). Min 1M. The count ceiling (`threads.max(8)` blocks in flight) is the primary admission control; this budget is a safety net against individually huge blocks and never binds on normal input, whatever the blob packing. See the constant's comment in `crates/lib/src/resources.rs` |
 | `--dedup-cap <N>` | 1000000 when omitted; 0 is rejected | positive entry cap for the PMTiles payload dedup map. Tile content is identical under any cap; past it duplicate payloads are stored instead of referenced, costing archive bytes, and the map costs ~56 bytes/entry of RAM. Deliberately outside the provenance contract, like the budgets: it cannot change what a consumer decodes |
 | `--assemble-budget <SIZE>` | 32M | tile assembly batch. Min 1M |
 
@@ -334,7 +340,7 @@ caps are `Option<NonZeroU32>` per layer, `None` meaning uncapped; `threads` is
 a required `NonZeroUsize`, and `elivagar::resources::default_threads()` is the
 CLI's default. The minimums are enforced by the library too, so a library
 caller cannot run a smaller budget than the CLI accepts. The run resolves every
-budget, worker count and environment knob once, in `src/resources.rs`, and
+budget, worker count and environment knob once, in `crates/lib/src/resources.rs`, and
 emits the resolved values as `res_*` sidecar counters.
 
 ### Geometry
@@ -374,12 +380,12 @@ valid only for a run naming the same shapefiles at the same compression level
 over z0-14.
 
 Rotating the artifact is an output-changing event. The corpus contract records
-the artifact key, so the next `brokkr pmtiles-corpus check` refuses with the
-key mismatch named until the corpus is re-blessed (`brokkr pmtiles-corpus
-bless --rotate`) from a build carrying the new artifact - and that rotation
+the artifact key, so the next `elivagar-corpus check` refuses with the
+key mismatch named until the corpus is re-blessed (`brokkr run
+elivagar-corpus -- bless --rotate`) from a build carrying the new artifact - and that rotation
 commit is the review.
 
-`OCEAN_POLICY_VERSION` (`src/ocean/policy.rs`) is the code half of the artifact key:
+`OCEAN_POLICY_VERSION` (`crates/lib/src/ocean/policy.rs`) is the code half of the artifact key:
 the shapefile hashes catch input rotations, the version stands in for "the
 geometry pipeline changed". Any change that alters emitted ocean geometry or
 encoding must bump it, which makes every existing artifact fail the key check
@@ -419,7 +425,7 @@ the active artifact unchanged, but retention cleanup has already replaced the
 previous retained generation with a link to that active artifact. The active
 path is never empty, and the extra ~1 GB materializes only when the finalize
 rename swaps the inode out. The retained generation is the
-comparand for the archive-bracketing idiom (`brokkr svg -o` the same tile
+comparand for the archive-bracketing idiom (`elivagar svg ... -o` the same tile
 from each generation, diff one ROI with `scripts/validate/svg-roi.mjs`) -
 without it, every policy bump destroys the only artifact of the version
 it replaces.
@@ -427,9 +433,10 @@ it replaces.
 ## `elivagar inspect <FILE>`
 
 Header, tile statistics, section layout, provenance, and metadata (layer list
-with zoom ranges) for a PMTiles archive. Wrapped by `brokkr pmtiles-inspect` -
-the brokkr name avoids colliding with `brokkr inspect`, which is pbfhogg's PBF
-inspector.
+with zoom ranges) for a PMTiles archive. In-session spelling: `brokkr run
+elivagar -- inspect <FILE>`. (The older `brokkr pmtiles-inspect` wrapper,
+named to avoid colliding with pbfhogg's `brokkr inspect`, is slated for
+deletion.)
 
 The `MVT validation` line reports whether the archive's declared tile type and
 compression are supported by the MVT validation and archive-view workflows.
@@ -443,7 +450,7 @@ reportable without reading tiles.
 ### Provenance
 
 The `elivagar` metadata member (`reference/metadata.md`, schema at
-`src/provenance.rs`), contract first:
+`crates/lib/src/provenance.rs`), contract first:
 
 ```
   Provenance:  schema 1
@@ -471,9 +478,9 @@ They explain a diff once the contract matches and must never be
 equality-gated - given identical input and config they are a function of the
 code, and a regression gate exists to compare revisions.
 
-For the standing gate, `brokkr pmtiles-corpus check` enforces the contract
-before reading content, decoding this block through the linked crate. `brokkr
-regress` does not read the block, so for an ad-hoc comparison these lines let
+For the standing gate, `elivagar-corpus check` enforces the contract
+before reading content, decoding this block through the library.
+`elivagar-corpus regress` does not read the block, so for an ad-hoc comparison these lines let
 a human refuse; they do not refuse it. See `reference/metadata.md`.
 
 `Ocean` answers "was this artifact-active or computed", which before this
@@ -545,20 +552,29 @@ Each metadata `vector_layers` entry must carry the complete canonical
 tessellation fault that decodes cleanly. That is what the earcut oracle
 (`scripts/validate/earcut-oracle.mjs`) is for.
 
-## The corpus gate and `regress` - moved to brokkr (2026-07-24)
+## The corpus gate and `regress` - the `elivagar-corpus` binary
 
 The `corpus` namespace (`check`, `bless`, `render`, `render-manifest`,
-`rings`, `mutate`) and `regress` are no longer elivagar subcommands. The
-corpus redesign moved the whole adjudication layer - the canonical semantic
-tile hash, the digest fold, the contract gating policy, the canonical SVG
-render core, the calibration instruments, and every baseline verdict - into
-brokkr, which links this crate and decodes archives in-process. The
-spellings are `brokkr pmtiles-corpus check|bless|render|render-manifest|
-rings|mutate` and `brokkr regress`; there is no raw elivagar spelling.
-`reference/corpus.md` remains the methodology. The baseline state stays
+`rings`, `mutate`), `regress` and `compare-tiles` are not `elivagar`
+subcommands. They are the separate `elivagar-corpus` binary in
+`crates/corpus`, which links the library by path and decodes archives
+in-process: the canonical semantic tile hash, the digest fold, the contract
+gating policy, the canonical SVG render core, the calibration instruments,
+and every baseline verdict. The spelling is `brokkr run elivagar-corpus --
+check|bless|render|render-manifest|rings|mutate|regress|compare-tiles ...`.
+(From the 2026-07-24 corpus redesign until the workspace split this layer
+was native brokkr code, spelled `brokkr pmtiles-corpus ...`, `brokkr regress`
+and `brokkr compare-tiles`; the port keeps the flags and exit codes.)
+`reference/corpus.md` remains the methodology. The baseline state is
 committed in this repo at `corpus/<dataset>/` + `corpus/style.toml`, read
-and written only by brokkr, so rotations stay atomic with their landing
-commits.
+and written only by `elivagar-corpus`, so rotations stay atomic with their
+landing commits.
+
+Plain dataset builds and the ocean artifact build likewise have an in-tree
+driver, `elivagar-devkit` in `crates/devkit`, which reads brokkr.toml and its
+`brokkr.d/` includes and owns the durable archive store
+`data/tilegen/<dataset>-<variant>-<commit>.pmtiles`:
+`brokkr run --with elivagar elivagar-devkit -- [--dry-run] tilegen|ocean-build ...`.
 
 What elivagar exposes instead is a library surface: the pmtiles reader
 (`archive::Archive`, including run-level raw payload access over validated
@@ -568,12 +584,11 @@ decoder with selectable unknown-field strictness (strict is the gate's mode -
 foreign wire fields error; tolerant skips them, for cross-producer
 comparison), typed provenance in full, and the writer's `add_run` plus the
 mutate-only `set_metadata_verbatim`. The comparability *policy* went with
-the gate: the provenance schema lives here, the decision of which fields
-gate lives in brokkr.
+the gate: the provenance schema lives in the library, the decision of which
+fields gate lives in `crates/corpus`.
 
-`brokkr compare-tiles`, the lenient cross-producer sampling comparison, is
-likewise brokkr-native (historically an elivagar cargo example, never a
-subcommand).
+`compare-tiles`, the lenient cross-producer sampling comparison, was
+historically an elivagar cargo example and never an `elivagar` subcommand.
 
 ## `elivagar svg <FILE> -z <Z> -x <X> -y <Y> [OPTIONS]`
 
@@ -615,7 +630,7 @@ None of these duplicates a flag or outranks one. A knob is a flag or an env
 var, never both, because two ways to say one thing means the quieter one wins
 silently.
 
-They are recordable: brokkr's `capture_env` in brokkr.toml matches `ELIVAGAR*`
+They are recordable on measured runs: brokkr's `capture_env` in brokkr.toml matches `ELIVAGAR*`
 and `MALLOC*` and stores what it finds with the run, so an env-configured run
 can be reconstructed from the results row. That is what makes them legitimate
 rather than ambient - before it, the knob below that moves NA assemble by 26s
@@ -628,7 +643,7 @@ was tunable from any shell and recorded nowhere.
 | `ELIVAGAR_ASSEMBLE_SPLIT_TARGET` | positive decimal integer; piece size in record bytes for hot-partition splitting, default 64 MiB; a partition over twice this splits into contiguous tile-range pieces read by independent workers (H8b - one dense z14-block partition otherwise puts hundreds of encoded MB behind one ordered slot). Output is byte-identical split or unsplit; set a tiny value to force splits on a small extract for that gate |
 | `ELIVAGAR_REL_BLOCKS_CAP` | non-negative decimal integer; relation-block buffer cap in bytes. Past it the tail re-reads relation blobs instead of holding them; zero forces the spill path |
 | `ELIVAGAR_LAYER_STATS=1` | per-layer per-zoom sort-stats firehose (~800 counters). Emitted at end of run, so it never affects timing. The per-layer totals are always emitted |
-| `BROKKR_MARKER_FIFO` | set by brokkr. Phase markers and counters go here; unset means every counter in `src/debug.rs` is a silent no-op |
+| `BROKKR_MARKER_FIFO` | set by brokkr. Phase markers and counters go here; unset means every counter in `crates/lib/src/debug.rs` is a silent no-op |
 
 For the four integer knobs above, only an unset variable selects the default.
 Set values must contain only ASCII decimal digits and fit the target integer:
@@ -650,9 +665,9 @@ carry that, and gates nothing.
 ## What is not on this surface, and why
 
 The `corpus` and `regress` subcommands were removed on 2026-07-24 by the
-corpus redesign - see the moved-to-brokkr section above. The gate machinery
-was development tooling in an end-user binary; it now lives in brokkr, which
-links this crate.
+corpus redesign - see the `elivagar-corpus` section above. The gate machinery
+was development tooling in an end-user binary; it now lives in its own
+workspace binary, which links the library.
 
 `--no-ocean`, `--no-ocean-simplify`, `--ocean-simplified` and `--ocean-tiles`
 were removed on 2026-07-14 along with the auto-detection.

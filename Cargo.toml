@@ -1,88 +1,22 @@
-[package]
-name = "elivagar"
+[workspace]
+members = ["crates/lib", "crates/cli", "crates/corpus", "crates/devkit", "crates/datasets"]
+# A plain build selects only the product, so it yields the one `elivagar`
+# executable. The dev tools are built by name (`brokkr run elivagar-corpus`,
+# `brokkr run --with elivagar elivagar-devkit`),
+# and the check sweeps in brokkr.d/checks.toml list every package.
+default-members = ["crates/lib", "crates/cli"]
+# Explicit: edition 2024 implies resolver 3 only for a root package, and a
+# virtual manifest has no edition, so without this it would drop to 1.
+resolver = "3"
+
+[workspace.package]
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
-description = "Shortbread vector tile generator - reads OSM PBF files and produces PMTiles v3 archives"
 repository = "https://github.com/folknor/elivagar"
-readme = "README.md"
-keywords = ["openstreetmap", "vector-tiles", "pmtiles", "shortbread", "tiles"]
-categories = ["command-line-utilities", "science::geo"]
-# Development state that is committed but has no business in a published
-# crate: the corpus baseline and its SVG renders, transient notes, the
-# benchmark database, the Node validation harness, and the agent-harness
-# instructions - the last of those describe brokkr invocations against
-# datasets and hosts a crates.io reader does not have.
-#
-# reference/ IS shipped: it is durable by convention and, with no docs site
-# yet, it is the only long-form CLI and corpus documentation a reader gets.
-#
-# docs/ holds the VitePress site AND the two README logos. The site is
-# excluded subpath by subpath rather than wholesale, because the logos have to
-# ship for the crates.io README to render - docs/public/*.svg stays in, the
-# fonts and page sources do not.
-exclude = [
-    "corpus/",
-    "notes/",
-    "research/",
-    "overnight-logs/",
-    "scripts/",
-    ".brokkr/",
-    "brokkr.toml",
-    "overnight.sh",
-    "tile_weights.tsv.gz",
-    ".review.toml",
-    "CLAUDE.md",
-    "AGENTS.md",
-    "docs/.vitepress/",
-    "docs/public/fonts/",
-    "docs/public/icons/",
-    "docs/guide/",
-    "docs/reference/",
-    "docs/index.md",
-    "package.json",
-    "pnpm-lock.yaml",
-    "pnpm-workspace.yaml",
-]
 
-[[bin]]
-name = "elivagar"
-path = "src/main.rs"
-
-[build-dependencies]
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-
-[dependencies]
-# Our PBF reader. The resolved lockfile version is read by build.rs and
-# recorded in every archive's provenance block, so a bump here flows into
-# provenance with no other edit needed.
-pbfhogg = "0.6.0"
-protohoggr = "0.5.0"
-rayon = "1.5"
-memmap2 = "0.9.11"
-flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
-brotli = "9.0.0"
-lz4_flex = "0.14.1"
-snap = "1"
-smallvec = "1.15.2"
-hotpath = "0.31.3"
-rustc-hash = "2"
-clap = { version = "4.6", features = ["derive"] }
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-mlt-core = { version = "0.22.0", optional = true }
-geo-types = { version = "0.7.19", optional = true }
-libc = "0.2"
-
-[dev-dependencies]
-i_overlay = "9.0.0"
-serde_yaml = "0.9"
-pmtiles = { version = "0.28.1", default-features = false, features = ["write"] }
-tempfile = "3.27"
-
-[lints.clippy]
+[workspace.lints.clippy]
 uninlined_format_args = "deny"
 cloned_instead_of_copied = "deny"
 redundant_closure_for_method_calls = "deny"
@@ -126,22 +60,6 @@ io_other_error = "deny"
 # HashMap/HashSet seed RandomState per process, so iterating one can reorder
 # output between runs of the same binary on the same input.
 disallowed_types = "deny"
-
-[features]
-# The system allocator is the allocator (see the note in main.rs; mimalloc
-# and jemalloc lost the measured A/B at 98824b4 and were removed).
-default = []
-# MLT (MapLibre Tile) output. Off by default: the encoder is real and
-# round-trips through mlt-core in tests, but no client has ever consumed its
-# output, the path carries no per-tile compression, and no standing gate
-# covers it (the corpus baseline, earcut oracle and verify are all MVT).
-# Shipping it on by default would put an unvalidated wire format behind a
-# stable-looking flag. mlt-core is pre-1.0 and moves; keeping the dep optional
-# also keeps it out of the default build graph.
-mlt = ["dep:mlt-core", "dep:geo-types"]
-hotpath = ["hotpath/hotpath"]
-hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
-# linux-io-uring = ["dep:io-uring", "dep:libc"]
 
 [profile.release]
 strip = true

@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/public/elivagar-logo-text-dark.svg">
-    <img src="docs/public/elivagar-logo-text.svg" width="300" alt="Elivagar">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/folknor/elivagar/main/docs/public/elivagar-logo-text-dark.svg">
+    <img src="https://raw.githubusercontent.com/folknor/elivagar/main/docs/public/elivagar-logo-text.svg" width="300" alt="Elivagar">
   </picture>
   <br>
   <em>Shortbread vector tile generator</em>
@@ -10,8 +10,8 @@
 <p align="center">
   <a href="https://crates.io/crates/elivagar"><img src="https://img.shields.io/crates/v/elivagar" alt="crates.io"></a>
   <a href="https://docs.rs/elivagar"><img src="https://img.shields.io/docsrs/elivagar" alt="docs.rs"></a>
-  <a href="Cargo.toml"><img src="https://img.shields.io/badge/rust-MSRV%20in%20Cargo.toml-orange?logo=rust" alt="Minimum Rust version in Cargo.toml"></a>
-  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
+  <a href="https://github.com/folknor/elivagar/blob/main/Cargo.toml"><img src="https://img.shields.io/badge/rust-MSRV%20in%20Cargo.toml-orange?logo=rust" alt="Minimum Rust version in Cargo.toml"></a>
+  <a href="https://github.com/folknor/elivagar/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
 </p>
 
 Reads OSM PBF files and produces
@@ -265,8 +265,10 @@ Denmark against other tools, plantasjen, best of 3:
 | Planetiler 0.10 | 41s |
 
 Those competitor runs are stale and predate several campaigns on our side;
-re-run them before quoting a ratio. Measured with `brokkr tilegen --bench`;
-results in `.brokkr/results.db`, per-phase detail in `.brokkr/sidecar.db`.
+re-run them before quoting a ratio. These numbers came from the retired typed
+`brokkr tilegen --bench`, whose rows stay in `.brokkr/results.db`; re-measure
+with `brokkr bench tilegen --dataset D` (runs land in brokkr's bench store,
+read with `brokkr results`; per-phase detail via `brokkr sidecar`).
 
 ### Sort chunk compression
 
@@ -301,7 +303,7 @@ synthetic tiles (unique gzipped payloads, Hilbert-ordered), best of 5 runs
 | 500K | 164 ms | 356 ms | 2.2x |
 | 1M | 303 ms | 686 ms | 2.3x |
 
-Run with `brokkr pmtiles-writer --bench [--tiles N]`.
+Run with `brokkr bench pmtiles-writer [--tiles N]`.
 
 ## MLT output
 

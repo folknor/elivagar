@@ -19,7 +19,8 @@ A prose rule already said not to compare across dataset variants.
 
 On 2026-07-14 the same thing happened again. A denmark archive blessed from a
 `--variant locations` build was compared against a default-variant (raw) build.
-`brokkr regress` reported 363,620 structural moves across every layer, which
+The two-archive regress diff (today `brokkr run elivagar-corpus -- regress`)
+reported 363,620 structural moves across every layer, which
 was read as a code regression and investigated as one, at length, in the wrong
 subsystem. The two builds were both correct.
 
@@ -174,7 +175,7 @@ produces no ocean and correctly reports `none`. It distinguishes `artifact`
 from `shapefile` and is part of the contract: artifact-served tiles are not
 geometry-identical to extract-computed ones (descent seams depend on each
 piece's clip extent - see the extract-consumption note in
-`src/pipeline/mod.rs`). Comparing an artifact-active archive against an
+`crates/lib/src/pipeline/mod.rs`). Comparing an artifact-active archive against an
 artifact-absent one is a contract mismatch, not a regression.
 
 `config.ocean.low_zoom_source` is independent of `runtime_simplification`.
@@ -338,39 +339,41 @@ run provenance deliberately. It retains the unchanged top-level
 `ocean_artifact` identity and emits `ocean_artifact_no_run_provenance=1` on the
 counter channel when measured.
 
-The dirty flag observes the whole git status, including untracked files, so a
-fixed source-file watch list cannot keep it fresh, and watching the repository
-recursively would walk ignored datasets and build outputs. Rerunning
-`build.rs` rebuilds the whole crate, so it reruns only when its git inputs
-change: before every cargo call brokkr computes `ELV_BUILD_OBSERVATION`
-(`[cargo_env]` in brokkr.toml), HEAD plus git's object id of the raw status
-bytes, and `build.rs` declares `rerun-if-env-changed` on it. `build.rs`
-computes the same token from the bytes it stamps from; when the variable is
-absent (plain cargo, an old `brokkr --commit` worktree) or disagrees (the tree
-moved mid-build, a failed read), it also watches an intentionally absent input
-and so reruns on every build until the two agree - slower, never stale. Both
-observers strip `GIT_*` from git's environment, so they read this checkout. The
-guarantee is freshness equal to rerunning every build for any tree state that
-holds from the trigger's evaluation through the build; an edit inside that
-window, or git configuration visible to only one observer, is outside it.
-The `build-observation-stable` script check fails the gate when the trigger
-is stuck on its unique-per-call fallback. Git itself resolves
-HEAD and repository metadata, including worktrees and submodules whose `.git`
-is a file. Registry dependency identities come from the lockfile. A future
-path dependency would need its own git inspection and commit/dirty pair.
-The script writes the `build` values once, already typed, as generated Rust
-that `provenance.rs`
-includes, and a failed `git status` records `dirty` as unknown rather than
-clean. Its rerun declarations are intended to keep build
+Beside `commit` and `dirty`, `build.elivagar` carries `source_xxh3_128`, a
+content digest of the source that was compiled, so two dirty builds of one
+commit are told apart. In a git checkout it covers the HEAD tree, the tracked
+patch, untracked non-ignored file contents (by length and mtime above a size
+cap) and the lockfile; a packaged crate, or a checkout without git metadata,
+is hashed as a file tree. A tree that cannot be read, or that moves between
+the recipe's two passes, records null. The recipe lives in
+`crates/lib/build/source_identity.rs`.
+
+The digest depends on the whole working tree, which no fixed watch list can
+cover, and rerunning `build.rs` recompiles the crate. So the rerun trigger is
+content computed outside cargo: before every cargo call brokkr runs
+`scripts/source_identity.py` (`[cargo_env]` in brokkr.toml) and exports a
+hash of the same inputs as `ELV_SOURCE_IDENTITY`, and `build.rs` declares
+`rerun-if-env-changed` on it. The two hashes are never compared; the trigger
+only has to change whenever the recipe's inputs do, and both read
+`crates/lib/build/source_inputs.toml`, which `tests/source_identity.rs` pins
+they read identically. Without the variable (plain cargo, an old `brokkr
+--commit` worktree) or when the recipe fails, `build.rs` also watches an
+intentionally absent input and so reruns on every build - slower, never
+stale. Both observers strip `GIT_*` from git's environment, so they read this
+checkout. An edit landing between the trigger's evaluation and rustc reading
+the file ships stale for that one build. The `source-identity-stable` script
+check fails the gate when the trigger is stuck on its unique-per-call
+fallback. Registry dependency identities come from the lockfile. The script
+writes the `build` values once, already typed, as generated Rust that
+`provenance.rs` includes. Its rerun declarations are intended to keep build
 provenance fresh; they are not independent proof of the code that ran.
 
-`dirty` uses brokkr's definition, not git's: `*.md` and `.brokkr/results.db`
-are ignored. A dirty `results.db` is this repo's expected state and markdown
+`dirty` and the digest use brokkr's definition of a change, not git's: the
+paths `source_inputs.toml` names (`*.md`, `.brokkr/results.db`) enter
+neither. A dirty `results.db` is this repo's expected state and markdown
 never affects the binary, so counting either would mark nearly every build
-dirty and make the flag meaningless. Status is read with untracked directories
-expanded to files and rename detection off, so a new directory holding only
-markdown is clean while a source file renamed to markdown is dirty (its
-deletion counts).
+dirty and make the flag meaningless. A source file renamed to markdown still
+counts, through its deletion.
 
 ## Consumer contract
 
@@ -390,13 +393,13 @@ than assuming comparability.
 
 Recorded here so they are not rediscovered as bugs:
 
-- **Enforcement landed for the standing gate only.** `brokkr pmtiles-corpus
-  check` (native brokkr code since the 2026-07-24 corpus redesign, decoding
-  this block through the linked crate) compares the committed `contract.json`
+- **Enforcement landed for the standing gate only.** `brokkr run
+  elivagar-corpus -- check` (the in-tree corpus crate, decoding this block
+  through the path-linked library crate) compares the committed `contract.json`
   against this block before reading content and refuses with the differing
   field named, including the calibrated stale-artifact mismatch at
-  `config.ocean.artifact_key.policy_version`. `brokkr regress` still reads
-  nothing here: an ad-hoc two-archive diff can be run across incomparable
+  `config.ocean.artifact_key.policy_version`. `elivagar-corpus regress` still
+  reads nothing here: an ad-hoc two-archive diff can be run across incomparable
   archives, so establish comparability with `elivagar inspect` first.
 - `input.replication_sequence` is not recorded (the pbfhogg header API for it
   is unconfirmed). `replication_timestamp` is.

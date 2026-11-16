@@ -1,6 +1,6 @@
 // Extract the vertices and edges of SVG path geometry inside a bbox ROI.
 // Built for seam/spike triage: dump the same tile from several archives via
-// `brokkr svg -o`, then compare what each build emits in the defect region
+// `brokkr run elivagar -- svg <archive> -z Z -x X -y Y -o <out.svg>`, then compare what each build emits in the defect region
 // without reading whole files. Prints, per path, every edge with at least
 // one endpoint inside the ROI; long edges that only CROSS the ROI are
 // caught by also printing edges whose segment intersects the bbox.

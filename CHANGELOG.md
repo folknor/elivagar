@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- The binary moved to its own crate: install it with
+  `cargo install elivagar-cli`, which still installs a binary named
+  `elivagar`. The `elivagar` crate is now the library alone. The
+  `reference/` documents no longer ship inside the crate; read them in the
+  repository or on the docs site.
+
+- Archive provenance records `build.elivagar.source_xxh3_128`, a content
+  digest of the compiled source, so two builds of one dirty commit can be
+  told apart. Readers that ignore unknown `build` members, as 0.2.0 does,
+  are unaffected.
+
 ## 0.2.0 - 2026-11-15
 
 - Archives built from a published crate now stamp the commit recorded in

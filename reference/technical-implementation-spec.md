@@ -26,23 +26,23 @@ Specifications are saved to the ./notes folder.
    the change can break: `brokkr check` (clippy + full test suite, including
    the Shortbread spec cases) for anything touching tag matching or
    encoding semantics; `elivagar verify <output>.pmtiles` on a fresh
-   `brokkr tilegen --dataset denmark` build for anything touching geometry,
+   `brokkr run --with elivagar elivagar-devkit -- tilegen --dataset
+   denmark` build for anything touching geometry,
    clipping, or the MVT/PMTiles container (zero errors is the bar);
    targeted tile inspection (`elivagar svg` / `elivagar diag` /
-   `brokkr compare-tiles`) for named regression tiles when the change aims
-   at a specific visual defect; `brokkr pmtiles-corpus check --dataset
-   denmark --variant locations` (native brokkr code over the linked crate
-   since the 2026-07-24 corpus redesign; there is no raw elivagar spelling)
-   on a fresh
-   `brokkr tilegen --dataset denmark --variant locations` build for output-
+   `elivagar-corpus compare-tiles`) for named regression tiles when the
+   change aims at a specific visual defect; `brokkr run elivagar-corpus --
+   check --dataset denmark --variant locations` on a fresh
+   `brokkr run --with elivagar elivagar-devkit -- tilegen --dataset denmark
+   --variant locations` build for output-
    neutral changes (exit 0 is digest equality over every tile; exit 2 is a
    contract refusal, not a verdict; exit 3 is baseline trouble, also not a
    verdict); intended output changes adjudicate the named leaves and land
-   with `brokkr pmtiles-corpus bless --rotate` in the same commit;
+   with `brokkr run elivagar-corpus -- bless --rotate` in the same commit;
    explicit-tolerance geometry landings gate on the explicit two-archive
-   `brokkr regress` with `--tol N --max-moved M`, with the tolerance, move
+   `elivagar-corpus regress` with `--tol N --max-moved M`, with the tolerance, move
    budget, and displacement-percentile criteria stated in the spec;
-   the `brokkr tilegen --bench` invocation for
+   the `brokkr bench tilegen` invocation for
    anything claiming or risking a performance effect (the win, its
    neutrality, or - when a feature knowingly pays for capability with
    throughput - the accepted cost, stated as an explicit bound the
@@ -59,7 +59,7 @@ Specifications are saved to the ./notes folder.
    derived from the PBF phase, so a raw-variant run legitimately diffs
    in the ocean layer against a locations corpus baseline). The corpus
    baseline is locations-variant and its contract records input identity,
-   so a cross-variant corpus check refuses loudly. A `brokkr regress`
+   so a cross-variant corpus check refuses loudly. A `regress`
    read across variants remains a false alarm; it is the 2026-07-09 false
    alarm, which burned a session tail proving the code innocent. A gate also uses the smallest dataset that can
    answer its question: sometimes that is norway (coastal/ocean and
@@ -107,7 +107,7 @@ Specifications are saved to the ./notes folder.
     durable record such as `reference/rendering-postmortem.md`), if it
     exists.
     The measurement record is `reference/performance.md` plus
-    `.brokkr/results.db`: a spec that claims a performance effect, or whose
+    brokkr's bench store (`brokkr results`): a spec that claims a performance effect, or whose
     changes touch a measured path, states the pre-change baseline (host +
     commit hash) the keep/revert verdict will be read against, and after
     landing records the post-change numbers the same way (commit, then

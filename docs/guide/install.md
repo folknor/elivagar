@@ -4,20 +4,20 @@
 ## From crates.io
 
 ```sh
-cargo install elivagar
+cargo install elivagar-cli
 ```
 
-That builds the binary from source with release optimizations. The minimum
-Rust version is declared by `rust-version` in
+That builds the `elivagar` binary from source with release optimizations. The
+`elivagar` crate itself is the library. The minimum Rust version is declared
+by `rust-version` in
 [`Cargo.toml`](https://github.com/folknor/elivagar/blob/main/Cargo.toml).
 Uses edition 2024 and the stable toolchain, with no nightly features.
 
 ## As a library
 
-```toml
-[dependencies]
-elivagar = "0.1"
-```
+Add the `elivagar` crate at its current release from
+[crates.io](https://crates.io/crates/elivagar), for example with
+`cargo add elivagar`.
 
 The public API is `elivagar::run` over a `TilegenConfig`, plus the decode and
 write surface in `elivagar::archive` (the PMTiles reader `Archive`, the typed
@@ -92,7 +92,7 @@ The binary lands at `target/release/elivagar`.
 ### MLT output
 
 ```sh
-cargo build --release --features mlt
+cargo build --release -p elivagar-cli --features mlt
 ```
 
 MLT is off by default deliberately. The encoder is real - it calls upstream

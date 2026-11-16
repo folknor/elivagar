@@ -2,7 +2,9 @@
 
 The durable measurement record for elivagar performance work. Specs written
 against `reference/technical-implementation-spec.md` cite THIS document plus
-`.brokkr/results.db` as the measurement record: the pre-change baseline (host +
+brokkr's bench store (read with `brokkr results`, which also reads the
+typed-command history in `.brokkr/results.db`) as the measurement record: the
+pre-change baseline (host +
 commit hash) a keep/revert verdict is read against comes from here, and after a
 landing the post-change numbers are recorded here the same way.
 
@@ -11,13 +13,17 @@ landing the post-change numbers are recorded here the same way.
 - Every published number carries **host name** and **git commit hash** of the
   measured code. A number without both is not a baseline.
 - Workflow: commit first, THEN benchmark, THEN write the hash-anchored numbers.
-  Never benchmark uncommitted code (brokkr enforces a clean tree, ignoring
-  `*.md` and `.brokkr/results.db`; `--force` runs are not stored and prove
-  nothing durable).
+  Never benchmark uncommitted code (`brokkr bench` stores a run of a dirty
+  tree but marks it dirty and never compares it; `.md` changes do not count
+  as dirty).
 - README.md performance numbers always come from plantasjen (the reference
   host).
-- Raw results live in `.brokkr/results.db` (SQLite, tracked in git). Every row
-  stores the literal subprocess invocation; query with `brokkr results --grep`.
+- Bench runs (`brokkr bench`, registered in `brokkr.d/benches.toml`) live in
+  brokkr's bench store or results server, not in git. Each stores its bound
+  params, every child's argv and its measurement; query with `brokkr
+  results`. Rows of the superseded typed commands stay in
+  `.brokkr/results.db` (SQLite, tracked in git) with their literal
+  subprocess invocation, found with `brokkr results --grep`.
 
 ## Hosts
 
@@ -409,20 +415,27 @@ Exact invocations for spec gates (per
 `reference/technical-implementation-spec.md` clause 5):
 
 ```
-brokkr tilegen --bench 3 --dataset denmark     # default perf gate
-brokkr tilegen --bench 3 --dataset norway      # coastal/relation-heavy claims
-brokkr tilegen --bench 3 --dataset germany     # phase12/way-volume claims
-brokkr results --compare-last                  # diff the two most recent runs
-brokkr results --compare-last --mode hotpath   # diff hotpath profiles
+brokkr bench --iterations 3 tilegen --dataset denmark   # default perf gate
+brokkr bench --iterations 3 tilegen --dataset norway    # coastal/relation-heavy claims
+brokkr bench --iterations 3 tilegen --dataset germany   # phase12/way-volume claims
+brokkr results --compare A B --command tilegen  # diff commits A and B, paired per bench and params
+brokkr results --compare A B --command tilegen --top 0  # same; hotpath pairs show every function
 ```
+
+`--compare` pairs script-bench runs only within the same measurement kind
+(timing, `--hotpath`, `--alloc`), so a hotpath diff is just a compare of two
+commits that each have a `brokkr bench --hotpath` run. `--mode` excludes every
+bench run; narrow with `--param` (e.g. `--param dataset=denmark`) instead. Both
+sides must be clean-tree runs of the named commits.
 
 Pick the gate dataset whose stress matches the claim; a change sold on
 coastal-multipolygon cost is not proven on denmark alone.
 
 ## Reading rules
 
-- **Keep/revert verdicts are read from `--bench 3` (best-of), never a single
-  `--bench 1` run.** Single-run deltas under ~10% are within observed
+- **Keep/revert verdicts are read from `--iterations 3` (fastest of three),
+  never a single `--iterations 1` run** (the typed spelling was `--bench 3`
+  versus `--bench 1`). Single-run deltas under ~10% are within observed
   bench-to-bench variance; multi-run best-of deltas under ~5% are still
   suspect. A spec claiming a win states the expected bound up front and the
   verdict is read against that bound.
@@ -658,8 +671,9 @@ The corpus check became the standing output gate, following the digest
 gate calibration at `a8c4f84` and render-core calibration at `41a953a`; its
 denmark cost is about 2.2 s. The committed corpus baseline supersedes the
 07-15 re-bless-pending-user-decision thread. (Spelled `elivagar corpus
-check` until the 2026-07-24 corpus redesign; the standing spelling is now
-`brokkr pmtiles-corpus check`, native brokkr code over the linked crate.)
+check` until the 2026-07-24 corpus redesign, then `brokkr pmtiles-corpus
+check` while the gate was native brokkr code; the standing spelling is now
+`brokkr run elivagar-corpus -- check`, the in-tree `crates/corpus` binary.)
 
 ## Low-zoom ocean union (2026-07-19, OCEAN_POLICY_VERSION v3, denmark locations)
 

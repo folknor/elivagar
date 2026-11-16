@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Summarizes what changed in a `brokkr regress --overlay` SVG.
+// Summarizes what changed in a `brokkr run elivagar-corpus -- regress --overlay` SVG.
 //
 // Usage: node overlay-diff.mjs [--rings] <overlay.svg | overlay-dir>...
 //
